@@ -44,11 +44,39 @@ const MAX_JOINS_PER_24H: i64 = 10;
 /// Minimum member count for a community to be eligible for auto-join.
 const MIN_MEMBER_COUNT: i32 = 100;
 /// Per-request timeout for the agents service join call.
-const JOIN_API_TIMEOUT: Duration = Duration::from_secs(60);
+///
+/// A join runs through the logged-in browser, and the first one after the
+/// agent service restarts pays for launching Chromium and navigating before
+/// it can subscribe. Sixty seconds did not cover that, so the request was
+/// cancelled in flight and the worker recorded `http error: error sending
+/// request for url (http://agent-service:8095/reddit/join)` -- a transport
+/// failure with no status and no body, which reads like the agent service is
+/// down when it is simply slower than the budget. `community_executor` allows
+/// 300 seconds for the same browser for the same reason.
+const JOIN_API_TIMEOUT: Duration = Duration::from_secs(300);
 /// Watchdog for one executor cycle.
-const CYCLE_WATCHDOG_TIMEOUT: Duration = Duration::from_secs(180);
+///
+/// Must exceed the whole batch, not one request. At 3 places × 60 seconds the
+/// old pair budgeted exactly 180 seconds for 180 seconds of requests, leaving
+/// nothing for claiming rows, the rate-limit check, stale recovery or the
+/// membership writes between them -- so the cycle hit its watchdog and
+/// cancelled whichever join was in flight. Production logged
+/// "community join executor cycle timed out" every few minutes with zero
+/// communities ever reaching `joined`.
+const CYCLE_WATCHDOG_TIMEOUT: Duration = Duration::from_secs(1800);
 /// Maximum places to claim in a single cycle.
 const CLAIM_BATCH: i64 = 3;
+
+/// The watchdog has to outlast the batch it is watching.
+///
+/// Written as a build error rather than a comment because the previous values
+/// were self-consistent to read and impossible in practice: whoever picks a
+/// new batch size or per-request timeout has to keep this true, and will find
+/// out at compile time instead of from a stalled join queue.
+const _: () = assert!(
+    CYCLE_WATCHDOG_TIMEOUT.as_secs() > JOIN_API_TIMEOUT.as_secs() * (CLAIM_BATCH as u64) + 60,
+    "cycle watchdog must exceed CLAIM_BATCH joins plus room for the database work between them"
+);
 
 #[derive(Debug, Error)]
 pub enum CommunityJoinError {
