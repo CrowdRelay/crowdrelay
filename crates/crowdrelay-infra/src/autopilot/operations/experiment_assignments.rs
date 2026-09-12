@@ -466,6 +466,43 @@ pub(in crate::autopilot) async fn record_experiment_assignment(
 /// executor/result path.
 ///
 /// Retry-safe: setting the same status is a no-op (idempotent).
+/// Reports a transition the guard refused, without inventing noise.
+///
+/// Both callers below guard the transition in the WHERE clause and then
+/// discarded `rows_affected`, so a refused transition returned `Ok(())` and the
+/// caller believed the assignment had moved. `execution_status` is what the
+/// causal learner reads to decide whether a treatment was realized, so an
+/// assignment silently stuck on `dispatched` is counted as neither executed nor
+/// failed — it drops out of the treatment effect entirely, and nothing says so.
+///
+/// Zero rows has two meanings and only one is worth a word. Most calls are for
+/// actions that simply have no assignment — every non-experiment action reaches
+/// `update_execution_status_by_action_id` — and warning on those would bury the
+/// real case. So the lookup runs only on the zero-row path, and speaks only
+/// when an assignment exists and did not move.
+fn report_refused_transition(
+    workspace_id: WorkspaceId,
+    lookup: &str,
+    key: &str,
+    current: Option<String>,
+    attempted: crowdrelay_brain::ExecutionStatus,
+) {
+    let Some(current) = current else { return };
+    if current == attempted.as_str() {
+        // Already there. A replayed receipt, which is what monotonicity is for.
+        return;
+    }
+    tracing::warn!(
+        workspace_id = %workspace_id.into_uuid(),
+        %lookup,
+        %key,
+        %current,
+        attempted = attempted.as_str(),
+        "experiment assignment did not move: the transition guard refused it, so \
+         the causal learner still sees the old execution_status"
+    );
+}
+
 pub(in crate::autopilot) async fn update_execution_status(
     repo: &PostgresAutopilotRepository,
     workspace_id: WorkspaceId,
@@ -477,7 +514,7 @@ pub(in crate::autopilot) async fn update_execution_status(
     //   unknown    → executed | failed  (reconciliation)
     // The WHERE clause enforces this at the DB level — no application-
     // level race condition possible.
-    sqlx::query(
+    let moved = sqlx::query(
         r#"
         UPDATE viryaos_experiment_assignments
         SET execution_status = $3
@@ -495,6 +532,24 @@ pub(in crate::autopilot) async fn update_execution_status(
     .execute(&repo.pool)
     .await
     .map_err(map_sqlx)?;
+    if moved.rows_affected() == 0 {
+        let current = sqlx::query_scalar::<_, String>(
+            "SELECT execution_status FROM viryaos_experiment_assignments \
+             WHERE workspace_id = $1 AND id = $2",
+        )
+        .bind(workspace_id.into_uuid())
+        .bind(assignment_id)
+        .fetch_optional(&repo.pool)
+        .await
+        .map_err(map_sqlx)?;
+        report_refused_transition(
+            workspace_id,
+            "assignment_id",
+            assignment_id,
+            current,
+            new_status,
+        );
+    }
     Ok(())
 }
 
@@ -522,7 +577,7 @@ pub(in crate::autopilot) async fn update_execution_status_by_action_id(
     // Allowed transitions:
     //   dispatched → executed | failed | unknown
     //   unknown    → executed | failed  (reconciliation)
-    sqlx::query(
+    let moved = sqlx::query(
         r#"
         UPDATE viryaos_experiment_assignments
         SET execution_status = $3
@@ -540,6 +595,24 @@ pub(in crate::autopilot) async fn update_execution_status_by_action_id(
     .execute(&repo.pool)
     .await
     .map_err(map_sqlx)?;
+    if moved.rows_affected() == 0 {
+        let current = sqlx::query_scalar::<_, String>(
+            "SELECT execution_status FROM viryaos_experiment_assignments \
+             WHERE workspace_id = $1 AND action_id = $2",
+        )
+        .bind(workspace_id.into_uuid())
+        .bind(action_id)
+        .fetch_optional(&repo.pool)
+        .await
+        .map_err(map_sqlx)?;
+        report_refused_transition(
+            workspace_id,
+            "action_id",
+            &action_id.to_string(),
+            current,
+            new_status,
+        );
+    }
     Ok(())
 }
 
