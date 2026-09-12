@@ -21,6 +21,7 @@
 //! (workspace_id, key), and the autopilot decision_key mirrors it, so worker
 //! retries and task re-runs can never double-create decisions.
 
+use crate::auto_post_platforms::AutoPostPlatforms;
 use std::time::Duration;
 
 use crowdrelay_application::agent_outcomes::{
@@ -293,6 +294,9 @@ pub struct AgentOutcomeWorker {
     /// is an open redirect whose target a model picks. See
     /// `domain::acquisition::agent_smart_link_destination`.
     public_origin: String,
+    /// Channels the operator already granted standing approval to, by setting
+    /// that channel's auto-post flag. See `auto_post_platforms`.
+    auto_post_platforms: AutoPostPlatforms,
 }
 
 impl AgentOutcomeWorker {
@@ -303,6 +307,7 @@ impl AgentOutcomeWorker {
         poll_interval: Duration,
         operation_timeout: Duration,
         public_origin: String,
+        auto_post_platforms: AutoPostPlatforms,
     ) -> Self {
         Self {
             pool,
@@ -310,6 +315,7 @@ impl AgentOutcomeWorker {
             poll_interval,
             operation_timeout,
             public_origin,
+            auto_post_platforms,
         }
     }
 
@@ -718,6 +724,21 @@ impl AgentOutcomeWorker {
             // approval because they reach external audiences directly.
             let is_reddit_community_post = community_target_id.is_some();
             let is_signal_push = outcome.kind == OutcomeKind::SignalPush;
+            // A channel whose auto-post flag is set already carries the
+            // operator's approval; asking again per post is asking twice, and
+            // the second ask is what expired. See `auto_post_platforms` for
+            // what that cost. Reddit cannot reach this: `permits` refuses it,
+            // and `REDDIT_IS_READ_ONLY` holds the executor besides.
+            let draft_platform = outcome
+                .payload
+                .item
+                .as_ref()
+                .and_then(|i| i.get("platform"))
+                .and_then(Value::as_str);
+            let channel_pre_approved = outcome.kind == OutcomeKind::SocialPost
+                && community_target_id.is_none()
+                && self.auto_post_platforms.permits(draft_platform);
+
             let auto_execute = if is_reddit_community_post {
                 self.is_context_bounded_auto(&mut tx, "promotion_budget")
                     .await?
@@ -725,8 +746,15 @@ impl AgentOutcomeWorker {
                 self.is_context_bounded_auto(&mut tx, "fan_lifecycle")
                     .await?
             } else {
-                false
+                channel_pre_approved
             };
+            if channel_pre_approved {
+                tracing::info!(
+                    outcome_id = %outcome.id,
+                    platform = draft_platform.unwrap_or("unknown"),
+                    "channel has standing operator approval; dispatching without a second one"
+                );
+            }
 
             let action_details = if let Some(target_id) = community_target_id {
                 let item = outcome.payload.item.as_ref();

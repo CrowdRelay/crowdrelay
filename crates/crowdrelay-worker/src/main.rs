@@ -30,6 +30,7 @@ use crowdrelay_worker::{
     agent_outcomes::AgentOutcomeWorker,
     attribution::AttributionWorker,
     audience_graph::AudienceGraphSweeper,
+    auto_post_platforms,
     autopilot::{AutopilotWorker, TeamEmailDispatchWorker},
     bootstrap::{BootstrapSpec, bootstrap, bootstrap_admission_access, bootstrap_team_operations},
     city_geocoding::CityGeocodeWorker,
@@ -97,6 +98,21 @@ enum Command {
 impl Command {
     const KNOWN: &'static str =
         "`run`, `run --standby`, `migrate`, `bootstrap`, `setup`, or `replay`";
+}
+
+/// Reads a boolean auto-post flag.
+///
+/// One parse rather than four copies: the same three-line `map`/`matches!`
+/// was inlined per channel, and the agent outcome worker now needs the same
+/// answer to decide whether a draft carries standing approval. Four copies of
+/// a truth test is how two of them end up disagreeing.
+fn auto_post_enabled(variable: &str) -> bool {
+    std::env::var(variable)
+        .map(|value| {
+            let value = value.trim().to_ascii_lowercase();
+            matches!(value.as_str(), "true" | "1" | "yes" | "on")
+        })
+        .unwrap_or(false)
 }
 
 #[tokio::main]
@@ -408,6 +424,14 @@ async fn run(database: PgPool, config: &Config, standby: bool) -> Result<()> {
             AGENT_OUTCOME_POLL_INTERVAL,
             config.database.operation_timeout,
             config.public_site_base_url.origin().ascii_serialization(),
+            // The operator's standing approval, read here rather than at each
+            // executor: the decision this affects is made when the outcome
+            // becomes an action, long before any executor sees it.
+            auto_post_platforms::AutoPostPlatforms {
+                telegram: auto_post_enabled("CROWDRELAY_TELEGRAM_AUTO_POST"),
+                discord: auto_post_enabled("CROWDRELAY_DISCORD_AUTO_POST"),
+                social: auto_post_enabled("CROWDRELAY_SOCIAL_AUTO_POST"),
+            },
         ))
     } else {
         tracing::info!("agent outcome ingestion is disabled by process configuration");
@@ -500,12 +524,7 @@ async fn run(database: PgPool, config: &Config, standby: bool) -> Result<()> {
     // telegram fanbase_connections row. In manual mode (default), posts are
     // drafted and marked `awaiting_manual_post` — the operator posts manually.
     // Enable with CROWDRELAY_TELEGRAM_AUTO_POST=true.
-    let telegram_auto_post = std::env::var("CROWDRELAY_TELEGRAM_AUTO_POST")
-        .map(|value| {
-            let value = value.trim().to_ascii_lowercase();
-            matches!(value.as_str(), "true" | "1" | "yes" | "on")
-        })
-        .unwrap_or(false);
+    let telegram_auto_post = auto_post_enabled("CROWDRELAY_TELEGRAM_AUTO_POST");
     let telegram_executor = match TelegramExecutorWorker::new(
         database.clone(),
         workspace_id,
@@ -539,12 +558,7 @@ async fn run(database: PgPool, config: &Config, standby: bool) -> Result<()> {
     // discord fanbase_connections row. In manual mode (default), posts are
     // drafted and marked `awaiting_manual_post` — the operator posts manually.
     // Enable with CROWDRELAY_DISCORD_AUTO_POST=true.
-    let discord_auto_post = std::env::var("CROWDRELAY_DISCORD_AUTO_POST")
-        .map(|value| {
-            let value = value.trim().to_ascii_lowercase();
-            matches!(value.as_str(), "true" | "1" | "yes" | "on")
-        })
-        .unwrap_or(false);
+    let discord_auto_post = auto_post_enabled("CROWDRELAY_DISCORD_AUTO_POST");
     let discord_executor = match DiscordExecutorWorker::new(
         database.clone(),
         workspace_id,
@@ -575,12 +589,7 @@ async fn run(database: PgPool, config: &Config, standby: bool) -> Result<()> {
     // manually. Auto-posting via Meta Graph API / X API will be added in a
     // future phase. Env: CROWDRELAY_SOCIAL_AUTO_POST=true (enables auto mode
     // when platform API integration is available).
-    let social_auto_post = std::env::var("CROWDRELAY_SOCIAL_AUTO_POST")
-        .map(|value| {
-            let value = value.trim().to_ascii_lowercase();
-            matches!(value.as_str(), "true" | "1" | "yes" | "on")
-        })
-        .unwrap_or(false);
+    let social_auto_post = auto_post_enabled("CROWDRELAY_SOCIAL_AUTO_POST");
     // Constructed below, after the Facebook Page token is read — the executor
     // needs it, and reading the same environment variable twice is how the two
     // reads drift.

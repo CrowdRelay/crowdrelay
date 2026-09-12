@@ -132,6 +132,9 @@ fn worker(pool: &PgPool, workspace_id: WorkspaceId) -> AgentOutcomeWorker {
         Duration::from_secs(60),
         Duration::from_secs(30),
         "https://virya.music".to_owned(),
+        // Default: every channel still waits for a person, which is what
+        // these guards are about.
+        crowdrelay_worker::auto_post_platforms::AutoPostPlatforms::default(),
     )
 }
 
