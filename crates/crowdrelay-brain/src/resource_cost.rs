@@ -32,6 +32,24 @@
 //! Reputation risk should eventually be a **hard constraint** in
 //! `PortfolioConfig`, not an additive cost. For now, it's a future
 //! dimension — not in `units`.
+//!
+//! # None of the five dimensions is populated, ever
+//!
+//! Stronger than "not summed yet", and worth saying outright because the
+//! paragraphs above read as though the numbers exist and are merely held
+//! back from the total. They do not exist. `ResourceCost::configured` is the
+//! only constructor production uses — `portfolio::template_cost` calls it for
+//! every candidate — and it sets `llm_tokens`, `api_calls`,
+//! `audience_attention`, `reputation_risk` and `campaign_slots` to `None`
+//! without exception. Nothing else assigns them anywhere in the workspace.
+//!
+//! So this is a five-dimensional cost model carrying one dimension. That is a
+//! defensible place to be while `units` is an operator knob, and the shape is
+//! worth keeping for when real measurements arrive. What is not defensible is
+//! leaving a reader to infer from the type that the brain weighs token spend
+//! or reputation risk against expected fans. It weighs neither. It compares
+//! one configured number per template, and `CostSource::Configured` is the
+//! field that admits it.
 
 use serde::{Deserialize, Serialize};
 
