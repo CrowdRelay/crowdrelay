@@ -864,6 +864,63 @@ pub(in crate::autopilot) async fn load_growth_intelligence_snapshots(
         );
     }
 
+    // Metacognition: the brain's assessment of its own recent performance,
+    // from the daily North Star series. The assessment feeds
+    // `exploration_boost` into EFE weights and `sizing_multiplier` into
+    // dispatch budget — the brain explores harder when stagnant and sizes down
+    // when regressing, mirroring Kern's metacognition feedback loop.
+    //
+    // Computed once, workspace-wide, for the same reason
+    // `agent_execution_health` above is: it is one state per tenant, not one
+    // per template. It was inside the loop, so a sixty-day North Star query
+    // and a full CUSUM pass ran once per worker template — the same query, the
+    // same answer, every five minutes — and the change-point log line fired
+    // once per template, which reads as several regime shifts detected rather
+    // than one detected several times.
+    let north_star_days = super::super::daily_north_star(
+        repo.pool(),
+        workspace_id,
+        super::super::NORTH_STAR_WINDOW_DAYS,
+    )
+    .await
+    .unwrap_or_default();
+    // CUSUM change-point detection over the same series, for sudden regime
+    // shifts: viral moments, algorithm changes, audience fatigue. The detector
+    // is stateless across cycles, so this is a batch detection over the whole
+    // window rather than an incremental one. Threshold and drift are tuned for
+    // daily fan counts.
+    let north_star_series: Vec<f64> = north_star_days.iter().map(|day| day.value).collect();
+    let shifts = crowdrelay_brain::change_point::detect_fan_growth_shifts(
+        &north_star_series,
+        10.0, // threshold: 10 fans cumulative deviation
+        2.0,  // drift: 2 fans of noise tolerated
+    );
+    if let Some(last) = shifts.last() {
+        tracing::info!(
+            workspace_id = %workspace_id.into_uuid(),
+            direction = last.direction.as_str(),
+            shift_size = last.shift_size(),
+            pre_mean = last.pre_mean,
+            post_mean = last.post_mean,
+            total_shifts = shifts.len(),
+            "change-point detection: regime shift detected in North Star series"
+        );
+    }
+    // A fresh monitor each cycle, which is why `learning_cycles` and its
+    // siblings are only ever 0 or 1. Nothing in the cycle reads them —
+    // `sizing_multiplier`, `exploration_boost` and `state` all depend on the
+    // assessed state alone — so this is honest for every use inside the brain.
+    // It is not honest on the operator scorecard, which renders
+    // `learning_cycles` off the serialized snapshot as though it counted
+    // history. Making it count would mean persisting the monitor, and this
+    // loader also serves the read-only cycle preview, so the write would
+    // advance the brain's self-history every time somebody looked at it.
+    let metacognition = {
+        let mut monitor = crowdrelay_brain::self_assessment::MetacognitionMonitor::new();
+        monitor.observe(crowdrelay_brain::self_assessment::assess(north_star_days));
+        monitor
+    };
+
     // Build one snapshot per worker template.
     let templates = worker_templates();
     // hypothesis_states loaded in parallel with the audience queries above.
@@ -933,61 +990,9 @@ pub(in crate::autopilot) async fn load_growth_intelligence_snapshots(
                 .get(*template_id)
                 .copied()
                 .unwrap_or(crowdrelay_brain::hypothesis::HypothesisState::Active),
-            // Metacognition: assess the brain's own performance from
-            // the daily North Star series. The assessment feeds
-            // exploration_boost into EFE weights and sizing_multiplier
-            // into dispatch budget — the brain explores harder when
-            // stagnant and sizes down when regressing, mirroring Kern's
-            // metacognition feedback loop.
-            //
-            // Falls back to Improving (neutral) when there is not yet
-            // enough history to assess — the honest answer for a young
-            // system rather than claiming stagnation.
-            //
-            // Change-point detection: CUSUM runs on the same daily
-            // North Star series to detect sudden regime shifts (viral
-            // moments, algorithm changes, audience fatigue). The
-            // detected change points are logged so the operator can
-            // see when the brain detected a shift, and the last
-            // change point's direction feeds into the self-assessment:
-            // an upward shift boosts toward Improving, a downward
-            // shift triggers Regressing earlier than the proportional
-            // threshold would.
             agent_execution_health,
-            metacognition: {
-                let samples = super::super::daily_north_star(
-                    repo.pool(),
-                    workspace_id,
-                    super::super::NORTH_STAR_WINDOW_DAYS,
-                )
-                .await
-                .unwrap_or_default();
-                let state = crowdrelay_brain::self_assessment::assess(samples.clone());
-                // Run CUSUM change-point detection on the North Star
-                // series. The detector is created fresh each cycle —
-                // it is stateless across cycles, so this is a batch
-                // detection over the full window. The threshold and
-                // drift are tuned for daily fan counts.
-                let series: Vec<f64> = samples.iter().map(|s| s.value).collect();
-                let shifts = crowdrelay_brain::change_point::detect_fan_growth_shifts(
-                    &series, 10.0, // threshold: 10 fans cumulative deviation
-                    2.0,  // drift: 2 fans of noise tolerated
-                );
-                if let Some(last) = shifts.last() {
-                    tracing::info!(
-                        workspace_id = %workspace_id.into_uuid(),
-                        direction = last.direction.as_str(),
-                        shift_size = last.shift_size(),
-                        pre_mean = last.pre_mean,
-                        post_mean = last.post_mean,
-                        total_shifts = shifts.len(),
-                        "change-point detection: regime shift detected in North Star series"
-                    );
-                }
-                let mut m = crowdrelay_brain::self_assessment::MetacognitionMonitor::new();
-                m.observe(state);
-                m
-            },
+            // One state per tenant — see where it is assessed, above the loop.
+            metacognition: metacognition.clone(),
         });
     }
 
