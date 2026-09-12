@@ -150,9 +150,21 @@ pub struct LearningState {
     /// The brain's self-assessment from the most recent cycle:
     /// improving, learning, stagnant, regressing, or initializing.
     pub metacognition: Option<String>,
-    /// Total cycles where the posterior was updated with new evidence.
+    /// Days on which a belief actually moved, from
+    /// `viryaos_brain_belief_revisions`.
+    ///
+    /// Previously read off the serialized metacognition snapshot, where it
+    /// could only ever be 0 or 1: the loader builds a fresh monitor each cycle
+    /// and gives it one observation. A system that had learned a thousand
+    /// times and one that had never learned both rendered `1`. It now counts
+    /// the durable ledger, so an empty ledger reads 0 — which is the honest
+    /// number, and the one that makes a stalled learning loop visible.
     pub learning_cycles: i64,
-    /// Total cycles where the brain's state was "improving".
+    /// Belief revisions recorded in total.
+    ///
+    /// Same provenance and the same correction. A revision is the only
+    /// durable evidence of improvement the brain writes down, so this counts
+    /// those rather than an in-memory tally that did not survive the cycle.
     pub improving_cycles_total: i64,
     /// Evidence rows with at least one partial resolution (3d/7d
     /// checkpoint stamped). The brain can learn from partial evidence
@@ -233,9 +245,27 @@ struct MetacognitionRow {
 
 #[derive(Debug, serde::Deserialize)]
 struct MetacognitionPayload {
+    /// The assessed state, which is the only field of this payload the brain
+    /// itself acts on and the only one worth reading here.
+    ///
+    /// The snapshot also carries `learning_cycles` and
+    /// `improving_cycles_total`. They are deliberately not deserialized: the
+    /// loader builds a fresh monitor every cycle, so both are always 0 or 1,
+    /// and the scorecard now counts `viryaos_brain_belief_revisions` instead.
+    /// Leaving the fields here would invite someone to read them again.
     state: Option<String>,
-    learning_cycles: Option<i64>,
-    improving_cycles_total: Option<i64>,
+}
+
+/// What the durable belief ledger says about learning that actually happened.
+#[derive(Debug, FromRow)]
+struct LearningHistoryRow {
+    /// Distinct days on which a belief moved. Days, not rows: several
+    /// revisions in one cycle are one cycle that learned.
+    learning_cycles: i64,
+    /// Every recorded revision. Named `improving_cycles_total` on the wire for
+    /// compatibility; a revision is the only durable evidence of improvement
+    /// the brain writes down.
+    belief_revisions: i64,
 }
 
 #[derive(Debug, FromRow)]
@@ -546,18 +576,46 @@ async fn load_agent_scorecard(
     .fetch_optional(pool)
     .await?;
 
-    let (metacognition, learning_cycles, improving_cycles_total) = match meta_row {
-        Some(row) => {
-            let p = row.metacognition
-                .and_then(|s| serde_json::from_str::<MetacognitionPayload>(&s).ok());
-            (
-                p.as_ref().and_then(|m| m.state.clone()),
-                p.as_ref().and_then(|m| m.learning_cycles).unwrap_or(0),
-                p.as_ref().and_then(|m| m.improving_cycles_total).unwrap_or(0),
-            )
-        }
-        None => (None, 0, 0),
-    };
+    let metacognition = meta_row
+        .and_then(|row| row.metacognition)
+        .and_then(|s| serde_json::from_str::<MetacognitionPayload>(&s).ok())
+        .and_then(|m| m.state);
+
+    // Counted from the durable belief ledger, not from the snapshot.
+    //
+    // `learning_cycles` and `improving_cycles_total` used to be read off the
+    // serialized `metacognition` payload. The loader builds a fresh
+    // `MetacognitionMonitor` every cycle and feeds it exactly one observation,
+    // so both are only ever 0 or 1 — and it says so in a comment. Inside the
+    // brain that is harmless, because nothing reads them: `sizing_multiplier`,
+    // `exploration_boost` and `state` all depend on the assessed state alone.
+    // On the operator scorecard it was a lie with a history-shaped name. A
+    // system that had learned a thousand times and one that had never learned
+    // both rendered `1`.
+    //
+    // Persisting the monitor is the wrong fix: this loader also serves the
+    // read-only cycle preview, so the write would advance the brain's
+    // self-history every time somebody opened the page.
+    //
+    // `viryaos_brain_belief_revisions` is the record that already exists and
+    // already means this. A learning cycle is a day on which a belief actually
+    // moved, and an improving one is a revision the module recorded as an
+    // improvement. When nothing has been learned this reads 0, which is the
+    // honest answer and the one the empty ledger deserves.
+    let learning_row = sqlx::query_as::<_, LearningHistoryRow>(
+        r#"
+        SELECT
+            count(DISTINCT recorded_at::date)::bigint AS learning_cycles,
+            count(*)::bigint AS belief_revisions
+        FROM viryaos_brain_belief_revisions
+        WHERE workspace_id = $1
+        "#,
+    )
+    .bind(workspace_id)
+    .fetch_one(pool)
+    .await?;
+    let learning_cycles = learning_row.learning_cycles;
+    let improving_cycles_total = learning_row.belief_revisions;
 
     let evidence_row = sqlx::query_as::<_, EvidenceRow>(
         r#"
