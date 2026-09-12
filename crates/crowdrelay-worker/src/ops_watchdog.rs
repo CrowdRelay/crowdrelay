@@ -256,9 +256,11 @@ struct OpsSnapshot {
     /// learning, and not one alarm — the whole autonomous loop was shut by a
     /// quota and the only trace was a rejection reason in a table nobody reads.
     outcomes_rejected_unverified: i64,
-    /// Agent outcomes accepted in the same window. Zero accepted alongside a
-    /// non-zero refusal count is a stopped loop; a few refusals beside healthy
-    /// traffic is a verifier doing its job.
+    /// Actionable agent outcomes accepted in the same window.
+    ///
+    /// Restricted to the `require_approval` kinds, because those are the only
+    /// ones the grounding gate can refuse. Counting observations here compared
+    /// two different populations and made the condition unfirable.
     outcomes_accepted: i64,
     /// Publishing actions that succeeded but produced no post artifact, long
     /// enough ago that an executor would have claimed them.
@@ -392,8 +394,19 @@ async fn load_snapshot(
                AND o.rejection_reason LIKE 'NOT_GROUNDING_CHECKED%'
                AND o.created_at > now() - interval '1 day'
             )::bigint AS outcomes_rejected_unverified,
+            -- Accepted *actionable* outcomes only.
+            --
+            -- The grounding gate applies to `require_approval` kinds alone, so
+            -- the refusals counted above are all actionable. Counting every
+            -- accepted kind against them compares two different populations:
+            -- `recommend_only` insights and segments pass the gate untouched
+            -- and keep arriving, so the accepted total is never zero and the
+            -- condition could never fire — in exactly the state it exists to
+            -- report. Production proved that on the first cycle after deploy:
+            -- refusals present, alarm silent.
             (SELECT count(*) FROM agent_outcomes o
              WHERE o.workspace_id=$1 AND o.status='processed'
+               AND o.kind IN ('press_pitch','social_post','signal_push','outreach_targets')
                AND o.created_at > now() - interval '1 day'
             )::bigint AS outcomes_accepted,
             -- Succeeded publishing actions with no artifact in any of the four
@@ -658,6 +671,47 @@ mod tests {
             outcomes_accepted: 4,
             orphaned_publishing_actions: 0,
         }
+    }
+
+    /// The condition must fire when actionable outcomes are all refused, even
+    /// while observations keep flowing.
+    ///
+    /// This is the shape production was actually in: the grounding gate covers
+    /// `require_approval` kinds only, so insights and segments kept arriving
+    /// and kept being accepted. Comparing refusals against *every* accepted
+    /// kind made the alarm unfirable in the one state it exists to report, and
+    /// it stayed silent on the first cycle after deploy with 94 refusals
+    /// behind it.
+    #[test]
+    fn refused_actionable_outcomes_raise_attention_even_while_insights_flow() {
+        let mut snapshot = healthy();
+        snapshot.outcomes_rejected_unverified = 7;
+        snapshot.outcomes_accepted = 0;
+        let raised = conditions(&snapshot)
+            .into_iter()
+            .filter(|c| c.active)
+            .map(|c| c.key)
+            .collect::<Vec<_>>();
+        assert!(
+            raised.contains(&"learning.outcomes_unverified"),
+            "expected the learning alarm, raised: {raised:?}"
+        );
+    }
+
+    #[test]
+    fn a_few_refusals_beside_healthy_actionable_traffic_are_not_an_alarm() {
+        let mut snapshot = healthy();
+        snapshot.outcomes_rejected_unverified = 2;
+        snapshot.outcomes_accepted = 9;
+        let raised = conditions(&snapshot)
+            .into_iter()
+            .filter(|c| c.active)
+            .map(|c| c.key)
+            .collect::<Vec<_>>();
+        assert!(
+            !raised.contains(&"learning.outcomes_unverified"),
+            "a verifier doing its job is not an outage, raised: {raised:?}"
+        );
     }
 
     #[test]
