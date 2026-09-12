@@ -24,6 +24,50 @@ use super::super::super::*;
 /// observations to the OutcomeModel regime tracker. This ensures that
 /// a badly calibrated observational predictor cannot distort uncertainty
 /// for the randomized treatment estimator.
+/// Whether a horizon carries an observation this batch has not learned from.
+///
+/// A row enters the delta when *any* of its per-horizon cursors passes the
+/// checkpoint, so every replay must ask this per horizon rather than per row.
+/// The 30d measurement stamps its own column without changing the 14d value:
+/// a learner that reads the row instead of the horizon replays the same 14-day
+/// observation a second time and calls the result more certain.
+///
+/// A NULL per-horizon timestamp falls back to `resolved_at`, so a fully
+/// resolved row whose per-horizon columns were never stamped — legacy rows, or
+/// evidence inserted directly by a test — is still new when it resolved after
+/// the checkpoint. Only when both are NULL is the horizon genuinely
+/// incomplete.
+pub(super) fn horizon_is_new(
+    checkpoint: Option<OffsetDateTime>,
+    horizon: Option<OffsetDateTime>,
+    fallback: Option<OffsetDateTime>,
+) -> bool {
+    match (checkpoint, horizon.or(fallback)) {
+        (None, _) => true,        // full replay — learn from everything
+        (Some(_), None) => false, // measurement not completed yet
+        (Some(cp), Some(ts)) => ts > cp,
+    }
+}
+
+/// The observation this row contributes to the strategy posterior, if any.
+///
+/// [`crowdrelay_brain::GrowthEvidence::incremental_fans_for_learning`] prefers
+/// the Y14 reading and falls back to the three-day one, so the horizon that
+/// produced the value is exactly the one gated here.
+pub(super) fn strategy_observation(
+    ev: &crowdrelay_brain::GrowthEvidence,
+    checkpoint: Option<OffsetDateTime>,
+) -> Option<(f64, f64)> {
+    let (incremental_fans, variance_multiplier) = ev.incremental_fans_for_learning()?;
+    let horizon = if ev.observed_incremental_fans.is_some() {
+        ev.replayed_14d_at
+    } else {
+        ev.replayed_3d_at
+    };
+    horizon_is_new(checkpoint, horizon, ev.resolved_at)
+        .then_some((incremental_fans, variance_multiplier))
+}
+
 /// The control arm's average outcome, per experiment.
 ///
 /// `None` for a horizon means no control unit has a resolved outcome on it
@@ -141,21 +185,9 @@ pub(super) fn apply_evidence_to_model_with_contrast(
     // horizons that are new since the checkpoint. This prevents
     // double-counting — the 30d measurement stamps its own cursor without
     // changing observed_fans, so the outcome model must not be updated
-    // again for it.
-    //
-    // A horizon is "new" when its replay timestamp is newer than the
-    // checkpoint, or when there is no checkpoint (full replay). A NULL
-    // per-horizon timestamp falls back to `resolved_at`: a fully resolved
-    // row whose per-horizon columns were never stamped (legacy rows, or
-    // evidence inserted directly by tests) is still new if it resolved
-    // after the checkpoint. Only when both the per-horizon timestamp AND
-    // `resolved_at` are NULL is the horizon genuinely incomplete.
+    // again for it. See [`horizon_is_new`] for the rule.
     let horizon_is_new = |ts: Option<OffsetDateTime>, fallback: Option<OffsetDateTime>| -> bool {
-        match (checkpoint, ts.or(fallback)) {
-            (None, _) => true,          // full replay — learn from everything
-            (Some(_cp), None) => false, // measurement not completed yet
-            (Some(cp), Some(ts)) => ts > cp,
-        }
+        self::horizon_is_new(checkpoint, ts, fallback)
     };
 
     // Intent-to-treat compares the arms. The control rows in this batch are
@@ -463,9 +495,19 @@ pub(super) fn apply_evidence_to_model_with_contrast(
 /// the evidence's context. This is called alongside `apply_evidence_to_model`
 /// during the causal model load, so the strategy posterior stays in sync
 /// with the causal model's evidence replay.
+///
+/// `checkpoint` gates the same way it does for the causal model, and for the
+/// same reason. A row enters the delta whenever any of its horizons stamps a
+/// cursor, so a dispatch measured at 3d, 14d and 30d arrives in three separate
+/// batches. Ungated, the third one re-applied the *same* Y14 value the second
+/// one had already learned from: one observation, counted twice, in a
+/// Normal-Normal posterior whose variance shrinks with the count. The strategy
+/// posterior picks which strategy the brain runs, so the visible symptom was a
+/// brain more certain of its favourite than the evidence supports.
 pub(in crate::autopilot) fn apply_evidence_to_strategy_posterior(
     posterior: &mut crowdrelay_brain::StateConditionedStrategyPosterior,
     evidence: &[crowdrelay_brain::GrowthEvidence],
+    checkpoint: Option<OffsetDateTime>,
 ) {
     use crowdrelay_brain::GrowthStrategy;
 
@@ -503,7 +545,8 @@ pub(in crate::autopilot) fn apply_evidence_to_strategy_posterior(
         // quantity should move the posterior less, not report a smaller
         // number — halving the estimate would teach the brain the effect was
         // small, when what is actually true is that we are less sure.
-        if let Some((incremental_fans, variance_multiplier)) = ev.incremental_fans_for_learning() {
+        if let Some((incremental_fans, variance_multiplier)) = strategy_observation(ev, checkpoint)
+        {
             let obs_var = 2.0 * incremental_fans.abs().max(1.0) * variance_multiplier;
             posterior.update(
                 &strategy,
@@ -545,8 +588,17 @@ pub(super) async fn apply_evidence_to_stored_strategy_posterior(
     workspace_id: WorkspaceId,
     evidence: &[crowdrelay_brain::GrowthEvidence],
     replay: PosteriorReplay,
+    checkpoint: Option<OffsetDateTime>,
 ) {
     use crowdrelay_brain::StateConditionedStrategyPosterior;
+
+    // `FromScratch` replays every row the workspace has, so no horizon can be
+    // stale relative to a cursor the caller is not using. Carrying a
+    // checkpoint into it would silence horizons the rebuild has to include.
+    debug_assert!(
+        replay == PosteriorReplay::Delta || checkpoint.is_none(),
+        "a full rebuild must not be gated by a delta cursor"
+    );
 
     // What is stored right now, whichever replay mode this is.
     //
@@ -603,7 +655,7 @@ pub(super) async fn apply_evidence_to_stored_strategy_posterior(
         },
     };
 
-    apply_evidence_to_strategy_posterior(&mut posterior, evidence);
+    apply_evidence_to_strategy_posterior(&mut posterior, evidence, checkpoint);
 
     match serde_json::to_value(&posterior) {
         Ok(state) => {
@@ -635,6 +687,7 @@ pub(super) async fn apply_evidence_to_stored_strategy_posterior(
                     before,
                     &posterior,
                     evidence,
+                    checkpoint,
                 )
                 .await;
             }
@@ -657,13 +710,16 @@ async fn record_strategy_posterior_revisions(
     before: &crowdrelay_brain::StateConditionedStrategyPosterior,
     after: &crowdrelay_brain::StateConditionedStrategyPosterior,
     evidence: &[crowdrelay_brain::GrowthEvidence],
+    checkpoint: Option<OffsetDateTime>,
 ) {
-    // Only the rows that actually updated a cell. `apply_evidence_to_strategy_posterior`
-    // skips evidence without an incremental outcome, so citing every row in the
-    // batch would attribute the change to dispatches that contributed nothing.
+    // Only the rows that actually updated a cell — the same predicate the
+    // learner used, not a restatement of it. `observed_incremental_fans` alone
+    // was both too narrow and too wide: it dropped the rows learned from their
+    // three-day reading, and it claimed the rows whose Y14 value this batch
+    // was gated out of re-applying.
     let caused_by: Vec<uuid::Uuid> = evidence
         .iter()
-        .filter(|ev| ev.observed_incremental_fans.is_some())
+        .filter(|ev| strategy_observation(ev, checkpoint).is_some())
         .filter_map(|ev| ev.action_id)
         .collect();
     let revisions =

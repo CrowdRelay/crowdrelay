@@ -1096,12 +1096,15 @@ pub(in crate::autopilot) async fn load_causal_model(
                     Some(checkpoint_time),
                 );
                 // Also apply delta evidence to the strategy posterior so it
-                // stays in sync with the causal model's evidence replay.
+                // stays in sync with the causal model's evidence replay —
+                // including the per-horizon gating, which is why the
+                // checkpoint goes across too.
                 apply_evidence_to_stored_strategy_posterior(
                     repo,
                     workspace_id,
                     &delta,
                     PosteriorReplay::Delta,
+                    Some(checkpoint_time),
                 )
                 .await;
                 // Attribution: summarize the delta evidence for operator
@@ -1232,6 +1235,7 @@ async fn full_replay(
             workspace_id,
             &evidence,
             PosteriorReplay::FromScratch,
+            None,
         )
         .await;
         // Attribution: summarize where fan growth came from, for operator

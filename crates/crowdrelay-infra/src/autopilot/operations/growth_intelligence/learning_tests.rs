@@ -516,3 +516,154 @@ fn a_learned_posterior_reaches_the_decision_value() {
         "scoring must not mutate the model it reads"
     );
 }
+
+/// The 30-day measurement must not re-teach the 14-day observation.
+///
+/// A row enters the delta whenever *any* of its per-horizon cursors passes the
+/// checkpoint, so one dispatch arrives in three separate batches: once when 3d
+/// stamps, once when 14d stamps, once when 30d stamps. `observed_incremental_fans`
+/// is the 14-day value and the 30d measurement does not change it, so the third
+/// batch carries an observation the second batch already learned from.
+///
+/// The causal model has gated this per horizon since the cursor became
+/// `GREATEST(...)`. The strategy posterior did not, and it is the posterior
+/// that decides which strategy runs: `from_world_model_with_posterior`
+/// overrides the operator's rule once a cell holds five observations, so
+/// counting each dispatch twice reached that threshold on two and a half real
+/// dispatches. The number that moved was confidence, which is the one thing a
+/// duplicate must never move.
+#[test]
+fn the_thirty_day_stamp_does_not_relearn_the_fourteen_day_outcome() {
+    use super::evidence_replay::apply_evidence_to_strategy_posterior;
+    use crowdrelay_brain::StateConditionedStrategyPosterior;
+    use time::{Duration, OffsetDateTime};
+
+    let dispatched = OffsetDateTime::UNIX_EPOCH;
+    let three_d = dispatched + Duration::days(3);
+    let fourteen_d = dispatched + Duration::days(14);
+    let thirty_d = dispatched + Duration::days(30);
+
+    let row = GrowthEvidence {
+        opportunity_id: Some("community-engager:target:post:ctx".to_owned()),
+        strategy: Some("community_first".to_owned()),
+        treatment: TreatmentAssignment::Treatment,
+        observed_incremental_fans: Some(4.0),
+        observed_fans: Some(4.0),
+        durable_fans_30d: Some(9.0),
+        replayed_3d_at: Some(three_d),
+        replayed_14d_at: Some(fourteen_d),
+        replayed_30d_at: Some(thirty_d),
+        resolved_at: Some(thirty_d),
+        ..GrowthEvidence::default()
+    };
+
+    let mut posterior = StateConditionedStrategyPosterior::new();
+    let state = ("community_first", "steady", "far");
+
+    // The batch in which the 14d horizon stamps: this is the observation.
+    apply_evidence_to_strategy_posterior(&mut posterior, std::slice::from_ref(&row), Some(three_d));
+    let after_y14 = posterior.confidence(state.0, state.1, state.2);
+    assert_eq!(
+        after_y14, 1,
+        "the batch carrying the 14-day outcome must teach it exactly once"
+    );
+    let (mean_after_y14, variance_after_y14) = posterior.predict(state.0, state.1, state.2);
+
+    // The batch in which only the 30d horizon stamps. Same row, same 14-day
+    // value, nothing new about it.
+    apply_evidence_to_strategy_posterior(
+        &mut posterior,
+        std::slice::from_ref(&row),
+        Some(fourteen_d),
+    );
+
+    assert_eq!(
+        posterior.confidence(state.0, state.1, state.2),
+        after_y14,
+        "the 30-day stamp re-applied the 14-day outcome; one dispatch now \
+         counts as two observations and the strategy override threshold \
+         arrives on half the evidence it asks for"
+    );
+    let (mean, variance) = posterior.predict(state.0, state.1, state.2);
+    assert!(
+        (variance - variance_after_y14).abs() < f64::EPSILON,
+        "a duplicate must not shrink the variance: {variance_after_y14} became {variance}"
+    );
+    assert!(
+        (mean - mean_after_y14).abs() < f64::EPSILON,
+        "and must not move the mean: {mean_after_y14} became {mean}"
+    );
+}
+
+/// A full replay learns from every horizon it holds.
+///
+/// The gate above keys on a checkpoint. `None` means there is no cursor —
+/// the caller is rebuilding from all evidence — and gating a rebuild would
+/// silence exactly the horizons it exists to replay.
+#[test]
+fn a_full_replay_is_not_gated_by_a_cursor_it_does_not_have() {
+    use super::evidence_replay::apply_evidence_to_strategy_posterior;
+    use crowdrelay_brain::StateConditionedStrategyPosterior;
+    use time::{Duration, OffsetDateTime};
+
+    let fourteen_d = OffsetDateTime::UNIX_EPOCH + Duration::days(14);
+    let row = GrowthEvidence {
+        opportunity_id: Some("community-engager:target:post:ctx".to_owned()),
+        strategy: Some("community_first".to_owned()),
+        treatment: TreatmentAssignment::Treatment,
+        observed_incremental_fans: Some(4.0),
+        observed_fans: Some(4.0),
+        replayed_14d_at: Some(fourteen_d),
+        ..GrowthEvidence::default()
+    };
+
+    let mut posterior = StateConditionedStrategyPosterior::new();
+    apply_evidence_to_strategy_posterior(&mut posterior, std::slice::from_ref(&row), None);
+    assert_eq!(
+        posterior.confidence("community_first", "steady", "far"),
+        1,
+        "a full replay must learn from the 14-day outcome it was handed"
+    );
+}
+
+/// The three-day reading teaches the posterior, so it must reach the ledger.
+///
+/// `incremental_fans_for_learning` falls back to the three-day estimate while
+/// Y14 is pending — that fallback exists so a strategy belief can move before
+/// day fourteen. The belief-revision ledger filtered on
+/// `observed_incremental_fans` instead, so every revision driven by an early
+/// reading was recorded with no action behind it: a belief that changed, and
+/// an operator with no way to ask what changed it.
+#[test]
+fn an_early_reading_that_moves_the_posterior_names_the_action_that_caused_it() {
+    use super::evidence_replay::{apply_evidence_to_strategy_posterior, strategy_observation};
+    use crowdrelay_brain::StateConditionedStrategyPosterior;
+    use time::{Duration, OffsetDateTime};
+
+    let three_d = OffsetDateTime::UNIX_EPOCH + Duration::days(3);
+    let row = GrowthEvidence {
+        opportunity_id: Some("community-engager:target:post:ctx".to_owned()),
+        strategy: Some("community_first".to_owned()),
+        treatment: TreatmentAssignment::Treatment,
+        action_id: Some(uuid::Uuid::from_u128(0x3d_0001)),
+        observed_incremental_fans: None,
+        observed_incremental_fans_3d: Some(2.0),
+        observed_fans: Some(2.0),
+        replayed_3d_at: Some(three_d),
+        partial_resolution_count: 1,
+        ..GrowthEvidence::default()
+    };
+
+    let mut posterior = StateConditionedStrategyPosterior::new();
+    apply_evidence_to_strategy_posterior(&mut posterior, std::slice::from_ref(&row), None);
+    assert_eq!(
+        posterior.confidence("community_first", "steady", "far"),
+        1,
+        "the three-day reading must move the posterior"
+    );
+    assert!(
+        strategy_observation(&row, None).is_some(),
+        "and the ledger must agree that it did, or the revision it records \
+         cites no action at all"
+    );
+}
