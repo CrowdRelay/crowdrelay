@@ -7,7 +7,17 @@
 //! not actionable from there. FakAP remains the external health probe for
 //! API reachability; this watchdog catches silent failures FakAP cannot see.
 //!
-//! The watchdog monitors five conditions:
+//! The watchdog monitors six conditions:
+//! - `learning.outcomes_unverified` — every agent outcome in the last day was
+//!   refused because no grounding check ran, and none were accepted. Refusing
+//!   an unchecked outcome is correct and fail-closed; the cost is that a broken
+//!   verifier looks exactly like a quiet system. Production stood in this state
+//!   for nine days while every verifier returned HTTP 429 against an exhausted
+//!   free-tier quota: 94 outcomes refused, no post ever drafted, and — because
+//!   nothing was ever published — the measurement path correctly declined to
+//!   resolve any evidence at all. Zero resolved outcomes, zero learning, and
+//!   not one alarm. Nothing downstream of a refusal works, so this is critical
+//!   rather than a warning.
 //! - `executor.offline` — the API is up but no executor has heartbeated
 //!   recently, so nothing can actually execute. This is a silent failure
 //!   that FakAP (external health probe) cannot detect.
@@ -223,6 +233,25 @@ struct OpsSnapshot {
     /// whether one city is holding thirty people or thirty are holding one
     /// each, and those need different responses.
     fans_awaiting_geocoding: i64,
+    /// Agent outcomes refused in the last day because no grounding check ran.
+    ///
+    /// `VerificationStatus::NotVerified` is fail-closed on purpose: an outcome
+    /// nobody checked must not become an action. The cost of that correctness
+    /// is that a broken verifier is indistinguishable from a quiet system —
+    /// the brain proposes, every proposal is refused, and the funnel reports
+    /// nothing wrong because nothing errored.
+    ///
+    /// It happened. Every verifier returned HTTP 429 against an exhausted
+    /// free-tier daily quota, 94 outcomes were refused over nine days, no post
+    /// was ever drafted, and with no published artifact the measurement path
+    /// correctly declined to resolve any of it. Zero resolved outcomes, zero
+    /// learning, and not one alarm — the whole autonomous loop was shut by a
+    /// quota and the only trace was a rejection reason in a table nobody reads.
+    outcomes_rejected_unverified: i64,
+    /// Agent outcomes accepted in the same window. Zero accepted alongside a
+    /// non-zero refusal count is a stopped loop; a few refusals beside healthy
+    /// traffic is a verifier doing its job.
+    outcomes_accepted: i64,
 }
 
 #[derive(Clone, Debug)]
@@ -331,7 +360,20 @@ async fn load_snapshot(
                AND ct.latitude IS NULL
                AND ct.moderation_status IN ('pending', 'approved')
                AND ct.geocode_attempts >= 5
-            )::bigint AS fans_awaiting_geocoding
+            )::bigint AS fans_awaiting_geocoding,
+            -- Agent outcomes refused in the last day for want of a grounding
+            -- check, and the accepted count beside it. A day, not all time:
+            -- this asks whether the loop is running now, and a rejection from
+            -- last month is history rather than an alarm.
+            (SELECT count(*) FROM agent_outcomes o
+             WHERE o.workspace_id=$1 AND o.status='rejected'
+               AND o.rejection_reason LIKE 'NOT_GROUNDING_CHECKED%'
+               AND o.created_at > now() - interval '1 day'
+            )::bigint AS outcomes_rejected_unverified,
+            (SELECT count(*) FROM agent_outcomes o
+             WHERE o.workspace_id=$1 AND o.status='processed'
+               AND o.created_at > now() - interval '1 day'
+            )::bigint AS outcomes_accepted
         FROM viryaos_executor_instances WHERE workspace_id=$1
         "#,
     )
@@ -343,6 +385,30 @@ async fn load_snapshot(
 
 fn conditions(snapshot: &OpsSnapshot) -> Vec<Condition> {
     vec![
+        Condition {
+            // Critical, and deliberately not a warning. Nothing downstream of
+            // this works: an outcome that is refused never becomes an action,
+            // so no post is drafted, no artifact is published, and the
+            // measurement path correctly declines to resolve evidence for a
+            // dispatch that never reached anybody. Every posterior stays on
+            // its prior. The brain is not degraded, it is disconnected, and no
+            // other condition on this list can tell you so.
+            //
+            // The predicate needs both halves. Refusals alongside healthy
+            // traffic are a verifier doing its job on bad output; refusals
+            // with nothing accepted is the loop stopped.
+            key: "learning.outcomes_unverified",
+            severity: "critical",
+            summary: "Every agent outcome is being refused for want of a grounding check",
+            active: snapshot.outcomes_rejected_unverified > 0 && snapshot.outcomes_accepted == 0,
+            details: json!({
+                "rejected_unverified": snapshot.outcomes_rejected_unverified,
+                "accepted": snapshot.outcomes_accepted,
+                "window": "1 day",
+                "remedy": "check the agent service's verifier: the reason is in \
+                           agent_outcomes.payload->'provenance'->'verification'->>'verifier_error'",
+            }),
+        },
         Condition {
             key: "executor.offline",
             severity: "critical",
@@ -532,6 +598,8 @@ mod tests {
             working_platforms: 2,
             stuck_ungeocoded_cities: 0,
             fans_awaiting_geocoding: 0,
+            outcomes_rejected_unverified: 0,
+            outcomes_accepted: 4,
         }
     }
 
