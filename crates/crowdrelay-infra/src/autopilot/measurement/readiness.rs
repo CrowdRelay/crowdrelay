@@ -11,12 +11,15 @@ use super::super::*;
 /// Whether an outbound dispatch ever reached an audience.
 ///
 /// Returns `Ok(true)` when at least one of the action's post artifacts is
-/// published, `Ok(false)` when the action produced artifacts and every one of
-/// them is still a draft, and `Ok(None)`— expressed as `Ok(true)` — is
-/// deliberately not a case: an action with no artifacts at all is reported as
-/// `true`, because "there was nothing to publish" must not be confused with
-/// "it was never published". Scanner and strategist dispatches produce no
-/// post, and their outcomes are real.
+/// published, and `Ok(false)` when the action produced artifacts and every one
+/// of them is still a draft.
+///
+/// An action with no artifacts at all depends on whether it was supposed to
+/// have one. Scanner and strategist dispatches never produce a post and their
+/// outcomes are real, so they report `true` — "there was nothing to publish"
+/// must not be confused with "it was never published". A publishing kind with
+/// no artifact reports `false`: it reached nobody, and the only honest reading
+/// of an absent post is that there is no outcome to measure.
 ///
 /// # Why this exists
 ///
@@ -41,17 +44,46 @@ pub(in crate::autopilot) async fn dispatch_reached_an_audience(
     action_id: AutopilotActionId,
 ) -> Result<bool, RepositoryError> {
     // One query over the four post tables. `bool_or` is NULL when the action
-    // produced no artifact at all, and COALESCE turns that into `true` — see
-    // the note above on why absence of an artifact is not absence of a post.
+    // produced no artifact at all, and the COALESCE decides what that means.
     //
     // 'posted' is the published state in all four vocabularies; every other
     // state ('pending', 'posting', 'failed', 'rate_limited',
     // 'awaiting_manual_post') means no audience saw it. Matching on the
     // published state rather than excluding the draft one keeps a future
     // status from silently counting as published.
+    //
+    // The COALESCE default is per action kind, not a constant.
+    //
+    // "No artifact" means two opposite things. A scanner or the strategist
+    // never produces one, and its outcome is real — defaulting those to `true`
+    // is what lets them be measured at all. A publishing action that produced
+    // none did not reach anybody, and defaulting it to `true` measures the
+    // fans a post that does not exist did not attract, then teaches the
+    // template that it does not work.
+    //
+    // That gap is reachable. The three executors claim
+    // `agent.content.request` by the agent task's `template_id`, and the
+    // social one additionally requires
+    // `platform IN ('instagram','facebook','x')` — while the agents service's
+    // own schema lets a `social-post` draft carry `telegram` or `discord`.
+    // Such a draft is claimed by nobody: social skips it on platform, telegram
+    // and discord skip it on template. The action stays `succeeded` with no
+    // artifact for good, and before this it was then measured as a real zero.
+    //
+    // Publishing kinds are listed explicitly rather than inferred, so a new
+    // kind is opted in deliberately and an unrecognised one keeps the old
+    // permissive default instead of silently becoming unmeasurable.
     let reached = sqlx::query_scalar::<_, bool>(
         r#"
-        SELECT COALESCE(bool_or(published), true)
+        SELECT COALESCE(
+                   bool_or(published),
+                   NOT EXISTS (
+                       SELECT 1 FROM viryaos_autopilot_actions a
+                       WHERE a.workspace_id = $1 AND a.id = $2
+                         AND a.action_kind IN ('agent.content.request',
+                                               'community.engage.request')
+                   )
+               )
         FROM (
             SELECT status = 'posted' AS published
             FROM community_posts

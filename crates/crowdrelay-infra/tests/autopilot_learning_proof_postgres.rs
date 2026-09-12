@@ -651,5 +651,36 @@ async fn an_unpublished_draft_is_not_measured_as_a_zero() -> Result<(), Box<dyn 
         .await
         .expect("a dispatch that produces no post must still be measurable");
 
+    // ...but a *publishing* action with no artifact is the opposite case, and
+    // it used to fall into the same permissive default.
+    //
+    // The three executors claim `agent.content.request` by the agent task's
+    // `template_id`, and the social one also requires
+    // `platform IN ('instagram','facebook','x')` — while the agents service's
+    // schema lets a `social-post` draft carry `telegram` or `discord`. Such a
+    // draft is claimed by nobody: social skips it on platform, the other two
+    // skip it on template. The action stays `succeeded` with no artifact, and
+    // measuring it records the fans a post that does not exist did not attract.
+    //
+    // Same seed, publishing kind, opposite required answer.
+    let orphaned =
+        seed_resolved_dispatch(&pool, workspace_id, "social-post", "community_first", 0.0).await?;
+    sqlx::query(
+        "UPDATE viryaos_autopilot_actions SET action_kind = 'agent.content.request' WHERE id = $1",
+    )
+    .bind(orphaned.action_id)
+    .execute(&pool)
+    .await?;
+    match repository
+        .observe_measurement(workspace_id, &claimed(orphaned.action_id), now)
+        .await
+    {
+        Err(RepositoryError::ConflictBecause(_)) => {}
+        other => panic!(
+            "a publishing action with no artifact reached nobody and must not be \
+             measured as a zero, got {other:?}"
+        ),
+    }
+
     Ok(())
 }
