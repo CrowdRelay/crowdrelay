@@ -21,6 +21,29 @@
 //! has concluded this template does not work for this tenant. This is
 //! the kill switch at the template level: a `Retired` template produces
 //! no actions, no matter how good it once looked.
+//!
+//! # What production actually runs
+//!
+//! [`HypothesisState`] is live: it is persisted per `(workspace, template)`,
+//! loaded onto every growth snapshot, and read for `may_act` and `sizing_bps`
+//! when the cycle sizes dispatches.
+//!
+//! Everything else here is not. [`GrowthHypothesis`],
+//! [`assess_hypothesis_transition`], [`HypothesisLifecyclePolicy`] and
+//! [`LifecycleTransition`] are referenced by their own tests and by nothing in
+//! `crowdrelay-application`, `-infra`, `-worker` or `-api`. The transitions
+//! production performs are decided by `next_hypothesis_state` in
+//! `crowdrelay-application`'s walk-forward validation, which moves a template
+//! between `Active` and `Degraded` and never touches the other five states.
+//!
+//! So the promotion ladder described above — `Testing` → `Paper` →
+//! `MicroLive` → `Active`, resurrection counting, the observation thresholds —
+//! is a design nothing calls. Saying so here costs a paragraph; leaving a
+//! reader to infer from the type that a template earns its way up the ladder
+//! costs them the afternoon it takes to find out it does not. Kept rather than
+//! deleted because the states are already persisted and the ladder is the
+//! shape the lifecycle should grow into; the note is what stops it being read
+//! as the shape it already has.
 
 use serde::{Deserialize, Serialize};
 
