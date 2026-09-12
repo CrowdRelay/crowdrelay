@@ -88,16 +88,21 @@ const MAX_WEBHOOK_SECRET_REFERENCES: usize = 1_000;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Command {
-    Run { standby: bool },
+    Run {
+        standby: bool,
+    },
     Migrate,
     Bootstrap,
     Setup,
     Replay(ReplayOptions),
+    /// Bulk-import hand-curated outreach contacts from a CSV.
+    ImportOutreach {
+        path: std::path::PathBuf,
+    },
 }
 
 impl Command {
-    const KNOWN: &'static str =
-        "`run`, `run --standby`, `migrate`, `bootstrap`, `setup`, or `replay`";
+    const KNOWN: &'static str = "`run`, `run --standby`, `migrate`, `bootstrap`, `setup`, `replay`, or `import-outreach <csv>`";
 }
 
 /// Reads a boolean auto-post flag.
@@ -147,6 +152,23 @@ async fn main() -> Result<()> {
             )
             .await?;
         }
+        Command::ImportOutreach { path } => {
+            let workspace = trusted_workspace_id(&database, &config).await?;
+            let summary =
+                crowdrelay_worker::import_outreach::import_outreach(&database, workspace, &path)
+                    .await?;
+            tracing::info!(
+                read = summary.read,
+                written = summary.written,
+                skipped = summary.skipped,
+                path = %path.display(),
+                "outreach contacts imported"
+            );
+            println!(
+                "IMPORT_OUTREACH=OK read={} written={} skipped={}",
+                summary.read, summary.written, summary.skipped
+            );
+        }
         Command::Run { standby } => {
             tracing::info!(environment = %config.environment, standby, "CrowdRelay worker started");
             run(database.clone(), &config, standby).await?;
@@ -184,6 +206,17 @@ fn parse_command(args: impl IntoIterator<Item = String>) -> Result<Command> {
             Command::Setup
         }
         Some("replay") => Command::Replay(parse_replay_options(rest)?),
+        Some("import-outreach") => {
+            let Some((path, extras)) = rest.split_first() else {
+                bail!("import-outreach needs a CSV path");
+            };
+            if let Some(extra) = extras.first() {
+                bail!("unexpected worker argument `{extra}`");
+            }
+            Command::ImportOutreach {
+                path: std::path::PathBuf::from(path),
+            }
+        }
         Some(other) => bail!(
             "unknown worker command `{other}`; expected {}",
             Command::KNOWN

@@ -14,6 +14,8 @@ hex.workspace = true
 getrandom.workspace = true
 reqwest.workspace = true
 ring.workspace = true
+# Reading the hand-curated outreach CSV; see src/import_outreach.rs.
+csv = "1"
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
@@ -28,3 +30,9 @@ crowdrelay-domain = { path = "../crowdrelay-domain" }
 crowdrelay-brain = { path = "../crowdrelay-brain" }
 crowdrelay-application = { path = "../crowdrelay-application" }
 crowdrelay-infra = { path = "../crowdrelay-infra" }
+
+[dev-dependencies]
+# The outreach import test writes a CSV fixture to a real path, because the
+# importer takes a path rather than a reader — that is what the operator runs.
+tempfile = "3"
+anyhow.workspace = true
