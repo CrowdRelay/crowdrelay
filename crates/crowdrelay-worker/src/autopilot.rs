@@ -288,6 +288,8 @@ impl AutopilotWorker {
                 //
                 // WARN, not INFO: this is work waiting on a person.
                 if !report.blocked_on_membership.is_empty() {
+                    let auto_join_enabled =
+                        std::env::var("CROWDRELAY_COMMUNITY_AUTO_JOIN").as_deref() == Ok("true");
                     let waiting: u32 = report
                         .blocked_on_membership
                         .iter()
@@ -301,8 +303,13 @@ impl AutopilotWorker {
                             .iter()
                             .take(5)
                             .collect::<Vec<_>>(),
-                        "growth blocked: posts are waiting on communities nobody has joined — \
-                         join these, or set CROWDRELAY_COMMUNITY_AUTO_JOIN=true"
+                        auto_join = auto_join_enabled,
+                        // The remedy depends on whether auto-join is already
+                        // on. Telling an operator to set a flag they set
+                        // already sends them to the wrong place: when it is
+                        // on, the joins are being attempted and failing, and
+                        // the reason is in `failed to join community`.
+                        "growth blocked: posts are waiting on communities nobody has joined"
                     );
                 }
             }

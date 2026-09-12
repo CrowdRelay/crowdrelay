@@ -96,6 +96,22 @@ pub enum CommunityJoinError {
     NotASubreddit(String),
 }
 
+/// The whole `source()` chain of an error, joined.
+///
+/// `reqwest::Error` renders as "error sending request for url (...)" and says
+/// nothing about why — connection refused, DNS failure, TLS, timeout all look
+/// identical. Walking the chain is the difference between a log line somebody
+/// can act on and one that only says something went wrong.
+fn error_chain(error: &dyn std::error::Error) -> String {
+    let mut parts = vec![error.to_string()];
+    let mut source = error.source();
+    while let Some(cause) = source {
+        parts.push(cause.to_string());
+        source = cause.source();
+    }
+    parts.join(": ")
+}
+
 impl CommunityJoinError {
     /// Whether this failure is Reddit refusing us, as opposed to our own side
     /// failing before Reddit ever saw the request.
@@ -273,14 +289,24 @@ impl CommunityJoinExecutorWorker {
                     // actually refused; our own failures go back to
                     // `not_joined` so the next cycle retries them.
                     let refused = error.is_refusal();
+                    // `reqwest::Error`'s Display is only "error sending request
+                    // for url (...)" — the reason lives in the source chain. A
+                    // join that fails on a connection reset and one that fails
+                    // on a TLS error print the same line, which is how a
+                    // blocker holding fifty drafted posts across forty-one
+                    // communities stayed unreadable in the logs.
+                    let cause = error_chain(&error);
                     tracing::warn!(
                         place_id = %place.place_id,
                         place = %place.name,
                         error = %error,
+                        %cause,
                         refused,
                         "failed to join community"
                     );
-                    let msg = error.to_string();
+                    // The membership note is what the operator reads in the
+                    // console, so it carries the cause rather than the summary.
+                    let msg = cause.clone();
                     let state = if refused { "rejected" } else { "not_joined" };
                     self.set_membership(place.place_id, state, Some(&msg))
                         .await
