@@ -404,3 +404,172 @@ async fn insight_inner(pool: &PgPool) -> Result<()> {
     );
     Ok(())
 }
+
+// ── The grounding gate: what shut production for nine days ───────────
+//
+// `provenance_admission` refuses a `require_approval` outcome whose
+// verification status is not `grounding_check_passed`. That is correct and
+// deliberately fail-closed — an outcome nobody checked must not become an
+// action that reaches fans, journalists or communities.
+//
+// Nothing tested it. Every verifier in the agent service returned HTTP 429
+// against an exhausted free-tier daily quota, so every outcome arrived
+// `not_verified`, and every actionable one was refused. No post was drafted,
+// no artifact published, and — because `dispatch_reached_an_audience` will not
+// resolve a dispatch that reached nobody — 57 evidence rows stayed unresolved.
+// Zero learning for nine days, and no test, gauge or alarm said so.
+//
+// The three tests below pin the gate from both sides and pin the asymmetry
+// that made the outage invisible.
+
+fn unverified_provenance(confidence: i32) -> serde_json::Value {
+    json!({
+        "verification": { "status": "not_verified" },
+        "context": { "any_source_failed": false, "any_source_truncated": false },
+        "confidence": { "basis_points": confidence, "source": "model_self_report", "is_evidence_confidence": false },
+        "model": { "actual": "test-model", "provider": "test" }
+    })
+}
+
+fn outreach_item() -> serde_json::Value {
+    json!({
+        "target_kind": "creator",
+        "display_name": "r/metalpolska",
+        "evidence_urls": ["https://reddit.com/r/metalpolska"],
+        "why_fit": "active metal community",
+    })
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn unverified_actionable_outcome_creates_nothing() -> Result<()> {
+    let database = DisposableDatabase::create().await?;
+    let result = unverified_actionable_inner(&database.pool).await;
+    database.drop_database().await;
+    result
+}
+
+async fn unverified_actionable_inner(pool: &PgPool) -> Result<()> {
+    let ws = workspace(pool).await?;
+    let id = insert_outcome(
+        pool,
+        ws,
+        "outreach_targets",
+        5000,
+        json!({
+            "item": outreach_item(),
+            "rationale": "found via Reddit search",
+            "provenance": unverified_provenance(5000),
+        }),
+    )
+    .await?;
+
+    worker(pool, ws).run_once().await?;
+    ensure!(
+        decision_count(pool, ws).await? == 0,
+        "an unverified actionable outcome must not create a decision"
+    );
+    ensure!(
+        action_count(pool, ws).await? == 0,
+        "an unverified actionable outcome must not create an action"
+    );
+    // The reason has to name the gate. This string is what an operator greps
+    // for, and it is the only durable record of why the loop is not moving.
+    let reason = rejection_reason(pool, id).await?.unwrap_or_default();
+    ensure!(
+        reason.contains("NOT_GROUNDING_CHECKED"),
+        "the refusal must name the grounding gate, got {reason:?}"
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn a_passing_grounding_check_opens_the_same_gate() -> Result<()> {
+    let database = DisposableDatabase::create().await?;
+    let result = passing_grounding_inner(&database.pool).await;
+    database.drop_database().await;
+    result
+}
+
+/// The other half of the pair. Without this, a gate that refused *everything*
+/// would still pass the test above, which is exactly the failure mode being
+/// guarded against: production refused every outcome and looked healthy.
+async fn passing_grounding_inner(pool: &PgPool) -> Result<()> {
+    let ws = workspace(pool).await?;
+    insert_outcome(
+        pool,
+        ws,
+        "outreach_targets",
+        5000,
+        json!({
+            "item": outreach_item(),
+            "rationale": "found via Reddit search",
+            "provenance": {
+                "verification": { "status": "grounding_check_passed" },
+                "context": { "any_source_failed": false, "any_source_truncated": false },
+                "confidence": { "basis_points": 5000, "source": "model_self_report", "is_evidence_confidence": false },
+                "model": { "actual": "test-model", "provider": "test" }
+            },
+        }),
+    )
+    .await?;
+
+    worker(pool, ws).run_once().await?;
+    ensure!(
+        decision_count(pool, ws).await? == 1,
+        "a grounding-checked outcome must create exactly one decision"
+    );
+    ensure!(
+        action_count(pool, ws).await? == 1,
+        "a grounding-checked outcome must create exactly one action"
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn an_unverified_observation_still_reaches_the_board() -> Result<()> {
+    let database = DisposableDatabase::create().await?;
+    let result = unverified_observation_inner(&database.pool).await;
+    database.drop_database().await;
+    result
+}
+
+/// The asymmetry that hid the outage, pinned deliberately.
+///
+/// The gate applies to `require_approval` kinds only. `recommend_only` kinds
+/// pass through unverified, because gating an observation would delete
+/// intelligence instead of labelling it. That is the right call and it has a
+/// consequence worth stating: while every actionable outcome was being
+/// refused, insights and segments kept flowing, so the board filled up and the
+/// system looked busy. Anyone watching the board saw a working brain.
+///
+/// This test exists so that behaviour stays intentional rather than becoming
+/// a thing someone "fixes" by gating observations too, or by ungating actions.
+async fn unverified_observation_inner(pool: &PgPool) -> Result<()> {
+    let ws = workspace(pool).await?;
+    insert_outcome(
+        pool,
+        ws,
+        "campaign_insight",
+        0,
+        json!({
+            "item": { "headline": "engagement is up on Thursdays" },
+            "rationale": "observed in campaign stats",
+            "provenance": unverified_provenance(0),
+        }),
+    )
+    .await?;
+
+    worker(pool, ws).run_once().await?;
+    ensure!(
+        decision_count(pool, ws).await? == 1,
+        "an observation must reach the board even unverified"
+    );
+    ensure!(
+        action_count(pool, ws).await? == 0,
+        "an observation must never create an action"
+    );
+    Ok(())
+}
