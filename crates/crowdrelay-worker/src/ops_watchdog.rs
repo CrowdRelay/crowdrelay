@@ -7,7 +7,15 @@
 //! not actionable from there. FakAP remains the external health probe for
 //! API reachability; this watchdog catches silent failures FakAP cannot see.
 //!
-//! The watchdog monitors six conditions:
+//! The watchdog monitors seven conditions:
+//! - `publishing.orphaned_draft` — a publishing action succeeded and no
+//!   executor produced a post for it. The three executors claim
+//!   `agent.content.request` by the agent task's `template_id`, and the social
+//!   one also filters on platform, while the agents service's schema permits
+//!   platforms that filter excludes. Such a draft is claimed by nobody and sits
+//!   succeeded-with-no-artifact for good. A static gate cannot see this: the
+//!   two halves live in different repositories and CI has no credential to
+//!   check out the other one, so the rows say it instead.
 //! - `learning.outcomes_unverified` — every agent outcome in the last day was
 //!   refused because no grounding check ran, and none were accepted. Refusing
 //!   an unchecked outcome is correct and fail-closed; the cost is that a broken
@@ -252,6 +260,20 @@ struct OpsSnapshot {
     /// non-zero refusal count is a stopped loop; a few refusals beside healthy
     /// traffic is a verifier doing its job.
     outcomes_accepted: i64,
+    /// Publishing actions that succeeded but produced no post artifact, long
+    /// enough ago that an executor would have claimed them.
+    ///
+    /// The three executors claim `agent.content.request` by the agent task's
+    /// `template_id`, and the social one also filters on
+    /// `platform IN ('instagram','facebook','x')` — while the agents service's
+    /// schema lets a `social-post` draft carry `telegram` or `discord`. Such a
+    /// draft is claimed by nobody and sits succeeded-with-no-artifact for good.
+    ///
+    /// A static gate cannot catch this: the two halves live in different
+    /// repositories and CI has no credential to check out the other one. The
+    /// rows can say it instead, and they catch a mismatch this precise pair
+    /// does not cover as well.
+    orphaned_publishing_actions: i64,
 }
 
 #[derive(Clone, Debug)]
@@ -373,7 +395,25 @@ async fn load_snapshot(
             (SELECT count(*) FROM agent_outcomes o
              WHERE o.workspace_id=$1 AND o.status='processed'
                AND o.created_at > now() - interval '1 day'
-            )::bigint AS outcomes_accepted
+            )::bigint AS outcomes_accepted,
+            -- Succeeded publishing actions with no artifact in any of the four
+            -- post tables. The 30-minute floor is the executors' poll window:
+            -- below it an action is in flight, not orphaned.
+            (SELECT count(*) FROM viryaos_autopilot_actions a
+             WHERE a.workspace_id=$1
+               AND a.status='succeeded'
+               AND a.action_kind IN ('agent.content.request',
+                                     'community.engage.request')
+               AND a.finished_at < now() - interval '30 minutes'
+               AND NOT EXISTS (SELECT 1 FROM community_posts p
+                               WHERE p.workspace_id=$1 AND p.action_id=a.id)
+               AND NOT EXISTS (SELECT 1 FROM telegram_posts p
+                               WHERE p.workspace_id=$1 AND p.action_id=a.id)
+               AND NOT EXISTS (SELECT 1 FROM discord_posts p
+                               WHERE p.workspace_id=$1 AND p.action_id=a.id)
+               AND NOT EXISTS (SELECT 1 FROM social_posts p
+                               WHERE p.workspace_id=$1 AND p.action_id=a.id)
+            )::bigint AS orphaned_publishing_actions
         FROM viryaos_executor_instances WHERE workspace_id=$1
         "#,
     )
@@ -407,6 +447,22 @@ fn conditions(snapshot: &OpsSnapshot) -> Vec<Condition> {
                 "window": "1 day",
                 "remedy": "check the agent service's verifier: the reason is in \
                            agent_outcomes.payload->'provenance'->'verification'->>'verifier_error'",
+            }),
+        },
+        Condition {
+            // Warning, not critical: measurement already refuses to score
+            // these, so nothing is being corrupted and no wrong lesson is
+            // learned. What is lost is the work — a draft nobody will ever
+            // publish, and a dispatch budget spent on it.
+            key: "publishing.orphaned_draft",
+            severity: "warning",
+            summary: "A publishing action succeeded but no executor produced a post",
+            active: snapshot.orphaned_publishing_actions > 0,
+            details: json!({
+                "orphaned_actions": snapshot.orphaned_publishing_actions,
+                "remedy": "an executor's claim predicate does not cover this draft — \
+                           compare the agent task's template_id and the draft's \
+                           platform against the three executors' WHERE clauses",
             }),
         },
         Condition {
@@ -600,6 +656,7 @@ mod tests {
             fans_awaiting_geocoding: 0,
             outcomes_rejected_unverified: 0,
             outcomes_accepted: 4,
+            orphaned_publishing_actions: 0,
         }
     }
 
