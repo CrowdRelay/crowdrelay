@@ -104,9 +104,19 @@ fn build_http_client(
     builder.build().map_err(CommunityExecutorError::ClientBuild)
 }
 
-/// Maximum posts per workspace per 24 hours. Reddit's rate limits are strict;
-/// this is well within their bounds while still allowing meaningful engagement.
-const MAX_POSTS_PER_24H: i64 = 3;
+/// Maximum posts per workspace per 24 hours.
+///
+/// One, not three, for as long as autonomous posting is unproven. The account
+/// this publishes through is the only Reddit access the system has, and a
+/// moderator who reads the pattern as spam does not cost a post — it costs
+/// every read the growth loop depends on. One post a day into a community the
+/// account has joined, on a seven-day per-subreddit cooldown, is
+/// indistinguishable from somebody who posts occasionally.
+///
+/// Raise it once posts have survived a week, not before. Three was chosen
+/// when nothing had ever been published, so the evidence for it was zero
+/// either way.
+const MAX_POSTS_PER_24H: i64 = 1;
 
 /// Cooldown: no more than one post per subreddit per 7 days.
 const SUBREDDIT_COOLDOWN_DAYS: i32 = 7;
@@ -165,11 +175,27 @@ const DEFAULT_PUBLIC_ORIGIN: &str = "https://virya.music";
 /// through `POST /v1/control-plane/community-posts/{id}/register-manual`, and
 /// measurement proceeds from there exactly as it would have.
 ///
-/// `CROWDRELAY_COMMUNITY_AUTO_POST` cannot override this. An environment
-/// variable is the wrong place for a decision this consequential — the point
-/// of writing it here is that turning it back on means editing this constant
-/// and reading the paragraph above.
-const REDDIT_IS_READ_ONLY: bool = true;
+/// Publishing therefore takes two switches, not one.
+/// `CROWDRELAY_COMMUNITY_AUTO_POST=true` says "publish community posts", and
+/// `CROWDRELAY_REDDIT_WRITE_ENABLED=true` says "and Reddit specifically is in
+/// scope". Either one alone leaves this executor drafting.
+///
+/// Two, because a single flag is easy to set while copying an env file
+/// between hosts, and one of these names Reddit explicitly. This was a
+/// hardcoded constant for exactly that reason; it is a flag now because the
+/// operator made the call deliberately, and the paragraphs above are what
+/// they were deciding against.
+///
+/// Read-only by default. An unset variable, a typo and a fresh deployment all
+/// mean the same thing: draft, do not publish.
+fn reddit_write_enabled() -> bool {
+    std::env::var("CROWDRELAY_REDDIT_WRITE_ENABLED")
+        .map(|value| {
+            let value = value.trim().to_ascii_lowercase();
+            matches!(value.as_str(), "true" | "1" | "yes" | "on")
+        })
+        .unwrap_or(false)
+}
 
 #[derive(Debug, Error)]
 pub enum CommunityExecutorError {
@@ -215,8 +241,8 @@ impl CommunityExecutorWorker {
     /// `CROWDRELAY_COMMUNITY_AUTO_POST` is told plainly that it had no
     /// effect, instead of watching drafts pile up and wondering.
     #[must_use]
-    pub const fn reddit_is_read_only() -> bool {
-        REDDIT_IS_READ_ONLY
+    pub fn reddit_is_read_only() -> bool {
+        !reddit_write_enabled()
     }
 
     /// Creates a new executor. Returns an error if the HTTP client cannot be
@@ -244,7 +270,10 @@ impl CommunityExecutorWorker {
         // Read-only wins over whatever the caller asked for. The guard lives
         // here rather than at the call site because this type owns the
         // invariant, and `new` is public.
-        let manual_mode = manual_mode || REDDIT_IS_READ_ONLY;
+        // Both switches, or it drafts. `manual_mode` already carries
+        // `CROWDRELAY_COMMUNITY_AUTO_POST` being off; this adds the
+        // Reddit-specific consent on top of it.
+        let manual_mode = manual_mode || !reddit_write_enabled();
         Ok(Self {
             pool,
             workspace_id,
@@ -1311,11 +1340,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reddit_stays_read_only_however_the_worker_is_constructed() {
-        // The policy is not a default an environment variable can flip. A
-        // caller asking for automatic posting still gets a drafting
+    async fn asking_for_auto_post_alone_still_drafts() {
+        // The community auto-post flag is one of two switches, and on its own
+        // it does not publish to Reddit. A caller asking for automatic posting
+        // without `CROWDRELAY_REDDIT_WRITE_ENABLED` still gets a drafting
         // executor, because the login session this would post through is the
         // only Reddit access the growth loop has for reading.
+        //
+        // Renamed from `reddit_stays_read_only_however_the_worker_is_
+        // constructed`: that name asserted an invariant that no longer holds,
+        // and a test whose name overstates what it proves is worse than no
+        // test. What it actually pins — and pinned before — is that this
+        // argument alone is not enough.
         let worker = CommunityExecutorWorker::new(
             PgPool::connect_lazy("postgres://invalid/invalid").expect("lazy pool"),
             WorkspaceId::from_uuid(uuid::Uuid::nil()),
@@ -1328,7 +1364,7 @@ mod tests {
         .expect("worker");
         assert!(
             worker.manual_mode,
-            "reddit posting must stay manual while the policy holds"
+            "one switch is not enough: CROWDRELAY_REDDIT_WRITE_ENABLED is also required"
         );
         assert!(CommunityExecutorWorker::reddit_is_read_only());
     }
@@ -1404,5 +1440,48 @@ mod tests {
         let worker = worker("https://virya.music");
         let body = worker.build_post_body("hello", Some("https://VIRYA.MUSIC./l/x"));
         assert_eq!(body.as_ref(), "hello\n\nhttps://VIRYA.MUSIC./l/x");
+    }
+
+    /// Publishing needs both switches, and the Reddit-specific one is the
+    /// second. `manual_mode` carries `CROWDRELAY_COMMUNITY_AUTO_POST` being
+    /// off; this asserts the other half cannot be skipped.
+    ///
+    /// Exercised through the same expression the constructor uses rather than
+    /// through the constructor, which would need a live pool. The point being
+    /// pinned is the boolean rule, not the wiring.
+    #[test]
+    fn publishing_needs_both_switches() {
+        for (auto_post_off, reddit_write, expect_manual) in [
+            (true, false, true),  // neither
+            (false, false, true), // community only
+            (true, true, true),   // reddit only
+            (false, true, false), // both — the only publishing case
+        ] {
+            let manual = auto_post_off || !reddit_write;
+            assert_eq!(
+                manual, expect_manual,
+                "auto_post_off={auto_post_off} reddit_write={reddit_write}"
+            );
+        }
+    }
+
+    /// Unset, misspelled, or a fresh deployment all mean draft.
+    #[test]
+    fn reddit_write_is_off_unless_explicitly_enabled() {
+        // The variable is absent in the test environment, which is the
+        // default every deployment starts from.
+        assert!(!reddit_write_enabled());
+        assert!(CommunityExecutorWorker::reddit_is_read_only());
+    }
+
+    /// One post a day while autonomous posting is unproven. This is the
+    /// number a moderator sees, so it is worth a test rather than a comment.
+    #[test]
+    fn the_daily_post_ceiling_stays_conservative() {
+        assert_eq!(
+            MAX_POSTS_PER_24H, 1,
+            "raise this only after posts have survived a week"
+        );
+        assert_eq!(SUBREDDIT_COOLDOWN_DAYS, 7);
     }
 }

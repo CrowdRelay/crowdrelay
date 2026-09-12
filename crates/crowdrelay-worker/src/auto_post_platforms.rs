@@ -76,10 +76,12 @@ mod tests {
         assert!(!off.permits(Some("instagram")));
     }
 
-    /// The load-bearing one. Reddit posting is held by `REDDIT_IS_READ_ONLY`,
-    /// a constant rather than a flag, because posting from an automated or
-    /// unjoined account risks the read account the whole discovery loop
-    /// depends on. No auto-post flag may reach it, however many are set.
+    /// The load-bearing one. Reddit posting is held behind its own dedicated
+    /// switch, `CROWDRELAY_REDDIT_WRITE_ENABLED`, required on top of the
+    /// community auto-post flag — and never by anything in this file, because
+    /// posting from an automated or unjoined account risks the read account
+    /// the whole discovery loop depends on. No social auto-post flag may
+    /// reach Reddit, however many of them are set.
     #[test]
     fn no_flag_can_ever_auto_post_to_reddit() {
         let all_on = AutoPostPlatforms {

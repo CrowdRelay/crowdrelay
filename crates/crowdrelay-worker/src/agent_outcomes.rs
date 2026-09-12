@@ -728,7 +728,8 @@ impl AgentOutcomeWorker {
             // operator's approval; asking again per post is asking twice, and
             // the second ask is what expired. See `auto_post_platforms` for
             // what that cost. Reddit cannot reach this: `permits` refuses it,
-            // and `REDDIT_IS_READ_ONLY` holds the executor besides.
+            // and the executor needs `CROWDRELAY_REDDIT_WRITE_ENABLED` on top
+            // of the community auto-post flag besides.
             let draft_platform = outcome
                 .payload
                 .item
