@@ -57,7 +57,19 @@ async fn upsert_service_member(
         INSERT INTO workspace_members (workspace_id, normalized_email, display_name, role, status)
         VALUES ($1, $2, $3, $4, 'active')
         ON CONFLICT (workspace_id, normalized_email) DO UPDATE SET
-            display_name = EXCLUDED.display_name, role = EXCLUDED.role, status = 'active'
+            display_name = EXCLUDED.display_name,
+            role = EXCLUDED.role,
+            -- `disabled` survives, for the same reason as in `team.rs`: this
+            -- runs inside `setup`, which every deploy runs, so forcing 'active'
+            -- meant a disablement lasted until the next release.
+            --
+            -- It does not block recovery from a lost admin credential. The
+            -- recovery path is the seeded `workspace_member_sessions` row below,
+            -- not the member's status.
+            status = CASE
+                WHEN workspace_members.status = 'disabled' THEN 'disabled'
+                ELSE 'active'
+            END
         RETURNING id
         "#,
     )

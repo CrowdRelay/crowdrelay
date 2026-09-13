@@ -3,6 +3,13 @@
 /// Emails remain secret-backed runtime configuration. This function only writes
 /// them into CrowdRelay's existing member identity store, while stable member
 /// keys and skills stay reviewable in source control.
+///
+/// It runs inside `setup`, which `scripts/deploy.sh` runs on every release
+/// before either long-running service starts. That makes it an unattended
+/// periodic writer, so it refreshes facts and never overrides a decision:
+/// `workspace_members.status = 'disabled'` and `viryaos_team_profiles.active =
+/// false` both survive it. Turning either back on is a deliberate act, not a
+/// side effect of deploying.
 pub async fn bootstrap_team_operations(
     pool: &PgPool,
     workspace_slug: &WorkspaceSlug,
@@ -31,7 +38,29 @@ pub async fn bootstrap_team_operations(
                     workspace_id, normalized_email, display_name, role, status
                 ) VALUES ($1, $2, $3, 'staff', 'active')
                 ON CONFLICT (workspace_id, normalized_email) DO UPDATE SET
-                    status = 'active'
+                    -- `disabled` survives. This clause used to set 'active'
+                    -- unconditionally, and `setup` runs on every deploy
+                    -- (`scripts/deploy.sh` runs it before either long-running
+                    -- service starts), so disabling a member lasted until the
+                    -- next release and then silently undid itself.
+                    --
+                    -- That is not cosmetic. `admission/support.rs` requires
+                    -- `m.status = 'active'` to operate a gate, and
+                    -- `autopilot/{team,control}.rs` require it to route work. A
+                    -- revived member regains both.
+                    --
+                    -- Removing the contact from the deploy secret does keep a
+                    -- disablement, because then this loop never reaches the row
+                    -- — but `disabled` and "not on the team" are different
+                    -- statements, and only one of them is available while
+                    -- somebody is still a contact for routing.
+                    --
+                    -- `invited` is still promoted: a secret-backed contact
+                    -- appearing here is what confirms the invitation.
+                    status = CASE
+                        WHEN workspace_members.status = 'disabled' THEN 'disabled'
+                        ELSE 'active'
+                    END
                 RETURNING id
                 "#,
             )
@@ -49,7 +78,11 @@ pub async fn bootstrap_team_operations(
                 ) VALUES ($1, $2, $3, true, $4, 10000)
                 ON CONFLICT (workspace_id, member_id) DO UPDATE SET
                     member_key = EXCLUDED.member_key,
-                    active = true,
+                    -- `active` is deliberately absent, for the same reason as
+                    -- the status above: a profile turned off is somebody's
+                    -- decision about capacity, and a deploy is not a decision
+                    -- about capacity. `skills` and `member_key` are
+                    -- source-controlled facts, so those do refresh.
                     skills = EXCLUDED.skills
                 "#,
             )
