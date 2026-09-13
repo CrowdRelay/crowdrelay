@@ -105,6 +105,16 @@ The reference is what makes a retried webhook a replay instead of a second count
 
 A worked example is `n8n/examples/autopilot-beacon-invite-batch.example.json`: validate, claim once, compose the single-ask message from the payload facts (identifies sender, states where the address came from, explicit opt-out), send via the workspace Gmail credential, report the receipt with the claim token. The executor must never issue codes itself, invent signups, purchase or bot invites, broaden the ask beyond the named show, or re-ask on its own schedule: one batch per beacon per show is decided in CrowdRelay, and the cooldown lives there too.
 
+## Drafted content, including press pitches
+
+`crowdrelay.agent.content_requested` carries content an agent drafted and the brain approved for sending. The payload names `template_id`, `task_id`, the `draft` itself, and — when the template is a press pitch — `recipient_email`, `recipient_name` and `recipient_target_id`, resolved from `agent_outreach_targets` before the action was created.
+
+**This event currently has no handler and production refuses it.** Measured 2026-09-13: four deliveries to `/webhook/crowdrelay-events-v1` returned HTTP 422, the newest that day, alongside 485 delivered events of other types. 422 is `http_permanent_status`, so the outbox stops retrying and the delivery is recorded `cancelled` — the pitch is simply gone. `crowdrelay.community.engagement_requested` is refused the same way. Every press pitch the brain has ever drafted ended here.
+
+An executor for this event should branch on `template_id`: `press-pitch` is an email to `recipient_email`, and any other template is channel content whose own channel executor owns it. Two rules are absolute. Send to `recipient_email` and to nothing else — never to a list, never to an address the executor resolved itself; the recipient was chosen in CrowdRelay from a screened target and substituting another one sends cold mail to somebody nobody screened. And report the receipt as **Execution receipts** below requires, because until a provider-confirmed `succeeded` arrives, CrowdRelay creates no evidence and the measurement window never opens: the pitch would be sent and the brain would still learn nothing from it.
+
+Until a handler exists, answering `2xx` and dropping the event is worse than the 422. The refusal is at least recorded, and `delivery.growth_event_refused` in `ops/attention` now reports it as critical.
+
 ## Provider execution claims
 
 Before Gmail, Discord, Drive, or another provider call without a trustworthy request-idempotency primitive, POST `/v1/internal/autopilot/actions/{action_id}/execution-claim`. Only `claimed` may call the provider. `already_succeeded` is a no-op replay. `in_flight` and `ambiguous` must fail closed and require reconciliation instead of an automatic second provider call. Explicitly safe/idempotent provider operations may omit the claim when their provider key guarantees replay safety.
