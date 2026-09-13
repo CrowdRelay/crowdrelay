@@ -7,7 +7,7 @@
 //! not actionable from there. FakAP remains the external health probe for
 //! API reachability; this watchdog catches silent failures FakAP cannot see.
 //!
-//! The watchdog monitors nine conditions:
+//! The watchdog monitors ten conditions:
 //! - `publishing.orphaned_draft` — a publishing action succeeded and no
 //!   executor produced a post for it. The three executors claim
 //!   `agent.content.request` by the agent task's `template_id`, and the social
@@ -38,6 +38,11 @@
 //!   decision row, no log, no counter. 430 festival and competition applications
 //!   imported from the band's CRM were dropped on every cycle with no trace, and
 //!   a table showing 430 rows read as progress.
+//! - `publishing.duplicate_community_draft` — two unpublished drafts target the
+//!   same community. Reddit is case-insensitive, so duplicate `discovery_places`
+//!   rows drafted one post each for what is one place. Publishing both is posting
+//!   twice under the band's name, and the queue is the last point where that is
+//!   still cheap to prevent.
 //! - `executor.offline` — the API is up but no executor has heartbeated
 //!   recently, so nothing can actually execute. This is a silent failure
 //!   that FakAP (external health probe) cannot detect.
@@ -307,6 +312,11 @@ struct OpsSnapshot {
     /// nothing to cost a trip from, 40 of the 100 points are unreachable and the
     /// best possible total is 60 against a minimum of 65.
     unscoreable_live_opportunities: i64,
+    /// Unpublished community drafts beyond the first for their community.
+    ///
+    /// The count of redundant drafts, not of affected communities: two queued
+    /// drafts for one subreddit is one double-post to prevent.
+    duplicate_community_drafts: i64,
 }
 
 #[derive(Clone, Debug)]
@@ -531,7 +541,27 @@ async fn load_snapshot(
                AND (o.deadline IS NULL OR o.deadline > now())
                AND o.strategic_value_basis_points = 0
                AND o.distance_km IS NULL
-            )::bigint AS unscoreable_live_opportunities
+            )::bigint AS unscoreable_live_opportunities,
+            -- Unpublished drafts that target the same community as another.
+            --
+            -- Reddit treats subreddit names case-insensitively, so `r/MetalMemes`
+            -- and `r/metalmemes` are one place. Duplicate `discovery_places` rows
+            -- drafted one post each, and migration 0259 collapsed the places but
+            -- deliberately left the drafts alone: they carry different text the
+            -- band wrote, and deleting either is not a migration's call.
+            --
+            -- Two posts to one community months apart are ordinary. Two sitting in
+            -- the queue at once are a double-post waiting for whoever publishes
+            -- them, which is the spam the North Star rules out — so the condition
+            -- is scoped to drafts that are *both* still unpublished.
+            (SELECT COALESCE(sum(drafts - 1), 0) FROM (
+                SELECT count(*) AS drafts
+                FROM community_posts
+                WHERE workspace_id=$1
+                  AND status='awaiting_manual_post'
+                GROUP BY lower(subreddit)
+                HAVING count(*) > 1
+             ) AS duplicated)::bigint AS duplicate_community_drafts
         FROM viryaos_executor_instances WHERE workspace_id=$1
         "#,
     )
@@ -541,197 +571,7 @@ async fn load_snapshot(
     .await
 }
 
-fn conditions(snapshot: &OpsSnapshot) -> Vec<Condition> {
-    vec![
-        Condition {
-            // Critical, and deliberately not a warning. Nothing downstream of
-            // this works: an outcome that is refused never becomes an action,
-            // so no post is drafted, no artifact is published, and the
-            // measurement path correctly declines to resolve evidence for a
-            // dispatch that never reached anybody. Every posterior stays on
-            // its prior. The brain is not degraded, it is disconnected, and no
-            // other condition on this list can tell you so.
-            //
-            // The predicate needs both halves. Refusals alongside healthy
-            // traffic are a verifier doing its job on bad output; refusals
-            // with nothing accepted is the loop stopped.
-            key: "learning.outcomes_unverified",
-            severity: "critical",
-            summary: "Every agent outcome is being refused for want of a grounding check",
-            active: snapshot.outcomes_rejected_unverified > 0 && snapshot.outcomes_accepted == 0,
-            details: json!({
-                "rejected_unverified": snapshot.outcomes_rejected_unverified,
-                "accepted": snapshot.outcomes_accepted,
-                "window": "1 day",
-                "remedy": "check the agent service's verifier: the reason is in \
-                           agent_outcomes.payload->'provenance'->'verification'->>'verifier_error'",
-            }),
-        },
-        Condition {
-            // Warning, not critical: measurement already refuses to score
-            // these, so nothing is being corrupted and no wrong lesson is
-            // learned. What is lost is the work — a draft nobody will ever
-            // publish, and a dispatch budget spent on it.
-            key: "publishing.orphaned_draft",
-            severity: "warning",
-            summary: "A publishing action succeeded but no executor produced a post",
-            active: snapshot.orphaned_publishing_actions > 0,
-            details: json!({
-                "orphaned_actions": snapshot.orphaned_publishing_actions,
-                "orphaned_actions_all_time": snapshot.orphaned_publishing_actions_all_time,
-                "window": "7 days",
-                "remedy": "an executor's claim predicate does not cover this draft — \
-                           compare the agent task's template_id and the draft's \
-                           platform against the three executors' WHERE clauses",
-            }),
-        },
-        Condition {
-            // Critical, because unlike `publishing.orphaned_draft` this one has
-            // already spent everything: the outcome was verified, the action was
-            // created, the event was built with its recipient and handed to the
-            // outbox — and the consumer refused it permanently. The work is done
-            // and lands nowhere.
-            //
-            // It was invisible, and the reason is worth keeping. A 4xx is
-            // `http_permanent_status`, so the outbox correctly stops retrying:
-            // the delivery is `cancelled`, never `dead`. `ops/attention` reports
-            // dead deliveries and a bare `cancelled` count, so a permanently
-            // refused growth event showed up as one increment in a number with
-            // no breakdown. Measured in production 2026-09-13: four
-            // `agent.content_requested` deliveries refused 422 by
-            // n8n.virya.music, the newest that day, alongside 485 delivered —
-            // and `crowdrelay.agent.content_requested` appears in no n8n
-            // example workflow or executor contract in this repository, so the
-            // consumer has most likely never known the event.
-            key: "delivery.growth_event_refused",
-            severity: "critical",
-            summary: "A growth event was permanently refused by its consumer",
-            active: snapshot.refused_growth_deliveries > 0,
-            details: json!({
-                "refused_deliveries": snapshot.refused_growth_deliveries,
-                "window": "7 days",
-                "remedy": "join webhook_deliveries to outbox_events on \
-                           outbox_event_id for status='cancelled' and read \
-                           last_response_status: 4xx is the consumer refusing \
-                           the payload, not the outbox failing to send it",
-            }),
-        },
-        Condition {
-            // Warning, not critical: nothing is corrupted and no wrong lesson is
-            // learned. What is happening is that real work sits untouched — the
-            // band's own festival and competition list, imported and then held
-            // every cycle for a reason no surface reported.
-            //
-            // Actionable in exactly two ways, which is why it is worth an alert:
-            // enrich the rows so the unreachable 40 points become reachable
-            // (strategic value, or a city and distance so the trip can be
-            // costed), or lower `minimum_score` for a tenant whose opportunities
-            // legitimately arrive without either. Both are decisions; neither can
-            // be made while the hold is invisible.
-            key: "growth.unscoreable_live_opportunities",
-            severity: "warning",
-            summary: "Live opportunities are held because their score ceiling is below the bar",
-            active: snapshot.unscoreable_live_opportunities > 0,
-            details: json!({
-                "unscoreable": snapshot.unscoreable_live_opportunities,
-                "score_ceiling": 60,
-                "minimum_score": 65,
-                "remedy": "fit, reputation and confidence together cap at 60 of \
-                           100; the missing 40 are strategic_value_basis_points \
-                           and the economics score, which needs distance_km and \
-                           nights_away to cost a trip. Fill either, or lower \
-                           minimum_score in the live_opportunity policy",
-            }),
-        },
-        Condition {
-            key: "executor.offline",
-            severity: "critical",
-            summary: "ViryaOS executor registry has no live executor",
-            active: snapshot.executor_registered > 0 && snapshot.executor_active == 0,
-            details: json!({
-                "registered": snapshot.executor_registered,
-                "active": snapshot.executor_active,
-            }),
-        },
-        Condition {
-            key: "execution.unknown_outcome",
-            severity: "warning",
-            summary: "Autopilot actions stuck in unknown execution outcome",
-            active: snapshot.stale_unknown_actions > 0,
-            details: json!({
-                "unknown_actions": snapshot.unknown_actions,
-                "stale_unknown_actions": snapshot.stale_unknown_actions,
-            }),
-        },
-        Condition {
-            key: "execution.contradicted_outcome",
-            // Warning, not critical: the state machine already refused to
-            // act on the contradiction, so nothing is being corrupted. What
-            // is missing is a person deciding which source was right.
-            severity: "warning",
-            summary: "Autopilot action status contradicted by its newest executor receipt",
-            active: snapshot.contradicted_actions > 0,
-            details: json!({
-                "contradicted_actions": snapshot.contradicted_actions,
-            }),
-        },
-        Condition {
-            key: "growth.feed_failing",
-            // Warning: the tenant still has a channel the brain can work
-            // through, and nothing is being lost while this stands.
-            severity: "warning",
-            summary: "A growth feed's last sync attempt failed",
-            active: snapshot.failing_platforms > 0 && snapshot.working_platforms > 0,
-            details: json!({
-                "failing_platforms": snapshot.failing_platforms,
-                "working_platforms": snapshot.working_platforms,
-            }),
-        },
-        Condition {
-            // Every feed the tenant has is failing. The brain will not plan
-            // discovery through them -- see
-            // `GrowthStrategy::discovery_channels_are_silent` -- so the top of
-            // the funnel is shut until a person restores a credential. There is
-            // no automatic recovery from this and nothing else on this list
-            // says it.
-            //
-            // Critical rather than warning, and separate from
-            // `growth.feed_failing` rather than an escalation of it, because
-            // the two ask for different things: one is a feed to repair, this
-            // is the whole acquisition side of the North Star stopped.
-            key: "growth.all_feeds_failing",
-            severity: "critical",
-            summary: "Every growth feed is failing — the brain cannot discover through any channel",
-            active: snapshot.failing_platforms > 0 && snapshot.working_platforms == 0,
-            details: json!({
-                "failing_platforms": snapshot.failing_platforms,
-            }),
-        },
-        Condition {
-            // Cities that fans requested but the geocoder gave up on. Every
-            // fan sitting in one is unreachable by the nearby-show loop — the
-            // only automatic reason an installed app reopens itself — and
-            // nothing recovers this on its own. The geocoding worker may be
-            // disabled (missing contact config) or the provider may not
-            // recognize the name; either way a human must fix it.
-            //
-            // Warning, not critical: the nearby-show loop still reaches fans
-            // in geocoded cities, and the stuck cities are a growing gap, not
-            // a total stop.
-            key: "growth.stuck_ungeocoded_cities",
-            severity: "warning",
-            summary: "Fan-requested cities have exhausted geocoding — fans there are unreachable by nearby-show",
-            // Both counts come from the same predicate, so a city only
-            // reaches this finding when a fan is behind it. The summary's
-            // claim is now load-bearing rather than decorative.
-            active: snapshot.stuck_ungeocoded_cities > 0,
-            details: json!({
-                "stuck_ungeocoded_cities": snapshot.stuck_ungeocoded_cities,
-                "fans_awaiting_geocoding": snapshot.fans_awaiting_geocoding,
-            }),
-        },
-    ]
-}
+include!("ops_watchdog/conditions.rs");
 
 async fn load_states(
     transaction: &mut Transaction<'_, Postgres>,
@@ -838,6 +678,7 @@ mod tests {
             orphaned_publishing_actions_all_time: 0,
             refused_growth_deliveries: 0,
             unscoreable_live_opportunities: 0,
+            duplicate_community_drafts: 0,
         }
     }
 
@@ -909,6 +750,45 @@ mod tests {
         let details = condition.details.to_string();
         assert!(details.contains("\"score_ceiling\":60"), "{details}");
         assert!(details.contains("\"minimum_score\":65"), "{details}");
+    }
+
+    /// Two queued drafts for one community must raise attention.
+    ///
+    /// Reddit is case-insensitive, so `r/MetalMemes` and `r/metalmemes` are one
+    /// place. Duplicate `discovery_places` rows drafted one post each and
+    /// migration 0259 collapsed the places while deliberately leaving the drafts,
+    /// which carry different text the band wrote. Publishing both is posting twice
+    /// under its name.
+    #[test]
+    fn duplicate_community_drafts_raise_attention_by_themselves() {
+        let mut snapshot = healthy();
+        snapshot.duplicate_community_drafts = 2;
+        let raised = conditions(&snapshot)
+            .into_iter()
+            .filter(|c| c.active)
+            .map(|c| c.key)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            raised,
+            vec!["publishing.duplicate_community_draft"],
+            "a queued double-post must fire without needing any other fault"
+        );
+    }
+
+    /// And it must be a warning, because nothing has gone out yet.
+    ///
+    /// Reddit posting is manual, so the queue is the last point where this is
+    /// still cheap to fix. Publishing both would be the fault; this is the warning
+    /// before it.
+    #[test]
+    fn duplicate_community_drafts_are_a_warning() {
+        let mut snapshot = healthy();
+        snapshot.duplicate_community_drafts = 1;
+        let condition = conditions(&snapshot)
+            .into_iter()
+            .find(|c| c.key == "publishing.duplicate_community_draft")
+            .expect("condition should exist");
+        assert_eq!(condition.severity, "warning");
     }
 
     /// A permanently refused growth event must raise attention on its own.
