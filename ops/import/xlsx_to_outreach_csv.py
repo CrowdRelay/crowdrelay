@@ -53,8 +53,19 @@ CATEGORY = {
 
 
 def fold(value: str) -> str:
-    """Lowercase and strip Polish diacritics so the lookup is stable."""
-    text = unicodedata.normalize("NFKD", str(value)).encode("ascii", "ignore").decode()
+    """Lowercase and strip Polish diacritics so the lookup is stable.
+
+    ł needs its own line. It is a distinct letter with no canonical NFKD
+    decomposition, so `encode("ascii", "ignore")` deletes it rather than
+    reducing it: "Strona / społeczność Facebook" became
+    "strona / spoecznosc facebook" and never matched the "spolecznosc" key. The
+    whole `community` category was silently skipped by that, and nothing said so
+    — an unmapped category is counted as skipped, which looks identical to a
+    category nobody wrote a mapping for.
+    """
+    text = unicodedata.normalize("NFKD", str(value))
+    text = "".join(ch for ch in text if not unicodedata.combining(ch))
+    text = text.replace("ł", "l").replace("Ł", "L")
     return " ".join(text.lower().split())
 
 

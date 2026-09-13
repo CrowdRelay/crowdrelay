@@ -38,6 +38,7 @@ pub mod event_sync;
 pub mod executor_registry;
 pub mod growth_metric_sync;
 pub mod growth_readiness;
+pub mod import_opportunities;
 pub mod import_outreach;
 pub mod leadership;
 pub mod nearby_gigs;

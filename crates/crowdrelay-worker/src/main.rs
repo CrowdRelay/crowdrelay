@@ -18,7 +18,7 @@ use std::{
     collections::HashMap, env, fs::File, future::pending, io::Read, sync::Arc, time::Duration,
 };
 
-use anyhow::{Context, Result, anyhow, bail, ensure};
+use anyhow::{Context, Result, anyhow, ensure};
 use crowdrelay_domain::WorkspaceId;
 use crowdrelay_infra::{
     autopilot::PostgresAutopilotRepository,
@@ -53,7 +53,7 @@ use crowdrelay_worker::{
     push_delivery::PushDeliveryWorker,
     receipt_reconciliation::ReceiptReconciliationWorker,
     reminders::EventReminderScheduler,
-    replay::{ReplayOptions, parse_replay_options, run_replay},
+    replay::run_replay,
     retention::{RetentionWorker, RetentionWorkerConfig},
     social_post_executor::SocialPostExecutorWorker,
     telegram_executor::TelegramExecutorWorker,
@@ -86,24 +86,8 @@ const MAX_BOOTSTRAP_FILE_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_WEBHOOK_SECRETS_FILE_BYTES: u64 = 1024 * 1024;
 const MAX_WEBHOOK_SECRET_REFERENCES: usize = 1_000;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum Command {
-    Run {
-        standby: bool,
-    },
-    Migrate,
-    Bootstrap,
-    Setup,
-    Replay(ReplayOptions),
-    /// Bulk-import hand-curated outreach contacts from a CSV.
-    ImportOutreach {
-        path: std::path::PathBuf,
-    },
-}
-
-impl Command {
-    const KNOWN: &'static str = "`run`, `run --standby`, `migrate`, `bootstrap`, `setup`, `replay`, or `import-outreach <csv>`";
-}
+mod worker_cli;
+use worker_cli::{Command, parse_command};
 
 /// Reads a boolean auto-post flag.
 ///
@@ -169,6 +153,25 @@ async fn main() -> Result<()> {
                 summary.read, summary.written, summary.skipped
             );
         }
+        Command::ImportOpportunities { path } => {
+            let workspace = trusted_workspace_id(&database, &config).await?;
+            let summary = crowdrelay_worker::import_opportunities::import_opportunities(
+                &database, workspace, &path,
+            )
+            .await?;
+            tracing::info!(
+                read = summary.read,
+                written = summary.written,
+                skipped = summary.skipped,
+                with_deadline = summary.with_deadline,
+                path = %path.display(),
+                "live opportunities imported"
+            );
+            println!(
+                "IMPORT_OPPORTUNITIES=OK read={} written={} skipped={} with_deadline={}",
+                summary.read, summary.written, summary.skipped, summary.with_deadline
+            );
+        }
         Command::Run { standby } => {
             tracing::info!(environment = %config.environment, standby, "CrowdRelay worker started");
             run(database.clone(), &config, standby).await?;
@@ -179,69 +182,6 @@ async fn main() -> Result<()> {
     database.close().await;
 
     Ok(())
-}
-
-fn parse_command(args: impl IntoIterator<Item = String>) -> Result<Command> {
-    let mut args = args.into_iter();
-    let head = args.next();
-    let rest: Vec<String> = args.collect();
-    let command = match head.as_deref() {
-        None | Some("run") => {
-            let mut standby = parse_standby_flag(&rest)?;
-            if !standby && std::env::var("CROWDRELAY_WORKER_STANDBY").as_deref() == Ok("true") {
-                standby = true;
-            }
-            Command::Run { standby }
-        }
-        Some("migrate") => {
-            reject_extras(&rest)?;
-            Command::Migrate
-        }
-        Some("bootstrap") => {
-            reject_extras(&rest)?;
-            Command::Bootstrap
-        }
-        Some("setup") => {
-            reject_extras(&rest)?;
-            Command::Setup
-        }
-        Some("replay") => Command::Replay(parse_replay_options(rest)?),
-        Some("import-outreach") => {
-            let Some((path, extras)) = rest.split_first() else {
-                bail!("import-outreach needs a CSV path");
-            };
-            if let Some(extra) = extras.first() {
-                bail!("unexpected worker argument `{extra}`");
-            }
-            Command::ImportOutreach {
-                path: std::path::PathBuf::from(path),
-            }
-        }
-        Some(other) => bail!(
-            "unknown worker command `{other}`; expected {}",
-            Command::KNOWN
-        ),
-    };
-
-    Ok(command)
-}
-
-fn reject_extras(rest: &[String]) -> Result<()> {
-    if let Some(extra) = rest.first() {
-        bail!("unexpected worker argument `{extra}`");
-    }
-    Ok(())
-}
-
-fn parse_standby_flag(rest: &[String]) -> Result<bool> {
-    let mut standby = false;
-    for arg in rest {
-        match arg.as_str() {
-            "--standby" => standby = true,
-            other => bail!("unexpected `run` argument `{other}`; expected `--standby`"),
-        }
-    }
-    Ok(standby)
 }
 
 async fn run_migrations(database_pool: &PgPool) -> Result<()> {
@@ -1308,7 +1248,8 @@ async fn shutdown_signal() {
 
 #[cfg(test)]
 mod tests {
-    use super::{Command, ReplayOptions, parse_command};
+    use super::{Command, parse_command};
+    use crowdrelay_worker::replay::ReplayOptions;
 
     #[test]
     fn defaults_to_run() -> Result<(), Box<dyn std::error::Error>> {
