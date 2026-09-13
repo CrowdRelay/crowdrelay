@@ -48,16 +48,30 @@ where
 /// How many of one endpoint's queries may hold a database connection at once.
 ///
 /// The attention view fans out eleven independent reads through one
-/// `tokio::join!`. The pool is eight, so without a limit a single page load
-/// asks for more connections than exist, takes every one of them, and every
-/// other request to this API waits behind it. The section that loses the race
-/// then reports its own timeout, which is how identical slowness surfaces as a
+/// `tokio::join!`. Without a limit a single page load asks for more connections
+/// than exist, takes every one of them, and every other request to this API
+/// waits behind one operator refresh. The section that loses the race then
+/// reports its own timeout, which is how identical slowness surfaces as a
 /// different broken section on each refresh.
 ///
 /// Half the pool, so a page load cannot starve the rest of the API. The
-/// remaining arms queue on `acquire()` rather than failing -- this bounds
+/// remaining arms queue on `acquire()` rather than failing — this bounds
 /// concurrency, it does not drop work.
-const OPS_FAN_OUT_LIMIT: usize = 4;
+///
+/// **Read from the pool rather than written down.** This was `const … = 4` with a
+/// comment saying "the pool is eight", and four numbers disagreed about the pool:
+/// the code default is 20, `.env.example` says 10, `deploy/env.production.example`
+/// says 5, and the comment said 8. "Half the pool" was therefore true of none of
+/// them. At a pool of 5 the constant took 80% of it for one page — the starvation
+/// it exists to prevent — and at 20 it ran the page in three waves for nothing.
+/// A budget that reasons about another configured value has to read that value.
+///
+/// Floored at 1: a pool of 1 is a valid configuration, and a semaphore of 0 would
+/// deadlock every arm rather than serialise them.
+fn ops_fan_out_limit(pool: &sqlx::PgPool) -> usize {
+    let pool_size = pool.options().get_max_connections() as usize;
+    (pool_size / 2).max(1)
+}
 
 /// `run_with_timeout`, holding a permit for the duration of the query.
 ///
@@ -83,3 +97,58 @@ where
     .await
     .map_err(|_| OpsError::Unavailable)?
 }
+
+#[cfg(test)]
+mod fan_out_tests {
+    use super::ops_fan_out_limit;
+    use sqlx::postgres::PgPoolOptions;
+
+    /// Builds a pool without connecting, so the budget can be checked at every
+    /// size the deployed configuration actually uses.
+    fn pool_of(max: u32) -> sqlx::PgPool {
+        PgPoolOptions::new()
+            .max_connections(max)
+            .connect_lazy("postgres://invalid/invalid")
+            .expect("lazy pool")
+    }
+
+    /// Half the pool, at each size the configuration actually uses.
+    ///
+    /// These four numbers are why this is read rather than written down: the code
+    /// default is 20, `.env.example` says 10, `deploy/env.production.example` says
+    /// 5, and the replaced constant's comment claimed 8. A fixed 4 was "half the
+    /// pool" for none of them — 80% at five, and a third of the way there at
+    /// twenty, which ran the eleven-arm page in three waves for nothing.
+    #[tokio::test]
+    async fn the_budget_is_half_of_whatever_pool_this_process_has() {
+        assert_eq!(ops_fan_out_limit(&pool_of(20)), 10);
+        assert_eq!(ops_fan_out_limit(&pool_of(10)), 5);
+        assert_eq!(ops_fan_out_limit(&pool_of(5)), 2);
+        assert_eq!(ops_fan_out_limit(&pool_of(8)), 4);
+    }
+
+    /// A page load must never be able to take the whole pool.
+    ///
+    /// This is the property the limiter exists for, and it has to hold at every
+    /// size rather than at the one somebody had in mind.
+    #[tokio::test]
+    async fn a_page_load_always_leaves_connections_for_the_rest_of_the_api() {
+        for pool_size in 2_u32..=64 {
+            let limit = ops_fan_out_limit(&pool_of(pool_size));
+            assert!(
+                limit < pool_size as usize,
+                "pool {pool_size} would let one page take {limit} of {pool_size}"
+            );
+        }
+    }
+
+    /// A pool of one is a valid configuration.
+    ///
+    /// `1 / 2` is 0, and a semaphore of zero permits deadlocks every arm instead
+    /// of serialising them — the floor is what stops that being a hang.
+    #[tokio::test]
+    async fn a_pool_of_one_serialises_rather_than_deadlocks() {
+        assert_eq!(ops_fan_out_limit(&pool_of(1)), 1);
+    }
+}
+

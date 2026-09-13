@@ -109,9 +109,39 @@ class OperatorAttentionAggregateContract(unittest.TestCase):
         # many run at once. Without it the page asks for more connections than
         # the pool holds, which is a self-inflicted outage rather than a slow
         # page, so the limiter is asserted rather than left to review.
-        self.assertIn("OPS_FAN_OUT_LIMIT", self.attention)
+        self.assertIn("Semaphore::new(ops_fan_out_limit(", self.attention)
         for section in re.findall(r"let \w+ =\s*run_limited\(\s*(&\w+)", self.attention):
             self.assertEqual(section, "&limiter")
+
+    def test_the_limiter_budget_is_read_from_the_pool(self):
+        """A budget that reasons about the pool has to read the pool.
+
+        This was `const OPS_FAN_OUT_LIMIT: usize = 4` with a comment asserting
+        "the pool is eight". Four numbers disagreed about the pool: the code
+        default is 20, `.env.example` says 10, `deploy/env.production.example`
+        says 5, and the comment said 8 — so "half the pool" was true of none of
+        them. At five, one page load took 80% of the pool, which is the
+        starvation the limiter exists to prevent.
+        """
+        fan_out = (
+            ROOT / "crates/crowdrelay-api/src/ops/fan_out.rs"
+        ).read_text()
+        self.assertIn(
+            "fn ops_fan_out_limit(pool: &sqlx::PgPool)",
+            fan_out,
+            "the fan-out budget must take the pool, not a constant",
+        )
+        self.assertIn(
+            "pool.options().get_max_connections()",
+            fan_out,
+            "read the configured pool size rather than restating it",
+        )
+        self.assertNotRegex(
+            fan_out,
+            r"const OPS_FAN_OUT_LIMIT",
+            "a hardcoded budget cannot stay correct across four different "
+            "configured pool sizes",
+        )
 
 
 if __name__ == "__main__":

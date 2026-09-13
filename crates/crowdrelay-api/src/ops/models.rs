@@ -35,6 +35,15 @@ impl OpsState {
     pub(crate) const fn workspace_id(&self) -> WorkspaceId {
         self.workspace_id
     }
+
+    /// The pool this process was configured with.
+    ///
+    /// Exposed so a concurrency budget can be derived from the real pool size
+    /// instead of a constant that guesses at it.
+    #[must_use]
+    pub(crate) const fn pool(&self) -> &PgPool {
+        &self.pool
+    }
 }
 
 #[derive(Debug, Serialize)]

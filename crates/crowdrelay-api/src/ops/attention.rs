@@ -129,10 +129,11 @@ struct BrainSelfAssessment {
 
 pub async fn attention(State(state): State<crate::AppState>, headers: HeaderMap) -> Response {
     let timeout_duration = state.ops.operation_timeout;
-    // Eleven reads, a pool of eight. Without the limiter this page asks for
-    // more connections than exist and holds every one of them, so any other
-    // request to this API waits behind a single operator refresh.
-    let limiter = tokio::sync::Semaphore::new(OPS_FAN_OUT_LIMIT);
+    // Eleven reads. Without the limiter this page asks for more connections
+    // than exist and holds every one of them, so any other request to this API
+    // waits behind a single operator refresh. The budget is half of whatever
+    // pool this process was configured with — see `ops_fan_out_limit`.
+    let limiter = tokio::sync::Semaphore::new(ops_fan_out_limit(state.ops.pool()));
     let summary = run_limited(&limiter, timeout_duration, load_summary(&state.ops));
     let alerts = run_limited(&limiter, timeout_duration, load_alerts(&state.ops));
     let dead_outbox = run_limited(&limiter, timeout_duration, load_dead_outbox(&state.ops));
