@@ -37,6 +37,7 @@ import json
 import re
 import subprocess
 import sys
+import json
 import unittest
 from pathlib import Path
 
@@ -49,6 +50,55 @@ NUMERIC_SOURCES = (
     ("SUM(", "SUM over a bigint returns numeric; cast to ::bigint"),
     ("AVG(", "AVG over an integer returns numeric; cast to ::double precision"),
 )
+
+
+BASELINE = Path(__file__).with_suffix(".json")
+
+
+def baseline() -> dict | None:
+    if not BASELINE.exists():
+        return None
+    return json.loads(BASELINE.read_text())
+
+
+def new_unprepared(unprepared: list[tuple[str, int]]) -> list[str]:
+    """Only the queries that did not prepare and are not in the baseline.
+
+    A count on its own told you something broke and then listed all fifty-eight
+    queries that never prepared, burying the one that matters. Line numbers move,
+    so a shifted entry can show up here spuriously — acceptable in a message that
+    already says the count dropped, and far better than fifty-eight rows.
+    """
+    known = set((baseline() or {}).get("unprepared", []))
+    return [f"{path}:{line}" for path, line in unprepared if f"{path}:{line}" not in known]
+
+
+def real_errors(stderr: str) -> list[str]:
+    """psql errors, without the follow-on noise.
+
+    Every failed PREPARE leaves its transaction aborted, so each real error is
+    trailed by a "current transaction is aborted" line that says nothing.
+    """
+    return [
+        line
+        for line in stderr.splitlines()
+        if "ERROR" in line and "current transaction is aborted" not in line
+    ]
+
+
+def baseline_minimum() -> int | None:
+    """The prepared count this schema is known to reach.
+
+    A floor of `total * 0.8` was not enough. Breaking one query took the count
+    from 679 to 678 — 92% of 736, comfortably above the ratio — and the script
+    printed PASS. The single most valuable thing it can catch is a query that
+    will not prepare, and it was treating that as "never mind".
+
+    Shrinking is a deliberate act: pass `--write-baseline` after removing
+    queries on purpose.
+    """
+    recorded = baseline()
+    return None if recorded is None else int(recorded["minimum_prepared"])
 
 
 def psql(sql: str, container: str) -> subprocess.CompletedProcess:
@@ -94,7 +144,7 @@ def queries() -> list[tuple[str, int, str]]:
     return found
 
 
-def sweep(container: str) -> tuple[list[tuple[str, int, list[int], list[str], str]], int, int]:
+def sweep(container: str) -> tuple[list, int, int, list, str]:
     """Prepares each query and returns those with a NUMERIC output column."""
     candidates = queries()
     script: list[str] = ["\\set ON_ERROR_STOP 0"]
@@ -107,11 +157,13 @@ def sweep(container: str) -> tuple[list[tuple[str, int, list[int], list[str], st
     result = psql("\n".join(script), container)
     offenders = []
     prepared = 0
+    seen = set()
     for line in result.stdout.splitlines():
         if not line.startswith("TYPES|"):
             continue
         prepared += 1
         _, index, types = line.split("|", 2)
+        seen.add(int(index))
         columns = [t.strip() for t in types.strip().strip("{}").split(",")]
         positions = [i for i, t in enumerate(columns) if t == "numeric"]
         if not positions:
@@ -119,7 +171,17 @@ def sweep(container: str) -> tuple[list[tuple[str, int, list[int], list[str], st
         path, line_no, sql = candidates[int(index)]
         reasons = [why for token, why in NUMERIC_SOURCES if token in sql.upper()]
         offenders.append((path, line_no, positions, reasons, sql))
-    return offenders, prepared, len(candidates)
+    # Every candidate that produced no TYPES row. Some cannot be prepared
+    # standalone — a fragment built with format!, a multi-statement body — and
+    # those are the baseline. A NEW one is the thing this script exists to
+    # catch: a query naming a column that does not exist is exactly the failure
+    # mode of runtime SQL, and it was silently counted as "not prepared".
+    unprepared = [
+        (candidates[i][0], candidates[i][1])
+        for i in range(len(candidates))
+        if i not in seen
+    ]
+    return offenders, prepared, len(candidates), unprepared, result.stderr
 
 
 class SqlResultTypes(unittest.TestCase):
@@ -131,16 +193,31 @@ class SqlResultTypes(unittest.TestCase):
                 "`just test-postgres` and the deploy both have one"
             )
 
-    def test_no_query_returns_numeric(self):
-        offenders, prepared, total = sweep(self.container)
-        # A sweep that prepared almost nothing proves nothing. Some queries are
-        # built with format! and cannot be prepared standalone; most can.
-        self.assertGreater(
+    def test_every_query_that_used_to_prepare_still_does(self):
+        """The count is a ratchet, not a ratio.
+
+        A query that will not prepare is the whole failure mode of runtime SQL,
+        and this script used to skip it. Breaking one query moved the count from
+        679 to 678, which cleared the old `> total * 0.8` floor and printed PASS.
+        """
+        _, prepared, total, unprepared, stderr = sweep(self.container)
+        minimum = baseline_minimum()
+        if minimum is None:
+            self.skipTest("no scripts/sql-result-types.json baseline recorded")
+        self.assertGreaterEqual(
             prepared,
-            total * 0.8,
-            f"only {prepared} of {total} queries could be prepared; the sweep is "
-            f"not covering enough to be meaningful",
+            minimum,
+            f"{minimum - prepared} query/queries stopped preparing "
+            f"({prepared}/{total}, baseline {minimum}). Newly unprepared:\n"
+            + "\n".join(f"  {entry}" for entry in new_unprepared(unprepared))
+            + "\n\npsql said:\n"
+            + "\n".join(f"  {line}" for line in real_errors(stderr)[-8:])
+            + "\n\nIf queries were removed on purpose, re-record with "
+            "`python3 scripts/sql-result-types.py --write-baseline`.",
         )
+
+    def test_no_query_returns_numeric(self):
+        offenders, prepared, total, _, _ = sweep(self.container)
         if offenders:
             report = []
             for path, line, positions, reasons, _ in offenders:
@@ -162,7 +239,32 @@ def main() -> int:
     if not container:
         print("SQL_RESULT_TYPES=SKIP reason=no-local-database")
         return 0
-    offenders, prepared, total = sweep(container)
+    offenders, prepared, total, unprepared, stderr = sweep(container)
+    if "--write-baseline" in sys.argv:
+        BASELINE.write_text(
+            json.dumps(
+                {
+                    "minimum_prepared": prepared,
+                    # Recorded so a failure can name what is NEW rather than
+                    # listing every query that has never prepared.
+                    "unprepared": sorted(f"{path}:{line}" for path, line in unprepared),
+                },
+                indent=2,
+            )
+            + "\n"
+        )
+        print(f"SQL_RESULT_TYPES=BASELINE minimum_prepared={prepared}")
+        return 0
+    minimum = baseline_minimum()
+    if minimum is not None and prepared < minimum:
+        print(f"SQL_RESULT_TYPES=FAIL prepared={prepared}/{total} baseline={minimum}")
+        print("  newly unprepared; one names something that does not exist:")
+        for entry in new_unprepared(unprepared):
+            print(f"    {entry}")
+        for line in real_errors(stderr)[-8:]:
+            print(f"    psql: {line}")
+        print("  if queries were removed on purpose: --write-baseline")
+        return 1
     if offenders:
         print("SQL_RESULT_TYPES=FAIL")
         for path, line, positions, reasons, _ in offenders:
@@ -170,7 +272,10 @@ def main() -> int:
             for reason in reasons:
                 print(f"      likely: {reason}")
         return 1
-    print(f"SQL_RESULT_TYPES=PASS prepared={prepared}/{total} numeric_columns=0")
+    print(
+        f"SQL_RESULT_TYPES=PASS prepared={prepared}/{total} "
+        f"baseline={minimum} numeric_columns=0"
+    )
     return 0
 
 

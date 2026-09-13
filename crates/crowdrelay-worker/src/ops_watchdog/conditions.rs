@@ -135,6 +135,38 @@ fn conditions(snapshot: &OpsSnapshot) -> Vec<Condition> {
             }),
         },
         Condition {
+            // Critical, because this is the one reading that separates the two
+            // meanings of a degraded cycle. Phase isolation exists so that one
+            // phase failing cannot stop already-authorized work, and a
+            // transient failure being absorbed is the design working — that is
+            // why `degraded` is not `failed`. A phase that has failed in every
+            // cycle for an hour is not being absorbed; that part of the brain
+            // has simply stopped, and every cycle since has silently done less
+            // than it reported.
+            //
+            // Production measured why this was needed: 296 cycles in 24 hours,
+            // 40 degraded, and no way to tell which of the two situations that
+            // was without grepping worker logs by timestamp — so the answer
+            // expired with the logs.
+            //
+            // Consecutiveness rather than a share, deliberately. What fraction
+            // of cycles counts as broken is arbitrary and would need tuning
+            // against a number nobody has; a phase failing every cycle for an
+            // hour is not transient under any reading.
+            key: "brain.phase_failing_every_cycle",
+            severity: "critical",
+            summary: "A cycle phase has failed in every recent cycle",
+            active: snapshot.relentless_degraded_phases.is_some(),
+            details: json!({
+                "phases": snapshot.relentless_degraded_phases,
+                "consecutive_cycles": RELENTLESS_CYCLE_WINDOW,
+                "remedy": "read /v1/admin/ops/cycles?state=degraded for the phase \
+                           names, then the worker log for that phase's own warning \
+                           line — each phase logs its cause before the cycle \
+                           reports itself degraded",
+            }),
+        },
+        Condition {
             key: "executor.offline",
             severity: "critical",
             summary: "ViryaOS executor registry has no live executor",

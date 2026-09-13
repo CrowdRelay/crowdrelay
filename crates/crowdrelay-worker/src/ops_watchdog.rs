@@ -321,6 +321,18 @@ struct OpsSnapshot {
     /// The count of redundant drafts, not of affected communities: two queued
     /// drafts for one subreddit is one double-post to prevent.
     duplicate_community_drafts: i64,
+    /// Phases that failed in every one of the last `RELENTLESS_CYCLE_WINDOW`
+    /// consecutive cycles, comma-separated, or `None`.
+    ///
+    /// `outcome = 'degraded'` alone cannot answer the operator's question.
+    /// Production ran 296 cycles in a day with 40 degraded, and 13% is either
+    /// phase isolation absorbing transient errors — the design working — or one
+    /// phase broken every cycle. Those call for opposite responses.
+    ///
+    /// Consecutiveness is the discriminator, deliberately rather than a share
+    /// threshold: what fraction counts as broken is arbitrary, while a phase
+    /// that has failed every cycle for an hour is not transient by any reading.
+    relentless_degraded_phases: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -338,6 +350,13 @@ struct AlertState {
     active: bool,
     last_alerted_at: Option<OffsetDateTime>,
 }
+
+/// How many consecutive cycles a phase must fail before it is not transient.
+///
+/// Twelve, which is about an hour at the default five-minute cycle. Long enough
+/// that a provider blip or a lock contention has resolved; short enough that a
+/// genuinely broken phase is reported within the hour rather than the day.
+const RELENTLESS_CYCLE_WINDOW: i64 = 12;
 
 async fn load_snapshot(
     transaction: &mut Transaction<'_, Postgres>,
@@ -561,12 +580,42 @@ async fn load_snapshot(
                   AND status='awaiting_manual_post'
                 GROUP BY lower(subreddit)
                 HAVING count(*) > 1
-             ) AS duplicated)::bigint AS duplicate_community_drafts
+             ) AS duplicated)::bigint AS duplicate_community_drafts,
+            -- Phases that failed in EVERY one of the last N closed cycles.
+            --
+            -- `HAVING count(*) = (SELECT count(*) FROM recent)` is the
+            -- intersection of the recent phase arrays: a phase appearing once per
+            -- cycle in all of them failed all of them. The second condition
+            -- requires a full window, so a worker that has only just started does
+            -- not report its first two cycles as a relentless failure.
+            --
+            -- Only cycles that recorded the column. Rows from before migration
+            -- 0261 carry NULL, which means "did not look" rather than "nothing
+            -- failed", and counting them as clean would suppress the alarm.
+            (SELECT string_agg(relentless.phase, ',' ORDER BY relentless.phase)
+             FROM (
+                WITH recent AS (
+                    SELECT degraded_phases
+                    FROM viryaos_autopilot_cycle_runs
+                    WHERE workspace_id=$1
+                      AND finished_at IS NOT NULL
+                      AND degraded_phases IS NOT NULL
+                    ORDER BY started_at DESC
+                    LIMIT $3
+                )
+                SELECT failures.phase
+                FROM (SELECT unnest(degraded_phases) AS phase FROM recent) AS failures
+                GROUP BY failures.phase
+                HAVING count(*) = (SELECT count(*) FROM recent)
+                   AND (SELECT count(*) FROM recent) >= $3
+             ) AS relentless
+            ) AS relentless_degraded_phases
         FROM viryaos_executor_instances WHERE workspace_id=$1
         "#,
     )
     .bind(workspace_id.into_uuid())
     .bind(UNKNOWN_ALERT_AGE_THRESHOLD.as_secs() as i64)
+    .bind(RELENTLESS_CYCLE_WINDOW)
     .fetch_one(&mut **transaction)
     .await
 }
@@ -679,6 +728,7 @@ mod tests {
             refused_growth_deliveries: 0,
             unscoreable_live_opportunities: 0,
             duplicate_community_drafts: 0,
+            relentless_degraded_phases: None,
         }
     }
 
@@ -774,6 +824,62 @@ mod tests {
             raised,
             vec!["publishing.duplicate_community_draft"],
             "a queued double-post must fire without needing any other fault"
+        );
+    }
+
+    /// A phase failing every cycle must fire on its own.
+    ///
+    /// This is the reading that separates "isolation absorbing a transient
+    /// error", which is the design working, from "that part of the brain has
+    /// stopped". Nothing else on the list can tell an operator which they have.
+    #[test]
+    fn a_relentlessly_failing_phase_raises_attention_by_itself() {
+        let mut snapshot = healthy();
+        snapshot.relentless_degraded_phases = Some("action_claim".to_owned());
+        let raised = conditions(&snapshot)
+            .into_iter()
+            .filter(|c| c.active)
+            .map(|c| c.key)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            raised,
+            vec!["brain.phase_failing_every_cycle"],
+            "a phase broken every cycle must fire without needing another fault"
+        );
+    }
+
+    /// And it must be critical rather than a warning.
+    ///
+    /// Every cycle since the phase broke has done less than it reported, and
+    /// `outcome = 'degraded'` is the same word a healthy cycle absorbing one
+    /// transient error carries. A warning here would read as that.
+    #[test]
+    fn a_relentlessly_failing_phase_is_critical() {
+        let mut snapshot = healthy();
+        snapshot.relentless_degraded_phases = Some("evaluation,reply_triage_claim".to_owned());
+        let severity = conditions(&snapshot)
+            .into_iter()
+            .find(|c| c.key == "brain.phase_failing_every_cycle")
+            .map(|c| c.severity);
+        assert_eq!(severity, Some("critical"));
+    }
+
+    /// An occasional degraded cycle must stay quiet.
+    ///
+    /// The phases are isolated precisely so one can fail without stopping the
+    /// rest, and reporting that would teach an operator to ignore the alarm —
+    /// the same reason the cycle records `degraded` rather than `failed`.
+    #[test]
+    fn occasional_degradation_does_not_raise_attention() {
+        let snapshot = healthy();
+        let raised = conditions(&snapshot)
+            .into_iter()
+            .filter(|c| c.active)
+            .map(|c| c.key)
+            .collect::<Vec<_>>();
+        assert!(
+            !raised.contains(&"brain.phase_failing_every_cycle"),
+            "a cycle that degraded now and then is isolation working, not a fault"
         );
     }
 
