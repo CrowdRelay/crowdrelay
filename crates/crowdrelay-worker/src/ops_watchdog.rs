@@ -374,6 +374,14 @@ struct OpsSnapshot {
     /// publishing posture it answers the question an operator actually asks:
     /// "I approved everything and set autopilot — why has nothing published?"
     reddit_drafts_waiting: i64,
+    /// Reddit drafts that failed in the last day, with the distinct reasons.
+    ///
+    /// `community_posts.error_message` is written on every failure and read by
+    /// nothing. A failed draft is not recoverable by the brain — the parent
+    /// action is terminal and the seven-day subreddit cooldown stops it drafting
+    /// the community again — so the reason is the only thing that tells an
+    /// operator whether to requeue the content or fix the account.
+    reddit_drafts_failed: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -676,7 +684,20 @@ async fn load_snapshot(
             )::bigint AS off_platform_push_attempts,
             (SELECT count(*) FROM community_posts p
              WHERE p.workspace_id=$1 AND p.status='awaiting_manual_post'
-            )::bigint AS reddit_drafts_waiting
+            )::bigint AS reddit_drafts_waiting,
+            -- Failed drafts in the last day, as `count×reason`. Truncated,
+            -- because the reason can carry a provider body and this travels in
+            -- an alert payload.
+            (SELECT string_agg(f.hits || '×' || f.reason, '; ' ORDER BY f.hits DESC)
+             FROM (
+                SELECT count(*) AS hits, left(coalesce(p.error_message, 'unknown'), 120) AS reason
+                FROM community_posts p
+                WHERE p.workspace_id=$1
+                  AND p.status='failed'
+                  AND p.updated_at > now() - interval '1 day'
+                GROUP BY left(coalesce(p.error_message, 'unknown'), 120)
+             ) AS f
+            ) AS reddit_drafts_failed
         FROM viryaos_executor_instances WHERE workspace_id=$1
         "#,
     )

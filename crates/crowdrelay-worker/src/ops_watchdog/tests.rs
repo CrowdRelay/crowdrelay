@@ -51,6 +51,7 @@ fn publishing() -> PublishingPosture {
             outcome_rejection_reasons: None,
             off_platform_push_attempts: 0,
             reddit_drafts_waiting: 0,
+            reddit_drafts_failed: None,
         }
     }
 
@@ -146,6 +147,34 @@ fn publishing() -> PublishingPosture {
             raised,
             vec!["publishing.duplicate_community_draft"],
             "a queued double-post must fire without needing any other fault"
+        );
+    }
+
+    /// A failed draft must be reported with its reason.
+    ///
+    /// The content is still in the row, so this is recoverable — but only by a
+    /// person, and only if they know. The brain cannot: the parent action is
+    /// terminal and the seven-day cooldown stops it drafting that community
+    /// again.
+    #[test]
+    fn failed_drafts_are_reported_with_their_reasons() {
+        let mut snapshot = healthy();
+        snapshot.reddit_drafts_failed = Some("5×error sending request; 2×403".to_owned());
+        let raised = conditions(&snapshot, publishing())
+            .into_iter()
+            .filter(|c| c.active)
+            .map(|c| c.key)
+            .collect::<Vec<_>>();
+        assert_eq!(raised, vec!["publishing.drafts_failed"]);
+        let reasons = conditions(&snapshot, publishing())
+            .into_iter()
+            .find(|c| c.key == "publishing.drafts_failed")
+            .and_then(|c| c.details.get("reasons").cloned());
+        assert_eq!(
+            reasons,
+            Some(serde_json::json!("5×error sending request; 2×403")),
+            "the reason decides whether the content can be requeued; a count \
+             cannot say that"
         );
     }
 

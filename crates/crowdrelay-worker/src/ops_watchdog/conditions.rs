@@ -234,6 +234,32 @@ fn conditions(snapshot: &OpsSnapshot, posture: PublishingPosture) -> Vec<Conditi
             }),
         },
         Condition {
+            // Warning: the content still exists in the row, so this is
+            // recoverable — but only by a person, and only if they know it
+            // happened. The brain cannot recover it: the parent action is
+            // terminal once a draft fails, and the seven-day subreddit cooldown
+            // stops it drafting that community again.
+            //
+            // The reason is the whole point. "Reddit refused this" and "the
+            // agents service was unreachable" call for opposite responses, and
+            // `error_message` was written on every failed row and read by
+            // nothing.
+            key: "publishing.drafts_failed",
+            severity: "warning",
+            summary: "Reddit drafts failed and the content is not being retried",
+            active: snapshot.reddit_drafts_failed.is_some(),
+            details: json!({
+                "reasons": snapshot.reddit_drafts_failed,
+                "window": "1 day",
+                "remedy": "read the reasons. A transport error or an unreachable \
+                           agents service means the content is fine and can be \
+                           requeued by setting community_posts.status back to \
+                           'pending' and the parent action back to 'succeeded'. \
+                           A refusal from Reddit means the content or the account \
+                           needs attention first — requeuing would repeat it.",
+            }),
+        },
+        Condition {
             key: "executor.offline",
             severity: "critical",
             summary: "ViryaOS executor registry has no live executor",
