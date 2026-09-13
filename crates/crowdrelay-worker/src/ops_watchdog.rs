@@ -7,7 +7,7 @@
 //! not actionable from there. FakAP remains the external health probe for
 //! API reachability; this watchdog catches silent failures FakAP cannot see.
 //!
-//! The watchdog monitors seven conditions:
+//! The watchdog monitors nine conditions:
 //! - `publishing.orphaned_draft` — a publishing action succeeded and no
 //!   executor produced a post for it. The three executors claim
 //!   `agent.content.request` by the agent task's `template_id`, and the social
@@ -26,6 +26,18 @@
 //!   resolve any evidence at all. Zero resolved outcomes, zero learning, and
 //!   not one alarm. Nothing downstream of a refusal works, so this is critical
 //!   rather than a warning.
+//! - `delivery.growth_event_refused` — a growth-carrying outbox event was
+//!   permanently refused by its consumer. A 4xx is `http_permanent_status`, so
+//!   the outbox correctly stops retrying and the delivery is `cancelled` rather
+//!   than `dead` — which means `ops/attention`, reporting dead deliveries and a
+//!   bare cancelled count, showed four refused press pitches as four increments
+//!   in a number that also held 39 stale refusals from August.
+//! - `growth.unscoreable_live_opportunities` — live opportunities held because
+//!   their score ceiling is below the score floor, not because they were judged
+//!   poor. `evaluate_live_opportunity` returns `Hold` as `return Ok(None)`: no
+//!   decision row, no log, no counter. 430 festival and competition applications
+//!   imported from the band's CRM were dropped on every cycle with no trace, and
+//!   a table showing 430 rows read as progress.
 //! - `executor.offline` — the API is up but no executor has heartbeated
 //!   recently, so nothing can actually execute. This is a silent failure
 //!   that FakAP (external health probe) cannot detect.
@@ -289,6 +301,12 @@ struct OpsSnapshot {
     /// `agent.content_requested` is a press pitch the brain drafted, addressed
     /// to a named journalist, that no longer has any route to them.
     refused_growth_deliveries: i64,
+    /// Live opportunities whose score ceiling is below the score floor.
+    ///
+    /// Not "none scored well" — *cannot* score well. With no strategic value and
+    /// nothing to cost a trip from, 40 of the 100 points are unreachable and the
+    /// best possible total is 60 against a minimum of 65.
+    unscoreable_live_opportunities: i64,
 }
 
 #[derive(Clone, Debug)]
@@ -485,7 +503,35 @@ async fn load_snapshot(
                AND d.cancelled_at > now() - interval '7 days'
                AND e.event_type IN ('crowdrelay.agent.content_requested',
                                     'crowdrelay.community.engagement_requested')
-            )::bigint AS refused_growth_deliveries
+            )::bigint AS refused_growth_deliveries,
+            -- Live opportunities that cannot clear the score bar, ever.
+            --
+            -- `live_opportunity_score` is fit*30 + strategic*25 + reputation*15
+            -- + confidence*15 + economics(<=15), capped at 100, against
+            -- `minimum_score` 65. With `strategic_value_basis_points = 0` and no
+            -- logistics to cost from, 40 of those 100 points are unreachable and
+            -- the ceiling is 30 + 15 + 15 = 60. Below 65 at maximum fit,
+            -- reputation and confidence — so `evaluate_live_opportunity` returns
+            -- `Hold` for arithmetic reasons, not judgement.
+            --
+            -- `Hold` is `return Ok(None)`: no decision row, no log line, no
+            -- counter. So 430 festival and competition applications imported from
+            -- the band's CRM were evaluated and dropped on every cycle with no
+            -- trace anywhere, and the table showing 430 rows looked like progress.
+            --
+            -- Stated as the provable case rather than by recomputing the score in
+            -- SQL: a count of rows whose ceiling is below the floor cannot be
+            -- wrong about whether they are reachable.
+            (SELECT count(*) FROM viryaos_team_opportunities o
+             WHERE o.workspace_id=$1
+               AND o.status='new'
+               AND o.eligible
+               AND o.opportunity_kind IN ('festival','showcase',
+                                          'review_contest','support_slot')
+               AND (o.deadline IS NULL OR o.deadline > now())
+               AND o.strategic_value_basis_points = 0
+               AND o.distance_km IS NULL
+            )::bigint AS unscoreable_live_opportunities
         FROM viryaos_executor_instances WHERE workspace_id=$1
         "#,
     )
@@ -568,6 +614,33 @@ fn conditions(snapshot: &OpsSnapshot) -> Vec<Condition> {
                            outbox_event_id for status='cancelled' and read \
                            last_response_status: 4xx is the consumer refusing \
                            the payload, not the outbox failing to send it",
+            }),
+        },
+        Condition {
+            // Warning, not critical: nothing is corrupted and no wrong lesson is
+            // learned. What is happening is that real work sits untouched — the
+            // band's own festival and competition list, imported and then held
+            // every cycle for a reason no surface reported.
+            //
+            // Actionable in exactly two ways, which is why it is worth an alert:
+            // enrich the rows so the unreachable 40 points become reachable
+            // (strategic value, or a city and distance so the trip can be
+            // costed), or lower `minimum_score` for a tenant whose opportunities
+            // legitimately arrive without either. Both are decisions; neither can
+            // be made while the hold is invisible.
+            key: "growth.unscoreable_live_opportunities",
+            severity: "warning",
+            summary: "Live opportunities are held because their score ceiling is below the bar",
+            active: snapshot.unscoreable_live_opportunities > 0,
+            details: json!({
+                "unscoreable": snapshot.unscoreable_live_opportunities,
+                "score_ceiling": 60,
+                "minimum_score": 65,
+                "remedy": "fit, reputation and confidence together cap at 60 of \
+                           100; the missing 40 are strategic_value_basis_points \
+                           and the economics score, which needs distance_km and \
+                           nights_away to cost a trip. Fill either, or lower \
+                           minimum_score in the live_opportunity policy",
             }),
         },
         Condition {
@@ -764,6 +837,7 @@ mod tests {
             orphaned_publishing_actions: 0,
             orphaned_publishing_actions_all_time: 0,
             refused_growth_deliveries: 0,
+            unscoreable_live_opportunities: 0,
         }
     }
 
@@ -790,6 +864,51 @@ mod tests {
             .find(|condition| condition.key == "publishing.orphaned_draft")
             .expect("the orphaned-draft condition is always present");
         assert_eq!(orphan.details["orphaned_actions_all_time"], 2);
+    }
+
+    /// An opportunity whose ceiling is under the floor must raise attention.
+    ///
+    /// `Hold` is `return Ok(None)` — no decision row, no log, no counter. So 430
+    /// festival and competition applications imported from the band's CRM were
+    /// evaluated and dropped on every cycle with no trace, and a table showing
+    /// 430 rows read as progress. The score is fit*30 + strategic*25 +
+    /// reputation*15 + confidence*15 + economics(<=15) against a floor of 65;
+    /// with strategic at 0 and nothing to cost a trip from, the ceiling is 60.
+    #[test]
+    fn an_unscoreable_live_opportunity_raises_attention_by_itself() {
+        let mut snapshot = healthy();
+        snapshot.unscoreable_live_opportunities = 430;
+        let raised = conditions(&snapshot)
+            .into_iter()
+            .filter(|c| c.active)
+            .map(|c| c.key)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            raised,
+            vec!["growth.unscoreable_live_opportunities"],
+            "an unreachable score bar must fire without needing any other fault"
+        );
+    }
+
+    /// And it must be a warning, not critical.
+    ///
+    /// Nothing is corrupted and no wrong lesson is learned — the work is simply
+    /// sat on. The two fixes are enriching the rows or lowering the bar, and both
+    /// are decisions rather than emergencies.
+    #[test]
+    fn an_unscoreable_live_opportunity_is_a_warning() {
+        let mut snapshot = healthy();
+        snapshot.unscoreable_live_opportunities = 1;
+        let condition = conditions(&snapshot)
+            .into_iter()
+            .find(|c| c.key == "growth.unscoreable_live_opportunities")
+            .expect("condition should exist");
+        assert_eq!(condition.severity, "warning");
+        // The arithmetic belongs in the alert: an operator deciding whether to
+        // lower the bar needs to see that 40 of the 100 points are unreachable.
+        let details = condition.details.to_string();
+        assert!(details.contains("\"score_ceiling\":60"), "{details}");
+        assert!(details.contains("\"minimum_score\":65"), "{details}");
     }
 
     /// A permanently refused growth event must raise attention on its own.
