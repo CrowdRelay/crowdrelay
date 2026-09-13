@@ -52,6 +52,15 @@ fn publishing() -> PublishingPosture {
             off_platform_push_attempts: 0,
             reddit_drafts_waiting: 0,
             reddit_drafts_failed: None,
+            reddit_posting_demand: 0,
+            reddit_session_usable: 1,
+            reddit_credential_status: Some("active".to_owned()),
+            reddit_credential_error: None,
+            // A workspace below the decision threshold, so the
+            // never-updated-posterior condition stays quiet unless a test asks
+            // for it.
+            decisions_total: 0,
+            causal_observations: Some(0),
         }
     }
 
@@ -148,6 +157,101 @@ fn publishing() -> PublishingPosture {
             vec!["publishing.duplicate_community_draft"],
             "a queued double-post must fire without needing any other fault"
         );
+    }
+
+    /// The brain acting on a belief nothing has ever tested must be reported.
+    ///
+    /// Measured production state: 733 decisions, 0 resolved evidence, empty
+    /// strategy posterior, 0 belief revisions, and 22 fans none of which any
+    /// action can claim. Every other signal looked healthy the whole time —
+    /// cycles succeeded, decisions were written, actions were created. Nothing
+    /// said the prior had never been checked against this tenant.
+    #[test]
+    fn a_posterior_no_observation_has_touched_raises_attention() {
+        let mut snapshot = healthy();
+        snapshot.decisions_total = 733;
+        snapshot.causal_observations = Some(0);
+        let raised = conditions(&snapshot, publishing())
+            .into_iter()
+            .filter(|c| c.active)
+            .map(|c| c.key)
+            .collect::<Vec<_>>();
+        assert_eq!(raised, vec!["learning.posterior_never_updated"]);
+    }
+
+    /// A missing checkpoint means the same thing as zero observations.
+    ///
+    /// A workspace that has decided hundreds of times and written no causal
+    /// checkpoint has not learned either — the absence is the finding, not a
+    /// reason to stay quiet.
+    #[test]
+    fn a_missing_checkpoint_counts_as_never_updated() {
+        let mut snapshot = healthy();
+        snapshot.decisions_total = 733;
+        snapshot.causal_observations = None;
+        let raised = conditions(&snapshot, publishing())
+            .into_iter()
+            .filter(|c| c.active)
+            .map(|c| c.key)
+            .collect::<Vec<_>>();
+        assert_eq!(raised, vec!["learning.posterior_never_updated"]);
+    }
+
+    /// One observation is enough to stop the alarm.
+    ///
+    /// This reports that learning never started, not that it is slow. The moment
+    /// evidence reaches the posterior the condition has nothing to say, and the
+    /// quality of what was learned is a different question with different
+    /// signals.
+    #[test]
+    fn one_observation_silences_it() {
+        let mut snapshot = healthy();
+        snapshot.decisions_total = 733;
+        snapshot.causal_observations = Some(1);
+        let raised = conditions(&snapshot, publishing())
+            .into_iter()
+            .filter(|c| c.active)
+            .map(|c| c.key)
+            .collect::<Vec<_>>();
+        assert!(
+            !raised.contains(&"learning.posterior_never_updated"),
+            "an observation has reached the posterior; learning started"
+        );
+    }
+
+    /// A young workspace is not a broken one.
+    ///
+    /// No observations after three decisions is a system that has not run yet.
+    /// Reporting it would train an operator to ignore the alarm before it ever
+    /// meant anything.
+    #[test]
+    fn a_young_workspace_is_not_reported() {
+        let mut snapshot = healthy();
+        snapshot.decisions_total = 3;
+        snapshot.causal_observations = Some(0);
+        let raised = conditions(&snapshot, publishing())
+            .into_iter()
+            .filter(|c| c.active)
+            .map(|c| c.key)
+            .collect::<Vec<_>>();
+        assert!(raised.is_empty(), "a system that has not run yet is not a fault");
+    }
+
+    /// And it must be critical.
+    ///
+    /// Every other alarm reports a thing that broke. This one reports a thing
+    /// that never started, while the brain spends its action budget ranking by
+    /// an assumption.
+    #[test]
+    fn a_never_updated_posterior_is_critical() {
+        let mut snapshot = healthy();
+        snapshot.decisions_total = 733;
+        snapshot.causal_observations = Some(0);
+        let severity = conditions(&snapshot, publishing())
+            .into_iter()
+            .find(|c| c.key == "learning.posterior_never_updated")
+            .map(|c| c.severity);
+        assert_eq!(severity, Some("critical"));
     }
 
     /// A failed draft must be reported with its reason.

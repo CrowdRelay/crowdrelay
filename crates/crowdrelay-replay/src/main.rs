@@ -78,25 +78,55 @@ async fn main() {
     }
 }
 
+/// The workspace this analysis is about.
+///
+/// Every business table carries `workspace_id`, and that column is the whole of
+/// the tenant boundary. An unscoped read here would silently average two tenants
+/// together and report a number that describes neither — so the tool refuses
+/// rather than guesses when a database holds more than one.
+async fn sole_workspace(pool: &sqlx::PgPool) -> Result<Option<uuid::Uuid>, sqlx::Error> {
+    let ids: Vec<uuid::Uuid> = sqlx::query_scalar("SELECT id FROM workspaces ORDER BY id LIMIT 2")
+        .fetch_all(pool)
+        .await?;
+    match ids.as_slice() {
+        [one] => Ok(Some(*one)),
+        [] => Ok(None),
+        _ => {
+            eprintln!(
+                "this database holds more than one workspace. Blending them would \
+                 describe neither; point the tool at a single-tenant snapshot."
+            );
+            std::process::exit(2);
+        }
+    }
+}
+
 async fn report(pool: &sqlx::PgPool) -> Result<(), sqlx::Error> {
-    let total = decision_total(pool).await?;
+    let Some(workspace) = sole_workspace(pool).await? else {
+        println!("No workspace in this database.");
+        return Ok(());
+    };
+    let total = decision_total(pool, workspace).await?;
     if total == 0 {
         println!("No decisions in this database. Point the tool at one that has history.");
         return Ok(());
     }
     println!("{total} decisions in the ledger\n");
 
-    confidence_distribution(pool, total).await?;
-    subject_diversity(pool, total).await?;
-    learning_state(pool).await?;
-    prior_sensitivity(pool).await?;
+    confidence_distribution(pool, workspace, total).await?;
+    subject_diversity(pool, workspace, total).await?;
+    learning_state(pool, workspace).await?;
+    prior_sensitivity(pool, workspace).await?;
     Ok(())
 }
 
-async fn decision_total(pool: &sqlx::PgPool) -> Result<i64, sqlx::Error> {
-    sqlx::query_scalar("SELECT count(*)::bigint FROM viryaos_autopilot_decisions")
-        .fetch_one(pool)
-        .await
+async fn decision_total(pool: &sqlx::PgPool, workspace: uuid::Uuid) -> Result<i64, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT count(*)::bigint FROM viryaos_autopilot_decisions WHERE workspace_id = $1",
+    )
+    .bind(workspace)
+    .fetch_one(pool)
+    .await
 }
 
 /// Question 1 — is `confidence_basis_points` carrying information?
@@ -104,16 +134,22 @@ async fn decision_total(pool: &sqlx::PgPool) -> Result<i64, sqlx::Error> {
 /// Policies gate on `minimum_confidence_basis_points`. If every decision lands
 /// on the same value, that gate is not filtering anything and the number is
 /// decoration.
-async fn confidence_distribution(pool: &sqlx::PgPool, total: i64) -> Result<(), sqlx::Error> {
+async fn confidence_distribution(
+    pool: &sqlx::PgPool,
+    workspace: uuid::Uuid,
+    total: i64,
+) -> Result<(), sqlx::Error> {
     let rows = sqlx::query(
         r#"
         SELECT confidence_basis_points AS bp, count(*)::bigint AS hits
         FROM viryaos_autopilot_decisions
+        WHERE workspace_id = $1
         GROUP BY confidence_basis_points
         ORDER BY hits DESC
         LIMIT 10
         "#,
     )
+    .bind(workspace)
     .fetch_all(pool)
     .await?;
 
@@ -151,15 +187,21 @@ async fn confidence_distribution(pool: &sqlx::PgPool, total: i64) -> Result<(), 
 ///
 /// Many decisions over few subjects is one decision repeated. It is also the
 /// shape a stuck cooldown produces, so the two are worth telling apart.
-async fn subject_diversity(pool: &sqlx::PgPool, total: i64) -> Result<(), sqlx::Error> {
+async fn subject_diversity(
+    pool: &sqlx::PgPool,
+    workspace: uuid::Uuid,
+    total: i64,
+) -> Result<(), sqlx::Error> {
     let row = sqlx::query(
         r#"
         SELECT count(DISTINCT subject_id)::bigint AS subjects,
                count(DISTINCT context)::bigint     AS contexts,
                count(DISTINCT decision_key)::bigint AS keys
         FROM viryaos_autopilot_decisions
+        WHERE workspace_id = $1
         "#,
     )
+    .bind(workspace)
     .fetch_one(pool)
     .await?;
     let subjects: i64 = row.try_get("subjects")?;
@@ -185,9 +227,11 @@ async fn subject_diversity(pool: &sqlx::PgPool, total: i64) -> Result<(), sqlx::
         r#"
         SELECT context, count(*)::bigint AS hits
         FROM viryaos_autopilot_decisions
+        WHERE workspace_id = $1
         GROUP BY context ORDER BY hits DESC LIMIT 8
         "#,
     )
+    .bind(workspace)
     .fetch_all(pool)
     .await?;
     println!("\n  busiest contexts:");
@@ -205,17 +249,21 @@ async fn subject_diversity(pool: &sqlx::PgPool, total: i64) -> Result<(), sqlx::
 /// This is the loop. The causal model learns from `observed_new_fans` on a
 /// resolved outcome; if nothing resolves, the prior stands forever and the brain
 /// acts on a belief no evidence has touched.
-async fn learning_state(pool: &sqlx::PgPool) -> Result<(), sqlx::Error> {
+async fn learning_state(pool: &sqlx::PgPool, workspace: uuid::Uuid) -> Result<(), sqlx::Error> {
     let row = sqlx::query(
         r#"
         SELECT
-          (SELECT count(*)::bigint FROM viryaos_growth_evidence)                          AS evidence,
           (SELECT count(*)::bigint FROM viryaos_growth_evidence
-            WHERE resolved_at IS NOT NULL)                                                AS resolved,
-          (SELECT count(*)::bigint FROM viryaos_autopilot_actions)                        AS actions,
-          (SELECT count(*)::bigint FROM viryaos_reach_events)                             AS reach
+            WHERE workspace_id = $1)                                                      AS evidence,
+          (SELECT count(*)::bigint FROM viryaos_growth_evidence
+            WHERE workspace_id = $1 AND resolved_at IS NOT NULL)                          AS resolved,
+          (SELECT count(*)::bigint FROM viryaos_autopilot_actions
+            WHERE workspace_id = $1)                                                      AS actions,
+          (SELECT count(*)::bigint FROM viryaos_reach_events
+            WHERE workspace_id = $1)                                                      AS reach
         "#,
     )
+    .bind(workspace)
     .fetch_one(pool)
     .await?;
     let evidence: i64 = row.try_get("evidence")?;
@@ -248,15 +296,17 @@ async fn learning_state(pool: &sqlx::PgPool) -> Result<(), sqlx::Error> {
 /// already has, and reports what it would predict. A model whose prediction
 /// barely moves between a prior of 2.0 and one of 0.0 is being driven by data;
 /// one that tracks the prior exactly is being driven by the prior.
-async fn prior_sensitivity(pool: &sqlx::PgPool) -> Result<(), sqlx::Error> {
+async fn prior_sensitivity(pool: &sqlx::PgPool, workspace: uuid::Uuid) -> Result<(), sqlx::Error> {
     let templates = sqlx::query(
         r#"
         SELECT DISTINCT input_snapshot #>> '{prediction,template_id}' AS template
         FROM viryaos_autopilot_decisions
-        WHERE input_snapshot #>> '{prediction,template_id}' IS NOT NULL
+        WHERE workspace_id = $1
+          AND input_snapshot #>> '{prediction,template_id}' IS NOT NULL
         LIMIT 12
         "#,
     )
+    .bind(workspace)
     .fetch_all(pool)
     .await?;
 

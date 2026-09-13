@@ -14,4 +14,5 @@ crowdrelay-domain = { path = "../crowdrelay-domain" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sqlx = { workspace = true }
+uuid = { workspace = true }
 tokio = { workspace = true }

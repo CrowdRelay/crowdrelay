@@ -123,6 +123,24 @@ def find_container() -> str | None:
     return None
 
 
+# Relations another service owns and creates. They are absent from a freshly
+# created development database, and a query naming one then fails to PREPARE for
+# a reason that has nothing to do with the query. Without this the prepared-count
+# ratchet fails on every clean checkout, which is how a gate teaches people to
+# ignore it. Kept in step with `test_sql_identifiers_v1.py`, which carries the
+# same list for the same reason.
+FOREIGN_RELATIONS = (
+    "agent_service_tasks",
+    "agent_service_reddit_cookies",
+    "agent_service_credentials",
+)
+
+
+def names_a_foreign_relation(sql: str) -> bool:
+    lowered = sql.lower()
+    return any(relation in lowered for relation in FOREIGN_RELATIONS)
+
+
 def queries() -> list[tuple[str, int, str]]:
     """Every raw SQL literal that returns rows, with where it was written."""
     found: list[tuple[str, int, str]] = []
@@ -146,7 +164,12 @@ def queries() -> list[tuple[str, int, str]]:
 
 def sweep(container: str) -> tuple[list, int, int, list, str]:
     """Prepares each query and returns those with a NUMERIC output column."""
-    candidates = queries()
+    # A query naming a relation another service owns cannot prepare against a
+    # database that service has not touched. Excluding them keeps the prepared
+    # count a property of this repository rather than of what else has run.
+    candidates = [
+        candidate for candidate in queries() if not names_a_foreign_relation(candidate[2])
+    ]
     script: list[str] = ["\\set ON_ERROR_STOP 0"]
     for index, (_, _, sql) in enumerate(candidates):
         script.append(

@@ -260,6 +260,81 @@ fn conditions(snapshot: &OpsSnapshot, posture: PublishingPosture) -> Vec<Conditi
             }),
         },
         Condition {
+            // Warning, not critical: drafts survive for a while — the
+            // executor defers a session failure and retries for about an
+            // hour before giving up — and nothing is corrupted. But the
+            // demand is real and nothing fixes it alone: `invalid` needs a
+            // new credential, a missing row needs a first one, and a
+            // six-hour cooldown outlives the retry cover, so every draft in
+            // the queue dies unless a person acts inside the window.
+            //
+            // The predicate is the agents service's own eligibility rule,
+            // not a proxy: an 'active' reddit-browser credential, or one in
+            // a cooldown whose window has passed. Stored cookies alone do
+            // not count — establishSession refuses to use them without a
+            // credential, so an 'active' cookie row beside a dead
+            // credential is a session that still cannot post.
+            key: "publishing.session_dead",
+            severity: "warning",
+            summary: "Reddit work is queued and no session can post it",
+            active: snapshot.reddit_posting_demand > 0 && snapshot.reddit_session_usable == 0,
+            details: json!({
+                "drafts_waiting": snapshot.reddit_posting_demand,
+                "credential_status": snapshot.reddit_credential_status,
+                "credential_error": snapshot.reddit_credential_error,
+                "remedy": "status 'invalid' means Reddit rejected the password \
+                           — store fresh credentials via POST /reddit/credentials \
+                           on the agents service. No row at all means credentials \
+                           were never stored. 'cooldown' means a challenge or a \
+                           crash — it clears itself, but drafts only retry for \
+                           about an hour. After fixing, failed drafts can be \
+                           requeued by setting community_posts.status back to \
+                           'pending'.",
+            }),
+        },
+        Condition {
+            // Critical, and it reports the one failure nothing else can see: not
+            // that something broke, but that something never started.
+            //
+            // The causal model learns only from resolved evidence. Until an
+            // outcome resolves, every prediction it makes IS the prior —
+            // `DEFAULT_EXPECTED_FANS`, a number chosen once and never checked
+            // against this tenant. The brain then ranks, dispatches and reports
+            // confidence against a belief no observation has ever touched, and
+            // every other signal looks healthy while it happens: cycles succeed,
+            // decisions are written, actions are created.
+            //
+            // Measured production state that motivated this: 733 decisions, 0
+            // resolved evidence, empty strategy posterior, 0 belief revisions,
+            // and 22 fans none of which any action can claim. The prior says two
+            // per dispatch. Nothing anywhere said the number was untested.
+            //
+            // It is also self-reinforcing. An uncorrected optimistic prior keeps
+            // `has_positive_candidates` true, which lets `min_dispatches`
+            // override WAIT every cycle, which spends the budget on candidates
+            // whose value is an assumption.
+            //
+            // Both halves are required. A young workspace with few decisions and
+            // no observations is a system that has not run yet, not one that
+            // cannot learn.
+            key: "learning.posterior_never_updated",
+            severity: "critical",
+            summary: "The brain has never corrected its causal prior with an observation",
+            active: snapshot.decisions_total >= DECISIONS_BEFORE_LEARNING_EXPECTED
+                && snapshot.causal_observations.unwrap_or(0) == 0,
+            details: json!({
+                "decisions": snapshot.decisions_total,
+                "causal_observations": snapshot.causal_observations,
+                "checkpoint_present": snapshot.causal_observations.is_some(),
+                "remedy": "every prediction the brain makes is currently its prior. \
+                           Resolution is what corrects it, and resolution needs a \
+                           dispatch to land externally and its measurement window \
+                           to close — check publishing first, then \
+                           viryaos_growth_evidence for rows with resolved_at set. \
+                           Until then, treat the brain's rankings as assumptions.",
+            }),
+        },
+        Condition {
             key: "executor.offline",
             severity: "critical",
             summary: "ViryaOS executor registry has no live executor",

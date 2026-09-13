@@ -382,6 +382,26 @@ struct OpsSnapshot {
     /// the community again — so the reason is the only thing that tells an
     /// operator whether to requeue the content or fix the account.
     reddit_drafts_failed: Option<String>,
+    /// Drafts waiting on a Reddit session (pending or deferred).
+    reddit_posting_demand: i64,
+    /// Count of credential rows eligible to establish a session — the same
+    /// eligibility the agents service's `getRedditCredentials` applies.
+    reddit_session_usable: i64,
+    /// The credential row's status (`active`/`cooldown`/`invalid`), or NULL
+    /// when no `reddit-browser` credential exists at all.
+    reddit_credential_status: Option<String>,
+    reddit_credential_error: Option<String>,
+    /// Lifetime decisions, and how many observations the causal posterior has.
+    ///
+    /// The brain checkpoints its causal model to `viryaos_brain_state`, and that
+    /// model carries its own observation count. Reading it answers "has any
+    /// evidence ever corrected this belief" directly, rather than inferring it
+    /// from a proxy like the resolved-evidence count.
+    ///
+    /// `None` means no checkpoint exists yet, which for a workspace that has
+    /// made decisions means the same thing as zero.
+    decisions_total: i64,
+    causal_observations: Option<i64>,
 }
 
 #[derive(Clone, Debug)]
@@ -406,6 +426,14 @@ struct AlertState {
 /// that a provider blip or a lock contention has resolved; short enough that a
 /// genuinely broken phase is reported within the hour rather than the day.
 const RELENTLESS_CYCLE_WINDOW: i64 = 12;
+
+/// How many lifetime decisions a workspace makes before an untouched causal
+/// prior is a fault rather than a young system.
+///
+/// A workspace that has decided a hundred times has had a hundred chances to
+/// learn something. Below that, "no observations yet" is a system that has not
+/// run, which is a different statement and not worth waking anybody for.
+const DECISIONS_BEFORE_LEARNING_EXPECTED: i64 = 100;
 
 async fn load_snapshot(
     transaction: &mut Transaction<'_, Postgres>,
@@ -697,7 +725,45 @@ async fn load_snapshot(
                   AND p.updated_at > now() - interval '1 day'
                 GROUP BY left(coalesce(p.error_message, 'unknown'), 120)
              ) AS f
-            ) AS reddit_drafts_failed
+            ) AS reddit_drafts_failed,
+            -- Reddit posting demand: drafts that need a live session to go
+            -- out. `pending` waits for its first attempt; `rate_limited`
+            -- covers transient deferrals retrying through the session gap
+            -- and subreddit-cooldown holds — a dead session with work queued
+            -- is worth reporting regardless of why the work is queued.
+            (SELECT count(*) FROM community_posts p
+             WHERE p.workspace_id=$1 AND p.status IN ('pending','rate_limited')
+            )::bigint AS reddit_posting_demand,
+            -- Whether session material exists that can actually establish a
+            -- posting session. Cookies alone cannot: the agents service's
+            -- establishSession refuses before seeding them when no
+            -- credential row is eligible. Mirrors getRedditCredentials'
+            -- eligibility — 'active', or 'cooldown' past its six-hour window
+            -- (LOGIN_COOLDOWN_HOURS in crowdrelay-agents).
+            (SELECT count(*) FROM agent_service_credentials c
+             WHERE c.workspace_id=$1 AND c.provider='reddit-browser'
+               AND (c.status='active'
+                    OR (c.status='cooldown'
+                        AND (c.last_validated_at IS NULL
+                             OR c.last_validated_at < now() - interval '6 hours')))
+            )::bigint AS reddit_session_usable,
+            (SELECT c.status FROM agent_service_credentials c
+             WHERE c.workspace_id=$1 AND c.provider='reddit-browser'
+            ) AS reddit_credential_status,
+            (SELECT left(c.last_validation_error, 200) FROM agent_service_credentials c
+             WHERE c.workspace_id=$1 AND c.provider='reddit-browser'
+            ) AS reddit_credential_error,
+            (SELECT count(*) FROM viryaos_autopilot_decisions d
+             WHERE d.workspace_id=$1)::bigint AS decisions_total,
+            -- The brain's own count, read out of its checkpoint. `fans.global.n`
+            -- is the observation count on the pooled posterior; it is zero until
+            -- a resolved outcome reaches it. Text-extracted then cast, because a
+            -- checkpoint written before this level existed has no such key and
+            -- must read NULL rather than fail the whole snapshot.
+            (SELECT (bs.state #>> '{fans,global,n}')::bigint
+             FROM viryaos_brain_state bs
+             WHERE bs.workspace_id=$1 AND bs.module='causal_model'
+            ) AS causal_observations
         FROM viryaos_executor_instances WHERE workspace_id=$1
         "#,
     )
