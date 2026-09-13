@@ -61,10 +61,17 @@ where
 /// **Read from the pool rather than written down.** This was `const … = 4` with a
 /// comment saying "the pool is eight", and four numbers disagreed about the pool:
 /// the code default is 20, `.env.example` says 10, `deploy/env.production.example`
-/// says 5, and the comment said 8. "Half the pool" was therefore true of none of
-/// them. At a pool of 5 the constant took 80% of it for one page — the starvation
-/// it exists to prevent — and at 20 it ran the page in three waves for nothing.
-/// A budget that reasons about another configured value has to read that value.
+/// said 5, and the comment said 8.
+///
+/// The comment was the accurate one — `crowdrelay_db_pool_max` reads 8 in
+/// production — so the constant genuinely was half the pool there. It was wrong
+/// everywhere else: at 20 it ran the eleven-arm page in three waves for nothing,
+/// and at the 5 the production example carried it would have taken 80% of the
+/// pool for one page, which is the starvation it exists to prevent. The example
+/// has since been corrected to 8.
+///
+/// Reading the pool is what makes the ratio true without depending on which of
+/// four files somebody deployed from.
 ///
 /// Floored at 1: a pool of 1 is a valid configuration, and a semaphore of 0 would
 /// deadlock every arm rather than serialise them.
