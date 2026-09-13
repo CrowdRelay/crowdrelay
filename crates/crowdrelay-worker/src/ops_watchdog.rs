@@ -276,6 +276,13 @@ struct OpsSnapshot {
     /// rows can say it instead, and they catch a mismatch this precise pair
     /// does not cover as well.
     orphaned_publishing_actions: i64,
+    /// Growth events whose delivery was permanently refused in the last 7 days.
+    ///
+    /// The event list is deliberately narrow. A refused `ops.status_changed` is
+    /// a stale consumer contract and costs nothing; a refused
+    /// `agent.content_requested` is a press pitch the brain drafted, addressed
+    /// to a named journalist, that no longer has any route to them.
+    refused_growth_deliveries: i64,
 }
 
 #[derive(Clone, Debug)]
@@ -426,7 +433,29 @@ async fn load_snapshot(
                                WHERE p.workspace_id=$1 AND p.action_id=a.id)
                AND NOT EXISTS (SELECT 1 FROM social_posts p
                                WHERE p.workspace_id=$1 AND p.action_id=a.id)
-            )::bigint AS orphaned_publishing_actions
+            )::bigint AS orphaned_publishing_actions,
+            -- Growth-carrying events whose delivery was permanently refused.
+            --
+            -- Only the event types that carry work outward: a pitch, a community
+            -- engagement, a push proposal. A refused `ops.status_changed` is a
+            -- stale consumer contract and costs nothing; a refused
+            -- `agent.content_requested` is the press pitch the brain drafted,
+            -- addressed to a journalist, never sent.
+            --
+            -- Cancelled, not dead, which is why nothing reported this. A 4xx is
+            -- `http_permanent_status` and the outbox correctly stops retrying —
+            -- so the delivery leaves the pending set, never becomes dead, and
+            -- `ops/attention`'s `dead_deliveries` stays empty while the event is
+            -- just as undelivered. The only trace was the `cancelled` count,
+            -- a bare number with no breakdown.
+            (SELECT count(*) FROM webhook_deliveries d
+             JOIN outbox_events e ON e.id = d.outbox_event_id
+             WHERE d.workspace_id=$1
+               AND d.status='cancelled'
+               AND d.cancelled_at > now() - interval '7 days'
+               AND e.event_type IN ('crowdrelay.agent.content_requested',
+                                    'crowdrelay.community.engagement_requested')
+            )::bigint AS refused_growth_deliveries
         FROM viryaos_executor_instances WHERE workspace_id=$1
         "#,
     )
@@ -476,6 +505,37 @@ fn conditions(snapshot: &OpsSnapshot) -> Vec<Condition> {
                 "remedy": "an executor's claim predicate does not cover this draft — \
                            compare the agent task's template_id and the draft's \
                            platform against the three executors' WHERE clauses",
+            }),
+        },
+        Condition {
+            // Critical, because unlike `publishing.orphaned_draft` this one has
+            // already spent everything: the outcome was verified, the action was
+            // created, the event was built with its recipient and handed to the
+            // outbox — and the consumer refused it permanently. The work is done
+            // and lands nowhere.
+            //
+            // It was invisible, and the reason is worth keeping. A 4xx is
+            // `http_permanent_status`, so the outbox correctly stops retrying:
+            // the delivery is `cancelled`, never `dead`. `ops/attention` reports
+            // dead deliveries and a bare `cancelled` count, so a permanently
+            // refused growth event showed up as one increment in a number with
+            // no breakdown. Measured in production 2026-09-13: four
+            // `agent.content_requested` deliveries refused 422 by
+            // n8n.virya.music, the newest that day, alongside 485 delivered —
+            // and `crowdrelay.agent.content_requested` appears in no n8n
+            // example workflow or executor contract in this repository, so the
+            // consumer has most likely never known the event.
+            key: "delivery.growth_event_refused",
+            severity: "critical",
+            summary: "A growth event was permanently refused by its consumer",
+            active: snapshot.refused_growth_deliveries > 0,
+            details: json!({
+                "refused_deliveries": snapshot.refused_growth_deliveries,
+                "window": "7 days",
+                "remedy": "join webhook_deliveries to outbox_events on \
+                           outbox_event_id for status='cancelled' and read \
+                           last_response_status: 4xx is the consumer refusing \
+                           the payload, not the outbox failing to send it",
             }),
         },
         Condition {
@@ -670,7 +730,63 @@ mod tests {
             outcomes_rejected_unverified: 0,
             outcomes_accepted: 4,
             orphaned_publishing_actions: 0,
+            refused_growth_deliveries: 0,
         }
+    }
+
+    /// A permanently refused growth event must raise attention on its own.
+    ///
+    /// It was silent in production for ten days. A 4xx is
+    /// `http_permanent_status`, so the outbox stops retrying and the delivery is
+    /// `cancelled` rather than `dead` — and `ops/attention` reports dead
+    /// deliveries plus a bare `cancelled` count, so four refused press pitches
+    /// were one increment in a number that also held 39 stale
+    /// `ops.status_changed` refusals from August.
+    #[test]
+    fn a_refused_growth_event_raises_attention_by_itself() {
+        let mut snapshot = healthy();
+        snapshot.refused_growth_deliveries = 4;
+        let raised = conditions(&snapshot)
+            .into_iter()
+            .filter(|c| c.active)
+            .map(|c| c.key)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            raised,
+            vec!["delivery.growth_event_refused"],
+            "a refused growth event must fire without needing any other fault"
+        );
+    }
+
+    /// And it must be critical, not a warning.
+    ///
+    /// `publishing.orphaned_draft` is a warning because the draft was never
+    /// spent. This one has already spent everything: verified outcome, created
+    /// action, event built with its recipient, handed to the outbox — and then
+    /// refused. The work is complete and reaches nobody.
+    #[test]
+    fn a_refused_growth_event_is_critical() {
+        let mut snapshot = healthy();
+        snapshot.refused_growth_deliveries = 1;
+        let condition = conditions(&snapshot)
+            .into_iter()
+            .find(|c| c.key == "delivery.growth_event_refused")
+            .expect("condition should exist");
+        assert_eq!(condition.severity, "critical");
+    }
+
+    /// A healthy delivery path must not raise it.
+    #[test]
+    fn no_refused_growth_event_stays_quiet() {
+        let raised = conditions(&healthy())
+            .into_iter()
+            .filter(|c| c.active)
+            .map(|c| c.key)
+            .collect::<Vec<_>>();
+        assert!(
+            !raised.contains(&"delivery.growth_event_refused"),
+            "raised on a healthy snapshot: {raised:?}"
+        );
     }
 
     /// The condition must fire when actionable outcomes are all refused, even

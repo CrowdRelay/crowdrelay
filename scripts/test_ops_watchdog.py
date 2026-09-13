@@ -17,7 +17,15 @@ class OpsWatchdogContract(unittest.TestCase):
         self.assertIn("viryaos_ops_alert_state", worker)
         self.assertIn("ALERT_REPEAT_AFTER", worker)
         self.assertNotIn("crowdrelay.ops.status_changed", worker)
-        self.assertNotIn("outbox_events", worker)
+        # The rule is that the watchdog does not *emit*, not that it may not read.
+        # This was `assertNotIn("outbox_events", worker)`, which is a proxy for
+        # the rule and forbids more than the rule does: diagnosing why a delivery
+        # was refused needs `outbox_events.event_type`, since `webhook_deliveries`
+        # carries only the id. Reading a table in order to raise an alert is the
+        # opposite of emitting an event from the watchdog.
+        for write in ("INSERT INTO outbox_events", "UPDATE outbox_events",
+                      "DELETE FROM outbox_events"):
+            self.assertNotIn(write, worker)
         self.assertIn("OpsWatchdogWorker::new", main)
         self.assertNotIn("retry_dead_outbox", worker)
         self.assertNotIn("retry_dead_delivery", worker)
