@@ -611,6 +611,33 @@ printf '\n==> 7/7 — Stop old containers, finalize\n'
 docker stop --time 30 "$CURRENT_API" "$CURRENT_WORKER" >/dev/null 2>&1 || true
 docker rm "$CURRENT_API" "$CURRENT_WORKER" >/dev/null 2>&1 || true
 
+# Drop the removed colour from the edge upstream list. It stayed listed as
+# the soak fallback; with the container gone it is a dead DNS name that the
+# edge health-checks forever and can still be selected during a flap of the
+# live colour — the Caddyfile comments call that out as a source of 502/503.
+# The next deploy re-adds the second colour at cutover (the sed rewrites the
+# whole line), and the preflight accepts a single-upstream line. Post-pass,
+# so a failure here warns rather than rolling back a deploy that succeeded.
+caddy_finalize="$(mktemp -t caddyfile-finalize.XXXXXX)"
+if sed \
+    -e "s|^\([[:space:]]*\)reverse_proxy crowdrelay-api[^{]*|\1reverse_proxy ${NEW_API}:8080 |" \
+    "$EDGE_CADDYFILE" > "$caddy_finalize" \
+  && grep -Fq "reverse_proxy ${NEW_API}:8080 {" "$caddy_finalize" \
+  && ! grep -Fq "${CURRENT_API}:8080" "$caddy_finalize" \
+  && cat "$caddy_finalize" | docker exec -i "$EDGE_CONTAINER" caddy validate --config /dev/stdin --adapter caddyfile >/dev/null 2>&1; then
+  cat "$caddy_finalize" > "$EDGE_CADDYFILE"
+  if cmp -s <(docker exec "$EDGE_CONTAINER" cat /etc/caddy/Caddyfile 2>/dev/null) "$EDGE_CADDYFILE"; then
+    docker exec "$EDGE_CONTAINER" caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile --address 127.0.0.1:2019 >/dev/null 2>&1 \
+      && printf 'CADDY_FINALIZE=PASS upstream=%s\n' "$NEW_API" \
+      || printf 'CADDY_FINALIZE=WARN reason=reload-failed removed-upstream-still-listed=%s\n' "$CURRENT_API" >&2
+  else
+    printf 'CADDY_FINALIZE=WARN reason=edge-mount-detached removed-upstream-still-listed=%s\n' "$CURRENT_API" >&2
+  fi
+else
+  printf 'CADDY_FINALIZE=WARN reason=validate-failed removed-upstream-still-listed=%s\n' "$CURRENT_API" >&2
+fi
+rm -f "$caddy_finalize"
+
 # Update the pin to the new SHA
 sed -i "s|^CROWDRELAY_IMAGE_SHA=.*|CROWDRELAY_IMAGE_SHA=\"${TARGET}\"|" .crowdrelay.local.sh
 sed -i "s|^CROWDRELAY_IMAGE_TAG=.*|CROWDRELAY_IMAGE_TAG=\"sha-\${CROWDRELAY_IMAGE_SHA}\"|" .crowdrelay.local.sh

@@ -54,11 +54,11 @@ signal-api.virya.music {
 		max_size 32KB
 	}
 
-	# CROWDRELAY_ACTIVE=green
+	# CROWDRELAY_ACTIVE=blue
 	# Blue-green: deploy-bluegreen.sh reorders this line at cutover.
 	# When only blue is running, the green upstream must be absent —
 	# a dead DNS reference causes Caddy health-check spam and 502/503.
-	reverse_proxy crowdrelay-api-green-1:8080 {
+	reverse_proxy crowdrelay-api-1:8080 {
 		lb_policy first
 		health_uri /v1/health/ready
 		health_interval 2s
@@ -88,11 +88,12 @@ signal-api.virya.music {
 # Static blue-green upstreams with lb_policy first: the active color is listed
 # first, the fallback second. Cutover is a graceful reload that reorders the
 # `to` line in the cp_upstream snippet — no Docker alias moves, no restarts.
-# When only blue is running, the green upstream must be absent — a dead DNS
-# reference causes Caddy health-check spam and 502/503.
-# CONTROL_PLANE_ACTIVE=green
+# The inactive colour stays listed: the health check marks it down and
+# lb_policy first skips it. Both upstreams must stay present — the cp deploy
+# preflight expects the pair (a single upstream is self-healed back to two).
+# CONTROL_PLANE_ACTIVE=blue
 (cp_upstream) {
-	to crowdrelay-control-plane-app-green-1:8090 crowdrelay-control-plane-app-1:8090
+	to crowdrelay-control-plane-app-1:8090 crowdrelay-control-plane-app-green-1:8090
 	lb_policy first
 	health_uri /healthz/ready
 	health_interval 2s
