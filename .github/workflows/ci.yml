@@ -55,6 +55,7 @@ jobs:
       CROWDRELAY_MOBILE_FAN_TEST_DATABASE_URL: postgres://crowdrelay:crowdrelay-ci-only@127.0.0.1:5432/crowdrelay
       CROWDRELAY_REMINDER_TEST_DATABASE_URL: postgres://crowdrelay:crowdrelay-ci-only@127.0.0.1:5432/crowdrelay
       CROWDRELAY_RETENTION_TEST_DATABASE_URL: postgres://crowdrelay:crowdrelay-ci-only@127.0.0.1:5432/crowdrelay
+      CROWDRELAY_COMMUNITY_TEST_DATABASE_URL: postgres://crowdrelay:crowdrelay-ci-only@127.0.0.1:5432/crowdrelay
       CROWDRELAY_DATABASE_MAX_CONNECTIONS: 5
       CROWDRELAY_ALLOWED_ORIGINS: http://localhost:4321
       CROWDRELAY_WORKSPACE_SLUG: example
@@ -238,6 +239,7 @@ jobs:
       CROWDRELAY_MOBILE_FAN_TEST_DATABASE_URL: postgres://crowdrelay:crowdrelay-ci-only@127.0.0.1:5432/crowdrelay
       CROWDRELAY_REMINDER_TEST_DATABASE_URL: postgres://crowdrelay:crowdrelay-ci-only@127.0.0.1:5432/crowdrelay
       CROWDRELAY_RETENTION_TEST_DATABASE_URL: postgres://crowdrelay:crowdrelay-ci-only@127.0.0.1:5432/crowdrelay
+      CROWDRELAY_COMMUNITY_TEST_DATABASE_URL: postgres://crowdrelay:crowdrelay-ci-only@127.0.0.1:5432/crowdrelay
       CROWDRELAY_DATABASE_MAX_CONNECTIONS: 5
       CROWDRELAY_ALLOWED_ORIGINS: http://localhost:4321
       CROWDRELAY_WORKSPACE_SLUG: example
@@ -349,7 +351,10 @@ jobs:
           for filter in \
             postgres_outbox_round_trip \
             due_reminder_is_enqueued_exactly_once \
-            cycle_deletes_expired_rows_scrubs_safe_payloads_and_preserves_audit
+            cycle_deletes_expired_rows_scrubs_safe_payloads_and_preserves_audit \
+            publishing_adopts_the_drafts_manual_mode_wrote \
+            manual_mode_leaves_its_own_drafts_alone \
+            the_rate_limit_defers_a_draft_instead_of_failing_it
           do
             cargo test --locked \
               --package crowdrelay-worker \

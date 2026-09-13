@@ -44,6 +44,19 @@ KNOWN_WRITERS = {
 }
 
 
+def is_test_module(path: Path) -> bool:
+    """A `tests.rs` under `src` is a test module, not production code.
+
+    Large modules split their `#[cfg(test)] mod tests` into
+    `src/<module>/tests.rs` behind an `include!` to stay inside the
+    source-size ratchet. The file is still test code, and a fixture that has to
+    insert a row — `viryaos_autopilot_actions.decision_id` is NOT NULL, so a
+    community-post fixture must write a decision — is not "code that can write
+    to the decision ledger" in the sense the writer-set check means.
+    """
+    return path.name == "tests.rs" or path.name.endswith("_tests.rs")
+
+
 def rust_sources(include_tests: bool) -> list[Path]:
     paths: list[Path] = []
     for crate in sorted(CRATES.iterdir()):
@@ -110,6 +123,8 @@ class EveryWriterSuppliesATrace(unittest.TestCase):
     def test_the_writer_set_is_still_the_audited_one(self) -> None:
         writers = set()
         for path in rust_sources(include_tests=False):
+            if is_test_module(path):
+                continue
             text = path.read_text(encoding="utf-8", errors="replace")
             if f"INSERT INTO {DECISION_TABLE}" in text:
                 writers.add(str(path.relative_to(ROOT)))

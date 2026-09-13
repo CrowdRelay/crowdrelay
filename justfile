@@ -103,6 +103,7 @@ test-postgres-env:
     export CROWDRELAY_OUTBOX_TEST_DATABASE_URL=$CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL
     export CROWDRELAY_REMINDER_TEST_DATABASE_URL=$CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL
     export CROWDRELAY_RETENTION_TEST_DATABASE_URL=$CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL
+    export CROWDRELAY_COMMUNITY_TEST_DATABASE_URL=$CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL
     {{COMPOSE}} up --detach --wait postgres
     {{COMPOSE}} exec -T postgres psql -U crowdrelay -d postgres \
         -c "DROP DATABASE IF EXISTS crowdrelay_autopilot_test;" \
@@ -163,7 +164,10 @@ test-postgres-env:
     for filter in \
       postgres_outbox_round_trip \
       due_reminder_is_enqueued_exactly_once \
-      cycle_deletes_expired_rows_scrubs_safe_payloads_and_preserves_audit
+      cycle_deletes_expired_rows_scrubs_safe_payloads_and_preserves_audit \
+      publishing_adopts_the_drafts_manual_mode_wrote \
+      manual_mode_leaves_its_own_drafts_alone \
+      the_rate_limit_defers_a_draft_instead_of_failing_it
     do
       {{CARGO}} test --locked --package crowdrelay-worker "$filter" -- --ignored --test-threads=1
     done

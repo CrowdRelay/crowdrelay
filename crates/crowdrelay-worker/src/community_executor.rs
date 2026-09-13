@@ -132,6 +132,13 @@ pub(crate) const CRASH_POSTING_ERROR_PREFIX: &str = "worker crashed during posti
 /// Rate limit backoff: how long to wait before retrying a rate-limited post.
 const RATE_LIMIT_BACKOFF: Duration = Duration::from_secs(600);
 
+/// How long to wait before reconsidering a draft held by the subreddit cooldown.
+///
+/// The cooldown is seven days, so the ten-minute window above would re-check
+/// the same draft a thousand times and log a thousand deferrals. Six hours is
+/// short enough that the draft goes out promptly once the window opens.
+const SUBREDDIT_COOLDOWN_BACKOFF: Duration = Duration::from_secs(6 * 60 * 60);
+
 /// How long after a post was created do we keep polling its metrics.
 /// After this window, engagement is considered stale and polling stops.
 const METRICS_WINDOW: Duration = Duration::from_secs(72 * 60 * 60);
@@ -356,7 +363,7 @@ impl CommunityExecutorWorker {
                 Ok(()) => processed += 1,
                 Err(CommunityExecutorError::RateLimited) => {
                     // Rate limited — set status for later retry, don't fail.
-                    if let Err(e) = self.mark_rate_limited(action.id).await {
+                    if let Err(e) = self.mark_rate_limited(action.id, RATE_LIMIT_BACKOFF).await {
                         tracing::warn!(error = %e, "failed to mark rate_limited");
                     }
                 }
@@ -568,11 +575,8 @@ impl CommunityExecutorWorker {
         // to that subreddit was made in the last SUBREDDIT_COOLDOWN_DAYS days).
         let rows = sqlx::query_as::<_, ClaimedAction>(
             r#"
-            WITH claimed AS (
-                UPDATE community_posts
-                SET status = 'posting',
-                    attempts = attempts + 1,
-                    updated_at = now()
+            WITH target AS (
+                SELECT id, status AS claimed_from FROM community_posts
                 WHERE id IN (
                     SELECT cp.id FROM community_posts cp
                     WHERE cp.workspace_id = $1
@@ -580,6 +584,18 @@ impl CommunityExecutorWorker {
                           cp.status = 'pending'
                           OR (cp.status = 'rate_limited' AND cp.rate_limited_until IS NOT NULL
                               AND cp.rate_limited_until < now())
+                          -- Drafts manual mode wrote, adopted once publishing is
+                          -- on. Without this clause, turning autopilot on moved
+                          -- nothing: `awaiting_manual_post` was in no claim
+                          -- predicate, the parent action was already consumed,
+                          -- and the seven-day cooldown stopped the brain from
+                          -- drafting the community again. Five ready drafts for
+                          -- communities of 2.6M and 1M members were stranded
+                          -- permanently by a missing status in one WHERE clause.
+                          --
+                          -- $3 is false in manual mode, so nothing is adopted
+                          -- while a person is still the publisher.
+                          OR (cp.status = 'awaiting_manual_post' AND $3)
                       )
                       AND NOT EXISTS (
                           SELECT 1 FROM community_posts recent
@@ -592,9 +608,18 @@ impl CommunityExecutorWorker {
                     LIMIT 5
                     FOR UPDATE SKIP LOCKED
                 )
-                RETURNING id, action_id, subreddit, title, body, smart_link
+            ), claimed AS (
+                UPDATE community_posts AS cp
+                SET status = 'posting',
+                    attempts = cp.attempts + 1,
+                    updated_at = now()
+                FROM target
+                WHERE cp.id = target.id
+                RETURNING cp.id, cp.action_id, cp.subreddit, cp.title, cp.body,
+                          cp.smart_link, target.claimed_from
             )
             SELECT c.id, c.action_id, c.subreddit, c.title, c.body, c.smart_link,
+                   c.claimed_from,
                    a.trace_id, a.causation_id, a.decision_id
             FROM claimed c
             LEFT JOIN viryaos_autopilot_actions a ON a.id = c.action_id
@@ -602,6 +627,7 @@ impl CommunityExecutorWorker {
         )
         .bind(ws)
         .bind(SUBREDDIT_COOLDOWN_DAYS)
+        .bind(!self.manual_mode)
         .fetch_all(&mut *tx)
         .await?;
 
@@ -612,21 +638,42 @@ impl CommunityExecutorWorker {
     /// Processes a single claimed action: checks anti-spam guardrails,
     /// posts to Reddit via the agents service browser, and records the result.
     async fn process_action(&self, action: &ClaimedAction) -> Result<(), CommunityExecutorError> {
+        if action.claimed_from == "awaiting_manual_post" {
+            tracing::warn!(
+                post_id = %action.id,
+                subreddit = %action.subreddit,
+                "adopting a draft that was waiting for manual publication — if it \
+                 was already published by hand without registering the URL, this \
+                 will post it a second time"
+            );
+        }
         // Anti-spam: check subreddit cooldown.
         if self.subreddit_on_cooldown(&action.subreddit).await? {
             tracing::info!(
                 subreddit = %action.subreddit,
-                "subreddit on 7-day cooldown, skipping"
+                "subreddit on 7-day cooldown, deferring"
             );
-            self.mark_failed(action.id, "subreddit on 7-day cooldown")
+            // Deferred, not failed. Our own cooldown saying "not yet" is not a
+            // post that failed: the draft is intact and publishable, and
+            // `mark_failed` both discarded it and propagated failure to the
+            // parent autopilot action — so the brain learned that a post it
+            // wrote had failed when nothing had been attempted.
+            self.mark_rate_limited(action.id, SUBREDDIT_COOLDOWN_BACKOFF)
                 .await?;
             return Ok(());
         }
 
         // Anti-spam: check 24h rate limit.
         if self.rate_limit_reached().await? {
-            tracing::info!("24h post limit reached, skipping");
-            self.mark_failed(action.id, "24h post limit reached")
+            tracing::info!("24h post limit reached, deferring");
+            // Same reason as the cooldown above. `claim_pending_actions`
+            // already refuses to claim anything while the cap is reached, and
+            // says so in its own comment, so this is the narrow race: the cap
+            // becoming reached between the claim and the attempt, which is
+            // reachable because they are separate transactions. Rare, and
+            // `mark_failed` made it expensive — a draft nobody attempted was
+            // discarded and the brain was told its post had failed.
+            self.mark_rate_limited(action.id, RATE_LIMIT_BACKOFF)
                 .await?;
             return Ok(());
         }
@@ -1244,7 +1291,11 @@ impl CommunityExecutorWorker {
     /// Does not propagate to the autopilot action because rate-limited
     /// posts will be retried — the action stays 'succeeded' and the
     /// community_posts row tracks the retry state.
-    async fn mark_rate_limited(&self, post_id: Uuid) -> Result<(), CommunityExecutorError> {
+    async fn mark_rate_limited(
+        &self,
+        post_id: Uuid,
+        backoff: Duration,
+    ) -> Result<(), CommunityExecutorError> {
         sqlx::query(
             r#"
             UPDATE community_posts
@@ -1255,7 +1306,7 @@ impl CommunityExecutorWorker {
             "#,
         )
         .bind(post_id)
-        .bind(RATE_LIMIT_BACKOFF.as_secs() as i64)
+        .bind(backoff.as_secs() as i64)
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -1265,6 +1316,15 @@ impl CommunityExecutorWorker {
 #[derive(sqlx::FromRow)]
 struct ClaimedAction {
     id: Uuid,
+    /// The status this row held before the claim.
+    ///
+    /// `awaiting_manual_post` means the draft was written for a person to
+    /// publish and is now being adopted by the executor. That is the one claim
+    /// worth announcing: if the operator already published it by hand and never
+    /// registered the URL, nothing in this system can know, and posting it again
+    /// would be a second post under the band's name. Reported before the
+    /// attempt, so it is in the log beside the post rather than after it.
+    claimed_from: String,
     action_id: Uuid,
     subreddit: String,
     title: String,
@@ -1320,168 +1380,4 @@ struct RedditPostMetrics {
     upvote_ratio: Option<f64>,
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn worker(origin: &str) -> CommunityExecutorWorker {
-        CommunityExecutorWorker {
-            pool: PgPool::connect_lazy("postgres://invalid/invalid").expect("lazy pool"),
-            workspace_id: WorkspaceId::from_uuid(uuid::Uuid::nil()),
-            http_client: Arc::new(RwLock::new(reqwest::Client::new())),
-            poll_interval: POLL_INTERVAL,
-            operation_timeout: Duration::from_secs(5),
-            public_origin: origin.to_owned(),
-            manual_mode: true,
-            agent_service_url: "http://agent-service:8095".to_owned(),
-            agent_service_auth_key: None,
-            env_proxy_url: None,
-        }
-    }
-
-    #[tokio::test]
-    async fn asking_for_auto_post_alone_still_drafts() {
-        // The community auto-post flag is one of two switches, and on its own
-        // it does not publish to Reddit. A caller asking for automatic posting
-        // without `CROWDRELAY_REDDIT_WRITE_ENABLED` still gets a drafting
-        // executor, because the login session this would post through is the
-        // only Reddit access the growth loop has for reading.
-        //
-        // Renamed from `reddit_stays_read_only_however_the_worker_is_
-        // constructed`: that name asserted an invariant that no longer holds,
-        // and a test whose name overstates what it proves is worse than no
-        // test. What it actually pins — and pinned before — is that this
-        // argument alone is not enough.
-        let worker = CommunityExecutorWorker::new(
-            PgPool::connect_lazy("postgres://invalid/invalid").expect("lazy pool"),
-            WorkspaceId::from_uuid(uuid::Uuid::nil()),
-            Duration::from_secs(5),
-            false, // caller asks for automatic posting
-            None,
-            "http://agent-service:8095".to_owned(),
-            Some("key".to_owned()),
-        )
-        .expect("worker");
-        assert!(
-            worker.manual_mode,
-            "one switch is not enough: CROWDRELAY_REDDIT_WRITE_ENABLED is also required"
-        );
-        assert!(CommunityExecutorWorker::reddit_is_read_only());
-    }
-
-    #[tokio::test]
-    async fn a_rooted_path_resolves_against_our_own_origin() {
-        let worker = worker("https://virya.music");
-        let body = worker.build_post_body("hello", Some("/l/spring-tour"));
-        assert_eq!(body.as_ref(), "hello\n\nhttps://virya.music/l/spring-tour");
-    }
-
-    #[tokio::test]
-    async fn a_trailing_slash_on_the_origin_does_not_double_up() {
-        let worker = worker("https://virya.music/");
-        let body = worker.build_post_body("hello", Some("/l/x"));
-        assert_eq!(body.as_ref(), "hello\n\nhttps://virya.music/l/x");
-    }
-
-    #[tokio::test]
-    async fn our_own_absolute_url_is_kept() {
-        let worker = worker("https://virya.music");
-        let body = worker.build_post_body("hello", Some("https://virya.music/l/x"));
-        assert_eq!(body.as_ref(), "hello\n\nhttps://virya.music/l/x");
-    }
-
-    #[tokio::test]
-    async fn a_hallucinated_domain_never_reaches_the_post() {
-        // Both drafts production has produced carry a domain the model made
-        // up. Sending fans to a stranger's site is the smaller half of the
-        // problem; an unrelated outbound link in a promo post is what gets
-        // the one account this channel has banned.
-        let worker = worker("https://virya.music");
-        for link in [
-            "https://virya.com",
-            "https://virya.com/smartlink",
-            "http://example.com/anything",
-        ] {
-            let body = worker.build_post_body("hello", Some(link));
-            assert_eq!(body.as_ref(), "hello", "{link} must not be appended");
-        }
-    }
-
-    #[tokio::test]
-    async fn a_lookalike_host_is_not_our_origin() {
-        // `starts_with` would admit this, which is why the check compares
-        // hosts rather than prefixes.
-        let worker = worker("https://virya.music");
-        let body = worker.build_post_body("hello", Some("https://virya.music.evil.example/l/x"));
-        assert_eq!(body.as_ref(), "hello");
-    }
-
-    #[tokio::test]
-    async fn a_link_that_is_neither_absolute_nor_rooted_is_dropped() {
-        let worker = worker("https://virya.music");
-        assert_eq!(
-            worker.build_post_body("hello", Some("l/x")).as_ref(),
-            "hello"
-        );
-        assert_eq!(
-            worker.build_post_body("hello", Some("   ")).as_ref(),
-            "hello"
-        );
-    }
-
-    #[tokio::test]
-    async fn no_link_leaves_the_body_untouched() {
-        let worker = worker("https://virya.music");
-        assert_eq!(worker.build_post_body("hello", None).as_ref(), "hello");
-    }
-
-    #[tokio::test]
-    async fn host_comparison_ignores_case_and_a_trailing_dot() {
-        let worker = worker("https://virya.music");
-        let body = worker.build_post_body("hello", Some("https://VIRYA.MUSIC./l/x"));
-        assert_eq!(body.as_ref(), "hello\n\nhttps://VIRYA.MUSIC./l/x");
-    }
-
-    /// Publishing needs both switches, and the Reddit-specific one is the
-    /// second. `manual_mode` carries `CROWDRELAY_COMMUNITY_AUTO_POST` being
-    /// off; this asserts the other half cannot be skipped.
-    ///
-    /// Exercised through the same expression the constructor uses rather than
-    /// through the constructor, which would need a live pool. The point being
-    /// pinned is the boolean rule, not the wiring.
-    #[test]
-    fn publishing_needs_both_switches() {
-        for (auto_post_off, reddit_write, expect_manual) in [
-            (true, false, true),  // neither
-            (false, false, true), // community only
-            (true, true, true),   // reddit only
-            (false, true, false), // both — the only publishing case
-        ] {
-            let manual = auto_post_off || !reddit_write;
-            assert_eq!(
-                manual, expect_manual,
-                "auto_post_off={auto_post_off} reddit_write={reddit_write}"
-            );
-        }
-    }
-
-    /// Unset, misspelled, or a fresh deployment all mean draft.
-    #[test]
-    fn reddit_write_is_off_unless_explicitly_enabled() {
-        // The variable is absent in the test environment, which is the
-        // default every deployment starts from.
-        assert!(!reddit_write_enabled());
-        assert!(CommunityExecutorWorker::reddit_is_read_only());
-    }
-
-    /// One post a day while autonomous posting is unproven. This is the
-    /// number a moderator sees, so it is worth a test rather than a comment.
-    #[test]
-    fn the_daily_post_ceiling_stays_conservative() {
-        assert_eq!(
-            MAX_POSTS_PER_24H, 1,
-            "raise this only after posts have survived a week"
-        );
-        assert_eq!(SUBREDDIT_COOLDOWN_DAYS, 7);
-    }
-}
+include!("community_executor/tests.rs");
