@@ -1,0 +1,17 @@
+[package]
+name = "crowdrelay-replay"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+publish = false
+
+# Offline analysis of the decision ledger. Read-only by construction: it opens a
+# connection, runs SELECTs, and never writes. Kept out of the api and worker
+# binaries so an analysis tool can never be reached at runtime.
+[dependencies]
+crowdrelay-brain = { path = "../crowdrelay-brain" }
+crowdrelay-domain = { path = "../crowdrelay-domain" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sqlx = { workspace = true }
+tokio = { workspace = true }

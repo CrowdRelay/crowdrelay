@@ -511,7 +511,19 @@ impl NegBinPosterior {
     #[must_use]
     pub fn prior(mean: f64, dispersion: f64) -> Self {
         let alpha = dispersion.max(0.1);
-        let beta = if mean > 0.0 { alpha / mean } else { alpha };
+        // A Gamma prior's mean is alpha/beta, so beta = alpha/mean. The zero
+        // case used to fall back to `beta = alpha`, which is a prior mean of
+        // exactly 1.0 — the opposite of what the caller asked for. "We have
+        // never seen this produce anything" silently became "expect one per
+        // dispatch", and a tenant seeding the prior from its own realized yield
+        // of zero would have been handed an optimistic belief instead.
+        //
+        // Floored rather than rejected: beta grows as the mean shrinks, and an
+        // arbitrarily small mean makes beta large enough to lose precision. One
+        // outcome per hundred dispatches is near-zero for every caller here and
+        // keeps the posterior numerically well behaved.
+        const MIN_PRIOR_MEAN: f64 = 0.01;
+        let beta = alpha / mean.max(MIN_PRIOR_MEAN);
         Self { alpha, beta, n: 0 }
     }
 
@@ -1272,5 +1284,35 @@ mod tests {
         let h: HierarchicalNegBinPosterior =
             serde_json::from_str(json).expect("legacy checkpoint should deserialize");
         assert!(h.by_target.is_empty());
+    }
+
+    /// A prior of zero must not become a prior of one.
+    ///
+    /// `beta = if mean > 0.0 { alpha / mean } else { alpha }` produced a Gamma
+    /// whose mean is alpha/beta = 1.0 for a requested mean of 0.0. That is the
+    /// exact input a tenant seeding the prior from its own realized yield
+    /// supplies, and it silently received an optimistic belief instead of an
+    /// empty one. Found by the offline replay sweeping the prior.
+    #[test]
+    fn a_zero_prior_does_not_become_one() {
+        let zero = NegBinPosterior::prior(0.0, 1.0);
+        assert!(
+            zero.mean() < 0.05,
+            "a requested prior of 0 produced a mean of {}",
+            zero.mean()
+        );
+    }
+
+    /// And a requested prior is still honoured where it is positive.
+    #[test]
+    fn a_positive_prior_is_returned_as_asked() {
+        for requested in [0.1_f64, 0.5, 2.0, 7.5] {
+            let posterior = NegBinPosterior::prior(requested, 1.0);
+            assert!(
+                (posterior.mean() - requested).abs() < 1e-9,
+                "asked for {requested}, got {}",
+                posterior.mean()
+            );
+        }
     }
 }

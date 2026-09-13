@@ -8,6 +8,7 @@ members = [
   "crates/crowdrelay-application",
   "crates/crowdrelay-infra",
   "crates/crowdrelay-docs",
+  "crates/crowdrelay-replay",
 ]
 
 [workspace.package]

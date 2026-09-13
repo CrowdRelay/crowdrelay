@@ -308,9 +308,35 @@ impl CausalModel {
     /// Creates a causal model with the default priors.
     #[must_use]
     pub fn new() -> Self {
+        Self::with_expected_outcome(DEFAULT_EXPECTED_FANS)
+    }
+
+    /// Creates a causal model whose outcome prior is supplied rather than
+    /// compiled in.
+    ///
+    /// `DEFAULT_EXPECTED_FANS` is 2.0, which was a reasonable guess and has
+    /// never been corrected: the posterior only learns from resolved evidence,
+    /// and a tenant whose first post has not landed has none. Until it does,
+    /// every prediction this model makes IS the prior — so the prior decides
+    /// what gets dispatched, and nothing in the system reports that.
+    ///
+    /// Two callers need this. A tenant should be able to start from its own
+    /// realized yield instead of a number chosen for somebody else, and the
+    /// offline replay in `crowdrelay-replay` has to sweep the prior to show how
+    /// much of the ranking it explains. Both were impossible while the value was
+    /// a constant reachable only by editing this file.
+    #[must_use]
+    pub fn with_expected_outcome(expected: f64) -> Self {
+        // A non-finite or negative prior would poison every posterior it
+        // touches, and the caller is usually reading a config value.
+        let expected = if expected.is_finite() && expected >= 0.0 {
+            expected
+        } else {
+            DEFAULT_EXPECTED_FANS
+        };
         Self {
             fans: HierarchicalNegBinPosterior::new(NegBinPosterior::prior(
-                DEFAULT_EXPECTED_FANS,
+                expected,
                 1.0, // dispersion=1.0 → prior rate variance = 4.0, matching old Normal prior
             )),
             treatment_effects: TreatmentEffectPosterior::new(),
