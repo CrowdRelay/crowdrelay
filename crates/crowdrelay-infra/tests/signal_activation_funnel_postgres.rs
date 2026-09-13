@@ -239,3 +239,237 @@ async fn an_unknown_installation_is_reported_not_invented() -> Result<(), Box<dy
 
     Ok(())
 }
+
+/// The backfill statement, read from the migration rather than copied into it.
+///
+/// The migration has already run by the time `test_pool` returns, and on a
+/// local database it ran against no rows at all — which is exactly how
+/// migration 0259 shipped a bug that only production had the data to expose.
+/// So these tests seed the shapes first and then apply the real file. The
+/// migration claims to be re-runnable; reading it here is both the test of the
+/// backfill and the test of that claim.
+///
+/// To check that these tests actually bite, edit the migration and run them
+/// against a *fresh* database. `sqlx` stores each migration's checksum, so an
+/// already-migrated database answers `Migration(VersionMismatch(260))` before
+/// any assertion runs, and every test fails for a reason that has nothing to do
+/// with the change.
+fn backfill_sql() -> String {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../migrations/0260_backfill_signal_activation_from_push.sql");
+    match std::fs::read_to_string(&path) {
+        Ok(sql) => sql,
+        Err(error) => panic!("could not read {}: {error}", path.display()),
+    }
+}
+
+/// Seeds one push endpoint.
+///
+/// `transport` is a parameter because `fan_push_endpoints` is unique on
+/// `(workspace_id, installation_id, transport, audience_kind)`. One installation
+/// therefore holds at most one endpoint per transport, and the only way it can
+/// name two different fans — the case the backfill's ordering rule exists for —
+/// is across transports. A first attempt at this test used `android_fcm` twice
+/// and failed on that constraint, which is the constraint teaching the test what
+/// the real shape is.
+async fn seed_push_endpoint(
+    pool: &PgPool,
+    workspace_id: WorkspaceId,
+    installation_id: &str,
+    fan_id: Uuid,
+    transport: &str,
+    created_at: &str,
+) -> Result<(), sqlx::Error> {
+    // `fan_push_endpoints_web_keys` requires the two web keys on `web_push`,
+    // forbids them on `android_fcm`, and bounds their lengths: p256dh 40..256,
+    // auth_secret 8..128. A shorter placeholder is rejected.
+    let (p256dh, auth_secret) = if transport == "web_push" {
+        (
+            Some("p256dh-test-key-padded-to-the-minimum-length"),
+            Some("auth-secret-value"),
+        )
+    } else {
+        (None, None)
+    };
+    sqlx::query(
+        "INSERT INTO fan_push_endpoints \
+           (workspace_id, fan_id, installation_id, transport, endpoint_address, \
+            p256dh, auth_secret, created_at) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8::timestamptz)",
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(fan_id)
+    .bind(installation_id)
+    .bind(transport)
+    .bind(format!("push-endpoint-address-{}", Uuid::now_v7().simple()))
+    .bind(p256dh)
+    .bind(auth_secret)
+    .bind(created_at)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn the_backfill_recovers_the_fan_the_push_endpoint_already_named()
+-> Result<(), Box<dyn std::error::Error>> {
+    let pool = test_pool().await?;
+    let workspace_id = seed_workspace(&pool, "signal-backfill").await?;
+
+    // Production's shape: an install recorded anonymously, and a push endpoint
+    // registered before anything wrote `fan_id`.
+    let installation_id = format!("install-{}", Uuid::now_v7().simple());
+    record_installation(
+        &pool,
+        workspace_id,
+        &installation_id,
+        "android",
+        Some("1.0.0"),
+    )
+    .await?;
+
+    let late_fan = seed_fan(&pool, workspace_id).await?;
+    let early_fan = seed_fan(&pool, workspace_id).await?;
+    // Inserted out of order on purpose: the rule is earliest `created_at`, not
+    // insertion order, and a test that agrees with both proves neither.
+    seed_push_endpoint(
+        &pool,
+        workspace_id,
+        &installation_id,
+        late_fan,
+        "web_push",
+        "2026-06-01T00:00:00Z",
+    )
+    .await?;
+    seed_push_endpoint(
+        &pool,
+        workspace_id,
+        &installation_id,
+        early_fan,
+        "android_fcm",
+        "2026-01-01T00:00:00Z",
+    )
+    .await?;
+
+    sqlx::raw_sql(&backfill_sql()).execute(&pool).await?;
+    assert_eq!(
+        linked_fan(&pool, workspace_id, &installation_id).await?,
+        Some(early_fan),
+        "the first identification is the conversion, in history as in the live write",
+    );
+
+    // Re-runnable, and it must not move a link it already made.
+    sqlx::raw_sql(&backfill_sql()).execute(&pool).await?;
+    assert_eq!(
+        linked_fan(&pool, workspace_id, &installation_id).await?,
+        Some(early_fan),
+        "applying the backfill twice changed nothing",
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn the_backfill_leaves_an_already_identified_install_alone()
+-> Result<(), Box<dyn std::error::Error>> {
+    let pool = test_pool().await?;
+    let workspace_id = seed_workspace(&pool, "signal-settled").await?;
+    let installation_id = format!("install-{}", Uuid::now_v7().simple());
+    record_installation(&pool, workspace_id, &installation_id, "android", None).await?;
+
+    // The install identified itself through the live path. A later endpoint for
+    // somebody else must not become the recorded conversion just because the
+    // backfill runs after it.
+    let owner = seed_fan(&pool, workspace_id).await?;
+    assert!(link_installation_to_fan(&pool, workspace_id, &installation_id, owner).await?);
+
+    let someone_else = seed_fan(&pool, workspace_id).await?;
+    seed_push_endpoint(
+        &pool,
+        workspace_id,
+        &installation_id,
+        someone_else,
+        "android_fcm",
+        "2020-01-01T00:00:00Z",
+    )
+    .await?;
+
+    sqlx::raw_sql(&backfill_sql()).execute(&pool).await?;
+    assert_eq!(
+        linked_fan(&pool, workspace_id, &installation_id).await?,
+        Some(owner),
+        "an install that already has an answer keeps it",
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn the_backfill_neither_invents_installs_nor_crosses_tenants()
+-> Result<(), Box<dyn std::error::Error>> {
+    let pool = test_pool().await?;
+    let ours = seed_workspace(&pool, "signal-bf-ours").await?;
+    let theirs = seed_workspace(&pool, "signal-bf-theirs").await?;
+
+    // Production has these: the install-reporting code is newer than the app
+    // builds that registered for push, so a fan can be reachable with no
+    // install row. Raising the denominator with a device nobody observed
+    // installing would make the funnel wrong in the other direction.
+    let orphan_installation = format!("orphan-{}", Uuid::now_v7().simple());
+    let orphan_fan = seed_fan(&pool, ours).await?;
+    seed_push_endpoint(
+        &pool,
+        ours,
+        &orphan_installation,
+        orphan_fan,
+        "android_fcm",
+        "2026-02-01T00:00:00Z",
+    )
+    .await?;
+
+    // One installation string, two tenants. Only ours has an endpoint, so an
+    // unscoped join would identify their install with our fan — and the foreign
+    // key on (workspace_id, fan_id) would not stop it, because the write goes
+    // to a different table than the one that constraint guards.
+    let shared_installation = format!("shared-{}", Uuid::now_v7().simple());
+    record_installation(&pool, ours, &shared_installation, "android", None).await?;
+    record_installation(&pool, theirs, &shared_installation, "ios", None).await?;
+    let our_fan = seed_fan(&pool, ours).await?;
+    seed_push_endpoint(
+        &pool,
+        ours,
+        &shared_installation,
+        our_fan,
+        "android_fcm",
+        "2026-03-01T00:00:00Z",
+    )
+    .await?;
+
+    sqlx::raw_sql(&backfill_sql()).execute(&pool).await?;
+
+    assert_eq!(
+        linked_fan(&pool, ours, &shared_installation).await?,
+        Some(our_fan),
+    );
+    assert_eq!(
+        linked_fan(&pool, theirs, &shared_installation).await?,
+        None,
+        "the other tenant's install of the same id stayed anonymous",
+    );
+
+    let orphans: i64 = sqlx::query(
+        "SELECT COUNT(*) FROM signal_installations \
+         WHERE workspace_id = $1 AND installation_id = $2",
+    )
+    .bind(ours.into_uuid())
+    .bind(&orphan_installation)
+    .fetch_one(&pool)
+    .await?
+    .try_get(0)?;
+    assert_eq!(orphans, 0, "the backfill invented no install row");
+
+    Ok(())
+}
