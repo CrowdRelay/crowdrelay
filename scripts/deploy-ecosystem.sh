@@ -326,6 +326,39 @@ fi
 printf '\n==> 0e — Ecosystem contracts (pre-deploy)\n'
 python3 scripts/test-ecosystem-contract-v2.py
 printf 'ECOSYSTEM_CONTRACTS_PRE=PASS\n'
+
+# 0e2. The agent-service pairing gates.
+#
+# Three lists here are paired with three lists in crowdrelay-agents: the HTTP
+# timeouts against the browser budgets, `WorkerTemplate` against the template
+# catalog, and the draft platform enum against the executors that claim it. Each
+# gate skips when the sibling checkout is absent, and `ecosystem-contract.yml`
+# — the workflow that would check them out — is `disabled_manually`, along with
+# seven other workflows in this repository.
+#
+# So this is the only place they are guaranteed to run against both revisions,
+# and it is the right place: the deploy is what puts a drifted pair into
+# production. Phase 0a has already proven both checkouts are clean and match
+# their origin/main, so what is compared here is what is about to ship.
+#
+# A skip is a failure. Each gate answers "no sibling checkout" by skipping, so
+# treating a skip as a pass would let a moved or missing checkout deploy the
+# drift these exist to catch — 16 wasted dispatches against a disabled template,
+# and an out-of-memory browser reported as a bare `operation timed out`.
+printf '\n==> 0e2 — Agent service pairing\n'
+for gate in test_agents_timeout_parity_v1 \
+            test_agents_template_parity_v1 \
+            test_agents_platform_parity_v1; do
+  gate_log="$(mktemp)"
+  ( cd "$ROOT_DIR/scripts" && python3 -m unittest "$gate" -v ) >"$gate_log" 2>&1 \
+    || { cat "$gate_log" >&2; fail "$gate failed against the agents revision about to deploy"; }
+  if grep -q 'skipped=' "$gate_log"; then
+    cat "$gate_log" >&2
+    fail "$gate skipped — the crowdrelay-agents checkout is missing or moved, so the pairing was not checked"
+  fi
+  printf 'PAIRING=PASS gate=%s\n' "$gate"
+  rm -f "$gate_log"
+done
 ECOSYSTEM_CONTRACTS_RAN=true
 
 # 0f. Snapshot CrowdRelay DB

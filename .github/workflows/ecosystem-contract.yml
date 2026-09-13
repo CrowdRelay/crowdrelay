@@ -96,6 +96,17 @@ jobs:
       # Its reciprocal upstream-contract workflow checks current CrowdRelay main
       # on every relevant change and on the same six-hour cadence.
 
+  # NOTE: this whole workflow is `disabled_manually` — checked 2026-09-13 against
+  # the Actions API, along with security.yml, ecosystem-deploy.yml,
+  # ecosystem-release-audit.yml, external-proofs.yml, production-readiness.yml,
+  # production-smoke.yml and performance.yml. Eight of twelve. Its last run was
+  # 2026-09-07 and it failed.
+  #
+  # So this job protects nothing until somebody re-enables the workflow, and it is
+  # written to be correct when they do rather than to look like a gate now. The
+  # place these gates are actually guaranteed to run is phase 0e2 of
+  # `scripts/deploy-ecosystem.sh`, which is what puts a drifted pair into
+  # production and where a skip is treated as a failure.
   agents-pairing:
     name: Agent service pairing
     runs-on: [self-hosted, arm64]
