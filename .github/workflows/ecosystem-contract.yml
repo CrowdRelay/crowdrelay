@@ -66,6 +66,57 @@ jobs:
       # Its reciprocal upstream-contract workflow checks current CrowdRelay main
       # on every relevant change and on the same six-hour cadence.
 
+  agents-pairing:
+    name: Agent service pairing
+    runs-on: [self-hosted, arm64]
+    timeout-minutes: 10
+    steps:
+      # Three gates compare a list here against a list in crowdrelay-agents:
+      # the HTTP timeouts against the browser budgets, `WorkerTemplate` against
+      # the template catalog, and the draft platform enum against the executors
+      # that claim it. Each skips when the sibling checkout is absent, so without
+      # this job they only ever ran on the build host — and a contributor who
+      # does not have crowdrelay-agents beside this repository got no protection
+      # from any of them.
+      #
+      # All three exist because a pair of lists in two repositories drifted and
+      # nothing failed: 16 wasted dispatches against a disabled template, and an
+      # out-of-memory browser that the caller's clock reported as a bare timeout.
+      # A gate that only runs in one place is halfway back to that.
+      - name: Check out CrowdRelay under canonical ecosystem layout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: crowdrelay
+
+      # `..` from the CrowdRelay checkout, which is the layout the gates resolve.
+      - name: Check out the agent service
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: CrowdRelay/crowdrelay-agents
+          ref: main
+          path: crowdrelay-agents
+          token: ${{ secrets.CROWDRELAY_PAT }}
+          persist-credentials: false
+
+      # Asserting they did not skip is the point. Each gate answers "no sibling
+      # checkout" by skipping, so a checkout that silently failed would leave
+      # this job green while checking nothing — the exact shape of failure the
+      # gates are here to prevent.
+      - name: Verify the agent service pairing
+        working-directory: crowdrelay/scripts
+        run: |
+          set -Eeuo pipefail
+          for gate in test_agents_timeout_parity_v1 \
+                      test_agents_template_parity_v1 \
+                      test_agents_platform_parity_v1; do
+            printf '==> %s\n' "$gate"
+            python3 -m unittest "$gate" -v 2>&1 | tee /tmp/"$gate".log
+            if grep -q 'skipped=' /tmp/"$gate".log; then
+              echo "$gate skipped — the agents checkout is missing or moved" >&2
+              exit 1
+            fi
+          done
+
   # When the OpenAPI spec changes on main, send a repository_dispatch event to
   # each downstream repo so it can auto-regenerate its contract files and open
   # a PR. This closes the manual-sync gap that caused stale SHA markers.
