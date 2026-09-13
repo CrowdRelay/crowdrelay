@@ -71,7 +71,54 @@ pub(crate) fn classify_sqlx_error(error: &sqlx::Error) -> SqlxErrorClass {
                 "unexpected PostgreSQL persistence failure"
             );
         } else {
-            tracing::error!(error = %error, "unexpected SQLx persistence failure");
+            // A decode failure says which column and which types disagreed, and
+            // nothing about which of the ~1700 runtime queries produced it. That
+            // is not enough to act on: production spent hours reporting
+            //
+            //   error occurred while decoding column 2: mismatched types;
+            //   Rust type `f64` (as SQL type `FLOAT8`) is not compatible with
+            //   SQL type `NUMERIC`
+            //
+            // while every autopilot cycle degraded, and the query could not be
+            // found by reading the tree — no row struct or tuple in any crate
+            // has an `f64` at column index 2, so the offending type is produced
+            // by an expression, and `SUM` over a `bigint` column returns
+            // `NUMERIC`. Which expression, in which query, was unanswerable from
+            // the log.
+            //
+            // `map_sqlx` is passed to `map_err` as a function, so `#[track_caller]`
+            // would record `map_err` rather than the call site. A backtrace is
+            // the one thing that names the query from inside this funnel. It is
+            // captured only for the decode case, which is always a deployment
+            // defect rather than a runtime condition, and only when
+            // `RUST_BACKTRACE` is set — `Backtrace::capture` is
+            // `Disabled` otherwise and costs nothing.
+            //
+            // This is the same failure class as everything else fixed today: the
+            // cause existed and had nowhere to be seen.
+            let backtrace = match error {
+                sqlx::Error::ColumnDecode { .. } | sqlx::Error::Decode(_) => {
+                    Some(std::backtrace::Backtrace::capture())
+                }
+                _ => None,
+            };
+            match backtrace {
+                Some(backtrace)
+                    if backtrace.status() == std::backtrace::BacktraceStatus::Captured =>
+                {
+                    tracing::error!(
+                        error = %error,
+                        backtrace = %backtrace,
+                        "unexpected SQLx persistence failure"
+                    );
+                }
+                Some(_) => tracing::error!(
+                    error = %error,
+                    hint = "set RUST_BACKTRACE=1 to learn which query this decode came from",
+                    "unexpected SQLx persistence failure"
+                ),
+                None => tracing::error!(error = %error, "unexpected SQLx persistence failure"),
+            }
         }
     }
     class
