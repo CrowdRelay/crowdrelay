@@ -216,12 +216,48 @@ pub async fn register_endpoint(
     .execute(&state.database)
     .await;
     match result {
-        Ok(_) => (
-            StatusCode::OK,
-            [(CACHE_CONTROL, PRIVATE_NO_STORE)],
-            Json(PushEndpointMutationResponse { registered: true }),
-        )
-            .into_response(),
+        Ok(_) => {
+            // This request is the moment an install stops being anonymous, and
+            // the only one that holds both halves: the route requires a fan
+            // session and the body carries the app's own `installation_id`.
+            //
+            // Migration 0257 built `signal_installations` to measure "the gap
+            // between the count of rows and the count of non-null values here",
+            // which is the activation funnel — and nothing ever wrote `fan_id`,
+            // so the numerator was zero by construction and the funnel could
+            // only read 0%. Production: one install, no fan on it.
+            //
+            // Deliberately after the endpoint write and deliberately unable to
+            // fail it. Accepting the push registration is this endpoint's job;
+            // losing a funnel datapoint is not a reason to refuse one, so a
+            // failure here is logged and the caller still gets its 200.
+            match crowdrelay_infra::signal_installations::link_installation_to_fan(
+                &state.database,
+                crowdrelay_domain::WorkspaceId::from_uuid(workspace_id),
+                installation_id,
+                fan_id,
+            )
+            .await
+            {
+                Ok(true) => tracing::info!(
+                    %fan_id,
+                    "signal installation identified itself for the first time"
+                ),
+                Ok(false) => {}
+                Err(error) => tracing::warn!(
+                    %error,
+                    %fan_id,
+                    "could not link a signal installation to its fan; the \
+                     activation funnel loses this one"
+                ),
+            }
+            (
+                StatusCode::OK,
+                [(CACHE_CONTROL, PRIVATE_NO_STORE)],
+                Json(PushEndpointMutationResponse { registered: true }),
+            )
+                .into_response()
+        }
         Err(error) => {
             tracing::warn!(%error, %fan_id, transport, "could not register fan push endpoint");
             PushError::Unavailable.response(request_id_value)
