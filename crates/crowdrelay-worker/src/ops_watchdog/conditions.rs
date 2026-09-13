@@ -84,28 +84,36 @@ fn conditions(snapshot: &OpsSnapshot) -> Vec<Condition> {
         Condition {
             // Warning, not critical: nothing is corrupted and no wrong lesson is
             // learned. What is happening is that real work sits untouched — the
-            // band's own festival and competition list, imported and then held
-            // every cycle for a reason no surface reported.
+            // band's own festival and competition list, scored by the brain and
+            // then refused on a threshold no surface reported.
             //
-            // Actionable in exactly two ways, which is why it is worth an alert:
-            // enrich the rows so the unreachable 40 points become reachable
-            // (strategic value, or a city and distance so the trip can be
-            // costed), or lower `minimum_score` for a tenant whose opportunities
-            // legitimately arrive without either. Both are decisions; neither can
-            // be made while the hold is invisible.
+            // Derived from the brain's own denied decisions rather than from a
+            // guess at why. The first version counted rows missing strategic value
+            // and logistics, which was true that morning; an import filled
+            // strategic value and the alarm went quiet while every opportunity
+            // stayed held on the confidence gate instead. A proxy for a hold stops
+            // tracking the hold.
+            //
+            // Actionable in three ways, and all three are judgement rather than
+            // code: assert the festival's standing through
+            // `reputation_basis_points`, which is 7 of 15 points at its default and
+            // the only score component still unclaimed; lower
+            // `minimum_confidence`, remembering that it is what turns a score floor
+            // of 65 into an effective 70; or lower `minimum_score` so less reaches
+            // scoring at all.
             key: "growth.unscoreable_live_opportunities",
             severity: "warning",
-            summary: "Live opportunities are held because their score ceiling is below the bar",
+            summary: "The brain scored live opportunities and denied every one",
             active: snapshot.unscoreable_live_opportunities > 0,
             details: json!({
-                "unscoreable": snapshot.unscoreable_live_opportunities,
-                "score_ceiling": 60,
-                "minimum_score": 65,
-                "remedy": "fit, reputation and confidence together cap at 60 of \
-                           100; the missing 40 are strategic_value_basis_points \
-                           and the economics score, which needs distance_km and \
-                           nights_away to cost a trip. Fill either, or lower \
-                           minimum_score in the live_opportunity policy",
+                "denied_decisions": snapshot.unscoreable_live_opportunities,
+                "window": "1 day",
+                "remedy": "a live opportunity's confidence is 7500 + (score - \
+                           minimum_score) * 100, and `disposition()` denies below \
+                           minimum_confidence — so minimum_confidence 8000 against \
+                           minimum_score 65 means the real floor is 70. Raise \
+                           reputation_basis_points on the opportunities worth \
+                           playing, or move one of the two thresholds",
             }),
         },
         Condition {

@@ -32,12 +32,16 @@
 //!   than `dead` — which means `ops/attention`, reporting dead deliveries and a
 //!   bare cancelled count, showed four refused press pitches as four increments
 //!   in a number that also held 39 stale refusals from August.
-//! - `growth.unscoreable_live_opportunities` — live opportunities held because
-//!   their score ceiling is below the score floor, not because they were judged
-//!   poor. `evaluate_live_opportunity` returns `Hold` as `return Ok(None)`: no
-//!   decision row, no log, no counter. 430 festival and competition applications
-//!   imported from the band's CRM were dropped on every cycle with no trace, and
-//!   a table showing 430 rows read as progress.
+//! - `growth.unscoreable_live_opportunities` — the brain scored live
+//!   opportunities and denied every one. Read off its own denied decisions, not
+//!   off a guess at why: the first version counted rows missing strategic value
+//!   and logistics, which was the true reason that morning, and when an import
+//!   filled strategic value the alarm went quiet while all 430 opportunities
+//!   stayed held on the confidence gate instead. A proxy for a hold stops tracking
+//!   the hold. The gate itself is worth knowing: a live opportunity's confidence
+//!   is `7500 + (score - minimum_score) * 100`, and `disposition()` denies below
+//!   `minimum_confidence`, so 8000 against a score floor of 65 makes the real
+//!   floor 70.
 //! - `publishing.duplicate_community_draft` — two unpublished drafts target the
 //!   same community. Reddit is case-insensitive, so duplicate `discovery_places`
 //!   rows drafted one post each for what is one place. Publishing both is posting
@@ -514,33 +518,29 @@ async fn load_snapshot(
                AND e.event_type IN ('crowdrelay.agent.content_requested',
                                     'crowdrelay.community.engagement_requested')
             )::bigint AS refused_growth_deliveries,
-            -- Live opportunities that cannot clear the score bar, ever.
+            -- Live opportunities the brain scored and then denied.
             --
-            -- `live_opportunity_score` is fit*30 + strategic*25 + reputation*15
-            -- + confidence*15 + economics(<=15), capped at 100, against
-            -- `minimum_score` 65. With `strategic_value_basis_points = 0` and no
-            -- logistics to cost from, 40 of those 100 points are unreachable and
-            -- the ceiling is 30 + 15 + 15 = 60. Below 65 at maximum fit,
-            -- reputation and confidence — so `evaluate_live_opportunity` returns
-            -- `Hold` for arithmetic reasons, not judgement.
+            -- Read off the decisions the brain actually recorded rather than by
+            -- recomputing its arithmetic here. The first version of this condition
+            -- counted rows with `strategic_value_basis_points = 0` and no logistics,
+            -- which was the true reason on the day it was written — and the moment
+            -- an import filled strategic value, the alarm went quiet while all 430
+            -- opportunities stayed held for a different reason. A proxy for a hold
+            -- stops tracking the hold; the decision row does not.
             --
-            -- `Hold` is `return Ok(None)`: no decision row, no log line, no
-            -- counter. So 430 festival and competition applications imported from
-            -- the band's CRM were evaluated and dropped on every cycle with no
-            -- trace anywhere, and the table showing 430 rows looked like progress.
-            --
-            -- Stated as the provable case rather than by recomputing the score in
-            -- SQL: a count of rows whose ceiling is below the floor cannot be
-            -- wrong about whether they are reachable.
-            (SELECT count(*) FROM viryaos_team_opportunities o
-             WHERE o.workspace_id=$1
-               AND o.status='new'
-               AND o.eligible
-               AND o.opportunity_kind IN ('festival','showcase',
-                                          'review_contest','support_slot')
-               AND (o.deadline IS NULL OR o.deadline > now())
-               AND o.strategic_value_basis_points = 0
-               AND o.distance_km IS NULL
+            -- `apply_live_opportunity` with `deny` is a precise state: the
+            -- opportunity cleared `minimum_score`, so it was worth scoring, and was
+            -- refused anyway. In production that is the confidence gate —
+            -- `disposition()` denies below `minimum_confidence`, and a live
+            -- opportunity's confidence is `7500 + (score - minimum_score) * 100`,
+            -- so a `minimum_confidence` of 8000 makes the effective floor five
+            -- points above the score floor an operator set. 65 in the policy is 70
+            -- in practice, and nothing said so.
+            (SELECT count(*) FROM viryaos_autopilot_decisions d
+             WHERE d.workspace_id=$1
+               AND d.decision_kind='apply_live_opportunity'
+               AND d.disposition='deny'
+               AND d.evaluated_at > now() - interval '1 day'
             )::bigint AS unscoreable_live_opportunities,
             -- Unpublished drafts that target the same community as another.
             --
@@ -707,14 +707,13 @@ mod tests {
         assert_eq!(orphan.details["orphaned_actions_all_time"], 2);
     }
 
-    /// An opportunity whose ceiling is under the floor must raise attention.
+    /// A denied live-opportunity decision must raise attention.
     ///
-    /// `Hold` is `return Ok(None)` — no decision row, no log, no counter. So 430
-    /// festival and competition applications imported from the band's CRM were
-    /// evaluated and dropped on every cycle with no trace, and a table showing
-    /// 430 rows read as progress. The score is fit*30 + strategic*25 +
-    /// reputation*15 + confidence*15 + economics(<=15) against a floor of 65;
-    /// with strategic at 0 and nothing to cost a trip from, the ceiling is 60.
+    /// Counted from the brain's own `deny` decisions rather than from a guess at
+    /// the reason. The first version counted rows with no strategic value and no
+    /// logistics; an import filled strategic value and the alarm went quiet while
+    /// every opportunity stayed held on the confidence gate. The decision row is
+    /// the one signal that cannot drift from what the brain did.
     #[test]
     fn an_unscoreable_live_opportunity_raises_attention_by_itself() {
         let mut snapshot = healthy();
@@ -734,8 +733,9 @@ mod tests {
     /// And it must be a warning, not critical.
     ///
     /// Nothing is corrupted and no wrong lesson is learned — the work is simply
-    /// sat on. The two fixes are enriching the rows or lowering the bar, and both
-    /// are decisions rather than emergencies.
+    /// sat on. Every fix is judgement rather than code: assert the festival's
+    /// standing, or move one of the two thresholds that interact to produce the
+    /// real floor.
     #[test]
     fn an_unscoreable_live_opportunity_is_a_warning() {
         let mut snapshot = healthy();
@@ -747,9 +747,11 @@ mod tests {
         assert_eq!(condition.severity, "warning");
         // The arithmetic belongs in the alert: an operator deciding whether to
         // lower the bar needs to see that 40 of the 100 points are unreachable.
+        // The arithmetic belongs in the alert: an operator deciding whether to move
+        // a threshold needs to see that two of them interact.
         let details = condition.details.to_string();
-        assert!(details.contains("\"score_ceiling\":60"), "{details}");
-        assert!(details.contains("\"minimum_score\":65"), "{details}");
+        assert!(details.contains("minimum_confidence"), "{details}");
+        assert!(details.contains("real floor is 70"), "{details}");
     }
 
     /// Two queued drafts for one community must raise attention.
