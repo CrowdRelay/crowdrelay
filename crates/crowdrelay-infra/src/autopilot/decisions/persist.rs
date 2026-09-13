@@ -365,18 +365,10 @@ async fn record_prediction_and_evidence_tx(
         &prediction.context,
     );
     let recipient_id = target.clone();
-    let channel = prediction
-        .context
-        .subreddit_type
-        .as_deref()
-        .map(|s| {
-            if s.starts_with("r/") {
-                crowdrelay_brain::ReachChannel::RedditPost
-            } else {
-                crowdrelay_brain::ReachChannel::Other
-            }
-        })
-        .unwrap_or(crowdrelay_brain::ReachChannel::Other);
+    // The channel is a fact about the template's delivery surface.
+    // `subreddit_type` names the community's genre (metal, indie), not a
+    // handle — reading it as a channel mislabeled every community post.
+    let channel = crowdrelay_brain::channel_for_template(&prediction.template_id);
     let (treatment_propensity, evidence_quality) = if holdout_probability > 0.0 {
         (
             1.0 - holdout_probability,

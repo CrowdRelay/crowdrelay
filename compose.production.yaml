@@ -92,6 +92,9 @@ services:
       - ${CROWDRELAY_ENV_FILE:-deploy/.env.production}
     environment:
       TOKIO_WORKER_THREADS: ${CROWDRELAY_API_TOKIO_THREADS:-2}
+      # See compose.bluegreen.yaml — caps glibc arena retention that
+      # ratchets the API's RSS toward the cgroup limit under load.
+      MALLOC_ARENA_MAX: ${CROWDRELAY_MALLOC_ARENA_MAX:-2}
     depends_on:
       setup:
         condition: service_completed_successfully
@@ -109,7 +112,10 @@ services:
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
     pids_limit: 128
-    mem_limit: ${CROWDRELAY_API_MEMORY:-256m}
+    # Sized for the RSS ratchet, not the fresh-process footprint — the API
+    # settles ~240MiB after serving traffic and 256m left zero burst
+    # headroom (730 cgroup OOM kills in 7 days on prod).
+    mem_limit: ${CROWDRELAY_API_MEMORY:-512m}
     cpus: ${CROWDRELAY_API_CPUS:-0.75}
     stop_grace_period: 25s
     restart: unless-stopped

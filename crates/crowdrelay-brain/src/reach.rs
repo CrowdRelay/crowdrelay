@@ -25,11 +25,39 @@ pub enum ReachChannel {
     SignalPush,
     /// A social media post (Facebook, Instagram, etc.).
     SocialPost,
+    /// A Telegram channel post.
+    TelegramPost,
+    /// A Discord channel post.
+    DiscordPost,
     /// An SMS message.
     Sms,
     /// Any other channel.
     #[default]
     Other,
+}
+
+/// The channel a worker template's intervention reaches an audience on.
+///
+/// This is a fact about the template's delivery surface — which executor
+/// publishes its output — NOT about the target. `subreddit_type` names the
+/// community's genre (metal, indie, local), and reading it as a channel
+/// mislabeled every community post `other`.
+///
+/// Intelligence templates (scanners, the strategist) reach nobody; their
+/// evidence rows exist for the learning loop, so `Other` is the honest
+/// bucket for "the intervention touched no audience".
+#[must_use]
+pub fn channel_for_template(template_id: &str) -> ReachChannel {
+    use crowdrelay_domain::worker_template::WorkerTemplate;
+    match WorkerTemplate::parse(template_id) {
+        Some(WorkerTemplate::CommunityEngager) => ReachChannel::RedditPost,
+        Some(WorkerTemplate::SocialPost) => ReachChannel::SocialPost,
+        Some(WorkerTemplate::TelegramPoster) => ReachChannel::TelegramPost,
+        Some(WorkerTemplate::DiscordPoster) => ReachChannel::DiscordPost,
+        Some(WorkerTemplate::SignalInviter) => ReachChannel::SignalPush,
+        Some(WorkerTemplate::PressPitch) => ReachChannel::Email,
+        Some(_) | None => ReachChannel::Other,
+    }
 }
 
 impl ReachChannel {
@@ -42,6 +70,8 @@ impl ReachChannel {
             Self::RedditDm => "reddit_dm",
             Self::SignalPush => "signal_push",
             Self::SocialPost => "social_post",
+            Self::TelegramPost => "telegram_post",
+            Self::DiscordPost => "discord_post",
             Self::Sms => "sms",
             Self::Other => "other",
         }
@@ -56,6 +86,8 @@ impl ReachChannel {
             "reddit_dm" => Some(Self::RedditDm),
             "signal_push" => Some(Self::SignalPush),
             "social_post" => Some(Self::SocialPost),
+            "telegram_post" => Some(Self::TelegramPost),
+            "discord_post" => Some(Self::DiscordPost),
             "sms" => Some(Self::Sms),
             "other" => Some(Self::Other),
             _ => None,
@@ -67,7 +99,14 @@ impl ReachChannel {
     /// whom convert. The conversion model updates α += K, β += (N - K).
     #[must_use]
     pub const fn is_broadcast(self) -> bool {
-        matches!(self, Self::RedditPost | Self::SocialPost | Self::SignalPush)
+        matches!(
+            self,
+            Self::RedditPost
+                | Self::SocialPost
+                | Self::SignalPush
+                | Self::TelegramPost
+                | Self::DiscordPost
+        )
     }
 
     /// Returns true if this channel is a direct message (one-to-one). Direct
@@ -179,6 +218,8 @@ mod tests {
             ReachChannel::RedditDm,
             ReachChannel::SignalPush,
             ReachChannel::SocialPost,
+            ReachChannel::TelegramPost,
+            ReachChannel::DiscordPost,
             ReachChannel::Sms,
             ReachChannel::Other,
         ] {
@@ -188,10 +229,49 @@ mod tests {
     }
 
     #[test]
+    fn channel_comes_from_the_template_not_the_target() {
+        // Publishing templates map to the surface their executor posts on.
+        assert_eq!(
+            channel_for_template("community-engager"),
+            ReachChannel::RedditPost
+        );
+        assert_eq!(
+            channel_for_template("social-post"),
+            ReachChannel::SocialPost
+        );
+        assert_eq!(
+            channel_for_template("telegram-poster"),
+            ReachChannel::TelegramPost
+        );
+        assert_eq!(
+            channel_for_template("discord-poster"),
+            ReachChannel::DiscordPost
+        );
+        assert_eq!(
+            channel_for_template("signal-inviter"),
+            ReachChannel::SignalPush
+        );
+        assert_eq!(channel_for_template("press-pitch"), ReachChannel::Email);
+        // Intelligence work reaches nobody — honest `other`, never a
+        // phantom broadcast channel.
+        assert_eq!(channel_for_template("reddit-scanner"), ReachChannel::Other);
+        assert_eq!(
+            channel_for_template("growth-strategist"),
+            ReachChannel::Other
+        );
+        assert_eq!(channel_for_template("not-a-template"), ReachChannel::Other);
+        // The bug this replaces: a genre token like "metal" is a target
+        // classification, never a channel.
+        assert_eq!(channel_for_template("metal"), ReachChannel::Other);
+    }
+
+    #[test]
     fn reach_channel_broadcast_classification() {
         assert!(ReachChannel::RedditPost.is_broadcast());
         assert!(ReachChannel::SocialPost.is_broadcast());
         assert!(ReachChannel::SignalPush.is_broadcast());
+        assert!(ReachChannel::TelegramPost.is_broadcast());
+        assert!(ReachChannel::DiscordPost.is_broadcast());
         assert!(!ReachChannel::Email.is_broadcast());
         assert!(!ReachChannel::RedditDm.is_broadcast());
     }
@@ -203,6 +283,8 @@ mod tests {
         assert!(ReachChannel::Sms.is_direct());
         assert!(!ReachChannel::RedditPost.is_direct());
         assert!(!ReachChannel::SocialPost.is_direct());
+        assert!(!ReachChannel::TelegramPost.is_direct());
+        assert!(!ReachChannel::DiscordPost.is_direct());
     }
 
     #[test]

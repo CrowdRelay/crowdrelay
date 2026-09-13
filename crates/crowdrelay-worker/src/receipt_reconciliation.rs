@@ -90,12 +90,20 @@ use uuid::Uuid;
 /// `state = 'UNKNOWN'`) — see `ops_watchdog.rs`.
 const RECEIPT_GAP_THRESHOLD: Duration = Duration::from_secs(24 * 60 * 60);
 
+/// How long an `agent.run` task may sit queued/running before its assignment
+/// is reaped as failed. The agents service's scheduler claims due tasks
+/// within seconds of their creation; a task still unrun a day later belongs
+/// to a service that is down or to a row the claim predicates no longer
+/// reach — either way the intervention never happened and the assignment
+/// must not wait forever to learn that.
+const AGENT_RUN_STALE_THRESHOLD: Duration = Duration::from_secs(24 * 60 * 60);
+
 /// Upper bound on rows examined per phase per cycle, so a large backlog
 /// drains progressively instead of stretching one transaction.
 const SWEEP_BATCH_LIMIT: i64 = 500;
 
 #[derive(Debug, Error)]
-enum ReceiptReconciliationError {
+pub enum ReceiptReconciliationError {
     #[error("receipt reconciliation database operation failed")]
     Database(#[from] sqlx::Error),
 }
@@ -149,8 +157,10 @@ impl ReceiptReconciliationWorker {
     }
 
     /// One reconciliation cycle. Returns how many actions transitioned
-    /// (into or out of `unknown`).
-    async fn run_once(&self) -> Result<usize, ReceiptReconciliationError> {
+    /// (into or out of `unknown`). `pub` so the postgres suite can drive a
+    /// single cycle instead of the ticker — same convention as
+    /// `AgentOutcomeWorker::run_once`.
+    pub async fn run_once(&self) -> Result<usize, ReceiptReconciliationError> {
         let mut transaction = self.pool.begin().await?;
         sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
             .bind(format!(
@@ -163,9 +173,10 @@ impl ReceiptReconciliationWorker {
         let by_receipt = self.resolve_from_receipts(&mut transaction).await?;
         let by_community = self.resolve_community_posts(&mut transaction).await?;
         let by_content = self.resolve_content_posts(&mut transaction).await?;
+        let by_agent_run = self.resolve_agent_runs(&mut transaction).await?;
         let by_outbox = self.resolve_from_outbox(&mut transaction).await?;
         transaction.commit().await?;
-        Ok(gaps + by_receipt + by_community + by_content + by_outbox)
+        Ok(gaps + by_receipt + by_community + by_content + by_agent_run + by_outbox)
     }
 
     /// Sweep 1: dispatch-confirmed actions whose terminal receipt never
@@ -494,7 +505,99 @@ impl ReceiptReconciliationWorker {
         Ok(resolved)
     }
 
-    /// Sweep 2d: resolve `unknown` actions from their outbox delivery
+    /// Sweep 2d: `agent.run.request` actions are executed by inserting an
+    /// `agent_service_tasks` row in the dispatch transaction — the action's
+    /// job is the dispatch itself, so it lands `succeeded`, files no
+    /// executor receipt, and emits no outbox event. Its experiment
+    /// assignment therefore sat `dispatched` forever: the causal learner
+    /// could never count the run as realized treatment. The task row is
+    /// the execution record: `completed` means the run happened, `failed`
+    /// means it did not, and a task still `queued`/`running` past
+    /// [`AGENT_RUN_STALE_THRESHOLD`] belongs to a dead service — reaped as
+    /// failed so the learner attributes the missing treatment instead of
+    /// waiting forever.
+    async fn resolve_agent_runs(
+        &self,
+        transaction: &mut Transaction<'_, Postgres>,
+    ) -> Result<usize, ReceiptReconciliationError> {
+        // `agent_service_tasks` belongs to the agents service — it is in
+        // FOREIGN_RELATIONS and no migration here creates it. On a
+        // CrowdRelay-only deployment the relation does not exist, and a
+        // failed statement inside this transaction would abort every sweep
+        // sharing it. Check first; a missing table means no agent runs are
+        // dispatching anyway, so skipping is the honest answer.
+        let task_table_present: Option<String> =
+            sqlx::query_scalar("SELECT to_regclass('agent_service_tasks')::text")
+                .fetch_one(&mut **transaction)
+                .await?;
+        if task_table_present.is_none() {
+            return Ok(0);
+        }
+        // The task is found through `metadata->>'action_id'` (the dispatch
+        // writes it there because the table belongs to the TS service and
+        // has no action column). The latest task decides: a re-dispatch
+        // inserts a fresh row and supersedes an older stale one.
+        let rows: Vec<(Uuid, Option<String>, Option<bool>, String)> = sqlx::query_as(
+            r#"
+            SELECT a.id,
+                   task.status AS task_status,
+                   (task.created_at < now() - make_interval(secs => $3::double precision))
+                       AS task_stale,
+                   a.status AS action_status
+            FROM viryaos_experiment_assignments ea
+            JOIN viryaos_autopilot_actions a
+              ON a.workspace_id = ea.workspace_id
+             AND a.id = ea.action_id
+            LEFT JOIN LATERAL (
+                SELECT t.status, t.created_at
+                FROM agent_service_tasks t
+                WHERE t.workspace_id = ea.workspace_id
+                  AND t.metadata->>'action_id' = ea.action_id::text
+                ORDER BY t.created_at DESC
+                LIMIT 1
+            ) task ON true
+            WHERE ea.workspace_id = $1
+              AND ea.execution_status = 'dispatched'
+              AND a.action_kind = 'agent.run.request'
+            LIMIT $2
+            "#,
+        )
+        .bind(self.workspace_id.into_uuid())
+        .bind(SWEEP_BATCH_LIMIT)
+        .bind(AGENT_RUN_STALE_THRESHOLD.as_secs() as i64)
+        .fetch_all(&mut **transaction)
+        .await?;
+
+        let mut resolved = 0usize;
+        for (action_id, task_status, task_stale, action_status) in rows {
+            let transition = match task_status.as_deref() {
+                Some("completed") => AssignmentTransition::ExecutedFromDispatched,
+                Some("failed") => AssignmentTransition::FailedFromDispatched,
+                Some("queued" | "running") if task_stale == Some(true) => {
+                    AssignmentTransition::FailedFromDispatched
+                }
+                // Fresh queued/running — the run may still happen.
+                Some(_) => continue,
+                // Dispatch failed ⇒ the task insert rolled back with it.
+                None if action_status == "failed" => AssignmentTransition::FailedFromDispatched,
+                // `succeeded` without a task row is impossible (same-tx
+                // insert); any other pairing is dispatched-but-unverifiable.
+                None if action_status == "succeeded" => {
+                    tracing::warn!(
+                        action_id = %action_id,
+                        "agent.run action succeeded but no agent_service_tasks row exists"
+                    );
+                    AssignmentTransition::Unknown
+                }
+                // Action still dispatching/processing — leave it alone.
+                None => continue,
+            };
+            resolved += transition_assignment(transaction, action_id, transition).await? as usize;
+        }
+        Ok(resolved)
+    }
+
+    /// Sweep 2e: resolve `unknown` actions from their outbox delivery
     /// status. This is the authoritative reconciliation for actions that
     /// entered `unknown` because of ambiguous transport failures (timeout
     /// after max attempts — the request may or may not have reached the
@@ -597,14 +700,18 @@ enum AssignmentTransition {
     Unknown,
     Executed,
     Failed,
+    /// `agent.run` assignments resolve straight from `dispatched` — the
+    /// action never enters `unknown` because its dispatch is its outcome.
+    ExecutedFromDispatched,
+    FailedFromDispatched,
 }
 
 impl AssignmentTransition {
     const fn status(self) -> &'static str {
         match self {
             Self::Unknown => "unknown",
-            Self::Executed => "executed",
-            Self::Failed => "failed",
+            Self::Executed | Self::ExecutedFromDispatched => "executed",
+            Self::Failed | Self::FailedFromDispatched => "failed",
         }
     }
 
@@ -612,7 +719,9 @@ impl AssignmentTransition {
     /// sweep stays idempotent under concurrency.
     const fn requires_from(self) -> &'static str {
         match self {
-            Self::Unknown => "dispatched",
+            Self::Unknown | Self::ExecutedFromDispatched | Self::FailedFromDispatched => {
+                "dispatched"
+            }
             Self::Executed | Self::Failed => "unknown",
         }
     }
@@ -622,8 +731,8 @@ async fn transition_assignment(
     transaction: &mut Transaction<'_, Postgres>,
     action_id: Uuid,
     transition: AssignmentTransition,
-) -> Result<(), ReceiptReconciliationError> {
-    sqlx::query(
+) -> Result<u64, ReceiptReconciliationError> {
+    let transitioned = sqlx::query(
         r#"
         UPDATE viryaos_experiment_assignments
         SET execution_status = $1,
@@ -643,8 +752,9 @@ async fn transition_assignment(
     .bind(action_id)
     .bind(transition.requires_from())
     .execute(&mut **transaction)
-    .await?;
-    Ok(())
+    .await?
+    .rows_affected();
+    Ok(transitioned)
 }
 
 /// Terminal outcome to write for a resolved action.

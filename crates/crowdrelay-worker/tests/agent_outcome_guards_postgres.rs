@@ -573,3 +573,64 @@ async fn unverified_observation_inner(pool: &PgPool) -> Result<()> {
     );
     Ok(())
 }
+
+// ── Regression: a missing rationale must not die on reason_check ──────
+//
+// `payload.rationale` deserializes with `#[serde(default)]` — an outcome
+// that carries no rationale produces `""`, and `viryaos_autopilot_decisions
+// .reason` is CHECKed `btrim <> ''`. One production outcome (2026-08-28,
+// press_pitch) hit exactly this: the decision INSERT violated the CHECK,
+// the whole transaction aborted, and the outcome was rejected with a
+// database error as its only record.
+//
+// The fix states the absence instead of discarding the work.
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn an_outcome_without_a_rationale_still_maps() -> Result<()> {
+    let database = DisposableDatabase::create().await?;
+    let result = rationaleless_inner(&database.pool).await;
+    database.drop_database().await;
+    result
+}
+
+async fn rationaleless_inner(pool: &PgPool) -> Result<()> {
+    let ws = workspace(pool).await?;
+    let id = insert_outcome(
+        pool,
+        ws,
+        "campaign_insight",
+        0,
+        // No `rationale` key at all — `#[serde(default)]` yields "".
+        json!({
+            "item": { "headline": "engagement is up on Thursdays" },
+        }),
+    )
+    .await?;
+
+    worker(pool, ws).run_once().await?;
+    ensure!(
+        decision_count(pool, ws).await? == 1,
+        "a rationale-less outcome must still map to a decision"
+    );
+    let reason: String = sqlx::query_scalar(
+        "SELECT reason FROM viryaos_autopilot_decisions \
+         WHERE workspace_id = $1 AND subject_kind = 'agent_outcome'",
+    )
+    .bind(ws.into_uuid())
+    .fetch_one(pool)
+    .await?;
+    ensure!(
+        reason == "Outcome supplied no rationale.",
+        "the decision reason must state the absence, got {reason:?}"
+    );
+    let status: String = sqlx::query_scalar("SELECT status FROM agent_outcomes WHERE id = $1")
+        .bind(id)
+        .fetch_one(pool)
+        .await?;
+    ensure!(
+        status == "processed",
+        "the outcome must be processed, not rejected — got {status}"
+    );
+    Ok(())
+}

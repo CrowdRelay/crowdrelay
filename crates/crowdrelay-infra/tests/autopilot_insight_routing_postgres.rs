@@ -264,3 +264,223 @@ async fn a_prompt_carries_the_newest_insights_up_to_the_budget()
     );
     Ok(())
 }
+
+/// A task + optional outcome row, with control over the fields the
+/// effective-run predicate reads: the outcome's status, its
+/// rejection_reason, and whether the payload carries an `item`.
+#[allow(clippy::too_many_arguments)]
+async fn seed_run(
+    pool: &sqlx::PgPool,
+    workspace_id: WorkspaceId,
+    template_id: &str,
+    created_at: OffsetDateTime,
+    outcome_status: Option<&str>,
+    rejection_reason: Option<&str>,
+    payload: serde_json::Value,
+) -> Result<(), sqlx::Error> {
+    let task_id = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO agent_service_tasks (id, workspace_id, template_id, created_at)
+         VALUES ($1, $2, $3, $4)",
+    )
+    .bind(task_id)
+    .bind(workspace_id.into_uuid())
+    .bind(template_id)
+    .bind(created_at)
+    .execute(pool)
+    .await?;
+
+    if let Some(status) = outcome_status {
+        let outcome_id = Uuid::now_v7();
+        sqlx::query(
+            "INSERT INTO agent_outcomes
+               (id, workspace_id, task_id, result_id, kind, payload,
+                confidence_basis_points, status, rejection_reason,
+                idempotency_key, created_at)
+             VALUES ($1, $2, $3, $4, 'generic_insight', $5, 8000, $6, $7, $8, $9)",
+        )
+        .bind(outcome_id)
+        .bind(workspace_id.into_uuid())
+        .bind(task_id)
+        .bind(Uuid::now_v7())
+        .bind(payload)
+        .bind(status)
+        .bind(rejection_reason)
+        .bind(outcome_id.simple().to_string())
+        .bind(created_at)
+        .execute(pool)
+        .await?;
+    }
+    Ok(())
+}
+
+async fn last_runs(
+    pool: &sqlx::PgPool,
+    database: &DatabaseConfig,
+    workspace_id: WorkspaceId,
+    template_id: &str,
+    now: OffsetDateTime,
+) -> Result<(Option<u32>, Option<u32>), Box<dyn std::error::Error>> {
+    let repository = PostgresAutopilotRepository::new(pool.clone(), database);
+    let snapshots = repository
+        .load_growth_intelligence_snapshots(workspace_id, now)
+        .await?;
+    let snapshot = snapshots
+        .iter()
+        .find(|snapshot| snapshot.template_id == template_id)
+        .ok_or("no snapshot for the seeded template")?;
+    Ok((
+        snapshot.hours_since_last_run,
+        snapshot.hours_since_last_effective_run,
+    ))
+}
+
+/// "Effective" used to mean "the outcome carried an item", so a scanner
+/// that finished and found nothing — a real answer — was retried every
+/// failed-run window forever. The run completed; it counts.
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn an_empty_scan_counts_as_an_effective_run() -> Result<(), Box<dyn std::error::Error>> {
+    let (pool, database) = connect().await?;
+    let workspace_id = workspace(&pool, "empty-scan").await?;
+    let now = OffsetDateTime::now_utc();
+    seed_run(
+        &pool,
+        workspace_id,
+        "reddit-scanner",
+        now - time::Duration::hours(3),
+        Some("processed"),
+        None,
+        serde_json::json!({ "rationale": "no relevant threads this week" }),
+    )
+    .await?;
+
+    let (last_run, last_effective) =
+        last_runs(&pool, &database, workspace_id, "reddit-scanner", now).await?;
+    assert_eq!(last_run, Some(3), "the task ran three hours ago");
+    assert_eq!(
+        last_effective,
+        Some(3),
+        "a completed scan that found nothing is still an answer"
+    );
+    Ok(())
+}
+
+/// The verifier never ran — nothing about the world was learned, so the
+/// run is retried on the short cadence instead of resetting the cooldown.
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn a_verifier_outage_does_not_count_as_effective() -> Result<(), Box<dyn std::error::Error>> {
+    let (pool, database) = connect().await?;
+    let workspace_id = workspace(&pool, "verifier-outage").await?;
+    let now = OffsetDateTime::now_utc();
+    seed_run(
+        &pool,
+        workspace_id,
+        ACTIVE_TEMPLATE,
+        now - time::Duration::hours(5),
+        Some("rejected"),
+        Some("NOT_GROUNDING_CHECKED: verification status is NotVerified, not GroundingCheckPassed"),
+        serde_json::json!({ "item": { "headline": "draft", "detail": "d" } }),
+    )
+    .await?;
+
+    let (last_run, last_effective) =
+        last_runs(&pool, &database, workspace_id, ACTIVE_TEMPLATE, now).await?;
+    assert_eq!(last_run, Some(5), "the failed run still paces the retry");
+    assert_eq!(
+        last_effective, None,
+        "a dead verifier proves nothing about the world"
+    );
+    Ok(())
+}
+
+/// The verifier ran and refused the draft — that IS a verdict about the
+/// content, so the cooldown applies. Otherwise the same refused draft
+/// regenerates on every retry window.
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn a_verifier_refusal_counts_as_effective() -> Result<(), Box<dyn std::error::Error>> {
+    let (pool, database) = connect().await?;
+    let workspace_id = workspace(&pool, "verifier-refusal").await?;
+    let now = OffsetDateTime::now_utc();
+    seed_run(
+        &pool,
+        workspace_id,
+        ACTIVE_TEMPLATE,
+        now - time::Duration::hours(5),
+        Some("rejected"),
+        Some(
+            "NOT_GROUNDING_CHECKED: verification status is GroundingCheckRejected, not GroundingCheckPassed",
+        ),
+        serde_json::json!({ "item": { "headline": "draft", "detail": "d" } }),
+    )
+    .await?;
+
+    let (_, last_effective) =
+        last_runs(&pool, &database, workspace_id, ACTIVE_TEMPLATE, now).await?;
+    assert_eq!(
+        last_effective,
+        Some(5),
+        "a verifier that ran and said no is a completed run"
+    );
+    Ok(())
+}
+
+/// A data source that never loaded means an absence in the output proves
+/// nothing — retry on the short cadence.
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn a_degraded_context_does_not_count_as_effective() -> Result<(), Box<dyn std::error::Error>>
+{
+    let (pool, database) = connect().await?;
+    let workspace_id = workspace(&pool, "degraded-context").await?;
+    let now = OffsetDateTime::now_utc();
+    seed_run(
+        &pool,
+        workspace_id,
+        ACTIVE_TEMPLATE,
+        now - time::Duration::hours(2),
+        Some("rejected"),
+        Some(
+            "DEGRADED_CONTEXT: a data source did not complete, so an absence in this output proves nothing",
+        ),
+        serde_json::json!({ "item": { "headline": "draft", "detail": "d" } }),
+    )
+    .await?;
+
+    let (last_run, last_effective) =
+        last_runs(&pool, &database, workspace_id, ACTIVE_TEMPLATE, now).await?;
+    assert_eq!(last_run, Some(2));
+    assert_eq!(
+        last_effective, None,
+        "an unloaded source makes the outcome uninformative"
+    );
+    Ok(())
+}
+
+/// A task that produced no outcome row at all — the agents service died
+/// mid-run — is retried, not mistaken for a completed scan.
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn a_run_without_an_outcome_is_retried() -> Result<(), Box<dyn std::error::Error>> {
+    let (pool, database) = connect().await?;
+    let workspace_id = workspace(&pool, "no-outcome").await?;
+    let now = OffsetDateTime::now_utc();
+    seed_run(
+        &pool,
+        workspace_id,
+        ACTIVE_TEMPLATE,
+        now - time::Duration::hours(4),
+        None,
+        None,
+        serde_json::json!({}),
+    )
+    .await?;
+
+    let (last_run, last_effective) =
+        last_runs(&pool, &database, workspace_id, ACTIVE_TEMPLATE, now).await?;
+    assert_eq!(last_run, Some(4), "the task row still paces the retry");
+    assert_eq!(last_effective, None, "no outcome row means nothing learned");
+    Ok(())
+}

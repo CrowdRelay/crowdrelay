@@ -336,12 +336,12 @@ impl SocialPostExecutorWorker {
 
             sqlx::query(
                 r#"
-                UPDATE viryaos_experiment_assignments
+                UPDATE viryaos_experiment_assignments AS ea
                 SET execution_status = 'unknown',
-                    trace_id = COALESCE(trace_id, (SELECT trace_id FROM viryaos_autopilot_actions WHERE id = experiment_assignments.action_id))
-                WHERE workspace_id = $1
-                  AND action_id = ANY($2)
-                  AND execution_status = 'dispatched'
+                    trace_id = COALESCE(ea.trace_id, (SELECT trace_id FROM viryaos_autopilot_actions WHERE id = ea.action_id))
+                WHERE ea.workspace_id = $1
+                  AND ea.action_id = ANY($2)
+                  AND ea.execution_status = 'dispatched'
                 "#,
             )
             .bind(ws)
@@ -591,6 +591,11 @@ impl SocialPostExecutorWorker {
             .await
         {
             Ok(media_id) => {
+                // Post + re-anchor in one commit: the measurement window
+                // starts when the audience could see the post, not at
+                // dispatch — a deferred draft must not be observed across
+                // dead pre-exposure time.
+                let mut posted_tx = self.pool.begin().await?;
                 sqlx::query(
                     r#"
                     UPDATE social_posts
@@ -607,8 +612,16 @@ impl SocialPostExecutorWorker {
                 .bind(action.id)
                 .bind(&media_id)
                 .bind(&image_url)
-                .execute(&self.pool)
+                .execute(&mut *posted_tx)
                 .await?;
+                crowdrelay_infra::fanbase::anchor_content_measurements_to_publication(
+                    &mut posted_tx,
+                    self.workspace_id.into_uuid(),
+                    "social_posts",
+                    action.id,
+                )
+                .await?;
+                posted_tx.commit().await?;
                 tracing::info!(
                     action_id = %action.action_id,
                     media_id = %media_id,
@@ -778,6 +791,9 @@ impl SocialPostExecutorWorker {
 
         match self.submit_to_facebook_page(&page_id, body, token).await {
             Ok(post_id) => {
+                // Same one-commit shape as the Instagram arm: post +
+                // re-anchored measurement windows land or neither does.
+                let mut posted_tx = self.pool.begin().await?;
                 sqlx::query(
                     r#"
                     UPDATE social_posts
@@ -792,8 +808,16 @@ impl SocialPostExecutorWorker {
                 .bind(self.workspace_id.into_uuid())
                 .bind(action.id)
                 .bind(format!("https://www.facebook.com/{post_id}"))
-                .execute(&self.pool)
+                .execute(&mut *posted_tx)
                 .await?;
+                crowdrelay_infra::fanbase::anchor_content_measurements_to_publication(
+                    &mut posted_tx,
+                    self.workspace_id.into_uuid(),
+                    "social_posts",
+                    action.id,
+                )
+                .await?;
+                posted_tx.commit().await?;
                 tracing::info!(
                     action_id = %action.action_id,
                     post_id = %post_id,

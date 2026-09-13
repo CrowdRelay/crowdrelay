@@ -709,21 +709,28 @@ pub(super) async fn observe(
                 // whether a dispatched worker produced anything usable, so the
                 // fast half of the learning loop was dead while the slow half
                 // looked fine.
+                //
+                // The linkage is the task row, not `processed_action_id`: that
+                // column names the action an outcome *produced*, while this
+                // measurement asks whether the dispatched run produced an
+                // outcome. The run action's id is on the task's metadata —
+                // same join StrategistInsightQuality1h makes below.
                 sqlx::query_scalar::<_, f64>(
                     r#"
                     SELECT CASE WHEN EXISTS (
-                        SELECT 1 FROM agent_outcomes
-                        WHERE workspace_id = $1
-                          AND processed_action_id = $2
-                          AND status = 'processed'
-                          AND created_at >= $3
-                          AND created_at < $3 + INTERVAL '1 hour'
+                        SELECT 1 FROM agent_outcomes AS outcome
+                        JOIN agent_service_tasks AS task ON task.id = outcome.task_id
+                        WHERE outcome.workspace_id = $1
+                          AND outcome.status = 'processed'
+                          AND outcome.created_at >= $2
+                          AND outcome.created_at < $2 + INTERVAL '1 hour'
+                          AND task.metadata->>'action_id' = $3
                     ) THEN 1.0::double precision ELSE 0.0::double precision END
                     "#,
                 )
                 .bind(workspace_id.into_uuid())
-                .bind(measurement.action_id.into_uuid())
                 .bind(measurement.action_finished_at)
+                .bind(measurement.action_id.into_uuid().to_string())
                 .fetch_one(pool)
                 .await
                 .map_err(map_sqlx)?

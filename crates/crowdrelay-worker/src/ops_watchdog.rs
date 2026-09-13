@@ -125,7 +125,7 @@ const ALERT_REPEAT_AFTER: time::Duration = time::Duration::hours(6);
 const UNKNOWN_ALERT_AGE_THRESHOLD: Duration = Duration::from_secs(60 * 60);
 
 #[derive(Debug, Error)]
-enum OpsWatchdogError {
+pub enum OpsWatchdogError {
     #[error("operational watchdog database operation failed")]
     Database(#[from] sqlx::Error),
 }
@@ -187,7 +187,10 @@ impl OpsWatchdogWorker {
         }
     }
 
-    async fn run_once(&self) -> Result<usize, OpsWatchdogError> {
+    /// One watchdog cycle. Public so tests can drive the real snapshot +
+    /// condition evaluation — the alerting surface is the worst place for a
+    /// break that only a live database can see.
+    pub async fn run_once(&self) -> Result<usize, OpsWatchdogError> {
         let now = OffsetDateTime::now_utc();
         let mut transaction = self.pool.begin().await?;
         sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
@@ -439,7 +442,7 @@ async fn load_snapshot(
     transaction: &mut Transaction<'_, Postgres>,
     workspace_id: WorkspaceId,
 ) -> Result<OpsSnapshot, sqlx::Error> {
-    sqlx::query_as::<_, OpsSnapshot>(
+    let mut snapshot = sqlx::query_as::<_, OpsSnapshot>(
         r#"
         SELECT
             count(*)::bigint AS executor_registered,
@@ -734,25 +737,15 @@ async fn load_snapshot(
             (SELECT count(*) FROM community_posts p
              WHERE p.workspace_id=$1 AND p.status IN ('pending','rate_limited')
             )::bigint AS reddit_posting_demand,
-            -- Whether session material exists that can actually establish a
-            -- posting session. Cookies alone cannot: the agents service's
-            -- establishSession refuses before seeding them when no
-            -- credential row is eligible. Mirrors getRedditCredentials'
-            -- eligibility — 'active', or 'cooldown' past its six-hour window
-            -- (LOGIN_COOLDOWN_HOURS in crowdrelay-agents).
-            (SELECT count(*) FROM agent_service_credentials c
-             WHERE c.workspace_id=$1 AND c.provider='reddit-browser'
-               AND (c.status='active'
-                    OR (c.status='cooldown'
-                        AND (c.last_validated_at IS NULL
-                             OR c.last_validated_at < now() - interval '6 hours')))
-            )::bigint AS reddit_session_usable,
-            (SELECT c.status FROM agent_service_credentials c
-             WHERE c.workspace_id=$1 AND c.provider='reddit-browser'
-            ) AS reddit_credential_status,
-            (SELECT left(c.last_validation_error, 200) FROM agent_service_credentials c
-             WHERE c.workspace_id=$1 AND c.provider='reddit-browser'
-            ) AS reddit_credential_error,
+            -- Filled in by the guarded follow-up below. The real values live
+            -- in `agent_service_credentials`, which the agents service owns —
+            -- on a CrowdRelay-only deployment the relation does not exist,
+            -- and naming it here would abort the whole snapshot (and every
+            -- condition the watchdog evaluates) with it. Defaults read
+            -- "no usable session" — honest, since nothing can post.
+            0::bigint AS reddit_session_usable,
+            NULL::text AS reddit_credential_status,
+            NULL::text AS reddit_credential_error,
             (SELECT count(*) FROM viryaos_autopilot_decisions d
              WHERE d.workspace_id=$1)::bigint AS decisions_total,
             -- The brain's own count, read out of its checkpoint. `fans.global.n`
@@ -771,7 +764,49 @@ async fn load_snapshot(
     .bind(UNKNOWN_ALERT_AGE_THRESHOLD.as_secs() as i64)
     .bind(RELENTLESS_CYCLE_WINDOW)
     .fetch_one(&mut **transaction)
-    .await
+    .await?;
+
+    // Whether session material exists that can actually establish a posting
+    // session. Cookies alone cannot: the agents service's establishSession
+    // refuses before seeding them when no credential row is eligible.
+    // Mirrors getRedditCredentials' eligibility — 'active', or 'cooldown'
+    // past its six-hour window (LOGIN_COOLDOWN_HOURS in crowdrelay-agents).
+    //
+    // `agent_service_credentials` is foreign to this deployment — probed
+    // first so its absence skips the read instead of aborting the
+    // transaction (same pattern as receipt_reconciliation's task sweep).
+    // When it is absent the defaults stand: no credential service means no
+    // session can post, so `usable = 0` is the honest reading.
+    let credentials_table: Option<String> =
+        sqlx::query_scalar("SELECT to_regclass('agent_service_credentials')::text")
+            .fetch_one(&mut **transaction)
+            .await?;
+    if credentials_table.is_some() {
+        let row: (i64, Option<String>, Option<String>) = sqlx::query_as(
+            r#"
+            SELECT
+                count(*) FILTER (
+                    WHERE c.status='active'
+                       OR (c.status='cooldown'
+                           AND (c.last_validated_at IS NULL
+                                OR c.last_validated_at < now() - interval '6 hours'))
+                )::bigint,
+                (SELECT c2.status FROM agent_service_credentials c2
+                 WHERE c2.workspace_id=$1 AND c2.provider='reddit-browser'),
+                (SELECT left(c3.last_validation_error, 200) FROM agent_service_credentials c3
+                 WHERE c3.workspace_id=$1 AND c3.provider='reddit-browser')
+            FROM agent_service_credentials c
+            WHERE c.workspace_id=$1 AND c.provider='reddit-browser'
+            "#,
+        )
+        .bind(workspace_id.into_uuid())
+        .fetch_one(&mut **transaction)
+        .await?;
+        snapshot.reddit_session_usable = row.0;
+        snapshot.reddit_credential_status = row.1;
+        snapshot.reddit_credential_error = row.2;
+    }
+    Ok(snapshot)
 }
 
 include!("ops_watchdog/conditions.rs");

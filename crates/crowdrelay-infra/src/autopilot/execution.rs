@@ -460,8 +460,8 @@ pub(super) async fn schedule_effect_measurement(
                       AND community = $3
                       AND event_kind = 'conversion'
                       AND fan_id IS NOT NULL
-                      AND occurred_at >= $2 - INTERVAL '14 days'
-                      AND occurred_at < $2
+                      AND occurred_at >= $2::timestamptz - INTERVAL '14 days'
+                      AND occurred_at < $2::timestamptz
                     "#,
                 )
                 .bind(workspace_id.into_uuid())
@@ -475,8 +475,8 @@ pub(super) async fn schedule_effect_measurement(
                     r#"
                     SELECT COUNT(*)::double precision / 14.0 FROM fans
                     WHERE workspace_id = $1
-                      AND created_at >= $2 - INTERVAL '14 days'
-                      AND created_at < $2
+                      AND created_at >= $2::timestamptz - INTERVAL '14 days'
+                      AND created_at < $2::timestamptz
                       AND status != 'suppressed'
                     "#,
                 )
@@ -638,13 +638,69 @@ pub(super) async fn schedule_effect_measurement(
                 0.0,
                 now + time::Duration::days(7),
             ));
-            // Fast checkpoint: 1h outcome quality.
+            // North Star: the post exists to grow fans, so the action carries
+            // the same incremental counterfactual every publishing action
+            // does — community-scoped when the experiment unit is one, the
+            // workspace rate otherwise. The window anchor is dispatch time
+            // for now; `anchor_measurements_to_publication` re-anchors to
+            // `community_posts.posted_at` when the post actually lands, and
+            // `measures_outbound_reach` abandons the measurement entirely if
+            // it never does — the absence of an outcome is not an outcome
+            // of zero.
+            let community =
+                measurement_unit_community(transaction, workspace_id, action_id).await?;
+            let pre_action_daily_rate = if let Some(handle) = &community {
+                sqlx::query_scalar::<_, f64>(
+                    r#"
+                    SELECT COUNT(DISTINCT fan_id)::double precision / 14.0
+                    FROM fan_provenance_events
+                    WHERE workspace_id = $1
+                      AND community = $3
+                      AND event_kind = 'conversion'
+                      AND fan_id IS NOT NULL
+                      AND occurred_at >= $2::timestamptz - INTERVAL '14 days'
+                      AND occurred_at < $2::timestamptz
+                    "#,
+                )
+                .bind(workspace_id.into_uuid())
+                .bind(now)
+                .bind(handle)
+                .fetch_one(&mut **transaction)
+                .await
+                .map_err(map_sqlx)?
+            } else {
+                sqlx::query_scalar::<_, f64>(
+                    r#"
+                    SELECT COUNT(*)::double precision / 14.0 FROM fans
+                    WHERE workspace_id = $1
+                      AND created_at >= $2::timestamptz - INTERVAL '14 days'
+                      AND created_at < $2::timestamptz
+                      AND status != 'suppressed'
+                    "#,
+                )
+                .bind(workspace_id.into_uuid())
+                .bind(now)
+                .fetch_one(&mut **transaction)
+                .await
+                .map_err(map_sqlx)?
+            };
             plans.push((
-                AutopilotMeasurementKind::AgentRunOutcomeQuality1h,
+                AutopilotMeasurementKind::IncrementalFanGrowth14d,
                 action_id.into_uuid(),
-                0.0,
-                now + time::Duration::hours(1),
+                pre_action_daily_rate,
+                now + time::Duration::days(14),
             ));
+            plans.push((
+                AutopilotMeasurementKind::IncrementalFanGrowth3d,
+                action_id.into_uuid(),
+                pre_action_daily_rate,
+                now + time::Duration::days(3),
+            ));
+            // No AgentRunOutcomeQuality1h here: that measure links through
+            // `agent_service_tasks.metadata->>'action_id'`, and community
+            // engagement creates no task row — the community_posts row is
+            // its receipt. A measure that can only ever read 0 would teach
+            // the brain the intervention failed when nothing failed at all.
         }
         // Agent content (social/telegram/discord posts): measure whether the
         // published content actually grew fans. The baseline is the pre-action
@@ -666,8 +722,8 @@ pub(super) async fn schedule_effect_measurement(
                 r#"
                 SELECT COUNT(*)::double precision / 14.0 FROM fans
                 WHERE workspace_id = $1
-                  AND created_at >= $2 - INTERVAL '14 days'
-                  AND created_at < $2
+                  AND created_at >= $2::timestamptz - INTERVAL '14 days'
+                  AND created_at < $2::timestamptz
                   AND status != 'suppressed'
                 "#,
             )
@@ -693,13 +749,9 @@ pub(super) async fn schedule_effect_measurement(
                 pre_action_daily_rate,
                 now + time::Duration::days(3),
             ));
-            // Fast checkpoint: 1h outcome quality.
-            plans.push((
-                AutopilotMeasurementKind::AgentRunOutcomeQuality1h,
-                action_id.into_uuid(),
-                0.0,
-                now + time::Duration::hours(1),
-            ));
+            // No AgentRunOutcomeQuality1h here either: the drafting task's
+            // outcome links to the action that requested the draft, not to
+            // this content action — the join can never match.
         }
     }
 

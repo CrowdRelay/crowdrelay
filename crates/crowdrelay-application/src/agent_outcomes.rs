@@ -410,6 +410,12 @@ impl std::fmt::Display for ProvenanceRejection {
                 f,
                 "MISSING_PROVENANCE: the row records nothing about how it was produced"
             ),
+            // The `{status:?}` Debug repr is load-bearing beyond display:
+            // `growth_intelligence.rs`'s last_effective_run predicate reads
+            // the stored `rejection_reason` for `NOT_GROUNDING_CHECKED:` +
+            // `NotVerified` to tell a verifier outage (retry soon) from a
+            // verifier refusal (cooldown applies). Renaming the variant or
+            // this format must update that query.
             Self::NotGroundingChecked(status) => write!(
                 f,
                 "NOT_GROUNDING_CHECKED: verification status is {status:?}, not GroundingCheckPassed"

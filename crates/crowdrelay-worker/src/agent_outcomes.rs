@@ -526,14 +526,22 @@ impl AgentOutcomeWorker {
         .bind(outcome.kind.disposition())
         .bind({
             // The autopilot_decisions.reason column has a CHECK constraint
-            // (non-empty, <=240 chars). The LLM rationale can be longer, so
+            // (non-empty, <=240 chars). `payload.rationale` deserializes
+            // with `#[serde(default)]` — an outcome that carries no
+            // rationale, or only whitespace, used to die here on
+            // `reason_check` and the whole outcome was discarded. The
+            // absence is itself the honest reason; record it.
+            //
+            // The LLM rationale can also be longer than 240 chars, so
             // truncate to fit. Use char-based truncation (not byte-based)
             // so multi-byte UTF-8 (Polish diacritics, emoji) doesn't
             // exceed the char_length CHECK. The full rationale is
             // preserved in input_snapshot.payload.rationale.
-            let r = &outcome.payload.rationale;
-            if r.chars().count() <= 240 {
-                r.as_str()
+            let r = outcome.payload.rationale.trim();
+            if r.is_empty() {
+                "Outcome supplied no rationale."
+            } else if r.chars().count() <= 240 {
+                r
             } else {
                 let byte_end = r.char_indices().nth(240).map_or(r.len(), |(b, _)| b);
                 // Safety: char_indices always lands on a UTF-8 boundary.

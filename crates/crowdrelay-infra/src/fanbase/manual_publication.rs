@@ -141,7 +141,7 @@ pub async fn register_manual_reddit_post(
             },
         );
     }
-    anchor_measurements_to_publication(&mut transaction, workspace_id, community_post_id).await?;
+    anchor_measurements_to_publication(&mut *transaction, workspace_id, community_post_id).await?;
     record_publication_reach(&mut transaction, workspace_id, community_post_id).await?;
     transaction.commit().await?;
     Ok(())
@@ -246,11 +246,18 @@ async fn record_publication_reach(
 ///
 /// Each measurement keeps its own offset — seven days stays seven days from
 /// publication, forty-four stays forty-four — so only the origin moves.
-async fn anchor_measurements_to_publication(
-    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+/// Re-anchors a published community post's pending measurements from
+/// dispatch time to `posted_at`. Generic over the executor so the manual
+/// registration path runs it inside its transaction and the community
+/// executor can run it on a bare pool connection after stamping `posted`.
+pub async fn anchor_measurements_to_publication<'e, E>(
+    executor: E,
     workspace_id: Uuid,
     community_post_id: Uuid,
-) -> Result<(), sqlx::Error> {
+) -> Result<(), sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
     sqlx::query(
         r#"
         WITH published AS (
@@ -291,7 +298,7 @@ async fn anchor_measurements_to_publication(
     )
     .bind(workspace_id)
     .bind(community_post_id)
-    .execute(&mut **transaction)
+    .execute(executor)
     .await?;
     Ok(())
 }
@@ -531,7 +538,12 @@ pub async fn register_manual_discord_post(
 /// `anchor_measurements_to_publication` for community posts but works for
 /// social_posts, telegram_posts, and discord_posts — all of which carry an
 /// `action_id` column that links back to the autopilot action.
-async fn anchor_content_measurements_to_publication(
+///
+/// Public so the automatic publish paths in the channel executors can run
+/// the same re-anchor inside their mark-posted transaction — a post that
+/// sat `rate_limited` must not be observed across a window that started
+/// before anyone could see it.
+pub async fn anchor_content_measurements_to_publication(
     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     workspace_id: Uuid,
     table: &str,

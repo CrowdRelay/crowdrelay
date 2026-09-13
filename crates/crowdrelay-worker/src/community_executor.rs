@@ -224,6 +224,12 @@ pub enum CommunityExecutorError {
     Database(#[from] sqlx::Error),
     #[error("reddit API error: {0}")]
     RedditApi(String),
+    /// A 5xx from the agents service: the login/session/browser layer failed
+    /// before Reddit ever saw the post. Not a content refusal — the draft is
+    /// intact and publishable once the session is repaired, so this routes to
+    /// the deferral arm rather than `mark_failed`.
+    #[error("reddit session unavailable: {0}")]
+    SessionUnavailable(String),
     #[error("http error: {0}")]
     Http(#[from] reqwest::Error),
     #[error("no agents service configured for Reddit posting")]
@@ -448,7 +454,11 @@ impl CommunityExecutorWorker {
     /// causal learner excludes it from both realized-treatment and
     /// failed-treatment counts. Unknown is non-terminal: it can later resolve
     /// to `executed` or `failed` via reconciliation.
-    async fn recover_stale_posting(&self) -> Result<(), CommunityExecutorError> {
+    ///
+    /// Public so tests can drive the real recovery path instead of replaying
+    /// its writes — a regression in the SQL here used to be invisible to a
+    /// test that repeated the statements by hand.
+    pub async fn recover_stale_posting(&self) -> Result<(), CommunityExecutorError> {
         let ws = self.workspace_id.into_uuid();
 
         // Step 1: Find stale posting rows and collect their action_ids.
@@ -518,12 +528,12 @@ impl CommunityExecutorWorker {
             // or 'failed' via reconciliation.
             sqlx::query(
                 r#"
-                UPDATE viryaos_experiment_assignments
+                UPDATE viryaos_experiment_assignments AS ea
                 SET execution_status = 'unknown',
-                    trace_id = COALESCE(trace_id, (SELECT trace_id FROM viryaos_autopilot_actions WHERE id = experiment_assignments.action_id))
-                WHERE workspace_id = $1
-                  AND action_id = ANY($2)
-                  AND execution_status = 'dispatched'
+                    trace_id = COALESCE(ea.trace_id, (SELECT trace_id FROM viryaos_autopilot_actions WHERE id = ea.action_id))
+                WHERE ea.workspace_id = $1
+                  AND ea.action_id = ANY($2)
+                  AND ea.execution_status = 'dispatched'
                 "#,
             )
             .bind(ws)
@@ -746,7 +756,14 @@ impl CommunityExecutorWorker {
 
         let reddit_result = self.submit_via_agent_browser(action, &post_body).await?;
 
-        // Record success.
+        // Record success, and re-anchor the action's pending measurements to
+        // `posted_at` in the same transaction: the exposure window starts
+        // when the audience could actually see the post, not when the row
+        // was claimed — a draft that sat in `rate_limited` for two days does
+        // not get a fourteen-day window that was half over before anyone
+        // could see it. Same re-anchor the manual-registration path runs;
+        // measurements stay pending if the process dies before the commit.
+        let mut posted_tx = self.pool.begin().await?;
         sqlx::query(
             r#"
             UPDATE community_posts
@@ -763,9 +780,22 @@ impl CommunityExecutorWorker {
         .bind(action.id)
         .bind(&reddit_result.post_id)
         .bind(&reddit_result.post_url)
-        .execute(&self.pool)
+        .execute(&mut *posted_tx)
         .await?;
-        sqlx::query(r#"INSERT INTO viryaos_reach_events (workspace_id, action_id, recipient_kind, recipient_id, channel, template_id, estimated_reach, status, metadata, trace_id, causation_id) VALUES ($1, $2, 'subreddit_audience', $3, 'reddit_post', 'community-engager', $5, 'delivered', jsonb_build_object('subreddit', $3, 'post_url', $4), $6, $2) ON CONFLICT (action_id, recipient_id, channel) WHERE action_id IS NOT NULL DO NOTHING"#).bind(self.workspace_id.into_uuid()).bind(action.action_id).bind(&action.subreddit).bind(&reddit_result.post_url).bind(100_i32).bind(action.trace_id).execute(&self.pool).await?; // reach ledger — estimated_reach=100 as a conservative default for subreddit broadcasts (actual subscriber count not available at this layer). causation_id = action_id (the action caused the reach event).
+        crowdrelay_infra::fanbase::anchor_measurements_to_publication(
+            &mut *posted_tx,
+            self.workspace_id.into_uuid(),
+            action.id,
+        )
+        .await?;
+        // The reach row and the assignment transition belong to the same
+        // commit as the post itself: a crash between "post marked posted"
+        // and these writes would leave an assignment `dispatched` forever —
+        // the claim query never revisits a `posted` row and no sweep owns
+        // it. Both writes are idempotent (`ON CONFLICT DO NOTHING`, a
+        // monotonic from-guard), so rolling them into `posted_tx` only
+        // shrinks the window where the record can lie.
+        sqlx::query(r#"INSERT INTO viryaos_reach_events (workspace_id, action_id, recipient_kind, recipient_id, channel, template_id, estimated_reach, status, metadata, trace_id, causation_id) VALUES ($1, $2, 'subreddit_audience', $3, 'reddit_post', 'community-engager', $5, 'delivered', jsonb_build_object('subreddit', $3, 'post_url', $4), $6, $2) ON CONFLICT (action_id, recipient_id, channel) WHERE action_id IS NOT NULL DO NOTHING"#).bind(self.workspace_id.into_uuid()).bind(action.action_id).bind(&action.subreddit).bind(&reddit_result.post_url).bind(100_i32).bind(action.trace_id).execute(&mut *posted_tx).await?; // reach ledger — estimated_reach=100 as a conservative default for subreddit broadcasts (actual subscriber count not available at this layer). causation_id = action_id (the action caused the reach event).
         // Transition the experiment assignment execution_status from
         // dispatched → executed. This is the actual execution boundary:
         // the external intervention (Reddit post) has been confirmed.
@@ -784,8 +814,9 @@ impl CommunityExecutorWorker {
         )
         .bind(self.workspace_id.into_uuid())
         .bind(action.action_id)
-        .execute(&self.pool)
+        .execute(&mut *posted_tx)
         .await?;
+        posted_tx.commit().await?;
         tracing::info!(
             subreddit = %action.subreddit,
             post_url = %reddit_result.post_url,
@@ -857,6 +888,17 @@ impl CommunityExecutorWorker {
         }
         if !status.is_success() {
             let body = response.text().await.unwrap_or_default();
+            if status.is_server_error() {
+                // The agents service uses 5xx for everything that failed
+                // before Reddit saw the post: no stored credentials (503),
+                // a login that never produced a session (502), a crashed
+                // browser (503). `RedditApi` here marked the draft failed —
+                // one dead session burned every queued draft in a cycle and
+                // told the brain the content had been refused.
+                return Err(CommunityExecutorError::SessionUnavailable(format!(
+                    "agents /reddit/post HTTP {status}: {body}"
+                )));
+            }
             return Err(CommunityExecutorError::RedditApi(format!(
                 "agents /reddit/post HTTP {status}: {body}"
             )));

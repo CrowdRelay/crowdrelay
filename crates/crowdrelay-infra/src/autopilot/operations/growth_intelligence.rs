@@ -217,12 +217,14 @@ pub(in crate::autopilot) async fn load_growth_intelligence_snapshots(
     // We distinguish two timestamps:
     // - `last_any_run`: the most recent task regardless of outcome. Used for
     //   the failed-run retry delay so the brain doesn't retry every cycle.
-    // - `last_effective_run`: the most recent task whose outcome produced at
-    //   least one item. The agents service writes one row per item with
-    //   `payload.item` (singular); an empty run writes a single row with
-    //   only `payload.rationale` and no `item` key. The cooldown is measured
-    //   from the last effective run, so a failed/empty run does NOT reset
-    //   the cooldown.
+    // - `last_effective_run`: the most recent task whose outcome the brain
+    //   could actually use — processed, or rejected for a reason about the
+    //   content. "Effective" once meant "the outcome carried an item", which
+    //   got both ends wrong: a completed scan that found nothing writes a
+    //   row without `item` and was retried hourly forever, and an outcome
+    //   rejected because the verifier never ran kept its `item` and counted
+    //   as effective — so a dead verifier read as a week of healthy cadence
+    //   while every actionable outcome was refused.
     //
     // `agent_service_tasks` belongs to the TypeScript agent service and no
     // migration here creates it, so on a fresh deployment it does not exist
@@ -242,7 +244,22 @@ pub(in crate::autopilot) async fn load_growth_intelligence_snapshots(
                 r#"
         SELECT ast.template_id,
                MAX(ast.created_at) AS last_any_run,
-               MAX(CASE WHEN ao.payload ? 'item'
+               MAX(CASE WHEN ao.status = 'processed'
+                          -- A rejection the run's own infrastructure caused
+                          -- is not an answer: the verifier never ran
+                          -- (NotVerified — NOT a GroundingCheckRejected,
+                          -- which is a completed run whose verdict was no),
+                          -- or a data source never loaded. The task gets
+                          -- retried on the short failed-run cadence and
+                          -- heals itself the moment the verifier or the
+                          -- source comes back. A content rejection (bad
+                          -- evidence, unnamed target, verifier-refused
+                          -- draft, off-platform push, missing provenance)
+                          -- IS an answer — the cooldown applies or the same
+                          -- refusal regenerates every hour.
+                          OR (ao.status = 'rejected'
+                              AND ao.rejection_reason NOT LIKE 'NOT_GROUNDING_CHECKED:%NotVerified%'
+                              AND ao.rejection_reason NOT LIKE 'DEGRADED_CONTEXT%')
                         THEN ao.created_at END) AS last_effective_run
         FROM agent_service_tasks ast
         LEFT JOIN agent_outcomes ao ON ao.task_id = ast.id

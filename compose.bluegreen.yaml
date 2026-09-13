@@ -23,6 +23,12 @@ services:
       - ${CROWDRELAY_ENV_FILE:-deploy/.env.production}
     environment:
       TOKIO_WORKER_THREADS: ${CROWDRELAY_API_TOKIO_THREADS:-2}
+      # glibc keeps freed memory in per-thread arenas and never returns it —
+      # the API's RSS ratchets up under load and stays (measured 86MiB fresh
+      # → 240MiB after hours of traffic). Capping arenas at the worker-thread
+      # count shrinks the retained footprint; every arena beyond the count
+      # would keep its own free list forever.
+      MALLOC_ARENA_MAX: ${CROWDRELAY_MALLOC_ARENA_MAX:-2}
     expose: ["8080"]
     healthcheck:
       test: ["CMD", "curl", "--fail", "--silent", "--show-error", "http://127.0.0.1:8080/v1/health/live"]
@@ -37,7 +43,11 @@ services:
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
     pids_limit: 128
-    mem_limit: ${CROWDRELAY_API_MEMORY:-256m}
+    # Sized for the RSS ratchet, not the fresh-process footprint: the API
+    # starts near 86MiB but retains freed arena memory and settles ~240MiB,
+    # so 256m left no headroom for a burst and the cgroup OOM-killed it
+    # (730 kills in 7 days on prod). 512m doubles the settled ceiling.
+    mem_limit: ${CROWDRELAY_API_MEMORY:-512m}
     cpus: ${CROWDRELAY_API_CPUS:-0.75}
     stop_grace_period: 25s
     restart: unless-stopped

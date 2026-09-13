@@ -714,6 +714,72 @@ async fn f_manual_publication_moves_the_measurement_window() {
     );
 }
 
+/// H: an automatically published post re-anchors its measurements the same
+/// way the manual path does — the exposure window starts at `posted_at`,
+/// not at the moment the draft was claimed. A post that spent two days in
+/// `rate_limited` gets its full fourteen days of observation.
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn h_automatic_publication_moves_the_measurement_window() {
+    let f = setup().await.expect("fixture");
+    let claimed_at = f.now - time::Duration::days(2);
+    let action_id = insert_dispatch(&f, "community-engager:h", claimed_at).await;
+    let measurement = queue_measurement(
+        &f,
+        action_id,
+        AutopilotMeasurementKind::IncrementalFanGrowth14d,
+        0.0,
+        claimed_at,
+    )
+    .await;
+    let post_id = uuid::Uuid::now_v7();
+    let posted_at = f.now - time::Duration::hours(1);
+    sqlx::query(
+        r#"INSERT INTO community_posts
+           (id, workspace_id, action_id, target_id, subreddit, title, body,
+            status, reddit_post_id, reddit_post_url, posted_at)
+           VALUES ($1,$2,$3,$4,'r/spinetest','t','b','posted','abc123',
+                   'https://www.reddit.com/r/spinetest/comments/abc123/title/',$5)"#,
+    )
+    .bind(post_id)
+    .bind(f.workspace_id.into_uuid())
+    .bind(action_id)
+    .bind(uuid::Uuid::now_v7())
+    .bind(posted_at)
+    .execute(&f.pool)
+    .await
+    .expect("posted row");
+
+    // What the executor calls inside the mark-posted transaction.
+    crowdrelay_infra::fanbase::anchor_measurements_to_publication(
+        &f.pool,
+        f.workspace_id.into_uuid(),
+        post_id,
+    )
+    .await
+    .expect("re-anchor");
+
+    let (anchored_at, due_at) = sqlx::query_as::<_, (OffsetDateTime, OffsetDateTime)>(
+        "SELECT action_finished_at, due_at FROM viryaos_autopilot_measurements \
+             WHERE workspace_id=$1 AND id=$2",
+    )
+    .bind(f.workspace_id.into_uuid())
+    .bind(measurement.id.into_uuid())
+    .fetch_one(&f.pool)
+    .await
+    .expect("anchored measurement");
+    assert_eq!(
+        anchored_at, posted_at,
+        "the window must open when the audience could see the post"
+    );
+    assert_eq!(
+        due_at - anchored_at,
+        time::Duration::days(7),
+        "the offset is preserved — the full observation window, not whatever \
+         was left after the draft waited"
+    );
+}
+
 /// G: resolution is idempotent and local.
 #[tokio::test]
 #[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
@@ -1375,5 +1441,110 @@ async fn h_a_community_outcome_is_tenant_scoped_and_counts_each_fan_once() {
         (observed - 1.0).abs() < f64::EPSILON,
         "one fan converted once: three recordings of the same fan are one fan, \
          and five fans belonging to another tenant are none of ours. Got {observed}"
+    );
+}
+
+/// I: a dispatched run that produced a processed outcome inside the hour
+/// reports quality 1 — through the task row, which is the only link the
+/// outcome carries back to the run.
+///
+/// The first version of this measure read `processed_action_id`, which names
+/// the action an outcome *produced*, never the run that produced the
+/// outcome. Every dispatch resolved 0 — "the worker did nothing" — for every
+/// run that did exactly its job.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn i_a_processed_outcome_counts_toward_its_dispatching_run() {
+    let f = setup().await.expect("fixture");
+    let action_id = insert_dispatch(&f, "opp-quality", f.now).await;
+
+    // `agent_service_tasks` belongs to the agents service; the disposable
+    // database gets the columns the measure reads, same convention as the
+    // insight-routing suite.
+    sqlx::query(
+        r#"CREATE TABLE IF NOT EXISTS agent_service_tasks (
+               id uuid PRIMARY KEY,
+               workspace_id uuid NOT NULL,
+               template_id text NOT NULL,
+               model_id text NOT NULL,
+               prompt text NOT NULL,
+               status text NOT NULL DEFAULT 'queued',
+               tier text NOT NULL DEFAULT 'basic',
+               metadata jsonb NOT NULL DEFAULT '{}'::jsonb,
+               created_at timestamptz NOT NULL DEFAULT now()
+           )"#,
+    )
+    .execute(&f.pool)
+    .await
+    .expect("foreign task table");
+
+    let task_id = uuid::Uuid::now_v7();
+    sqlx::query(
+        r#"INSERT INTO agent_service_tasks
+               (id, workspace_id, template_id, model_id, prompt, status, metadata)
+           VALUES ($1,$2,'community-engager','auto','probe','completed',$3)"#,
+    )
+    .bind(task_id)
+    .bind(f.workspace_id.into_uuid())
+    .bind(serde_json::json!({"source": "autopilot", "action_id": action_id}))
+    .execute(&f.pool)
+    .await
+    .expect("task");
+
+    // The outcome the run produced, processed inside the one-hour window.
+    sqlx::query(
+        r#"INSERT INTO agent_outcomes
+               (id, workspace_id, task_id, result_id, kind, payload,
+                confidence_basis_points, status, idempotency_key, created_at)
+           VALUES ($1,$2,$3,$4,'generic_insight','{}'::jsonb,8000,'processed',
+                   $5, now())"#,
+    )
+    .bind(uuid::Uuid::now_v7())
+    .bind(f.workspace_id.into_uuid())
+    .bind(task_id)
+    .bind(uuid::Uuid::now_v7())
+    .bind(format!("outcome-{action_id}"))
+    .execute(&f.pool)
+    .await
+    .expect("outcome");
+
+    let measurement = queue_measurement(
+        &f,
+        action_id,
+        AutopilotMeasurementKind::AgentRunOutcomeQuality1h,
+        0.0,
+        f.now,
+    )
+    .await;
+    let observed = f
+        .repository
+        .observe_measurement(f.workspace_id, &measurement, f.now)
+        .await
+        .expect("observe the run's outcome quality");
+    assert!(
+        (observed - 1.0).abs() < f64::EPSILON,
+        "a run that produced a processed outcome reports 1, got {observed}"
+    );
+
+    // And the honest zero: a second run whose task produced nothing
+    // processed yet still reports 0 — the measure is not just "any outcome
+    // in the workspace".
+    let silent_action = insert_dispatch(&f, "opp-silent", f.now).await;
+    let silent = queue_measurement(
+        &f,
+        silent_action,
+        AutopilotMeasurementKind::AgentRunOutcomeQuality1h,
+        0.0,
+        f.now,
+    )
+    .await;
+    let observed = f
+        .repository
+        .observe_measurement(f.workspace_id, &silent, f.now)
+        .await
+        .expect("observe a run with no outcome");
+    assert!(
+        observed.abs() < f64::EPSILON,
+        "a run with no processed outcome reports 0, got {observed}"
     );
 }

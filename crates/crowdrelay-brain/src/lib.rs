@@ -112,7 +112,7 @@ pub use portfolio::{
     DecisionMode, EfeSignal, PortfolioCandidate, PortfolioConfig, PortfolioOptimizer,
     PortfolioRejection, PortfolioSelection, RejectionReason, WaitCandidateValue,
 };
-pub use reach::{ReachChannel, ReachMetrics};
+pub use reach::{ReachChannel, ReachMetrics, channel_for_template};
 pub use reply_model::{
     FEATURE_VERSION, MODEL_VERSION, ReplyOutcome, ReplyPrediction, ReplyProbabilityModel,
     disposition_to_label, kind_key, target_key,

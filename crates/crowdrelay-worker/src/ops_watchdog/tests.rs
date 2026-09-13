@@ -775,4 +775,69 @@ fn publishing() -> PublishingPosture {
         let active = active_keys(&snapshot);
         assert!(!active.contains(&"growth.stuck_ungeocoded_cities"));
     }
+
+    /// Queued Reddit work with nothing that can carry it must fire.
+    ///
+    /// The eligibility rule is the agents service's own: an `active`
+    /// credential or a `cooldown` past six hours. Drafts only retry for
+    /// about an hour, so every one in the queue dies inside it unless a
+    /// person acts — the warning exists to land inside that window.
+    #[test]
+    fn queued_drafts_with_no_usable_session_raise_attention() {
+        let mut snapshot = healthy();
+        snapshot.reddit_posting_demand = 3;
+        snapshot.reddit_session_usable = 0;
+        snapshot.reddit_credential_status = Some("invalid".to_owned());
+        let raised = conditions(&snapshot, publishing())
+            .into_iter()
+            .filter(|c| c.active)
+            .map(|c| c.key)
+            .collect::<Vec<_>>();
+        assert_eq!(raised, vec!["publishing.session_dead"]);
+        let severity = conditions(&snapshot, publishing())
+            .into_iter()
+            .find(|c| c.key == "publishing.session_dead")
+            .map(|c| c.severity);
+        assert_eq!(
+            severity,
+            Some("warning"),
+            "drafts die inside the retry window but nothing is corrupted yet"
+        );
+    }
+
+    /// A usable session silences it — the queue is being worked.
+    #[test]
+    fn queued_drafts_with_a_usable_session_raise_nothing() {
+        let mut snapshot = healthy();
+        snapshot.reddit_posting_demand = 3;
+        snapshot.reddit_session_usable = 1;
+        let raised = conditions(&snapshot, publishing())
+            .into_iter()
+            .filter(|c| c.active)
+            .map(|c| c.key)
+            .collect::<Vec<_>>();
+        assert!(
+            !raised.contains(&"publishing.session_dead"),
+            "a queue with a session that can carry it is work in progress"
+        );
+    }
+
+    /// No credential and nothing queued is a tenant that never connected
+    /// Reddit — a choice, not a fault.
+    #[test]
+    fn no_session_and_no_demand_raises_nothing() {
+        let mut snapshot = healthy();
+        snapshot.reddit_posting_demand = 0;
+        snapshot.reddit_session_usable = 0;
+        snapshot.reddit_credential_status = None;
+        let raised = conditions(&snapshot, publishing())
+            .into_iter()
+            .filter(|c| c.active)
+            .map(|c| c.key)
+            .collect::<Vec<_>>();
+        assert!(
+            !raised.contains(&"publishing.session_dead"),
+            "no queued work means nothing is at risk"
+        );
+    }
 }

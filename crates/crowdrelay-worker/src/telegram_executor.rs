@@ -298,12 +298,12 @@ impl TelegramExecutorWorker {
 
             sqlx::query(
                 r#"
-                UPDATE viryaos_experiment_assignments
+                UPDATE viryaos_experiment_assignments AS ea
                 SET execution_status = 'unknown',
-                    trace_id = COALESCE(trace_id, (SELECT trace_id FROM viryaos_autopilot_actions WHERE id = experiment_assignments.action_id))
-                WHERE workspace_id = $1
-                  AND action_id = ANY($2)
-                  AND execution_status = 'dispatched'
+                    trace_id = COALESCE(ea.trace_id, (SELECT trace_id FROM viryaos_autopilot_actions WHERE id = ea.action_id))
+                WHERE ea.workspace_id = $1
+                  AND ea.action_id = ANY($2)
+                  AND ea.execution_status = 'dispatched'
                 "#,
             )
             .bind(ws)
@@ -517,7 +517,22 @@ impl TelegramExecutorWorker {
             .submit_via_bot_api(target_channel, body, &bot_token)
             .await?;
 
-        // Record success.
+        // Reach is what the credit allocator divides fan outcomes by, so a
+        // guess is a fabricated denominator. Fall back to a conservative
+        // constant only when nothing has measured the audience yet. Read
+        // before the transaction — it is a snapshot input, not part of the
+        // commit's invariant.
+        let estimated_reach = self
+            .measured_audience()
+            .await
+            .unwrap_or(UNMEASURED_AUDIENCE_REACH);
+
+        // One commit carries the post, the re-anchored measurement windows,
+        // the reach row and the assignment transition: a crash between any
+        // of them used to leave a live post with dispatch-anchored windows
+        // and an assignment `dispatched` forever — the claim query never
+        // revisits a `posted` row and no sweep owns it.
+        let mut posted_tx = self.pool.begin().await?;
         sqlx::query(
             r#"
             UPDATE telegram_posts
@@ -537,16 +552,17 @@ impl TelegramExecutorWorker {
         .bind(action.id)
         .bind(result.message_id)
         .bind(target_channel)
-        .execute(&self.pool)
+        .execute(&mut *posted_tx)
         .await?;
 
-        // Reach is what the credit allocator divides fan outcomes by, so a
-        // guess is a fabricated denominator. Fall back to a conservative
-        // constant only when nothing has measured the audience yet.
-        let estimated_reach = self
-            .measured_audience()
-            .await
-            .unwrap_or(UNMEASURED_AUDIENCE_REACH);
+        crowdrelay_infra::fanbase::anchor_content_measurements_to_publication(
+            &mut posted_tx,
+            self.workspace_id.into_uuid(),
+            "telegram_posts",
+            action.id,
+        )
+        .await?;
+
         // Reach ledger.
         sqlx::query(
             r#"INSERT INTO viryaos_reach_events
@@ -564,7 +580,7 @@ impl TelegramExecutorWorker {
         .bind(estimated_reach)
         .bind(result.message_id)
         .bind(action.trace_id)
-        .execute(&self.pool)
+        .execute(&mut *posted_tx)
         .await?;
 
         // Transition the experiment assignment execution_status from
@@ -581,8 +597,9 @@ impl TelegramExecutorWorker {
         )
         .bind(self.workspace_id.into_uuid())
         .bind(action.action_id)
-        .execute(&self.pool)
+        .execute(&mut *posted_tx)
         .await?;
+        posted_tx.commit().await?;
 
         tracing::info!(
             action_id = %action.action_id,

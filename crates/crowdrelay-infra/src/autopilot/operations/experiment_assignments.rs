@@ -415,19 +415,9 @@ pub(in crate::autopilot) async fn record_experiment_assignment(
             crowdrelay_brain::OpportunityAction::Post,
             &assignment.prediction.context,
         );
-        let channel = assignment
-            .prediction
-            .context
-            .subreddit_type
-            .as_deref()
-            .map(|s| {
-                if s.starts_with("r/") {
-                    crowdrelay_brain::ReachChannel::RedditPost
-                } else {
-                    crowdrelay_brain::ReachChannel::Other
-                }
-            })
-            .unwrap_or(crowdrelay_brain::ReachChannel::Other);
+        // Same derivation as the treatment arm: the channel is a fact
+        // about the template's delivery surface, not the target genre.
+        let channel = crowdrelay_brain::channel_for_template(&assignment.prediction.template_id);
         let evidence = crowdrelay_brain::GrowthEvidence::at_dispatch(
             workspace_id.into_uuid(),
             assignment.action_id,

@@ -106,6 +106,11 @@ FOREIGN_RELATIONS = {
     # Google OAuth) directly from this table to authenticate Reddit requests.
     # The agent service creates and maintains it; CrowdRelay only reads.
     "agent_service_reddit_cookies",
+    # Owned by the TypeScript agent service. The ops watchdog reads the
+    # reddit-browser credential row's status to report when queued posting
+    # work has no session that can carry it — the same eligibility rule the
+    # agents service's own loader applies. CrowdRelay only reads.
+    "agent_service_credentials",
     # Owned by sqlx's migrator, which creates and maintains it. No migration in
     # this repository creates it, and none should: it is the migrator's own
     # bookkeeping.
