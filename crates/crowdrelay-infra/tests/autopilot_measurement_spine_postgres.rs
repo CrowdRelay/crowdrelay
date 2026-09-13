@@ -759,17 +759,23 @@ async fn h_automatic_publication_moves_the_measurement_window() {
     .await
     .expect("re-anchor");
 
-    let (anchored_at, due_at) = sqlx::query_as::<_, (OffsetDateTime, OffsetDateTime)>(
-        "SELECT action_finished_at, due_at FROM viryaos_autopilot_measurements \
-             WHERE workspace_id=$1 AND id=$2",
-    )
-    .bind(f.workspace_id.into_uuid())
-    .bind(measurement.id.into_uuid())
-    .fetch_one(&f.pool)
-    .await
-    .expect("anchored measurement");
+    let (anchored_at, due_at, stored_posted_at) =
+        sqlx::query_as::<_, (OffsetDateTime, OffsetDateTime, OffsetDateTime)>(
+            "SELECT m.action_finished_at, m.due_at, p.posted_at \
+             FROM viryaos_autopilot_measurements m \
+             JOIN community_posts p ON p.id = $2 \
+             WHERE m.workspace_id=$1 AND m.id=$3",
+        )
+        .bind(f.workspace_id.into_uuid())
+        .bind(post_id)
+        .bind(measurement.id.into_uuid())
+        .fetch_one(&f.pool)
+        .await
+        .expect("anchored measurement");
+    // timestamptz stores microseconds; the bound value can carry more, so the
+    // comparison is against what Postgres actually recorded.
     assert_eq!(
-        anchored_at, posted_at,
+        anchored_at, stored_posted_at,
         "the window must open when the audience could see the post"
     );
     assert_eq!(
