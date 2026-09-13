@@ -171,6 +171,27 @@ async fn import_inner(pool: &PgPool) -> Result<()> {
     .await?;
     ensure!(fresh == 3, "imported opportunities start as new");
 
+    // The sheet's A–D priority is the only strategic signal the import has;
+    // it must land as `strategic_value_basis_points` or the row can never
+    // reach the live-opportunity score bar. A maps above the policy's 8_500
+    // Landmark floor, B above the 6_000 Notable floor.
+    let strategic: Vec<(String, i32)> = sqlx::query_as(
+        "SELECT external_key, strategic_value_basis_points FROM viryaos_team_opportunities \
+         WHERE workspace_id = $1 ORDER BY external_key",
+    )
+    .bind(ws.into_uuid())
+    .fetch_all(pool)
+    .await?;
+    ensure!(
+        strategic
+            == [
+                ("ZG-001".to_owned(), 9_000),
+                ("ZG-002".to_owned(), 9_000),
+                ("ZG-003".to_owned(), 6_500),
+            ],
+        "priority must land as strategic value, got {strategic:?}"
+    );
+
     // A closed edition lands ineligible, so the live-calendar index skips it.
     let eligible: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM viryaos_team_opportunities \
@@ -274,6 +295,28 @@ PL,Lodz,7000,4000,,true,5,Brak,B,,,,"
         "a corrected address must land, got {email:?}"
     );
     ensure!(fit == 9700, "a corrected fit score must land, got {fit}");
+
+    // Strategic value fills a blank but never overwrites: a nonzero value may
+    // be operator judgement or loop learning the sheet does not know about.
+    sqlx::query(
+        "UPDATE viryaos_team_opportunities SET strategic_value_basis_points = 8_800 \
+         WHERE workspace_id = $1 AND external_key = 'ZG-001'",
+    )
+    .bind(ws.into_uuid())
+    .execute(pool)
+    .await?;
+    import_opportunities(pool, ws, csv.path()).await?;
+    let kept: i32 = sqlx::query_scalar(
+        "SELECT strategic_value_basis_points FROM viryaos_team_opportunities \
+         WHERE workspace_id = $1 AND external_key = 'ZG-001'",
+    )
+    .bind(ws.into_uuid())
+    .fetch_one(pool)
+    .await?;
+    ensure!(
+        kept == 8_800,
+        "an enriched strategic value must survive a re-import, got {kept}"
+    );
 
     // Status does not move. Walking `submitted` back to `new` would put the band
     // in front of the same festival twice under its own name.

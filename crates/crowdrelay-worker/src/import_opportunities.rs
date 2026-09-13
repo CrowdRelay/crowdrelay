@@ -96,6 +96,24 @@ const ACCEPTED_KINDS: [&str; 5] = [
     "funding",
 ];
 
+/// The band's own priority column, mapped into `strategic_value_basis_points`.
+///
+/// The sheet ranks every row A–D and that ranking is the only strategic signal
+/// the import has. Without it the column lands at zero and the row can never
+/// reach the live-opportunity score bar — the
+/// `growth.unscoreable_live_opportunities` watchdog fires on exactly that
+/// shape. The cut points are the policy's own tiers: 8_500 is Landmark, the
+/// slot worth playing at break-even, and 6_000 is Notable.
+fn strategic_value(row: &OpportunityRow) -> i32 {
+    match row.priority.trim().to_ascii_uppercase().as_str() {
+        "A" => 9_000,
+        "B" => 6_500,
+        "C" => 4_000,
+        "D" => 1_500,
+        _ => 0,
+    }
+}
+
 /// Basis points, or `None` when the cell was blank or unparseable.
 fn basis_points(value: &str) -> Option<i32> {
     let parsed: i32 = value.trim().parse().ok()?;
@@ -227,9 +245,10 @@ pub async fn import_opportunities(
             INSERT INTO viryaos_team_opportunities
                 (workspace_id, opportunity_kind, source, external_key, title,
                  organization, destination_url, contact_email, country_code,
-                 fit_basis_points, confidence_basis_points, deadline, eligible,
+                 fit_basis_points, confidence_basis_points,
+                 strategic_value_basis_points, deadline, eligible,
                  metadata, status)
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,'new')
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,'new')
             ON CONFLICT (workspace_id, source, external_key) DO UPDATE SET
                 -- Contact details and the deadline are what a re-import is for:
                 -- the sheet is the band's live record and CrowdRelay's copy goes
@@ -240,6 +259,14 @@ pub async fn import_opportunities(
                 deadline = COALESCE(EXCLUDED.deadline, viryaos_team_opportunities.deadline),
                 fit_basis_points = EXCLUDED.fit_basis_points,
                 confidence_basis_points = EXCLUDED.confidence_basis_points,
+                -- The sheet fills a blank strategic value but never overwrites
+                -- one: a nonzero value may be operator judgement or something
+                -- the loop learned, and the sheet does not know that.
+                strategic_value_basis_points = CASE
+                    WHEN viryaos_team_opportunities.strategic_value_basis_points = 0
+                        THEN EXCLUDED.strategic_value_basis_points
+                    ELSE viryaos_team_opportunities.strategic_value_basis_points
+                END,
                 title = EXCLUDED.title,
                 -- `status`, `eligible` and `metadata` are deliberately absent.
                 -- Status is the loop's own record of what it did — a re-import
@@ -262,6 +289,7 @@ pub async fn import_opportunities(
         .bind(country)
         .bind(basis_points(&row.fit_basis_points).unwrap_or(0))
         .bind(basis_points(&row.confidence_basis_points).unwrap_or(2_500))
+        .bind(strategic_value(&row))
         .bind(deadline)
         .bind(eligible)
         .bind(metadata(&row))
