@@ -83,8 +83,24 @@ pub(super) async fn load_worker_signals(
         r#"
         SELECT COALESCE(action.payload->>'template_id', 'unknown') AS template_id,
                oa.action AS operator_action,
-               EXTRACT(EPOCH FROM (oa.created_at - action.created_at)) / 3600.0 AS hours_to_decision,
-               EXTRACT(EPOCH FROM (now() - oa.created_at)) / 86400.0 AS age_days
+               -- `::double precision` on both, and it is load-bearing. PostgreSQL
+               -- 14 changed `EXTRACT` to return `numeric` where it used to return
+               -- `double precision`, and dividing by a numeric literal keeps it
+               -- numeric — so these two columns arrived as NUMERIC and the `f64`
+               -- decode below failed. Runtime only: it compiled, linted and
+               -- passed every test, because no test executes this query with a
+               -- row in it.
+               --
+               -- It cost every autopilot cycle for two hours on 2026-09-13. The
+               -- query reads operator approvals, so it returned zero rows for as
+               -- long as the loop had never produced anything to approve, and
+               -- started failing the moment it did — nine decisions in, the first
+               -- time the brain had ever got that far. The whole evaluation phase
+               -- aborted on it, so no decision was recorded at all.
+               (EXTRACT(EPOCH FROM (oa.created_at - action.created_at)) / 3600.0)::double precision
+                   AS hours_to_decision,
+               (EXTRACT(EPOCH FROM (now() - oa.created_at)) / 86400.0)::double precision
+                   AS age_days
         FROM operator_actions oa
         JOIN viryaos_autopilot_actions action ON action.id = oa.target_id
         -- Both sides carry the workspace. Constraining only the joined

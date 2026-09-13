@@ -248,12 +248,20 @@ macro_rules! decision_opportunity_reads {
                     state.maximum_daily_budget_minor,
                     state.spend_last_7d_minor,
                     state.attributed_revenue_last_7d_minor,
+                    -- `::bigint` on both. `SUM` over a `bigint` column returns
+                    -- NUMERIC in PostgreSQL, and both of these are `*_minor`
+                    -- bigints, so without the cast the two columns arrive as
+                    -- NUMERIC and the `i64` fields they decode into fail. Latent
+                    -- rather than live: it needs one `viryaos_promotion_campaign_states`
+                    -- row to fire, and production has none yet. Its sibling in
+                    -- `growth_intelligence/worker_signals.rs` was the same mistake
+                    -- and did fire, aborting every autopilot cycle for two hours.
                     SUM(state.current_daily_budget_minor) OVER (
                         PARTITION BY state.workspace_id, state.currency
-                    ) AS workspace_daily_budget_minor,
+                    )::bigint AS workspace_daily_budget_minor,
                     SUM(state.spend_month_to_date_minor) OVER (
                         PARTITION BY state.workspace_id, state.currency
-                    ) AS workspace_spend_month_to_date_minor,
+                    )::bigint AS workspace_spend_month_to_date_minor,
                     guardrail.maximum_total_daily_budget_minor AS workspace_maximum_daily_budget_minor,
                     guardrail.maximum_monthly_spend_minor AS workspace_maximum_monthly_spend_minor,
                     CASE
