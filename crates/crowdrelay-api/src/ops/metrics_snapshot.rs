@@ -316,3 +316,66 @@ async fn load_metrics_snapshot(state: &OpsState) -> Result<OpsMetricsSnapshot, O
     })
 }
 
+
+/// Every growth component and whether it will do its work.
+///
+/// A labelled gauge rather than a field on the fixed snapshot, because the set of
+/// components changes when one is added and a fixed format would have to be
+/// edited in three places to match.
+///
+/// This exists because the answer used to live in one `tracing::info!` at worker
+/// startup, inside a container. An operator who set the publishing switches and
+/// saw nothing publish could not read it, and the reading at the time was wrong
+/// anyway: `community_executor` reported whether the worker had been constructed,
+/// which is true in manual mode.
+///
+/// `observed_at` travels too. These switches are read at startup, so a row older
+/// than the last env-file edit means the worker was never restarted — which is
+/// its own answer to "I changed the setting and nothing happened".
+pub(crate) async fn growth_component_prometheus(
+    pool: &sqlx::PgPool,
+    workspace_id: crowdrelay_domain::WorkspaceId,
+) -> Result<String, OpsError> {
+    let rows = sqlx::query_as::<_, (String, bool, Option<String>, i64)>(
+        r#"
+        SELECT component,
+               enabled,
+               missing_switch,
+               EXTRACT(EPOCH FROM (now() - observed_at))::bigint AS age_seconds
+        FROM growth_component_state
+        WHERE workspace_id = $1
+        ORDER BY component
+        "#,
+    )
+    .bind(workspace_id.into_uuid())
+    .fetch_all(pool)
+    .await
+    .map_err(OpsError::sqlx)?;
+    if rows.is_empty() {
+        return Ok(String::new());
+    }
+    let mut body = String::from(
+        "# HELP crowdrelay_growth_component_enabled Whether a growth component will do its work, 1 or 0.\n         # TYPE crowdrelay_growth_component_enabled gauge\n",
+    );
+    for (component, enabled, switch, _) in &rows {
+        // The missing switch is a label so it is visible in the scrape rather
+        // than needing a second lookup. Absent when the component is on.
+        let switch_label = switch
+            .as_deref()
+            .map(|name| format!(",missing_switch=\"{name}\""))
+            .unwrap_or_default();
+        body.push_str(&format!(
+            "crowdrelay_growth_component_enabled{{component=\"{component}\"{switch_label}}} {}\n",
+            u8::from(*enabled)
+        ));
+    }
+    body.push_str(
+        "# HELP crowdrelay_growth_component_reported_age_seconds How long ago the worker reported this component.\n         # TYPE crowdrelay_growth_component_reported_age_seconds gauge\n",
+    );
+    for (component, _, _, age) in &rows {
+        body.push_str(&format!(
+            "crowdrelay_growth_component_reported_age_seconds{{component=\"{component}\"}} {age}\n"
+        ));
+    }
+    Ok(body)
+}

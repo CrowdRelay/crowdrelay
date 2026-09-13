@@ -167,7 +167,8 @@ test-postgres-env:
       cycle_deletes_expired_rows_scrubs_safe_payloads_and_preserves_audit \
       publishing_adopts_the_drafts_manual_mode_wrote \
       manual_mode_leaves_its_own_drafts_alone \
-      the_rate_limit_defers_a_draft_instead_of_failing_it
+      the_rate_limit_defers_a_draft_instead_of_failing_it \
+      every_component_is_recorded_with_its_missing_switch
     do
       {{CARGO}} test --locked --package crowdrelay-worker "$filter" -- --ignored --test-threads=1
     done

@@ -777,6 +777,14 @@ async fn run(database: PgPool, config: &Config, standby: bool) -> Result<()> {
         random_draws_enabled: weighted_draw_worker.is_some(),
     };
     growth_readiness.log();
+    // And in Postgres, so it is readable without a shell on the deploy host.
+    // Never fatal: recording what the worker will do is worth less than doing it.
+    if let Err(error) = growth_readiness
+        .record(&database, workspace_id, posture.reddit.missing_switch())
+        .await
+    {
+        tracing::warn!(error = %error, "could not record growth component state");
+    }
 
     // Query the database for evidence of recent activity (last 24h) from
     // each fan-growth component. This complements the readiness log above:

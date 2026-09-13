@@ -914,6 +914,13 @@ crowdrelay_brain_signal_fans_push_enabled {}\n",
         ops_snapshot.brain_signal_fans_push_enabled,
     ));
 
+    match state.ops.growth_component_prometheus().await {
+        Ok(block) => body.push_str(&block),
+        Err(error) => {
+            tracing::warn!(error = ?error, "growth component state unavailable");
+        }
+    }
+
     body.push_str(&http_metrics().route_prometheus());
     let pool = state.ticketing.pool();
     let pool_size = pool.size();

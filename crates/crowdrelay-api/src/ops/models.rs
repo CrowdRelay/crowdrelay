@@ -21,6 +21,16 @@ impl OpsState {
         run_with_timeout(self.operation_timeout, load_metrics_snapshot(self)).await
     }
 
+    /// Prometheus text for the growth components, or empty when the worker has
+    /// not reported yet.
+    pub(crate) async fn growth_component_prometheus(&self) -> Result<String, OpsError> {
+        run_with_timeout(
+            self.operation_timeout,
+            growth_component_prometheus(&self.pool, self.workspace_id),
+        )
+        .await
+    }
+
     #[must_use]
     pub(crate) const fn workspace_id(&self) -> WorkspaceId {
         self.workspace_id

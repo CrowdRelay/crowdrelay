@@ -124,6 +124,56 @@ impl GrowthReadiness {
             .collect()
     }
 
+    /// Records the same reading in Postgres, so an operator can read it.
+    ///
+    /// `log` below is written once at worker startup, inside a container. It is
+    /// the only place these fourteen answers existed, which is why "I set the
+    /// publishing switches and nothing published" took a shell on the deploy
+    /// host to answer — and why a wrong answer went unnoticed:
+    /// `community_executor_enabled` reported whether the worker had been
+    /// constructed, which is true in manual mode.
+    ///
+    /// `missing_switch` carries the environment variable to set when the worker
+    /// knows which one it is. The publishing posture knows; the others are a
+    /// single flag named in `.env.example` beside the field.
+    ///
+    /// # Errors
+    ///
+    /// Returns the `sqlx` error. The caller must not fail startup over it:
+    /// recording what the worker will do is worth less than doing it.
+    pub async fn record(
+        &self,
+        pool: &sqlx::PgPool,
+        workspace_id: crowdrelay_domain::WorkspaceId,
+        missing_switch: Option<&str>,
+    ) -> Result<(), sqlx::Error> {
+        for (component, enabled) in self.components() {
+            // The switch is only known for the publishing component; the rest
+            // carry null rather than a guess.
+            let switch = (component == "community_executor" && !enabled)
+                .then_some(missing_switch)
+                .flatten();
+            sqlx::query(
+                r#"
+                INSERT INTO growth_component_state
+                    (workspace_id, component, enabled, missing_switch)
+                VALUES ($1, $2, $3, $4)
+                ON CONFLICT (workspace_id, component) DO UPDATE
+                    SET enabled = EXCLUDED.enabled,
+                        missing_switch = EXCLUDED.missing_switch,
+                        observed_at = now()
+                "#,
+            )
+            .bind(workspace_id.into_uuid())
+            .bind(component)
+            .bind(enabled)
+            .bind(switch)
+            .execute(pool)
+            .await?;
+        }
+        Ok(())
+    }
+
     /// Logs a structured growth readiness summary. Each component is logged
     /// as a field so it can be searched/alerted on in log aggregation.
     pub fn log(&self) {
@@ -521,6 +571,116 @@ mod tests {
         assert_eq!(
             readiness.disabled(),
             vec!["telegram_executor", "community_join_executor"]
+        );
+    }
+}
+
+#[cfg(test)]
+mod record_tests {
+    use super::*;
+
+    /// The reading has to reach Postgres, or it is a log line again.
+    ///
+    /// Fourteen components existed only in one `tracing::info!` at worker
+    /// startup, inside a container. That is why "I set the publishing switches
+    /// and nothing published" needed a shell on the deploy host to answer.
+    #[tokio::test]
+    #[ignore = "requires CROWDRELAY_COMMUNITY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+    async fn every_component_is_recorded_with_its_missing_switch() {
+        let Ok(url) = std::env::var("CROWDRELAY_COMMUNITY_TEST_DATABASE_URL") else {
+            return;
+        };
+        let pool = sqlx::PgPool::connect(&url).await.expect("connect");
+        crowdrelay_infra::database::MIGRATOR
+            .run(&pool)
+            .await
+            .expect("migrate");
+        let workspace_id = crowdrelay_domain::WorkspaceId::new();
+        sqlx::query("INSERT INTO workspaces (id, slug, name) VALUES ($1, $2, 'Readiness test')")
+            .bind(workspace_id.into_uuid())
+            .bind(format!("readiness-{}", uuid::Uuid::now_v7().simple()))
+            .execute(&pool)
+            .await
+            .expect("workspace");
+
+        let readiness = GrowthReadiness {
+            autopilot_enabled: true,
+            agent_outcomes_enabled: true,
+            push_delivery_enabled: true,
+            nearby_shows_enabled: true,
+            city_geocoding_enabled: true,
+            // Off, and for a reason the worker knows.
+            community_executor_enabled: false,
+            telegram_executor_enabled: false,
+            discord_executor_enabled: false,
+            social_post_executor_enabled: false,
+            community_join_executor_enabled: false,
+            reddit_discovery_enabled: true,
+            x_discovery_enabled: true,
+            ad_conversion_enabled: true,
+            random_draws_enabled: true,
+        };
+        readiness
+            .record(&pool, workspace_id, Some("CROWDRELAY_REDDIT_WRITE_ENABLED"))
+            .await
+            .expect("record");
+
+        let recorded: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM growth_component_state WHERE workspace_id = $1",
+        )
+        .bind(workspace_id.into_uuid())
+        .fetch_one(&pool)
+        .await
+        .expect("count");
+        assert_eq!(
+            recorded,
+            readiness.components().len() as i64,
+            "every component named in the log must also be recorded; a component \
+             counted and not written is the drift this replaced"
+        );
+
+        let (enabled, switch): (bool, Option<String>) = sqlx::query_as(
+            "SELECT enabled, missing_switch FROM growth_component_state \
+             WHERE workspace_id = $1 AND component = 'community_executor'",
+        )
+        .bind(workspace_id.into_uuid())
+        .fetch_one(&pool)
+        .await
+        .expect("community executor row");
+        assert!(!enabled);
+        assert_eq!(
+            switch.as_deref(),
+            Some("CROWDRELAY_REDDIT_WRITE_ENABLED"),
+            "the switch an operator has to set must travel with the reading"
+        );
+
+        // A component that is on carries no switch: there is nothing to set.
+        let autopilot_switch: Option<String> = sqlx::query_scalar(
+            "SELECT missing_switch FROM growth_component_state \
+             WHERE workspace_id = $1 AND component = 'autopilot'",
+        )
+        .bind(workspace_id.into_uuid())
+        .fetch_one(&pool)
+        .await
+        .expect("autopilot row");
+        assert_eq!(autopilot_switch, None);
+
+        // Re-reporting is what every worker restart does, so it must update
+        // rather than fail on the primary key.
+        readiness
+            .record(&pool, workspace_id, None)
+            .await
+            .expect("re-record");
+        let after: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM growth_component_state WHERE workspace_id = $1",
+        )
+        .bind(workspace_id.into_uuid())
+        .fetch_one(&pool)
+        .await
+        .expect("count again");
+        assert_eq!(
+            after, recorded,
+            "a restart re-reports, it does not duplicate"
         );
     }
 }
