@@ -374,6 +374,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "crowdrelay-docs"
+version = "1.0.0"
+dependencies = [
+ "axum",
+ "tokio",
+]
+
+[[package]]
 name = "crowdrelay-domain"
 version = "1.0.0"
 dependencies = [

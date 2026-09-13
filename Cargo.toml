@@ -7,6 +7,7 @@ members = [
   "crates/crowdrelay-brain",
   "crates/crowdrelay-application",
   "crates/crowdrelay-infra",
+  "crates/crowdrelay-docs",
 ]
 
 [workspace.package]

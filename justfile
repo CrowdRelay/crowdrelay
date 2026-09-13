@@ -80,6 +80,24 @@ check: fmt lint test
     python3 scripts/test_release_receipt.py
     python3 scripts/test_ecosystem_deploy_contract.py
 
+# Browse the OpenAPI contract as Redoc, on this machine only.
+#
+# Binds 127.0.0.1 and re-reads openapi/openapi.yaml on every request, so editing
+# the spec and refreshing the browser shows the change. Redoc found a duplicated
+# `components.parameters` key that `validate-contract-assets` had reported clean
+# for as long as it existed — reading the rendered contract is worth doing.
+docs PORT="8088":
+    cargo run --quiet --package crowdrelay-docs -- {{PORT}}
+
+# The dark-mode system reference PDF, measured from this tree.
+#
+# Stage one reads the repository and writes HTML; stage two prints it through the
+# Chromium that ../crowdrelay-agents installs for Playwright, which is the only
+# CSS-to-PDF renderer on this machine. Output: ../CrowdRelay-System-Reference.pdf
+reference:
+    python3 ops/docs/build_reference.py
+    node ops/docs/render_reference.mjs
+
 # Everything a push should have passed
 ci: check validate-contract-assets contract-tests policy-checks
 

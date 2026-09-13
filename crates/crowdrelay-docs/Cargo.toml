@@ -1,0 +1,14 @@
+[package]
+name = "crowdrelay-docs"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+publish = false
+
+# Deliberately thin. This serves the OpenAPI contract to a browser on a
+# developer's machine and nothing else, so it takes no dependency on the API
+# crate, the database, or any of the workspace's runtime machinery — it cannot
+# drift with them because it does not know about them.
+[dependencies]
+axum = { workspace = true }
+tokio = { workspace = true, features = ["fs"] }
