@@ -642,6 +642,16 @@ rm -f "$caddy_finalize"
 sed -i "s|^CROWDRELAY_IMAGE_SHA=.*|CROWDRELAY_IMAGE_SHA=\"${TARGET}\"|" .crowdrelay.local.sh
 sed -i "s|^CROWDRELAY_IMAGE_TAG=.*|CROWDRELAY_IMAGE_TAG=\"sha-\${CROWDRELAY_IMAGE_SHA}\"|" .crowdrelay.local.sh
 
+# Keep the manual-compose pin honest: a plain `docker compose up` resolves the
+# image tag from the env file, not from .crowdrelay.local.sh, so a stale tag
+# there silently recreates services on an older image — one that can still
+# carry bugs the deploy just removed.
+if grep -Fq 'CROWDRELAY_IMAGE_TAG=' "$env_file" 2>/dev/null; then
+  sed -i "s|^CROWDRELAY_IMAGE_TAG=.*|CROWDRELAY_IMAGE_TAG=sha-${TARGET}|" "$env_file"
+else
+  printf 'CROWDRELAY_IMAGE_TAG=sha-%s\n' "$TARGET" >> "$env_file"
+fi
+
 # Clean up rollback temp file
 rm -f "$CADDY_BACKUP"
 

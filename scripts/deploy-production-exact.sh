@@ -157,6 +157,12 @@ set -Eeuo pipefail
 repo="$1"
 [[ -d "$repo/.git" ]] || { echo "ERROR=repo-missing"; exit 20; }
 cd "$repo"
+# ops/edge/Caddyfile is deploy-managed state: every blue-green cutover rewrites
+# its marker and upstream order on the host, so it is legitimately dirty
+# between deploys. Restore the committed copy before measuring dirt — the
+# running edge keeps serving its pinned inode regardless, and the cutover
+# step reconciles the content before the next reload.
+git checkout -- ops/edge/Caddyfile 2>/dev/null || true
 head="$(git rev-parse HEAD)"
 branch="$(git symbolic-ref --quiet --short HEAD 2>/dev/null || true)"
 dirty="$(git status --porcelain --untracked-files=normal)"
@@ -231,6 +237,9 @@ current="$(git rev-parse HEAD)"
 branch="$(git symbolic-ref --quiet --short HEAD 2>/dev/null || true)"
 [[ "$current" == "$expected_old" ]] || fail "production HEAD changed during deploy: got=$current expected=$expected_old"
 [[ "$branch" == "$expected_branch" ]] || fail "production branch changed during deploy: got=$branch expected=$expected_branch"
+# Same deploy-managed drift as the preflight: the Caddyfile may have been
+# rewritten by a cutover between preflight and sync.
+git checkout -- ops/edge/Caddyfile 2>/dev/null || true
 [[ -z "$(git status --porcelain --untracked-files=normal)" ]] || fail 'production worktree became dirty during deploy'
 
 bundle_head="$(git bundle list-heads "$bundle" | awk '$2 == "HEAD" {print $1}')"
@@ -310,7 +319,10 @@ fail() {
 
 head="$(git rev-parse HEAD)"
 [[ "$head" == "$target" ]] || fail "production git HEAD mismatch: got=$head expected=$target"
-[[ -z "$(git status --porcelain --untracked-files=normal)" ]] || fail 'production worktree is dirty at final receipt'
+# The Caddyfile holds post-cutover state here — it is supposed to differ from
+# the committed copy after a deploy (that is where the marker lives). Exclude
+# it instead of checking it out, so the live content stays on disk.
+[[ -z "$(git status --porcelain --untracked-files=normal -- . ':(exclude)ops/edge/Caddyfile')" ]] || fail 'production worktree is dirty at final receipt'
 
 for service in api worker; do
   container_id="$(docker ps -q --filter "name=^crowdrelay-${service}-1$" | head -n1)"
