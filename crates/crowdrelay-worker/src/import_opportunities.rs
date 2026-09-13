@@ -70,6 +70,8 @@ struct OpportunityRow {
     why_fit: String,
     #[serde(default)]
     verification: String,
+    #[serde(default)]
+    verified_destination: String,
 }
 
 /// What an import run did, so the operator sees more than "done".
@@ -246,9 +248,9 @@ pub async fn import_opportunities(
                 (workspace_id, opportunity_kind, source, external_key, title,
                  organization, destination_url, contact_email, country_code,
                  fit_basis_points, confidence_basis_points,
-                 strategic_value_basis_points, deadline, eligible,
-                 metadata, status)
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,'new')
+                 strategic_value_basis_points, verified_destination, deadline,
+                 eligible, metadata, status)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,'new')
             ON CONFLICT (workspace_id, source, external_key) DO UPDATE SET
                 -- Contact details and the deadline are what a re-import is for:
                 -- the sheet is the band's live record and CrowdRelay's copy goes
@@ -267,6 +269,13 @@ pub async fn import_opportunities(
                         THEN EXCLUDED.strategic_value_basis_points
                     ELSE viryaos_team_opportunities.strategic_value_basis_points
                 END,
+                -- Promotes false to true and never the reverse. A verification
+                -- is an assertion somebody made about the destination; the sheet
+                -- can add one, and an operator who verified a row inside
+                -- CrowdRelay must not have it taken away by a re-export that
+                -- happens not to carry the note.
+                verified_destination = viryaos_team_opportunities.verified_destination
+                    OR EXCLUDED.verified_destination,
                 title = EXCLUDED.title,
                 -- `status`, `eligible` and `metadata` are deliberately absent.
                 -- Status is the loop's own record of what it did — a re-import
@@ -290,6 +299,11 @@ pub async fn import_opportunities(
         .bind(basis_points(&row.fit_basis_points).unwrap_or(0))
         .bind(basis_points(&row.confidence_basis_points).unwrap_or(2_500))
         .bind(strategic_value(&row))
+        // Only the rows whose verification names an official source. Automated
+        // discovery sets this false deliberately and the operator endpoint takes
+        // it as an explicit assertion — this carries the assertion the band
+        // already recorded, and claims nothing for the rest.
+        .bind(row.verified_destination.trim().eq_ignore_ascii_case("true"))
         .bind(deadline)
         .bind(eligible)
         .bind(metadata(&row))

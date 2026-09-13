@@ -197,7 +197,26 @@ FIELDS = [
     "next_step",
     "why_fit",
     "verification",
+    "verified_destination",
 ]
+
+
+# The one verification state that asserts the destination itself was checked
+# against an official source. Everything else in the sheet says "to verify", and
+# two of them say "for re-verification", which is the opposite of a verification.
+#
+# `verified_destination` gates dispatch (`execution.rs` selects on
+# `eligible AND verified_destination`) and holds every opportunity in
+# `evaluate_live_opportunity` before its score is even read. Automated discovery
+# sets it false on purpose — `autopilot/discovery.rs` does — and the operator
+# endpoint takes it as a required assertion. So this maps only the rows where the
+# band recorded that assertion itself, from an official source, and leaves the 399
+# others held exactly as discovery would leave them.
+OFFICIALLY_VERIFIED = "zweryfikowane 2026 - zrodlo oficjalne"
+
+
+def destination_verified(value: object) -> str:
+    return "true" if fold(value) == OFFICIALLY_VERIFIED else "false"
 
 
 def convert(records: list[dict]) -> tuple[list[dict], dict[str, int]]:
@@ -277,6 +296,9 @@ def convert(records: list[dict]) -> tuple[list[dict], dict[str, int]]:
                 "next_step": clean(record.get("Następny_krok"))[:500],
                 "why_fit": clean(record.get("Uzasadnienie_dopasowania"))[:1000],
                 "verification": clean(record.get("Status_weryfikacji"))[:200],
+                "verified_destination": destination_verified(
+                    record.get("Status_weryfikacji")
+                ),
             }
         )
     return out, counts
