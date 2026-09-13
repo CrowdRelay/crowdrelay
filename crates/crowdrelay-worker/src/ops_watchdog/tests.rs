@@ -12,6 +12,22 @@
 #[cfg(test)]
 mod tests {
     use super::{OpsSnapshot, conditions};
+use crate::auto_post_platforms::{PublishingPosture, RedditPosture};
+
+/// The posture of a workspace whose channels are all switched on.
+///
+/// Every test that is not about publishing uses this, so a condition about
+/// unpublished drafts does not fire in the middle of an unrelated assertion.
+fn publishing() -> PublishingPosture {
+    PublishingPosture {
+        platforms: crate::auto_post_platforms::AutoPostPlatforms {
+            telegram: true,
+            discord: true,
+            social: true,
+        },
+        reddit: RedditPosture::Publishes,
+    }
+}
 
     fn healthy() -> OpsSnapshot {
         OpsSnapshot {
@@ -34,6 +50,7 @@ mod tests {
             relentless_degraded_phases: None,
             outcome_rejection_reasons: None,
             off_platform_push_attempts: 0,
+            reddit_drafts_waiting: 0,
         }
     }
 
@@ -46,7 +63,7 @@ mod tests {
     fn orphans_older_than_the_window_report_without_alarming() {
         let mut snapshot = healthy();
         snapshot.orphaned_publishing_actions_all_time = 2;
-        let raised = conditions(&snapshot)
+        let raised = conditions(&snapshot, publishing())
             .into_iter()
             .filter(|condition| condition.active)
             .map(|condition| condition.key)
@@ -55,7 +72,7 @@ mod tests {
             raised.is_empty(),
             "orphans outside the window must not hold an alarm open: {raised:?}"
         );
-        let orphan = conditions(&snapshot)
+        let orphan = conditions(&snapshot, publishing())
             .into_iter()
             .find(|condition| condition.key == "publishing.orphaned_draft")
             .expect("the orphaned-draft condition is always present");
@@ -73,7 +90,7 @@ mod tests {
     fn an_unscoreable_live_opportunity_raises_attention_by_itself() {
         let mut snapshot = healthy();
         snapshot.unscoreable_live_opportunities = 430;
-        let raised = conditions(&snapshot)
+        let raised = conditions(&snapshot, publishing())
             .into_iter()
             .filter(|c| c.active)
             .map(|c| c.key)
@@ -95,7 +112,7 @@ mod tests {
     fn an_unscoreable_live_opportunity_is_a_warning() {
         let mut snapshot = healthy();
         snapshot.unscoreable_live_opportunities = 1;
-        let condition = conditions(&snapshot)
+        let condition = conditions(&snapshot, publishing())
             .into_iter()
             .find(|c| c.key == "growth.unscoreable_live_opportunities")
             .expect("condition should exist");
@@ -120,7 +137,7 @@ mod tests {
     fn duplicate_community_drafts_raise_attention_by_themselves() {
         let mut snapshot = healthy();
         snapshot.duplicate_community_drafts = 2;
-        let raised = conditions(&snapshot)
+        let raised = conditions(&snapshot, publishing())
             .into_iter()
             .filter(|c| c.active)
             .map(|c| c.key)
@@ -129,6 +146,91 @@ mod tests {
             raised,
             vec!["publishing.duplicate_community_draft"],
             "a queued double-post must fire without needing any other fault"
+        );
+    }
+
+    /// The condition this whole surface exists for.
+    ///
+    /// An operator approved every suggestion, believed they had set autopilot
+    /// everywhere, and saw nothing publish. Reddit needs three switches, the
+    /// write switch overrides the other two, and none of that was readable
+    /// anywhere — the readiness log reported the community executor as enabled
+    /// because the worker had been constructed, not because it would post.
+    #[test]
+    fn drafts_with_nothing_to_publish_them_raise_attention() {
+        let mut snapshot = healthy();
+        snapshot.reddit_drafts_waiting = 5;
+        let drafting = PublishingPosture {
+            platforms: crate::auto_post_platforms::AutoPostPlatforms::default(),
+            reddit: RedditPosture::Drafts {
+                missing: "CROWDRELAY_REDDIT_WRITE_ENABLED",
+            },
+        };
+        let raised = conditions(&snapshot, drafting)
+            .into_iter()
+            .filter(|c| c.active)
+            .map(|c| c.key)
+            .collect::<Vec<_>>();
+        assert_eq!(raised, vec!["publishing.drafts_with_no_publisher"]);
+    }
+
+    /// And it must name the switch, not merely report the count.
+    ///
+    /// A count of waiting drafts is what the operator could already see. The
+    /// switch is what they could not.
+    #[test]
+    fn the_waiting_drafts_condition_names_the_missing_switch() {
+        let mut snapshot = healthy();
+        snapshot.reddit_drafts_waiting = 5;
+        let drafting = PublishingPosture {
+            platforms: crate::auto_post_platforms::AutoPostPlatforms::default(),
+            reddit: RedditPosture::Drafts {
+                missing: "CROWDRELAY_COMMUNITY_AUTO_POST",
+            },
+        };
+        let named = conditions(&snapshot, drafting)
+            .into_iter()
+            .find(|c| c.key == "publishing.drafts_with_no_publisher")
+            .and_then(|c| c.details.get("missing_switch").cloned());
+        assert_eq!(
+            named,
+            Some(serde_json::json!("CROWDRELAY_COMMUNITY_AUTO_POST")),
+        );
+    }
+
+    /// Publishing on, drafts waiting: that is a queue, not a fault.
+    ///
+    /// The executor claims them on its own schedule, bounded to one post per
+    /// subreddit per 7 days.
+    #[test]
+    fn drafts_waiting_while_publishing_is_on_is_not_a_fault() {
+        let mut snapshot = healthy();
+        snapshot.reddit_drafts_waiting = 5;
+        let raised = conditions(&snapshot, publishing())
+            .into_iter()
+            .filter(|c| c.active)
+            .map(|c| c.key)
+            .collect::<Vec<_>>();
+        assert!(raised.is_empty(), "a queue being worked is not an alarm");
+    }
+
+    /// Publishing off with nothing waiting is a setting, not a fault.
+    #[test]
+    fn manual_mode_with_an_empty_queue_reports_nothing() {
+        let drafting = PublishingPosture {
+            platforms: crate::auto_post_platforms::AutoPostPlatforms::default(),
+            reddit: RedditPosture::Drafts {
+                missing: "CROWDRELAY_REDDIT_WRITE_ENABLED",
+            },
+        };
+        let raised = conditions(&healthy(), drafting)
+            .into_iter()
+            .filter(|c| c.active)
+            .map(|c| c.key)
+            .collect::<Vec<_>>();
+        assert!(
+            raised.is_empty(),
+            "a manual channel with nothing queued is a choice, not a problem"
         );
     }
 
@@ -143,7 +245,7 @@ mod tests {
     fn a_refused_off_platform_push_raises_attention_by_itself() {
         let mut snapshot = healthy();
         snapshot.off_platform_push_attempts = 1;
-        let raised = conditions(&snapshot)
+        let raised = conditions(&snapshot, publishing())
             .into_iter()
             .filter(|c| c.active)
             .map(|c| c.key)
@@ -164,7 +266,7 @@ mod tests {
     fn a_refused_off_platform_push_is_critical() {
         let mut snapshot = healthy();
         snapshot.off_platform_push_attempts = 2;
-        let severity = conditions(&snapshot)
+        let severity = conditions(&snapshot, publishing())
             .into_iter()
             .find(|c| c.key == "safety.off_platform_push_proposed")
             .map(|c| c.severity);
@@ -182,7 +284,7 @@ mod tests {
     fn guard_reasons_travel_without_raising_an_alarm() {
         let mut snapshot = healthy();
         snapshot.outcome_rejection_reasons = Some("MISSING_TARGET_IDENTITY=4".to_owned());
-        let raised = conditions(&snapshot)
+        let raised = conditions(&snapshot, publishing())
             .into_iter()
             .filter(|c| c.active)
             .map(|c| c.key)
@@ -191,7 +293,7 @@ mod tests {
             raised.is_empty(),
             "a guard doing its job is not an alarm; it is a reading"
         );
-        let reported = conditions(&snapshot)
+        let reported = conditions(&snapshot, publishing())
             .into_iter()
             .find(|c| c.key == "learning.outcomes_unverified")
             .and_then(|c| c.details.get("guards_fired").cloned());
@@ -211,7 +313,7 @@ mod tests {
     fn a_relentlessly_failing_phase_raises_attention_by_itself() {
         let mut snapshot = healthy();
         snapshot.relentless_degraded_phases = Some("action_claim".to_owned());
-        let raised = conditions(&snapshot)
+        let raised = conditions(&snapshot, publishing())
             .into_iter()
             .filter(|c| c.active)
             .map(|c| c.key)
@@ -232,7 +334,7 @@ mod tests {
     fn a_relentlessly_failing_phase_is_critical() {
         let mut snapshot = healthy();
         snapshot.relentless_degraded_phases = Some("evaluation,reply_triage_claim".to_owned());
-        let severity = conditions(&snapshot)
+        let severity = conditions(&snapshot, publishing())
             .into_iter()
             .find(|c| c.key == "brain.phase_failing_every_cycle")
             .map(|c| c.severity);
@@ -247,7 +349,7 @@ mod tests {
     #[test]
     fn occasional_degradation_does_not_raise_attention() {
         let snapshot = healthy();
-        let raised = conditions(&snapshot)
+        let raised = conditions(&snapshot, publishing())
             .into_iter()
             .filter(|c| c.active)
             .map(|c| c.key)
@@ -267,7 +369,7 @@ mod tests {
     fn duplicate_community_drafts_are_a_warning() {
         let mut snapshot = healthy();
         snapshot.duplicate_community_drafts = 1;
-        let condition = conditions(&snapshot)
+        let condition = conditions(&snapshot, publishing())
             .into_iter()
             .find(|c| c.key == "publishing.duplicate_community_draft")
             .expect("condition should exist");
@@ -286,7 +388,7 @@ mod tests {
     fn a_refused_growth_event_raises_attention_by_itself() {
         let mut snapshot = healthy();
         snapshot.refused_growth_deliveries = 4;
-        let raised = conditions(&snapshot)
+        let raised = conditions(&snapshot, publishing())
             .into_iter()
             .filter(|c| c.active)
             .map(|c| c.key)
@@ -308,7 +410,7 @@ mod tests {
     fn a_refused_growth_event_is_critical() {
         let mut snapshot = healthy();
         snapshot.refused_growth_deliveries = 1;
-        let condition = conditions(&snapshot)
+        let condition = conditions(&snapshot, publishing())
             .into_iter()
             .find(|c| c.key == "delivery.growth_event_refused")
             .expect("condition should exist");
@@ -318,7 +420,7 @@ mod tests {
     /// A healthy delivery path must not raise it.
     #[test]
     fn no_refused_growth_event_stays_quiet() {
-        let raised = conditions(&healthy())
+        let raised = conditions(&healthy(), publishing())
             .into_iter()
             .filter(|c| c.active)
             .map(|c| c.key)
@@ -343,7 +445,7 @@ mod tests {
         let mut snapshot = healthy();
         snapshot.outcomes_rejected_unverified = 7;
         snapshot.outcomes_accepted = 0;
-        let raised = conditions(&snapshot)
+        let raised = conditions(&snapshot, publishing())
             .into_iter()
             .filter(|c| c.active)
             .map(|c| c.key)
@@ -359,7 +461,7 @@ mod tests {
         let mut snapshot = healthy();
         snapshot.outcomes_rejected_unverified = 2;
         snapshot.outcomes_accepted = 9;
-        let raised = conditions(&snapshot)
+        let raised = conditions(&snapshot, publishing())
             .into_iter()
             .filter(|c| c.active)
             .map(|c| c.key)
@@ -373,7 +475,7 @@ mod tests {
     #[test]
     fn healthy_runtime_does_not_raise_attention() {
         assert!(
-            conditions(&healthy())
+            conditions(&healthy(), publishing())
                 .iter()
                 .all(|condition| !condition.active)
         );
@@ -383,7 +485,7 @@ mod tests {
     fn executor_offline_is_detected() {
         let mut snapshot = healthy();
         snapshot.executor_active = 0;
-        let active = conditions(&snapshot)
+        let active = conditions(&snapshot, publishing())
             .into_iter()
             .filter(|condition| condition.active)
             .map(|condition| condition.key)
@@ -399,7 +501,7 @@ mod tests {
         let mut snapshot = healthy();
         snapshot.unknown_actions = 2;
         snapshot.stale_unknown_actions = 0;
-        let active = conditions(&snapshot)
+        let active = conditions(&snapshot, publishing())
             .into_iter()
             .filter(|condition| condition.active)
             .map(|condition| condition.key)
@@ -414,7 +516,7 @@ mod tests {
         let mut snapshot = healthy();
         snapshot.unknown_actions = 2;
         snapshot.stale_unknown_actions = 1;
-        let active = conditions(&snapshot)
+        let active = conditions(&snapshot, publishing())
             .into_iter()
             .filter(|condition| condition.active)
             .map(|condition| condition.key)
@@ -430,7 +532,7 @@ mod tests {
         // rather than waiting out a staleness threshold.
         let mut snapshot = healthy();
         snapshot.contradicted_actions = 1;
-        let active = conditions(&snapshot)
+        let active = conditions(&snapshot, publishing())
             .into_iter()
             .filter(|condition| condition.active)
             .map(|condition| condition.key)
@@ -447,14 +549,14 @@ mod tests {
         let mut snapshot = healthy();
         snapshot.unknown_actions = 3;
         snapshot.contradicted_actions = 0;
-        assert!(conditions(&snapshot).iter().all(|condition| condition.key
+        assert!(conditions(&snapshot, publishing()).iter().all(|condition| condition.key
             != "execution.contradicted_outcome"
             || !condition.active));
     }
 
     /// The keys `conditions` reports as active for a snapshot.
     fn active_keys(snapshot: &OpsSnapshot) -> Vec<&'static str> {
-        conditions(snapshot)
+        conditions(snapshot, publishing())
             .into_iter()
             .filter(|condition| condition.active)
             .map(|condition| condition.key)

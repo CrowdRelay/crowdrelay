@@ -30,7 +30,7 @@ use crowdrelay_worker::{
     agent_outcomes::AgentOutcomeWorker,
     attribution::AttributionWorker,
     audience_graph::AudienceGraphSweeper,
-    auto_post_platforms,
+    auto_post_platforms::PublishingPosture,
     autopilot::{AutopilotWorker, TeamEmailDispatchWorker},
     bootstrap::{BootstrapSpec, bootstrap, bootstrap_admission_access, bootstrap_team_operations},
     city_geocoding::CityGeocodeWorker,
@@ -373,12 +373,6 @@ async fn run(database: PgPool, config: &Config, standby: bool) -> Result<()> {
         );
         None
     };
-    let ops_watchdog = OpsWatchdogWorker::new(
-        database.clone(),
-        workspace_id,
-        OPS_WATCHDOG_INTERVAL,
-        config.database.operation_timeout,
-    );
     // Receipt reconciliation: flags dispatched actions whose executor
     // receipts never arrived (transitions them to `unknown`) and resolves
     // existing `unknown` actions from late receipts or the community
@@ -390,6 +384,14 @@ async fn run(database: PgPool, config: &Config, standby: bool) -> Result<()> {
         RECEIPT_RECONCILIATION_INTERVAL,
         config.database.operation_timeout,
     );
+    let agent_service_auth_key = std::env::var("CROWDRELAY_AGENT_SERVICE_AUTH_KEY")
+        .ok()
+        .map(|key| key.trim().to_owned())
+        .filter(|key| !key.is_empty());
+    // The community-intelligence Reddit adapter needs the same key, and the
+    // community executor takes ownership of it below.
+    let community_intel_agent_key = agent_service_auth_key.clone();
+    let posture = PublishingPosture::from_env(agent_service_auth_key.is_some());
     let agent_outcome_worker = if config.agent_outcomes_enabled {
         Some(AgentOutcomeWorker::new(
             database.clone(),
@@ -400,11 +402,7 @@ async fn run(database: PgPool, config: &Config, standby: bool) -> Result<()> {
             // The operator's standing approval, read here rather than at each
             // executor: the decision this affects is made when the outcome
             // becomes an action, long before any executor sees it.
-            auto_post_platforms::AutoPostPlatforms {
-                telegram: auto_post_enabled("CROWDRELAY_TELEGRAM_AUTO_POST"),
-                discord: auto_post_enabled("CROWDRELAY_DISCORD_AUTO_POST"),
-                social: auto_post_enabled("CROWDRELAY_SOCIAL_AUTO_POST"),
-            },
+            posture.platforms,
         ))
     } else {
         tracing::info!("agent outcome ingestion is disabled by process configuration");
@@ -435,21 +433,14 @@ async fn run(database: PgPool, config: &Config, standby: bool) -> Result<()> {
     // HMAC from nothing, and gets 401 from the agents service — which reads as
     // a wrong key rather than a missing one. That is exactly how the Reddit
     // adapter reached production authenticating with an empty secret.
-    let agent_service_auth_key = std::env::var("CROWDRELAY_AGENT_SERVICE_AUTH_KEY")
-        .ok()
-        .map(|key| key.trim().to_owned())
-        .filter(|key| !key.is_empty());
-    // The community-intelligence Reddit adapter needs the same key, and the
-    // community executor takes ownership of it below.
-    let community_intel_agent_key = agent_service_auth_key.clone();
-    let auto_post_requested = std::env::var("CROWDRELAY_COMMUNITY_AUTO_POST")
-        .map(|value| {
-            let value = value.trim().to_ascii_lowercase();
-            matches!(value.as_str(), "true" | "1" | "yes" | "on")
-        })
-        .unwrap_or(false);
-    let has_agent_key = agent_service_auth_key.is_some();
-    let manual_mode = !auto_post_requested || !has_agent_key;
+    let ops_watchdog = OpsWatchdogWorker::new(
+        database.clone(),
+        workspace_id,
+        OPS_WATCHDOG_INTERVAL,
+        config.database.operation_timeout,
+        posture,
+    );
+    let manual_mode = !posture.reddit.publishes();
     let community_executor = match CommunityExecutorWorker::new(
         database.clone(),
         workspace_id,
@@ -463,21 +454,12 @@ async fn run(database: PgPool, config: &Config, standby: bool) -> Result<()> {
             // Say which of the two reasons put it in manual mode. "Not
             // posting" with no cause is the kind of message an operator reads
             // once and cannot act on.
-            if manual_mode {
-                // Read-only is checked first because it overrides the other
-                // two: an operator who set the env var deserves to be told
-                // it had no effect rather than left to infer it.
-                let reason = if CommunityExecutorWorker::reddit_is_read_only() {
-                    "reddit is read-only by policy — the login session the growth loop reads through is not risked on automated posting"
-                } else if !auto_post_requested {
-                    "CROWDRELAY_COMMUNITY_AUTO_POST is not enabled"
-                } else {
-                    "CROWDRELAY_AGENT_SERVICE_AUTH_KEY is missing"
-                };
+            if let Some(missing) = posture.reddit.missing_switch() {
+                // The order of the three switches is decided in
+                // `PublishingPosture::from_env`, so this log and the watchdog
+                // name the same one.
                 tracing::info!(
-                    auto_post_requested,
-                    has_agent_key,
-                    reason,
+                    missing_switch = missing,
                     "community executor running in MANUAL MODE — posts are drafted and wait for an operator to publish them and register the URL"
                 );
             } else {
@@ -784,10 +766,10 @@ async fn run(database: PgPool, config: &Config, standby: bool) -> Result<()> {
         push_delivery_enabled: push_delivery_worker.is_some(),
         nearby_shows_enabled: true,
         city_geocoding_enabled,
-        community_executor_enabled: community_executor.is_some(),
+        community_executor_enabled: posture.reddit.publishes(),
         telegram_executor_enabled: telegram_executor.is_some(),
         discord_executor_enabled: discord_executor.is_some(),
-        social_post_executor_enabled: true,
+        social_post_executor_enabled: posture.platforms.social,
         community_join_executor_enabled: community_join_executor.is_some(),
         reddit_discovery_enabled: reddit_discovery.is_some(),
         x_discovery_enabled: x_discovery.is_some(),

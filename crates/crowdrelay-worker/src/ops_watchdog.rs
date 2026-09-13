@@ -103,6 +103,8 @@
 use std::{collections::HashMap, time::Duration};
 
 use crowdrelay_domain::WorkspaceId;
+
+use crate::auto_post_platforms::PublishingPosture;
 use serde_json::{Value, json};
 use sqlx::{FromRow, PgPool, Postgres, Transaction};
 use thiserror::Error;
@@ -134,6 +136,13 @@ pub struct OpsWatchdogWorker {
     workspace_id: WorkspaceId,
     poll_interval: Duration,
     operation_timeout: Duration,
+    /// Whether anything will publish a Reddit draft, and which switch is missing.
+    ///
+    /// Passed in rather than read here: the watchdog reports on state, and a
+    /// process-level switch is not state it should be discovering for itself.
+    /// One value is read in `main` so the readiness log, the executor's mode and
+    /// this condition cannot disagree about what will publish.
+    posture: PublishingPosture,
 }
 
 impl OpsWatchdogWorker {
@@ -143,12 +152,14 @@ impl OpsWatchdogWorker {
         workspace_id: WorkspaceId,
         poll_interval: Duration,
         operation_timeout: Duration,
+        posture: PublishingPosture,
     ) -> Self {
         Self {
             pool,
             workspace_id,
             poll_interval,
             operation_timeout,
+            posture,
         }
     }
 
@@ -184,7 +195,7 @@ impl OpsWatchdogWorker {
             .execute(&mut *transaction)
             .await?;
         let snapshot = load_snapshot(&mut transaction, self.workspace_id).await?;
-        let conditions = conditions(&snapshot);
+        let conditions = conditions(&snapshot, self.posture);
         let states = load_states(&mut transaction, self.workspace_id).await?;
         let repeat_before = now
             .checked_sub(ALERT_REPEAT_AFTER)
@@ -357,6 +368,12 @@ struct OpsSnapshot {
     /// than the link. The guard catches it every time — that is exactly why a
     /// model doing it repeatedly must be visible rather than silently absorbed.
     off_platform_push_attempts: i64,
+    /// Reddit drafts sitting in `awaiting_manual_post`.
+    ///
+    /// On its own this is the normal state of a manual channel. Paired with the
+    /// publishing posture it answers the question an operator actually asks:
+    /// "I approved everything and set autopilot — why has nothing published?"
+    reddit_drafts_waiting: i64,
 }
 
 #[derive(Clone, Debug)]
@@ -656,7 +673,10 @@ async fn load_snapshot(
              WHERE o.workspace_id=$1 AND o.status='rejected'
                AND o.rejection_reason LIKE 'OFF_PLATFORM_PUSH_TARGET%'
                AND o.created_at > now() - interval '1 day'
-            )::bigint AS off_platform_push_attempts
+            )::bigint AS off_platform_push_attempts,
+            (SELECT count(*) FROM community_posts p
+             WHERE p.workspace_id=$1 AND p.status='awaiting_manual_post'
+            )::bigint AS reddit_drafts_waiting
         FROM viryaos_executor_instances WHERE workspace_id=$1
         "#,
     )

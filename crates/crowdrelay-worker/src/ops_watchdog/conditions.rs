@@ -6,7 +6,7 @@
 // to the watchdog for: what counts as worth waking somebody for, and why each
 // answer is a warning rather than critical.
 
-fn conditions(snapshot: &OpsSnapshot) -> Vec<Condition> {
+fn conditions(snapshot: &OpsSnapshot, posture: PublishingPosture) -> Vec<Condition> {
     vec![
         Condition {
             // Critical, and deliberately not a warning. Nothing downstream of
@@ -197,6 +197,40 @@ fn conditions(snapshot: &OpsSnapshot) -> Vec<Condition> {
                            'OFF_PLATFORM_PUSH_TARGET%' for the target the model \
                            wrote, then fix the prompt or template that produced \
                            it. Nothing was sent; the guard refused it.",
+            }),
+        },
+        Condition {
+            // Warning, not critical: nothing is broken and nothing is lost. The
+            // drafts are intact and an operator can publish them by hand today.
+            //
+            // It exists because the operator has no other way to learn this.
+            // Reddit publishing needs three switches, the write switch is
+            // checked first and overrides the other two, and it was in no
+            // `.env.example` — so somebody who approved every suggestion and
+            // believed they had set autopilot everywhere watched drafts pile up
+            // with nothing anywhere naming what was missing. The growth
+            // readiness log reported the community executor as enabled, because
+            // it reported that the worker had been constructed rather than that
+            // it would post.
+            //
+            // Both halves are required. Drafts with no publisher is the fault;
+            // an empty queue with publishing off is a setting, and a manual
+            // channel with nothing waiting is nothing to report.
+            key: "publishing.drafts_with_no_publisher",
+            severity: "warning",
+            summary: "Reddit drafts are waiting and nothing will publish them",
+            active: snapshot.reddit_drafts_waiting > 0 && !posture.reddit.publishes(),
+            details: json!({
+                "drafts_waiting": snapshot.reddit_drafts_waiting,
+                "missing_switch": posture.reddit.missing_switch(),
+                "remedy": "either publish them by hand and register each URL \
+                           through POST /v1/control-plane/community-posts/{id}/\
+                           register-manual, or set the named switch in \
+                           deploy/.env.production and restart the worker. \
+                           Reddit needs CROWDRELAY_REDDIT_WRITE_ENABLED and \
+                           CROWDRELAY_COMMUNITY_AUTO_POST together, plus an \
+                           agent-service key — the write switch is checked \
+                           first, so the other two have no effect without it.",
             }),
         },
         Condition {

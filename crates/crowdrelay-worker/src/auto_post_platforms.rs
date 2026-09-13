@@ -47,6 +47,105 @@ impl AutoPostPlatforms {
     }
 }
 
+/// Whether Reddit posting will happen, and if not, which switch is missing.
+///
+/// Reddit needs three things, and only one of them is in `.env.example`:
+/// `CROWDRELAY_COMMUNITY_AUTO_POST=true`, `CROWDRELAY_REDDIT_WRITE_ENABLED=true`
+/// and an agent-service auth key. The write switch is checked first and
+/// overrides the others, and it was undocumented — so an operator who set
+/// "autopilot everywhere", approved every suggestion, and watched drafts pile up
+/// had nothing to read that named the switch they were missing.
+///
+/// The reason is a value rather than a log line because the log line is the
+/// problem: it is written once at worker startup, inside a container, and the
+/// operator asking "why has nothing published" is not reading it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RedditPosture {
+    /// Approved posts publish through the agents service browser session.
+    Publishes,
+    /// Drafts are written `awaiting_manual_post` and wait for a person.
+    Drafts {
+        /// The switch to set, or the policy that overrides all of them. Stable
+        /// text: it reaches the operator through the watchdog.
+        missing: &'static str,
+    },
+}
+
+impl RedditPosture {
+    #[must_use]
+    pub const fn publishes(self) -> bool {
+        matches!(self, Self::Publishes)
+    }
+
+    /// The switch an operator has to change, or `None` when nothing is missing.
+    #[must_use]
+    pub const fn missing_switch(self) -> Option<&'static str> {
+        match self {
+            Self::Publishes => None,
+            Self::Drafts { missing } => Some(missing),
+        }
+    }
+}
+
+/// Reads the publishing switches once, so every reader agrees.
+///
+/// `community_executor_enabled` in the growth-readiness log used to be
+/// `community_executor.is_some()` — the worker is constructed in manual mode
+/// too, so the one surface an operator has for "is Reddit posting on" reported
+/// `true` while the executor would never post. Same shape as a connection that
+/// reads `connected` with an invalid credential.
+#[derive(Clone, Copy, Debug)]
+pub struct PublishingPosture {
+    pub platforms: AutoPostPlatforms,
+    pub reddit: RedditPosture,
+}
+
+impl PublishingPosture {
+    /// `has_agent_key` is passed rather than read here because the key itself is
+    /// a secret the caller already holds and validates.
+    #[must_use]
+    pub fn from_env(has_agent_key: bool) -> Self {
+        Self {
+            platforms: AutoPostPlatforms {
+                telegram: flag("CROWDRELAY_TELEGRAM_AUTO_POST"),
+                discord: flag("CROWDRELAY_DISCORD_AUTO_POST"),
+                social: flag("CROWDRELAY_SOCIAL_AUTO_POST"),
+            },
+            // Order matters and is the order an operator needs. The write switch
+            // overrides the other two, so somebody who set the auto-post flag is
+            // told that it had no effect instead of being left to infer it.
+            reddit: if !flag("CROWDRELAY_REDDIT_WRITE_ENABLED") {
+                RedditPosture::Drafts {
+                    missing: "CROWDRELAY_REDDIT_WRITE_ENABLED",
+                }
+            } else if !flag("CROWDRELAY_COMMUNITY_AUTO_POST") {
+                RedditPosture::Drafts {
+                    missing: "CROWDRELAY_COMMUNITY_AUTO_POST",
+                }
+            } else if !has_agent_key {
+                RedditPosture::Drafts {
+                    missing: "CROWDRELAY_AGENT_SERVICE_AUTH_KEY",
+                }
+            } else {
+                RedditPosture::Publishes
+            },
+        }
+    }
+}
+
+/// One spelling of "on" for every switch here.
+///
+/// Three call sites used to parse this inline with the same four accepted
+/// values, and a fourth would have been written by hand.
+fn flag(name: &str) -> bool {
+    std::env::var(name)
+        .map(|value| {
+            let value = value.trim().to_ascii_lowercase();
+            matches!(value.as_str(), "true" | "1" | "yes" | "on")
+        })
+        .unwrap_or(false)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -92,6 +191,28 @@ mod tests {
         assert!(!all_on.permits(Some("reddit")));
         assert!(!all_on.permits(Some("Reddit")));
         assert!(!all_on.permits(Some(" REDDIT ")));
+    }
+
+    /// The write switch overrides the other two, and is reported first.
+    ///
+    /// An operator who set `CROWDRELAY_COMMUNITY_AUTO_POST` has to be told that
+    /// it had no effect, rather than being left to infer it from drafts piling
+    /// up. Reporting the auto-post flag as the missing one would send them to
+    /// check a switch they had already set.
+    #[test]
+    fn the_reddit_write_switch_is_reported_before_the_others() {
+        // Deliberately not reading the environment: these tests must not depend
+        // on the machine running them, and `set_var` is racy across threads.
+        let held = RedditPosture::Drafts {
+            missing: "CROWDRELAY_REDDIT_WRITE_ENABLED",
+        };
+        assert!(!held.publishes());
+        assert_eq!(
+            held.missing_switch(),
+            Some("CROWDRELAY_REDDIT_WRITE_ENABLED")
+        );
+        assert!(RedditPosture::Publishes.publishes());
+        assert_eq!(RedditPosture::Publishes.missing_switch(), None);
     }
 
     /// An unrecognised platform is exactly when a human should look.
