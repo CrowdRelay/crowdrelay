@@ -61,13 +61,21 @@ pub(crate) struct WorkerSummary {
     pub(crate) lease_age_seconds: i64,
     /// False once the lease is stale enough that the process cannot be running.
     pub(crate) alive: bool,
-    /// Seconds since the last autopilot decision was evaluated. 999999 if no
-    /// decision has ever been recorded.
+    /// Seconds since an autopilot cycle last *finished*. 999999 if none ever has.
     pub(crate) cycle_age_seconds: i64,
+    /// Seconds since an autopilot decision was last evaluated. 999999 if none
+    /// ever has.
+    ///
+    /// Reported next to `cycle_age_seconds` rather than instead of it, because
+    /// the two answer different questions and only one of them is a fault. A
+    /// long decision age on a healthy cycle means the brain is finding nothing
+    /// worth doing, which is a growth-loop observation; a long cycle age means
+    /// the worker is not getting through a cycle at all.
+    pub(crate) decision_age_seconds: i64,
     /// True when the lease is fresh but no autopilot cycle has completed in
     /// [`WORKER_CYCLE_STALE_AFTER_SECONDS`]. This is the crash-loop signal:
     /// the worker keeps restarting and acquiring leadership but never gets
-    /// far enough to run the evaluator.
+    /// far enough to finish a cycle.
     pub(crate) crash_looping: bool,
 }
 
@@ -97,22 +105,44 @@ pub(crate) async fn load_worker_summary(pool: &PgPool) -> Result<WorkerSummary, 
     .fetch_one(pool)
     .await?;
 
-    // Last autopilot decision timestamp — the honest signal that the worker
-    // actually completed a cycle, not just acquired a lease.
+    // Last *finished* cycle — the honest signal that the worker gets through a
+    // cycle, not just that it acquired a lease.
     //
-    // This query is deliberately cross-workspace: the worker serves all
+    // This used to read `MAX(evaluated_at)` from `viryaos_autopilot_decisions`,
+    // which is a proxy and not the thing: a cycle that runs correctly and finds
+    // nothing worth deciding writes no decision row. Measured in production
+    // 2026-09-13, that reported `crash_looping: true` against a worker with
+    // `RestartCount=0` and eight consecutive `succeeded` cycles, each finishing
+    // in 300-1700ms. Thirty minutes of healthy empty cycles was enough to raise
+    // a crash-loop alarm in the operator's first view.
+    //
+    // The proxy predates `viryaos_autopilot_cycle_runs` (migration 0233), which
+    // records cycle completion directly and whose own comment names the case
+    // this signal wants: "NULL means the cycle never finished: the process died
+    // mid-cycle, which is otherwise indistinguishable from a cycle that ran and
+    // decided nothing." Reading `finished_at` gets both halves right — it goes
+    // stale when cycles stop finishing, and it does not when they finish empty.
+    //
+    // Both queries are deliberately cross-workspace: the worker serves all
     // workspaces and the operator needs to know whether ANY cycle has
-    // completed recently, not whether one workspace has. Scoping it to a
+    // completed recently, not whether one workspace has. Scoping them to a
     // single workspace would hide a stalled worker behind a workspace that
-    // happens to have a recent decision. The workspace-scope ratchet
-    // baseline allows this one unscoped statement for that reason.
-    let cycle_age_seconds: i64 = sqlx::query_scalar(
+    // happens to have a recent cycle. The workspace-scope ratchet baseline
+    // allows these unscoped statements for that reason.
+    // One statement, two subselects: this view is on the operator's screen and
+    // does not need a second round trip to answer a second question about the
+    // same worker.
+    let (cycle_age_seconds, decision_age_seconds): (i64, i64) = sqlx::query_as(
         r#"
-        SELECT COALESCE(
-            EXTRACT(EPOCH FROM (now() - MAX(evaluated_at)))::bigint,
-            999999
-        )
-        FROM viryaos_autopilot_decisions
+        SELECT
+            COALESCE((
+                SELECT EXTRACT(EPOCH FROM (now() - MAX(finished_at)))::bigint
+                FROM viryaos_autopilot_cycle_runs
+            ), 999999),
+            COALESCE((
+                SELECT EXTRACT(EPOCH FROM (now() - MAX(evaluated_at)))::bigint
+                FROM viryaos_autopilot_decisions
+            ), 999999)
         "#,
     )
     .fetch_one(pool)
@@ -125,6 +155,7 @@ pub(crate) async fn load_worker_summary(pool: &PgPool) -> Result<WorkerSummary, 
         lease_age_seconds,
         alive,
         cycle_age_seconds,
+        decision_age_seconds,
         crash_looping,
     })
 }
