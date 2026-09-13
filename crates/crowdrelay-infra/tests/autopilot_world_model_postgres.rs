@@ -410,10 +410,12 @@ async fn pipeline_counts_count_places_not_posts() -> Result<(), Box<dyn std::err
         .execute(&pool)
         .await?;
 
-    // Three communities. Only the first will carry any posts.
+    // Three communities. Only the first will carry any posts. The URLs are in
+    // canonical form: migration 0259's `discovery_places_url_is_canonical`
+    // rejects anything `crowdrelay_canonical_place_url` would rewrite.
     for (name, url) in [
-        ("r/Test", "https://reddit.com/r/Test"),
-        ("r/Quiet", "https://reddit.com/r/Quiet"),
+        ("r/Test", "https://www.reddit.com/r/test"),
+        ("r/Quiet", "https://www.reddit.com/r/quiet"),
         ("Some Discord", "https://discord.example/server"),
     ] {
         sqlx::query(
