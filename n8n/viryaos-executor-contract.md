@@ -115,6 +115,10 @@ An executor for this event should branch on `template_id`: `press-pitch` is an e
 
 Until a handler exists, answering `2xx` and dropping the event is worse than the 422. The refusal is at least recorded, and `delivery.growth_event_refused` in `ops/attention` now reports it as critical.
 
+**A press pitch now requires its own capability, `agent.content.press_pitch`.** The capability every other drafted template needs, `agent.content`, is advertised unconditionally by the CrowdRelay worker, because the social, telegram and discord executors run in-process there and claim `social-post`, `telegram-poster` and `discord-poster` respectively. A pitch is not work any of those three can do, so it no longer rides their capability: a `press-pitch` action parks with `awaiting_executor` rather than being dispatched, marked `succeeded` with no artifact, and emitted to a consumer that refuses it. The pending-approval list reports `executor_ready: false` for it, so the state is visible before an operator spends an approval, and the stale sweep cancels it with `no_executor` after the grace window instead of recording it as done.
+
+An n8n executor that handles pitches must therefore register `agent.content.press_pitch` in its heartbeat capabilities. Registering it unparks the queue with no change in CrowdRelay — and registering it before the handler works is the one thing not to do, because that resumes emission to a consumer that will refuse it. Channel templates are unaffected and keep flowing through `agent.content`.
+
 ## Provider execution claims
 
 Before Gmail, Discord, Drive, or another provider call without a trustworthy request-idempotency primitive, POST `/v1/internal/autopilot/actions/{action_id}/execution-claim`. Only `claimed` may call the provider. `already_succeeded` is a no-op replay. `in_flight` and `ambiguous` must fail closed and require reconciliation instead of an automatic second provider call. Explicitly safe/idempotent provider operations may omit the claim when their provider key guarantees replay safety.

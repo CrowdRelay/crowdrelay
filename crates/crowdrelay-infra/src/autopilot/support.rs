@@ -58,6 +58,72 @@ mod tests {
             assert_eq!(policy.version, 1);
         }
     }
+
+    fn drafted_content(template_id: Option<&str>) -> AutopilotActionPayload {
+        AutopilotActionPayload::RequestAgentContent {
+            template_id: template_id.map(ToOwned::to_owned),
+            task_id: Uuid::now_v7(),
+            draft: json!({"platform": "instagram", "body": "hello"}),
+            recipient_email: None,
+            recipient_name: None,
+            recipient_target_id: None,
+        }
+    }
+
+    /// A press pitch needs a capability of its own.
+    ///
+    /// The worker advertises `agent.content` unconditionally for the three
+    /// channel executors, and none of them claims `press-pitch` — they claim
+    /// `social-post`, `telegram-poster` and `discord-poster`. Sharing one
+    /// capability let every pitch pass the gate, reach `succeeded` with no
+    /// artifact, and be emitted to a consumer that answers 422.
+    #[test]
+    fn a_press_pitch_needs_a_capability_the_channel_executors_do_not_supply() {
+        assert_eq!(
+            executor_capability_for_payload(&drafted_content(Some(PRESS_PITCH_TEMPLATE))),
+            Some(PRESS_PITCH_CAPABILITY)
+        );
+        assert_ne!(PRESS_PITCH_CAPABILITY, "agent.content");
+    }
+
+    /// And the channel templates must keep passing on `agent.content`.
+    ///
+    /// Their executors claim them in-process by direct SQL, so gating them
+    /// would park work that three executors are sitting idle waiting for —
+    /// which is the state `a5466cd` fixed.
+    #[test]
+    fn channel_drafts_stay_ungated() {
+        for template in [Some("social-post"), Some("telegram-poster"), None] {
+            assert_eq!(
+                executor_capability_for_payload(&drafted_content(template)),
+                None,
+                "template {template:?} must not be gated"
+            );
+        }
+    }
+
+    /// The emission gate reads the template, not just the event type.
+    #[test]
+    fn emission_capability_splits_press_pitch_from_channel_content() {
+        assert_eq!(
+            executor_capability_for_emission(
+                "crowdrelay.agent.content_requested",
+                &json!({"template_id": PRESS_PITCH_TEMPLATE}),
+            ),
+            PRESS_PITCH_CAPABILITY
+        );
+        assert_eq!(
+            executor_capability_for_emission(
+                "crowdrelay.agent.content_requested",
+                &json!({"template_id": "social-post"}),
+            ),
+            "agent.content"
+        );
+        assert_eq!(
+            executor_capability_for_emission("crowdrelay.agent.content_requested", &json!({})),
+            "agent.content"
+        );
+    }
 }
 
 // measurement repository implementation lives in `autopilot/measurement.rs`.

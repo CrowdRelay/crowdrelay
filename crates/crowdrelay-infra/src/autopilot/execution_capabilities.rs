@@ -37,6 +37,43 @@ fn executor_capability_for_event(event_type: &str) -> &'static str {
     }
 }
 
+/// The drafted-content template whose artifact is an email to a named
+/// journalist. No executor claims it: the social, telegram and discord
+/// executors claim `social-post`, `telegram-poster` and `discord-poster`
+/// respectively, by direct SQL on the agent task's `template_id`.
+pub(in crate::autopilot) const PRESS_PITCH_TEMPLATE: &str = "press-pitch";
+
+/// The capability a press pitch needs, deliberately separate from
+/// `agent.content`.
+///
+/// The worker advertises `agent.content` unconditionally, because the three
+/// channel executors are always constructed and share that action kind. A
+/// press pitch is not work any of them can do, so sharing one capability let
+/// every pitch pass the gate, be dispatched, be marked `succeeded` with no
+/// artifact anywhere, and be emitted to a consumer that answers HTTP 422.
+/// Measured in production on 2026-09-13 and reported by both
+/// `publishing.orphaned_draft` and `delivery.growth_event_refused`.
+///
+/// With its own capability the pitch parks with `awaiting_executor` instead,
+/// the pending-approval list reports `executor_ready: false` before an
+/// operator spends an approval on it, and the stale sweep cancels it by name
+/// after the grace window. An n8n handler that advertises this capability
+/// unparks the queue with no change here.
+pub(in crate::autopilot) const PRESS_PITCH_CAPABILITY: &str = "agent.content.press_pitch";
+
+/// The capability an emission needs. For drafted content that depends on the
+/// template inside the payload, not on the event type alone, so this wraps
+/// `executor_capability_for_event` rather than widening it — the public
+/// executor manifest is generated from that function's event mapping.
+fn executor_capability_for_emission(event_type: &str, payload: &Value) -> &'static str {
+    if event_type == "crowdrelay.agent.content_requested"
+        && payload.get("template_id").and_then(Value::as_str) == Some(PRESS_PITCH_TEMPLATE)
+    {
+        return PRESS_PITCH_CAPABILITY;
+    }
+    executor_capability_for_event(event_type)
+}
+
 /// Whether this payload is executed by an external executor that must file
 /// a terminal execution receipt. Public for the worker's receipt
 /// reconciliation sweep, which flags dispatched actions whose receipts
@@ -84,6 +121,16 @@ pub const fn payload_requires_executor(payload: &AutopilotActionPayload) -> bool
 pub(in crate::autopilot) fn executor_capability_for_payload(
     payload: &AutopilotActionPayload,
 ) -> Option<&'static str> {
+    // Checked before `payload_requires_executor`, which is false for drafted
+    // content: the three channel executors claim those actions by direct SQL
+    // and file no receipt, so their evidence is committed at dispatch. A press
+    // pitch is the one template none of them claims, so it is gated here even
+    // though its siblings are not.
+    if let AutopilotActionPayload::RequestAgentContent { template_id, .. } = payload
+        && template_id.as_deref() == Some(PRESS_PITCH_TEMPLATE)
+    {
+        return Some(PRESS_PITCH_CAPABILITY);
+    }
     if !payload_requires_executor(payload) {
         return None;
     }

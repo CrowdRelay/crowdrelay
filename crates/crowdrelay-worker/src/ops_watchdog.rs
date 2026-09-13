@@ -276,6 +276,12 @@ struct OpsSnapshot {
     /// rows can say it instead, and they catch a mismatch this precise pair
     /// does not cover as well.
     orphaned_publishing_actions: i64,
+    /// The same population with no window, reported for context only.
+    ///
+    /// An orphaned draft is never published later, so the windowed count is
+    /// what an operator can still act on and this one is history. It travels in
+    /// the details so bounding the alarm hides nothing.
+    orphaned_publishing_actions_all_time: i64,
     /// Growth events whose delivery was permanently refused in the last 7 days.
     ///
     /// The event list is deliberately narrow. A refused `ops.status_changed` is
@@ -419,6 +425,30 @@ async fn load_snapshot(
             -- Succeeded publishing actions with no artifact in any of the four
             -- post tables. The 30-minute floor is the executors' poll window:
             -- below it an action is in flight, not orphaned.
+            --
+            -- Bounded at 7 days, matching `refused_growth_deliveries`, because
+            -- an orphaned draft is unrecoverable: nothing publishes it later
+            -- and there is no acknowledgement mechanism, so an unbounded count
+            -- made this condition permanently active once a single orphan
+            -- existed. An alarm that can never clear is one an operator learns
+            -- to ignore. The all-time count still travels in the details, so
+            -- the history is reported, just not alarmed on forever.
+            (SELECT count(*) FROM viryaos_autopilot_actions a
+             WHERE a.workspace_id=$1
+               AND a.status='succeeded'
+               AND a.action_kind IN ('agent.content.request',
+                                     'community.engage.request')
+               AND a.finished_at < now() - interval '30 minutes'
+               AND a.finished_at > now() - interval '7 days'
+               AND NOT EXISTS (SELECT 1 FROM community_posts p
+                               WHERE p.workspace_id=$1 AND p.action_id=a.id)
+               AND NOT EXISTS (SELECT 1 FROM telegram_posts p
+                               WHERE p.workspace_id=$1 AND p.action_id=a.id)
+               AND NOT EXISTS (SELECT 1 FROM discord_posts p
+                               WHERE p.workspace_id=$1 AND p.action_id=a.id)
+               AND NOT EXISTS (SELECT 1 FROM social_posts p
+                               WHERE p.workspace_id=$1 AND p.action_id=a.id)
+            )::bigint AS orphaned_publishing_actions,
             (SELECT count(*) FROM viryaos_autopilot_actions a
              WHERE a.workspace_id=$1
                AND a.status='succeeded'
@@ -433,7 +463,7 @@ async fn load_snapshot(
                                WHERE p.workspace_id=$1 AND p.action_id=a.id)
                AND NOT EXISTS (SELECT 1 FROM social_posts p
                                WHERE p.workspace_id=$1 AND p.action_id=a.id)
-            )::bigint AS orphaned_publishing_actions,
+            )::bigint AS orphaned_publishing_actions_all_time,
             -- Growth-carrying events whose delivery was permanently refused.
             --
             -- Only the event types that carry work outward: a pitch, a community
@@ -502,6 +532,8 @@ fn conditions(snapshot: &OpsSnapshot) -> Vec<Condition> {
             active: snapshot.orphaned_publishing_actions > 0,
             details: json!({
                 "orphaned_actions": snapshot.orphaned_publishing_actions,
+                "orphaned_actions_all_time": snapshot.orphaned_publishing_actions_all_time,
+                "window": "7 days",
                 "remedy": "an executor's claim predicate does not cover this draft — \
                            compare the agent task's template_id and the draft's \
                            platform against the three executors' WHERE clauses",
@@ -730,8 +762,34 @@ mod tests {
             outcomes_rejected_unverified: 0,
             outcomes_accepted: 4,
             orphaned_publishing_actions: 0,
+            orphaned_publishing_actions_all_time: 0,
             refused_growth_deliveries: 0,
         }
+    }
+
+    /// History alone must not hold the alarm open.
+    ///
+    /// An orphaned draft is never published later, so an unbounded count kept
+    /// `publishing.orphaned_draft` active for good once one existed. The
+    /// all-time count still travels in the details, so nothing is hidden.
+    #[test]
+    fn orphans_older_than_the_window_report_without_alarming() {
+        let mut snapshot = healthy();
+        snapshot.orphaned_publishing_actions_all_time = 2;
+        let raised = conditions(&snapshot)
+            .into_iter()
+            .filter(|condition| condition.active)
+            .map(|condition| condition.key)
+            .collect::<Vec<_>>();
+        assert!(
+            raised.is_empty(),
+            "orphans outside the window must not hold an alarm open: {raised:?}"
+        );
+        let orphan = conditions(&snapshot)
+            .into_iter()
+            .find(|condition| condition.key == "publishing.orphaned_draft")
+            .expect("the orphaned-draft condition is always present");
+        assert_eq!(orphan.details["orphaned_actions_all_time"], 2);
     }
 
     /// A permanently refused growth event must raise attention on its own.

@@ -791,7 +791,7 @@ pub(super) async fn emit_external_action(
     ensure_executor_capability(
         transaction,
         workspace_id,
-        executor_capability_for_event(event_type),
+        executor_capability_for_emission(event_type, &payload),
     )
     .await?;
     let emission_key = format!("autopilot-action:{}", action_id);
