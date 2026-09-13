@@ -3,9 +3,23 @@ name: CI
 
 on:
   workflow_dispatch:
+  # No paths-ignore on main. `deploy-ecosystem.sh` requires a CI run for HEAD and
+  # refuses to deploy without one, so a documentation-only commit on main used to
+  # make production undeployable: CI skipped it, no run ever appeared, and the
+  # deploy waited an hour for one and failed. Writing something down should not
+  # stop a release.
+  #
+  # Teaching the deploy to fall back to a validated ancestor was the other option
+  # and is worse. It would have to decide which differences CI was allowed to
+  # ignore, and thread a second SHA through image pulls, the digest artifact and
+  # the runtime-SHA verification — four places to be subtly wrong in the release
+  # path, against a handful of runner minutes on a self-hosted runner that is
+  # free. A release invariant that holds unconditionally is worth more.
+  #
+  # Pull requests keep the filter: nothing deploys from them, so the time saved
+  # there costs nothing.
   push:
     branches: ["main"]
-    paths-ignore: ["**/*.md", "docs/**"]
   pull_request:
     paths-ignore: ["**/*.md", "docs/**"]
 

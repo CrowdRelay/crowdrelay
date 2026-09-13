@@ -248,6 +248,12 @@ AGENTS_REPO="$SIBLING_REPO_OUT"
 printf 'CHECKOUTS=PASS\n'
 
 # 0b. Wait for CrowdRelay CI
+#
+# This requires a CI run for HEAD itself, with no fallback to an ancestor. That
+# is deliberate, and it is why `ci.yml` no longer skips documentation-only pushes
+# to main: the alternative is this script reasoning about which differences CI was
+# allowed to ignore, in a release path where being subtly wrong is worse than the
+# runner minutes it would save.
 printf '\n==> 0b — Wait for CrowdRelay CI\n'
 await_workflow CROWDRELAY "$REPO" "CI" "$TARGET" 3600
 
