@@ -178,6 +178,11 @@ pub const MIN_TREATMENT_CONFIDENCE: u32 = 5;
 /// that are statistically significant but practically irrelevant.
 pub const MEANINGFUL_EFFECT_THRESHOLD: f64 = 1.0;
 
+/// Serde's default for [`CausalModel::meaningful_effect_threshold`].
+fn default_meaningful_effect() -> f64 {
+    MEANINGFUL_EFFECT_THRESHOLD
+}
+
 /// The minimum number of paired (Y14, Y30) observations before the Y14→Y30
 /// bridge model is considered reliable. Below this, the bridge's predictive
 /// variance is inflated (up to 3× at 0 observations) to reflect that the
@@ -204,8 +209,20 @@ pub const MIN_BRIDGE_CONFIDENCE: u32 = 10;
 /// accumulated ([`MIN_TREATMENT_CONFIDENCE`] paired observations), the brain
 /// uses τ as the primary ranking signal. Before that, it falls back to the
 /// outcome model.
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CausalModel {
+    /// The effect size worth acting on, in this tenant's outcome units.
+    ///
+    /// Held here rather than read from [`MEANINGFUL_EFFECT_THRESHOLD`] so the
+    /// bar can be set to the tenant it is judging. The constant is 1.0 — one
+    /// fan — which is a 4.5% lift for a workspace with 22 fans and noise for one
+    /// with ten thousand. A threshold written in absolute outcome units is
+    /// correct for exactly one tenant size and silently wrong for every other.
+    ///
+    /// Defaulted on deserialize so checkpoints written before this field
+    /// existed still load, the same way `by_target` is.
+    #[serde(default = "default_meaningful_effect")]
+    meaningful_effect_threshold: f64,
     /// Hierarchical NegBin posterior for fan acquisition (outcome model).
     /// Uses Gamma-Poisson conjugate model for count data with over-dispersion.
     pub fans: HierarchicalNegBinPosterior,
@@ -304,6 +321,20 @@ pub struct TreatmentAwareStats {
     pub evidence_quality: crate::evidence::EvidenceQuality,
 }
 
+/// Delegates to [`CausalModel::new`] rather than deriving.
+///
+/// A derived `Default` gives `meaningful_effect_threshold` the `f64` default of
+/// 0.0, and P(τ > 0) is the probability that an effect is merely positive —
+/// which ranks noise as worth dispatching. `CausalModel::default()` is a live
+/// path (`growth_intelligence` uses it when no checkpoint exists), so the
+/// derive would have dropped the ranking bar to zero in production the moment
+/// the field was added.
+impl Default for CausalModel {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl CausalModel {
     /// Creates a causal model with the default priors.
     #[must_use]
@@ -327,6 +358,21 @@ impl CausalModel {
     /// a constant reachable only by editing this file.
     #[must_use]
     pub fn with_expected_outcome(expected: f64) -> Self {
+        Self::with_tenant_scale(expected, MEANINGFUL_EFFECT_THRESHOLD)
+    }
+
+    /// Creates a causal model sized to the tenant it will judge.
+    ///
+    /// Both numbers are scale-bound and neither belongs in a constant. The
+    /// prior says what an action is expected to yield; the threshold says what
+    /// yield is worth acting on. Written as absolutes they describe one tenant,
+    /// and this system is meant to serve more than one.
+    ///
+    /// `meaningful_effect` is floored above zero: a threshold of zero makes
+    /// P(τ > δ) the probability that the effect is merely positive, which would
+    /// rank noise as worth dispatching.
+    #[must_use]
+    pub fn with_tenant_scale(expected: f64, meaningful_effect: f64) -> Self {
         // A non-finite or negative prior would poison every posterior it
         // touches, and the caller is usually reading a config value.
         let expected = if expected.is_finite() && expected >= 0.0 {
@@ -334,7 +380,13 @@ impl CausalModel {
         } else {
             DEFAULT_EXPECTED_FANS
         };
+        let meaningful_effect = if meaningful_effect.is_finite() && meaningful_effect > 0.0 {
+            meaningful_effect
+        } else {
+            MEANINGFUL_EFFECT_THRESHOLD
+        };
         Self {
+            meaningful_effect_threshold: meaningful_effect,
             fans: HierarchicalNegBinPosterior::new(NegBinPosterior::prior(
                 expected,
                 1.0, // dispersion=1.0 → prior rate variance = 4.0, matching old Normal prior
@@ -346,6 +398,12 @@ impl CausalModel {
             context_effects: ContextGLM::new(),
             bridge: Y14Y30Bridge::new(),
         }
+    }
+
+    /// The effect size this model treats as worth acting on.
+    #[must_use]
+    pub fn meaningful_effect_threshold(&self) -> f64 {
+        self.meaningful_effect_threshold
     }
 
     /// Predicts expected new fans for a dispatch given its context.
@@ -722,7 +780,7 @@ impl CausalModel {
             self.treatment_effects_y30.p_meaningful_effect(
                 template_id,
                 context.subreddit_type.as_deref(),
-                MEANINGFUL_EFFECT_THRESHOLD,
+                self.meaningful_effect_threshold,
             )
         } else if use_treatment {
             // Bridged regime. Reading the Y14 posterior here answered a
@@ -732,13 +790,13 @@ impl CausalModel {
             // posterior is Normal by construction — a linear map of a Normal
             // plus independent bridge noise — so the probability is exact from
             // the mean and standard deviation already computed above.
-            let z = (MEANINGFUL_EFFECT_THRESHOLD - treatment_effect) / treatment_std.max(0.1);
+            let z = (self.meaningful_effect_threshold - treatment_effect) / treatment_std.max(0.1);
             1.0 - crate::bayesian::normal_cdf(z)
         } else {
             self.treatment_effects.p_meaningful_effect(
                 template_id,
                 context.subreddit_type.as_deref(),
-                MEANINGFUL_EFFECT_THRESHOLD,
+                self.meaningful_effect_threshold,
             )
         };
 

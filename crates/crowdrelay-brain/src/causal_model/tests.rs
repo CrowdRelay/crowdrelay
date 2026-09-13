@@ -967,3 +967,59 @@ fn a_context_written_before_a_field_existed_keeps_the_fields_it_has() {
     assert_eq!(context.post_format, None);
     assert_eq!(context.time_of_day_bps, 0);
 }
+/// `default()` must not drop the ranking bar to zero.
+///
+/// `meaningful_effect_threshold` is an `f64`, so a derived `Default` gives
+/// it 0.0 — and P(τ > 0) is the probability an effect is merely positive,
+/// which ranks noise as worth dispatching. `CausalModel::default()` is a
+/// live path: `growth_intelligence` uses it whenever no checkpoint exists.
+#[test]
+fn default_keeps_a_meaningful_bar() {
+    let model = CausalModel::default();
+    assert_eq!(
+        model.meaningful_effect_threshold(),
+        MEANINGFUL_EFFECT_THRESHOLD
+    );
+}
+
+/// A checkpoint written before the field existed must still load, with the
+/// bar intact rather than zeroed.
+#[test]
+fn an_older_checkpoint_loads_with_the_default_bar() {
+    let older = serde_json::to_value(CausalModel::new()).expect("serialize");
+    let mut object = older.as_object().expect("object").clone();
+    object.remove("meaningful_effect_threshold");
+    let restored: CausalModel =
+        serde_json::from_value(serde_json::Value::Object(object)).expect("deserialize");
+    assert_eq!(
+        restored.meaningful_effect_threshold(),
+        MEANINGFUL_EFFECT_THRESHOLD,
+        "a checkpoint predating the field must not deserialize to a zero bar"
+    );
+}
+
+/// The bar is set to the tenant, not compiled in.
+///
+/// One fan is a 4.5% lift for a workspace with 22 fans and noise for one
+/// with ten thousand. A threshold in absolute outcome units is correct for
+/// exactly one tenant size.
+#[test]
+fn the_bar_is_sized_to_the_tenant() {
+    let small = CausalModel::with_tenant_scale(2.0, 1.0);
+    let large = CausalModel::with_tenant_scale(2.0, 250.0);
+    assert_eq!(small.meaningful_effect_threshold(), 1.0);
+    assert_eq!(large.meaningful_effect_threshold(), 250.0);
+}
+
+/// A zero or nonsense bar falls back rather than ranking noise.
+#[test]
+fn a_zero_bar_is_refused() {
+    for bad in [0.0_f64, -3.0, f64::NAN, f64::INFINITY] {
+        let model = CausalModel::with_tenant_scale(2.0, bad);
+        assert_eq!(
+            model.meaningful_effect_threshold(),
+            MEANINGFUL_EFFECT_THRESHOLD,
+            "a bar of {bad} must fall back, not rank noise as meaningful"
+        );
+    }
+}
