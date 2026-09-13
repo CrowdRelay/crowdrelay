@@ -42,14 +42,74 @@ const PLAY_OUTCOME_BATCH_SIZE: u32 = 8;
 const WAVE_OUTCOME_BATCH_SIZE: u32 = 8;
 const REPLY_TRIAGE_BATCH_SIZE: u32 = 50;
 
+/// Stable identifiers for the phases of one autopilot cycle.
+///
+/// These are recorded on the cycle row and read by an operator, so they are
+/// part of a contract: renaming one silently re-labels history. They are
+/// deliberately not the log messages, which are prose and change freely.
+mod phase {
+    pub const GROWTH_METRIC_CAPTURE: &str = "growth_metric_capture";
+    pub const EVALUATION: &str = "evaluation";
+    pub const TEAM_HANDOFF_RECONCILIATION: &str = "team_handoff_reconciliation";
+    pub const NO_EXECUTOR_SWEEP: &str = "no_executor_sweep";
+    pub const ABANDONED_CLAIM_SWEEP: &str = "abandoned_claim_sweep";
+    pub const ACTION_EXECUTION: &str = "action_execution";
+    pub const ACTION_CLAIM: &str = "action_claim";
+    pub const MEASUREMENT_RESOLUTION: &str = "measurement_resolution";
+    pub const MEASUREMENT_CLAIM: &str = "measurement_claim";
+    pub const PLAY_OUTCOME_RESOLUTION: &str = "play_outcome_resolution";
+    pub const PLAY_OUTCOME_CLAIM: &str = "play_outcome_claim";
+    pub const WAVE_OUTCOME_RESOLUTION: &str = "wave_outcome_resolution";
+    pub const WAVE_OUTCOME_CLAIM: &str = "wave_outcome_claim";
+    pub const REPLY_CLASSIFICATION: &str = "reply_classification";
+    pub const REPLY_TRIAGE_CLAIM: &str = "reply_triage_claim";
+    /// The one phase a park-skipped cycle can fail. The park read fails closed
+    /// — an unreadable park flag is treated as parked — so a cycle degraded on
+    /// this alone took no action at all, which is a different situation from a
+    /// phase falling over mid-cycle.
+    pub const PARK_CHECK: &str = "park_check";
+}
+
+/// Which phases of a cycle fell over.
+///
+/// This replaced a single `phase_failed` boolean that eighteen call sites could
+/// set. The boolean was enough to mark the cycle `degraded` and not enough to
+/// say anything else: production ran 296 cycles in 24 hours with 40 degraded,
+/// and answering "which phase" meant grepping worker logs by timestamp — so the
+/// answer expired with the logs. A 13% degraded rate is either phase isolation
+/// doing its job on transient errors or one phase broken every cycle, and those
+/// call for opposite responses.
+///
+/// A set, because a phase that iterates (actions, measurements, replies) can
+/// fail on many items in one cycle and that is still one broken phase. Ordered,
+/// so the recorded value does not change with iteration order.
+#[derive(Clone, Debug, Default)]
+struct DegradedPhases(std::collections::BTreeSet<&'static str>);
+
+impl DegradedPhases {
+    fn failed(&mut self, phase: &'static str) {
+        self.0.insert(phase);
+    }
+
+    fn any(&self) -> bool {
+        !self.0.is_empty()
+    }
+
+    /// The value written to the cycle row. Empty means no phase failed, which
+    /// is a different statement from the NULL a pre-column cycle carries.
+    fn recorded(&self) -> Vec<String> {
+        self.0.iter().map(|phase| (*phase).to_owned()).collect()
+    }
+}
+
 /// What one cycle produced, for the record that describes it.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Debug, Default)]
 struct CycleObservation {
-    /// A phase fell over while the others completed. Not a failed cycle: the
-    /// phases are isolated so that one failing cannot stop already-authorized
-    /// work, and calling that failure would teach an operator to ignore the
-    /// word.
-    degraded: bool,
+    /// Which phases fell over while the others completed. Not a failed cycle:
+    /// the phases are isolated so that one failing cannot stop
+    /// already-authorized work, and calling that failure would teach an
+    /// operator to ignore the word. Empty means the cycle was clean.
+    degraded: DegradedPhases,
     /// The North Star as the evaluation phase read it, in whatever metric the
     /// tenant has chosen. `None` when that phase did not get far enough to
     /// take a reading.
@@ -174,6 +234,7 @@ impl AutopilotWorker {
         };
         if parked {
             tracing::info!("autopilot cycle skipped — tenant is parked");
+            let park_check_phase = phase::PARK_CHECK.to_owned();
             let cycle_id = crowdrelay_infra::autopilot::open_cycle_run(
                 self.repository.pool(),
                 self.workspace_id,
@@ -186,7 +247,13 @@ impl AutopilotWorker {
                     self.repository.pool(),
                     self.workspace_id,
                     cycle_id,
-                    park_check_failed,
+                    // A park-skipped cycle ran no phase, so the only thing that
+                    // can degrade it is the park check itself.
+                    if park_check_failed {
+                        std::slice::from_ref(&park_check_phase)
+                    } else {
+                        &[]
+                    },
                     OffsetDateTime::now_utc(),
                     None,
                 )
@@ -215,7 +282,7 @@ impl AutopilotWorker {
                 self.repository.pool(),
                 self.workspace_id,
                 cycle_id,
-                observed.degraded,
+                &observed.degraded.recorded(),
                 OffsetDateTime::now_utc(),
                 observed.north_star,
             )
@@ -235,7 +302,7 @@ impl AutopilotWorker {
         // Evaluation, execution and delayed measurement are intentionally isolated.
         // A context-specific query failure must never block already-authorized work
         // or evidence collection from a previous cycle.
-        let mut phase_failed = false;
+        let mut degraded = DegradedPhases::default();
         let mut north_star_observed = None;
 
         // Recording first-party observations runs before evaluation so a cycle
@@ -257,7 +324,7 @@ impl AutopilotWorker {
             }
             Ok(_) => {}
             Err(error) => {
-                phase_failed = true;
+                degraded.failed(phase::GROWTH_METRIC_CAPTURE);
                 tracing::warn!(error = %error, "ViryaOS first-party growth metric capture failed");
             }
         }
@@ -314,7 +381,7 @@ impl AutopilotWorker {
                 }
             }
             Err(error) => {
-                phase_failed = true;
+                degraded.failed(phase::EVALUATION);
                 tracing::warn!(error = %error, "ViryaOS Autopilot evaluation failed");
             }
         }
@@ -327,7 +394,7 @@ impl AutopilotWorker {
             Ok(count) if count > 0 => tracing::info!(count, "assigned ViryaOS human handoffs"),
             Ok(_) => {}
             Err(error) => {
-                phase_failed = true;
+                degraded.failed(phase::TEAM_HANDOFF_RECONCILIATION);
                 tracing::warn!(error = %error, "ViryaOS team handoff reconciliation failed");
             }
         }
@@ -341,7 +408,7 @@ impl AutopilotWorker {
             }
             Ok(_) => {}
             Err(error) => {
-                phase_failed = true;
+                degraded.failed(phase::NO_EXECUTOR_SWEEP);
                 tracing::warn!(error = %error, "ViryaOS no-executor sweep failed");
             }
         }
@@ -357,7 +424,7 @@ impl AutopilotWorker {
         {
             Ok(_) => {}
             Err(error) => {
-                phase_failed = true;
+                degraded.failed(phase::ABANDONED_CLAIM_SWEEP);
                 tracing::warn!(error = %error, "ViryaOS abandoned-claim sweep failed");
             }
         }
@@ -374,7 +441,7 @@ impl AutopilotWorker {
                         .execute_action(self.workspace_id, &action, OffsetDateTime::now_utc())
                         .await
                     {
-                        phase_failed = true;
+                        degraded.failed(phase::ACTION_EXECUTION);
                         let error_kind = repository_error_kind(error);
                         let retryable = repository_error_retryable(error);
                         tracing::warn!(
@@ -405,7 +472,7 @@ impl AutopilotWorker {
                 }
             }
             Err(error) => {
-                phase_failed = true;
+                degraded.failed(phase::ACTION_CLAIM);
                 tracing::warn!(error = %error, "ViryaOS Autopilot action claim failed");
             }
         }
@@ -447,7 +514,7 @@ impl AutopilotWorker {
                         Ok(()) => succeeded += 1,
                         Err(error) => {
                             failed += 1;
-                            phase_failed = true;
+                            degraded.failed(phase::MEASUREMENT_RESOLUTION);
                             let error_kind = repository_error_kind(error);
                             let retryable = repository_error_retryable(error);
                             tracing::warn!(
@@ -487,7 +554,7 @@ impl AutopilotWorker {
                 }
             }
             Err(error) => {
-                phase_failed = true;
+                degraded.failed(phase::MEASUREMENT_CLAIM);
                 tracing::warn!(error = %error, "ViryaOS Autopilot measurement claim failed");
             }
         }
@@ -524,7 +591,7 @@ impl AutopilotWorker {
                     .await;
 
                     if let Err(error) = result {
-                        phase_failed = true;
+                        degraded.failed(phase::PLAY_OUTCOME_RESOLUTION);
                         let error_kind = repository_error_kind(error);
                         let retryable = repository_error_retryable(error);
                         tracing::warn!(
@@ -555,7 +622,7 @@ impl AutopilotWorker {
                 }
             }
             Err(error) => {
-                phase_failed = true;
+                degraded.failed(phase::PLAY_OUTCOME_CLAIM);
                 tracing::warn!(error = %error, "ViryaOS play outcome claim failed");
             }
         }
@@ -590,7 +657,7 @@ impl AutopilotWorker {
                     .await;
 
                     if let Err(error) = result {
-                        phase_failed = true;
+                        degraded.failed(phase::WAVE_OUTCOME_RESOLUTION);
                         let error_kind = repository_error_kind(error);
                         let retryable = repository_error_retryable(error);
                         tracing::warn!(
@@ -621,7 +688,7 @@ impl AutopilotWorker {
                 }
             }
             Err(error) => {
-                phase_failed = true;
+                degraded.failed(phase::WAVE_OUTCOME_CLAIM);
                 tracing::warn!(error = %error, "ViryaOS wave outcome claim failed");
             }
         }
@@ -654,7 +721,7 @@ impl AutopilotWorker {
                         .record_reply_classification(self.workspace_id, reply.reply_id, &result)
                         .await
                     {
-                        phase_failed = true;
+                        degraded.failed(phase::REPLY_CLASSIFICATION);
                         tracing::warn!(
                             reply_id = %reply.reply_id,
                             error = %error,
@@ -664,12 +731,12 @@ impl AutopilotWorker {
                 }
             }
             Err(error) => {
-                phase_failed = true;
+                degraded.failed(phase::REPLY_TRIAGE_CLAIM);
                 tracing::warn!(error = %error, "ViryaOS reply triage claim failed");
             }
         }
 
-        if phase_failed {
+        if degraded.any() {
             // Each phase has already logged what it hit. This line says the
             // cycle as a whole is degraded, which the previous one -- an
             // opaque `RepositoryError::Unexpected` raised here and logged by
@@ -677,7 +744,7 @@ impl AutopilotWorker {
             tracing::warn!("ViryaOS Autopilot cycle degraded: a phase failed");
         }
         CycleObservation {
-            degraded: phase_failed,
+            degraded,
             north_star: north_star_observed,
         }
     }

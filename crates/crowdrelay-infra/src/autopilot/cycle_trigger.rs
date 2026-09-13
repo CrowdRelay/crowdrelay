@@ -180,7 +180,7 @@ pub async fn close_cycle_run(
     pool: &PgPool,
     workspace_id: WorkspaceId,
     cycle_id: uuid::Uuid,
-    degraded: bool,
+    degraded_phases: &[String],
     finished_at: OffsetDateTime,
     north_star_observed: Option<u32>,
 ) {
@@ -189,7 +189,11 @@ pub async fn close_cycle_run(
         UPDATE viryaos_autopilot_cycle_runs AS run
         SET finished_at = $3,
             duration_ms = GREATEST(0, (EXTRACT(EPOCH FROM ($3 - run.started_at)) * 1000)::integer),
-            outcome = CASE WHEN $4 THEN 'degraded' ELSE 'succeeded' END,
+            outcome = CASE WHEN cardinality($4::text[]) > 0 THEN 'degraded' ELSE 'succeeded' END,
+            -- Which phase, not just that one failed. The caller passes an empty
+            -- array for a clean cycle, which is a different statement from the
+            -- NULL carried by every cycle that ran before the column existed.
+            degraded_phases = $4::text[],
             decisions_recorded = (
                 SELECT count(*)
                 FROM viryaos_autopilot_decisions AS decision
@@ -215,7 +219,7 @@ pub async fn close_cycle_run(
     .bind(workspace_id.into_uuid())
     .bind(cycle_id)
     .bind(finished_at)
-    .bind(degraded)
+    .bind(degraded_phases)
     .bind(north_star_observed.and_then(|value| i32::try_from(value).ok()))
     .execute(pool)
     .await;

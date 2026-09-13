@@ -179,6 +179,14 @@ pub struct CycleRunEntry {
     /// Active fans when the cycle finished. NULL when the reading could not be
     /// taken, which is not the same as zero.
     pub north_star_value: Option<i32>,
+    /// Which phases fell over, for a `degraded` cycle. `outcome` said that one
+    /// did and never which, so the answer lived only in worker logs and expired
+    /// with them — and a 13% degraded rate is either phase isolation working on
+    /// transient errors or one phase broken every cycle.
+    ///
+    /// Absent for every cycle that ran before migration 0261. An empty list is
+    /// a different statement: that cycle recorded no phase failure.
+    pub degraded_phases: Option<Vec<String>>,
 }
 
 /// What the brain makes of its own recent performance, and the cycles behind it.
@@ -273,7 +281,8 @@ async fn load_cycle_runs(
                outcome,
                decisions_recorded,
                actions_created,
-               north_star_value
+               north_star_value,
+               degraded_phases
         FROM viryaos_autopilot_cycle_runs
         WHERE workspace_id = $1
           AND ($2::text IS NULL OR outcome IS NOT DISTINCT FROM $2)

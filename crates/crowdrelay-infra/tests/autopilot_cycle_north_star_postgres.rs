@@ -298,7 +298,7 @@ async fn the_cycle_records_the_reading_it_was_given_not_a_fan_count() -> Result<
         .await
         .ok_or("the cycle run record must open")?;
     // The reading the world model resolved: signal installs, not the three fans.
-    close_cycle_run(&pool, workspace_id, cycle_id, false, now, Some(1)).await;
+    close_cycle_run(&pool, workspace_id, cycle_id, &[], now, Some(1)).await;
 
     let stored: Option<i32> = sqlx::query_scalar(
         "SELECT north_star_value FROM viryaos_autopilot_cycle_runs WHERE workspace_id = $1 AND id = $2",
@@ -338,7 +338,15 @@ async fn a_cycle_that_took_no_reading_records_none() -> Result<()> {
         .await
         .ok_or("the cycle run record must open")?;
     // The evaluation phase never got far enough to read anything.
-    close_cycle_run(&pool, workspace_id, cycle_id, true, now, None).await;
+    close_cycle_run(
+        &pool,
+        workspace_id,
+        cycle_id,
+        &["evaluation".to_owned()],
+        now,
+        None,
+    )
+    .await;
 
     let stored: Option<i32> = sqlx::query_scalar(
         "SELECT north_star_value FROM viryaos_autopilot_cycle_runs WHERE workspace_id = $1 AND id = $2",
@@ -358,6 +366,96 @@ async fn a_cycle_that_took_no_reading_records_none() -> Result<()> {
         samples.is_empty(),
         "an unread cycle contributes nothing to the series, got {} samples",
         samples.len()
+    );
+    Ok(())
+}
+
+/// `outcome` said a phase failed and never which one.
+///
+/// Production ran 296 cycles in 24 hours with 40 degraded, and the only way to
+/// learn what those 40 hit was grepping worker logs by timestamp — so the answer
+/// expired with the logs. A 13% degraded rate is either phase isolation working
+/// on transient errors or one phase broken every cycle, and those call for
+/// opposite responses.
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn a_degraded_cycle_records_which_phases_failed() -> Result<()> {
+    let pool = pool().await?;
+    let workspace_id = workspace(&pool).await?;
+    let now = OffsetDateTime::now_utc();
+
+    let cycle_id = open_cycle_run(&pool, workspace_id, CycleTrigger::Scheduled, now)
+        .await
+        .ok_or("the cycle run record must open")?;
+    // Two phases, because they are isolated: one failing does not stop the
+    // next, so more than one can fail in a single cycle.
+    close_cycle_run(
+        &pool,
+        workspace_id,
+        cycle_id,
+        &["action_claim".to_owned(), "reply_triage_claim".to_owned()],
+        now,
+        Some(7),
+    )
+    .await;
+
+    let row = sqlx::query(
+        "SELECT outcome, degraded_phases FROM viryaos_autopilot_cycle_runs \
+         WHERE workspace_id = $1 AND id = $2",
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(cycle_id)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        sqlx::Row::try_get::<Option<String>, _>(&row, "outcome")?,
+        Some("degraded".to_owned()),
+        "a non-empty phase list is what makes a cycle degraded",
+    );
+    assert_eq!(
+        sqlx::Row::try_get::<Option<Vec<String>>, _>(&row, "degraded_phases")?,
+        Some(vec![
+            "action_claim".to_owned(),
+            "reply_triage_claim".to_owned()
+        ]),
+        "the operator must be able to read which phase broke",
+    );
+    Ok(())
+}
+
+/// A clean cycle records an empty list, not NULL.
+///
+/// NULL means "this cycle did not record it", which is true of every cycle that
+/// ran before migration 0261 and must stay distinguishable from "no phase
+/// failed". Collapsing them would make the whole column unreadable as history.
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn a_clean_cycle_records_an_empty_phase_list_not_null() -> Result<()> {
+    let pool = pool().await?;
+    let workspace_id = workspace(&pool).await?;
+    let now = OffsetDateTime::now_utc();
+
+    let cycle_id = open_cycle_run(&pool, workspace_id, CycleTrigger::Scheduled, now)
+        .await
+        .ok_or("the cycle run record must open")?;
+    close_cycle_run(&pool, workspace_id, cycle_id, &[], now, Some(7)).await;
+
+    let row = sqlx::query(
+        "SELECT outcome, degraded_phases FROM viryaos_autopilot_cycle_runs \
+         WHERE workspace_id = $1 AND id = $2",
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(cycle_id)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        sqlx::Row::try_get::<Option<String>, _>(&row, "outcome")?,
+        Some("succeeded".to_owned()),
+    );
+    assert_eq!(
+        sqlx::Row::try_get::<Option<Vec<String>>, _>(&row, "degraded_phases")?,
+        Some(Vec::<String>::new()),
+        "a clean cycle states that no phase failed; NULL would mean it did not look",
     );
     Ok(())
 }
