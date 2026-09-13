@@ -58,7 +58,7 @@ signal-api.virya.music {
 	# Blue-green: deploy-bluegreen.sh reorders this line at cutover.
 	# When only blue is running, the green upstream must be absent —
 	# a dead DNS reference causes Caddy health-check spam and 502/503.
-	reverse_proxy crowdrelay-api-1:8080 {
+	reverse_proxy crowdrelay-api-1:8080 crowdrelay-api-green-1:8080 {
 		lb_policy first
 		health_uri /v1/health/ready
 		health_interval 2s
@@ -90,9 +90,9 @@ signal-api.virya.music {
 # `to` line in the cp_upstream snippet — no Docker alias moves, no restarts.
 # When only blue is running, the green upstream must be absent — a dead DNS
 # reference causes Caddy health-check spam and 502/503.
-# CONTROL_PLANE_ACTIVE=blue
+# CONTROL_PLANE_ACTIVE=green
 (cp_upstream) {
-	to crowdrelay-control-plane-app-1:8090
+	to crowdrelay-control-plane-app-green-1:8090 crowdrelay-control-plane-app-1:8090
 	lb_policy first
 	health_uri /healthz/ready
 	health_interval 2s
