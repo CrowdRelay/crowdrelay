@@ -27,6 +27,11 @@ fn conditions(snapshot: &OpsSnapshot) -> Vec<Condition> {
             details: json!({
                 "rejected_unverified": snapshot.outcomes_rejected_unverified,
                 "accepted": snapshot.outcomes_accepted,
+                // Every guard that fired, not only this one. The reason was
+                // written on each refused row and read by nothing, so a count of
+                // four refusals could not be told apart from a dead connector,
+                // one bad model answer, or a broken verifier.
+                "guards_fired": snapshot.outcome_rejection_reasons,
                 "window": "1 day",
                 "remedy": "check the agent service's verifier: the reason is in \
                            agent_outcomes.payload->'provenance'->'verification'->>'verifier_error'",
@@ -164,6 +169,34 @@ fn conditions(snapshot: &OpsSnapshot) -> Vec<Condition> {
                            names, then the worker log for that phase's own warning \
                            line — each phase logs its cause before the cycle \
                            reports itself degraded",
+            }),
+        },
+        Condition {
+            // Critical, and deliberately not conditioned on anything else
+            // failing. The guard refused it, so nothing was sent and no fan was
+            // harmed — which is exactly why this would otherwise be invisible.
+            //
+            // `signal_push.target_path` is an in-app route. A model writing an
+            // absolute URL or a scheme there proposes to send the whole fanbase
+            // to a destination nobody approved, and the approval click shows the
+            // copy rather than the link, so a human reviewer would not see it
+            // either. The guard is the only thing between that proposal and the
+            // audience, and a model producing it repeatedly is a fact about the
+            // prompt or the model, not a transient data error.
+            //
+            // Counted over one day. A single refusal months ago is history; one
+            // today means the next one is coming.
+            key: "safety.off_platform_push_proposed",
+            severity: "critical",
+            summary: "A proposed Signal push would have sent fans off-platform",
+            active: snapshot.off_platform_push_attempts > 0,
+            details: json!({
+                "attempts": snapshot.off_platform_push_attempts,
+                "window": "1 day",
+                "remedy": "read agent_outcomes where rejection_reason LIKE \
+                           'OFF_PLATFORM_PUSH_TARGET%' for the target the model \
+                           wrote, then fix the prompt or template that produced \
+                           it. Nothing was sent; the guard refused it.",
             }),
         },
         Condition {
