@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use sqlx::{FromRow, PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
-use crowdrelay_domain::audience_graph::{self, OutreachStage, PlaceKind};
+use crowdrelay_domain::audience_graph::{self, OutreachStage, PlaceKind, canonical_place_url};
 
 #[derive(Clone)]
 pub struct PostgresAudienceGraphRepository {
@@ -169,7 +169,10 @@ impl PostgresAudienceGraphRepository {
         .bind(input.place_kind.as_str())
         .bind(input.platform)
         .bind(input.name)
-        .bind(input.url)
+        // Canonical rather than as-found: the unique key is
+        // `(workspace_id, platform, url)`, so one community written two ways
+        // became two rows and then two drafted posts to the same subreddit.
+        .bind(canonical_place_url(input.url))
         .bind(input.country_code)
         .bind(input.language)
         .bind(input.genres)
@@ -529,7 +532,10 @@ impl PostgresAudienceGraphRepository {
         .bind(input.place_kind.as_str())
         .bind(input.platform)
         .bind(input.name)
-        .bind(input.url)
+        // Canonical rather than as-found: the unique key is
+        // `(workspace_id, platform, url)`, so one community written two ways
+        // became two rows and then two drafted posts to the same subreddit.
+        .bind(canonical_place_url(input.url))
         .bind(input.country_code)
         .bind(input.language)
         .bind(input.genres)

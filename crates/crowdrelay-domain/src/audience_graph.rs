@@ -350,3 +350,185 @@ mod tests {
         ));
     }
 }
+
+/// Canonical form of a place URL, so one community is one row.
+///
+/// `discovery_places` is unique on `(workspace_id, platform, url)`, which makes
+/// the URL the identity of a place. Discovery finds the same subreddit written
+/// several ways and each spelling became its own row: measured in production,
+/// `/r/MetalForTheMasses/` beside `https://www.reddit.com/r/MetalForTheMasses`,
+/// and `https://reddit.com/r/Djent` beside `https://www.reddit.com/r/Djent`.
+///
+/// The cost is not a tidy table. One post is drafted per place, so a duplicated
+/// community gets two posts — production held drafts for both `r/MetalMemes` and
+/// `r/metalmemes`, and for both `r/listentothis` and `r/ListenToThis`. Publishing
+/// both is posting twice to one community under the band's name, which is the
+/// definition of the spam this project's North Star rules out. Reddit treats
+/// subreddit names case-insensitively, so the two are the same place and only the
+/// URL disagreed.
+///
+/// Deliberately narrow: only Reddit URLs are rewritten, and only into the form
+/// Reddit itself canonicalises to. Folding by *name* instead would have been
+/// wrong — production also holds `/r/InMetalWeTrust/` beside
+/// `https://inmetalwetrust.club`, a subreddit and a website that share a name and
+/// are two genuinely different places. Anything this does not recognise is
+/// returned trimmed and otherwise untouched, so a new platform is not silently
+/// mangled into a shape its own dedupe does not expect.
+#[must_use]
+pub fn canonical_place_url(url: &str) -> String {
+    let trimmed = url.trim();
+    let Some(name) = reddit_subreddit_name(trimmed) else {
+        return trimmed.to_owned();
+    };
+    format!("https://www.reddit.com/r/{}", name.to_lowercase())
+}
+
+/// The subreddit a URL names, if it names one.
+///
+/// Accepts the spellings discovery actually produces: absolute with or without
+/// `www`, `http` or `https`, `old.` or `new.`, a bare `reddit.com/...`, and the
+/// relative `/r/name/` that Reddit's own listing JSON returns.
+fn reddit_subreddit_name(url: &str) -> Option<&str> {
+    let rest = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))
+        .unwrap_or(url);
+    let rest = rest
+        .strip_prefix("www.")
+        .or_else(|| rest.strip_prefix("old."))
+        .or_else(|| rest.strip_prefix("new."))
+        .unwrap_or(rest);
+    // `/r/name/` with no host at all, as Reddit's listings return it.
+    let path = if let Some(path) = rest.strip_prefix("reddit.com") {
+        path
+    } else if rest.starts_with("/r/") || rest.starts_with("r/") {
+        rest
+    } else {
+        return None;
+    };
+    let path = path.strip_prefix('/').unwrap_or(path);
+    let name = path.strip_prefix("r/")?;
+    // `/r/name/comments/...` is a post inside the subreddit, not the subreddit.
+    // Taking the first segment and discarding the rest would fold a permalink
+    // onto the community and make a post look like a place, so a deeper path is
+    // refused rather than truncated. A single trailing slash is just a spelling.
+    let (name, rest) = match name.split_once(['/', '?', '#']) {
+        Some((name, rest)) => (name, rest),
+        None => (name, ""),
+    };
+    if !rest.is_empty() {
+        return None;
+    }
+    let name = name.trim();
+    // A name Reddit could not have issued is not a name worth canonicalising on.
+    if name.is_empty()
+        || name.len() > 21
+        || !name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+    {
+        return None;
+    }
+    Some(name)
+}
+
+#[cfg(test)]
+mod canonical_place_url_tests {
+    use super::canonical_place_url;
+
+    /// The spellings production actually held, all folding onto one row.
+    #[test]
+    fn every_spelling_of_one_subreddit_canonicalises_together() {
+        let canonical = "https://www.reddit.com/r/djent";
+        for spelling in [
+            "https://www.reddit.com/r/Djent",
+            "https://reddit.com/r/Djent",
+            "http://reddit.com/r/djent",
+            "https://old.reddit.com/r/DJENT",
+            "https://www.reddit.com/r/Djent/",
+            "/r/Djent/",
+            "r/djent",
+            "  https://www.reddit.com/r/Djent  ",
+        ] {
+            assert_eq!(
+                canonical_place_url(spelling),
+                canonical,
+                "{spelling} should canonicalise to {canonical}"
+            );
+        }
+    }
+
+    /// Case is the half that caused duplicate *posts*, not just duplicate rows.
+    ///
+    /// Reddit treats subreddit names case-insensitively, so `r/MetalMemes` and
+    /// `r/metalmemes` are one community. Production drafted a post for each.
+    #[test]
+    fn case_variants_are_one_place() {
+        assert_eq!(
+            canonical_place_url("https://www.reddit.com/r/MetalMemes"),
+            canonical_place_url("https://www.reddit.com/r/metalmemes"),
+        );
+        assert_eq!(
+            canonical_place_url("/r/ListenToThis/"),
+            canonical_place_url("https://reddit.com/r/listentothis"),
+        );
+    }
+
+    /// A website that shares a subreddit's name is a different place.
+    ///
+    /// Production holds `/r/InMetalWeTrust/` beside `https://inmetalwetrust.club`.
+    /// Folding by name would have merged a subreddit into a website.
+    #[test]
+    fn a_website_sharing_the_name_stays_separate() {
+        assert_ne!(
+            canonical_place_url("/r/InMetalWeTrust/"),
+            canonical_place_url("https://inmetalwetrust.club"),
+        );
+        assert_eq!(
+            canonical_place_url("https://inmetalwetrust.club"),
+            "https://inmetalwetrust.club"
+        );
+    }
+
+    /// A post inside a subreddit is not the subreddit.
+    #[test]
+    fn a_permalink_is_not_folded_onto_its_subreddit() {
+        let post = "https://www.reddit.com/r/Metal/comments/abc123/some_title/";
+        assert_eq!(canonical_place_url(post), post);
+        assert_ne!(canonical_place_url(post), "https://www.reddit.com/r/metal");
+    }
+
+    /// Anything unrecognised passes through, trimmed and otherwise untouched.
+    #[test]
+    fn other_platforms_are_left_alone() {
+        for url in [
+            "https://discord.gg/abc123",
+            "https://www.facebook.com/groups/12345",
+            "https://open.spotify.com/playlist/xyz",
+            "",
+        ] {
+            assert_eq!(canonical_place_url(url), url);
+        }
+        assert_eq!(
+            canonical_place_url("  https://discord.gg/x  "),
+            "https://discord.gg/x"
+        );
+    }
+
+    /// A name Reddit could not have issued is not canonicalised on.
+    ///
+    /// Subreddit names are at most 21 characters of alphanumerics and
+    /// underscores. Rewriting something else into `reddit.com/r/...` would invent
+    /// a URL that resolves to nothing and merge unrelated rows onto it.
+    #[test]
+    fn an_impossible_subreddit_name_is_left_alone() {
+        for url in [
+            "https://www.reddit.com/r/",
+            "https://www.reddit.com/r/way_too_long_to_be_a_real_subreddit_name",
+            "https://www.reddit.com/r/has-a-hyphen",
+            "https://www.reddit.com/user/someone",
+        ] {
+            assert_eq!(canonical_place_url(url), url, "{url} should pass through");
+        }
+    }
+}
