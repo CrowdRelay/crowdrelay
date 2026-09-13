@@ -354,8 +354,13 @@ pub(crate) async fn growth_component_prometheus(
     if rows.is_empty() {
         return Ok(String::new());
     }
+    // Built from one literal per line. A `\`-continued literal keeps the source
+    // indentation, which put spaces in front of `# TYPE` — and a Prometheus
+    // comment line has to start with `#`, so that output was not valid
+    // exposition format. Found by reading the live scrape, not by a test here;
+    // `scripts/test_prometheus_exposition_v1.py` now refuses it.
     let mut body = String::from(
-        "# HELP crowdrelay_growth_component_enabled Whether a growth component will do its work, 1 or 0.\n         # TYPE crowdrelay_growth_component_enabled gauge\n",
+        "# HELP crowdrelay_growth_component_enabled Whether a growth component will do its work, 1 or 0.\n# TYPE crowdrelay_growth_component_enabled gauge\n",
     );
     for (component, enabled, switch, _) in &rows {
         // The missing switch is a label so it is visible in the scrape rather
@@ -370,7 +375,7 @@ pub(crate) async fn growth_component_prometheus(
         ));
     }
     body.push_str(
-        "# HELP crowdrelay_growth_component_reported_age_seconds How long ago the worker reported this component.\n         # TYPE crowdrelay_growth_component_reported_age_seconds gauge\n",
+        "# HELP crowdrelay_growth_component_reported_age_seconds How long ago the worker reported this component.\n# TYPE crowdrelay_growth_component_reported_age_seconds gauge\n",
     );
     for (component, _, _, age) in &rows {
         body.push_str(&format!(
