@@ -660,14 +660,44 @@ async fn f_manual_publication_moves_the_measurement_window() {
          not change what the post is worth"
     );
 
-    // Re-registering the same URL must not double-count the reach.
-    let _ = crowdrelay_infra::fanbase::register_manual_reddit_post(
+    // Re-registering the same URL must not double-count the reach, and must say
+    // why it refused. Every error from this function used to reach the operator
+    // as 400 "the request could not be parsed", which is the wrong thing to tell
+    // somebody holding a URL they know is right — the natural response is to
+    // retry, or to publish to Reddit a second time.
+    let repeat = crowdrelay_infra::fanbase::register_manual_reddit_post(
         &f.pool,
         f.workspace_id.into_uuid(),
         post_id,
         "https://www.reddit.com/r/spinetest/comments/abc123/title/",
     )
     .await;
+    match repeat {
+        Err(crowdrelay_infra::fanbase::ManualRedditPostError::NotAwaitingPublication {
+            ref status,
+        }) => assert_eq!(
+            status, "posted",
+            "the refusal must name the status so the answer can say 'already registered'"
+        ),
+        other => panic!("a second registration must report the status, got {other:?}"),
+    }
+
+    // An id that does not exist is a different answer: 404, not 409. Conflating
+    // them left an operator unable to tell a typo from work already done.
+    let unknown = crowdrelay_infra::fanbase::register_manual_reddit_post(
+        &f.pool,
+        f.workspace_id.into_uuid(),
+        uuid::Uuid::now_v7(),
+        "https://www.reddit.com/r/spinetest/comments/abc123/title/",
+    )
+    .await;
+    assert!(
+        matches!(
+            unknown,
+            Err(crowdrelay_infra::fanbase::ManualRedditPostError::NotFound)
+        ),
+        "an unknown post id must be NotFound, not a status conflict"
+    );
     let reach_rows_after: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM viryaos_reach_events \
          WHERE workspace_id = $1 AND action_id = $2 AND channel = 'reddit_post'",

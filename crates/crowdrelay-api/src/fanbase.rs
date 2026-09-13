@@ -325,8 +325,19 @@ pub async fn register_manual_community_post(
     {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(error) => {
+            use crowdrelay_infra::fanbase::ManualRedditPostError as E;
             tracing::warn!(error = %error, "failed to register manual community post");
-            Problem::bad_request(request_id_value).into_response()
+            match error {
+                E::InvalidUrl(_) => Problem::bad_request(request_id_value),
+                E::NotFound => Problem::not_found(request_id_value),
+                E::NotAwaitingPublication { .. } => Problem::conflict_because(
+                    "This post is not awaiting publication. It was most likely \
+                     registered already — check its status before publishing again.",
+                    request_id_value,
+                ),
+                E::Database(_) => Problem::service_unavailable(request_id_value),
+            }
+            .into_response()
         }
     }
 }
@@ -361,8 +372,18 @@ pub async fn register_manual_social_post(
     {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(error) => {
+            use crowdrelay_infra::fanbase::ManualContentPostError as E;
             tracing::warn!(error = %error, "failed to register manual social post");
-            Problem::bad_request(request_id_value).into_response()
+            match error {
+                E::NotFound => Problem::not_found(request_id_value),
+                E::NotAwaitingPublication { .. } => Problem::conflict_because(
+                    "This post is not awaiting publication. It was most likely \
+                     registered already — check its status before publishing again.",
+                    request_id_value,
+                ),
+                E::Database(_) => Problem::service_unavailable(request_id_value),
+            }
+            .into_response()
         }
     }
 }
@@ -395,8 +416,18 @@ pub async fn register_manual_telegram_post(
     {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(error) => {
+            use crowdrelay_infra::fanbase::ManualContentPostError as E;
             tracing::warn!(error = %error, "failed to register manual telegram post");
-            Problem::bad_request(request_id_value).into_response()
+            match error {
+                E::NotFound => Problem::not_found(request_id_value),
+                E::NotAwaitingPublication { .. } => Problem::conflict_because(
+                    "This post is not awaiting publication. It was most likely \
+                     registered already — check its status before publishing again.",
+                    request_id_value,
+                ),
+                E::Database(_) => Problem::service_unavailable(request_id_value),
+            }
+            .into_response()
         }
     }
 }
@@ -429,8 +460,18 @@ pub async fn register_manual_discord_post(
     {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(error) => {
+            use crowdrelay_infra::fanbase::ManualContentPostError as E;
             tracing::warn!(error = %error, "failed to register manual discord post");
-            Problem::bad_request(request_id_value).into_response()
+            match error {
+                E::NotFound => Problem::not_found(request_id_value),
+                E::NotAwaitingPublication { .. } => Problem::conflict_because(
+                    "This post is not awaiting publication. It was most likely \
+                     registered already — check its status before publishing again.",
+                    request_id_value,
+                ),
+                E::Database(_) => Problem::service_unavailable(request_id_value),
+            }
+            .into_response()
         }
     }
 }

@@ -22,6 +22,38 @@ use uuid::Uuid;
 // can track it.
 // ---------------------------------------------------------------------------
 
+/// Which of the two reasons a zero-row update had.
+///
+/// Runs only on the failure path, inside the same transaction — the update
+/// affected nothing, so there is no work to roll back. The table name is
+/// interpolated from a fixed set of callers in this module and never from
+/// input.
+async fn publication_failure(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    table: &'static str,
+    workspace_id: Uuid,
+    post_id: Uuid,
+) -> Result<PublicationFailure, sqlx::Error> {
+    let status: Option<String> = sqlx::query_scalar(&format!(
+        "SELECT status FROM {table} WHERE id = $1 AND workspace_id = $2"
+    ))
+    .bind(post_id)
+    .bind(workspace_id)
+    .fetch_optional(&mut **transaction)
+    .await?
+    .flatten();
+    Ok(match status {
+        Some(status) => PublicationFailure::WrongStatus(status),
+        None => PublicationFailure::Missing,
+    })
+}
+
+/// Why a manual registration could not be applied.
+enum PublicationFailure {
+    Missing,
+    WrongStatus(String),
+}
+
 /// Error type for manual Reddit post registration.
 #[derive(Debug, thiserror::Error)]
 pub enum ManualRedditPostError {
@@ -29,8 +61,25 @@ pub enum ManualRedditPostError {
     Database(#[from] sqlx::Error),
     #[error("invalid URL: {0}")]
     InvalidUrl(String),
-    #[error("community post not found or not in awaiting_manual_post status")]
+    /// No row with that id in this workspace.
+    ///
+    /// Split from the status case because the caller answers them differently
+    /// and an operator acts on them differently. Both used to be `NotFound`,
+    /// and the API layer turned every variant here into 400 — so publishing a
+    /// post by hand and then registering it answered "the request could not be
+    /// parsed" whether the id was wrong, the post was already registered, or
+    /// the database was down. Reddit is manual by policy, so this is the path
+    /// every real post takes, and the natural response to an ambiguous failure
+    /// is to retry or to re-post.
+    #[error("post not found in this workspace")]
     NotFound,
+    /// The row exists and is not waiting to be published.
+    ///
+    /// Almost always because it is already `posted` — the operator registered
+    /// it once and is retrying. Carrying the status lets the answer say so
+    /// instead of leaving them to guess.
+    #[error("post is {status}, not awaiting_manual_post")]
+    NotAwaitingPublication { status: String },
 }
 
 /// Registers a manually-posted Reddit URL for a community post that was
@@ -76,7 +125,21 @@ pub async fn register_manual_reddit_post(
     .await?;
 
     if result.rows_affected() == 0 {
-        return Err(ManualRedditPostError::NotFound);
+        return Err(
+            match publication_failure(
+                &mut transaction,
+                "community_posts",
+                workspace_id,
+                community_post_id,
+            )
+            .await?
+            {
+                PublicationFailure::Missing => ManualRedditPostError::NotFound,
+                PublicationFailure::WrongStatus(status) => {
+                    ManualRedditPostError::NotAwaitingPublication { status }
+                }
+            },
+        );
     }
     anchor_measurements_to_publication(&mut transaction, workspace_id, community_post_id).await?;
     record_publication_reach(&mut transaction, workspace_id, community_post_id).await?;
@@ -253,8 +316,25 @@ fn extract_reddit_post_id(url: &str) -> Option<String> {
 pub enum ManualContentPostError {
     #[error("database error: {0}")]
     Database(#[from] sqlx::Error),
-    #[error("content post not found or not in awaiting_manual_post status")]
+    /// No row with that id in this workspace.
+    ///
+    /// Split from the status case because the caller answers them differently
+    /// and an operator acts on them differently. Both used to be `NotFound`,
+    /// and the API layer turned every variant here into 400 — so publishing a
+    /// post by hand and then registering it answered "the request could not be
+    /// parsed" whether the id was wrong, the post was already registered, or
+    /// the database was down. Reddit is manual by policy, so this is the path
+    /// every real post takes, and the natural response to an ambiguous failure
+    /// is to retry or to re-post.
+    #[error("post not found in this workspace")]
     NotFound,
+    /// The row exists and is not waiting to be published.
+    ///
+    /// Almost always because it is already `posted` — the operator registered
+    /// it once and is retrying. Carrying the status lets the answer say so
+    /// instead of leaving them to guess.
+    #[error("post is {status}, not awaiting_manual_post")]
+    NotAwaitingPublication { status: String },
 }
 
 /// Registers a manually-posted social post URL for a social post that was
@@ -295,7 +375,21 @@ pub async fn register_manual_social_post(
     .await?;
 
     if result.rows_affected() == 0 {
-        return Err(ManualContentPostError::NotFound);
+        return Err(
+            match publication_failure(
+                &mut transaction,
+                "social_posts",
+                workspace_id,
+                social_post_id,
+            )
+            .await?
+            {
+                PublicationFailure::Missing => ManualContentPostError::NotFound,
+                PublicationFailure::WrongStatus(status) => {
+                    ManualContentPostError::NotAwaitingPublication { status }
+                }
+            },
+        );
     }
     anchor_content_measurements_to_publication(
         &mut transaction,
@@ -343,7 +437,21 @@ pub async fn register_manual_telegram_post(
     .await?;
 
     if result.rows_affected() == 0 {
-        return Err(ManualContentPostError::NotFound);
+        return Err(
+            match publication_failure(
+                &mut transaction,
+                "telegram_posts",
+                workspace_id,
+                telegram_post_id,
+            )
+            .await?
+            {
+                PublicationFailure::Missing => ManualContentPostError::NotFound,
+                PublicationFailure::WrongStatus(status) => {
+                    ManualContentPostError::NotAwaitingPublication { status }
+                }
+            },
+        );
     }
     anchor_content_measurements_to_publication(
         &mut transaction,
@@ -391,7 +499,21 @@ pub async fn register_manual_discord_post(
     .await?;
 
     if result.rows_affected() == 0 {
-        return Err(ManualContentPostError::NotFound);
+        return Err(
+            match publication_failure(
+                &mut transaction,
+                "discord_posts",
+                workspace_id,
+                discord_post_id,
+            )
+            .await?
+            {
+                PublicationFailure::Missing => ManualContentPostError::NotFound,
+                PublicationFailure::WrongStatus(status) => {
+                    ManualContentPostError::NotAwaitingPublication { status }
+                }
+            },
+        );
     }
     anchor_content_measurements_to_publication(
         &mut transaction,
