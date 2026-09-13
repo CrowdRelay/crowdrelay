@@ -317,14 +317,17 @@ struct ShowPassRow {
 }
 
 pub async fn overview(State(state): State<crate::AppState>, headers: HeaderMap) -> Response {
+    // One permit per in-flight query from the shared control-plane budget —
+    // the join below can hold five connections at once, so it pays five.
+    let budget = &state.read_budget;
     let future = async {
-        ensure_default_flags(&state).await?;
+        crate::ops::hold(budget, ensure_default_flags(&state)).await?;
         let (flags, last_reconciliation, open_findings, next_event, bandsintown_sync) = tokio::try_join!(
-            load_flags(&state),
-            load_last_reconciliation(&state),
-            count_open_findings(&state),
-            load_next_event(&state),
-            load_bandsintown_sync(&state),
+            crate::ops::hold(budget, load_flags(&state)),
+            crate::ops::hold(budget, load_last_reconciliation(&state)),
+            crate::ops::hold(budget, count_open_findings(&state)),
+            crate::ops::hold(budget, load_next_event(&state)),
+            crate::ops::hold(budget, load_bandsintown_sync(&state)),
         )?;
         Ok::<_, EcosystemError>(EcosystemOverview {
             schema_version: SHOW_SNAPSHOT_SCHEMA,

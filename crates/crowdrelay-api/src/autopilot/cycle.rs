@@ -20,10 +20,17 @@ pub async fn preview_autopilot_cycle(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Response {
-    match crowdrelay_infra::autopilot::preview_autopilot_cycle(
-        &state.autopilot,
-        state.ops.workspace_id(),
-        OffsetDateTime::now_utc(),
+    // The preview's snapshot loader fans out to five concurrent queries
+    // inside, so it pays five permits of the shared read budget — the widest
+    // single read on the surface.
+    match read(
+        &state,
+        5,
+        crowdrelay_infra::autopilot::preview_autopilot_cycle(
+            &state.autopilot,
+            state.ops.workspace_id(),
+            OffsetDateTime::now_utc(),
+        ),
     )
     .await
     {

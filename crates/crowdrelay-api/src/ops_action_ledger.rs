@@ -32,7 +32,8 @@ pub async fn list_actions(
     Query(query): Query<ActionLedgerQuery>,
 ) -> Response {
     let limit = query.limit.unwrap_or(50).clamp(1, 250);
-    match run_with_timeout(
+    match run_limited(
+        &state.read_budget,
         state.ops.operation_timeout,
         load_action_ledger(&state.ops, query.state.as_deref(), limit),
     )
@@ -113,7 +114,8 @@ pub async fn get_action(
         Ok(value) => value,
         Err(error) => return error.into_response(request_id(&headers)),
     };
-    match run_with_timeout(
+    match run_limited(
+        &state.read_budget,
         state.ops.operation_timeout,
         load_single_action(&state.ops, action_id),
     )
@@ -219,13 +221,15 @@ pub async fn list_cycles(
     Query(query): Query<ActionLedgerQuery>,
 ) -> Response {
     let limit = query.limit.unwrap_or(20).clamp(1, 200);
-    let cycles = run_with_timeout(
+    let cycles = run_limited(
+        &state.read_budget,
         state.ops.operation_timeout,
         load_cycle_runs(&state.ops, query.state.as_deref(), limit),
     );
     // The same assessment `/ops/attention` reports, from the same loader, so
     // the two surfaces cannot disagree about whether the fanbase is growing.
-    let brain = run_with_timeout(
+    let brain = run_limited(
+        &state.read_budget,
         state.ops.operation_timeout,
         load_brain_assessment(&state.ops),
     );
@@ -338,7 +342,8 @@ pub async fn list_connection_health(
     State(state): State<crate::AppState>,
     headers: HeaderMap,
 ) -> Response {
-    match run_with_timeout(
+    match run_limited(
+        &state.read_budget,
         state.ops.operation_timeout,
         load_connection_health(&state.ops),
     )

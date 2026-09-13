@@ -51,9 +51,18 @@ pub async fn overview(State(state): State<crate::AppState>, headers: HeaderMap) 
         "#,
     )
     .bind(workspace_id)
-    .fetch_one(&state.database)
-    .await;
-    private_json(result, &headers)
+    .fetch_one(&state.database);
+    match crate::ops::budgeted(
+        &state.read_budget,
+        1,
+        state.ticketing.operation_timeout(),
+        result,
+    )
+    .await
+    {
+        Some(result) => private_json(result, &headers),
+        None => unavailable(&headers),
+    }
 }
 pub async fn list_fans(
     State(state): State<crate::AppState>,
@@ -116,23 +125,35 @@ pub async fn fan_detail(
     headers: HeaderMap,
 ) -> Response {
     let workspace_id = state.ticketing.workspace_id().into_uuid();
-    let fan = load_fan_card(&state, workspace_id, fan_id).await;
+    // The fan card and the seven joined reads below each pay one permit of
+    // the shared control-plane budget and run under the same timeout, so a
+    // detail view cannot take the pool alone — or hang it.
+    let budget = &state.read_budget;
+    let fan = tokio::time::timeout(
+        state.ticketing.operation_timeout(),
+        crate::ops::hold(budget, load_fan_card(&state, workspace_id, fan_id)),
+    )
+    .await;
     let fan = match fan {
-        Ok(Some(value)) => value,
-        Ok(None) => {
+        Ok(Ok(Some(value))) => value,
+        Ok(Ok(None)) => {
             return Problem::not_found(request_id(&headers))
                 .private()
                 .into_response();
         }
-        Err(error) => {
+        Ok(Err(error)) => {
             tracing::warn!(%error, %fan_id, "could not load fan 360 card");
             return unavailable(&headers);
         }
+        Err(_) => return unavailable(&headers),
     };
 
     let email = fan.email.clone();
-    let (acquisitions, event_interests, attendance, ticket_purchases, rewards, synesthesia, tags) = tokio::join!(
-        sqlx::query_as::<_, AcquisitionTouch>(
+    let joined = tokio::time::timeout(
+        state.ticketing.operation_timeout(),
+        async {
+        tokio::join!(
+        crate::ops::hold(budget, sqlx::query_as::<_, AcquisitionTouch>(
             r#"
             SELECT acquisition.source, campaign.name AS campaign_name, acquisition.occurred_at
             FROM fan_acquisition_events acquisition
@@ -146,8 +167,8 @@ pub async fn fan_detail(
         )
         .bind(workspace_id)
         .bind(fan_id)
-        .fetch_all(&state.database),
-        sqlx::query_as::<_, EventInterestTouch>(
+        .fetch_all(&state.database)),
+        crate::ops::hold(budget, sqlx::query_as::<_, EventInterestTouch>(
             r#"
             SELECT event.slug AS event_slug, event.title AS event_title, interest.created_at
             FROM event_interests interest
@@ -161,8 +182,8 @@ pub async fn fan_detail(
         )
         .bind(workspace_id)
         .bind(fan_id)
-        .fetch_all(&state.database),
-        sqlx::query_as::<_, AttendanceTouch>(
+        .fetch_all(&state.database)),
+        crate::ops::hold(budget, sqlx::query_as::<_, AttendanceTouch>(
             r#"
             SELECT event.slug AS event_slug, event.title AS event_title,
                    pass.status, pass.redeemed_at
@@ -177,8 +198,8 @@ pub async fn fan_detail(
         )
         .bind(workspace_id)
         .bind(fan_id)
-        .fetch_all(&state.database),
-        sqlx::query_as::<_, TicketPurchase>(
+        .fetch_all(&state.database)),
+        crate::ops::hold(budget, sqlx::query_as::<_, TicketPurchase>(
             r#"
             SELECT orders.public_reference AS order_reference,
                    event.slug AS event_slug,
@@ -202,8 +223,8 @@ pub async fn fan_detail(
         )
         .bind(workspace_id)
         .bind(&email)
-        .fetch_all(&state.database),
-        sqlx::query_as::<_, RewardTouch>(
+        .fetch_all(&state.database)),
+        crate::ops::hold(budget, sqlx::query_as::<_, RewardTouch>(
             r#"
             SELECT rule.name AS reward_name, rule.reward_type, grant.status, grant.created_at
             FROM reward_grants grant
@@ -217,8 +238,8 @@ pub async fn fan_detail(
         )
         .bind(workspace_id)
         .bind(fan_id)
-        .fetch_all(&state.database),
-        sqlx::query_as::<_, SynesthesiaTouch>(
+        .fetch_all(&state.database)),
+        crate::ops::hold(budget, sqlx::query_as::<_, SynesthesiaTouch>(
             r#"
             SELECT entry.campaign_slug, entry.entered_at, run.completed_at, run.client_total_elapsed_ms
             FROM synesthesia_reward_entries entry
@@ -232,8 +253,8 @@ pub async fn fan_detail(
         )
         .bind(workspace_id)
         .bind(fan_id)
-        .fetch_all(&state.database),
-        sqlx::query_scalar::<_, String>(
+        .fetch_all(&state.database)),
+        crate::ops::hold(budget, sqlx::query_scalar::<_, String>(
             r#"
             SELECT tag
             FROM fan_audience_tags
@@ -243,8 +264,16 @@ pub async fn fan_detail(
         )
         .bind(workspace_id)
         .bind(fan_id)
-        .fetch_all(&state.database),
-    );
+        .fetch_all(&state.database)),
+    )
+        },
+    )
+    .await;
+    let (acquisitions, event_interests, attendance, ticket_purchases, rewards, synesthesia, tags) =
+        match joined {
+            Ok(results) => results,
+            Err(_) => return unavailable(&headers),
+        };
 
     let detail = match (
         acquisitions,

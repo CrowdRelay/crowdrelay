@@ -129,25 +129,27 @@ struct BrainSelfAssessment {
 
 pub async fn attention(State(state): State<crate::AppState>, headers: HeaderMap) -> Response {
     let timeout_duration = state.ops.operation_timeout;
-    // Eleven reads. Without the limiter this page asks for more connections
-    // than exist and holds every one of them, so any other request to this API
-    // waits behind a single operator refresh. The budget is half of whatever
-    // pool this process was configured with — see `ops_fan_out_limit`.
-    let limiter = tokio::sync::Semaphore::new(ops_fan_out_limit(state.ops.pool()));
-    let summary = run_limited(&limiter, timeout_duration, load_summary(&state.ops));
-    let alerts = run_limited(&limiter, timeout_duration, load_alerts(&state.ops));
-    let dead_outbox = run_limited(&limiter, timeout_duration, load_dead_outbox(&state.ops));
+    // Eleven reads, each paying one permit of the process-wide control-plane
+    // budget — the ecosystem arm pays its leaves individually inside
+    // `load_attention_ecosystem`. Without a shared bound this page asks for
+    // more connections than the pool has and holds every one of them, so any
+    // other request to this API waits behind a single operator refresh; the
+    // budget turns that into queueing — see `ops::ControlPlaneReadBudget`.
+    let budget = &state.read_budget;
+    let summary = run_limited(budget, timeout_duration, load_summary(&state.ops));
+    let alerts = run_limited(budget, timeout_duration, load_alerts(&state.ops));
+    let dead_outbox = run_limited(budget, timeout_duration, load_dead_outbox(&state.ops));
     let dead_deliveries =
-        run_limited(&limiter, timeout_duration, load_dead_deliveries(&state.ops));
-    let dead_push = run_limited(&limiter, timeout_duration, load_dead_push(&state.ops));
-    let ecosystem = run_limited(&limiter, timeout_duration, load_attention_ecosystem(&state));
-    let findings = run_limited(&limiter, timeout_duration, load_open_findings(&state));
-    let needs_you = run_limited(&limiter, timeout_duration, load_needs_you(&state.ops));
-    let brain = run_limited(&limiter, timeout_duration, load_brain_assessment(&state.ops));
+        run_limited(budget, timeout_duration, load_dead_deliveries(&state.ops));
+    let dead_push = run_limited(budget, timeout_duration, load_dead_push(&state.ops));
+    let ecosystem = run_with_timeout(timeout_duration, load_attention_ecosystem(&state));
+    let findings = run_limited(budget, timeout_duration, load_open_findings(&state));
+    let needs_you = run_limited(budget, timeout_duration, load_needs_you(&state.ops));
+    let brain = run_limited(budget, timeout_duration, load_brain_assessment(&state.ops));
     let unpublished_drafts =
-        run_limited(&limiter, timeout_duration, load_unpublished_drafts(&state));
+        run_limited(budget, timeout_duration, load_unpublished_drafts(&state));
     let blocked_communities =
-        run_limited(&limiter, timeout_duration, load_blocked_communities(&state.ops));
+        run_limited(budget, timeout_duration, load_blocked_communities(&state.ops));
 
     let (
         summary, alerts, dead_outbox, dead_deliveries, dead_push,
@@ -408,7 +410,8 @@ async fn load_attention_ecosystem(
     // this a workspace whose flags have never been written reports an empty
     // flag list here while the dedicated endpoint reports the full default
     // set, so the two views of the same tenant disagree.
-    crate::ecosystem::ensure_default_flags(state)
+    let budget = &state.read_budget;
+    hold(budget, crate::ecosystem::ensure_default_flags(state))
         .await
         .map_err(|_| OpsError::Unexpected)?;
     let workspace_id = state.ticketing.workspace_id().into_uuid();
@@ -420,8 +423,8 @@ async fn load_attention_ecosystem(
         ORDER BY key
         "#,
     )
-    .bind(workspace_id)
-    .fetch_all(state.ticketing.pool());
+    .bind(workspace_id);
+    let flags = hold(budget, flags.fetch_all(state.ticketing.pool()));
     let last_reconciliation = sqlx::query_as::<_, crate::ecosystem::ReconciliationRun>(
         r#"
         SELECT id, status, trigger, finding_count, started_at, finished_at
@@ -431,13 +434,14 @@ async fn load_attention_ecosystem(
         LIMIT 1
         "#,
     )
-    .bind(workspace_id)
-    .fetch_optional(state.ticketing.pool());
+    .bind(workspace_id);
+    let last_reconciliation =
+        hold(budget, last_reconciliation.fetch_optional(state.ticketing.pool()));
     let open_findings = sqlx::query_scalar::<_, i64>(
         "SELECT count(*)::bigint FROM reconciliation_findings WHERE workspace_id = $1 AND resolved_at IS NULL",
     )
-    .bind(workspace_id)
-    .fetch_one(state.ticketing.pool());
+    .bind(workspace_id);
+    let open_findings = hold(budget, open_findings.fetch_one(state.ticketing.pool()));
     let next_event = sqlx::query_as::<_, crate::ecosystem::OverviewEvent>(
         r#"
         SELECT id, slug, title, venue, starts_at
@@ -448,8 +452,8 @@ async fn load_attention_ecosystem(
         LIMIT 1
         "#,
     )
-    .bind(workspace_id)
-    .fetch_optional(state.ticketing.pool());
+    .bind(workspace_id);
+    let next_event = hold(budget, next_event.fetch_optional(state.ticketing.pool()));
     let bandsintown_sync = sqlx::query_as::<_, crate::ecosystem::BandsintownSyncStatus>(
         r#"
         SELECT last_synced_at, last_success_at, next_sync_at, consecutive_failures, last_error,
@@ -460,8 +464,9 @@ async fn load_attention_ecosystem(
         LIMIT 1
         "#,
     )
-    .bind(workspace_id)
-    .fetch_optional(state.ticketing.pool());
+    .bind(workspace_id);
+    let bandsintown_sync =
+        hold(budget, bandsintown_sync.fetch_optional(state.ticketing.pool()));
 
     let (flags, last_reconciliation, open_findings, next_event, bandsintown_sync) =
         tokio::try_join!(flags, last_reconciliation, open_findings, next_event, bandsintown_sync)

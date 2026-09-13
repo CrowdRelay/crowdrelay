@@ -32,7 +32,8 @@ pub async fn operation_timeline(
         Ok(value) => value,
         Err(error) => return error.into_response(request_id(&headers)),
     };
-    match run_with_timeout(
+    match run_limited(
+        &state.read_budget,
         state.ops.operation_timeout,
         load_operation_timeline(&state.ops, &timeline_request_id),
     )
@@ -174,7 +175,8 @@ pub async fn trace_timeline(
         Ok(value) => value,
         Err(error) => return error.into_response(request_id(&headers)),
     };
-    match run_with_timeout(
+    match run_limited(
+        &state.read_budget,
         state.ops.operation_timeout,
         load_trace_timeline(&state.ops, &trace_id),
     )

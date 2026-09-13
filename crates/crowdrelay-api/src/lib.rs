@@ -178,6 +178,11 @@ pub struct AppState {
     pub(crate) http_client: reqwest::Client,
     /// Provider verifiers for connection creation probes.
     pub(crate) provider_verifiers: crowdrelay_infra::provider_verification::ProviderVerifiers,
+    /// The process-wide connection budget the operations page and every
+    /// fanning control-plane read acquires from — see
+    /// `ops::ControlPlaneReadBudget`. One page load firing nine endpoints at
+    /// once used to take the entire pool; the budget turns that into queueing.
+    pub(crate) read_budget: ops::ControlPlaneReadBudget,
 }
 
 impl AppState {
@@ -213,6 +218,7 @@ impl AppState {
         let area_admin = crowdrelay_application::AreaAdminService::new(Arc::new(
             PostgresAreaAdminRepository::new(database.clone()),
         ));
+        let read_budget = ops::ControlPlaneReadBudget::new(&database);
         Self {
             database,
             readiness_timeout,
@@ -240,6 +246,7 @@ impl AppState {
             response_encryption_key,
             http_client: reqwest::Client::new(),
             provider_verifiers,
+            read_budget,
         }
     }
 }

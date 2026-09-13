@@ -105,13 +105,36 @@ class OperatorAttentionAggregateContract(unittest.TestCase):
         )
 
     def test_aggregate_sections_share_one_connection_limiter(self):
-        # The timeout bounds how long a section may take; the limiter bounds how
-        # many run at once. Without it the page asks for more connections than
-        # the pool holds, which is a self-inflicted outage rather than a slow
-        # page, so the limiter is asserted rather than left to review.
-        self.assertIn("Semaphore::new(ops_fan_out_limit(", self.attention)
-        for section in re.findall(r"let \w+ =\s*run_limited\(\s*(&\w+)", self.attention):
-            self.assertEqual(section, "&limiter")
+        # The timeout bounds how long a section may take; the shared budget
+        # bounds how many hold a connection at once. Without it the page asks
+        # for more connections than the pool holds, which is a self-inflicted
+        # outage rather than a slow page, so the limiter is asserted rather
+        # than left to review.
+        #
+        # The budget is `AppState.read_budget` — one semaphore shared by every
+        # control-plane read, not a semaphore built per request. A per-request
+        # limiter let the page take the entire pool when nine endpoints fanned
+        # out at once (measured: 10 of 10 connections for one page load), so a
+        # request-local `Semaphore::new` here would be a regression.
+        self.assertIn("let budget = &state.read_budget;", self.attention)
+        self.assertNotIn(
+            "Semaphore::new(",
+            self.attention,
+            "the bound is the shared read budget, not a per-request semaphore",
+        )
+        for section in re.findall(r"let \w+ =\s*run_limited\(\s*(\w+)", self.attention):
+            self.assertEqual(section, "budget")
+        # The ecosystem arm pays its leaves instead of holding one permit for
+        # the whole arm — it fans out five queries inside the join, and the
+        # permit unit is the in-flight query.
+        body = self.attention.split("async fn load_attention_ecosystem", 1)[1].split(
+            "async fn ", 1
+        )[0]
+        self.assertGreaterEqual(
+            body.count("hold(budget,"),
+            5,
+            "each in-flight query inside the ecosystem join pays one permit",
+        )
 
     def test_the_limiter_budget_is_read_from_the_pool(self):
         """A budget that reasons about the pool has to read the pool.
@@ -127,9 +150,9 @@ class OperatorAttentionAggregateContract(unittest.TestCase):
             ROOT / "crates/crowdrelay-api/src/ops/fan_out.rs"
         ).read_text()
         self.assertIn(
-            "fn ops_fan_out_limit(pool: &sqlx::PgPool)",
+            "fn new(pool: &sqlx::PgPool)",
             fan_out,
-            "the fan-out budget must take the pool, not a constant",
+            "the read budget must take the pool, not a constant",
         )
         self.assertIn(
             "pool.options().get_max_connections()",
@@ -138,10 +161,27 @@ class OperatorAttentionAggregateContract(unittest.TestCase):
         )
         self.assertNotRegex(
             fan_out,
-            r"const OPS_FAN_OUT_LIMIT",
+            r"const OPS_FAN_OUT_LIMIT|const CONTROL_PLANE_READ",
             "a hardcoded budget cannot stay correct across four different "
             "configured pool sizes",
         )
+
+    def test_the_budget_is_shared_by_the_pages_other_arms(self):
+        """The budget only bounds what acquires from it.
+
+        One instance lives on `AppState`, built from the real pool; the page's
+        other arms — the autopilot read helper and the ecosystem overview's
+        join — pay the same budget, otherwise an endpoint could fan out
+        unbounded beside the nine that are bounded.
+        """
+        lib = read("crates/crowdrelay-api/src/lib.rs")
+        self.assertIn("read_budget: ops::ControlPlaneReadBudget", lib)
+        self.assertIn("ControlPlaneReadBudget::new(&database)", lib)
+        autopilot = read("crates/crowdrelay-api/src/autopilot.rs")
+        self.assertIn("crate::ops::budgeted(", autopilot)
+        self.assertIn("&state.read_budget", autopilot)
+        self.assertIn("let budget = &state.read_budget;", self.ecosystem)
+        self.assertIn("crate::ops::hold(budget,", self.ecosystem)
 
 
 if __name__ == "__main__":

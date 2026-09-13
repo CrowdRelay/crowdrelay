@@ -75,10 +75,23 @@ pub async fn get_brand_settings(
     let request_id_value = request_id(&headers);
     let workspace_id = state.ticketing.workspace_id().into_uuid();
     let repository = repository(&state);
-    match tokio::join!(
-        repository.brand_settings(workspace_id),
-        repository.list_overrides(workspace_id)
-    ) {
+    let budget = &state.read_budget;
+    let joined = tokio::time::timeout(state.ticketing.operation_timeout(), async {
+        tokio::join!(
+            crate::ops::hold(budget, repository.brand_settings(workspace_id)),
+            crate::ops::hold(budget, repository.list_overrides(workspace_id))
+        )
+    })
+    .await;
+    let joined = match joined {
+        Ok(results) => results,
+        Err(_) => {
+            return Problem::service_unavailable(request_id_value)
+                .private()
+                .into_response();
+        }
+    };
+    match joined {
         (Ok(effective), Ok(overrides)) => {
             let mut settings = HashMap::new();
             let effective: &crowdrelay_infra::tenant_settings::TenantBrandSettings =

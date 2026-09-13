@@ -36,13 +36,13 @@ impl OpsState {
         self.workspace_id
     }
 
-    /// The pool this process was configured with.
+    /// The read timeout the control-plane surface shares.
     ///
-    /// Exposed so a concurrency budget can be derived from the real pool size
-    /// instead of a constant that guesses at it.
+    /// Exposed outside the ops module so `autopilot` handlers waiting on the
+    /// shared read budget run on the same clock the rest of the page does.
     #[must_use]
-    pub(crate) const fn pool(&self) -> &PgPool {
-        &self.pool
+    pub(crate) const fn operation_timeout(&self) -> Duration {
+        self.operation_timeout
     }
 }
 

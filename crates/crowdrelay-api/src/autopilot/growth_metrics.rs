@@ -175,10 +175,14 @@ pub async fn record_growth_metric_point(
 }
 
 pub async fn growth_metric_trends(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    match state
-        .autopilot
-        .load_growth_metric_trends(state.ops.workspace_id(), OffsetDateTime::now_utc())
-        .await
+    match read(
+        &state,
+        1,
+        state
+            .autopilot
+            .load_growth_metric_trends(state.ops.workspace_id(), OffsetDateTime::now_utc()),
+    )
+    .await
     {
         Ok(series) => private_json(StatusCode::OK, GrowthMetricTrendsResponse { series }),
         Err(error) => repository_problem(error, request_id(&headers)),
@@ -197,10 +201,14 @@ struct GrowthMetricTrendsResponse {
 /// is reported as a state so an operator sees "Spotify: not connected" instead
 /// of an empty list.
 pub async fn growth_metric_coverage(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    match state
-        .autopilot
-        .load_growth_metric_trends(state.ops.workspace_id(), OffsetDateTime::now_utc())
-        .await
+    match read(
+        &state,
+        1,
+        state
+            .autopilot
+            .load_growth_metric_trends(state.ops.workspace_id(), OffsetDateTime::now_utc()),
+    )
+    .await
     {
         Ok(series) => {
             let observed: Vec<(MetricPlatform, bool)> = series
@@ -232,10 +240,14 @@ struct GrowthMetricCoverageResponse {
 /// not be made, which is the intended failure: there is no number there to
 /// misread.
 pub async fn play_ledger(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    match state
-        .autopilot
-        .load_play_ledger(state.ops.workspace_id(), OffsetDateTime::now_utc())
-        .await
+    match read(
+        &state,
+        1,
+        state
+            .autopilot
+            .load_play_ledger(state.ops.workspace_id(), OffsetDateTime::now_utc()),
+    )
+    .await
     {
         Ok(ledger) => private_json(StatusCode::OK, ledger),
         Err(error) => repository_problem(error, request_id(&headers)),
@@ -250,10 +262,14 @@ pub async fn play_ledger(State(state): State<AppState>, headers: HeaderMap) -> R
 pub async fn reach_metrics(State(state): State<AppState>, headers: HeaderMap) -> Response {
     let now = OffsetDateTime::now_utc();
     let since = now - time::Duration::days(30);
-    match state
-        .autopilot
-        .load_reach_metrics(state.ops.workspace_id(), since, Some(now))
-        .await
+    match read(
+        &state,
+        1,
+        state
+            .autopilot
+            .load_reach_metrics(state.ops.workspace_id(), since, Some(now)),
+    )
+    .await
     {
         Ok(metrics) => {
             let json = serde_json::to_value(&metrics).unwrap_or(serde_json::Value::Null);

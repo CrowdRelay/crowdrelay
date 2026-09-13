@@ -1,5 +1,11 @@
 pub async fn summary(State(state): State<crate::AppState>, headers: HeaderMap) -> Response {
-    match run_with_timeout(state.ops.operation_timeout, load_summary(&state.ops)).await {
+    match run_limited(
+        &state.read_budget,
+        state.ops.operation_timeout,
+        load_summary(&state.ops),
+    )
+    .await
+    {
         Ok(summary) => private_json(StatusCode::OK, summary),
         Err(error) => error.into_response(request_id(&headers)),
     }
@@ -11,9 +17,13 @@ pub async fn summary(State(state): State<crate::AppState>, headers: HeaderMap) -
 /// as an optional source so a secondary analytics query cannot take down the
 /// whole control plane.
 pub async fn signal_overview(State(state): State<crate::AppState>, headers: HeaderMap) -> Response {
-    let summary_future =
-        run_with_timeout(state.ops.operation_timeout, load_signal_summary(&state.ops));
-    let cities_future = run_with_timeout(
+    let summary_future = run_limited(
+        &state.read_budget,
+        state.ops.operation_timeout,
+        load_signal_summary(&state.ops),
+    );
+    let cities_future = run_limited(
+        &state.read_budget,
         state.ops.operation_timeout,
         load_signal_top_cities(&state.ops),
     );
@@ -54,7 +64,8 @@ pub async fn list_outbox(
     };
     let result = match query.status {
         Some(status) => {
-            run_with_timeout(
+            run_limited(
+                &state.read_budget,
                 state.ops.operation_timeout,
                 sqlx::query_as::<_, OutboxItem>(
                     r#"
@@ -75,7 +86,8 @@ pub async fn list_outbox(
             .await
         }
         None => {
-            run_with_timeout(
+            run_limited(
+                &state.read_budget,
                 state.ops.operation_timeout,
                 sqlx::query_as::<_, OutboxItem>(
                     r#"
@@ -112,7 +124,8 @@ pub async fn list_deliveries(
     };
     let result = match query.status {
         Some(status) => {
-            run_with_timeout(
+            run_limited(
+                &state.read_budget,
                 state.ops.operation_timeout,
                 sqlx::query_as::<_, DeliveryItem>(
                     r#"
@@ -142,7 +155,8 @@ pub async fn list_deliveries(
             .await
         }
         None => {
-            run_with_timeout(
+            run_limited(
+                &state.read_budget,
                 state.ops.operation_timeout,
                 sqlx::query_as::<_, DeliveryItem>(
                     r#"
@@ -186,7 +200,13 @@ pub async fn delivery_details(
         Ok(id) => id,
         Err(error) => return error.into_response(request_id(&headers)),
     };
-    match run_with_timeout(state.ops.operation_timeout, load_delivery(&state.ops, id)).await {
+    match run_limited(
+        &state.read_budget,
+        state.ops.operation_timeout,
+        load_delivery(&state.ops, id),
+    )
+    .await
+    {
         Ok(Some(details)) => private_json(StatusCode::OK, details),
         Ok(None) => Problem::not_found(request_id(&headers))
             .private()
@@ -209,7 +229,7 @@ pub async fn clear_dead_deliveries(
         &idempotency_key,
         request_id_value.as_deref(),
     );
-    match run_with_timeout(state.ops.operation_timeout, future).await {
+    match run_limited(&state.read_budget, state.ops.operation_timeout, future).await {
         Ok(result) => private_json(StatusCode::OK, result),
         Err(error) => error.into_response(request_id_value),
     }
@@ -311,7 +331,7 @@ pub async fn retry_outbox(
             .private()
             .into_response();
     }
-    retry(&state.ops, &headers, "outbox", &id).await
+    retry(&state, &headers, "outbox", &id).await
 }
 
 pub async fn retry_delivery(
@@ -327,7 +347,7 @@ pub async fn retry_delivery(
             .private()
             .into_response();
     }
-    retry(&state.ops, &headers, "delivery", &id).await
+    retry(&state, &headers, "delivery", &id).await
 }
 
 pub async fn retry_push(
@@ -343,7 +363,7 @@ pub async fn retry_push(
             .private()
             .into_response();
     }
-    retry(&state.ops, &headers, "push", &id).await
+    retry(&state, &headers, "push", &id).await
 }
 
 /// Lists delivery results — what the brain actually posted, where, and what
@@ -363,7 +383,8 @@ pub async fn list_delivery_results(
         Ok(limit) => limit,
         Err(error) => return error.into_response(request_id(&headers)),
     };
-    match run_with_timeout(
+    match run_limited(
+        &state.read_budget,
         state.ops.operation_timeout,
         load_delivery_results(&state.ops, limit),
     )
@@ -374,7 +395,12 @@ pub async fn list_delivery_results(
     }
 }
 
-async fn retry(state: &OpsState, headers: &HeaderMap, target: &'static str, id: &str) -> Response {
+async fn retry(
+    state: &crate::AppState,
+    headers: &HeaderMap,
+    target: &'static str,
+    id: &str,
+) -> Response {
     let id = match parse_id(id) {
         Ok(id) => id,
         Err(error) => return error.into_response(request_id(headers)),
@@ -385,13 +411,13 @@ async fn retry(state: &OpsState, headers: &HeaderMap, target: &'static str, id: 
     };
     let request_id_value = request_id(headers);
     let future = retry_transaction(
-        state,
+        &state.ops,
         target,
         id,
         &idempotency_key,
         request_id_value.as_deref(),
     );
-    match run_with_timeout(state.operation_timeout, future).await {
+    match run_limited(&state.read_budget, state.ops.operation_timeout, future).await {
         Ok(result) => private_json(StatusCode::OK, result),
         Err(error) => error.into_response(request_id_value),
     }
