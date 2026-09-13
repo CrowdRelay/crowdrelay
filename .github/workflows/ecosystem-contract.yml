@@ -10,6 +10,21 @@ on:
       - "crates/crowdrelay-api/src/meta.rs"
       - "crates/crowdrelay-api/src/routing.rs"
       - "scripts/test-ecosystem-contract-v2.py"
+      # The agent-service pairing gates, and every file they read. Without these
+      # the job runs only when the OpenAPI or this workflow changes — so lowering
+      # a timeout in community_executor.rs, or adding a WorkerTemplate slug, would
+      # not run the gate that exists to catch exactly that.
+      - "scripts/test_agents_timeout_parity_v1.py"
+      - "scripts/test_agents_template_parity_v1.py"
+      - "scripts/test_agents_platform_parity_v1.py"
+      - "crates/crowdrelay-domain/src/worker_template.rs"
+      - "crates/crowdrelay-worker/src/community_join_executor.rs"
+      - "crates/crowdrelay-worker/src/community_executor.rs"
+      - "crates/crowdrelay-worker/src/discovery.rs"
+      - "crates/crowdrelay-worker/src/social_post_executor.rs"
+      - "crates/crowdrelay-worker/src/telegram_executor.rs"
+      - "crates/crowdrelay-worker/src/discord_executor.rs"
+      - "crates/crowdrelay-worker/src/community_intelligence/reddit.rs"
       - ".github/workflows/ecosystem-contract.yml"
   pull_request:
     paths:
@@ -18,6 +33,21 @@ on:
       - "crates/crowdrelay-api/src/meta.rs"
       - "crates/crowdrelay-api/src/routing.rs"
       - "scripts/test-ecosystem-contract-v2.py"
+      # The agent-service pairing gates, and every file they read. Without these
+      # the job runs only when the OpenAPI or this workflow changes — so lowering
+      # a timeout in community_executor.rs, or adding a WorkerTemplate slug, would
+      # not run the gate that exists to catch exactly that.
+      - "scripts/test_agents_timeout_parity_v1.py"
+      - "scripts/test_agents_template_parity_v1.py"
+      - "scripts/test_agents_platform_parity_v1.py"
+      - "crates/crowdrelay-domain/src/worker_template.rs"
+      - "crates/crowdrelay-worker/src/community_join_executor.rs"
+      - "crates/crowdrelay-worker/src/community_executor.rs"
+      - "crates/crowdrelay-worker/src/discovery.rs"
+      - "crates/crowdrelay-worker/src/social_post_executor.rs"
+      - "crates/crowdrelay-worker/src/telegram_executor.rs"
+      - "crates/crowdrelay-worker/src/discord_executor.rs"
+      - "crates/crowdrelay-worker/src/community_intelligence/reddit.rs"
       - ".github/workflows/ecosystem-contract.yml"
 
 permissions:
