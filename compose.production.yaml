@@ -136,6 +136,14 @@ services:
       - ${CROWDRELAY_ENV_FILE:-deploy/.env.production}
     environment:
       TOKIO_WORKER_THREADS: ${CROWDRELAY_WORKER_TOKIO_THREADS:-1}
+      # On by default, and cheap: `Backtrace::capture` is only reached for a
+      # decode failure, which is a deployment defect rather than a runtime
+      # condition. Without it a mismatched column type reports which column and
+      # which two types disagreed, and nothing about which of ~1700 runtime
+      # queries produced it — that is what left every autopilot cycle degrading
+      # for hours on 2026-09-13 with no way to find the query. See `map_sqlx`
+      # in crowdrelay-infra/src/database.rs.
+      RUST_BACKTRACE: ${CROWDRELAY_WORKER_RUST_BACKTRACE:-1}
       # The agents service runs its own compose project and is reachable on the
       # shared network as `agent-service`. Without this the worker falls back to
       # `http://127.0.0.1:8095`, which resolves to the worker itself — so every
