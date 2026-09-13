@@ -160,7 +160,19 @@ impl PostgresAudienceGraphRepository {
                 country_code = COALESCE(EXCLUDED.country_code, discovery_places.country_code),
                 language = COALESCE(EXCLUDED.language, discovery_places.language),
                 notes = COALESCE(EXCLUDED.notes, discovery_places.notes),
-                status = 'active',
+                -- `status` is deliberately absent. A conflict here means
+                -- discovery saw the place again, which is an observation
+                -- that it still exists — not a decision that we want it.
+                -- This clause used to set `status = 'active'`, and since
+                -- the two upserts are the ONLY writers of that column in
+                -- the codebase, `blocked` and `archived` could not
+                -- survive a scrape: the next run of discovery silently
+                -- un-blocked every community somebody had ruled out, and
+                -- `refused_by_us_or_them` went false again with it.
+                -- `archived` is worse, because the doc comment on
+                -- `upsert_place` prescribes archiving as how you correct
+                -- a mis-kinded row; reviving the tombstone undoes the
+                -- correction.
                 updated_at = now()
             RETURNING id
             "#,
@@ -523,7 +535,19 @@ impl PostgresAudienceGraphRepository {
                 country_code = COALESCE(EXCLUDED.country_code, discovery_places.country_code),
                 language = COALESCE(EXCLUDED.language, discovery_places.language),
                 notes = COALESCE(EXCLUDED.notes, discovery_places.notes),
-                status = 'active',
+                -- `status` is deliberately absent. A conflict here means
+                -- discovery saw the place again, which is an observation
+                -- that it still exists — not a decision that we want it.
+                -- This clause used to set `status = 'active'`, and since
+                -- the two upserts are the ONLY writers of that column in
+                -- the codebase, `blocked` and `archived` could not
+                -- survive a scrape: the next run of discovery silently
+                -- un-blocked every community somebody had ruled out, and
+                -- `refused_by_us_or_them` went false again with it.
+                -- `archived` is worse, because the doc comment on
+                -- `upsert_place` prescribes archiving as how you correct
+                -- a mis-kinded row; reviving the tombstone undoes the
+                -- correction.
                 updated_at = now()
             RETURNING id
             "#,
