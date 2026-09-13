@@ -399,4 +399,83 @@ mod tests {
         );
         assert_eq!(SUBREDDIT_COOLDOWN_DAYS, 7);
     }
+
+    /// A transient failure must keep the draft and say nothing to the brain.
+    ///
+    /// Every failure used to call `mark_failed`, which set the draft to `failed`
+    /// AND marked the parent autopilot action failed. The action is terminal once
+    /// told and the brain will not draft the same community for seven days, so
+    /// one invalid credential could consume every queued draft in a single cycle
+    /// — and teach the brain that each of those posts had failed.
+    #[tokio::test]
+    #[ignore = "requires CROWDRELAY_COMMUNITY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+    async fn a_transient_failure_defers_the_draft_and_spares_the_action() {
+        let Some((worker, workspace_id)) = live_worker(false).await else {
+            return;
+        };
+        let draft = seed_draft(&worker, workspace_id, "r/transient", "pending").await;
+        worker
+            .mark_transient_failure(draft, "error sending request")
+            .await
+            .expect("defer");
+        assert_eq!(status_of(&worker, draft).await, "rate_limited");
+        let action_status: String = sqlx::query_scalar(
+            "SELECT a.status FROM viryaos_autopilot_actions a \
+             JOIN community_posts c ON c.action_id = a.id WHERE c.id = $1",
+        )
+        .bind(draft)
+        .fetch_one(&worker.pool)
+        .await
+        .expect("action status");
+        assert_eq!(
+            action_status, "succeeded",
+            "a deferred post must not tell the brain that its post failed"
+        );
+    }
+
+    /// And it must stop deferring eventually.
+    ///
+    /// A condition that has not resolved in `MAX_TRANSIENT_ATTEMPTS` attempts is
+    /// not transient, so the draft is given up on and the ledger is corrected.
+    #[tokio::test]
+    #[ignore = "requires CROWDRELAY_COMMUNITY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+    async fn an_exhausted_draft_fails_and_corrects_the_ledger() {
+        let Some((worker, workspace_id)) = live_worker(false).await else {
+            return;
+        };
+        let draft = seed_draft(&worker, workspace_id, "r/exhausted", "pending").await;
+        sqlx::query("UPDATE community_posts SET attempts = $2 WHERE id = $1")
+            .bind(draft)
+            .bind(MAX_TRANSIENT_ATTEMPTS)
+            .execute(&worker.pool)
+            .await
+            .expect("exhaust");
+        worker
+            .mark_transient_failure(draft, "error sending request")
+            .await
+            .expect("give up");
+        assert_eq!(status_of(&worker, draft).await, "failed");
+        let retry_at: Option<time::OffsetDateTime> =
+            sqlx::query_scalar("SELECT rate_limited_until FROM community_posts WHERE id = $1")
+                .bind(draft)
+                .fetch_one(&worker.pool)
+                .await
+                .expect("retry window");
+        assert_eq!(
+            retry_at, None,
+            "a draft given up on must not also carry a retry time"
+        );
+        let action_status: String = sqlx::query_scalar(
+            "SELECT a.status FROM viryaos_autopilot_actions a \
+             JOIN community_posts c ON c.action_id = a.id WHERE c.id = $1",
+        )
+        .bind(draft)
+        .fetch_one(&worker.pool)
+        .await
+        .expect("action status");
+        assert_eq!(
+            action_status, "failed",
+            "once the draft is given up on, the ledger must say so"
+        );
+    }
 }

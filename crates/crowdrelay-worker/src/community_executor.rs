@@ -139,6 +139,20 @@ const RATE_LIMIT_BACKOFF: Duration = Duration::from_secs(600);
 /// short enough that the draft goes out promptly once the window opens.
 const SUBREDDIT_COOLDOWN_BACKOFF: Duration = Duration::from_secs(6 * 60 * 60);
 
+/// How many times a transient failure may defer a draft before it is given up on.
+///
+/// A transport error, a 5xx from the agents service, or a browser session that
+/// has expired are all conditions that a later cycle may find resolved. They used
+/// to call `mark_failed`, which discarded the draft and propagated failure to the
+/// parent autopilot action — and the action is terminal, so "the operator can
+/// re-approve" was not available: the brain will not draft the same community
+/// again for seven days. One bad credential could therefore consume every queued
+/// draft in a single cycle.
+///
+/// Six, so a draft survives roughly an hour of an unavailable agents service at
+/// the ten-minute retry window, and still stops rather than retrying forever.
+const MAX_TRANSIENT_ATTEMPTS: i32 = 6;
+
 /// How long after a post was created do we keep polling its metrics.
 /// After this window, engagement is considered stale and polling stops.
 const METRICS_WINDOW: Duration = Duration::from_secs(72 * 60 * 60);
@@ -368,12 +382,29 @@ impl CommunityExecutorWorker {
                     }
                 }
                 Err(CommunityExecutorError::NoAgentsService) => {
-                    // No agents service — permanent failure, don't retry.
+                    // Configuration, not content. Fixing the configuration makes
+                    // the same draft publishable, so the draft is kept.
                     if let Err(e) = self
-                        .mark_failed(action.id, "no agents service configured for Reddit posting")
+                        .mark_transient_failure(
+                            action.id,
+                            "no agents service configured for Reddit posting",
+                        )
                         .await
                     {
-                        tracing::warn!(error = %e, "failed to mark no-agents-service");
+                        tracing::warn!(error = %e, "failed to defer no-agents-service");
+                    }
+                }
+                Err(CommunityExecutorError::RedditApi(message)) => {
+                    // Reddit itself refused the post. That is about the content or
+                    // the account, and a retry would repeat it, so a person looks.
+                    tracing::warn!(
+                        action_id = %action.action_id,
+                        subreddit = %action.subreddit,
+                        error = %message,
+                        "reddit refused the community post"
+                    );
+                    if let Err(e) = self.mark_failed(action.id, &message).await {
+                        tracing::warn!(error = %e, "failed to mark reddit refusal");
                     }
                 }
                 Err(error) => {
@@ -381,14 +412,16 @@ impl CommunityExecutorWorker {
                         action_id = %action.action_id,
                         subreddit = %action.subreddit,
                         error = %error,
-                        "failed to post community engagement"
+                        "failed to post community engagement — deferring"
                     );
-                    // Transient errors (network, 5xx) leave the row as
-                    // `posting` so the next cycle's stale recovery handles it.
-                    // For now, mark as failed — the operator can re-approve.
+                    // A transport error, a 5xx, or an expired browser session may
+                    // be resolved by the time the next cycle runs. `mark_failed`
+                    // here discarded the draft and told the brain its post had
+                    // failed, and the parent action is terminal — so one bad
+                    // credential could consume every queued draft in a cycle.
                     let msg = error.to_string();
-                    if let Err(e) = self.mark_failed(action.id, &msg).await {
-                        tracing::warn!(error = %e, "failed to mark error");
+                    if let Err(e) = self.mark_transient_failure(action.id, &msg).await {
+                        tracing::warn!(error = %e, "failed to defer error");
                     }
                 }
             }
@@ -1213,12 +1246,6 @@ impl CommunityExecutorWorker {
     /// propagates the failure back to the parent autopilot action so the
     /// ledger does not report success for a post that never went live.
     async fn mark_failed(&self, post_id: Uuid, error: &str) -> Result<(), CommunityExecutorError> {
-        let action_id: Option<Uuid> =
-            sqlx::query_scalar("SELECT action_id FROM community_posts WHERE id = $1")
-                .bind(post_id)
-                .fetch_optional(&self.pool)
-                .await?;
-
         sqlx::query(
             r#"
             UPDATE community_posts
@@ -1232,10 +1259,29 @@ impl CommunityExecutorWorker {
         .bind(error)
         .execute(&self.pool)
         .await?;
+        self.propagate_failure(post_id, error).await
+    }
 
-        // Propagate failure to the parent autopilot action. The action was
-        // marked 'succeeded' by actions_execution.rs before this worker
-        // ran — that was premature. Correct it now so the operator sees
+    /// Tells the parent autopilot action, and the experiment assignment, that
+    /// the post did not go live.
+    ///
+    /// Split out of `mark_failed` because a transient failure defers the draft
+    /// without saying anything to the ledger — the action is terminal once told,
+    /// so propagating on the first network error made one outage look like a
+    /// batch of failed posts to the brain.
+    async fn propagate_failure(
+        &self,
+        post_id: Uuid,
+        error: &str,
+    ) -> Result<(), CommunityExecutorError> {
+        let action_id: Option<Uuid> =
+            sqlx::query_scalar("SELECT action_id FROM community_posts WHERE id = $1")
+                .bind(post_id)
+                .fetch_optional(&self.pool)
+                .await?;
+
+        // The action was marked 'succeeded' by actions_execution.rs before this
+        // worker ran — that was premature. Correct it now so the operator sees
         // the real outcome in the autopilot ledger.
         if let Some(action_id) = action_id {
             let error_kind = if error.len() > 96 {
@@ -1283,6 +1329,54 @@ impl CommunityExecutorWorker {
                 error = %error,
                 "community post failed — propagated failure to autopilot action"
             );
+        }
+        Ok(())
+    }
+
+    /// Defers a draft after a failure that a later cycle may not hit.
+    ///
+    /// Bounded by `MAX_TRANSIENT_ATTEMPTS`: past that the draft is given up on
+    /// and the parent action is told, because a condition that has not resolved
+    /// in six attempts is not transient. `attempts` is incremented at claim time,
+    /// so the count is already accurate here.
+    ///
+    /// The decision is made in SQL so the read and the write cannot disagree
+    /// about the count.
+    async fn mark_transient_failure(
+        &self,
+        post_id: Uuid,
+        error: &str,
+    ) -> Result<(), CommunityExecutorError> {
+        let exhausted: bool = sqlx::query_scalar(
+            r#"
+            UPDATE community_posts
+            SET status = CASE
+                    WHEN attempts >= $3 THEN 'failed'
+                    ELSE 'rate_limited'
+                END,
+                rate_limited_until = CASE
+                    WHEN attempts >= $3 THEN NULL
+                    ELSE now() + make_interval(secs => $4::double precision)
+                END,
+                error_message = $2,
+                updated_at = now()
+            WHERE id = $1
+              AND workspace_id = $5
+            RETURNING attempts >= $3
+            "#,
+        )
+        .bind(post_id)
+        .bind(error)
+        .bind(MAX_TRANSIENT_ATTEMPTS)
+        .bind(RATE_LIMIT_BACKOFF.as_secs() as i64)
+        .bind(self.workspace_id.into_uuid())
+        .fetch_one(&self.pool)
+        .await?;
+        if exhausted {
+            // Only now is the parent action told. Propagating on the first
+            // transient failure is what made one outage look like a batch of
+            // failed posts to the brain.
+            self.propagate_failure(post_id, error).await?;
         }
         Ok(())
     }

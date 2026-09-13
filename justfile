@@ -168,7 +168,9 @@ test-postgres-env:
       publishing_adopts_the_drafts_manual_mode_wrote \
       manual_mode_leaves_its_own_drafts_alone \
       the_rate_limit_defers_a_draft_instead_of_failing_it \
-      every_component_is_recorded_with_its_missing_switch
+      every_component_is_recorded_with_its_missing_switch \
+      a_transient_failure_defers_the_draft_and_spares_the_action \
+      an_exhausted_draft_fails_and_corrects_the_ledger
     do
       {{CARGO}} test --locked --package crowdrelay-worker "$filter" -- --ignored --test-threads=1
     done
