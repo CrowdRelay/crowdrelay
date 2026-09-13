@@ -78,9 +78,18 @@ ranked AS (
 )
 SELECT id AS loser_id, survivor_id FROM ranked WHERE id <> survivor_id;
 
--- `discovery_place_rules.place_id` and `agent_outreach_targets.place_id` are
--- unique per place. Drop the loser's row when the survivor already has one; the
--- survivor's is the one the loop has been reading.
+-- Two dependents are unique per place, and both had to be read off the live
+-- schema rather than inferred: `discovery_place_rules.place_id` is that table's
+-- primary key, and `discovery_outreach.place_id` carries its own unique index.
+-- The first attempt at this migration guessed `agent_outreach_targets` instead of
+-- `discovery_outreach` and failed on
+-- `discovery_outreach_place_id_key` — harmlessly, because the deploy rolled the
+-- whole migration back, but the lesson is that "which column is unique" is a
+-- question for `pg_index`, not for reading a CREATE TABLE and assuming.
+--
+-- For both, the loser's row is dropped when the survivor already has one. The
+-- survivor is the more progressed place by construction, so its row is the one
+-- the loop has been reading and the one worth keeping.
 DELETE FROM discovery_place_rules r
 USING crowdrelay_place_merges m
 WHERE r.place_id = m.loser_id
@@ -91,6 +100,14 @@ SET place_id = m.survivor_id
 FROM crowdrelay_place_merges m
 WHERE r.place_id = m.loser_id;
 
+DELETE FROM discovery_outreach d
+USING crowdrelay_place_merges m
+WHERE d.place_id = m.loser_id
+  AND EXISTS (SELECT 1 FROM discovery_outreach s WHERE s.place_id = m.survivor_id);
+
+-- Not unique per place: `agent_outreach_targets` is unique on
+-- (workspace_id, display_name, target_kind), so several targets may share a
+-- place and all of them simply repoint.
 UPDATE agent_outreach_targets t
 SET place_id = m.survivor_id
 FROM crowdrelay_place_merges m

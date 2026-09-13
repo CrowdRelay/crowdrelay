@@ -174,3 +174,160 @@ async fn compare(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
 
     Ok(())
 }
+
+/// Migration 0259's merge, against the shapes that broke it.
+///
+/// The first attempt guessed which dependents are unique per place and failed in
+/// production on `discovery_outreach_place_id_key`. It failed safely — the deploy
+/// rolled the migration back and nothing was touched — but the reason it reached
+/// production is that the local migration run passed trivially: the local database
+/// had no duplicate places, so the merge had nothing to merge.
+///
+/// This seeds the duplicates production actually held, including the case the
+/// first attempt died on: a duplicate pair where *both* places carry a
+/// `discovery_outreach` row and *both* carry a `discovery_place_rules` row, so the
+/// repoint must collide unless the loser's row is dropped first.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn the_merge_collapses_duplicates_that_share_unique_children()
+-> Result<(), Box<dyn std::error::Error>> {
+    let database = DisposableDatabase::create().await?;
+    let result = merge(&database.pool).await;
+    database.drop_database().await;
+    result
+}
+
+async fn merge(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
+    // The CHECK exists once the migration has run, and a duplicate is
+    // non-canonical by definition — so the state this tests cannot be created
+    // while the constraint stands. Dropping it is how the pre-migration world is
+    // reconstructed; it goes back on at the end and must validate.
+    sqlx::query("ALTER TABLE discovery_places DROP CONSTRAINT discovery_places_url_is_canonical")
+        .execute(pool)
+        .await?;
+
+    let workspace = Uuid::now_v7();
+    sqlx::query("INSERT INTO workspaces (id, slug, name) VALUES ($1, $2, $3)")
+        .bind(workspace)
+        .bind(format!("merge-{}", workspace.simple()))
+        .bind("Place merge test")
+        .execute(pool)
+        .await?;
+
+    // Two spellings of one subreddit, as production held them. The survivor must
+    // be the joined one: a joined community is knowledge its duplicate lacks.
+    let survivor = Uuid::now_v7();
+    let loser = Uuid::now_v7();
+    for (id, url, membership) in [
+        (survivor, "https://www.reddit.com/r/Djent", "joined"),
+        (loser, "https://reddit.com/r/Djent", "not_joined"),
+    ] {
+        sqlx::query(
+            "INSERT INTO discovery_places \
+             (id, workspace_id, place_kind, platform, name, url, membership_state) \
+             VALUES ($1,$2,'subreddit','reddit','r/Djent',$3,$4)",
+        )
+        .bind(id)
+        .bind(workspace)
+        .bind(url)
+        .bind(membership)
+        .execute(pool)
+        .await?;
+        // Both children are unique per place, which is what the first attempt
+        // tripped over.
+        sqlx::query(
+            "INSERT INTO discovery_outreach (workspace_id, place_id, stage) VALUES ($1,$2,'discovered')",
+        )
+        .bind(workspace)
+        .bind(id)
+        .execute(pool)
+        .await?;
+        sqlx::query("INSERT INTO discovery_place_rules (place_id) VALUES ($1)")
+            .bind(id)
+            .execute(pool)
+            .await?;
+        // And one that is not unique per place, so it must simply repoint.
+        sqlx::query(
+            "INSERT INTO discovery_place_evidence \
+             (workspace_id, place_id, evidence_kind, method, confidence_bp) \
+             VALUES ($1,$2,'manual_note','seeded',5000)",
+        )
+        .bind(workspace)
+        .bind(id)
+        .execute(pool)
+        .await?;
+    }
+
+    // Run the migration's merge and canonicalise steps, read from the file that
+    // production runs, so this cannot drift from it.
+    let sql = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../migrations/0259_one_community_is_one_place.sql"
+    ))?;
+    let body = sql
+        .split("-- Phase 3: keep it true.")
+        .next()
+        .ok_or("migration 0259 has no Phase 3 marker")?;
+    sqlx::raw_sql(body).execute(pool).await?;
+
+    let places: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM discovery_places WHERE workspace_id = $1")
+            .bind(workspace)
+            .fetch_one(pool)
+            .await?;
+    if places != 1 {
+        return Err(format!("expected one place after the merge, found {places}").into());
+    }
+
+    let (id, url, membership): (Uuid, String, String) = sqlx::query_as(
+        "SELECT id, url, membership_state FROM discovery_places WHERE workspace_id = $1",
+    )
+    .bind(workspace)
+    .fetch_one(pool)
+    .await?;
+    if id != survivor {
+        return Err("the joined place must survive, not the not_joined duplicate".into());
+    }
+    if url != "https://www.reddit.com/r/djent" {
+        return Err(format!("the surviving URL must be canonical, got {url:?}").into());
+    }
+    if membership != "joined" {
+        return Err(format!("the surviving membership must be joined, got {membership:?}").into());
+    }
+
+    // The unique children survive exactly once, pointing at the survivor.
+    for table in ["discovery_outreach", "discovery_place_rules"] {
+        let rows: i64 =
+            sqlx::query_scalar(&format!("SELECT count(*) FROM {table} WHERE place_id = $1"))
+                .bind(survivor)
+                .fetch_one(pool)
+                .await?;
+        if rows != 1 {
+            return Err(
+                format!("{table} should hold one row for the survivor, found {rows}").into(),
+            );
+        }
+    }
+    // The non-unique child keeps both, repointed rather than dropped: evidence is
+    // what the place is believed on, and throwing half of it away would weaken a
+    // belief the merge was supposed to consolidate.
+    let evidence: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM discovery_place_evidence WHERE place_id = $1")
+            .bind(survivor)
+            .fetch_one(pool)
+            .await?;
+    if evidence != 2 {
+        return Err(format!("both evidence rows should repoint, found {evidence}").into());
+    }
+
+    // And the constraint the migration adds must validate against the result.
+    sqlx::query(
+        "ALTER TABLE discovery_places ADD CONSTRAINT discovery_places_url_is_canonical \
+         CHECK (url = crowdrelay_canonical_place_url(url))",
+    )
+    .execute(pool)
+    .await
+    .map_err(|error| format!("the merged rows must satisfy the canonical CHECK: {error}"))?;
+
+    Ok(())
+}
