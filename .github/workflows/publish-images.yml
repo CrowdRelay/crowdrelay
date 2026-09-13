@@ -100,6 +100,84 @@ jobs:
           provenance: mode=max
           sbom: true
 
+      - name: Prune BuildKit cache after build
+        if: always()
+        continue-on-error: true
+        run: docker builder prune --all -f 2>/dev/null || true
+
+      # Per-architecture digests are an intermediate product. The release
+      # identity is the merged manifest list, so it is recorded in `merge`.
+      - name: Record per-architecture digests
+        env:
+          BAKE_METADATA: ${{ steps.images.outputs.metadata }}
+        run: |
+          set -Eeuo pipefail
+          # bake reports every target in one metadata document; pull each
+          # digest out by target name rather than by step output.
+          API_DIGEST="$(jq -er '.api["containerimage.digest"]' <<<"$BAKE_METADATA")"
+          WORKER_DIGEST="$(jq -er '.worker["containerimage.digest"]' <<<"$BAKE_METADATA")"
+          for value in "$API_DIGEST" "$WORKER_DIGEST"; do
+            [[ "$value" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "Invalid image digest: $value" >&2; exit 1; }
+          done
+          printf '%s api=%s worker=%s\n' "arm64" "$API_DIGEST" "$WORKER_DIGEST"
+
+  # The proof anchor builds in its own job, with no edge to `merge`.
+  #
+  # It used to be a step inside `build`, and on 2026-09-12 its push failed with
+  # `denied: permission_denied: write_package` — the repository's GITHUB_TOKEN
+  # can write crowdrelay-api and crowdrelay-worker but not this package, which
+  # is a GHCR package-access setting and not something this file can fix.
+  # Because the step failed, the whole `build` job failed, `merge` was skipped
+  # for `needs: build`, and the api and worker manifest lists were never
+  # assembled. One unrelated image blocked the entire release: production could
+  # only be updated by building locally and bypassing CI, which is exactly the
+  # path that has no gates on it.
+  #
+  # `continue-on-error` would be the wrong fix. A broken anchor must stay loud —
+  # this one already spent three days down behind a hostname nobody checked, and
+  # the whole point of an anchor is that somebody notices when it stops. A
+  # separate job keeps the failure red on the run while the release it has
+  # nothing to do with proceeds.
+  anchor:
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.head_branch == github.event.repository.default_branch
+    name: Publish Rekor proof anchor
+    runs-on: [self-hosted, arm64]
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+      attestations: write
+      id-token: write
+
+    steps:
+      - name: Check out the exact validated revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.IMAGE_SHA }}
+
+      - name: Resolve immutable build identity
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          owner_lower="$(printf '%s' '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')"
+          echo "OWNER_LOWER=${owner_lower}" >> "$GITHUB_ENV"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+
+      - name: Log in to GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Pushed straight to the release tag rather than an arch-suffixed one.
+      # The anchor is arm64-only and is installed by `ops/rekor/install-anchor.sh`,
+      # which pulls the tag by name — so it never needed the manifest merge that
+      # coupled it to `merge` in the first place.
       - name: Build and publish Rekor proof anchor image
         id: rekor-image
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
@@ -108,7 +186,7 @@ jobs:
           platforms: linux/arm64
           push: true
           tags: >-
-            ${{ env.REGISTRY }}/${{ env.OWNER_LOWER }}/crowdrelay-rekor-proof-anchor:sha-${{ env.IMAGE_SHA }}-arm64
+            ${{ env.REGISTRY }}/${{ env.OWNER_LOWER }}/crowdrelay-rekor-proof-anchor:sha-${{ env.IMAGE_SHA }}
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.revision=${{ env.IMAGE_SHA }}
@@ -122,23 +200,14 @@ jobs:
         continue-on-error: true
         run: docker builder prune --all -f 2>/dev/null || true
 
-      # Per-architecture digests are an intermediate product. The release
-      # identity is the merged manifest list, so it is recorded in `merge`.
-      - name: Record per-architecture digests
+      - name: Record the anchor digest
         env:
-          BAKE_METADATA: ${{ steps.images.outputs.metadata }}
           REKOR_DIGEST: ${{ steps.rekor-image.outputs.digest }}
         run: |
           set -Eeuo pipefail
-          # bake reports every target in one metadata document; pull each
-          # digest out by target name rather than by step output.
-          API_DIGEST="$(jq -er '.api["containerimage.digest"]' <<<"$BAKE_METADATA")"
-          WORKER_DIGEST="$(jq -er '.worker["containerimage.digest"]' <<<"$BAKE_METADATA")"
-          for value in "$API_DIGEST" "$WORKER_DIGEST" "$REKOR_DIGEST"; do
-            [[ "$value" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "Invalid image digest: $value" >&2; exit 1; }
-          done
-          printf '%s api=%s worker=%s rekor=%s\n' \
-            "arm64" "$API_DIGEST" "$WORKER_DIGEST" "$REKOR_DIGEST"
+          [[ "$REKOR_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || {
+            echo "Invalid anchor digest: $REKOR_DIGEST" >&2; exit 1; }
+          printf 'arm64 rekor=%s\n' "$REKOR_DIGEST"
 
   merge:
     needs: build
@@ -190,9 +259,11 @@ jobs:
             printf '%s=%s\n' "$var" "$digest" >> image-digests/images.env
           }
 
+          # The anchor is published by its own job, straight to the release tag,
+          # and nothing in the deploy reads a rekor digest — `ops/rekor/install-anchor.sh`
+          # pulls the tag by name. Merging it here only coupled the release to it.
           merge crowdrelay-api CROWDRELAY_API_DIGEST
           merge crowdrelay-worker CROWDRELAY_WORKER_DIGEST
-          merge crowdrelay-rekor-proof-anchor CROWDRELAY_REKOR_DIGEST
           sha256sum image-digests/images.env > image-digests/images.env.sha256
           cat image-digests/images.env
 
