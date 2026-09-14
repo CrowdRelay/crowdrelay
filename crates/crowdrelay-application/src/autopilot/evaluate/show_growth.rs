@@ -16,8 +16,11 @@ pub(super) fn show_growth_candidate(
     let AutopilotPolicyConfig::ShowGrowth(domain_policy) = policy.config else {
         return Ok(None);
     };
-    let ShowGrowthDecision::Request { lever, confidence } =
-        evaluate_show_growth(snapshot, domain_policy, now)
+    let ShowGrowthDecision::Request {
+        lever,
+        confidence,
+        send_at,
+    } = evaluate_show_growth(snapshot, domain_policy, now)
     else {
         return Ok(None);
     };
@@ -26,6 +29,7 @@ pub(super) fn show_growth_candidate(
         event_id: snapshot.event_id,
         lever,
         template_key: lever.template_key().to_owned(),
+        send_at,
     };
     Ok(Some(DecisionCandidate {
         context: policy.context,

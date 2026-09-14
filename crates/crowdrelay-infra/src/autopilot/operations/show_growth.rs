@@ -30,6 +30,8 @@ struct ShowGrowthRow {
     high_intent_last_mile_requested: bool,
     post_show_merch_requested: bool,
     post_show_follow_ask_requested: bool,
+    post_show_recap_requested: bool,
+    morning_after_send_at: Option<OffsetDateTime>,
 }
 
 pub(in crate::autopilot) async fn load_show_growth_snapshots(
@@ -64,7 +66,23 @@ pub(in crate::autopilot) async fn load_show_growth_snapshots(
             COALESCE(history.merch_buyer_offer_requested, false) AS merch_buyer_offer_requested,
             COALESCE(history.high_intent_last_mile_requested, false) AS high_intent_last_mile_requested,
             COALESCE(history.post_show_merch_requested, false) AS post_show_merch_requested,
-            COALESCE(history.post_show_follow_ask_requested, false) AS post_show_follow_ask_requested
+            COALESCE(history.post_show_follow_ask_requested, false) AS post_show_follow_ask_requested,
+            COALESCE(history.post_show_recap_requested, false) AS post_show_recap_requested,
+            -- The first 10:00 in the event's own timezone strictly after the
+            -- show has had time to end (`starts_at + 6h`), the same local-
+            -- morning slot the check-in welcome occupies. Anchoring to the
+            -- day containing `starts_at - 4h` and adding 34h lands there for
+            -- evening and matinee shows alike. `events.timezone` is free text
+            -- and a bad zone would abort this whole set-oriented load, so an
+            -- unknown zone degrades to NULL and the recap sends when decided.
+            CASE WHEN EXISTS (
+                SELECT 1 FROM pg_timezone_names AS zone
+                WHERE zone.name = event.timezone
+            ) THEN
+                (date_trunc('day', (event.starts_at - interval '4 hours')
+                        AT TIME ZONE event.timezone)
+                    + interval '34 hours') AT TIME ZONE event.timezone
+            END AS morning_after_send_at
         FROM events AS event
         LEFT JOIN ecosystem_feature_flags AS comm
           ON comm.workspace_id = event.workspace_id
@@ -167,7 +185,8 @@ pub(in crate::autopilot) async fn load_show_growth_snapshots(
                 BOOL_OR(action.payload ->> 'lever' IN ('merch_buyer_offer','merch_preorder_pickup')) AS merch_buyer_offer_requested,
                 BOOL_OR(action.payload ->> 'lever' = 'high_intent_last_mile') AS high_intent_last_mile_requested,
                 BOOL_OR(action.payload ->> 'lever' = 'post_show_merch_follow_up') AS post_show_merch_requested,
-                BOOL_OR(action.payload ->> 'lever' = 'post_show_follow_ask') AS post_show_follow_ask_requested
+                BOOL_OR(action.payload ->> 'lever' = 'post_show_follow_ask') AS post_show_follow_ask_requested,
+                BOOL_OR(action.payload ->> 'lever' = 'post_show_recap') AS post_show_recap_requested
             FROM viryaos_autopilot_actions AS action
             WHERE action.workspace_id = event.workspace_id
               AND action.context = 'show_growth'
@@ -176,7 +195,7 @@ pub(in crate::autopilot) async fn load_show_growth_snapshots(
         ) AS history ON true
         WHERE event.workspace_id = $1
           AND event.status IN ('published','completed')
-          AND event.starts_at BETWEEN $2 - INTERVAL '2 days' AND $2 + INTERVAL '61 days'
+          AND event.starts_at BETWEEN $2 - INTERVAL '4 days' AND $2 + INTERVAL '61 days'
         ORDER BY event.starts_at, event.id
         LIMIT $3
         "#,
@@ -220,7 +239,9 @@ fn map_row(row: ShowGrowthRow) -> Result<ShowGrowthSnapshot, RepositoryError> {
             high_intent_last_mile_requested: row.high_intent_last_mile_requested,
             post_show_merch_requested: row.post_show_merch_requested,
             post_show_follow_ask_requested: row.post_show_follow_ask_requested,
+            post_show_recap_requested: row.post_show_recap_requested,
         },
+        morning_after_send_at: row.morning_after_send_at,
     })
 }
 

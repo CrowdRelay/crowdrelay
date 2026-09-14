@@ -228,7 +228,7 @@ impl AutopilotActionPayload {
                 ],
                 deadline_note: String::new(),
             },
-            Self::RequestShowGrowth { event_id, lever, template_key } => ActionBriefing {
+            Self::RequestShowGrowth { event_id, lever, template_key, send_at } => ActionBriefing {
                 summary: format!("Boost attendance: {}", lever.as_str()),
                 why_it_matters: "This is an attendance push for a show. It may contact outside parties or message fans directly.".into(),
                 steps: vec![
@@ -239,6 +239,13 @@ impl AutopilotActionPayload {
                     BriefingField { label: "Wydarzenie".into(), value: event_id.to_string() },
                     BriefingField { label: "Lever".into(), value: lever.as_str().into() },
                     BriefingField { label: "Template".into(), value: template_key.clone() },
+                    BriefingField {
+                        label: "Reaches fans".into(),
+                        value: send_at.map_or_else(
+                            || "on approval".to_owned(),
+                            |at| at.to_string(),
+                        ),
+                    },
                 ],
                 deadline_note: String::new(),
             },

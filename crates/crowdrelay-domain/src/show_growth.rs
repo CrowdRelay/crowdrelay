@@ -26,6 +26,7 @@ pub struct ShowGrowthHistory {
     pub high_intent_last_mile_requested: bool,
     pub post_show_merch_requested: bool,
     pub post_show_follow_ask_requested: bool,
+    pub post_show_recap_requested: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -44,6 +45,12 @@ pub struct ShowGrowthSnapshot {
     pub qualified_referrers_in_city: u32,
     pub beacon_partners: u16,
     pub attendees: u32,
+    /// Local-morning send time for the night's one post-show contact, computed
+    /// from the event timezone by the snapshot loader: the first 10:00 after
+    /// the show has had time to end, mirroring the check-in welcome's
+    /// scheduling. `None` only when the event's timezone is not a known IANA
+    /// name, in which case the recap sends when the decision lands.
+    pub morning_after_send_at: Option<OffsetDateTime>,
     pub history: ShowGrowthHistory,
 }
 
@@ -61,6 +68,10 @@ pub struct ShowGrowthPolicy {
     pub merch_preorder_lead_days: u32,
     pub last_mile_lead_days: u32,
     pub post_show_merch_hours: u32,
+    /// How long after the show the recap stays worth creating. The recap is
+    /// the first post-show contact — one "here's who you saw" note, no ask —
+    /// so its window is the tightest of the three.
+    pub post_show_recap_hours: u32,
     /// How long after the show the follow ask stays worth sending. Longer than
     /// the merch window because it asks for something free, and the memory of a
     /// good night outlasts the impulse to buy a shirt.
@@ -70,6 +81,7 @@ pub struct ShowGrowthPolicy {
     pub minimum_paid_buyers_for_merch_offer: u32,
     pub minimum_unconverted_interest: u32,
     pub minimum_attendees_for_post_show_merch: u32,
+    pub minimum_attendees_for_recap: u32,
     pub minimum_attendees_for_follow_ask: u32,
     /// Pace floor at <= 28 days before show.
     pub target_sold_28d_basis_points: u16,
@@ -93,12 +105,14 @@ impl Default for ShowGrowthPolicy {
             merch_preorder_lead_days: 14,
             last_mile_lead_days: 10,
             post_show_merch_hours: 36,
+            post_show_recap_hours: 30,
             post_show_follow_ask_hours: 72,
             minimum_city_signal_fans: 5,
             minimum_referrers_for_ambassador_push: 1,
             minimum_paid_buyers_for_merch_offer: 2,
             minimum_unconverted_interest: 3,
             minimum_attendees_for_post_show_merch: 3,
+            minimum_attendees_for_recap: 1,
             minimum_attendees_for_follow_ask: 1,
             target_sold_28d_basis_points: 1_500,
             target_sold_14d_basis_points: 3_000,
@@ -124,6 +138,12 @@ pub enum ShowGrowthLever {
     MerchBuyerOffer,
     HighIntentLastMile,
     PostShowMerchFollowUp,
+    /// The night's own memory as the first post-show contact: one "here's who
+    /// you saw" note to the reachable room, carrying no ask at all. It anchors
+    /// the night before the merch window and the follow ask arrive, and fans
+    /// whose scan welcome already served as the recall are filtered out of its
+    /// audience so nobody hears twice about the same morning.
+    PostShowRecap,
     /// Ask the people who were actually in the room to follow and track the
     /// band, so the next show finds them without anybody paying for reach.
     PostShowFollowAsk,
@@ -144,6 +164,7 @@ impl ShowGrowthLever {
             Self::MerchBuyerOffer => "merch_buyer_offer",
             Self::HighIntentLastMile => "high_intent_last_mile",
             Self::PostShowMerchFollowUp => "post_show_merch_follow_up",
+            Self::PostShowRecap => "post_show_recap",
             Self::PostShowFollowAsk => "post_show_follow_ask",
         }
     }
@@ -162,6 +183,7 @@ impl ShowGrowthLever {
             Self::MerchBuyerOffer => "show.growth.merch_buyer_offer.v1",
             Self::HighIntentLastMile => "show.growth.high_intent.v1",
             Self::PostShowMerchFollowUp => "show.growth.post_show_merch.v1",
+            Self::PostShowRecap => "show.growth.post_show_recap.v1",
             Self::PostShowFollowAsk => "show.growth.post_show_follow_ask.v1",
         }
     }
@@ -175,7 +197,19 @@ impl ShowGrowthLever {
                 | Self::MerchBuyerOffer
                 | Self::HighIntentLastMile
                 | Self::PostShowMerchFollowUp
+                | Self::PostShowRecap
                 | Self::PostShowFollowAsk
+        )
+    }
+
+    /// True for the levers that only exist because a show already happened.
+    /// Any of them executing is first-party proof the night is over, which is
+    /// what registers the show as harvestable material.
+    #[must_use]
+    pub const fn is_post_show(self) -> bool {
+        matches!(
+            self,
+            Self::PostShowMerchFollowUp | Self::PostShowRecap | Self::PostShowFollowAsk
         )
     }
 
@@ -193,6 +227,7 @@ impl ShowGrowthLever {
                 | Self::MerchBuyerOffer
                 | Self::HighIntentLastMile
                 | Self::PostShowMerchFollowUp
+                | Self::PostShowRecap
                 | Self::PostShowFollowAsk
         )
     }
@@ -204,6 +239,12 @@ pub enum ShowGrowthDecision {
     Request {
         lever: ShowGrowthLever,
         confidence: Confidence,
+        /// When the resulting action should reach people. `None` means now —
+        /// the pre-show levers all want to land as soon as they are due.
+        /// Post-show levers set it so the decision's cadence (next morning,
+        /// T+72h) survives into the campaign's `available_at` instead of every
+        /// post-show message racing out in the middle of the night.
+        send_at: Option<OffsetDateTime>,
     },
 }
 
@@ -235,6 +276,21 @@ pub fn evaluate_show_growth(
     let until = snapshot.starts_at - now;
     if until.is_negative() || until.is_zero() {
         let since_show = now - snapshot.starts_at;
+        // The recap opens the post-show cadence: one note about the night
+        // itself, no ask attached, landing the next morning rather than in the
+        // middle of it. It runs before the merch window so a full room hears
+        // "here's who you saw" before it hears "here's the shirt".
+        if since_show <= Duration::hours(i64::from(policy.post_show_recap_hours))
+            && !snapshot.history.post_show_recap_requested
+            && snapshot.communication_enabled
+            && snapshot.attendees >= policy.minimum_attendees_for_recap
+        {
+            return request_at(
+                ShowGrowthLever::PostShowRecap,
+                9_100,
+                snapshot.morning_after_send_at,
+            );
+        }
         if since_show <= Duration::hours(i64::from(policy.post_show_merch_hours))
             && !snapshot.history.post_show_merch_requested
             && snapshot.communication_enabled
@@ -246,13 +302,22 @@ pub fn evaluate_show_growth(
         // will ever have, and asking them to follow costs nothing. It runs
         // after the merch window rather than beside it, so nobody gets two
         // messages about the same night, and it stays open longer because a
-        // free ask does not go stale the way an offer does.
+        // free ask does not go stale the way an offer does. The send itself is
+        // anchored to the window's end: deciding it early only schedules the
+        // T+72h touch, it does not move it into the night.
         if since_show <= Duration::hours(i64::from(policy.post_show_follow_ask_hours))
             && !snapshot.history.post_show_follow_ask_requested
             && snapshot.communication_enabled
             && snapshot.attendees >= policy.minimum_attendees_for_follow_ask
         {
-            return request(ShowGrowthLever::PostShowFollowAsk, 9_400);
+            return request_at(
+                ShowGrowthLever::PostShowFollowAsk,
+                9_400,
+                Some(
+                    snapshot.starts_at
+                        + Duration::hours(i64::from(policy.post_show_follow_ask_hours)),
+                ),
+            );
         }
         return ShowGrowthDecision::Hold(ShowGrowthHoldReason::NotDue);
     }
@@ -364,9 +429,18 @@ pub fn evaluate_show_growth(
 }
 
 fn request(lever: ShowGrowthLever, basis_points: u16) -> ShowGrowthDecision {
+    request_at(lever, basis_points, None)
+}
+
+fn request_at(
+    lever: ShowGrowthLever,
+    basis_points: u16,
+    send_at: Option<OffsetDateTime>,
+) -> ShowGrowthDecision {
     ShowGrowthDecision::Request {
         lever,
         confidence: Confidence::saturating_from_basis_points(basis_points),
+        send_at,
     }
 }
 
@@ -410,7 +484,13 @@ const fn valid_policy(policy: ShowGrowthPolicy) -> bool {
         && policy.merch_preorder_lead_days >= policy.last_mile_lead_days
         && policy.last_mile_lead_days > 0
         && policy.post_show_merch_hours > 0
+        && policy.post_show_recap_hours > 0
+        // The recap is evaluated first every cycle; if its window outlasted
+        // the merch window, a failed or pending recap could starve the merch
+        // lever out of existence. Keeping it tightest preserves the chain.
+        && policy.post_show_recap_hours <= policy.post_show_merch_hours
         && policy.post_show_follow_ask_hours >= policy.post_show_merch_hours
+        && policy.minimum_attendees_for_recap > 0
         && policy.minimum_attendees_for_follow_ask > 0
         && policy.minimum_city_signal_fans > 0
         && policy.minimum_paid_buyers_for_merch_offer > 0
@@ -444,6 +524,7 @@ mod tests {
             qualified_referrers_in_city: 4,
             beacon_partners: 0,
             attendees: 0,
+            morning_after_send_at: None,
             history: ShowGrowthHistory {
                 // Every test below describes a show already mid-campaign; the
                 // tracked link is set up once, before anything is shared.
@@ -640,6 +721,7 @@ mod tests {
         let mut data = snapshot(-1);
         data.starts_at = now() - Duration::hours(18);
         data.attendees = 14;
+        data.history.post_show_recap_requested = true;
         let decision = evaluate_show_growth(data, ShowGrowthPolicy::default(), now());
         assert!(matches!(
             decision,
@@ -697,6 +779,7 @@ mod tests {
         let mut data = snapshot(-1);
         data.starts_at = now() - Duration::hours(48);
         data.attendees = 40;
+        data.history.post_show_recap_requested = true;
         data.history.post_show_merch_requested = true;
         assert!(matches!(
             evaluate_show_growth(data, ShowGrowthPolicy::default(), now()),
@@ -713,6 +796,7 @@ mod tests {
         let mut data = snapshot(-1);
         data.starts_at = now() - Duration::hours(6);
         data.attendees = 40;
+        data.history.post_show_recap_requested = true;
         assert!(matches!(
             evaluate_show_growth(data, ShowGrowthPolicy::default(), now()),
             ShowGrowthDecision::Request {
@@ -744,6 +828,91 @@ mod tests {
         assert_eq!(
             evaluate_show_growth(data, ShowGrowthPolicy::default(), now()),
             ShowGrowthDecision::Hold(ShowGrowthHoldReason::NotDue)
+        );
+    }
+
+    #[test]
+    fn the_room_gets_one_recap_the_next_morning_before_any_ask() {
+        // The night itself is the first post-show message: no merch, no ask,
+        // just "here's who you saw". It opens the post-show cadence.
+        let mut data = snapshot(-1);
+        data.starts_at = now() - Duration::hours(14);
+        data.attendees = 40;
+        let morning = now() + Duration::hours(20);
+        data.morning_after_send_at = Some(morning);
+        let decision = evaluate_show_growth(data, ShowGrowthPolicy::default(), now());
+        assert_eq!(
+            decision,
+            ShowGrowthDecision::Request {
+                lever: ShowGrowthLever::PostShowRecap,
+                confidence: Confidence::saturating_from_basis_points(9_100),
+                send_at: Some(morning),
+            }
+        );
+    }
+
+    #[test]
+    fn the_recap_needs_a_room_and_runs_once() {
+        // No attendees means there is no room to recall; the merch window can
+        // still try its own minimum instead of being blocked by the recap.
+        let mut empty = snapshot(-1);
+        empty.starts_at = now() - Duration::hours(14);
+        empty.attendees = 0;
+        assert!(!matches!(
+            evaluate_show_growth(empty, ShowGrowthPolicy::default(), now()),
+            ShowGrowthDecision::Request {
+                lever: ShowGrowthLever::PostShowRecap,
+                ..
+            }
+        ));
+
+        let mut done = snapshot(-1);
+        done.starts_at = now() - Duration::hours(14);
+        done.attendees = 40;
+        done.history.post_show_recap_requested = true;
+        assert!(!matches!(
+            evaluate_show_growth(done, ShowGrowthPolicy::default(), now()),
+            ShowGrowthDecision::Request {
+                lever: ShowGrowthLever::PostShowRecap,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn the_recap_window_closes_before_the_follow_ask() {
+        // Past the recap's window the night's memory has gone stale, but the
+        // free ask still has its own longer window to run inside.
+        let mut data = snapshot(-1);
+        data.starts_at = now() - Duration::hours(40);
+        data.attendees = 40;
+        data.history.post_show_merch_requested = true;
+        assert!(matches!(
+            evaluate_show_growth(data, ShowGrowthPolicy::default(), now()),
+            ShowGrowthDecision::Request {
+                lever: ShowGrowthLever::PostShowFollowAsk,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn the_follow_ask_is_anchored_to_the_third_morning_not_the_decision() {
+        // Deciding the ask early must not move it into the night: the send
+        // rides on `send_at` at `starts_at + 72h`, whatever hour the cycle ran.
+        let mut data = snapshot(-1);
+        data.starts_at = now() - Duration::hours(48);
+        data.attendees = 40;
+        data.history.post_show_recap_requested = true;
+        data.history.post_show_merch_requested = true;
+        let send_at = data.starts_at + Duration::hours(72);
+        assert_eq!(
+            evaluate_show_growth(data, ShowGrowthPolicy::default(), now()),
+            ShowGrowthDecision::Request {
+                lever: ShowGrowthLever::PostShowFollowAsk,
+                confidence: Confidence::saturating_from_basis_points(9_400),
+                send_at: Some(send_at),
+            }
         );
     }
 

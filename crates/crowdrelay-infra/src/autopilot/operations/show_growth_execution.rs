@@ -9,7 +9,9 @@ use super::*;
 use crowdrelay_domain::show_growth::ShowGrowthLever;
 
 /// Canonical event facts a growth campaign renders from: slug, title, city
-/// slug, venue, ticket URL and the event's own listen URL.
+/// slug, venue, ticket URL, the event's own listen URL, and the announced bill
+/// as a JSON array of `{slug, name}` in play order — `NULL` when no bill was
+/// ever set, which renders as an empty lineup rather than a fabricated one.
 type GrowthEventFacts = (
     String,
     String,
@@ -17,8 +19,10 @@ type GrowthEventFacts = (
     Option<String>,
     Option<String>,
     Option<String>,
+    Option<serde_json::Value>,
 );
 
+#[allow(clippy::too_many_arguments)]
 pub(in crate::autopilot) async fn execute_show_growth(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     workspace_id: WorkspaceId,
@@ -26,11 +30,18 @@ pub(in crate::autopilot) async fn execute_show_growth(
     event_id: EventId,
     lever: ShowGrowthLever,
     template_key: &str,
+    send_at: Option<OffsetDateTime>,
     now: OffsetDateTime,
 ) -> Result<(), RepositoryError> {
     let event = sqlx::query_as::<_, GrowthEventFacts>(
         r#"
-        SELECT event.slug, event.title, city.slug, event.venue, event.ticket_url, event.listen_url
+        SELECT event.slug, event.title, city.slug, event.venue, event.ticket_url,
+            event.listen_url,
+            (SELECT jsonb_agg(jsonb_build_object('slug', act.act_slug, 'name', act.act_name)
+                     ORDER BY act.position, act.act_slug)
+             FROM event_acts AS act
+             WHERE act.workspace_id = event.workspace_id
+               AND act.event_id = event.id) AS acts
         FROM events AS event
         -- `cities` is a shared catalogue, not a tenant table: it has no
         -- `workspace_id`, and `events_city_id_fkey` references `cities(id)`
@@ -57,6 +68,14 @@ pub(in crate::autopilot) async fn execute_show_growth(
         return ensure_canonical_show_link(tx, workspace_id, event_id, &event).await;
     }
 
+    // A post-show lever only exists because the night is over: whichever one
+    // executes first registers the show as harvestable material in the same
+    // transaction. The harvest itself still waits out the material window in
+    // the supply policy before drafting anything.
+    if lever.is_post_show() {
+        ensure_show_completed_source(tx, workspace_id, event_id).await?;
+    }
+
     if lever.is_first_party_campaign() {
         return execute_first_party_growth_campaign(
             tx,
@@ -66,6 +85,7 @@ pub(in crate::autopilot) async fn execute_show_growth(
             &event,
             lever,
             template_key,
+            send_at,
             now,
         )
         .await;
@@ -342,6 +362,51 @@ async fn ensure_canonical_show_link(
     Ok(())
 }
 
+/// Registers a finished show as a `show_completed` content source — the input
+/// the harvest chain (recap, feed, story artifacts) demands. Called from every
+/// first-party moment that proves the night ended while the event still sits
+/// at `published`: a post-show lever firing, or reconciliation escalating. The
+/// `source_key` mirrors the `viryaos_events_project_content_sources` trigger
+/// that registers the same source on a `completed` flip, so helper, trigger
+/// and operator upserts all converge on one row per show.
+pub(in crate::autopilot) async fn ensure_show_completed_source(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    workspace_id: WorkspaceId,
+    event_id: EventId,
+) -> Result<(), RepositoryError> {
+    sqlx::query(
+        r#"
+        INSERT INTO viryaos_content_sources (
+            workspace_id, source_kind, source_key, title,
+            occurred_at, expires_at, metadata, active
+        )
+        SELECT
+            event.workspace_id, 'show_completed',
+            'show_completed:' || event.id::text, event.title,
+            -- `starts_at` rather than `now()`: the night is what is being
+            -- harvested, and the supply policy's material window counts from
+            -- when it ended, not from when some lever first noticed.
+            event.starts_at, event.starts_at + interval '45 days',
+            jsonb_build_object('event_id', event.id, 'slug', event.slug,
+                'venue', event.venue, 'starts_at', event.starts_at,
+                'city_id', event.city_id),
+            true
+        FROM events AS event
+        WHERE event.workspace_id = $1
+          AND event.id = $2
+          AND event.status IN ('published','completed')
+          AND event.starts_at <= now()
+        ON CONFLICT (workspace_id, source_kind, source_key) DO NOTHING
+        "#,
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(event_id.into_uuid())
+    .execute(&mut **tx)
+    .await
+    .map_err(map_sqlx)?;
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn execute_first_party_growth_campaign(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
@@ -351,6 +416,7 @@ async fn execute_first_party_growth_campaign(
     event: &GrowthEventFacts,
     lever: ShowGrowthLever,
     template_key: &str,
+    send_at: Option<OffsetDateTime>,
     now: OffsetDateTime,
 ) -> Result<(), RepositoryError> {
     let enabled = sqlx::query_scalar::<_, bool>(
@@ -408,6 +474,15 @@ async fn execute_first_party_growth_campaign(
             "attended_event_slugs": [event.0.clone()],
             "marketing_consent": true
         }),
+        ShowGrowthLever::PostShowRecap => json!({
+            "statuses": ["active"],
+            "attended_event_slugs": [event.0.clone()],
+            // Email-claim scans already hold the room's one next-morning
+            // contact: their welcome doubles as the recall. Sending them the
+            // recap too would put two messages in the same morning.
+            "excluded_scan_checkin_event_slugs": [event.0.clone()],
+            "marketing_consent": true
+        }),
         ShowGrowthLever::PostShowFollowAsk => json!({
             "statuses": ["active"],
             "attended_event_slugs": [event.0.clone()],
@@ -422,7 +497,15 @@ async fn execute_first_party_growth_campaign(
     };
 
     let suffix = lever.as_str().replace('_', "-");
-    let slug = format!("viryaos-{}-{}", event.0, suffix);
+    // Segment and campaign slugs are CHECK-bounded at 128 chars while an
+    // event slug may reach 128 itself; overlong events would fail the insert
+    // and burn the lever's one shot. Truncate the event part so the lever
+    // suffix — the part that makes campaigns distinct — always survives.
+    let event_part: String = event.0.chars().take(90).collect();
+    let slug = format!("viryaos-{}-{}", event_part, suffix);
+    // `name` carries the event title into a 160-char CHECK bound.
+    let display_name: String = event.1.chars().take(140).collect();
+    let name = format!("{} · {}", display_name, lever.as_str());
     let content = match lever {
         ShowGrowthLever::FanAmbassadors => json!({
             "event_id": event_id,
@@ -482,6 +565,28 @@ async fn execute_first_party_growth_campaign(
                 ]
             }
         }),
+        ShowGrowthLever::PostShowRecap => json!({
+            "event_id": event_id,
+            "lever": lever.as_str(),
+            "venue": event.3,
+            // The bill as announced, in play order: "here's who you saw" is a
+            // statement of record, not a pitch, so it carries the acts table
+            // rather than a ticket link.
+            "acts": event.6.clone().unwrap_or_else(|| json!([])),
+            "managed_by": "viryaos_show_growth",
+            "email_contract": {
+                "goal": "give the room one honest memory of the night — who played, where it was — so the band stays attached to the evening the fan actually had",
+                "rules": [
+                    "use_existing_marketing_consent_only",
+                    "one_email_per_fan_per_show",
+                    "no_ask_no_offer_no_link_farm_in_this_message",
+                    "name_only_acts_on_the_announced_bill",
+                    "do_not_claim_attendance_the_records_do_not_support",
+                    "include_unsubscribe_via_existing_mailer_contract",
+                    "never fabricate crowd_or_reaction_numbers"
+                ]
+            }
+        }),
         ShowGrowthLever::PostShowFollowAsk => json!({
             "event_id": event_id,
             "lever": lever.as_str(),
@@ -532,7 +637,7 @@ async fn execute_first_party_growth_campaign(
     )
     .bind(workspace_id.into_uuid())
     .bind(&slug)
-    .bind(format!("{} · {}", event.1, lever.as_str()))
+    .bind(&name)
     .bind(filter)
     .fetch_one(&mut **tx)
     .await
@@ -550,7 +655,7 @@ async fn execute_first_party_growth_campaign(
     .bind(workspace_id.into_uuid())
     .bind(segment_id)
     .bind(&slug)
-    .bind(format!("{} · {}", event.1, lever.as_str()))
+    .bind(&name)
     .bind(template_key)
     .bind(content)
     .fetch_one(&mut **tx)
@@ -575,7 +680,7 @@ async fn execute_first_party_growth_campaign(
         .bind(&slug)
         .bind(segment_id)
         .bind(template_key)
-        .bind(now)
+        .bind(send_at.unwrap_or(now))
         .fetch_one(&mut **tx)
         .await
         .map_err(map_sqlx)?;
@@ -584,7 +689,7 @@ async fn execute_first_party_growth_campaign(
         )
         .bind(workspace_id.into_uuid())
         .bind(campaign.0)
-        .bind(now)
+        .bind(send_at.unwrap_or(now))
         .bind(outbox_id)
         .execute(&mut **tx)
         .await

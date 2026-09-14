@@ -516,6 +516,11 @@ pub enum AutopilotActionPayload {
         event_id: EventId,
         lever: ShowGrowthLever,
         template_key: String,
+        /// Scheduled reach time for the lever's campaign, decided at evaluation
+        /// time so the cadence is part of the durable action evidence. `None`
+        /// (and older payloads without the field) send when execution runs.
+        #[serde(default)]
+        send_at: Option<OffsetDateTime>,
     },
     RequestContentArtifact {
         source_id: ContentSourceId,
@@ -845,6 +850,7 @@ impl AutopilotActionPayload {
                 | ShowGrowthLever::MerchBuyerOffer
                 | ShowGrowthLever::HighIntentLastMile
                 | ShowGrowthLever::PostShowMerchFollowUp
+                | ShowGrowthLever::PostShowRecap
                 | ShowGrowthLever::PostShowFollowAsk => ActionClass::OwnedAudience,
                 ShowGrowthLever::CanonicalLinkSetup
                 | ShowGrowthLever::FreeListingSweep

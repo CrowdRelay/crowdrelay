@@ -679,6 +679,7 @@ impl PostgresAutopilotRepository {
                     event_id,
                     lever,
                     template_key,
+                    send_at,
                 } => {
                     operations::execute_show_growth(
                         &mut transaction,
@@ -687,6 +688,7 @@ impl PostgresAutopilotRepository {
                         *event_id,
                         *lever,
                         template_key,
+                        *send_at,
                         now,
                     )
                     .await?;
@@ -746,6 +748,20 @@ impl PostgresAutopilotRepository {
                     .await?;
                 }
                 AutopilotActionPayload::EscalateShowTask { event_id, task } => {
+                    // Reconciliation escalating means the night is over even
+                    // when no post-show lever ever qualified (an empty room,
+                    // communication off): the show still becomes harvestable
+                    // material so the night is not lost to the supply chain.
+                    if *task
+                        == crowdrelay_domain::show_operations::ShowTaskKind::PostShowReconciliation
+                    {
+                        operations::ensure_show_completed_source(
+                            &mut transaction,
+                            workspace_id,
+                            *event_id,
+                        )
+                        .await?;
+                    }
                     emit_external_action(
                         &mut transaction,
                         workspace_id,

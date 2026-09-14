@@ -63,14 +63,21 @@ pub struct ContentSupplySnapshot {
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(default)]
 pub struct ContentSupplyPolicy {
     pub maximum_source_age_days: u32,
+    /// How long a finished show's material gets to arrive before the harvest
+    /// starts drafting from it: the capture plan needs the night plus a
+    /// collection window, so `show_completed` sources stay pending until
+    /// `occurred_at + post_show_harvest_hours`. Zero means no delay.
+    pub post_show_harvest_hours: u32,
 }
 
 impl Default for ContentSupplyPolicy {
     fn default() -> Self {
         Self {
             maximum_source_age_days: 45,
+            post_show_harvest_hours: 72,
         }
     }
 }
@@ -88,6 +95,9 @@ pub enum ContentSupplyDecision {
 pub enum ContentSupplyHoldReason {
     InvalidSnapshot,
     StaleSource,
+    /// The show ended but its harvest window is still open — drafts would
+    /// race the photographer. The source becomes live when the window closes.
+    HarvestPending,
     Complete,
 }
 
@@ -117,6 +127,15 @@ pub fn evaluate_content_supply(
     );
     if snapshot.expires_at <= now || (age_bounded && now - snapshot.occurred_at > maximum_age) {
         return ContentSupplyDecision::Hold(ContentSupplyHoldReason::StaleSource);
+    }
+
+    // A finished show is harvestable only after its material window closes:
+    // the capture plan's shots need the night plus collection time before a
+    // recap or social artifact can honestly render from them.
+    if snapshot.source_kind == ContentSourceKind::ShowCompleted
+        && now - snapshot.occurred_at < Duration::hours(i64::from(policy.post_show_harvest_hours))
+    {
+        return ContentSupplyDecision::Hold(ContentSupplyHoldReason::HarvestPending);
     }
 
     for artifact in required_artifacts(snapshot.source_kind) {
@@ -272,6 +291,47 @@ mod tests {
         ));
         assert!(matches!(
             evaluate_content_supply(&old_story, ContentSupplyPolicy::default(), now()),
+            ContentSupplyDecision::Request { .. }
+        ));
+    }
+
+    #[test]
+    fn a_finished_show_waits_out_its_material_window_before_harvesting() {
+        let show = ContentSupplySnapshot {
+            source_id: ContentSourceId::new(),
+            source_kind: ContentSourceKind::ShowCompleted,
+            source_version: 1,
+            occurred_at: now() - Duration::hours(20),
+            expires_at: now() + Duration::days(30),
+            completed_artifacts: Vec::new(),
+            in_flight_artifacts: Vec::new(),
+        };
+
+        // Twenty hours in, the night is over but the capture plan's material
+        // is still being collected: nothing drafts from it yet.
+        assert_eq!(
+            evaluate_content_supply(&show, ContentSupplyPolicy::default(), now()),
+            ContentSupplyDecision::Hold(ContentSupplyHoldReason::HarvestPending),
+        );
+
+        // Once the window closes the recap artifact is demanded first — the
+        // night's own record before the social reuse of it.
+        let mut collected = show.clone();
+        collected.occurred_at = now() - Duration::hours(80);
+        assert!(matches!(
+            evaluate_content_supply(&collected, ContentSupplyPolicy::default(), now()),
+            ContentSupplyDecision::Request {
+                artifact: ContentArtifactKind::PostShowRecap,
+                ..
+            }
+        ));
+
+        // The gate is kind-scoped: events and releases still draft the moment
+        // they land, with no collection window to wait out.
+        let mut event = show;
+        event.source_kind = ContentSourceKind::Event;
+        assert!(matches!(
+            evaluate_content_supply(&event, ContentSupplyPolicy::default(), now()),
             ContentSupplyDecision::Request { .. }
         ));
     }
