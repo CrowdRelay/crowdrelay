@@ -6,7 +6,6 @@
     "crates/crowdrelay-api/src/audience.rs:140",
     "crates/crowdrelay-api/src/audience.rs:182",
     "crates/crowdrelay-api/src/audience.rs:35",
-    "crates/crowdrelay-api/src/audience/engagement_handlers.rs:229",
     "crates/crowdrelay-api/src/audience/query_support.rs:12",
     "crates/crowdrelay-api/src/audience/query_support.rs:130",
     "crates/crowdrelay-api/src/audience/query_support.rs:274",

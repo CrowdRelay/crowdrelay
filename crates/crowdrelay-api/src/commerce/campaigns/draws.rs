@@ -186,9 +186,9 @@ async fn delete_reward_draw_inner(
                     AND other_draw.reward_rule_id = rule.id
               )
               AND NOT EXISTS (
-                  SELECT 1 FROM reward_grants AS grant
-                  WHERE grant.workspace_id = rule.workspace_id
-                    AND grant.reward_rule_id = rule.id
+                  SELECT 1 FROM reward_grants AS reward_grant
+                  WHERE reward_grant.workspace_id = rule.workspace_id
+                    AND reward_grant.reward_rule_id = rule.id
               )
             "#,
         )
@@ -211,9 +211,9 @@ async fn delete_reward_draw_inner(
                     AND other_draw.reward_rule_id = rule.id
               )
               AND NOT EXISTS (
-                  SELECT 1 FROM reward_grants AS grant
-                  WHERE grant.workspace_id = rule.workspace_id
-                    AND grant.reward_rule_id = rule.id
+                  SELECT 1 FROM reward_grants AS reward_grant
+                  WHERE reward_grant.workspace_id = rule.workspace_id
+                    AND reward_grant.reward_rule_id = rule.id
               )
             "#,
         )

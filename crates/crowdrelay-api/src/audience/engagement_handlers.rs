@@ -226,13 +226,13 @@ pub async fn fan_detail(
         .fetch_all(&state.database)),
         crate::ops::hold(budget, sqlx::query_as::<_, RewardTouch>(
             r#"
-            SELECT rule.name AS reward_name, rule.reward_type, grant.status, grant.created_at
-            FROM reward_grants grant
+            SELECT rule.name AS reward_name, rule.reward_type, reward_grant.status, reward_grant.created_at
+            FROM reward_grants reward_grant
             JOIN reward_rules rule
-              ON rule.workspace_id = grant.workspace_id
-             AND rule.id = grant.reward_rule_id
-            WHERE grant.workspace_id = $1 AND grant.fan_id = $2
-            ORDER BY grant.created_at DESC, grant.id DESC
+              ON rule.workspace_id = reward_grant.workspace_id
+             AND rule.id = reward_grant.reward_rule_id
+            WHERE reward_grant.workspace_id = $1 AND reward_grant.fan_id = $2
+            ORDER BY reward_grant.created_at DESC, reward_grant.id DESC
             LIMIT 100
             "#,
         )
