@@ -66,6 +66,7 @@ use crowdrelay_infra::autopilot::payload_requires_executor;
 use serde_json::Value;
 use sqlx::{PgPool, Postgres, Transaction};
 use thiserror::Error;
+use time::OffsetDateTime;
 use tokio::{
     sync::watch,
     time::{MissedTickBehavior, interval, timeout},
@@ -277,12 +278,12 @@ impl ReceiptReconciliationWorker {
         // status — the caller adjusts the evidence before calling the
         // pure resolver. The current state is always Unknown (the query
         // filters status = 'unknown').
-        let rows: Vec<(Uuid, String, bool)> = sqlx::query_as(
+        let rows: Vec<(Uuid, String, bool, OffsetDateTime)> = sqlx::query_as(
             r#"
-            SELECT a.id, r.status, r.prior_success
+            SELECT a.id, r.status, r.prior_success, r.occurred_at
             FROM viryaos_autopilot_actions a
             JOIN LATERAL (
-                SELECT status,
+                SELECT status, occurred_at,
                        EXISTS (
                            SELECT 1 FROM viryaos_autopilot_execution_reports r2
                            WHERE r2.workspace_id = a.workspace_id
@@ -308,7 +309,7 @@ impl ReceiptReconciliationWorker {
         .await?;
 
         let mut resolved = 0usize;
-        for (action_id, receipt_status, prior_success_exists) in rows {
+        for (action_id, receipt_status, prior_success_exists, occurred_at) in rows {
             // If a prior succeeded receipt exists, the effective
             // observation is Executed — regardless of the latest
             // receipt's status. This is the caller's responsibility:
@@ -333,6 +334,8 @@ impl ReceiptReconciliationWorker {
                         transaction,
                         action_id,
                         ActionOutcome::Succeeded,
+                        "late_executor_receipt",
+                        occurred_at,
                     )
                     .await?;
                 }
@@ -342,6 +345,8 @@ impl ReceiptReconciliationWorker {
                         transaction,
                         action_id,
                         ActionOutcome::Failed,
+                        "late_executor_receipt",
+                        occurred_at,
                     )
                     .await?;
                 }
@@ -367,9 +372,10 @@ impl ReceiptReconciliationWorker {
         &self,
         transaction: &mut Transaction<'_, Postgres>,
     ) -> Result<usize, ReceiptReconciliationError> {
-        let rows: Vec<(Uuid, String, Option<String>)> = sqlx::query_as(
+        let rows: Vec<(Uuid, String, Option<String>, OffsetDateTime)> = sqlx::query_as(
             r#"
-            SELECT a.id, cp.status, cp.error_message
+            SELECT a.id, cp.status, cp.error_message,
+                   COALESCE(cp.posted_at, cp.updated_at)
             FROM viryaos_autopilot_actions a
             JOIN community_posts cp ON cp.action_id = a.id
             WHERE a.workspace_id = $1
@@ -384,7 +390,7 @@ impl ReceiptReconciliationWorker {
         .await?;
 
         let mut resolved = 0usize;
-        for (action_id, post_status, error_message) in rows {
+        for (action_id, post_status, error_message, evidence_at) in rows {
             // Use the canonical resolver via the provider-specific adapter.
             let evidence = community_post_to_evidence(&post_status, error_message.as_deref());
             match legal_transition(
@@ -398,6 +404,8 @@ impl ReceiptReconciliationWorker {
                         transaction,
                         action_id,
                         ActionOutcome::Succeeded,
+                        "community_post",
+                        evidence_at,
                     )
                     .await?;
                 }
@@ -407,6 +415,8 @@ impl ReceiptReconciliationWorker {
                         transaction,
                         action_id,
                         ActionOutcome::Failed,
+                        "community_post",
+                        evidence_at,
                     )
                     .await?;
                 }
@@ -442,16 +452,19 @@ impl ReceiptReconciliationWorker {
         // social_posts, telegram_posts, and discord_posts all have the same
         // status vocabulary and an `action_id` column. UNION them into one
         // result set so a single loop resolves all three.
-        let rows: Vec<(Uuid, String, Option<String>)> = sqlx::query_as(
+        let rows: Vec<(Uuid, String, Option<String>, OffsetDateTime)> = sqlx::query_as(
             r#"
-            SELECT a.id, post.status, post.error_message
+            SELECT a.id, post.status, post.error_message, post.evidence_at
             FROM viryaos_autopilot_actions a
             JOIN (
-                SELECT action_id, status, error_message FROM social_posts
+                SELECT action_id, status, error_message,
+                       COALESCE(posted_at, updated_at) AS evidence_at FROM social_posts
                 UNION ALL
-                SELECT action_id, status, error_message FROM telegram_posts
+                SELECT action_id, status, error_message,
+                       COALESCE(posted_at, updated_at) FROM telegram_posts
                 UNION ALL
-                SELECT action_id, status, error_message FROM discord_posts
+                SELECT action_id, status, error_message,
+                       COALESCE(posted_at, updated_at) FROM discord_posts
             ) post ON post.action_id = a.id
             WHERE a.workspace_id = $1
               AND a.status = 'unknown'
@@ -465,7 +478,7 @@ impl ReceiptReconciliationWorker {
         .await?;
 
         let mut resolved = 0usize;
-        for (action_id, post_status, error_message) in rows {
+        for (action_id, post_status, error_message, evidence_at) in rows {
             let evidence = content_post_to_evidence(&post_status, error_message.as_deref());
             match legal_transition(
                 ActionState::Unknown,
@@ -478,6 +491,8 @@ impl ReceiptReconciliationWorker {
                         transaction,
                         action_id,
                         ActionOutcome::Succeeded,
+                        "content_post",
+                        evidence_at,
                     )
                     .await?;
                 }
@@ -487,6 +502,8 @@ impl ReceiptReconciliationWorker {
                         transaction,
                         action_id,
                         ActionOutcome::Failed,
+                        "content_post",
+                        evidence_at,
                     )
                     .await?;
                 }
@@ -615,11 +632,12 @@ impl ReceiptReconciliationWorker {
     ) -> Result<usize, ReceiptReconciliationError> {
         // Find unknown actions that have a linked outbox event, and check
         // the outbox event's delivery status. Skip community.engage
-        // actions (handled by sweep 2b) and actions that already have
-        // executor receipts (handled by sweep 2a).
-        let rows: Vec<(Uuid, String, Option<String>)> = sqlx::query_as(
+        // actions (handled by sweep 2b), agent.content actions (sweep 2c),
+        // and actions that already have executor receipts (sweep 2a).
+        let rows: Vec<(Uuid, String, Option<String>, OffsetDateTime)> = sqlx::query_as(
             r#"
-            SELECT a.id, e.status, e.last_error_kind
+            SELECT a.id, e.status, e.last_error_kind,
+                   COALESCE(e.delivered_at, e.updated_at)
             FROM viryaos_autopilot_actions a
             JOIN outbox_events e
                 ON e.workspace_id = a.workspace_id
@@ -641,7 +659,7 @@ impl ReceiptReconciliationWorker {
         .await?;
 
         let mut resolved = 0usize;
-        for (action_id, outbox_status, last_error_kind) in rows {
+        for (action_id, outbox_status, last_error_kind, evidence_at) in rows {
             // Route through the canonical resolver via the outbox adapter.
             let evidence = outbox_event_to_evidence(&outbox_status, last_error_kind.as_deref());
             match legal_transition(
@@ -655,6 +673,8 @@ impl ReceiptReconciliationWorker {
                         transaction,
                         action_id,
                         ActionOutcome::Succeeded,
+                        "outbox_delivery",
+                        evidence_at,
                     )
                     .await?;
                 }
@@ -664,6 +684,8 @@ impl ReceiptReconciliationWorker {
                         transaction,
                         action_id,
                         ActionOutcome::Failed,
+                        "outbox_delivery",
+                        evidence_at,
                     )
                     .await?;
                 }
@@ -763,14 +785,35 @@ enum ActionOutcome {
     Failed,
 }
 
-/// Moves an `unknown` action to its resolved terminal status and follows
-/// the experiment assignment. Returns 1 if the action transitioned, 0 if
-/// another runner resolved it first.
+/// Moves an `unknown` action to its resolved terminal status, follows
+/// the experiment assignment, and writes the receipt the gap sweep looks
+/// for so the resolution closes instead of re-entering candidacy.
+///
+/// Without the synthesized report an action resolved from delivery
+/// evidence — outbox `delivered`, a posted community row — stayed a
+/// receipt-gap candidate forever: `finished_at = now()` re-armed the 24h
+/// timer and the next sweep marked it `unknown` again, in a loop that
+/// could never converge. The report is honest about its provenance:
+/// `executor_id = 'receipt_reconciliation'` and `resolved_via` in
+/// metadata record *how* the terminal state was learned — they never
+/// claim an executor filed it.
+///
+/// `occurred_at` is the evidence's own timestamp — the post's
+/// `posted_at`, the outbox event's `delivered_at` — which is when the
+/// work verifiably happened. (The action's own `finished_at` cannot
+/// serve: the gap sweep NULLs it when marking `unknown`, and a
+/// synthesized `now()` would report a reconciler's judgement as a fresh
+/// executor confirmation in the 24h metrics.) `received_at` defaults to
+/// now, which is when the outcome became known.
+/// Returns 1 if the action transitioned, 0 if another runner resolved it
+/// first.
 async fn resolve_action(
     workspace_id: WorkspaceId,
     transaction: &mut Transaction<'_, Postgres>,
     action_id: Uuid,
     outcome: ActionOutcome,
+    resolved_via: &'static str,
+    evidence_at: OffsetDateTime,
 ) -> Result<usize, ReceiptReconciliationError> {
     let (status, error_kind) = match outcome {
         ActionOutcome::Succeeded => ("succeeded", None),
@@ -808,9 +851,59 @@ async fn resolve_action(
         },
     )
     .await?;
+    // Close the loop: the gap sweep's candidate query and the console's
+    // `awaiting_executor` count both key on "no terminal report exists",
+    // so without this row the action re-enters `unknown` 24h from now and
+    // the count never drains. The NOT EXISTS guard makes the insert a
+    // no-op when a real executor report already landed — the
+    // resolve_from_receipts case — and `ON CONFLICT` on the deterministic
+    // receipt key makes a re-resolution idempotent.
+    //
+    // A real receipt committed between this insert's NOT EXISTS snapshot
+    // and commit still produces two terminal reports — they carry
+    // different receipt_keys, so ON CONFLICT does not fire, and the
+    // action's FK does not serialise the two writers. The window is the
+    // duration of this transaction and the outcome is benign: every
+    // metric that counts reports dedupes by DISTINCT action_id, so a
+    // twin overstates nothing it would not already have counted.
+    sqlx::query(
+        r#"
+        INSERT INTO viryaos_autopilot_execution_reports (
+            id, workspace_id, action_id, receipt_key, executor_id, status,
+            provider_reference, error_kind, metadata, occurred_at
+        )
+        SELECT $5, $1, $2, $6, 'receipt_reconciliation', $3, NULL, $4, $7, $8
+        WHERE EXISTS (
+            SELECT 1
+            FROM viryaos_autopilot_action_emissions emission
+            WHERE emission.workspace_id = $1 AND emission.action_id = $2
+        )
+          AND NOT EXISTS (
+            SELECT 1
+            FROM viryaos_autopilot_execution_reports report
+            WHERE report.workspace_id = $1 AND report.action_id = $2
+              AND report.status IN ('succeeded', 'failed')
+        )
+        ON CONFLICT (workspace_id, receipt_key) DO NOTHING
+        "#,
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(action_id)
+    .bind(status)
+    .bind(error_kind)
+    .bind(Uuid::now_v7())
+    .bind(format!("reconcile:{action_id}"))
+    .bind(serde_json::json!({
+        "resolved_via": resolved_via,
+        "synthesized": true,
+    }))
+    .bind(evidence_at)
+    .execute(&mut **transaction)
+    .await?;
     tracing::info!(
         action_id = %action_id,
         status,
+        resolved_via,
         "resolved unknown action outcome"
     );
     Ok(1)
