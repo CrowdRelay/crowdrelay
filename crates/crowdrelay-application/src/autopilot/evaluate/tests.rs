@@ -3,7 +3,6 @@ mod tests {
     use super::*;
     use crowdrelay_domain::{
         TeamOpportunityId, TicketTypeId,
-        booking::BookingOpportunityPolicy,
         live_opportunities::{
             LiveOpportunityKind, LiveOpportunityPolicy, LiveOpportunitySnapshot,
             live_opportunity_score,
