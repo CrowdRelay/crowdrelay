@@ -992,12 +992,34 @@ impl GrowthMetricSyncWorker {
                     status = refresh_response.status().as_u16(),
                     "TikTok token refresh failed, marking connection as expired"
                 );
-                let _ = sqlx::query(
-                    "UPDATE fanbase_connections SET status = 'expired', updated_at = now() WHERE id = $1",
+                // Scoped to the workspace as well as the id. A bare primary key is
+                // no reason to skip the predicate that is the whole of tenant
+                // isolation — and until this was written the ratchet could not
+                // have told us, because it inspected only `r#"..."#` literals and
+                // this is a plain one.
+                //
+                // The write is not propagated — a bookkeeping failure must not
+                // replace the provider error the caller needs — but it is logged,
+                // which is the convention `record_sync_failure` already follows in
+                // this module. Silence here would mean the connection stays
+                // `active`, gets picked up again, and retries a refresh that
+                // cannot succeed until somebody re-authorises it.
+                if let Err(error) = sqlx::query(
+                    "UPDATE fanbase_connections SET status = 'expired', updated_at = now() \
+                     WHERE workspace_id = $1 AND id = $2",
                 )
+                .bind(conn.workspace_id)
                 .bind(conn.id)
                 .execute(&self.pool)
-                .await;
+                .await
+                {
+                    tracing::warn!(
+                        connection_id = %conn.id,
+                        error = %error,
+                        "could not mark the TikTok connection expired; it will be \
+                         retried until the write succeeds"
+                    );
+                }
                 return Err(GrowthMetricSyncError::ProviderApi(format!(
                     "TikTok token refresh failed: HTTP {} — connection marked as expired, re-auth required",
                     refresh_response.status()
