@@ -141,15 +141,41 @@ def names_a_foreign_relation(sql: str) -> bool:
     return any(relation in lowered for relation in FOREIGN_RELATIONS)
 
 
+#: A raw literal, `r#"..."#`. Most queries here are written this way.
+RAW_LITERAL = re.compile(r'r#"(.*?)"#', re.S)
+
+#: A plain literal, `"..."`, honouring escapes.
+PLAIN_LITERAL = re.compile(r'"((?:[^"\\]|\\.)*)"', re.S)
+
+
+def is_test_source(relative: str) -> bool:
+    """Test code, in either place this workspace keeps it.
+
+    `crates/*/tests/` holds integration targets; unit tests live beside their
+    source as `src/**/tests.rs`, attached with `include!`. A path test for
+    `/tests/` alone misses the second kind.
+    """
+    return "/tests/" in relative or relative.endswith("/tests.rs")
+
+
 def queries() -> list[tuple[str, int, str]]:
-    """Every raw SQL literal that returns rows, with where it was written."""
+    """Every SQL literal that returns rows, with where it was written.
+
+    **Both string forms.** This used to read only `r#"..."#`, which left 223
+    row-returning queries across 100 files — roughly a quarter of the surface —
+    never PREPAREd and so never type-checked, in the one gate that exists to catch
+    a runtime decode failure. A plain-string `EXTRACT` would have reproduced the
+    two-hour outage in the header with this gate reporting PASS.
+
+    The patterns overlap: `PLAIN_LITERAL` also matches a raw literal's body,
+    because `r#"SELECT ..."#` contains a quote, the query, and another quote. Raw
+    literals are collected first and blanked out before the plain scan, or every
+    raw query is counted twice.
+    """
     found: list[tuple[str, int, str]] = []
-    literal = re.compile(r'r#"(.*?)"#', re.S)
-    for path in sorted((ROOT / "crates").rglob("*.rs")):
-        if "/tests/" in str(path):
-            continue
-        text = path.read_text(errors="ignore")
-        for match in literal.finditer(text):
+
+    def collect(path, text: str, haystack: str, pattern: re.Pattern, *, strict: bool) -> None:
+        for match in pattern.finditer(haystack):
             sql = match.group(1).strip()
             head = sql.lower()
             # RETURNING clauses are writes; PREPARE would execute nothing but the
@@ -157,8 +183,28 @@ def queries() -> list[tuple[str, int, str]]:
             # skipping them keeps the sweep obviously read-only.
             if not head.startswith(("select", "with")) or "returning" in head:
                 continue
-            line = text[: match.start()].count("\n") + 1
+            # A plain literal needs a real SQL token before it counts. English
+            # sentences start with "with", and the assertion messages in the
+            # IO-free crates are full of them -- "with no approved origin, every
+            # link in the body is unapproved" parsed as a CTE and put
+            # `crowdrelay-domain`, which contains no SQL at all, into the
+            # unprepared baseline. A raw literal here is SQL by convention and
+            # needs no such test.
+            if strict and not (" from " in head or "::" in head):
+                continue
+            # Located in the original text, so a blanked haystack does not shift
+            # the reported line. `find` is enough: a duplicate query reports the
+            # first occurrence, which is still a place to look.
+            offset = text.find(sql)
+            line = text[:offset].count("\n") + 1 if offset >= 0 else 0
             found.append((str(path.relative_to(ROOT)), line, sql))
+
+    for path in sorted((ROOT / "crates").rglob("*.rs")):
+        if is_test_source(path.relative_to(ROOT).as_posix()):
+            continue
+        text = path.read_text(errors="ignore")
+        collect(path, text, text, RAW_LITERAL, strict=False)
+        collect(path, text, RAW_LITERAL.sub("", text), PLAIN_LITERAL, strict=True)
     return found
 
 
