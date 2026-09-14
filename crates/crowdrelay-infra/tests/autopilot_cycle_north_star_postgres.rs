@@ -508,16 +508,58 @@ async fn a_quiet_cycle_records_its_reason_and_an_active_one_records_none() -> Re
     );
 
     // A cycle that produced actions has nothing to explain — NULL, not a
-    // leftover string an operator could mistake for a current wait.
-    let active_id = open_cycle_run(
+    // leftover string an operator could mistake for a current wait. This leg
+    // creates a real action inside the cycle's window and still passes a
+    // reason — the min_dispatches override path does exactly that — so the
+    // stored value must be dropped, not just absent.
+    let active_started = now + Duration::minutes(5);
+    let active_id = open_cycle_run(&pool, workspace_id, CycleTrigger::Scheduled, active_started)
+        .await
+        .ok_or("the cycle run record must open")?;
+
+    let decision_id = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO viryaos_autopilot_decisions
+           (id, workspace_id, decision_key, context, subject_kind, subject_id,
+            decision_kind, confidence_basis_points, disposition, reason,
+            input_snapshot, policy_snapshot, recommendation, evaluated_at, trace_id)
+         VALUES ($1, $2, $3, 'live_opportunity', 'team_opportunity', $4,
+                 'opportunity.live.apply', 7600, 'require_approval', 'test decision',
+                 '{}'::jsonb, '{}'::jsonb, '{}'::jsonb, $5, $4)",
+    )
+    .bind(decision_id)
+    .bind(workspace_id.into_uuid())
+    .bind(format!("test-{active_id}"))
+    .bind(Uuid::now_v7())
+    .bind(active_started)
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO viryaos_autopilot_actions
+           (id, workspace_id, decision_id, context, action_kind, subject_kind,
+            subject_id, idempotency_key, payload, status, created_at)
+         VALUES ($1, $2, $3, 'live_opportunity', 'opportunity.live.apply',
+                 'team_opportunity', $4, $5, '{}'::jsonb, 'awaiting_approval', $6)",
+    )
+    .bind(Uuid::now_v7())
+    .bind(workspace_id.into_uuid())
+    .bind(decision_id)
+    .bind(Uuid::now_v7())
+    .bind(format!("test-action-{active_id}"))
+    .bind(active_started)
+    .execute(&pool)
+    .await?;
+
+    close_cycle_run(
         &pool,
         workspace_id,
-        CycleTrigger::Scheduled,
-        now + Duration::minutes(5),
+        active_id,
+        &[],
+        now + Duration::minutes(6),
+        Some(20),
+        Some("WAIT overridden by min_dispatches=1 dispatched 1 candidate(s)"),
     )
-    .await
-    .ok_or("the cycle run record must open")?;
-    close_cycle_run(&pool, workspace_id, active_id, &[], now, Some(20), None).await;
+    .await;
 
     let stored: Option<String> = sqlx::query_scalar(
         "SELECT wait_reason FROM viryaos_autopilot_cycle_runs \

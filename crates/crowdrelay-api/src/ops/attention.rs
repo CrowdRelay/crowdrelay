@@ -133,7 +133,8 @@ struct BrainSelfAssessment {
     /// Why the most recent quiet cycle stayed quiet, in the brain's own words
     /// ("WAIT wins: VOI=0.85 > best_action_value=0.00"). The first principle
     /// of the plan is that the system may do nothing — and says so. NULL when
-    /// the latest cycle acted, or ran before migration 0268.
+    /// no quiet cycle has a recorded reason — the cycle is acting, or it ran
+    /// before migration 0268.
     latest_wait_reason: Option<String>,
 }
 
@@ -335,6 +336,7 @@ async fn load_brain_assessment(state: &OpsState) -> Result<BrainSelfAssessment, 
                ), '-infinity'::timestamptz)) AS quiet_cycles,
             (SELECT wait_reason FROM viryaos_autopilot_cycle_runs
              WHERE workspace_id = $1 AND finished_at IS NOT NULL
+               AND actions_created = 0
                AND wait_reason IS NOT NULL
              ORDER BY started_at DESC LIMIT 1) AS latest_wait_reason
         "#,

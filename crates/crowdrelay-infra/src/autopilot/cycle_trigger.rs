@@ -216,8 +216,19 @@ pub async fn close_cycle_run(
             north_star_value = $5,
             -- The brain's own account of a quiet cycle. Persisted so "the
             -- system did nothing" is answerable from the record, not only from
-            -- a worker log that rotates away.
-            wait_reason = $6
+            -- a worker log that rotates away. A cycle that dispatched actions
+            -- — including a WAIT overridden by min_dispatches — is not quiet,
+            -- so its reason is dropped rather than recorded as a quiet one.
+            wait_reason = CASE
+                WHEN (
+                    SELECT count(*)
+                    FROM viryaos_autopilot_actions AS action
+                    WHERE action.workspace_id = run.workspace_id
+                      AND action.created_at >= run.started_at
+                      AND action.created_at <= $3
+                ) = 0 THEN $6
+                ELSE NULL
+            END
         WHERE run.workspace_id = $1 AND run.id = $2
         "#,
     )

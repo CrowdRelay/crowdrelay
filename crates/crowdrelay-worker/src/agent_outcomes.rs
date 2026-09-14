@@ -1037,7 +1037,7 @@ impl AgentOutcomeWorker {
                                 ),
                                 12,
                                 $9,
-                                NULL,
+                                $10,
                                 $2
                             )
                             "#,
@@ -1051,6 +1051,7 @@ impl AgentOutcomeWorker {
                         .bind(decision_reason)
                         .bind(evidence_confidence_basis_points(outcome))
                         .bind(trace_id)
+                        .bind(decision_id)
                         .execute(&mut *tx)
                         .await?;
                     }
