@@ -916,6 +916,13 @@ async fn run(database: PgPool, config: &Config, standby: bool) -> Result<()> {
     // always constructed, so the capability always has at least one claimant
     // and is advertised unconditionally.
     in_process_capabilities.push("agent.content");
+    // `team.email` for `SendTeamAssignmentEmail`: the dispatch worker is
+    // constructed unconditionally a few hundred lines up and claims its
+    // actions by direct SQL — the same claim-by-polling shape as the two
+    // capabilities above. Nothing advertised it, so every reminder the
+    // brain queued parked with `awaiting_executor` while the worker that
+    // would send it polled an empty claim.
+    in_process_capabilities.push("team.email");
     if let Some(registrar) = crowdrelay_worker::executor_registry::ExecutorRegistrar::new(
         database.clone(),
         workspace_id,
