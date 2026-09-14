@@ -19,6 +19,7 @@
         /v1/control-plane/autopilot/show-economics \
         /v1/control-plane/autopilot/chief-of-staff \
         /v1/control-plane/autopilot/growth-envelope \
+        /v1/control-plane/autopilot/content-sources \
         /v1/control-plane/autopilot/outreach/candidates \
         /v1/control-plane/autopilot/outreach/candidates/* \
         /v1/control-plane/autopilot/booking-discovery/candidates \

@@ -27,7 +27,14 @@ pub(in crate::autopilot) async fn process_attribution_batch(
     batch_size: u32,
 ) -> Result<u32, RepositoryError> {
     let pool = &repo.pool;
-    // Claim pending attribution requests.
+    // Claim pending attribution requests — and re-claim stale `processing`
+    // ones. The claim commits in its own statement, so a worker that dies
+    // between claiming and resolving leaves the row `processing` forever:
+    // this query is the only place `pending` is selected, and the module's
+    // crash-recovery promise (a request survives the worker) is void
+    // without the second disjunct. An hour is far beyond any real batch's
+    // processing time; `created_at` is the claim's own clock since the
+    // table carries no `updated_at`.
     let rows = sqlx::query(
         r#"
         UPDATE viryaos_attribution_requests
@@ -36,12 +43,14 @@ pub(in crate::autopilot) async fn process_attribution_batch(
         WHERE id IN (
             SELECT id FROM viryaos_attribution_requests
             WHERE workspace_id = $1
-              AND status = 'pending'
+              AND (status = 'pending'
+                   OR (status = 'processing'
+                       AND created_at < now() - INTERVAL '1 hour'))
             ORDER BY created_at ASC
             LIMIT $2
             FOR UPDATE SKIP LOCKED
         )
-        RETURNING id, measurement_id, action_id, attribution_version
+        RETURNING id, measurement_id, action_id, attribution_version, attempt_count
         "#,
     )
     .bind(workspace_id.into_uuid())
@@ -55,10 +64,20 @@ pub(in crate::autopilot) async fn process_attribution_batch(
     let allocator = ProportionalCreditAllocator;
     let mut processed = 0u32;
     for row in &rows {
-        let request_id: uuid::Uuid = row.try_get("id").unwrap_or_default();
-        let measurement_id: uuid::Uuid = row.try_get("measurement_id").unwrap_or_default();
-        let action_id: uuid::Uuid = row.try_get("action_id").unwrap_or_default();
-        let attribution_version: i32 = row.try_get("attribution_version").unwrap_or(1);
+        // A claimed row that cannot decode is a schema disagreement, not
+        // something a nil UUID should pretend to process: the row stays
+        // `processing`, the stale-claim disjunct requeues it in an hour,
+        // and the log says why instead of the row silently vanishing.
+        let (Ok(request_id), Ok(measurement_id), Ok(action_id), Ok(attribution_version)) = (
+            row.try_get::<uuid::Uuid, _>("id"),
+            row.try_get::<uuid::Uuid, _>("measurement_id"),
+            row.try_get::<uuid::Uuid, _>("action_id"),
+            row.try_get::<i32, _>("attribution_version"),
+        ) else {
+            tracing::error!("claimed attribution request row failed to decode");
+            continue;
+        };
+        let attempts: i32 = row.try_get("attempt_count").unwrap_or(0);
         match process_one(
             repo,
             &allocator,
@@ -70,32 +89,68 @@ pub(in crate::autopilot) async fn process_attribution_batch(
         .await
         {
             Ok(()) => {
-                mark_done(pool, measurement_id).await;
+                mark_done(pool, request_id).await;
                 processed += 1;
             }
             Err(e) => {
+                let status = failure_status(&e, attempts);
                 tracing::warn!(
                     error = %e,
                     %request_id,
                     %measurement_id,
+                    status,
                     "attribution request failed"
                 );
-                let _ = sqlx::query(
+                let writeback = sqlx::query(
                     r#"
                     UPDATE viryaos_attribution_requests
-                    SET status = 'pending', last_error = $2
+                    SET status = $3, last_error = $2
                     WHERE id = $1 AND status = 'processing'
                     "#,
                 )
                 .bind(request_id)
                 .bind(format!("{e}"))
+                .bind(status)
                 .execute(pool)
                 .await;
+                if let Err(writeback_error) = writeback {
+                    // The row stays `processing` and re-claims in an hour —
+                    // but a writeback that also fails is the moment not to
+                    // be quiet about.
+                    tracing::error!(
+                        error = %writeback_error,
+                        %request_id,
+                        "attribution failure could not be recorded"
+                    );
+                }
             }
         }
     }
     Ok(processed)
 }
+
+/// Maps a processing failure to the request's next status.
+///
+/// A permanent verdict retried forever is a spin loop wearing a retry's
+/// clothes: `Conflict` means the write can never apply to this state,
+/// `NotFound` means the rows it joins are gone, and no poll interval turns
+/// either into success. Two production requests passed 2,000 attempts each
+/// doing exactly that. Transient classes still return to `pending`, but no
+/// error may retry without bound — `MAX_ATTRIBUTION_ATTEMPTS` lands every
+/// class in `failed` eventually, where an operator can see it.
+fn failure_status(error: &RepositoryError, attempt_count: i32) -> &'static str {
+    let terminal = matches!(
+        error,
+        RepositoryError::Conflict | RepositoryError::ConflictBecause(_) | RepositoryError::NotFound
+    );
+    if terminal || attempt_count >= MAX_ATTRIBUTION_ATTEMPTS {
+        "failed"
+    } else {
+        "pending"
+    }
+}
+
+const MAX_ATTRIBUTION_ATTEMPTS: i32 = 50;
 
 async fn process_one(
     repo: &PostgresAutopilotRepository,
@@ -130,7 +185,6 @@ async fn process_one(
         Some(r) => r,
         None => return Ok(()), // No resolved evidence yet — nothing to attribute.
     };
-    use sqlx::Row;
     let observed_incremental: Option<f64> = outcome_row
         .try_get("observed_incremental_fans")
         .ok()
@@ -244,15 +298,52 @@ async fn mark_causal_credits(
     Ok(())
 }
 
-async fn mark_done(pool: &sqlx::PgPool, measurement_id: uuid::Uuid) {
-    let _ = sqlx::query(
+/// Marks the request that was actually processed. Scoping by id, not by
+/// measurement: requests are versioned, so two versions of the same
+/// measurement can be claimed in one batch, and a sweep by measurement_id
+/// would mark the newer version done before its credits were written — and
+/// its own failure update would then find no `processing` row to move.
+async fn mark_done(pool: &sqlx::PgPool, request_id: uuid::Uuid) {
+    let result = sqlx::query(
         r#"
         UPDATE viryaos_attribution_requests
         SET status = 'done', processed_at = now()
-        WHERE measurement_id = $1 AND status = 'processing'
+        WHERE id = $1 AND status = 'processing'
         "#,
     )
-    .bind(measurement_id)
+    .bind(request_id)
     .execute(pool)
     .await;
+    if let Err(error) = result {
+        // A success that cannot be recorded is not a failure to process —
+        // the credits are written and the stale-claim disjunct will run the
+        // request again, idempotently. But silence here once hid a bug, so
+        // the row's second trip is at least announced.
+        tracing::error!(error = %error, %request_id, "attribution success could not be recorded");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Permanent verdicts terminate; transient ones retry; nothing retries
+    /// without bound. The two production rows that passed 2,000 attempts on
+    /// a guaranteed-forever conflict are the receipt for why `pending` is not
+    /// a valid answer to every error.
+    #[test]
+    fn failure_status_lands_permanent_verdicts_and_bounds_the_rest() {
+        for error in [
+            RepositoryError::Conflict,
+            RepositoryError::ConflictBecause("still stale"),
+            RepositoryError::NotFound,
+        ] {
+            assert_eq!(failure_status(&error, 1), "failed");
+        }
+        for error in [RepositoryError::Unavailable, RepositoryError::Unexpected] {
+            assert_eq!(failure_status(&error, 1), "pending");
+            assert_eq!(failure_status(&error, MAX_ATTRIBUTION_ATTEMPTS), "failed");
+        }
+        assert_eq!(failure_status(&RepositoryError::Conflict, 0), "failed");
+    }
 }

@@ -44,7 +44,7 @@ use crowdrelay_brain::{
     GrowthTrend, RecentInsight, TenantPreferencePosterior, WorldModel, agent_standing_policy,
     platform_yield::PlatformGrowth,
 };
-use crowdrelay_domain::growth_metrics::{MetricPlatform, NorthStarMetric};
+use crowdrelay_domain::growth_metrics::{AUDIENCE_WEIGHT_SCALE, MetricPlatform, NorthStarMetric};
 use crowdrelay_domain::learning::{OutcomeRecord, Standing, assess_standing};
 use crowdrelay_domain::worker_template::WorkerTemplate;
 
@@ -631,10 +631,30 @@ pub(in crate::autopilot) async fn load_growth_intelligence_snapshots(
     // workspace may run several accounts on one platform (two YouTube
     // channels), so levels are summed across that platform's series.
     let (north_star_current, north_star_this_month) =
-        match (north_star.platform(), north_star.metric_key()) {
-            (Some(platform), Some(metric_key)) => {
-                let metric_counts: (i64, i64) = sqlx::query_as(
-                    r#"
+        if north_star == NorthStarMetric::ActivatedFans30d {
+            // `activated_30d` is already a rolling 30-day count — signed up,
+            // consented, did something meaningful. It is a windowed level, not a
+            // cumulative one, so there is no month-boundary subtraction to do:
+            // the current count IS the month's progress.
+            let activated: i64 = sqlx::query_scalar(
+                r#"
+            SELECT COALESCE(activated_30d, 0)::bigint
+            FROM viryaos_fan_activation_kpi
+            WHERE workspace_id = $1
+            "#,
+            )
+            .bind(workspace_id.into_uuid())
+            .fetch_optional(pool)
+            .await
+            .map_err(map_sqlx)?
+            .unwrap_or(0);
+            let value = u32::try_from(activated.max(0)).unwrap_or(u32::MAX);
+            (value, value)
+        } else {
+            match (north_star.platform(), north_star.metric_key()) {
+                (Some(platform), Some(metric_key)) => {
+                    let metric_counts: (i64, i64) = sqlx::query_as(
+                        r#"
                 WITH target_series AS (
                     SELECT id FROM viryaos_growth_metric_series
                     WHERE workspace_id = $1
@@ -683,23 +703,24 @@ pub(in crate::autopilot) async fn load_growth_intelligence_snapshots(
                         0
                     )::bigint
                 "#,
-                )
-                .bind(workspace_id.into_uuid())
-                .bind(platform.as_str())
-                .bind(metric_key)
-                .fetch_optional(pool)
-                .await
-                .map_err(map_sqlx)?
-                .unwrap_or((0, 0));
-                (
-                    u32::try_from(metric_counts.0.max(0)).unwrap_or(u32::MAX),
-                    u32::try_from(metric_counts.1.max(0)).unwrap_or(u32::MAX),
-                )
+                    )
+                    .bind(workspace_id.into_uuid())
+                    .bind(platform.as_str())
+                    .bind(metric_key)
+                    .fetch_optional(pool)
+                    .await
+                    .map_err(map_sqlx)?
+                    .unwrap_or((0, 0));
+                    (
+                        u32::try_from(metric_counts.0.max(0)).unwrap_or(u32::MAX),
+                        u32::try_from(metric_counts.1.max(0)).unwrap_or(u32::MAX),
+                    )
+                }
+                // SignalInstalls, TotalAudience, and any future north star with no
+                // single platform series. TotalAudience is resolved below, once the
+                // aggregate it names has actually been summed.
+                _ => (total_signal_installs, signal_installs_this_month),
             }
-            // SignalInstalls, TotalAudience, and any future north star with no
-            // single platform series. TotalAudience is resolved below, once the
-            // aggregate it names has actually been summed.
-            _ => (total_signal_installs, signal_installs_this_month),
         };
 
     // Off-platform audience across every connected feed.
@@ -819,8 +840,37 @@ pub(in crate::autopilot) async fn load_growth_intelligence_snapshots(
     // A tenant whose north star is the whole portfolio reads the aggregate just
     // computed rather than any one platform. Resolved here because the sum does
     // not exist until the query above has run.
-    let (north_star_current, north_star_this_month) = if north_star.is_total_audience() {
-        (off_platform_audience, off_platform_audience_this_month)
+    //
+    // Both portfolio-wide north stars are summed from `platform_growth`, which
+    // already carries every platform including Signal — so neither needs a
+    // query of its own.
+    //
+    // `TotalAudience` used to read `off_platform_audience`, which by its own
+    // definition excludes the audience that is already ours. A tenant asking
+    // the brain to grow everything got a goal that counted three thousand
+    // followers it cannot contact and none of the twenty fans who installed
+    // the app. Whole means whole.
+    let (north_star_current, north_star_this_month) = if north_star.is_portfolio_wide() {
+        let weigh = |platform: &str| -> u64 {
+            if !north_star.is_weighted() {
+                return 1;
+            }
+            MetricPlatform::parse(platform)
+                .map_or(0, |platform| u64::from(platform.audience_weight()))
+        };
+        let scale = if north_star.is_weighted() {
+            AUDIENCE_WEIGHT_SCALE
+        } else {
+            1
+        };
+        let fold = |pick: fn(&PlatformGrowth) -> u32| -> u32 {
+            let total: u64 = platform_growth
+                .iter()
+                .map(|row| u64::from(pick(row)) * weigh(&row.platform))
+                .sum();
+            u32::try_from(total / scale).unwrap_or(u32::MAX)
+        };
+        (fold(|row| row.audience), fold(|row| row.gained_this_month))
     } else {
         (north_star_current, north_star_this_month)
     };

@@ -43,8 +43,8 @@ async fn create_agent_service_tasks(pool: &sqlx::PgPool) -> Result<(), sqlx::Err
             id           UUID PRIMARY KEY,
             workspace_id UUID NOT NULL,
             template_id  TEXT NOT NULL,
-            model_id     TEXT NOT NULL DEFAULT 'auto',
-            prompt       TEXT NOT NULL DEFAULT '',
+            model_id     TEXT NOT NULL,
+            prompt       TEXT NOT NULL,
             status       TEXT NOT NULL DEFAULT 'completed',
             tier         TEXT NOT NULL DEFAULT 'basic',
             metadata     JSONB NOT NULL DEFAULT '{}'::jsonb,
@@ -68,8 +68,8 @@ async fn seed_insight(
 ) -> Result<Uuid, sqlx::Error> {
     let task_id = Uuid::now_v7();
     sqlx::query(
-        "INSERT INTO agent_service_tasks (id, workspace_id, template_id, created_at)
-         VALUES ($1, $2, $3, $4)",
+        "INSERT INTO agent_service_tasks (id, workspace_id, template_id, model_id, prompt, created_at)
+         VALUES ($1, $2, $3, 'auto', '', $4)",
     )
     .bind(task_id)
     .bind(workspace_id.into_uuid())
@@ -280,8 +280,8 @@ async fn seed_run(
 ) -> Result<(), sqlx::Error> {
     let task_id = Uuid::now_v7();
     sqlx::query(
-        "INSERT INTO agent_service_tasks (id, workspace_id, template_id, created_at)
-         VALUES ($1, $2, $3, $4)",
+        "INSERT INTO agent_service_tasks (id, workspace_id, template_id, model_id, prompt, created_at)
+         VALUES ($1, $2, $3, 'auto', '', $4)",
     )
     .bind(task_id)
     .bind(workspace_id.into_uuid())

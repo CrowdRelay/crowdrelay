@@ -120,10 +120,10 @@ enum OutcomeRejection {
     /// a refused community (off-topic, too small, previously refused) posts
     /// past the screen that rejected it.
     UnvettedCommunity { target_id: Uuid },
-    /// A community post that names no trusted content source — or names one
-    /// that does not exist, is inactive, or expired. The post's facts are
-    /// supposed to come from `viryaos_content_sources`; a post about nothing
-    /// is how fabricated anecdotes reached Reddit.
+    /// A community post that names no trusted video source — or names one
+    /// that does not exist, is inactive, expired, or is not a video. A thread
+    /// post exists to share a release video; anything else is a post about
+    /// nothing — which is how fabricated anecdotes reached Reddit.
     UnsourcedPost { source_id: Option<String> },
 }
 
@@ -150,7 +150,7 @@ impl std::fmt::Display for OutcomeRejection {
             ),
             Self::UnsourcedPost { source_id } => write!(
                 f,
-                "UNSOURCED_POST: source_id {source_id:?} does not name an active, unexpired content source for this workspace"
+                "UNSOURCED_POST: source_id {source_id:?} does not name an active, unexpired video content source for this workspace"
             ),
         }
     }
@@ -644,10 +644,10 @@ impl AgentOutcomeWorker {
                 }
 
                 // Source gate: the post must name the trusted content source
-                // its facts come from. The schema requires source_id; here we
-                // check the row exists, belongs to this workspace, and is
-                // still live. A post without one is a post about nothing —
-                // which is exactly how invented anecdotes shipped.
+                // its facts come from — and only a release video may become
+                // a community thread post. Events, releases and stories are
+                // real material too, but they belong to other channels; a
+                // thread post exists to share a new video, nothing else.
                 let source_id_raw = outcome
                     .payload
                     .item
@@ -666,6 +666,7 @@ impl AgentOutcomeWorker {
                             SELECT 1 FROM viryaos_content_sources
                             WHERE workspace_id = $1
                               AND id = $2
+                              AND source_kind = 'video'
                               AND active
                               AND expires_at > now()
                         )

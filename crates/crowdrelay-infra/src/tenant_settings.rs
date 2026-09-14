@@ -23,7 +23,7 @@ use uuid::Uuid;
 pub const DEFAULT_MEMBER_SITE_BASE_URL: &str = "https://virya.music";
 pub const DEFAULT_MEMBER_AREA_PATH: &str = "pl/latarnik";
 pub const DEFAULT_SYNESTHESIA_CAMPAIGN_SLUG: &str = "virya-synesthesia-album-v1";
-pub const DEFAULT_NORTH_STAR_METRIC: &str = "signal_installs";
+pub const DEFAULT_NORTH_STAR_METRIC: &str = "activated_fans_30d";
 
 /// The keys an operator may edit. Anything else stays internal even if a row
 /// somehow appears, so the HTTP surface cannot be used to smuggle state.
@@ -56,7 +56,8 @@ pub struct TenantBrandSettings {
     pub signal_enabled: bool,
     /// Synesthesia product opt-in. Default false.
     pub synesthesia_enabled: bool,
-    /// Brain north star metric. Default "signal_installs".
+    /// Brain north star metric. Default "activated_fans_30d" — real fans who
+    /// signed up, consented, and acted within 30 days, not raw installs.
     pub north_star_metric: String,
     /// Social auto-posting: when true, the social post executor publishes to
     /// platforms that have credentials (Facebook Pages, Instagram) instead of
@@ -248,7 +249,7 @@ mod tests {
         // Product opt-in defaults: Signal on, Synesthesia off.
         assert!(settings.signal_enabled);
         assert!(!settings.synesthesia_enabled);
-        assert_eq!(settings.north_star_metric, "signal_installs");
+        assert_eq!(settings.north_star_metric, "activated_fans_30d");
         assert!(!settings.social_auto_post);
     }
 

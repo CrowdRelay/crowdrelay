@@ -211,6 +211,129 @@ async fn connected_platforms_reach_the_brain_as_audience_and_north_star()
     Ok(())
 }
 
+/// The default north star is real fans, not a platform counter.
+///
+/// `activated_fans_30d` reads `viryaos_fan_activation_kpi.activated_30d`:
+/// signed up within 30 days, marketing consent granted, and a meaningful
+/// action inside 30 days of signing up. A fan who never consented, or who
+/// signed up before the window, must not inflate the reading — the brain
+/// would be optimizing people it cannot honestly claim.
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn activated_fans_north_star_reads_the_activation_kpi()
+-> Result<(), Box<dyn std::error::Error>> {
+    let database_url = std::env::var("CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL")?;
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&database_url)
+        .await?;
+    crowdrelay_infra::database::MIGRATOR.run(&pool).await?;
+
+    let workspace_id = WorkspaceId::new();
+    let suffix = workspace_id.into_uuid().simple().to_string();
+    sqlx::query("INSERT INTO workspaces (id, slug, name) VALUES ($1, $2, $3)")
+        .bind(workspace_id.into_uuid())
+        .bind(format!("activated-fans-{suffix}"))
+        .bind("Activated Fans North Star")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "INSERT INTO tenant_settings (workspace_id, key, value)
+         VALUES ($1, 'north_star_metric', 'activated_fans_30d')",
+    )
+    .bind(workspace_id.into_uuid())
+    .execute(&pool)
+    .await?;
+
+    let now = OffsetDateTime::now_utc();
+    let consent = |fan_id: Uuid, granted: bool| {
+        format!(
+            "INSERT INTO fan_consents
+               (id, workspace_id, fan_id, purpose, granted, policy_version, source)
+             VALUES ('{}', '{}', '{}', 'marketing', {}, 'v1', 'test')",
+            Uuid::now_v7(),
+            workspace_id.into_uuid(),
+            fan_id,
+            granted,
+        )
+    };
+    // Two activated fans: recent signup, consent, meaningful activity.
+    for index in 0..2 {
+        let fan_id = Uuid::now_v7();
+        sqlx::query(
+            "INSERT INTO fans (id, workspace_id, normalized_email, status, created_at, last_activity_at)
+             VALUES ($1, $2, $3, 'active', $4, $5)",
+        )
+        .bind(fan_id)
+        .bind(workspace_id.into_uuid())
+        .bind(format!("activated-{index}-{suffix}@north-star.test"))
+        .bind(now - time::Duration::days(1))
+        .bind(now - time::Duration::hours(1))
+        .execute(&pool)
+        .await?;
+        sqlx::query(&consent(fan_id, true)).execute(&pool).await?;
+    }
+    // Consented but never did anything: signed up, reachable, not activated.
+    let idle = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO fans (id, workspace_id, normalized_email, status, created_at, last_activity_at)
+         VALUES ($1, $2, $3, 'active', $4, NULL)",
+    )
+    .bind(idle)
+    .bind(workspace_id.into_uuid())
+    .bind(format!("idle-{suffix}@north-star.test"))
+    .bind(now - time::Duration::days(1))
+    .execute(&pool)
+    .await?;
+    sqlx::query(&consent(idle, true)).execute(&pool).await?;
+    // Consented and active, but signed up 40 days ago: outside the window.
+    let old = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO fans (id, workspace_id, normalized_email, status, created_at, last_activity_at)
+         VALUES ($1, $2, $3, 'active', $4, $5)",
+    )
+    .bind(old)
+    .bind(workspace_id.into_uuid())
+    .bind(format!("old-{suffix}@north-star.test"))
+    .bind(now - time::Duration::days(40))
+    .bind(now - time::Duration::hours(1))
+    .execute(&pool)
+    .await?;
+    sqlx::query(&consent(old, true)).execute(&pool).await?;
+
+    let database = DatabaseConfig {
+        url: database_url,
+        max_connections: 4,
+        connect_timeout: Duration::from_secs(3),
+        ping_timeout: Duration::from_secs(2),
+        operation_timeout: Duration::from_secs(10),
+        lock_timeout: Duration::from_secs(1),
+    };
+    let repository = PostgresAutopilotRepository::new(pool.clone(), &database);
+    let snapshots = repository
+        .load_growth_intelligence_snapshots(workspace_id, now)
+        .await?;
+    let world = &snapshots
+        .first()
+        .ok_or("the loader returned no snapshots")?
+        .world_model;
+
+    assert_eq!(
+        world.north_star_current, 2,
+        "only consented recent signups with activity are activated fans"
+    );
+    assert_eq!(
+        world.north_star_this_month, 2,
+        "activated_30d is a windowed level, so the month's progress is the level"
+    );
+
+    // No cleanup: `fan_consents` is append-only and its FK on workspaces is
+    // RESTRICT, so this fixture's workspace is permanent. The test database
+    // is disposable — the suite's other assertions are workspace-scoped, so
+    // leftover rows cannot leak into them.
+    Ok(())
+}
+
 /// A tenant whose reach is spread across platforms can name the whole
 /// portfolio as its north star.
 ///

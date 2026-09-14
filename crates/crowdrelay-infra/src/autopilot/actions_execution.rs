@@ -1050,6 +1050,16 @@ impl PostgresAutopilotRepository {
             // evidence is committed when the executor reports provider-confirmed
             // success, so a queued webhook can never masquerade as completed work.
             if !payload_requires_executor(&action.payload) {
+                // The envelope first: outcome-created actions carry no
+                // prediction/evidence rows, and without them the measurements
+                // scheduled next resolve into nothing.
+                ensure_dispatch_envelope(
+                    &mut transaction,
+                    workspace_id,
+                    action.id,
+                    &action.payload,
+                )
+                .await?;
                 schedule_effect_measurement(
                     &mut transaction,
                     workspace_id,

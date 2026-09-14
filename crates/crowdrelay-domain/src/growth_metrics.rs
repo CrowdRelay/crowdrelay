@@ -21,16 +21,22 @@ use crate::{GrowthMetricSeriesId, autonomy::Confidence};
 /// Scale applied to per-day rates so integer division keeps three decimals.
 const RATE_SCALE: i64 = 1_000;
 
+/// Divisor for [`MetricPlatform::audience_weight`], which is expressed in
+/// tenths so a weighted total reads in whole fans-you-can-reach rather than in
+/// an arbitrary point.
+pub const AUDIENCE_WEIGHT_SCALE: u64 = 10;
+
 /// The brain's north star — the primary metric a tenant's autopilot optimizes.
 ///
 /// This is a per-tenant setting stored in `tenant_settings`. It parameterizes
 /// which `GrowthTarget` the brain tracks, which `GrowthStrategy` variant is
 /// selected when the tenant is behind, and which worker templates are
-/// dispatched. The default (`SignalInstalls`) preserves Virya's behavior.
+/// dispatched. The default (`ActivatedFans30d`) counts real fans — signed up,
+/// consented, and did something meaningful within 30 days — not installs,
+/// which measure downloads rather than people who stayed.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NorthStarMetric {
-    #[default]
     SignalInstalls,
     /// Every connected platform's audience, summed.
     ///
@@ -39,6 +45,29 @@ pub enum NorthStarMetric {
     /// single-platform north star answers "is YouTube growing"; this answers
     /// "is the audience growing", which is the question the product is for.
     TotalAudience,
+    /// Fans who signed up, consented, and did something meaningful within 30
+    /// days — `viryaos_fan_activation_kpi.activated_30d`, the acquisition
+    /// KPI's definition verbatim.
+    ///
+    /// The default because it is the honest one: a Signal install can never
+    /// be opened and a follower can be a bot, but an activated fan is a real
+    /// person who arrived and stayed long enough to act. Optimizing anything
+    /// upstream of activation teaches the brain to buy the upstream.
+    #[default]
+    ActivatedFans30d,
+    /// Every audience the tenant has, each counted for what it is worth.
+    ///
+    /// `TotalAudience` answers "is the audience growing" but treats a TikTok
+    /// follower and a fan who installed Signal as the same person, and leaves
+    /// the Signal fan out of the sum entirely. Both are wrong in the same
+    /// direction: they teach the brain that the cheapest follower is the best
+    /// one.
+    ///
+    /// This weights each platform by how much of the relationship the tenant
+    /// actually holds — see [`MetricPlatform::audience_weight`] — and reports
+    /// the total in Signal-fan equivalents, so the unit means something: one
+    /// point is one fan you could message today.
+    WeightedAudience,
     /// One platform's audience-size metric.
     ///
     /// Previously only YouTube, Spotify and Bandsintown could be a north star,
@@ -59,15 +88,22 @@ impl NorthStarMetric {
         match self {
             Self::SignalInstalls => "signal_installs",
             Self::TotalAudience => "total_audience",
+            Self::ActivatedFans30d => "activated_fans_30d",
+            Self::WeightedAudience => "weighted_audience",
             Self::Platform(platform) => platform.north_star_key(),
         }
     }
 
-    /// Every north star a tenant may choose: the two first-party metrics, plus
-    /// one per platform that reports an audience size.
+    /// Every north star a tenant may choose: the three first-party metrics,
+    /// plus one per platform that reports an audience size.
     #[must_use]
     pub fn all() -> Vec<Self> {
-        let mut options = vec![Self::SignalInstalls, Self::TotalAudience];
+        let mut options = vec![
+            Self::SignalInstalls,
+            Self::TotalAudience,
+            Self::WeightedAudience,
+            Self::ActivatedFans30d,
+        ];
         options.extend(
             MetricPlatform::ALL
                 .into_iter()
@@ -91,7 +127,10 @@ impl NorthStarMetric {
     #[must_use]
     pub const fn platform(self) -> Option<MetricPlatform> {
         match self {
-            Self::SignalInstalls | Self::TotalAudience => None,
+            Self::SignalInstalls
+            | Self::TotalAudience
+            | Self::WeightedAudience
+            | Self::ActivatedFans30d => None,
             Self::Platform(platform) => Some(platform),
         }
     }
@@ -102,7 +141,10 @@ impl NorthStarMetric {
     #[must_use]
     pub const fn metric_key(self) -> Option<&'static str> {
         match self {
-            Self::SignalInstalls | Self::TotalAudience => None,
+            Self::SignalInstalls
+            | Self::TotalAudience
+            | Self::WeightedAudience
+            | Self::ActivatedFans30d => None,
             Self::Platform(platform) => platform.audience_metric_key(),
         }
     }
@@ -114,12 +156,29 @@ impl NorthStarMetric {
         matches!(self, Self::TotalAudience)
     }
 
+    /// Whether this north star reads the whole portfolio rather than one
+    /// platform — flat or weighted. Both are resolved after the per-platform
+    /// query has run, because neither exists until every platform is summed.
+    #[must_use]
+    pub const fn is_portfolio_wide(self) -> bool {
+        matches!(self, Self::TotalAudience | Self::WeightedAudience)
+    }
+
+    /// Whether this north star counts each platform for what it is worth
+    /// rather than counting every follower as one.
+    #[must_use]
+    pub const fn is_weighted(self) -> bool {
+        matches!(self, Self::WeightedAudience)
+    }
+
     /// Human-readable label for operator surfaces.
     #[must_use]
     pub const fn display_name(self) -> &'static str {
         match self {
             Self::SignalInstalls => "Signal installs",
             Self::TotalAudience => "Total audience",
+            Self::ActivatedFans30d => "Activated fans (30d)",
+            Self::WeightedAudience => "Whole audience, weighted",
             Self::Platform(platform) => platform.display_name(),
         }
     }
@@ -318,6 +377,57 @@ impl MetricPlatform {
     /// A platform publishes several keys and they are not interchangeable:
     /// Last.fm reports both `listeners` (people) and `playcount` (plays), and
     /// Discogs reports `in_collection` (people who own a release) alongside
+    /// What one member of this platform's audience is worth, in tenths of a
+    /// fan you can reach.
+    ///
+    /// A follower is not a fan and not every follower is the same follower.
+    /// The scale is how much of the relationship the tenant actually holds:
+    ///
+    /// * **10 — Signal.** Ours. Consented, contactable, and countable from our
+    ///   own tables. The unit everything else is priced against.
+    /// * **6 — money changed hands.** A Bandcamp supporter opened a wallet.
+    /// * **5 — a channel we own, or a record they own.** Discord and Telegram
+    ///   reach everyone who joined, with no algorithm in between; a Discogs
+    ///   collector filed the release in their shelf.
+    /// * **4 — stated intent.** A Bandsintown tracker asked to be told when we
+    ///   play near them.
+    /// * **3 — proven listening.** A Last.fm listener's plays are logged.
+    /// * **2 — an algorithmic follow.** Spotify, YouTube, SoundCloud, Deezer,
+    ///   Instagram, Facebook: the platform decides whether they ever hear from
+    ///   us again.
+    /// * **1 — reach that expires.** TikTok, X, Bluesky.
+    ///
+    /// Reddit is absent on purpose, as it is from [`Self::audience_metric_key`]:
+    /// `social` holds community sizes — the people in r/Metal, not the people
+    /// following this artist. That is reach to address, never audience held,
+    /// and summing it once made 99.93% of the brain's north star other
+    /// people's subscribers.
+    ///
+    /// The numbers are a judgement, not a measurement, and they are meant to
+    /// be: the alternative is treating every follower as one fan, which is a
+    /// judgement too — just a worse one, made silently.
+    #[must_use]
+    pub const fn audience_weight(self) -> u32 {
+        match self {
+            Self::Signal => 10,
+            Self::Bandcamp => 6,
+            Self::Discord | Self::Telegram | Self::Discogs => 5,
+            Self::Bandsintown => 4,
+            Self::LastFm => 3,
+            Self::Spotify
+            | Self::YouTube
+            | Self::SoundCloud
+            | Self::Deezer
+            | Self::Instagram
+            | Self::Facebook => 2,
+            Self::TikTok | Self::X | Self::Bluesky => 1,
+            // No audience key, so these never reach the weighted sum. Named
+            // rather than caught by a wildcard so a platform that gains one
+            // has to answer this question too.
+            Self::Social | Self::Website | Self::Ticketing | Self::Merch => 0,
+        }
+    }
+
     /// `in_wantlist` (people who want one). Summing a platform without picking
     /// its headline key would add plays to people. First-party surfaces return
     /// `None`: their reach is measured from our own tables, not from a feed.
@@ -1081,9 +1191,116 @@ mod tests {
         }
     }
 
+    /// Every platform the weighted sum can see must be priced, and only those.
+    ///
+    /// The weighted north star folds `platform_growth`, which is the
+    /// off-platform feeds that report an audience size **plus Signal** — see
+    /// the per-platform query in `growth_intelligence`. Signal is the reason
+    /// this is not simply "has an audience key": its fans are counted from our
+    /// own tables rather than from a feed, so `audience_metric_key` returns
+    /// `None` for it while it is nonetheless the most valuable audience there
+    /// is. Pricing it off the feed key would leave the owned audience at zero,
+    /// which is the bug this whole goal exists to fix.
+    ///
+    /// A contributor left at zero is worse than a loud failure: its followers
+    /// are counted as worth no fans at all, and the total reads as a smaller
+    /// audience rather than as a mistake.
     #[test]
-    fn north_star_default_is_signal_installs() {
-        assert_eq!(NorthStarMetric::default(), NorthStarMetric::SignalInstalls);
+    fn a_platform_is_priced_exactly_when_the_weighted_sum_can_see_it() {
+        for platform in MetricPlatform::ALL {
+            let counted = platform == MetricPlatform::Signal
+                || (platform.is_off_platform_feed() && platform.audience_metric_key().is_some());
+            assert_eq!(
+                counted,
+                platform.audience_weight() > 0,
+                "{} is counted by the weighted sum but unpriced, or priced but never counted",
+                platform.as_str()
+            );
+        }
+    }
+
+    /// A fan we can message is the unit the rest are priced against, so
+    /// nothing may be worth more than one.
+    #[test]
+    fn nothing_outranks_a_fan_we_can_reach() {
+        let signal = MetricPlatform::Signal.audience_weight();
+        for platform in MetricPlatform::ALL {
+            assert!(
+                platform.audience_weight() <= signal,
+                "{} is priced above a Signal fan",
+                platform.as_str()
+            );
+        }
+        assert_eq!(
+            u64::from(signal),
+            AUDIENCE_WEIGHT_SCALE,
+            "the scale is the Signal weight, so a Signal-only tenant reads its real fan count"
+        );
+    }
+
+    /// The community-size trap, on the weighted path this time.
+    ///
+    /// `a_community_size_is_never_counted_as_audience` keeps Reddit out of the
+    /// flat sum. The weighted sum multiplies rather than adds, so it needs its
+    /// own guarantee: a weight of zero, not merely a missing key.
+    #[test]
+    fn a_community_size_is_worth_no_fans() {
+        assert_eq!(
+            MetricPlatform::Social.audience_weight(),
+            0,
+            "subreddit members are reach to address, never audience held"
+        );
+    }
+
+    /// Both portfolio-wide goals read every platform; only one of them prices
+    /// them. The resolver in growth_intelligence branches on these, so a new
+    /// aggregate that forgets to answer them reads as a single platform.
+    #[test]
+    fn portfolio_goals_are_distinguishable_from_single_platform_ones() {
+        assert!(NorthStarMetric::TotalAudience.is_portfolio_wide());
+        assert!(NorthStarMetric::WeightedAudience.is_portfolio_wide());
+        assert!(!NorthStarMetric::WeightedAudience.is_total_audience());
+        assert!(NorthStarMetric::WeightedAudience.is_weighted());
+        assert!(!NorthStarMetric::TotalAudience.is_weighted());
+        assert!(
+            !NorthStarMetric::Platform(MetricPlatform::Spotify).is_portfolio_wide(),
+            "one platform is not the portfolio"
+        );
+        assert!(
+            !NorthStarMetric::ActivatedFans30d.is_portfolio_wide(),
+            "activated fans are counted from our own tables, not summed from feeds"
+        );
+    }
+
+    #[test]
+    fn weighted_audience_round_trips() {
+        assert_eq!(
+            NorthStarMetric::WeightedAudience.as_str(),
+            "weighted_audience"
+        );
+        assert_eq!(
+            NorthStarMetric::parse("weighted_audience"),
+            Some(NorthStarMetric::WeightedAudience)
+        );
+        assert_eq!(NorthStarMetric::WeightedAudience.platform(), None);
+    }
+
+    #[test]
+    fn north_star_default_is_activated_fans() {
+        // The default is the honest metric: a real fan who signed up,
+        // consented and acted — not an install count a tenant can buy.
+        assert_eq!(
+            NorthStarMetric::default(),
+            NorthStarMetric::ActivatedFans30d
+        );
+        assert_eq!(
+            NorthStarMetric::ActivatedFans30d.as_str(),
+            "activated_fans_30d"
+        );
+        assert_eq!(
+            NorthStarMetric::parse("activated_fans_30d"),
+            Some(NorthStarMetric::ActivatedFans30d)
+        );
     }
 
     #[test]

@@ -36,6 +36,7 @@ const MAX_PAGE_SIZE: i64 = 100;
 include!("ops/models.rs");
 
 include!("ops_timeline.rs");
+include!("ops/trace_timeline_pg_tests.rs");
 use crowdrelay_application::self_assessment::{DailyNorthStar, assess};
 
 include!("ops_action_ledger.rs");

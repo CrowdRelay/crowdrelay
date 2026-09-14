@@ -100,10 +100,16 @@ class DiscoveryPlaceStatusDurability(unittest.TestCase):
 
     def test_the_refusal_paths_still_read_the_status(self):
         """The reason a durable status matters, pinned where it is consumed."""
-        outcomes = (ROOT / "crates/crowdrelay-worker/src/agent_outcomes.rs").read_text()
+        consumed = "".join(
+            (ROOT / path).read_text()
+            for path in (
+                "crates/crowdrelay-worker/src/agent_outcomes.rs",
+                "crates/crowdrelay-worker/src/community_vetting.rs",
+            )
+        )
         self.assertIn(
             '== "blocked"',
-            outcomes,
+            consumed,
             "refused_by_us_or_them reads the place status; if that moves, the "
             "durability requirement moves with it",
         )

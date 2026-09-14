@@ -602,6 +602,9 @@ mod tests {
         let world = WorldModel {
             total_fans: 100,
             signal_conversion_rate_bps: 200,
+            // SignalConversion only makes sense when installs are the goal —
+            // under the activated-fans default this world reads ContentFirst.
+            north_star: crowdrelay_domain::growth_metrics::NorthStarMetric::SignalInstalls,
             ..Default::default()
         };
         assert_eq!(
@@ -682,6 +685,7 @@ mod tests {
         let world = WorldModel {
             total_fans: 100,
             signal_conversion_rate_bps: 600,
+            north_star: crowdrelay_domain::growth_metrics::NorthStarMetric::SignalInstalls,
             ..Default::default()
         };
         assert_eq!(

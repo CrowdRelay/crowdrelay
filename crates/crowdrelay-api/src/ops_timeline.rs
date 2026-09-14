@@ -207,7 +207,7 @@ async fn load_trace_timeline(
         FROM (
             -- Autopilot decision: the starting point of a trace
             SELECT
-                created_at AS occurred_at,
+                evaluated_at AS occurred_at,
                 'decision'::text AS source,
                 disposition::text AS kind,
                 NULL::text AS state,
@@ -352,6 +352,30 @@ async fn load_trace_timeline(
                 'FACT'::text AS certainty
             FROM agent_outcomes
             WHERE workspace_id = $1 AND trace_id = $2
+
+            UNION ALL
+
+            -- Growth evidence: the learning row the causal model updates
+            -- from. Evidence carries no trace_id of its own — it reaches the
+            -- trace through the action it measures.
+            SELECT
+                evidence.created_at AS occurred_at,
+                'growth_evidence'::text AS source,
+                COALESCE(evidence.strategy, 'growth')::text AS kind,
+                CASE
+                    WHEN evidence.resolved_at IS NOT NULL THEN 'resolved'
+                    ELSE 'open'
+                END AS state,
+                evidence.action_id::text AS action_id,
+                NULL::text AS decision_id,
+                NULL::text AS causation_id,
+                evidence.id::text AS event_id,
+                'FACT'::text AS certainty
+            FROM viryaos_growth_evidence AS evidence
+            JOIN viryaos_autopilot_actions AS action
+              ON action.workspace_id = evidence.workspace_id
+             AND action.id = evidence.action_id
+            WHERE evidence.workspace_id = $1 AND action.trace_id = $2
         ) AS timeline
         ORDER BY occurred_at ASC, source ASC
         LIMIT 500

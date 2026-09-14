@@ -1,5 +1,5 @@
 {
-  "minimum_prepared": 839,
+  "minimum_prepared": 846,
   "unprepared": [
     "crates/crowdrelay-api/src/area/rewards.rs:70",
     "crates/crowdrelay-api/src/area/ticket_rewards.rs:36",
@@ -15,7 +15,6 @@
     "crates/crowdrelay-api/src/autopilot/scorecard.rs:340",
     "crates/crowdrelay-api/src/autopilot/scorecard.rs:372",
     "crates/crowdrelay-api/src/autopilot/scorecard.rs:489",
-    "crates/crowdrelay-api/src/ops_timeline.rs:205",
     "crates/crowdrelay-infra/src/autopilot/actions.rs:106",
     "crates/crowdrelay-infra/src/autopilot/decisions/core_reads.rs:286",
     "crates/crowdrelay-infra/src/autopilot/decisions/core_reads.rs:35",
@@ -41,7 +40,7 @@
     "crates/crowdrelay-infra/src/autopilot/operations/chief.rs:232",
     "crates/crowdrelay-infra/src/autopilot/operations/chief.rs:266",
     "crates/crowdrelay-infra/src/autopilot/operations/chief.rs:314",
-    "crates/crowdrelay-infra/src/autopilot/operations/evidence.rs:802",
+    "crates/crowdrelay-infra/src/autopilot/operations/evidence.rs:821",
     "crates/crowdrelay-infra/src/autopilot/operations/growth_intelligence.rs:63",
     "crates/crowdrelay-infra/src/autopilot/operations/next_best_action.rs:89",
     "crates/crowdrelay-infra/src/autopilot/operations/show_growth.rs:42",

@@ -69,6 +69,9 @@ impl VideoSourceSyncWorker {
             .connect_timeout(HTTP_TIMEOUT.min(Duration::from_secs(10)))
             .timeout(HTTP_TIMEOUT)
             .user_agent(USER_AGENT)
+            // The shorts probe needs the raw status: a full video redirects
+            // /shorts/{id} to /watch, and a followed redirect would hide that.
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(VideoSourceSyncError::ClientBuild)?;
         Ok(Self {
@@ -175,9 +178,51 @@ impl VideoSourceSyncWorker {
 
         let entries = parse_feed(&body);
         for entry in entries.into_iter().take(MAX_ENTRIES_PER_FEED) {
+            // Only full videos become share sources — a Short is a format the
+            // community strategy never turns into a thread post. The probe
+            // runs once per unseen id; a known row is never re-checked.
+            let source_key = format!("youtube:{}", entry.video_id);
+            if !self.source_exists(&source_key).await? && self.is_short(&entry.video_id).await {
+                tracing::info!(
+                    video_id = %entry.video_id,
+                    "video source sync: skipped a short"
+                );
+                continue;
+            }
             self.upsert_video(channel_id, &entry).await?;
         }
         Ok(())
+    }
+
+    /// Whether a `youtube:{id}` source row already exists for this workspace.
+    async fn source_exists(&self, source_key: &str) -> Result<bool, String> {
+        sqlx::query_scalar::<_, bool>(
+            r#"
+            SELECT EXISTS(
+                SELECT 1 FROM viryaos_content_sources
+                WHERE workspace_id = $1
+                  AND source_kind = 'video'
+                  AND source_key = $2
+            )
+            "#,
+        )
+        .bind(self.workspace_id)
+        .bind(source_key)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|e| format!("source exists check: {e}"))
+    }
+
+    /// YouTube answers `/shorts/{id}` with 200 for a Short and redirects a
+    /// full video to `/watch`. A probe failure must not drop a real upload
+    /// forever — treat it as a full video and let the row live or die on
+    /// the content rules, not on one transient HTTP error.
+    async fn is_short(&self, video_id: &str) -> bool {
+        let url = format!("https://www.youtube.com/shorts/{video_id}");
+        match self.http_client.get(&url).send().await {
+            Ok(response) => is_short_status(response.status()),
+            Err(_) => false,
+        }
     }
 
     /// Idempotent upsert keyed on the video id. A title change bumps the
@@ -305,6 +350,12 @@ fn parse_feed(body: &str) -> Vec<FeedEntry> {
     entries
 }
 
+/// The shorts probe's answer, decided on status alone: YouTube serves the
+/// /shorts/{id} URL for a Short and redirects a full video to /watch.
+fn is_short_status(status: reqwest::StatusCode) -> bool {
+    status.is_success()
+}
+
 /// Reads the text of the first `<tag>…</tag>` in a block. Handles the
 /// namespaced forms the feed uses (`<yt:videoId>`) and CDATA/plain bodies.
 fn extract_tag(block: &str, tag: &str) -> Option<String> {
@@ -361,5 +412,14 @@ mod tests {
     #[test]
     fn empty_feed_yields_no_entries() {
         assert!(parse_feed("<feed><title>x</title></feed>").is_empty());
+    }
+
+    #[test]
+    fn shorts_answer_200_full_videos_redirect() {
+        use reqwest::StatusCode;
+        assert!(is_short_status(StatusCode::OK));
+        assert!(!is_short_status(StatusCode::SEE_OTHER));
+        assert!(!is_short_status(StatusCode::FOUND));
+        assert!(!is_short_status(StatusCode::NOT_FOUND));
     }
 }
