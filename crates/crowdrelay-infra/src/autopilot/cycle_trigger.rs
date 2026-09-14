@@ -183,6 +183,7 @@ pub async fn close_cycle_run(
     degraded_phases: &[String],
     finished_at: OffsetDateTime,
     north_star_observed: Option<u32>,
+    wait_reason: Option<&str>,
 ) {
     let closed = sqlx::query(
         r#"
@@ -212,7 +213,11 @@ pub async fn close_cycle_run(
             -- measured against the metric the brain is actually optimizing. A
             -- cycle whose evaluation phase never ran records NULL rather than a
             -- zero, which would be indistinguishable from losing the audience.
-            north_star_value = $5
+            north_star_value = $5,
+            -- The brain's own account of a quiet cycle. Persisted so "the
+            -- system did nothing" is answerable from the record, not only from
+            -- a worker log that rotates away.
+            wait_reason = $6
         WHERE run.workspace_id = $1 AND run.id = $2
         "#,
     )
@@ -221,6 +226,7 @@ pub async fn close_cycle_run(
     .bind(finished_at)
     .bind(degraded_phases)
     .bind(north_star_observed.and_then(|value| i32::try_from(value).ok()))
+    .bind(wait_reason)
     .execute(pool)
     .await;
     if let Err(error) = closed {

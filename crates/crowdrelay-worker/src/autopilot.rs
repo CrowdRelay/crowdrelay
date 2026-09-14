@@ -114,6 +114,10 @@ struct CycleObservation {
     /// tenant has chosen. `None` when that phase did not get far enough to
     /// take a reading.
     north_star: Option<u32>,
+    /// Why the portfolio selected nothing, in the brain's own words. The
+    /// system may do nothing and say so — but only if the reason survives
+    /// past the worker log it was first written to.
+    wait_reason: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -256,6 +260,7 @@ impl AutopilotWorker {
                     },
                     OffsetDateTime::now_utc(),
                     None,
+                    None,
                 )
                 .await;
             }
@@ -285,6 +290,7 @@ impl AutopilotWorker {
                 &observed.degraded.recorded(),
                 OffsetDateTime::now_utc(),
                 observed.north_star,
+                observed.wait_reason.as_deref(),
             )
             .await;
         }
@@ -304,6 +310,7 @@ impl AutopilotWorker {
         // or evidence collection from a previous cycle.
         let mut degraded = DegradedPhases::default();
         let mut north_star_observed = None;
+        let mut wait_reason = None;
 
         // Recording first-party observations runs before evaluation so a cycle
         // reasons about the newest evidence it can. It is a separate phase
@@ -333,6 +340,7 @@ impl AutopilotWorker {
         match evaluator.execute(now).await {
             Ok(report) => {
                 north_star_observed = report.north_star_observed;
+                wait_reason = report.gi_wait_reason.clone();
                 tracing::info!(
                     decisions = report.decisions,
                     actions_enqueued = report.actions_enqueued,
@@ -746,6 +754,7 @@ impl AutopilotWorker {
         CycleObservation {
             degraded,
             north_star: north_star_observed,
+            wait_reason,
         }
     }
 

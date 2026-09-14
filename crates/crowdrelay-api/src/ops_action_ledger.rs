@@ -189,6 +189,11 @@ pub struct CycleRunEntry {
     /// Absent for every cycle that ran before migration 0261. An empty list is
     /// a different statement: that cycle recorded no phase failure.
     pub degraded_phases: Option<Vec<String>>,
+    /// Why a quiet cycle was quiet, in the brain's own words ("WAIT wins:
+    /// VOI=0.85 > best_action_value=0.00"). The system may do nothing and say
+    /// so — but only if the reason is readable next to the silence. NULL when
+    /// the cycle produced actions, was skipped, or predates migration 0268.
+    pub wait_reason: Option<String>,
 }
 
 /// What the brain makes of its own recent performance, and the cycles behind it.
@@ -286,7 +291,8 @@ async fn load_cycle_runs(
                decisions_recorded,
                actions_created,
                north_star_value,
-               degraded_phases
+               degraded_phases,
+               wait_reason
         FROM viryaos_autopilot_cycle_runs
         WHERE workspace_id = $1
           AND ($2::text IS NULL OR outcome IS NOT DISTINCT FROM $2)

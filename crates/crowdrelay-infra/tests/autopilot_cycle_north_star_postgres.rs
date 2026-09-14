@@ -298,7 +298,7 @@ async fn the_cycle_records_the_reading_it_was_given_not_a_fan_count() -> Result<
         .await
         .ok_or("the cycle run record must open")?;
     // The reading the world model resolved: signal installs, not the three fans.
-    close_cycle_run(&pool, workspace_id, cycle_id, &[], now, Some(1)).await;
+    close_cycle_run(&pool, workspace_id, cycle_id, &[], now, Some(1), None).await;
 
     let stored: Option<i32> = sqlx::query_scalar(
         "SELECT north_star_value FROM viryaos_autopilot_cycle_runs WHERE workspace_id = $1 AND id = $2",
@@ -344,6 +344,7 @@ async fn a_cycle_that_took_no_reading_records_none() -> Result<()> {
         cycle_id,
         &["evaluation".to_owned()],
         now,
+        None,
         None,
     )
     .await;
@@ -396,6 +397,7 @@ async fn a_degraded_cycle_records_which_phases_failed() -> Result<()> {
         &["action_claim".to_owned(), "reply_triage_claim".to_owned()],
         now,
         Some(7),
+        None,
     )
     .await;
 
@@ -438,7 +440,7 @@ async fn a_clean_cycle_records_an_empty_phase_list_not_null() -> Result<()> {
     let cycle_id = open_cycle_run(&pool, workspace_id, CycleTrigger::Scheduled, now)
         .await
         .ok_or("the cycle run record must open")?;
-    close_cycle_run(&pool, workspace_id, cycle_id, &[], now, Some(7)).await;
+    close_cycle_run(&pool, workspace_id, cycle_id, &[], now, Some(7), None).await;
 
     let row = sqlx::query(
         "SELECT outcome, degraded_phases FROM viryaos_autopilot_cycle_runs \
@@ -456,6 +458,117 @@ async fn a_clean_cycle_records_an_empty_phase_list_not_null() -> Result<()> {
         sqlx::Row::try_get::<Option<Vec<String>>, _>(&row, "degraded_phases")?,
         Some(Vec::<String>::new()),
         "a clean cycle states that no phase failed; NULL would mean it did not look",
+    );
+    Ok(())
+}
+
+/// A quiet cycle must be able to say why.
+///
+/// The brain's first principle is that doing nothing is a decision — but for
+/// two days in production it was a silent one: cycles ran every five minutes,
+/// created nothing, and the only record of "WAIT wins: VOI=0.85 >
+/// best_action_value=0.00" was a log line that expired with the worker. An
+/// operator asking `/ops/attention` saw a brain that looked idle and could not
+/// tell patience from paralysis. The cycle record now keeps the reason, and
+/// this asserts it survives the round trip — and that a cycle which acted
+/// stores NULL rather than a stale explanation.
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn a_quiet_cycle_records_its_reason_and_an_active_one_records_none() -> Result<()> {
+    let pool = pool().await?;
+    let workspace_id = workspace(&pool).await?;
+    let now = OffsetDateTime::now_utc();
+
+    let quiet_id = open_cycle_run(&pool, workspace_id, CycleTrigger::Scheduled, now)
+        .await
+        .ok_or("the cycle run record must open")?;
+    close_cycle_run(
+        &pool,
+        workspace_id,
+        quiet_id,
+        &[],
+        now,
+        Some(20),
+        Some("WAIT wins: VOI=0.85 > best_action_value=0.00"),
+    )
+    .await;
+
+    let stored: Option<String> = sqlx::query_scalar(
+        "SELECT wait_reason FROM viryaos_autopilot_cycle_runs \
+         WHERE workspace_id = $1 AND id = $2",
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(quiet_id)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        stored.as_deref(),
+        Some("WAIT wins: VOI=0.85 > best_action_value=0.00"),
+        "the reason a cycle did nothing is the first thing an operator asks for",
+    );
+
+    // A cycle that produced actions has nothing to explain — NULL, not a
+    // leftover string an operator could mistake for a current wait.
+    let active_id = open_cycle_run(
+        &pool,
+        workspace_id,
+        CycleTrigger::Scheduled,
+        now + Duration::minutes(5),
+    )
+    .await
+    .ok_or("the cycle run record must open")?;
+    close_cycle_run(&pool, workspace_id, active_id, &[], now, Some(20), None).await;
+
+    let stored: Option<String> = sqlx::query_scalar(
+        "SELECT wait_reason FROM viryaos_autopilot_cycle_runs \
+         WHERE workspace_id = $1 AND id = $2",
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(active_id)
+    .fetch_one(&pool)
+    .await?;
+    assert!(
+        stored.is_none(),
+        "an active cycle records no wait reason, got {stored:?}"
+    );
+    Ok(())
+}
+
+/// The latest reason is read per workspace — one tenant's quiet brain must
+/// never explain another tenant's silence.
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn the_latest_wait_reason_is_scoped_to_the_workspace() -> Result<()> {
+    let pool = pool().await?;
+    let mine = workspace(&pool).await?;
+    let theirs = workspace(&pool).await?;
+    let now = OffsetDateTime::now_utc();
+
+    for (ws, reason) in [
+        (theirs, "their reason: no budget"),
+        (mine, "my reason: WAIT wins"),
+    ] {
+        let id = open_cycle_run(&pool, ws, CycleTrigger::Scheduled, now)
+            .await
+            .ok_or("the cycle run record must open")?;
+        close_cycle_run(&pool, ws, id, &[], now, None, Some(reason)).await;
+    }
+
+    // The same query shape `ops/attention` runs: latest non-NULL reason,
+    // workspace-scoped.
+    let latest: Option<String> = sqlx::query_scalar(
+        "SELECT wait_reason FROM viryaos_autopilot_cycle_runs \
+         WHERE workspace_id = $1 AND finished_at IS NOT NULL \
+           AND wait_reason IS NOT NULL \
+         ORDER BY started_at DESC LIMIT 1",
+    )
+    .bind(mine.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        latest.as_deref(),
+        Some("my reason: WAIT wins"),
+        "the operator reads this tenant's reason, not a neighbour's",
     );
     Ok(())
 }

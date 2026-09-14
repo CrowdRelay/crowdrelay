@@ -125,6 +125,16 @@ struct BrainSelfAssessment {
     /// with a small number here is a system that has not watched itself for
     /// long enough, which is a different thing from one that cannot decide.
     days_observed: usize,
+    /// Consecutive finished cycles that produced no actions, counting back
+    /// from the latest. A brain that has been quiet for three days straight
+    /// is a different thing from one quiet since the last check — the count
+    /// is what makes the silence legible.
+    quiet_cycles: i64,
+    /// Why the most recent quiet cycle stayed quiet, in the brain's own words
+    /// ("WAIT wins: VOI=0.85 > best_action_value=0.00"). The first principle
+    /// of the plan is that the system may do nothing — and says so. NULL when
+    /// the latest cycle acted, or ran before migration 0268.
+    latest_wait_reason: Option<String>,
 }
 
 pub async fn attention(State(state): State<crate::AppState>, headers: HeaderMap) -> Response {
@@ -307,10 +317,38 @@ async fn load_brain_assessment(state: &OpsState) -> Result<BrainSelfAssessment, 
     let samples = load_north_star_days(state).await?;
     let days_observed = samples.len();
     let assessment = assess(samples);
+    // The quiet streak: consecutive finished cycles that created no actions,
+    // counted back from the latest, plus the brain's own reason for the most
+    // recent one. The system may do nothing and say so — this is where the
+    // saying surfaces, because this is the page an operator opens to ask
+    // "what needs me?" and a silent brain is a thing that can need them.
+    let quiet = sqlx::query_as::<_, (i64, Option<String>)>(
+        r#"
+        SELECT
+            (SELECT count(*) FROM viryaos_autopilot_cycle_runs
+             WHERE workspace_id = $1 AND finished_at IS NOT NULL
+               AND actions_created = 0
+               AND started_at > COALESCE((
+                   SELECT max(started_at) FROM viryaos_autopilot_cycle_runs
+                   WHERE workspace_id = $1 AND finished_at IS NOT NULL
+                     AND actions_created > 0
+               ), '-infinity'::timestamptz)) AS quiet_cycles,
+            (SELECT wait_reason FROM viryaos_autopilot_cycle_runs
+             WHERE workspace_id = $1 AND finished_at IS NOT NULL
+               AND wait_reason IS NOT NULL
+             ORDER BY started_at DESC LIMIT 1) AS latest_wait_reason
+        "#,
+    )
+    .bind(state.workspace_id.into_uuid())
+    .fetch_one(&state.pool)
+    .await
+    .map_err(OpsError::sqlx)?;
     Ok(BrainSelfAssessment {
         state: assessment.as_str(),
         needs_attention: assessment.needs_attention(),
         days_observed,
+        quiet_cycles: quiet.0,
+        latest_wait_reason: quiet.1,
     })
 }
 
