@@ -127,6 +127,10 @@ pub struct AudienceFilter {
     attended_event_slugs: Vec<String>,
     purchased_event_slugs: Vec<String>,
     excluded_purchased_event_slugs: Vec<String>,
+    /// Events whose email-claim check-ins already received the scan welcome.
+    /// The welcome is the fan's one contact for the night, so campaigns use
+    /// this to keep the next send from double-contacting them.
+    excluded_scan_checkin_event_slugs: Vec<String>,
     synesthesia_completed: Option<bool>,
     marketing_consent: Option<bool>,
     tags_all: Vec<String>,
@@ -157,6 +161,10 @@ impl AudienceFilter {
                 .iter()
                 .all(|value| valid_slug(value))
             && self
+                .excluded_scan_checkin_event_slugs
+                .iter()
+                .all(|value| valid_slug(value))
+            && self
                 .min_qualified_referrals
                 .is_none_or(|value| (0..=1_000_000).contains(&value))
             && self.tags_all.iter().all(|value| valid_tag(value))
@@ -166,6 +174,7 @@ impl AudienceFilter {
             && self.attended_event_slugs.len() <= 50
             && self.purchased_event_slugs.len() <= 50
             && self.excluded_purchased_event_slugs.len() <= 50
+            && self.excluded_scan_checkin_event_slugs.len() <= 50
             && self.tags_all.len() <= 50
     }
 }

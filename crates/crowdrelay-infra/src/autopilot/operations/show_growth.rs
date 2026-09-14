@@ -137,11 +137,22 @@ pub(in crate::autopilot) async fn load_show_growth_snapshots(
               AND campaign.status = 'partner'
         ) AS beacons ON true
         LEFT JOIN LATERAL (
-            SELECT COUNT(*)::bigint AS attendees
-            FROM admission_passes AS pass
-            WHERE pass.workspace_id = event.workspace_id
-              AND pass.event_id = event.id
-              AND pass.status = 'redeemed'
+            -- Attendance is anyone with first-party proof they were in the
+            -- room: a redeemed admission pass or a concert QR check-in. The
+            -- UNION dedupes fans who hold both so the room is counted once.
+            SELECT COUNT(DISTINCT attendee_id)::bigint AS attendees
+            FROM (
+                SELECT pass.fan_id AS attendee_id
+                FROM admission_passes AS pass
+                WHERE pass.workspace_id = event.workspace_id
+                  AND pass.event_id = event.id
+                  AND pass.status = 'redeemed'
+                UNION
+                SELECT checkin.fan_id AS attendee_id
+                FROM concert_checkins AS checkin
+                WHERE checkin.workspace_id = event.workspace_id
+                  AND checkin.event_id = event.id
+            ) AS room
         ) AS attendance ON true
         LEFT JOIN LATERAL (
             SELECT

@@ -286,6 +286,7 @@ async fn segment_member_count(
         .bind(filter.synesthesia_completed)
         .bind(filter.marketing_consent)
         .bind(&filter.tags_all)
+        .bind(&filter.excluded_scan_checkin_event_slugs)
         .fetch_one(&state.database)
         .await
 }
@@ -297,7 +298,7 @@ async fn segment_member_ids(
     limit: i64,
 ) -> Result<Vec<Uuid>, sqlx::Error> {
     let sql = format!(
-        "SELECT fan.id FROM fans fan WHERE {} ORDER BY fan.updated_at DESC, fan.id DESC LIMIT $12",
+        "SELECT fan.id FROM fans fan WHERE {} ORDER BY fan.updated_at DESC, fan.id DESC LIMIT $13",
         segment_predicate()
     );
     sqlx::query_scalar::<_, Uuid>(&sql)
@@ -312,6 +313,7 @@ async fn segment_member_ids(
         .bind(filter.synesthesia_completed)
         .bind(filter.marketing_consent)
         .bind(&filter.tags_all)
+        .bind(&filter.excluded_scan_checkin_event_slugs)
         .bind(limit)
         .fetch_all(&state.database)
         .await
@@ -349,11 +351,10 @@ async fn ensure_recipient_snapshot(
     let sql = format!(
         r#"
         INSERT INTO communication_campaign_recipients (workspace_id, campaign_id, fan_id)
-        SELECT $1, $12, fan.id
+        SELECT $1, $13, fan.id
         FROM fans fan
         WHERE {}
-          AND fan.status = 'active'
-          AND ($13::boolean = false OR EXISTS (
+          AND ($14::boolean = false OR EXISTS (
               SELECT 1
               FROM fan_consents consent
               WHERE consent.workspace_id = fan.workspace_id
@@ -386,6 +387,7 @@ async fn ensure_recipient_snapshot(
         .bind(filter.synesthesia_completed)
         .bind(filter.marketing_consent)
         .bind(&filter.tags_all)
+        .bind(&filter.excluded_scan_checkin_event_slugs)
         .bind(campaign_id)
         .bind(require_marketing)
         .execute(&mut *transaction)
@@ -522,6 +524,15 @@ fn segment_predicate() -> &'static str {
               AND pass.fan_id = fan.id
               AND pass.status = 'redeemed'
               AND event.slug = ANY($6::text[])
+        ) OR EXISTS (
+            SELECT 1
+            FROM concert_checkins checkin
+            JOIN events event
+              ON event.workspace_id = checkin.workspace_id
+             AND event.id = checkin.event_id
+            WHERE checkin.workspace_id = fan.workspace_id
+              AND checkin.fan_id = fan.id
+              AND event.slug = ANY($6::text[])
         ))
         AND (cardinality($7::text[]) = 0 OR EXISTS (
             SELECT 1
@@ -584,6 +595,17 @@ fn segment_predicate() -> &'static str {
                   AND assigned.fan_id = fan.id
                   AND assigned.tag = required.tag
             )
+        ))
+        AND (cardinality($12::text[]) = 0 OR NOT EXISTS (
+            SELECT 1
+            FROM concert_checkins welcomed
+            JOIN events welcomed_event
+              ON welcomed_event.workspace_id = welcomed.workspace_id
+             AND welcomed_event.id = welcomed.event_id
+            WHERE welcomed.workspace_id = fan.workspace_id
+              AND welcomed.fan_id = fan.id
+              AND welcomed.identity_source = 'email_claim'
+              AND welcomed_event.slug = ANY($12::text[])
         ))
     "#
 }
@@ -747,6 +769,7 @@ mod tests {
             attended_event_slugs: Vec::new(),
             purchased_event_slugs: Vec::new(),
             excluded_purchased_event_slugs: Vec::new(),
+            excluded_scan_checkin_event_slugs: Vec::new(),
             synesthesia_completed: Some(true),
             marketing_consent: Some(true),
             tags_all: vec!["ambassador".to_owned()],

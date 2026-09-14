@@ -35,7 +35,9 @@ pub(in crate::autopilot) async fn execute_audience_campaign(
             json!({"statuses":["active"],"purchased_event_slugs":[row.0.clone()],"marketing_consent":true})
         }
         crowdrelay_domain::campaign_lifecycle::EventCampaignPhase::ThankYou => {
-            json!({"statuses":["active"],"attended_event_slugs":[row.0.clone()],"marketing_consent":true})
+            // Email-claim check-ins already received the scan welcome, which
+            // doubles as their recall — the room stays at one contact.
+            json!({"statuses":["active"],"attended_event_slugs":[row.0.clone()],"excluded_scan_checkin_event_slugs":[row.0.clone()],"marketing_consent":true})
         }
     };
     let segment_id = sqlx::query_scalar::<_, Uuid>(

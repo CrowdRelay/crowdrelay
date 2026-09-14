@@ -15,10 +15,10 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use crowdrelay_application::{
-    CheckinCommand, ConcertQrError, ConcertQrRepository, CreateCampaignCommand,
+    CheckinCommand, CheckinConsent, ConcertQrError, ConcertQrRepository, CreateCampaignCommand,
     RevokeCampaignCommand,
 };
-use crowdrelay_domain::{EventSlug, WorkspaceId};
+use crowdrelay_domain::{EventSlug, NormalizedEmail, WorkspaceId};
 use hmac::{Hmac, KeyInit, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -161,6 +161,17 @@ struct ConcertQrOverviewResponse {
 #[serde(deny_unknown_fields)]
 pub struct CheckinRequest {
     token: String,
+    /// A stranger's reachable identifier — the scan ritual's whole point.
+    /// Required when no fan-session cookie accompanies the request.
+    email: Option<String>,
+    consent: Option<CheckinConsentRequest>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CheckinConsentRequest {
+    marketing: bool,
+    policy_version: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -170,6 +181,10 @@ pub struct CheckinResponse {
     campaign_id: Uuid,
     created: bool,
     checked_in_at: String,
+    /// `session` means the fan's own browser proved identity; `email_claim`
+    /// means the inbox follow-up now decides whether the scan becomes a
+    /// reachable fan.
+    identity: String,
 }
 
 #[derive(Debug, FromRow)]
@@ -503,11 +518,7 @@ pub async fn check_in(
     payload: Result<Json<CheckinRequest>, JsonRejection>,
 ) -> Response {
     let request_id_value = request_id(&headers);
-    let Some(session) = fan_session_from_headers(&headers) else {
-        return Problem::unauthorized(request_id_value)
-            .private()
-            .into_response();
-    };
+    let session = fan_session_from_headers(&headers);
     let Some(signing_key) = state.concert_qr.signing_key else {
         return Problem::service_unavailable(request_id_value)
             .private()
@@ -538,13 +549,40 @@ pub async fn check_in(
             .into_response();
     }
 
+    // A scan must still yield a reachable identifier. With no session the
+    // email field carries it; a request carrying neither is the same
+    // unauthorized scan the endpoint has always rejected.
+    let email = if session.is_none() {
+        let Some(raw_email) = payload.email else {
+            return Problem::unauthorized(request_id_value)
+                .private()
+                .into_response();
+        };
+        match NormalizedEmail::parse(raw_email) {
+            Ok(email) => Some(email.as_str().to_owned()),
+            Err(_) => {
+                return Problem::bad_request(request_id_value)
+                    .private()
+                    .into_response();
+            }
+        }
+    } else {
+        None
+    };
+    let consent = payload.consent.map(|consent| CheckinConsent {
+        granted: consent.marketing,
+        policy_version: consent.policy_version.trim().chars().take(64).collect(),
+    });
+
     let command = CheckinCommand {
         workspace_id: state.concert_qr.workspace_id.into_uuid(),
         event_slug: event_slug.as_str().to_owned(),
         campaign_id: claims.campaign_id,
         event_id: claims.event_id,
         expires_at: claims.expires_at,
-        session_token: session.as_str().to_owned(),
+        session_token: session.map(|session| session.as_str().to_owned()),
+        email,
+        consent,
         now,
         request_id: request_id_value.clone(),
     };
@@ -585,6 +623,7 @@ pub async fn check_in(
             campaign_id: result.campaign_id,
             created: result.created,
             checked_in_at: format_time(result.checked_in_at),
+            identity: result.identity.as_str().to_owned(),
         }),
     )
         .into_response()

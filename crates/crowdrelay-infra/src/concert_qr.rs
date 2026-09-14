@@ -6,13 +6,16 @@
 
 use async_trait::async_trait;
 use crowdrelay_application::{
-    CheckinCommand, CheckinResult, ConcertEventInfo, ConcertQrError, ConcertQrRepository,
-    CreateCampaignCommand, CreateCampaignResult, RevokeCampaignCommand,
+    CheckinCommand, CheckinIdentity, CheckinResult, ConcertEventInfo, ConcertQrError,
+    ConcertQrRepository, CreateCampaignCommand, CreateCampaignResult, RevokeCampaignCommand,
 };
+use crowdrelay_domain::{FanId, WorkspaceId};
 use serde_json::json;
 use sqlx::{FromRow, PgPool};
 use time::OffsetDateTime;
 use uuid::Uuid;
+
+use crate::fan_lifecycle::{issue_confirmation_token, issue_fan_action_token};
 
 /// PostgreSQL implementation of [`ConcertQrRepository`].
 #[derive(Clone)]
@@ -34,6 +37,25 @@ struct EventRow {
     title: String,
     venue: Option<String>,
     starts_at: OffsetDateTime,
+    city_id: Option<Uuid>,
+    timezone: String,
+}
+
+/// How the checking-in fan resolved inside the transaction.
+enum FanResolution {
+    /// Live session cookie — verified identity.
+    Session(Uuid),
+    /// Email claim — the fan row behind the address plus its status, which
+    /// decides the follow-up email (confirm, sign in, or none).
+    EmailClaim { fan_id: Uuid, status: String },
+}
+
+impl FanResolution {
+    fn fan_id(&self) -> Uuid {
+        match *self {
+            Self::Session(fan_id) | Self::EmailClaim { fan_id, .. } => fan_id,
+        }
+    }
 }
 
 #[derive(Debug, FromRow)]
@@ -60,7 +82,7 @@ impl ConcertQrRepository for PostgresConcertQrRepository {
 
         let event = match sqlx::query_as::<_, EventRow>(
             r#"
-                SELECT id, slug, title, venue, starts_at
+                SELECT id, slug, title, venue, starts_at, city_id, timezone
                 FROM events
                 WHERE workspace_id = $1 AND slug = $2 AND status = 'published'
                 FOR SHARE
@@ -203,7 +225,7 @@ impl ConcertQrRepository for PostgresConcertQrRepository {
         })?;
 
         let event = match sqlx::query_as::<_, EventRow>(
-            "SELECT id, slug, title, venue, starts_at FROM events WHERE workspace_id = $1 AND slug = $2 AND id = $3 AND status = 'published' FOR SHARE",
+            "SELECT id, slug, title, venue, starts_at, city_id, timezone FROM events WHERE workspace_id = $1 AND slug = $2 AND id = $3 AND status = 'published' FOR SHARE",
         )
         .bind(command.workspace_id)
         .bind(&command.event_slug)
@@ -251,52 +273,58 @@ impl ConcertQrRepository for PostgresConcertQrRepository {
             return Err(ConcertQrError::NotFound);
         }
 
-        // Resolve the fan from the session token, bumping last_seen_at.
-        let fan_id = match sqlx::query_scalar::<_, Uuid>(
-            r#"
-            UPDATE fan_sessions
-            SET last_seen_at = now()
-            WHERE workspace_id = $1
-              AND session_token_hash = digest($2, 'sha256')
-              AND revoked_at IS NULL
-              AND expires_at > now()
-            RETURNING fan_id
-            "#,
-        )
-        .bind(command.workspace_id)
-        .bind(&command.session_token)
-        .fetch_optional(&mut *tx)
-        .await
-        {
-            Ok(Some(value)) => value,
-            Ok(None) => return Err(ConcertQrError::NotFound),
-            Err(error) => {
-                tracing::warn!(%error, "concert QR check_in fan resolve failed");
-                return Err(ConcertQrError::Unavailable);
+        let resolution = if let Some(session_token) = command.session_token.as_ref() {
+            // Resolve the fan from the session token, bumping last_seen_at.
+            let fan_id = match sqlx::query_scalar::<_, Uuid>(
+                r#"
+                UPDATE fan_sessions
+                SET last_seen_at = now()
+                WHERE workspace_id = $1
+                  AND session_token_hash = digest($2, 'sha256')
+                  AND revoked_at IS NULL
+                  AND expires_at > now()
+                RETURNING fan_id
+                "#,
+            )
+            .bind(command.workspace_id)
+            .bind(session_token)
+            .fetch_optional(&mut *tx)
+            .await
+            {
+                Ok(Some(value)) => value,
+                Ok(None) => return Err(ConcertQrError::NotFound),
+                Err(error) => {
+                    tracing::warn!(%error, "concert QR check_in fan resolve failed");
+                    return Err(ConcertQrError::Unavailable);
+                }
+            };
+
+            // Serialize all check-ins for one fan before testing the unique
+            // (workspace, event, fan) invariant. This keeps retries idempotent even
+            // when two independently issued campaign QR codes are scanned at once.
+            match sqlx::query_scalar::<_, Uuid>(
+                "SELECT id FROM fans WHERE workspace_id = $1 AND id = $2 FOR UPDATE",
+            )
+            .bind(command.workspace_id)
+            .bind(fan_id)
+            .fetch_optional(&mut *tx)
+            .await
+            {
+                Ok(Some(_)) => {}
+                Ok(None) => return Err(ConcertQrError::NotFound),
+                Err(error) => {
+                    tracing::warn!(%error, "concert QR check_in fan lock failed");
+                    return Err(ConcertQrError::Unavailable);
+                }
             }
+            FanResolution::Session(fan_id)
+        } else {
+            self.resolve_email_claim(&mut tx, command).await?
         };
+        let fan_id = resolution.fan_id();
 
-        // Serialize all check-ins for one fan before testing the unique
-        // (workspace, event, fan) invariant. This keeps retries idempotent even
-        // when two independently issued campaign QR codes are scanned at once.
-        match sqlx::query_scalar::<_, Uuid>(
-            "SELECT id FROM fans WHERE workspace_id = $1 AND id = $2 FOR UPDATE",
-        )
-        .bind(command.workspace_id)
-        .bind(fan_id)
-        .fetch_optional(&mut *tx)
-        .await
-        {
-            Ok(Some(_)) => {}
-            Ok(None) => return Err(ConcertQrError::NotFound),
-            Err(error) => {
-                tracing::warn!(%error, "concert QR check_in fan lock failed");
-                return Err(ConcertQrError::Unavailable);
-            }
-        }
-
-        let existing = match sqlx::query_as::<_, (Uuid, OffsetDateTime)>(
-            "SELECT campaign_id, checked_in_at FROM concert_checkins WHERE workspace_id = $1 AND event_id = $2 AND fan_id = $3",
+        let existing = match sqlx::query_as::<_, (Uuid, OffsetDateTime, String)>(
+            "SELECT campaign_id, checked_in_at, identity_source FROM concert_checkins WHERE workspace_id = $1 AND event_id = $2 AND fan_id = $3",
         )
         .bind(command.workspace_id)
         .bind(event.id)
@@ -311,17 +339,24 @@ impl ConcertQrRepository for PostgresConcertQrRepository {
             }
         };
 
-        if let Some((existing_campaign, checked_in_at)) = existing {
+        if let Some((existing_campaign, checked_in_at, stored_source)) = existing {
             tx.commit().await.map_err(|error| {
                 tracing::warn!(%error, "concert QR check_in idempotent commit failed");
                 ConcertQrError::Unavailable
             })?;
+            // A rescan must report the provenance of the row that actually
+            // exists, not how this request happened to identify itself.
+            let identity = match stored_source.as_str() {
+                "email_claim" => CheckinIdentity::EmailClaim,
+                _ => CheckinIdentity::Session,
+            };
             return Ok(CheckinResult {
                 event_id: event.id,
                 event_slug: event.slug,
                 campaign_id: existing_campaign,
                 created: false,
                 checked_in_at,
+                identity,
             });
         }
 
@@ -347,9 +382,13 @@ impl ConcertQrRepository for PostgresConcertQrRepository {
 
         let checkin_id = Uuid::now_v7();
         let checked_in_at = command.now;
+        let identity = match &resolution {
+            FanResolution::Session(_) => CheckinIdentity::Session,
+            FanResolution::EmailClaim { .. } => CheckinIdentity::EmailClaim,
+        };
 
         if let Err(error) = sqlx::query(
-            "INSERT INTO concert_checkins (id, workspace_id, event_id, campaign_id, fan_id, checked_in_at, request_id) VALUES ($1, $2, $3, $4, $5, $6, $7)",
+            "INSERT INTO concert_checkins (id, workspace_id, event_id, campaign_id, fan_id, checked_in_at, request_id, identity_source) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
         )
         .bind(checkin_id)
         .bind(command.workspace_id)
@@ -358,6 +397,7 @@ impl ConcertQrRepository for PostgresConcertQrRepository {
         .bind(fan_id)
         .bind(checked_in_at)
         .bind(&command.request_id)
+        .bind(identity.as_str())
         .execute(&mut *tx)
         .await
         {
@@ -404,6 +444,11 @@ impl ConcertQrRepository for PostgresConcertQrRepository {
             return Err(ConcertQrError::Unavailable);
         }
 
+        if let FanResolution::EmailClaim { status, .. } = &resolution {
+            self.finish_email_claim(&mut tx, command, &event, fan_id, status)
+                .await?;
+        }
+
         tx.commit().await.map_err(|error| {
             tracing::warn!(%error, "concert QR check_in commit failed");
             ConcertQrError::Unavailable
@@ -415,6 +460,217 @@ impl ConcertQrRepository for PostgresConcertQrRepository {
             campaign_id: campaign.id,
             created: true,
             checked_in_at,
+            identity,
         })
+    }
+}
+
+impl PostgresConcertQrRepository {
+    /// Upsert the fan behind an email claim, holding the row lock so the rest
+    /// of the check-in serializes exactly like the session path.
+    ///
+    /// A scan always lands `pending`: the address is unverified no matter what
+    /// the workspace's signup policy is, and an unverified claim must not
+    /// inherit `active` reachability. Suppressed rows surface their status so
+    /// the caller can record the attendance fact while skipping every email.
+    async fn resolve_email_claim(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        command: &CheckinCommand,
+    ) -> Result<FanResolution, ConcertQrError> {
+        let Some(email) = command.email.as_ref() else {
+            // The HTTP layer requires an email before this branch is reached;
+            // a missing one here is a contract violation, not a panic.
+            return Err(ConcertQrError::Invalid);
+        };
+        let inserted = match sqlx::query_as::<_, (Uuid, String)>(
+            r#"
+            INSERT INTO fans (workspace_id, normalized_email, status)
+            VALUES ($1, $2, 'pending')
+            ON CONFLICT (workspace_id, normalized_email) DO NOTHING
+            RETURNING id, status
+            "#,
+        )
+        .bind(command.workspace_id)
+        .bind(email)
+        .fetch_optional(&mut **tx)
+        .await
+        {
+            Ok(value) => value,
+            Err(error) => {
+                tracing::warn!(%error, "concert QR check_in fan upsert failed");
+                return Err(ConcertQrError::Unavailable);
+            }
+        };
+
+        let (fan_id, status) = match inserted {
+            Some(row) => row,
+            None => match sqlx::query_as::<_, (Uuid, String)>(
+                "SELECT id, status FROM fans WHERE workspace_id = $1 AND normalized_email = $2 FOR UPDATE",
+            )
+            .bind(command.workspace_id)
+            .bind(email)
+            .fetch_optional(&mut **tx)
+            .await
+            {
+                Ok(Some(row)) => row,
+                Ok(None) => {
+                    // The upsert and its fallback disagree about reality, which
+                    // is a store fault, not a caller fault.
+                    tracing::error!("concert QR check_in fan upsert returned no row");
+                    return Err(ConcertQrError::Unavailable);
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "concert QR check_in fan lookup failed");
+                    return Err(ConcertQrError::Unavailable);
+                }
+            },
+        };
+
+        Ok(FanResolution::EmailClaim { fan_id, status })
+    }
+
+    /// Consent, city interest and the inbox follow-up for an email-claim
+    /// check-in — only ever reached after the check-in row itself committed,
+    /// so a rescan dedupes before any of this can repeat.
+    ///
+    /// The follow-up matches the signup contract exactly: pending fans get a
+    /// `fan.confirmation_requested` token, active and unsubscribed ones get
+    /// `fan.session_requested` — sign-in is transactional mail an unsubscribe
+    /// does not block. Suppressed means do-not-contact: the attendance fact
+    /// stands and nothing is sent.
+    async fn finish_email_claim(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        command: &CheckinCommand,
+        event: &EventRow,
+        fan_id: Uuid,
+        status: &str,
+    ) -> Result<(), ConcertQrError> {
+        if let Some(consent) = command.consent.as_ref()
+            && let Err(error) = sqlx::query(
+                r#"
+                INSERT INTO fan_consents (
+                    workspace_id, fan_id, purpose, granted, policy_version,
+                    source, request_id
+                )
+                VALUES ($1, $2, 'marketing', $3, $4, 'concert_checkin', $5)
+                "#,
+            )
+            .bind(command.workspace_id)
+            .bind(fan_id)
+            .bind(consent.granted)
+            .bind(&consent.policy_version)
+            .bind(&command.request_id)
+            .execute(&mut **tx)
+            .await
+        {
+            tracing::warn!(%error, "concert QR check_in consent insert failed");
+            return Err(ConcertQrError::Unavailable);
+        }
+
+        if let Some(city_id) = event.city_id
+            && let Err(error) = sqlx::query(
+                "INSERT INTO fan_city_interests (workspace_id, fan_id, city_id) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING",
+            )
+            .bind(command.workspace_id)
+            .bind(fan_id)
+            .bind(city_id)
+            .execute(&mut **tx)
+            .await
+        {
+            tracing::warn!(%error, "concert QR check_in city interest failed");
+            return Err(ConcertQrError::Unavailable);
+        }
+
+        let workspace = WorkspaceId::from_uuid(command.workspace_id);
+        let fan = FanId::from_uuid(fan_id);
+        // The scan's welcome doubles as the T+1 recall: one contact carrying
+        // the night's context, so the follow-ask lever must not send a second
+        // message to the same fan inside the same window.
+        let mut payload = json!({
+            "workspace_id": command.workspace_id,
+            "fan_id": fan_id,
+            "email": command.email,
+            "display_name": null,
+            "locale": null,
+            "city_slug": null,
+            "event_id": event.id,
+            "event_slug": event.slug,
+            "event_title": event.title,
+            "venue": event.venue,
+            "event_starts_at": event.starts_at,
+            "source": "concert_checkin",
+        });
+        let event_type = match status {
+            "pending" => {
+                let token = match issue_confirmation_token(tx, workspace, fan).await {
+                    Ok(token) => token,
+                    Err(error) => {
+                        tracing::warn!(error = %error, "concert QR check_in confirmation token failed");
+                        return Err(ConcertQrError::Unavailable);
+                    }
+                };
+                if let Some(map) = payload.as_object_mut() {
+                    map.insert("confirmation_token".to_owned(), json!(token.as_str()));
+                    map.insert(
+                        "policy_version".to_owned(),
+                        command
+                            .consent
+                            .as_ref()
+                            .map_or(serde_json::Value::Null, |consent| {
+                                json!(consent.policy_version)
+                            }),
+                    );
+                }
+                "fan.confirmation_requested"
+            }
+            "active" | "unsubscribed" => {
+                let token = match issue_fan_action_token(tx, workspace, fan, "session", 2).await {
+                    Ok(token) => token,
+                    Err(error) => {
+                        tracing::warn!(error = %error, "concert QR check_in session token failed");
+                        return Err(ConcertQrError::Unavailable);
+                    }
+                };
+                if let Some(map) = payload.as_object_mut() {
+                    map.insert("session_recovery_token".to_owned(), json!(token.as_str()));
+                }
+                "fan.session_requested"
+            }
+            _ => return Ok(()),
+        };
+
+        // One contact, scheduled next morning in the event's timezone: the
+        // scan lands late at night, and a confirm/sign-in mail sent at 23:40
+        // competes with the night itself. `now + 6h` rolls the date forward so
+        // a post-midnight scan still lands at 10:00 that same morning rather
+        // than waiting a full extra day.
+        if let Err(error) = sqlx::query(
+            r#"
+            INSERT INTO outbox_events (
+                workspace_id, event_type, event_version, payload, request_id,
+                available_at
+            )
+            VALUES (
+                $1, $2, 1, $3, $4,
+                (date_trunc('day', (now() + interval '6 hours') AT TIME ZONE $5)
+                    + interval '10 hours') AT TIME ZONE $5
+            )
+            "#,
+        )
+        .bind(command.workspace_id)
+        .bind(event_type)
+        .bind(payload)
+        .bind(&command.request_id)
+        .bind(&event.timezone)
+        .execute(&mut **tx)
+        .await
+        {
+            tracing::warn!(%error, "concert QR check_in follow-up outbox failed");
+            return Err(ConcertQrError::Unavailable);
+        }
+
+        Ok(())
     }
 }

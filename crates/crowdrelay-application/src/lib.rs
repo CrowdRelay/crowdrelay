@@ -78,8 +78,9 @@ pub use commerce_inventory::{
     StocktakeItemResult, StocktakeResult,
 };
 pub use concert_qr::{
-    CheckinCommand, CheckinResult, ConcertEventInfo, ConcertQrError, ConcertQrRepository,
-    CreateCampaignCommand, CreateCampaignResult, RevokeCampaignCommand,
+    CheckinCommand, CheckinConsent, CheckinIdentity, CheckinResult, ConcertEventInfo,
+    ConcertQrError, ConcertQrRepository, CreateCampaignCommand, CreateCampaignResult,
+    RevokeCampaignCommand,
 };
 /// Re-exported brain types used in API responses.
 pub use crowdrelay_brain::ReachMetrics;

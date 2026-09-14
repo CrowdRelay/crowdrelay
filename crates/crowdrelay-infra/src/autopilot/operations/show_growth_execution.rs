@@ -411,6 +411,11 @@ async fn execute_first_party_growth_campaign(
         ShowGrowthLever::PostShowFollowAsk => json!({
             "statuses": ["active"],
             "attended_event_slugs": [event.0.clone()],
+            // Fans who scanned with an email claim already received the
+            // night-of welcome, which doubles as their recall. Excluding them
+            // here keeps the room at one contact inside the window instead of
+            // a welcome at the door and a recall the next morning.
+            "excluded_scan_checkin_event_slugs": [event.0.clone()],
             "marketing_consent": true
         }),
         _ => return Err(RepositoryError::Conflict),
