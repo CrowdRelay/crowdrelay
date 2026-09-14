@@ -129,6 +129,13 @@ jobs:
           # `test_` prefix. Listed explicitly or they never run.
           python3 scripts/source-size-ratchet.py
           python3 scripts/api-sql-ratchet.py
+          # The third ratchet. CLAUDE.md presents all three together as the most
+          # common self-inflicted CI failure; this one was not in any workflow,
+          # so it was not a CI failure at all. It needs no database — pure source
+          # analysis, sub-second — and it is the whole of tenant isolation: a
+          # statement reading one of the 232 workspace_id-bearing tables without
+          # naming the workspace fails it.
+          python3 scripts/workspace-scope-ratchet.py
           python3 scripts/test-modularity-contract.py
           python3 scripts/test_platform_vocabulary_v1.py
           python3 scripts/test_sql_identifiers_v1.py
@@ -367,6 +374,23 @@ jobs:
               --nocapture \
               --test-threads=1
           done
+
+      # The two gates that need a live schema, and therefore could only ever run
+      # here. Both were in `just policy-checks` and in no workflow, so they ran
+      # when somebody remembered to run them on a machine whose local database
+      # happened to be migrated — which is not a gate.
+      #
+      # `sql-result-types.py` is the one CLAUDE.md names as covering the cheap
+      # half of having no compile-time SQL checking: it PREPAREs every
+      # row-returning query and reads the result types sqlx will decode. An
+      # uncast EXTRACT returning NUMERIC aborted every autopilot cycle for two
+      # hours after compiling, linting and passing the whole suite. It is also a
+      # ratchet on the prepared count, and a ratchet nobody runs is a file.
+      - name: Gates that require a migrated schema
+        run: |
+          set -euo pipefail
+          python3 scripts/sql-result-types.py
+          python3 scripts/test_sql_scalar_types_v1.py
 
   deploy-config:
     name: Compose and bake validation
