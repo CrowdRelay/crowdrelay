@@ -1,8 +1,8 @@
 use std::time::Duration;
 
 use crowdrelay_application::{
-    AcquisitionRepository, EventRepository, IdempotencyKey, RegisterEventInterestCommand,
-    RequestId, SignupFanCommand,
+    AcquisitionRepository, EventActEntry, EventRepository, IdempotencyKey,
+    RegisterEventInterestCommand, ReplaceEventActsCommand, RequestId, SignupFanCommand,
 };
 use crowdrelay_domain::{
     CitySlug, CountryCode, EventAction, EventActionKind, EventId, EventSlug, FanSignup,
@@ -171,6 +171,197 @@ async fn publishes_events_tracks_actions_and_registers_interest_idempotently()
     .fetch_one(&pool)
     .await?;
     assert_eq!(outbox_count, 1);
+
+    pool.close().await;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_EVENT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn replaces_event_bill_and_attributes_ticket_clicks_per_act()
+-> Result<(), Box<dyn std::error::Error>> {
+    let database_url = std::env::var("CROWDRELAY_EVENT_TEST_DATABASE_URL").map_err(|e| {
+        format!("CROWDRELAY_EVENT_TEST_DATABASE_URL must target a disposable database: {e}")
+    })?;
+    let pool = PgPoolOptions::new()
+        .max_connections(8)
+        .connect(&database_url)
+        .await?;
+    crowdrelay_infra::database::MIGRATOR.run(&pool).await?;
+
+    let workspace_id = WorkspaceId::new();
+    let workspace_slug =
+        WorkspaceSlug::parse(format!("event-acts-{}", workspace_id.into_uuid().simple()))?;
+    let starts_at = OffsetDateTime::now_utc() + time::Duration::days(2);
+    let event_id = seed_fixture(&pool, workspace_id, &workspace_slug, starts_at).await?;
+
+    let database = DatabaseConfig {
+        url: database_url,
+        max_connections: 8,
+        connect_timeout: Duration::from_secs(3),
+        ping_timeout: Duration::from_secs(2),
+        operation_timeout: Duration::from_secs(5),
+        lock_timeout: Duration::from_secs(1),
+    };
+    let events =
+        PostgresEventRepository::new(pool.clone(), workspace_slug, &database, vec![1_440, 120]);
+
+    // Write the bill: two acts, headliner second in running order.
+    events
+        .replace_event_acts(&ReplaceEventActsCommand {
+            workspace_id,
+            event_slug: "wroclaw-live-2026".to_owned(),
+            acts: vec![
+                EventActEntry {
+                    act_slug: "virya".to_owned(),
+                    act_name: "Virya".to_owned(),
+                    position: 1,
+                    ticket_url: Some("https://tickets.example.test/virya".to_owned()),
+                },
+                EventActEntry {
+                    act_slug: "opener".to_owned(),
+                    act_name: "Opener".to_owned(),
+                    position: 0,
+                    ticket_url: None,
+                },
+            ],
+        })
+        .await?;
+
+    // The bill surfaces on the published event in bill order.
+    let published = events.load_published_events().await?;
+    assert_eq!(published.len(), 1);
+    assert_eq!(published[0].acts.len(), 2);
+    assert_eq!(published[0].acts[0].act_slug, "opener");
+    assert_eq!(published[0].acts[0].ticket_url, None);
+    assert_eq!(published[0].acts[1].act_slug, "virya");
+    assert_eq!(
+        published[0].acts[1].ticket_url.as_deref(),
+        Some("https://tickets.example.test/virya")
+    );
+
+    // Replace semantics: a second write swaps the bill atomically.
+    events
+        .replace_event_acts(&ReplaceEventActsCommand {
+            workspace_id,
+            event_slug: "wroclaw-live-2026".to_owned(),
+            acts: vec![EventActEntry {
+                act_slug: "virya".to_owned(),
+                act_name: "Virya".to_owned(),
+                position: 0,
+                ticket_url: Some("https://tickets.example.test/virya".to_owned()),
+            }],
+        })
+        .await?;
+    let published = events.load_published_events().await?;
+    assert_eq!(published[0].acts.len(), 1);
+    assert_eq!(published[0].acts[0].act_slug, "virya");
+
+    // A click attributed to the act lands on the ledger with the slug — the
+    // fact survives the act row changing later because it is denormalized.
+    let mut action = EventAction::new(
+        workspace_id,
+        EventId::from_uuid(event_id),
+        EventActionKind::TicketClick,
+        None,
+        Some(VisitorId::new()),
+        None,
+        OffsetDateTime::now_utc(),
+    )?;
+    action.set_act_slug("virya")?;
+    events.persist_event_action(&[action]).await?;
+    let recorded: Option<String> = sqlx::query_scalar(
+        "SELECT act_slug FROM event_action_events WHERE workspace_id = $1 AND event_id = $2",
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(event_id)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(recorded.as_deref(), Some("virya"));
+
+    // An unattributed click stays NULL — not guessed at after the fact.
+    let plain = EventAction::new(
+        workspace_id,
+        EventId::from_uuid(event_id),
+        EventActionKind::TicketClick,
+        None,
+        None,
+        None,
+        OffsetDateTime::now_utc(),
+    )?;
+    events.persist_event_action(&[plain]).await?;
+    let null_count = sqlx::query_scalar::<_, i64>(
+        "SELECT count(*)::bigint FROM event_action_events WHERE workspace_id = $1 AND act_slug IS NULL",
+    )
+    .bind(workspace_id.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(null_count, 1);
+
+    // Rejections: unknown event, malformed act, duplicate slugs, http URL.
+    assert_eq!(
+        events
+            .replace_event_acts(&ReplaceEventActsCommand {
+                workspace_id,
+                event_slug: "no-such-show".to_owned(),
+                acts: Vec::new(),
+            })
+            .await,
+        Err(crowdrelay_application::RepositoryError::NotFound)
+    );
+    assert_eq!(
+        events
+            .replace_event_acts(&ReplaceEventActsCommand {
+                workspace_id,
+                event_slug: "wroclaw-live-2026".to_owned(),
+                acts: vec![EventActEntry {
+                    act_slug: "Bad Slug!".to_owned(),
+                    act_name: "Bad".to_owned(),
+                    position: 0,
+                    ticket_url: None,
+                }],
+            })
+            .await,
+        Err(crowdrelay_application::RepositoryError::Conflict)
+    );
+    assert_eq!(
+        events
+            .replace_event_acts(&ReplaceEventActsCommand {
+                workspace_id,
+                event_slug: "wroclaw-live-2026".to_owned(),
+                acts: vec![
+                    EventActEntry {
+                        act_slug: "dup".to_owned(),
+                        act_name: "One".to_owned(),
+                        position: 0,
+                        ticket_url: None,
+                    },
+                    EventActEntry {
+                        act_slug: "dup".to_owned(),
+                        act_name: "Two".to_owned(),
+                        position: 1,
+                        ticket_url: None,
+                    },
+                ],
+            })
+            .await,
+        Err(crowdrelay_application::RepositoryError::Conflict)
+    );
+    assert_eq!(
+        events
+            .replace_event_acts(&ReplaceEventActsCommand {
+                workspace_id,
+                event_slug: "wroclaw-live-2026".to_owned(),
+                acts: vec![EventActEntry {
+                    act_slug: "virya".to_owned(),
+                    act_name: "Virya".to_owned(),
+                    position: 0,
+                    ticket_url: Some("http://insecure.example.test/x".to_owned()),
+                }],
+            })
+            .await,
+        Err(crowdrelay_application::RepositoryError::Conflict)
+    );
 
     pool.close().await;
     Ok(())

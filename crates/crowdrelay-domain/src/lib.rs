@@ -133,7 +133,8 @@ pub use beacon_release::{
 pub use beacons::BeaconContactIdentity;
 pub use events::{
     EventAction, EventActionError, EventActionKind, EventCity, EventInterestResult, EventStatus,
-    FanEventInterest, PublicEvent, PublicEventError,
+    FanEventInterest, PublicEvent, PublicEventAct, PublicEventError, valid_act_slug,
+    validate_act_fields,
 };
 pub use fan_lifecycle::{
     FanActionToken, FanActionTokenError, FanConfirmationResult, FanUnsubscribeResult,

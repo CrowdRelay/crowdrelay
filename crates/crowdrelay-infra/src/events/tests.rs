@@ -40,6 +40,13 @@ mod tests {
         ) -> Result<Vec<FanEventInterest>, RepositoryError> {
             Err(RepositoryError::Unavailable)
         }
+
+        async fn replace_event_acts(
+            &self,
+            _command: &ReplaceEventActsCommand,
+        ) -> Result<(), RepositoryError> {
+            Err(RepositoryError::Unavailable)
+        }
     }
 
     #[tokio::test]

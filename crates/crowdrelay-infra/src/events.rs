@@ -13,10 +13,12 @@ use std::{
 };
 
 use async_trait::async_trait;
-use crowdrelay_application::{EventRepository, RegisterEventInterestCommand, RepositoryError};
+use crowdrelay_application::{
+    EventRepository, RegisterEventInterestCommand, ReplaceEventActsCommand, RepositoryError,
+};
 use crowdrelay_domain::{
     CampaignId, CityId, EventAction, EventCity, EventId, EventInterestResult, EventSlug,
-    FanEventInterest, FanId, PublicEvent, VisitorId, WorkspaceId, WorkspaceSlug,
+    FanEventInterest, FanId, PublicEvent, PublicEventAct, VisitorId, WorkspaceId, WorkspaceSlug,
 };
 use serde::Serialize;
 use serde_json::json;
@@ -36,6 +38,8 @@ const INTEREST_IDEMPOTENCY_SCOPE: &str = "event_interest";
 const IDEMPOTENCY_RETENTION_MILLISECONDS: i64 = 86_400_000;
 const MAX_EVENT_ACTION_BATCH_ROWS: usize = 1_000;
 const MAX_FAN_INTEREST_ROWS: u32 = 100;
+const MAX_EVENT_ACTS_PER_EVENT: usize = 32;
+const MAX_EVENT_ACT_POSITION: i32 = 999;
 
 #[derive(Clone, Debug)]
 pub struct PostgresEventRepository {
@@ -111,10 +115,24 @@ impl PostgresEventRepository {
                 events.image_url,
                 events.trailer_url,
                 events.external_event_url,
+                acts.value AS acts,
                 events.updated_at
             FROM events
             INNER JOIN workspaces ON workspaces.id = events.workspace_id
             LEFT JOIN cities ON cities.id = events.city_id
+            LEFT JOIN LATERAL (
+                SELECT json_agg(
+                    json_build_object(
+                        'act_slug', act.act_slug,
+                        'act_name', act.act_name,
+                        'ticket_url', act.ticket_url
+                    )
+                    ORDER BY act.position, act.act_slug
+                ) AS value
+                FROM event_acts AS act
+                WHERE act.workspace_id = events.workspace_id
+                  AND act.event_id = events.id
+            ) AS acts ON true
             WHERE workspaces.slug = $1
                 AND events.status = 'published'
                 AND events.starts_at >= now() - interval '12 hours'
@@ -182,6 +200,10 @@ impl PostgresEventRepository {
             .iter()
             .map(|action| action.referrer_host().map(str::to_owned))
             .collect();
+        let act_slugs: Vec<Option<String>> = actions
+            .iter()
+            .map(|action| action.act_slug().map(str::to_owned))
+            .collect();
         let occurred_at: Vec<OffsetDateTime> =
             actions.iter().map(EventAction::occurred_at).collect();
 
@@ -189,11 +211,11 @@ impl PostgresEventRepository {
             r#"
             WITH candidates (
                 workspace_id, event_id, action, campaign_id,
-                anonymous_visitor_id, referrer_host, occurred_at
+                anonymous_visitor_id, referrer_host, occurred_at, act_slug
             ) AS (
                 SELECT * FROM UNNEST(
                     $1::uuid[], $2::uuid[], $3::text[], $4::uuid[],
-                    $5::uuid[], $6::text[], $7::timestamptz[]
+                    $5::uuid[], $6::text[], $7::timestamptz[], $8::text[]
                 )
             ), normalized_candidates AS (
                 SELECT
@@ -203,7 +225,8 @@ impl PostgresEventRepository {
                     CASE WHEN campaigns.active THEN campaigns.id ELSE NULL END AS campaign_id,
                     candidates.anonymous_visitor_id,
                     candidates.referrer_host,
-                    candidates.occurred_at
+                    candidates.occurred_at,
+                    candidates.act_slug
                 FROM candidates
                 INNER JOIN events
                     ON events.workspace_id = candidates.workspace_id
@@ -217,11 +240,11 @@ impl PostgresEventRepository {
                 WHERE (
                     SELECT count(*)::bigint
                     FROM normalized_candidates
-                ) = $8
+                ) = $9
             )
             INSERT INTO event_action_events (
                 workspace_id, event_id, action, campaign_id,
-                anonymous_visitor_id, referrer_host, occurred_at
+                anonymous_visitor_id, referrer_host, occurred_at, act_slug
             )
             SELECT * FROM validated_candidates
             "#,
@@ -233,6 +256,7 @@ impl PostgresEventRepository {
         .bind(&visitor_ids)
         .bind(&referrer_hosts)
         .bind(&occurred_at)
+        .bind(&act_slugs)
         .bind(i64::try_from(actions.len()).unwrap_or(i64::MAX))
         .execute(&self.pool)
         .await
@@ -428,6 +452,124 @@ impl PostgresEventRepository {
         Ok(result)
     }
 
+    async fn replace_event_acts_inner(
+        &self,
+        command: &ReplaceEventActsCommand,
+    ) -> Result<(), EventStoreError> {
+        // The same validator `PublicEvent::validate` applies on the way back
+        // out — a bill that stores must not poison the public event cache on
+        // the next refresh.
+        if command.acts.len() > MAX_EVENT_ACTS_PER_EVENT {
+            return Err(EventStoreError::Conflict);
+        }
+        let mut seen_slugs = std::collections::HashSet::with_capacity(command.acts.len());
+        for act in &command.acts {
+            let fields_ok = crowdrelay_domain::validate_act_fields(
+                &act.act_slug,
+                &act.act_name,
+                act.ticket_url.as_deref(),
+            )
+            .is_ok();
+            if !fields_ok
+                || !(0..=MAX_EVENT_ACT_POSITION).contains(&act.position)
+                || !seen_slugs.insert(act.act_slug.as_str())
+            {
+                return Err(EventStoreError::Conflict);
+            }
+        }
+
+        let mut transaction = self
+            .pool
+            .begin()
+            .await
+            .map_err(EventStoreError::from_sqlx)?;
+        let workspace_id =
+            trusted_workspace_id_in_transaction(&mut transaction, &self.workspace_slug).await?;
+        if workspace_id != command.workspace_id {
+            return Err(EventStoreError::NotFound);
+        }
+
+        // The bill belongs to a real show — drafts and published events take
+        // acts, cancelled/completed ones are history and refuse edits.
+        let event_id = sqlx::query_scalar::<_, Uuid>(
+            r#"
+            SELECT id FROM events
+            WHERE workspace_id = $1
+                AND slug = $2
+                AND status IN ('draft', 'published')
+            FOR UPDATE
+            "#,
+        )
+        .bind(workspace_id.into_uuid())
+        .bind(command.event_slug.as_str())
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(EventStoreError::from_sqlx)?
+        .ok_or(EventStoreError::NotFound)?;
+
+        sqlx::query("DELETE FROM event_acts WHERE workspace_id = $1 AND event_id = $2")
+            .bind(workspace_id.into_uuid())
+            .bind(event_id)
+            .execute(&mut *transaction)
+            .await
+            .map_err(EventStoreError::from_sqlx)?;
+
+        if !command.acts.is_empty() {
+            let act_slugs: Vec<&str> = command
+                .acts
+                .iter()
+                .map(|act| act.act_slug.as_str())
+                .collect();
+            let act_names: Vec<&str> = command
+                .acts
+                .iter()
+                .map(|act| act.act_name.as_str())
+                .collect();
+            let positions: Vec<i32> = command.acts.iter().map(|act| act.position).collect();
+            let ticket_urls: Vec<Option<&str>> = command
+                .acts
+                .iter()
+                .map(|act| act.ticket_url.as_deref().map(str::trim))
+                .collect();
+            sqlx::query(
+                r#"
+                INSERT INTO event_acts (workspace_id, event_id, act_slug, act_name, position, ticket_url)
+                SELECT $1, $2, act_slug, act_name, position, ticket_url
+                FROM UNNEST(
+                    $3::text[],
+                    $4::text[],
+                    $5::integer[],
+                    $6::text[]
+                ) AS bill(act_slug, act_name, position, ticket_url)
+                "#,
+            )
+            .bind(workspace_id.into_uuid())
+            .bind(event_id)
+            .bind(&act_slugs)
+            .bind(&act_names)
+            .bind(&positions)
+            .bind(&ticket_urls)
+            .execute(&mut *transaction)
+            .await
+            .map_err(EventStoreError::from_sqlx)?;
+        }
+
+        // event_acts writes do not touch the events row, so its updated_at
+        // trigger never fires — bump it explicitly so cache readers and
+        // consumers ordering on updated_at see the bill change.
+        sqlx::query("UPDATE events SET updated_at = now() WHERE workspace_id = $1 AND id = $2")
+            .bind(workspace_id.into_uuid())
+            .bind(event_id)
+            .execute(&mut *transaction)
+            .await
+            .map_err(EventStoreError::from_sqlx)?;
+
+        transaction
+            .commit()
+            .await
+            .map_err(EventStoreError::from_sqlx)
+    }
+
     async fn list_fan_interests_inner(
         &self,
         workspace_id: WorkspaceId,
@@ -479,6 +621,7 @@ impl PostgresEventRepository {
                 events.image_url,
                 events.trailer_url,
                 events.external_event_url,
+                acts.value AS acts,
                 events.updated_at,
                 event_interests.created_at AS interested_at
             FROM event_interests
@@ -486,6 +629,19 @@ impl PostgresEventRepository {
                 ON events.workspace_id = event_interests.workspace_id
                 AND events.id = event_interests.event_id
             LEFT JOIN cities ON cities.id = events.city_id
+            LEFT JOIN LATERAL (
+                SELECT json_agg(
+                    json_build_object(
+                        'act_slug', act.act_slug,
+                        'act_name', act.act_name,
+                        'ticket_url', act.ticket_url
+                    )
+                    ORDER BY act.position, act.act_slug
+                ) AS value
+                FROM event_acts AS act
+                WHERE act.workspace_id = events.workspace_id
+                  AND act.event_id = events.id
+            ) AS acts ON true
             WHERE event_interests.workspace_id = $1
                 AND event_interests.fan_id = $2
             ORDER BY events.starts_at, events.id
@@ -525,6 +681,15 @@ impl EventRepository for PostgresEventRepository {
         command: &RegisterEventInterestCommand,
     ) -> Result<EventInterestResult, RepositoryError> {
         self.bounded(self.register_interest_inner(command))
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn replace_event_acts(
+        &self,
+        command: &ReplaceEventActsCommand,
+    ) -> Result<(), RepositoryError> {
+        self.bounded(self.replace_event_acts_inner(command))
             .await
             .map_err(Into::into)
     }

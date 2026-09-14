@@ -28,8 +28,8 @@ use crowdrelay_application::{
     AcquisitionRepository, AdmissionRepository, ClaimAdmissionPass, ConfirmFan, EventCache,
     EventRepository, FanLifecycleRepository, IssueAdmissionPass, ListCities, ListFanEventInterests,
     LoadAdmissionPass, LoadEvents, LoadReferralProgress, LoadSmartLinks, RedeemAdmissionPass,
-    RedeemCoupon, RedirectCache, ReferralRepository, RegisterEventInterest, ResolveReferralCode,
-    RevokeAdmissionPass, SignupFan, UnsubscribeFan,
+    RedeemCoupon, RedirectCache, ReferralRepository, RegisterEventInterest, ReplaceEventActs,
+    ResolveReferralCode, RevokeAdmissionPass, SignupFan, UnsubscribeFan,
 };
 use crowdrelay_infra::{
     acquisition::{ClickBuffer, PostgresAcquisitionRepository},
@@ -207,7 +207,8 @@ async fn main() -> Result<()> {
         workspace_id,
         event_cache,
         RegisterEventInterest::new(Arc::clone(&event_repository)),
-        ListFanEventInterests::new(event_repository),
+        ListFanEventInterests::new(Arc::clone(&event_repository)),
+        ReplaceEventActs::new(event_repository),
         event_action_submitter,
         event_action_metrics_reader,
     );

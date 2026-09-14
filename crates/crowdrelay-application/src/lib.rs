@@ -80,7 +80,7 @@ pub use commerce_inventory::{
 pub use concert_qr::{
     CheckinCommand, CheckinConsent, CheckinIdentity, CheckinResult, ConcertEventInfo,
     ConcertQrError, ConcertQrRepository, CreateCampaignCommand, CreateCampaignResult,
-    RevokeCampaignCommand,
+    RevokeCampaignCommand, UpdateCampaignContextCommand,
 };
 /// Re-exported brain types used in API responses.
 pub use crowdrelay_brain::ReachMetrics;
@@ -91,9 +91,10 @@ pub use ecosystem::{
     UpdateFeatureFlagCommand, UpdateShowChecklistCommand,
 };
 pub use events::{
-    EventCache, EventCacheError, EventRepository, EventSnapshot, ListFanEventInterests, LoadEvents,
-    LoadEventsError, MAX_PUBLIC_EVENT_LIMIT, RegisterEventInterest, RegisterEventInterestCommand,
-    RegisterEventInterestCommandArgs, RegisterEventInterestCommandError,
+    EventActEntry, EventCache, EventCacheError, EventRepository, EventSnapshot,
+    ListFanEventInterests, LoadEvents, LoadEventsError, MAX_PUBLIC_EVENT_LIMIT,
+    RegisterEventInterest, RegisterEventInterestCommand, RegisterEventInterestCommandArgs,
+    RegisterEventInterestCommandError, ReplaceEventActs, ReplaceEventActsCommand,
 };
 pub use fan_lifecycle::{
     ConfirmFan, ConfirmFanCommand, FanLifecycleError, FanLifecycleRepository, UnsubscribeFan,

@@ -404,6 +404,10 @@ pub(super) fn application_routes(state: AppState) -> Router {
             get(events::ticket_redirect),
         )
         .route(
+            "/v1/public/events/{slug}/acts/{act_slug}/ticket",
+            get(events::act_ticket_redirect),
+        )
+        .route(
             "/v1/public/events/{slug}/listen",
             get(events::listen_redirect),
         )
@@ -432,6 +436,14 @@ pub(super) fn application_routes(state: AppState) -> Router {
         .route(
             "/v1/staff/events/{slug}/ticketing",
             get(ticketing::admin_overview),
+        )
+        .route(
+            "/v1/staff/events/{slug}/acts",
+            put(events::replace_event_acts),
+        )
+        .route(
+            "/v1/admin/events/{slug}/acts",
+            put(events::replace_event_acts),
         )
         .route(
             "/v1/internal/ticket-orders/{order_id}/stripe-checkout",

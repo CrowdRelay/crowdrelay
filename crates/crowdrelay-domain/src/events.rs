@@ -64,6 +64,18 @@ pub struct EventCity {
     pub region: Option<String>,
 }
 
+/// One act on an event's bill, as the fan-facing page renders it.
+///
+/// `ticket_url` is the act's own tagged link — when absent the event's
+/// shared `ticket_url` is the fallback, because a crossbill night often has
+/// one door link for everyone.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct PublicEventAct {
+    pub act_slug: String,
+    pub act_name: String,
+    pub ticket_url: Option<String>,
+}
+
 /// Fan-visible event detail view served from the in-memory cache.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct PublicEvent {
@@ -86,6 +98,8 @@ pub struct PublicEvent {
     pub image_url: Option<String>,
     pub trailer_url: Option<String>,
     pub external_event_url: Option<String>,
+    #[serde(default)]
+    pub acts: Vec<PublicEventAct>,
     #[serde(with = "time::serde::rfc3339")]
     pub updated_at: OffsetDateTime,
 }
@@ -115,6 +129,16 @@ impl PublicEvent {
         {
             return Err(PublicEventError::InvalidSchedule);
         }
+
+        // Acts are the bill: each carries its own tagged ticket link, so a
+        // malformed one gets the same scrutiny as the event's own fields.
+        if self.acts.len() > 32 {
+            return Err(PublicEventError::InvalidActs);
+        }
+        for act in &self.acts {
+            validate_act_fields(&act.act_slug, &act.act_name, act.ticket_url.as_deref())
+                .map_err(|_| PublicEventError::InvalidActs)?;
+        }
         Ok(())
     }
 }
@@ -137,6 +161,46 @@ pub enum PublicEventError {
     /// A URL field was not a valid HTTPS URL.
     #[error("event URL is invalid")]
     InvalidUrl,
+    /// An act on the bill was malformed (slug grammar, empty/oversized name,
+    /// or the bill itself exceeded the bound).
+    #[error("event act bill is invalid")]
+    InvalidActs,
+}
+
+/// The `event_acts.act_slug` CHECK grammar: `^[a-z0-9][a-z0-9-]{0,63}$`.
+/// One source shared by click attribution, public-event validation and the
+/// staff write path so a slug that is legal in one place cannot be illegal in
+/// the other.
+#[must_use]
+pub fn valid_act_slug(slug: &str) -> bool {
+    !slug.is_empty()
+        && slug.len() <= 64
+        && slug
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+        && slug
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphanumeric())
+}
+
+/// Validates one act exactly as [`PublicEvent::validate`] will on the way back
+/// out — write paths call this so a bill that stores cannot poison the public
+/// event cache on the next refresh.
+///
+/// The checks mirror the event's own field rules: CHECK-grammar slug,
+/// control-free trimmed name within bytes, HTTPS-only ticket URL with no
+/// userinfo or fragment.
+pub fn validate_act_fields(
+    act_slug: &str,
+    act_name: &str,
+    ticket_url: Option<&str>,
+) -> Result<(), PublicEventError> {
+    if !valid_act_slug(act_slug) {
+        return Err(PublicEventError::InvalidActs);
+    }
+    validate_required_text(act_name, 160).map_err(|_| PublicEventError::InvalidActs)?;
+    validate_optional_https_url(ticket_url)
 }
 
 fn validate_required_text(value: &str, maximum_bytes: usize) -> Result<(), PublicEventError> {
@@ -227,6 +291,9 @@ pub struct EventAction {
     campaign_id: Option<CampaignId>,
     visitor_id: Option<VisitorId>,
     referrer_host: Option<String>,
+    /// Which act's tagged link produced the action — recorded with the fact
+    /// so it survives later edits to the bill.
+    act_slug: Option<String>,
     occurred_at: OffsetDateTime,
 }
 
@@ -259,8 +326,22 @@ impl EventAction {
             campaign_id,
             visitor_id,
             referrer_host,
+            act_slug: None,
             occurred_at,
         })
+    }
+
+    /// Attributes the action to one act's tagged link. The slug grammar
+    /// matches `event_acts.act_slug`; anything else is rejected rather than
+    /// silently persisted into the analytics ledger. On failure the action
+    /// itself is untouched — a click still counts unattributed.
+    pub fn set_act_slug(&mut self, act_slug: &str) -> Result<(), EventActionError> {
+        let slug = act_slug.trim().to_ascii_lowercase();
+        if !valid_act_slug(&slug) {
+            return Err(EventActionError::InvalidActSlug);
+        }
+        self.act_slug = Some(slug);
+        Ok(())
     }
 
     /// Returns the workspace that owns the event.
@@ -293,6 +374,11 @@ impl EventAction {
     pub fn referrer_host(&self) -> Option<&str> {
         self.referrer_host.as_deref()
     }
+    /// Returns the act whose tagged link produced the action, if any.
+    #[must_use]
+    pub fn act_slug(&self) -> Option<&str> {
+        self.act_slug.as_deref()
+    }
     /// Returns the timestamp at which the action occurred.
     #[must_use]
     pub const fn occurred_at(&self) -> OffsetDateTime {
@@ -306,13 +392,16 @@ pub enum EventActionError {
     /// The referrer host was empty, too long, or contained invalid characters.
     #[error("event action referrer is invalid")]
     InvalidReferrer,
+    /// The act slug was empty, too long, or outside the slug grammar.
+    #[error("event action act slug is invalid")]
+    InvalidActSlug,
 }
 
 #[cfg(test)]
 mod description_tests {
     use super::*;
 
-    fn event(description: Option<&str>, venue: Option<&str>) -> PublicEvent {
+    pub(super) fn event(description: Option<&str>, venue: Option<&str>) -> PublicEvent {
         PublicEvent {
             id: EventId::new(),
             slug: EventSlug::parse("wlacz-sie-na-nowe").expect("slug should parse"),
@@ -330,6 +419,7 @@ mod description_tests {
             image_url: None,
             trailer_url: None,
             external_event_url: None,
+            acts: Vec::new(),
             updated_at: OffsetDateTime::UNIX_EPOCH,
         }
     }
@@ -379,5 +469,98 @@ mod description_tests {
     fn venue_remains_single_line() {
         assert!(event(None, Some("Klub Łącznik")).validate().is_ok());
         assert!(event(None, Some("Klub\nŁącznik")).validate().is_err());
+    }
+}
+
+#[cfg(test)]
+mod act_tests {
+    use super::*;
+
+    #[test]
+    fn act_slug_grammar_matches_the_check_constraint() {
+        for slug in ["virya", "the-openers-2", "a", "x".repeat(64).as_str()] {
+            assert!(valid_act_slug(slug), "expected valid: {slug:?}");
+        }
+        for slug in [
+            "",
+            "-leading-hyphen",
+            "Uppercase",
+            "with space",
+            "under_score",
+            "ünïcode",
+            "x".repeat(65).as_str(),
+        ] {
+            assert!(!valid_act_slug(slug), "expected invalid: {slug:?}");
+        }
+        // A trailing hyphen is ugly but legal — the CHECK allows it, so the
+        // shared predicate must too, or a stored row would fail reads.
+        assert!(valid_act_slug("virya-"));
+    }
+
+    #[test]
+    fn set_act_slug_normalizes_and_rejects() {
+        let mut action = EventAction::new(
+            WorkspaceId::new(),
+            EventId::new(),
+            EventActionKind::TicketClick,
+            None,
+            None,
+            None,
+            OffsetDateTime::UNIX_EPOCH,
+        )
+        .expect("action should build");
+        action
+            .set_act_slug("  Virya  ")
+            .expect("trimmed lowercase slug should set");
+        assert_eq!(action.act_slug(), Some("virya"));
+        assert_eq!(
+            action.set_act_slug("not a slug!"),
+            Err(EventActionError::InvalidActSlug)
+        );
+        // A failed set leaves the action untouched — the prior attribution
+        // stands rather than being cleared by a bad update.
+        assert_eq!(action.act_slug(), Some("virya"));
+    }
+
+    #[test]
+    fn act_field_validation_matches_read_path_strictness() {
+        assert!(validate_act_fields("virya", "Virya", None).is_ok());
+        assert!(validate_act_fields("virya", "Virya", Some("https://tickets.example/x")).is_ok());
+        // Write paths must refuse everything the read path would — otherwise
+        // a stored bill ejects the whole event from the public cache.
+        for bad_url in [
+            "http://insecure.example/x",
+            "https://exa mple.com",
+            "https://user:pass@example.com/x",
+            "https://example.com/#frag",
+            "not a url",
+        ] {
+            assert!(
+                validate_act_fields("virya", "Virya", Some(bad_url)).is_err(),
+                "expected rejection: {bad_url:?}"
+            );
+        }
+        assert!(validate_act_fields("virya", "with\nnewline", None).is_err());
+        assert!(validate_act_fields("virya", " padded ", None).is_err());
+        assert!(validate_act_fields("virya", "", None).is_err());
+        assert!(validate_act_fields("virya", &"n".repeat(161), None).is_err());
+        assert!(validate_act_fields("Bad Slug", "Virya", None).is_err());
+    }
+
+    #[test]
+    fn event_validation_rejects_a_poisoned_bill() {
+        let mut event = description_tests::event(None, None);
+        event.acts.push(PublicEventAct {
+            act_slug: "virya".to_owned(),
+            act_name: "Virya".to_owned(),
+            ticket_url: Some("https://tickets.example/virya".to_owned()),
+        });
+        assert!(event.validate().is_ok());
+        event.acts.push(PublicEventAct {
+            act_slug: "bad".to_owned(),
+            act_name: "Line\nBreak".to_owned(),
+            ticket_url: None,
+        });
+        assert_eq!(event.validate(), Err(PublicEventError::InvalidActs));
     }
 }

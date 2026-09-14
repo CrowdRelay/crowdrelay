@@ -15,9 +15,9 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use crowdrelay_application::{
-    EventCache, IdempotencyKey, ListFanEventInterests, MAX_PUBLIC_EVENT_LIMIT,
+    EventActEntry, EventCache, IdempotencyKey, ListFanEventInterests, MAX_PUBLIC_EVENT_LIMIT,
     RegisterEventInterest, RegisterEventInterestCommand, RegisterEventInterestCommandArgs,
-    RepositoryError, RequestId,
+    ReplaceEventActs, ReplaceEventActsCommand, RepositoryError, RequestId,
 };
 use crowdrelay_domain::{
     CampaignId, EventAction, EventActionKind, EventSlug, PublicEvent, WorkspaceId,
@@ -60,6 +60,7 @@ pub struct EventState {
     cache: Arc<EventCache>,
     register_interest: RegisterEventInterest,
     list_fan_interests: ListFanEventInterests,
+    replace_acts: ReplaceEventActs,
     action_submitter: EventActionSubmitter,
     action_metrics_reader: EventActionMetricsReader,
 }
@@ -72,6 +73,7 @@ impl EventState {
         cache: Arc<EventCache>,
         register_interest: RegisterEventInterest,
         list_fan_interests: ListFanEventInterests,
+        replace_acts: ReplaceEventActs,
         action_submitter: EventActionSubmitter,
         action_metrics_reader: EventActionMetricsReader,
     ) -> Self {
@@ -80,6 +82,7 @@ impl EventState {
             cache,
             register_interest,
             list_fan_interests,
+            replace_acts,
             action_submitter,
             action_metrics_reader,
         }
@@ -218,8 +221,71 @@ pub async fn ticket_redirect(
         headers,
         attribution.campaign_id,
         EventActionKind::TicketClick,
+        None,
         |event| event.ticket_url.clone(),
     )
+}
+
+/// Records a ticket conversion action attributed to one act on the bill and
+/// redirects to that act's tagged link — or the event's shared URL when the
+/// act carries none of its own.
+pub async fn act_ticket_redirect(
+    State(state): State<crate::AppState>,
+    Path((raw_slug, raw_act)): Path<(String, String)>,
+    query: Result<Query<AttributionQuery>, QueryRejection>,
+    headers: HeaderMap,
+) -> Response {
+    let request_id_value = request_id(&headers);
+    let attribution = match query {
+        Ok(Query(value)) => value,
+        Err(_) => {
+            return Problem::bad_request(request_id_value)
+                .private()
+                .into_response();
+        }
+    };
+    let Some(event) = resolve_event(&state.events, raw_slug) else {
+        return Problem::not_found(request_id_value)
+            .private()
+            .into_response();
+    };
+    let act_slug = raw_act.trim().to_ascii_lowercase();
+    let Some(act) = event.acts.iter().find(|act| act.act_slug == act_slug) else {
+        return Problem::not_found(request_id_value)
+            .private()
+            .into_response();
+    };
+    let Some(destination) = act.ticket_url.clone().or_else(|| event.ticket_url.clone()) else {
+        // An act with no link anywhere up the chain is a 404, not a fan-
+        // facing error page: the click simply has nowhere to land.
+        return Problem::not_found(request_id_value)
+            .private()
+            .into_response();
+    };
+    let act_slug = act.act_slug.clone();
+    let Ok(location) = HeaderValue::from_str(&destination) else {
+        tracing::error!(event_id = %event.id, %act_slug, "stored act URL is not a valid response header");
+        return Problem::internal(request_id_value)
+            .private()
+            .into_response();
+    };
+
+    submit_action(
+        &state.events,
+        &headers,
+        &event,
+        EventActionKind::TicketClick,
+        attribution.campaign_id,
+        Some(&act_slug),
+    );
+    (
+        StatusCode::FOUND,
+        [
+            (LOCATION, location),
+            (CACHE_CONTROL, HeaderValue::from_static(PRIVATE_NO_STORE)),
+        ],
+    )
+        .into_response()
 }
 
 /// Records a listen conversion action and redirects to the music destination.
@@ -243,6 +309,7 @@ pub async fn listen_redirect(
         headers,
         attribution.campaign_id,
         EventActionKind::ListenClick,
+        None,
         |event| event.listen_url.clone(),
     )
 }
@@ -253,6 +320,7 @@ fn event_redirect(
     headers: HeaderMap,
     campaign_id: Option<CampaignId>,
     action: EventActionKind,
+    act_slug: Option<&str>,
     destination: impl FnOnce(&PublicEvent) -> Option<String>,
 ) -> Response {
     let request_id_value = request_id(&headers);
@@ -273,7 +341,14 @@ fn event_redirect(
             .into_response();
     };
 
-    submit_action(&state.events, &headers, &event, action, campaign_id);
+    submit_action(
+        &state.events,
+        &headers,
+        &event,
+        action,
+        campaign_id,
+        act_slug,
+    );
     (
         StatusCode::FOUND,
         [
@@ -310,6 +385,7 @@ pub async fn calendar(
         &event,
         EventActionKind::CalendarDownload,
         attribution.campaign_id,
+        None,
     );
 
     let filename = format!("virya-{}.ics", event.slug.as_str());
@@ -535,6 +611,7 @@ fn track_action(
         &event,
         action,
         attribution.campaign_id,
+        None,
     );
     (StatusCode::NO_CONTENT, [(CACHE_CONTROL, PRIVATE_NO_STORE)]).into_response()
 }
@@ -550,8 +627,9 @@ fn submit_action(
     event: &PublicEvent,
     action: EventActionKind,
     campaign_id: Option<CampaignId>,
+    act_slug: Option<&str>,
 ) {
-    let Ok(event_action) = EventAction::new(
+    let Ok(mut event_action) = EventAction::new(
         state.workspace_id,
         event.id,
         action,
@@ -562,6 +640,11 @@ fn submit_action(
     ) else {
         return;
     };
+    if let Some(slug) = act_slug {
+        // The click counts even when the act label fails validation — an
+        // unattributed ticket click is a fact, not a loss.
+        let _ = event_action.set_act_slug(slug);
+    }
     (state.action_submitter)(event_action);
 }
 
@@ -647,6 +730,88 @@ fn etag_matches(candidate: Option<&HeaderValue>, expected: &str) -> bool {
         })
 }
 
+/// One act as staff write it in a bill-replacement request.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EventActInput {
+    act_slug: String,
+    act_name: String,
+    #[serde(default)]
+    position: i32,
+    #[serde(default)]
+    ticket_url: Option<String>,
+}
+
+/// Body of the staff/admin bill-replacement endpoint. The whole bill is sent
+/// and replaced atomically — a partial update protocol buys nothing on a list
+/// this small.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReplaceEventActsRequest {
+    acts: Vec<EventActInput>,
+}
+
+fn act_input_valid(act: &EventActInput) -> bool {
+    // Same validator the read path applies inside `PublicEvent::validate` —
+    // a bill that stores must not poison the public cache on the next refresh.
+    (0..=999).contains(&act.position)
+        && crowdrelay_domain::validate_act_fields(
+            &act.act_slug.trim().to_ascii_lowercase(),
+            act.act_name.trim(),
+            act.ticket_url.as_deref().map(str::trim),
+        )
+        .is_ok()
+}
+
+/// Replaces an event's whole act bill in one transaction (staff/admin). The
+/// bill is what makes per-act ticket-click attribution answerable.
+pub async fn replace_event_acts(
+    State(state): State<crate::AppState>,
+    Path(raw_slug): Path<String>,
+    headers: HeaderMap,
+    body: Result<Json<ReplaceEventActsRequest>, JsonRejection>,
+) -> Response {
+    let request_id_value = request_id(&headers);
+    let Json(payload) = match body {
+        Ok(value) => value,
+        Err(rejection) => {
+            let problem = if rejection.status() == StatusCode::PAYLOAD_TOO_LARGE {
+                Problem::payload_too_large(request_id_value)
+            } else {
+                Problem::bad_request(request_id_value)
+            };
+            return problem.private().into_response();
+        }
+    };
+    if payload.acts.len() > 32 || payload.acts.iter().any(|act| !act_input_valid(act)) {
+        return Problem::bad_request(request_id_value)
+            .private()
+            .into_response();
+    }
+    let command = ReplaceEventActsCommand {
+        workspace_id: state.events.workspace_id,
+        event_slug: raw_slug.trim().to_ascii_lowercase(),
+        acts: payload
+            .acts
+            .iter()
+            .map(|act| EventActEntry {
+                act_slug: act.act_slug.trim().to_ascii_lowercase(),
+                act_name: act.act_name.trim().to_owned(),
+                position: act.position,
+                ticket_url: act.ticket_url.as_deref().map(|url| url.trim().to_owned()),
+            })
+            .collect(),
+    };
+    match state.events.replace_acts.execute(&command).await {
+        Ok(()) => (
+            StatusCode::NO_CONTENT,
+            [(CACHE_CONTROL, HeaderValue::from_static(PRIVATE_NO_STORE))],
+        )
+            .into_response(),
+        Err(error) => repository_problem(error, request_id_value).into_response(),
+    }
+}
+
 fn repository_problem(error: RepositoryError, request_id: Option<String>) -> Problem {
     match error {
         RepositoryError::Unavailable => Problem::service_unavailable(request_id),
@@ -685,6 +850,7 @@ mod tests {
             image_url: None,
             trailer_url: None,
             external_event_url: None,
+            acts: Vec::new(),
             updated_at: OffsetDateTime::UNIX_EPOCH,
         };
 
@@ -724,6 +890,7 @@ mod tests {
             image_url: None,
             trailer_url: None,
             external_event_url: None,
+            acts: Vec::new(),
             updated_at: OffsetDateTime::UNIX_EPOCH,
         };
 

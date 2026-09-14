@@ -21,9 +21,9 @@ mod tests {
         ConfirmFanCommand, EventCache, EventRepository, FanLifecycleRepository, IssueAdmissionPass,
         ListCities, ListFanEventInterests, LoadAdmissionPass, LoadReferralProgress,
         RedeemAdmissionPass, RedeemCoupon, RedeemCouponCommand, RedirectCache, ReferralRepository,
-        RegisterEventInterest, RegisterEventInterestCommand, RepositoryError, ResolveReferralCode,
-        RevokeAdmissionPass, SignupFan, SignupFanCommand, UnsubscribeFan, UpsertSmartLinkCommand,
-        UpsertedSmartLink,
+        RegisterEventInterest, RegisterEventInterestCommand, ReplaceEventActs, RepositoryError,
+        ResolveReferralCode, RevokeAdmissionPass, SignupFan, SignupFanCommand, UnsubscribeFan,
+        UpsertSmartLinkCommand, UpsertedSmartLink,
     };
     use crowdrelay_domain::{
         AdmissionPassClaimed, AdmissionPassIssued, AdmissionPassView, AdmissionRedemptionResult,
@@ -224,6 +224,13 @@ mod tests {
         ) -> Result<Vec<FanEventInterest>, RepositoryError> {
             Ok(Vec::new())
         }
+
+        async fn replace_event_acts(
+            &self,
+            _command: &crowdrelay_application::ReplaceEventActsCommand,
+        ) -> Result<(), RepositoryError> {
+            Ok(())
+        }
     }
 
     struct TestAdmissionRepository;
@@ -321,7 +328,8 @@ mod tests {
             workspace_id,
             Arc::new(EventCache::new()),
             RegisterEventInterest::new(Arc::clone(&repository)),
-            ListFanEventInterests::new(repository),
+            ListFanEventInterests::new(Arc::clone(&repository)),
+            ReplaceEventActs::new(repository),
             Arc::new(|_action| {}),
             Arc::new(EventActionMetricsSnapshot::default),
         )
@@ -366,6 +374,22 @@ mod tests {
         redirect_cache: Arc<RedirectCache>,
         click_submitter: ClickSubmitter,
     ) -> Result<AppState, Box<dyn std::error::Error>> {
+        state_with_event_state(
+            repository,
+            workspace_id,
+            redirect_cache,
+            click_submitter,
+            event_state(workspace_id),
+        )
+    }
+
+    fn state_with_event_state(
+        repository: Arc<dyn AcquisitionRepository>,
+        workspace_id: WorkspaceId,
+        redirect_cache: Arc<RedirectCache>,
+        click_submitter: ClickSubmitter,
+        events: EventState,
+    ) -> Result<AppState, Box<dyn std::error::Error>> {
         let database = PgPoolOptions::new()
             .max_connections(1)
             .acquire_timeout(Duration::from_millis(50))
@@ -394,7 +418,7 @@ mod tests {
             Duration::from_millis(50),
             acquisition_state(repository, workspace_id, redirect_cache, click_submitter)?,
             referral_state(workspace_id)?,
-            event_state(workspace_id),
+            events,
             admission_state(workspace_id),
             concert_qr,
             fan_lifecycle_state(workspace_id)?,
@@ -1131,6 +1155,124 @@ mod tests {
             .oneshot(Request::builder().uri("/health/live").body(Body::empty())?)
             .await?;
         assert_eq!(health.status(), StatusCode::OK);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn act_ticket_redirect_attributes_clicks_and_redirects_per_act()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let workspace_id = WorkspaceId::new();
+        let captured: Arc<Mutex<Vec<EventAction>>> = Arc::new(Mutex::new(Vec::new()));
+        let cache = Arc::new(EventCache::new());
+        cache.replace_for_workspace(
+            workspace_id,
+            [PublicEvent {
+                id: crowdrelay_domain::EventId::new(),
+                slug: crowdrelay_domain::EventSlug::parse("test-show")?,
+                title: "Test Show".to_owned(),
+                description: None,
+                city: None,
+                venue: None,
+                venue_address: None,
+                timezone: "Europe/Warsaw".to_owned(),
+                starts_at: time::OffsetDateTime::now_utc() + time::Duration::days(7),
+                doors_at: None,
+                ends_at: None,
+                ticket_url: Some("https://tickets.example.test/event".to_owned()),
+                listen_url: None,
+                image_url: None,
+                trailer_url: None,
+                external_event_url: None,
+                acts: vec![
+                    crowdrelay_domain::PublicEventAct {
+                        act_slug: "opener".to_owned(),
+                        act_name: "Opener".to_owned(),
+                        ticket_url: None,
+                    },
+                    crowdrelay_domain::PublicEventAct {
+                        act_slug: "virya".to_owned(),
+                        act_name: "Virya".to_owned(),
+                        ticket_url: Some("https://tickets.example.test/virya".to_owned()),
+                    },
+                ],
+                updated_at: time::OffsetDateTime::now_utc(),
+            }],
+        )?;
+        let repository: Arc<dyn EventRepository> = Arc::new(TestEventRepository);
+        let events = EventState::new(
+            workspace_id,
+            cache,
+            RegisterEventInterest::new(Arc::clone(&repository)),
+            ListFanEventInterests::new(Arc::clone(&repository)),
+            ReplaceEventActs::new(repository),
+            {
+                let captured = Arc::clone(&captured);
+                Arc::new(move |action: EventAction| {
+                    captured
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .push(action);
+                })
+            },
+            Arc::new(EventActionMetricsSnapshot::default),
+        );
+        let app = test_router_with_state(state_with_event_state(
+            Arc::new(TestRepository::unavailable()),
+            workspace_id,
+            Arc::new(RedirectCache::new()),
+            Arc::new(|_event| {}),
+            events,
+        )?)?;
+
+        // An act with its own tagged link redirects there, attributed.
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/public/events/test-show/acts/virya/ticket")
+                    .body(Body::empty())?,
+            )
+            .await?;
+        assert_eq!(response.status(), StatusCode::FOUND);
+        assert_eq!(
+            response.headers()[LOCATION],
+            "https://tickets.example.test/virya"
+        );
+
+        // An act with no link of its own falls back to the event's shared URL.
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/public/events/test-show/acts/opener/ticket")
+                    .body(Body::empty())?,
+            )
+            .await?;
+        assert_eq!(response.status(), StatusCode::FOUND);
+        assert_eq!(
+            response.headers()[LOCATION],
+            "https://tickets.example.test/event"
+        );
+
+        // An act that is not on the bill is a 404 and records nothing.
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/public/events/test-show/acts/nobody/ticket")
+                    .body(Body::empty())?,
+            )
+            .await?;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+        let actions = captured.lock().unwrap_or_else(|e| e.into_inner());
+        assert_eq!(actions.len(), 2);
+        assert_eq!(
+            actions[0].action(),
+            crowdrelay_domain::EventActionKind::TicketClick
+        );
+        assert_eq!(actions[0].act_slug(), Some("virya"));
+        assert_eq!(actions[1].act_slug(), Some("opener"));
         Ok(())
     }
 }

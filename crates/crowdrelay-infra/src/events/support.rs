@@ -20,6 +20,7 @@ struct PublicEventRow {
     image_url: Option<String>,
     trailer_url: Option<String>,
     external_event_url: Option<String>,
+    acts: Option<serde_json::Value>,
     updated_at: OffsetDateTime,
 }
 
@@ -55,6 +56,12 @@ impl TryFrom<PublicEventRow> for PublicEvent {
             image_url: row.image_url,
             trailer_url: row.trailer_url,
             external_event_url: row.external_event_url,
+            acts: row
+                .acts
+                .map(serde_json::from_value::<Vec<PublicEventAct>>)
+                .transpose()
+                .map_err(|_| EventStoreError::Unexpected)?
+                .unwrap_or_default(),
             updated_at: row.updated_at,
         };
         event.validate().map_err(|_| EventStoreError::Unexpected)?;
@@ -84,6 +91,7 @@ struct FanInterestRow {
     image_url: Option<String>,
     trailer_url: Option<String>,
     external_event_url: Option<String>,
+    acts: Option<serde_json::Value>,
     updated_at: OffsetDateTime,
     interested_at: OffsetDateTime,
 }
@@ -112,6 +120,7 @@ impl TryFrom<FanInterestRow> for FanEventInterest {
             image_url: row.image_url,
             trailer_url: row.trailer_url,
             external_event_url: row.external_event_url,
+            acts: row.acts,
             updated_at: row.updated_at,
         })?;
         Ok(Self {
@@ -390,6 +399,10 @@ async fn complete_idempotency(
 fn duration_as_milliseconds(duration: Duration) -> Result<i64, EventStoreError> {
     i64::try_from(duration.as_millis()).map_err(|_| EventStoreError::Unexpected)
 }
+
+/// The `event_acts.act_slug` CHECK grammar lives in
+/// `crowdrelay_domain::valid_act_slug` — one source shared by click
+/// attribution, bill writes and public-event validation.
 
 #[derive(Clone, Copy, Debug, thiserror::Error, Eq, PartialEq)]
 enum EventStoreError {

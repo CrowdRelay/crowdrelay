@@ -1880,6 +1880,89 @@ paths:
         '503':
           $ref: '#/components/responses/PrivateProblem'
 
+  /admin/events/{slug}/acts:
+    put:
+      operationId: replaceEventActsAdmin
+      summary: Replace the event's whole act bill atomically
+      description: >-
+        The bill names every act on the show and gives each its own tagged
+        ticket link — the input that makes per-act click attribution
+        answerable. Replace semantics: the submitted list becomes the bill;
+        acts absent from it are removed in the same transaction.
+      security:
+      - adminBearer: []
+      parameters:
+      - in: path
+        name: slug
+        required: true
+        schema:
+          type: string
+          minLength: 1
+          maxLength: 128
+          pattern: ^[a-z0-9][a-z0-9_-]*$
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReplaceEventActsRequest'
+      responses:
+        '204':
+          description: Bill replaced.
+        '400':
+          $ref: '#/components/responses/PrivateProblem'
+        '401':
+          $ref: '#/components/responses/PrivateProblem'
+        '404':
+          $ref: '#/components/responses/PrivateProblem'
+        '409':
+          $ref: '#/components/responses/PrivateProblem'
+        '413':
+          $ref: '#/components/responses/PrivateProblem'
+        '503':
+          $ref: '#/components/responses/PrivateProblem'
+
+  /staff/events/{slug}/acts:
+    put:
+      operationId: replaceEventActsStaff
+      summary: Replace the event's whole act bill atomically
+      description: >-
+        Same replace semantics as the admin surface: the submitted list
+        becomes the bill, and each act's tagged ticket link is what per-act
+        click attribution records against.
+      security:
+      - staffBearer: []
+      parameters:
+      - in: path
+        name: slug
+        required: true
+        schema:
+          type: string
+          minLength: 1
+          maxLength: 128
+          pattern: ^[a-z0-9][a-z0-9_-]*$
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReplaceEventActsRequest'
+      responses:
+        '204':
+          description: Bill replaced.
+        '400':
+          $ref: '#/components/responses/PrivateProblem'
+        '401':
+          $ref: '#/components/responses/PrivateProblem'
+        '404':
+          $ref: '#/components/responses/PrivateProblem'
+        '409':
+          $ref: '#/components/responses/PrivateProblem'
+        '413':
+          $ref: '#/components/responses/PrivateProblem'
+        '503':
+          $ref: '#/components/responses/PrivateProblem'
+
   /admin/signal/overview:
     get:
       operationId: getSignalOverview
@@ -4644,6 +4727,36 @@ paths:
       responses:
         '302':
           description: Redirect to the configured external URL.
+          headers:
+            Location:
+              $ref: '#/components/headers/RedirectLocation'
+            Cache-Control:
+              $ref: '#/components/headers/PrivateNoStore'
+        '400': *id004
+        '404': *id004
+  /public/events/{slug}/acts/{act_slug}/ticket:
+    get:
+      operationId: openActTicket
+      summary: Track and redirect to one act's tagged ticket link
+      description: >-
+        Records the ticket click attributed to the act, then redirects to that
+        act's own ticket link — or the event's shared ticket URL when the act
+        carries none of its own. Answers "which act moved clicks" without
+        rewriting history: the act slug is stored with the click fact.
+      parameters:
+      - *id003
+      - in: path
+        name: act_slug
+        required: true
+        schema:
+          type: string
+          minLength: 1
+          maxLength: 64
+          pattern: ^[a-z0-9][a-z0-9-]*$
+      - *id005
+      responses:
+        '302':
+          description: Redirect to the act's ticket link or the event fallback.
           headers:
             Location:
               $ref: '#/components/headers/RedirectLocation'
@@ -13091,6 +13204,7 @@ components:
       - title
       - timezone
       - starts_at
+      - acts
       - updated_at
       properties:
         id:
@@ -13156,9 +13270,36 @@ components:
           - string
           - 'null'
           format: uri
+        acts:
+          type: array
+          description: >-
+            The show's bill in running order. Each act's `ticket_url` is its
+            own tagged link; when absent the event's shared `ticket_url` is
+            the fallback. Empty for a show whose bill staff have not written.
+          items:
+            $ref: '#/components/schemas/PublicEventAct'
         updated_at:
           type: string
           format: date-time
+    PublicEventAct:
+      type: object
+      additionalProperties: false
+      required:
+      - act_slug
+      - act_name
+      properties:
+        act_slug:
+          type: string
+          pattern: ^[a-z0-9][a-z0-9-]{0,63}$
+        act_name:
+          type: string
+          minLength: 1
+          maxLength: 160
+        ticket_url:
+          type:
+          - string
+          - 'null'
+          format: uri
     EventListResponse:
       type: object
       additionalProperties: false
@@ -13169,6 +13310,50 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/PublicEvent'
+    ReplaceEventActsRequest:
+      type: object
+      additionalProperties: false
+      required:
+      - acts
+      properties:
+        acts:
+          type: array
+          maxItems: 32
+          description: >-
+            The whole bill, in one list. Replace semantics: the submitted
+            array becomes the event's act bill in a single transaction.
+          items:
+            $ref: '#/components/schemas/EventActInput'
+    EventActInput:
+      type: object
+      additionalProperties: false
+      required:
+      - act_slug
+      - act_name
+      properties:
+        act_slug:
+          type: string
+          pattern: ^[a-z0-9][a-z0-9-]{0,63}$
+          description: Stable per-act attribution key stored on click facts.
+        act_name:
+          type: string
+          minLength: 1
+          maxLength: 160
+        position:
+          type: integer
+          minimum: 0
+          maximum: 999
+          default: 0
+          description: Running order on the bill; sorts the public act list.
+        ticket_url:
+          type:
+          - string
+          - 'null'
+          format: uri
+          pattern: ^https://
+          description: >-
+            The act's own tagged ticket link. Absent acts fall back to the
+            event's shared ticket URL at redirect time.
     ConfigureTicketSaleRequest:
       type: object
       additionalProperties: false

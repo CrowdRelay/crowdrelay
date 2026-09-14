@@ -296,6 +296,32 @@ pub enum RegisterEventInterestCommandError {
     InvalidSource,
 }
 
+/// One act on a show's bill, as staff write it.
+///
+/// `ticket_url` is the act's own tagged link — what its announcement points
+/// at, and what makes "which act moved clicks" answerable. `position` is the
+/// running order on the bill (0 = first/opener ordering is the operator's
+/// own convention, the field only sorts).
+#[derive(Clone, Debug)]
+pub struct EventActEntry {
+    pub act_slug: String,
+    pub act_name: String,
+    pub position: i32,
+    pub ticket_url: Option<String>,
+}
+
+/// Command to replace an event's whole bill in one transaction.
+///
+/// Replace rather than patch: the bill is small (a handful of acts), staff
+/// see it as one list, and a partial update protocol buys nothing but ways
+/// to leave stale acts behind.
+#[derive(Clone, Debug)]
+pub struct ReplaceEventActsCommand {
+    pub workspace_id: WorkspaceId,
+    pub event_slug: String,
+    pub acts: Vec<EventActEntry>,
+}
+
 /// Repository port for event discovery, interest registration, and action tracking.
 #[async_trait]
 pub trait EventRepository: Send + Sync {
@@ -315,6 +341,15 @@ pub trait EventRepository: Send + Sync {
         session_token: &FanSessionToken,
         limit: u32,
     ) -> Result<Vec<FanEventInterest>, RepositoryError>;
+    /// Replaces an event's whole bill atomically and bumps the event's
+    /// `updated_at` so the public cache picks the new acts up on its next
+    /// refresh. Returns `RepositoryError::NotFound` when the event slug does
+    /// not resolve to a draft or published event in the workspace — cancelled
+    /// and completed shows are history and refuse edits.
+    async fn replace_event_acts(
+        &self,
+        command: &ReplaceEventActsCommand,
+    ) -> Result<(), RepositoryError>;
 }
 
 /// Use case: loads published events from the repository and refreshes the event cache.
@@ -411,6 +446,30 @@ impl ListFanEventInterests {
     }
 }
 
+/// Use case: replaces an event's whole act bill in one transaction.
+///
+/// The bill is what makes per-act attribution answerable — each act carries
+/// its own tagged ticket link, and the click ledger records which act the
+/// fan came through. Staff write the bill as one list, so the use case is a
+/// replace, not a per-row patch.
+#[derive(Clone)]
+pub struct ReplaceEventActs {
+    repository: Arc<dyn EventRepository>,
+}
+
+impl ReplaceEventActs {
+    /// Creates the bill-replacement use case.
+    #[must_use]
+    pub fn new(repository: Arc<dyn EventRepository>) -> Self {
+        Self { repository }
+    }
+
+    /// Replaces the event's bill atomically.
+    pub async fn execute(&self, command: &ReplaceEventActsCommand) -> Result<(), RepositoryError> {
+        self.repository.replace_event_acts(command).await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::{
@@ -441,6 +500,7 @@ mod tests {
             image_url: None,
             trailer_url: None,
             external_event_url: None,
+            acts: Vec::new(),
             updated_at: OffsetDateTime::UNIX_EPOCH,
         })
     }
