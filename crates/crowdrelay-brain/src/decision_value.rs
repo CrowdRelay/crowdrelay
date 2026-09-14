@@ -63,10 +63,18 @@ use crate::resource_cost::ResourceCost;
 /// which understated it. Both were written from this file alone.
 ///
 /// What is true: [`DecisionValue::total`] is `pragmatic_value + risk_penalty +
-/// opportunity_cost`, `risk_penalty` is `None`, and `opportunity_cost` is set
-/// by the optimizer — so **intrinsic** value is the posterior mean alone, and
-/// `uncertainty`, `evidence_quality`, `sample_size` and `contamination` do
-/// not enter it.
+/// opportunity_cost`, and `opportunity_cost` is set by the optimizer.
+/// `risk_penalty` is `None` **only when `p_meaningful_effect >= 0.5`** — the
+/// third version of this sentence, and the first to say so. Below coin-flip it
+/// is `Some(-(1 - p) × pragmatic_value)`, which makes intrinsic value `p ×
+/// pragmatic_value` there and the posterior mean alone above. See
+/// [`DecisionValue::risk_penalty`] for why the boundary is where it is, and
+/// `intrinsic_value_is_the_mean_above_coin_flip_and_scaled_below` for the test
+/// that pins both halves so a fourth version cannot drift.
+///
+/// `uncertainty`, `evidence_quality`, `sample_size` and `contamination` do not
+/// enter intrinsic value. `p_meaningful_effect` does, by the clause above; it is
+/// a probability about the effect's sign and size, not a spread.
 ///
 /// But `bridge_is_reliable` is read, one layer out.
 /// [`crate::portfolio::PortfolioOptimizer`] multiplies a `Y14Bridged`
@@ -190,10 +198,27 @@ pub struct DecisionValue {
     /// Risk penalty: expected fan-equivalent loss from adverse outcomes.
     /// Negative when modeled.
     ///
-    /// `None` = risk is NotModeled (Phase 1). This does NOT mean "risk
-    /// is zero" — it means "we have not yet modeled risk." Future: risk
-    /// may become hard constraints (risk > ceiling → ineligible) or
-    /// explicit downside utility. NEVER derived from uncertainty.
+    /// `None` above coin-flip, `Some` below it. `from_stats` sets
+    /// `Some(-(1 - p_meaningful_effect) × pragmatic_value)` when
+    /// `p_meaningful_effect < 0.5` and `None` otherwise, so `None` means "this
+    /// effect is more likely real than not, and carries no noise discount" — not
+    /// "risk is unmodelled". An earlier version of this comment said the latter,
+    /// while the code below had already started computing it; anyone who
+    /// believed the comment and added a discount elsewhere would have charged
+    /// the same risk twice.
+    ///
+    /// Read as a utility term this is a kink: at `p = 0.51` a candidate keeps its
+    /// full mean and at `p = 0.49` it keeps roughly half, so two estimates two
+    /// points apart differ twofold. That is deliberate and it is not a risk
+    /// model. It is a noise discount with a stated boundary — below a coin flip,
+    /// the brain does not get to bank the whole mean of an effect that is more
+    /// likely absent than present. Smoothing it to `p × pragmatic_value`
+    /// everywhere would be continuous and would also mark down every well-
+    /// evidenced candidate in the portfolio, which is a product decision about
+    /// how conservative the autopilot should be, not a bug fix.
+    ///
+    /// NEVER derived from uncertainty: `p_meaningful_effect` is a probability
+    /// about the effect's size, and a posterior spread is not.
     #[serde(default)]
     pub risk_penalty: Option<f64>,
     /// Opportunity cost: expected Y30 fans foregone by choosing this
@@ -697,5 +722,70 @@ mod tests {
         let back: DecisionValue = serde_json::from_str(old_json).unwrap();
         assert!((back.contamination - 0.0).abs() < 0.001);
         assert!(back.risk_penalty.is_none());
+    }
+    /// Pins what intrinsic value actually is, on both sides of the boundary.
+    ///
+    /// The module comment has now been wrong about this twice, in opposite
+    /// directions, and both versions were written from reading this file. A
+    /// sentence nothing checks drifts; this is the check. If the noise discount
+    /// is ever smoothed, or the boundary moves, this test is what fails and says
+    /// which claim in the docs went stale with it.
+    #[test]
+    fn intrinsic_value_is_the_mean_above_coin_flip_and_scaled_below() {
+        let cost = ResourceCost::configured(1.0);
+
+        let mut likely = make_stats(4.0, 1.0, 10);
+        likely.p_meaningful_effect = 0.8;
+        let dv = DecisionValue::from_stats(&likely, cost, DecisionMode::Exploit);
+        assert_eq!(
+            dv.risk_penalty, None,
+            "above coin flip there is no noise discount"
+        );
+        assert!(
+            (dv.total() - 4.0).abs() < 1e-9,
+            "intrinsic value should be the posterior mean alone, got {}",
+            dv.total()
+        );
+
+        let mut unlikely = make_stats(4.0, 1.0, 10);
+        unlikely.p_meaningful_effect = 0.25;
+        let dv = DecisionValue::from_stats(&unlikely, cost, DecisionMode::Exploit);
+        assert_eq!(
+            dv.risk_penalty,
+            Some(-3.0),
+            "below coin flip the discount is -(1 - p) x mean"
+        );
+        assert!(
+            (dv.total() - 1.0).abs() < 1e-9,
+            "intrinsic value should be p x mean, got {}",
+            dv.total()
+        );
+    }
+
+    /// The boundary is a kink, and that is a decision rather than an accident.
+    ///
+    /// Two points of probability either side of a coin flip change a candidate's
+    /// value roughly twofold. Written down as a test because the alternative —
+    /// discounting every candidate by `p` — is continuous and defensible, and
+    /// somebody choosing it should be choosing it, not discovering that ranking
+    /// moved.
+    #[test]
+    fn the_noise_discount_is_discontinuous_at_coin_flip() {
+        let cost = ResourceCost::configured(1.0);
+        let mut just_above = make_stats(4.0, 1.0, 10);
+        just_above.p_meaningful_effect = 0.501;
+        let mut just_below = make_stats(4.0, 1.0, 10);
+        just_below.p_meaningful_effect = 0.499;
+
+        let above = DecisionValue::from_stats(&just_above, cost, DecisionMode::Exploit).total();
+        let below = DecisionValue::from_stats(&just_below, cost, DecisionMode::Exploit).total();
+        assert!(
+            (above - 4.0).abs() < 1e-9,
+            "just above coin flip keeps the whole mean, got {above}"
+        );
+        assert!(
+            above > below * 1.9,
+            "the step at the boundary is close to twofold: {above} against {below}"
+        );
     }
 }
