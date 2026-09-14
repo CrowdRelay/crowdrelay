@@ -15,6 +15,13 @@ pub enum ContentSourceKind {
     Event,
     Release,
     ShowCompleted,
+    /// A published video (e.g. a music video on YouTube) — the artifact the
+    /// community-engagement loop shares. Trusted facts only: title, link,
+    /// published timestamp; the story around it is never invented.
+    Video,
+    /// A first-person account the tenant entered through the control plane —
+    /// the only first-person material an agent may narrate.
+    Story,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Ord, PartialOrd, Serialize)]
@@ -97,8 +104,18 @@ pub fn evaluate_content_supply(
         return ContentSupplyDecision::Hold(ContentSupplyHoldReason::InvalidSnapshot);
     }
 
+    // Time-anchored kinds go stale by age: an event or release stops being
+    // news after the policy window. Videos and stories are evergreen
+    // material — a year-old video is still a video, and a story the tenant
+    // entered is live until its writer-set expiry. For them `expires_at`
+    // is the only freshness bound; aging them out by `occurred_at` would
+    // make the channel's whole back catalog unshareable on arrival.
     let maximum_age = Duration::days(i64::from(policy.maximum_source_age_days.max(1)));
-    if snapshot.expires_at <= now || now - snapshot.occurred_at > maximum_age {
+    let age_bounded = matches!(
+        snapshot.source_kind,
+        ContentSourceKind::Event | ContentSourceKind::Release | ContentSourceKind::ShowCompleted
+    );
+    if snapshot.expires_at <= now || (age_bounded && now - snapshot.occurred_at > maximum_age) {
         return ContentSupplyDecision::Hold(ContentSupplyHoldReason::StaleSource);
     }
 
@@ -140,11 +157,17 @@ fn required_artifacts(kind: ContentSourceKind) -> &'static [ContentArtifactKind]
         ContentArtifactKind::SocialFeed,
         ContentArtifactKind::SocialStory,
     ];
+    const SOCIAL: &[ContentArtifactKind] = &[
+        ContentArtifactKind::SocialFeed,
+        ContentArtifactKind::SocialStory,
+    ];
 
     match kind {
         ContentSourceKind::Event => EVENT,
-        ContentSourceKind::Release => RELEASE,
+        ContentSourceKind::Release | ContentSourceKind::Video => RELEASE,
         ContentSourceKind::ShowCompleted => POST,
+        // A story is share material, not an announcement: feed artifacts only.
+        ContentSourceKind::Story => SOCIAL,
     }
 }
 
@@ -216,5 +239,40 @@ mod tests {
                 confidence: Confidence::saturating_from_basis_points(9_500),
             }
         );
+    }
+
+    #[test]
+    fn a_year_old_event_is_stale_but_a_year_old_video_is_share_material() {
+        let old_event = ContentSupplySnapshot {
+            source_id: ContentSourceId::new(),
+            source_kind: ContentSourceKind::Event,
+            source_version: 1,
+            occurred_at: now() - Duration::days(365),
+            expires_at: now() + Duration::days(10),
+            completed_artifacts: Vec::new(),
+            in_flight_artifacts: Vec::new(),
+        };
+        let old_video = ContentSupplySnapshot {
+            source_kind: ContentSourceKind::Video,
+            ..old_event.clone()
+        };
+        let old_story = ContentSupplySnapshot {
+            source_kind: ContentSourceKind::Story,
+            ..old_event.clone()
+        };
+
+        assert_eq!(
+            evaluate_content_supply(&old_event, ContentSupplyPolicy::default(), now()),
+            ContentSupplyDecision::Hold(ContentSupplyHoldReason::StaleSource),
+        );
+        // Video and story are evergreen: only expires_at bounds them.
+        assert!(matches!(
+            evaluate_content_supply(&old_video, ContentSupplyPolicy::default(), now()),
+            ContentSupplyDecision::Request { .. }
+        ));
+        assert!(matches!(
+            evaluate_content_supply(&old_story, ContentSupplyPolicy::default(), now()),
+            ContentSupplyDecision::Request { .. }
+        ));
     }
 }

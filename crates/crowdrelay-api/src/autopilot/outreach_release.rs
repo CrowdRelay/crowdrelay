@@ -644,6 +644,16 @@ pub async fn upsert_content_source(
     headers: HeaderMap,
     Json(request): Json<ContentSourceRequest>,
 ) -> Response {
+    // Videos and stories are evergreen: their facts may be old (a founding
+    // story, a back-catalog video), so the time-anchored 90-day span cap
+    // would make them impossible to enter. For them the create-time bound
+    // is that the source is still live; an edit may move the expiry into
+    // the past, which is how a source is retired.
+    let evergreen = matches!(
+        request.source_kind,
+        ContentSourceKind::Video | ContentSourceKind::Story
+    );
+    let creating = request.expected_version == 0;
     let invalid = request.expected_version < 0
         || (request.expected_version > 0 && request.source_id.is_none())
         || request.source_key.trim().is_empty()
@@ -651,7 +661,8 @@ pub async fn upsert_content_source(
         || request.title.trim().is_empty()
         || request.title.len() > 240
         || request.expires_at <= request.occurred_at
-        || request.expires_at - request.occurred_at > Duration::days(90)
+        || (!evergreen && request.expires_at - request.occurred_at > Duration::days(90))
+        || (evergreen && creating && request.expires_at <= OffsetDateTime::now_utc())
         || !request.metadata.is_object();
     if invalid {
         return Problem::bad_request(request_id(&headers))
@@ -671,6 +682,7 @@ pub async fn upsert_content_source(
         occurred_at: request.occurred_at,
         expires_at: request.expires_at,
         metadata: request.metadata,
+        active: request.active,
         expected_version: request.expected_version,
     };
     match state
@@ -684,6 +696,22 @@ pub async fn upsert_content_source(
         .await
     {
         Ok(result) => private_json(StatusCode::OK, result),
+        Err(error) => repository_problem(error, request_id(&headers)),
+    }
+}
+
+/// The operator's real-material list: every trusted fact the content loop may
+/// draw on — releases, videos, events, stories — active and retired both.
+pub async fn list_content_sources(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Response {
+    match state
+        .autopilot
+        .list_content_sources(state.ops.workspace_id())
+        .await
+    {
+        Ok(sources) => private_json(StatusCode::OK, sources),
         Err(error) => repository_problem(error, request_id(&headers)),
     }
 }

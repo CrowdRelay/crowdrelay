@@ -854,6 +854,8 @@ pub(super) fn parse_content_source_kind(value: &str) -> Result<ContentSourceKind
         "event" => Ok(ContentSourceKind::Event),
         "release" => Ok(ContentSourceKind::Release),
         "show_completed" => Ok(ContentSourceKind::ShowCompleted),
+        "video" => Ok(ContentSourceKind::Video),
+        "story" => Ok(ContentSourceKind::Story),
         _ => Err(RepositoryError::Unexpected),
     }
 }

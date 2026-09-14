@@ -22,6 +22,7 @@
 //! retries and task re-runs can never double-create decisions.
 
 use crate::auto_post_platforms::AutoPostPlatforms;
+use crate::community_vetting::{community_place, community_snapshot};
 use std::time::Duration;
 
 use crowdrelay_application::agent_outcomes::{
@@ -30,7 +31,7 @@ use crowdrelay_application::agent_outcomes::{
 };
 use crowdrelay_domain::WorkspaceId;
 use crowdrelay_domain::target_discovery::{
-    CommunityCandidateSnapshot, ScreeningVerdict, TargetDiscoveryPolicy, screen_community_candidate,
+    ScreeningVerdict, TargetDiscoveryPolicy, screen_community_candidate,
 };
 use serde_json::{Value, json};
 use sqlx::{PgPool, Postgres, Transaction};
@@ -111,6 +112,19 @@ enum OutcomeRejection {
     /// a destination nobody approved, and the approval click shows the copy,
     /// not the link.
     OffPlatformPushTarget { target: String },
+    /// A community post whose target is not a screened-and-admitted
+    /// community. The `target_id` a model supplies is only a claim — the row
+    /// it names must exist, carry `screening_verdict = 'admitted'`, and sit
+    /// at `status = 'promoted'`. Anything else is a post to a community
+    /// nobody vetted: a fabricated UUID posts anywhere the model names, and
+    /// a refused community (off-topic, too small, previously refused) posts
+    /// past the screen that rejected it.
+    UnvettedCommunity { target_id: Uuid },
+    /// A community post that names no trusted content source — or names one
+    /// that does not exist, is inactive, or expired. The post's facts are
+    /// supposed to come from `viryaos_content_sources`; a post about nothing
+    /// is how fabricated anecdotes reached Reddit.
+    UnsourcedPost { source_id: Option<String> },
 }
 
 impl std::fmt::Display for OutcomeRejection {
@@ -130,6 +144,14 @@ impl std::fmt::Display for OutcomeRejection {
                 f,
                 "OFF_PLATFORM_PUSH_TARGET: target_path {target:?} is not an in-app route"
             ),
+            Self::UnvettedCommunity { target_id } => write!(
+                f,
+                "UNVETTED_COMMUNITY: target_id {target_id} is not an admitted, promoted community target"
+            ),
+            Self::UnsourcedPost { source_id } => write!(
+                f,
+                "UNSOURCED_POST: source_id {source_id:?} does not name an active, unexpired content source for this workspace"
+            ),
         }
     }
 }
@@ -144,51 +166,6 @@ include!("agent_outcomes/quality_guard.rs");
 /// is a database question, and this guard is pure so it stays unit-testable.
 fn is_in_app_route(target: &str) -> bool {
     target.starts_with('/') && !target.starts_with("//") && !target.contains("://")
-}
-
-/// Row shape of the audience-graph lookup for a proposed community.
-type CommunityPlaceRow = (Uuid, Option<i32>, Option<i32>, String, String, Option<i16>);
-
-/// What the audience graph already knows about a proposed community.
-#[derive(Clone, Debug)]
-struct CommunityPlace {
-    id: Uuid,
-    member_count: Option<i32>,
-    activity_bp: Option<i32>,
-    status: String,
-    membership_state: String,
-    self_promo_ratio_percent: Option<i16>,
-}
-
-/// Builds the screening snapshot for a proposed community from the agent's
-/// evidence and whatever the audience graph has measured.
-///
-/// Reddit places are never sold placement through this path — the discovery
-/// adapters import public subreddits, not sponsorship inventory — so
-/// `sells_placement` stays false rather than being guessed from prose.
-fn community_snapshot(
-    evidence: &Value,
-    place: Option<&CommunityPlace>,
-) -> CommunityCandidateSnapshot {
-    let has_evidence = evidence.as_array().is_some_and(|items| {
-        items
-            .iter()
-            .any(|item| item.as_str().is_some_and(|s| !s.trim().is_empty()))
-    });
-    let mut snapshot = CommunityCandidateSnapshot {
-        has_evidence,
-        ..CommunityCandidateSnapshot::default()
-    };
-    if let Some(place) = place {
-        snapshot.member_count = place.member_count.and_then(|v| u32::try_from(v).ok());
-        snapshot.activity_basis_points = place.activity_bp.and_then(|v| u16::try_from(v).ok());
-        snapshot.self_promo_ratio_percent = place
-            .self_promo_ratio_percent
-            .and_then(|v| u8::try_from(v).ok());
-        snapshot.refused_by_us_or_them = place.status == "blocked"
-            || matches!(place.membership_state.as_str(), "rejected" | "not_a_fit");
-    }
-    snapshot
 }
 
 #[derive(Clone, Debug)]
@@ -628,6 +605,95 @@ impl AgentOutcomeWorker {
                 None
             };
 
+            // Admission gate: the supplied target_id must name a real,
+            // screened-and-admitted community target. Until the topical screen
+            // existed, communities were admitted on member count alone — a
+            // 360k-member video-game subreddit was admitted and posted to, and
+            // the model's target_id needed only to parse as a UUID. Both holes
+            // close here: fabricated ids find no row, and refused communities
+            // carry no admit.
+            if let Some(target_id) = community_target_id {
+                let admitted = sqlx::query_scalar::<_, bool>(
+                    r#"
+                    SELECT EXISTS(
+                        SELECT 1 FROM agent_outreach_targets
+                        WHERE workspace_id = $1
+                          AND id = $2
+                          AND target_kind = 'community'
+                          AND screening_verdict = 'admitted'
+                          AND status = 'promoted'
+                    )
+                    "#,
+                )
+                .bind(outcome.workspace_id)
+                .bind(target_id)
+                .fetch_one(&mut *tx)
+                .await?;
+                if !admitted {
+                    let rejection = OutcomeRejection::UnvettedCommunity { target_id };
+                    tracing::warn!(
+                        outcome_id = %outcome.id,
+                        target_id = %target_id,
+                        rejection = %rejection,
+                        "rejecting community post: target is not an admitted community"
+                    );
+                    drop(tx);
+                    self.reject_outcome(outcome.id, &rejection.to_string())
+                        .await?;
+                    return Ok((None, None));
+                }
+
+                // Source gate: the post must name the trusted content source
+                // its facts come from. The schema requires source_id; here we
+                // check the row exists, belongs to this workspace, and is
+                // still live. A post without one is a post about nothing —
+                // which is exactly how invented anecdotes shipped.
+                let source_id_raw = outcome
+                    .payload
+                    .item
+                    .as_ref()
+                    .and_then(|i| i.get("source_id"))
+                    .and_then(Value::as_str)
+                    .map(str::to_owned);
+                let source_ok = match source_id_raw
+                    .as_deref()
+                    .and_then(|s| Uuid::parse_str(s).ok())
+                {
+                    Some(source_id) => {
+                        sqlx::query_scalar::<_, bool>(
+                            r#"
+                        SELECT EXISTS(
+                            SELECT 1 FROM viryaos_content_sources
+                            WHERE workspace_id = $1
+                              AND id = $2
+                              AND active
+                              AND expires_at > now()
+                        )
+                        "#,
+                        )
+                        .bind(outcome.workspace_id)
+                        .bind(source_id)
+                        .fetch_one(&mut *tx)
+                        .await?
+                    }
+                    None => false,
+                };
+                if !source_ok {
+                    let rejection = OutcomeRejection::UnsourcedPost {
+                        source_id: source_id_raw,
+                    };
+                    tracing::warn!(
+                        outcome_id = %outcome.id,
+                        rejection = %rejection,
+                        "rejecting community post: no live content source behind it"
+                    );
+                    drop(tx);
+                    self.reject_outcome(outcome.id, &rejection.to_string())
+                        .await?;
+                    return Ok((None, None));
+                }
+            }
+
             // Check if the workspace's policy for the outcome's context is
             // set to bounded_auto. If so, the action skips the approval step
             // and goes straight to queued. Two cases:
@@ -724,6 +790,7 @@ impl AgentOutcomeWorker {
                         "title": item.and_then(|i| i.get("title")).and_then(Value::as_str).unwrap_or(""),
                         "body": item.and_then(|i| i.get("body")).and_then(Value::as_str).unwrap_or(""),
                         "smart_link": tracked_link,
+                        "source_id": item.and_then(|i| i.get("source_id")).and_then(Value::as_str),
                     }),
                     "community.engage.request",
                     "third_party",
@@ -1186,9 +1253,7 @@ impl AgentOutcomeWorker {
         let is_community = target_kind == "community";
         let initial_status = if is_community { "promoted" } else { "proposed" };
         let (place_id, verdict, refusal) = if is_community {
-            let place = self
-                .community_place(tx, outcome.workspace_id, subreddit)
-                .await?;
+            let place = community_place(tx, outcome.workspace_id, subreddit).await?;
             let snapshot = community_snapshot(&evidence, place.as_ref());
             match screen_community_candidate(&snapshot, TargetDiscoveryPolicy::default()) {
                 ScreeningVerdict::Admit { .. } => (place.map(|p| p.id), Some("admitted"), None),
@@ -1247,51 +1312,6 @@ impl AgentOutcomeWorker {
         // to approve them. Personal-contact kinds keep the proposed → promoted
         // operator-approval flow and need an action row.
         Ok(is_community)
-    }
-
-    /// Looks up the audience-graph place for a proposed community, matching
-    /// on the subreddit slug in the place URL. Returns `None` when discovery
-    /// has not seen the community yet — that is common for a fresh proposal
-    /// and is not a refusal.
-    async fn community_place(
-        &self,
-        tx: &mut Transaction<'_, Postgres>,
-        workspace_id: Uuid,
-        subreddit: Option<&str>,
-    ) -> Result<Option<CommunityPlace>, AgentOutcomeError> {
-        let Some(subreddit) = subreddit.map(str::trim).filter(|s| !s.is_empty()) else {
-            return Ok(None);
-        };
-        let row: Option<CommunityPlaceRow> = sqlx::query_as(
-            r#"
-                SELECT place.id, place.member_count, place.activity_bp,
-                       place.status, place.membership_state,
-                       rules.self_promo_ratio_percent
-                FROM discovery_places AS place
-                LEFT JOIN discovery_place_rules AS rules ON rules.place_id = place.id
-                WHERE place.workspace_id = $1
-                  AND place.place_kind = 'subreddit'
-                  AND lower(substring(place.url from '/r/([^/?#]+)')) = lower($2)
-                ORDER BY place.updated_at DESC
-                LIMIT 1
-                "#,
-        )
-        .bind(workspace_id)
-        .bind(subreddit)
-        .fetch_optional(&mut **tx)
-        .await?;
-        Ok(row.map(
-            |(id, member_count, activity_bp, status, membership_state, self_promo)| {
-                CommunityPlace {
-                    id,
-                    member_count,
-                    activity_bp,
-                    status,
-                    membership_state,
-                    self_promo_ratio_percent: self_promo,
-                }
-            },
-        ))
     }
 
     async fn reject_outcome(

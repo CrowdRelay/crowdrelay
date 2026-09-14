@@ -57,6 +57,7 @@ use crowdrelay_worker::{
     retention::{RetentionWorker, RetentionWorkerConfig},
     social_post_executor::SocialPostExecutorWorker,
     telegram_executor::TelegramExecutorWorker,
+    video_source_sync::VideoSourceSyncWorker,
 };
 use sqlx::PgPool;
 use tokio::{
@@ -728,6 +729,12 @@ async fn run(database: PgPool, config: &Config, standby: bool) -> Result<()> {
         workspace_id.into_uuid(),
     );
 
+    // Video source sync — watches each connected YouTube channel's public
+    // Atom feed and registers new uploads as trusted `video` content sources.
+    // This is how a new video reaches the community loop on its own.
+    let video_source_sync = VideoSourceSyncWorker::new(database.clone(), workspace_id.into_uuid())
+        .context("invalid video source sync worker configuration")?;
+
     let (shutdown_sender, shutdown_receiver) = watch::channel(false);
     let reminder_shutdown = shutdown_receiver.clone();
     let nearby_gig_shutdown = shutdown_receiver.clone();
@@ -752,6 +759,7 @@ async fn run(database: PgPool, config: &Config, standby: bool) -> Result<()> {
     let social_post_executor_shutdown = shutdown_receiver.clone();
     let community_join_executor_shutdown = shutdown_receiver.clone();
     let growth_metric_sync_shutdown = shutdown_receiver.clone();
+    let video_source_sync_shutdown = shutdown_receiver.clone();
     let attribution_shutdown = shutdown_receiver.clone();
     let community_intel_shutdown = shutdown_receiver.clone();
 
@@ -962,6 +970,10 @@ async fn run(database: PgPool, config: &Config, standby: bool) -> Result<()> {
             "growth metric sync"
         });
     }
+    runtime_tasks.spawn(async move {
+        let _ = video_source_sync.run(video_source_sync_shutdown).await;
+        "video source sync"
+    });
     runtime_tasks.spawn(async move {
         attribution_worker.run(attribution_shutdown).await;
         "attribution worker"

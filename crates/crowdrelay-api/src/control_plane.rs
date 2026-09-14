@@ -372,6 +372,15 @@ pub(crate) fn router(state: crate::AppState) -> Router {
             "/v1/control-plane/autopilot/growth-envelope",
             get(crate::autopilot::growth_envelope).post(crate::autopilot::set_growth_envelope),
         )
+        // ── Trusted material ──────────────────────────────────────────
+        // The real-material panel: every fact the content loop may write
+        // about. GET lists, POST upserts through the same versioned,
+        // idempotent command the admin route uses.
+        .route(
+            "/v1/control-plane/autopilot/content-sources",
+            get(crate::autopilot::list_content_sources)
+                .post(crate::autopilot::upsert_content_source),
+        )
         // ── Outreach & booking discovery ──────────────────────────────
         // Candidate queues for the growth pipeline: what the agent found,
         // and the two decisions a human can make about one finding.

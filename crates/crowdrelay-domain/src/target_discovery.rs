@@ -24,6 +24,10 @@ use time::{Duration, OffsetDateTime};
 
 use crate::{action_class::ActionClass, autonomy::Confidence};
 
+// The topical vocabulary lives in its own module; the screen consults the
+// signal, and workers importing it through this path keep working.
+pub use crate::community_topic::{CommunityTopicSignal, community_topic_signal};
+
 /// Where a candidate came from. Recorded on every row so a source that turns
 /// out to be bad can be revoked wholesale instead of hunted row by row.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -163,6 +167,15 @@ pub enum RefusalReason {
     PoorFit,
     /// Real, but too small for a contact the band only gets one of.
     TooSmall,
+    /// The community's own description shows it is not a music space at all —
+    /// a video-game subreddit, an object-identification forum, a hobby that
+    /// happens to share a word with a genre. Posting there is spam to an
+    /// audience that cannot become fans, and a moderator who remembers.
+    ///
+    /// Distinct from `PoorFit`: `PoorFit` is "real community, wrong for this
+    /// band" — a judgement. `OffTopic` is "not a music community" — a fact
+    /// about the space's stated purpose that size cannot rescue.
+    OffTopic,
     /// We already failed to reach this community, or it turned us away.
     ///
     /// Distinct from `PoorFit` on purpose. This collapsed into it, and the two
@@ -187,6 +200,7 @@ impl RefusalReason {
             Self::IndiscriminateChurn => "indiscriminate_churn",
             Self::PoorFit => "poor_fit",
             Self::TooSmall => "too_small",
+            Self::OffTopic => "off_topic",
             Self::PreviouslyRefused => "previously_refused",
         }
     }
@@ -289,6 +303,9 @@ pub struct CommunityCandidateSnapshot {
     /// Our own recorded judgement: the community rejected us, or an operator
     /// marked it as not a fit.
     pub refused_by_us_or_them: bool,
+    /// Whether the community's own description shows a music space. See
+    /// [`CommunityTopicSignal`] — `Unknown` does not refuse; `Unrelated` does.
+    pub topic_signal: CommunityTopicSignal,
 }
 
 /// Screens one public community. The refusal order matches
@@ -313,6 +330,14 @@ pub fn screen_community_candidate(
     }
     if snapshot.refused_by_us_or_them {
         return ScreeningVerdict::Refuse(RefusalReason::PreviouslyRefused);
+    }
+    // A community that is not a music space at all is refused whatever its
+    // size. The check reads the community's own description — a subreddit
+    // for a video game, object identification or metal detecting admits on
+    // member count alone if this arm is missing, and each post there costs
+    // a removal and a moderator who remembers the band.
+    if snapshot.topic_signal == CommunityTopicSignal::Unrelated {
+        return ScreeningVerdict::Refuse(RefusalReason::OffTopic);
     }
     // A community that bans self-promotion outright is not a growth target at
     // any size. Posting there costs a removal and a moderator who remembers.
@@ -919,6 +944,9 @@ mod tests {
             self_promo_ratio_percent: Some(10),
             sells_placement: false,
             refused_by_us_or_them: false,
+            // The pre-topic-screen tests exercise the size/activity/policy
+            // arms; an on-topic baseline keeps them there.
+            topic_signal: CommunityTopicSignal::MusicRelated,
         }
     }
 

@@ -585,6 +585,13 @@ impl CommunityExecutorWorker {
         }
 
         // Step 1: Insert pending rows for unprocessed succeeded actions.
+        //
+        // The community must be a screened-and-admitted target: the action
+        // payload's subreddit came from a model and target_id needed only to
+        // parse as a UUID, so a fabricated or unvetted target used to write a
+        // real post row here. The outcome-ingest gate rejects those outcomes
+        // upstream; this predicate is the second wall for any action that
+        // reaches `succeeded` by another path.
         sqlx::query(
             r#"
             INSERT INTO community_posts
@@ -592,7 +599,8 @@ impl CommunityExecutorWorker {
             SELECT
                 $1,
                 a.id,
-                (a.payload->>'target_id')::uuid,
+                CASE WHEN a.payload->>'target_id' ~ '^[0-9a-fA-F-]{36}$'
+                     THEN (a.payload->>'target_id')::uuid END,
                 COALESCE(a.payload->>'subreddit', ''),
                 COALESCE(a.payload->>'title', ''),
                 COALESCE(a.payload->>'body', ''),
@@ -602,6 +610,19 @@ impl CommunityExecutorWorker {
             WHERE a.workspace_id = $1
               AND a.action_kind = 'community.engage.request'
               AND a.status = 'succeeded'
+              AND a.payload->>'target_id' ~ '^[0-9a-fA-F-]{36}$'
+              AND EXISTS (
+                  SELECT 1 FROM agent_outreach_targets t
+                  WHERE t.workspace_id = a.workspace_id
+                    AND t.id = CASE WHEN a.payload->>'target_id' ~ '^[0-9a-fA-F-]{36}$'
+                                    THEN (a.payload->>'target_id')::uuid END
+                    AND t.target_kind = 'community'
+                    AND t.screening_verdict = 'admitted'
+                    AND t.status = 'promoted'
+                    AND lower(t.subreddit) = lower(
+                        regexp_replace(COALESCE(a.payload->>'subreddit', ''), '^/?r/', '')
+                    )
+              )
               AND NOT EXISTS (
                   SELECT 1 FROM community_posts cp WHERE cp.action_id = a.id
               )

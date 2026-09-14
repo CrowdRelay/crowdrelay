@@ -541,6 +541,10 @@ pub struct UpsertContentSource {
     pub occurred_at: OffsetDateTime,
     pub expires_at: OffsetDateTime,
     pub metadata: serde_json::Value,
+    /// `None` leaves the flag alone — creates default to `active = true`,
+    /// edits keep whatever the row already says. `Some` is the operator's
+    /// "stop/start sharing this" control.
+    pub active: Option<bool>,
     pub expected_version: i64,
 }
 #[derive(Clone, Debug, Serialize)]
@@ -549,6 +553,20 @@ pub struct ContentSourceMutation {
     pub source_id: ContentSourceId,
     pub version: i64,
     pub replayed: bool,
+}
+/// What the control plane renders in the real-material panel: the trusted
+/// facts the engager may write about, with the metadata that carries links.
+#[derive(Clone, Debug, Serialize)]
+pub struct ContentSourceView {
+    pub source_id: ContentSourceId,
+    pub source_kind: ContentSourceKind,
+    pub source_key: String,
+    pub title: String,
+    pub occurred_at: OffsetDateTime,
+    pub expires_at: OffsetDateTime,
+    pub metadata: serde_json::Value,
+    pub version: i64,
+    pub active: bool,
 }
 #[async_trait]
 pub trait AutopilotContentStateRepository: Send + Sync {
@@ -559,6 +577,12 @@ pub trait AutopilotContentStateRepository: Send + Sync {
         idempotency_key: &IdempotencyKey,
         request_id: Option<&RequestId>,
     ) -> Result<ContentSourceMutation, RepositoryError>;
+    /// Every content source for the panel — active and retired both, so the
+    /// operator sees what the engager can draw on and what has lapsed.
+    async fn list_content_sources(
+        &self,
+        workspace_id: WorkspaceId,
+    ) -> Result<Vec<ContentSourceView>, RepositoryError>;
 }
 
 #[derive(Clone, Debug)]

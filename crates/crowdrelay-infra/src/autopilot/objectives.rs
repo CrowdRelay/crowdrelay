@@ -67,6 +67,17 @@ impl AutopilotObjectiveRepository for PostgresAutopilotRepository {
             if command.declared_by.trim().is_empty() {
                 return Err(RepositoryError::Unexpected);
             }
+            // A community's size is somebody else's audience — a source we
+            // draw fans from, never the fanbase itself. The `social` series
+            // exist so the brain can watch a source grow; an objective on
+            // one would point the whole plan at growing a forum, which is
+            // exactly the victory condition this product does not have.
+            if MetricPlatform::parse(command.platform.as_str()) == Some(MetricPlatform::Social) {
+                return Err(RepositoryError::ConflictBecause(
+                    "a community's member count is reach we can address, not an \
+                     audience we own — objectives target the fanbase, never the forum",
+                ));
+            }
             let mut transaction = self.pool.begin().await.map_err(map_sqlx)?;
             let observed = latest_series_value(
                 &mut transaction,

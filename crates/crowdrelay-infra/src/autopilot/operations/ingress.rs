@@ -6,8 +6,8 @@ use async_trait::async_trait;
 use crowdrelay_application::autopilot::{
     AutopilotBeaconStateRepository, AutopilotContentStateRepository, AutopilotControlMutation,
     AutopilotExperimentStateRepository, AutopilotOutreachStateRepository,
-    AutopilotTeamStateRepository, BeaconMutation, ContentSourceMutation, CreateExperiment,
-    ExperimentAssignmentSource, ExperimentAssignmentVariant, ExperimentMutation,
+    AutopilotTeamStateRepository, BeaconMutation, ContentSourceMutation, ContentSourceView,
+    CreateExperiment, ExperimentAssignmentSource, ExperimentAssignmentVariant, ExperimentMutation,
     ExperimentObservation, OutreachOpportunityMutation, OutreachTargetMutation, PromoterPosition,
     RecordBeaconReply, RecordDeliveryFault, RecordOutreachReply, RecordPlaylistPlacement,
     RecordTeamOpportunityProgress, RecordTeamOpportunityTerms, ReleasePlanMutation,
@@ -589,8 +589,8 @@ impl AutopilotContentStateRepository for PostgresAutopilotRepository {
                     r#"
                     INSERT INTO viryaos_content_sources (
                         id, workspace_id, source_kind, source_key, title,
-                        occurred_at, expires_at, metadata
-                    ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+                        occurred_at, expires_at, metadata, active
+                    ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,COALESCE($9, true))
                     RETURNING version
                     "#,
                 )
@@ -602,6 +602,7 @@ impl AutopilotContentStateRepository for PostgresAutopilotRepository {
                 .bind(command.occurred_at)
                 .bind(command.expires_at)
                 .bind(&command.metadata)
+                .bind(command.active)
                 .fetch_one(&mut *transaction)
                 .await
                 .map_err(map_sqlx)?
@@ -615,6 +616,7 @@ impl AutopilotContentStateRepository for PostgresAutopilotRepository {
                         occurred_at = $6,
                         expires_at = $7,
                         metadata = $8,
+                        active = COALESCE($10, active),
                         version = version + 1
                     WHERE workspace_id = $1 AND id = $2 AND version = $9
                     RETURNING version
@@ -629,6 +631,7 @@ impl AutopilotContentStateRepository for PostgresAutopilotRepository {
                 .bind(command.expires_at)
                 .bind(&command.metadata)
                 .bind(command.expected_version)
+                .bind(command.active)
                 .fetch_optional(&mut *transaction)
                 .await
                 .map_err(map_sqlx)?
@@ -667,6 +670,70 @@ impl AutopilotContentStateRepository for PostgresAutopilotRepository {
                 version,
                 replayed: false,
             })
+        })
+        .await
+    }
+
+    async fn list_content_sources(
+        &self,
+        workspace_id: WorkspaceId,
+    ) -> Result<Vec<ContentSourceView>, RepositoryError> {
+        self.bounded(async {
+            let rows = sqlx::query_as::<
+                _,
+                (
+                    Uuid,
+                    String,
+                    String,
+                    String,
+                    OffsetDateTime,
+                    OffsetDateTime,
+                    serde_json::Value,
+                    i64,
+                    bool,
+                ),
+            >(
+                r#"
+                SELECT id, source_kind, source_key, title, occurred_at,
+                       expires_at, metadata, version, active
+                FROM viryaos_content_sources
+                WHERE workspace_id = $1
+                ORDER BY occurred_at DESC
+                LIMIT 200
+                "#,
+            )
+            .bind(workspace_id.into_uuid())
+            .fetch_all(&self.pool)
+            .await
+            .map_err(map_sqlx)?;
+
+            rows.into_iter()
+                .map(
+                    |(
+                        id,
+                        source_kind,
+                        source_key,
+                        title,
+                        occurred_at,
+                        expires_at,
+                        metadata,
+                        version,
+                        active,
+                    )| {
+                        Ok(ContentSourceView {
+                            source_id: ContentSourceId::from_uuid(id),
+                            source_kind: super::snapshots::parse_content_source_kind(&source_kind)?,
+                            source_key,
+                            title,
+                            occurred_at,
+                            expires_at,
+                            metadata,
+                            version,
+                            active,
+                        })
+                    },
+                )
+                .collect()
         })
         .await
     }
@@ -1010,6 +1077,8 @@ const fn content_source_kind_str(value: ContentSourceKind) -> &'static str {
         ContentSourceKind::Event => "event",
         ContentSourceKind::Release => "release",
         ContentSourceKind::ShowCompleted => "show_completed",
+        ContentSourceKind::Video => "video",
+        ContentSourceKind::Story => "story",
     }
 }
 

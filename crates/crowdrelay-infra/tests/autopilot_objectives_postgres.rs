@@ -140,3 +140,95 @@ async fn a_target_freezes_its_baseline_declares_once_and_is_read_back_from_the_s
     );
     Ok(())
 }
+
+/// A `social` series measures the size of somebody else's subreddit — reach
+/// we can address, never audience we own. Even with data present, declaring
+/// an objective on it must be refused: otherwise the plan would optimize
+/// for growing a forum, which is precisely the victory condition the
+/// product does not have.
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn a_community_size_cannot_be_declared_as_an_objective()
+-> Result<(), Box<dyn std::error::Error>> {
+    let database_url =
+        std::env::var("CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL").map_err(|error| {
+            format!(
+                "CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL must target a disposable database: {error}"
+            )
+        })?;
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&database_url)
+        .await?;
+    crowdrelay_infra::database::MIGRATOR.run(&pool).await?;
+
+    let workspace_id = WorkspaceId::new();
+    let suffix = workspace_id.into_uuid().simple().to_string();
+    sqlx::query("INSERT INTO workspaces (id, slug, name) VALUES ($1, $2, $3)")
+        .bind(workspace_id.into_uuid())
+        .bind(format!("objective-e2e-{suffix}"))
+        .bind("Objectives E2E")
+        .execute(&pool)
+        .await?;
+    let series_id = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO viryaos_growth_metric_series (id, workspace_id, platform, metric_key, display_name)
+         VALUES ($1,$2,'social','members','r/Metal members')",
+    )
+    .bind(series_id)
+    .bind(workspace_id.into_uuid())
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO viryaos_growth_metric_points (workspace_id, series_id, captured_at, value, source)
+         VALUES ($1,$2,$3,$4,'test')",
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(series_id)
+    .bind(OffsetDateTime::now_utc())
+    .bind(4_000_000_i64)
+    .execute(&pool)
+    .await?;
+
+    let database = DatabaseConfig {
+        url: database_url,
+        max_connections: 4,
+        connect_timeout: Duration::from_secs(3),
+        ping_timeout: Duration::from_secs(2),
+        operation_timeout: Duration::from_secs(10),
+        lock_timeout: Duration::from_secs(1),
+    };
+    let repository = PostgresAutopilotRepository::new(pool.clone(), &database);
+    let refused = repository
+        .declare_growth_objective(
+            workspace_id,
+            DeclareGrowthObjective {
+                platform: MetricPlatform::Social,
+                metric_key: "members".to_owned(),
+                scope: ObjectiveScope::Workspace,
+                direction: MetricDirection::HigherIsBetter,
+                target_value: 5_000_000,
+                deadline: OffsetDateTime::now_utc() + time::Duration::days(90),
+                declared_by: "band".to_owned(),
+            },
+            &key(),
+            None,
+        )
+        .await;
+
+    assert!(
+        refused.is_err(),
+        "growing a forum is a source-health signal, never a goal — the objective must be refused"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM viryaos_growth_objectives WHERE workspace_id=$1"
+        )
+        .bind(workspace_id.into_uuid())
+        .fetch_one(&pool)
+        .await?,
+        0,
+        "and nothing is stored"
+    );
+    Ok(())
+}

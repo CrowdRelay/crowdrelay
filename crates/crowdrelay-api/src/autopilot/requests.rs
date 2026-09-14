@@ -362,6 +362,9 @@ pub struct ContentSourceRequest {
     #[serde(with = "time::serde::rfc3339")]
     expires_at: OffsetDateTime,
     metadata: serde_json::Value,
+    /// Omit on create (defaults to active) or to leave the flag alone on
+    /// edit; send it to retire or reinstate the source.
+    active: Option<bool>,
     expected_version: i64,
 }
 

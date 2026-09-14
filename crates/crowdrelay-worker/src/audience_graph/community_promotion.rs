@@ -23,7 +23,8 @@
 //! why.
 
 use crowdrelay_domain::target_discovery::{
-    CommunityCandidateSnapshot, ScreeningVerdict, TargetDiscoveryPolicy, screen_community_candidate,
+    CommunityCandidateSnapshot, ScreeningVerdict, TargetDiscoveryPolicy, community_topic_signal,
+    screen_community_candidate,
 };
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -34,6 +35,11 @@ use uuid::Uuid;
 const PROMOTION_BATCH: i64 = 100;
 
 /// A place considered for promotion, with the rules it published.
+/// id, name, subreddit, member_count, activity_bp, status, membership_state,
+/// self_promo_ratio_percent, notes, genres — the last three fields feed the
+/// topical screen, which reads the community's own description rather than
+/// trusting its size.
+#[allow(clippy::type_complexity)]
 type PlaceRow = (
     Uuid,
     String,
@@ -43,6 +49,8 @@ type PlaceRow = (
     String,
     String,
     Option<i16>,
+    Option<String>,
+    Vec<String>,
 );
 
 /// What one promotion sweep did.
@@ -77,7 +85,9 @@ pub(super) async fn promote_community_places(
                place.activity_bp,
                place.status,
                place.membership_state,
-               rules.self_promo_ratio_percent
+               rules.self_promo_ratio_percent,
+               place.notes,
+               COALESCE(place.genres, '{}'::text[])
         FROM discovery_places AS place
         LEFT JOIN discovery_place_rules AS rules ON rules.place_id = place.id
         WHERE place.workspace_id = $1
@@ -122,8 +132,18 @@ pub(super) async fn promote_community_places(
     let mut refusals: Vec<Option<String>> = Vec::with_capacity(places.len());
     let mut report = PromotionReport::default();
 
-    for (id, name, subreddit, member_count, activity_bp, status, membership_state, self_promo) in
-        places
+    for (
+        id,
+        name,
+        subreddit,
+        member_count,
+        activity_bp,
+        status,
+        membership_state,
+        self_promo,
+        notes,
+        genres,
+    ) in places
     {
         let Some(subreddit) = subreddit
             .map(|s| s.trim().to_owned())
@@ -141,6 +161,7 @@ pub(super) async fn promote_community_places(
             sells_placement: false,
             refused_by_us_or_them: status == "blocked"
                 || matches!(membership_state.as_str(), "rejected" | "not_a_fit"),
+            topic_signal: community_topic_signal(&name, notes.as_deref(), &genres),
         };
         // A refused community is still written, as a refused row. Recording
         // the refusal is what stops the next sweep rediscovering it.
