@@ -63,6 +63,27 @@ async fn seed_resolved_dispatch(
     strategy: &str,
     observed_incremental_fans: f64,
 ) -> Result<ResolvedDispatch, Box<dyn std::error::Error>> {
+    seed_resolved_dispatch_aged(
+        pool,
+        workspace_id,
+        template_id,
+        strategy,
+        observed_incremental_fans,
+        time::Duration::ZERO,
+    )
+    .await
+}
+
+/// Same fixture with `resolved_at` pushed into the past — the lookback-bound
+/// test needs an observation older than the learner's window.
+async fn seed_resolved_dispatch_aged(
+    pool: &sqlx::PgPool,
+    workspace_id: WorkspaceId,
+    template_id: &str,
+    strategy: &str,
+    observed_incremental_fans: f64,
+    resolved_age: time::Duration,
+) -> Result<ResolvedDispatch, Box<dyn std::error::Error>> {
     let workspace = workspace_id.into_uuid();
     let decision_id = Uuid::now_v7();
     let action_id = Uuid::now_v7();
@@ -168,7 +189,7 @@ async fn seed_resolved_dispatch(
             observed_fans, observed_incremental_fans, predicted_fans,
             context, strategy, evidence_quality, resolved_at
         ) VALUES ($1, $2, $3, $4, 'r/testsubreddit', 'testsubreddit', 'reddit_post',
-                  1, 'treatment', 1.0, $5, $5, 1.0, $6, $7, 'observational', now())
+                  1, 'treatment', 1.0, $5, $5, 1.0, $6, $7, 'observational', $8)
         "#,
     )
     .bind(workspace)
@@ -180,6 +201,7 @@ async fn seed_resolved_dispatch(
     // cell key at `<strategy>:steady:far`.
     .bind(serde_json::json!({ "fan_growth_trend": "steady" }))
     .bind(strategy)
+    .bind(now - resolved_age)
     .execute(pool)
     .await?;
 
@@ -399,6 +421,95 @@ async fn a_resolved_outcome_moves_a_belief_and_leaves_a_citable_record()
     assert_eq!(
         revision_count, 1,
         "a replay that learns nothing new must record nothing new"
+    );
+
+    Ok(())
+}
+
+/// An observation older than the lookback window must not be learned from.
+///
+/// `hypothesis_validation` has bounded its own evidence load to 180 days
+/// (`VALIDATION_LOOKBACK_DAYS`) since walk-forward needed a usable
+/// out-of-sample half after the purge gap. The shared loader had no such
+/// bound: a full replay (`since = NULL`) read every resolved and partial
+/// row the workspace had ever written, and a delta replay whose checkpoint
+/// was old did the same. The set grew without bound, and at roster scale
+/// each cycle would have loaded 180+ days of history per workspace. The
+/// loader now applies the same 180-day observation-recency bound, so this
+/// test proves a row resolved 200 days ago leaves the posterior untouched.
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn evidence_older_than_the_lookback_is_not_relearned()
+-> Result<(), Box<dyn std::error::Error>> {
+    let database_url =
+        std::env::var("CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL").map_err(|error| {
+            format!(
+                "CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL must target a disposable database: {error}"
+            )
+        })?;
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&database_url)
+        .await?;
+    crowdrelay_infra::database::MIGRATOR.run(&pool).await?;
+
+    let workspace_id = WorkspaceId::new();
+    let suffix = workspace_id.into_uuid().simple().to_string();
+    sqlx::query("INSERT INTO workspaces (id, slug, name) VALUES ($1, $2, $3)")
+        .bind(workspace_id.into_uuid())
+        .bind(format!("lookback-proof-{suffix}"))
+        .bind("Lookback proof")
+        .execute(&pool)
+        .await?;
+
+    // A dispatch that resolved 200 days ago — outside the 180-day window.
+    seed_resolved_dispatch_aged(
+        &pool,
+        workspace_id,
+        "community-engager",
+        "community_first",
+        8.0,
+        time::Duration::days(200),
+    )
+    .await?;
+
+    let database = DatabaseConfig {
+        url: database_url,
+        max_connections: 4,
+        connect_timeout: Duration::from_secs(3),
+        ping_timeout: Duration::from_secs(2),
+        operation_timeout: Duration::from_secs(10),
+        lock_timeout: Duration::from_secs(1),
+    };
+    let repository = PostgresAutopilotRepository::new(pool.clone(), &database);
+    repository.load_causal_model(workspace_id).await?;
+
+    // The posterior must not carry the cell the stale evidence was in.
+    let posterior: Option<(serde_json::Value,)> = sqlx::query_as(
+        "SELECT state FROM viryaos_brain_state
+         WHERE workspace_id = $1 AND module = 'strategy_posterior'",
+    )
+    .bind(workspace_id.into_uuid())
+    .fetch_optional(&pool)
+    .await?;
+    if let Some((state,)) = posterior {
+        assert!(
+            state["posteriors"]["community_first:steady:far"].is_null(),
+            "a row outside the lookback must not move the posterior, got {state}"
+        );
+    }
+
+    // And the ledger must record nothing — a replay that learns nothing
+    // records nothing (the invariant the first proof test pins).
+    let revisions: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM viryaos_brain_belief_revisions WHERE workspace_id = $1",
+    )
+    .bind(workspace_id.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        revisions, 0,
+        "out-of-window evidence must record no revision"
     );
 
     Ok(())

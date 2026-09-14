@@ -348,6 +348,25 @@ async fn load_evidence(
         ) ea ON true
         WHERE ge.workspace_id = $1
           AND (ge.resolved_at IS NOT NULL OR COALESCE(ge.partial_resolution_count, 0) > 0)
+          -- Absolute lookback bound, mirroring VALIDATION_LOOKBACK_DAYS in
+          -- hypothesis_validation.rs: the learner must not scan every row the
+          -- workspace has ever produced. The bound is on observation time
+          -- (when the outcome was measured), not dispatch time — a row whose
+          -- 30d measurement landed yesterday is fresh evidence regardless of
+          -- when it was dispatched, and a control row whose observation is
+          -- older than the window is a stale counterfactual for today's
+          -- treated units anyway. The per-horizon replayed_* cursors are
+          -- deliberately NOT in this COALESCE: they are learner bookkeeping
+          -- that advances on every replay, and counting them would keep a
+          -- row inside the window forever.
+          --
+          -- COALESCE → NULL when neither observation timestamp exists, which
+          -- fails the comparison and excludes the row — fail-closed: an
+          -- observation whose recency cannot be established is not learned
+          -- from. Phase 1 (horizons-as-rows) absorbs this into MAX over the
+          -- horizon rows.
+          AND COALESCE(ge.resolved_at, ge.last_partial_resolution_at)
+              >= now() - INTERVAL '180 days'
           -- Exclude unresolved (unknown) executions from the causal
           -- learner. This is an explicit defense at the learning
           -- boundary — do NOT rely on the implicit chain
