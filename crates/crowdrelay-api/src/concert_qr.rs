@@ -16,7 +16,7 @@ use axum::{
 };
 use crowdrelay_application::{
     CheckinCommand, CheckinConsent, ConcertQrError, ConcertQrRepository, CreateCampaignCommand,
-    RevokeCampaignCommand,
+    RevokeCampaignCommand, UpdateCampaignContextCommand,
 };
 use crowdrelay_domain::{EventSlug, NormalizedEmail, WorkspaceId};
 use hmac::{Hmac, KeyInit, Mac};
@@ -79,6 +79,19 @@ pub struct CreateCampaignRequest {
     valid_from: String,
     valid_until: String,
     max_checkins: Option<u32>,
+    /// Where this QR physically lives — the context the scan rate is read
+    /// against. Optional because a code made before doors may not know yet.
+    placement: Option<String>,
+    announced_from_stage: Option<bool>,
+    incentive: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UpdateCampaignContextRequest {
+    placement: Option<String>,
+    announced_from_stage: bool,
+    incentive: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -103,6 +116,9 @@ struct CampaignRow {
     valid_from: OffsetDateTime,
     valid_until: OffsetDateTime,
     max_checkins: Option<i32>,
+    placement: Option<String>,
+    announced_from_stage: bool,
+    incentive: Option<String>,
     active: bool,
     revoked_at: Option<OffsetDateTime>,
     created_at: OffsetDateTime,
@@ -122,6 +138,9 @@ pub struct CampaignView {
     valid_until: String,
     max_checkins: Option<u32>,
     checkin_count: u64,
+    placement: Option<String>,
+    announced_from_stage: bool,
+    incentive: Option<String>,
     active: bool,
     revoked_at: Option<String>,
     created_at: String,
@@ -140,6 +159,7 @@ struct StaffEventRow {
     title: String,
     venue: Option<String>,
     starts_at: OffsetDateTime,
+    scan_count: i64,
 }
 
 #[derive(Debug, Serialize)]
@@ -149,6 +169,9 @@ struct StaffEventView {
     title: String,
     venue: Option<String>,
     starts_at: String,
+    /// Check-ins on record for this show across every campaign — the
+    /// per-show scan count the iteration loop reads.
+    scan_count: u64,
 }
 
 #[derive(Debug, Serialize)]
@@ -288,6 +311,15 @@ pub async fn create_campaign(
     let max_checkins = payload
         .max_checkins
         .and_then(|value| i32::try_from(value).ok());
+    let placement = bounded_optional_text(payload.placement.as_deref(), 128);
+    let incentive = bounded_optional_text(payload.incentive.as_deref(), 256);
+    if payload.placement.is_some() && placement.is_none()
+        || payload.incentive.is_some() && incentive.is_none()
+    {
+        return Problem::unprocessable(request_id_value)
+            .private()
+            .into_response();
+    }
     let command = CreateCampaignCommand {
         workspace_id: state.concert_qr.workspace_id.into_uuid(),
         event_slug: event_slug.as_str().to_owned(),
@@ -295,6 +327,9 @@ pub async fn create_campaign(
         valid_from,
         valid_until,
         max_checkins,
+        placement,
+        announced_from_stage: payload.announced_from_stage.unwrap_or(false),
+        incentive,
         created_at,
         request_id: request_id_value.clone(),
     };
@@ -332,6 +367,9 @@ pub async fn create_campaign(
         valid_from,
         valid_until,
         max_checkins,
+        placement: command.placement.clone(),
+        announced_from_stage: command.announced_from_stage,
+        incentive: command.incentive.clone(),
         active: true,
         revoked_at: None,
         created_at: result.created_at,
@@ -417,6 +455,7 @@ pub async fn overview(State(state): State<crate::AppState>, headers: HeaderMap) 
             title: row.title,
             venue: row.venue,
             starts_at: format_time(row.starts_at),
+            scan_count: u64::try_from(row.scan_count).unwrap_or_default(),
         })
         .collect();
     let campaigns = campaign_rows
@@ -435,12 +474,17 @@ pub async fn overview(State(state): State<crate::AppState>, headers: HeaderMap) 
 async fn load_staff_events(state: &ConcertQrState) -> Result<Vec<StaffEventRow>, sqlx::Error> {
     sqlx::query_as::<_, StaffEventRow>(
         r#"
-        SELECT id, slug, title, venue, starts_at
-        FROM events
-        WHERE workspace_id = $1
-          AND status = 'published'
-          AND starts_at >= now() - interval '36 hours'
-        ORDER BY starts_at, id
+        SELECT event.id, event.slug, event.title, event.venue, event.starts_at,
+               count(checkin.id)::bigint AS scan_count
+        FROM events AS event
+        LEFT JOIN concert_checkins AS checkin
+          ON checkin.workspace_id = event.workspace_id
+         AND checkin.event_id = event.id
+        WHERE event.workspace_id = $1
+          AND event.status = 'published'
+          AND event.starts_at >= now() - interval '36 hours'
+        GROUP BY event.id
+        ORDER BY event.starts_at, event.id
         LIMIT $2
         "#,
     )
@@ -459,7 +503,9 @@ async fn load_campaigns(
         SELECT campaign.id, campaign.event_id, event.slug AS event_slug,
                event.title AS event_title, event.venue, event.starts_at,
                campaign.label, campaign.valid_from, campaign.valid_until,
-               campaign.max_checkins, campaign.active, campaign.revoked_at,
+               campaign.max_checkins, campaign.placement,
+               campaign.announced_from_stage, campaign.incentive,
+               campaign.active, campaign.revoked_at,
                campaign.created_at, count(checkin.id)::bigint AS checkin_count
         FROM concert_qr_campaigns AS campaign
         INNER JOIN events AS event
@@ -629,6 +675,79 @@ pub async fn check_in(
         .into_response()
 }
 
+/// Free-text context fields are bounded and control-char-free — they land in
+/// operator-facing output, never in a machine contract, so the check is
+/// length and printability, nothing more.
+fn bounded_optional_text(value: Option<&str>, max_chars: usize) -> Option<String> {
+    let trimmed = value?.trim();
+    if trimmed.is_empty()
+        || trimmed.chars().count() > max_chars
+        || trimmed.chars().any(char::is_control)
+    {
+        return None;
+    }
+    Some(trimmed.to_owned())
+}
+
+pub async fn update_campaign_context(
+    State(state): State<crate::AppState>,
+    Path(raw_id): Path<String>,
+    headers: HeaderMap,
+    payload: Result<Json<UpdateCampaignContextRequest>, JsonRejection>,
+) -> Response {
+    let request_id_value = request_id(&headers);
+    let Ok(campaign_id) = Uuid::parse_str(&raw_id) else {
+        return Problem::bad_request(request_id_value)
+            .private()
+            .into_response();
+    };
+    let Json(payload) = match payload {
+        Ok(value) => value,
+        Err(_) => {
+            return Problem::bad_request(request_id_value)
+                .private()
+                .into_response();
+        }
+    };
+    let placement = bounded_optional_text(payload.placement.as_deref(), 128);
+    let incentive = bounded_optional_text(payload.incentive.as_deref(), 256);
+    if payload.placement.is_some() && placement.is_none()
+        || payload.incentive.is_some() && incentive.is_none()
+    {
+        return Problem::unprocessable(request_id_value)
+            .private()
+            .into_response();
+    }
+
+    let command = UpdateCampaignContextCommand {
+        workspace_id: state.concert_qr.workspace_id.into_uuid(),
+        campaign_id,
+        placement,
+        announced_from_stage: payload.announced_from_stage,
+        incentive,
+        request_id: request_id_value.clone(),
+    };
+    match state
+        .concert_qr_repo
+        .update_campaign_context(&command)
+        .await
+    {
+        Ok(()) => (StatusCode::NO_CONTENT, [(CACHE_CONTROL, PRIVATE_NO_STORE)]).into_response(),
+        Err(ConcertQrError::NotFound) => Problem::not_found(request_id_value)
+            .private()
+            .into_response(),
+        Err(ConcertQrError::Conflict) => Problem::conflict(request_id_value)
+            .private()
+            .into_response(),
+        Err(ConcertQrError::Invalid) => Problem::unprocessable(request_id_value)
+            .private()
+            .into_response(),
+        Err(ConcertQrError::Unavailable) => Problem::service_unavailable(request_id_value)
+            .private()
+            .into_response(),
+    }
+}
+
 fn campaign_view(row: CampaignRow, signing_key: Option<&[u8; 32]>) -> CampaignView {
     let effective_active =
         row.active && row.revoked_at.is_none() && row.valid_until > OffsetDateTime::now_utc();
@@ -649,6 +768,9 @@ fn campaign_view(row: CampaignRow, signing_key: Option<&[u8; 32]>) -> CampaignVi
         valid_until: format_time(row.valid_until),
         max_checkins: row.max_checkins.and_then(|value| u32::try_from(value).ok()),
         checkin_count: u64::try_from(row.checkin_count).unwrap_or_default(),
+        placement: row.placement,
+        announced_from_stage: row.announced_from_stage,
+        incentive: row.incentive,
         active: effective_active,
         revoked_at: row.revoked_at.map(format_time),
         created_at: format_time(row.created_at),

@@ -961,6 +961,10 @@ pub(super) fn application_routes(state: AppState) -> Router {
             post(concert_qr::revoke_campaign),
         )
         .route(
+            "/v1/admin/event-qr/campaigns/{campaign_id}/context",
+            post(concert_qr::update_campaign_context),
+        )
+        .route(
             "/v1/staff/event-qr/campaigns",
             get(concert_qr::list_campaigns).post(concert_qr::create_campaign),
         )
@@ -972,6 +976,10 @@ pub(super) fn application_routes(state: AppState) -> Router {
         .route(
             "/v1/staff/event-qr/campaigns/{campaign_id}/revoke",
             post(concert_qr::revoke_campaign),
+        )
+        .route(
+            "/v1/staff/event-qr/campaigns/{campaign_id}/context",
+            post(concert_qr::update_campaign_context),
         )
         .route("/v1/events/{slug}/check-in", post(concert_qr::check_in))
         .route(

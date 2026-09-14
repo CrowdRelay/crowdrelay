@@ -41,6 +41,13 @@ pub struct CreateCampaignCommand {
     pub valid_from: OffsetDateTime,
     pub valid_until: OffsetDateTime,
     pub max_checkins: Option<i32>,
+    /// Where this QR physically lives (door, merch table, stage screen) —
+    /// the context the per-show scan rate is later read against.
+    pub placement: Option<String>,
+    /// Whether the scan was announced from the stage.
+    pub announced_from_stage: bool,
+    /// What the scan offered (setlist, sticker, draw entry).
+    pub incentive: Option<String>,
     pub created_at: OffsetDateTime,
     pub request_id: Option<String>,
 }
@@ -58,6 +65,22 @@ pub struct CreateCampaignResult {
 pub struct RevokeCampaignCommand {
     pub workspace_id: Uuid,
     pub campaign_id: Uuid,
+    pub request_id: Option<String>,
+}
+
+/// Command to record a campaign's scan context as it actually happened.
+///
+/// The context is a whole record, not a patch: the operator writes what the
+/// night looked like in one shot and rewrites it when the picture changes.
+/// Token material, validity windows and revocation are deliberately absent —
+/// this command can only describe the night, never change who may scan.
+#[derive(Clone, Debug)]
+pub struct UpdateCampaignContextCommand {
+    pub workspace_id: Uuid,
+    pub campaign_id: Uuid,
+    pub placement: Option<String>,
+    pub announced_from_stage: bool,
+    pub incentive: Option<String>,
     pub request_id: Option<String>,
 }
 
@@ -138,6 +161,14 @@ pub trait ConcertQrRepository: Send + Sync {
 
     /// Revoke a concert QR campaign.
     async fn revoke_campaign(&self, command: &RevokeCampaignCommand) -> Result<(), ConcertQrError>;
+
+    /// Record a campaign's scan context (placement, stage announcement,
+    /// incentive). Replaces the whole context record; never touches token
+    /// material, validity windows or revocation state.
+    async fn update_campaign_context(
+        &self,
+        command: &UpdateCampaignContextCommand,
+    ) -> Result<(), ConcertQrError>;
 
     /// Idempotently check a fan in to a concert via a campaign QR token.
     async fn check_in(&self, command: &CheckinCommand) -> Result<CheckinResult, ConcertQrError>;

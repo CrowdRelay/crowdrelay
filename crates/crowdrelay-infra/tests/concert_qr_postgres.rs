@@ -13,6 +13,7 @@
 
 use crowdrelay_application::{
     CheckinCommand, CheckinConsent, CheckinIdentity, ConcertQrRepository,
+    UpdateCampaignContextCommand,
 };
 use crowdrelay_domain::WorkspaceId;
 use crowdrelay_infra::concert_qr::PostgresConcertQrRepository;
@@ -290,6 +291,50 @@ async fn email_claim_rescan_dedupes_and_never_resends() -> Result<()> {
     .await?;
     assert_eq!(checkins, 1);
     assert_eq!(confirmations, 1, "a rescan must not resend the follow-up");
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn campaign_context_updates_in_place_and_refuses_revoked() -> Result<()> {
+    let pool = pool().await?;
+    let ws = workspace(&pool, "scan-ctx").await?;
+    let fixture = show(&pool, ws, "scan-ctx").await?;
+    let repo = PostgresConcertQrRepository::new(pool.clone());
+
+    let command = UpdateCampaignContextCommand {
+        workspace_id: ws.into_uuid(),
+        campaign_id: fixture.campaign_id,
+        placement: Some("merch table".to_owned()),
+        announced_from_stage: true,
+        incentive: Some("setlist pdf".to_owned()),
+        request_id: Some(format!("req-{}", Uuid::now_v7())),
+    };
+    repo.update_campaign_context(&command).await?;
+
+    let (placement, announced, incentive): (Option<String>, bool, Option<String>) =
+        sqlx::query_as(
+            "SELECT placement, announced_from_stage, incentive FROM concert_qr_campaigns WHERE workspace_id = $1 AND id = $2",
+        )
+        .bind(ws.into_uuid())
+        .bind(fixture.campaign_id)
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(placement.as_deref(), Some("merch table"));
+    assert!(announced);
+    assert_eq!(incentive.as_deref(), Some("setlist pdf"));
+
+    sqlx::query("UPDATE concert_qr_campaigns SET active = false, revoked_at = now() WHERE workspace_id = $1 AND id = $2")
+        .bind(ws.into_uuid())
+        .bind(fixture.campaign_id)
+        .execute(&pool)
+        .await?;
+    let err = repo.update_campaign_context(&command).await.unwrap_err();
+    assert_eq!(
+        err,
+        crowdrelay_application::ConcertQrError::NotFound,
+        "a revoked campaign must refuse context writes"
+    );
     Ok(())
 }
 

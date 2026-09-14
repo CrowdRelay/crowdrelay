@@ -8,6 +8,7 @@ use async_trait::async_trait;
 use crowdrelay_application::{
     CheckinCommand, CheckinIdentity, CheckinResult, ConcertEventInfo, ConcertQrError,
     ConcertQrRepository, CreateCampaignCommand, CreateCampaignResult, RevokeCampaignCommand,
+    UpdateCampaignContextCommand,
 };
 use crowdrelay_domain::{FanId, WorkspaceId};
 use serde_json::json;
@@ -106,8 +107,9 @@ impl ConcertQrRepository for PostgresConcertQrRepository {
             r#"
             INSERT INTO concert_qr_campaigns (
                 id, workspace_id, event_id, label, valid_from, valid_until,
-                max_checkins, created_at, updated_at
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $8)
+                max_checkins, placement, announced_from_stage, incentive,
+                created_at, updated_at
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $11)
             "#,
         )
         .bind(campaign_id)
@@ -117,6 +119,9 @@ impl ConcertQrRepository for PostgresConcertQrRepository {
         .bind(command.valid_from)
         .bind(command.valid_until)
         .bind(command.max_checkins)
+        .bind(&command.placement)
+        .bind(command.announced_from_stage)
+        .bind(&command.incentive)
         .bind(command.created_at)
         .execute(&mut *tx)
         .await
@@ -212,6 +217,71 @@ impl ConcertQrRepository for PostgresConcertQrRepository {
 
         tx.commit().await.map_err(|error| {
             tracing::warn!(%error, "concert QR revoke_campaign commit failed");
+            ConcertQrError::Unavailable
+        })?;
+
+        Ok(())
+    }
+
+    async fn update_campaign_context(
+        &self,
+        command: &UpdateCampaignContextCommand,
+    ) -> Result<(), ConcertQrError> {
+        let mut tx = self.pool.begin().await.map_err(|error| {
+            tracing::warn!(%error, "concert QR update_campaign_context begin failed");
+            ConcertQrError::Unavailable
+        })?;
+
+        let updated = match sqlx::query_scalar::<_, Uuid>(
+            r#"
+            UPDATE concert_qr_campaigns
+            SET placement = $3,
+                announced_from_stage = $4,
+                incentive = $5,
+                updated_at = now()
+            WHERE workspace_id = $1 AND id = $2 AND revoked_at IS NULL
+            RETURNING id
+            "#,
+        )
+        .bind(command.workspace_id)
+        .bind(command.campaign_id)
+        .bind(&command.placement)
+        .bind(command.announced_from_stage)
+        .bind(&command.incentive)
+        .fetch_optional(&mut *tx)
+        .await
+        {
+            Ok(value) => value,
+            Err(error) => {
+                tracing::warn!(%error, "concert QR update_campaign_context update failed");
+                return Err(ConcertQrError::Unavailable);
+            }
+        };
+
+        if updated.is_none() {
+            return Err(ConcertQrError::NotFound);
+        }
+
+        if let Err(error) = sqlx::query(
+            "INSERT INTO audit_events (workspace_id, actor_kind, action, target_type, target_id, request_id, metadata) VALUES ($1, 'service', 'concert_qr.context_updated', 'concert_qr_campaign', $2, $3, $4)",
+        )
+        .bind(command.workspace_id)
+        .bind(command.campaign_id.to_string())
+        .bind(&command.request_id)
+        .bind(json!({
+            "placement": command.placement,
+            "announced_from_stage": command.announced_from_stage,
+            "incentive": command.incentive,
+        }))
+        .execute(&mut *tx)
+        .await
+        {
+            tracing::warn!(%error, "concert QR update_campaign_context audit insert failed");
+            return Err(ConcertQrError::Unavailable);
+        }
+
+        tx.commit().await.map_err(|error| {
+            tracing::warn!(%error, "concert QR update_campaign_context commit failed");
             ConcertQrError::Unavailable
         })?;
 
