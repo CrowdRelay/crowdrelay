@@ -75,8 +75,28 @@ LOCK_CLAUSE = re.compile(
     r"(?:\s+OF\s+[\w\s,\"]+?)?(?:\s+(?:NOWAIT|SKIP\s+LOCKED))?",
     re.IGNORECASE,
 )
-# Raw string literals are where the multi-line SQL lives.
+# Raw string literals carry most of the multi-line SQL.
 RAW_STRING = re.compile(r'r#"(.*?)"#', re.DOTALL)
+# Plain ones carry the rest — 301 statements this gate could not see until
+# 2026-09-14, in the check CLAUDE.md leads with for having no compile-time SQL.
+PLAIN_STRING = re.compile(r'"((?:[^"\\]|\\.)*)"', re.DOTALL)
+# What a plain literal must look like before it is treated as SQL.
+#
+# `STATEMENT` matches its keywords anywhere in the string, which is right for a raw
+# literal and wrong for English: 132 of the 433 plain literals containing
+# `SELECT`/`UPDATE`/`WITH` are prose, and the reference scan reads whatever follows
+# their "from" as a relation. A first pass requiring only a SQL-ish token still
+# reported nine missing relations named 'a', 'the', 'for', 'this' and 'drifting'.
+#
+# So a plain literal must *begin* with a statement keyword, which is how every
+# query actually handed to `sqlx::query` here is written, and also carry a
+# structural token. "with no approved origin, every link in the body is
+# unapproved" passes the first test and fails the second. A raw literal is SQL by
+# convention and needs neither.
+PLAIN_SQL_START = re.compile(
+    r"^\s*(?:select|insert\s+into|update|delete\s+from|with)\b", re.IGNORECASE
+)
+SQL_SHAPE = re.compile(r"\s(?:from|into|set)\s|::", re.IGNORECASE)
 STATEMENT = re.compile(r"\b(?:SELECT|INSERT\s+INTO|UPDATE|DELETE\s+FROM|WITH)\b", re.IGNORECASE)
 
 # Set-returning functions and syntax that follow FROM but name no relation.
@@ -137,11 +157,25 @@ def known_relations() -> set[str]:
 
 
 def sql_literals() -> list[tuple[Path, str]]:
+    """Every SQL statement in the tree, from both string forms.
+
+    The two patterns overlap: `PLAIN_STRING` also matches a raw literal's body,
+    because `r#"SELECT ..."#` contains a quote, the query and another quote. Raw
+    literals are taken first and blanked out before the plain scan, or every raw
+    statement is scanned twice.
+    """
     found: list[tuple[Path, str]] = []
     for path in sorted(CRATES.rglob("*.rs")):
         if "target" in path.parts:
             continue
-        for literal in RAW_STRING.findall(path.read_text(encoding="utf-8", errors="ignore")):
+        text = path.read_text(encoding="utf-8", errors="ignore")
+        raw = RAW_STRING.findall(text)
+        plain = [
+            literal
+            for literal in PLAIN_STRING.findall(RAW_STRING.sub("", text))
+            if PLAIN_SQL_START.match(literal) and SQL_SHAPE.search(literal)
+        ]
+        for literal in raw + plain:
             if not STATEMENT.search(literal):
                 continue
             # SQL comments carry English prose, and prose contains the words

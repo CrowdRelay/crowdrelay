@@ -50,6 +50,20 @@ LINE_COMMENT = re.compile(r"--[^\n]*")
 BLOCK_COMMENT = re.compile(r"/\*.*?\*/", re.DOTALL)
 STRING_LITERAL = re.compile(r"'(?:[^']|'')*'", re.DOTALL)
 RAW_STRING = re.compile(r'r#"(.*?)"#', re.DOTALL)
+# Plain literals carry SQL too, and this gate could not see them until
+# 2026-09-14 — the same blind spot `sql-result-types.py` and
+# `test_sql_identifiers_v1.py` had, in the third of the three checks standing in
+# for compile-time SQL verification.
+PLAIN_STRING = re.compile(r'"((?:[^"\\]|\\.)*)"', re.DOTALL)
+# A plain literal must *begin* with a statement keyword and carry a structural
+# token. `STATEMENT` matches its keywords anywhere, which is right for a raw
+# literal and wrong for English: without both tests the reference scan reads the
+# nouns in an assertion message as relations and columns. A raw literal is SQL by
+# convention and needs neither.
+PLAIN_SQL_START = re.compile(
+    r"^\s*(?:select|insert\s+into|update|delete\s+from|with)\b", re.IGNORECASE
+)
+SQL_SHAPE = re.compile(r"\s(?:from|into|set)\s|::", re.IGNORECASE)
 STATEMENT = re.compile(
     r"\b(?:SELECT|INSERT\s+INTO|UPDATE|DELETE\s+FROM|WITH)\b", re.IGNORECASE
 )
@@ -229,7 +243,17 @@ def sql_literals() -> list[tuple[Path, str]]:
         if "target" in path.parts:
             continue
         source = path.read_text(encoding="utf-8", errors="ignore")
-        for literal in RAW_STRING.findall(source):
+        # Raw literals first, then blanked out: `PLAIN_STRING` also matches a raw
+        # literal's body, since `r#"SELECT ..."#` contains a quote, the query and
+        # another quote, so scanning both over the same text reads every raw
+        # statement twice.
+        raw = RAW_STRING.findall(source)
+        plain = [
+            literal
+            for literal in PLAIN_STRING.findall(RAW_STRING.sub("", source))
+            if PLAIN_SQL_START.match(literal) and SQL_SHAPE.search(literal)
+        ]
+        for literal in raw + plain:
             if not STATEMENT.search(literal):
                 continue
             stripped = literal
