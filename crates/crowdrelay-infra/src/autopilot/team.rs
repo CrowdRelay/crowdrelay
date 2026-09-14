@@ -138,12 +138,14 @@ impl PostgresAutopilotRepository {
                 WITH task(item_key) AS (VALUES
                     ('staff_assigned'),('offline_snapshot_ready'),('gate_device_charged'),
                     ('backup_device_ready'),('network_tested'),('guestlist_checked'),
-                    ('post_show_reconciliation'),('post_show_report')
+                    ('capture_plan'),('post_show_reconciliation'),('post_show_report')
                 )
                 SELECT event.id event_id, event.title event_title, task.item_key task_key,
                        event.starts_at,
                        CASE WHEN task.item_key IN ('post_show_reconciliation','post_show_report')
                             THEN event.starts_at + INTERVAL '36 hours'
+                            WHEN task.item_key = 'capture_plan'
+                            THEN event.starts_at
                             ELSE event.starts_at - INTERVAL '2 hours' END due_at
                 FROM events event CROSS JOIN task
                 LEFT JOIN show_checklist_items checklist
@@ -162,6 +164,8 @@ impl PostgresAutopilotRepository {
                   AND CASE
                       WHEN task.item_key IN ('post_show_reconciliation','post_show_report')
                           THEN $2 >= event.starts_at + INTERVAL '6 hours'
+                      WHEN task.item_key = 'capture_plan'
+                          THEN $2 BETWEEN event.starts_at - INTERVAL '30 hours' AND event.starts_at
                       ELSE $2 >= event.starts_at - INTERVAL '72 hours'
                   END
                 ORDER BY due_at, event.id, task.item_key
@@ -273,10 +277,7 @@ impl PostgresAutopilotRepository {
                     &member.normalized_email,
                     &member.display_name,
                     friendly_show_task_title(&task.task_key),
-                    format!(
-                        "Koncert: {}. Termin koncertu: {}.",
-                        task.event_title, task.starts_at
-                    ),
+                    show_task_detail(&task),
                     Some(task.due_at),
                     0,
                     None,
@@ -748,6 +749,12 @@ pub(super) fn assignment_need(context: &str, action_kind: &str) -> TeamAssignmen
             secondary_skill: Some(TeamSkill::People),
             allow_generalist: true,
         }
+    } else if action.contains("capture") {
+        TeamAssignmentNeed {
+            primary_skill: TeamSkill::Video,
+            secondary_skill: Some(TeamSkill::Photography),
+            allow_generalist: true,
+        }
     } else if context == "show_operations" || action.contains("show") {
         TeamAssignmentNeed {
             primary_skill: TeamSkill::Operations,
@@ -775,6 +782,20 @@ pub(super) fn friendly_action_title(action_kind: &str) -> String {
     }
 }
 
+fn show_task_detail(task: &UnassignedShowTaskRow) -> String {
+    if task.task_key == "capture_plan" {
+        format!(
+            "Koncert: {}. Termin koncertu: {}.\n\nUjęcia do zrobienia:\n1. Szerokie ujęcie sali w szczycie setu.\n2. 20–30 s wideo z jednego utworu — materiał pod harvest T+3.\n3. Rytuał skanowania — uchwyć fana skanującego kod QR.",
+            task.event_title, task.starts_at
+        )
+    } else {
+        format!(
+            "Koncert: {}. Termin koncertu: {}.",
+            task.event_title, task.starts_at
+        )
+    }
+}
+
 fn friendly_show_task_title(task_key: &str) -> String {
     match task_key {
         "staff_assigned" => "Potwierdź obsadę koncertu".into(),
@@ -783,6 +804,7 @@ fn friendly_show_task_title(task_key: &str) -> String {
         "backup_device_ready" => "Przygotuj urządzenie zapasowe".into(),
         "network_tested" => "Przetestuj internet na wejściu".into(),
         "guestlist_checked" => "Sprawdź guestlistę".into(),
+        "capture_plan" => "Zabezpiecz materiał z koncertu".into(),
         "post_show_reconciliation" => "Zrób rozliczenie po koncercie".into(),
         "post_show_report" => "Domknij raport po koncercie".into(),
         other => format!("Domknij zadanie koncertowe: {}", other.replace('_', " ")),

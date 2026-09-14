@@ -19,6 +19,7 @@ pub enum ShowTaskKind {
     BackupDeviceReady,
     NetworkTested,
     GuestlistChecked,
+    CapturePlan,
     PostShowReconciliation,
     PostShowReport,
 }
@@ -35,6 +36,7 @@ impl ShowTaskKind {
             Self::BackupDeviceReady => "backup_device_ready",
             Self::NetworkTested => "network_tested",
             Self::GuestlistChecked => "guestlist_checked",
+            Self::CapturePlan => "capture_plan",
             Self::PostShowReconciliation => "post_show_reconciliation",
             Self::PostShowReport => "post_show_report",
         }
@@ -44,7 +46,10 @@ impl ShowTaskKind {
     pub const fn is_physical(self) -> bool {
         matches!(
             self,
-            Self::GateDeviceCharged | Self::BackupDeviceReady | Self::NetworkTested
+            Self::GateDeviceCharged
+                | Self::BackupDeviceReady
+                | Self::NetworkTested
+                | Self::CapturePlan
         )
     }
 

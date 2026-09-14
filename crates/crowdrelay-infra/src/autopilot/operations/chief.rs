@@ -314,7 +314,7 @@ pub(in crate::autopilot) async fn load_chief_of_staff(
         WITH task(item_key) AS (VALUES
             ('announcement_published'),('ticketing_verified'),('staff_assigned'),('offline_snapshot_ready'),
             ('gate_device_charged'),('backup_device_ready'),('network_tested'),('guestlist_checked'),
-            ('post_show_reconciliation'),('post_show_report'))
+            ('capture_plan'),('post_show_reconciliation'),('post_show_report'))
         SELECT event.id event_id, event.title event_title, task.item_key task_key,
                COALESCE(checklist.status,'pending') status, event.starts_at
         FROM events event CROSS JOIN task

@@ -154,6 +154,7 @@ async fn ensure_checklist_defaults(
             ('wireless_checked', 'gear', 80),
             ('power_and_chargers_packed', 'gear', 90),
             ('camera_handoff_ready', 'media', 110),
+            ('capture_plan', 'media', 120),
             ('venue_schedule_confirmed', 'logistics', 130),
             ('tech_rider_confirmed', 'logistics', 140),
             ('staff_assigned', 'logistics', 150),

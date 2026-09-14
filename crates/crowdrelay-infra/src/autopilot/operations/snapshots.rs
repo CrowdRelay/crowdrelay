@@ -725,6 +725,7 @@ pub(in crate::autopilot) async fn load_show_task_snapshots(
                 ('backup_device_ready'),
                 ('network_tested'),
                 ('guestlist_checked'),
+                ('capture_plan'),
                 ('post_show_reconciliation'),
                 ('post_show_report')
         )
@@ -891,6 +892,7 @@ pub(super) fn parse_show_task(value: &str) -> Result<ShowTaskKind, RepositoryErr
         "backup_device_ready" => Ok(ShowTaskKind::BackupDeviceReady),
         "network_tested" => Ok(ShowTaskKind::NetworkTested),
         "guestlist_checked" => Ok(ShowTaskKind::GuestlistChecked),
+        "capture_plan" => Ok(ShowTaskKind::CapturePlan),
         "post_show_reconciliation" => Ok(ShowTaskKind::PostShowReconciliation),
         "post_show_report" => Ok(ShowTaskKind::PostShowReport),
         _ => Err(RepositoryError::Unexpected),
