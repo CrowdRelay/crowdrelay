@@ -62,6 +62,40 @@ impl WaitCandidateValue {
             + self.opportunity_cost
     }
 
+    /// What waiting is worth for reasons that acting cannot supply.
+    ///
+    /// The distinction `min_dispatches` needs. WAIT wins for two different kinds
+    /// of reason, and only one of them is a deadlock:
+    ///
+    /// - **Waiting for information.** [`Self::value_of_information`] is high
+    ///   because measurements are pending, and a pending measurement resolves
+    ///   only after the brain acts and the window elapses. Honouring this WAIT
+    ///   means never acting, never resolving, and never learning.
+    ///   `min_dispatches` exists to break exactly this, and acting is the only
+    ///   escape.
+    ///
+    /// - **Waiting for the fanbase.** [`Self::fatigue_recovery_value`] is high
+    ///   because the audience is tired. Acting does not resolve that; acting
+    ///   makes it worse. Overriding this WAIT is spam, which the North Star
+    ///   rules out, and it burns the fans the whole system exists to grow.
+    ///
+    /// This sum excludes VOI, so it answers: would WAIT still win if the brain
+    /// already knew everything the pending measurements could teach it? If yes,
+    /// `min_dispatches` must not override, because no amount of acting changes
+    /// that answer.
+    ///
+    /// **Zero today, on purpose.** `fatigue_recovery_value` and `option_value`
+    /// are both unconditionally `0.0` — see the fields — so this is currently
+    /// just the negative opportunity cost and is never positive. Every WAIT that
+    /// can win today is a VOI deadlock, which is why overriding unconditionally
+    /// has been indistinguishable from overriding correctly. The distinction is
+    /// drawn now, while both readings agree, so that filling either seam changes
+    /// one number rather than silently turning the override into a spam switch.
+    #[must_use]
+    pub fn total_excluding_information(&self) -> f64 {
+        self.fatigue_recovery_value + self.option_value + self.opportunity_cost
+    }
+
     /// The decision sensitivity constant — converts treatment uncertainty
     /// to expected fan value. Conservative: 0.1 means VOI is small relative
     /// to typical fan values (2-5). Monitor in production — if WAIT never

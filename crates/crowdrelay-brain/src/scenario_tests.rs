@@ -352,6 +352,82 @@ fn scenario_f_min_dispatches_breaks_wait_deadlock() {
     assert_eq!(selection.selected.len(), 1);
 }
 
+/// `min_dispatches` breaks a deadlock; it is not a licence to spam.
+///
+/// Same candidate and the same default `min_dispatches=1` as the test above, but
+/// WAIT is now winning for a reason acting cannot fix: the fanbase needs to
+/// recover. VOI is zero, so there is no information to go and fetch — dispatching
+/// here does not resolve anything, it just spends a tired audience.
+///
+/// `fatigue_recovery_value` is set on the struct rather than through `compute`,
+/// because `compute` hardcodes it to `0.0`. That is exactly why this test exists:
+/// today every WAIT that can win is a VOI deadlock, so the unconditional override
+/// and the correct one are indistinguishable, and the first person to compute
+/// fatigue recovery would have turned the override into a spam switch without a
+/// single test failing.
+#[test]
+fn scenario_f_min_dispatches_does_not_override_a_fatigued_fanbase() {
+    let dv = make_dv(
+        0.5,
+        3.0,
+        EstimationRegime::Y30Direct,
+        EvidenceQuality::RandomizedHoldout,
+        1.0,
+    );
+    let candidate = make_candidate_with_dv("community.engage", "djent", "audience_a", dv);
+    let wait = WaitCandidateValue {
+        value_of_information: 0.0,
+        fatigue_recovery_value: 4.0,
+        opportunity_cost: -0.5,
+        option_value: 0.0,
+    };
+    assert!(
+        wait.total_excluding_information() > 0.1,
+        "the scenario requires a WAIT that survives setting VOI aside"
+    );
+    let optimizer = PortfolioOptimizer::default(); // min_dispatches=1
+    let selection = optimizer.select_with_wait(vec![candidate], wait);
+    assert!(
+        selection.do_nothing,
+        "min_dispatches must not dispatch into a fanbase that needs to recover: \
+         acting cannot resolve fatigue, it deepens it"
+    );
+}
+
+/// The deadlock override still fires when the only reason to wait is information.
+///
+/// The complement of the test above, stated against the same seam. Fatigue is
+/// zero and VOI is high, so waiting buys information that only acting can
+/// deliver, and `min_dispatches` must act.
+#[test]
+fn scenario_f_min_dispatches_still_overrides_a_purely_informational_wait() {
+    let dv = make_dv(
+        0.5,
+        3.0,
+        EstimationRegime::Y30Direct,
+        EvidenceQuality::RandomizedHoldout,
+        1.0,
+    );
+    let candidate = make_candidate_with_dv("community.engage", "djent", "audience_a", dv);
+    let wait = WaitCandidateValue {
+        value_of_information: 6.0,
+        fatigue_recovery_value: 0.0,
+        opportunity_cost: -0.5,
+        option_value: 0.0,
+    };
+    assert!(
+        wait.total() > 0.1,
+        "the scenario requires a WAIT that would otherwise win"
+    );
+    let optimizer = PortfolioOptimizer::default();
+    let selection = optimizer.select_with_wait(vec![candidate], wait);
+    assert!(
+        !selection.do_nothing,
+        "a WAIT waiting only for information is the deadlock min_dispatches exists \
+         to break"
+    );
+}
+
 #[test]
 fn scenario_f_wait_loses_to_high_value_action() {
     // Adversarial variant: high Y30 (10.0) → WAIT should lose

@@ -524,8 +524,19 @@ impl PortfolioOptimizer {
         // portfolio. This ensures the brain always tries at least one action,
         // even when VOI from pending measurements exceeds the best action's value.
         // When min_dispatches=0, WAIT can still block all candidates.
-        let min_dispatches_overrides_wait =
-            self.config.min_dispatches > 0 && has_positive_candidates;
+        //
+        // It may only break *that* deadlock. A WAIT that still wins once VOI is
+        // set aside is not waiting for information the brain could go and fetch —
+        // it is waiting for the fanbase to recover, and dispatching into that is
+        // spam rather than a cold start. See
+        // `WaitCandidateValue::total_excluding_information`. Both of the terms
+        // that could make this positive are hardcoded `0.0` today, so this clause
+        // changes no decision now; it is here so that computing fatigue recovery
+        // later is a one-number change rather than a silent spam switch.
+        let wait_survives_information = wait.total_excluding_information();
+        let min_dispatches_overrides_wait = self.config.min_dispatches > 0
+            && has_positive_candidates
+            && wait_survives_information <= self.config.min_marginal_value;
         if wait_total > 0.0
             && wait_total > self.config.min_marginal_value
             && !min_dispatches_overrides_wait
