@@ -412,6 +412,20 @@ fn live_terms_candidate(
     }))
 }
 
+/// What the autonomy level alone would allow, with the confidence gate set aside.
+///
+/// Used only for a decision the domain has already routed to a human. Asking
+/// `disposition` with the minimum as the confidence is deliberate: it keeps the
+/// level the single authority on what dispositions are available, so adding an
+/// autonomy level cannot be answered correctly here and wrongly there.
+fn disposition_ignoring_confidence(policy: &AutopilotPolicy) -> PolicyDisposition {
+    disposition(
+        policy.autonomy_level,
+        policy.minimum_confidence,
+        policy.minimum_confidence,
+    )
+}
+
 fn live_opportunity_candidate(
     snapshot: LiveOpportunitySnapshot,
     policy: &AutopilotPolicy,
@@ -449,7 +463,47 @@ fn live_opportunity_candidate(
             "a landmark opportunity arrived at or past the annual stretch; the year being full is not a reason to lose it",
         ),
     };
+    // The confidence gate decides whether the *machine* may act unattended. It
+    // has no say in whether a human gets to look at something the domain gate has
+    // already routed to a human, and both directions matter here.
+    //
+    // Downward, which was already handled: a forced-approval decision must not
+    // auto-execute however confident it is.
+    //
+    // Upward, which was not: `Deny` creates no action row, so the opportunity
+    // never enters `awaiting_approval` — the queue `ops/attention` reads and the
+    // only place the operator looks. The decision is still written to the ledger,
+    // so nothing is destroyed, but finding it means querying for
+    // `disposition = 'deny'`, which nobody does.
+    //
+    // For `EscalateLandmark` that is a straight contradiction with its own
+    // reason string, one match arm above: "the year being full is not a reason to
+    // lose it". It is escalated precisely so a person sees it, and the confidence
+    // gate decided no person would.
+    //
+    // It is reachable, not theoretical. Confidence here is a linear
+    // re-expression of the score — `7_500 + (score - minimum_score) * 100` — so
+    // with the default `minimum_score` of 65 and `minimum_confidence` of 8000,
+    // every score below 70 denies. A Landmark festival at strategic value 85%,
+    // fit 70%, reputation 60%, evidence 70% and a bounded loss scores 67. The
+    // configured floor says 65 and the real floor is 70; that gap is worth
+    // closing on its own, and it is a policy question rather than this function's.
+    // What this function can fix is that the gap silently swallows decisions the
+    // domain sent to a human.
+    //
+    // The autonomy level is still obeyed, and that is why the lift is written the
+    // way it is rather than as `Deny => RequireApproval`. `disposition` tests
+    // confidence *before* the level, so on an `Observe` workspace a low-confidence
+    // decision returns `Deny` too — and rewriting that to `RequireApproval` would
+    // put approval requests in front of an operator who asked to observe only.
+    // Re-asking with a confidence that clears keeps the level the authority on
+    // what the answer may be: Observe still observes, Recommend still recommends.
+    //
+    // Only ever moves a decision *into* the approval queue, never past it.
     let mut disposition = disposition(policy.autonomy_level, confidence, policy.minimum_confidence);
+    if forced_approval && matches!(disposition, PolicyDisposition::Deny) {
+        disposition = disposition_ignoring_confidence(policy);
+    }
     if forced_approval && matches!(disposition, PolicyDisposition::AutoExecute) {
         disposition = PolicyDisposition::RequireApproval;
     }
