@@ -7,7 +7,12 @@
 //! not actionable from there. FakAP remains the external health probe for
 //! API reachability; this watchdog catches silent failures FakAP cannot see.
 //!
-//! The watchdog monitors ten conditions:
+//! The watchdog monitors seventeen conditions. The count and this list are
+//! gated against `conditions()` by `test_watchdog_conditions_documented_v1.py`:
+//! it said "ten" while seven alarms went undocumented, including two criticals,
+//! and this repository has a record of concluding a live capability is missing
+//! by reading a stale list. Every condition below also has a test, so none is
+//! an alarm nobody has seen fire.
 //! - `publishing.orphaned_draft` — a publishing action succeeded and no
 //!   executor produced a post for it. The three executors claim
 //!   `agent.content.request` by the agent task's `template_id`, and the social
@@ -59,6 +64,43 @@
 //!   action says the opposite of the action's persisted status. This is what
 //!   `LegalTransition::Conflict` refused to coerce, and until now the
 //!   refusal existed only as a log line. See below.
+//! - `brain.phase_failing_every_cycle` — **critical.** One cycle phase has
+//!   failed in every cycle across the window. Consecutiveness rather than a
+//!   share, because what fraction counts as broken would need a number nobody
+//!   has, and a phase failing every cycle for an hour is not transient under any
+//!   reading.
+//! - `safety.off_platform_push_proposed` — **critical**, and not conditioned on
+//!   anything else failing. A model proposed a Signal push whose target was an
+//!   absolute URL rather than an in-app route, which would have sent the whole
+//!   fanbase somewhere nobody approved. The guard refused it, so nothing was
+//!   sent and no fan was harmed — which is precisely why it would otherwise be
+//!   invisible. The approval click shows the copy, not the link, so a human
+//!   reviewer would not have caught it either.
+//! - `learning.posterior_never_updated` — **critical.** Decisions are being made
+//!   and the causal posterior has never seen an observation, so every prediction
+//!   the brain reports IS its prior. It reports the one failure nothing else can
+//!   see: not that something broke, but that something never started. Cycles
+//!   succeed, decisions are written and actions are created throughout. Both
+//!   halves are required, because a workspace with few decisions and no
+//!   observations has not run yet rather than failed to learn.
+//! - `publishing.drafts_with_no_publisher` — drafts are queued and the posture
+//!   says nothing will publish them, naming the switch that is missing. Both
+//!   halves are required: an empty queue with publishing off is a setting, and a
+//!   manual channel with nothing waiting is nothing to report.
+//! - `publishing.drafts_failed` — drafts failed and their content is not being
+//!   retried, reported **with the reasons**. The reason is the whole point:
+//!   "Reddit refused this" and "the agents service was unreachable" call for
+//!   opposite responses, and `error_message` was written on every failed row and
+//!   read by nothing.
+//! - `publishing.session_dead` — Reddit work is queued and no session can post
+//!   it. The predicate is the agents service's own eligibility rule rather than a
+//!   proxy: stored cookies beside a dead credential are a session that still
+//!   cannot post. Drafts retry for about an hour, and a six-hour cooldown
+//!   outlives that cover, so the window for a person to act is real.
+//! - `growth.stuck_ungeocoded_cities` — fan-requested cities have exhausted
+//!   geocoding, so fans there are unreachable by the nearby-show loop. Both
+//!   counts come from one predicate, so a city only reaches this finding when a
+//!   fan is behind it.
 //! - `growth.feed_failing` — a growth feed's last sync attempt failed while
 //!   others still work. A credential to go and repair.
 //! - `growth.all_feeds_failing` — every feed the tenant has is failing, so
