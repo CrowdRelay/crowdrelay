@@ -7,7 +7,7 @@
 //! not actionable from there. FakAP remains the external health probe for
 //! API reachability; this watchdog catches silent failures FakAP cannot see.
 //!
-//! The watchdog monitors seventeen conditions. The count and this list are
+//! The watchdog monitors eighteen conditions. The count and this list are
 //! gated against `conditions()` by `test_watchdog_conditions_documented_v1.py`:
 //! it said "ten" while seven alarms went undocumented, including two criticals,
 //! and this repository has a record of concluding a live capability is missing
@@ -64,6 +64,15 @@
 //!   action says the opposite of the action's persisted status. This is what
 //!   `LegalTransition::Conflict` refused to coerce, and until now the
 //!   refusal existed only as a log line. See below.
+//! - `approval.expired_unanswered` — approvals were cancelled because nobody
+//!   answered them inside the 72-hour window. Each is a proposal the brain made,
+//!   ranked and queued, that the system then discarded. It is the one loss that
+//!   scales with the operator being the bottleneck, and nothing else here sees it:
+//!   when it happens the executors are live, the feeds sync, the drafts publish
+//!   and the brain cycles. The only trace is `last_error_kind` on a cancelled
+//!   row, which is also the only thing separating an expiry from a deliberate
+//!   rejection. Reported with the next outstanding deadline, not just the past
+//!   count — a count says somebody was too slow, a deadline says what to do today.
 //! - `brain.phase_failing_every_cycle` — **critical.** One cycle phase has
 //!   failed in every cycle across the window. Consecutiveness rather than a
 //!   share, because what fraction counts as broken would need a number nobody
@@ -427,6 +436,30 @@ struct OpsSnapshot {
     /// the community again — so the reason is the only thing that tells an
     /// operator whether to requeue the content or fix the account.
     reddit_drafts_failed: Option<String>,
+    /// Approvals cancelled unanswered in the last week, and the soonest deadline
+    /// still outstanding in hours.
+    ///
+    /// An approval is inserted with `approval_expires_at = now() + 72 hours` and
+    /// the claim sweep cancels it at that point with
+    /// `last_error_kind = 'approval_expired'`. Every one of those is a proposal
+    /// the brain made, an operator never saw in time, and the system threw away.
+    ///
+    /// It is the one loss that scales with the operator being the bottleneck,
+    /// which is the state this deployment is in — the queue is the throughput
+    /// limit, and the queue empties itself every three days whether or not
+    /// anybody looked. None of the other sixteen conditions watches it: they
+    /// watch executors, feeds, drafts and the brain, all of which are working
+    /// when this happens.
+    approvals_expired_7d: i64,
+    /// Hours until the next outstanding approval expires. `None` when nothing is
+    /// awaiting approval.
+    ///
+    /// Reported alongside the expiry count so the alarm can say what is about to
+    /// go as well as what already went. A count of past losses tells an operator
+    /// they were too slow; a deadline tells them what to do today.
+    hours_to_next_approval_expiry: Option<i64>,
+    /// Approvals currently outstanding, whatever their deadline.
+    approvals_outstanding: i64,
     /// Drafts waiting on a Reddit session (pending or deferred).
     reddit_posting_demand: i64,
     /// Count of credential rows eligible to establish a session — the same
@@ -779,6 +812,27 @@ async fn load_snapshot(
             (SELECT count(*) FROM community_posts p
              WHERE p.workspace_id=$1 AND p.status IN ('pending','rate_limited')
             )::bigint AS reddit_posting_demand,
+            -- Approvals the operator never answered. `last_error_kind` is the
+            -- only thing distinguishing these from an operator's own rejection,
+            -- and the claim sweep is the only writer of that value.
+            (SELECT count(*) FROM viryaos_autopilot_actions a
+             WHERE a.workspace_id=$1
+               AND a.status='cancelled'
+               AND a.last_error_kind='approval_expired'
+               AND a.finished_at > now() - interval '7 days'
+            )::bigint AS approvals_expired_7d,
+            -- What is about to go, not only what went. Cast because EXTRACT
+            -- returns numeric on PostgreSQL 14+ and sqlx cannot decode that
+            -- into an integer; `sql-result-types.py` refuses an uncast one.
+            (SELECT floor(EXTRACT(EPOCH FROM (min(a.approval_expires_at) - now())) / 3600)::bigint
+             FROM viryaos_autopilot_actions a
+             WHERE a.workspace_id=$1
+               AND a.status='awaiting_approval'
+               AND a.approval_expires_at IS NOT NULL
+            ) AS hours_to_next_approval_expiry,
+            (SELECT count(*) FROM viryaos_autopilot_actions a
+             WHERE a.workspace_id=$1 AND a.status='awaiting_approval'
+            )::bigint AS approvals_outstanding,
             -- Filled in by the guarded follow-up below. The real values live
             -- in `agent_service_credentials`, which the agents service owns —
             -- on a CrowdRelay-only deployment the relation does not exist,

@@ -335,6 +335,50 @@ fn conditions(snapshot: &OpsSnapshot, posture: PublishingPosture) -> Vec<Conditi
             }),
         },
         Condition {
+            // The loss that scales with the operator being the bottleneck.
+            //
+            // An approval is written with `approval_expires_at = now() + 72
+            // hours`, and the claim sweep cancels it there with
+            // `last_error_kind = 'approval_expired'`. Each one is a proposal the
+            // brain made, ranked and queued, that nobody answered in time and the
+            // system then discarded. On this deployment the approval queue *is*
+            // the throughput limit, and it empties itself every three days
+            // whether or not anybody looked.
+            //
+            // No other condition sees it, because nothing is broken when it
+            // happens: executors are live, feeds sync, drafts publish, the brain
+            // cycles. The only trace is `last_error_kind` on a cancelled row, and
+            // that is also the only thing separating an expiry from an operator's
+            // own deliberate rejection.
+            //
+            // Warning rather than critical. Nothing is corrupted and the
+            // opportunity may come round again — but it is the operator's own
+            // work being thrown away, so it is reported with the next deadline
+            // rather than only the past losses: a count of what was lost says
+            // somebody was too slow, a deadline says what to do today.
+            key: "approval.expired_unanswered",
+            severity: "warning",
+            summary: "Approvals were cancelled because nobody answered them in time",
+            active: snapshot.approvals_expired_7d > 0,
+            details: json!({
+                "expired": snapshot.approvals_expired_7d,
+                "window": "7 days",
+                "outstanding_now": snapshot.approvals_outstanding,
+                "hours_to_next_expiry": snapshot.hours_to_next_approval_expiry,
+                "approval_window_hours": 72,
+                "remedy": "read /v1/control-plane/ops/attention for what is \
+                           awaiting_approval now — that list is ordered by \
+                           soonest deadline. The expired ones are in \
+                           viryaos_autopilot_actions with status 'cancelled' and \
+                           last_error_kind 'approval_expired'; they are not \
+                           retried and the brain will only propose them again if \
+                           the underlying opportunity is still open. If the queue \
+                           is consistently outrunning you, the answer is either a \
+                           higher autonomy level for the contexts you trust or a \
+                           longer approval window, not a faster operator.",
+            }),
+        },
+        Condition {
             key: "executor.offline",
             severity: "critical",
             summary: "ViryaOS executor registry has no live executor",

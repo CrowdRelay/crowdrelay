@@ -266,3 +266,114 @@ async fn a_dead_credential_raises_session_dead_and_a_live_one_clears_it() -> Res
     db.drop_database().await;
     result
 }
+
+/// An approval cancelled unanswered must reach the operator, against a real
+/// schema.
+///
+/// The unit tests prove the condition's predicate. This proves the reading
+/// behind it: three subqueries over `viryaos_autopilot_actions`, one of them an
+/// `EXTRACT(EPOCH …)` that returns `numeric` on PostgreSQL 14+ and has to be cast
+/// before sqlx can decode it. An uncast one compiles, lints and passes every unit
+/// test, then aborts the whole snapshot — and with it all eighteen conditions —
+/// on first contact with a server.
+///
+/// Also pins the distinction the alarm turns on: an approval merely waiting is
+/// the system working, and only one already discarded is the finding.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn an_approval_cancelled_unanswered_reaches_the_operator() -> Result<()> {
+    let db = DisposableDatabase::create().await?;
+    let result = async {
+        let ws = workspace(&db.pool).await?;
+
+        // An approval still outstanding, well inside its window.
+        approval_action(&db.pool, ws, "awaiting_approval", Some(48), None).await?;
+        watchdog(db.pool.clone(), ws).run_once().await?;
+        let alerts = active_alerts(&db.pool, ws).await?;
+        assert!(
+            !alerts.contains(&"approval.expired_unanswered".to_owned()),
+            "work in the queue is the system working, not a finding: {alerts:?}"
+        );
+
+        // One the sweep cancelled because nobody answered it.
+        approval_action(
+            &db.pool,
+            ws,
+            "cancelled",
+            Some(-1),
+            Some("approval_expired"),
+        )
+        .await?;
+        watchdog(db.pool.clone(), ws).run_once().await?;
+        let alerts = active_alerts(&db.pool, ws).await?;
+        assert!(
+            alerts.contains(&"approval.expired_unanswered".to_owned()),
+            "an approval discarded unanswered must be reported: {alerts:?}"
+        );
+        Ok(())
+    }
+    .await;
+    db.drop_database().await;
+    result
+}
+
+/// One approval action, with its decision. `expires_in_hours` may be negative to
+/// place the deadline in the past; `last_error_kind` is what separates an expiry
+/// from an operator's own rejection.
+async fn approval_action(
+    pool: &PgPool,
+    workspace_id: WorkspaceId,
+    status: &str,
+    expires_in_hours: Option<i32>,
+    last_error_kind: Option<&str>,
+) -> Result<()> {
+    let decision_id = Uuid::now_v7();
+    sqlx::query(
+        r#"
+        INSERT INTO viryaos_autopilot_decisions (
+            id, workspace_id, decision_key, context, subject_kind, subject_id,
+            decision_kind, confidence_basis_points, disposition, reason,
+            input_snapshot, policy_snapshot, recommendation, trace_id
+        ) VALUES ($1,$2,$3,'live_opportunity','workspace',$4,
+                  'apply_live_opportunity',7700,'require_approval','a festival',
+                  '{}'::jsonb,'{}'::jsonb,'{}'::jsonb,$5)
+        "#,
+    )
+    .bind(decision_id)
+    .bind(workspace_id.into_uuid())
+    .bind(format!("live-{decision_id}"))
+    .bind(workspace_id.into_uuid())
+    .bind(Uuid::now_v7())
+    .execute(pool)
+    .await
+    .context("insert decision")?;
+    let action_id = Uuid::now_v7();
+    sqlx::query(
+        r#"
+        INSERT INTO viryaos_autopilot_actions (
+            id, workspace_id, decision_id, context, action_kind, subject_kind,
+            subject_id, idempotency_key, payload, status,
+            approval_expires_at, last_error_kind, finished_at, trace_id
+        ) VALUES ($1,$2,$3,'live_opportunity','apply_live_opportunity',
+                  'workspace',$4,$5,'{}'::jsonb,$6,
+                  CASE WHEN $7::int IS NULL THEN NULL
+                       ELSE now() + make_interval(hours => $7::int) END,
+                  $8,
+                  CASE WHEN $6 = 'cancelled' THEN now() ELSE NULL END,
+                  $9)
+        "#,
+    )
+    .bind(action_id)
+    .bind(workspace_id.into_uuid())
+    .bind(decision_id)
+    .bind(workspace_id.into_uuid())
+    .bind(format!("action-{action_id}"))
+    .bind(status)
+    .bind(expires_in_hours)
+    .bind(last_error_kind)
+    .bind(Uuid::now_v7())
+    .execute(pool)
+    .await
+    .context("insert approval action")?;
+    Ok(())
+}

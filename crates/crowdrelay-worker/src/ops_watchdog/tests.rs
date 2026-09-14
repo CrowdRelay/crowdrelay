@@ -61,6 +61,11 @@ fn publishing() -> PublishingPosture {
             // for it.
             decisions_total: 0,
             causal_observations: Some(0),
+            // Nothing expired, nothing waiting: the approval alarm stays
+            // quiet unless a test asks for it.
+            approvals_expired_7d: 0,
+            hours_to_next_approval_expiry: None,
+            approvals_outstanding: 0,
         }
     }
 
@@ -840,4 +845,71 @@ fn publishing() -> PublishingPosture {
             "no queued work means nothing is at risk"
         );
     }
+    /// One expired approval is worth reporting on its own.
+    ///
+    /// Nothing is broken when this fires — executors live, feeds syncing, brain
+    /// cycling — which is exactly why no other condition sees it. The proposal
+    /// was ranked, queued and discarded unanswered.
+    #[test]
+    fn an_expired_approval_raises_attention_by_itself() {
+        let mut snapshot = healthy();
+        snapshot.approvals_expired_7d = 1;
+        let raised = conditions(&snapshot, publishing())
+            .into_iter()
+            .filter(|c| c.active)
+            .map(|c| c.key)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            raised,
+            vec!["approval.expired_unanswered"],
+            "an approval the operator never answered must report without needing \
+             another fault alongside it"
+        );
+    }
+
+    /// An outstanding queue is not a fault, however close its deadline.
+    ///
+    /// The operator having work in front of them is the system working. Only an
+    /// approval already thrown away is the finding, so a pending deadline must
+    /// not raise the alarm by itself — otherwise the alarm is on permanently and
+    /// stops meaning anything.
+    #[test]
+    fn approvals_merely_waiting_do_not_raise_the_alarm() {
+        let mut snapshot = healthy();
+        snapshot.approvals_outstanding = 4;
+        snapshot.hours_to_next_approval_expiry = Some(2);
+        let raised = conditions(&snapshot, publishing())
+            .into_iter()
+            .filter(|c| c.active)
+            .map(|c| c.key)
+            .collect::<Vec<_>>();
+        assert!(
+            raised.is_empty(),
+            "a queue with work in it is the system working, not a finding: {raised:?}"
+        );
+    }
+
+    /// The next deadline travels with the alarm, not just the past count.
+    ///
+    /// A count of losses tells an operator they were too slow. A deadline tells
+    /// them what to do today, which is the only actionable half.
+    #[test]
+    fn the_expiry_alarm_carries_the_next_deadline() {
+        let mut snapshot = healthy();
+        snapshot.approvals_expired_7d = 3;
+        snapshot.approvals_outstanding = 2;
+        snapshot.hours_to_next_approval_expiry = Some(5);
+        let condition = conditions(&snapshot, publishing())
+            .into_iter()
+            .find(|c| c.key == "approval.expired_unanswered")
+            .expect("the condition must be present");
+        assert_eq!(condition.severity, "warning");
+        assert_eq!(condition.details["expired"], 3);
+        assert_eq!(
+            condition.details["hours_to_next_expiry"], 5,
+            "the alarm must say what is about to go as well as what went"
+        );
+        assert_eq!(condition.details["outstanding_now"], 2);
+    }
+
 }
