@@ -1023,3 +1023,106 @@ fn a_zero_bar_is_refused() {
         );
     }
 }
+
+/// `default()` must not drop the Signal seed to zero by accident.
+///
+/// Same hazard as the ranking bar: a derived `Default` would give this `f64`
+/// 0.0, and `CausalModel::default()` is a live path in `growth_intelligence`
+/// whenever no checkpoint exists. A zero seed is a legitimate *configured*
+/// value — see `a_tenant_with_no_app_may_seed_zero_signal` — which is exactly
+/// why it must not also be what an accident produces.
+#[test]
+fn default_keeps_the_signal_seed() {
+    let model = CausalModel::default();
+    assert_eq!(
+        model.expected_signal_per_dispatch(),
+        DEFAULT_EXPECTED_SIGNAL
+    );
+}
+
+/// A checkpoint written before the field existed must still load with a seed.
+#[test]
+fn an_older_checkpoint_loads_with_the_default_signal_seed() {
+    let older = serde_json::to_value(CausalModel::new()).expect("serialize");
+    let mut object = older.as_object().expect("object").clone();
+    object.remove("expected_signal_per_dispatch");
+    let restored: CausalModel =
+        serde_json::from_value(serde_json::Value::Object(object)).expect("deserialize");
+    assert_eq!(
+        restored.expected_signal_per_dispatch(),
+        DEFAULT_EXPECTED_SIGNAL,
+        "a checkpoint predating the field must not deserialize to a zero seed"
+    );
+}
+
+/// The seed is a property of the tenant's app, not of the method.
+#[test]
+fn the_signal_seed_is_sized_to_the_tenant() {
+    let weak = CausalModel::with_tenant_scale_and_signal(2.0, 1.0, 0.2);
+    let strong = CausalModel::with_tenant_scale_and_signal(2.0, 250.0, 40.0);
+    assert_eq!(weak.expected_signal_per_dispatch(), 0.2);
+    assert_eq!(strong.expected_signal_per_dispatch(), 40.0);
+}
+
+/// Zero is legal here, and only here.
+///
+/// A tenant with no companion app converts nobody — that is a fact about the
+/// tenant, not a misconfiguration, so it must survive validation. The ranking
+/// bar is the opposite case: a zero bar ranks noise as meaningful, so it falls
+/// back. The two fields go through the same constructor and must not share the
+/// same rule.
+#[test]
+fn a_tenant_with_no_app_may_seed_zero_signal() {
+    let model = CausalModel::with_tenant_scale_and_signal(2.0, 1.0, 0.0);
+    assert_eq!(
+        model.expected_signal_per_dispatch(),
+        0.0,
+        "a tenant with no app must be allowed to say so"
+    );
+}
+
+/// Nonsense is still refused, so a bad config cannot poison the EMA.
+#[test]
+fn a_nonsense_signal_seed_falls_back() {
+    for bad in [-3.0_f64, f64::NAN, f64::INFINITY] {
+        let model = CausalModel::with_tenant_scale_and_signal(2.0, 1.0, bad);
+        assert_eq!(
+            model.expected_signal_per_dispatch(),
+            DEFAULT_EXPECTED_SIGNAL,
+            "a seed of {bad} must fall back rather than enter the EMA"
+        );
+    }
+}
+
+/// The seed is what the first observation is pulled away from, so it changes
+/// the learned value — this is the reason it may not be a constant.
+///
+/// One observation of zero installs against a template with no history. The
+/// EMA moves from the seed toward the observation, so the tenant whose seed
+/// says its app converts nobody lands lower than the one seeded at 0.2. A
+/// constant seed would make these two identical and would have the second
+/// tenant's brain predicting installs it will never see.
+#[test]
+fn the_signal_seed_moves_the_first_learned_value() {
+    let mut seeded = CausalModel::with_tenant_scale_and_signal(2.0, 1.0, 4.0);
+    let mut unseeded = CausalModel::with_tenant_scale_and_signal(2.0, 1.0, 0.0);
+    let prediction = DispatchPrediction {
+        template_id: "t".to_owned(),
+        expected_new_fans: 5.0,
+        expected_signal_installs: 0.0,
+        ..Default::default()
+    };
+    seeded.update(&PredictionOutcome::from_observation(
+        prediction.clone(),
+        5.0,
+        0.0,
+    ));
+    unseeded.update(&PredictionOutcome::from_observation(prediction, 5.0, 0.0));
+    let high = seeded.template_expected_signal["t"];
+    let low = unseeded.template_expected_signal["t"];
+    assert!(
+        high > low,
+        "the seed must survive one observation: seeded {high}, unseeded {low}"
+    );
+    assert_eq!(low, 0.0, "a zero seed and a zero observation stay at zero");
+}

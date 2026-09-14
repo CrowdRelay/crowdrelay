@@ -183,6 +183,11 @@ fn default_meaningful_effect() -> f64 {
     MEANINGFUL_EFFECT_THRESHOLD
 }
 
+/// Serde's default for [`CausalModel::expected_signal_per_dispatch`].
+fn default_expected_signal() -> f64 {
+    DEFAULT_EXPECTED_SIGNAL
+}
+
 /// The minimum number of paired (Y14, Y30) observations before the Y14→Y30
 /// bridge model is considered reliable. Below this, the bridge's predictive
 /// variance is inflated (up to 3× at 0 observations) to reflect that the
@@ -223,6 +228,16 @@ pub struct CausalModel {
     /// existed still load, the same way `by_target` is.
     #[serde(default = "default_meaningful_effect")]
     meaningful_effect_threshold: f64,
+    /// The Signal-install rate assumed for a template nothing has been observed
+    /// about, in this tenant's units.
+    ///
+    /// Same reasoning as the effect bar above: 0.2 installs per dispatch is a
+    /// guess about one tenant's app, and it seeds the EMA that every later
+    /// observation moves. A tenant with no app at all wants zero here, and one
+    /// with a converting app wants its own measured rate — neither is served by
+    /// a number compiled in for somebody else.
+    #[serde(default = "default_expected_signal")]
+    expected_signal_per_dispatch: f64,
     /// Hierarchical NegBin posterior for fan acquisition (outcome model).
     /// Uses Gamma-Poisson conjugate model for count data with over-dispersion.
     pub fans: HierarchicalNegBinPosterior,
@@ -373,6 +388,20 @@ impl CausalModel {
     /// rank noise as worth dispatching.
     #[must_use]
     pub fn with_tenant_scale(expected: f64, meaningful_effect: f64) -> Self {
+        Self::with_tenant_scale_and_signal(expected, meaningful_effect, DEFAULT_EXPECTED_SIGNAL)
+    }
+
+    /// Every tenant-scale number in one call.
+    ///
+    /// `expected_signal` is allowed to be zero: a tenant with no app converts
+    /// nobody to it, and that is a fact rather than a misconfiguration. The
+    /// effect bar is not, because a bar of zero ranks noise.
+    #[must_use]
+    pub fn with_tenant_scale_and_signal(
+        expected: f64,
+        meaningful_effect: f64,
+        expected_signal: f64,
+    ) -> Self {
         // A non-finite or negative prior would poison every posterior it
         // touches, and the caller is usually reading a config value.
         let expected = if expected.is_finite() && expected >= 0.0 {
@@ -385,8 +414,14 @@ impl CausalModel {
         } else {
             MEANINGFUL_EFFECT_THRESHOLD
         };
+        let expected_signal = if expected_signal.is_finite() && expected_signal >= 0.0 {
+            expected_signal
+        } else {
+            DEFAULT_EXPECTED_SIGNAL
+        };
         Self {
             meaningful_effect_threshold: meaningful_effect,
+            expected_signal_per_dispatch: expected_signal,
             fans: HierarchicalNegBinPosterior::new(NegBinPosterior::prior(
                 expected,
                 1.0, // dispersion=1.0 → prior rate variance = 4.0, matching old Normal prior
@@ -398,6 +433,12 @@ impl CausalModel {
             context_effects: ContextGLM::new(),
             bridge: Y14Y30Bridge::new(),
         }
+    }
+
+    /// The Signal-install rate assumed for an unobserved template.
+    #[must_use]
+    pub fn expected_signal_per_dispatch(&self) -> f64 {
+        self.expected_signal_per_dispatch
     }
 
     /// The effect size this model treats as worth acting on.
@@ -485,7 +526,7 @@ impl CausalModel {
             .template_expected_signal
             .get(template)
             .copied()
-            .unwrap_or(DEFAULT_EXPECTED_SIGNAL);
+            .unwrap_or(self.expected_signal_per_dispatch);
         let signal_updated =
             signal_current + lr * (outcome.observed_signal_installs - signal_current);
         self.template_expected_signal
