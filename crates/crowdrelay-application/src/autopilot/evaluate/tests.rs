@@ -3,6 +3,7 @@ mod tests {
     use super::*;
     use crowdrelay_domain::{
         TeamOpportunityId, TicketTypeId,
+        booking::BookingOpportunityPolicy,
         live_opportunities::{
             LiveOpportunityKind, LiveOpportunityPolicy, LiveOpportunitySnapshot,
             live_opportunity_score,
@@ -175,4 +176,67 @@ mod tests {
         Ok(())
     }
 
+    /// Finds the real confidence floor by asking the production evaluator.
+    ///
+    /// `minimum_confidence` is a score floor wearing different units. Live
+    /// opportunity confidence is `7_500 + (score - minimum_score) * 100`, so with
+    /// a 8000 minimum the first score to clear it is `minimum_score + 5` — an
+    /// operator who sets `minimum_score` to 65 has really set 70, and the two
+    /// numbers live in different crates with neither mentioning the other.
+    ///
+    /// Nothing is lost to it now: a decision the domain routed to a human is
+    /// lifted past the confidence gate, because that gate decides whether the
+    /// *machine* may act alone. The gap still governs whether an opportunity can
+    /// ever auto-submit, so it is worth having written down.
+    ///
+    /// The first version of this test computed the formula inline and asserted it
+    /// against itself. Moving the real base from 7_500 to 8_000 did not fail it.
+    /// This one sweeps `fit_basis_points` through `evaluate_live_opportunity` and
+    /// reads the confidence the production path actually produced, so the
+    /// assertion is about the code rather than about a copy of it.
+    #[test]
+    fn the_confidence_floor_is_a_second_score_floor() -> Result<(), Box<dyn std::error::Error>> {
+        let minimum = Confidence::from_basis_points(8_000)?;
+        let policy = LiveOpportunityPolicy::default();
+        let now = OffsetDateTime::UNIX_EPOCH + time::Duration::days(20_000);
+
+        let mut lowest_clearing: Option<u16> = None;
+        let mut highest_denied: Option<u16> = None;
+        for fit in (0..=10_000_u16).step_by(100) {
+            let mut snapshot = landmark_scoring_67();
+            snapshot.fit_basis_points = fit;
+            let score = live_opportunity_score(snapshot);
+            let confidence = match evaluate_live_opportunity(snapshot, policy, now) {
+                LiveOpportunityDecision::PrepareForApproval { confidence, .. }
+                | LiveOpportunityDecision::SubmitAutomatically { confidence, .. }
+                | LiveOpportunityDecision::EscalateLandmark { confidence, .. } => confidence,
+                // Below `minimum_score`, or refused for another reason. The
+                // confidence gate is not what is being measured there.
+                LiveOpportunityDecision::Hold => continue,
+            };
+            if confidence.basis_points() >= minimum.basis_points() {
+                lowest_clearing = Some(lowest_clearing.map_or(score, |best| best.min(score)));
+            } else {
+                highest_denied = Some(highest_denied.map_or(score, |worst| worst.max(score)));
+            }
+        }
+
+        let lowest_clearing = lowest_clearing.expect("some score must clear the floor");
+        let highest_denied = highest_denied.expect("some score must fall under it");
+        assert_eq!(
+            lowest_clearing,
+            policy.minimum_score + 5,
+            "the evaluator's own confidence clears {} five points above the \
+             configured minimum_score of {}",
+            minimum.basis_points(),
+            policy.minimum_score
+        );
+        assert_eq!(
+            highest_denied,
+            policy.minimum_score + 4,
+            "and the band the confidence gate rejects runs right up to it, so \
+             minimum_score is not the floor an operator gets"
+        );
+        Ok(())
+    }
 }
