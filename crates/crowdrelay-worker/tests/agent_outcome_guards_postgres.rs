@@ -170,6 +170,20 @@ async fn rejection_reason(pool: &PgPool, outcome_id: Uuid) -> Result<Option<Stri
     .await?)
 }
 
+/// Counts approval-requested notifications for a workspace. An
+/// `awaiting_approval` action with no event here is a parked decision no
+/// human ever hears about — the silence that hid four outreach targets.
+async fn approval_event_count(pool: &PgPool, workspace_id: WorkspaceId) -> Result<i64> {
+    Ok(sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM outbox_events \
+         WHERE workspace_id = $1 \
+           AND event_type = 'crowdrelay.autopilot.approval_requested'",
+    )
+    .bind(workspace_id.into_uuid())
+    .fetch_one(pool)
+    .await?)
+}
+
 // ── Guard: zero confidence → zero decisions ──────────────────────────
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -359,6 +373,33 @@ async fn valid_inner(pool: &PgPool) -> Result<()> {
     ensure!(
         action_count(pool, ws).await? == 1,
         "valid outreach target must create exactly one action"
+    );
+    // The action parks for a human — and the human must hear about it.
+    // For hours this event never left: the action waited, nobody knew.
+    ensure!(
+        approval_event_count(pool, ws).await? == 1,
+        "awaiting_approval action must emit exactly one approval_requested event"
+    );
+    // The event must name the action it asks about — an alert that cannot
+    // be answered is noise.
+    let event_action_id = sqlx::query_scalar::<_, Uuid>(
+        "SELECT (payload ->> 'action_id')::uuid FROM outbox_events \
+         WHERE workspace_id = $1 \
+           AND event_type = 'crowdrelay.autopilot.approval_requested'",
+    )
+    .bind(ws.into_uuid())
+    .fetch_one(pool)
+    .await?;
+    let action_id = sqlx::query_scalar::<_, Uuid>(
+        "SELECT id FROM viryaos_autopilot_actions \
+         WHERE workspace_id = $1 AND subject_kind = 'agent_outcome'",
+    )
+    .bind(ws.into_uuid())
+    .fetch_one(pool)
+    .await?;
+    ensure!(
+        event_action_id == action_id,
+        "approval event must reference the parked action"
     );
     Ok(())
 }

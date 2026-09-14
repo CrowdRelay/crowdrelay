@@ -475,6 +475,31 @@ impl AgentOutcomeWorker {
             "confidence_provenance": "model_self_report",
         });
 
+        // The autopilot_decisions.reason column has a CHECK constraint
+        // (non-empty, <=240 chars). `payload.rationale` deserializes
+        // with `#[serde(default)]` — an outcome that carries no
+        // rationale, or only whitespace, used to die here on
+        // `reason_check` and the whole outcome was discarded. The
+        // absence is itself the honest reason; record it.
+        //
+        // The LLM rationale can also be longer than 240 chars, so
+        // truncate to fit. Use char-based truncation (not byte-based)
+        // so multi-byte UTF-8 (Polish diacritics, emoji) doesn't
+        // exceed the char_length CHECK. The full rationale is
+        // preserved in input_snapshot.payload.rationale.
+        let decision_reason = {
+            let r = outcome.payload.rationale.trim();
+            if r.is_empty() {
+                "Outcome supplied no rationale."
+            } else if r.chars().count() <= 240 {
+                r
+            } else {
+                let byte_end = r.char_indices().nth(240).map_or(r.len(), |(b, _)| b);
+                // Safety: char_indices always lands on a UTF-8 boundary.
+                r.get(..byte_end).unwrap_or(r)
+            }
+        };
+
         // Insert the decision row. decision_key mirrors the outcome's
         // idempotency_key so a worker retry is a no-op.
         let inserted_decision = sqlx::query_scalar::<_, Uuid>(
@@ -501,30 +526,7 @@ impl AgentOutcomeWorker {
         // the constant saying so rather than a number the model chose for itself.
         .bind(evidence_confidence_basis_points(outcome))
         .bind(outcome.kind.disposition())
-        .bind({
-            // The autopilot_decisions.reason column has a CHECK constraint
-            // (non-empty, <=240 chars). `payload.rationale` deserializes
-            // with `#[serde(default)]` — an outcome that carries no
-            // rationale, or only whitespace, used to die here on
-            // `reason_check` and the whole outcome was discarded. The
-            // absence is itself the honest reason; record it.
-            //
-            // The LLM rationale can also be longer than 240 chars, so
-            // truncate to fit. Use char-based truncation (not byte-based)
-            // so multi-byte UTF-8 (Polish diacritics, emoji) doesn't
-            // exceed the char_length CHECK. The full rationale is
-            // preserved in input_snapshot.payload.rationale.
-            let r = outcome.payload.rationale.trim();
-            if r.is_empty() {
-                "Outcome supplied no rationale."
-            } else if r.chars().count() <= 240 {
-                r
-            } else {
-                let byte_end = r.char_indices().nth(240).map_or(r.len(), |(b, _)| b);
-                // Safety: char_indices always lands on a UTF-8 boundary.
-                r.get(..byte_end).unwrap_or(r)
-            }
-        })
+        .bind(decision_reason)
         .bind(&input_snapshot)
         .bind(json!({ "source": "agent_outcome", "schema_version": outcome.schema_version }))
         .bind(json!({}))
@@ -975,7 +977,7 @@ impl AgentOutcomeWorker {
                     .fetch_optional(&mut *tx)
                     .await?
                 } else {
-                    sqlx::query_scalar::<_, Uuid>(
+                    let inserted = sqlx::query_scalar::<_, Uuid>(
                         r#"
                     INSERT INTO viryaos_autopilot_actions (
                         id, workspace_id, decision_id, context, action_kind,
@@ -1006,7 +1008,53 @@ impl AgentOutcomeWorker {
                     .bind(action_class)
                     .bind(trace_id)
                     .fetch_optional(&mut *tx)
-                    .await?
+                    .await?;
+                    // A parked approval nobody hears about is a decision that
+                    // never happened. `decisions/persist.rs` emits
+                    // `approval_requested` for the brain's own candidates;
+                    // agent-outcome actions insert on a different path and
+                    // parked silently — outreach targets sat for hours with
+                    // no Discord alert because no event ever left. Same
+                    // transaction: action + notification commit or neither
+                    // does. Only on a real insert — a conflict is a re-run
+                    // and must not re-notify.
+                    if let Some(inserted_id) = inserted {
+                        sqlx::query(
+                            r#"
+                            INSERT INTO outbox_events (workspace_id, event_type, event_version, payload, max_attempts, trace_id, causation_id, action_id)
+                            VALUES (
+                                $1, 'crowdrelay.autopilot.approval_requested', 1,
+                                jsonb_build_object(
+                                    'action_id', $2::uuid,
+                                    'context', $3::text,
+                                    'action_kind', $4::text,
+                                    'subject_kind', $5::text,
+                                    'subject_id', $6::uuid,
+                                    'reason', $7::text,
+                                    'confidence_basis_points', $8::integer,
+                                    'approval_expires_at', now() + INTERVAL '72 hours',
+                                    'trace_id', $9::uuid
+                                ),
+                                12,
+                                $9,
+                                NULL,
+                                $2
+                            )
+                            "#,
+                        )
+                        .bind(outcome.workspace_id)
+                        .bind(inserted_id)
+                        .bind(outcome.kind.autopilot_context())
+                        .bind(action_kind)
+                        .bind("agent_outcome")
+                        .bind(outcome.id)
+                        .bind(decision_reason)
+                        .bind(evidence_confidence_basis_points(outcome))
+                        .bind(trace_id)
+                        .execute(&mut *tx)
+                        .await?;
+                    }
+                    inserted
                 }
             } else {
                 None
