@@ -11,7 +11,7 @@
 //! platform, sampled daily — and nothing read it for this purpose.
 //!
 //! This module turns those series into a per-platform yield and reranks the
-//! strategy's list by it. Three properties matter:
+//! strategy's list by it. Four properties matter:
 //!
 //! - **The strategy still decides.** Reranking happens inside the list a
 //!   strategy chose; it never adds a template the strategy excluded, and never
@@ -22,6 +22,13 @@
 //!   post a huge percentage gain from noise. Yield is shrunk toward the prior
 //!   by an evidence weight, so a platform reorders only once it has enough
 //!   audience behind the number to mean something.
+//!
+//! - **A rate is noisy on a small audience; a gain never is.** The evidence
+//!   floor applies to the rate and only to the rate. Below it the platform is
+//!   still ranked on the absolute audience it returned, because that is the
+//!   North Star quantity rather than a ratio, and suppressing it let a large
+//!   flat platform outrank the one that delivered the tenant's only fan. See
+//!   [`PlatformGrowth::rank_key`].
 //!
 //! - **A Signal install outweighs a follower.** The North Star is fans, and a
 //!   Signal install is an addressable fan — someone reachable directly, not a
@@ -98,6 +105,38 @@ impl PlatformGrowth {
             .checked_div(u64::from(FULL_CONFIDENCE_AUDIENCE))?;
         u32::try_from(shrunk.min(u64::from(u32::MAX))).ok()
     }
+
+    /// What this platform is ranked on: its trustworthy rate first, then the
+    /// absolute audience it actually returned.
+    ///
+    /// The rate alone was not enough, and the gap it left was the worst case for
+    /// exactly the tenant this module exists to help. `yield_bps()` is `None`
+    /// below the evidence floor, and `None` sorts behind `Some(0)`, so a platform
+    /// with five thousand followers that gained *nothing* outranked the platform
+    /// that delivered the tenant's only addressable fan. The Signal multiple was
+    /// written to prefer Signal and the floor guaranteed Signal could not place
+    /// until it already had fifty installs — with one install in production, the
+    /// most valuable platform was the one permanently last.
+    ///
+    /// The absolute weighted gain closes it, and it is safe where a rate is not:
+    /// it is the North Star quantity itself, not a ratio, so there is no small
+    /// denominator to inflate it. Two followers becoming four is 100% and
+    /// meaningless as a rate; as a gain it is two, and two is honestly less than
+    /// two hundred. The floor keeps doing its job — it still stops a near-empty
+    /// platform's *rate* from winning — it no longer erases the platform's gain.
+    ///
+    /// `None` only when there is nothing at all: no trustworthy rate and no gain.
+    /// A platform that returned nobody is not evidence for trying it again, so it
+    /// ranks with the unmeasured templates rather than ahead of them.
+    #[must_use]
+    pub fn rank_key(&self) -> RankKey {
+        let rate = self.yield_bps().unwrap_or(0);
+        let absolute = self.weighted_gain();
+        if rate == 0 && absolute == 0 {
+            return None;
+        }
+        Some((rate, absolute))
+    }
 }
 
 /// The metric platform a template acts on, if it acts on exactly one.
@@ -118,6 +157,16 @@ pub fn template_platform(template: &str) -> Option<&'static str> {
     }
 }
 
+/// What a platform is ranked on: trustworthy rate in basis points, then the
+/// absolute weighted gain. `None` when the platform is unmeasured.
+///
+/// Compared in field order, so the rate leads and the gain breaks ties the rate
+/// cannot see. See [`PlatformGrowth::rank_key`].
+type RankKey = Option<(u32, u32)>;
+
+/// One template's position in the prior, its name, and what it ranks on.
+type RankedTemplate = (usize, &'static str, RankKey);
+
 /// Reorders a strategy's template list by measured platform yield.
 ///
 /// Stable: templates whose platform has no trustworthy measurement keep their
@@ -126,25 +175,28 @@ pub fn template_platform(template: &str) -> Option<&'static str> {
 /// drops one.
 #[must_use]
 pub fn rank_templates(prior: &[&'static str], growth: &[PlatformGrowth]) -> Vec<&'static str> {
-    let score_for = |template: &str| -> Option<u32> {
+    let score_for = |template: &str| -> RankKey {
         let platform = template_platform(template)?;
         growth
             .iter()
             .find(|entry| entry.platform == platform)
-            .and_then(PlatformGrowth::yield_bps)
+            .and_then(PlatformGrowth::rank_key)
     };
 
-    let mut ranked: Vec<(usize, &'static str, Option<u32>)> = prior
+    let mut ranked: Vec<RankedTemplate> = prior
         .iter()
         .enumerate()
         .map(|(index, template)| (index, *template, score_for(template)))
         .collect();
 
     ranked.sort_by(|left, right| {
-        // Measured platforms sort ahead of unmeasured ones, best first. Two
-        // unmeasured templates — or two with equal yield — fall back to the
-        // strategy's own order, so the prior survives wherever evidence does
-        // not contradict it.
+        // Measured platforms sort ahead of unmeasured ones, best first. The key
+        // is (trustworthy rate, absolute weighted gain), compared in that order,
+        // so a rate still decides between two platforms with real audience and
+        // the gain only breaks a tie the rate cannot see. Two unmeasured
+        // templates — or two with an identical key — fall back to the strategy's
+        // own order, so the prior survives wherever evidence does not
+        // contradict it.
         right.2.cmp(&left.2).then_with(|| left.0.cmp(&right.0))
     });
 
@@ -250,6 +302,84 @@ mod tests {
         assert!(
             bandcamp < strategist,
             "templates with no measurement should keep the strategy's ordering"
+        );
+    }
+
+    /// The case production was actually in.
+    ///
+    /// One Signal install against a large, flat Reddit audience. The rate floor
+    /// hides the install, and a platform that gained nobody used to rank ahead of
+    /// the one that delivered the tenant's only addressable fan.
+    #[test]
+    fn the_only_platform_that_gained_anyone_is_tried_first() {
+        let measured = [growth("social", 5_000, 0), growth("signal", 1, 1)];
+        let ranked = rank_templates(PRIOR, &measured);
+        assert_eq!(
+            ranked.first(),
+            Some(&"signal-inviter"),
+            "a platform that gained nobody must not outrank one that gained a fan"
+        );
+    }
+
+    /// A gain below the floor still counts, because a gain is not a rate.
+    #[test]
+    fn a_below_floor_gain_outranks_a_flat_platform() {
+        let measured = [growth("telegram", 2_000, 0), growth("bandcamp", 10, 3)];
+        let ranked = rank_templates(PRIOR, &measured);
+        assert_eq!(
+            ranked.first(),
+            Some(&"bandcamp-scanner"),
+            "three followers gained beats zero, whatever the denominators are"
+        );
+    }
+
+    /// The floor still holds where it was pointed: at rates.
+    ///
+    /// Both platforms gained somebody, so both have a key and the comparison is
+    /// the rate's to make. The tiny platform's 100% must not win it.
+    #[test]
+    fn the_absolute_gain_does_not_let_a_rate_jump_the_floor() {
+        let measured = [growth("telegram", 2, 2), growth("social", 5_000, 250)];
+        let ranked = rank_templates(PRIOR, &measured);
+        assert_eq!(
+            ranked.first(),
+            Some(&"reddit-scanner"),
+            "the gain breaks ties the rate cannot see; it does not overrule one"
+        );
+    }
+
+    /// The rate leads and the gain only breaks ties — pinned where they disagree.
+    ///
+    /// Telegram returns 30% of a thousand; Reddit returns 5% of ten thousand. The
+    /// bigger *number* of followers is Reddit's, the better *return per follower
+    /// already held* is Telegram's, and the rate is what predicts the next
+    /// dispatch. Both are above the floor, so this is the rate's call to make.
+    ///
+    /// Without this case the ordering inside the key is untested: the earlier
+    /// tests all have the same platform winning on both halves, so reversing the
+    /// two fields passes them all.
+    #[test]
+    fn the_rate_decides_when_it_disagrees_with_the_raw_gain() {
+        let measured = [
+            growth("telegram", 1_000, 300),
+            growth("social", 10_000, 500),
+        ];
+        let ranked = rank_templates(PRIOR, &measured);
+        assert_eq!(
+            ranked.first(),
+            Some(&"telegram-scanner"),
+            "the better return per follower held should be tried first, even \
+             though the other platform added more followers in total"
+        );
+    }
+
+    /// A platform that returned nobody is not evidence for trying it.
+    #[test]
+    fn a_platform_that_gained_nobody_ranks_with_the_unmeasured() {
+        assert_eq!(
+            growth("telegram", 5_000, 0).rank_key(),
+            None,
+            "no rate and no gain is no evidence, however large the audience"
         );
     }
 }
