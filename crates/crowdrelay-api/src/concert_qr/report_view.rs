@@ -300,7 +300,7 @@ async fn load_report_facts(
             "title": event.title,
             "city": event.city,
             "venue": event.venue,
-            "starts_at": event.starts_at,
+            "starts_at": format_time(event.starts_at),
             "timezone": event.timezone,
             "acts": event.acts.unwrap_or_else(|| serde_json::json!([])),
         }),
