@@ -54,12 +54,15 @@ jobs:
           POSTGRES_PASSWORD: crowdrelay-ci-only
         ports:
           - 5432:5432
-        # --tmpfs keeps postgres data in RAM: the postgres image declares
-        # VOLUME /var/lib/postgresql/data, and without an explicit mount the
-        # runner leaves an anonymous volume behind on every run (~7 GB/day of
-        # leak measured on this host).
+        # --tmpfs keeps postgres data in RAM: the 18+ image declares
+        # VOLUME /var/lib/postgresql (data goes in a versioned subdir), and
+        # without an explicit mount the runner leaves an anonymous volume
+        # behind on every run (~7 GB/day of leak measured on this host). The
+        # mount must sit at the VOLUME path itself — mounting at
+        # /var/lib/postgresql/data trips the image's pg_ctlcluster layout
+        # check and the container refuses to start.
         options: >-
-          --tmpfs /var/lib/postgresql/data
+          --tmpfs /var/lib/postgresql
           --health-cmd "pg_isready -U crowdrelay -d crowdrelay"
           --health-interval 5s
           --health-timeout 3s
@@ -297,12 +300,15 @@ jobs:
           POSTGRES_PASSWORD: crowdrelay-ci-only
         ports:
           - 5432:5432
-        # --tmpfs keeps postgres data in RAM: the postgres image declares
-        # VOLUME /var/lib/postgresql/data, and without an explicit mount the
-        # runner leaves an anonymous volume behind on every run (~7 GB/day of
-        # leak measured on this host).
+        # --tmpfs keeps postgres data in RAM: the 18+ image declares
+        # VOLUME /var/lib/postgresql (data goes in a versioned subdir), and
+        # without an explicit mount the runner leaves an anonymous volume
+        # behind on every run (~7 GB/day of leak measured on this host). The
+        # mount must sit at the VOLUME path itself — mounting at
+        # /var/lib/postgresql/data trips the image's pg_ctlcluster layout
+        # check and the container refuses to start.
         options: >-
-          --tmpfs /var/lib/postgresql/data
+          --tmpfs /var/lib/postgresql
           --health-cmd "pg_isready -U crowdrelay -d crowdrelay"
           --health-interval 5s
           --health-timeout 3s

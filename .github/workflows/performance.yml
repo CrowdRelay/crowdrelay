@@ -33,9 +33,11 @@ jobs:
         ports:
           - 5432:5432
         # --tmpfs keeps postgres data in RAM — otherwise the image's declared
-        # VOLUME leaves an anonymous volume behind on every run.
+        # VOLUME (/var/lib/postgresql on 18+, mounted at that exact path or the
+        # container refuses to start) leaves an anonymous volume behind on
+        # every run.
         options: >-
-          --tmpfs /var/lib/postgresql/data
+          --tmpfs /var/lib/postgresql
           --health-cmd "pg_isready -U crowdrelay -d crowdrelay"
           --health-interval 5s
           --health-timeout 3s
