@@ -13,6 +13,7 @@ mod timeline_tests {
                 slug: "friday".to_string(),
                 title: "Friday".to_string(),
                 venue: Some("Klub".to_string()),
+                venue_address: None,
                 status: "published".to_string(),
                 starts_at: now + Duration::days(10),
                 ends_at: None,
@@ -40,6 +41,10 @@ mod timeline_tests {
                 succeeded_requests: 0,
             },
             cost: None,
+            crossbill_acts: Vec::new(),
+            crossbill_edge: None,
+            venue_beacons: Vec::new(),
+            recap_campaign: None,
         }
     }
 
@@ -170,6 +175,22 @@ mod timeline_tests {
         });
         let steps = build_steps(&facts, now);
         assert_eq!(states(&steps)[6], ("recall", "skipped"));
+    }
+
+    #[test]
+    fn a_missing_recap_inside_the_open_window_is_due_not_waiting() {
+        let now = OffsetDateTime::now_utc();
+        // Before the show starts, absence is `waiting` — the brain cannot
+        // have requested a recap for a night that has not happened.
+        let steps = build_steps(&facts(now), now);
+        assert_eq!(states(&steps)[6], ("recall", "waiting"));
+        // Two hours after doors the recap window is open (since_show <= 30h)
+        // and the brain has queued nothing — absence inside an open window is
+        // `due`, the same contract every other step keeps.
+        let mut during_show = facts(now);
+        during_show.event.starts_at = now - Duration::hours(2);
+        let steps = build_steps(&during_show, now);
+        assert_eq!(states(&steps)[6], ("recall", "due"));
     }
 
     #[test]

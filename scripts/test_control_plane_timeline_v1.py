@@ -38,6 +38,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "crates/crowdrelay-api/src/concert_qr/timeline.rs"
+FACTS = ROOT / "crates/crowdrelay-api/src/concert_qr/timeline_facts.rs"
 SCAN = ROOT / "crates/crowdrelay-api/src/concert_qr/scan_view.rs"
 REPORT = ROOT / "crates/crowdrelay-api/src/concert_qr/report_view.rs"
 ROUTER = ROOT / "crates/crowdrelay-api/src/control_plane.rs"
@@ -62,7 +63,13 @@ ANCHORS = ("T-21", "T-14", "T-7", "T-2", "T-0", "T-0", "T+1", "T+3", "T+7")
 class ControlPlaneTimelineContract(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
-        cls.source = SOURCE.read_text(encoding="utf-8")
+        # The module is two chunks — `timeline.rs` owns the response shape
+        # and step builder, `timeline_facts.rs` owns the row types and the
+        # workspace-scoped fan-out. The contract pins the module's behavior,
+        # so it reads both.
+        cls.source = SOURCE.read_text(encoding="utf-8") + FACTS.read_text(
+            encoding="utf-8"
+        )
         cls.router = ROUTER.read_text(encoding="utf-8")
         cls.parent = PARENT.read_text(encoding="utf-8")
         cls.lib = re.sub(r"\s+", " ", LIB.read_text(encoding="utf-8"))
@@ -85,6 +92,7 @@ class ControlPlaneTimelineContract(unittest.TestCase):
 
     def test_the_chunk_is_included(self) -> None:
         self.assertIn('include!("concert_qr/timeline.rs");', self.parent)
+        self.assertIn('include!("concert_qr/timeline_facts.rs");', self.parent)
         self.assertIn('include!("concert_qr/timeline_tests.rs");', self.parent)
 
     def test_every_query_is_workspace_scoped(self) -> None:
@@ -141,6 +149,20 @@ class ControlPlaneTimelineContract(unittest.TestCase):
         self.assertIn("viryaos_autopilot_action_emissions", self.source)
         self.assertIn("report.status IN ('succeeded','failed')", self.source)
         self.assertIn("phase = 'announcement'", self.source)
+
+    def test_the_placement_table_holds(self) -> None:
+        # UX-2.5 — every artifact sits at its anchor with no new top-level
+        # destination: the crossbill on T-21 (cap is the consent's own), the
+        # recap campaign on T+1, venue knowledge on the show itself.
+        self.assertIn('"crossbill"', self.source)
+        self.assertIn("amplification_consents", self.source)
+        self.assertIn("event_crossbill", self.source)
+        self.assertIn("to_workspace_id", self.source)
+        self.assertIn('"campaign"', self.source)
+        self.assertIn("content->>'lever' = 'post_show_recap'", self.source)
+        self.assertIn("viryaos_beacon_campaigns", self.source)
+        self.assertIn("venue_knowledge", self.source)
+        self.assertIn("venue_address", self.source)
 
     def test_no_credentials_or_fan_rows_in_the_shape(self) -> None:
         for leaked in ("token", "signing_key", "fan_id", "email"):

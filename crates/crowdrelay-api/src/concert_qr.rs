@@ -955,6 +955,7 @@ mod tests {
     }
 }
 include!("concert_qr/timeline.rs");
+include!("concert_qr/timeline_facts.rs");
 include!("concert_qr/timeline_tests.rs");
 include!("concert_qr/scan_view.rs");
 include!("concert_qr/report_view.rs");

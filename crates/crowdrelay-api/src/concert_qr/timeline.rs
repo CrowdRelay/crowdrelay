@@ -3,121 +3,10 @@
 // shows"; this answers "what state is Friday in" — each step's state, the
 // owner the handoff index names, and the one action open now, in time order.
 //
-// Every query here reads an existing workspace-scoped artifact table;
-// nothing in this file writes, and nothing in the response carries a
-// campaign credential or a per-fan row. Missing evidence is null, not
-// zero — a step whose measurement does not exist yet says so by carrying
-// no detail rather than a fabricated count.
-
-#[derive(Debug, FromRow)]
-struct TimelineEventRow {
-    id: Uuid,
-    slug: String,
-    title: String,
-    venue: Option<String>,
-    status: String,
-    starts_at: OffsetDateTime,
-    ends_at: Option<OffsetDateTime>,
-}
-
-#[derive(Debug, FromRow)]
-struct LifecycleEmissionRow {
-    phase: String,
-    emitted_at: OffsetDateTime,
-}
-
-#[derive(Debug, FromRow)]
-struct TimelineSurfaceRow {
-    surface_key: String,
-    status: String,
-}
-
-#[derive(Debug, FromRow)]
-struct ShowGrowthActionRow {
-    id: Uuid,
-    status: String,
-    lever: Option<String>,
-    available_at: OffsetDateTime,
-    finished_at: Option<OffsetDateTime>,
-}
-
-#[derive(Debug, FromRow)]
-struct TimelineAssignmentRow {
-    source_kind: String,
-    source_ref: Option<String>,
-    action_id: Option<Uuid>,
-    status: String,
-    due_at: Option<OffsetDateTime>,
-    // display_name is nullable on workspace_members — a NULL must not decode
-    // into a 503 for the whole page. The owner slot stays empty for an
-    // unnamed assignee rather than leaking the member's sign-in address.
-    display_name: Option<String>,
-}
-
-#[derive(Debug, FromRow)]
-struct TimelinePlayStepRow {
-    step_kind: String,
-    due_at: OffsetDateTime,
-    settled_at: Option<OffsetDateTime>,
-    skip_reason: Option<String>,
-}
-
-#[derive(Debug, FromRow)]
-struct TimelineChecklistRow {
-    item_key: String,
-    status: String,
-}
-
-#[derive(Debug, FromRow)]
-struct TimelineCountsRow {
-    nearby_notified: i64,
-    qr_campaigns: i64,
-    checkins: i64,
-}
-
-#[derive(Debug, FromRow)]
-struct TimelinePaceRow {
-    capacity: Option<i64>,
-    paid_tickets: i64,
-    paid_tickets_last_7d: i64,
-}
-
-#[derive(Debug, FromRow)]
-struct TimelineDecisionRow {
-    reason: String,
-    evaluated_at: OffsetDateTime,
-}
-
-#[derive(Debug, FromRow)]
-struct TimelineHarvestRow {
-    occurred_at: Option<OffsetDateTime>,
-    pending_requests: i64,
-    succeeded_requests: i64,
-}
-
-#[derive(Debug, FromRow)]
-struct TimelineCostRow {
-    predicted_total_cost_minor: Option<i64>,
-    settled_total_cost_minor: Option<i64>,
-    fee_received_minor: Option<i64>,
-    accuracy: Option<String>,
-    prediction_missing_input: Option<String>,
-}
-
-struct TimelineFacts {
-    event: TimelineEventRow,
-    emissions: Vec<LifecycleEmissionRow>,
-    surfaces: Vec<TimelineSurfaceRow>,
-    pace: TimelinePaceRow,
-    latest_decision: Option<TimelineDecisionRow>,
-    growth_actions: Vec<ShowGrowthActionRow>,
-    assignments: Vec<TimelineAssignmentRow>,
-    play_steps: Vec<TimelinePlayStepRow>,
-    checklist: Vec<TimelineChecklistRow>,
-    counts: TimelineCountsRow,
-    harvest: TimelineHarvestRow,
-    cost: Option<TimelineCostRow>,
-}
+// Facts load in `timeline_facts.rs`; this file owns the response shape and
+// the step builder. Missing evidence is null, not zero — a step whose
+// measurement does not exist yet says so by carrying no detail rather than
+// a fabricated count.
 
 #[derive(Debug, Serialize)]
 struct TimelineActionView {
@@ -155,9 +44,13 @@ struct TimelineEventView {
     slug: String,
     title: String,
     venue: Option<String>,
+    venue_address: Option<String>,
     status: String,
     starts_at: String,
     ends_at: Option<String>,
+    /// What the night knows about the room itself — the beacon-campaign
+    /// record keyed to this event (relationship status, last reply, notes).
+    venue_knowledge: Vec<serde_json::Value>,
 }
 
 /// `GET /v1/control-plane/events/{event_slug}/timeline` — the nine-step
@@ -198,319 +91,27 @@ pub async fn control_plane_event_timeline(
                 slug: facts.event.slug.clone(),
                 title: facts.event.title.clone(),
                 venue: facts.event.venue.clone(),
+                venue_address: facts.event.venue_address.clone(),
                 status: facts.event.status.clone(),
                 starts_at: format_time(facts.event.starts_at),
                 ends_at: facts.event.ends_at.map(format_time),
+                venue_knowledge: facts
+                    .venue_beacons
+                    .iter()
+                    .map(|b| serde_json::json!({
+                        "name": b.display_name,
+                        "kind": b.beacon_kind,
+                        "status": b.status,
+                        "last_reply": b.last_reply_disposition,
+                        "last_outreach_at": b.last_outreach_at.map(format_time),
+                        "notes": b.notes,
+                    }))
+                    .collect(),
             },
             steps,
         }),
     )
         .into_response()
-}
-
-async fn load_timeline_facts(
-    state: &ConcertQrState,
-    event_slug: &str,
-) -> Result<Option<TimelineFacts>, sqlx::Error> {
-    let Some(event) = sqlx::query_as::<_, TimelineEventRow>(
-        r#"
-        SELECT id, slug, title, venue, status, starts_at, ends_at
-        FROM events
-        WHERE workspace_id = $1 AND slug = $2
-          AND status IN ('published','completed')
-        "#,
-    )
-    .bind(state.workspace_id.into_uuid())
-    .bind(event_slug)
-    .fetch_optional(&state.database)
-    .await?
-    else {
-        return Ok(None);
-    };
-    let workspace_id = state.workspace_id.into_uuid();
-    let event_id = event.id;
-
-    let emissions = sqlx::query_as::<_, LifecycleEmissionRow>(
-        r#"
-        SELECT phase, emitted_at
-        FROM viryaos_campaign_lifecycle_emissions
-        WHERE workspace_id = $1 AND event_id = $2
-          AND phase = 'announcement'
-        ORDER BY emitted_at
-        "#,
-    )
-    .bind(workspace_id)
-    .bind(event_id)
-    .fetch_all(&state.database)
-    .await?;
-
-    let surfaces = sqlx::query_as::<_, TimelineSurfaceRow>(
-        r#"
-        SELECT surface_key, status
-        FROM viryaos_show_growth_surfaces
-        WHERE workspace_id = $1 AND event_id = $2
-        ORDER BY surface_key
-        "#,
-    )
-    .bind(workspace_id)
-    .bind(event_id)
-    .fetch_all(&state.database)
-    .await?;
-
-    // The same predicates the show-growth snapshot uses: an active sale's
-    // paid and partially-refunded orders, capacity taken from the sale first
-    // and the largest admission pool as the fallback — the brain's own
-    // COALESCE(ticket_sale.capacity, admission.capacity).
-    // The pace verdict itself stays in the brain's decisions — this surface
-    // reports the numbers, not a re-derived opinion.
-    let pace = sqlx::query_as::<_, TimelinePaceRow>(
-        r#"
-        SELECT COALESCE(ticket_sale.capacity, admission.capacity) AS capacity,
-               COALESCE(ticket.paid_tickets, 0)::bigint AS paid_tickets,
-               COALESCE(ticket.paid_tickets_last_7d, 0)::bigint AS paid_tickets_last_7d
-        FROM events AS event
-        LEFT JOIN LATERAL (
-            SELECT MAX(sale.capacity)::bigint AS capacity
-            FROM ticket_sales AS sale
-            WHERE sale.workspace_id = event.workspace_id
-              AND sale.event_id = event.id
-              AND sale.active
-        ) AS ticket_sale ON true
-        LEFT JOIN LATERAL (
-            SELECT SUM(item.quantity) FILTER (
-                    WHERE orders.status IN ('paid','partially_refunded')
-                )::bigint AS paid_tickets,
-                SUM(item.quantity) FILTER (
-                    WHERE orders.status IN ('paid','partially_refunded')
-                      AND orders.paid_at >= now() - INTERVAL '7 days'
-                )::bigint AS paid_tickets_last_7d
-            FROM ticket_sales AS sale
-            JOIN ticket_orders AS orders
-              ON orders.workspace_id = sale.workspace_id
-             AND orders.ticket_sale_id = sale.id
-            JOIN ticket_order_items AS item
-              ON item.workspace_id = orders.workspace_id
-             AND item.ticket_order_id = orders.id
-            WHERE sale.workspace_id = event.workspace_id
-              AND sale.event_id = event.id
-              AND sale.active
-        ) AS ticket ON true
-        LEFT JOIN LATERAL (
-            SELECT MAX(pool.capacity)::bigint AS capacity
-            FROM admission_pools AS pool
-            WHERE pool.workspace_id = event.workspace_id
-              AND pool.event_id = event.id
-        ) AS admission ON true
-        WHERE event.workspace_id = $1 AND event.id = $2
-        "#,
-    )
-    .bind(workspace_id)
-    .bind(event_id)
-    .fetch_one(&state.database)
-    .await?;
-
-    let latest_decision = sqlx::query_as::<_, TimelineDecisionRow>(
-        r#"
-        SELECT reason, evaluated_at
-        FROM viryaos_autopilot_decisions
-        WHERE workspace_id = $1 AND context = 'show_growth' AND subject_id = $2
-        ORDER BY evaluated_at DESC
-        LIMIT 1
-        "#,
-    )
-    .bind(workspace_id)
-    .bind(event_id)
-    .fetch_optional(&state.database)
-    .await?;
-
-    let growth_actions = sqlx::query_as::<_, ShowGrowthActionRow>(
-        r#"
-        SELECT id, status, payload ->> 'lever' AS lever,
-               available_at, finished_at
-        FROM viryaos_autopilot_actions
-        WHERE workspace_id = $1 AND context = 'show_growth' AND subject_id = $2
-        ORDER BY created_at
-        "#,
-    )
-    .bind(workspace_id)
-    .bind(event_id)
-    .fetch_all(&state.database)
-    .await?;
-
-    // Both assignment shapes key the event through `source_id`: a show_task
-    // stores the event id there directly (source_ref names the checklist
-    // item), an autopilot_action stores the action's subject — the event —
-    // the same way. `source_ref` distinguishes the task inside the event.
-    let assignments = sqlx::query_as::<_, TimelineAssignmentRow>(
-        r#"
-        SELECT assignment.source_kind, assignment.source_ref,
-               assignment.action_id,
-               assignment.status, assignment.due_at,
-               member.display_name
-        FROM viryaos_team_assignments AS assignment
-        JOIN workspace_members AS member
-          ON member.workspace_id = assignment.workspace_id
-         AND member.id = assignment.assignee_member_id
-        WHERE assignment.workspace_id = $1 AND assignment.source_id = $2
-        ORDER BY assignment.due_at NULLS LAST
-        "#,
-    )
-    .bind(workspace_id)
-    .bind(event_id)
-    .fetch_all(&state.database)
-    .await?;
-
-    let play_steps = sqlx::query_as::<_, TimelinePlayStepRow>(
-        r#"
-        SELECT step.step_kind, step.due_at, step.settled_at, step.skip_reason
-        FROM viryaos_play_steps AS step
-        JOIN viryaos_plays AS play
-          ON play.workspace_id = step.workspace_id
-         AND play.id = step.play_id
-        WHERE step.workspace_id = $1
-          AND play.anchor_kind = 'event'
-          AND play.anchor_id = $2
-        ORDER BY step.due_at
-        "#,
-    )
-    .bind(workspace_id)
-    .bind(event_id)
-    .fetch_all(&state.database)
-    .await?;
-
-    let checklist = sqlx::query_as::<_, TimelineChecklistRow>(
-        r#"
-        SELECT item_key, status
-        FROM show_checklist_items
-        WHERE workspace_id = $1 AND event_id = $2
-          AND item_key IN ('capture_plan','post_show_report')
-        "#,
-    )
-    .bind(workspace_id)
-    .bind(event_id)
-    .fetch_all(&state.database)
-    .await?;
-
-    // Three counts in one round trip: the dedupe ledger proves a fan was
-    // told, the campaign row proves the scan had a door, and the check-in
-    // count is the scan itself. Delivered-vs-queued push detail stays on
-    // the ops surface — the ladder needs the fact, not the funnel.
-    let counts = sqlx::query_as::<_, TimelineCountsRow>(
-        r#"
-        SELECT
-            (SELECT count(*)::bigint FROM nearby_gig_notifications
-             WHERE workspace_id = $1 AND event_id = $2) AS nearby_notified,
-            (SELECT count(*)::bigint FROM concert_qr_campaigns
-             WHERE workspace_id = $1 AND event_id = $2
-               AND active AND revoked_at IS NULL
-               AND valid_until > now()) AS qr_campaigns,
-            (SELECT count(*)::bigint FROM concert_checkins
-             WHERE workspace_id = $1 AND event_id = $2) AS checkins
-        "#,
-    )
-    .bind(workspace_id)
-    .bind(event_id)
-    .fetch_one(&state.database)
-    .await?;
-
-    // Harvest anchors on the content source the completed-show trigger
-    // projects; artifact requests are content-supply actions whose subject is
-    // that source. The pending predicate is the supply snapshot's own: an
-    // action is in flight while it is open, or while it succeeded at the
-    // request layer without a terminal execution report yet.
-    let harvest = sqlx::query_as::<_, TimelineHarvestRow>(
-        r#"
-        SELECT
-            (SELECT MAX(source.occurred_at)
-             FROM viryaos_content_sources AS source
-             WHERE source.workspace_id = $1
-               AND source.source_kind = 'show_completed'
-               AND source.source_key = 'show_completed:' || $2::text
-               AND source.active
-            ) AS occurred_at,
-            (SELECT count(*)::bigint
-             FROM viryaos_autopilot_actions AS action
-             JOIN viryaos_content_sources AS source
-               ON source.workspace_id = action.workspace_id
-              AND source.id = action.subject_id
-             WHERE action.workspace_id = $1
-               AND action.context = 'content_supply'
-               AND source.source_key = 'show_completed:' || $2::text
-               AND source.active
-               AND (
-                   action.status IN ('awaiting_approval','queued','processing')
-                   OR (
-                       action.status = 'succeeded'
-                       AND EXISTS (
-                           SELECT 1
-                           FROM viryaos_autopilot_action_emissions AS emission
-                           WHERE emission.workspace_id = action.workspace_id
-                             AND emission.action_id = action.id
-                       )
-                       AND NOT EXISTS (
-                           SELECT 1
-                           FROM viryaos_autopilot_execution_reports AS report
-                           WHERE report.workspace_id = action.workspace_id
-                             AND report.action_id = action.id
-                             AND report.status IN ('succeeded','failed')
-                       )
-                   )
-               )
-            ) AS pending_requests,
-            (SELECT count(*)::bigint
-             FROM viryaos_autopilot_actions AS action
-             JOIN viryaos_content_sources AS source
-               ON source.workspace_id = action.workspace_id
-              AND source.id = action.subject_id
-             WHERE action.workspace_id = $1
-               AND action.context = 'content_supply'
-               AND source.source_key = 'show_completed:' || $2::text
-               AND source.active
-               AND action.status = 'succeeded'
-               AND EXISTS (
-                   SELECT 1
-                   FROM viryaos_autopilot_execution_reports AS report
-                   WHERE report.workspace_id = action.workspace_id
-                     AND report.action_id = action.id
-                     AND report.status = 'succeeded'
-               )
-            ) AS succeeded_requests
-        "#,
-    )
-    .bind(workspace_id)
-    .bind(event_id)
-    .fetch_one(&state.database)
-    .await?;
-
-    let cost = sqlx::query_as::<_, TimelineCostRow>(
-        r#"
-        SELECT predicted_total_cost_minor, settled_total_cost_minor,
-               fee_received_minor, accuracy, prediction_missing_input
-        FROM viryaos_show_cost_ledger
-        WHERE workspace_id = $1 AND event_id = $2
-        ORDER BY predicted_at DESC
-        LIMIT 1
-        "#,
-    )
-    .bind(workspace_id)
-    .bind(event_id)
-    .fetch_optional(&state.database)
-    .await?;
-
-    Ok(Some(TimelineFacts {
-        event,
-        emissions,
-        surfaces,
-        pace,
-        latest_decision,
-        growth_actions,
-        assignments,
-        play_steps,
-        checklist,
-        counts,
-        harvest,
-        cost,
-    }))
 }
 
 fn task_owner<'a>(facts: &'a TimelineFacts, item_key: &str) -> Option<&'a str> {
@@ -592,8 +193,17 @@ fn build_steps(facts: &TimelineFacts, now: OffsetDateTime) -> Vec<TimelineStepVi
     let mut steps = Vec::with_capacity(9);
 
     // T-21 — announced. Proof is the lifecycle emission; the surfaces say
-    // where the announcement actually landed.
+    // where the announcement actually landed. The shared bill rides here:
+    // a second act makes the crossbill real, the consent edge says whether
+    // the system can push it itself, and the cap is the consent's own.
     let announced = facts.emissions.iter().find(|e| e.phase == "announcement");
+    let crossbill_state = if facts.crossbill_acts.len() <= 1 {
+        "no_support_bill"
+    } else if facts.crossbill_edge.is_some() {
+        "automated_overlap"
+    } else {
+        "manual_ask"
+    };
     let announced_detail = serde_json::json!({
         "emitted_at": announced.map(|e| format_time(e.emitted_at)),
         "surfaces": facts
@@ -601,6 +211,17 @@ fn build_steps(facts: &TimelineFacts, now: OffsetDateTime) -> Vec<TimelineStepVi
             .iter()
             .map(|s| serde_json::json!({"surface": s.surface_key, "status": s.status}))
             .collect::<Vec<_>>(),
+        "crossbill": {
+            "state": crossbill_state,
+            "acts": facts
+                .crossbill_acts
+                .iter()
+                .map(|a| serde_json::json!({"slug": a.act_slug, "name": a.act_name}))
+                .collect::<Vec<_>>(),
+            "cap_per_month": facts.crossbill_edge.as_ref().map(|e| e.max_campaigns_per_month),
+            "cooldown_days": facts.crossbill_edge.as_ref().map(|e| e.cooldown_days),
+            "deliveries_this_month": facts.crossbill_edge.as_ref().map(|e| e.deliveries_this_month),
+        },
     });
     let (announced_state, announced_action) = if announced.is_some() {
         ("done", None)
@@ -796,12 +417,17 @@ fn build_steps(facts: &TimelineFacts, now: OffsetDateTime) -> Vec<TimelineStepVi
         .iter()
         .rev()
         .find(|a| a.lever.as_deref() == Some("post_show_recap"));
-    let recap_window_open = now < starts + Duration::hours(30);
+    // The window is the brain's own `since_show <= post_show_recap_hours`,
+    // edge included — a recap can only be requested once the show has
+    // started, so absence before `starts` is `waiting` and absence inside
+    // the open window is `due`, never a silent shrug.
+    let recap_window_open = now <= starts + Duration::hours(30);
     let recap_state = match recap {
         Some(a) if a.status == "succeeded" => "done",
         Some(a) if matches!(a.status.as_str(), "awaiting_approval" | "queued" | "processing") => "active",
         _ if !recap_window_open => "skipped",
         Some(_) => "due",
+        None if now >= starts => "due",
         None => "waiting",
     };
     let recap_action = match recap {
@@ -821,6 +447,16 @@ fn build_steps(facts: &TimelineFacts, now: OffsetDateTime) -> Vec<TimelineStepVi
             "action_status": recap.map(|a| a.status.as_str()),
             "send_after": recap.map(|a| format_time(a.available_at)),
             "finished_at": recap.and_then(|a| a.finished_at).map(format_time),
+            // The campaign is the artifact — subject and receipts ride the
+            // step so the band sees the send, not just the action's state.
+            "campaign": facts.recap_campaign.as_ref().map(|c| serde_json::json!({
+                "slug": c.slug,
+                "subject": c.subject,
+                "status": c.status,
+                "scheduled_at": c.scheduled_at.map(format_time),
+                "delivered": c.delivered_count,
+                "recipients": c.recipient_count,
+            })),
         }),
     ));
 
