@@ -61,6 +61,10 @@ pub struct FanbaseRow {
     pub last_finished_at: Option<time::OffsetDateTime>,
     pub last_imported_pending: Option<i32>,
     pub members: Option<i64>,
+    // Members whose fan row is still active — the retained share of what
+    // this source brought in, which is the part of the ROI that raw member
+    // counts cannot show.
+    pub active_members: Option<i64>,
 }
 
 /// One validated candidate from a provider batch.
@@ -175,7 +179,13 @@ impl PostgresFanbaseRepository {
                    ing.finished_at AS last_finished_at,
                    ing.imported_pending AS last_imported_pending,
                    (SELECT count(*)::bigint FROM fanbase_members m
-                     WHERE m.fanbase_id = fb.id) AS members
+                     WHERE m.fanbase_id = fb.id) AS members,
+                   (SELECT count(*)::bigint FROM fanbase_members m
+                     JOIN fans f
+                       ON f.workspace_id = m.workspace_id
+                      AND f.id = m.fan_id
+                      AND f.status = 'active'
+                     WHERE m.fanbase_id = fb.id) AS active_members
             FROM fanbases fb
             LEFT JOIN LATERAL (
                 SELECT status, finished_at, imported_pending

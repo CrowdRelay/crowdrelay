@@ -47,8 +47,11 @@ pub struct FanbaseResponse {
     fetch_url: Option<String>,
     consent_attested_by: Option<String>,
     enabled: bool,
+    created_at: time::OffsetDateTime,
     members: Option<i64>,
+    active_members: Option<i64>,
     last_status: Option<String>,
+    last_finished_at: Option<time::OffsetDateTime>,
     last_imported_pending: Option<i32>,
 }
 
@@ -60,8 +63,11 @@ fn fanbase_response(row: crowdrelay_infra::fanbase::FanbaseRow) -> FanbaseRespon
         fetch_url: row.fetch_url,
         consent_attested_by: row.consent_attested_by,
         enabled: row.enabled,
+        created_at: row.created_at,
         members: row.members,
+        active_members: row.active_members,
         last_status: row.last_status,
+        last_finished_at: row.last_finished_at,
         last_imported_pending: row.last_imported_pending,
     }
 }
