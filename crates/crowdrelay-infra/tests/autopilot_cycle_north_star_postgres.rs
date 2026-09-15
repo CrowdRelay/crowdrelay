@@ -87,7 +87,11 @@ async fn cycle(
 async fn a_growing_fanbase_is_reported_as_improving() -> Result<()> {
     let pool = pool().await?;
     let workspace_id = workspace(&pool).await?;
-    let now = OffsetDateTime::now_utc();
+    // Anchored to midday like the sibling test: day 7's ticks run 55 minutes
+    // past the anchor, so a run inside the last hour of a UTC day would spill
+    // them onto tomorrow and conjure a ninth sample.
+    let now = OffsetDateTime::now_utc()
+        .replace_time(time::Time::from_hms(12, 0, 0).expect("a valid time of day"));
 
     // Eight days of five-minute cycles, the fan count rising across them. Read
     // off the rendered page this is at most two days of history and the brain
