@@ -70,6 +70,7 @@ SELECT
             FROM viryaos_release_plans AS plan
             WHERE plan.workspace_id = wave.workspace_id
               AND plan.id = wave.anchor_id
+              AND plan.active
         )
         ELSE COALESCE((
             SELECT event.status = 'published'
@@ -111,6 +112,10 @@ WITH anchors AS (
     SELECT 'release'::text AS anchor_kind, plan.id AS anchor_id, plan.release_at AS anchor_at
     FROM viryaos_release_plans AS plan
     WHERE plan.workspace_id = $1
+      AND plan.active
+      -- A filler release owes no vertical — the free-reach waves are part
+      -- of it, and the tier is the band's call, not a wave that went missing.
+      AND plan.tier <> 'filler'
       AND plan.release_at > $2
     UNION ALL
     SELECT 'event'::text, event.id, event.starts_at

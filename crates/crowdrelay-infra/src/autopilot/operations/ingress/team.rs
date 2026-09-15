@@ -50,6 +50,7 @@ impl AutopilotTeamStateRepository for PostgresAutopilotRepository {
                 "title": &command.title,
                 "release_at": command.release_at,
                 "listen_url": &command.listen_url,
+                "tier": command.tier.map(|tier| tier.as_str()),
                 "active": command.active,
                 "assets_ready": command.assets_ready,
                 "communication_enabled": command.communication_enabled,
@@ -93,8 +94,8 @@ impl AutopilotTeamStateRepository for PostgresAutopilotRepository {
                     r#"
                     INSERT INTO viryaos_release_plans(
                         id, workspace_id, source_key, title, release_at, listen_url,
-                        active, assets_ready, communication_enabled, press_enabled
-                    ) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+                        tier, active, assets_ready, communication_enabled, press_enabled
+                    ) VALUES($1,$2,$3,$4,$5,$6,COALESCE($7,'track'),$8,$9,$10,$11)
                     RETURNING version
                     "#,
                 )
@@ -104,6 +105,7 @@ impl AutopilotTeamStateRepository for PostgresAutopilotRepository {
                 .bind(command.title.trim())
                 .bind(command.release_at)
                 .bind(command.listen_url.as_deref())
+                .bind(command.tier.map(|tier| tier.as_str()))
                 .bind(command.active)
                 .bind(command.assets_ready)
                 .bind(command.communication_enabled)
@@ -123,12 +125,13 @@ impl AutopilotTeamStateRepository for PostgresAutopilotRepository {
                     SET title=$3,
                         release_at=$4,
                         listen_url=$5,
-                        active=$6,
-                        assets_ready=$7,
-                        communication_enabled=$8,
-                        press_enabled=$9,
+                        tier=COALESCE($6, tier),
+                        active=$7,
+                        assets_ready=$8,
+                        communication_enabled=$9,
+                        press_enabled=$10,
                         version=version+1
-                    WHERE workspace_id=$1 AND id=$2 AND version=$10
+                    WHERE workspace_id=$1 AND id=$2 AND version=$11
                     RETURNING version
                     "#,
                 )
@@ -137,6 +140,7 @@ impl AutopilotTeamStateRepository for PostgresAutopilotRepository {
                 .bind(command.title.trim())
                 .bind(command.release_at)
                 .bind(command.listen_url.as_deref())
+                .bind(command.tier.map(|tier| tier.as_str()))
                 .bind(command.active)
                 .bind(command.assets_ready)
                 .bind(command.communication_enabled)

@@ -251,6 +251,9 @@ pub struct ReleasePlanRequest {
     #[serde(with = "time::serde::rfc3339")]
     release_at: OffsetDateTime,
     listen_url: Option<String>,
+    /// The band's call about what kind of release this is. Absent leaves a
+    /// stored tier alone and defaults a new plan to `track`.
+    tier: Option<ReleaseTier>,
     active: bool,
     assets_ready: bool,
     communication_enabled: bool,

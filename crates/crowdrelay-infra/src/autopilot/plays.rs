@@ -259,6 +259,9 @@ SELECT
 FROM viryaos_release_plans AS plan
 WHERE plan.workspace_id = $1
   AND plan.active
+  -- A filler release is posted into a quiet week, not run through the
+  -- runway — the tier is the band's call, not a play that failed to open.
+  AND plan.tier <> 'filler'
   AND plan.release_at > $3
   AND NOT EXISTS (
       SELECT 1

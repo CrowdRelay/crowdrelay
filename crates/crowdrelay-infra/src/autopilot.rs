@@ -130,7 +130,9 @@ use crowdrelay_domain::{
     plays::{PlayAnchorKind, PlayKind, PlayPolicy, PlayStepKind, PlayStepState, StepAudience},
     pricing::TicketYieldSnapshot,
     promotion::PromotionPerformanceSnapshot,
-    release_autopilot::{ReleaseMilestoneHistory, ReleasePlanSnapshot},
+    release_autopilot::{
+        ReleaseMilestone, ReleaseMilestoneHistory, ReleasePlanSnapshot, ReleaseTier,
+    },
     show_growth::ShowGrowthSnapshot,
     show_operations::ShowTaskSnapshot,
     show_settlement::{
@@ -428,6 +430,7 @@ struct ReleaseSnapshotRow {
     title: String,
     release_at: OffsetDateTime,
     active: bool,
+    tier: String,
     assets_ready: bool,
     communication_enabled: bool,
     press_enabled: bool,
@@ -439,7 +442,7 @@ struct ReleaseSnapshotRow {
     release_day_sent: bool,
     sustain_sent: bool,
     editorial_pitch_parked: bool,
-    editorial_pitch_done: bool,
+    editorial_pitch_completed_at: Option<OffsetDateTime>,
     editorial_pitch_escalated_at: Option<OffsetDateTime>,
     wrap_sent: bool,
 }

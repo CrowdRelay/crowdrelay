@@ -11276,6 +11276,10 @@ components:
         title: { type: string, minLength: 1, maxLength: 240 }
         release_at: { type: string, format: date-time }
         listen_url: { type: [string, 'null'], maxLength: 1000 }
+        tier:
+          type: [string, 'null']
+          enum: ['single', 'track', 'filler', null]
+          description: The band's call about what kind of release this is (single = full vertical, track = announced and catalogued, filler = posted into a quiet week). Absent leaves a stored tier alone; a new plan defaults to track.
         active: { type: boolean }
         assets_ready: { type: boolean }
         communication_enabled: { type: boolean }
@@ -11290,18 +11294,67 @@ components:
         release_id: { type: string, format: uuid }
         version: { type: integer, format: int64, minimum: 1 }
         replayed: { type: boolean }
+    ReleaseMilestoneHistory:
+      type: object
+      additionalProperties: false
+      required: [calendar_seeded, editorial_pitch_parked, announcement_sent, press_started, fan_warmup_sent, countdown_sent, release_day_sent, sustain_sent, wrap_sent]
+      properties:
+        calendar_seeded: { type: boolean }
+        editorial_pitch_parked: { type: boolean }
+        announcement_sent: { type: boolean }
+        press_started: { type: boolean }
+        fan_warmup_sent: { type: boolean }
+        countdown_sent: { type: boolean }
+        release_day_sent: { type: boolean }
+        sustain_sent: { type: boolean }
+        wrap_sent: { type: boolean }
+    ReleaseTimelineStep:
+      type: object
+      additionalProperties: false
+      required: [milestone, offset_days, due_at, completed_at, state]
+      properties:
+        milestone:
+          type: string
+          enum: [seed_calendar, editorial_pitch, announcement, start_press, fan_warmup, countdown, release_day, sustain, wrap]
+        offset_days:
+          type: integer
+          description: Days relative to the release — -28 is R-28, 3 is R+3.
+        due_at: { type: string, format: date-time }
+        completed_at: { type: [string, 'null'], format: date-time }
+        state:
+          type: string
+          enum: [done, parked, due, upcoming, disabled, blocked]
+          description: done = recorded; parked = the editorial pitch is sitting with a human (parked, never claimed submitted); due = window open, nothing recorded; upcoming = ahead of window; disabled = the vertical is off for this rung — the step's own switch is off or the plan is tier filler, which owes no ladder; blocked = a plan-level gate holds it (missing assets or communication off).
     AutopilotReleasePlanSnapshot:
       type: object
       additionalProperties: false
-      required: [release_id, title, release_at, active, assets_ready, communication_enabled, press_enabled]
+      required: [release_id, title, release_at, active, tier, assets_ready, communication_enabled, press_enabled, editorial_pitch_completed_at, editorial_pitch_escalated_at, history, lifecycle, timeline]
       properties:
         release_id: { type: string, format: uuid }
         title: { type: string }
         release_at: { type: string, format: date-time }
         active: { type: boolean }
+        tier: { type: string, enum: [single, track, filler] }
         assets_ready: { type: boolean }
         communication_enabled: { type: boolean }
         press_enabled: { type: boolean }
+        editorial_pitch_completed_at:
+          type: [string, 'null']
+          format: date-time
+          description: Somebody says they submitted the form, and when — the only way this is set, because nothing the agent can read would tell it.
+        editorial_pitch_escalated_at:
+          type: [string, 'null']
+          format: date-time
+          description: When the agent last nudged about an unfinished pitch.
+        history: { $ref: '#/components/schemas/ReleaseMilestoneHistory' }
+        lifecycle:
+          type: string
+          enum: [inactive, preparing, release_week, sustaining, complete]
+          description: Where the release itself has got to, computed from the same policy and facts the evaluator decides from.
+        timeline:
+          type: array
+          items: { $ref: '#/components/schemas/ReleaseTimelineStep' }
+          description: Every rung of the release ladder with its R-offset, due date and honest state — the page that opens the timeline.
     AutopilotOutreachWaveView:
       type: object
       additionalProperties: true

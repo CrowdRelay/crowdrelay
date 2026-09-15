@@ -44,10 +44,11 @@ struct LastDebtSignalRow {
 }
 
 /// Milestones a release plan is expected to record, from the CHECK constraint
-/// on `viryaos_release_milestones` (migration 0039). The denominator is the
-/// declared set, not the recorded rows — otherwise a plan that recorded one
-/// milestone and stopped would report as 0% outstanding.
-const RELEASE_MILESTONE_COUNT: i64 = 8;
+/// on `viryaos_release_milestones` (migration 0039, widened to nine by
+/// `editorial_pitch` in 0100). The denominator is the declared set, not the
+/// recorded rows — otherwise a plan that recorded one milestone and stopped
+/// would report as 0% outstanding.
+const RELEASE_MILESTONE_COUNT: i64 = 9;
 
 fn subject_of(row: &GrowthDebtRow) -> Option<GrowthDebtSubject> {
     match row.subject_kind.as_str() {
@@ -193,9 +194,18 @@ pub(in crate::autopilot) async fn load_growth_debt_observations(
                         $2 - COALESCE(recorded.last_completed_at, plan.created_at)
                     )) / 3600)
                 )::bigint AS idle_hours,
-                GREATEST(0, $3::bigint - COALESCE(recorded.completed, 0))::bigint
-                    AS outstanding_items,
-                $3::bigint AS tracked_items,
+                -- The denominator is the milestones this plan can actually
+                -- owe: a no-press plan never records start_press, so counting
+                -- it as debt would report a deliberate switch as neglect.
+                GREATEST(
+                    0,
+                    $3::bigint
+                        - CASE WHEN plan.press_enabled THEN 0 ELSE 1 END
+                        - COALESCE(recorded.completed, 0)
+                )::bigint AS outstanding_items,
+                ($3::bigint
+                    - CASE WHEN plan.press_enabled THEN 0 ELSE 1 END)::bigint
+                    AS tracked_items,
                 NULL::integer AS relationship_score,
                 FLOOR(EXTRACT(EPOCH FROM (plan.release_at - $2)) / 3600)::bigint
                     AS hours_until_deadline
@@ -210,6 +220,9 @@ pub(in crate::autopilot) async fn load_growth_debt_observations(
             ) AS recorded ON true
             WHERE plan.workspace_id = $1
               AND plan.active
+              -- A filler plan owes no vertical — the tier is the band's call,
+              -- not nine missed milestones.
+              AND plan.tier <> 'filler'
               AND plan.release_at > $2
         ),
         missing_assets AS (

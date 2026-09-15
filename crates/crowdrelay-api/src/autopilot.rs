@@ -57,6 +57,10 @@ use crowdrelay_domain::{
     objectives::ObjectiveScope,
     outreach::{OutreachReplyDisposition, OutreachTargetKind},
     playlist_placement::PlacementObservation,
+    release_autopilot::{
+        ReleaseMilestone, ReleasePhase, ReleasePlanSnapshot, ReleaseTier, ReleaseTimelineStep,
+        release_phase, release_timeline,
+    },
     show_settlement::SettledShowCost,
     target_discovery::{CandidateSource, ChannelCost, RouteKind},
     tour_economics::TourEconomicsPolicy,

@@ -337,6 +337,7 @@ pub async fn upsert_release_plan(
         title: request.title,
         release_at: request.release_at,
         listen_url: request.listen_url,
+        tier: request.tier,
         active: request.active,
         assets_ready: request.assets_ready,
         communication_enabled: request.communication_enabled,
@@ -716,20 +717,67 @@ pub async fn list_content_sources(
     }
 }
 
+/// One plan as the timeline page opens it (§4i-1): the stored facts plus
+/// where the ladder actually got to, computed from the same policy and the
+/// same milestone marks the evaluator decides from.
+#[derive(serde::Serialize)]
+struct ReleasePlanView<'a> {
+    #[serde(flatten)]
+    snapshot: &'a ReleasePlanSnapshot,
+    lifecycle: ReleasePhase,
+    timeline: Vec<ReleaseTimelineStep>,
+}
+
 /// The operator's release-plan list: what the panel renders before anybody
 /// edits anything. Read-only, so no idempotency ledger row is written.
 pub async fn list_release_plans(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Response {
-    match state
+    let now = OffsetDateTime::now_utc();
+    let (plans, policies) = match tokio::try_join!(
+        state
+            .autopilot
+            .load_release_plan_snapshots(state.ops.workspace_id(), now),
+        state.autopilot.load_policies(state.ops.workspace_id()),
+    ) {
+        Ok(results) => results,
+        Err(error) => return repository_problem(error, request_id(&headers)),
+    };
+    let release_policy = policies
+        .iter()
+        .find_map(|policy| match &policy.config {
+            AutopilotPolicyConfig::Release(release) => Some(*release),
+            _ => None,
+        })
+        .unwrap_or_default();
+    let release_ids: Vec<ReleasePlanId> = plans.iter().map(|plan| plan.release_id).collect();
+    let marks = match state
         .autopilot
-        .load_release_plan_snapshots(state.ops.workspace_id(), OffsetDateTime::now_utc())
+        .load_release_milestone_marks(state.ops.workspace_id(), &release_ids)
         .await
     {
-        Ok(plans) => private_json(StatusCode::OK, plans),
-        Err(error) => repository_problem(error, request_id(&headers)),
-    }
+        Ok(marks) => marks,
+        Err(error) => return repository_problem(error, request_id(&headers)),
+    };
+    private_json(
+        StatusCode::OK,
+        plans
+            .iter()
+            .map(|plan| {
+                let completed: Vec<(ReleaseMilestone, OffsetDateTime)> = marks
+                    .iter()
+                    .filter(|(release_id, _, _)| *release_id == plan.release_id)
+                    .map(|(_, milestone, at)| (*milestone, *at))
+                    .collect();
+                ReleasePlanView {
+                    snapshot: plan,
+                    lifecycle: release_phase(plan, release_policy, now),
+                    timeline: release_timeline(plan, &completed, release_policy, now),
+                }
+            })
+            .collect::<Vec<_>>(),
+    )
 }
 
 /// Free-reach waves still drafting or waiting on a human. This is the queue an

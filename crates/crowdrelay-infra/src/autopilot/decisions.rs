@@ -150,6 +150,15 @@ impl AutopilotDecisionRepository for PostgresAutopilotRepository {
             .await
     }
 
+    async fn load_release_milestone_marks(
+        &self,
+        workspace_id: WorkspaceId,
+        release_ids: &[ReleasePlanId],
+    ) -> Result<Vec<(ReleasePlanId, ReleaseMilestone, OffsetDateTime)>, RepositoryError> {
+        self.load_release_milestone_marks_impl(workspace_id, release_ids)
+            .await
+    }
+
     async fn load_live_opportunity_snapshots(
         &self,
         workspace_id: WorkspaceId,

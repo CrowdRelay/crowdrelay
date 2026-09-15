@@ -315,7 +315,7 @@ macro_rules! decision_opportunity_reads {
     ) -> Result<Vec<ReleasePlanSnapshot>, RepositoryError> {
         self.bounded(async {
             let rows = sqlx::query_as::<_, ReleaseSnapshotRow>(r#"
-                SELECT plan.id AS release_id, plan.title, plan.release_at, plan.active,
+                SELECT plan.id AS release_id, plan.title, plan.release_at, plan.active, plan.tier,
                        plan.assets_ready, plan.communication_enabled, plan.press_enabled,
                        EXISTS(SELECT 1 FROM viryaos_release_milestones m WHERE m.workspace_id=plan.workspace_id AND m.release_id=plan.id AND m.milestone='seed_calendar') calendar_seeded,
                        EXISTS(SELECT 1 FROM viryaos_release_milestones m WHERE m.workspace_id=plan.workspace_id AND m.release_id=plan.id AND m.milestone='announcement') announcement_sent,
@@ -326,7 +326,7 @@ macro_rules! decision_opportunity_reads {
                        EXISTS(SELECT 1 FROM viryaos_release_milestones m WHERE m.workspace_id=plan.workspace_id AND m.release_id=plan.id AND m.milestone='sustain') sustain_sent,
                        EXISTS(SELECT 1 FROM viryaos_release_milestones m WHERE m.workspace_id=plan.workspace_id AND m.release_id=plan.id AND m.milestone='wrap') wrap_sent,
                        EXISTS(SELECT 1 FROM viryaos_release_milestones m WHERE m.workspace_id=plan.workspace_id AND m.release_id=plan.id AND m.milestone='editorial_pitch') editorial_pitch_parked,
-                       plan.editorial_pitch_completed_at IS NOT NULL editorial_pitch_done,
+                       plan.editorial_pitch_completed_at,
                        plan.editorial_pitch_escalated_at
                 FROM viryaos_release_plans plan
                 WHERE plan.workspace_id=$1 AND plan.active
@@ -338,9 +338,18 @@ macro_rules! decision_opportunity_reads {
             .fetch_all(&self.pool).await.map_err(map_sqlx)?;
             Ok(rows.into_iter().map(|row| ReleasePlanSnapshot {
                 release_id: ReleasePlanId::from_uuid(row.release_id), title: row.title,
-                release_at: row.release_at, active: row.active, assets_ready: row.assets_ready,
+                release_at: row.release_at, active: row.active,
+                tier: ReleaseTier::parse(&row.tier).unwrap_or_else(|| {
+                    // The CHECK constraint owns this vocabulary; an unknown
+                    // value means a migration widened it without widening the
+                    // parse arms — say so rather than silently label it track.
+                    tracing::warn!(tier = %row.tier, release_id = %row.release_id,
+                        "release plan tier outside the known vocabulary; reporting track");
+                    ReleaseTier::Track
+                }),
+                assets_ready: row.assets_ready,
                 communication_enabled: row.communication_enabled, press_enabled: row.press_enabled,
-                editorial_pitch_done: row.editorial_pitch_done,
+                editorial_pitch_completed_at: row.editorial_pitch_completed_at,
                 editorial_pitch_escalated_at: row.editorial_pitch_escalated_at,
                 history: ReleaseMilestoneHistory {
                     editorial_pitch_parked: row.editorial_pitch_parked,
@@ -350,6 +359,39 @@ macro_rules! decision_opportunity_reads {
                     sustain_sent: row.sustain_sent, wrap_sent: row.wrap_sent,
                 },
             }).collect())
+        }).await
+    }
+
+    async fn load_release_milestone_marks_impl(
+        &self,
+        workspace_id: WorkspaceId,
+        release_ids: &[ReleasePlanId],
+    ) -> Result<Vec<(ReleasePlanId, ReleaseMilestone, OffsetDateTime)>, RepositoryError> {
+        if release_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.bounded(async {
+            let ids: Vec<Uuid> = release_ids.iter().map(|id| id.into_uuid()).collect();
+            let rows = sqlx::query_as::<_, (Uuid, String, OffsetDateTime)>(
+                r#"
+                SELECT release_id, milestone, completed_at
+                FROM viryaos_release_milestones
+                WHERE workspace_id=$1 AND release_id = ANY($2)
+                ORDER BY release_id, completed_at
+                "#,
+            )
+            .bind(workspace_id.into_uuid())
+            .bind(&ids)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(map_sqlx)?;
+            Ok(rows
+                .into_iter()
+                .filter_map(|(release_id, milestone, completed_at)| {
+                    ReleaseMilestone::parse(&milestone)
+                        .map(|m| (ReleasePlanId::from_uuid(release_id), m, completed_at))
+                })
+                .collect())
         }).await
     }
 

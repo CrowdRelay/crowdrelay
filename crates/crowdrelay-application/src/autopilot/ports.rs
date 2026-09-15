@@ -7,7 +7,7 @@ use crowdrelay_brain::{
     GrowthIntelligenceSnapshot,
 };
 use crowdrelay_domain::{
-    AutopilotActionId, PlayId, TraceContext, WorkspaceId,
+    AutopilotActionId, PlayId, ReleasePlanId, TraceContext, WorkspaceId,
     action_class::ActionClass,
     audience_lifecycle::FanLifecycleSnapshot,
     autonomy::AutonomyLevel,
@@ -32,7 +32,7 @@ use crowdrelay_domain::{
     plays::{PlayKind, PlayPolicy},
     pricing::TicketYieldSnapshot,
     promotion::PromotionPerformanceSnapshot,
-    release_autopilot::ReleasePlanSnapshot,
+    release_autopilot::{ReleaseMilestone, ReleasePlanSnapshot},
     show_growth::ShowGrowthSnapshot,
     show_operations::ShowTaskSnapshot,
     target_discovery::OutreachSupplySnapshot,
@@ -191,6 +191,16 @@ pub trait AutopilotDecisionRepository: Send + Sync {
         workspace_id: WorkspaceId,
         now: OffsetDateTime,
     ) -> Result<Vec<ReleasePlanSnapshot>, RepositoryError>;
+
+    /// The recorded milestone marks for a set of release plans: what the
+    /// ladder actually got to, and when. The timeline view is built from
+    /// these rather than from the snapshot's done/not-done booleans, so a
+    /// completion carries its real date.
+    async fn load_release_milestone_marks(
+        &self,
+        workspace_id: WorkspaceId,
+        release_ids: &[ReleasePlanId],
+    ) -> Result<Vec<(ReleasePlanId, ReleaseMilestone, OffsetDateTime)>, RepositoryError>;
 
     async fn load_live_opportunity_snapshots(
         &self,

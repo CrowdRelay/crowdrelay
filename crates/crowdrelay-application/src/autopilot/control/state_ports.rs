@@ -313,6 +313,10 @@ pub struct UpsertReleasePlan {
     pub title: String,
     pub release_at: OffsetDateTime,
     pub listen_url: Option<String>,
+    /// `None` leaves the stored tier alone on update and defaults to `track`
+    /// on insert — the band's call is not silently reset by a caller that
+    /// does not know about tiers yet.
+    pub tier: Option<crowdrelay_domain::release_autopilot::ReleaseTier>,
     pub active: bool,
     pub assets_ready: bool,
     pub communication_enabled: bool,

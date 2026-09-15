@@ -251,11 +251,12 @@ pub(in crate::autopilot) async fn execute_release_milestone(
             bool,
             bool,
             String,
+            String,
             Option<String>,
         ),
     >(
         r#"
-        SELECT title,release_at,active,communication_enabled,press_enabled,source_key,listen_url
+        SELECT title,release_at,active,communication_enabled,press_enabled,source_key,tier,listen_url
         FROM viryaos_release_plans WHERE workspace_id=$1 AND id=$2 FOR UPDATE
     "#,
     )
@@ -265,7 +266,10 @@ pub(in crate::autopilot) async fn execute_release_milestone(
     .await
     .map_err(map_sqlx)?
     .ok_or(RepositoryError::Conflict)?;
-    if !locked.2 || locked.1 != release_at || locked.0 != title {
+    // An action queued while the plan was a track or a single must not still
+    // fire after the band marks it filler — the tier flip is a newer decision
+    // than the queue entry, and a filler release owes no vertical.
+    if !locked.2 || locked.6 == "filler" || locked.1 != release_at || locked.0 != title {
         return Err(RepositoryError::Conflict);
     }
     let key = release_milestone_str(milestone);
@@ -280,7 +284,7 @@ pub(in crate::autopilot) async fn execute_release_milestone(
     // the first one can legitimately fail on a missing executor capability and
     // the announcement must not then go out untracked. It is an upsert, so the
     // repeats cost a statement and change nothing.
-    ensure_release_tracked_link(tx, workspace_id, &locked.5, locked.6.as_deref()).await?;
+    ensure_release_tracked_link(tx, workspace_id, &locked.5, locked.7.as_deref()).await?;
 
     use crowdrelay_domain::release_autopilot::ReleaseMilestone::*;
     match milestone {
