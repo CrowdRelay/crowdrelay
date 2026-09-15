@@ -40,6 +40,26 @@ jobs:
     runs-on: [self-hosted, arm64]
     timeout-minutes: 40
 
+    # The pg-gated lib tests in this job point at 127.0.0.1:5432 and used to
+    # borrow whatever happened to be listening there — usually a leftover
+    # service container from another job. On a clean box the connect refused
+    # for 30s and the only hard-failing one (the trace-timeline test) died
+    # with PoolTimedOut. A dedicated service makes the dependency real.
+    services:
+      postgres:
+        image: postgres:19beta3-alpine
+        env:
+          POSTGRES_DB: crowdrelay
+          POSTGRES_USER: crowdrelay
+          POSTGRES_PASSWORD: crowdrelay-ci-only
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U crowdrelay -d crowdrelay"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+
     env:
       CROWDRELAY_ENV: test
       CROWDRELAY_BIND_ADDR: 127.0.0.1:8080
