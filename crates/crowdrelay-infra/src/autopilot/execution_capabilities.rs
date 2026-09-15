@@ -26,6 +26,10 @@ fn executor_capability_for_event(event_type: &str) -> &'static str {
         // "unknown" and fails closed wherever executors are registered, which
         // would wedge the whole sustain arm on every retry.
         "crowdrelay.release.r3_report_due" => "show.escalation",
+        // Same class again: a parked or escalated editorial pitch is a note to
+        // the band about work that needs a human, not an executor task.
+        "crowdrelay.release.editorial_pitch_parked" => "show.escalation",
+        "crowdrelay.release.editorial_pitch_escalated" => "show.escalation",
         "crowdrelay.ops.status_changed" => "ops.alert",
         "crowdrelay.promotion.budget_change_requested" => "promotion.budget",
         "crowdrelay.opportunity.application_requested" => "opportunity.application",
