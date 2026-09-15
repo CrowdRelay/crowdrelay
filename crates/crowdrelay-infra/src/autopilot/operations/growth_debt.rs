@@ -553,7 +553,95 @@ pub(in crate::autopilot) async fn load_growth_debt_observations(
         }
     }
 
+    // §4i-0d: the same mechanism pointed at the cadence commitment itself.
+    // One missed interval is information; two in a row with nothing scheduled
+    // is the signal — and it reports, it does not scold. The content-source
+    // projection is the serious-moment register: events, releases, and videos
+    // all land there with the moment's own timestamp, so the count is a fact
+    // about the record rather than an inference about intent.
+    let interval_hours = 730_u64 / u64::from(cadence.serious_moments_per_month);
+    let (moments, workspace_created_at) = load_moment_register(repo, workspace).await?;
+    if cadence_moment_missed(&moments, workspace_created_at, interval_hours, now) {
+        observations.push(GrowthDebtObservation {
+            kind: GrowthDebtKind::CadenceMomentMissed,
+            subject: GrowthDebtSubject::Workspace(workspace_id),
+            idle_hours: 0,
+            outstanding_items: 1,
+            tracked_items: 1,
+            relationship_score: None,
+            hours_until_deadline: None,
+            hours_since_last_signal: last_signal_at
+                .get(&(
+                    workspace,
+                    GrowthDebtKind::CadenceMomentMissed
+                        .decision_kind()
+                        .to_owned(),
+                ))
+                .map(|at| u32::try_from((now - *at).whole_hours().max(0)).unwrap_or(u32::MAX)),
+        });
+    }
+
     Ok(observations)
+}
+
+/// The workspace's serious-moment timestamps plus its own creation time —
+/// the two facts the slippage rule needs. Moment kinds are the §4i-0c serious
+/// classes only: `event`, `release`, `video`. Stories and harvest are filler
+/// material, and `show_completed` would double-count a night the event row
+/// already represents. `occurred_at` runs both ways — a published future
+/// show is a scheduled moment, a past one a held moment.
+async fn load_moment_register(
+    repo: &PostgresAutopilotRepository,
+    workspace: Uuid,
+) -> Result<(Vec<OffsetDateTime>, Option<OffsetDateTime>), RepositoryError> {
+    let moments = sqlx::query_scalar::<_, OffsetDateTime>(
+        r#"
+        SELECT occurred_at
+        FROM viryaos_content_sources
+        WHERE workspace_id = $1
+          AND active
+          AND source_kind IN ('event','release','video')
+        "#,
+    )
+    .bind(workspace)
+    .fetch_all(&repo.pool)
+    .await
+    .map_err(map_sqlx)?;
+    let workspace_created_at =
+        sqlx::query_scalar::<_, OffsetDateTime>("SELECT created_at FROM workspaces WHERE id = $1")
+            .bind(workspace)
+            .fetch_optional(&repo.pool)
+            .await
+            .map_err(map_sqlx)?;
+    Ok((moments, workspace_created_at))
+}
+
+/// True when the cadence has slipped twice running. The rule needs two facts
+/// beyond the count itself: the tenant has to be old enough to have had an
+/// interval to miss (a workspace younger than one interval gets the benefit
+/// of the doubt, not a finding), and a moment already scheduled inside the
+/// next half-interval means the rhythm is recovering on its own — reporting
+/// debt that resolves itself is how an operator learns to ignore the queue.
+/// `interval_hours` is 730 divided by the committed moments per month — the
+/// average month in hours, integer math like the rest of the domain.
+fn cadence_moment_missed(
+    moments: &[OffsetDateTime],
+    workspace_created_at: Option<OffsetDateTime>,
+    interval_hours: u64,
+    now: OffsetDateTime,
+) -> bool {
+    let interval = time::Duration::hours(i64::try_from(interval_hours).unwrap_or(i64::MAX));
+    if workspace_created_at.is_none_or(|created| now - created < interval) {
+        return false;
+    }
+    let recent = moments.iter().any(|at| *at <= now && *at > now - interval);
+    let prior = moments
+        .iter()
+        .any(|at| *at <= now - interval && *at > now - interval * 2);
+    let recovering = moments
+        .iter()
+        .any(|at| *at > now && *at <= now + interval / 2);
+    !(recent || prior) && !recovering
 }
 
 /// The workspace's content-supply policy for the shelf check — the same row
@@ -713,5 +801,61 @@ mod tests {
             ContentSupplyPolicy::default(),
             now
         ));
+    }
+
+    fn days_ago(now: OffsetDateTime, days: i64) -> OffsetDateTime {
+        now - Duration::days(days)
+    }
+
+    #[test]
+    fn two_empty_intervals_with_nothing_scheduled_is_a_missed_cadence() {
+        // One moment a month: interval ≈ 730h ≈ 30.4d. The last held moment
+        // was 80 days ago — the last two 30-day intervals are both empty and
+        // the schedule ahead is bare.
+        let now = OffsetDateTime::UNIX_EPOCH + Duration::days(20_000);
+        let created = Some(days_ago(now, 400));
+        let moments = vec![days_ago(now, 80)];
+        assert!(cadence_moment_missed(&moments, created, 730, now));
+    }
+
+    #[test]
+    fn one_empty_interval_is_information_not_debt() {
+        // A moment 20 days ago fills the current interval even though the
+        // one before it was dry — that is a recovered rhythm, not slippage.
+        let now = OffsetDateTime::UNIX_EPOCH + Duration::days(20_000);
+        let created = Some(days_ago(now, 400));
+        let moments = vec![days_ago(now, 20), days_ago(now, 100)];
+        assert!(!cadence_moment_missed(&moments, created, 730, now));
+    }
+
+    #[test]
+    fn a_scheduled_moment_means_the_rhythm_is_recovering() {
+        // Two dry intervals behind, but a show is announced inside the next
+        // half-interval — the miss resolves itself without an ask.
+        let now = OffsetDateTime::UNIX_EPOCH + Duration::days(20_000);
+        let created = Some(days_ago(now, 400));
+        let moments = vec![now + Duration::days(10)];
+        assert!(!cadence_moment_missed(&moments, created, 730, now));
+        // The same moment placed beyond the half-interval does not count as
+        // recovery — "eventually" is not a cadence.
+        let far = vec![now + Duration::days(20)];
+        assert!(cadence_moment_missed(&far, created, 730, now));
+    }
+
+    #[test]
+    fn a_young_workspace_cannot_have_missed_a_rhythm_yet() {
+        // Twenty days old at a monthly cadence: the record is empty but the
+        // tenant has not had a full interval to miss.
+        let now = OffsetDateTime::UNIX_EPOCH + Duration::days(20_000);
+        let created = Some(days_ago(now, 20));
+        assert!(!cadence_moment_missed(&[], created, 730, now));
+    }
+
+    #[test]
+    fn no_creation_fact_means_no_claim() {
+        // Without the workspace's age the two-empty-intervals rule cannot be
+        // evaluated honestly, so the detector stays quiet.
+        let now = OffsetDateTime::UNIX_EPOCH + Duration::days(20_000);
+        assert!(!cadence_moment_missed(&[], None, 730, now));
     }
 }

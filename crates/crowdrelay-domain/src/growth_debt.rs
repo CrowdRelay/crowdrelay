@@ -74,6 +74,12 @@ pub enum GrowthDebtKind {
     /// the shelf itself is the band's: this is the one moment the machine
     /// asks for material instead of scheduling what it already holds.
     FillerShelfEmpty,
+    /// The tenant committed to a cadence of serious moments and the record
+    /// shows none for two intervals running, with none scheduled — the
+    /// slippage rule of §4i-0d. One miss is information; two in a row is the
+    /// signal, and the remedy offered is honest: schedule a moment, or lower
+    /// the cadence — both are legitimate, and the setting is the tenant's own.
+    CadenceMomentMissed,
 }
 
 impl GrowthDebtKind {
@@ -88,6 +94,7 @@ impl GrowthDebtKind {
             Self::CalendarRoutingConflict => "calendar_routing_conflict",
             Self::TicketSalesBehindPace => "ticket_sales_behind_pace",
             Self::FillerShelfEmpty => "filler_shelf_empty",
+            Self::CadenceMomentMissed => "cadence_moment_missed",
         }
     }
 
@@ -102,6 +109,7 @@ impl GrowthDebtKind {
             "calendar_routing_conflict" => Some(Self::CalendarRoutingConflict),
             "ticket_sales_behind_pace" => Some(Self::TicketSalesBehindPace),
             "filler_shelf_empty" => Some(Self::FillerShelfEmpty),
+            "cadence_moment_missed" => Some(Self::CadenceMomentMissed),
             _ => None,
         }
     }
@@ -135,6 +143,9 @@ impl GrowthDebtKind {
             Self::FillerShelfEmpty => {
                 "the filler cadence is enabled and no video, story, or show-harvest source has an unproduced artifact left"
             }
+            Self::CadenceMomentMissed => {
+                "the committed cadence has produced no serious moment for two intervals running and none is scheduled"
+            }
         }
     }
 
@@ -151,6 +162,7 @@ impl GrowthDebtKind {
             Self::CalendarRoutingConflict => "review_calendar_routing",
             Self::TicketSalesBehindPace => "announce_show_to_local_fans",
             Self::FillerShelfEmpty => "restock_filler_shelf",
+            Self::CadenceMomentMissed => "schedule_moment_or_lower_cadence",
         }
     }
 
@@ -171,6 +183,7 @@ impl GrowthDebtKind {
             Self::CalendarRoutingConflict => "raise_growth_debt_calendar_routing_conflict",
             Self::TicketSalesBehindPace => "raise_growth_debt_ticket_sales_behind_pace",
             Self::FillerShelfEmpty => "raise_growth_debt_filler_shelf_empty",
+            Self::CadenceMomentMissed => "raise_growth_debt_cadence_moment_missed",
         }
     }
 
@@ -185,6 +198,7 @@ impl GrowthDebtKind {
             Self::CalendarRoutingConflict => "growth_debt_calendar_routing",
             Self::TicketSalesBehindPace => "growth_debt_ticket_sales_pace",
             Self::FillerShelfEmpty => "growth_debt_filler_shelf",
+            Self::CadenceMomentMissed => "growth_debt_cadence_moment",
         }
     }
 
@@ -199,7 +213,8 @@ impl GrowthDebtKind {
             | Self::ReleaseMilestonesMissed
             | Self::ReleaseAssetsMissing
             | Self::CalendarRoutingConflict
-            | Self::TicketSalesBehindPace => MetricValueTier::Downstream,
+            | Self::TicketSalesBehindPace
+            | Self::CadenceMomentMissed => MetricValueTier::Downstream,
             Self::RelationshipQuiet | Self::FillerShelfEmpty => MetricValueTier::Intermediate,
             Self::StaleContactData => MetricValueTier::Vanity,
         }
@@ -236,7 +251,10 @@ impl GrowthDebtKind {
     pub const fn is_structural(self) -> bool {
         matches!(
             self,
-            Self::CalendarRoutingConflict | Self::TicketSalesBehindPace | Self::FillerShelfEmpty
+            Self::CalendarRoutingConflict
+                | Self::TicketSalesBehindPace
+                | Self::FillerShelfEmpty
+                | Self::CadenceMomentMissed
         )
     }
 
@@ -247,6 +265,7 @@ impl GrowthDebtKind {
             Self::CalendarRoutingConflict => 80,
             Self::TicketSalesBehindPace => 72,
             Self::ReleaseMilestonesMissed => 65,
+            Self::CadenceMomentMissed => 60,
             Self::RelationshipQuiet => 50,
             Self::FillerShelfEmpty => 45,
             Self::StaleContactData => 30,
@@ -411,6 +430,9 @@ pub const fn horizon_hours(kind: GrowthDebtKind, policy: GrowthDebtPolicy) -> u3
         // emitted when the cadence wants fillers and every filler source is
         // exhausted, so the finding needs no ageing to be real.
         GrowthDebtKind::FillerShelfEmpty => 0,
+        // Two empty intervals are the finding itself — the loader has already
+        // counted the moments, so nothing here needs to age further.
+        GrowthDebtKind::CadenceMomentMissed => 0,
     }
 }
 
@@ -825,6 +847,7 @@ mod tests {
             GrowthDebtKind::CalendarRoutingConflict,
             GrowthDebtKind::TicketSalesBehindPace,
             GrowthDebtKind::FillerShelfEmpty,
+            GrowthDebtKind::CadenceMomentMissed,
         ] {
             assert_eq!(GrowthDebtKind::parse(kind.as_str()), Some(kind));
             assert!(!kind.reason().is_empty());
@@ -1033,5 +1056,31 @@ mod structural_kind_tests {
             evaluate_growth_debt(&shelf_observation(), GrowthDebtPolicy::default()),
             GrowthDebtDecision::Raise(_)
         ));
+    }
+
+    #[test]
+    fn a_missed_cadence_raises_the_honest_two_way_remedy() {
+        let observation = GrowthDebtObservation {
+            kind: GrowthDebtKind::CadenceMomentMissed,
+            subject: GrowthDebtSubject::Workspace(WorkspaceId::from_uuid(uuid::Uuid::now_v7())),
+            idle_hours: 0,
+            outstanding_items: 1,
+            tracked_items: 1,
+            relationship_score: None,
+            hours_until_deadline: None,
+            hours_since_last_signal: None,
+        };
+        let decision = evaluate_growth_debt(&observation, GrowthDebtPolicy::default());
+        let GrowthDebtDecision::Raise(item) = decision else {
+            panic!("expected Raise for a slipped cadence, got {decision:?}");
+        };
+        assert_eq!(item.kind.value_tier(), MetricValueTier::Downstream);
+        // The remedy names both legitimate outcomes — schedule a moment or
+        // lower the commitment — because scolding a band into a rhythm it
+        // cannot hold is how the product gets ignored.
+        assert_eq!(
+            item.kind.recommended_action(),
+            "schedule_moment_or_lower_cadence"
+        );
     }
 }
