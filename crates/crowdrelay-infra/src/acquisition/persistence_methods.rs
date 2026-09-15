@@ -1002,10 +1002,11 @@ impl PostgresAcquisitionRepository {
 /// Caller contract: invoke only when the fan INSERT actually created a row —
 /// an `ON CONFLICT` hit means the fan already has provenance from wherever
 /// they first arrived, and a second row would fabricate a second arrival.
-/// `source` names the path (`concert_qr`, `fan_import:csv`, `fanbase_ingest`);
-/// `request_id` correlates to the operation that created the fan, the same
-/// role the signup request's correlation id plays on the signup path.
-pub(crate) async fn record_fan_arrival(
+/// `source` names the path (`concert_qr`, `fan_import:csv`, `fanbase_ingest`,
+/// `ticket_purchase`, `synesthesia_claim`); `request_id` correlates to the
+/// operation that created the fan, the same role the signup request's
+/// correlation id plays on the signup path.
+pub async fn record_fan_arrival(
     transaction: &mut Transaction<'_, Postgres>,
     workspace_id: WorkspaceId,
     fan_id: FanId,

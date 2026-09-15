@@ -265,19 +265,33 @@ async fn enter_reward_draw_inner(
     {
         Some((_, status)) if status == "suppressed" => return Err(SynesthesiaError::Conflict),
         Some((fan_id, _)) => fan_id,
-        None => sqlx::query_scalar::<_, Uuid>(
-            r#"
+        None => {
+            // The match guard means reaching this arm always creates the
+            // fan — the claim is how they arrived.
+            let fan_id: Uuid = sqlx::query_scalar(
+                r#"
                 INSERT INTO fans (workspace_id, normalized_email, locale, status)
                 VALUES ($1, $2, $3, 'pending')
                 RETURNING id
                 "#,
-        )
-        .bind(workspace_id)
-        .bind(normalized_email)
-        .bind(clean_locale(payload.locale.as_deref()))
-        .fetch_one(&mut **transaction)
-        .await
-        .map_err(SynesthesiaError::sqlx)?,
+            )
+            .bind(workspace_id)
+            .bind(normalized_email)
+            .bind(clean_locale(payload.locale.as_deref()))
+            .fetch_one(&mut **transaction)
+            .await
+            .map_err(SynesthesiaError::sqlx)?;
+            crowdrelay_infra::acquisition::record_fan_arrival(
+                transaction,
+                crowdrelay_domain::WorkspaceId::from_uuid(workspace_id),
+                crowdrelay_domain::FanId::from_uuid(fan_id),
+                "synesthesia_claim",
+                &format!("synesthesia_run:{run_id}"),
+            )
+            .await
+            .map_err(SynesthesiaError::sqlx)?;
+            fan_id
+        }
     };
 
     let linked_run = sqlx::query(

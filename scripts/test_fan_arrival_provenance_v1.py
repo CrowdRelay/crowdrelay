@@ -28,31 +28,52 @@ INSERT_RE = re.compile(r"INSERT\s+INTO\s+fans\b", re.IGNORECASE)
 SIGNUP_PATH = "crates/crowdrelay-infra/src/acquisition/persistence_methods.rs"
 
 # Paths that instrument their INSERT — the bulk sites fold provenance into
-# the same statement, the single-row site calls `record_fan_arrival`.
+# the same statement, the single-row sites call `record_fan_arrival` in the
+# same transaction.
 INSTRUMENTED = {
     "crates/crowdrelay-infra/src/fan_import.rs": "fan_acquisition_events",
     "crates/crowdrelay-infra/src/fanbase/ingestion.rs": "fan_acquisition_events",
     "crates/crowdrelay-infra/src/concert_qr.rs": "record_fan_arrival",
+    "crates/crowdrelay-api/src/ticketing/payments.rs": "record_fan_arrival",
+    "crates/crowdrelay-api/src/synesthesia/rewards.rs": "record_fan_arrival",
 }
 
-# Paths that still create fans with no provenance row. Each needs either a
-# port through application→infra (the api-sql ratchet forbids a new write in
-# crowdrelay-api) or a deliberate decision that the path is not an arrival
-# channel. Listed so a reviewer can see the debt instead of rediscovering it.
-KNOWN_EXCEPTIONS = {
-    # Ticket buyers — the conversion channel. Needs the api→infra port.
-    "crates/crowdrelay-api/src/ticketing/payments.rs",
-    # Synesthesia reward claims. Needs the api→infra port.
-    "crates/crowdrelay-api/src/synesthesia/rewards.rs",
-}
+# No exceptions today. A new fan-creation path that cannot instrument must be
+# named here with the reason attached — an unlisted INSERT fails the build.
+KNOWN_EXCEPTIONS: set[str] = set()
+
+
+def production_body(source: str) -> str:
+    """Strip `#[cfg(test)]` modules, keeping everything around them —
+    the same brace-matching shape `api-sql-ratchet.py` uses. Truncating at
+    the first marker would let code appended after a test mod escape."""
+    out = source
+    while True:
+        marker = out.find("#[cfg(test)]")
+        if marker == -1:
+            return out
+        brace = out.find("{", marker)
+        if brace == -1:
+            return out[:marker]
+        depth = 0
+        end = None
+        for index in range(brace, len(out)):
+            char = out[index]
+            if char == "{":
+                depth += 1
+            elif char == "}":
+                depth -= 1
+                if depth == 0:
+                    end = index + 1
+                    break
+        if end is None:
+            return out[:marker]
+        out = out[:marker] + out[end:]
 
 
 def production_fan_insert_sites() -> list[str]:
     """Every non-test .rs file containing `INSERT INTO fans` in production
-    code — text after the first `#[cfg(test)]` is a test mod by convention
-    in this workspace, so it is not scanned (fixtures seeding `fans` inside
-    `outbox/repository.rs` and `reminders.rs` would otherwise read as
-    production debt)."""
+    code."""
     sites: list[str] = []
     for path in CRATES.rglob("*.rs"):
         rel = path.relative_to(ROOT).as_posix()
@@ -64,9 +85,7 @@ def production_fan_insert_sites() -> list[str]:
             or name.endswith(("_test.rs", "_tests.rs"))
         ):
             continue
-        text = path.read_text(encoding="utf-8")
-        text = text.split("#[cfg(test)]", 1)[0]
-        if INSERT_RE.search(text):
+        if INSERT_RE.search(production_body(path.read_text(encoding="utf-8"))):
             sites.append(rel)
     return sorted(sites)
 
@@ -113,11 +132,22 @@ class FanArrivalProvenanceContract(unittest.TestCase):
     def test_source_vocabulary_stays_named_not_free(self) -> None:
         """The readout groups by `source`; a free-form string per call site
         fragments the channel it is supposed to measure."""
-        for rel, marker in INSTRUMENTED.items():
-            if marker != "record_fan_arrival":
-                continue
-            body = (ROOT / rel).read_text(encoding="utf-8")
-            self.assertIn('"concert_qr"', body)
+        qr = (ROOT / "crates/crowdrelay-infra/src/concert_qr.rs").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('"concert_qr"', qr)
+        pay = (ROOT / "crates/crowdrelay-api/src/ticketing/payments.rs").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('"ticket_purchase"', pay)
+        # `DO UPDATE` returns the row either way — `xmax = 0` is what tells
+        # a created fan from a returning buyer. Dropping it makes every
+        # repeat purchase write a fabricated second arrival.
+        self.assertIn("xmax = 0", pay)
+        rewards = (
+            ROOT / "crates/crowdrelay-api/src/synesthesia/rewards.rs"
+        ).read_text(encoding="utf-8")
+        self.assertIn('"synesthesia_claim"', rewards)
         ingest = (ROOT / "crates/crowdrelay-infra/src/fanbase/ingestion.rs").read_text(
             encoding="utf-8"
         )

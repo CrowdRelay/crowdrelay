@@ -696,3 +696,77 @@ async fn fan_import_admits_a_repeated_address_once() -> Result<(), Box<dyn std::
     // Each run seeds its own workspace, so leaving the rows is harmless.
     Ok(())
 }
+
+/// The ticket-purchase path in `crowdrelay-api/src/ticketing/payments.rs`
+/// resolves the buyer's fan row with `INSERT ... ON CONFLICT DO UPDATE`, and
+/// `RETURNING` hands back the row either way — so it reads `xmax = 0` to tell
+/// a created fan (new arrival, write provenance) from a returning buyer
+/// (existing fan, keep their original provenance). This pins that contract
+/// against a real engine: if `xmax` semantics ever change, the payment path
+/// would silently fabricate a second arrival on every repeat purchase.
+#[tokio::test]
+#[ignore = "requires an explicit CROWDRELAY_TEST_DATABASE_URL PostgreSQL database"]
+async fn upsert_conflict_marks_only_the_created_fan_as_new() -> Result<(), sqlx::Error> {
+    let pool = pool().await;
+    crowdrelay_infra::database::MIGRATOR
+        .run(&pool)
+        .await
+        .expect("migrate");
+    let workspace = seed_workspace(&pool, "xmax").await;
+
+    let mut transaction = pool.begin().await?;
+
+    // The same statement `payments.rs` runs for a buyer — verbatim so the
+    // pin fails when the production shape changes, not just the idiom.
+    const BUYER_UPSERT: &str = r#"
+        INSERT INTO fans (workspace_id, normalized_email, display_name, status)
+        VALUES ($1, $2, $3, 'active')
+        ON CONFLICT (workspace_id, normalized_email) DO UPDATE
+        SET display_name = COALESCE(fans.display_name, EXCLUDED.display_name)
+        RETURNING id, (xmax = 0) AS is_new
+        "#;
+
+    let (fan_id, is_new): (Uuid, bool) = sqlx::query_as(BUYER_UPSERT)
+        .bind(workspace)
+        .bind("buyer@x.test")
+        .bind("Buyer")
+        .fetch_one(&mut *transaction)
+        .await?;
+    assert!(is_new, "the first purchase creates the fan");
+    crowdrelay_infra::acquisition::record_fan_arrival(
+        &mut transaction,
+        crowdrelay_domain::WorkspaceId::from_uuid(workspace),
+        crowdrelay_domain::FanId::from_uuid(fan_id),
+        "ticket_purchase",
+        &format!("ticket_order:{}", Uuid::now_v7()),
+    )
+    .await?;
+    transaction.commit().await?;
+
+    // A repeat purchase is a *later* transaction — the committed row is
+    // what `ON CONFLICT` hits in production.
+    let mut repeat = pool.begin().await?;
+    let (same_fan, is_new_again): (Uuid, bool) = sqlx::query_as(BUYER_UPSERT)
+        .bind(workspace)
+        .bind("buyer@x.test")
+        .bind("Buyer")
+        .fetch_one(&mut *repeat)
+        .await?;
+    assert_eq!(same_fan, fan_id);
+    assert!(
+        !is_new_again,
+        "a repeat purchase must not read as an arrival"
+    );
+    repeat.commit().await?;
+
+    let arrivals: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM fan_acquisition_events \
+         WHERE workspace_id = $1 AND fan_id = $2",
+    )
+    .bind(workspace)
+    .bind(fan_id)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(arrivals, 1, "one purchase, one provenance row");
+    Ok(())
+}

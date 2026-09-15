@@ -491,21 +491,39 @@ async fn process_paid_order(
             .map_err(TicketingError::sqlx)?;
             fan_id
         }
-        None => sqlx::query_scalar::<_, Uuid>(
-            r#"
-            INSERT INTO fans (workspace_id, normalized_email, display_name, status)
-            VALUES ($1, $2, $3, 'active')
-            ON CONFLICT (workspace_id, normalized_email) DO UPDATE
-            SET display_name = COALESCE(fans.display_name, EXCLUDED.display_name)
-            RETURNING id
-            "#,
-        )
-        .bind(state.workspace_id.into_uuid())
-        .bind(&order.buyer_email)
-        .bind(&order.buyer_name)
-        .fetch_one(&mut **transaction)
-        .await
-        .map_err(TicketingError::sqlx)?,
+        None => {
+            // `DO UPDATE` returns the row on a conflict too, so `xmax = 0`
+            // marks the INSERT case — a repeat buyer keeps the provenance
+            // from wherever they first arrived rather than gaining a second
+            // acquisition row.
+            let (fan_id, is_new): (Uuid, bool) = sqlx::query_as(
+                r#"
+                INSERT INTO fans (workspace_id, normalized_email, display_name, status)
+                VALUES ($1, $2, $3, 'active')
+                ON CONFLICT (workspace_id, normalized_email) DO UPDATE
+                SET display_name = COALESCE(fans.display_name, EXCLUDED.display_name)
+                RETURNING id, (xmax = 0) AS is_new
+                "#,
+            )
+            .bind(state.workspace_id.into_uuid())
+            .bind(&order.buyer_email)
+            .bind(&order.buyer_name)
+            .fetch_one(&mut **transaction)
+            .await
+            .map_err(TicketingError::sqlx)?;
+            if is_new {
+                crowdrelay_infra::acquisition::record_fan_arrival(
+                    transaction,
+                    state.workspace_id,
+                    crowdrelay_domain::FanId::from_uuid(fan_id),
+                    "ticket_purchase",
+                    &format!("ticket_order:{}", order.id),
+                )
+                .await
+                .map_err(TicketingError::sqlx)?;
+            }
+            fan_id
+        }
     };
 
     let claim_expires_at = order
