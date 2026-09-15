@@ -211,7 +211,6 @@ impl HierarchicalBetaPosterior {
             .and_then(|k| self.by_kind.get(k))
             .map_or((global_alpha, global_beta), |p| (p.alpha, p.beta));
 
-        // Update global posterior.
         self.global.update(success);
 
         // Update kind posterior, using the PRE-update global as prior.

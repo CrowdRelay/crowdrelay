@@ -145,7 +145,6 @@ pub fn attribute_fan_growth(evidence: &[GrowthEvidence]) -> FanGrowthAttribution
             total_durable += durable;
         }
 
-        // Template attribution.
         let template_key = ev
             .context
             .subreddit_type
@@ -178,7 +177,6 @@ pub fn attribute_fan_growth(evidence: &[GrowthEvidence]) -> FanGrowthAttribution
             template_entry.best_quality = ev.evidence_quality;
         }
 
-        // Strategy attribution.
         let strategy_key = ev.strategy.clone().unwrap_or_else(|| "unknown".to_owned());
         let strategy_entry = by_strategy.entry(strategy_key.clone()).or_default();
         strategy_entry.strategy = strategy_key;
@@ -190,7 +188,6 @@ pub fn attribute_fan_growth(evidence: &[GrowthEvidence]) -> FanGrowthAttribution
         }
         strategy_entry.observations += 1;
 
-        // Quality attribution.
         let quality_entry = by_quality.entry(ev.evidence_quality).or_default();
         quality_entry.quality = ev.evidence_quality;
         if let Some(incremental) = ev.observed_incremental_fans {

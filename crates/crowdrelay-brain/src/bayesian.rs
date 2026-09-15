@@ -282,7 +282,6 @@ impl HierarchicalPosterior {
             .and_then(|st| self.by_subreddit_type.get(st))
             .map_or(global_prior, |p| (p.mean, p.variance));
 
-        // Update global posterior.
         self.global.update(observation, observation_variance);
 
         // Update template posterior, using the PRE-update global as prior.
@@ -645,7 +644,6 @@ impl HierarchicalNegBinPosterior {
             .and_then(|st| self.by_subreddit_type.get(st))
             .map_or((global_alpha, global_beta), |p| (p.alpha, p.beta));
 
-        // Update global posterior.
         self.global.update(observation);
 
         // Update template posterior, using the PRE-update global as prior.

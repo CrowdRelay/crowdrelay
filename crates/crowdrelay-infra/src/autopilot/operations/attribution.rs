@@ -200,7 +200,6 @@ async fn process_one(
     }
     let window_end = resolved_at.unwrap_or_else(|| timestamp + time::Duration::days(14));
     let window_start = timestamp;
-    // Discover competing actions.
     let competing = evidence::discover_competing_actions(
         repo,
         workspace_id,
@@ -209,7 +208,6 @@ async fn process_one(
         window_end,
     )
     .await?;
-    // Construct the FanOutcome.
     let outcome = FanOutcome {
         workspace_id: workspace_id.into_uuid(),
         observed_incremental_fans: observed,
@@ -217,7 +215,6 @@ async fn process_one(
         measurement_window_start: window_start,
         measurement_window_end: window_end,
     };
-    // Run the allocator.
     let mut result = allocator.allocate(&outcome, &competing);
     // Upgrade the credits whose action was a clean randomized treatment.
     //

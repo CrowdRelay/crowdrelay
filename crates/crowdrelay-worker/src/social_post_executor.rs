@@ -448,7 +448,6 @@ impl SocialPostExecutorWorker {
     /// posts to the platform (or marks as awaiting manual post), and
     /// records the result.
     async fn process_action(&self, action: &ClaimedAction) -> Result<(), SocialPostExecutorError> {
-        // Validate platform.
         if !matches!(action.platform.as_str(), "instagram" | "facebook" | "x") {
             return Err(SocialPostExecutorError::InvalidPlatform(
                 action.platform.clone(),
