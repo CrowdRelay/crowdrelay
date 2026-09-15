@@ -9,6 +9,26 @@ pub struct AudienceOverview {
     paid_ticket_orders: i64,
 }
 
+#[derive(Debug, Serialize, FromRow)]
+pub struct AcquisitionSourceRow {
+    pub source: String,
+    pub fans: i64,
+    pub fans_30d: i64,
+}
+
+#[derive(Debug, FromRow)]
+pub struct AcquisitionTotalsRow {
+    pub active_fans: i64,
+    pub tracked_fans: i64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AcquisitionSources {
+    pub active_fans: i64,
+    pub tracked_fans: i64,
+    pub sources: Vec<AcquisitionSourceRow>,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FanListQuery {

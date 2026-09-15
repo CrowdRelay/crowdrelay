@@ -309,6 +309,10 @@ pub(crate) fn router(state: crate::AppState) -> Router {
             get(crate::audience::overview),
         )
         .route(
+            "/v1/control-plane/audience/acquisition-sources",
+            get(crate::audience::acquisition_sources),
+        )
+        .route(
             "/v1/control-plane/audience/fans",
             get(crate::audience::list_fans),
         )

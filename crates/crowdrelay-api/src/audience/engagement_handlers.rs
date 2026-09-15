@@ -700,3 +700,78 @@ pub async fn fan_journey(
         }
     }
 }
+
+/// `GET /v1/control-plane/audience/acquisition-sources` — where the fans
+/// came from. First-touch attribution over `fan_acquisition_events`,
+/// counted on fans still active today: a fan re-arriving through a second
+/// channel keeps the source that brought them — the same first-touch rule
+/// the funnel uses, though the funnel labels campaign-attributed fans by
+/// campaign name and this read keeps the raw channel. `tracked_fans` below
+/// `active_fans` is the honest unknown — fans who predate the ledger carry
+/// no source at all, and the totals say so rather than inventing one.
+pub async fn acquisition_sources(
+    State(state): State<crate::AppState>,
+    headers: HeaderMap,
+) -> Response {
+    let workspace_id = state.ticketing.workspace_id().into_uuid();
+    let result = async {
+        let sources = sqlx::query_as::<_, AcquisitionSourceRow>(
+            r#"
+            WITH first_touch AS (
+                SELECT DISTINCT ON (e.fan_id) e.fan_id, e.source, e.occurred_at
+                FROM fan_acquisition_events e
+                WHERE e.workspace_id = $1
+                ORDER BY e.fan_id, e.occurred_at, e.id
+            )
+            SELECT t.source,
+                   count(*)::bigint AS fans,
+                   count(*) FILTER (
+                       WHERE t.occurred_at >= now() - interval '30 days'
+                   )::bigint AS fans_30d
+            FROM first_touch t
+            JOIN fans f
+              ON f.workspace_id = $1
+             AND f.id = t.fan_id
+             AND f.status = 'active'
+            GROUP BY t.source
+            ORDER BY fans DESC, t.source
+            LIMIT 12
+            "#,
+        )
+        .bind(workspace_id)
+        .fetch_all(&state.database)
+        .await?;
+        let totals = sqlx::query_as::<_, AcquisitionTotalsRow>(
+            r#"
+            SELECT count(*)::bigint AS active_fans,
+                   count(*) FILTER (WHERE EXISTS (
+                       SELECT 1
+                       FROM fan_acquisition_events e
+                       WHERE e.workspace_id = f.workspace_id
+                         AND e.fan_id = f.id
+                   ))::bigint AS tracked_fans
+            FROM fans f
+            WHERE f.workspace_id = $1 AND f.status = 'active'
+            "#,
+        )
+        .bind(workspace_id)
+        .fetch_one(&state.database)
+        .await?;
+        Ok::<_, sqlx::Error>(AcquisitionSources {
+            active_fans: totals.active_fans,
+            tracked_fans: totals.tracked_fans,
+            sources,
+        })
+    };
+    match crate::ops::budgeted(
+        &state.read_budget,
+        1,
+        state.ticketing.operation_timeout(),
+        result,
+    )
+    .await
+    {
+        Some(result) => private_json(result, &headers),
+        None => unavailable(&headers),
+    }
+}
