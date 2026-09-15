@@ -57,32 +57,73 @@ fn key_digest(source_key: &str) -> u32 {
 /// A release with no listen URL gets no link: a tracked route to nowhere is
 /// worse than an untracked route to the right place, and a release plan often
 /// exists before the music does.
+///
+/// The link is bound to the release's acquisition campaign — one campaign per
+/// plan, created lazily here — so clicks and signups through it attribute to
+/// the release rather than to ambient growth. The campaign exists only once a
+/// link does; without a listen_url there is no path for either to prove.
 pub(in crate::autopilot) async fn ensure_release_tracked_link(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     workspace_id: WorkspaceId,
+    release_id: crowdrelay_domain::ReleasePlanId,
     source_key: &str,
+    title: &str,
     listen_url: Option<&str>,
 ) -> Result<(), RepositoryError> {
-    let Some(destination) = listen_url.filter(|url| url.starts_with("http")) else {
+    // Must satisfy smart_links.destination_url ~* '^https?://' — a looser gate
+    // here turns a malformed listen_url into a CHECK violation that wedges the
+    // whole milestone ladder on every retry, and a stricter one silently drops
+    // a valid URL.
+    let Some(destination) = listen_url.filter(|url| {
+        url.get(..7)
+            .is_some_and(|p| p.eq_ignore_ascii_case("http://"))
+            || url
+                .get(..8)
+                .is_some_and(|p| p.eq_ignore_ascii_case("https://"))
+    }) else {
         return Ok(());
     };
     let Some(slug) = release_link_slug(source_key) else {
         return Ok(());
     };
 
+    let campaign_id = sqlx::query_scalar::<_, Uuid>(
+        r#"
+        WITH existing AS (
+            SELECT id FROM campaigns
+            WHERE workspace_id = $1 AND release_plan_id = $2 AND active
+            ORDER BY created_at
+            LIMIT 1
+        ), inserted AS (
+            INSERT INTO campaigns (workspace_id, name, active, release_plan_id)
+            SELECT $1, $3, true, $2
+            WHERE NOT EXISTS (SELECT 1 FROM existing)
+            RETURNING id
+        )
+        SELECT id FROM inserted UNION ALL SELECT id FROM existing LIMIT 1
+        "#,
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(release_id.into_uuid())
+    .bind(format!("{title} · release"))
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(map_sqlx)?;
+
     sqlx::query(
         r#"
-        INSERT INTO smart_links (workspace_id, slug, destination_url, active)
-        VALUES ($1, $2, $3, true)
+        INSERT INTO smart_links (workspace_id, slug, destination_url, campaign_id, active)
+        VALUES ($1, $2, $3, $4, true)
         ON CONFLICT (workspace_id, slug) DO UPDATE SET
             destination_url = EXCLUDED.destination_url,
-            active = true,
-            version = smart_links.version + 1
+            campaign_id = EXCLUDED.campaign_id,
+            active = true
         "#,
     )
     .bind(workspace_id.into_uuid())
     .bind(&slug)
     .bind(destination)
+    .bind(campaign_id)
     .execute(&mut **tx)
     .await
     .map_err(map_sqlx)?;

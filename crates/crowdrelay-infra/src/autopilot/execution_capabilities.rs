@@ -21,6 +21,11 @@ fn executor_capability_for_event(event_type: &str) -> &'static str {
         // that already handles show notifications rather than parking behind
         // a capability nobody advertises yet.
         "crowdrelay.show.post_show_report_due" => "show.escalation",
+        // The R+3 release report is the same delivery class — an email to the
+        // band — so it rides the same executor. An unmapped kind resolves to
+        // "unknown" and fails closed wherever executors are registered, which
+        // would wedge the whole sustain arm on every retry.
+        "crowdrelay.release.r3_report_due" => "show.escalation",
         "crowdrelay.ops.status_changed" => "ops.alert",
         "crowdrelay.promotion.budget_change_requested" => "promotion.budget",
         "crowdrelay.opportunity.application_requested" => "opportunity.application",

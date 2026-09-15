@@ -287,7 +287,7 @@ class ShowGrowthDoesTheWorkContract(unittest.TestCase):
         milestone = execution.split("async fn execute_release_milestone", 1)[1].split(
             "\n    use crowdrelay_domain::release_autopilot", 1
         )[0]
-        self.assertIn("ensure_release_tracked_link(tx", milestone)
+        self.assertIn("ensure_release_tracked_link(", milestone)
 
     def test_two_releases_can_never_share_one_link(self) -> None:
         # A release key is free text and the slug is unique per workspace, so

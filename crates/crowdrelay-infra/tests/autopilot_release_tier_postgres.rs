@@ -448,3 +448,287 @@ async fn a_flag_flip_defeats_a_queued_release_artifact() -> Result<(), Box<dyn s
     );
     Ok(())
 }
+
+/// Queues one release-milestone action the way the evaluator writes it, then
+/// claims and executes it — the only path the milestone arms see in
+/// production.
+async fn run_release_milestone(
+    fixture: &Fixture,
+    release_id: crowdrelay_domain::ReleasePlanId,
+    title: &str,
+    release_at: OffsetDateTime,
+    milestone: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let decision_id = uuid::Uuid::now_v7();
+    let action_id = uuid::Uuid::now_v7();
+    sqlx::query(
+        r#"INSERT INTO viryaos_autopilot_decisions
+           (id, workspace_id, decision_key, context, subject_kind, subject_id,
+            decision_kind, confidence_basis_points, disposition, reason,
+            input_snapshot, policy_snapshot, recommendation, evaluated_at, trace_id)
+           VALUES ($1,$2,$3,'release','release_plan',$4,'execute_release_milestone',
+                   9000,'auto_execute','milestone due','{}','{}','{}',$5,$1)"#,
+    )
+    .bind(decision_id)
+    .bind(fixture.workspace_id.into_uuid())
+    .bind(format!("decision-{decision_id}-{milestone}"))
+    .bind(release_id.into_uuid())
+    .bind(fixture.now)
+    .execute(&fixture.pool)
+    .await?;
+    sqlx::query(
+        r#"INSERT INTO viryaos_autopilot_actions
+           (id, workspace_id, decision_id, context, action_kind, subject_kind,
+            subject_id, idempotency_key, payload, status,
+            approved_at, approved_by, available_at)
+           VALUES ($1,$2,$3,'release','release.milestone.execute','release_plan',
+                   $4,$5,$6,'queued',$7,'system:test',$7)"#,
+    )
+    .bind(action_id)
+    .bind(fixture.workspace_id.into_uuid())
+    .bind(decision_id)
+    .bind(release_id.into_uuid())
+    .bind(format!("action:release:{release_id}:{milestone}"))
+    .bind(serde_json::json!({
+        "kind": "execute_release_milestone",
+        "release_id": release_id.into_uuid(),
+        "title": title,
+        "release_at": release_at,
+        "milestone": milestone,
+    }))
+    .bind(fixture.now)
+    .execute(&fixture.pool)
+    .await?;
+    let claimed = fixture
+        .repository
+        .claim_due_autonomous_actions(fixture.workspace_id, 8, fixture.now)
+        .await?;
+    let action = claimed
+        .iter()
+        .find(|a| a.id.into_uuid() == action_id)
+        .expect("the queued milestone action is claimable");
+    fixture
+        .repository
+        .execute_action(fixture.workspace_id, action, fixture.now)
+        .await?;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "needs a live postgres"]
+async fn the_sustain_milestone_writes_the_r3_report_and_binds_the_release_campaign()
+-> Result<(), Box<dyn std::error::Error>> {
+    // The R+3 read is owed to the band whether or not the release moved
+    // anything: campaign-bound arrivals sit next to the ambient window, and
+    // the verdict names its own threshold. What fails here and nowhere else:
+    // a report that credits ambient growth to the release, or a campaign that
+    // never got bound so nothing could attribute.
+    let fixture = fixture("r3report").await?;
+    sqlx::query("UPDATE workspaces SET created_at = $2 WHERE id = $1")
+        .bind(fixture.workspace_id.into_uuid())
+        .bind(fixture.now - time::Duration::days(40))
+        .execute(&fixture.pool)
+        .await?;
+    sqlx::query(
+        "INSERT INTO ecosystem_feature_flags (workspace_id, key, enabled, reason)
+         VALUES ($1, 'communication_campaigns_enabled', true, 'test')",
+    )
+    .bind(fixture.workspace_id.into_uuid())
+    .execute(&fixture.pool)
+    .await?;
+
+    let release_at =
+        OffsetDateTime::from_unix_timestamp(fixture.now.unix_timestamp() - 4 * 86_400)?;
+    let created = fixture
+        .repository
+        .upsert_release_plan(
+            fixture.workspace_id,
+            UpsertReleasePlan {
+                release_id: None,
+                source_key: "r3report-plan".into(),
+                title: "r3report title".into(),
+                release_at,
+                listen_url: Some("https://listen.example/r3report".into()),
+                tier: Some(ReleaseTier::Single),
+                active: true,
+                assets_ready: true,
+                communication_enabled: true,
+                press_enabled: true,
+                expected_version: 0,
+            },
+            &idem("r3report"),
+            None,
+        )
+        .await?;
+
+    // First milestone binds the campaign and the tracked link.
+    run_release_milestone(
+        &fixture,
+        created.release_id,
+        "r3report title",
+        release_at,
+        "seed_calendar",
+    )
+    .await?;
+    let (campaign_id, link_bound): (uuid::Uuid, bool) = sqlx::query_as(
+        "SELECT c.id, EXISTS(
+             SELECT 1 FROM smart_links sl
+             WHERE sl.workspace_id = c.workspace_id AND sl.campaign_id = c.id
+               AND sl.slug LIKE 'release-%' AND sl.active
+         )
+         FROM campaigns c
+         WHERE c.workspace_id = $1 AND c.release_plan_id = $2 AND c.active",
+    )
+    .bind(fixture.workspace_id.into_uuid())
+    .bind(created.release_id.into_uuid())
+    .fetch_one(&fixture.pool)
+    .await?;
+    assert!(
+        link_bound,
+        "the tracked link must bind the release campaign"
+    );
+
+    // Evidence: two baseline arrivals ten days out, one ambient arrival and
+    // two campaign-bound arrivals inside the release window.
+    let seed_fan = |email: &str| {
+        let pool = fixture.pool.clone();
+        let workspace_id = fixture.workspace_id;
+        let email = email.to_string();
+        async move {
+            sqlx::query_scalar::<_, uuid::Uuid>(
+                "INSERT INTO fans (id, workspace_id, normalized_email, status)
+                 VALUES (gen_random_uuid(), $1, $2, 'active') RETURNING id",
+            )
+            .bind(workspace_id.into_uuid())
+            .bind(&email)
+            .fetch_one(&pool)
+            .await
+        }
+    };
+    let seed_acq =
+        |fan: uuid::Uuid, campaign: Option<uuid::Uuid>, at: OffsetDateTime, req: &str| {
+            let pool = fixture.pool.clone();
+            let workspace_id = fixture.workspace_id;
+            let req = req.to_string();
+            async move {
+                sqlx::query(
+                    "INSERT INTO fan_acquisition_events
+                    (workspace_id, fan_id, campaign_id, source, request_id, occurred_at)
+                 VALUES ($1, $2, $3, 'public_signup', $4, $5)",
+                )
+                .bind(workspace_id.into_uuid())
+                .bind(fan)
+                .bind(campaign)
+                .bind(&req)
+                .bind(at)
+                .execute(&pool)
+                .await
+            }
+        };
+    for idx in 0..2_i32 {
+        let fan = seed_fan(&format!("baseline-{idx}@example.test")).await?;
+        seed_acq(
+            fan,
+            None,
+            fixture.now - time::Duration::days(10),
+            &format!("baseline-{idx}"),
+        )
+        .await?;
+    }
+    let ambient = seed_fan("ambient@example.test").await?;
+    seed_acq(
+        ambient,
+        None,
+        fixture.now - time::Duration::days(3),
+        "ambient-0",
+    )
+    .await?;
+    for idx in 0..2_i32 {
+        let fan = seed_fan(&format!("bound-{idx}@example.test")).await?;
+        seed_acq(
+            fan,
+            Some(campaign_id),
+            fixture.now - time::Duration::days(3),
+            &format!("bound-{idx}"),
+        )
+        .await?;
+    }
+
+    // An executor registry flips ensure_executor_capability to fail-closed:
+    // every emitted event kind must resolve to an advertised capability or the
+    // emit returns Unavailable and the whole sustain arm rolls back. The R+3
+    // report rides show.escalation, same delivery class as the T+7 report.
+    sqlx::query(
+        "INSERT INTO viryaos_executor_instances (
+            workspace_id, executor_id, version, manifest_sha, observed_at, expires_at
+        ) VALUES ($1,'n8n-r3-test','test','test-manifest',$2,$3)",
+    )
+    .bind(fixture.workspace_id.into_uuid())
+    .bind(fixture.now)
+    .bind(fixture.now + time::Duration::minutes(30))
+    .execute(&fixture.pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO viryaos_executor_capabilities (
+            workspace_id, executor_id, capability, capability_version, observed_at, expires_at
+        ) VALUES ($1,'n8n-r3-test','show.escalation','1',$2,$3)",
+    )
+    .bind(fixture.workspace_id.into_uuid())
+    .bind(fixture.now)
+    .bind(fixture.now + time::Duration::minutes(30))
+    .execute(&fixture.pool)
+    .await?;
+
+    run_release_milestone(
+        &fixture,
+        created.release_id,
+        "r3report title",
+        release_at,
+        "sustain",
+    )
+    .await?;
+
+    let sustain_done: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM viryaos_release_milestones
+         WHERE workspace_id=$1 AND release_id=$2 AND milestone='sustain')",
+    )
+    .bind(fixture.workspace_id.into_uuid())
+    .bind(created.release_id.into_uuid())
+    .fetch_one(&fixture.pool)
+    .await?;
+    assert!(sustain_done, "the sustain milestone must record completion");
+
+    let report = sqlx::query_scalar::<_, serde_json::Value>(
+        "SELECT payload->'report' FROM outbox_events
+         WHERE workspace_id=$1 AND event_type='crowdrelay.release.r3_report_due'",
+    )
+    .bind(fixture.workspace_id.into_uuid())
+    .fetch_one(&fixture.pool)
+    .await?;
+    assert_eq!(
+        report["observed"]["fans_acquired_via_release_campaign"],
+        serde_json::json!(2),
+        "bound acquisitions must be counted on the release's own numbers: {report}"
+    );
+    assert_eq!(
+        report["inferred"]["window_acquisitions"],
+        serde_json::json!(3),
+        "the window counts everything that arrived, bound or not: {report}"
+    );
+    assert_eq!(
+        report["inferred"]["verdict"],
+        serde_json::json!("above_trend"),
+        "3 arrivals against a 2-in-28d baseline is above trend: {report}"
+    );
+    let gaps = report["evidence_gaps"]
+        .as_array()
+        .expect("evidence_gaps is a list")
+        .iter()
+        .filter_map(|gap| gap.as_str())
+        .collect::<Vec<_>>();
+    assert!(
+        gaps.contains(&"streams_not_measured"),
+        "listens are never claimed without listen data: {gaps:?}"
+    );
+    Ok(())
+}

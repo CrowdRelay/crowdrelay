@@ -284,7 +284,15 @@ pub(in crate::autopilot) async fn execute_release_milestone(
     // the first one can legitimately fail on a missing executor capability and
     // the announcement must not then go out untracked. It is an upsert, so the
     // repeats cost a statement and change nothing.
-    ensure_release_tracked_link(tx, workspace_id, &locked.5, locked.7.as_deref()).await?;
+    ensure_release_tracked_link(
+        tx,
+        workspace_id,
+        release_id,
+        &locked.5,
+        &locked.0,
+        locked.7.as_deref(),
+    )
+    .await?;
 
     use crowdrelay_domain::release_autopilot::ReleaseMilestone::*;
     match milestone {
@@ -317,7 +325,7 @@ pub(in crate::autopilot) async fn execute_release_milestone(
             }
             seed_release_outreach(tx, workspace_id, release_id, title, release_at, now).await?;
         }
-        Announcement | FanWarmup | Countdown | ReleaseDay | Sustain | Wrap => {
+        Announcement | FanWarmup | Countdown | ReleaseDay | Wrap => {
             if !locked.3 {
                 return Err(RepositoryError::Conflict);
             }
@@ -328,6 +336,34 @@ pub(in crate::autopilot) async fn execute_release_milestone(
                 release_id,
                 title,
                 milestone,
+                now,
+            )
+            .await?;
+        }
+        Sustain => {
+            if !locked.3 {
+                return Err(RepositoryError::Conflict);
+            }
+            execute_release_campaign(
+                tx,
+                workspace_id,
+                action_id,
+                release_id,
+                title,
+                milestone,
+                now,
+            )
+            .await?;
+            // The R+3 read rides the sustain milestone — same due date, same
+            // transaction. It comes after the campaign so the phase's own
+            // send appears in the receipts the report carries.
+            release_r3_report::issue_release_r3_report(
+                tx,
+                workspace_id,
+                action_id,
+                release_id,
+                title,
+                release_at,
                 now,
             )
             .await?;
@@ -421,7 +457,12 @@ async fn execute_release_campaign(
     .bind(workspace_id.into_uuid())
     .bind(segment_id)
     .bind(&campaign_slug)
-    .bind(format!("{title} · {phase}"))
+    // communication_campaigns.name is CHECKed at 160 chars while a plan title
+    // allows 240; an over-long title must not wedge every milestone send.
+    .bind(format!(
+        "{} · {phase}",
+        title.chars().take(140).collect::<String>()
+    ))
     .bind(&template)
     .bind(release_id.into_uuid())
     .bind(growth_goal)
