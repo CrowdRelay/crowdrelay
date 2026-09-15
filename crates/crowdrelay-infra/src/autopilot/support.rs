@@ -153,6 +153,7 @@ fn policy_summary(row: PolicyRow) -> Result<AutopilotPolicySummary, RepositoryEr
 fn pending_action(
     row: PendingActionRow,
     live_capabilities: &[String],
+    locale: crowdrelay_application::autopilot::BriefingLocale,
 ) -> Result<PendingAutopilotAction, RepositoryError> {
     // A payload the worker cannot parse is a live action it will never run.
     // Discarding the serde error made that indistinguishable from a database
@@ -174,7 +175,9 @@ fn pending_action(
             .iter()
             .any(|advertised| advertised == capability)
     });
-    let mut briefing = payload.briefing();
+    // Same briefing the task email carries, in the same language — the panel
+    // and the email are two views of one handoff and must not disagree.
+    let mut briefing = payload.briefing().localized(locale);
     briefing.deadline_note = format_deadline_note(row.approval_expires_at, row.assignment_due_at);
     Ok(PendingAutopilotAction {
         required_capability: required_capability.map(ToOwned::to_owned),

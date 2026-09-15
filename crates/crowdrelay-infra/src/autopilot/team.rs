@@ -5,6 +5,7 @@
 //! confirmed email actions through the existing Autopilot execution plane.
 
 use super::*;
+use crowdrelay_application::autopilot::BriefingLocale;
 use crowdrelay_domain::{
     WorkspaceMemberId,
     team_operations::{
@@ -79,6 +80,7 @@ impl PostgresAutopilotRepository {
     ) -> Result<u32, RepositoryError> {
         self.bounded(async {
             let mut tx = self.pool.begin().await.map_err(map_sqlx)?;
+            let crew_locale = crew_locale_in_tx(&mut tx, workspace_id).await;
 
             close_resolved_assignments(&mut tx, workspace_id, now).await?;
             let team = load_team_routing(&mut tx, workspace_id, now).await?;
@@ -223,7 +225,12 @@ impl PostgresAutopilotRepository {
                     &member.normalized_email,
                     &member.display_name,
                     friendly_action_title(&action.action_kind),
-                    enriched_task_detail(&action.payload, action.approval_expires_at, None),
+                    enriched_task_detail(
+                        &action.payload,
+                        action.approval_expires_at,
+                        None,
+                        crew_locale,
+                    ),
                     action.approval_expires_at,
                     0,
                     Some(action.id),
@@ -305,6 +312,7 @@ impl PostgresAutopilotRepository {
     ) -> Result<u32, RepositoryError> {
         self.bounded(async {
             let mut tx = self.pool.begin().await.map_err(map_sqlx)?;
+            let crew_locale = crew_locale_in_tx(&mut tx, workspace_id).await;
             // Same reasoning as the handoff sweep: a gated capability is an
             // operator's decision, not a fault, and reporting it as a failed
             // cycle every sixty seconds trains everyone to ignore the log.
@@ -378,7 +386,7 @@ impl PostgresAutopilotRepository {
                         "To zadanie nadal czeka na Twoje domknięcie.".to_owned()
                     }
                 } else if let Some(payload_json) = row.payload.as_ref() {
-                    enriched_task_detail(payload_json, row.due_at, row.due_at)
+                    enriched_task_detail(payload_json, row.due_at, row.due_at, crew_locale)
                 } else {
                     "To zadanie nadal czeka na Twoją decyzję lub wykonanie.".to_owned()
                 };
@@ -815,22 +823,76 @@ fn friendly_show_task_title(task_key: &str) -> String {
 /// This is what goes into the team assignment email body — summary, why it
 /// matters, steps, and the content being approved. Truncated to 1800 chars
 /// to fit the n8n workflow's slice limit.
+/// The crew's language for this workspace, read inside the caller's
+/// transaction so the briefing and the frame cannot disagree mid-sweep.
+///
+/// A missing or unreadable row is the source language rather than an error: a
+/// task email that arrives in English is usable, one that fails to send is not.
+async fn crew_locale_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    workspace_id: WorkspaceId,
+) -> BriefingLocale {
+    let stored: Option<String> = sqlx::query_scalar(
+        "SELECT value FROM tenant_settings WHERE workspace_id = $1 AND key = 'crew_locale'",
+    )
+    .bind(workspace_id.into_uuid())
+    .fetch_optional(&mut **tx)
+    .await
+    .ok()
+    .flatten();
+    stored.map_or(BriefingLocale::default(), |tag| {
+        BriefingLocale::from_tag(&tag)
+    })
+}
+
+/// The words around the briefing, in the crew's language.
+///
+/// The frame used to be Polish while the briefing inside it was English, so a
+/// crew member read "Dlaczego to ważne:" followed by an English sentence.
+/// Localising only one of the two moves the seam rather than removing it, so
+/// the frame and its contents resolve from the same locale.
+struct DetailFrame {
+    why: &'static str,
+    steps: &'static str,
+    content: &'static str,
+    unreadable: &'static str,
+}
+
+const fn detail_frame(locale: BriefingLocale) -> DetailFrame {
+    match locale {
+        BriefingLocale::Pl => DetailFrame {
+            why: "Dlaczego to ważne",
+            steps: "Kroki",
+            content: "Treść",
+            unreadable: "Nie udało się odczytać szczegółów zadania. Otwórz panel operacyjny, aby zobaczyć pełne dane.",
+        },
+        BriefingLocale::En => DetailFrame {
+            why: "Why this matters",
+            steps: "Steps",
+            content: "Details",
+            unreadable: "This task's details could not be read. Open the operations panel to see the full record.",
+        },
+    }
+}
+
 fn enriched_task_detail(
     payload_json: &serde_json::Value,
     approval_expires_at: Option<OffsetDateTime>,
     assignment_due_at: Option<OffsetDateTime>,
+    locale: BriefingLocale,
 ) -> String {
     use crowdrelay_application::autopilot::AutopilotActionPayload;
 
+    let frame = detail_frame(locale);
     let Ok(payload) = serde_json::from_value::<AutopilotActionPayload>(payload_json.clone()) else {
-        return "Nie udało się odczytać szczegółów zadania. Otwórz panel operacyjny aby zobaczyć pełne dane.".to_owned();
+        return frame.unreadable.to_owned();
     };
-    let mut briefing = payload.briefing();
+    let mut briefing = payload.briefing().localized(locale);
     briefing.deadline_note = format_deadline_note(approval_expires_at, assignment_due_at);
 
     let mut text = format!(
-        "{}\n\nDlaczego to ważne: {}\n\nKroki:",
-        briefing.summary, briefing.why_it_matters
+        "{}\n\n{}: {}\n\n{}:",
+        briefing.summary, frame.why, briefing.why_it_matters, frame.steps
     );
     for (i, step) in briefing.steps.iter().enumerate() {
         text.push_str(&format!(
@@ -841,7 +903,7 @@ fn enriched_task_detail(
         ));
     }
     if !briefing.content.is_empty() {
-        text.push_str("\n\nTreść:");
+        text.push_str(&format!("\n\n{}:", frame.content));
         for field in &briefing.content {
             text.push_str(&format!("\n{}: {}", field.label, field.value));
         }

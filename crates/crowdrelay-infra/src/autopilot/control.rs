@@ -322,9 +322,25 @@ impl AutopilotControlRepository for PostgresAutopilotRepository {
                 .map(policy_summary)
                 .collect::<Result<Vec<_>, _>>()?;
 
+            // One answer for the whole queue, resolved where the rows are mapped.
+            // An unreadable setting is the source language: a briefing in English
+            // beats a cockpit that 500s.
+            let crew_locale = sqlx::query_scalar::<_, String>(
+                "SELECT value FROM tenant_settings WHERE workspace_id = $1 AND key = 'crew_locale'",
+            )
+            .bind(workspace_id.into_uuid())
+            .fetch_optional(&self.pool)
+            .await
+            .ok()
+            .flatten()
+            .map_or(
+                crowdrelay_application::autopilot::BriefingLocale::default(),
+                |tag| crowdrelay_application::autopilot::BriefingLocale::from_tag(&tag),
+            );
+
             let needs_you = needs_you_rows
                 .into_iter()
-                .map(|row| pending_action(row, &live_capabilities))
+                .map(|row| pending_action(row, &live_capabilities, crew_locale))
                 .collect::<Result<Vec<_>, _>>()?;
 
             Ok(AutopilotControlOverview {

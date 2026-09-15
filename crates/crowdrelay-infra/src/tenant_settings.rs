@@ -24,10 +24,13 @@ pub const DEFAULT_MEMBER_SITE_BASE_URL: &str = "https://virya.music";
 pub const DEFAULT_MEMBER_AREA_PATH: &str = "pl/latarnik";
 pub const DEFAULT_SYNESTHESIA_CAMPAIGN_SLUG: &str = "virya-synesthesia-album-v1";
 pub const DEFAULT_NORTH_STAR_METRIC: &str = "activated_fans_30d";
+/// The language briefings are authored in. A tenant that never sets
+/// `crew_locale` reads the source language, which is always complete.
+pub const DEFAULT_CREW_LOCALE: &str = "en";
 
 /// The keys an operator may edit. Anything else stays internal even if a row
 /// somehow appears, so the HTTP surface cannot be used to smuggle state.
-pub const EDITABLE_KEYS: [&str; 9] = [
+pub const EDITABLE_KEYS: [&str; 10] = [
     KEY_MEMBER_SITE_BASE_URL,
     KEY_MEMBER_AREA_PATH,
     KEY_SYNESTHESIA_CAMPAIGN_SLUG,
@@ -37,6 +40,7 @@ pub const EDITABLE_KEYS: [&str; 9] = [
     KEY_SOCIAL_AUTO_POST,
     KEY_GROWTH_CADENCE_MOMENTS_PER_MONTH,
     KEY_GROWTH_CADENCE_FILLERS_ENABLED,
+    KEY_CREW_LOCALE,
 ];
 
 const KEY_MEMBER_SITE_BASE_URL: &str = "member_site_base_url";
@@ -48,6 +52,13 @@ const KEY_NORTH_STAR_METRIC: &str = "north_star_metric";
 pub const KEY_SOCIAL_AUTO_POST: &str = "social_auto_post";
 pub const KEY_GROWTH_CADENCE_MOMENTS_PER_MONTH: &str = "growth_cadence_moments_per_month";
 pub const KEY_GROWTH_CADENCE_FILLERS_ENABLED: &str = "growth_cadence_fillers_enabled";
+/// The language the crew reads task briefings in.
+///
+/// Briefings are authored in English and localised at the edge, so this is the
+/// setting that decides which words a band member actually gets in their email
+/// and in the staff panel. It is a tenant preference, not a compiled-in
+/// assumption: Virya is Polish and the next tenant may not be.
+pub const KEY_CREW_LOCALE: &str = "crew_locale";
 
 const CACHE_TTL: Duration = Duration::from_secs(60);
 
@@ -227,6 +238,26 @@ impl TenantSettingsRepository {
     /// The growth cadence for one workspace, defaults over the two override
     /// rows. Not cached: it is read by the scheduler, not on a request path,
     /// and two rows are cheaper than a second cache entry to keep honest.
+    /// The crew's language tag, or the source language when unset.
+    ///
+    /// Returns the raw tag rather than a parsed enum so this crate stays free
+    /// of the briefing vocabulary; the caller resolves it with
+    /// `BriefingLocale::from_tag`, which treats anything it has no wording for
+    /// as English.
+    pub async fn crew_locale(&self, workspace_id: Uuid) -> Result<String, sqlx::Error> {
+        let stored: Option<String> = sqlx::query_scalar(
+            "SELECT value FROM tenant_settings WHERE workspace_id = $1 AND key = $2",
+        )
+        .bind(workspace_id)
+        .bind(KEY_CREW_LOCALE)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(stored
+            .map(|tag| tag.trim().to_owned())
+            .filter(|tag| !tag.is_empty())
+            .unwrap_or_else(|| DEFAULT_CREW_LOCALE.to_owned()))
+    }
+
     pub async fn cadence_settings(
         &self,
         workspace_id: Uuid,

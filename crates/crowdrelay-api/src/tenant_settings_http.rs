@@ -80,7 +80,8 @@ pub async fn get_brand_settings(
         tokio::join!(
             crate::ops::hold(budget, repository.brand_settings(workspace_id)),
             crate::ops::hold(budget, repository.list_overrides(workspace_id)),
-            crate::ops::hold(budget, repository.cadence_settings(workspace_id))
+            crate::ops::hold(budget, repository.cadence_settings(workspace_id)),
+            crate::ops::hold(budget, repository.crew_locale(workspace_id))
         )
     })
     .await;
@@ -93,7 +94,7 @@ pub async fn get_brand_settings(
         }
     };
     match joined {
-        (Ok(effective), Ok(overrides), Ok(cadence)) => {
+        (Ok(effective), Ok(overrides), Ok(cadence), Ok(crew_locale)) => {
             let mut settings = HashMap::new();
             let effective: &crowdrelay_infra::tenant_settings::TenantBrandSettings =
                 effective.as_ref();
@@ -140,6 +141,7 @@ pub async fn get_brand_settings(
                 }
                 .to_owned(),
             );
+            settings.insert("crew_locale".to_owned(), crew_locale.clone());
             settings.insert(
                 "growth_cadence_moments_per_month".to_owned(),
                 cadence.serious_moments_per_month.to_string(),
@@ -164,7 +166,10 @@ pub async fn get_brand_settings(
             )
                 .into_response()
         }
-        (Err(error), _, _) | (_, Err(error), _) | (_, _, Err(error)) => {
+        (Err(error), _, _, _)
+        | (_, Err(error), _, _)
+        | (_, _, Err(error), _)
+        | (_, _, _, Err(error)) => {
             tracing::warn!(%error, "tenant settings lookup failed");
             Problem::service_unavailable(request_id_value)
                 .private()
@@ -202,6 +207,19 @@ fn validate_value(key: &str, value: &str) -> bool {
         || key == "growth_cadence_fillers_enabled"
     {
         return value == "true" || value == "false";
+    }
+    // A language tag, not free text: this decides which wording a crew member
+    // gets, and a typo would silently fall back to English forever.
+    if key == "crew_locale" {
+        let mut parts = value.split(['-', '_']);
+        let language = parts.next().unwrap_or_default();
+        let region = parts.next();
+        return parts.next().is_none()
+            && language.len() == 2
+            && language.bytes().all(|b| b.is_ascii_lowercase())
+            && region.is_none_or(|region| {
+                region.len() == 2 && region.bytes().all(|b| b.is_ascii_alphabetic())
+            });
     }
     // North star metric must be a valid enum value.
     if key == "north_star_metric" {

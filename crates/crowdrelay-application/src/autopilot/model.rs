@@ -927,6 +927,9 @@ impl AutopilotActionPayload {
     }
 }
 
+mod briefing_locale;
+pub use briefing_locale::BriefingLocale;
+
 include!("model/briefing.rs");
 
 /// Formats a minor-currency amount as a human-readable string.

@@ -16,6 +16,17 @@ impl AutopilotActionPayload {
     pub fn briefing(&self) -> super::control::ActionBriefing {
         use super::control::{ActionBriefing, BriefingField, BriefingStep};
 
+        // A raw UUID in a briefing tells a band member nothing — it is eight
+        // lines of hex where a name belongs. `briefing` is a pure function on
+        // the payload with no repository, so it cannot resolve an id to a
+        // title; what it can do is stop pretending the id is content. The
+        // short form stays useful to an operator matching a row in the console
+        // and stops dominating the panel for everyone else.
+        let short_ref = |id: &dyn std::fmt::Display| {
+            let full = id.to_string();
+            full.split('-').next().unwrap_or(&full).to_owned()
+        };
+
         let truncate = |s: String, max: usize| {
             if s.len() > max {
                 let mut truncated = s.chars().take(max.saturating_sub(1)).collect::<String>();
@@ -35,7 +46,7 @@ impl AutopilotActionPayload {
                     BriefingStep { what_to_do: "Click APPROVE to apply it".into(), why_it_matters: "Once approved the price is live immediately".into() },
                 ],
                 content: vec![
-                    BriefingField { label: "Typ biletu".into(), value: ticket_type_id.to_string() },
+                    BriefingField { label: "Ticket type".into(), value: short_ref(ticket_type_id) },
                     BriefingField { label: "Previous price".into(), value: format_minor(*from_minor) },
                     BriefingField { label: "New price".into(), value: format_minor(*to_minor) },
                 ],
@@ -49,7 +60,7 @@ impl AutopilotActionPayload {
                     BriefingStep { what_to_do: "Click APPROVE to apply it".into(), why_it_matters: "Once approved the capacity is live".into() },
                 ],
                 content: vec![
-                    BriefingField { label: "Typ biletu".into(), value: ticket_type_id.to_string() },
+                    BriefingField { label: "Ticket type".into(), value: short_ref(ticket_type_id) },
                     BriefingField { label: "Previous capacity".into(), value: from_capacity.to_string() },
                     BriefingField { label: "New capacity".into(), value: to_capacity.to_string() },
                 ],
@@ -63,7 +74,7 @@ impl AutopilotActionPayload {
                     BriefingStep { what_to_do: "Click APPROVE to send it".into(), why_it_matters: "The message is delivered to the fan".into() },
                 ],
                 content: vec![
-                    BriefingField { label: "Fan".into(), value: fan_id.to_string() },
+                    BriefingField { label: "Fan".into(), value: short_ref(fan_id) },
                     BriefingField { label: "Template".into(), value: template_key.clone() },
                 ],
                 deadline_note: String::new(),
@@ -76,7 +87,7 @@ impl AutopilotActionPayload {
                     BriefingStep { what_to_do: "Click APPROVE to place the order".into(), why_it_matters: "Once approved the order is placed".into() },
                 ],
                 content: vec![
-                    BriefingField { label: "Variant".into(), value: variant_id.to_string() },
+                    BriefingField { label: "Variant".into(), value: short_ref(variant_id) },
                     BriefingField { label: "Quantity".into(), value: quantity.to_string() },
                 ],
                 deadline_note: String::new(),
@@ -89,7 +100,7 @@ impl AutopilotActionPayload {
                     BriefingStep { what_to_do: "Click APPROVE to apply it".into(), why_it_matters: "Once approved the price is live immediately".into() },
                 ],
                 content: vec![
-                    BriefingField { label: "Product".into(), value: product_id.to_string() },
+                    BriefingField { label: "Product".into(), value: short_ref(product_id) },
                     BriefingField { label: "Previous price".into(), value: format_minor(*from_minor) },
                     BriefingField { label: "New price".into(), value: format_minor(*to_minor) },
                 ],
@@ -105,7 +116,7 @@ impl AutopilotActionPayload {
                 content: vec![
                     BriefingField { label: "Target".into(), value: target_name.clone() },
                     BriefingField { label: "Phase".into(), value: format!("{:?}", phase) },
-                    BriefingField { label: "Wynik".into(), value: format!("{}", score) },
+                    BriefingField { label: "Outcome".into(), value: format!("{}", score) },
                 ],
                 deadline_note: String::new(),
             },
@@ -117,7 +128,7 @@ impl AutopilotActionPayload {
                     BriefingStep { what_to_do: "Click APPROVE to start it".into(), why_it_matters: "Once approved the campaign is sent".into() },
                 ],
                 content: vec![
-                    BriefingField { label: "Wydarzenie".into(), value: event_id.to_string() },
+                    BriefingField { label: "Event".into(), value: short_ref(event_id) },
                     BriefingField { label: "Phase".into(), value: format!("{:?}", phase) },
                     BriefingField { label: "Template".into(), value: template_key.clone() },
                 ],
@@ -172,7 +183,7 @@ impl AutopilotActionPayload {
                     BriefingStep { what_to_do: "Click APPROVE to run the search".into(), why_it_matters: "System znajdzie potencjalne Beacony dla wydarzenia".into() },
                 ],
                 content: vec![
-                    BriefingField { label: "Wydarzenie".into(), value: event_id.to_string() },
+                    BriefingField { label: "Event".into(), value: short_ref(event_id) },
                     BriefingField { label: "Targets".into(), value: target_count.to_string() },
                 ],
                 deadline_note: String::new(),
@@ -185,8 +196,8 @@ impl AutopilotActionPayload {
                     BriefingStep { what_to_do: "Click APPROVE to send the request".into(), why_it_matters: "Once approved the request goes to the Beacon".into() },
                 ],
                 content: vec![
-                    BriefingField { label: "Beacon".into(), value: beacon_id.to_string() },
-                    BriefingField { label: "Wydarzenie".into(), value: event_id.to_string() },
+                    BriefingField { label: "Beacon".into(), value: short_ref(beacon_id) },
+                    BriefingField { label: "Event".into(), value: short_ref(event_id) },
                     BriefingField { label: "Codes".into(), value: requested_count.to_string() },
                 ],
                 deadline_note: String::new(),
@@ -221,8 +232,8 @@ impl AutopilotActionPayload {
                     BriefingStep { what_to_do: "Click APPROVE to send it".into(), why_it_matters: "Once approved the message is sent".into() },
                 ],
                 content: vec![
-                    BriefingField { label: "Beacon".into(), value: beacon_id.to_string() },
-                    BriefingField { label: "Wydarzenie".into(), value: event_id.to_string() },
+                    BriefingField { label: "Beacon".into(), value: short_ref(beacon_id) },
+                    BriefingField { label: "Event".into(), value: short_ref(event_id) },
                     BriefingField { label: "Phase".into(), value: format!("{:?}", phase) },
                     BriefingField { label: "Template".into(), value: template_key.clone() },
                 ],
@@ -236,7 +247,7 @@ impl AutopilotActionPayload {
                     BriefingStep { what_to_do: "Click APPROVE to start it".into(), why_it_matters: "Once approved the action is carried out".into() },
                 ],
                 content: vec![
-                    BriefingField { label: "Wydarzenie".into(), value: event_id.to_string() },
+                    BriefingField { label: "Event".into(), value: short_ref(event_id) },
                     BriefingField { label: "Lever".into(), value: lever.as_str().into() },
                     BriefingField { label: "Template".into(), value: template_key.clone() },
                     BriefingField {
@@ -256,7 +267,7 @@ impl AutopilotActionPayload {
                     BriefingStep { what_to_do: "Click APPROVE to generate it".into(), why_it_matters: "The system builds an artefact from the named source".into() },
                 ],
                 content: vec![
-                    BriefingField { label: "Source".into(), value: source_id.to_string() },
+                    BriefingField { label: "Source".into(), value: short_ref(source_id) },
                     BriefingField { label: "Artefakt".into(), value: format!("{:?}", artifact) },
                     BriefingField { label: "Template".into(), value: template_key.clone() },
                 ],
@@ -271,8 +282,8 @@ impl AutopilotActionPayload {
                 ],
                 content: {
                     let mut fields = vec![
-                        BriefingField { label: "Eksperyment".into(), value: experiment_id.to_string() },
-                        BriefingField { label: "Winning variant".into(), value: winner_variant_id.to_string() },
+                        BriefingField { label: "Experiment".into(), value: short_ref(experiment_id) },
+                        BriefingField { label: "Winning variant".into(), value: short_ref(winner_variant_id) },
                     ];
                     for alloc in allocations {
                         fields.push(BriefingField {
@@ -293,8 +304,8 @@ impl AutopilotActionPayload {
                     BriefingStep { what_to_do: "Click APPROVE to close it out".into(), why_it_matters: "Once approved the task is marked complete".into() },
                 ],
                 content: vec![
-                    BriefingField { label: "Wydarzenie".into(), value: event_id.to_string() },
-                    BriefingField { label: "Zadanie".into(), value: format!("{:?}", task) },
+                    BriefingField { label: "Event".into(), value: short_ref(event_id) },
+                    BriefingField { label: "Task".into(), value: format!("{:?}", task) },
                 ],
                 deadline_note: String::new(),
             },
@@ -306,8 +317,8 @@ impl AutopilotActionPayload {
                     BriefingStep { what_to_do: "Click APPROVE to escalate it".into(), why_it_matters: "Once approved the priority is raised".into() },
                 ],
                 content: vec![
-                    BriefingField { label: "Wydarzenie".into(), value: event_id.to_string() },
-                    BriefingField { label: "Zadanie".into(), value: format!("{:?}", task) },
+                    BriefingField { label: "Event".into(), value: short_ref(event_id) },
+                    BriefingField { label: "Task".into(), value: format!("{:?}", task) },
                 ],
                 deadline_note: String::new(),
             },
@@ -319,7 +330,7 @@ impl AutopilotActionPayload {
                     BriefingStep { what_to_do: "Click APPROVE to apply it".into(), why_it_matters: "Once approved the budget changes".into() },
                 ],
                 content: vec![
-                    BriefingField { label: "Kampania".into(), value: campaign_id.to_string() },
+                    BriefingField { label: "Campaign".into(), value: short_ref(campaign_id) },
                     BriefingField { label: "Previous budget".into(), value: format_minor(*from_minor) },
                     BriefingField { label: "New budget".into(), value: format_minor(*to_minor) },
                     BriefingField { label: "ROAS".into(), value: format!("{}%", roas_basis_points / 100) },
@@ -361,9 +372,9 @@ impl AutopilotActionPayload {
                     BriefingStep { what_to_do: "Click APPROVE to send the application".into(), why_it_matters: "Once approved the application is sent".into() },
                 ],
                 content: vec![
-                    BriefingField { label: "Okazja".into(), value: opportunity_id.to_string() },
+                    BriefingField { label: "Opportunity".into(), value: short_ref(opportunity_id) },
                     BriefingField { label: "Type".into(), value: format!("{:?}", opportunity_kind) },
-                    BriefingField { label: "Wynik".into(), value: score.to_string() },
+                    BriefingField { label: "Outcome".into(), value: score.to_string() },
                 ],
                 deadline_note: String::new(),
             },
@@ -375,7 +386,7 @@ impl AutopilotActionPayload {
                     BriefingStep { what_to_do: "Click APPROVE to send the counter-offer".into(), why_it_matters: "Once approved the counter-offer is sent".into() },
                 ],
                 content: vec![
-                    BriefingField { label: "Okazja".into(), value: opportunity_id.to_string() },
+                    BriefingField { label: "Opportunity".into(), value: short_ref(opportunity_id) },
                     BriefingField { label: "Amount".into(), value: format_minor(*ask_minor) },
                     BriefingField { label: "Currency".into(), value: currency.clone() },
                     BriefingField { label: "Runda".into(), value: round.to_string() },
@@ -390,7 +401,7 @@ impl AutopilotActionPayload {
                     BriefingStep { what_to_do: "Click APPROVE to accept the terms".into(), why_it_matters: "Once approved the terms are binding".into() },
                 ],
                 content: vec![
-                    BriefingField { label: "Okazja".into(), value: opportunity_id.to_string() },
+                    BriefingField { label: "Opportunity".into(), value: short_ref(opportunity_id) },
                     BriefingField { label: "Fee".into(), value: format_minor(*fee_minor) },
                     BriefingField { label: "Currency".into(), value: currency.clone() },
                 ],
@@ -403,7 +414,7 @@ impl AutopilotActionPayload {
                     BriefingStep { what_to_do: "Click APPROVE to assemble the package".into(), why_it_matters: "System zbierze wymagane dokumenty".into() },
                 ],
                 content: vec![
-                    BriefingField { label: "Okazja".into(), value: opportunity_id.to_string() },
+                    BriefingField { label: "Opportunity".into(), value: short_ref(opportunity_id) },
                 ],
                 deadline_note: String::new(),
             },
@@ -415,7 +426,7 @@ impl AutopilotActionPayload {
                     BriefingStep { what_to_do: "Click APPROVE to send it".into(), why_it_matters: "Once approved the application is sent".into() },
                 ],
                 content: vec![
-                    BriefingField { label: "Okazja".into(), value: opportunity_id.to_string() },
+                    BriefingField { label: "Opportunity".into(), value: short_ref(opportunity_id) },
                 ],
                 deadline_note: String::new(),
             },
@@ -427,11 +438,11 @@ impl AutopilotActionPayload {
                     BriefingStep { what_to_do: "Click APPROVE to schedule the action".into(), why_it_matters: "Once approved the action joins the queue".into() },
                 ],
                 content: vec![
-                    BriefingField { label: "Platforma".into(), value: platform_label(platform) },
+                    BriefingField { label: "Platform".into(), value: platform_label(platform) },
                     BriefingField { label: "Metryka".into(), value: metric_key.clone() },
                     BriefingField { label: "Signal".into(), value: format!("{:?}", signal) },
                     BriefingField { label: "Odchylenie".into(), value: format!("{}%", deviation_basis_points / 100) },
-                    BriefingField { label: "Zalecana akcja".into(), value: recommended_action.clone() },
+                    BriefingField { label: "Recommended action".into(), value: recommended_action.clone() },
                 ],
                 deadline_note: String::new(),
             },
@@ -442,7 +453,7 @@ impl AutopilotActionPayload {
                     BriefingStep { what_to_do: "Click APPROVE to issue the code".into(), why_it_matters: "Once approved the fan receives their referral code".into() },
                 ],
                 content: vec![
-                    BriefingField { label: "Fan".into(), value: fan_id.to_string() },
+                    BriefingField { label: "Fan".into(), value: short_ref(fan_id) },
                 ],
                 deadline_note: String::new(),
             },
@@ -455,7 +466,7 @@ impl AutopilotActionPayload {
                 ],
                 content: vec![
                     BriefingField { label: "Debt type".into(), value: format!("{:?}", debt_kind) },
-                    BriefingField { label: "Zalecana akcja".into(), value: recommended_action.clone() },
+                    BriefingField { label: "Recommended action".into(), value: recommended_action.clone() },
                     BriefingField { label: "Po terminie".into(), value: format!("{}%", overdue_basis_points / 100) },
                     BriefingField { label: "Overdue items".into(), value: format!("{} / {}", outstanding_items, tracked_items) },
                 ],
@@ -470,16 +481,16 @@ impl AutopilotActionPayload {
                 ],
                 content: {
                     let mut fields = vec![
-                        BriefingField { label: "Play".into(), value: play_id.to_string() },
-                        BriefingField { label: "Typ play".into(), value: format!("{:?}", play_kind) },
+                        BriefingField { label: "Play".into(), value: short_ref(play_id) },
+                        BriefingField { label: "Play type".into(), value: format!("{:?}", play_kind) },
                         BriefingField { label: "Krok".into(), value: format!("{}: {:?}", step_index, step_kind) },
                         BriefingField { label: "Template".into(), value: template_key.clone() },
                     ];
                     if let Some(eid) = event_id {
-                        fields.push(BriefingField { label: "Wydarzenie".into(), value: eid.to_string() });
+                        fields.push(BriefingField { label: "Event".into(), value: short_ref(eid) });
                     }
                     if let Some(fid) = fan_id {
-                        fields.push(BriefingField { label: "Fan".into(), value: fid.to_string() });
+                        fields.push(BriefingField { label: "Fan".into(), value: short_ref(fid) });
                     }
                     fields
                 },
@@ -523,7 +534,7 @@ impl AutopilotActionPayload {
                     if let Some(tid) = template_id {
                         fields.push(BriefingField { label: "Template".into(), value: tid.clone() });
                     }
-                    fields.push(BriefingField { label: "Zadanie".into(), value: task_id.to_string() });
+                    fields.push(BriefingField { label: "Task".into(), value: short_ref(task_id) });
                     // Approving a pitch without seeing the recipient is
                     // approving half the decision.
                     if let Some(name) = recipient_name {
@@ -556,7 +567,7 @@ impl AutopilotActionPayload {
                 ],
                 content: {
                     let mut fields = vec![
-                        BriefingField { label: "Typ celu".into(), value: target_kind.clone() },
+                        BriefingField { label: "Target type".into(), value: target_kind.clone() },
                         BriefingField { label: "Name".into(), value: display_name.clone() },
                     ];
                     if let Some(email) = contact_email {
@@ -604,7 +615,7 @@ impl AutopilotActionPayload {
                     BriefingStep { what_to_do: "Click APPROVE to publish it".into(), why_it_matters: "Once approved the post goes live on the platform".into() },
                 ],
                 content: vec![
-                    BriefingField { label: "Platforma".into(), value: platform.clone() },
+                    BriefingField { label: "Platform".into(), value: platform.clone() },
                     BriefingField { label: "Subreddit".into(), value: subreddit.clone().unwrap_or("—".into()) },
                     BriefingField { label: "Title".into(), value: title.clone() },
                     BriefingField { label: "Body".into(), value: truncate(body.clone(), 2000) },
@@ -624,7 +635,7 @@ impl AutopilotActionPayload {
                     BriefingField { label: "Body".into(), value: truncate(body.clone(), 2000) },
                     BriefingField { label: "Link".into(), value: target_path.clone().unwrap_or("—".into()) },
                     BriefingField { label: "Segment".into(), value: segment.clone().unwrap_or("wszyscy".into()) },
-                    BriefingField { label: "Wydarzenie".into(), value: event_id.map(|id| id.to_string()).unwrap_or("—".into()) },
+                    BriefingField { label: "Event".into(), value: event_id.map(|id| id.to_string()).unwrap_or("—".into()) },
                 ],
                 deadline_note: String::new(),
             },
