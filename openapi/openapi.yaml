@@ -6570,7 +6570,7 @@ paths:
         required: true
         schema:
           type: string
-          enum: [member_site_base_url, member_area_path, synesthesia_campaign_slug]
+          enum: [member_site_base_url, member_area_path, synesthesia_campaign_slug, signal_enabled, synesthesia_enabled, north_star_metric, social_auto_post, growth_cadence_moments_per_month, growth_cadence_fillers_enabled]
       requestBody:
         required: true
         content:

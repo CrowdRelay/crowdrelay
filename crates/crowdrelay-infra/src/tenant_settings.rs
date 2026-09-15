@@ -27,7 +27,7 @@ pub const DEFAULT_NORTH_STAR_METRIC: &str = "activated_fans_30d";
 
 /// The keys an operator may edit. Anything else stays internal even if a row
 /// somehow appears, so the HTTP surface cannot be used to smuggle state.
-pub const EDITABLE_KEYS: [&str; 7] = [
+pub const EDITABLE_KEYS: [&str; 9] = [
     KEY_MEMBER_SITE_BASE_URL,
     KEY_MEMBER_AREA_PATH,
     KEY_SYNESTHESIA_CAMPAIGN_SLUG,
@@ -35,6 +35,8 @@ pub const EDITABLE_KEYS: [&str; 7] = [
     KEY_SYNESTHESIA_ENABLED,
     KEY_NORTH_STAR_METRIC,
     KEY_SOCIAL_AUTO_POST,
+    KEY_GROWTH_CADENCE_MOMENTS_PER_MONTH,
+    KEY_GROWTH_CADENCE_FILLERS_ENABLED,
 ];
 
 const KEY_MEMBER_SITE_BASE_URL: &str = "member_site_base_url";
@@ -44,6 +46,8 @@ const KEY_SIGNAL_ENABLED: &str = "signal_enabled";
 const KEY_SYNESTHESIA_ENABLED: &str = "synesthesia_enabled";
 const KEY_NORTH_STAR_METRIC: &str = "north_star_metric";
 pub const KEY_SOCIAL_AUTO_POST: &str = "social_auto_post";
+pub const KEY_GROWTH_CADENCE_MOMENTS_PER_MONTH: &str = "growth_cadence_moments_per_month";
+pub const KEY_GROWTH_CADENCE_FILLERS_ENABLED: &str = "growth_cadence_fillers_enabled";
 
 const CACHE_TTL: Duration = Duration::from_secs(60);
 
@@ -111,6 +115,28 @@ impl TenantBrandSettings {
             area,
             token
         )
+    }
+}
+
+/// The growth cadence a tenant commits to (§4i-0b). One serious moment a
+/// month plus machine-scheduled fillers is the shipped default — a tenant who
+/// beats the default moves their own number up; nothing is compiled in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TenantCadenceSettings {
+    /// Serious moments (release, video, or show) the tenant commits to per
+    /// month. Range 1–4: past weekly, nothing is a "serious" moment any more.
+    pub serious_moments_per_month: u8,
+    /// Whether the machine may schedule fillers (demos, harvest output,
+    /// catalogue rotation, show material) between serious moments.
+    pub fillers_enabled: bool,
+}
+
+impl Default for TenantCadenceSettings {
+    fn default() -> Self {
+        Self {
+            serious_moments_per_month: 1,
+            fillers_enabled: true,
+        }
     }
 }
 
@@ -196,6 +222,47 @@ impl TenantSettingsRepository {
                 .fetch_all(&self.pool)
                 .await?;
         Ok(rows.into_iter().collect())
+    }
+
+    /// The growth cadence for one workspace, defaults over the two override
+    /// rows. Not cached: it is read by the scheduler, not on a request path,
+    /// and two rows are cheaper than a second cache entry to keep honest.
+    pub async fn cadence_settings(
+        &self,
+        workspace_id: Uuid,
+    ) -> Result<TenantCadenceSettings, sqlx::Error> {
+        let rows: Vec<(String, String)> = sqlx::query_as(
+            r#"
+            SELECT key, value FROM tenant_settings
+            WHERE workspace_id = $1
+              AND key IN ($2, $3)
+            "#,
+        )
+        .bind(workspace_id)
+        .bind(KEY_GROWTH_CADENCE_MOMENTS_PER_MONTH)
+        .bind(KEY_GROWTH_CADENCE_FILLERS_ENABLED)
+        .fetch_all(&self.pool)
+        .await?;
+        let mut settings = TenantCadenceSettings::default();
+        for (key, value) in rows {
+            match key.as_str() {
+                KEY_GROWTH_CADENCE_MOMENTS_PER_MONTH => {
+                    // An out-of-range stored value resolves to the default
+                    // rather than poisoning the reader — writes are validated
+                    // at the edge, this is defense against a hand edit.
+                    settings.serious_moments_per_month = value
+                        .parse::<u8>()
+                        .ok()
+                        .filter(|moments| (1..=4).contains(moments))
+                        .unwrap_or(1);
+                }
+                KEY_GROWTH_CADENCE_FILLERS_ENABLED => {
+                    settings.fillers_enabled = value == "true";
+                }
+                _ => {}
+            }
+        }
+        Ok(settings)
     }
 
     /// Upserts one override and drops the workspace's cache entry so the next

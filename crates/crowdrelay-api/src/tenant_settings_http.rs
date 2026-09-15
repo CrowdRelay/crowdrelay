@@ -79,7 +79,8 @@ pub async fn get_brand_settings(
     let joined = tokio::time::timeout(state.ticketing.operation_timeout(), async {
         tokio::join!(
             crate::ops::hold(budget, repository.brand_settings(workspace_id)),
-            crate::ops::hold(budget, repository.list_overrides(workspace_id))
+            crate::ops::hold(budget, repository.list_overrides(workspace_id)),
+            crate::ops::hold(budget, repository.cadence_settings(workspace_id))
         )
     })
     .await;
@@ -92,7 +93,7 @@ pub async fn get_brand_settings(
         }
     };
     match joined {
-        (Ok(effective), Ok(overrides)) => {
+        (Ok(effective), Ok(overrides), Ok(cadence)) => {
             let mut settings = HashMap::new();
             let effective: &crowdrelay_infra::tenant_settings::TenantBrandSettings =
                 effective.as_ref();
@@ -139,6 +140,19 @@ pub async fn get_brand_settings(
                 }
                 .to_owned(),
             );
+            settings.insert(
+                "growth_cadence_moments_per_month".to_owned(),
+                cadence.serious_moments_per_month.to_string(),
+            );
+            settings.insert(
+                "growth_cadence_fillers_enabled".to_owned(),
+                if cadence.fillers_enabled {
+                    "true"
+                } else {
+                    "false"
+                }
+                .to_owned(),
+            );
             (
                 StatusCode::OK,
                 [(CACHE_CONTROL, PRIVATE_NO_STORE)],
@@ -150,7 +164,7 @@ pub async fn get_brand_settings(
             )
                 .into_response()
         }
-        (Err(error), _) | (_, Err(error)) => {
+        (Err(error), _, _) | (_, Err(error), _) | (_, _, Err(error)) => {
             tracing::warn!(%error, "tenant settings lookup failed");
             Problem::service_unavailable(request_id_value)
                 .private()
@@ -182,12 +196,24 @@ fn validate_value(key: &str, value: &str) -> bool {
         return false;
     }
     // Boolean keys accept only "true" or "false".
-    if key == "signal_enabled" || key == "synesthesia_enabled" || key == "social_auto_post" {
+    if key == "signal_enabled"
+        || key == "synesthesia_enabled"
+        || key == "social_auto_post"
+        || key == "growth_cadence_fillers_enabled"
+    {
         return value == "true" || value == "false";
     }
     // North star metric must be a valid enum value.
     if key == "north_star_metric" {
         return crowdrelay_domain::growth_metrics::NorthStarMetric::parse(value).is_some();
+    }
+    // The cadence commitment is 1–4 serious moments a month — past weekly,
+    // nothing is a serious moment any more.
+    if key == "growth_cadence_moments_per_month" {
+        return value
+            .parse::<u8>()
+            .ok()
+            .is_some_and(|moments| (1..=4).contains(&moments));
     }
     true
 }
@@ -211,37 +237,53 @@ pub async fn upsert_setting(
         .await
     {
         Ok(()) => {
-            let updated = repository(&state)
-                .brand_settings(workspace_id)
-                .await
-                .map(|effective| {
-                    let value = match key.as_str() {
-                        "member_site_base_url" => effective.member_site_base_url.clone(),
-                        "member_area_path" => effective.member_area_path.clone(),
-                        "signal_enabled" => if effective.signal_enabled {
-                            "true"
+            let repository = repository(&state);
+            let updated = match key.as_str() {
+                "growth_cadence_moments_per_month" | "growth_cadence_fillers_enabled" => repository
+                    .cadence_settings(workspace_id)
+                    .await
+                    .map(|cadence| {
+                        let value = if key == "growth_cadence_moments_per_month" {
+                            cadence.serious_moments_per_month.to_string()
+                        } else if cadence.fillers_enabled {
+                            "true".to_owned()
                         } else {
-                            "false"
-                        }
-                        .to_owned(),
-                        "synesthesia_enabled" => if effective.synesthesia_enabled {
-                            "true"
-                        } else {
-                            "false"
-                        }
-                        .to_owned(),
-                        "north_star_metric" => effective.north_star_metric.clone(),
-                        "social_auto_post" => if effective.social_auto_post {
-                            "true"
-                        } else {
-                            "false"
-                        }
-                        .to_owned(),
-                        _ => effective.synesthesia_campaign_slug.clone(),
-                    };
-                    serde_json::json!({ "key": key, "value": value })
-                })
-                .unwrap_or_else(|_| serde_json::json!({ "key": key }));
+                            "false".to_owned()
+                        };
+                        serde_json::json!({ "key": key, "value": value })
+                    }),
+                _ => repository
+                    .brand_settings(workspace_id)
+                    .await
+                    .map(|effective| {
+                        let value = match key.as_str() {
+                            "member_site_base_url" => effective.member_site_base_url.clone(),
+                            "member_area_path" => effective.member_area_path.clone(),
+                            "signal_enabled" => if effective.signal_enabled {
+                                "true"
+                            } else {
+                                "false"
+                            }
+                            .to_owned(),
+                            "synesthesia_enabled" => if effective.synesthesia_enabled {
+                                "true"
+                            } else {
+                                "false"
+                            }
+                            .to_owned(),
+                            "north_star_metric" => effective.north_star_metric.clone(),
+                            "social_auto_post" => if effective.social_auto_post {
+                                "true"
+                            } else {
+                                "false"
+                            }
+                            .to_owned(),
+                            _ => effective.synesthesia_campaign_slug.clone(),
+                        };
+                        serde_json::json!({ "key": key, "value": value })
+                    }),
+            }
+            .unwrap_or_else(|_| serde_json::json!({ "key": key }));
             (
                 StatusCode::OK,
                 [(CACHE_CONTROL, PRIVATE_NO_STORE)],
