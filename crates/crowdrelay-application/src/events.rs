@@ -322,6 +322,16 @@ pub struct ReplaceEventActsCommand {
     pub acts: Vec<EventActEntry>,
 }
 
+/// Command: sets or clears the show's counterparty — the promoter or booker
+/// the T+7 report is delivered to alongside the band. `None` clears the
+/// field; the report then honestly records `no_counterparty_on_record`.
+pub struct SetEventCounterpartyCommand {
+    pub workspace_id: WorkspaceId,
+    pub event_slug: String,
+    pub counterparty_name: Option<String>,
+    pub counterparty_email: Option<String>,
+}
+
 /// Repository port for event discovery, interest registration, and action tracking.
 #[async_trait]
 pub trait EventRepository: Send + Sync {
@@ -349,6 +359,14 @@ pub trait EventRepository: Send + Sync {
     async fn replace_event_acts(
         &self,
         command: &ReplaceEventActsCommand,
+    ) -> Result<(), RepositoryError>;
+    /// Sets or clears the show's counterparty contact. Same status rule as
+    /// the bill: draft and published events accept edits, cancelled and
+    /// completed shows are history. `NotFound` when the slug does not
+    /// resolve inside the workspace.
+    async fn set_event_counterparty(
+        &self,
+        command: &SetEventCounterpartyCommand,
     ) -> Result<(), RepositoryError>;
 }
 
@@ -467,6 +485,30 @@ impl ReplaceEventActs {
     /// Replaces the event's bill atomically.
     pub async fn execute(&self, command: &ReplaceEventActsCommand) -> Result<(), RepositoryError> {
         self.repository.replace_event_acts(command).await
+    }
+}
+
+/// Use case: sets or clears an event's counterparty — the person on the
+/// other side of the show who receives the T+7 report. Private contact
+/// data: it never enters the public event payload.
+#[derive(Clone)]
+pub struct SetEventCounterparty {
+    repository: Arc<dyn EventRepository>,
+}
+
+impl SetEventCounterparty {
+    /// Creates the counterparty use case.
+    #[must_use]
+    pub fn new(repository: Arc<dyn EventRepository>) -> Self {
+        Self { repository }
+    }
+
+    /// Writes the counterparty fields; `None` clears them.
+    pub async fn execute(
+        &self,
+        command: &SetEventCounterpartyCommand,
+    ) -> Result<(), RepositoryError> {
+        self.repository.set_event_counterparty(command).await
     }
 }
 

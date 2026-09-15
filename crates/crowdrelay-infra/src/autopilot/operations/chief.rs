@@ -320,12 +320,30 @@ pub(in crate::autopilot) async fn load_chief_of_staff(
         FROM events event CROSS JOIN task
         LEFT JOIN show_checklist_items checklist
           ON checklist.workspace_id=event.workspace_id AND checklist.event_id=event.id AND checklist.item_key=task.item_key
+        LEFT JOIN viryaos_autopilot_policies ops_policy
+          ON ops_policy.workspace_id=event.workspace_id AND ops_policy.context='show_operations'
         WHERE event.workspace_id=$1 AND event.status IN ('published','completed')
-          AND event.starts_at BETWEEN $2 - INTERVAL '2 days' AND $2 + INTERVAL '7 days'
+          AND event.starts_at <= $2 + INTERVAL '7 days'
           AND COALESCE(checklist.status,'pending') <> 'done'
           AND CASE
-              WHEN task.item_key IN ('post_show_reconciliation','post_show_report') THEN $2 >= event.starts_at + INTERVAL '12 hours'
+              -- Post-show tasks stay visible for the evaluator's full 9-day
+              -- lookback so a failed report does not silently age out.
+              WHEN task.item_key = 'post_show_reconciliation'
+                  THEN $2 >= event.starts_at + INTERVAL '12 hours'
+                       AND event.starts_at >= $2 - INTERVAL '9 days'
+              -- The report is a system artifact due at the tenant's own
+              -- horizon (default 168h, ceiling 192h = the snapshot's 9-day
+              -- trailing edge minus a day of retry room). It belongs here
+              -- only while overdue — the emit failed or the action is still
+              -- queued — not as a human chore from T+12h.
+              WHEN task.item_key = 'post_show_report'
+                  THEN $2 >= event.starts_at + make_interval(hours =>
+                           LEAST(COALESCE(
+                               (ops_policy.config->>'post_show_report_hours')::numeric::int,
+                               168), 192))
+                       AND event.starts_at >= $2 - INTERVAL '9 days'
               ELSE $2 >= event.starts_at - INTERVAL '36 hours'
+                   AND event.starts_at >= $2 - INTERVAL '2 days'
           END
         ORDER BY event.starts_at, task.item_key
         LIMIT 20

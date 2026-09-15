@@ -16,6 +16,11 @@ fn executor_capability_for_event(event_type: &str) -> &'static str {
         "crowdrelay.show_growth.requested" => "show.growth",
         "crowdrelay.content.artifact_requested" => "content.artifact",
         "crowdrelay.show.task_attention_required" => "show.escalation",
+        // The T+7 report is the same delivery class as a task escalation —
+        // an email to the humans around the show — so it rides the executor
+        // that already handles show notifications rather than parking behind
+        // a capability nobody advertises yet.
+        "crowdrelay.show.post_show_report_due" => "show.escalation",
         "crowdrelay.ops.status_changed" => "ops.alert",
         "crowdrelay.promotion.budget_change_requested" => "promotion.budget",
         "crowdrelay.opportunity.application_requested" => "opportunity.application",

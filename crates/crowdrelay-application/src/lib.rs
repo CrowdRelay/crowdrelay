@@ -95,6 +95,7 @@ pub use events::{
     ListFanEventInterests, LoadEvents, LoadEventsError, MAX_PUBLIC_EVENT_LIMIT,
     RegisterEventInterest, RegisterEventInterestCommand, RegisterEventInterestCommandArgs,
     RegisterEventInterestCommandError, ReplaceEventActs, ReplaceEventActsCommand,
+    SetEventCounterparty, SetEventCounterpartyCommand,
 };
 pub use fan_lifecycle::{
     ConfirmFan, ConfirmFanCommand, FanLifecycleError, FanLifecycleRepository, UnsubscribeFan,

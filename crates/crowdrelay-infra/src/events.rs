@@ -15,6 +15,7 @@ use std::{
 use async_trait::async_trait;
 use crowdrelay_application::{
     EventRepository, RegisterEventInterestCommand, ReplaceEventActsCommand, RepositoryError,
+    SetEventCounterpartyCommand,
 };
 use crowdrelay_domain::{
     CampaignId, CityId, EventAction, EventCity, EventId, EventInterestResult, EventSlug,
@@ -570,6 +571,53 @@ impl PostgresEventRepository {
             .map_err(EventStoreError::from_sqlx)
     }
 
+    async fn set_event_counterparty_inner(
+        &self,
+        command: &SetEventCounterpartyCommand,
+    ) -> Result<(), EventStoreError> {
+        let mut transaction = self
+            .pool
+            .begin()
+            .await
+            .map_err(EventStoreError::from_sqlx)?;
+        let workspace_id =
+            trusted_workspace_id_in_transaction(&mut transaction, &self.workspace_slug).await?;
+        if workspace_id != command.workspace_id {
+            return Err(EventStoreError::NotFound);
+        }
+
+        let updated = sqlx::query(
+            r#"
+            UPDATE events
+            SET counterparty_name = $3,
+                counterparty_email = $4,
+                updated_at = now()
+            WHERE workspace_id = $1
+                AND slug = $2
+                -- 'completed' is included on purpose: promoter contact
+                -- details are often only confirmed around show day, and the
+                -- T+7 report addresses its artifact to the counterparty.
+                -- 'cancelled' stays out — no report ships for a dead show.
+                AND status IN ('draft', 'published', 'completed')
+            "#,
+        )
+        .bind(workspace_id.into_uuid())
+        .bind(command.event_slug.as_str())
+        .bind(command.counterparty_name.as_deref())
+        .bind(command.counterparty_email.as_deref())
+        .execute(&mut *transaction)
+        .await
+        .map_err(EventStoreError::from_sqlx)?;
+        if updated.rows_affected() == 0 {
+            return Err(EventStoreError::NotFound);
+        }
+
+        transaction
+            .commit()
+            .await
+            .map_err(EventStoreError::from_sqlx)
+    }
+
     async fn list_fan_interests_inner(
         &self,
         workspace_id: WorkspaceId,
@@ -690,6 +738,15 @@ impl EventRepository for PostgresEventRepository {
         command: &ReplaceEventActsCommand,
     ) -> Result<(), RepositoryError> {
         self.bounded(self.replace_event_acts_inner(command))
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn set_event_counterparty(
+        &self,
+        command: &SetEventCounterpartyCommand,
+    ) -> Result<(), RepositoryError> {
+        self.bounded(self.set_event_counterparty_inner(command))
             .await
             .map_err(Into::into)
     }

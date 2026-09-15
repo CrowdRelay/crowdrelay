@@ -748,32 +748,50 @@ impl PostgresAutopilotRepository {
                     .await?;
                 }
                 AutopilotActionPayload::EscalateShowTask { event_id, task } => {
-                    // Reconciliation escalating means the night is over even
-                    // when no post-show lever ever qualified (an empty room,
-                    // communication off): the show still becomes harvestable
-                    // material so the night is not lost to the supply chain.
-                    if *task
-                        == crowdrelay_domain::show_operations::ShowTaskKind::PostShowReconciliation
-                    {
-                        operations::ensure_show_completed_source(
-                            &mut transaction,
-                            workspace_id,
-                            *event_id,
-                        )
-                        .await?;
+                    match *task {
+                        // The report task resolves into the report itself —
+                        // labelled numbers to band and counterparty — not into
+                        // another reminder to go write one.
+                        crowdrelay_domain::show_operations::ShowTaskKind::PostShowReport => {
+                            operations::issue_post_show_report(
+                                &mut transaction,
+                                workspace_id,
+                                action.id,
+                                *event_id,
+                                now,
+                            )
+                            .await?;
+                        }
+                        task => {
+                            // Reconciliation escalating means the night is over
+                            // even when no post-show lever ever qualified (an
+                            // empty room, communication off): the show still
+                            // becomes harvestable material so the night is not
+                            // lost to the supply chain.
+                            if task
+                                == crowdrelay_domain::show_operations::ShowTaskKind::PostShowReconciliation
+                            {
+                                operations::ensure_show_completed_source(
+                                    &mut transaction,
+                                    workspace_id,
+                                    *event_id,
+                                )
+                                .await?;
+                            }
+                            emit_external_action(
+                                &mut transaction,
+                                workspace_id,
+                                action.id,
+                                "crowdrelay.show.task_attention_required",
+                                json!({
+                                    "action_id": action.id,
+                                    "event_id": event_id,
+                                    "task": task,
+                                }),
+                            )
+                            .await?;
+                        }
                     }
-                    emit_external_action(
-                        &mut transaction,
-                        workspace_id,
-                        action.id,
-                        "crowdrelay.show.task_attention_required",
-                        json!({
-                            "action_id": action.id,
-                            "event_id": event_id,
-                            "task": task,
-                        }),
-                    )
-                    .await?;
                 }
                 AutopilotActionPayload::RequestPromotionBudgetChange {
                     campaign_id,

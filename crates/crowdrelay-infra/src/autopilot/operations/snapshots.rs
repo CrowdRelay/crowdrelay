@@ -753,13 +753,19 @@ pub(in crate::autopilot) async fn load_show_task_snapshots(
                 )
                 ELSE false
             END AS verifiable_fact,
+            -- Any terminal outcome counts, not only success: finished_at is
+            -- stamped on succeeded, failed and cancelled alike, so a dead
+            -- escalation still advances the idempotency epoch. Filtering to
+            -- 'succeeded' left last_escalated_at NULL after a terminal
+            -- failure, which regenerated the same action key forever and
+            -- suppressed every retry of a task that still needed doing.
             (SELECT max(action.finished_at)
              FROM viryaos_autopilot_actions AS action
              WHERE action.workspace_id = event.workspace_id
                AND action.context = 'show_operations'
                AND action.action_kind = 'show.task.escalate'
                AND action.subject_id = event.id
-               AND action.status = 'succeeded'
+               AND action.finished_at IS NOT NULL
                AND action.payload->>'task' = task.item_key) AS last_escalated_at
         FROM events AS event
         CROSS JOIN task
@@ -769,7 +775,10 @@ pub(in crate::autopilot) async fn load_show_task_snapshots(
          AND checklist.item_key = task.item_key
         WHERE event.workspace_id = $1
           AND event.status IN ('published','completed')
-          AND event.starts_at BETWEEN $2 - INTERVAL '7 days' AND $2 + INTERVAL '14 days'
+          -- The trailing edge must outlast the T+7 report's due time plus
+          -- evaluation-cycle slack, or a show ages out of the snapshot the
+          -- morning its report comes due and the artifact never ships.
+          AND event.starts_at BETWEEN $2 - INTERVAL '9 days' AND $2 + INTERVAL '14 days'
         ORDER BY event.starts_at, task.item_key
         LIMIT $3
         "#,

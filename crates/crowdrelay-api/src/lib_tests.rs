@@ -22,7 +22,8 @@ mod tests {
         ListCities, ListFanEventInterests, LoadAdmissionPass, LoadReferralProgress,
         RedeemAdmissionPass, RedeemCoupon, RedeemCouponCommand, RedirectCache, ReferralRepository,
         RegisterEventInterest, RegisterEventInterestCommand, ReplaceEventActs, RepositoryError,
-        ResolveReferralCode, RevokeAdmissionPass, SignupFan, SignupFanCommand, UnsubscribeFan,
+        ResolveReferralCode, RevokeAdmissionPass, SetEventCounterparty, SignupFan, SignupFanCommand,
+        UnsubscribeFan,
         UpsertSmartLinkCommand, UpsertedSmartLink,
     };
     use crowdrelay_domain::{
@@ -231,6 +232,13 @@ mod tests {
         ) -> Result<(), RepositoryError> {
             Ok(())
         }
+
+        async fn set_event_counterparty(
+            &self,
+            _command: &crowdrelay_application::SetEventCounterpartyCommand,
+        ) -> Result<(), RepositoryError> {
+            Ok(())
+        }
     }
 
     struct TestAdmissionRepository;
@@ -329,7 +337,8 @@ mod tests {
             Arc::new(EventCache::new()),
             RegisterEventInterest::new(Arc::clone(&repository)),
             ListFanEventInterests::new(Arc::clone(&repository)),
-            ReplaceEventActs::new(repository),
+            ReplaceEventActs::new(Arc::clone(&repository)),
+            SetEventCounterparty::new(repository),
             Arc::new(|_action| {}),
             Arc::new(EventActionMetricsSnapshot::default),
         )
@@ -1204,7 +1213,8 @@ mod tests {
             cache,
             RegisterEventInterest::new(Arc::clone(&repository)),
             ListFanEventInterests::new(Arc::clone(&repository)),
-            ReplaceEventActs::new(repository),
+            ReplaceEventActs::new(Arc::clone(&repository)),
+            SetEventCounterparty::new(repository),
             {
                 let captured = Arc::clone(&captured);
                 Arc::new(move |action: EventAction| {

@@ -214,7 +214,12 @@ impl AutopilotPolicyConfig {
                 Self::parse_into(raw, Self::Experimentation, ExperimentPolicy::default())
             }
             AutopilotContext::ShowOperations => {
-                Self::parse_into(raw, Self::ShowOperations, ShowOperationsPolicy::default())
+                let parsed =
+                    Self::parse_into(raw, Self::ShowOperations, ShowOperationsPolicy::default())?;
+                if let Self::ShowOperations(policy) = &parsed {
+                    policy.validate().map_err(serde::de::Error::custom)?;
+                }
+                Ok(parsed)
             }
             AutopilotContext::Release => {
                 Self::parse_into(raw, Self::Release, ReleaseAutopilotPolicy::default())

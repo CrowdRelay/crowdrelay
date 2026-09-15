@@ -701,3 +701,302 @@ async fn execute_first_party_growth_campaign(
     let _ = action_id; // action id is already the durable one-shot record.
     Ok(())
 }
+
+/// Event row the T+7 report renders from — a wider fact set than the growth
+/// facts because the artifact has to stand alone for a reader who never opens
+/// the console: when, where, who played, and who sat across the table.
+type ReportEventFacts = (
+    String,
+    String,
+    Option<String>,
+    Option<String>,
+    OffsetDateTime,
+    String,
+    Option<String>,
+    Option<String>,
+    Option<serde_json::Value>,
+);
+
+/// Issues the T+7 post-show report: the night's numbers honestly labelled by
+/// evidence class, delivered to the band and the event's counterparty as an
+/// artifact email that needs no account. This is the escalation that
+/// `post_show_report` resolves to — the report itself, not a reminder to go
+/// write one — so the checklist item is marked done in the same transaction.
+///
+/// The numbers are split into `observed` (first-party room evidence: QR
+/// check-ins, redeemed admission passes), `inferred` (signals that suggest
+/// reach or attendance without proving presence: paid orders, interest,
+/// clicks), and `evidence_gaps` (what cannot be claimed at all). A recipient
+/// reading the artifact can repeat every figure without trusting us.
+pub(in crate::autopilot) async fn issue_post_show_report(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    workspace_id: WorkspaceId,
+    action_id: crowdrelay_domain::AutopilotActionId,
+    event_id: EventId,
+    now: OffsetDateTime,
+) -> Result<(), RepositoryError> {
+    let event = sqlx::query_as::<_, ReportEventFacts>(
+        r#"
+        SELECT event.slug, event.title, city.name, event.venue,
+            event.starts_at, event.timezone,
+            event.counterparty_name, event.counterparty_email,
+            (SELECT jsonb_agg(jsonb_build_object('slug', act.act_slug, 'name', act.act_name)
+                     ORDER BY act.position, act.act_slug)
+             FROM event_acts AS act
+             WHERE act.workspace_id = event.workspace_id
+               AND act.event_id = event.id) AS acts
+        FROM events AS event
+        LEFT JOIN cities AS city ON city.id = event.city_id
+        WHERE event.workspace_id = $1
+          AND event.id = $2
+          AND event.status IN ('published','completed')
+        "#,
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(event_id.into_uuid())
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(map_sqlx)?
+    .ok_or(RepositoryError::Conflict)?;
+
+    // One pass over the room evidence and the proxy signals. `new_fan_records`
+    // counts fans whose record first existed around show time and who checked
+    // in — the stranger pipeline made flesh — rather than every email-claim
+    // scan, which can also re-activate a long-pending fan.
+    let numbers = sqlx::query_as::<_, (i64, i64, i64, i64, i64, i64, i64, i64)>(
+        r#"
+        SELECT
+            (SELECT count(*) FROM concert_checkins AS c
+             WHERE c.workspace_id = $1 AND c.event_id = $2) AS checkins_total,
+            (SELECT count(*) FROM concert_checkins AS c
+             WHERE c.workspace_id = $1 AND c.event_id = $2
+               AND c.identity_source = 'session') AS checkins_session,
+            (SELECT count(*) FROM concert_checkins AS c
+             WHERE c.workspace_id = $1 AND c.event_id = $2
+               AND c.identity_source = 'email_claim') AS checkins_email_claim,
+            (SELECT count(*) FROM concert_checkins AS c
+             JOIN fans AS fan
+               ON fan.workspace_id = c.workspace_id AND fan.id = c.fan_id
+             WHERE c.workspace_id = $1 AND c.event_id = $2
+               AND fan.created_at >= (
+                   SELECT starts_at - interval '6 hours'
+                   FROM events WHERE workspace_id = $1 AND id = $2
+               )
+               -- Upper bound keeps a fan record created days later — with a
+               -- checkin row for unrelated reasons — out of "new at show".
+               AND fan.created_at <= (
+                   SELECT starts_at + interval '12 hours'
+                   FROM events WHERE workspace_id = $1 AND id = $2
+               )) AS new_fan_records,
+            (SELECT count(*) FROM admission_passes AS p
+             WHERE p.workspace_id = $1 AND p.event_id = $2
+               AND p.status = 'redeemed') AS passes_redeemed,
+            (SELECT count(*) FROM event_action_events AS a
+             WHERE a.workspace_id = $1 AND a.event_id = $2
+               AND a.action = 'ticket_click') AS ticket_clicks,
+            (SELECT count(DISTINCT lower(o.buyer_email)) FROM ticket_orders AS o
+             JOIN ticket_sales AS s
+               ON s.workspace_id = o.workspace_id AND s.id = o.ticket_sale_id
+             WHERE o.workspace_id = $1 AND s.event_id = $2
+               -- A partially refunded order is still a buyer who paid and
+               -- (usually) came; 'refunded' alone drops out, matching the
+               -- money-collected convention used elsewhere.
+               AND o.status IN ('paid', 'partially_refunded')) AS paid_buyers,
+            (SELECT count(*) FROM event_interests AS i
+             WHERE i.workspace_id = $1 AND i.event_id = $2) AS interested_fans
+        "#,
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(event_id.into_uuid())
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(map_sqlx)?;
+
+    // Which act moved clicks — the per-act attribution the bill records, kept
+    // separate from the total so a promoted support act's pull stays visible.
+    let act_clicks = sqlx::query_as::<_, (Option<String>, i64)>(
+        r#"
+        SELECT act_slug, count(*) AS clicks
+        FROM event_action_events
+        WHERE workspace_id = $1 AND event_id = $2 AND action = 'ticket_click'
+        GROUP BY act_slug
+        ORDER BY clicks DESC, act_slug
+        "#,
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(event_id.into_uuid())
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(map_sqlx)?;
+
+    // What the system itself did about the night, with receipts — a campaign
+    // that was scheduled but delivered nobody reads differently from one that
+    // landed, and the report must not blur the two.
+    let campaigns = sqlx::query_as::<
+        _,
+        (
+            String,
+            String,
+            String,
+            Option<OffsetDateTime>,
+            Option<i32>,
+            Option<i32>,
+            Option<OffsetDateTime>,
+        ),
+    >(
+        r#"
+        SELECT slug, template_key, status, scheduled_at,
+               recipient_count, delivered_count, completed_at
+        FROM communication_campaigns
+        WHERE workspace_id = $1 AND content->>'event_id' = $2
+        ORDER BY scheduled_at NULLS LAST, slug
+        "#,
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(event_id.into_uuid().to_string())
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(map_sqlx)?;
+
+    // display_name is nullable on workspace_members — a member without one
+    // still gets the report, labelled by the only identity they have.
+    let band = sqlx::query_as::<_, (String, String)>(
+        r#"
+        SELECT normalized_email, COALESCE(display_name, normalized_email)
+        FROM workspace_members
+        WHERE workspace_id = $1 AND status = 'active'
+        ORDER BY display_name
+        "#,
+    )
+    .bind(workspace_id.into_uuid())
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(map_sqlx)?;
+
+    let (
+        checkins_total,
+        checkins_session,
+        checkins_email_claim,
+        new_fan_records,
+        passes_redeemed,
+        ticket_clicks,
+        paid_buyers,
+        interested_fans,
+    ) = numbers;
+
+    let mut evidence_gaps: Vec<&str> = Vec::new();
+    if checkins_total == 0 && passes_redeemed == 0 {
+        // No scan and no redeemed pass: the night's attendance rests on
+        // proxies alone, and the report must say so rather than quote zero.
+        evidence_gaps.push("room_attendance_unverified");
+    }
+    if event.7.is_none() {
+        evidence_gaps.push("no_counterparty_on_record");
+    }
+    if band.is_empty() {
+        evidence_gaps.push("no_active_band_recipient");
+    }
+    if campaigns.is_empty() {
+        // "No campaigns" is only true for THIS event's tag — a show with
+        // untagged or staff-composed sends reads the same, so the gap names
+        // the record, not the intent.
+        evidence_gaps.push("no_event_campaigns_on_record");
+    }
+
+    crate::autopilot::emit_external_action(
+        tx,
+        workspace_id,
+        action_id,
+        "crowdrelay.show.post_show_report_due",
+        json!({
+            "action_id": action_id,
+            "event_id": event_id,
+            "event": {
+                "slug": event.0,
+                "title": event.1,
+                "city": event.2,
+                "venue": event.3,
+                "starts_at": event.4,
+                "timezone": event.5,
+                "acts": event.8.unwrap_or_else(|| json!([])),
+            },
+            "report": {
+                "kind": "post_show_t7",
+                "generated_at": now,
+                "observed": {
+                    "room_checkins_total": checkins_total,
+                    "room_checkins_by_session": checkins_session,
+                    "room_checkins_by_email_claim": checkins_email_claim,
+                    "new_fan_records_at_show": new_fan_records,
+                    "admission_passes_redeemed": passes_redeemed,
+                },
+                "inferred": {
+                    "paid_ticket_buyers": paid_buyers,
+                    "interested_fans": interested_fans,
+                    "ticket_link_clicks": ticket_clicks,
+                    "ticket_link_clicks_by_act": act_clicks
+                        .iter()
+                        .map(|(slug, clicks)| json!({
+                            "act_slug": slug,
+                            "clicks": clicks,
+                        }))
+                        .collect::<Vec<_>>(),
+                },
+                "campaigns": campaigns
+                    .iter()
+                    .map(|row| json!({
+                        "slug": row.0,
+                        "template_key": row.1,
+                        "status": row.2,
+                        "scheduled_at": row.3,
+                        "recipients": row.4,
+                        "delivered": row.5,
+                        "completed_at": row.6,
+                    }))
+                    .collect::<Vec<_>>(),
+                "evidence_gaps": evidence_gaps,
+            },
+            "recipients": {
+                "band": band
+                    .iter()
+                    .map(|(email, name)| json!({"email": email, "name": name}))
+                    .collect::<Vec<_>>(),
+                "counterparty": match (&event.6, &event.7) {
+                    (_, Some(email)) => json!({"name": event.6, "email": email}),
+                    _ => serde_json::Value::Null,
+                },
+            },
+            "honesty_contract": {
+                "observed": "first-party room evidence only — QR check-ins and redeemed admission passes",
+                "inferred": "suggests reach or attendance but does not prove presence in the room",
+                "rules": [
+                    "never_sum_numbers_across_evidence_classes",
+                    "state_evidence_gaps_explicitly_do_not_zero_them",
+                    "do_not_claim_attendance_or_reach_the_records_do_not_support",
+                    "the_artifact_is_the_whole_report_no_account_required"
+                ]
+            },
+        }),
+    )
+    .await?;
+
+    // The report shipping IS the task completing — same durable write the
+    // auto-verify path uses, so re-evaluation holds instead of re-sending.
+    sqlx::query(
+        r#"INSERT INTO show_checklist_items(workspace_id,event_id,item_key,section,sort_order,status,note,updated_at)
+           VALUES($1,$2,'post_show_report','post_show',320,'done','T+7 report issued by ViryaOS to band and counterparty',$3)
+           ON CONFLICT(workspace_id,event_id,item_key) DO UPDATE
+           SET status='done',note=EXCLUDED.note,updated_at=EXCLUDED.updated_at
+           WHERE show_checklist_items.status<>'done'"#,
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(event_id.into_uuid())
+    .bind(now)
+    .execute(&mut **tx)
+    .await
+    .map_err(map_sqlx)?;
+
+    // A report going out proves the night ended; if reconciliation never ran
+    // (an odd path, but possible) the harvest source still registers here.
+    ensure_show_completed_source(tx, workspace_id, event_id).await
+}

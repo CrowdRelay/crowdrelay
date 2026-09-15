@@ -47,6 +47,13 @@ mod tests {
         ) -> Result<(), RepositoryError> {
             Err(RepositoryError::Unavailable)
         }
+
+        async fn set_event_counterparty(
+            &self,
+            _command: &crowdrelay_application::SetEventCounterpartyCommand,
+        ) -> Result<(), RepositoryError> {
+            Err(RepositoryError::Unavailable)
+        }
     }
 
     #[tokio::test]

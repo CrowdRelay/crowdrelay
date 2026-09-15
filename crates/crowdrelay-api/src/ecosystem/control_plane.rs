@@ -188,10 +188,16 @@ async fn update_checklist_inner(
 ) -> Result<ShowChecklist, EcosystemError> {
     // Which statuses and key shapes are legal is HTTP input policy; the
     // transaction, replay window and audit row belong to the repository.
+    //
+    // post_show_report is system-owned: its `done` means "the T+7 artifact
+    // shipped", which only the report emitter can truthfully write. A manual
+    // tick would hold the evaluator on already_done and no report would ever
+    // go out — while the UI claims it did.
     if !matches!(
         payload.status.as_str(),
         "pending" | "done" | "blocked" | "skipped"
     ) || item_key.is_empty()
+        || (item_key == "post_show_report" && payload.status == "done")
         || item_key.len() > 64
         || payload
             .note

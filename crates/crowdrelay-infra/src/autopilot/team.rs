@@ -138,11 +138,11 @@ impl PostgresAutopilotRepository {
                 WITH task(item_key) AS (VALUES
                     ('staff_assigned'),('offline_snapshot_ready'),('gate_device_charged'),
                     ('backup_device_ready'),('network_tested'),('guestlist_checked'),
-                    ('capture_plan'),('post_show_reconciliation'),('post_show_report')
+                    ('capture_plan'),('post_show_reconciliation')
                 )
                 SELECT event.id event_id, event.title event_title, task.item_key task_key,
                        event.starts_at,
-                       CASE WHEN task.item_key IN ('post_show_reconciliation','post_show_report')
+                       CASE WHEN task.item_key = 'post_show_reconciliation'
                             THEN event.starts_at + INTERVAL '36 hours'
                             WHEN task.item_key = 'capture_plan'
                             THEN event.starts_at
@@ -162,7 +162,7 @@ impl PostgresAutopilotRepository {
                   AND assignment.id IS NULL
                   AND event.starts_at BETWEEN $2 - INTERVAL '2 days' AND $2 + INTERVAL '7 days'
                   AND CASE
-                      WHEN task.item_key IN ('post_show_reconciliation','post_show_report')
+                      WHEN task.item_key = 'post_show_reconciliation'
                           THEN $2 >= event.starts_at + INTERVAL '6 hours'
                       WHEN task.item_key = 'capture_plan'
                           THEN $2 BETWEEN event.starts_at - INTERVAL '30 hours' AND event.starts_at

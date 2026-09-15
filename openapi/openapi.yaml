@@ -1922,6 +1922,53 @@ paths:
         '503':
           $ref: '#/components/responses/PrivateProblem'
 
+  /admin/events/{slug}/counterparty:
+    put:
+      operationId: setEventCounterpartyAdmin
+      summary: Set or clear the event's counterparty contact
+      description: >-
+        The counterparty is the promoter or booker on the other side of the
+        show. At T+7 the system-issued post-show report is delivered to this
+        address alongside the band, as an artifact email needing no account.
+        Null or empty fields clear the stored contact. Private data — never
+        exposed on the public event payload.
+      security:
+      - adminBearer: []
+      parameters:
+      - in: path
+        name: slug
+        required: true
+        schema:
+          type: string
+          minLength: 1
+          maxLength: 128
+          pattern: ^[a-z0-9][a-z0-9_-]*$
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SetEventCounterpartyRequest'
+      responses:
+        '200':
+          description: Counterparty updated; echoes the stored contact.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SetEventCounterpartyRequest'
+        '400':
+          $ref: '#/components/responses/PrivateProblem'
+        '401':
+          $ref: '#/components/responses/PrivateProblem'
+        '404':
+          $ref: '#/components/responses/PrivateProblem'
+        '409':
+          $ref: '#/components/responses/PrivateProblem'
+        '413':
+          $ref: '#/components/responses/PrivateProblem'
+        '503':
+          $ref: '#/components/responses/PrivateProblem'
+
   /staff/events/{slug}/acts:
     put:
       operationId: replaceEventActsStaff
@@ -1950,6 +1997,51 @@ paths:
       responses:
         '204':
           description: Bill replaced.
+        '400':
+          $ref: '#/components/responses/PrivateProblem'
+        '401':
+          $ref: '#/components/responses/PrivateProblem'
+        '404':
+          $ref: '#/components/responses/PrivateProblem'
+        '409':
+          $ref: '#/components/responses/PrivateProblem'
+        '413':
+          $ref: '#/components/responses/PrivateProblem'
+        '503':
+          $ref: '#/components/responses/PrivateProblem'
+
+  /staff/events/{slug}/counterparty:
+    put:
+      operationId: setEventCounterpartyStaff
+      summary: Set or clear the event's counterparty contact
+      description: >-
+        Same semantics as the admin surface: the counterparty is the promoter
+        or booker the T+7 post-show report is emailed to alongside the band.
+        Null or empty fields clear the stored contact.
+      security:
+      - staffBearer: []
+      parameters:
+      - in: path
+        name: slug
+        required: true
+        schema:
+          type: string
+          minLength: 1
+          maxLength: 128
+          pattern: ^[a-z0-9][a-z0-9_-]*$
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SetEventCounterpartyRequest'
+      responses:
+        '200':
+          description: Counterparty updated; echoes the stored contact.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SetEventCounterpartyRequest'
         '400':
           $ref: '#/components/responses/PrivateProblem'
         '401':
@@ -13354,6 +13446,26 @@ components:
           description: >-
             The act's own tagged ticket link. Absent acts fall back to the
             event's shared ticket URL at redirect time.
+    SetEventCounterpartyRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        counterparty_name:
+          type:
+          - string
+          - 'null'
+          maxLength: 160
+          description: >-
+            Promoter or booker contact name. Null or empty clears the stored
+            name.
+        counterparty_email:
+          type:
+          - string
+          - 'null'
+          format: email
+          description: >-
+            Address the T+7 post-show report is delivered to. Null or empty
+            clears the stored address.
     ConfigureTicketSaleRequest:
       type: object
       additionalProperties: false

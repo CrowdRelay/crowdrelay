@@ -446,6 +446,14 @@ pub(super) fn application_routes(state: AppState) -> Router {
             put(events::replace_event_acts),
         )
         .route(
+            "/v1/staff/events/{slug}/counterparty",
+            put(events::set_event_counterparty),
+        )
+        .route(
+            "/v1/admin/events/{slug}/counterparty",
+            put(events::set_event_counterparty),
+        )
+        .route(
             "/v1/internal/ticket-orders/{order_id}/stripe-checkout",
             post(ticketing::bind_stripe_checkout),
         )

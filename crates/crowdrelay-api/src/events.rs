@@ -17,7 +17,8 @@ use axum::{
 use crowdrelay_application::{
     EventActEntry, EventCache, IdempotencyKey, ListFanEventInterests, MAX_PUBLIC_EVENT_LIMIT,
     RegisterEventInterest, RegisterEventInterestCommand, RegisterEventInterestCommandArgs,
-    ReplaceEventActs, ReplaceEventActsCommand, RepositoryError, RequestId,
+    ReplaceEventActs, ReplaceEventActsCommand, RepositoryError, RequestId, SetEventCounterparty,
+    SetEventCounterpartyCommand,
 };
 use crowdrelay_domain::{
     CampaignId, EventAction, EventActionKind, EventSlug, PublicEvent, WorkspaceId,
@@ -61,6 +62,7 @@ pub struct EventState {
     register_interest: RegisterEventInterest,
     list_fan_interests: ListFanEventInterests,
     replace_acts: ReplaceEventActs,
+    set_counterparty: SetEventCounterparty,
     action_submitter: EventActionSubmitter,
     action_metrics_reader: EventActionMetricsReader,
 }
@@ -68,12 +70,14 @@ pub struct EventState {
 impl EventState {
     /// Creates event route state for one trusted workspace.
     #[must_use]
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         workspace_id: WorkspaceId,
         cache: Arc<EventCache>,
         register_interest: RegisterEventInterest,
         list_fan_interests: ListFanEventInterests,
         replace_acts: ReplaceEventActs,
+        set_counterparty: SetEventCounterparty,
         action_submitter: EventActionSubmitter,
         action_metrics_reader: EventActionMetricsReader,
     ) -> Self {
@@ -83,6 +87,7 @@ impl EventState {
             register_interest,
             list_fan_interests,
             replace_acts,
+            set_counterparty,
             action_submitter,
             action_metrics_reader,
         }
@@ -806,6 +811,99 @@ pub async fn replace_event_acts(
         Ok(()) => (
             StatusCode::NO_CONTENT,
             [(CACHE_CONTROL, HeaderValue::from_static(PRIVATE_NO_STORE))],
+        )
+            .into_response(),
+        Err(error) => repository_problem(error, request_id_value).into_response(),
+    }
+}
+
+/// Body of the staff/admin counterparty endpoint. Both fields are optional —
+/// `null` clears the stored value so a promoter change of plans is
+/// representable.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SetEventCounterpartyRequest {
+    counterparty_name: Option<String>,
+    counterparty_email: Option<String>,
+}
+
+/// The counterparty email must satisfy the same shape the
+/// `events.counterparty_email` CHECK enforces — `[^@\s]+@[^@\s]+\.[^@\s]+$`.
+/// `NormalizedEmail` accepts single-label domains (`x@localhost`), which the
+/// CHECK would reject at write time, surfacing a 500 where this validation
+/// returns the honest 400.
+fn valid_counterparty_email(email: &str) -> bool {
+    if crowdrelay_domain::NormalizedEmail::parse(email).is_err() {
+        return false;
+    }
+    let Some((_, domain)) = email.split_once('@') else {
+        return false;
+    };
+    domain
+        .rfind('.')
+        .is_some_and(|dot| dot > 0 && dot + 1 < domain.len())
+}
+
+/// Sets the event's counterparty contact (staff/admin). The T+7 post-show
+/// report is emailed to this address alongside the band.
+pub async fn set_event_counterparty(
+    State(state): State<crate::AppState>,
+    Path(raw_slug): Path<String>,
+    headers: HeaderMap,
+    body: Result<Json<SetEventCounterpartyRequest>, JsonRejection>,
+) -> Response {
+    let request_id_value = request_id(&headers);
+    let Json(payload) = match body {
+        Ok(value) => value,
+        Err(rejection) => {
+            let problem = if rejection.status() == StatusCode::PAYLOAD_TOO_LARGE {
+                Problem::payload_too_large(request_id_value)
+            } else {
+                Problem::bad_request(request_id_value)
+            };
+            return problem.private().into_response();
+        }
+    };
+    let counterparty_name = payload
+        .counterparty_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(str::to_owned);
+    let counterparty_email = payload
+        .counterparty_email
+        .as_deref()
+        .map(str::trim)
+        .filter(|email| !email.is_empty())
+        .map(|email| email.to_ascii_lowercase());
+    if counterparty_name
+        .as_deref()
+        .is_some_and(|name| name.len() > 160)
+        || counterparty_email
+            .as_deref()
+            .is_some_and(|email| !valid_counterparty_email(email))
+    {
+        return Problem::bad_request(request_id_value)
+            .private()
+            .into_response();
+    }
+    let command = SetEventCounterpartyCommand {
+        workspace_id: state.events.workspace_id,
+        event_slug: raw_slug.trim().to_ascii_lowercase(),
+        counterparty_name,
+        counterparty_email,
+    };
+    match state.events.set_counterparty.execute(&command).await {
+        // Echo back what was stored — the only read-back surface this
+        // endpoint has, so staff can confirm the write without fetching
+        // a second view.
+        Ok(()) => (
+            StatusCode::OK,
+            [(CACHE_CONTROL, HeaderValue::from_static(PRIVATE_NO_STORE))],
+            Json(serde_json::json!({
+                "counterparty_name": command.counterparty_name,
+                "counterparty_email": command.counterparty_email,
+            })),
         )
             .into_response(),
         Err(error) => repository_problem(error, request_id_value).into_response(),

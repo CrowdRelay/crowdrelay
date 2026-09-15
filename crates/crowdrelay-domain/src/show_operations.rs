@@ -73,7 +73,37 @@ pub struct ShowTaskSnapshot {
 pub struct ShowOperationsPolicy {
     pub escalate_hours_before: u32,
     pub post_show_escalate_hours: u32,
+    /// Hours after the show when the T+7 report is due. The report is
+    /// system-generated — first-party numbers honestly labelled, delivered to
+    /// band and counterparty — so it waits a week for receipts (campaign
+    /// deliveries, harvest artifacts) to land before it speaks.
+    #[serde(default = "default_post_show_report_hours")]
+    pub post_show_report_hours: u32,
     pub escalation_cooldown_hours: u32,
+}
+
+const fn default_post_show_report_hours() -> u32 {
+    168
+}
+
+/// The report horizon cannot outgrow the snapshot that evaluates it.
+///
+/// The loader trails shows for 9 days, so a configured due past ~8 days
+/// would come due only after the show had already aged out — an artifact
+/// that can never ship. 192 hours leaves a day of evaluation and retry
+/// room inside the window.
+pub const MAX_POST_SHOW_REPORT_HOURS: u32 = 192;
+
+impl ShowOperationsPolicy {
+    /// Rejects horizons the evaluator cannot honor. Runs on every policy
+    /// parse — write and read alike — so an out-of-range stored row fails
+    /// loudly instead of silently suppressing the one report that exists.
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if self.post_show_report_hours > MAX_POST_SHOW_REPORT_HOURS {
+            return Err("post_show_report_hours exceeds the evaluable window");
+        }
+        Ok(())
+    }
 }
 
 impl Default for ShowOperationsPolicy {
@@ -81,6 +111,7 @@ impl Default for ShowOperationsPolicy {
         Self {
             escalate_hours_before: 36,
             post_show_escalate_hours: 12,
+            post_show_report_hours: default_post_show_report_hours(),
             escalation_cooldown_hours: 12,
         }
     }
@@ -153,10 +184,16 @@ pub fn evaluate_show_task(
         };
     }
 
-    let due_at = if snapshot.task.is_post_show() {
-        snapshot.starts_at + Duration::hours(i64::from(policy.post_show_escalate_hours))
-    } else {
-        snapshot.starts_at - Duration::hours(i64::from(policy.escalate_hours_before))
+    let due_at = match snapshot.task {
+        // The report is the system's own artifact, not a nag: it goes out once
+        // a week of receipts has had time to land.
+        ShowTaskKind::PostShowReport => {
+            snapshot.starts_at + Duration::hours(i64::from(policy.post_show_report_hours))
+        }
+        task if task.is_post_show() => {
+            snapshot.starts_at + Duration::hours(i64::from(policy.post_show_escalate_hours))
+        }
+        _ => snapshot.starts_at - Duration::hours(i64::from(policy.escalate_hours_before)),
     };
     if now < due_at {
         return ShowOperationsDecision::Hold(ShowOperationsHoldReason::NotDue);
@@ -246,6 +283,88 @@ mod tests {
             evaluate_show_task(snapshot, policy, now()),
             ShowOperationsDecision::Hold(ShowOperationsHoldReason::Cooldown)
         );
+    }
+
+    /// The report waits a week for receipts while reconciliation still fires
+    /// the night after — same family, different clocks.
+    #[test]
+    fn the_report_is_due_a_week_after_the_show_not_the_next_morning() {
+        let policy = ShowOperationsPolicy::default();
+        let starts_at = now() - Duration::days(3);
+        let report = ShowTaskSnapshot {
+            event_id: EventId::new(),
+            task: ShowTaskKind::PostShowReport,
+            starts_at,
+            already_done: false,
+            verifiable_fact: false,
+            last_escalated_at: None,
+        };
+        assert_eq!(
+            evaluate_show_task(report, policy, now()),
+            ShowOperationsDecision::Hold(ShowOperationsHoldReason::NotDue)
+        );
+        let reconciliation = ShowTaskSnapshot {
+            task: ShowTaskKind::PostShowReconciliation,
+            ..report
+        };
+        assert!(matches!(
+            evaluate_show_task(reconciliation, policy, now()),
+            ShowOperationsDecision::EscalateHuman { .. }
+        ));
+    }
+
+    #[test]
+    fn the_report_escalates_once_its_week_has_passed() {
+        let report = ShowTaskSnapshot {
+            event_id: EventId::new(),
+            task: ShowTaskKind::PostShowReport,
+            starts_at: now() - Duration::days(7) - Duration::hours(1),
+            already_done: false,
+            verifiable_fact: false,
+            last_escalated_at: None,
+        };
+        assert!(matches!(
+            evaluate_show_task(report, ShowOperationsPolicy::default(), now()),
+            ShowOperationsDecision::EscalateHuman { .. }
+        ));
+    }
+
+    /// A horizon past the snapshot's trailing edge can never be evaluated —
+    /// the show ages out before its report comes due — so it is rejected
+    /// rather than silently suppressing the artifact.
+    #[test]
+    fn a_report_horizon_beyond_the_evaluable_window_is_rejected() {
+        let policy = ShowOperationsPolicy {
+            post_show_report_hours: MAX_POST_SHOW_REPORT_HOURS + 1,
+            ..ShowOperationsPolicy::default()
+        };
+        assert!(policy.validate().is_err());
+        assert!(ShowOperationsPolicy::default().validate().is_ok());
+        assert!(
+            ShowOperationsPolicy {
+                post_show_report_hours: MAX_POST_SHOW_REPORT_HOURS,
+                ..ShowOperationsPolicy::default()
+            }
+            .validate()
+            .is_ok()
+        );
+    }
+
+    /// Policies persisted before the field existed must still parse — the
+    /// missing key falls back to the one-week default rather than failing the
+    /// whole policy read.
+    #[test]
+    fn a_stored_policy_without_the_report_window_keeps_its_other_values() {
+        let parsed: ShowOperationsPolicy = serde_json::from_value(serde_json::json!({
+            "escalate_hours_before": 24,
+            "post_show_escalate_hours": 8,
+            "escalation_cooldown_hours": 6
+        }))
+        .expect("legacy policy shape parses");
+        assert_eq!(parsed.escalate_hours_before, 24);
+        assert_eq!(parsed.post_show_escalate_hours, 8);
+        assert_eq!(parsed.escalation_cooldown_hours, 6);
+        assert_eq!(parsed.post_show_report_hours, 168);
     }
 
     #[test]
