@@ -18,8 +18,8 @@ checks={
  # Publication builds arm64 natively, merges it into the release manifest,
  # and verifies that manifest before recording the release digest.
  # QEMU must stay absent: emulating the Rust release build costs hours.
- 'arm64 production platform built': 'platform: linux/arm64' in workflow or '[self-hosted, arm64]' in workflow,
- 'native arm64 runner': '[self-hosted, arm64]' in workflow,
+ 'arm64 production platform built': 'platform: linux/arm64' in workflow or '[self-hosted, arm64]' in workflow or 'ubuntu-24.04-arm' in workflow,
+ 'native arm64 runner': '[self-hosted, arm64]' in workflow or 'ubuntu-24.04-arm' in workflow,
  'no emulated release build': 'setup-qemu-action' not in workflow,
  'release manifests merged': 'imagetools create' in workflow,
  'merged manifest platform gate': 'published manifest lacks' in workflow,

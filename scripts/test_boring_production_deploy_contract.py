@@ -98,8 +98,13 @@ class BoringProductionDeployContract(unittest.TestCase):
         # carries that platform and merges it into the manifest list the
         # deploy tag resolves to. amd64 was dropped to stay within
         # private-repo Actions minute limits.
-        # The build and merge jobs both use the self-hosted arm64 runner.
-        self.assertIn("[self-hosted, arm64]", PUBLISH)
+        # The build and merge jobs run on a native arm64 runner — the
+        # self-hosted one on virya-crowdrelay, or GitHub-hosted arm64 while
+        # the repos are public. amd64 + QEMU is the forbidden shape, not a
+        # particular runner label.
+        self.assertTrue(
+            "[self-hosted, arm64]" in PUBLISH or "ubuntu-24.04-arm" in PUBLISH
+        )
         self.assertIn("imagetools create", PUBLISH)
         # Native runners only: emulating the Rust release build costs hours.
         self.assertNotIn("setup-qemu-action", PUBLISH)

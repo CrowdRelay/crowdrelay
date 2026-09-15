@@ -78,8 +78,9 @@ jobs:
     # The image is built natively and pushed under an arch-suffixed tag;
     # the merge job joins it into the release tag the deploy resolves to.
     # QEMU is deliberately absent: emulating a Rust release build costs hours.
-    # Uses a self-hosted runner on virya-crowdrelay itself — free, unlimited,
-    # and the same ARM64 hardware that production deploys to.
+    # GitHub-hosted arm64 while the repos are public — native arm64 like the
+    # self-hosted runner on virya-crowdrelay, but off the production box's
+    # CPU. Move back to [self-hosted, arm64] when the repos go private.
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 60
 
