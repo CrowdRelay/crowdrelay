@@ -101,6 +101,10 @@ pub(crate) fn router(state: crate::AppState) -> Router {
             post(crate::ecosystem::update_flag),
         )
         .route(
+            "/v1/control-plane/events",
+            get(crate::concert_qr::control_plane_events),
+        )
+        .route(
             "/v1/control-plane/autopilot/cycle/preview",
             get(crate::autopilot::preview_autopilot_cycle),
         )

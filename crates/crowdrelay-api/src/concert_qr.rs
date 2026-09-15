@@ -471,6 +471,113 @@ pub async fn overview(State(state): State<crate::AppState>, headers: HeaderMap) 
         .into_response()
 }
 
+#[derive(Debug, FromRow)]
+struct ControlPlaneEventRow {
+    id: Uuid,
+    slug: String,
+    title: String,
+    venue: Option<String>,
+    starts_at: OffsetDateTime,
+    ends_at: Option<OffsetDateTime>,
+    scan_count: i64,
+    upcoming: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct ControlPlaneEventView {
+    id: Uuid,
+    slug: String,
+    title: String,
+    venue: Option<String>,
+    starts_at: String,
+    ends_at: Option<String>,
+    scan_count: u64,
+    /// `true` while the show is ahead of or inside the staff surface's
+    /// now-36h window — the "next up" block the gig page leads with.
+    upcoming: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct ControlPlaneEventsResponse {
+    events: Vec<ControlPlaneEventView>,
+}
+
+/// `GET /v1/control-plane/events` — the tenant's show list for the gig page:
+/// next up first, then past, newest first, over a 90-day lookback — the T+7
+/// lifecycle keeps a played show relevant for a week and ninety days covers
+/// the season the band remembers without becoming an archive. Events only —
+/// campaigns carry signing tokens and stay on the admin/staff surfaces.
+pub async fn control_plane_events(
+    State(state): State<crate::AppState>,
+    headers: HeaderMap,
+) -> Response {
+    let request_id_value = request_id(&headers);
+    let rows = match crate::ops::hold(
+        &state.read_budget,
+        load_control_plane_events(&state.concert_qr),
+    )
+    .await
+    {
+        Ok(rows) => rows,
+        Err(error) => {
+            tracing::warn!(%error, "control-plane events query failed");
+            return Problem::service_unavailable(request_id_value)
+                .private()
+                .into_response();
+        }
+    };
+    let events = rows
+        .into_iter()
+        .map(|row| ControlPlaneEventView {
+            id: row.id,
+            slug: row.slug,
+            title: row.title,
+            venue: row.venue,
+            starts_at: format_time(row.starts_at),
+            ends_at: row.ends_at.map(format_time),
+            scan_count: u64::try_from(row.scan_count).unwrap_or_default(),
+            upcoming: row.upcoming,
+        })
+        .collect();
+    (
+        StatusCode::OK,
+        [(CACHE_CONTROL, PRIVATE_NO_STORE)],
+        Json(ControlPlaneEventsResponse { events }),
+    )
+        .into_response()
+}
+
+async fn load_control_plane_events(
+    state: &ConcertQrState,
+) -> Result<Vec<ControlPlaneEventRow>, sqlx::Error> {
+    sqlx::query_as::<_, ControlPlaneEventRow>(
+        r#"
+        SELECT event.id, event.slug, event.title, event.venue, event.starts_at,
+               event.ends_at,
+               count(checkin.id)::bigint AS scan_count,
+               (event.starts_at >= now() - interval '36 hours') AS upcoming
+        FROM events AS event
+        LEFT JOIN concert_checkins AS checkin
+          ON checkin.workspace_id = event.workspace_id
+         AND checkin.event_id = event.id
+        WHERE event.workspace_id = $1
+          AND event.status = 'published'
+          AND event.starts_at >= now() - interval '90 days'
+        GROUP BY event.id
+        ORDER BY upcoming DESC,
+                 CASE WHEN event.starts_at >= now() - interval '36 hours'
+                      THEN event.starts_at END,
+                 CASE WHEN event.starts_at < now() - interval '36 hours'
+                      THEN event.starts_at END DESC
+        LIMIT $2
+        "#,
+    )
+    .bind(state.workspace_id.into_uuid())
+    .bind(MAX_STAFF_EVENTS_LIMIT)
+    .fetch_all(&state.database)
+    .await
+}
+
 async fn load_staff_events(state: &ConcertQrState) -> Result<Vec<StaffEventRow>, sqlx::Error> {
     sqlx::query_as::<_, StaffEventRow>(
         r#"
