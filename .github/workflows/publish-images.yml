@@ -312,8 +312,11 @@ jobs:
 
       - name: Purge stale artifacts before upload
         # Account-wide Actions storage quota is tight; old dockerbuild
-        # and digest artifacts from previous runs linger until retention
-        # expires. Delete them before uploading the current run's artifact.
+        # artifacts from previous runs linger until retention expires.
+        # Delete them before uploading the current run's artifact — but
+        # never digest/sbom artifacts: deploy.sh resolves releases by
+        # artifact name, and at high commit velocity a 2h purge would
+        # orphan the previous publish's ecosystem deploy mid-queue.
         continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
@@ -321,7 +324,7 @@ jobs:
         run: |
           set -euo pipefail
           mapfile -t ids < <(gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts?per_page=100" \
-            --jq ".artifacts[] | select(.workflow_run.id != ${GITHUB_RUN_ID}) | select(.created_at < (now - 7200 | strftime("%Y-%m-%dT%H:%M:%SZ"))) | .id" 2>/dev/null || true)
+            --jq ".artifacts[] | select(.workflow_run.id != ${GITHUB_RUN_ID}) | select(.name | test(\"digest|sbom\"; \"i\") | not) | select(.created_at < (now - 7200 | strftime("%Y-%m-%dT%H:%M:%SZ"))) | .id" 2>/dev/null || true)
           for id in "${ids[@]}"; do
             gh api -X DELETE "repos/${GITHUB_REPOSITORY}/actions/artifacts/${id}" 2>/dev/null || true
           done
