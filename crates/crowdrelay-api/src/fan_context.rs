@@ -253,14 +253,20 @@ struct StaffEventDashboardResponse {
 /// edge, and edges require a second workspace inside a shared organization —
 /// at one tenant that cannot exist, so the bill step must surface as the
 /// manual bill-mate ask the partner relay brief already carries.
+#[derive(Debug, Serialize, FromRow)]
+struct EventCrossbillAct {
+    slug: String,
+    name: String,
+}
+
 #[derive(Debug, Serialize)]
 struct EventCrossbill {
     state: &'static str,
-    acts: Vec<String>,
+    acts: Vec<EventCrossbillAct>,
     explanation: &'static str,
 }
 
-fn crossbill_state(acts: Vec<String>, automated_edge_active: bool) -> EventCrossbill {
+fn crossbill_state(acts: Vec<EventCrossbillAct>, automated_edge_active: bool) -> EventCrossbill {
     let (state, explanation) = if acts.len() <= 1 {
         (
             "no_support_bill",
@@ -269,7 +275,7 @@ fn crossbill_state(acts: Vec<String>, automated_edge_active: bool) -> EventCross
     } else if automated_edge_active {
         (
             "automated_overlap",
-            "An active event-crossbill consent edge exists; audience overlap amplification applies to this show.",
+            "An active event-crossbill edge routes this workspace's shows into a partner audience. It is workspace-level: whether the partner's act is on this bill is not recorded.",
         )
     } else {
         (
@@ -848,9 +854,9 @@ async fn event_crossbill(
     workspace_id: Uuid,
     event_slug: &str,
 ) -> Result<EventCrossbill, sqlx::Error> {
-    let acts = sqlx::query_scalar::<_, String>(
+    let acts = sqlx::query_as::<_, EventCrossbillAct>(
         r#"
-        SELECT act.act_name
+        SELECT act.act_slug AS slug, act.act_name AS name
         FROM event_acts AS act
         INNER JOIN events AS event
           ON event.workspace_id = act.workspace_id AND event.id = act.event_id
@@ -862,11 +868,18 @@ async fn event_crossbill(
     .bind(event_slug)
     .fetch_all(pool)
     .await?;
+    // No bill-mate means no crossbill either way — skip the edge check.
+    if acts.len() <= 1 {
+        return Ok(crossbill_state(acts, false));
+    }
+    // Only an edge whose beneficiary is this workspace amplifies its shows —
+    // `from` is the audience owner, `to` the beneficiary (portfolio.rs). An
+    // edge mailing our fans about a partner is not amplification of our show.
     let automated_edge_active = sqlx::query_scalar::<_, bool>(
         r#"
         SELECT EXISTS(
             SELECT 1 FROM amplification_consents AS edge
-            WHERE (edge.from_workspace_id = $1 OR edge.to_workspace_id = $1)
+            WHERE edge.to_workspace_id = $1
               AND edge.purpose = 'event_crossbill'
               AND edge.status = 'active'
         )
@@ -891,19 +904,20 @@ mod tests {
 
     #[test]
     fn crossbill_states_are_honest() {
+        let act = |name: &str| EventCrossbillAct {
+            slug: name.to_owned(),
+            name: name.to_owned(),
+        };
+        assert_eq!(crossbill_state(vec![], false).state, "no_support_bill");
         assert_eq!(
-            crossbill_state(vec!["headliner".to_string()], false).state,
+            crossbill_state(vec![act("headliner")], true).state,
             "no_support_bill"
         );
-        assert_eq!(
-            crossbill_state(vec!["headliner".to_string()], true).state,
-            "no_support_bill"
-        );
-        let manual = crossbill_state(vec!["headliner".to_string(), "support".to_string()], false);
+        let manual = crossbill_state(vec![act("headliner"), act("support")], false);
         assert_eq!(manual.state, "manual_ask");
         assert!(manual.explanation.contains("manual ask"));
         assert_eq!(
-            crossbill_state(vec!["headliner".to_string(), "support".to_string()], true).state,
+            crossbill_state(vec![act("headliner"), act("support")], true).state,
             "automated_overlap"
         );
     }
