@@ -77,9 +77,20 @@ jobs:
           # used to delete a release's tagged index while keeping its
           # children, and could evict the deployed digest for images that
           # were never deployed.
-          protected_digests=$(docker images --format '{{range .RepoDigests}}{{.}}{{"\n"}}{{end}}' 2>/dev/null \
+          # .Digest is the repo digest the image was pulled as; RepoDigests
+          # lives on docker inspect, not docker images, and a template error
+          # here must not silently empty the protection set.
+          protected_digests=$(docker images --format '{{.Digest}}' 2>/dev/null \
             | grep -o 'sha256:[0-9a-f]\{64\}' | sort -u || true)
-          echo "protected digests (deployed + rollback): $(echo "$protected_digests" | grep -c . || true)"
+          protected_count=$(echo "$protected_digests" | grep -c . || true)
+          echo "protected digests (deployed + rollback): $protected_count"
+          # An empty protection set means the read broke, not that nothing is
+          # deployed — deleting GHCR versions blind is exactly the incident
+          # this job exists to prevent.
+          if [ "$protected_count" -eq 0 ]; then
+            echo "ERROR: no digests read from the host image store — refusing to clean GHCR blind" >&2
+            exit 1
+          fi
 
           for pkg in crowdrelay-api crowdrelay-worker crowdrelay-control-plane crowdrelay-agents crowdrelay-rekor-proof-anchor crowdrelay-buildcache crowdrelay-control-plane-buildcache; do
             versions=$(gh api "/orgs/CrowdRelay/packages/container/$pkg/versions?per_page=100" \
