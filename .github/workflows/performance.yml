@@ -32,7 +32,10 @@ jobs:
           POSTGRES_PASSWORD: crowdrelay-perf-only
         ports:
           - 5432:5432
+        # --tmpfs keeps postgres data in RAM — otherwise the image's declared
+        # VOLUME leaves an anonymous volume behind on every run.
         options: >-
+          --tmpfs /var/lib/postgresql/data
           --health-cmd "pg_isready -U crowdrelay -d crowdrelay"
           --health-interval 5s
           --health-timeout 3s

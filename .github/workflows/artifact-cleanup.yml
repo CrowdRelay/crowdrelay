@@ -28,35 +28,86 @@ jobs:
             CrowdRelay/virya-signal
             CrowdRelay/synesthesia
           )
-          KEEP_RUNS=5
+          KEEP_RUNS=15
 
           for repo in "${REPOS[@]}"; do
             echo "=== $repo ==="
 
-            # Delete all artifacts (keep none — 1-day retention)
-            artifacts=$(gh api "/repos/$repo/actions/artifacts?per_page=100" --jq '.artifacts[].id' 2>/dev/null || true)
+            # Delete expirable artifacts. `*digest*` and `*sbom*` artifacts are
+            # protected: they carry retention-days and self-expire, and
+            # scripts/deploy.sh refuses to deploy a release whose immutable
+            # digest artifact is gone — blanket deletion aborted every
+            # ecosystem deploy attempted more than a day after publish.
+            artifacts=$(gh api "/repos/$repo/actions/artifacts?per_page=100" \
+              --jq '.artifacts[] | select(.name | test("digest|sbom"; "i") | not) | .id' 2>/dev/null || true)
             count=$(echo "$artifacts" | grep -c . || true)
-            echo "  deleting $count artifacts"
+            echo "  deleting $count artifacts (digest/sbom artifacts kept)"
             echo "$artifacts" | while read id; do
               [ -n "$id" ] && gh api -X DELETE "/repos/$repo/actions/artifacts/$id" 2>/dev/null || true
             done
 
-            # Delete old completed runs, keep 5 newest
+            # Delete old completed runs, keep 15 newest — enough history to
+            # debug a bad day at high commit velocity. A run that still holds
+            # digest/sbom artifacts is skipped: deleting the run deletes the
+            # artifact, which would orphan a queued or manual deploy that
+            # deploy.sh resolves by artifact name.
             runs=$(gh api "/repos/$repo/actions/runs?per_page=100&status=completed" --jq ".workflow_runs[${KEEP_RUNS}:] | .[].id" 2>/dev/null || true)
-            count=$(echo "$runs" | grep -c . || true)
-            echo "  deleting $count old runs (keeping $KEEP_RUNS newest)"
-            echo "$runs" | while read id; do
-              [ -n "$id" ] && gh api -X DELETE "/repos/$repo/actions/runs/$id" 2>/dev/null || true
+            kept_runs=0
+            for id in $runs; do
+              [ -n "$id" ] || continue
+              # Fail closed: an API error keeps the run rather than deleting
+              # it and whatever deploy artifacts it still holds.
+              protected_artifact=$(gh api "/repos/$repo/actions/runs/$id/artifacts?per_page=100" \
+                --jq '[.artifacts[] | select(.name | test("digest|sbom"; "i")) | select(.expired == false)] | length' 2>/dev/null) \
+                || protected_artifact="keep"
+              if [ "$protected_artifact" != "0" ]; then
+                echo "  keeping run $id (holds live digest/sbom artifacts)"
+                kept_runs=$((kept_runs + 1))
+                continue
+              fi
+              gh api -X DELETE "/repos/$repo/actions/runs/$id" 2>/dev/null || true
+            done
+            echo "  runs scanned past newest $KEEP_RUNS; $kept_runs kept for live artifacts"
+          done
+
+          # ── GHCR: retain deployed + rollback, not "newest N" ─────────────
+          # The rule that matters is what production can still run: the
+          # deployed digest and the one rollback the host retains locally —
+          # read straight off the host's own image store. "Keep 2 newest"
+          # used to delete a release's tagged index while keeping its
+          # children, and could evict the deployed digest for images that
+          # were never deployed.
+          protected_digests=$(docker images --format '{{range .RepoDigests}}{{.}}{{"\n"}}{{end}}' 2>/dev/null \
+            | grep -o 'sha256:[0-9a-f]\{64\}' | sort -u || true)
+          echo "protected digests (deployed + rollback): $(echo "$protected_digests" | grep -c . || true)"
+
+          for pkg in crowdrelay-api crowdrelay-worker crowdrelay-control-plane crowdrelay-agents crowdrelay-rekor-proof-anchor crowdrelay-buildcache crowdrelay-control-plane-buildcache; do
+            versions=$(gh api "/orgs/CrowdRelay/packages/container/$pkg/versions?per_page=100" \
+              --jq '.[] | "\(.id)\t\(.name)\t\(.metadata.container.tags | length)"' 2>/dev/null || true)
+            [ -z "$versions" ] && continue
+
+            # Seed the keep set with the two newest TAGGED versions (the two
+            # newest releases; untagged children carry no tags) plus every
+            # digest the host can still run.
+            keep_digests=$(echo "$versions" | awk -F'\t' '$3 > 0 {print $2}' | head -2 || true)
+            keep_digests=$(printf '%s\n%s\n%s' "$keep_digests" "$protected_digests" "" | grep . | sort -u || true)
+
+            # An index version's arch children are separate package versions
+            # with their own digests — deleting one breaks every index that
+            # references it. Resolve each kept index's manifest and protect
+            # every digest it lists. Only digests present in this package's
+            # version list can be its children — skip the rest to save calls.
+            for d in $(echo "$versions" | cut -f2); do
+              echo "$keep_digests" | grep -qx "$d" || continue
+              children=$(docker buildx imagetools inspect "ghcr.io/crowdrelay/${pkg}@${d}" --raw 2>/dev/null \
+                | grep -o 'sha256:[0-9a-f]\{64\}' || true)
+              keep_digests=$(printf '%s\n%s' "$keep_digests" "$children" | grep . | sort -u || true)
             done
 
-            # Clean GHCR image versions (keep 2 newest per package)
-            for pkg in crowdrelay-api crowdrelay-worker crowdrelay-control-plane crowdrelay-agents crowdrelay-rekor-proof-anchor; do
-              # Only clean packages that belong to this repo's org
-              versions=$(gh api "/orgs/CrowdRelay/packages/container/$pkg/versions?per_page=100" --jq '.[].id' 2>/dev/null || true)
-              [ -z "$versions" ] && continue
-              echo "$versions" | tail -n +3 | while read id; do
-                [ -n "$id" ] && gh api -X DELETE "/orgs/CrowdRelay/packages/container/$pkg/versions/$id" 2>/dev/null || true
-              done
+            echo "$versions" | while IFS=$'\t' read -r id digest tagcount; do
+              [ -n "$id" ] || continue
+              echo "$keep_digests" | grep -qx "$digest" && continue
+              gh api -X DELETE "/orgs/CrowdRelay/packages/container/$pkg/versions/$id" 2>/dev/null || true
             done
           done
 

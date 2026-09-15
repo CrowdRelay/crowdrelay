@@ -54,7 +54,12 @@ jobs:
           POSTGRES_PASSWORD: crowdrelay-ci-only
         ports:
           - 5432:5432
+        # --tmpfs keeps postgres data in RAM: the postgres image declares
+        # VOLUME /var/lib/postgresql/data, and without an explicit mount the
+        # runner leaves an anonymous volume behind on every run (~7 GB/day of
+        # leak measured on this host).
         options: >-
+          --tmpfs /var/lib/postgresql/data
           --health-cmd "pg_isready -U crowdrelay -d crowdrelay"
           --health-interval 5s
           --health-timeout 3s
@@ -134,8 +139,17 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' && github.job == 'rust-tests' }}
 
       - name: Run repository checks
+        # Format and lint run first inside this block: cheap gates fail fast
+        # instead of surfacing twenty minutes into a compile the run was never
+        # going to survive. They live inside this step rather than their own
+        # because the task-runner drift contract asserts the whole check chain
+        # in the span starting at this step's name. The retired rust-checks
+        # job bought a second checkout and toolchain setup — zero parallelism
+        # on the single self-hosted runner.
         run: |
           set -euo pipefail
+          cargo fmt --all --check
+          cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
           cargo test --locked --workspace --all-targets --all-features
           node --disable-warning=ExperimentalWarning --experimental-strip-types scripts/validate-contract-assets.ts
           # The source-reading contract suite. ~937 assertions across 150+
@@ -201,35 +215,73 @@ jobs:
             fi
           done
 
-  rust-checks:
-    name: Format and lint
-    runs-on: [self-hosted, arm64]
-    timeout-minutes: 20
-
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Activate repository-pinned Rust toolchain
+      # Moved here from the standalone deploy-config job — nine seconds of
+      # work no longer pays a full job setup on a serial runner.
+      - name: Validate Compose and Bake configuration
+        env:
+          CROWDRELAY_ENV_FILE: .env.example
         run: |
-          echo "/home/ubuntu/.cargo/bin" >> "$GITHUB_PATH"
-          echo "RUSTUP_HOME=/home/ubuntu/.rustup" >> "$GITHUB_ENV"
-          echo "CARGO_HOME=/home/ubuntu/.cargo" >> "$GITHUB_ENV"
-      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
-        with:
-          toolchain: 1.98.0
-          components: rustfmt, clippy
+          docker buildx bake --file docker-bake.hcl --print >/dev/null
+          docker compose config --quiet
+          production_images="$(
+            CROWDRELAY_IMAGE_TAG=sha-0000000000000000000000000000000000000000 \
+            CROWDRELAY_DOCKER_NETWORK=crowdrelay-ci \
+            CROWDRELAY_ENV_FILE=deploy/env.production.example \
+            CROWDRELAY_BOOTSTRAP_HOST_FILE=./deploy/bootstrap.example.json \
+            CROWDRELAY_WEBHOOK_SECRETS_HOST_FILE=./deploy/webhook-secrets.example.json \
+              docker compose \
+                --env-file deploy/env.production.example \
+                --file compose.production.yaml \
+                config \
+                --images
+          )"
+          # Every image CrowdRelay builds must be pinned to the build sha, and
+          # there must be exactly three of them (api, worker, and the worker
+          # image again for the migrate service). Upstream images are pinned by
+          # their own tag instead, which is a different rule -- asserting the
+          # sha over the whole list broke the moment `5c5e5a1` moved postgres
+          # into this compose file.
+          own_images="$(printf '%s\n' "$production_images" | grep '^ghcr.io/crowdrelay/' || true)"
+          image_count="$(printf '%s\n' "$own_images" | awk 'NF { count++ } END { print count+0 }')"
+          [[ "$image_count" -eq 3 ]]
+          while IFS= read -r image; do
+            [[ -n "$image" ]] || continue
+            [[ "${image##*:}" == "sha-0000000000000000000000000000000000000000" ]]
+          done <<< "$own_images"
+          # Upstream images carry an explicit version, never a floating tag.
+          while IFS= read -r image; do
+            [[ -n "$image" ]] || continue
+            case "$image" in
+              ghcr.io/crowdrelay/*) continue ;;
+            esac
+            [[ "$image" == *:* ]]
+            [[ "${image##*:}" != "latest" ]]
+          done <<< "$production_images"
+          digest="sha256:$(printf '0%.0s' {1..64})"
+          digest_images="$(
+            CROWDRELAY_IMAGE_TAG=sha-0000000000000000000000000000000000000000 \
+            CROWDRELAY_DOCKER_NETWORK=crowdrelay-ci \
+            CROWDRELAY_ENV_FILE=deploy/env.production.example \
+            CROWDRELAY_BOOTSTRAP_HOST_FILE=./deploy/bootstrap.example.json \
+            CROWDRELAY_WEBHOOK_SECRETS_HOST_FILE=./deploy/webhook-secrets.example.json \
+            CROWDRELAY_API_IMAGE_REF="ghcr.io/crowdrelay/crowdrelay-api@$digest" \
+            CROWDRELAY_WORKER_IMAGE_REF="ghcr.io/crowdrelay/crowdrelay-worker@$digest" \
+              docker compose \
+                --env-file deploy/env.production.example \
+                --file compose.production.yaml \
+                --file compose.production.digest.yaml \
+                config --images
+          )"
+          [[ "$(printf '%s\n' "$digest_images" | grep -c '@sha256:')" -eq 3 ]]
+          ./scripts/audit-public-tree.sh
 
-      - name: Cache Rust build artifacts
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-        with:
-          save-if: false
-
-      - name: Run format and lint checks
-        run: |
-          set -euo pipefail
-          cargo fmt --all --check
-          cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+      - name: Sweep unattached Docker leftovers
+        # Service containers detach their volumes only after the job ends, so
+        # each job cleans what the previous one left. Only unattached
+        # resources are pruned — in-flight work is never touched.
+        if: always()
+        continue-on-error: true
+        run: docker volume prune -f 2>/dev/null || true
 
   rust-postgres:
     name: PostgreSQL integration
@@ -245,7 +297,12 @@ jobs:
           POSTGRES_PASSWORD: crowdrelay-ci-only
         ports:
           - 5432:5432
+        # --tmpfs keeps postgres data in RAM: the postgres image declares
+        # VOLUME /var/lib/postgresql/data, and without an explicit mount the
+        # runner leaves an anonymous volume behind on every run (~7 GB/day of
+        # leak measured on this host).
         options: >-
+          --tmpfs /var/lib/postgresql/data
           --health-cmd "pg_isready -U crowdrelay -d crowdrelay"
           --health-interval 5s
           --health-timeout 3s
@@ -315,8 +372,13 @@ jobs:
       # listed. The previous hand-written list named 9 of 24 suites, so every
       # autopilot_* one — including the growth-intelligence paths — never ran
       # in CI. A suite that exists but is not enumerated is a suite nobody runs.
-      - name: Test all PostgreSQL integration paths sequentially
+      - name: Test all PostgreSQL integration paths
         shell: bash
+        env:
+          # Suites run in PG_SHARDS parallel lanes, each against its own
+          # database cloned from the migrated template. Set to 1 for the
+          # historical fully-serial single-database behavior.
+          PG_SHARDS: "3"
         run: |
           set -euo pipefail
           shopt -s nullglob
@@ -359,10 +421,38 @@ jobs:
             exit 1
           fi
           printf 'running %s integration targets\n' "${#targets[@]}"
-          for entry in "${targets[@]}"; do
-            package="${entry%%:*}"
-            target="${entry##*:}"
-            printf '::group::%s / %s\n' "$package" "$target"
+
+          # Ignored Postgres tests that live in unit-test modules rather than
+          # their own integration target, so the glob above cannot see them.
+          worker_filters=(
+            postgres_outbox_round_trip
+            due_reminder_is_enqueued_exactly_once
+            cycle_deletes_expired_rows_scrubs_safe_payloads_and_preserves_audit
+            publishing_adopts_the_drafts_manual_mode_wrote
+            manual_mode_leaves_its_own_drafts_alone
+            the_rate_limit_defers_a_draft_instead_of_failing_it
+            every_component_is_recorded_with_its_missing_switch
+            a_transient_failure_defers_the_draft_and_spares_the_action
+            an_exhausted_draft_fails_and_corrects_the_ledger
+          )
+
+          run_suite() {
+            local package="$1" target="$2" db="$3"
+            local url="postgres://crowdrelay:crowdrelay-ci-only@127.0.0.1:5432/${db}"
+            CROWDRELAY_DATABASE_URL="$url" \
+            CROWDRELAY_TEST_DATABASE_URL="$url" \
+            CROWDRELAY_OUTBOX_TEST_DATABASE_URL="$url" \
+            CROWDRELAY_ADMISSION_TEST_DATABASE_URL="$url" \
+            CROWDRELAY_EVENT_TEST_DATABASE_URL="$url" \
+            CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL="$url" \
+            CROWDRELAY_ECOSYSTEM_TEST_DATABASE_URL="$url" \
+            CROWDRELAY_FAN_LIFECYCLE_TEST_DATABASE_URL="$url" \
+            CROWDRELAY_REFERRAL_TEST_DATABASE_URL="$url" \
+            CROWDRELAY_MOBILE_FAN_TEST_DATABASE_URL="$url" \
+            CROWDRELAY_REMINDER_TEST_DATABASE_URL="$url" \
+            CROWDRELAY_RETENTION_TEST_DATABASE_URL="$url" \
+            CROWDRELAY_COMMUNITY_TEST_DATABASE_URL="$url" \
+            CROWDRELAY_AGENTS_TEST_DATABASE_URL="$url" \
             cargo test --locked \
               --package "$package" \
               --test "$target" \
@@ -370,22 +460,25 @@ jobs:
               --ignored \
               --nocapture \
               --test-threads=1
-            echo '::endgroup::'
-          done
+          }
 
-          # Ignored Postgres tests that live in unit-test modules rather than
-          # their own integration target, so the glob above cannot see them.
-          for filter in \
-            postgres_outbox_round_trip \
-            due_reminder_is_enqueued_exactly_once \
-            cycle_deletes_expired_rows_scrubs_safe_payloads_and_preserves_audit \
-            publishing_adopts_the_drafts_manual_mode_wrote \
-            manual_mode_leaves_its_own_drafts_alone \
-            the_rate_limit_defers_a_draft_instead_of_failing_it \
-            every_component_is_recorded_with_its_missing_switch \
-            a_transient_failure_defers_the_draft_and_spares_the_action \
-            an_exhausted_draft_fails_and_corrects_the_ledger
-          do
+          run_worker_filter() {
+            local filter="$1" db="$2"
+            local url="postgres://crowdrelay:crowdrelay-ci-only@127.0.0.1:5432/${db}"
+            CROWDRELAY_DATABASE_URL="$url" \
+            CROWDRELAY_TEST_DATABASE_URL="$url" \
+            CROWDRELAY_OUTBOX_TEST_DATABASE_URL="$url" \
+            CROWDRELAY_ADMISSION_TEST_DATABASE_URL="$url" \
+            CROWDRELAY_EVENT_TEST_DATABASE_URL="$url" \
+            CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL="$url" \
+            CROWDRELAY_ECOSYSTEM_TEST_DATABASE_URL="$url" \
+            CROWDRELAY_FAN_LIFECYCLE_TEST_DATABASE_URL="$url" \
+            CROWDRELAY_REFERRAL_TEST_DATABASE_URL="$url" \
+            CROWDRELAY_MOBILE_FAN_TEST_DATABASE_URL="$url" \
+            CROWDRELAY_REMINDER_TEST_DATABASE_URL="$url" \
+            CROWDRELAY_RETENTION_TEST_DATABASE_URL="$url" \
+            CROWDRELAY_COMMUNITY_TEST_DATABASE_URL="$url" \
+            CROWDRELAY_AGENTS_TEST_DATABASE_URL="$url" \
             cargo test --locked \
               --package crowdrelay-worker \
               "$filter" \
@@ -393,7 +486,78 @@ jobs:
               --ignored \
               --nocapture \
               --test-threads=1
-          done
+          }
+
+          if [ "${PG_SHARDS}" -le 1 ]; then
+            # Serial fallback: every suite against the shared `crowdrelay`
+            # database, exactly the historical behavior.
+            for entry in "${targets[@]}"; do
+              package="${entry%%:*}"
+              target="${entry##*:}"
+              printf '::group::%s / %s\n' "$package" "$target"
+              run_suite "$package" "$target" "crowdrelay"
+              echo '::endgroup::'
+            done
+            for filter in "${worker_filters[@]}"; do
+              printf '::group::crowdrelay-worker / %s\n' "$filter"
+              run_worker_filter "$filter" "crowdrelay"
+              echo '::endgroup::'
+            done
+          else
+            # Per-suite databases cloned from the migrated `crowdrelay`
+            # template: lanes run concurrently without ever seeing each
+            # other's rows. The template must have no open connections while
+            # it is copied — the setup binary exited in the previous step.
+            psql_url="postgres://crowdrelay:crowdrelay-ci-only@127.0.0.1:5432/postgres"
+            psql "$psql_url" -v ON_ERROR_STOP=1 -qAt \
+              -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname='crowdrelay' AND pid <> pg_backend_pid()" || true
+            for entry in "${targets[@]}"; do
+              target="${entry##*:}"
+              psql "$psql_url" -v ON_ERROR_STOP=1 -qAt \
+                -c "CREATE DATABASE ci_${target} WITH TEMPLATE crowdrelay"
+            done
+            psql "$psql_url" -v ON_ERROR_STOP=1 -qAt \
+              -c "CREATE DATABASE ci_worker_filters WITH TEMPLATE crowdrelay"
+
+            lane() {
+              local lane_id="$1"; shift
+              for entry in "$@"; do
+                package="${entry%%:*}"
+                target="${entry##*:}"
+                printf '::group::%s / %s\n' "$package" "$target"
+                run_suite "$package" "$target" "ci_${target}"
+                echo '::endgroup::'
+              done
+              # The unit-module filters share one dedicated database and run
+              # serially on lane 0, preserving their historical isolation
+              # semantics while the other lanes finish their suites.
+              if [ "${lane_id}" -eq 0 ]; then
+                for filter in "${worker_filters[@]}"; do
+                  printf '::group::crowdrelay-worker / %s\n' "$filter"
+                  run_worker_filter "$filter" "ci_worker_filters"
+                  echo '::endgroup::'
+                done
+              fi
+            }
+
+            pids=()
+            for (( lane_id=0; lane_id<PG_SHARDS; lane_id++ )); do
+              lane_targets=()
+              for (( i=lane_id; i<${#targets[@]}; i+=PG_SHARDS )); do
+                lane_targets+=("${targets[$i]}")
+              done
+              lane "$lane_id" "${lane_targets[@]}" > "/tmp/pg-lane-${lane_id}.log" 2>&1 &
+              pids+=($!)
+            done
+            failed=0
+            for pid in "${pids[@]}"; do
+              wait "$pid" || failed=1
+            done
+            for (( lane_id=0; lane_id<PG_SHARDS; lane_id++ )); do
+              cat "/tmp/pg-lane-${lane_id}.log"
+            done
+            [ "${failed}" -eq 0 ]
+          fi
 
       # The two gates that need a live schema, and therefore could only ever run
       # here. Both were in `just policy-checks` and in no workflow, so they ran
@@ -412,72 +576,10 @@ jobs:
           python3 scripts/sql-result-types.py
           python3 scripts/test_sql_scalar_types_v1.py
 
-  deploy-config:
-    name: Compose and bake validation
-    runs-on: [self-hosted, arm64]
-    timeout-minutes: 15
-
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Validate Compose and Bake configuration
-        env:
-          CROWDRELAY_ENV_FILE: .env.example
-        run: |
-          docker buildx bake --file docker-bake.hcl --print >/dev/null
-          docker compose config --quiet
-          production_images="$(
-            CROWDRELAY_IMAGE_TAG=sha-0000000000000000000000000000000000000000 \
-            CROWDRELAY_DOCKER_NETWORK=crowdrelay-ci \
-            CROWDRELAY_ENV_FILE=deploy/env.production.example \
-            CROWDRELAY_BOOTSTRAP_HOST_FILE=./deploy/bootstrap.example.json \
-            CROWDRELAY_WEBHOOK_SECRETS_HOST_FILE=./deploy/webhook-secrets.example.json \
-              docker compose \
-                --env-file deploy/env.production.example \
-                --file compose.production.yaml \
-                config \
-                --images
-          )"
-          # Every image CrowdRelay builds must be pinned to the build sha, and
-          # there must be exactly three of them (api, worker, and the worker
-          # image again for the migrate service). Upstream images are pinned by
-          # their own tag instead, which is a different rule -- asserting the
-          # sha over the whole list broke the moment `5c5e5a1` moved postgres
-          # into this compose file.
-          own_images="$(printf '%s\n' "$production_images" | grep '^ghcr.io/crowdrelay/' || true)"
-          image_count="$(printf '%s\n' "$own_images" | awk 'NF { count++ } END { print count+0 }')"
-          [[ "$image_count" -eq 3 ]]
-          while IFS= read -r image; do
-            [[ -n "$image" ]] || continue
-            [[ "${image##*:}" == "sha-0000000000000000000000000000000000000000" ]]
-          done <<< "$own_images"
-          # Upstream images carry an explicit version, never a floating tag.
-          while IFS= read -r image; do
-            [[ -n "$image" ]] || continue
-            case "$image" in
-              ghcr.io/crowdrelay/*) continue ;;
-            esac
-            [[ "$image" == *:* ]]
-            [[ "${image##*:}" != "latest" ]]
-          done <<< "$production_images"
-          digest="sha256:$(printf '0%.0s' {1..64})"
-          digest_images="$(
-            CROWDRELAY_IMAGE_TAG=sha-0000000000000000000000000000000000000000 \
-            CROWDRELAY_DOCKER_NETWORK=crowdrelay-ci \
-            CROWDRELAY_ENV_FILE=deploy/env.production.example \
-            CROWDRELAY_BOOTSTRAP_HOST_FILE=./deploy/bootstrap.example.json \
-            CROWDRELAY_WEBHOOK_SECRETS_HOST_FILE=./deploy/webhook-secrets.example.json \
-            CROWDRELAY_API_IMAGE_REF="ghcr.io/crowdrelay/crowdrelay-api@$digest" \
-            CROWDRELAY_WORKER_IMAGE_REF="ghcr.io/crowdrelay/crowdrelay-worker@$digest" \
-              docker compose \
-                --env-file deploy/env.production.example \
-                --file compose.production.yaml \
-                --file compose.production.digest.yaml \
-                config --images
-          )"
-          [[ "$(printf '%s\n' "$digest_images" | grep -c '@sha256:')" -eq 3 ]]
-          ./scripts/audit-public-tree.sh
+      - name: Sweep unattached Docker leftovers
+        if: always()
+        continue-on-error: true
+        run: docker volume prune -f 2>/dev/null || true
 
   dependency-security:
     name: Dependency security
@@ -538,12 +640,19 @@ jobs:
             --set "*.cache-from=type=registry,ref=${build_cache_ref}" \
             --set '*.output=type=cacheonly'
 
+      - name: Prune stale BuildKit cache after build
+        if: always()
+        continue-on-error: true
+        run: |
+          docker builder prune --filter until=72h -f 2>/dev/null || true
+          docker volume prune -f 2>/dev/null || true
+
   summary:
     # Single green check for branch protection, and the relation view for the
     # run panel: everything above reports into one node instead of eight
     # independent dots.
     name: All checks passed
-    needs: [rust-tests, rust-checks, rust-postgres, deploy-config, dependency-security, containers]
+    needs: [rust-tests, rust-postgres, dependency-security, containers]
     if: always()
     runs-on: [self-hosted, arm64]
     timeout-minutes: 5

@@ -31,8 +31,14 @@ RUN cargo chef prepare --recipe-path recipe.json
 FROM chef AS builder
 
 COPY --from=planner /workspace/recipe.json recipe.json
+# The target/ cache mount keeps compiled dependencies and incremental
+# workspace artifacts across image builds. Cargo fingerprints invalidate
+# precisely the crates that changed; env!-embedded identity (git sha,
+# timestamp) is tracked in depinfo, so a cache hit can never ship stale
+# provenance. Bounded by the 72h builder prune in the publish workflow.
 RUN --mount=type=cache,id=crowdrelay-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=crowdrelay-cargo-git,target=/usr/local/cargo/git/db,sharing=locked \
+    --mount=type=cache,id=crowdrelay-cargo-target,target=/workspace/target,sharing=locked \
     cargo chef cook \
         --locked \
         --release \
@@ -55,6 +61,7 @@ ENV CROWDRELAY_GIT_SHA=${CROWDRELAY_GIT_SHA} \
 # reuse this same builder graph instead of compiling the workspace twice.
 RUN --mount=type=cache,id=crowdrelay-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=crowdrelay-cargo-git,target=/usr/local/cargo/git/db,sharing=locked \
+    --mount=type=cache,id=crowdrelay-cargo-target,target=/workspace/target,sharing=locked \
     cargo build \
         --locked \
         --release \

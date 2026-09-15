@@ -27,13 +27,50 @@ env:
   # requires lowercase repository names and GitHub org names are case-preserving.
 
 jobs:
+  # At 60-70 commits a day the single ARM runner cannot afford to build an
+  # image for every green SHA — only the newest green ever reaches a deploy.
+  # A publish that is already obsolete at pickup skips in seconds instead of
+  # holding the queue for a ~20-minute build nobody will run.
+  gate:
+    name: Skip if superseded
+    runs-on: [self-hosted, arm64]
+    timeout-minutes: 5
+    outputs:
+      proceed: ${{ steps.check.outputs.proceed }}
+    steps:
+      - name: Check for a newer green CI run
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -uo pipefail
+          # A newer GREEN main CI run — proven work — supersedes this build.
+          # Compare created_at against the triggering run, not "newest sha !=
+          # mine": the API can take a minute to index the run that just fired
+          # this trigger, and the sha comparison would then mistake an older
+          # green for a newer one and skip the build a deploy is waiting on.
+          # A newer push that has not passed CI does not suppress this build.
+          triggered_at="${{ github.event.workflow_run.created_at }}"
+          newer="$(gh api 'repos/${{ github.repository }}/actions/runs?workflow_id=ci.yml&branch=main&status=success&per_page=10' \
+            --jq --arg ts "${triggered_at}" \
+            '[.workflow_runs[] | select(.created_at > $ts)] | .[0].head_sha // ""' 2>/dev/null || echo "")"
+          if [[ -n "$newer" ]]; then
+            echo "::notice title=Superseded::CI for ${newer} is green; image build for ${IMAGE_SHA} is obsolete — skipping"
+            echo "proceed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "proceed=true" >> "$GITHUB_OUTPUT"
+          fi
+
   build:
+    needs: gate
     # workflow_run already guarantees the source workflow is CI. Restrict the
     # release solely to a successful CI result for the repository default
     # branch; do not additionally key off the source event type, which can be
     # reported inconsistently by chained workflow executions and previously
     # caused a valid exact-main release to be skipped.
     if: >-
+      needs.gate.outputs.proceed == 'true' &&
       github.event.workflow_run.conclusion == 'success' &&
       github.event.workflow_run.head_branch == github.event.repository.default_branch
 
@@ -100,10 +137,13 @@ jobs:
           provenance: mode=max
           sbom: true
 
-      - name: Prune BuildKit cache after build
+      - name: Prune stale BuildKit cache after build
+        # Bounded, not scorched-earth: `--all` used to delete the cargo cache
+        # mounts after every build and the next build re-downloaded every
+        # crate. Keep 72h of warm cache; the host cron bounds it from there.
         if: always()
         continue-on-error: true
-        run: docker builder prune --all -f 2>/dev/null || true
+        run: docker builder prune --filter until=72h -f 2>/dev/null || true
 
       # Per-architecture digests are an intermediate product. The release
       # identity is the merged manifest list, so it is recorded in `merge`.
@@ -139,7 +179,9 @@ jobs:
   # separate job keeps the failure red on the run while the release it has
   # nothing to do with proceeds.
   anchor:
+    needs: gate
     if: >-
+      needs.gate.outputs.proceed == 'true' &&
       github.event.workflow_run.conclusion == 'success' &&
       github.event.workflow_run.head_branch == github.event.repository.default_branch
     name: Publish Rekor proof anchor
@@ -195,10 +237,10 @@ jobs:
           provenance: mode=max
           sbom: true
 
-      - name: Prune BuildKit cache after build
+      - name: Prune stale BuildKit cache after build
         if: always()
         continue-on-error: true
-        run: docker builder prune --all -f 2>/dev/null || true
+        run: docker builder prune --filter until=72h -f 2>/dev/null || true
 
       - name: Record the anchor digest
         env:
@@ -210,7 +252,8 @@ jobs:
           printf 'arm64 rekor=%s\n' "$REKOR_DIGEST"
 
   merge:
-    needs: build
+    needs: [gate, build]
+    if: needs.gate.outputs.proceed == 'true'
     name: Merge release manifests
     runs-on: [self-hosted, arm64]
     timeout-minutes: 15

@@ -62,8 +62,11 @@ class TaskRunnerContract(unittest.TestCase):
 
     def test_the_summary_job_gives_the_panel_one_node(self) -> None:
         ci = read(CI)
+        # rust-checks and deploy-config were folded into rust-tests on
+        # 2026-09-15: on a single self-hosted runner the extra jobs bought a
+        # second checkout and toolchain setup and zero parallelism.
         self.assertIn(
-            "needs: [rust-tests, rust-checks, rust-postgres, deploy-config, dependency-security, containers]",
+            "needs: [rust-tests, rust-postgres, dependency-security, containers]",
             ci,
         )
         self.assertIn("All checks passed", ci)
