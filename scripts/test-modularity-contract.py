@@ -39,6 +39,7 @@ CONTRACT = {
     "crates/crowdrelay-infra/src/acquisition.rs": [
         "acquisition/ingress_methods.rs",
         "acquisition/persistence_methods.rs",
+        "acquisition/acquisition_events.rs",
     ],
     "crates/crowdrelay-infra/src/referrals.rs": [
         "referrals/repository.rs",

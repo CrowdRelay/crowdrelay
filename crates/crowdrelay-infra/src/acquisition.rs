@@ -75,6 +75,7 @@ struct FanActiveOutboxArgs<'a> {
 
 include!("acquisition/ingress_methods.rs");
 include!("acquisition/persistence_methods.rs");
+include!("acquisition/acquisition_events.rs");
 
 #[async_trait]
 impl AcquisitionRepository for PostgresAcquisitionRepository {
