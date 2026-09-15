@@ -60,7 +60,7 @@ concurrency:
 jobs:
   public-consumers:
     name: Signal + Synesthesia compatibility
-    runs-on: [self-hosted, arm64]
+    runs-on: ubuntu-24.04-arm
     timeout-minutes: 10
     steps:
       - name: Check out CrowdRelay under canonical ecosystem layout
@@ -109,7 +109,7 @@ jobs:
   # production and where a skip is treated as a failure.
   agents-pairing:
     name: Agent service pairing
-    runs-on: [self-hosted, arm64]
+    runs-on: ubuntu-24.04-arm
     timeout-minutes: 10
     steps:
       # Three gates compare a list here against a list in crowdrelay-agents:
@@ -168,7 +168,7 @@ jobs:
   # still have their polling upstream-contract workflows as a fallback.
   propagate:
     name: Notify downstream repos
-    runs-on: [self-hosted, arm64]
+    runs-on: ubuntu-24.04-arm
     timeout-minutes: 5
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     needs: public-consumers

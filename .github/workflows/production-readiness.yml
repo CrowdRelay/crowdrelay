@@ -21,7 +21,7 @@ concurrency:
 jobs:
   team-email:
     if: ${{ vars.CROWDRELAY_PRODUCTION_BASE_URL != '' }}
-    runs-on: [self-hosted, arm64]
+    runs-on: ubuntu-24.04-arm
     timeout-minutes: 5
     env:
       CROWDRELAY_PRODUCTION_BASE_URL: ${{ vars.CROWDRELAY_PRODUCTION_BASE_URL }}

@@ -33,7 +33,7 @@ jobs:
   # holding the queue for a ~20-minute build nobody will run.
   gate:
     name: Skip if superseded
-    runs-on: [self-hosted, arm64]
+    runs-on: ubuntu-24.04-arm
     timeout-minutes: 5
     outputs:
       proceed: ${{ steps.check.outputs.proceed }}
@@ -80,7 +80,7 @@ jobs:
     # QEMU is deliberately absent: emulating a Rust release build costs hours.
     # Uses a self-hosted runner on virya-crowdrelay itself — free, unlimited,
     # and the same ARM64 hardware that production deploys to.
-    runs-on: [self-hosted, arm64]
+    runs-on: ubuntu-24.04-arm
     timeout-minutes: 60
 
     steps:
@@ -185,7 +185,7 @@ jobs:
       github.event.workflow_run.conclusion == 'success' &&
       github.event.workflow_run.head_branch == github.event.repository.default_branch
     name: Publish Rekor proof anchor
-    runs-on: [self-hosted, arm64]
+    runs-on: ubuntu-24.04-arm
     timeout-minutes: 30
     permissions:
       contents: read
@@ -255,7 +255,7 @@ jobs:
     needs: [gate, build]
     if: needs.gate.outputs.proceed == 'true'
     name: Merge release manifests
-    runs-on: [self-hosted, arm64]
+    runs-on: ubuntu-24.04-arm
     timeout-minutes: 15
     permissions:
       contents: read
