@@ -868,10 +868,13 @@ fn build_steps(facts: &TimelineFacts, now: OffsetDateTime) -> Vec<TimelineStepVi
     } else {
         "waiting"
     };
-    let numbers_action = if numbers_state == "due" {
-        Some(TimelineActionView { kind: "report", label: "Write the report" })
-    } else {
-        None
+    // The artifact stays reachable after issuance — "See the report" is
+    // the mailed payload; before T+7 opens the window the preview shows
+    // what the send will say. The band never writes it, the system does.
+    let numbers_action = match numbers_state {
+        "done" => Some(TimelineActionView { kind: "report", label: "See the report" }),
+        "due" => Some(TimelineActionView { kind: "report", label: "Preview the report" }),
+        _ => None,
     };
     let numbers_detail = serde_json::json!({
         "status": report_status,

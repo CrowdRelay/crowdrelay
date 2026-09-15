@@ -441,12 +441,17 @@ async fn delete_old_terminal_outbox_events(
     // Deleting the parent cascades its terminal deliveries and attempt rows.
     // Standalone delivery deletion would break materialization idempotency while
     // the parent event is retained, so it is intentionally not performed.
+    // `post_show_report_due` rows are exempt: their payload is the durable
+    // artifact itself — the only copy of what the counterparty was mailed —
+    // and the control-plane report view reads it back indefinitely. One row
+    // per show, so the exemption costs nothing measurable.
     let result = sqlx::query(
         r#"
         WITH candidates AS (
             SELECT event.id
             FROM outbox_events AS event
             WHERE event.status IN ('delivered', 'dead')
+                AND event.event_type <> 'crowdrelay.show.post_show_report_due'
                 AND COALESCE(event.delivered_at, event.dead_at) <=
                     now() - ($2::bigint * interval '1 millisecond')
                 AND NOT EXISTS (

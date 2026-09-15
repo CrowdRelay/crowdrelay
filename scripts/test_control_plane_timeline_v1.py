@@ -39,6 +39,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "crates/crowdrelay-api/src/concert_qr/timeline.rs"
 SCAN = ROOT / "crates/crowdrelay-api/src/concert_qr/scan_view.rs"
+REPORT = ROOT / "crates/crowdrelay-api/src/concert_qr/report_view.rs"
 ROUTER = ROOT / "crates/crowdrelay-api/src/control_plane.rs"
 PARENT = ROOT / "crates/crowdrelay-api/src/concert_qr.rs"
 LIB = ROOT / "crates/crowdrelay-api/src/lib.rs"
@@ -225,6 +226,82 @@ class ControlPlaneScanContract(unittest.TestCase):
             r'"#checkin=\{token\}"|#checkin=\{token\}',
             "the URL must carry the token in the fragment",
         )
+
+
+class ControlPlaneReportContract(unittest.TestCase):
+    # The T+7 counterparty artifact: the page renders the mailed payload
+    # when it exists and a live composition only before it does — never a
+    # re-derived "report" disagreeing with what the promoter actually got.
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.source = REPORT.read_text(encoding="utf-8")
+        cls.router = ROUTER.read_text(encoding="utf-8")
+        cls.parent = PARENT.read_text(encoding="utf-8")
+        cls.lib = re.sub(r"\s+", " ", LIB.read_text(encoding="utf-8"))
+
+    def test_report_route_is_registered(self) -> None:
+        self.assertIn('"/v1/control-plane/events/{event_slug}/report"', self.router)
+        self.assertIn("concert_qr::control_plane_event_report", self.router)
+
+    def test_report_path_is_under_the_management_credential(self) -> None:
+        self.assertIn(
+            'one_segment_with_suffix(path, "/v1/control-plane/events/", "/report")',
+            self.lib,
+        )
+
+    def test_report_chunk_is_included(self) -> None:
+        self.assertIn('include!("concert_qr/report_view.rs");', self.parent)
+
+    def test_report_queries_are_workspace_scoped(self) -> None:
+        bodies = [
+            body
+            for body in re.findall(r'r#"(.*?)"#', self.source, re.S)
+            if re.search(r"\bFROM\b", body)
+        ]
+        self.assertGreaterEqual(len(bodies), 6, "expected event + issued + evidence reads")
+        for body in bodies:
+            self.assertRegex(body, r"workspace_id\s*=", f"unscoped report query: {body[:80]!r}")
+
+    def test_issued_artifact_wins_over_live_composition(self) -> None:
+        # The outbox lookup must run BEFORE the preview branch — a report
+        # that disagrees with the mailed artifact is worse than no report.
+        self.assertIn("crowdrelay.show.post_show_report_due", self.source)
+        self.assertIn("ORDER BY created_at DESC", self.source)
+        lookup = self.source.find("post_show_report_due")
+        preview = self.source.find("compose the preview")
+        self.assertGreater(preview, lookup, "the issued check must precede the preview")
+
+    def test_the_evidence_contract_survives_the_preview(self) -> None:
+        for key in ("observed", "inferred", "evidence_gaps", "honesty_contract"):
+            self.assertIn(f'"{key}"', self.source)
+        # The four honesty rules travel with every render — the page shows
+        # the same contract the email does.
+        self.assertIn("never_sum_numbers_across_evidence_classes", self.source)
+        self.assertIn("room_attendance_unverified", self.source)
+
+    def test_issued_carries_delivery_status(self) -> None:
+        # `issued_at` alone cannot distinguish "mailed" from "queued and died"
+        # — the response must expose the outbox status so the page can say
+        # "Sent" only once the mail actually left.
+        self.assertIn("delivery_status", self.source)
+        self.assertIn("delivered_at", self.source)
+
+    def test_the_artifact_survives_terminal_retention(self) -> None:
+        # The emitted payload is the ONLY copy of what the counterparty was
+        # mailed — terminal outbox retention must exempt it or the page
+        # silently reverts to a dishonest "preview" for a mailed report.
+        retention = (
+            ROOT / "crates/crowdrelay-worker/src/retention/steps.rs"
+        ).read_text(encoding="utf-8")
+        delete = re.search(
+            r"delete_old_terminal_outbox_events.*?WITH candidates AS \(.*?event\.event_type <> '([^']+)'",
+            retention,
+            re.S,
+        )
+        self.assertIsNotNone(
+            delete, "the terminal-outbox DELETE must exempt the report artifact"
+        )
+        self.assertEqual(delete.group(1), "crowdrelay.show.post_show_report_due")
 
 
 if __name__ == "__main__":

@@ -411,6 +411,7 @@ fn is_control_plane_management_path(path: &str) -> bool {
         )
         || one_segment_with_suffix(path, "/v1/control-plane/events/", "/timeline")
         || one_segment_with_suffix(path, "/v1/control-plane/events/", "/scan")
+        || one_segment_with_suffix(path, "/v1/control-plane/events/", "/report")
         || one_segment_with_suffix(
             path,
             "/v1/control-plane/community-intelligence/communities/",

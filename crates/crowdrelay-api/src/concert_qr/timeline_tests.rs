@@ -197,6 +197,23 @@ mod timeline_tests {
     }
 
     #[test]
+    fn a_done_report_keeps_the_artifact_link() {
+        let now = OffsetDateTime::now_utc();
+        let mut facts = facts(now);
+        facts.event.starts_at = now - Duration::days(8);
+        facts.event.status = "completed".to_string();
+        facts.checklist.push(TimelineChecklistRow {
+            item_key: "post_show_report".to_string(),
+            status: "done".to_string(),
+        });
+        let steps = build_steps(&facts, now);
+        assert_eq!(states(&steps)[8], ("the_numbers", "done"));
+        let action = steps[8].action.as_ref().unwrap();
+        assert_eq!(action.kind, "report");
+        assert_eq!(action.label, "See the report");
+    }
+
+    #[test]
     fn a_succeeded_recap_is_done_with_its_send_time() {
         let now = OffsetDateTime::now_utc();
         let mut facts = facts(now);
