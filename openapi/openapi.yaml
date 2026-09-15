@@ -5097,6 +5097,37 @@ paths:
         '401': *id004
         '404': *id004
         '503': *id004
+  /staff/event-qr/campaigns/{campaign_id}/context:
+    put:
+      operationId: updateStaffConcertQrCampaignContext
+      summary: Record where a concert QR campaign lives and what it offers
+      security:
+      - staffBearer: []
+      parameters:
+      - in: path
+        name: campaign_id
+        required: true
+        schema:
+          type: string
+          format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateConcertQrCampaignContextRequest'
+      responses:
+        '204':
+          description: Scan context recorded.
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/PrivateNoStore'
+        '400': *id004
+        '401': *id004
+        '404': *id004
+        '409': *id004
+        '422': *id004
+        '503': *id004
   /admin/event-qr/overview:
     get:
       operationId: getConcertQrOverview
@@ -5190,6 +5221,37 @@ paths:
         '400': *id004
         '401': *id004
         '404': *id004
+        '503': *id004
+  /admin/event-qr/campaigns/{campaign_id}/context:
+    put:
+      operationId: updateConcertQrCampaignContext
+      summary: Record where a concert QR campaign lives and what it offers
+      security:
+      - adminBearer: []
+      parameters:
+      - in: path
+        name: campaign_id
+        required: true
+        schema:
+          type: string
+          format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateConcertQrCampaignContextRequest'
+      responses:
+        '204':
+          description: Scan context recorded.
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/PrivateNoStore'
+        '400': *id004
+        '401': *id004
+        '404': *id004
+        '409': *id004
+        '422': *id004
         '503': *id004
   /admin/admission/passes:
     post:
@@ -14373,6 +14435,39 @@ components:
           - 'null'
           minimum: 1
           maximum: 1000000
+        placement:
+          type:
+          - string
+          - 'null'
+          description: Where this QR physically lives. Optional — a code made before doors may not know yet.
+          maxLength: 128
+        announced_from_stage:
+          type: boolean
+        incentive:
+          type:
+          - string
+          - 'null'
+          maxLength: 256
+    UpdateConcertQrCampaignContextRequest:
+      type: object
+      additionalProperties: false
+      required:
+      - announced_from_stage
+      properties:
+        placement:
+          type:
+          - string
+          - 'null'
+          description: Where this QR physically lives. Null clears it.
+          maxLength: 128
+        announced_from_stage:
+          type: boolean
+        incentive:
+          type:
+          - string
+          - 'null'
+          description: What a scanner gets for checking in. Null clears it.
+          maxLength: 256
     ConcertQrCampaign:
       type: object
       additionalProperties: false
@@ -14388,6 +14483,9 @@ components:
       - valid_until
       - max_checkins
       - checkin_count
+      - placement
+      - announced_from_stage
+      - incentive
       - active
       - revoked_at
       - created_at
@@ -14426,6 +14524,21 @@ components:
         checkin_count:
           type: integer
           minimum: 0
+        placement:
+          type:
+          - string
+          - 'null'
+          description: Where this QR physically lives — the context the scan rate is read against.
+          maxLength: 128
+        announced_from_stage:
+          type: boolean
+          description: Whether the act pointed the room at the code from the stage.
+        incentive:
+          type:
+          - string
+          - 'null'
+          description: What a scanner gets for checking in, if anything was offered.
+          maxLength: 256
         active:
           type: boolean
         revoked_at:
