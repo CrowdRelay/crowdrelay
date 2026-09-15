@@ -196,6 +196,59 @@ async fn email_claim_creates_pending_fan_checkin_and_confirmation() -> Result<()
     .fetch_one(&pool)
     .await?;
     assert_eq!(city_interest, 1);
+
+    // The scan is how this fan arrived — provenance must say so, or the
+    // channel-ROI readout counts the room as invisible rather than measured.
+    let (source, request_id): (String, String) = sqlx::query_as(
+        "SELECT fae.source, fae.request_id FROM fan_acquisition_events fae \
+         JOIN concert_checkins c ON c.fan_id = fae.fan_id AND c.workspace_id = fae.workspace_id \
+         WHERE fae.workspace_id = $1 AND c.event_id = $2",
+    )
+    .bind(ws.into_uuid())
+    .bind(fixture.event_id)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(source, "concert_qr");
+    assert_eq!(request_id, cmd.request_id.as_deref().unwrap());
+    Ok(())
+}
+
+/// A rescan hits the fan ON CONFLICT — they already arrived wherever they
+/// first showed up, and a second acquisition row would fabricate a second
+/// arrival.
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn rescan_never_fabricates_a_second_arrival() -> Result<()> {
+    let pool = pool().await?;
+    let ws = workspace(&pool, "scan-arr").await?;
+    let fixture = show(&pool, ws, "scan-arr").await?;
+    let repo = PostgresConcertQrRepository::new(pool.clone());
+    let slug: String =
+        sqlx::query_scalar("SELECT slug FROM events WHERE workspace_id = $1 AND id = $2")
+            .bind(ws.into_uuid())
+            .bind(fixture.event_id)
+            .fetch_one(&pool)
+            .await?;
+
+    for _ in 0..2 {
+        let mut cmd = command(
+            &fixture,
+            ws,
+            None,
+            Some("arrival@example.com".to_owned()),
+            None,
+        );
+        cmd.event_slug.clone_from(&slug);
+        repo.check_in(&cmd).await?;
+    }
+
+    let arrivals: i64 = sqlx::query_scalar(
+        "SELECT count(*)::bigint FROM fan_acquisition_events WHERE workspace_id = $1 AND source = 'concert_qr'",
+    )
+    .bind(ws.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(arrivals, 1);
     Ok(())
 }
 

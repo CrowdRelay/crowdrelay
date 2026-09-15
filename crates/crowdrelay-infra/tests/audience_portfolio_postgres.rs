@@ -311,6 +311,23 @@ async fn fan_import_lands_pending_and_respects_opt_outs() -> Result<(), Box<dyn 
         .await?;
     assert_eq!(again.cooldown_skipped, 1);
 
+    // The import is how the fan arrived — one provenance row naming the
+    // batch's declared origin, and the re-import above must not have
+    // fabricated a second one.
+    let arrivals: Vec<(String, String)> = sqlx::query_as(
+        "SELECT source, request_id FROM fan_acquisition_events WHERE workspace_id=$1 AND source LIKE 'fan_import:%'",
+    )
+    .bind(workspace)
+    .fetch_all(&pool)
+    .await?;
+    assert_eq!(arrivals.len(), 1);
+    assert_eq!(arrivals[0].0, format!("fan_import:{source}"));
+    assert!(
+        arrivals[0].1.starts_with("fan-import-"),
+        "request_id correlates to the batch, got {}",
+        arrivals[0].1
+    );
+
     // One audit row names the source.
     let audited: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM audit_events WHERE action='fans.imported' AND metadata->>'source'=$1 AND metadata->>'imported_pending'='1'",

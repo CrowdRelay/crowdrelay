@@ -988,3 +988,43 @@ impl PostgresAcquisitionRepository {
         Ok(())
     }
 }
+
+/// Records a fan's arrival from a path that is not `POST /v1/fans` — a QR
+/// check-in, an import, a fanbase ingestion — in the same transaction that
+/// created the fan row.
+///
+/// `insert_acquisition_event` (above) only runs on the public signup path, so
+/// every other way into the fanbase landed in `fans` with no provenance row —
+/// and a channel ROI readout that counts acquisition events reports those
+/// arrivals as absent, not zero. The instrument has to precede the data, or
+/// the readout measures `public_signup` forever.
+///
+/// Caller contract: invoke only when the fan INSERT actually created a row —
+/// an `ON CONFLICT` hit means the fan already has provenance from wherever
+/// they first arrived, and a second row would fabricate a second arrival.
+/// `source` names the path (`concert_qr`, `fan_import:csv`, `fanbase_ingest`);
+/// `request_id` correlates to the operation that created the fan, the same
+/// role the signup request's correlation id plays on the signup path.
+pub(crate) async fn record_fan_arrival(
+    transaction: &mut Transaction<'_, Postgres>,
+    workspace_id: WorkspaceId,
+    fan_id: FanId,
+    source: &str,
+    request_id: &str,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        r#"
+        INSERT INTO fan_acquisition_events (
+            workspace_id, fan_id, source, request_id, occurred_at
+        )
+        VALUES ($1, $2, $3, $4, now())
+        "#,
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(fan_id.into_uuid())
+    .bind(source)
+    .bind(request_id)
+    .execute(&mut **transaction)
+    .await?;
+    Ok(())
+}

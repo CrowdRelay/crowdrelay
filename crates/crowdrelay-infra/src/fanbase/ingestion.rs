@@ -183,19 +183,30 @@ impl PostgresFanbaseRepository {
         }
         if !new_emails.is_empty() {
             let owned: Vec<String> = new_emails.iter().map(|value| (*value).to_owned()).collect();
+            // Same provenance contract as the import path: `RETURNING id`
+            // yields only newly-created fans, so a re-ingested address keeps
+            // its original arrival instead of gaining a fabricated second one.
             sqlx::query(
                 r#"
-                INSERT INTO fans (workspace_id, normalized_email, display_name, locale, status)
-                SELECT $1, candidate.email, candidate.display_name, candidate.locale, 'pending'
-                FROM unnest($2::text[], $3::text[], $4::text[])
-                    AS candidate(email, display_name, locale)
-                ON CONFLICT (workspace_id, normalized_email) DO NOTHING
+                WITH created AS (
+                    INSERT INTO fans (workspace_id, normalized_email, display_name, locale, status)
+                    SELECT $1, candidate.email, candidate.display_name, candidate.locale, 'pending'
+                    FROM unnest($2::text[], $3::text[], $4::text[])
+                        AS candidate(email, display_name, locale)
+                    ON CONFLICT (workspace_id, normalized_email) DO NOTHING
+                    RETURNING id
+                )
+                INSERT INTO fan_acquisition_events (
+                    workspace_id, fan_id, source, request_id, occurred_at
+                )
+                SELECT $1, id, 'fanbase_ingest', $5, now() FROM created
                 "#,
             )
             .bind(workspace_id)
             .bind(&owned)
             .bind(&new_names)
             .bind(&new_locales)
+            .bind(format!("fanbase_ingest:{run_id}"))
             .execute(&mut *tx)
             .await
             .map_err(Self::unexpected)?;

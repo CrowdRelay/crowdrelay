@@ -634,7 +634,28 @@ impl PostgresConcertQrRepository {
         };
 
         let (fan_id, status) = match inserted {
-            Some(row) => row,
+            Some((id, status)) => {
+                // The fan INSERT created a row — this scan is how they
+                // arrived. A conflict would mean they already have
+                // provenance from wherever they first showed up.
+                let request_id = command
+                    .request_id
+                    .clone()
+                    .unwrap_or_else(|| format!("concert_qr:{}", command.campaign_id));
+                crate::acquisition::record_fan_arrival(
+                    tx,
+                    WorkspaceId::from_uuid(command.workspace_id),
+                    FanId::from_uuid(id),
+                    "concert_qr",
+                    &request_id,
+                )
+                .await
+                .map_err(|error| {
+                    tracing::warn!(%error, "concert QR check_in arrival record failed");
+                    ConcertQrError::Unavailable
+                })?;
+                (id, status)
+            }
             None => match sqlx::query_as::<_, (Uuid, String)>(
                 "SELECT id, status FROM fans WHERE workspace_id = $1 AND normalized_email = $2 FOR UPDATE",
             )

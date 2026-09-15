@@ -176,19 +176,39 @@ impl PostgresFanImportRepository {
             new_locales.push(entry.locale.clone());
         }
         if !new_emails.is_empty() {
+            // Provenance rides the same statement: `RETURNING id` yields only
+            // the rows this INSERT created, so a repeat or an existing address
+            // never fabricates a second arrival. request_id is the batch's own
+            // correlation id — the same one its outbox rows carry — not a
+            // restatement of the source.
+            let origin = source.trim();
+            let arrival_source = if origin.is_empty() {
+                "fan_import".to_owned()
+            } else {
+                format!("fan_import:{origin}")
+            };
             sqlx::query(
                 r#"
-                INSERT INTO fans (workspace_id, normalized_email, display_name, locale, status)
-                SELECT $1, candidate.email, candidate.display_name, candidate.locale, 'pending'
-                FROM unnest($2::text[], $3::text[], $4::text[])
-                    AS candidate(email, display_name, locale)
-                ON CONFLICT (workspace_id, normalized_email) DO NOTHING
+                WITH created AS (
+                    INSERT INTO fans (workspace_id, normalized_email, display_name, locale, status)
+                    SELECT $1, candidate.email, candidate.display_name, candidate.locale, 'pending'
+                    FROM unnest($2::text[], $3::text[], $4::text[])
+                        AS candidate(email, display_name, locale)
+                    ON CONFLICT (workspace_id, normalized_email) DO NOTHING
+                    RETURNING id
+                )
+                INSERT INTO fan_acquisition_events (
+                    workspace_id, fan_id, source, request_id, occurred_at
+                )
+                SELECT $1, id, $5, $6, now() FROM created
                 "#,
             )
             .bind(workspace_id)
             .bind(&new_emails)
             .bind(&new_names)
             .bind(&new_locales)
+            .bind(arrival_source.chars().take(128).collect::<String>())
+            .bind(&batch_request_id)
             .execute(&mut *tx)
             .await
             .map_err(FanImportError::Database)?;
