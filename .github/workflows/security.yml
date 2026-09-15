@@ -40,7 +40,7 @@ jobs:
       # Prebuilt release binary instead of compiling cargo-audit from source;
       # the version pin and the action SHA together fix the supply chain.
       - name: Install pinned cargo-audit
-        uses: taiki-e/install-action@b6b84cf49ebfe0176417bdce007c624f0db37f20 # v2
+        uses: taiki-e/install-action@9534c84618278caac52cb373bb164ed464dbd8af # v2
         with:
           tool: cargo-audit@0.22.2
       - name: Audit reachable Rust dependencies
