@@ -10311,7 +10311,7 @@ components:
     StaffEventDashboard:
       type: object
       additionalProperties: false
-      required: [schema_version, slug, title, starts_at, interested_fans, paid_orders, paid_tickets, passes_issued, passes_claimed, passes_redeemed, lifecycle]
+      required: [schema_version, slug, title, starts_at, interested_fans, paid_orders, paid_tickets, passes_issued, passes_claimed, passes_redeemed, lifecycle, crossbill]
       properties:
         schema_version: { type: integer, const: 1 }
         slug: { type: string }
@@ -10325,6 +10325,26 @@ components:
         passes_claimed: { type: integer, format: int64, minimum: 0 }
         passes_redeemed: { type: integer, format: int64, minimum: 0 }
         lifecycle: { $ref: '#/components/schemas/ShowLifecycleView' }
+        crossbill: { $ref: '#/components/schemas/EventCrossbill' }
+    EventCrossbill:
+      type: object
+      additionalProperties: false
+      required: [state, acts, explanation]
+      description: >-
+        Whether band-to-band crossbill for this show runs automatically or is a
+        manual ask. Automated overlap needs an `event_crossbill` amplification
+        edge, which requires a second workspace inside a shared organization;
+        at one tenant that cannot exist, so the bill step surfaces as the
+        manual bill-mate ask carried by the partner relay brief.
+      properties:
+        state:
+          type: string
+          enum: [no_support_bill, manual_ask, automated_overlap]
+        acts:
+          type: array
+          description: Bill acts in bill order (position, then slug).
+          items: { type: string, maxLength: 160 }
+        explanation: { type: string }
     SynesthesiaLeaderboardEntry:
       type: object
       additionalProperties: false

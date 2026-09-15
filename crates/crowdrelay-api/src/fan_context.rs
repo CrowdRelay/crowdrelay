@@ -245,6 +245,43 @@ struct StaffEventDashboardResponse {
     #[serde(flatten)]
     dashboard: StaffEventDashboard,
     lifecycle: crowdrelay_domain::show_growth::ShowLifecycleView,
+    crossbill: EventCrossbill,
+}
+
+/// Whether band-to-band crossbill for this show runs automatically or is a
+/// manual ask. Automated overlap needs an `event_crossbill` amplification
+/// edge, and edges require a second workspace inside a shared organization —
+/// at one tenant that cannot exist, so the bill step must surface as the
+/// manual bill-mate ask the partner relay brief already carries.
+#[derive(Debug, Serialize)]
+struct EventCrossbill {
+    state: &'static str,
+    acts: Vec<String>,
+    explanation: &'static str,
+}
+
+fn crossbill_state(acts: Vec<String>, automated_edge_active: bool) -> EventCrossbill {
+    let (state, explanation) = if acts.len() <= 1 {
+        (
+            "no_support_bill",
+            "The bill has no second act to crossbill with.",
+        )
+    } else if automated_edge_active {
+        (
+            "automated_overlap",
+            "An active event-crossbill consent edge exists; audience overlap amplification applies to this show.",
+        )
+    } else {
+        (
+            "manual_ask",
+            "Band-to-band overlap needs a second workspace in a shared organization. Until then the crossbill is a manual ask — the partner relay brief carries the bill-mate cross-post step.",
+        )
+    };
+    EventCrossbill {
+        state,
+        acts,
+        explanation,
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -773,7 +810,7 @@ pub async fn staff_event_dashboard(
         "#,
     )
     .bind(workspace_id)
-    .bind(slug)
+    .bind(&slug)
     .bind(i32::try_from(SCHEMA_VERSION).unwrap_or(1))
     .fetch_optional(state.ticketing.pool())
     .await;
@@ -785,12 +822,18 @@ pub async fn staff_event_dashboard(
                 OffsetDateTime::now_utc(),
                 crowdrelay_domain::show_growth::ShowGrowthPolicy::default(),
             );
+            let crossbill = match event_crossbill(state.ticketing.pool(), workspace_id, &slug).await
+            {
+                Ok(crossbill) => crossbill,
+                Err(error) => return ContextError::sqlx(error).response(request_id_value),
+            };
             (
                 StatusCode::OK,
                 [(CACHE_CONTROL, PRIVATE_NO_STORE)],
                 Json(StaffEventDashboardResponse {
                     dashboard,
                     lifecycle,
+                    crossbill,
                 }),
             )
                 .into_response()
@@ -798,6 +841,41 @@ pub async fn staff_event_dashboard(
         Ok(None) => ContextError::NotFound.response(request_id_value),
         Err(error) => ContextError::sqlx(error).response(request_id_value),
     }
+}
+
+async fn event_crossbill(
+    pool: &sqlx::PgPool,
+    workspace_id: Uuid,
+    event_slug: &str,
+) -> Result<EventCrossbill, sqlx::Error> {
+    let acts = sqlx::query_scalar::<_, String>(
+        r#"
+        SELECT act.act_name
+        FROM event_acts AS act
+        INNER JOIN events AS event
+          ON event.workspace_id = act.workspace_id AND event.id = act.event_id
+        WHERE act.workspace_id = $1 AND event.slug = $2
+        ORDER BY act.position, act.act_slug
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(event_slug)
+    .fetch_all(pool)
+    .await?;
+    let automated_edge_active = sqlx::query_scalar::<_, bool>(
+        r#"
+        SELECT EXISTS(
+            SELECT 1 FROM amplification_consents AS edge
+            WHERE (edge.from_workspace_id = $1 OR edge.to_workspace_id = $1)
+              AND edge.purpose = 'event_crossbill'
+              AND edge.status = 'active'
+        )
+        "#,
+    )
+    .bind(workspace_id)
+    .fetch_one(pool)
+    .await?;
+    Ok(crossbill_state(acts, automated_edge_active))
 }
 
 #[cfg(test)]
@@ -809,5 +887,24 @@ mod tests {
         assert!(PRIVATE_REVALIDATE.contains("private"));
         assert!(PRIVATE_REVALIDATE.contains("stale-if-error=600"));
         assert_eq!(SCHEMA_VERSION, 1);
+    }
+
+    #[test]
+    fn crossbill_states_are_honest() {
+        assert_eq!(
+            crossbill_state(vec!["headliner".to_string()], false).state,
+            "no_support_bill"
+        );
+        assert_eq!(
+            crossbill_state(vec!["headliner".to_string()], true).state,
+            "no_support_bill"
+        );
+        let manual = crossbill_state(vec!["headliner".to_string(), "support".to_string()], false);
+        assert_eq!(manual.state, "manual_ask");
+        assert!(manual.explanation.contains("manual ask"));
+        assert_eq!(
+            crossbill_state(vec!["headliner".to_string(), "support".to_string()], true).state,
+            "automated_overlap"
+        );
     }
 }

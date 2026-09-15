@@ -188,8 +188,12 @@ pub(in crate::autopilot) async fn execute_show_growth(
                 "no_reciprocal_commitment_outside_configured_authority"
             ],
             "receipt_contract": {
+                "metadata": ["activations", "manual_steps", "skipped_with_reason"],
                 "activation_fields": ["activation_kind", "destination_key", "status", "reply_received"],
-                "reply_received_semantics": "true_only_after_an_explicit_inbound_human_reply"
+                "reply_received_semantics": "true_only_after_an_explicit_inbound_human_reply",
+                // The bill-mate cross-post is the crossbill step: a skipped
+                // receipt must name why, never drop it without a trace.
+                "manual_steps_must_include": ["destination", "url", "what_to_do", "why_it_matters"]
             }
         }),
         ShowGrowthLever::GrassrootsSceneRelay => json!({
@@ -283,6 +287,10 @@ pub(in crate::autopilot) async fn execute_show_growth(
             "city_slug": event.2,
             "venue": event.3,
             "ticket_url": event.4,
+            // The announced bill in play order — the partner relay's
+            // `support_or_bill_cross_post` ask names these acts, so a generic
+            // "cross-post with the bill" instruction is not enough.
+            "acts": event.6.clone().unwrap_or_else(|| json!([])),
             "lever": lever,
             "template_key": template_key,
             "constraints": constraints,
