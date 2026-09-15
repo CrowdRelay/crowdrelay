@@ -253,17 +253,13 @@ async fn enter_reward_draw_inner(
         return Err(SynesthesiaError::Conflict);
     }
 
-    let fan_id = match sqlx::query_as::<_, (Uuid, String)>(
-        r#"
-        SELECT id, status
-        FROM fans
-        WHERE workspace_id = $1 AND normalized_email = $2
-        FOR UPDATE
-        "#,
+    // The identity spine resolves first: a merged-away address must attach
+    // the run and entry to the surviving fan, not the tombstone.
+    let fan_id = match crowdrelay_infra::fan_identity::resolve_fan_for_email(
+        transaction,
+        workspace_id,
+        normalized_email,
     )
-    .bind(workspace_id)
-    .bind(normalized_email)
-    .fetch_optional(&mut **transaction)
     .await
     .map_err(SynesthesiaError::sqlx)?
     {

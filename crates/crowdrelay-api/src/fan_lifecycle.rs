@@ -170,29 +170,25 @@ pub async fn request_fan_access(
                 .into_response();
         }
     };
-    let row = sqlx::query_as::<_, (uuid::Uuid, String, Option<String>, Option<String>)>(
-        r#"
-        SELECT id, status, display_name, locale
-        FROM fans
-        WHERE workspace_id = $1 AND normalized_email = $2
-        FOR UPDATE
-        "#,
+    // The identity spine resolves first so a merged-away address reaches
+    // the surviving fan — a tombstone must never answer (or 500) here.
+    let resolved = crowdrelay_infra::fan_identity::resolve_fan_for_email(
+        &mut transaction,
+        state.fan_lifecycle.workspace_id.into_uuid(),
+        email.as_str(),
     )
-    .bind(state.fan_lifecycle.workspace_id.into_uuid())
-    .bind(email.as_str())
-    .fetch_optional(&mut *transaction)
     .await;
-    let row = match row {
-        Ok(row) => row,
+    let resolved = match resolved {
+        Ok(resolved) => resolved,
         Err(error) => {
-            tracing::warn!(%error, "could not load fan for access request");
+            tracing::warn!(%error, "could not resolve fan for access request");
             return Problem::service_unavailable(request_id_value)
                 .private()
                 .into_response();
         }
     };
 
-    let Some((fan_id, status, display_name, stored_locale)) = row else {
+    let Some((fan_id, status)) = resolved else {
         if let Err(error) = transaction.commit().await {
             tracing::warn!(%error, "could not finish neutral fan access request");
             return Problem::service_unavailable(request_id_value)
@@ -205,6 +201,33 @@ pub async fn request_fan_access(
             Json(FanAccessResponse { accepted: true }),
         )
             .into_response();
+    };
+
+    let profile = sqlx::query_as::<_, (Option<String>, Option<String>)>(
+        r#"
+        SELECT display_name, locale
+        FROM fans
+        WHERE workspace_id = $1 AND id = $2
+        "#,
+    )
+    .bind(state.fan_lifecycle.workspace_id.into_uuid())
+    .bind(fan_id)
+    .fetch_optional(&mut *transaction)
+    .await;
+    let (display_name, stored_locale) = match profile {
+        Ok(Some(profile)) => profile,
+        Ok(None) => {
+            tracing::error!(%fan_id, "resolved fan row vanished during access request");
+            return Problem::internal(request_id_value)
+                .private()
+                .into_response();
+        }
+        Err(error) => {
+            tracing::warn!(%error, "could not load fan profile for access request");
+            return Problem::service_unavailable(request_id_value)
+                .private()
+                .into_response();
+        }
     };
 
     let (purpose, event_type, token_field) = match status.as_str() {

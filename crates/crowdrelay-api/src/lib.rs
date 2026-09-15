@@ -75,6 +75,7 @@ mod ecosystem;
 mod event_copy;
 mod events;
 mod fan_context;
+mod fan_identity;
 mod fan_lifecycle;
 mod fan_privacy;
 mod fanbase;

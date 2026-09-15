@@ -495,6 +495,9 @@ pub enum FanStatus {
     Unsubscribed,
     /// Administratively suppressed.
     Suppressed,
+    /// Merged into another fan — the record is a tombstone kept for
+    /// history and audit; the person is the survivor. Never contactable.
+    Merged,
 }
 
 /// Email action associated with a fan signup response.

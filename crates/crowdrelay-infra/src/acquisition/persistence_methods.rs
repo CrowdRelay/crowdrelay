@@ -175,6 +175,24 @@ impl PostgresAcquisitionRepository {
         workspace_id: WorkspaceId,
         signup: &FanSignup,
     ) -> Result<FanUpsert, StoreError> {
+        // The identity spine resolves before any insert: an address a merge
+        // moved belongs to the survivor, so the signup must land on them
+        // rather than resurrect the tombstone.
+        if let Some((resolved_id, resolved_status)) = crate::fan_identity::resolve_fan_for_email(
+            transaction,
+            workspace_id.into_uuid(),
+            signup.email().as_str(),
+        )
+        .await
+        .map_err(StoreError::from_sqlx)?
+        {
+            let existing = StoredFan {
+                id: FanId::from_uuid(resolved_id),
+                status: parse_stored_status(&resolved_status)?,
+            };
+            return self.existing_fan_upsert(transaction, workspace_id, existing, signup).await;
+        }
+
         let inserted = sqlx::query_as::<_, FanRow>(
             r#"
             INSERT INTO fans (
@@ -228,7 +246,43 @@ impl PostgresAcquisitionRepository {
         .await
         .map_err(StoreError::from_sqlx)?;
         let existing: StoredFan = existing.try_into()?;
+        self.existing_fan_upsert(transaction, workspace_id, existing, signup).await
+    }
+
+    /// The status dispatch for a signup that lands on an existing fan —
+    /// reached either through the identity spine or the email upsert's
+    /// conflict fallback. A tombstone never revives: it follows the merge to
+    /// the survivor instead.
+    async fn existing_fan_upsert(
+        &self,
+        transaction: &mut Transaction<'_, Postgres>,
+        workspace_id: WorkspaceId,
+        existing: StoredFan,
+        signup: &FanSignup,
+    ) -> Result<FanUpsert, StoreError> {
         if existing.status == FanStatus::Suppressed {
+            return Err(StoreError::Conflict);
+        }
+        if existing.status == FanStatus::Merged {
+            // Rare race: the row merged between resolution and this lock.
+            // Follow the merge rather than resurrect the tombstone.
+            if let Some((id, status)) = crate::fan_identity::resolve_fan_for_email(
+                transaction,
+                workspace_id.into_uuid(),
+                signup.email().as_str(),
+            )
+            .await
+            .map_err(StoreError::from_sqlx)?
+            {
+                let resolved = StoredFan {
+                    id: FanId::from_uuid(id),
+                    status: parse_stored_status(&status)?,
+                };
+                return Box::pin(
+                    self.existing_fan_upsert(transaction, workspace_id, resolved, signup),
+                )
+                .await;
+            }
             return Err(StoreError::Conflict);
         }
         if existing.status == FanStatus::Active {

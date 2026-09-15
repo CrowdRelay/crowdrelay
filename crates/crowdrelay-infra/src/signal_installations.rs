@@ -99,5 +99,88 @@ pub async fn link_installation_to_fan(
     .execute(pool)
     .await?
     .rows_affected();
+
+    // The install's owner can differ from the fan registering right now —
+    // a device handed to somebody else keeps its first identification. That
+    // second presentation is itself a merge candidate for a human to weigh.
+    if linked == 0 {
+        match sqlx::query_scalar::<_, uuid::Uuid>(
+            "SELECT fan_id FROM signal_installations \
+             WHERE workspace_id = $1 AND installation_id = $2 AND fan_id <> $3",
+        )
+        .bind(workspace_id.into_uuid())
+        .bind(installation_id)
+        .bind(fan_id)
+        .fetch_optional(pool)
+        .await
+        {
+            Ok(Some(other)) => {
+                if let Err(error) = crate::fan_identity::record_merge_candidate(
+                    pool,
+                    workspace_id.into_uuid(),
+                    other,
+                    fan_id,
+                    serde_json::json!({
+                        "kind": "shared_signal_install",
+                        "installation_id": installation_id,
+                        "presentation": "second_fan",
+                    }),
+                )
+                .await
+                {
+                    tracing::warn!(%error, "could not record shared-install merge candidate");
+                }
+            }
+            Ok(None) => {}
+            Err(error) => {
+                tracing::warn!(%error, "could not read install owner for merge candidate");
+            }
+        }
+    }
+
+    // Identity spine, §4e-5: an identified install is a verified device
+    // identifier. It attaches to the install's owner — the first fan it
+    // identified as, matching the `fan_id IS NULL` rule above — and when the
+    // identifier is already owned by a different fan the same device just
+    // presented as two people: a merge candidate, never an automatic merge.
+    let owner = sqlx::query_scalar::<_, uuid::Uuid>(
+        "SELECT fan_id FROM signal_installations WHERE workspace_id = $1 AND installation_id = $2",
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(installation_id)
+    .fetch_optional(pool)
+    .await?;
+    if let Some(owner) = owner {
+        let identifier_owner = sqlx::query_scalar::<_, uuid::Uuid>(
+            "WITH ins AS ( \
+                 INSERT INTO fan_identifiers (workspace_id, fan_id, kind, value, source, verified_at) \
+                 VALUES ($1, $2, 'signal_install', $3, 'push_endpoint_registration', now()) \
+                 ON CONFLICT (workspace_id, kind, value) DO NOTHING RETURNING fan_id) \
+             SELECT fan_id FROM ins UNION ALL \
+             SELECT fan_id FROM fan_identifiers \
+             WHERE workspace_id = $1 AND kind = 'signal_install' AND value = $3 \
+             LIMIT 1",
+        )
+        .bind(workspace_id.into_uuid())
+        .bind(owner)
+        .bind(installation_id)
+        .fetch_one(pool)
+        .await?;
+        if identifier_owner != owner
+            && let Err(error) = crate::fan_identity::record_merge_candidate(
+                pool,
+                workspace_id.into_uuid(),
+                owner,
+                identifier_owner,
+                serde_json::json!({
+                    "kind": "shared_signal_install",
+                    "installation_id": installation_id,
+                }),
+            )
+            .await
+        {
+            tracing::warn!(%error, "could not record shared-install merge candidate");
+        }
+    }
     Ok(linked > 0)
 }

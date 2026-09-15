@@ -467,21 +467,46 @@ async fn process_paid_order(
         return Err(TicketingError::Conflict);
     }
 
-    let fan_id = sqlx::query_scalar::<_, Uuid>(
-        r#"
-        INSERT INTO fans (workspace_id, normalized_email, display_name, status)
-        VALUES ($1, $2, $3, 'active')
-        ON CONFLICT (workspace_id, normalized_email) DO UPDATE
-        SET display_name = COALESCE(fans.display_name, EXCLUDED.display_name)
-        RETURNING id
-        "#,
+    // The identity spine resolves first: a buyer address that was merged
+    // away must attach the paid passes to the surviving fan, never to the
+    // tombstone that still holds the email.
+    let resolved_fan = crowdrelay_infra::fan_identity::resolve_fan_for_email(
+        transaction,
+        state.workspace_id.into_uuid(),
+        &order.buyer_email,
     )
-    .bind(state.workspace_id.into_uuid())
-    .bind(&order.buyer_email)
-    .bind(&order.buyer_name)
-    .fetch_one(&mut **transaction)
     .await
     .map_err(TicketingError::sqlx)?;
+    let fan_id = match resolved_fan {
+        Some((fan_id, _status)) => {
+            sqlx::query(
+                "UPDATE fans SET display_name = COALESCE(display_name, $3) \
+                 WHERE workspace_id = $1 AND id = $2",
+            )
+            .bind(state.workspace_id.into_uuid())
+            .bind(fan_id)
+            .bind(&order.buyer_name)
+            .execute(&mut **transaction)
+            .await
+            .map_err(TicketingError::sqlx)?;
+            fan_id
+        }
+        None => sqlx::query_scalar::<_, Uuid>(
+            r#"
+            INSERT INTO fans (workspace_id, normalized_email, display_name, status)
+            VALUES ($1, $2, $3, 'active')
+            ON CONFLICT (workspace_id, normalized_email) DO UPDATE
+            SET display_name = COALESCE(fans.display_name, EXCLUDED.display_name)
+            RETURNING id
+            "#,
+        )
+        .bind(state.workspace_id.into_uuid())
+        .bind(&order.buyer_email)
+        .bind(&order.buyer_name)
+        .fetch_one(&mut **transaction)
+        .await
+        .map_err(TicketingError::sqlx)?,
+    };
 
     let claim_expires_at = order
         .ends_at

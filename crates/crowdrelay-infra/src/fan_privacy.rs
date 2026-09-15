@@ -182,8 +182,13 @@ impl PostgresFanPrivacyRepository {
         .map_err(Self::unexpected)?;
 
         // Kill every credential/contact surface before changing the canonical
-        // identity. Push deliveries cascade from endpoints.
+        // identity. Push deliveries cascade from endpoints. The identity
+        // spine holds the erased address and device link verbatim, so it
+        // goes too — otherwise the erased person could never re-register
+        // under their own address and staff views would keep serving PII.
         for statement in [
+            "DELETE FROM fan_identifiers WHERE workspace_id = $1 AND fan_id = $2",
+            "UPDATE signal_installations SET fan_id = NULL WHERE workspace_id = $1 AND fan_id = $2",
             "DELETE FROM fan_push_endpoints WHERE workspace_id = $1 AND fan_id = $2",
             "DELETE FROM fan_action_tokens WHERE workspace_id = $1 AND fan_id = $2",
             "DELETE FROM fan_sessions WHERE workspace_id = $1 AND fan_id = $2",

@@ -67,22 +67,28 @@ impl PostgresAdmissionRepository {
         .map_err(AdmissionStoreError::sqlx)?
         .ok_or(AdmissionStoreError::NotFound)?;
 
-        let fan = sqlx::query_as::<_, FanRow>(
-            r#"
-            SELECT id, normalized_email, display_name
-            FROM fans
-            WHERE workspace_id = $1
-              AND normalized_email = $2
-              AND status = 'active'
-            FOR SHARE
-            "#,
+        // The identity spine resolves first: a comp issued to a merged-away
+        // address belongs to the surviving fan, and the survivor's canonical
+        // row supplies the holder identity.
+        let resolved = crate::fan_identity::resolve_fan_for_email(
+            &mut transaction,
+            workspace_id.into_uuid(),
+            command.fan_email.as_str(),
         )
-        .bind(workspace_id.into_uuid())
-        .bind(command.fan_email.as_str())
-        .fetch_optional(&mut *transaction)
         .await
-        .map_err(AdmissionStoreError::sqlx)?
-        .ok_or(AdmissionStoreError::NotFound)?;
+        .map_err(AdmissionStoreError::sqlx)?;
+        let fan = match resolved {
+            Some((fan_id, status)) if status == "active" => sqlx::query_as::<_, FanRow>(
+                "SELECT id, normalized_email, display_name FROM fans \
+                 WHERE workspace_id = $1 AND id = $2",
+            )
+            .bind(workspace_id.into_uuid())
+            .bind(fan_id)
+            .fetch_one(&mut *transaction)
+            .await
+            .map_err(AdmissionStoreError::sqlx)?,
+            _ => return Err(AdmissionStoreError::NotFound),
+        };
 
         let duplicate = sqlx::query_scalar::<_, bool>(
             r#"

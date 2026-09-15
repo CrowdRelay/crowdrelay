@@ -110,14 +110,25 @@ impl PostgresFanbaseRepository {
             return Ok(counts);
         }
 
-        // ── 1. Current status of every address, locked in a stable order ──
+        // ── 1. Current status of every address, resolved through the spine ──
+        //
+        // `fan_identifiers` wins so a merged-away address answers the
+        // surviving fan's id/status; the fans row is the fallback for
+        // records the spine does not cover. All resolved fans are locked
+        // in a stable order before anything is written.
         let owned_emails: Vec<String> = emails.iter().map(|value| (*value).to_owned()).collect();
-        let existing: Vec<(String, String)> = sqlx::query_as(
+        let existing: Vec<(String, Uuid, String)> = sqlx::query_as(
             r#"
-            SELECT normalized_email, status FROM fans
-            WHERE workspace_id = $1 AND normalized_email = ANY($2)
-            ORDER BY normalized_email
-            FOR UPDATE
+            SELECT i.value, f.id, f.status FROM fan_identifiers i
+            JOIN fans f ON f.workspace_id = i.workspace_id AND f.id = i.fan_id
+            WHERE i.workspace_id = $1 AND i.kind = 'email' AND i.value = ANY($2)
+            UNION ALL
+            SELECT f.normalized_email, f.id, f.status FROM fans f
+            WHERE f.workspace_id = $1 AND f.normalized_email = ANY($2)
+              AND NOT EXISTS (
+                  SELECT 1 FROM fan_identifiers i
+                  WHERE i.workspace_id = $1 AND i.kind = 'email'
+                    AND i.value = f.normalized_email)
             "#,
         )
         .bind(workspace_id)
@@ -125,9 +136,25 @@ impl PostgresFanbaseRepository {
         .fetch_all(&mut *tx)
         .await
         .map_err(Self::unexpected)?;
+        let resolved_ids: Vec<Uuid> = existing.iter().map(|(_, id, _)| *id).collect();
+        if !resolved_ids.is_empty() {
+            sqlx::query(
+                "SELECT id FROM fans WHERE workspace_id = $1 AND id = ANY($2) \
+                 ORDER BY id FOR UPDATE",
+            )
+            .bind(workspace_id)
+            .bind(&resolved_ids)
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(Self::unexpected)?;
+        }
         let status_of: HashMap<&str, &str> = existing
             .iter()
-            .map(|(email, status)| (email.as_str(), status.as_str()))
+            .map(|(email, _, status)| (email.as_str(), status.as_str()))
+            .collect();
+        let id_of: HashMap<&str, Uuid> = existing
+            .iter()
+            .map(|(email, id, _)| (email.as_str(), *id))
             .collect();
 
         let action_of: HashMap<&str, AdmissionAction> = emails
@@ -175,19 +202,39 @@ impl PostgresFanbaseRepository {
         }
 
         // ── 3. Resolve every address to its fan ───────────────────────────
-        let resolved: Vec<(String, Uuid)> = sqlx::query_as(
-            "SELECT normalized_email, id FROM fans \
-             WHERE workspace_id = $1 AND normalized_email = ANY($2)",
-        )
-        .bind(workspace_id)
-        .bind(&owned_emails)
-        .fetch_all(&mut *tx)
-        .await
-        .map_err(Self::unexpected)?;
-        let fan_of: HashMap<&str, Uuid> = resolved
-            .iter()
-            .map(|(email, id)| (email.as_str(), *id))
-            .collect();
+        //
+        // `id_of` already carries the spine resolution from phase 1 (merged
+        // addresses point at the survivor). Only addresses it does not
+        // cover — the rows phase 2 just inserted — need a fresh lookup.
+        let mut fan_of: HashMap<&str, Uuid> = HashMap::new();
+        let mut unresolved: Vec<String> = Vec::new();
+        for email in &emails {
+            match id_of.get(*email) {
+                Some(id) => {
+                    fan_of.insert(*email, *id);
+                }
+                None => unresolved.push((*email).to_owned()),
+            }
+        }
+        if !unresolved.is_empty() {
+            let resolved: Vec<(String, Uuid)> = sqlx::query_as(
+                "SELECT normalized_email, id FROM fans \
+                 WHERE workspace_id = $1 AND normalized_email = ANY($2)",
+            )
+            .bind(workspace_id)
+            .bind(&unresolved)
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(Self::unexpected)?;
+            for (email, id) in resolved {
+                if let Some(key) = emails
+                    .iter()
+                    .find(|candidate| **candidate == email.as_str())
+                {
+                    fan_of.insert(key, id);
+                }
+            }
+        }
 
         // ── 4. Count, and attribute membership per external id ────────────
         let mut member_fans: Vec<Uuid> = Vec::new();

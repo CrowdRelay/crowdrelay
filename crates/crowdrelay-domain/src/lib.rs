@@ -72,6 +72,7 @@ pub mod deliverability;
 pub mod events;
 pub mod experimentation;
 pub mod fan_activation;
+pub mod fan_identity;
 pub mod fan_lifecycle;
 pub mod fanbase;
 pub mod free_reach;

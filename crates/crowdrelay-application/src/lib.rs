@@ -33,6 +33,7 @@ pub mod commerce_inventory;
 pub mod concert_qr;
 pub mod ecosystem;
 pub mod events;
+pub mod fan_identity;
 pub mod fan_lifecycle;
 pub mod ports;
 pub mod referrals;
@@ -96,6 +97,10 @@ pub use events::{
     RegisterEventInterest, RegisterEventInterestCommand, RegisterEventInterestCommandArgs,
     RegisterEventInterestCommandError, ReplaceEventActs, ReplaceEventActsCommand,
     SetEventCounterparty, SetEventCounterpartyCommand,
+};
+pub use fan_identity::{
+    DismissMergeCandidateCommand, FanIdentifierView, FanIdentity, FanIdentityError,
+    FanIdentityRepository, FanMergeView, MergeCandidateView, MergeFansCommand, UnmergeFanCommand,
 };
 pub use fan_lifecycle::{
     ConfirmFan, ConfirmFanCommand, FanLifecycleError, FanLifecycleRepository, UnsubscribeFan,

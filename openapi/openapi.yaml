@@ -5128,6 +5128,159 @@ paths:
         '409': *id004
         '422': *id004
         '503': *id004
+  /staff/fan-merges/candidates:
+    get:
+      operationId: listStaffFanMergeCandidates
+      summary: List fan identity merge candidates awaiting a human decision
+      description: >-
+        Signals that two fan records are probably one person — a ticket
+        buyer email that belongs to a different fan than the event's
+        checker, or one Signal installation that identified as two fans.
+        Candidates never merge themselves; a human decides via
+        POST /staff/fan-merges or dismisses the pair.
+      security:
+      - staffBearer: []
+      parameters:
+      - in: query
+        name: status
+        schema:
+          type: string
+          enum: [pending, merged, dismissed]
+          default: pending
+      - in: query
+        name: limit
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 200
+          default: 50
+      responses:
+        '200':
+          description: Candidates, newest first.
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/PrivateNoStore'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FanMergeCandidateList'
+        '400': *id004
+        '401': *id004
+        '503': *id004
+  /staff/fan-merges/candidates/{candidate_id}/dismiss:
+    post:
+      operationId: dismissStaffFanMergeCandidate
+      summary: Dismiss a merge candidate — a human decided these are two people
+      security:
+      - staffBearer: []
+      parameters:
+      - in: path
+        name: candidate_id
+        required: true
+        schema:
+          type: string
+          format: uuid
+      responses:
+        '204':
+          description: Candidate dismissed.
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/PrivateNoStore'
+        '401': *id004
+        '404': *id004
+        '409': *id004
+        '503': *id004
+  /staff/fan-merges:
+    post:
+      operationId: mergeStaffFans
+      summary: Merge one fan into another — explicit and reversible
+      description: >-
+        Tombstones `merged_fan_id` into `survivor_fan_id`. Movable rows
+        re-point to the survivor, append-only history stays behind, the
+        merged fan's verified identifiers follow so its addresses still
+        reach the person, and every moved row is recorded for an exact
+        unmerge. A wrong merge is a privacy incident; reversal is
+        POST /staff/fans/{fan_id}/unmerge.
+      security:
+      - staffBearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MergeFansRequest'
+      responses:
+        '200':
+          description: The merge audit record — what moved and what stayed.
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/PrivateNoStore'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FanMerge'
+        '400': *id004
+        '401': *id004
+        '404': *id004
+        '409': *id004
+        '503': *id004
+  /staff/fans/{fan_id}/unmerge:
+    post:
+      operationId: unmergeStaffFan
+      summary: Reverse a fan's latest merge exactly
+      description: >-
+        Re-points every row the merge recorded as moved back to the fan and
+        restores its prior status. Mirrored consent history stays — it is
+        append-only evidence of the state the survivor held meanwhile.
+      security:
+      - staffBearer: []
+      parameters:
+      - in: path
+        name: fan_id
+        required: true
+        schema:
+          type: string
+          format: uuid
+      responses:
+        '200':
+          description: The merge record with `unmergedAt` now set.
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/PrivateNoStore'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FanMerge'
+        '401': *id004
+        '404': *id004
+        '409': *id004
+        '503': *id004
+  /staff/fans/{fan_id}/identity:
+    get:
+      operationId: getStaffFanIdentity
+      summary: A fan's verified identifiers and merge history
+      security:
+      - staffBearer: []
+      parameters:
+      - in: path
+        name: fan_id
+        required: true
+        schema:
+          type: string
+          format: uuid
+      responses:
+        '200':
+          description: Identifiers and merges for the merge-review surface.
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/PrivateNoStore'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FanIdentityDetail'
+        '401': *id004
+        '404': *id004
+        '503': *id004
   /admin/event-qr/overview:
     get:
       operationId: getConcertQrOverview
@@ -14405,6 +14558,150 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/ConcertQrCampaign'
+    FanMergeCandidateList:
+      type: object
+      additionalProperties: false
+      required:
+      - candidates
+      properties:
+        candidates:
+          type: array
+          items:
+            $ref: '#/components/schemas/FanMergeCandidate'
+    FanMergeCandidate:
+      type: object
+      additionalProperties: false
+      required:
+      - id
+      - fanIdA
+      - fanIdB
+      - evidenceKind
+      - evidence
+      - createdAt
+      properties:
+        id:
+          type: string
+          format: uuid
+        fanIdA:
+          type: string
+          format: uuid
+          description: Canonically the smaller fan id of the pair.
+        fanIdB:
+          type: string
+          format: uuid
+        evidenceKind:
+          type: string
+          enum: [order_email_vs_checkin, shared_signal_install]
+        evidence:
+          type: object
+          description: The signal's detail — e.g. the event both fans touch.
+        createdAt:
+          type: string
+          format: date-time
+    MergeFansRequest:
+      type: object
+      additionalProperties: false
+      required:
+      - survivor_fan_id
+      - merged_fan_id
+      properties:
+        survivor_fan_id:
+          type: string
+          format: uuid
+          description: The fan that keeps existing and absorbs the other.
+        merged_fan_id:
+          type: string
+          format: uuid
+          description: The fan tombstoned into the survivor.
+        reason:
+          type:
+          - string
+          - 'null'
+          description: The human's reason for the merge, recorded in the audit.
+          maxLength: 500
+    FanMerge:
+      type: object
+      additionalProperties: false
+      required:
+      - id
+      - survivorFanId
+      - mergedFanId
+      - movedCounts
+      - retainedCounts
+      - consentsMirrored
+      - mergedAt
+      - unmergedAt
+      properties:
+        id:
+          type: string
+          format: uuid
+        survivorFanId:
+          type: string
+          format: uuid
+        mergedFanId:
+          type: string
+          format: uuid
+        movedCounts:
+          type: object
+          additionalProperties:
+            type: integer
+          description: Rows re-pointed to the survivor, per table.
+        retainedCounts:
+          type: object
+          additionalProperties:
+            type: integer
+          description: >-
+            Rows deliberately left on the merged fan, per table — unique
+            collisions and append-only history the merge must not rewrite.
+        consentsMirrored:
+          type: integer
+          description: Consent purposes the survivor had never decided, copied from the merged fan's latest decision.
+        mergedAt:
+          type: string
+          format: date-time
+        unmergedAt:
+          type:
+          - string
+          - 'null'
+          format: date-time
+    FanIdentifier:
+      type: object
+      additionalProperties: false
+      required:
+      - kind
+      - value
+      - source
+      - verifiedAt
+      properties:
+        kind:
+          type: string
+          enum: [email, signal_install]
+        value:
+          type: string
+        source:
+          type: string
+        verifiedAt:
+          type: string
+          format: date-time
+    FanIdentityDetail:
+      type: object
+      additionalProperties: false
+      required:
+      - fanId
+      - identifiers
+      - merges
+      properties:
+        fanId:
+          type: string
+          format: uuid
+        identifiers:
+          type: array
+          items:
+            $ref: '#/components/schemas/FanIdentifier'
+        merges:
+          type: array
+          items:
+            $ref: '#/components/schemas/FanMerge'
     CreateConcertQrCampaignRequest:
       type: object
       additionalProperties: false

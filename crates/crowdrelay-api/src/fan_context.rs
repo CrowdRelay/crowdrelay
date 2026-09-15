@@ -375,7 +375,11 @@ pub async fn fan_home(State(state): State<crate::AppState>, headers: HeaderMap) 
                     AND paid_sale.id = order_row.ticket_sale_id
                    WHERE order_row.workspace_id = event.workspace_id
                      AND paid_sale.event_id = event.id
-                     AND order_row.buyer_email = $3
+                     AND order_row.buyer_email = ANY(
+                         SELECT i.value FROM fan_identifiers AS i
+                         WHERE i.workspace_id = event.workspace_id
+                           AND i.fan_id = $2 AND i.kind = 'email'
+                         UNION ALL SELECT $3)
                      AND order_row.status IN ('paid', 'partially_refunded')
                ) AS has_paid_ticket,
                EXISTS(
@@ -537,7 +541,10 @@ pub async fn fan_home(State(state): State<crate::AppState>, headers: HeaderMap) 
           (SELECT COUNT(*)::bigint FROM admission_passes
              WHERE workspace_id = $1 AND fan_id = $2 AND status IN ('issued', 'claimed')) AS active_passes,
           (SELECT COUNT(*)::bigint FROM ticket_orders
-             WHERE workspace_id = $1 AND buyer_email = $3
+             WHERE workspace_id = $1 AND buyer_email = ANY(
+                 SELECT i.value FROM fan_identifiers AS i
+                 WHERE i.workspace_id = $1 AND i.fan_id = $2 AND i.kind = 'email'
+                 UNION ALL SELECT $3)
                AND status IN ('paid', 'partially_refunded')) AS paid_orders,
           (SELECT COUNT(*)::bigint
              FROM area_claims AS claim
@@ -672,7 +679,11 @@ pub async fn fan_event_context(
                    ON item.workspace_id = order_row.workspace_id AND item.ticket_order_id = order_row.id
                  WHERE order_row.workspace_id = event.workspace_id
                    AND sale.event_id = event.id
-                   AND order_row.buyer_email = $5
+                   AND order_row.buyer_email = ANY(
+                       SELECT i.value FROM fan_identifiers AS i
+                       WHERE i.workspace_id = event.workspace_id
+                         AND i.fan_id = $2 AND i.kind = 'email'
+                       UNION ALL SELECT $5)
                    AND order_row.status IN ('paid', 'partially_refunded')
                ), 0)::bigint AS paid_ticket_quantity,
                EXISTS(
@@ -688,7 +699,7 @@ pub async fn fan_event_context(
                     OR EXISTS(
                       SELECT 1 FROM ticket_orders AS o
                       INNER JOIN ticket_sales AS s ON s.workspace_id=o.workspace_id AND s.id=o.ticket_sale_id
-                      WHERE o.workspace_id=event.workspace_id AND s.event_id=event.id AND o.buyer_email=$5 AND o.status IN ('paid','partially_refunded')
+                      WHERE o.workspace_id=event.workspace_id AND s.event_id=event.id AND o.buyer_email=ANY(SELECT i.value FROM fan_identifiers AS i WHERE i.workspace_id=event.workspace_id AND i.fan_id=$2 AND i.kind='email' UNION ALL SELECT $5) AND o.status IN ('paid','partially_refunded')
                     )
                   ) THEN 'open_wallet'
                  WHEN event.starts_at <= now()

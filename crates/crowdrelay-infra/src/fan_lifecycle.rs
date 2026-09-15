@@ -843,6 +843,7 @@ fn parse_fan_status(value: &str) -> Result<FanStatus, LifecycleStoreError> {
         "active" => Ok(FanStatus::Active),
         "unsubscribed" => Ok(FanStatus::Unsubscribed),
         "suppressed" => Ok(FanStatus::Suppressed),
+        "merged" => Ok(FanStatus::Merged),
         _ => Err(LifecycleStoreError::Unexpected),
     }
 }

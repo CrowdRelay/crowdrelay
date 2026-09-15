@@ -491,6 +491,53 @@ impl ConcertQrRepository for PostgresConcertQrRepository {
             return Err(ConcertQrError::Unavailable);
         }
 
+        // Identity spine, §4e-5: a paid ticket order for this same event
+        // carrying a *different* fan's buyer email is the honest signal that
+        // the checker and the buyer may be one person. It parks a merge
+        // candidate for a human decision — never an automatic merge.
+        match sqlx::query_scalar::<_, Uuid>(
+            "SELECT DISTINCT i.fan_id FROM ticket_orders o \
+             JOIN ticket_sales s ON s.workspace_id = o.workspace_id \
+                 AND s.id = o.ticket_sale_id \
+             JOIN fan_identifiers i ON i.workspace_id = o.workspace_id \
+                 AND i.kind = 'email' AND i.value = o.buyer_email \
+             WHERE o.workspace_id = $1 AND s.event_id = $2 \
+                 AND o.status IN ('paid', 'partially_refunded') \
+                 AND i.fan_id <> $3",
+        )
+        .bind(command.workspace_id)
+        .bind(event.id)
+        .bind(fan_id)
+        .fetch_all(&mut *tx)
+        .await
+        {
+            Ok(buyer_fan_ids) => {
+                for buyer_fan_id in buyer_fan_ids {
+                    if let Err(error) = crate::fan_identity::record_merge_candidate_in_tx(
+                        &mut tx,
+                        command.workspace_id,
+                        fan_id,
+                        buyer_fan_id,
+                        json!({
+                            "kind": "order_email_vs_checkin",
+                            "event_id": event.id,
+                            "event_slug": event.slug,
+                            "checkin_id": checkin_id,
+                        }),
+                    )
+                    .await
+                    {
+                        tracing::warn!(%error, "concert QR check_in merge candidate failed");
+                        return Err(ConcertQrError::Unavailable);
+                    }
+                }
+            }
+            Err(error) => {
+                tracing::warn!(%error, "concert QR check_in buyer identity lookup failed");
+                return Err(ConcertQrError::Unavailable);
+            }
+        }
+
         if let Err(error) = sqlx::query(
             r#"
             INSERT INTO outbox_events (workspace_id, event_type, event_version, payload, request_id)
@@ -553,6 +600,19 @@ impl PostgresConcertQrRepository {
             // a missing one here is a contract violation, not a panic.
             return Err(ConcertQrError::Invalid);
         };
+        // The identity spine resolves first: an address a merge moved now
+        // belongs to the survivor, so the claim must land on them rather than
+        // resurrect the tombstone or double-count the person.
+        match crate::fan_identity::resolve_fan_for_email(tx, command.workspace_id, email).await {
+            Ok(Some((fan_id, status))) => {
+                return Ok(FanResolution::EmailClaim { fan_id, status });
+            }
+            Ok(None) => {}
+            Err(error) => {
+                tracing::warn!(%error, "concert QR check_in identity resolution failed");
+                return Err(ConcertQrError::Unavailable);
+            }
+        }
         let inserted = match sqlx::query_as::<_, (Uuid, String)>(
             r#"
             INSERT INTO fans (workspace_id, normalized_email, status)

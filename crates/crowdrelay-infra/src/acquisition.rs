@@ -600,20 +600,24 @@ struct FanUpsert {
     already_pending: bool,
 }
 
+fn parse_stored_status(value: &str) -> Result<FanStatus, StoreError> {
+    match value {
+        "pending" => Ok(FanStatus::Pending),
+        "active" => Ok(FanStatus::Active),
+        "unsubscribed" => Ok(FanStatus::Unsubscribed),
+        "suppressed" => Ok(FanStatus::Suppressed),
+        "merged" => Ok(FanStatus::Merged),
+        _ => Err(StoreError::Unexpected),
+    }
+}
+
 impl TryFrom<FanRow> for StoredFan {
     type Error = StoreError;
 
     fn try_from(row: FanRow) -> Result<Self, Self::Error> {
-        let status = match row.status.as_str() {
-            "pending" => FanStatus::Pending,
-            "active" => FanStatus::Active,
-            "unsubscribed" => FanStatus::Unsubscribed,
-            "suppressed" => FanStatus::Suppressed,
-            _ => return Err(StoreError::Unexpected),
-        };
         Ok(Self {
             id: FanId::from_uuid(row.id),
-            status,
+            status: parse_stored_status(&row.status)?,
         })
     }
 }

@@ -994,6 +994,23 @@ pub(super) fn application_routes(state: AppState) -> Router {
         )
         .route("/v1/staff/event-qr/overview", get(concert_qr::overview))
         .route(
+            "/v1/staff/fan-merges/candidates",
+            get(fan_identity::list_merge_candidates),
+        )
+        .route(
+            "/v1/staff/fan-merges/candidates/{candidate_id}/dismiss",
+            post(fan_identity::dismiss_merge_candidate),
+        )
+        .route("/v1/staff/fan-merges", post(fan_identity::merge_fans))
+        .route(
+            "/v1/staff/fans/{fan_id}/unmerge",
+            post(fan_identity::unmerge_fan),
+        )
+        .route(
+            "/v1/staff/fans/{fan_id}/identity",
+            get(fan_identity::fan_identity_detail),
+        )
+        .route(
             "/v1/staff/event-qr/campaigns/{campaign_id}/revoke",
             post(concert_qr::revoke_campaign),
         )
