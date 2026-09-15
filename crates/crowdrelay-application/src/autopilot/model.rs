@@ -323,6 +323,7 @@ impl From<GrowthDebtSubject> for ActionSubject {
             GrowthDebtSubject::Beacon(id) => Self::Beacon(id),
             GrowthDebtSubject::Event(id) => Self::Event(id),
             GrowthDebtSubject::ReleasePlan(id) => Self::ReleasePlan(id),
+            GrowthDebtSubject::Workspace(id) => Self::Workspace(id),
         }
     }
 }
@@ -1383,5 +1384,18 @@ mod tests {
         // The subject's UUID is the target_id, not the workspace_id.
         // This means the experiment unit is the community, not the workspace.
         assert_ne!(subject.kind(), "workspace");
+    }
+
+    /// A workspace-scoped debt finding maps onto the workspace action subject
+    /// so cooldown, dedup, and the operator queue all key off the workspace id.
+    #[test]
+    fn workspace_debt_subject_maps_to_workspace_action_subject() {
+        let workspace_id = WorkspaceId::new();
+        let subject = ActionSubject::from(
+            crowdrelay_domain::growth_debt::GrowthDebtSubject::Workspace(workspace_id),
+        );
+        assert_eq!(subject, ActionSubject::Workspace(workspace_id));
+        assert_eq!(subject.kind(), "workspace");
+        assert_eq!(subject.uuid(), workspace_id.into_uuid());
     }
 }

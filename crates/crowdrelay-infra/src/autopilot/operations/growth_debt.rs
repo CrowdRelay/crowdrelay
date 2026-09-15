@@ -13,8 +13,13 @@
 //! assumed zero.
 
 use super::*;
+use crate::tenant_settings::TenantSettingsRepository;
 use crowdrelay_domain::{
     BeaconId, BookingTargetId, EventId, OutreachTargetId, ReleasePlanId,
+    content_supply::{
+        ContentSupplyDecision, ContentSupplyHoldReason, ContentSupplyPolicy,
+        evaluate_content_supply,
+    },
     growth_debt::{GrowthDebtKind, GrowthDebtObservation, GrowthDebtSubject},
 };
 use std::collections::HashMap;
@@ -57,6 +62,9 @@ fn subject_of(row: &GrowthDebtRow) -> Option<GrowthDebtSubject> {
         ))),
         "event" => Some(GrowthDebtSubject::Event(EventId::from_uuid(row.subject_id))),
         "release_plan" => Some(GrowthDebtSubject::ReleasePlan(ReleasePlanId::from_uuid(
+            row.subject_id,
+        ))),
+        "workspace" => Some(GrowthDebtSubject::Workspace(WorkspaceId::from_uuid(
             row.subject_id,
         ))),
         _ => None,
@@ -491,7 +499,7 @@ pub(in crate::autopilot) async fn load_growth_debt_observations(
         .map(|row| ((row.subject_id, row.decision_kind), row.evaluated_at))
         .collect();
 
-    Ok(rows
+    let mut observations: Vec<GrowthDebtObservation> = rows
         .into_iter()
         .filter_map(|row| {
             let kind = GrowthDebtKind::parse(&row.debt_kind)?;
@@ -512,5 +520,198 @@ pub(in crate::autopilot) async fn load_growth_debt_observations(
                 hours_since_last_signal,
             })
         })
-        .collect())
+        .collect();
+
+    // §4i-0c: the cadence's other half. The supply evaluator already schedules
+    // fillers from what the workspace holds; this is the boundary where the
+    // machine asks the band instead — fillers are on and no video, story, or
+    // show-harvest source can still produce an artifact. The shelf is a
+    // property of the whole inventory, so the workspace itself is the subject.
+    let cadence = TenantSettingsRepository::new(repo.pool().clone())
+        .cadence_settings(workspace)
+        .await
+        .map_err(map_sqlx)?;
+    if cadence.fillers_enabled {
+        let supply_policy = load_content_supply_policy(repo, workspace).await?;
+        let supply = load_content_supply_snapshots(repo, workspace_id, now).await?;
+        if !filler_shelf_stocked(&supply, supply_policy, now) {
+            observations.push(GrowthDebtObservation {
+                kind: GrowthDebtKind::FillerShelfEmpty,
+                subject: GrowthDebtSubject::Workspace(workspace_id),
+                idle_hours: 0,
+                outstanding_items: 1,
+                tracked_items: 1,
+                relationship_score: None,
+                hours_until_deadline: None,
+                hours_since_last_signal: last_signal_at
+                    .get(&(
+                        workspace,
+                        GrowthDebtKind::FillerShelfEmpty.decision_kind().to_owned(),
+                    ))
+                    .map(|at| u32::try_from((now - *at).whole_hours().max(0)).unwrap_or(u32::MAX)),
+            });
+        }
+    }
+
+    Ok(observations)
+}
+
+/// The workspace's content-supply policy for the shelf check — the same row
+/// the supply context itself evaluates under, so "still produces" means the
+/// same thing here as it does where the artifacts are actually requested.
+/// Missing or unreadable config resolves to the shipped defaults, matching
+/// how the policy reader treats a workspace nobody has tuned.
+async fn load_content_supply_policy(
+    repo: &PostgresAutopilotRepository,
+    workspace: Uuid,
+) -> Result<ContentSupplyPolicy, RepositoryError> {
+    let raw = sqlx::query_scalar::<_, serde_json::Value>(
+        "SELECT config FROM viryaos_autopilot_policies \
+         WHERE workspace_id = $1 AND context = 'content_supply'",
+    )
+    .bind(workspace)
+    .fetch_optional(&repo.pool)
+    .await
+    .map_err(map_sqlx)?;
+    let Some(config) = raw else {
+        return Ok(ContentSupplyPolicy::default());
+    };
+    match serde_json::from_value::<ContentSupplyPolicy>(config) {
+        Ok(policy) => Ok(policy),
+        Err(error) => {
+            // The defaults are safe, so the shelf check still runs. What is
+            // not safe is letting an operator believe a tuned policy applies
+            // when it never parsed — same contract as the growth_metrics
+            // reader this mirrors.
+            tracing::error!(
+                %error,
+                workspace_id = %workspace,
+                "stored content_supply policy is unreadable; falling back to defaults"
+            );
+            Ok(ContentSupplyPolicy::default())
+        }
+    }
+}
+
+/// True while any filler-kind source can still produce an artifact. A source
+/// counts as stock while the supply evaluator would request an artifact from
+/// it — and while its harvest window is open, because material for a pending
+/// harvest is committed, not missing. `Complete`, stale, and invalid sources
+/// are what an empty shelf is made of. One deliberate edge: a source whose
+/// remaining artifacts are all in-flight reads `Complete` to the evaluator,
+/// so the ask can fire one approval cycle before the shelf is literally
+/// bare — restocking takes the band longer than that anyway.
+///
+/// The kind list is the §4i-0c filler inventory: evergreen video and story
+/// material plus show harvest. Events and releases are serious moments, not
+/// filler stock — a month of moments with no filler behind them is exactly
+/// the gap the cadence exists to fill.
+fn filler_shelf_stocked(
+    snapshots: &[crowdrelay_domain::content_supply::ContentSupplySnapshot],
+    policy: ContentSupplyPolicy,
+    now: OffsetDateTime,
+) -> bool {
+    snapshots.iter().any(|snapshot| {
+        matches!(
+            snapshot.source_kind,
+            ContentSourceKind::Video | ContentSourceKind::Story | ContentSourceKind::ShowCompleted
+        ) && matches!(
+            evaluate_content_supply(snapshot, policy, now),
+            ContentSupplyDecision::Request { .. }
+                | ContentSupplyDecision::Hold(ContentSupplyHoldReason::HarvestPending)
+        )
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crowdrelay_domain::ContentSourceId;
+    use time::Duration;
+
+    fn snapshot(
+        kind: ContentSourceKind,
+        completed: Vec<ContentArtifactKind>,
+    ) -> crowdrelay_domain::content_supply::ContentSupplySnapshot {
+        let now = OffsetDateTime::UNIX_EPOCH + Duration::days(20_000);
+        crowdrelay_domain::content_supply::ContentSupplySnapshot {
+            source_id: ContentSourceId::new(),
+            source_kind: kind,
+            source_version: 1,
+            occurred_at: now - Duration::days(10),
+            expires_at: now + Duration::days(30),
+            completed_artifacts: completed,
+            in_flight_artifacts: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn an_untouched_video_is_shelf_stock() {
+        let now = OffsetDateTime::UNIX_EPOCH + Duration::days(20_000);
+        let supply = vec![snapshot(ContentSourceKind::Video, Vec::new())];
+        assert!(filler_shelf_stocked(
+            &supply,
+            ContentSupplyPolicy::default(),
+            now
+        ));
+    }
+
+    #[test]
+    fn a_source_with_every_artifact_done_is_not_stock() {
+        let now = OffsetDateTime::UNIX_EPOCH + Duration::days(20_000);
+        let exhausted = snapshot(
+            ContentSourceKind::Story,
+            vec![
+                ContentArtifactKind::SocialFeed,
+                ContentArtifactKind::SocialStory,
+            ],
+        );
+        assert!(!filler_shelf_stocked(
+            &[exhausted],
+            ContentSupplyPolicy::default(),
+            now
+        ));
+    }
+
+    #[test]
+    fn a_pending_harvest_still_counts_as_stock() {
+        // Twenty hours after the show the harvest window is still open — the
+        // material is committed, so the shelf is not empty even though the
+        // evaluator would not draft from it yet.
+        let now = OffsetDateTime::UNIX_EPOCH + Duration::days(20_000);
+        let mut fresh_show = snapshot(ContentSourceKind::ShowCompleted, Vec::new());
+        fresh_show.occurred_at = now - Duration::hours(20);
+        assert!(filler_shelf_stocked(
+            &[fresh_show],
+            ContentSupplyPolicy::default(),
+            now
+        ));
+    }
+
+    #[test]
+    fn moments_are_not_filler_stock() {
+        // A show and a release can each have plenty of unproduced artifacts
+        // and still leave the filler shelf empty — they are the serious
+        // moments the fillers are supposed to sit between.
+        let now = OffsetDateTime::UNIX_EPOCH + Duration::days(20_000);
+        let supply = vec![
+            snapshot(ContentSourceKind::Event, Vec::new()),
+            snapshot(ContentSourceKind::Release, Vec::new()),
+        ];
+        assert!(!filler_shelf_stocked(
+            &supply,
+            ContentSupplyPolicy::default(),
+            now
+        ));
+    }
+
+    #[test]
+    fn an_empty_inventory_is_an_empty_shelf() {
+        let now = OffsetDateTime::UNIX_EPOCH + Duration::days(20_000);
+        assert!(!filler_shelf_stocked(
+            &[],
+            ContentSupplyPolicy::default(),
+            now
+        ));
+    }
 }

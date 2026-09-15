@@ -23,8 +23,8 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    BeaconId, BookingTargetId, EventId, OutreachTargetId, ReleasePlanId, autonomy::Confidence,
-    value_tier::MetricValueTier,
+    BeaconId, BookingTargetId, EventId, OutreachTargetId, ReleasePlanId, WorkspaceId,
+    autonomy::Confidence, value_tier::MetricValueTier,
 };
 
 /// The kind of neglect observed. Each kind carries its own horizon, its own
@@ -68,6 +68,12 @@ pub enum GrowthDebtKind {
     /// past shows to form a baseline — with zero history the detector
     /// honestly says "insufficient evidence" rather than inventing a pace.
     TicketSalesBehindPace,
+    /// The tenant's filler cadence is switched on and no filler source can
+    /// still produce an artifact — every video, story, and show-harvest source
+    /// is exhausted or expired. The filler calendar is the system's job, but
+    /// the shelf itself is the band's: this is the one moment the machine
+    /// asks for material instead of scheduling what it already holds.
+    FillerShelfEmpty,
 }
 
 impl GrowthDebtKind {
@@ -81,6 +87,7 @@ impl GrowthDebtKind {
             Self::StaleContactData => "stale_contact_data",
             Self::CalendarRoutingConflict => "calendar_routing_conflict",
             Self::TicketSalesBehindPace => "ticket_sales_behind_pace",
+            Self::FillerShelfEmpty => "filler_shelf_empty",
         }
     }
 
@@ -94,6 +101,7 @@ impl GrowthDebtKind {
             "stale_contact_data" => Some(Self::StaleContactData),
             "calendar_routing_conflict" => Some(Self::CalendarRoutingConflict),
             "ticket_sales_behind_pace" => Some(Self::TicketSalesBehindPace),
+            "filler_shelf_empty" => Some(Self::FillerShelfEmpty),
             _ => None,
         }
     }
@@ -124,6 +132,9 @@ impl GrowthDebtKind {
             Self::TicketSalesBehindPace => {
                 "an upcoming show is selling far below the workspace's own historical pace at the same lead time"
             }
+            Self::FillerShelfEmpty => {
+                "the filler cadence is enabled and no video, story, or show-harvest source has an unproduced artifact left"
+            }
         }
     }
 
@@ -139,6 +150,7 @@ impl GrowthDebtKind {
             Self::StaleContactData => "reverify_contact_data",
             Self::CalendarRoutingConflict => "review_calendar_routing",
             Self::TicketSalesBehindPace => "announce_show_to_local_fans",
+            Self::FillerShelfEmpty => "restock_filler_shelf",
         }
     }
 
@@ -158,6 +170,7 @@ impl GrowthDebtKind {
             Self::StaleContactData => "raise_growth_debt_stale_contact_data",
             Self::CalendarRoutingConflict => "raise_growth_debt_calendar_routing_conflict",
             Self::TicketSalesBehindPace => "raise_growth_debt_ticket_sales_behind_pace",
+            Self::FillerShelfEmpty => "raise_growth_debt_filler_shelf_empty",
         }
     }
 
@@ -171,6 +184,7 @@ impl GrowthDebtKind {
             Self::StaleContactData => "growth_debt_contact_data",
             Self::CalendarRoutingConflict => "growth_debt_calendar_routing",
             Self::TicketSalesBehindPace => "growth_debt_ticket_sales_pace",
+            Self::FillerShelfEmpty => "growth_debt_filler_shelf",
         }
     }
 
@@ -186,7 +200,7 @@ impl GrowthDebtKind {
             | Self::ReleaseAssetsMissing
             | Self::CalendarRoutingConflict
             | Self::TicketSalesBehindPace => MetricValueTier::Downstream,
-            Self::RelationshipQuiet => MetricValueTier::Intermediate,
+            Self::RelationshipQuiet | Self::FillerShelfEmpty => MetricValueTier::Intermediate,
             Self::StaleContactData => MetricValueTier::Vanity,
         }
     }
@@ -222,7 +236,7 @@ impl GrowthDebtKind {
     pub const fn is_structural(self) -> bool {
         matches!(
             self,
-            Self::CalendarRoutingConflict | Self::TicketSalesBehindPace
+            Self::CalendarRoutingConflict | Self::TicketSalesBehindPace | Self::FillerShelfEmpty
         )
     }
 
@@ -234,6 +248,7 @@ impl GrowthDebtKind {
             Self::TicketSalesBehindPace => 72,
             Self::ReleaseMilestonesMissed => 65,
             Self::RelationshipQuiet => 50,
+            Self::FillerShelfEmpty => 45,
             Self::StaleContactData => 30,
         }
     }
@@ -249,6 +264,11 @@ pub enum GrowthDebtSubject {
     Beacon(BeaconId),
     Event(EventId),
     ReleasePlan(ReleasePlanId),
+    /// A finding about the whole workspace rather than any one row — the
+    /// filler shelf is a property of the tenant's inventory, not of a show
+    /// or a contact. The workspace id is still carried so the cooldown and
+    /// dedup keys behave exactly like subject-bound kinds.
+    Workspace(WorkspaceId),
 }
 
 impl GrowthDebtSubject {
@@ -260,6 +280,7 @@ impl GrowthDebtSubject {
             Self::Beacon(_) => "beacon",
             Self::Event(_) => "event",
             Self::ReleasePlan(_) => "release_plan",
+            Self::Workspace(_) => "workspace",
         }
     }
 }
@@ -386,6 +407,10 @@ pub const fn horizon_hours(kind: GrowthDebtKind, policy: GrowthDebtPolicy) -> u3
         // current sales against historical pace at the same lead time, so the
         // horizon is 0 — the debt exists the moment sales fall behind.
         GrowthDebtKind::TicketSalesBehindPace => 0,
+        // An empty shelf is structural the same way: the observation is only
+        // emitted when the cadence wants fillers and every filler source is
+        // exhausted, so the finding needs no ageing to be real.
+        GrowthDebtKind::FillerShelfEmpty => 0,
     }
 }
 
@@ -799,6 +824,7 @@ mod tests {
             GrowthDebtKind::StaleContactData,
             GrowthDebtKind::CalendarRoutingConflict,
             GrowthDebtKind::TicketSalesBehindPace,
+            GrowthDebtKind::FillerShelfEmpty,
         ] {
             assert_eq!(GrowthDebtKind::parse(kind.as_str()), Some(kind));
             assert!(!kind.reason().is_empty());
@@ -961,5 +987,51 @@ mod structural_kind_tests {
             evaluate_growth_debt(&routing_observation(-1), GrowthDebtPolicy::default()),
             GrowthDebtDecision::Hold
         );
+    }
+
+    fn shelf_observation() -> GrowthDebtObservation {
+        GrowthDebtObservation {
+            kind: GrowthDebtKind::FillerShelfEmpty,
+            subject: GrowthDebtSubject::Workspace(WorkspaceId::from_uuid(uuid::Uuid::now_v7())),
+            // Structural like the other present-or-absent findings: the
+            // loader only emits this when the cadence wants fillers and no
+            // filler source can still produce an artifact.
+            idle_hours: 0,
+            outstanding_items: 1,
+            tracked_items: 1,
+            relationship_score: None,
+            hours_until_deadline: None,
+            hours_since_last_signal: None,
+        }
+    }
+
+    #[test]
+    fn an_empty_filler_shelf_raises_against_the_workspace() {
+        let decision = evaluate_growth_debt(&shelf_observation(), GrowthDebtPolicy::default());
+        let GrowthDebtDecision::Raise(item) = decision else {
+            panic!("expected Raise for an empty filler shelf, got {decision:?}");
+        };
+        assert_eq!(item.kind, GrowthDebtKind::FillerShelfEmpty);
+        assert_eq!(item.overdue_basis_points, 10_000);
+        assert_eq!(
+            item.kind.decision_kind(),
+            "raise_growth_debt_filler_shelf_empty"
+        );
+        assert_eq!(item.kind.recommended_action(), "restock_filler_shelf");
+        // No deadline is attached: the shelf stays a fact until it is
+        // restocked or the cadence is turned off, and the cooldown — not a
+        // date — decides when the ask may repeat.
+        assert!(item.priority >= 45);
+    }
+
+    #[test]
+    fn an_empty_shelf_never_expires_on_a_deadline() {
+        // is_deadline_bound is false for this kind, so a missing deadline
+        // must not drop the finding the way it drops a played-out show.
+        assert!(!GrowthDebtKind::FillerShelfEmpty.is_deadline_bound());
+        assert!(matches!(
+            evaluate_growth_debt(&shelf_observation(), GrowthDebtPolicy::default()),
+            GrowthDebtDecision::Raise(_)
+        ));
     }
 }
