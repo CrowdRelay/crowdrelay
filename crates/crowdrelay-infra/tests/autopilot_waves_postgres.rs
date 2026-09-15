@@ -318,6 +318,73 @@ async fn a_sealed_wave_is_approved_whole_and_a_drafting_one_is_not()
 
 #[tokio::test]
 #[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn only_active_non_filler_releases_anchor_waves() -> Result<(), Box<dyn std::error::Error>> {
+    // The anchor query is where "a filler owes no vertical" is decided: if the
+    // tier filter slips off it, a demo the band posted for free would draft
+    // five press waves nobody approved. Same for a plan the operator retired.
+    let fixture = fixture("wave-anchor").await?;
+    let suffix = fixture.workspace_id.into_uuid().simple().to_string();
+    let release_at = fixture.now + time::Duration::days(30);
+    let single_id = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO viryaos_release_plans (id, workspace_id, source_key, title, release_at, tier)
+         VALUES ($1,$2,$3,$4,$5,'single')",
+    )
+    .bind(single_id)
+    .bind(fixture.workspace_id.into_uuid())
+    .bind(format!("wave-anchor-single-{suffix}"))
+    .bind("The real single")
+    .bind(release_at)
+    .execute(&fixture.pool)
+    .await?;
+    for (tier, active) in [("filler", true), ("single", false)] {
+        sqlx::query(
+            "INSERT INTO viryaos_release_plans (
+                 id, workspace_id, source_key, title, release_at, tier, active
+             ) VALUES ($1,$2,$3,$4,$5,$6,$7)",
+        )
+        .bind(Uuid::now_v7())
+        .bind(fixture.workspace_id.into_uuid())
+        .bind(format!("wave-anchor-{tier}-{active}-{suffix}"))
+        .bind(format!("{tier} active={active}"))
+        .bind(release_at)
+        .bind(tier)
+        .bind(active)
+        .execute(&fixture.pool)
+        .await?;
+    }
+
+    let anchors = fixture
+        .repository
+        .load_outreach_wave_anchors(fixture.workspace_id, fixture.now)
+        .await?;
+    let release_anchors = anchors
+        .iter()
+        .filter(|anchor| matches!(anchor.anchor, WaveAnchor::Release { .. }))
+        .count();
+    assert_eq!(
+        release_anchors, 5,
+        "five free-reach kinds anchor on the one live non-filler plan"
+    );
+    assert!(
+        anchors.iter().all(|anchor| {
+            !matches!(anchor.anchor, WaveAnchor::Release { .. }) || anchor.anchor.id() == single_id
+        }),
+        "the filler and the retired plan stay out of the wave queue"
+    );
+    assert_eq!(
+        anchors
+            .iter()
+            .filter(|anchor| anchor.anchor.id() == fixture.event_id)
+            .count(),
+        5,
+        "the published show still anchors its five kinds beside it"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn an_expiring_wave_takes_its_unapproved_pitches_with_it()
 -> Result<(), Box<dyn std::error::Error>> {
     // Left queued, they send a release-week pitch a month late, one at a time,
