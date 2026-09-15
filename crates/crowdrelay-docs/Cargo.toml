@@ -12,3 +12,4 @@ publish = false
 [dependencies]
 axum = { workspace = true }
 tokio = { workspace = true, features = ["fs"] }
+tower-http = { workspace = true, features = ["fs"] }

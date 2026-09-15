@@ -89,6 +89,12 @@ check: fmt lint test
 docs PORT="8088":
     cargo run --quiet --package crowdrelay-docs -- {{PORT}}
 
+# The workspace rustdoc tree that `just docs` serves at /rustdoc/.
+# --document-private-items is deliberate: this map exists for navigating the
+# internals, and the interesting machinery is pub(crate), not pub.
+rustdoc *ARGS:
+    cargo doc --no-deps --document-private-items {{ARGS}}
+
 # The dark-mode system reference PDF, measured from this tree.
 #
 # Stage one reads the repository and writes HTML; stage two prints it through the
