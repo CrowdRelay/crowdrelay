@@ -561,7 +561,7 @@ async fn load_control_plane_events(
           ON checkin.workspace_id = event.workspace_id
          AND checkin.event_id = event.id
         WHERE event.workspace_id = $1
-          AND event.status = 'published'
+          AND event.status IN ('published','completed')
           AND event.starts_at >= now() - interval '90 days'
         GROUP BY event.id
         ORDER BY upcoming DESC,
@@ -954,3 +954,5 @@ mod tests {
         assert!(verify_token(&token, &[8_u8; 32]).is_none());
     }
 }
+include!("concert_qr/timeline.rs");
+include!("concert_qr/timeline_tests.rs");

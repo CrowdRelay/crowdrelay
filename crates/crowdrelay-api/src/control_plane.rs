@@ -105,6 +105,10 @@ pub(crate) fn router(state: crate::AppState) -> Router {
             get(crate::concert_qr::control_plane_events),
         )
         .route(
+            "/v1/control-plane/events/{event_slug}/timeline",
+            get(crate::concert_qr::control_plane_event_timeline),
+        )
+        .route(
             "/v1/control-plane/autopilot/cycle/preview",
             get(crate::autopilot::preview_autopilot_cycle),
         )

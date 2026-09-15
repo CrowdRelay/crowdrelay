@@ -21,6 +21,10 @@ CONTRACT = {
         "audience/query_support.rs",
     ],
     "crates/crowdrelay-api/src/ecosystem.rs": ["ecosystem/control_plane.rs"],
+    "crates/crowdrelay-api/src/concert_qr.rs": [
+        "concert_qr/timeline.rs",
+        "concert_qr/timeline_tests.rs",
+    ],
     "crates/crowdrelay-api/src/proofs.rs": [
         "proofs/admin_and_public.rs",
         "proofs/read_support.rs",

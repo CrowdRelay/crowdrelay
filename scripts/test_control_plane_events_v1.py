@@ -12,7 +12,9 @@ the invariants the page relies on:
 - Ordering is upcoming-ascending then past-descending — the two `CASE WHEN`
   arms in ORDER BY are what make one list read "next up, then past". A plain
   `ORDER BY starts_at` buries next Friday under every past date.
-- Only `published` events list — drafts must not reach a band-facing page.
+- Only `published` and `completed` events list — drafts must not reach a
+  band-facing page, and a played night still owes the band its T+ steps (the
+  timeline endpoint resolves the same two statuses).
 - Workspace scoping on both the event and the check-in join — tenant
   isolation is the whole of the WHERE clause.
 - A bounded lookback — the page is a season, not an archive.
@@ -57,8 +59,11 @@ class ControlPlaneEventsContract(unittest.TestCase):
             "CASE WHEN event.starts_at < now() - interval '36 hours'", self.source
         )
 
-    def test_published_only_and_bounded_lookback(self) -> None:
-        self.assertIn("event.status = 'published'", self.source)
+    def test_terminal_shows_stay_listed_with_bounded_lookback(self) -> None:
+        # `completed` belongs here: the list's past section is the only
+        # navigation path to the T+1/T+3/T+7 steps the timeline serves.
+        # Drafts and cancelled events still never reach the page.
+        self.assertIn("event.status IN ('published','completed')", self.source)
         self.assertIn("interval '90 days'", self.source)
 
     def test_workspace_scoped_including_checkin_join(self) -> None:
