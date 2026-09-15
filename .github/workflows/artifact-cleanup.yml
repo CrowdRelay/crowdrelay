@@ -13,7 +13,7 @@ permissions:
 jobs:
   cleanup:
     runs-on: [self-hosted, arm64]
-    timeout-minutes: 10
+    timeout-minutes: 25
     steps:
       - name: Clean artifacts and runs across all CrowdRelay repos
         env:
@@ -38,7 +38,9 @@ jobs:
             # scripts/deploy.sh refuses to deploy a release whose immutable
             # digest artifact is gone — blanket deletion aborted every
             # ecosystem deploy attempted more than a day after publish.
-            artifacts=$(gh api "/repos/$repo/actions/artifacts?per_page=100" \
+            # --paginate is load-bearing: without it only the newest 100 are
+            # scanned and the backlog below page 1 is invisible forever.
+            artifacts=$(gh api --paginate "/repos/$repo/actions/artifacts?per_page=100" \
               --jq '.artifacts[] | select(.name | test("digest|sbom"; "i") | not) | .id' 2>/dev/null || true)
             count=$(echo "$artifacts" | grep -c . || true)
             echo "  deleting $count artifacts (digest/sbom artifacts kept)"
@@ -51,7 +53,7 @@ jobs:
             # digest/sbom artifacts is skipped: deleting the run deletes the
             # artifact, which would orphan a queued or manual deploy that
             # deploy.sh resolves by artifact name.
-            runs=$(gh api "/repos/$repo/actions/runs?per_page=100&status=completed" --jq ".workflow_runs[${KEEP_RUNS}:] | .[].id" 2>/dev/null || true)
+            runs=$(gh api --paginate "/repos/$repo/actions/runs?per_page=100&status=completed" --jq ".workflow_runs[${KEEP_RUNS}:] | .[].id" 2>/dev/null || true)
             kept_runs=0
             for id in $runs; do
               [ -n "$id" ] || continue
