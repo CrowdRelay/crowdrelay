@@ -7,7 +7,7 @@
 use serde::{Deserialize, Serialize};
 use time::{Duration, OffsetDateTime};
 
-use crate::{ContentSourceId, autonomy::Confidence};
+use crate::{ContentSourceId, autonomy::Confidence, release_autopilot::ReleaseTier};
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -58,6 +58,18 @@ pub struct ContentSupplySnapshot {
     pub source_version: i64,
     pub occurred_at: OffsetDateTime,
     pub expires_at: OffsetDateTime,
+    /// The plan's own communication switch, projected as fact for a release
+    /// source. `None` means the kind carries no such switch — events, videos,
+    /// stories and harvests communicate freely — while `Some(false)` means
+    /// the plan's owner turned communication off and the chain owes it no
+    /// fan-facing artifact, the same hold the milestone ladder applies.
+    pub communication_enabled: Option<bool>,
+    /// The plan's press switch, same projection. `Some(false)` means the
+    /// chain owes no press hook even while the social artifacts still run.
+    pub press_enabled: Option<bool>,
+    /// A release plan's tier, projected for the artifact gate: a filler
+    /// release is posted, never pitched, so it owes no press hook.
+    pub release_tier: Option<ReleaseTier>,
     pub completed_artifacts: Vec<ContentArtifactKind>,
     pub in_flight_artifacts: Vec<ContentArtifactKind>,
 }
@@ -139,6 +151,9 @@ pub fn evaluate_content_supply(
     }
 
     for artifact in required_artifacts(snapshot.source_kind) {
+        if !artifact_owed(snapshot, *artifact) {
+            continue;
+        }
         let already_done = snapshot.completed_artifacts.contains(artifact);
         let in_flight = snapshot.in_flight_artifacts.contains(artifact);
         if !already_done && !in_flight {
@@ -150,6 +165,42 @@ pub fn evaluate_content_supply(
     }
 
     ContentSupplyDecision::Hold(ContentSupplyHoldReason::Complete)
+}
+
+/// Whether a source's own switches owe this artifact at all, evaluated on the
+/// bare flags so the evaluator and the execution-time recheck share one rule.
+/// A missing flag (`None`) means the kind carries no switch — the artifact is
+/// owed. Fan-facing artifacts hold on `communication_enabled`, the press hook
+/// on `press_enabled`, and a filler release owes no press hook because it is
+/// posted, not pitched. `LiveListing` is a fact surface on the band's own
+/// pages, not communication, so no switch reaches it.
+#[must_use]
+pub fn content_artifact_owed(
+    artifact: ContentArtifactKind,
+    communication_enabled: Option<bool>,
+    press_enabled: Option<bool>,
+    release_tier: Option<ReleaseTier>,
+) -> bool {
+    match artifact {
+        ContentArtifactKind::PressHook => {
+            press_enabled != Some(false) && release_tier != Some(ReleaseTier::Filler)
+        }
+        ContentArtifactKind::SignalPush
+        | ContentArtifactKind::NewsletterBlock
+        | ContentArtifactKind::SocialFeed
+        | ContentArtifactKind::SocialStory
+        | ContentArtifactKind::PostShowRecap => communication_enabled != Some(false),
+        ContentArtifactKind::LiveListing => true,
+    }
+}
+
+fn artifact_owed(snapshot: &ContentSupplySnapshot, artifact: ContentArtifactKind) -> bool {
+    content_artifact_owed(
+        artifact,
+        snapshot.communication_enabled,
+        snapshot.press_enabled,
+        snapshot.release_tier,
+    )
 }
 
 fn required_artifacts(kind: ContentSourceKind) -> &'static [ContentArtifactKind] {
@@ -206,6 +257,9 @@ mod tests {
             source_version: 1,
             occurred_at: now() - Duration::days(1),
             expires_at: now() + Duration::days(10),
+            communication_enabled: None,
+            press_enabled: None,
+            release_tier: None,
             completed_artifacts: Vec::new(),
             in_flight_artifacts: Vec::new(),
         };
@@ -227,6 +281,9 @@ mod tests {
             source_version: 1,
             occurred_at: now() - Duration::days(1),
             expires_at: now() + Duration::days(10),
+            communication_enabled: None,
+            press_enabled: None,
+            release_tier: None,
             completed_artifacts: vec![ContentArtifactKind::LiveListing],
             in_flight_artifacts: Vec::new(),
         };
@@ -247,6 +304,9 @@ mod tests {
             source_version: 1,
             occurred_at: now() - Duration::days(1),
             expires_at: now() + Duration::days(10),
+            communication_enabled: Some(true),
+            press_enabled: Some(true),
+            release_tier: Some(ReleaseTier::Single),
             completed_artifacts: vec![ContentArtifactKind::SignalPush],
             in_flight_artifacts: vec![ContentArtifactKind::SocialFeed],
         };
@@ -268,6 +328,9 @@ mod tests {
             source_version: 1,
             occurred_at: now() - Duration::days(365),
             expires_at: now() + Duration::days(10),
+            communication_enabled: None,
+            press_enabled: None,
+            release_tier: None,
             completed_artifacts: Vec::new(),
             in_flight_artifacts: Vec::new(),
         };
@@ -303,6 +366,9 @@ mod tests {
             source_version: 1,
             occurred_at: now() - Duration::hours(20),
             expires_at: now() + Duration::days(30),
+            communication_enabled: None,
+            press_enabled: None,
+            release_tier: None,
             completed_artifacts: Vec::new(),
             in_flight_artifacts: Vec::new(),
         };
@@ -334,5 +400,89 @@ mod tests {
             evaluate_content_supply(&event, ContentSupplyPolicy::default(), now()),
             ContentSupplyDecision::Request { .. }
         ));
+    }
+
+    fn release_snapshot() -> ContentSupplySnapshot {
+        ContentSupplySnapshot {
+            source_id: ContentSourceId::new(),
+            source_kind: ContentSourceKind::Release,
+            source_version: 1,
+            occurred_at: now() - Duration::days(1),
+            expires_at: now() + Duration::days(10),
+            communication_enabled: Some(true),
+            press_enabled: Some(true),
+            release_tier: Some(ReleaseTier::Single),
+            completed_artifacts: Vec::new(),
+            in_flight_artifacts: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_release_with_communication_off_owes_no_fan_facing_artifact() {
+        let mut snapshot = release_snapshot();
+        snapshot.communication_enabled = Some(false);
+
+        // The operator's own switch holds the whole fan-facing chain; the
+        // press hook still stands because press is a different switch and it
+        // reaches journalists, not fans.
+        assert!(matches!(
+            evaluate_content_supply(&snapshot, ContentSupplyPolicy::default(), now()),
+            ContentSupplyDecision::Request {
+                artifact: ContentArtifactKind::PressHook,
+                ..
+            }
+        ));
+
+        snapshot.completed_artifacts = vec![ContentArtifactKind::PressHook];
+        assert_eq!(
+            evaluate_content_supply(&snapshot, ContentSupplyPolicy::default(), now()),
+            ContentSupplyDecision::Hold(ContentSupplyHoldReason::Complete),
+        );
+    }
+
+    #[test]
+    fn a_release_with_press_off_never_owes_a_press_hook() {
+        let mut snapshot = release_snapshot();
+        snapshot.press_enabled = Some(false);
+
+        // Signal still comes first — the switch only mutes the press side.
+        assert!(matches!(
+            evaluate_content_supply(&snapshot, ContentSupplyPolicy::default(), now()),
+            ContentSupplyDecision::Request {
+                artifact: ContentArtifactKind::SignalPush,
+                ..
+            }
+        ));
+
+        snapshot.completed_artifacts = vec![
+            ContentArtifactKind::SignalPush,
+            ContentArtifactKind::SocialFeed,
+            ContentArtifactKind::SocialStory,
+            ContentArtifactKind::NewsletterBlock,
+        ];
+        assert_eq!(
+            evaluate_content_supply(&snapshot, ContentSupplyPolicy::default(), now()),
+            ContentSupplyDecision::Hold(ContentSupplyHoldReason::Complete),
+            "press off means the chain completes without the hook"
+        );
+    }
+
+    #[test]
+    fn a_filler_release_is_posted_but_never_pitched() {
+        let mut snapshot = release_snapshot();
+        snapshot.release_tier = Some(ReleaseTier::Filler);
+
+        // The owned-channel chain still runs — posting the demo is the point
+        // of the tier — but a demo owes no press hook.
+        snapshot.completed_artifacts = vec![
+            ContentArtifactKind::SignalPush,
+            ContentArtifactKind::SocialFeed,
+            ContentArtifactKind::SocialStory,
+            ContentArtifactKind::NewsletterBlock,
+        ];
+        assert_eq!(
+            evaluate_content_supply(&snapshot, ContentSupplyPolicy::default(), now()),
+            ContentSupplyDecision::Hold(ContentSupplyHoldReason::Complete),
+        );
     }
 }

@@ -600,9 +600,11 @@ pub(in crate::autopilot) async fn load_growth_debt_observations(
 /// The workspace's serious-moment timestamps plus its own creation time —
 /// the two facts the slippage rule needs. Moment kinds are the §4i-0c serious
 /// classes only: `event`, `release`, `video`. Stories and harvest are filler
-/// material, and `show_completed` would double-count a night the event row
-/// already represents. `occurred_at` runs both ways — a published future
-/// show is a scheduled moment, a past one a held moment.
+/// material, `show_completed` would double-count a night the event row
+/// already represents, and a `filler`-tier release is cadence *output*, not
+/// a serious moment — counting it would let demos satisfy the very
+/// commitment they exist to cover for. `occurred_at` runs both ways — a
+/// published future show is a scheduled moment, a past one a held moment.
 async fn load_moment_register(
     repo: &PostgresAutopilotRepository,
     workspace: Uuid,
@@ -614,6 +616,10 @@ async fn load_moment_register(
         WHERE workspace_id = $1
           AND active
           AND source_kind IN ('event','release','video')
+          AND (
+              source_kind <> 'release'
+              OR COALESCE(metadata->>'tier', '') <> 'filler'
+          )
         "#,
     )
     .bind(workspace)
@@ -741,6 +747,9 @@ mod tests {
             source_version: 1,
             occurred_at: now - Duration::days(10),
             expires_at: now + Duration::days(30),
+            communication_enabled: None,
+            press_enabled: None,
+            release_tier: None,
             completed_artifacts: completed,
             in_flight_artifacts: Vec::new(),
         }

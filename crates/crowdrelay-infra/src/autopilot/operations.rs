@@ -15,6 +15,7 @@ use crowdrelay_domain::{
     experimentation::{ExperimentMetric, ExperimentSnapshot, ExperimentVariantSnapshot},
     merch_bundle::MerchBundleSnapshot,
     outreach::{OutreachReplyDisposition, OutreachSnapshot, OutreachTargetKind},
+    release_autopilot::ReleaseTier,
     show_operations::{ShowTaskKind, ShowTaskSnapshot},
 };
 use serde_json::{Value, json};

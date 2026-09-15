@@ -526,6 +526,9 @@ struct ContentRow {
     source_version: i64,
     occurred_at: OffsetDateTime,
     expires_at: OffsetDateTime,
+    communication_enabled: Option<bool>,
+    press_enabled: Option<bool>,
+    release_tier: Option<String>,
     completed_artifacts: Vec<String>,
     inflight_artifacts: Vec<String>,
 }
@@ -543,6 +546,22 @@ pub(in crate::autopilot) async fn load_content_supply_snapshots(
             source.version AS source_version,
             source.occurred_at,
             source.expires_at,
+            -- The three switches are release-plan vocabulary, so the read is
+            -- scoped to release rows: a video or event whose own metadata
+            -- happens to carry a `tier` key must not inherit release gating.
+            -- The typeof guard keeps a non-boolean value (the metadata column
+            -- is operator-writable) from failing the whole snapshot load.
+            CASE WHEN source.source_kind = 'release'
+                  AND jsonb_typeof(source.metadata->'communication_enabled') = 'boolean'
+                 THEN (source.metadata->>'communication_enabled')::boolean
+            END AS communication_enabled,
+            CASE WHEN source.source_kind = 'release'
+                  AND jsonb_typeof(source.metadata->'press_enabled') = 'boolean'
+                 THEN (source.metadata->>'press_enabled')::boolean
+            END AS press_enabled,
+            CASE WHEN source.source_kind = 'release'
+                 THEN source.metadata->>'tier'
+            END AS release_tier,
             COALESCE(ARRAY(
                 SELECT DISTINCT action.payload->>'artifact'
                 FROM viryaos_autopilot_actions AS action
@@ -605,6 +624,9 @@ pub(in crate::autopilot) async fn load_content_supply_snapshots(
                 source_version: row.source_version,
                 occurred_at: row.occurred_at,
                 expires_at: row.expires_at,
+                communication_enabled: row.communication_enabled,
+                press_enabled: row.press_enabled,
+                release_tier: row.release_tier.as_deref().and_then(ReleaseTier::parse),
                 completed_artifacts: row
                     .completed_artifacts
                     .iter()
