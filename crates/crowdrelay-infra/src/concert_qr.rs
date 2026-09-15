@@ -773,9 +773,12 @@ impl PostgresConcertQrRepository {
 
         // One contact, scheduled next morning in the event's timezone: the
         // scan lands late at night, and a confirm/sign-in mail sent at 23:40
-        // competes with the night itself. `now + 6h` rolls the date forward so
-        // a post-midnight scan still lands at 10:00 that same morning rather
-        // than waiting a full extra day.
+        // competes with the night itself. The rule is "the next 10:00 local
+        // that is still ahead" — a post-midnight scan lands at 10:00 that same
+        // morning, while a daytime or post-10:00 scan lands at 10:00 tomorrow.
+        // Without the `> now() + 1 hour` guard a scan between 10:00 and 18:00
+        // local produced an `available_at` in the past, and the "next morning"
+        // promise silently became "right now".
         if let Err(error) = sqlx::query(
             r#"
             INSERT INTO outbox_events (
@@ -784,8 +787,15 @@ impl PostgresConcertQrRepository {
             )
             VALUES (
                 $1, $2, 1, $3, $4,
-                (date_trunc('day', (now() + interval '6 hours') AT TIME ZONE $5)
-                    + interval '10 hours') AT TIME ZONE $5
+                CASE
+                    WHEN (date_trunc('day', now() AT TIME ZONE $5)
+                          + interval '10 hours') AT TIME ZONE $5
+                         > now() + interval '1 hour'
+                    THEN (date_trunc('day', now() AT TIME ZONE $5)
+                          + interval '10 hours') AT TIME ZONE $5
+                    ELSE (date_trunc('day', now() AT TIME ZONE $5)
+                          + interval '34 hours') AT TIME ZONE $5
+                END
             )
             "#,
         )
