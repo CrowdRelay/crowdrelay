@@ -1190,8 +1190,7 @@ impl AgentOutcomeWorker {
             VALUES ($1, $2, $3, true, $4, $5)
             ON CONFLICT (workspace_id, slug) DO UPDATE SET
                 destination_url = EXCLUDED.destination_url,
-                active = true,
-                version = smart_links.version + 1
+                active = true
             "#,
         )
         .bind(workspace_id)

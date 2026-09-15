@@ -70,17 +70,8 @@ pub(in crate::autopilot) async fn ensure_release_tracked_link(
     title: &str,
     listen_url: Option<&str>,
 ) -> Result<(), RepositoryError> {
-    // Must satisfy smart_links.destination_url ~* '^https?://' — a looser gate
-    // here turns a malformed listen_url into a CHECK violation that wedges the
-    // whole milestone ladder on every retry, and a stricter one silently drops
-    // a valid URL.
-    let Some(destination) = listen_url.filter(|url| {
-        url.get(..7)
-            .is_some_and(|p| p.eq_ignore_ascii_case("http://"))
-            || url
-                .get(..8)
-                .is_some_and(|p| p.eq_ignore_ascii_case("https://"))
-    }) else {
+    // The gate is shared with the show link — see `is_http_url`.
+    let Some(destination) = listen_url.filter(|url| is_http_url(url)) else {
         return Ok(());
     };
     let Some(slug) = release_link_slug(source_key) else {

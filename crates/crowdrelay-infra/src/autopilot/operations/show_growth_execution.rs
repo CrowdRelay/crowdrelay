@@ -321,7 +321,7 @@ async fn ensure_canonical_show_link(
     // then marks the action dead, turning ordinary quiet into a queue full of
     // corpses. The release version of this already returned Ok here; shows
     // were the inconsistent one.
-    let Some(destination) = event.4.clone().filter(|url| url.starts_with("http")) else {
+    let Some(destination) = event.4.clone().filter(|url| is_http_url(url)) else {
         return Ok(());
     };
 
@@ -339,8 +339,7 @@ async fn ensure_canonical_show_link(
         VALUES ($1, $2, $3, true)
         ON CONFLICT (workspace_id, slug) DO UPDATE SET
             destination_url = EXCLUDED.destination_url,
-            active = true,
-            version = smart_links.version + 1
+            active = true
         "#,
     )
     .bind(workspace_id.into_uuid())

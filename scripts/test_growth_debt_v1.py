@@ -263,7 +263,7 @@ class ShowGrowthDoesTheWorkContract(unittest.TestCase):
         body = self.execution.split("async fn ensure_canonical_show_link", 1)[1].split(
             "\n#[allow", 1
         )[0]
-        self.assertIn('filter(|url| url.starts_with("http"))', body)
+        self.assertIn("filter(|url| is_http_url(url))", body)
         self.assertNotIn("RepositoryError::Conflict", body)
         self.assertIn("return Ok(());", body)
 
@@ -303,7 +303,7 @@ class ShowGrowthDoesTheWorkContract(unittest.TestCase):
         body = links.split("async fn ensure_release_tracked_link", 1)[1].split(
             "\n}", 1
         )[0]
-        self.assertIn('filter(|url| url.starts_with("http"))', body)
+        self.assertIn("filter(|url| is_http_url(url))", body)
 
     def test_the_room_is_asked_to_follow_after_the_show(self) -> None:
         # Attendance is the strongest signal in the system and the ask is free.

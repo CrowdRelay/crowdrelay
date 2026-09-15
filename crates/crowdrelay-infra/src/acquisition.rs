@@ -137,8 +137,7 @@ impl AcquisitionRepository for PostgresAcquisitionRepository {
                     channel_source = EXCLUDED.channel_source,
                     channel_community = EXCLUDED.channel_community,
                     channel_creative = EXCLUDED.channel_creative,
-                    campaign_id = EXCLUDED.campaign_id,
-                    version = smart_links.version + 1
+                    campaign_id = EXCLUDED.campaign_id
                 RETURNING id, slug, destination_url, active,
                           channel_source, channel_community, channel_creative,
                           campaign_id

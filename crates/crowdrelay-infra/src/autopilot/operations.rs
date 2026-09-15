@@ -66,6 +66,19 @@ pub(super) use show_growth::*;
 pub(super) use show_growth_execution::*;
 pub(super) use snapshots::*;
 
+/// The gate every smart-link destination must pass before it is inserted:
+/// `smart_links.destination_url` is CHECKed `~* '^https?://'` — a looser gate
+/// here turns a malformed URL into a CHECK violation that wedges the whole
+/// milestone ladder on every retry, and a stricter one (`starts_with`, which
+/// is case-sensitive) silently drops a valid `HTTPS://` URL.
+fn is_http_url(url: &str) -> bool {
+    url.get(..7)
+        .is_some_and(|p| p.eq_ignore_ascii_case("http://"))
+        || url
+            .get(..8)
+            .is_some_and(|p| p.eq_ignore_ascii_case("https://"))
+}
+
 const fn booking_reply_str(value: BookingReplyDisposition) -> &'static str {
     match value {
         BookingReplyDisposition::None => "none",

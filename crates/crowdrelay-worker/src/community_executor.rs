@@ -982,7 +982,10 @@ impl CommunityExecutorWorker {
         match smart_link {
             Some(link) if !link.trim().is_empty() => {
                 let link = link.trim();
-                let full_url = if link.starts_with("http") {
+                let full_url = if link
+                    .get(..4)
+                    .is_some_and(|p| p.eq_ignore_ascii_case("http"))
+                {
                     if self.is_own_origin(link) {
                         link.to_owned()
                     } else {
