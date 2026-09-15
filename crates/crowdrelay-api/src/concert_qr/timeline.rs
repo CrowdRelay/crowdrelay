@@ -761,7 +761,15 @@ fn build_steps(facts: &TimelineFacts, now: OffsetDateTime) -> Vec<TimelineStepVi
     } else {
         "waiting"
     };
-    let scan_action = if scan_state == "due" || (scan_state == "waiting" && now >= starts - Duration::hours(6)) {
+    // The door link must survive the first check-in — the page doubles as
+    // the live tally, and mid-show is when a second phone reaches for it.
+    // Once the night is over the door is too, so the link retires with it.
+    let scan_action = if show_over {
+        None
+    } else if (scan_state == "done" && facts.counts.qr_campaigns > 0)
+        || scan_state == "due"
+        || (scan_state == "waiting" && now >= starts - Duration::hours(6))
+    {
         Some(TimelineActionView { kind: "qr", label: "Open the QR" })
     } else {
         None

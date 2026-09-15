@@ -24,6 +24,7 @@ CONTRACT = {
     "crates/crowdrelay-api/src/concert_qr.rs": [
         "concert_qr/timeline.rs",
         "concert_qr/timeline_tests.rs",
+        "concert_qr/scan_view.rs",
     ],
     "crates/crowdrelay-api/src/proofs.rs": [
         "proofs/admin_and_public.rs",

@@ -136,6 +136,10 @@ impl AcquisitionState {
         self.workspace_id
     }
 
+    pub(crate) fn public_site_base_url(&self) -> &Url {
+        &self.public_site_base_url
+    }
+
     pub(crate) fn acquisition_repository(&self) -> &Arc<dyn AcquisitionRepository> {
         &self.acquisition_repository
     }
