@@ -408,12 +408,15 @@ impl CalibrationTracker {
 pub struct CalibrationByRegime {
     /// Y30 direct treatment-effect posterior — directly observed durable
     /// fans. Highest trust. No bridge uncertainty.
+    #[serde(default)]
     pub y30_direct: CalibrationTracker,
     /// Y14 treatment effect + Y14→Y30 bridge model. The bridge inflates
     /// variance when uncalibrated. Medium trust.
+    #[serde(default)]
     pub y14_bridged: CalibrationTracker,
     /// Outcome model only — no treatment-effect evidence. Observational.
     /// Lowest causal confidence.
+    #[serde(default)]
     pub outcome_model: CalibrationTracker,
 }
 

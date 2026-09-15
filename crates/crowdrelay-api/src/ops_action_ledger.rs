@@ -216,6 +216,10 @@ pub struct CycleReport {
     pub needs_attention: bool,
     /// Distinct days of North Star readings behind the assessment.
     pub days_observed: usize,
+    /// The brain's own calibration report — how honest its fan-growth
+    /// predictions have been — from the same assessment `/ops/attention`
+    /// reports. `null` until a causal-model checkpoint exists.
+    pub calibration: Option<CalibrationReadout>,
     pub cycles: Vec<CycleRunEntry>,
 }
 
@@ -254,6 +258,7 @@ pub async fn list_cycles(
             brain_state: brain.state,
             needs_attention: brain.needs_attention,
             days_observed: brain.days_observed,
+            calibration: brain.calibration,
             cycles: entries,
         },
     )

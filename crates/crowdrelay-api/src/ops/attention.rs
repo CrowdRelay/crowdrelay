@@ -136,6 +136,39 @@ struct BrainSelfAssessment {
     /// no quiet cycle has a recorded reason — the cycle is acting, or it ran
     /// before migration 0268.
     latest_wait_reason: Option<String>,
+    /// The brain's report on its own prediction accuracy, per estimation
+    /// regime, from the persisted causal-model checkpoint. `null` when no
+    /// checkpoint exists yet — a missing answer is null, never zero. Each
+    /// regime is independently nullable: an empty treatment-effect regime is
+    /// itself the honest answer ("no paired experiment evidence yet").
+    calibration: Option<CalibrationReadout>,
+}
+
+/// One regime's calibration report, reduced to what an operator acts on.
+#[derive(Debug, Serialize)]
+pub(crate) struct CalibrationRegimeReadout {
+    /// Prediction-observation pairs behind the numbers — the count is the
+    /// honesty: a slope computed from 3 pairs reads differently than one
+    /// from 300.
+    predictions: usize,
+    /// Mean (predicted - observed). Positive means the brain over-promises.
+    bias: f64,
+    /// Regression slope of observed on predicted. 1.0 is calibrated; below
+    /// one is over-confident, above is under-confident.
+    slope: f64,
+    /// Mean absolute error in fan units.
+    mae: f64,
+}
+
+/// The three estimation regimes' calibration, each independently nullable.
+#[derive(Debug, Serialize)]
+pub(crate) struct CalibrationReadout {
+    /// Directly observed durable fans — highest trust, and the thinnest data.
+    y30_direct: Option<CalibrationRegimeReadout>,
+    /// Y14 bridged to Y30 — medium trust.
+    y14_bridged: Option<CalibrationRegimeReadout>,
+    /// The observational outcome model — what EFE scores on today.
+    outcome_model: Option<CalibrationRegimeReadout>,
 }
 
 pub async fn attention(State(state): State<crate::AppState>, headers: HeaderMap) -> Response {
@@ -345,12 +378,61 @@ async fn load_brain_assessment(state: &OpsState) -> Result<BrainSelfAssessment, 
     .fetch_one(&state.pool)
     .await
     .map_err(OpsError::sqlx)?;
+    let calibration = load_calibration_readout(state).await;
     Ok(BrainSelfAssessment {
         state: assessment.as_str(),
         needs_attention: assessment.needs_attention(),
         days_observed,
         quiet_cycles: quiet.0,
         latest_wait_reason: quiet.1,
+        calibration,
+    })
+}
+
+/// The brain's own prediction-vs-outcome record, read out of the causal-model
+/// checkpoint. `record_by_regime` has written this since the first evidence
+/// replay; what was missing is anyone reading it back. A checkpoint that is
+/// absent, shaped differently, or unreadable degrades to `None` — the
+/// assessment must not fail because a diagnostic could not be read.
+async fn load_calibration_readout(state: &OpsState) -> Option<CalibrationReadout> {
+    let state_json = sqlx::query_scalar::<_, serde_json::Value>(
+        "SELECT state FROM viryaos_brain_state WHERE workspace_id = $1 AND module = 'causal_model'",
+    )
+    .bind(state.workspace_id().into_uuid())
+    .fetch_optional(&state.pool)
+    .await
+    .ok()??;
+    let readout = calibration_readout_from(&state_json);
+    if readout.is_none() {
+        tracing::warn!(
+            workspace_id = %state.workspace_id().into_uuid(),
+            "causal-model checkpoint has no readable calibration subtree"
+        );
+    }
+    readout
+}
+
+/// The checkpoint's `calibration` subtree -> per-regime readouts. `None` when
+/// the key is absent (a checkpoint from before the regime split) or does not
+/// deserialize — the report degrades rather than the page.
+fn calibration_readout_from(state_json: &serde_json::Value) -> Option<CalibrationReadout> {
+    let regimes = serde_json::from_value::<crowdrelay_application::CalibrationByRegime>(
+        state_json.get("calibration")?.clone(),
+    )
+    .ok()?;
+    let readout = |tracker: &crowdrelay_application::CalibrationTracker| {
+        let report: crowdrelay_application::CalibrationReport = tracker.report();
+        (report.n > 0).then_some(CalibrationRegimeReadout {
+            predictions: report.n,
+            bias: report.bias,
+            slope: report.calibration_slope,
+            mae: report.mae,
+        })
+    };
+    Some(CalibrationReadout {
+        y30_direct: readout(&regimes.y30_direct),
+        y14_bridged: readout(&regimes.y14_bridged),
+        outcome_model: readout(&regimes.outcome_model),
     })
 }
 
@@ -586,4 +668,48 @@ async fn load_needs_you(
         })
         .collect();
     Ok((summaries, total))
+}
+
+#[cfg(test)]
+mod calibration_readout_tests {
+    use super::calibration_readout_from;
+    use crowdrelay_application::CalibrationByRegime;
+
+    /// No `calibration` key — a checkpoint serialized before the regime
+    /// split — reads as "not reported", not zeroed numbers.
+    #[test]
+    fn absent_calibration_key_is_none() {
+        assert!(calibration_readout_from(&serde_json::json!({})).is_none());
+        assert!(
+            calibration_readout_from(&serde_json::json!({"calibration": "junk"})).is_none()
+        );
+    }
+
+    /// A tracked-but-unobserved regime reports `null`, so the operator sees
+    /// "no predictions scored yet", never a fabricated zero bias.
+    #[test]
+    fn unobserved_regimes_serialize_null_not_zero() {
+        let regimes = CalibrationByRegime::new();
+        let state = serde_json::json!({"calibration": regimes});
+        let readout = calibration_readout_from(&state).expect("readout");
+        let json = serde_json::to_value(&readout).unwrap();
+        assert!(json["y30_direct"].is_null());
+        assert!(json["y14_bridged"].is_null());
+        assert!(json["outcome_model"].is_null());
+    }
+
+    /// A populated regime reports the real numbers; empty siblings stay null.
+    #[test]
+    fn populated_regime_reports_counts_and_bias() {
+        let mut regimes = CalibrationByRegime::new();
+        regimes.outcome_model.record("t", 10.0, 1.0, 4.0);
+        regimes.outcome_model.record("t", 8.0, 1.0, 6.0);
+        let state = serde_json::json!({"calibration": regimes});
+        let readout = calibration_readout_from(&state).expect("readout");
+        let json = serde_json::to_value(&readout).unwrap();
+        assert_eq!(json["outcome_model"]["predictions"], 2);
+        // (10-4 + 8-6) / 2 = 4.0 — systematic over-prediction.
+        assert_eq!(json["outcome_model"]["bias"], 4.0);
+        assert!(json["y30_direct"].is_null());
+    }
 }

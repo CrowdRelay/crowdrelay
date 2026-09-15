@@ -44,6 +44,10 @@ pub mod use_cases;
 /// The rule is policy and belongs above infrastructure; the dependency edge
 /// api -> brain does not exist and is not worth creating for a read model.
 pub use crowdrelay_brain::self_assessment;
+/// Same reasoning: the ops surfaces report the brain's own miscalibration from
+/// the persisted causal-model checkpoint without the api crate taking a brain
+/// dependency.
+pub use crowdrelay_brain::{CalibrationByRegime, CalibrationReport, CalibrationTracker};
 
 pub use admission::{
     AdmissionRepository, AdmissionUseCaseError, ClaimAdmissionPass, ClaimAdmissionPassCommand,
