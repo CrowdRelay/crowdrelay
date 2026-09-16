@@ -37,7 +37,7 @@ jobs:
   # checks" to the summary job); execution itself is fully parallel.
   rust-tests:
     name: Unit tests and contracts
-    runs-on: ubuntu-24.04-arm
+    runs-on: [self-hosted, arm64]
     timeout-minutes: 40
 
     # The pg-gated lib tests in this job point at 127.0.0.1:5432 and used to
@@ -288,7 +288,7 @@ jobs:
 
   rust-postgres:
     name: PostgreSQL integration
-    runs-on: ubuntu-24.04-arm
+    runs-on: [self-hosted, arm64]
     timeout-minutes: 40
 
     services:
@@ -601,7 +601,7 @@ jobs:
     # the same platform that ships, so green CI means a deployable image.
     # Uses a self-hosted runner on virya-crowdrelay itself — free, unlimited,
     # and the same ARM64 hardware that production deploys to.
-    runs-on: ubuntu-24.04-arm
+    runs-on: [self-hosted, arm64]
     timeout-minutes: 45
     permissions:
       contents: read
@@ -660,7 +660,7 @@ jobs:
     name: All checks passed
     needs: [rust-tests, rust-postgres, dependency-security, containers]
     if: always()
-    runs-on: ubuntu-24.04-arm
+    runs-on: [self-hosted, arm64]
     timeout-minutes: 5
     steps:
       - name: Aggregate job results
