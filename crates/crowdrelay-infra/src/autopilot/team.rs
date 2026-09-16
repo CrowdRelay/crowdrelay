@@ -95,11 +95,6 @@ impl PostgresAutopilotRepository {
                 .await?;
             super::capture_plans::settle_capture_plans(&mut tx, workspace_id, now.date()).await?;
             close_resolved_assignments(&mut tx, workspace_id, now).await?;
-            let team = load_team_routing(&mut tx, workspace_id, now).await?;
-            if team.is_empty() {
-                tx.commit().await.map_err(map_sqlx)?;
-                return Ok(0);
-            }
             // Checked without erroring, because an operator who has gated
             // team.email off has not broken anything. Erroring here also rolled
             // back `close_resolved_assignments`, which needs no executor at
@@ -107,6 +102,30 @@ impl PostgresAutopilotRepository {
             // already succeeded.
             let can_email =
                 super::executor_capability_available(&mut tx, workspace_id, "team.email").await?;
+
+            // The briefing keeps its own cadence and its own roster — every
+            // active member reads it, including members the routing roster
+            // filters out (no team profile, at capacity). It runs before the
+            // roster-empty early return for that reason, and it is gated on
+            // the same email path every other handoff is, because a briefing
+            // nobody can receive is a row nobody reads.
+            let mut assigned = if can_email {
+                super::daily_briefing::issue_daily_briefings(
+                    &mut tx,
+                    workspace_id,
+                    now,
+                    crew_locale,
+                )
+                .await?
+            } else {
+                0
+            };
+
+            let team = load_team_routing(&mut tx, workspace_id, now).await?;
+            if team.is_empty() {
+                tx.commit().await.map_err(map_sqlx)?;
+                return Ok(assigned);
+            }
 
             let approvals = sqlx::query_as::<_, UnassignedApprovalRow>(
                 r#"
@@ -144,7 +163,7 @@ impl PostgresAutopilotRepository {
                     );
                 }
                 tx.commit().await.map_err(map_sqlx)?;
-                return Ok(0);
+                return Ok(assigned);
             }
 
             let show_tasks = sqlx::query_as::<_, UnassignedShowTaskRow>(
@@ -190,7 +209,6 @@ impl PostgresAutopilotRepository {
             .map_err(map_sqlx)?;
 
             let mut mutable_team = team;
-            let mut assigned = 0_u32;
             for action in approvals {
                 let need = assignment_need(&action.context, &action.action_kind);
                 let Some(member_index) = select_member_index(&mutable_team, need) else {
@@ -667,8 +685,19 @@ pub(in crate::autopilot) async fn load_team_routing(
         r#"SELECT profile.member_id, profile.member_key, member.display_name,
                   member.normalized_email, profile.active, profile.skills,
                   profile.capacity_basis_points,
-                  COUNT(assignment.id) FILTER (WHERE assignment.status='open') open_assignments,
-                  COUNT(assignment.id) FILTER (WHERE assignment.assigned_at >= $2 - INTERVAL '30 days') recent_assignments,
+                  -- 'daily_briefing' rows are reads, not work: they are
+                  -- excluded everywhere in this roster so the one the sweep
+                  -- hands every member each morning neither consumes
+                  -- capacity nor teaches the follow-through metric that
+                  -- the member "settles work without completing it".
+                  COUNT(assignment.id) FILTER (
+                      WHERE assignment.status='open'
+                        AND assignment.source_kind <> 'daily_briefing'
+                  ) open_assignments,
+                  COUNT(assignment.id) FILTER (
+                      WHERE assignment.assigned_at >= $2 - INTERVAL '30 days'
+                        AND assignment.source_kind <> 'daily_briefing'
+                  ) recent_assignments,
                   -- Follow-through: of the work this member was given and that
                   -- has had time to be done, how much did they actually finish,
                   -- and how much chasing did it take?
@@ -692,6 +721,7 @@ pub(in crate::autopilot) async fn load_team_routing(
                       WHERE history.workspace_id = profile.workspace_id
                         AND history.assignee_member_id = profile.member_id
                         AND history.status <> 'open'
+                        AND history.source_kind <> 'daily_briefing'
                         AND history.assigned_at < $2 - INTERVAL '1 day'
                   ), 5000) AS follow_through_basis_points,
                   -- The same measure, split by the skill the work needed.
@@ -721,6 +751,7 @@ pub(in crate::autopilot) async fn load_team_routing(
                    WHERE history.workspace_id = profile.workspace_id
                      AND history.assignee_member_id = profile.member_id
                      AND history.status <> 'open'
+                     AND history.source_kind <> 'daily_briefing'
                      AND history.assigned_at < $2 - INTERVAL '1 day'
                    GROUP BY history.required_skill
                ) skill
