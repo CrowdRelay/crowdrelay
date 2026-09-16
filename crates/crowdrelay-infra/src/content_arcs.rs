@@ -11,7 +11,7 @@
 use crowdrelay_brain::content_arcs::{
     ArcAnchor, ArcAnchorKind, ArcInputs, ArcTrendSupport, propose_arc,
 };
-use crowdrelay_brain::content_suggestions::{format_keys_for_pattern, is_stale};
+use crowdrelay_brain::content_suggestions::format_keys_for_pattern;
 use crowdrelay_domain::{
     ArcId, WorkspaceId,
     content_engine::{Arc, TrendDimension, TrendStatus},
@@ -237,18 +237,6 @@ impl PostgresContentEngineRepository {
         // would re-ask the same "not for us" inside a season's clothing.
         let declined_formats = self.declined_format_keys(&mut tx, workspace_id).await?;
         feasible.retain(|entry| !declined_formats.contains(&entry.key));
-        // A retired concept has had its attempts — a season built on a
-        // format that never produced in six offers argues the wrong thing.
-        // Runs on the tx's own connection: reaching back to the pool here
-        // would deadlock a one-connection configuration.
-        let (suggestion_counts, _, produced_counts) =
-            self.format_history(&mut *tx, workspace_id).await?;
-        feasible.retain(|entry| {
-            is_stale(
-                suggestion_counts.get(&entry.key).copied().unwrap_or(0),
-                produced_counts.get(&entry.key).copied().unwrap_or(0),
-            )
-        });
         let proposed = propose_arc(&ArcInputs {
             anchors: &anchors,
             feasible_formats: &feasible,
