@@ -279,3 +279,120 @@ async fn an_active_arc_refuses_orphan_suggestions_end_to_end()
     }
     Ok(())
 }
+
+/// §4b-4's stale rule applied to the season spine: a format that burned
+/// six offers without producing is ineligible as an arc beat. The
+/// polarity matters — an inverted predicate keeps the stale and drops
+/// the viable, so the proof runs both directions: all-stale proposes
+/// nothing, and a mostly-stale workspace proposes only living formats.
+async fn seed_capability_and_anchor(
+    pool: &PgPool,
+    workspace_id: WorkspaceId,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let member_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO workspace_members (workspace_id, normalized_email, role, status)
+         VALUES ($1, $2, 'staff', 'active') RETURNING id",
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(format!(
+        "crew-{}@example.test",
+        workspace_id.into_uuid().simple()
+    ))
+    .fetch_one(pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO viryaos_team_profiles
+             (workspace_id, member_id, member_key, active, skills)
+         VALUES ($1, $2, 'crew', true, ARRAY['video','photography','social','english_copy']::text[])",
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(member_id)
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO viryaos_release_plans (workspace_id, source_key, title, release_at, active)
+         VALUES ($1, 'arc-test', 'Arc Single', now() + interval '30 days', true)",
+    )
+    .bind(workspace_id.into_uuid())
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Six offers, zero productions — the catalogue entry is retired for
+/// this workspace. `keep` names the formats left living.
+async fn retire_formats(
+    pool: &PgPool,
+    workspace_id: WorkspaceId,
+    keep: &[&str],
+) -> Result<(), Box<dyn std::error::Error>> {
+    let keys: Vec<String> = sqlx::query_scalar("SELECT key FROM viryaos_content_format_entries")
+        .fetch_all(pool)
+        .await?;
+    for key in keys.iter().filter(|k| !keep.contains(&k.as_str())) {
+        for _ in 0..6 {
+            let suggestion_id: Uuid = sqlx::query_scalar(
+                "INSERT INTO viryaos_content_suggestions
+                     (id, workspace_id, format_key, concept, status)
+                 VALUES ($1, $2, $3, 'stale beat', 'expired') RETURNING id",
+            )
+            .bind(Uuid::now_v7())
+            .bind(workspace_id.into_uuid())
+            .bind(key)
+            .fetch_one(pool)
+            .await?;
+            sqlx::query(
+                "INSERT INTO viryaos_suggestion_outcomes
+                     (workspace_id, suggestion_id, outcome, resolved_at)
+                 VALUES ($1, $2, 'expired', now() - interval '50 days')",
+            )
+            .bind(workspace_id.into_uuid())
+            .bind(suggestion_id)
+            .execute(pool)
+            .await?;
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and disposable PostgreSQL"]
+async fn a_retired_format_cannot_anchor_an_arc_beat() -> Result<(), Box<dyn std::error::Error>> {
+    let (repo, pool) = repository().await?;
+    let today = time::OffsetDateTime::now_utc().date();
+
+    // All-stale: every catalogue format burned its offers. Feasibility
+    // must be empty — under the inverted predicate this workspace
+    // proposed happily, so silence is the polarity proof.
+    let all_stale = WorkspaceId::new();
+    seed_workspace(&pool, all_stale).await?;
+    seed_capability_and_anchor(&pool, all_stale).await?;
+    retire_formats(&pool, all_stale, &[]).await?;
+    assert!(
+        repo.refresh_arcs(all_stale, today).await?.is_empty(),
+        "every format retired means no season — the spine cannot rest on a dead concept"
+    );
+
+    // Mostly-stale: three living formats among the retired. The arc
+    // still proposes, and every beat names a living format.
+    let mixed = WorkspaceId::new();
+    seed_workspace(&pool, mixed).await?;
+    seed_capability_and_anchor(&pool, mixed).await?;
+    let living = ["rehearsal_clip", "track_by_track", "lyric_video"];
+    retire_formats(&pool, mixed, &living).await?;
+    let proposed = repo.refresh_arcs(mixed, today).await?;
+    assert_eq!(proposed.len(), 1, "living formats still carry a season");
+    let beats = proposed[0].spine.as_array().expect("spine is an array");
+    assert!(
+        beats.len() >= 2,
+        "an arc is a story — one beat is a playlist, refused"
+    );
+    for beat in beats {
+        let key = beat["format_key"].as_str().unwrap_or_default();
+        assert!(
+            living.contains(&key),
+            "a retired format reached the spine: {key}"
+        );
+    }
+    Ok(())
+}
