@@ -835,7 +835,10 @@ async fn connection_scan_scope_is_stored_and_a_change_resets_the_cursor()
             .bind(connection_id)
             .fetch_one(&pool)
             .await?;
-    assert!(cursor.is_none(), "a stale cycle must not undo the scope change");
+    assert!(
+        cursor.is_none(),
+        "a stale cycle must not undo the scope change"
+    );
     gdrive
         .set_sync_cursor(workspace, connection_id, "22222", None)
         .await?;
@@ -859,7 +862,11 @@ async fn connection_scan_scope_is_stored_and_a_change_resets_the_cursor()
             .bind(connection_id)
             .fetch_one(&pool)
             .await?;
-    assert_eq!(cursor.as_deref(), Some("22222"), "same scope keeps the cursor");
+    assert_eq!(
+        cursor.as_deref(),
+        Some("22222"),
+        "same scope keeps the cursor"
+    );
 
     // The stored scope comes back through both read paths.
     let due = gdrive.due_connections(workspace, "gmail").await?;
