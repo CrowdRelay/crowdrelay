@@ -186,7 +186,19 @@ pub async fn referral_conversion(
 /// `venues`/`promoters`/`festivals` count the confirmed bookable targets
 /// in that city — the "what's there" inventory beside the fans, so a
 /// city with reach and no room reads as the gap it is.
-pub async fn city_funnel(State(state): State<crate::AppState>, headers: HeaderMap) -> Response {
+/// `?order=organise` sorts by the domain's organise score — the ranked
+/// answer to "which city do we organise in next" — instead of the
+/// default 30d-active ordering. Anything else keeps the default.
+#[derive(Debug, Deserialize)]
+pub struct CityFunnelParams {
+    order: Option<String>,
+}
+
+pub async fn city_funnel(
+    State(state): State<crate::AppState>,
+    Query(params): Query<CityFunnelParams>,
+    headers: HeaderMap,
+) -> Response {
     let now = OffsetDateTime::now_utc();
     let result = sqlx::query_as::<_, CityFunnelRow>(
         r#"
@@ -374,6 +386,38 @@ pub async fn city_funnel(State(state): State<crate::AppState>, headers: HeaderMa
     .bind(now)
     .fetch_all(&state.database)
     .await;
+    let result = result.map(|mut rows| {
+        let today = now.date();
+        for row in &mut rows {
+            row.months_since_show = row.last_show_at.map(|played| {
+                let months = (today.year() - played.date().year()) * 12
+                    + i32::from(u8::from(today.month()))
+                    - i32::from(u8::from(played.date().month()));
+                i64::from(months.max(0))
+            });
+            row.organise_score_bp = i64::from(crowdrelay_domain::place::organise_score(
+                &crowdrelay_domain::place::OrganiseCityInputs {
+                    reachable: row.reachable.max(0) as u32,
+                    fans: row.fans.max(0) as u32,
+                    new_30d: row.new_30d.max(0) as u32,
+                    venues: row.venues.max(0) as u32,
+                    promoters: row.promoters.max(0) as u32,
+                    festivals: row.festivals.max(0) as u32,
+                    months_since_show: row.months_since_show.map(|m| m.max(0) as u32),
+                    next_show_booked: row.next_show_at.is_some(),
+                },
+            ));
+        }
+        if params.order.as_deref() == Some("organise") {
+            rows.sort_by(|a, b| {
+                b.organise_score_bp
+                    .cmp(&a.organise_score_bp)
+                    .then_with(|| b.active_30d.cmp(&a.active_30d))
+                    .then_with(|| a.city_slug.cmp(&b.city_slug))
+            });
+        }
+        rows
+    });
     private_json(result, &headers)
 }
 

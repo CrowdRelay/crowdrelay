@@ -8608,6 +8608,14 @@ paths:
     get:
       operationId: getAdminAudienceCityFunnel
       summary: Read per-city fan funnel (signups, trend, active, consented, reachable, bookable)
+      parameters:
+      - name: order
+        in: query
+        required: false
+        schema:
+          type: string
+          enum: [organise]
+        description: 'organise: sort by the deterministic organise-now score (descending) instead of 30d-active.'
       security:
       - adminBearer: []
       responses:
@@ -8635,6 +8643,8 @@ paths:
                     festivals: { type: integer, format: int64 }
                     last_show_at: { type: string, format: date-time, nullable: true }
                     next_show_at: { type: string, format: date-time, nullable: true }
+                    months_since_show: { type: integer, format: int64, nullable: true }
+                    organise_score_bp: { type: integer, format: int64 }
         '401':
           $ref: '#/components/responses/Problem'
         '503':

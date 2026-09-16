@@ -404,6 +404,14 @@ pub struct CityFunnelRow {
     /// organise-now gap.
     #[serde(with = "time::serde::rfc3339::option")]
     next_show_at: Option<OffsetDateTime>,
+    /// Whole months since `last_show_at`; NULL when never played. Filled
+    /// after the query — the organise score's staleness input.
+    #[sqlx(default)]
+    months_since_show: Option<i64>,
+    /// `domain::place::organise_score` in basis points — the ranked
+    /// organise-now answer; 0 while a show is already booked forward.
+    #[sqlx(default)]
+    organise_score_bp: i64,
 }
 
 #[derive(Debug, Serialize, FromRow)]

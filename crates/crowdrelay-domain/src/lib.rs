@@ -93,6 +93,7 @@ pub mod next_best_action;
 pub mod objectives;
 pub mod outreach;
 pub mod performance;
+pub mod place;
 pub mod play_measurement;
 pub mod playlist_placement;
 pub mod plays;
