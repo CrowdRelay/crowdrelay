@@ -2,6 +2,7 @@ use std::time::Duration;
 
 use crowdrelay_domain::WorkspaceId;
 use crowdrelay_infra::{autopilot::PostgresAutopilotRepository, config::DatabaseConfig};
+use serde_json::json;
 use sqlx::postgres::PgPoolOptions;
 use time::{OffsetDateTime, macros::datetime};
 use uuid::Uuid;
@@ -176,6 +177,34 @@ async fn the_briefing_issues_once_a_day_to_every_active_member()
     let unprofiled = seed_member_row(&pool, workspace_id, "unprofiled").await?;
     seed_team_email_executor(&pool, workspace_id).await?;
 
+    // Yesterday's shoot produced 4 of 5 planned pieces — the briefing
+    // reports the leverage number, not just "done".
+    let day_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO viryaos_production_events
+             (id, workspace_id, kind, title, scheduled_for, status)
+         VALUES ($1,$2,'shoot','Studio day', DATE '2026-10-04', 'done')
+         RETURNING id",
+    )
+    .bind(Uuid::now_v7())
+    .bind(workspace_id.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO viryaos_capture_plans
+             (id, workspace_id, production_event_id, items, status, issued_at, sources_landed)
+         VALUES ($1,$2,$3,$4,'done', now() - interval '2 days', 4)",
+    )
+    .bind(Uuid::now_v7())
+    .bind(workspace_id.into_uuid())
+    .bind(day_id)
+    .bind(json!([
+        {"item": "a", "skill": "video"}, {"item": "b", "skill": "video"},
+        {"item": "c", "skill": "video"}, {"item": "d", "skill": "video"},
+        {"item": "e", "skill": "video"}
+    ]))
+    .execute(&pool)
+    .await?;
+
     let morning = datetime!(2026-10-05 10:00 UTC);
     let issued = repository
         .reconcile_team_handoffs(workspace_id, morning)
@@ -193,6 +222,10 @@ async fn the_briefing_issues_once_a_day_to_every_active_member()
     assert!(
         body.contains("arc") || body.contains("Łuk"),
         "arc section present: {body}"
+    );
+    assert!(
+        body.contains("harvest 4/5"),
+        "the leverage number is in the briefing: {body}"
     );
 
     let assignments = briefing_assignments(&pool, workspace_id).await?;

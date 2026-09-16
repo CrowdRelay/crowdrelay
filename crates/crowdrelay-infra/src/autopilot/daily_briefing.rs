@@ -47,6 +47,8 @@ struct BriefingFrame {
     more_in_panel: &'static str,
     due_label: &'static str,
     no_plan: &'static str,
+    yield_label: &'static str,
+    unmeasured: &'static str,
 }
 
 const fn briefing_frame(locale: BriefingLocale) -> BriefingFrame {
@@ -64,6 +66,8 @@ const fn briefing_frame(locale: BriefingLocale) -> BriefingFrame {
             more_in_panel: "Więcej w panelu: /staff",
             due_label: "termin",
             no_plan: "brak planu",
+            yield_label: "zbiór",
+            unmeasured: "brak pomiaru",
         },
         BriefingLocale::En => BriefingFrame {
             title: "ViryaOS — morning briefing",
@@ -78,6 +82,8 @@ const fn briefing_frame(locale: BriefingLocale) -> BriefingFrame {
             more_in_panel: "More in the panel: /staff",
             due_label: "due",
             no_plan: "no plan",
+            yield_label: "harvest",
+            unmeasured: "unmeasured",
         },
     }
 }
@@ -108,6 +114,15 @@ struct ProductionDayRow {
     title: String,
     scheduled_for: time::Date,
     plan_status: Option<String>,
+}
+
+#[derive(Debug, FromRow)]
+struct RecentDayRow {
+    title: String,
+    scheduled_for: time::Date,
+    plan_status: Option<String>,
+    sources_landed: Option<i32>,
+    planned: Option<i32>,
 }
 
 /// Issues today's briefing once per tenant-local day, to every active
@@ -419,6 +434,37 @@ async fn compose_briefing(
     .await
     .map_err(map_sqlx)?;
 
+    // Days just gone, with what they produced — the leverage number the
+    // operator reads: landed pieces against the plan's shot list. A day
+    // with no plan is silent about yield, not a zero.
+    let recent_days = sqlx::query_as::<_, RecentDayRow>(
+        r#"
+        SELECT day.title, day.scheduled_for, plan.status AS plan_status,
+               plan.sources_landed, plan.planned
+        FROM viryaos_production_events day
+        JOIN LATERAL (
+            SELECT p.status, p.sources_landed,
+                   jsonb_array_length(p.items)::int AS planned, p.issued_at
+            FROM viryaos_capture_plans p
+            WHERE p.workspace_id = day.workspace_id
+              AND p.production_event_id = day.id
+              AND p.status IN ('done','abandoned')
+            ORDER BY p.issued_at DESC NULLS LAST
+            LIMIT 1
+        ) plan ON true
+        WHERE day.workspace_id = $1
+          AND day.scheduled_for < $2
+          AND day.scheduled_for >= $2 - INTERVAL '7 days'
+        ORDER BY day.scheduled_for DESC
+        LIMIT 2
+        "#,
+    )
+    .bind(ws)
+    .bind(local_date)
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(map_sqlx)?;
+
     // ── What changed in the last 24h ──────────────────────────────────
     let material_landed: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM viryaos_content_sources
@@ -504,10 +550,10 @@ async fn compose_briefing(
         body.push('\n');
     }
 
-    if !production_days.is_empty() {
+    if !production_days.is_empty() || !recent_days.is_empty() {
         sections_map.insert(
             "production_days".to_owned(),
-            (production_days.len() as i64).into(),
+            ((production_days.len() + recent_days.len()) as i64).into(),
         );
         body.push_str(&format!("\n{}:", frame.production));
         for day in &production_days {
@@ -517,6 +563,23 @@ async fn compose_briefing(
                 day.title,
                 day.plan_status.as_deref().unwrap_or(frame.no_plan)
             ));
+        }
+        for day in &recent_days {
+            body.push_str(&format!(
+                "\n- {} {} — {}",
+                day.scheduled_for,
+                day.title,
+                day.plan_status.as_deref().unwrap_or(frame.no_plan)
+            ));
+            // A zero shot list is no denominator — "harvest 4/0" reads as
+            // a bug, not as a plan that asked for nothing.
+            match (day.sources_landed, day.planned) {
+                (Some(landed), Some(planned)) if planned > 0 => {
+                    body.push_str(&format!(" · {} {}/{}", frame.yield_label, landed, planned))
+                }
+                (Some(landed), _) => body.push_str(&format!(" · {} {}", frame.yield_label, landed)),
+                _ => body.push_str(&format!(" · {}", frame.unmeasured)),
+            }
         }
         body.push('\n');
     }

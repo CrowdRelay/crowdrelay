@@ -1211,8 +1211,12 @@ mod tests {
         assert_eq!(greeting, "Cześć Wojtek!");
         assert!(intro.contains("nowe zadanie"));
 
-        let (subject, greeting, _) =
-            team_email_frame(BriefingLocale::En, "Wojtek", "Approve the content artifact", 0);
+        let (subject, greeting, _) = team_email_frame(
+            BriefingLocale::En,
+            "Wojtek",
+            "Approve the content artifact",
+            0,
+        );
         assert_eq!(subject, "VIRYA — new task: Approve the content artifact");
         assert_eq!(greeting, "Hi Wojtek!");
     }

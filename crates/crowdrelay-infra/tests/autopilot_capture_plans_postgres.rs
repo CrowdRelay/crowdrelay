@@ -528,6 +528,37 @@ async fn the_harvest_counts_sources_and_settles_plans() -> Result<(), Box<dyn st
     assert_eq!(assignment_of(plan_b), Some("cancelled"));
     assert_eq!(assignment_of(plan_c), Some("cancelled"));
     assert_eq!(assignment_of(plan_d), Some("open"));
+
+    // The yield persists on the plan — the operator reads what a day
+    // produced, and an unmeasured draft is NULL, never a guessed zero.
+    let yields: Vec<(Uuid, Option<i32>)> = sqlx::query_as(
+        "SELECT id, sources_landed FROM viryaos_capture_plans WHERE workspace_id=$1",
+    )
+    .bind(workspace_id.into_uuid())
+    .fetch_all(&pool)
+    .await?;
+    let yield_of = |plan: Uuid| {
+        yields
+            .iter()
+            .find(|(id, _)| *id == plan)
+            .map(|(_, landed)| *landed)
+    };
+    assert_eq!(
+        yield_of(plan_a),
+        Some(Some(4)),
+        "the filmed day kept its count — its own three plus D's footage inside the shared window"
+    );
+    assert_eq!(
+        yield_of(plan_b),
+        Some(Some(0)),
+        "measured and empty — the machine rows were not footage"
+    );
+    assert_eq!(
+        yield_of(plan_d),
+        Some(Some(1)),
+        "the running yield stays live"
+    );
+    assert_eq!(yield_of(plan_e), Some(None), "a draft was never measured");
     Ok(())
 }
 

@@ -228,18 +228,41 @@ pub(in crate::autopilot) async fn settle_capture_plans(
             plan.scheduled_for,
             today,
         ) {
-            CapturePlanVerdict::Keep => continue,
+            CapturePlanVerdict::Keep => {
+                // The running yield is honest even mid-harvest — issued
+                // plans keep their landed count current until the verdict.
+                if plan_status == CapturePlanStatus::Issued {
+                    sqlx::query(
+                        "UPDATE viryaos_capture_plans SET sources_landed=$3 \
+                         WHERE id=$2 AND workspace_id=$1 AND status='issued'",
+                    )
+                    .bind(workspace_id.into_uuid())
+                    .bind(plan.id)
+                    .bind(i32::try_from(sources_landed).unwrap_or(i32::MAX))
+                    .execute(&mut **tx)
+                    .await
+                    .map_err(map_sqlx)?;
+                }
+                continue;
+            }
             CapturePlanVerdict::Done => "done",
             CapturePlanVerdict::Abandon => "abandoned",
         };
+        // The verdict writes the final yield with it — NULL for a draft
+        // that was never measured, the count for anything issued.
         sqlx::query(
-            "UPDATE viryaos_capture_plans SET status=$3, updated_at=now() \
+            "UPDATE viryaos_capture_plans SET status=$3, sources_landed=$5, updated_at=now() \
              WHERE id=$2 AND workspace_id=$1 AND status=$4",
         )
         .bind(workspace_id.into_uuid())
         .bind(plan.id)
         .bind(next)
         .bind(plan.plan_status)
+        .bind(if plan_status == CapturePlanStatus::Issued {
+            Some(i32::try_from(sources_landed).unwrap_or(i32::MAX))
+        } else {
+            None
+        })
         .execute(&mut **tx)
         .await
         .map_err(map_sqlx)?;

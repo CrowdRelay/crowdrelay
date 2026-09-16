@@ -30,6 +30,7 @@
   "crates/crowdrelay-infra/src/autopilot/operations/ingress.rs": 1451,
   "crates/crowdrelay-infra/src/autopilot/play_outcomes.rs": 1357,
   "crates/crowdrelay-infra/src/autopilot/runtime.rs": 1233,
+  "crates/crowdrelay-infra/src/autopilot/team.rs": 1231,
   "crates/crowdrelay-infra/src/config.rs": 1558,
   "crates/crowdrelay-infra/src/events.rs": 1226,
   "crates/crowdrelay-infra/src/referrals.rs": 1797,
