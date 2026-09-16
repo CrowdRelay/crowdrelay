@@ -226,7 +226,7 @@ impl PostgresAttestationRepository {
     ) -> Result<VerifiedAttestation, AttestationError> {
         let row = sqlx::query(
             r#"
-            SELECT act_name, figures, issued_at, valid_until, digest, signature, revoked_at
+            SELECT workspace_id, act_name, figures, issued_at, valid_until, digest, signature, revoked_at
             FROM viryaos_attestations WHERE share_token = $1
             "#,
         )
@@ -247,7 +247,7 @@ impl PostgresAttestationRepository {
     ) -> Result<VerifiedAttestation, AttestationError> {
         let row = sqlx::query(
             r#"
-            SELECT act_name, figures, issued_at, valid_until, digest, signature, revoked_at
+            SELECT workspace_id, act_name, figures, issued_at, valid_until, digest, signature, revoked_at
             FROM viryaos_attestations WHERE digest = $1
             "#,
         )
