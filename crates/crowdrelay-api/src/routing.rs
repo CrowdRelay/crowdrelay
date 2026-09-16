@@ -905,6 +905,10 @@ pub(super) fn application_routes(state: AppState) -> Router {
             post(autopilot::upsert_content_source),
         )
         .route(
+            "/v1/admin/autopilot/content-suggestions/{suggestion_id}/outcome",
+            post(autopilot::report_suggestion_outcome),
+        )
+        .route(
             "/v1/admin/autopilot/experiments",
             post(autopilot::create_experiment),
         )

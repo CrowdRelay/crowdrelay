@@ -3,9 +3,9 @@
 use async_trait::async_trait;
 use crowdrelay_domain::{
     AutopilotActionId, AutopilotDecisionId, AutopilotMeasurementId, BeaconId, BookingTargetId,
-    CityId, ContentSourceId, EventId, ExperimentId, ExperimentVariantId, GrowthMetricSeriesId,
-    MarketSignalId, MerchProductId, OutreachOpportunityId, OutreachTargetId, PlayId,
-    PromotionCampaignId, ReleasePlanId, TeamOpportunityId, WorkspaceId,
+    CityId, ContentSourceId, ContentSuggestionId, EventId, ExperimentId, ExperimentVariantId,
+    GrowthMetricSeriesId, MarketSignalId, MerchProductId, OutreachOpportunityId, OutreachTargetId,
+    PlayId, PromotionCampaignId, ReleasePlanId, TeamOpportunityId, WorkspaceId,
     acquisition_channel::{ChannelAttribution, UnattributedReason},
     autonomy::{AutonomyLevel, Confidence, PolicyDisposition},
     beacons::{BeaconKind, BeaconReplyDisposition},

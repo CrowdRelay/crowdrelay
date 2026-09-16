@@ -375,6 +375,29 @@ pub struct ContentSourceRequest {
     expected_version: i64,
 }
 
+/// The two outcomes an operator may report on an approved suggestion.
+/// `declined` and `expired` are not reportable — one is a decision verb on
+/// the ask, the other is the sweep's verdict on a window that closed.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SuggestionOutcomeReportRequest {
+    Done,
+    DoneDifferently,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReportSuggestionOutcomeRequest {
+    pub outcome: SuggestionOutcomeReportRequest,
+    /// `done_differently` must name what was made instead — "a version of
+    /// yes" without the version is a shrug the loop cannot learn from.
+    /// Optional on a plain `done`.
+    pub reason: Option<String>,
+    /// What the band measured already, when it did — `{"views": ...}`.
+    /// Stored verbatim for the learning loop; never required.
+    pub results: Option<serde_json::Value>,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExperimentVariantRequest {

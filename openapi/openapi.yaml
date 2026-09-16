@@ -4173,6 +4173,31 @@ paths:
         '401': { $ref: '#/components/responses/PrivateProblem' }
         '409': { $ref: '#/components/responses/PrivateProblem' }
         '503': { $ref: '#/components/responses/PrivateProblem' }
+  /admin/autopilot/content-suggestions/{suggestion_id}/outcome:
+    post:
+      operationId: reportAutopilotContentSuggestionOutcome
+      summary: Report the outcome of an approved content suggestion (done / done differently)
+      description: Closes the suggestion loop the lapse sweep cannot — without a report, an approved beat resolves `expired` on its day whether or not the band played it. Only `approved` suggestions accept a report; `raised` is still the ask's decision and every other status is already resolved.
+      security:
+      - adminBearer: []
+      parameters:
+      - name: suggestion_id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+      - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ReportSuggestionOutcomeRequest' }
+      responses:
+        '200': { description: Outcome recorded or idempotently replayed, content: { application/json: { schema: { $ref: '#/components/schemas/AutopilotMutation' } } } }
+        '400': { $ref: '#/components/responses/PrivateProblem' }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '404': { $ref: '#/components/responses/PrivateProblem' }
+        '409': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
   /admin/autopilot/experiments:
     post:
       operationId: createAutopilotExperiment
@@ -8582,12 +8607,12 @@ paths:
   /admin/analytics/city-funnel:
     get:
       operationId: getAdminAudienceCityFunnel
-      summary: Read per-city fan funnel (signups, active, consented, bookable)
+      summary: Read per-city fan funnel (signups, trend, active, consented, reachable, bookable)
       security:
       - adminBearer: []
       responses:
         '200':
-          description: Per-city breakdown of fans, 30d-active, consented, and whether the city is bookable.
+          description: Per-city breakdown of fans, 30d trend, 30d-active, consented, reachable-by-nearby-gig, and whether the city is bookable.
           content:
             application/json:
               schema:
@@ -8598,10 +8623,18 @@ paths:
                     city_slug: { type: string }
                     city_name: { type: string }
                     country_code: { type: string }
+                    region: { type: string, nullable: true }
                     fans: { type: integer, format: int64 }
+                    new_30d: { type: integer, format: int64 }
                     active_30d: { type: integer, format: int64 }
                     consented: { type: integer, format: int64 }
                     bookable: { type: boolean }
+                    reachable: { type: integer, format: int64 }
+                    venues: { type: integer, format: int64 }
+                    promoters: { type: integer, format: int64 }
+                    festivals: { type: integer, format: int64 }
+                    last_show_at: { type: string, format: date-time, nullable: true }
+                    next_show_at: { type: string, format: date-time, nullable: true }
         '401':
           $ref: '#/components/responses/Problem'
         '503':
@@ -12674,6 +12707,23 @@ components:
         target_id: { type: string, format: uuid }
         status: { type: string, maxLength: 64 }
         replayed: { type: boolean }
+
+    ReportSuggestionOutcomeRequest:
+      type: object
+      additionalProperties: false
+      required: [outcome]
+      properties:
+        outcome:
+          type: string
+          enum: [done, done_differently]
+          description: "`done` — the band made the asked thing. `done_differently` — the band made something inspired by it; `reason` then names what was made instead and is required."
+        reason:
+          type: string
+          maxLength: 480
+          description: Required for `done_differently`; optional for `done`.
+        results:
+          type: object
+          description: 'What the band already measured — {"views": ...}. Stored verbatim for the learning loop.'
 
     GrowthPostureRequest:
       type: object

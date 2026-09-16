@@ -484,3 +484,63 @@ async fn the_briefing_reports_fan_concentration_and_says_so_when_flat()
     );
     Ok(())
 }
+
+/// An approved suggestion holds a queue slot until somebody reports what
+/// happened — and only until its beat day, when the sweep expires it
+/// either way. The briefing names the open reports so the report path
+/// gets used while it still can.
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn the_briefing_names_approved_work_awaiting_a_report()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (repository, pool) = repository().await?;
+    let workspace_id = WorkspaceId::new();
+    seed_workspace(&pool, workspace_id).await?;
+    seed_member(&pool, workspace_id, "reader").await?;
+    seed_team_email_executor(&pool, workspace_id).await?;
+    sqlx::query(
+        "INSERT INTO tenant_settings (workspace_id, key, value) VALUES ($1, 'crew_locale', 'en')",
+    )
+    .bind(workspace_id.into_uuid())
+    .execute(&pool)
+    .await?;
+
+    for (concept, beat) in [
+        ("playthrough for the single", Some("2026-10-09")),
+        ("rehearsal clip while the strings are fresh", None),
+    ] {
+        sqlx::query(
+            "INSERT INTO viryaos_content_suggestions
+                 (id, workspace_id, format_key, concept, status, suggested_before)
+             VALUES ($1, $2, 'playthrough', $3, 'approved', $4::date)",
+        )
+        .bind(Uuid::now_v7())
+        .bind(workspace_id.into_uuid())
+        .bind(concept)
+        .bind(beat)
+        .execute(&pool)
+        .await?;
+    }
+
+    let morning = datetime!(2026-10-05 10:00 UTC);
+    let issued = repository
+        .reconcile_team_handoffs(workspace_id, morning)
+        .await?;
+    assert_eq!(issued, 1);
+
+    let briefings = briefing_rows(&pool, workspace_id).await?;
+    let (_, _, _, body) = &briefings[0];
+    assert!(
+        body.contains("Awaiting your report (2)"),
+        "open reports are counted: {body}"
+    );
+    assert!(
+        body.contains("playthrough for the single — beat 2026-10-09"),
+        "the beat day is the report deadline: {body}"
+    );
+    assert!(
+        body.contains("rehearsal clip while the strings are fresh"),
+        "an open-ended report is named without a deadline: {body}"
+    );
+    Ok(())
+}

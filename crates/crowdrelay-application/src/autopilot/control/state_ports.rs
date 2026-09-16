@@ -581,6 +581,37 @@ pub struct ContentSourceView {
     pub version: i64,
     pub active: bool,
 }
+/// The two outcomes an operator may report on an approved suggestion.
+/// `declined` and `expired` are not reportable — one is a decision verb on
+/// the ask, the other is the sweep's verdict on a window that closed.
+#[derive(Clone, Copy, Debug)]
+pub enum SuggestionReportOutcome {
+    Done,
+    DoneDifferently,
+}
+
+impl SuggestionReportOutcome {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Done => "done",
+            Self::DoneDifferently => "done_differently",
+        }
+    }
+}
+
+/// What the operator reports about one approved suggestion: the band made
+/// the asked thing (`done`) or made something inspired by it
+/// (`done_differently`). `reason` names what happened instead for the
+/// latter — "a version of yes" without the version is a shrug the loop
+/// cannot learn from. `results` carries whatever the band already measured.
+#[derive(Clone, Debug)]
+pub struct ReportSuggestionOutcome {
+    pub suggestion_id: ContentSuggestionId,
+    pub outcome: SuggestionReportOutcome,
+    pub reason: Option<String>,
+    pub results: serde_json::Value,
+}
+
 #[async_trait]
 pub trait AutopilotContentStateRepository: Send + Sync {
     async fn upsert_content_source(
@@ -596,6 +627,17 @@ pub trait AutopilotContentStateRepository: Send + Sync {
         &self,
         workspace_id: WorkspaceId,
     ) -> Result<Vec<ContentSourceView>, RepositoryError>;
+    /// Resolves an approved suggestion with the band's report. Only
+    /// `approved` rows accept a report — `raised` is still the ask's
+    /// decision (approve it, or mark the decision handled-externally), and
+    /// every other status is already a resolved answer.
+    async fn report_suggestion_outcome(
+        &self,
+        workspace_id: WorkspaceId,
+        command: ReportSuggestionOutcome,
+        idempotency_key: &IdempotencyKey,
+        request_id: Option<&RequestId>,
+    ) -> Result<AutopilotControlMutation, RepositoryError>;
 }
 
 #[derive(Clone, Debug)]

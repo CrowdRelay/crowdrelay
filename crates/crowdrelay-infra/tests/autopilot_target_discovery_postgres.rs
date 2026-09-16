@@ -429,3 +429,273 @@ async fn a_content_sources_format_must_name_a_catalogue_entry()
     pool.close().await;
     Ok(())
 }
+
+/// The report path is the only way an approved suggestion reaches `done`:
+/// without it every committed beat lapses `expired` and the stale rule
+/// scores executed work as ignored. This walks the whole contract —
+/// done, done_differently, replay, wrong-state refusals, and the tenant
+/// boundary — because a report on somebody else's suggestion is not a
+/// 404-shaped nicety, it is the isolation guarantee.
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn an_approved_suggestion_resolves_on_the_bands_report()
+-> Result<(), Box<dyn std::error::Error>> {
+    let database_url =
+        std::env::var("CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL").map_err(|error| {
+            format!(
+                "CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL must target a disposable database: {error}"
+            )
+        })?;
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&database_url)
+        .await?;
+    crowdrelay_infra::database::MIGRATOR.run(&pool).await?;
+
+    let workspace_id = WorkspaceId::new();
+    sqlx::query("INSERT INTO workspaces (id, slug, name) VALUES ($1, $2, $3)")
+        .bind(workspace_id.into_uuid())
+        .bind(format!("report-{}", workspace_id.into_uuid().simple()))
+        .bind("Outcome Report E2E")
+        .execute(&pool)
+        .await?;
+    let database = DatabaseConfig {
+        url: database_url,
+        max_connections: 4,
+        connect_timeout: Duration::from_secs(3),
+        ping_timeout: Duration::from_secs(2),
+        operation_timeout: Duration::from_secs(5),
+        lock_timeout: Duration::from_secs(1),
+    };
+    let repository = PostgresAutopilotRepository::new(pool.clone(), &database);
+
+    async fn seed(
+        pool: &sqlx::PgPool,
+        workspace_id: WorkspaceId,
+        status: &str,
+        concept: &str,
+    ) -> Result<Uuid, sqlx::Error> {
+        sqlx::query_scalar::<_, Uuid>(
+            "INSERT INTO viryaos_content_suggestions
+                 (id, workspace_id, format_key, concept, status)
+             VALUES ($1, $2, 'playthrough', $3, $4) RETURNING id",
+        )
+        .bind(Uuid::now_v7())
+        .bind(workspace_id.into_uuid())
+        .bind(concept)
+        .bind(status)
+        .fetch_one(pool)
+        .await
+    }
+
+    use crowdrelay_application::autopilot::{ReportSuggestionOutcome, SuggestionReportOutcome};
+    async fn report(
+        repository: &PostgresAutopilotRepository,
+        workspace_id: WorkspaceId,
+        suggestion_id: Uuid,
+        outcome: SuggestionReportOutcome,
+        reason: Option<String>,
+        key: &str,
+    ) -> Result<crowdrelay_application::autopilot::AutopilotControlMutation, RepositoryError> {
+        let key = IdempotencyKey::parse(key).expect("valid key");
+        repository
+            .report_suggestion_outcome(
+                workspace_id,
+                ReportSuggestionOutcome {
+                    suggestion_id: crowdrelay_domain::ContentSuggestionId::from_uuid(suggestion_id),
+                    outcome,
+                    reason,
+                    results: serde_json::json!({}),
+                },
+                &key,
+                None,
+            )
+            .await
+    }
+
+    // done — the band made the asked thing.
+    let approved = seed(
+        &pool,
+        workspace_id,
+        "approved",
+        "playthrough for the single",
+    )
+    .await?;
+    let recorded = report(
+        &repository,
+        workspace_id,
+        approved,
+        SuggestionReportOutcome::Done,
+        None,
+        "report-done-1",
+    )
+    .await?;
+    assert!(!recorded.replayed);
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT status FROM viryaos_content_suggestions WHERE id = $1"
+        )
+        .bind(approved)
+        .fetch_one(&pool)
+        .await?,
+        "done"
+    );
+    let (outcome, decided_by): (String, Option<String>) = sqlx::query_as(
+        "SELECT outcome, decided_by FROM viryaos_suggestion_outcomes
+         WHERE workspace_id = $1 AND suggestion_id = $2",
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(approved)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(outcome, "done");
+    assert_eq!(decided_by.as_deref(), Some("operator:admin_api_key"));
+
+    // Idempotent replay — same key, same report, no second outcome row.
+    let replayed = report(
+        &repository,
+        workspace_id,
+        approved,
+        SuggestionReportOutcome::Done,
+        None,
+        "report-done-1",
+    )
+    .await?;
+    assert!(replayed.replayed);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM viryaos_suggestion_outcomes WHERE suggestion_id = $1"
+        )
+        .bind(approved)
+        .fetch_one(&pool)
+        .await?,
+        1,
+        "a replay must not write a second outcome"
+    );
+
+    // done_differently — the band made something instead; the reason
+    // carries what, and the outcome row keeps the distinction the
+    // terminal `done` status cannot.
+    let differently = seed(&pool, workspace_id, "approved", "making-of for the single").await?;
+    report(
+        &repository,
+        workspace_id,
+        differently,
+        SuggestionReportOutcome::DoneDifferently,
+        Some("filmed a rehearsal clip instead".to_owned()),
+        "report-diff-1",
+    )
+    .await?;
+    let (outcome, reason): (String, Option<String>) = sqlx::query_as(
+        "SELECT outcome, reason FROM viryaos_suggestion_outcomes
+         WHERE workspace_id = $1 AND suggestion_id = $2",
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(differently)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(outcome, "done_differently");
+    assert_eq!(reason.as_deref(), Some("filmed a rehearsal clip instead"));
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT status FROM viryaos_content_suggestions WHERE id = $1"
+        )
+        .bind(differently)
+        .fetch_one(&pool)
+        .await?,
+        "done",
+        "the terminal status is `done` — the outcome row holds the nuance"
+    );
+
+    // raised is still the ask's decision — a report there would skip the
+    // approve/handled-externally verbs the decision surface owns.
+    let raised = seed(&pool, workspace_id, "raised", "lyric video next week").await?;
+    let refused = report(
+        &repository,
+        workspace_id,
+        raised,
+        SuggestionReportOutcome::Done,
+        None,
+        "report-raised-1",
+    )
+    .await;
+    assert!(
+        matches!(refused, Err(RepositoryError::ConflictBecause(_))),
+        "a raised suggestion is still a decision, not a report: {refused:?}"
+    );
+
+    // Already resolved — a second report is a conflict, not a rewrite.
+    let double = report(
+        &repository,
+        workspace_id,
+        approved,
+        SuggestionReportOutcome::Done,
+        None,
+        "report-done-2",
+    )
+    .await;
+    assert!(
+        matches!(double, Err(RepositoryError::ConflictBecause(_))),
+        "a resolved suggestion cannot be re-resolved: {double:?}"
+    );
+
+    // Missing entirely.
+    let missing = report(
+        &repository,
+        workspace_id,
+        Uuid::now_v7(),
+        SuggestionReportOutcome::Done,
+        None,
+        "report-missing-1",
+    )
+    .await;
+    assert!(
+        matches!(missing, Err(RepositoryError::NotFound)),
+        "a suggestion that does not exist is not found: {missing:?}"
+    );
+
+    // The tenant boundary — the other workspace's suggestion is not
+    // reportable from here, and no row leaks either direction.
+    let other = WorkspaceId::new();
+    sqlx::query("INSERT INTO workspaces (id, slug, name) VALUES ($1, $2, $3)")
+        .bind(other.into_uuid())
+        .bind(format!("report-other-{}", other.into_uuid().simple()))
+        .bind("Other Tenant")
+        .execute(&pool)
+        .await?;
+    let foreign: Uuid = sqlx::query_scalar(
+        "INSERT INTO viryaos_content_suggestions
+             (id, workspace_id, format_key, concept, status)
+         VALUES ($1, $2, 'playthrough', 'foreign beat', 'approved') RETURNING id",
+    )
+    .bind(Uuid::now_v7())
+    .bind(other.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    let cross = report(
+        &repository,
+        workspace_id,
+        foreign,
+        SuggestionReportOutcome::Done,
+        None,
+        "report-cross-1",
+    )
+    .await;
+    assert!(
+        matches!(cross, Err(RepositoryError::NotFound)),
+        "another tenant's suggestion is not found, not conflict: {cross:?}"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT status FROM viryaos_content_suggestions WHERE id = $1"
+        )
+        .bind(foreign)
+        .fetch_one(&pool)
+        .await?,
+        "approved",
+        "the foreign row is untouched"
+    );
+
+    pool.close().await;
+    Ok(())
+}

@@ -710,6 +710,73 @@ pub async fn upsert_content_source(
     }
 }
 
+/// "We made it" / "we made something else instead" — the report that closes
+/// an approved suggestion's loop. Without it the only writers of `done` are
+/// a handled-externally decision and nothing else, so every approved beat
+/// would lapse `expired` and count against the format's stale rule as if
+/// the band had ignored the ask entirely.
+pub async fn report_suggestion_outcome(
+    State(state): State<AppState>,
+    Path(suggestion_id): Path<String>,
+    headers: HeaderMap,
+    Json(request): Json<ReportSuggestionOutcomeRequest>,
+) -> Response {
+    let Ok(suggestion_id) = Uuid::parse_str(&suggestion_id) else {
+        return Problem::not_found(request_id(&headers))
+            .private()
+            .into_response();
+    };
+    let done_differently =
+        matches!(request.outcome, SuggestionOutcomeReportRequest::DoneDifferently);
+    let invalid = request
+        .reason
+        .as_deref()
+        .is_some_and(|reason| reason.trim().is_empty() || reason.len() > 480)
+        || (done_differently && request.reason.is_none())
+        || request
+            .results
+            .as_ref()
+            .is_some_and(|results| !results.is_object());
+    if invalid {
+        return Problem::bad_request(request_id(&headers))
+            .private()
+            .into_response();
+    }
+    let idempotency_key = match parse_idempotency_key(&headers) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let request_id_value = parsed_request_id(&headers);
+    let command = ReportSuggestionOutcome {
+        suggestion_id: ContentSuggestionId::from_uuid(suggestion_id),
+        outcome: match request.outcome {
+            SuggestionOutcomeReportRequest::Done => SuggestionReportOutcome::Done,
+            SuggestionOutcomeReportRequest::DoneDifferently => {
+                SuggestionReportOutcome::DoneDifferently
+            }
+        },
+        reason: request
+            .reason
+            .as_deref()
+            .map(str::trim)
+            .map(str::to_owned),
+        results: request.results.unwrap_or_else(|| serde_json::json!({})),
+    };
+    match state
+        .autopilot
+        .report_suggestion_outcome(
+            state.ops.workspace_id(),
+            command,
+            &idempotency_key,
+            request_id_value.as_ref(),
+        )
+        .await
+    {
+        Ok(result) => private_json(StatusCode::OK, result),
+        Err(error) => repository_problem(error, request_id(&headers)),
+    }
+}
+
 /// The operator's real-material list: every trusted fact the content loop may
 /// draw on — releases, videos, events, stories — active and retired both.
 pub async fn list_content_sources(

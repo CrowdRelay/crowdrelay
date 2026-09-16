@@ -11,9 +11,9 @@ use crowdrelay_application::autopilot::{
     ExperimentObservation, OutreachOpportunityMutation, OutreachTargetMutation, PromoterPosition,
     RecordBeaconReply, RecordDeliveryFault, RecordOutreachReply, RecordPlaylistPlacement,
     RecordTeamOpportunityProgress, RecordTeamOpportunityTerms, ReleasePlanMutation,
-    TeamOpportunityKind, TeamOpportunityMutation, TeamOpportunityProgress, UpsertBeacon,
-    UpsertContentSource, UpsertOutreachOpportunity, UpsertOutreachTarget, UpsertReleasePlan,
-    UpsertTeamOpportunity,
+    ReportSuggestionOutcome, TeamOpportunityKind, TeamOpportunityMutation, TeamOpportunityProgress,
+    UpsertBeacon, UpsertContentSource, UpsertOutreachOpportunity, UpsertOutreachTarget,
+    UpsertReleasePlan, UpsertTeamOpportunity,
 };
 use crowdrelay_application::{IdempotencyKey, RequestId};
 use crowdrelay_domain::{
@@ -764,6 +764,110 @@ impl AutopilotContentStateRepository for PostgresAutopilotRepository {
                     },
                 )
                 .collect()
+        })
+        .await
+    }
+
+    async fn report_suggestion_outcome(
+        &self,
+        workspace_id: WorkspaceId,
+        command: ReportSuggestionOutcome,
+        idempotency_key: &IdempotencyKey,
+        request_id: Option<&RequestId>,
+    ) -> Result<AutopilotControlMutation, RepositoryError> {
+        self.bounded(async {
+            let mut transaction = self.pool.begin().await.map_err(map_sqlx)?;
+            let operation_id = Uuid::now_v7();
+            let details = json!({
+                "suggestion_id": command.suggestion_id.into_uuid(),
+                "outcome": command.outcome.as_str(),
+                "reason": &command.reason,
+                "results": &command.results,
+            });
+            if let Some(existing) = super::insert_operator_action(
+                &mut transaction,
+                workspace_id,
+                operation_id,
+                "report_suggestion_outcome",
+                "content_suggestion",
+                command.suggestion_id.into_uuid(),
+                "admin_api_key",
+                idempotency_key,
+                request_id,
+                &details,
+            )
+            .await?
+            {
+                transaction.commit().await.map_err(map_sqlx)?;
+                return Ok(AutopilotControlMutation {
+                    operation_id: existing,
+                    target_id: command.suggestion_id.into_uuid(),
+                    status: "outcome_recorded".into(),
+                    replayed: true,
+                });
+            }
+
+            // The terminal guard is in the UPDATE, not a read-then-write: a
+            // status that moved between the two cannot double-resolve, and
+            // the suggestion's terminal state stays `done` regardless of
+            // which report lands — the outcome row carries the distinction.
+            let resolved = sqlx::query_scalar::<_, Uuid>(
+                r#"
+                UPDATE viryaos_content_suggestions
+                SET status = 'done', updated_at = now()
+                WHERE workspace_id = $1 AND id = $2 AND status = 'approved'
+                RETURNING id
+                "#,
+            )
+            .bind(workspace_id.into_uuid())
+            .bind(command.suggestion_id.into_uuid())
+            .fetch_optional(&mut *transaction)
+            .await
+            .map_err(map_sqlx)?;
+            let Some(suggestion_id) = resolved else {
+                let status = sqlx::query_scalar::<_, String>(
+                    "SELECT status FROM viryaos_content_suggestions
+                     WHERE workspace_id = $1 AND id = $2",
+                )
+                .bind(workspace_id.into_uuid())
+                .bind(command.suggestion_id.into_uuid())
+                .fetch_optional(&mut *transaction)
+                .await
+                .map_err(map_sqlx)?;
+                return Err(match status {
+                    None => RepositoryError::NotFound,
+                    // `raised` is still the ask's decision — approve it or
+                    // mark the decision handled-externally; every other
+                    // status is an outcome already recorded.
+                    Some(_) => RepositoryError::ConflictBecause(
+                        "only an approved suggestion accepts an outcome report",
+                    ),
+                });
+            };
+
+            sqlx::query(
+                r#"
+                INSERT INTO viryaos_suggestion_outcomes
+                    (workspace_id, suggestion_id, outcome, decided_by, reason, results)
+                VALUES ($1, $2, $3, 'operator:admin_api_key', $4, $5)
+                "#,
+            )
+            .bind(workspace_id.into_uuid())
+            .bind(suggestion_id)
+            .bind(command.outcome.as_str())
+            .bind(command.reason.as_deref())
+            .bind(&command.results)
+            .execute(&mut *transaction)
+            .await
+            .map_err(map_sqlx)?;
+
+            transaction.commit().await.map_err(map_sqlx)?;
+            Ok(AutopilotControlMutation {
+                operation_id,
+                target_id: suggestion_id,
+                status: "outcome_recorded".into(),
+                replayed: false,
+            })
         })
         .await
     }

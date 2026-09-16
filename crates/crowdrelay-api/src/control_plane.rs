@@ -424,6 +424,10 @@ pub(crate) fn router(state: crate::AppState) -> Router {
             "/v1/control-plane/content/pipeline",
             get(crate::autopilot::content_pipeline),
         )
+        .route(
+            "/v1/control-plane/autopilot/content-suggestions/{suggestion_id}/outcome",
+            post(crate::autopilot::report_suggestion_outcome),
+        )
         // ── Outreach & booking discovery ──────────────────────────────
         // Candidate queues for the growth pipeline: what the agent found,
         // and the two decisions a human can make about one finding.

@@ -52,6 +52,8 @@ struct BriefingFrame {
     fans_label: &'static str,
     fans_flat: &'static str,
     fans_format_unrecorded: &'static str,
+    awaiting_report: &'static str,
+    beat_label: &'static str,
 }
 
 const fn briefing_frame(locale: BriefingLocale) -> BriefingFrame {
@@ -74,6 +76,8 @@ const fn briefing_frame(locale: BriefingLocale) -> BriefingFrame {
             fans_label: "fani (30 dni)",
             fans_flat: "brak konwersji — nic jeszcze nie działa, i to też jest wiedza",
             fans_format_unrecorded: "format niezapisany",
+            awaiting_report: "Czeka na raport",
+            beat_label: "beat",
         },
         BriefingLocale::En => BriefingFrame {
             title: "ViryaOS — morning briefing",
@@ -93,6 +97,8 @@ const fn briefing_frame(locale: BriefingLocale) -> BriefingFrame {
             fans_label: "fans (30d)",
             fans_flat: "no conversions — nothing is working yet, worth knowing",
             fans_format_unrecorded: "format unrecorded",
+            awaiting_report: "Awaiting your report",
+            beat_label: "beat",
         },
     }
 }
@@ -109,6 +115,12 @@ struct PendingAskRow {
     action_kind: String,
     expires_local: Option<time::Date>,
     payload: serde_json::Value,
+}
+
+#[derive(Debug, FromRow)]
+struct AwaitingReportRow {
+    concept: String,
+    suggested_before: Option<time::Date>,
 }
 
 #[derive(Debug, FromRow)]
@@ -389,6 +401,34 @@ async fn compose_briefing(
     .await
     .map_err(map_sqlx)?;
 
+    // ── Approved work awaiting the band's report ─────────────────────
+    // An approved suggestion stays open until somebody reports done /
+    // done_differently — and only until its beat day, when the sweep
+    // resolves it `expired` whether the work happened or not. Naming the
+    // count and the nearest day is what makes the report path get used
+    // before the window closes and the stale rule scores it as ignored.
+    let awaiting_report = sqlx::query_as::<_, AwaitingReportRow>(
+        r#"
+        SELECT concept, suggested_before
+        FROM viryaos_content_suggestions
+        WHERE workspace_id = $1 AND status = 'approved'
+        ORDER BY suggested_before NULLS LAST, created_at
+        LIMIT 3
+        "#,
+    )
+    .bind(ws)
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(map_sqlx)?;
+    let awaiting_report_total: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM viryaos_content_suggestions
+         WHERE workspace_id = $1 AND status = 'approved'",
+    )
+    .bind(ws)
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(map_sqlx)?;
+
     // ── Open handoffs per member (the briefing itself does not count) ──
     let open_tasks = sqlx::query_as::<_, OpenTaskRow>(
         r#"
@@ -627,6 +667,34 @@ async fn compose_briefing(
         }
         if pending_total > asks.len() as i64 {
             body.push_str(&format!("\n- … +{}", pending_total - asks.len() as i64));
+        }
+        body.push('\n');
+    }
+
+    if awaiting_report_total > 0 {
+        sections_map.insert("awaiting_report".to_owned(), awaiting_report_total.into());
+        body.push_str(&format!(
+            "\n{} ({}):",
+            frame.awaiting_report, awaiting_report_total
+        ));
+        for row in &awaiting_report {
+            let concept = if row.concept.chars().count() > 90 {
+                format!("{}…", row.concept.chars().take(89).collect::<String>())
+            } else {
+                row.concept.clone()
+            };
+            match row.suggested_before {
+                Some(beat) => {
+                    body.push_str(&format!("\n- {concept} — {} {beat}", frame.beat_label))
+                }
+                None => body.push_str(&format!("\n- {concept}")),
+            }
+        }
+        if awaiting_report_total > awaiting_report.len() as i64 {
+            body.push_str(&format!(
+                "\n- … +{}",
+                awaiting_report_total - awaiting_report.len() as i64
+            ));
         }
         body.push('\n');
     }
