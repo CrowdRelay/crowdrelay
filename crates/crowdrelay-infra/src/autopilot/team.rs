@@ -1057,6 +1057,40 @@ pub(super) async fn crew_locale_in_tx(
     })
 }
 
+/// The words the n8n workflow wraps around `task_title`/`task_detail` — the
+/// subject line, the greeting and the intro sentence.
+///
+/// They used to be hardcoded Polish inside the workflow, so a crew member on
+/// the English locale read a Polish frame around English content — the same
+/// seam the briefing overlay exists to remove. Composing them here keeps the
+/// whole email on one locale resolved in one place: the workflow only has to
+/// interpolate `email_subject`, `email_greeting` and `email_intro`.
+pub(super) fn team_email_frame(
+    locale: BriefingLocale,
+    recipient_name: &str,
+    task_title: &str,
+    reminder_number: u8,
+) -> (String, String, String) {
+    let reminder = reminder_number > 0;
+    let subject = match (locale, reminder) {
+        (BriefingLocale::Pl, false) => format!("VIRYA — nowe zadanie: {task_title}"),
+        (BriefingLocale::Pl, true) => format!("VIRYA — przypomnienie: {task_title}"),
+        (BriefingLocale::En, false) => format!("VIRYA — new task: {task_title}"),
+        (BriefingLocale::En, true) => format!("VIRYA — reminder: {task_title}"),
+    };
+    let greeting = match locale {
+        BriefingLocale::Pl => format!("Cześć {recipient_name}!"),
+        BriefingLocale::En => format!("Hi {recipient_name}!"),
+    };
+    let intro = match (locale, reminder) {
+        (BriefingLocale::Pl, false) => "Wpadło do Ciebie nowe zadanie od VIRYA OS.".to_owned(),
+        (BriefingLocale::Pl, true) => "To zadanie nadal czeka na Ciebie — przypominamy.".to_owned(),
+        (BriefingLocale::En, false) => "A new task from VIRYA OS landed for you.".to_owned(),
+        (BriefingLocale::En, true) => "This task is still waiting for you.".to_owned(),
+    };
+    (subject, greeting, intro)
+}
+
 /// The words around the briefing, in the crew's language.
 ///
 /// The frame used to be Polish while the briefing inside it was English, so a
@@ -1163,4 +1197,31 @@ fn next_reminder_at(
     };
     let candidate = now + TimeDuration::hours(hours);
     due.and_then(|due_at| (candidate < due_at).then_some(candidate))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_email_frame_follows_the_crew_locale() {
+        let (subject, greeting, intro) =
+            team_email_frame(BriefingLocale::Pl, "Wojtek", "Zatwierdź artefakt treści", 0);
+        assert_eq!(subject, "VIRYA — nowe zadanie: Zatwierdź artefakt treści");
+        assert_eq!(greeting, "Cześć Wojtek!");
+        assert!(intro.contains("nowe zadanie"));
+
+        let (subject, greeting, _) =
+            team_email_frame(BriefingLocale::En, "Wojtek", "Approve the content artifact", 0);
+        assert_eq!(subject, "VIRYA — new task: Approve the content artifact");
+        assert_eq!(greeting, "Hi Wojtek!");
+    }
+
+    #[test]
+    fn a_reminder_frame_is_not_the_first_send() {
+        let (subject, _, intro) =
+            team_email_frame(BriefingLocale::Pl, "Wojtek", "Domknij zadanie", 2);
+        assert!(subject.starts_with("VIRYA — przypomnienie:"));
+        assert!(intro.contains("przypominamy"));
+    }
 }

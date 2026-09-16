@@ -914,6 +914,19 @@ impl PostgresAutopilotRepository {
                     assignment_id, recipient_email, recipient_name, task_title, task_detail,
                     due_at, action_url_path, reminder_number,
                 } => {
+                    // The frame the executor wraps around the task body is
+                    // composed here, in the same transaction and the same
+                    // locale the body was written in — the alternative is a
+                    // second copy of the wording living inside n8n.
+                    let locale =
+                        super::team::crew_locale_in_tx(&mut transaction, workspace_id).await;
+                    let (email_subject, email_greeting, email_intro) =
+                        super::team::team_email_frame(
+                            locale,
+                            recipient_name,
+                            task_title,
+                            *reminder_number,
+                        );
                     emit_external_action(
                         &mut transaction,
                         workspace_id,
@@ -929,6 +942,10 @@ impl PostgresAutopilotRepository {
                             "due_at": due_at,
                             "action_url_path": action_url_path,
                             "reminder_number": reminder_number,
+                            "locale": locale.as_str(),
+                            "email_subject": email_subject,
+                            "email_greeting": email_greeting,
+                            "email_intro": email_intro,
                         }),
                     )
                     .await?;

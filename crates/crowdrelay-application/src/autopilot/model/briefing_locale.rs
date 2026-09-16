@@ -55,6 +55,16 @@ impl BriefingLocale {
             _ => Self::En,
         }
     }
+
+    /// The BCP-47 tag downstream executors read — the n8n workflow picks its
+    /// greeting and subject wrapper on this value.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::En => "en",
+            Self::Pl => "pl",
+        }
+    }
 }
 
 impl ActionBriefing {
