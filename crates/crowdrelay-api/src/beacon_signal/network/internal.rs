@@ -463,9 +463,18 @@ pub async fn internal_claim_invite_delivery_job(
         Ok(value) => value,
         Err(error) => return error.response(request_id_value),
     };
-    if batch.created != job.0.len() || batch.skipped != 0 {
-        tracing::info!(job_id=%job_id, created=batch.created, requested=job.0.len(), "Latarnik invite claim lost eligibility race");
+    // A fully-ineligible claim is a void job — refuse it so the caller reports
+    // failure instead of sending nothing and reporting success. A *partial*
+    // eligibility loss is not a race the job should die over: one beacon can
+    // be paused, revoked, or email-covered by a sibling row between queue and
+    // claim, and the remaining invitations still deserve to go out. The
+    // provider summary carries the real sent/skipped counts.
+    if batch.created == 0 {
+        tracing::info!(job_id=%job_id, requested=job.0.len(), "Latarnik invite claim lost eligibility race");
         return BeaconSignalError::Conflict.response(request_id_value);
+    }
+    if batch.skipped != 0 {
+        tracing::info!(job_id=%job_id, created=batch.created, skipped=batch.skipped, "Latarnik invite claim delivering partial batch");
     }
     // The `status='queued'` predicate is the whole race guard, so its result
     // has to be read.

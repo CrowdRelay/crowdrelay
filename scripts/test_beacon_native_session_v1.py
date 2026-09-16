@@ -87,6 +87,39 @@ class BeaconNativeSessionV1Contract(unittest.TestCase):
             self.assertIn(field, OPENAPI)
         self.assertIn('add_parser("network-preview"', OPERATOR)
 
+    def test_batch_invite_is_new_outreach_and_one_invite_per_email(self) -> None:
+        # paused/revoked are operator-set states a bulk click must not undo;
+        # the per-beacon endpoint is the deliberate revive path.
+        eligibility = LIFECYCLE.split("let eligible", 1)[1].split("invited_ids", 1)[0]
+        self.assertIn("NOT IN ('active','paused','revoked')", eligibility)
+        # One invitation per email address: the (kind, city, email) unique key
+        # lets an address sit on two rows; a live invite or an active
+        # membership under a sibling row already covers it.
+        self.assertIn("DISTINCT ON (lower(", eligibility)
+        self.assertIn("lower(covered.contact_email)=lower(other.contact_email)", eligibility)
+        self.assertIn("covered_profile.status='active'", eligibility)
+        self.assertIn("covered_profile.invite_expires_at > now()", eligibility)
+
+    def test_single_invite_refuses_live_invite_and_covered_email(self) -> None:
+        infra_create = INFRA_SIGNAL.split("async fn create_invite", 1)[1].split("async fn exchange_invite", 1)[0]
+        self.assertIn("invite_expires_at", infra_create)
+        self.assertIn('status == "invited"', infra_create)
+        self.assertIn("lower(covered.contact_email)=lower($3)", infra_create)
+        # paused/revoked are NOT excluded here — the single call is the only
+        # revive path a never-joined beacon has (set-state 'active' needs a
+        # join first), so the deliberate per-person act keeps its reach.
+        self.assertNotIn("'paused','revoked'", infra_create)
+
+    def test_invite_delivery_claim_survives_partial_eligibility(self) -> None:
+        claim = NETWORK_INTERNAL.split("internal_claim_invite_delivery_job", 1)[1].split(
+            "internal_report_invite_delivery_job", 1
+        )[0]
+        # A queued job whose beacons lost eligibility mid-flight must not
+        # wedge: zero created is a void job (refuse), a partial batch still
+        # deserves delivery and reports honest counts.
+        self.assertIn("batch.created == 0", claim)
+        self.assertNotIn("batch.created != job.0.len()", claim)
+
     def test_invitation_copy_sets_professional_non_transactional_expectation(self) -> None:
         lowered = COPY.lower()
         self.assertIn("nie jest newsletter", lowered)

@@ -19,6 +19,11 @@ pub struct ExtractedContact {
     pub organization: Option<String>,
     pub phone: Option<String>,
     pub suggested_kind: Option<String>,
+    /// The city the sheet placed this contact in. Free text at this
+    /// stage — the booking promote resolves it against the `cities`
+    /// catalogue, and a name that matches nothing still travels so the
+    /// operator sees what the file said.
+    pub city: Option<String>,
     pub notes: Option<String>,
 }
 
@@ -48,13 +53,23 @@ fn looks_emailish(value: &str) -> bool {
 /// the name column onto "contact_email", nor "mail" onto "gmail_export".
 /// Substring matching stays only as a fallback when no header is exact.
 fn header_is(header: &str, patterns: &[&str]) -> bool {
-    let normalized = header.trim().to_ascii_lowercase().replace([' ', '-'], "_");
+    let normalized = header.trim().to_lowercase().replace([' ', '-'], "_");
     patterns.iter().any(|p| normalized == *p)
 }
 
 fn header_contains(header: &str, patterns: &[&str]) -> bool {
-    let normalized = header.trim().to_ascii_lowercase().replace([' ', '-'], "_");
+    let normalized = header.trim().to_lowercase().replace([' ', '-'], "_");
     patterns.iter().any(|p| normalized.contains(p))
+}
+
+/// Token-level contains for the city role: "capacity" and "electricity"
+/// both contain the substring "city" while naming nothing of the sort —
+/// a venue sheet's Capacity column must never file its 300 as a city.
+/// Splitting the normalized header on `_` keeps "venue city" and
+/// "home town" matching while a glued word like "hometown" stays out.
+fn header_names_city(header: &str, patterns: &[&str]) -> bool {
+    let normalized = header.trim().to_lowercase().replace([' ', '-'], "_");
+    normalized.split('_').any(|token| patterns.contains(&token))
 }
 
 const EMAIL_HEADERS: &[&str] = &["email", "e_mail", "mail"];
@@ -75,6 +90,17 @@ const ORG_HEADERS: &[&str] = &[
 const TYPE_HEADERS: &[&str] = &["type", "kind", "role", "category"];
 const PHONE_HEADERS: &[&str] = &["phone", "tel", "mobile"];
 const NOTES_HEADERS: &[&str] = &["note", "notes", "comment", "comments"];
+// "location" rides the contains-fallback: a column literally named
+// "location" is a city to a contacts sheet, while "venue location" is
+// claimed by the org lookup first and excluded below before city reads.
+const CITY_HEADERS: &[&str] = &[
+    "city",
+    "town",
+    "location",
+    "miasto",
+    "miejscowość",
+    "miejscowosc",
+];
 
 /// Maps a free-form type/role value onto the staging vocabulary. Unknown
 /// values yield None — the operator decides on promote rather than the
@@ -130,18 +156,19 @@ fn find_column(
     headers: &[String],
     rows: &[Vec<String>],
     patterns: &[&str],
+    contains: fn(&str, &[&str]) -> bool,
     email_fallback: bool,
-    exclude: Option<usize>,
+    exclude: &[usize],
 ) -> Option<usize> {
     if let Some(index) = headers
         .iter()
         .enumerate()
-        .position(|(i, h)| Some(i) != exclude && header_is(h, patterns))
+        .position(|(i, h)| !exclude.contains(&i) && header_is(h, patterns))
         .or_else(|| {
             headers
                 .iter()
                 .enumerate()
-                .position(|(i, h)| Some(i) != exclude && header_contains(h, patterns))
+                .position(|(i, h)| !exclude.contains(&i) && contains(h, patterns))
         })
     {
         return Some(index);
@@ -182,16 +209,62 @@ pub fn extract_contacts(grid: &[Vec<String>]) -> ExtractionReport {
         report.no_email_column = true;
         return report;
     };
-    let Some(email_col) = find_column(headers, rows, EMAIL_HEADERS, true, None) else {
+    let Some(email_col) = find_column(headers, rows, EMAIL_HEADERS, header_contains, true, &[])
+    else {
         report.no_email_column = true;
         report.rows_read = rows.len();
         return report;
     };
-    let name_col = find_column(headers, rows, NAME_HEADERS, false, Some(email_col));
-    let org_col = find_column(headers, rows, ORG_HEADERS, false, Some(email_col));
-    let type_col = find_column(headers, rows, TYPE_HEADERS, false, Some(email_col));
-    let phone_col = find_column(headers, rows, PHONE_HEADERS, false, Some(email_col));
-    let notes_col = find_column(headers, rows, NOTES_HEADERS, false, Some(email_col));
+    // Each lookup excludes every column already claimed — a header like
+    // "Venue city" contains patterns for two roles, and serving both from
+    // one column files the venue's name as its city.
+    let mut claimed: Vec<usize> = vec![email_col];
+    let name_col = find_column(
+        headers,
+        rows,
+        NAME_HEADERS,
+        header_contains,
+        false,
+        &claimed,
+    );
+    claimed.extend(name_col);
+    let org_col = find_column(headers, rows, ORG_HEADERS, header_contains, false, &claimed);
+    claimed.extend(org_col);
+    let type_col = find_column(
+        headers,
+        rows,
+        TYPE_HEADERS,
+        header_contains,
+        false,
+        &claimed,
+    );
+    claimed.extend(type_col);
+    let phone_col = find_column(
+        headers,
+        rows,
+        PHONE_HEADERS,
+        header_contains,
+        false,
+        &claimed,
+    );
+    claimed.extend(phone_col);
+    let notes_col = find_column(
+        headers,
+        rows,
+        NOTES_HEADERS,
+        header_contains,
+        false,
+        &claimed,
+    );
+    claimed.extend(notes_col);
+    let city_col = find_column(
+        headers,
+        rows,
+        CITY_HEADERS,
+        header_names_city,
+        false,
+        &claimed,
+    );
 
     let cell = |row: &[String], column: Option<usize>| {
         column.and_then(|c| row.get(c)).and_then(|v| clean(v))
@@ -223,6 +296,7 @@ pub fn extract_contacts(grid: &[Vec<String>]) -> ExtractionReport {
                 organization: capped(cell(row, org_col), 200),
                 phone: capped(cell(row, phone_col), 40),
                 suggested_kind: cell(row, type_col).and_then(|v| kind_for(&v).map(str::to_owned)),
+                city: capped(cell(row, city_col), 120),
                 notes: capped(cell(row, notes_col), 2000),
             },
         );
@@ -322,8 +396,14 @@ mod tests {
     #[test]
     fn extracts_by_header_names() {
         let report = extract_contacts(&grid(&[
-            &["Name", "Email", "Outlet", "Type"],
-            &["Jane Doe", "Jane@Example.com", "Radio Z", "press"],
+            &["Name", "Email", "Outlet", "Type", "City"],
+            &[
+                "Jane Doe",
+                "Jane@Example.com",
+                "Radio Z",
+                "press",
+                "Wrocław",
+            ],
         ]));
         assert_eq!(report.contacts.len(), 1);
         let contact = &report.contacts[0];
@@ -331,6 +411,51 @@ mod tests {
         assert_eq!(contact.display_name.as_deref(), Some("Jane Doe"));
         assert_eq!(contact.organization.as_deref(), Some("Radio Z"));
         assert_eq!(contact.suggested_kind.as_deref(), Some("press"));
+        assert_eq!(contact.city.as_deref(), Some("Wrocław"));
+    }
+
+    #[test]
+    fn a_claimed_column_cannot_serve_two_roles() {
+        // "Venue city" contains patterns for both organisation and city —
+        // the earlier lookup claims it, and the city reads as absent
+        // rather than as the venue's name.
+        let report = extract_contacts(&grid(&[
+            &["Email", "Venue city"],
+            &["bookings@klubx.pl", "Klub X"],
+        ]));
+        let contact = &report.contacts[0];
+        assert_eq!(contact.organization.as_deref(), Some("Klub X"));
+        assert_eq!(contact.city, None);
+    }
+
+    #[test]
+    fn polish_city_headers_land() {
+        let report = extract_contacts(&grid(&[
+            &["Email", "Miasto"],
+            &["promoter@agency.pl", "Warszawa"],
+        ]));
+        assert_eq!(report.contacts[0].city.as_deref(), Some("Warszawa"));
+    }
+
+    #[test]
+    fn a_capacity_column_is_not_a_city() {
+        // "capacity" and "electricity" contain the substring "city" while
+        // naming nothing of the sort — a venue sheet's capacity column
+        // must never file its 300 as the contact's city.
+        let report = extract_contacts(&grid(&[
+            &["Email", "Capacity"],
+            &["bookings@klubx.pl", "300"],
+        ]));
+        assert_eq!(report.contacts[0].city, None);
+    }
+
+    #[test]
+    fn a_multi_word_city_header_still_matches() {
+        let report = extract_contacts(&grid(&[
+            &["Email", "Home Town"],
+            &["fan@list.pl", "Gdańsk"],
+        ]));
+        assert_eq!(report.contacts[0].city.as_deref(), Some("Gdańsk"));
     }
 
     #[test]

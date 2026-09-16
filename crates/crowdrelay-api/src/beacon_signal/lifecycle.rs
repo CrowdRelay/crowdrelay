@@ -68,20 +68,58 @@ pub(super) async fn mint_invite_batch_tx(
     locale: &str,
     source_invite_job_id: Option<Uuid>,
 ) -> Result<BatchInviteResponse, BeaconSignalError> {
+    // Batch eligibility is new outreach only: an unverified beacon (no profile
+    // row yet) or one whose invite has lapsed. `paused`/`revoked` are
+    // operator-set states a bulk click must not undo — the per-beacon invite
+    // endpoint is the deliberate revive path, and `active`/`invited`-live are
+    // already covered.
+    //
+    // One invitation per email address. The beacon unique key is
+    // (kind, city, email), so the same address can sit on two rows; inviting
+    // both mails the person twice. Within the batch the strongest row wins
+    // (relevance, then relationship); a live invite or an active membership
+    // under any sibling row already covers the address.
     let eligible = sqlx::query_as::<_, (Uuid, String, String)>(
         r#"
         SELECT beacon.id, beacon.display_name, beacon.contact_email
         FROM viryaos_beacons beacon
-        LEFT JOIN viryaos_beacon_signal_profiles profile
-          ON profile.workspace_id=beacon.workspace_id AND profile.beacon_id=beacon.id
-        WHERE beacon.workspace_id=$1 AND beacon.id=ANY($2)
-          AND beacon.active AND beacon.verified AND beacon.accepts_outreach
-          AND NOT beacon.do_not_contact AND beacon.contact_email IS NOT NULL
-          AND COALESCE(profile.status, '') <> 'active'
-          -- A never-invited beacon has no profile row at all. Three-valued logic
-          -- turns the bare NOT(...) into NULL there and silently drops exactly the
-          -- first-wave candidates this flow exists to reach, so fold NULL to false.
-          AND NOT COALESCE(profile.status='invited' AND profile.invite_expires_at > now(), false)
+        JOIN (
+            SELECT DISTINCT ON (lower(other.contact_email)) other.id
+            FROM viryaos_beacons other
+            LEFT JOIN viryaos_beacon_signal_profiles profile
+              ON profile.workspace_id=other.workspace_id
+             AND profile.beacon_id=other.id
+            WHERE other.workspace_id=$1 AND other.id=ANY($2)
+              AND other.active AND other.verified AND other.accepts_outreach
+              AND NOT other.do_not_contact AND other.contact_email IS NOT NULL
+              AND COALESCE(profile.status,'') NOT IN ('active','paused','revoked')
+              -- A never-invited beacon has no profile row at all. Three-valued
+              -- logic turns the bare NOT(...) into NULL there and silently
+              -- drops exactly the first-wave candidates this flow exists to
+              -- reach, so fold NULL to false.
+              AND NOT COALESCE(
+                  profile.status='invited' AND profile.invite_expires_at > now(),
+                  false
+              )
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM viryaos_beacons covered
+                  JOIN viryaos_beacon_signal_profiles covered_profile
+                    ON covered_profile.workspace_id=covered.workspace_id
+                   AND covered_profile.beacon_id=covered.id
+                  WHERE covered.workspace_id=other.workspace_id
+                    AND covered.id <> other.id
+                    AND lower(covered.contact_email)=lower(other.contact_email)
+                    AND (
+                        covered_profile.status='active'
+                        OR (covered_profile.status='invited'
+                            AND covered_profile.invite_expires_at > now())
+                    )
+              )
+            ORDER BY lower(other.contact_email),
+                     other.relevance_basis_points DESC,
+                     other.relationship_score DESC, other.id
+        ) picked ON picked.id = beacon.id
         ORDER BY beacon.id
         FOR UPDATE OF beacon
         "#,
@@ -94,6 +132,67 @@ pub(super) async fn mint_invite_batch_tx(
         tracing::warn!(%error, "Beacon batch invite eligibility lookup failed");
         BeaconSignalError::Unavailable
     })?;
+
+    // The eligibility SELECT's coverage check ran on a snapshot that a
+    // concurrent mint cannot see — two transactions over sibling rows with the
+    // same address would both pass it and mail the person twice. Serialize on
+    // the normalized email itself: advisory locks in a fixed (sorted) order,
+    // then re-run the coverage check under the locks so the loser sees the
+    // winner's invite. Lock order stays row-then-email everywhere: the beacon
+    // FOR UPDATE above runs first in every caller.
+    let mut lock_emails: Vec<&str> = eligible
+        .iter()
+        .map(|(_, _, email)| email.as_str())
+        .collect();
+    lock_emails.sort_unstable();
+    lock_emails.dedup();
+    for email in &lock_emails {
+        if let Err(error) =
+            sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended(lower($1), 0))")
+                .bind(*email)
+                .execute(&mut **tx)
+                .await
+        {
+            tracing::warn!(%error, "Beacon invite email lock failed");
+            return Err(BeaconSignalError::Unavailable);
+        }
+    }
+    let covered_ids: std::collections::HashSet<Uuid> = sqlx::query_scalar::<_, Uuid>(
+        r#"
+        SELECT other.id
+        FROM viryaos_beacons other
+        WHERE other.workspace_id=$1 AND other.id=ANY($2)
+          AND EXISTS (
+              SELECT 1
+              FROM viryaos_beacons covered
+              JOIN viryaos_beacon_signal_profiles covered_profile
+                ON covered_profile.workspace_id=covered.workspace_id
+               AND covered_profile.beacon_id=covered.id
+              WHERE covered.workspace_id=other.workspace_id
+                AND covered.id <> other.id
+                AND lower(covered.contact_email)=lower(other.contact_email)
+                AND (
+                    covered_profile.status='active'
+                    OR (covered_profile.status='invited'
+                        AND covered_profile.invite_expires_at > now())
+                )
+          )
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(eligible.iter().map(|(id, _, _)| *id).collect::<Vec<_>>())
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(|error| {
+        tracing::warn!(%error, "Beacon invite coverage re-check failed");
+        BeaconSignalError::Unavailable
+    })?
+    .into_iter()
+    .collect();
+    let eligible: Vec<(Uuid, String, String)> = eligible
+        .into_iter()
+        .filter(|(id, _, _)| !covered_ids.contains(id))
+        .collect();
 
     let expires_at = OffsetDateTime::now_utc() + Duration::days(ttl_days);
     let mut invitations = Vec::with_capacity(eligible.len());
@@ -404,6 +503,8 @@ struct AdminProfileView {
     invite_count: i32,
     #[serde(with = "time::serde::rfc3339::option")]
     last_invited_at: Option<OffsetDateTime>,
+    #[serde(with = "time::serde::rfc3339::option")]
+    invite_expires_at: Option<OffsetDateTime>,
     #[serde(with = "time::serde::rfc3339::option")]
     joined_at: Option<OffsetDateTime>,
     #[serde(with = "time::serde::rfc3339::option")]

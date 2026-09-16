@@ -12,7 +12,8 @@
 //!   press-side kinds — the screening queue, same as the curated-CRM import —
 //!   or an admitted `viryaos_booking_candidates` row for venue/promoter/
 //!   festival kinds. Booking candidates are city-scoped: the request's `city`
-//!   wins, else an unambiguous `place_venues` name match resolves the room.
+//!   wins, else the sheet's own city column resolves against `cities`, else
+//!   an unambiguous `place_venues` name match resolves the room.
 //! - `dismiss` records the decision so a re-scan never re-suggests.
 
 use axum::{
@@ -58,6 +59,11 @@ pub struct DriveContact {
     display_name: Option<String>,
     organization: Option<String>,
     suggested_kind: Option<String>,
+    /// The city the sheet gave this contact — the console shows it as a
+    /// hint on the booking promote rather than pre-filling the input, so
+    /// a display name never goes out as an explicit slug and 409s. The
+    /// backend resolves the staged value itself when no slug is sent.
+    city: Option<String>,
     notes: Option<String>,
     source_file_name: String,
     sources: Vec<String>,
@@ -97,6 +103,7 @@ fn contact_json(row: crowdrelay_infra::gdrive::DriveContactRow) -> DriveContact 
         display_name: row.display_name,
         organization: row.organization,
         suggested_kind: row.suggested_kind,
+        city: row.city,
         notes: row.notes,
         source_file_name: row.source_file_name,
         sources: row.sources,
@@ -265,6 +272,14 @@ pub async fn promote_contact(
                             .into_response()
                     }
                 };
+            }
+            // A `suggested_kind` from the sheet is a fan-side vocabulary —
+            // "fan" is legal on the staging row but not a beacon kind, and
+            // writing it into agent_outreach_targets trips the CHECK. An
+            // operator who wants a beacon outcome on a fan-typed contact
+            // picks the kind explicitly; the fallback is not guessed.
+            if !OUTREACH_KINDS.contains(&kind) && !BOOKING_KINDS.contains(&kind) {
+                return Problem::bad_request(request_id_value).into_response();
             }
             if BOOKING_KINDS.contains(&kind) {
                 return match repo

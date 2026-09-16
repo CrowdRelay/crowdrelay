@@ -80,6 +80,257 @@ async fn seed_contact(
         .await?)
 }
 
+async fn seed_contact_city(
+    fixture: &Fixture,
+    email: &str,
+    display_name: Option<&str>,
+    city: Option<&str>,
+) -> Result<crowdrelay_infra::gdrive::DriveContactRow, Box<dyn std::error::Error>> {
+    let id = Uuid::now_v7();
+    sqlx::query(
+        r#"
+        INSERT INTO viryaos_drive_contacts
+            (id, workspace_id, normalized_email, display_name,
+             suggested_kind, city, source_file_id, source_file_name, sources)
+        VALUES ($1,$2,$3,$4,'venue',$5,'file-1','rooms.xlsx','{gdrive}')
+        "#,
+    )
+    .bind(id)
+    .bind(fixture.workspace_id)
+    .bind(email)
+    .bind(display_name)
+    .bind(city)
+    .execute(&fixture.pool)
+    .await?;
+    Ok(fixture
+        .repository
+        .get_contact(fixture.workspace_id, id)
+        .await?)
+}
+
+#[tokio::test]
+#[ignore = "requires a disposable postgres database"]
+async fn staged_city_resolves_on_booking_promote() -> Result<(), Box<dyn std::error::Error>> {
+    let fixture = fixture("stagedcity").await?;
+    // The sheet said where — no venue match, no typed slug needed.
+    let contact =
+        seed_contact_city(&fixture, "room@kluby.pl", Some("Klub Y"), Some("wroclaw")).await?;
+    let outcome = fixture
+        .repository
+        .promote_beacon_booking(fixture.workspace_id, &contact, "venue", None)
+        .await?;
+    assert_eq!(
+        outcome,
+        crowdrelay_infra::gdrive::BookingPromoteOutcome::Done
+    );
+    let city: String = sqlx::query_scalar(
+        "SELECT city_slug FROM viryaos_booking_candidates \
+         WHERE workspace_id = $1 AND route_value = 'room@kluby.pl'",
+    )
+    .bind(fixture.workspace_id)
+    .fetch_one(&fixture.pool)
+    .await?;
+    assert_eq!(city, "wroclaw");
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires a disposable postgres database"]
+async fn staged_city_name_resolves_on_booking_promote() -> Result<(), Box<dyn std::error::Error>> {
+    let fixture = fixture("stagedname").await?;
+    // Sheets say "Wroclaw", not "wroclaw" — the name resolves the same slug.
+    let contact =
+        seed_contact_city(&fixture, "room@klubz.pl", Some("Klub Z"), Some("Wroclaw")).await?;
+    let outcome = fixture
+        .repository
+        .promote_beacon_booking(fixture.workspace_id, &contact, "venue", None)
+        .await?;
+    assert_eq!(
+        outcome,
+        crowdrelay_infra::gdrive::BookingPromoteOutcome::Done
+    );
+    let city: String = sqlx::query_scalar(
+        "SELECT city_slug FROM viryaos_booking_candidates \
+         WHERE workspace_id = $1 AND route_value = 'room@klubz.pl'",
+    )
+    .bind(fixture.workspace_id)
+    .fetch_one(&fixture.pool)
+    .await?;
+    assert_eq!(city, "wroclaw");
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires a disposable postgres database"]
+async fn staged_city_that_names_nothing_still_needs_a_city()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = fixture("stagednone").await?;
+    // A sheet value no catalogue city matches is a hint, not a city — the
+    // promote stays staged rather than guessing a place.
+    let contact = seed_contact_city(
+        &fixture,
+        "room@nowhere.pl",
+        Some("Nowhere"),
+        Some("Nowheresville"),
+    )
+    .await?;
+    let outcome = fixture
+        .repository
+        .promote_beacon_booking(fixture.workspace_id, &contact, "venue", None)
+        .await?;
+    assert_eq!(
+        outcome,
+        crowdrelay_infra::gdrive::BookingPromoteOutcome::CityRequired
+    );
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires a disposable postgres database"]
+async fn explicit_city_beats_the_staged_one() -> Result<(), Box<dyn std::error::Error>> {
+    let fixture = fixture("explicitcity").await?;
+    sqlx::query(
+        "INSERT INTO cities (id, slug, name, country_code) \
+         VALUES (gen_random_uuid(), 'poznan', 'Poznan', 'PL') \
+         ON CONFLICT (country_code, slug) DO NOTHING",
+    )
+    .execute(&fixture.pool)
+    .await?;
+    // The sheet says Wroclaw; the operator says Poznan. The explicit slug
+    // is the operator's call and wins outright.
+    let contact =
+        seed_contact_city(&fixture, "room@klubw.pl", Some("Klub W"), Some("Wroclaw")).await?;
+    let outcome = fixture
+        .repository
+        .promote_beacon_booking(fixture.workspace_id, &contact, "venue", Some("poznan"))
+        .await?;
+    assert_eq!(
+        outcome,
+        crowdrelay_infra::gdrive::BookingPromoteOutcome::Done
+    );
+    let city: String = sqlx::query_scalar(
+        "SELECT city_slug FROM viryaos_booking_candidates \
+         WHERE workspace_id = $1 AND route_value = 'room@klubw.pl'",
+    )
+    .bind(fixture.workspace_id)
+    .fetch_one(&fixture.pool)
+    .await?;
+    assert_eq!(city, "poznan");
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires a disposable postgres database"]
+async fn unmatched_staged_city_still_falls_back_to_the_venue_registry()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = fixture("stagedvenue").await?;
+    // The sheet's city names nothing in the catalogue, but the room is one
+    // the band already played — the registry's unique match is the better
+    // evidence and still resolves the city.
+    let city_id: Uuid = sqlx::query_scalar("SELECT id FROM cities WHERE slug = 'wroclaw'")
+        .fetch_one(&fixture.pool)
+        .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO events (
+            id, workspace_id, city_id, slug, title, description, venue,
+            timezone, starts_at, doors_at, ends_at, status, published_at
+        ) VALUES (
+            gen_random_uuid(), $1, $2, 'klub-v-show', 'Show', 'Test',
+            'Klub V', 'Europe/Warsaw', now() - interval '30 days',
+            now() - interval '31 days', now() - interval '27 days',
+            'completed', now() - interval '60 days'
+        )
+        "#,
+    )
+    .bind(fixture.workspace_id)
+    .bind(city_id)
+    .execute(&fixture.pool)
+    .await?;
+    let contact = seed_contact_city(
+        &fixture,
+        "booking@klubv.pl",
+        Some("Klub V"),
+        Some("Nowheresville"),
+    )
+    .await?;
+    let outcome = fixture
+        .repository
+        .promote_beacon_booking(fixture.workspace_id, &contact, "venue", None)
+        .await?;
+    assert_eq!(
+        outcome,
+        crowdrelay_infra::gdrive::BookingPromoteOutcome::Done
+    );
+    let city: String = sqlx::query_scalar(
+        "SELECT city_slug FROM viryaos_booking_candidates \
+         WHERE workspace_id = $1 AND route_value = 'booking@klubv.pl'",
+    )
+    .bind(fixture.workspace_id)
+    .fetch_one(&fixture.pool)
+    .await?;
+    assert_eq!(city, "wroclaw");
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires a disposable postgres database"]
+async fn upsert_keeps_the_sheet_city() -> Result<(), Box<dyn std::error::Error>> {
+    let fixture = fixture("upsertcity").await?;
+    fixture
+        .repository
+        .upsert_contacts_for_source(
+            fixture.workspace_id,
+            "gdrive",
+            "file-1",
+            "rooms.xlsx",
+            &[crowdrelay_domain::drive_contacts::ExtractedContact {
+                email: "venue@klubq.pl".to_owned(),
+                display_name: Some("Klub Q".to_owned()),
+                organization: None,
+                phone: None,
+                suggested_kind: Some("venue".to_owned()),
+                city: Some("Wroclaw".to_owned()),
+                notes: None,
+            }],
+            true,
+        )
+        .await?;
+    // A second file sighting the same address without the column keeps it —
+    // the new file is not the truth about the old one's city.
+    fixture
+        .repository
+        .upsert_contacts_for_source(
+            fixture.workspace_id,
+            "gmail",
+            "msg-9",
+            "Re: booking",
+            &[crowdrelay_domain::drive_contacts::ExtractedContact {
+                email: "venue@klubq.pl".to_owned(),
+                display_name: Some("Klub Q".to_owned()),
+                organization: None,
+                phone: None,
+                suggested_kind: None,
+                city: None,
+                notes: None,
+            }],
+            false,
+        )
+        .await?;
+    let row = sqlx::query_as::<_, (Option<String>, Vec<String>)>(
+        "SELECT city, sources FROM viryaos_drive_contacts \
+         WHERE workspace_id = $1 AND normalized_email = 'venue@klubq.pl'",
+    )
+    .bind(fixture.workspace_id)
+    .fetch_one(&fixture.pool)
+    .await?;
+    assert_eq!(row.0.as_deref(), Some("Wroclaw"));
+    let mut sources = row.1;
+    sources.sort_unstable();
+    assert_eq!(sources, ["gdrive".to_owned(), "gmail".to_owned()]);
+    Ok(())
+}
+
 #[tokio::test]
 #[ignore = "requires a disposable postgres database"]
 async fn booking_promote_files_admitted_candidate_with_thread()

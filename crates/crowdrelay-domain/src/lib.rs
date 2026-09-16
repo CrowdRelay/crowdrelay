@@ -55,6 +55,7 @@ pub mod action_class;
 pub mod action_ledger;
 pub mod admission;
 pub mod area;
+pub mod attestation;
 pub mod audience_graph;
 pub mod audience_lifecycle;
 pub mod autonomy;

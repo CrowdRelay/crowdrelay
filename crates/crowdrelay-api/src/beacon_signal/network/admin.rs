@@ -65,7 +65,26 @@ pub async fn admin_beacon_network(
           AND (beacon.metadata ? 'network_discovery_run_id' OR beacon.metadata ? 'imported_from')
           AND beacon.active AND beacon.verified AND beacon.accepts_outreach AND NOT beacon.do_not_contact
           AND beacon.contact_email IS NOT NULL
-          AND COALESCE(profile.status,'') <> 'active'
+          -- Same exclusions mint enforces: paused/revoked are operator-set
+          -- states bulk outreach must not undo, and an email already holding
+          -- a live invite or an active membership under a sibling row is
+          -- covered — offering it here would 409 the queue for one row.
+          AND COALESCE(profile.status,'') NOT IN ('active','paused','revoked')
+          AND NOT EXISTS (
+              SELECT 1
+              FROM viryaos_beacons covered
+              JOIN viryaos_beacon_signal_profiles covered_profile
+                ON covered_profile.workspace_id=covered.workspace_id
+               AND covered_profile.beacon_id=covered.id
+              WHERE covered.workspace_id=beacon.workspace_id
+                AND covered.id <> beacon.id
+                AND lower(covered.contact_email)=lower(beacon.contact_email)
+                AND (
+                    covered_profile.status='active'
+                    OR (covered_profile.status='invited'
+                        AND covered_profile.invite_expires_at > now())
+                )
+          )
           -- A never-invited beacon has no profile row at all. Three-valued logic
           -- turns the bare NOT(...) into NULL there and silently drops exactly the
           -- first-wave candidates this flow exists to reach, so fold NULL to false.
@@ -615,7 +634,25 @@ async fn preview_invites(
         WHERE beacon.workspace_id=$1 AND beacon.id=ANY($2)
           AND beacon.active AND beacon.verified AND beacon.accepts_outreach
           AND NOT beacon.do_not_contact AND beacon.contact_email IS NOT NULL
-          AND COALESCE(profile.status,'') <> 'active'
+          -- Same eligibility mint enforces (paused/revoked are operator-set;
+          -- a live invite or active membership under a sibling row covers the
+          -- email), so the preview shows what invite would actually do.
+          AND COALESCE(profile.status,'') NOT IN ('active','paused','revoked')
+          AND NOT EXISTS (
+              SELECT 1
+              FROM viryaos_beacons covered
+              JOIN viryaos_beacon_signal_profiles covered_profile
+                ON covered_profile.workspace_id=covered.workspace_id
+               AND covered_profile.beacon_id=covered.id
+              WHERE covered.workspace_id=beacon.workspace_id
+                AND covered.id <> beacon.id
+                AND lower(covered.contact_email)=lower(beacon.contact_email)
+                AND (
+                    covered_profile.status='active'
+                    OR (covered_profile.status='invited'
+                        AND covered_profile.invite_expires_at > now())
+                )
+          )
           -- A never-invited beacon has no profile row at all. Three-valued logic
           -- turns the bare NOT(...) into NULL there and silently drops exactly the
           -- first-wave candidates this flow exists to reach, so fold NULL to false.
@@ -739,7 +776,27 @@ async fn queue_invites(
         WHERE beacon.workspace_id=$1 AND beacon.id=ANY($2)
           AND beacon.active AND beacon.verified AND beacon.accepts_outreach
           AND NOT beacon.do_not_contact AND beacon.contact_email IS NOT NULL
-          AND COALESCE(profile.status,'') <> 'active'
+          -- Same eligibility the claim's mint enforces — paused/revoked are
+          -- operator-set states bulk outreach must not undo, and an email
+          -- already holding a live invite or an active membership under a
+          -- sibling row is covered. Refusing here beats queueing a job that
+          -- can only under-deliver.
+          AND COALESCE(profile.status,'') NOT IN ('active','paused','revoked')
+          AND NOT EXISTS (
+              SELECT 1
+              FROM viryaos_beacons covered
+              JOIN viryaos_beacon_signal_profiles covered_profile
+                ON covered_profile.workspace_id=covered.workspace_id
+               AND covered_profile.beacon_id=covered.id
+              WHERE covered.workspace_id=beacon.workspace_id
+                AND covered.id <> beacon.id
+                AND lower(covered.contact_email)=lower(beacon.contact_email)
+                AND (
+                    covered_profile.status='active'
+                    OR (covered_profile.status='invited'
+                        AND covered_profile.invite_expires_at > now())
+                )
+          )
           -- A never-invited beacon has no profile row at all. Three-valued logic
           -- turns the bare NOT(...) into NULL there and silently drops exactly the
           -- first-wave candidates this flow exists to reach, so fold NULL to false.
