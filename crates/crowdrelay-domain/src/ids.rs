@@ -119,6 +119,11 @@ typed_uuid_id!(
     TeamAssignmentId,
     GrowthMetricSeriesId,
     PlayId,
+    PeerId,
+    ProductionEventId,
+    CapturePlanId,
+    ArcId,
+    ContentSuggestionId,
 );
 
 #[cfg(test)]

@@ -27,6 +27,24 @@ pub enum TeamSkill {
 }
 
 impl TeamSkill {
+    /// Every declared skill — `content_engine` validates catalogue `skill`
+    /// text against this list so a format can never route to a skill nobody
+    /// can hold.
+    pub const ALL: &'static [Self] = &[
+        Self::General,
+        Self::Operations,
+        Self::Booking,
+        Self::Approval,
+        Self::Technical,
+        Self::Visual,
+        Self::Video,
+        Self::Photography,
+        Self::Social,
+        Self::EnglishCopy,
+        Self::PolishCopy,
+        Self::People,
+    ];
+
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {

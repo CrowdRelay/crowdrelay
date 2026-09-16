@@ -31,6 +31,7 @@ pub mod commerce_inventory;
 pub mod community_intelligence;
 pub mod concert_qr;
 pub mod config;
+pub mod content_engine;
 pub mod database;
 pub mod ecosystem;
 pub mod events;
