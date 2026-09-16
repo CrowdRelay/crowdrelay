@@ -283,6 +283,24 @@ pub(in crate::autopilot) async fn executor_capability_available(
     .map_err(map_sqlx)
 }
 
+/// Reserves the next contact window for one address, across the whole
+/// organization when there is one.
+///
+/// The table is keyed `(workspace_id, normalized_contact)`, and an act is a
+/// workspace: a roster of eight acts is eight workspaces under one
+/// `organizations` row. Keyed that way alone, the same person takes one message
+/// per act per week with every cooldown satisfied, and a `do_not_contact` given
+/// to one act does not bind the others. To someone who reads the roster as one
+/// sender that is not a cooldown at all.
+///
+/// So the insert is gated on no sibling workspace in the same organization
+/// holding a live block — either `do_not_contact`, or a window that has not
+/// expired. It stays one statement: a pre-check followed by an insert would
+/// leave a gap two acts could both pass through.
+///
+/// A workspace with no `organization_id` is unaffected. The `NOT EXISTS` is
+/// vacuously true for it, so a single-act tenant reserves exactly as before —
+/// which is every tenant today.
 pub(in crate::autopilot) async fn reserve_contact_window(
     transaction: &mut Transaction<'_, Postgres>,
     workspace_id: WorkspaceId,
@@ -300,7 +318,19 @@ pub(in crate::autopilot) async fn reserve_contact_window(
         INSERT INTO viryaos_contact_governor (
             workspace_id, normalized_contact, last_context, last_action_id,
             last_outbound_at, next_contact_after
-        ) VALUES ($1,$2,$3,$4,$5,$5 + INTERVAL '7 days')
+        )
+        SELECT $1,$2,$3,$4,$5,$5 + INTERVAL '7 days'
+        WHERE NOT EXISTS (
+            SELECT 1
+            FROM viryaos_contact_governor sibling
+            JOIN workspaces sibling_ws ON sibling_ws.id = sibling.workspace_id
+            JOIN workspaces self_ws ON self_ws.id = $1
+            WHERE sibling.normalized_contact = $2
+              AND sibling.workspace_id <> $1
+              AND self_ws.organization_id IS NOT NULL
+              AND sibling_ws.organization_id = self_ws.organization_id
+              AND (sibling.do_not_contact OR sibling.next_contact_after > $5)
+        )
         ON CONFLICT (workspace_id, normalized_contact) DO UPDATE
         SET last_context=EXCLUDED.last_context,
             last_action_id=EXCLUDED.last_action_id,
