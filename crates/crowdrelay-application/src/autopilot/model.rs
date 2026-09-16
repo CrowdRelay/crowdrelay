@@ -635,6 +635,33 @@ pub enum AutopilotActionPayload {
         priority: u16,
         template_key: String,
     },
+    /// Uncomfortable advice (§4g): a community the engager keeps posting
+    /// to that engages yet has produced zero fans. The finding is the work
+    /// — evidence and the alternative travel in the payload, never "stop X"
+    /// without "do Y instead". Approving parks the place (`not_a_fit`) so
+    /// the engager stops spending there; cancelling is the band's recorded
+    /// disagreement, and the same subject is not re-raised for a month.
+    RaiseDeclineAdvisory {
+        /// The outreach target whose community the advisory is about —
+        /// also the action's subject, so the inflight index dedupes it.
+        target_id: uuid::Uuid,
+        /// The discovery place an approval parks. NULL when the target
+        /// never matched a place row — the advisory still carries its
+        /// evidence, there is just nothing to switch off.
+        place_id: Option<uuid::Uuid>,
+        subreddit: String,
+        /// Posts with metrics inside the window, and their average score —
+        /// the "engages" half of the claim. Tenths of a point: 12.3 is
+        /// stored as 123, because the payload derives `Eq` and `f64` has none.
+        posts_considered: u32,
+        avg_score_tenths: i64,
+        /// Measurement window for both engagement and conversions.
+        window_days: u32,
+        /// The paired alternative — a community that converted, or the
+        /// strongest other room when nothing converts yet.
+        alternative_label: String,
+        alternative_detail: String,
+    },
     /// Give a consented fan a referral code.
     ///
     /// The only growth mechanism that scales with the audience rather than with
@@ -887,6 +914,10 @@ impl AutopilotActionPayload {
             | Self::PrepareFundingPackage { .. }
             | Self::RaiseGrowthOpportunity { .. }
             | Self::RaiseGrowthDebt { .. }
+            // The advisory itself reaches nobody; approving it flips one
+            // discovery_places row to `not_a_fit`, and flipping it back
+            // undoes the park — first-party and reversible either way.
+            | Self::RaiseDeclineAdvisory { .. }
             | Self::IssueReferralCode { .. }
             // Raising a suggestion or an arc flips one row inside the
             // workspace. It reaches nobody — the promises they name are
@@ -989,6 +1020,7 @@ impl AutopilotActionPayload {
             Self::PrepareFundingPackage { .. } => "funding.package.prepare",
             Self::SubmitFundingApplication { .. } => "funding.application.submit",
             Self::RaiseGrowthOpportunity { .. } => "growth.opportunity.raise",
+            Self::RaiseDeclineAdvisory { .. } => "community.decline.advisory",
             Self::RaiseGrowthDebt { .. } => "growth.debt.raise",
             Self::IssueReferralCode { .. } => "referral.code.issue",
             Self::RaiseContentSuggestion { .. } => "content.suggestion.raise",

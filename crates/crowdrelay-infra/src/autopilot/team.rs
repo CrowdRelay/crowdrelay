@@ -121,6 +121,10 @@ impl PostgresAutopilotRepository {
                 0
             };
 
+            // Decline advisories need neither the roster nor the email
+            // path — they are a decision row the queue already carries.
+            super::decline_advisories::raise_decline_advisories(&mut tx, workspace_id, now).await?;
+
             let team = load_team_routing(&mut tx, workspace_id, now).await?;
             if team.is_empty() {
                 tx.commit().await.map_err(map_sqlx)?;
@@ -952,6 +956,12 @@ pub(super) fn friendly_action_title(action_kind: &str, locale: BriefingLocale) -
         ("beacon.outreach.request", BriefingLocale::En) => "Approve the Beacon outreach",
         ("community.engage.request", BriefingLocale::Pl) => "Zatwierdź publikację w społeczności",
         ("community.engage.request", BriefingLocale::En) => "Approve the community post",
+        ("community.decline.advisory", BriefingLocale::Pl) => {
+            "Przeczytaj dowody: społeczność angażuje, ale nie daje fanów"
+        }
+        ("community.decline.advisory", BriefingLocale::En) => {
+            "Read the evidence: the community engages but produces zero fans"
+        }
         ("content.arc.raise", BriefingLocale::Pl) => "Zatwierdź łuk treści",
         ("content.arc.raise", BriefingLocale::En) => "Approve the content arc",
         ("content.artifact.request", BriefingLocale::Pl) => "Zatwierdź artefakt treści",

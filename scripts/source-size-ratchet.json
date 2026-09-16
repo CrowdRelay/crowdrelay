@@ -25,6 +25,7 @@
   "crates/crowdrelay-infra/src/acquisition.rs": 2012,
   "crates/crowdrelay-infra/src/admission.rs": 1451,
   "crates/crowdrelay-infra/src/autopilot.rs": 1498,
+  "crates/crowdrelay-infra/src/autopilot/actions_execution.rs": 1217,
   "crates/crowdrelay-infra/src/autopilot/measurement.rs": 1345,
   "crates/crowdrelay-infra/src/autopilot/operations/growth_intelligence.rs": 1553,
   "crates/crowdrelay-infra/src/autopilot/operations/ingress.rs": 1451,

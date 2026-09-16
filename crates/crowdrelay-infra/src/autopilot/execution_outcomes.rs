@@ -141,6 +141,9 @@ pub(super) async fn record_execution_outcome(
             ("content_suggestion_raised", 1.0, None)
         }
         AutopilotActionPayload::RaiseContentArc { .. } => ("content_arc_raised", 1.0, None),
+        AutopilotActionPayload::RaiseDeclineAdvisory { posts_considered, .. } => {
+            ("decline_advisory_raised", f64::from(*posts_considered), None)
+        }
     };
     sqlx::query(
         r#"

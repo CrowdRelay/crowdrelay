@@ -85,6 +85,21 @@ fn payload_signals(
             // not a kind name.
             (None, None, Some(summary))
         }
+        AutopilotActionPayload::RaiseDeclineAdvisory {
+            subreddit,
+            alternative_label,
+            ..
+        } => {
+            // The advice is the ask — park the room that converts nobody,
+            // put the effort where the alternative already works.
+            (
+                None,
+                None,
+                Some(format!(
+                    "park {subreddit}; engage {alternative_label} instead"
+                )),
+            )
+        }
         other => (None, None, Some(other.action_kind().to_owned())),
     }
 }

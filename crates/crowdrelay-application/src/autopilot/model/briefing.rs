@@ -502,6 +502,23 @@ impl AutopilotActionPayload {
                 ],
                 deadline_note: String::new(),
             },
+            Self::RaiseDeclineAdvisory { subreddit, posts_considered, avg_score_tenths, window_days, alternative_label, alternative_detail, .. } => ActionBriefing {
+                summary: format!("Stop engaging {subreddit} — it engages but produces zero fans"),
+                why_it_matters: "Effort spent on a room that never converts is effort taken from one that might. Approving parks the community; disagreeing keeps it and tells the system it is wrong.".into(),
+                steps: vec![
+                    BriefingStep { what_to_do: "Read the evidence — the posts, their average score, and the zero fan conversions".into(), why_it_matters: "The claim is only as good as the numbers behind it".into() },
+                    BriefingStep { what_to_do: "Click APPROVE to park the community, or CANCEL if the room is worth the effort anyway".into(), why_it_matters: "Approving stops the engager posting there; cancelling records your disagreement and the advisory will not be re-raised for a month".into() },
+                ],
+                content: vec![
+                    BriefingField { label: "Community".into(), value: subreddit.clone() },
+                    BriefingField { label: "Posts measured".into(), value: posts_considered.to_string() },
+                    BriefingField { label: "Average score".into(), value: format!("{:.1}", *avg_score_tenths as f64 / 10.0) },
+                    BriefingField { label: "Fan conversions".into(), value: "0".into() },
+                    BriefingField { label: "Window".into(), value: format!("{window_days} days") },
+                    BriefingField { label: "Alternative".into(), value: format!("{alternative_label} — {alternative_detail}") },
+                ],
+                deadline_note: String::new(),
+            },
             Self::IssueReferralCode { fan_id } => ActionBriefing {
                 summary: "Issue a referral code to a fan".into(),
                 why_it_matters: "A referral code is growth that scales with the audience. The fan must have consented.".into(),

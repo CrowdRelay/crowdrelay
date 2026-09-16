@@ -142,6 +142,13 @@ pub(super) async fn schedule_effect_measurement(
             // ticket or merch movement. Phase 5 adds the measurement kind that
             // can read those honestly.
         }
+        AutopilotActionPayload::RaiseDeclineAdvisory { .. } => {
+            // Whether parking the room moved anything is a question the
+            // provenance ledger answers on its own — conversions either
+            // start appearing from other rooms or they do not. Scheduling
+            // a fan metric against the approval date would attribute a
+            // number to a non-action.
+        }
         AutopilotActionPayload::RaiseContentSuggestion { .. }
         | AutopilotActionPayload::RaiseContentArc { .. } => {
             // No plan here either, for the strongest reason of the three:

@@ -645,6 +645,39 @@ impl PostgresAutopilotRepository {
                     // first-party mutation would fabricate state the evidence
                     // does not support.
                 }
+                AutopilotActionPayload::RaiseDeclineAdvisory {
+                    place_id,
+                    subreddit,
+                    window_days,
+                    ..
+                } => {
+                    // Approving is the park: the place flips to `not_a_fit`,
+                    // which is the same switch the console's block control
+                    // uses, so `load_community_targets` drops the room on the
+                    // next cycle and the engager stops spending there.
+                    // Flipping the state back un-parks it — reversible by
+                    // design. A target with no place row parked nothing;
+                    // the advisory still carried its evidence.
+                    if let Some(place_id) = place_id {
+                        sqlx::query(
+                            r#"UPDATE discovery_places
+                               SET membership_state = 'not_a_fit',
+                                   membership_changed_at = now(),
+                                   membership_changed_by = 'autopilot:decline-advisory',
+                                   membership_note = $3,
+                                   updated_at = now()
+                               WHERE id = $2 AND workspace_id = $1"#,
+                        )
+                        .bind(workspace_id.into_uuid())
+                        .bind(place_id)
+                        .bind(format!(
+                            "{subreddit} engaged but produced zero fan conversions in {window_days} days — parked on approval"
+                        ))
+                        .execute(&mut *transaction)
+                        .await
+                        .map_err(map_sqlx)?;
+                    }
+                }
                 AutopilotActionPayload::IssueReferralCode { fan_id } => {
                     // Same shape as the existing self-service path in
                     // `fan_lifecycle`: one code per fan, and a second one would

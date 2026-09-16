@@ -51,6 +51,7 @@ KNOWN_UNMEASURED = {
     "RaiseContentArc",
     "RaiseContentSuggestion",
     "RaiseGrowthDebt",
+    "RaiseDeclineAdvisory",
     "RaiseGrowthOpportunity",
     "RequestBeaconDiscovery",
     "RequestBeaconInviteBatch",

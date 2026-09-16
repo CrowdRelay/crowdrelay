@@ -39,6 +39,7 @@ DECISION_TABLE = "viryaos_autopilot_decisions"
 # enough to name, and that is worth keeping true.
 KNOWN_WRITERS = {
     "crates/crowdrelay-infra/src/autopilot/decisions/persist.rs",
+    "crates/crowdrelay-infra/src/autopilot/decline_advisories.rs",
     "crates/crowdrelay-infra/src/autopilot/team.rs",
     "crates/crowdrelay-worker/src/agent_outcomes.rs",
 }
