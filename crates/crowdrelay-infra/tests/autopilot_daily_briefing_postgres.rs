@@ -372,11 +372,11 @@ async fn the_briefing_reports_fan_concentration_and_says_so_when_flat()
     .fetch_one(&pool)
     .await?;
     let conversions = [
-        ("smart_link", "r/punk", warsaw),
-        ("smart_link", "r/punk", warsaw),
-        ("qr_code", "Kraków show", krakow),
+        ("smart_link", "r/punk", warsaw, Some("playthrough")),
+        ("smart_link", "r/punk", warsaw, Some("playthrough")),
+        ("qr_code", "Kraków show", krakow, None),
     ];
-    for (index, (channel, community, city)) in conversions.iter().enumerate() {
+    for (index, (channel, community, city, format_key)) in conversions.iter().enumerate() {
         let fan_id: Uuid = sqlx::query_scalar(
             "INSERT INTO fans (workspace_id, normalized_email, status)
              VALUES ($1, $2, 'active') RETURNING id",
@@ -398,13 +398,14 @@ async fn the_briefing_reports_fan_concentration_and_says_so_when_flat()
         .await?;
         sqlx::query(
             "INSERT INTO fan_provenance_events
-                 (workspace_id, fan_id, event_kind, channel, community, occurred_at)
-             VALUES ($1, $2, 'conversion', $3, $4, now())",
+                 (workspace_id, fan_id, event_kind, channel, community, format_key, occurred_at)
+             VALUES ($1, $2, 'conversion', $3, $4, $5, now())",
         )
         .bind(workspace_id.into_uuid())
         .bind(fan_id)
         .bind(channel)
         .bind(community)
+        .bind(format_key)
         .execute(&pool)
         .await?;
     }
@@ -430,9 +431,14 @@ async fn the_briefing_reports_fan_concentration_and_says_so_when_flat()
         body.contains("Warsaw 66%"),
         "the top city's share is named: {body}"
     );
+    assert!(
+        body.contains("playthrough 66%"),
+        "the top format's share is named when conversions carry one: {body}"
+    );
 
-    // A second tenant with no conversions still gets the line — flat is
-    // an answer, not an absence. And its rows must not leak tenant data.
+    // A second tenant whose one conversion carries no format still gets
+    // the line — "format unrecorded" is the honest unknown, not a guessed
+    // bucket. Its rows must not leak tenant data either.
     let quiet = WorkspaceId::new();
     seed_workspace(&pool, quiet).await?;
     seed_member(&pool, quiet, "quiet-reader").await?;
@@ -443,16 +449,37 @@ async fn the_briefing_reports_fan_concentration_and_says_so_when_flat()
     .bind(quiet.into_uuid())
     .execute(&pool)
     .await?;
+    let quiet_fan: Uuid = sqlx::query_scalar(
+        "INSERT INTO fans (workspace_id, normalized_email, status)
+         VALUES ($1, $2, 'active') RETURNING id",
+    )
+    .bind(quiet.into_uuid())
+    .bind(format!("quiet-{}@example.test", quiet.into_uuid().simple()))
+    .fetch_one(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO fan_provenance_events
+             (workspace_id, fan_id, event_kind, channel, community, occurred_at)
+         VALUES ($1, $2, 'conversion', 'concert_qr', 'Klub X door', now())",
+    )
+    .bind(quiet.into_uuid())
+    .bind(quiet_fan)
+    .execute(&pool)
+    .await?;
     let issued = repository.reconcile_team_handoffs(quiet, morning).await?;
     assert_eq!(issued, 1);
     let briefings = briefing_rows(&pool, quiet).await?;
     let (_, _, _, quiet_body) = &briefings[0];
     assert!(
-        quiet_body.contains("fans (30d): no conversions"),
-        "zero conversions renders the honest flat line: {quiet_body}"
+        quiet_body.contains("fans (30d): 1"),
+        "the quiet tenant's own conversion is counted: {quiet_body}"
     );
     assert!(
-        !quiet_body.contains("smart_link") && !quiet_body.contains("Warsaw"),
+        quiet_body.contains("format unrecorded"),
+        "conversions without a declared format say so: {quiet_body}"
+    );
+    assert!(
+        !quiet_body.contains("r/punk") && !quiet_body.contains("Warsaw"),
         "another tenant's concentration must not leak: {quiet_body}"
     );
     Ok(())

@@ -546,6 +546,27 @@ impl AutopilotContentStateRepository for PostgresAutopilotRepository {
             }
 
             let mut transaction = self.pool.begin().await.map_err(map_sqlx)?;
+
+            // A declared format must name a real catalogue entry — the same
+            // discipline `content_suggestions.format_key` holds by FK. The
+            // pre-check exists because a raw FK violation would classify as
+            // `Unexpected` (500) where this is the caller's bad key, and it
+            // runs inside the transaction so a catalogue delete between the
+            // two cannot turn it into one anyway.
+            if let Some(format_key) = command.format_key.as_deref() {
+                let known = sqlx::query_scalar::<_, bool>(
+                    "SELECT EXISTS(SELECT 1 FROM viryaos_content_format_entries WHERE key = $1)",
+                )
+                .bind(format_key)
+                .fetch_one(&mut *transaction)
+                .await
+                .map_err(map_sqlx)?;
+                if !known {
+                    return Err(RepositoryError::ConflictBecause(
+                        "format_key must name a viryaos_content_format_entries key",
+                    ));
+                }
+            }
             let operation_id = Uuid::now_v7();
             let source_id = command
                 .source_id
@@ -559,6 +580,8 @@ impl AutopilotContentStateRepository for PostgresAutopilotRepository {
                 "occurred_at": command.occurred_at,
                 "expires_at": command.expires_at,
                 "metadata": &command.metadata,
+                "active": command.active,
+                "format_key": &command.format_key,
                 "expected_version": command.expected_version,
             });
             if let Some(existing) = super::insert_operator_action(
@@ -589,8 +612,8 @@ impl AutopilotContentStateRepository for PostgresAutopilotRepository {
                     r#"
                     INSERT INTO viryaos_content_sources (
                         id, workspace_id, source_kind, source_key, title,
-                        occurred_at, expires_at, metadata, active
-                    ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,COALESCE($9, true))
+                        occurred_at, expires_at, metadata, active, format_key
+                    ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,COALESCE($9, true),$10)
                     RETURNING version
                     "#,
                 )
@@ -603,6 +626,7 @@ impl AutopilotContentStateRepository for PostgresAutopilotRepository {
                 .bind(command.expires_at)
                 .bind(&command.metadata)
                 .bind(command.active)
+                .bind(command.format_key.as_deref())
                 .fetch_one(&mut *transaction)
                 .await
                 .map_err(map_sqlx)?
@@ -617,6 +641,7 @@ impl AutopilotContentStateRepository for PostgresAutopilotRepository {
                         expires_at = $7,
                         metadata = $8,
                         active = COALESCE($10, active),
+                        format_key = COALESCE($11, format_key),
                         version = version + 1
                     WHERE workspace_id = $1 AND id = $2 AND version = $9
                     RETURNING version
@@ -632,6 +657,7 @@ impl AutopilotContentStateRepository for PostgresAutopilotRepository {
                 .bind(&command.metadata)
                 .bind(command.expected_version)
                 .bind(command.active)
+                .bind(command.format_key.as_deref())
                 .fetch_optional(&mut *transaction)
                 .await
                 .map_err(map_sqlx)?
@@ -650,7 +676,8 @@ impl AutopilotContentStateRepository for PostgresAutopilotRepository {
                     'occurred_at', occurred_at,
                     'expires_at', expires_at,
                     'metadata', metadata,
-                    'active', active
+                    'active', active,
+                    'format_key', format_key
                 )
                 FROM viryaos_content_sources
                 WHERE workspace_id = $1 AND id = $2 AND version = $3
@@ -691,11 +718,12 @@ impl AutopilotContentStateRepository for PostgresAutopilotRepository {
                     serde_json::Value,
                     i64,
                     bool,
+                    Option<String>,
                 ),
             >(
                 r#"
                 SELECT id, source_kind, source_key, title, occurred_at,
-                       expires_at, metadata, version, active
+                       expires_at, metadata, version, active, format_key
                 FROM viryaos_content_sources
                 WHERE workspace_id = $1
                 ORDER BY occurred_at DESC
@@ -719,6 +747,7 @@ impl AutopilotContentStateRepository for PostgresAutopilotRepository {
                         metadata,
                         version,
                         active,
+                        format_key,
                     )| {
                         Ok(ContentSourceView {
                             source_id: ContentSourceId::from_uuid(id),
@@ -728,6 +757,7 @@ impl AutopilotContentStateRepository for PostgresAutopilotRepository {
                             occurred_at,
                             expires_at,
                             metadata,
+                            format_key,
                             version,
                             active,
                         })

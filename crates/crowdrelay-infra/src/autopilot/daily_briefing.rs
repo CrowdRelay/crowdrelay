@@ -51,6 +51,7 @@ struct BriefingFrame {
     unmeasured: &'static str,
     fans_label: &'static str,
     fans_flat: &'static str,
+    fans_format_unrecorded: &'static str,
 }
 
 const fn briefing_frame(locale: BriefingLocale) -> BriefingFrame {
@@ -72,6 +73,7 @@ const fn briefing_frame(locale: BriefingLocale) -> BriefingFrame {
             unmeasured: "brak pomiaru",
             fans_label: "fani (30 dni)",
             fans_flat: "brak konwersji — nic jeszcze nie działa, i to też jest wiedza",
+            fans_format_unrecorded: "format niezapisany",
         },
         BriefingLocale::En => BriefingFrame {
             title: "ViryaOS — morning briefing",
@@ -90,6 +92,7 @@ const fn briefing_frame(locale: BriefingLocale) -> BriefingFrame {
             unmeasured: "unmeasured",
             fans_label: "fans (30d)",
             fans_flat: "no conversions — nothing is working yet, worth knowing",
+            fans_format_unrecorded: "format unrecorded",
         },
     }
 }
@@ -509,13 +512,12 @@ async fn compose_briefing(
     .map_err(map_sqlx)?;
 
     // ── Concentration (§4b-4) ─────────────────────────────────────────
-    // Share of new fans carried by the top channel and city. A flat
-    // spread — or zero conversions — is the honest answer that nothing
-    // is compounding yet; the line renders either way rather than only
-    // celebrating when a leader exists. (Format concentration is not
-    // here: no recorded edge joins a conversion to the content format
-    // that produced it, and a permanently-NULL share is worse than no
-    // share. The gap is tracked in the plan.)
+    // Share of new fans carried by the top channel, city and content
+    // format. A flat spread — or zero conversions — is the honest answer
+    // that nothing is compounding yet; the line renders either way rather
+    // than only celebrating when a leader exists. The format share only
+    // counts conversions whose promoted source was filed with a declared
+    // format — the rest report "unrecorded", not a guessed bucket.
     let fans_30d: i64 = sqlx::query_scalar(
         "SELECT COUNT(DISTINCT fan_id) FROM fan_provenance_events
          WHERE workspace_id = $1 AND event_kind = 'conversion'
@@ -553,6 +555,19 @@ async fn compose_briefing(
     .fetch_optional(&mut **tx)
     .await
     .map_err(map_sqlx)?;
+    let top_format = sqlx::query_as::<_, TopShareRow>(
+        "SELECT format_key AS label, COUNT(DISTINCT fan_id) AS fans
+         FROM fan_provenance_events
+         WHERE workspace_id = $1 AND event_kind = 'conversion'
+           AND occurred_at > $2 - INTERVAL '30 days'
+           AND format_key IS NOT NULL
+         GROUP BY format_key ORDER BY fans DESC, label LIMIT 1",
+    )
+    .bind(ws)
+    .bind(now)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(map_sqlx)?;
 
     // ── Assemble ──────────────────────────────────────────────────────
     let mut sections_map = serde_json::Map::new();
@@ -573,12 +588,15 @@ async fn compose_briefing(
         // share; the city share only appears when the converting fan
         // declared one — unattributed fans are absent, not zero.
         let mut shares: Vec<String> = Vec::new();
-        for top in [&top_channel, &top_city].into_iter().flatten() {
+        for top in [&top_channel, &top_city, &top_format].into_iter().flatten() {
             shares.push(format!(
                 "{} {}%",
                 top.label,
                 top.fans * 100 / fans_30d.max(1)
             ));
+        }
+        if top_format.is_none() {
+            shares.push(frame.fans_format_unrecorded.to_owned());
         }
         body.push_str(&format!(
             "{}: {} — {}\n",

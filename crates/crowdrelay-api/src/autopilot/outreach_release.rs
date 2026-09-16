@@ -664,7 +664,11 @@ pub async fn upsert_content_source(
         || request.expires_at <= request.occurred_at
         || (!evergreen && request.expires_at - request.occurred_at > Duration::days(90))
         || (evergreen && creating && request.expires_at <= OffsetDateTime::now_utc())
-        || !request.metadata.is_object();
+        || !request.metadata.is_object()
+        || request
+            .format_key
+            .as_deref()
+            .is_some_and(|key| key.trim().is_empty() || key.len() > 64);
     if invalid {
         return Problem::bad_request(request_id(&headers))
             .private()
@@ -684,6 +688,11 @@ pub async fn upsert_content_source(
         expires_at: request.expires_at,
         metadata: request.metadata,
         active: request.active,
+        format_key: request
+            .format_key
+            .as_deref()
+            .map(str::trim)
+            .map(str::to_owned),
         expected_version: request.expected_version,
     };
     match state

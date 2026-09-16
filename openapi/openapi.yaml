@@ -11584,7 +11584,7 @@ components:
 
     ContentSourceKind:
       type: string
-      enum: [event, release, show_completed]
+      enum: [event, release, show_completed, video, story]
     ContentSourceRequest:
       type: object
       additionalProperties: false
@@ -11597,6 +11597,8 @@ components:
         occurred_at: { type: string, format: date-time }
         expires_at: { type: string, format: date-time }
         metadata: { type: object, additionalProperties: true }
+        active: { type: [boolean, 'null'], description: Omit on create (defaults active) or to leave the flag alone on edit; send to retire or reinstate the source. }
+        format_key: { type: [string, 'null'], maxLength: 64, description: The catalogue format the artifact was produced in (a viryaos_content_format_entries key); omit to leave undeclared (create) or unchanged (edit). Conversion provenance stamps it onto fans so format concentration is measurable. }
         expected_version: { type: integer, format: int64, minimum: 0 }
     ContentSourceMutation:
       type: object

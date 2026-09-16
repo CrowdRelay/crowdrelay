@@ -368,6 +368,10 @@ pub struct ContentSourceRequest {
     /// Omit on create (defaults to active) or to leave the flag alone on
     /// edit; send it to retire or reinstate the source.
     active: Option<bool>,
+    /// The catalogue format this artifact was produced in. Omit to leave it
+    /// undeclared (create) or unchanged (edit); when present it must name a
+    /// `viryaos_content_format_entries` key.
+    format_key: Option<String>,
     expected_version: i64,
 }
 

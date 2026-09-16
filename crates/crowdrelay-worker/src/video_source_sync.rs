@@ -293,7 +293,8 @@ impl VideoSourceSyncWorker {
                     'occurred_at', occurred_at,
                     'expires_at', expires_at,
                     'metadata', metadata,
-                    'active', active
+                    'active', active,
+                    'format_key', format_key
                 )
                 FROM viryaos_content_sources
                 WHERE workspace_id = $1 AND id = $2 AND version = $3

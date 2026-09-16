@@ -335,8 +335,8 @@ async fn community_conversion_occurred_at_uses_fan_created_at()
             .await?;
 
     // Read the conversion provenance event.
-    let conversion_row: Option<(OffsetDateTime,)> = sqlx::query_as(
-        "SELECT occurred_at FROM fan_provenance_events \
+    let conversion_row: Option<(OffsetDateTime, Option<String>)> = sqlx::query_as(
+        "SELECT occurred_at, format_key FROM fan_provenance_events \
          WHERE workspace_id = $1 AND fan_id = $2 AND event_kind = 'conversion'",
     )
     .bind(workspace_id.into_uuid())
@@ -344,13 +344,200 @@ async fn community_conversion_occurred_at_uses_fan_created_at()
     .fetch_optional(&pool)
     .await?;
 
-    let occurred_at = conversion_row
-        .ok_or("expected a conversion provenance event to be written")?
-        .0;
+    let (occurred_at, format_key) =
+        conversion_row.ok_or("expected a conversion provenance event to be written")?;
 
     assert_eq!(
         occurred_at, fan_created_at,
         "occurred_at must equal fan.created_at, not now() (write time)"
+    );
+    assert_eq!(
+        format_key, None,
+        "no community_posts row behind this link — format must stay unrecorded, not guessed"
+    );
+
+    pool.close().await;
+    Ok(())
+}
+
+/// The format→fan edge: a conversion whose clicked link traces back to a
+/// community post promoting a format-declared content source stamps that
+/// `format_key` onto the provenance row — §4b-4's third concentration
+/// question becomes answerable.
+#[tokio::test]
+#[ignore = "requires an explicit CROWDRELAY_TEST_DATABASE_URL PostgreSQL database"]
+async fn community_conversion_stamps_the_promoted_sources_format()
+-> Result<(), Box<dyn std::error::Error>> {
+    let database_url = std::env::var(TEST_DATABASE_URL_KEY)
+        .map_err(|e| format!("set CROWDRELAY_TEST_DATABASE_URL: {e}"))?;
+    let database_config = DatabaseConfig {
+        url: database_url,
+        max_connections: 8,
+        connect_timeout: Duration::from_secs(5),
+        ping_timeout: Duration::from_secs(2),
+        operation_timeout: Duration::from_secs(5),
+        lock_timeout: Duration::from_secs(2),
+    };
+    let pool = database::connect(&database_config).await?;
+    database::migrate(&pool).await?;
+
+    let suffix = Uuid::now_v7().simple().to_string();
+    let workspace_id = WorkspaceId::new();
+    let workspace_slug = WorkspaceSlug::parse(format!("fmt-{suffix}"))?;
+    let city_slug = CitySlug::parse(format!("fmt-city-{suffix}"))?;
+    let campaign_id = CampaignId::new();
+    let other_campaign_id = CampaignId::new();
+    let smart_link_id = SmartLinkId::new();
+    seed_acquisition_scope(
+        &pool,
+        workspace_id,
+        &workspace_slug,
+        &city_slug,
+        campaign_id,
+        other_campaign_id,
+        smart_link_id,
+    )
+    .await?;
+
+    sqlx::query(
+        "UPDATE smart_links SET channel_community = 'r/progmetal', channel_source = 'reddit' \
+         WHERE workspace_id = $1 AND id = $2",
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(smart_link_id.into_uuid())
+    .execute(&pool)
+    .await?;
+
+    // A video source declared as a `playthrough` — the catalogue key the
+    // provenance row should stamp.
+    let source_id = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO viryaos_content_sources
+             (id, workspace_id, source_kind, source_key, title, occurred_at, expires_at, format_key)
+         VALUES ($1,$2,'video',$3,'Playthrough video', now() - interval '1 day', now() + interval '30 days','playthrough')",
+    )
+    .bind(source_id)
+    .bind(workspace_id.into_uuid())
+    .bind(format!("video-{suffix}"))
+    .execute(&pool)
+    .await?;
+
+    // The posting action carries the promoted source in its payload — the
+    // same shape the outcome-ingest gate guarantees in production.
+    let decision_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO viryaos_autopilot_decisions
+             (id, workspace_id, decision_key, context, subject_kind, subject_id,
+              decision_kind, confidence_basis_points, disposition, reason,
+              input_snapshot, policy_snapshot, recommendation, evaluated_at, trace_id)
+         VALUES ($1,$2,$3,'growth_intelligence','target_community',$4,
+                 'seed.post',9000,'auto_execute','seeded engagement post',
+                 '{}','{}','{}',now(),$5) RETURNING id",
+    )
+    .bind(Uuid::now_v7())
+    .bind(workspace_id.into_uuid())
+    .bind(format!("fmt-post-decision-{suffix}"))
+    .bind(Uuid::now_v7())
+    .bind(Uuid::now_v7())
+    .fetch_one(&pool)
+    .await?;
+    let action_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO viryaos_autopilot_actions
+             (id, workspace_id, decision_id, context, action_kind, subject_kind,
+              subject_id, idempotency_key, payload, status, finished_at)
+         VALUES ($1,$2,$3,'growth_intelligence','community.engage.request','target_community',
+                 $4,$5,$6,'succeeded', now()) RETURNING id",
+    )
+    .bind(Uuid::now_v7())
+    .bind(workspace_id.into_uuid())
+    .bind(decision_id)
+    .bind(Uuid::now_v7())
+    .bind(format!("fmt-post-{suffix}"))
+    .bind(serde_json::json!({
+        "kind": "request_community_engagement",
+        "target_id": Uuid::now_v7().to_string(),
+        "platform": "reddit",
+        "subreddit": "r/progmetal",
+        "title": "post",
+        "body": "body",
+        "smart_link": "/l/infra-test",
+        "source_id": source_id.to_string(),
+    }))
+    .fetch_one(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO community_posts
+             (id, workspace_id, action_id, subreddit, title, body, smart_link, status, posted_at)
+         VALUES ($1,$2,$3,'r/progmetal','post','body','/l/infra-test','posted', now() - interval '1 day')",
+    )
+    .bind(Uuid::now_v7())
+    .bind(workspace_id.into_uuid())
+    .bind(action_id)
+    .execute(&pool)
+    .await?;
+
+    let repository = PostgresAcquisitionRepository::new(
+        pool.clone(),
+        workspace_slug,
+        CountryCode::parse("PL")?,
+        &database_config,
+        false,
+        test_sensitive_response_codec(),
+    );
+
+    let visitor_id = VisitorId::new();
+    let link = ResolvedSmartLink::new(
+        smart_link_id,
+        workspace_id,
+        Some(campaign_id),
+        SmartLinkSlug::parse("infra-test")?,
+        DestinationUrl::parse("https://example.test/destination")?,
+        1,
+    )?;
+    let click = ClickEvent::from_link(
+        &link,
+        Some(visitor_id),
+        Some("example.test".to_owned()),
+        OffsetDateTime::now_utc(),
+    )?;
+    repository
+        .persist_click_batch(std::slice::from_ref(&click))
+        .await?;
+
+    let email = format!("fmt-{suffix}@example.test");
+    let signup = FanSignup::new(FanSignupInput {
+        workspace_id,
+        email: NormalizedEmail::parse(&email)?,
+        display_name: Some("Format test fan".to_owned()),
+        city_slug: city_slug.clone(),
+        locale: Some("pl-PL".to_owned()),
+        campaign_id: Some(campaign_id),
+        visitor_id: Some(visitor_id),
+        claimed_referral_code: None,
+        consent: MarketingConsent::new(true, "privacy-v1", "fmt-test")?,
+    })?;
+    let command = SignupFanCommand::new(
+        IdempotencyKey::parse(format!("idem-fmt-{suffix}"))?,
+        RequestId::parse(format!("request-fmt-{suffix}"))?,
+        signup,
+    );
+    let result = repository.persist_fan_signup(&command).await?;
+    assert!(result.created);
+
+    let row: Option<(Option<Uuid>, Option<String>)> = sqlx::query_as(
+        "SELECT action_id, format_key FROM fan_provenance_events \
+         WHERE workspace_id = $1 AND fan_id = $2 AND event_kind = 'conversion'",
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(result.fan_id.into_uuid())
+    .fetch_optional(&pool)
+    .await?;
+    let (stamped_action, stamped_format) =
+        row.ok_or("expected a conversion provenance event to be written")?;
+    assert_eq!(stamped_action, Some(action_id));
+    assert_eq!(
+        stamped_format.as_deref(),
+        Some("playthrough"),
+        "the promoted source's declared format must stamp onto the conversion"
     );
 
     pool.close().await;

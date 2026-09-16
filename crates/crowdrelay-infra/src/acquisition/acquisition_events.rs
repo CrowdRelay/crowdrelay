@@ -117,18 +117,26 @@ impl PostgresAcquisitionRepository {
         // community_posts row exists (manually created smart links, or links
         // dropped by the executor), action_id is NULL — unattributable rather
         // than fabricated.
+        //
+        // format_key continues one hop further along the same chain:
+        //   action → payload.source_id → viryaos_content_sources.format_key
+        // — the catalogue format the promoted artifact was declared in. The
+        // outcome-ingest gate means every posted thread names a live source,
+        // so a NULL here says "the source was filed without a format", which
+        // is an honest unrecorded, not a join failure.
         sqlx::query(
             r#"
             INSERT INTO fan_provenance_events (
                 workspace_id, fan_id, event_kind, channel, source_target,
                 community, campaign_id, action_id, attribution_method,
-                attribution_confidence, occurred_at
+                attribution_confidence, occurred_at, format_key
             )
             SELECT $1, $2, 'conversion',
                    COALESCE(link.channel_source, 'smart_link'),
                    link.slug, link.channel_community, click.campaign_id,
                    post.action_id,
-                   'last_community_click', 1.0, fan.created_at
+                   'last_community_click', 1.0, fan.created_at,
+                   post.format_key
             FROM click_events AS click
             JOIN smart_links AS link
               ON link.workspace_id = click.workspace_id
@@ -137,8 +145,14 @@ impl PostgresAcquisitionRepository {
               ON fan.workspace_id = $1
              AND fan.id = $2
             LEFT JOIN LATERAL (
-                SELECT post.action_id
+                SELECT post.action_id, source.format_key
                 FROM community_posts AS post
+                LEFT JOIN viryaos_autopilot_actions AS act
+                  ON act.workspace_id = $1
+                 AND act.id = post.action_id
+                LEFT JOIN viryaos_content_sources AS source
+                  ON source.workspace_id = $1
+                 AND source.id::text = lower(act.payload->>'source_id')
                 WHERE post.workspace_id = $1
                   AND post.smart_link = '/l/' || link.slug
                 ORDER BY post.posted_at DESC NULLS LAST,

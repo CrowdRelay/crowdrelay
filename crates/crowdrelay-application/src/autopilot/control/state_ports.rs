@@ -549,6 +549,12 @@ pub struct UpsertContentSource {
     /// edits keep whatever the row already says. `Some` is the operator's
     /// "stop/start sharing this" control.
     pub active: Option<bool>,
+    /// The catalogue format this artifact was produced in — `playthrough`,
+    /// `making_of`, and so on. `None` means "leave it alone" on edit and
+    /// "undeclared" on create: a source filed without a format is honest
+    /// unknown, and conversion provenance reports it as unrecorded rather
+    /// than a guessed bucket. Non-`None` must name a catalogue entry.
+    pub format_key: Option<String>,
     pub expected_version: i64,
 }
 #[derive(Clone, Debug, Serialize)]
@@ -569,6 +575,9 @@ pub struct ContentSourceView {
     pub occurred_at: OffsetDateTime,
     pub expires_at: OffsetDateTime,
     pub metadata: serde_json::Value,
+    /// The declared catalogue format, when one was filed — the operator's
+    /// read on the same column provenance stamps onto conversions.
+    pub format_key: Option<String>,
     pub version: i64,
     pub active: bool,
 }

@@ -3,11 +3,13 @@ use std::time::Duration;
 use crowdrelay_application::{
     IdempotencyKey, RepositoryError,
     autopilot::{
-        AutopilotTargetDiscoveryRepository, IngestOutreachCandidate, UpsertSubmissionChannel,
+        AutopilotContentStateRepository, AutopilotTargetDiscoveryRepository,
+        IngestOutreachCandidate, UpsertContentSource, UpsertSubmissionChannel,
     },
 };
 use crowdrelay_domain::{
     WorkspaceId,
+    content_supply::ContentSourceKind,
     outreach::OutreachTargetKind,
     target_discovery::{CandidateSource, ChannelCost, RouteKind},
 };
@@ -316,4 +318,114 @@ async fn pitch_class(
     .bind(route_value)
     .fetch_one(pool)
     .await?)
+}
+
+/// The declared format on a filed source must be a real catalogue key —
+/// `format_key` is the column conversion provenance later stamps onto fans,
+/// and a free-text value would let "format concentration" rank typos.
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn a_content_sources_format_must_name_a_catalogue_entry()
+-> Result<(), Box<dyn std::error::Error>> {
+    let database_url =
+        std::env::var("CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL").map_err(|error| {
+            format!(
+                "CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL must target a disposable database: {error}"
+            )
+        })?;
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&database_url)
+        .await?;
+    crowdrelay_infra::database::MIGRATOR.run(&pool).await?;
+
+    let workspace_id = WorkspaceId::new();
+    sqlx::query("INSERT INTO workspaces (id, slug, name) VALUES ($1, $2, $3)")
+        .bind(workspace_id.into_uuid())
+        .bind(format!("format-gate-{}", workspace_id.into_uuid().simple()))
+        .bind("Format gate")
+        .execute(&pool)
+        .await?;
+
+    let database = DatabaseConfig {
+        url: database_url,
+        max_connections: 4,
+        connect_timeout: Duration::from_secs(3),
+        ping_timeout: Duration::from_secs(2),
+        operation_timeout: Duration::from_secs(5),
+        lock_timeout: Duration::from_secs(1),
+    };
+    let repository = PostgresAutopilotRepository::new(pool.clone(), &database);
+
+    let command = |format_key: Option<&str>, key: &str| UpsertContentSource {
+        source_id: None,
+        kind: ContentSourceKind::Video,
+        source_key: key.to_owned(),
+        title: "A video".to_owned(),
+        occurred_at: time::OffsetDateTime::now_utc() - time::Duration::days(1),
+        expires_at: time::OffsetDateTime::now_utc() + time::Duration::days(30),
+        metadata: serde_json::json!({}),
+        active: None,
+        format_key: format_key.map(str::to_owned),
+        expected_version: 0,
+    };
+
+    // A bogus key is refused before the row exists.
+    let bad = repository
+        .upsert_content_source(
+            workspace_id,
+            command(Some("definately_a_format"), "video-bad"),
+            &IdempotencyKey::parse("fmt-gate-bad")?,
+            None,
+        )
+        .await;
+    assert!(
+        matches!(bad, Err(RepositoryError::ConflictBecause(_))),
+        "an unknown catalogue key must be refused, got {bad:?}"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM viryaos_content_sources WHERE workspace_id = $1 AND source_key = 'video-bad'"
+        )
+        .bind(workspace_id.into_uuid())
+        .fetch_one(&pool)
+        .await?,
+        0,
+        "a refused format must not write a row"
+    );
+
+    // A real catalogue key is accepted and listed back.
+    repository
+        .upsert_content_source(
+            workspace_id,
+            command(Some("playthrough"), "video-good"),
+            &IdempotencyKey::parse("fmt-gate-good")?,
+            None,
+        )
+        .await?;
+    let views = repository.list_content_sources(workspace_id).await?;
+    let filed = views
+        .iter()
+        .find(|view| view.source_key == "video-good")
+        .expect("the accepted source is listed");
+    assert_eq!(filed.format_key.as_deref(), Some("playthrough"));
+
+    // Undeclared stays NULL — honest unknown, not a defaulted format.
+    repository
+        .upsert_content_source(
+            workspace_id,
+            command(None, "video-undeclared"),
+            &IdempotencyKey::parse("fmt-gate-none")?,
+            None,
+        )
+        .await?;
+    let views = repository.list_content_sources(workspace_id).await?;
+    let filed = views
+        .iter()
+        .find(|view| view.source_key == "video-undeclared")
+        .expect("the undeclared source is listed");
+    assert_eq!(filed.format_key, None);
+
+    pool.close().await;
+    Ok(())
 }
