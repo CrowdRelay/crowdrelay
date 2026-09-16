@@ -6645,6 +6645,100 @@ paths:
           $ref: '#/components/responses/Problem'
         '503':
           $ref: '#/components/responses/Problem'
+  /public/connections/gdrive/authorize:
+    get:
+      operationId: authorizeGdriveConnection
+      summary: Redirect to Google OAuth consent page (Drive scope)
+      description: Public endpoint that redirects the browser to Google's consent page with openid, email and drive.readonly scopes. Sets a state cookie for CSRF protection. No admin auth needed — this only generates a redirect URL and sets a cookie.
+      parameters:
+      - name: redirect
+        in: query
+        required: false
+        schema: { type: string }
+        description: Where to redirect after successful connection (defaults to the tenant audience page).
+      responses:
+        '302':
+          description: Redirect to Google OAuth consent page.
+          headers:
+            Location:
+              schema: { type: string }
+            Set-Cookie:
+              schema: { type: string }
+        '503':
+          $ref: '#/components/responses/Problem'
+  /public/connections/gdrive/callback:
+    get:
+      operationId: gdriveOAuthCallback
+      summary: Google OAuth callback handler (Drive connection)
+      description: Receives the authorization code from Google's OAuth redirect, exchanges it for access/refresh tokens, and stores them encrypted in fanbase_connections. Redirects to the control plane after success.
+      parameters:
+      - name: code
+        in: query
+        required: true
+        schema: { type: string }
+      - name: state
+        in: query
+        required: true
+        schema: { type: string }
+      responses:
+        '302':
+          description: Redirect to control plane after successful connection.
+          headers:
+            Location:
+              schema: { type: string }
+            Set-Cookie:
+              schema: { type: string }
+        '400':
+          $ref: '#/components/responses/Problem'
+        '503':
+          $ref: '#/components/responses/Problem'
+  /public/connections/gmail/authorize:
+    get:
+      operationId: authorizeGmailConnection
+      summary: Redirect to Google OAuth consent page (Gmail scope)
+      description: Public endpoint that redirects the browser to Google's consent page with openid, email and gmail.readonly scopes. Sets a state cookie for CSRF protection. No admin auth needed — this only generates a redirect URL and sets a cookie. gmail.readonly is a restricted Google scope and requires app verification for production use.
+      parameters:
+      - name: redirect
+        in: query
+        required: false
+        schema: { type: string }
+        description: Where to redirect after successful connection (defaults to the tenant audience page).
+      responses:
+        '302':
+          description: Redirect to Google OAuth consent page.
+          headers:
+            Location:
+              schema: { type: string }
+            Set-Cookie:
+              schema: { type: string }
+        '503':
+          $ref: '#/components/responses/Problem'
+  /public/connections/gmail/callback:
+    get:
+      operationId: gmailOAuthCallback
+      summary: Google OAuth callback handler (Gmail connection)
+      description: Receives the authorization code from Google's OAuth redirect, exchanges it for access/refresh tokens, and stores them encrypted in fanbase_connections. Redirects to the control plane after success.
+      parameters:
+      - name: code
+        in: query
+        required: true
+        schema: { type: string }
+      - name: state
+        in: query
+        required: true
+        schema: { type: string }
+      responses:
+        '302':
+          description: Redirect to control plane after successful connection.
+          headers:
+            Location:
+              schema: { type: string }
+            Set-Cookie:
+              schema: { type: string }
+        '400':
+          $ref: '#/components/responses/Problem'
+        '503':
+          $ref: '#/components/responses/Problem'
   /admin/fanbases:
     get:
       operationId: listFanbases

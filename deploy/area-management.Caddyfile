@@ -66,6 +66,9 @@
         /v1/control-plane/social-posts/* \
         /v1/control-plane/telegram-posts/* \
         /v1/control-plane/discord-posts/* \
+        /v1/control-plane/gdrive/contacts \
+        /v1/control-plane/gdrive/contacts/* \
+        /v1/control-plane/gdrive/scan \
 
 	handle /healthz/ready {
 		rewrite * /v1/health/ready
