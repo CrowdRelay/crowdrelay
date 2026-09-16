@@ -1,0 +1,589 @@
+//! Google Drive contacts sync: scan the connected Drive for tabular files,
+//! extract email-bearing rows, and stage them for operator review.
+//!
+//! Everything this worker writes lands in `viryaos_drive_contacts` —
+//! never in `fans` or `agent_outreach_targets`. Classification is the
+//! operator's job: a fan goes through `fan_import` (pending + DOI), a
+//! beacon through the outreach screening queue, and one address may be
+//! both.
+//!
+//! Wake paths: `growth_metric_sync` NOTIFY (a gdrive connection appears),
+//! `gdrive_contacts` NOTIFY (Scan now), and an hourly sweep. Per-file the
+//! Drive `modifiedTime` is compared against the mtime recorded in staging —
+//! an unchanged file costs one tiny query, not an export.
+//!
+//! Bounds: one workspace, ≤200 files/cycle, ≤5000 rows/file, bounded page
+//! sizes, per-connection failures logged not propagated.
+
+use std::time::Duration;
+
+use crowdrelay_domain::drive_contacts::extract_contacts;
+use crowdrelay_infra::{
+    gdrive::{GDriveError, PostgresGDriveRepository},
+    sensitive_response::SensitiveResponseKey,
+};
+
+use crate::google_oauth::{access_token_for_connection, resolve_google_access_token};
+use sqlx::{PgPool, postgres::PgListener};
+use thiserror::Error;
+use tokio::{sync::watch, time::interval};
+use uuid::Uuid;
+
+/// Contacts change slowly — an hour is fresh and leans on nothing.
+const SYNC_INTERVAL: Duration = Duration::from_secs(60 * 60);
+/// Bound on Drive files considered per cycle.
+const MAX_FILES_PER_CYCLE: usize = 200;
+/// Bound on rows read per file — a contact list beyond that is not a
+/// contact list.
+const MAX_ROWS_PER_FILE: usize = 5000;
+/// Drive page size.
+const DRIVE_PAGE_SIZE: usize = 100;
+const HTTP_TIMEOUT: Duration = Duration::from_secs(30);
+const USER_AGENT: &str = "CrowdRelay/1.0 (gdrive contacts sync)";
+
+/// MIME types this connector reads. Google Docs and prose formats are
+/// deliberately absent — v1 is tabular only, and a doc is not a contact
+/// list.
+const TABULAR_MIMES: &[&str] = &[
+    "application/vnd.google-apps.spreadsheet",
+    "text/csv",
+    "text/tab-separated-values",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+];
+
+#[derive(Debug, Error)]
+pub enum GDriveContactsSyncError {
+    #[error("database error: {0}")]
+    Database(#[from] sqlx::Error),
+    #[error("http client build failed: {0}")]
+    ClientBuild(reqwest::Error),
+}
+
+#[derive(Clone)]
+pub struct GDriveContactsSyncWorker {
+    repo: PostgresGDriveRepository,
+    http_client: reqwest::Client,
+    workspace_id: Uuid,
+    response_encryption_key: SensitiveResponseKey,
+    google_client_id: Option<String>,
+    google_client_secret: Option<String>,
+}
+
+/// One Drive file descriptor from files.list.
+#[derive(Debug, serde::Deserialize)]
+struct DriveFile {
+    id: String,
+    name: String,
+    #[serde(rename = "mimeType")]
+    mime_type: String,
+    #[serde(rename = "modifiedTime")]
+    modified_time: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct DriveFileList {
+    // Google omits empty repeated fields — a Drive with no tabular files
+    // answers with no `files` key at all, not an empty array.
+    #[serde(default)]
+    files: Vec<DriveFile>,
+    #[serde(rename = "nextPageToken")]
+    next_page_token: Option<String>,
+}
+
+#[derive(Debug, Default)]
+struct CycleCounts {
+    files_considered: usize,
+    files_scanned: usize,
+    files_skipped_unchanged: usize,
+    files_failed: usize,
+    contacts_upserted: u64,
+    rows_without_email: usize,
+    marked_disappeared: u64,
+}
+
+impl GDriveContactsSyncWorker {
+    pub fn new(
+        pool: PgPool,
+        workspace_id: Uuid,
+        response_encryption_key: SensitiveResponseKey,
+    ) -> Result<Self, GDriveContactsSyncError> {
+        let http_client = reqwest::Client::builder()
+            .connect_timeout(HTTP_TIMEOUT.min(Duration::from_secs(10)))
+            .timeout(HTTP_TIMEOUT)
+            .user_agent(USER_AGENT)
+            .build()
+            .map_err(GDriveContactsSyncError::ClientBuild)?;
+        Ok(Self {
+            repo: PostgresGDriveRepository::new(pool),
+            http_client,
+            workspace_id,
+            response_encryption_key,
+            google_client_id: std::env::var("CROWDRELAY_GOOGLE_ADS_CLIENT_ID")
+                .ok()
+                .filter(|v| !v.trim().is_empty()),
+            google_client_secret: std::env::var("CROWDRELAY_GOOGLE_ADS_CLIENT_SECRET")
+                .ok()
+                .filter(|v| !v.trim().is_empty()),
+        })
+    }
+
+    /// Main loop: initial sweep, then NOTIFY wakes or the hourly interval.
+    pub async fn run(
+        self,
+        mut shutdown: watch::Receiver<bool>,
+    ) -> Result<(), GDriveContactsSyncError> {
+        tracing::info!("gdrive contacts sync worker started");
+
+        let mut listener = PgListener::connect_with(self.repo.pool())
+            .await
+            .map_err(GDriveContactsSyncError::Database)?;
+        listener
+            .listen("growth_metric_sync")
+            .await
+            .map_err(GDriveContactsSyncError::Database)?;
+        listener
+            .listen("gdrive_contacts")
+            .await
+            .map_err(GDriveContactsSyncError::Database)?;
+
+        self.sync_cycle().await;
+
+        let mut tick = interval(SYNC_INTERVAL);
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            tokio::select! {
+                biased;
+                changed = shutdown.changed() => {
+                    if changed.is_err() || *shutdown.borrow() {
+                        tracing::info!("gdrive contacts sync worker shutting down");
+                        return Ok(());
+                    }
+                }
+                _ = listener.recv() => {
+                    self.sync_cycle().await;
+                }
+                _ = tick.tick() => {
+                    self.sync_cycle().await;
+                }
+            }
+        }
+    }
+
+    /// One cycle: every connected gdrive connection scans its Drive.
+    /// Per-connection failures are recorded on the connection row, not
+    /// propagated — one bad grant must not starve another account.
+    async fn sync_cycle(&self) {
+        let connections = match self.repo.due_connections(self.workspace_id, "gdrive").await {
+            Ok(c) => c,
+            Err(error) => {
+                tracing::warn!(%error, "gdrive contacts: connection list failed");
+                return;
+            }
+        };
+        for (connection_id, account_ref) in connections {
+            if let Err(error) = self.sync_connection(connection_id, &account_ref).await {
+                tracing::warn!(%error, connection_id = %connection_id, "gdrive contacts sync failed");
+                let message = error.to_string();
+                // Expired means "needs an operator reconnect", not "Google
+                // had a bad minute": only auth-level failures qualify. A
+                // transient 5xx/429 from the token endpoint stays a sync
+                // error and retries next cycle.
+                let expired = message.contains("invalid_grant")
+                    || message.contains("refresh failed status=400")
+                    || message.contains("refresh failed status=401")
+                    || message.contains("missing encrypted_refresh_token");
+                let mark = if expired {
+                    self.repo
+                        .mark_expired(self.workspace_id, connection_id, &message)
+                        .await
+                } else {
+                    self.repo
+                        .mark_sync_error(self.workspace_id, connection_id, &message)
+                        .await
+                };
+                if let Err(e) = mark {
+                    tracing::warn!(%e, "gdrive contacts: sync status write failed");
+                }
+            }
+        }
+    }
+
+    async fn sync_connection(&self, connection_id: Uuid, account_ref: &str) -> Result<(), String> {
+        let access_token = self.access_token(connection_id, account_ref).await?;
+        let files = self.list_tabular_files(&access_token).await?;
+
+        let mut counts = CycleCounts::default();
+        for file in files.iter().take(MAX_FILES_PER_CYCLE) {
+            counts.files_considered += 1;
+            match self.scan_file(connection_id, file).await {
+                Ok(file_counts) => {
+                    counts.files_scanned += file_counts.files_scanned;
+                    counts.files_skipped_unchanged += file_counts.files_skipped_unchanged;
+                    counts.contacts_upserted += file_counts.contacts_upserted;
+                    counts.rows_without_email += file_counts.rows_without_email;
+                    counts.marked_disappeared += file_counts.marked_disappeared;
+                }
+                Err(error) => {
+                    counts.files_failed += 1;
+                    tracing::warn!(%error, file = %file.name, "gdrive file scan failed");
+                }
+            }
+        }
+
+        self.repo
+            .mark_sync_ok(self.workspace_id, connection_id)
+            .await
+            .map_err(|e| e.to_string())?;
+        tracing::info!(
+            files_considered = counts.files_considered,
+            files_scanned = counts.files_scanned,
+            files_skipped_unchanged = counts.files_skipped_unchanged,
+            files_failed = counts.files_failed,
+            contacts_upserted = counts.contacts_upserted,
+            rows_without_email = counts.rows_without_email,
+            marked_disappeared = counts.marked_disappeared,
+            "gdrive contacts sync cycle complete"
+        );
+        Ok(())
+    }
+
+    /// A valid access token for the connection — shared Google helper
+    /// (decrypt, refresh through Google's token endpoint, re-encrypt).
+    async fn access_token(&self, connection_id: Uuid, account_ref: &str) -> Result<String, String> {
+        resolve_google_access_token(
+            &self.repo,
+            &self.http_client,
+            &self.response_encryption_key,
+            self.workspace_id,
+            connection_id,
+            account_ref,
+            "gdrive",
+            self.google_client_id.as_deref(),
+            self.google_client_secret.as_deref(),
+        )
+        .await
+    }
+
+    /// All tabular files in the Drive, paginated and bounded.
+    async fn list_tabular_files(&self, access_token: &str) -> Result<Vec<DriveFile>, String> {
+        let query = format!(
+            "trashed = false and ({})",
+            TABULAR_MIMES
+                .iter()
+                .map(|m| format!("mimeType = '{m}'"))
+                .collect::<Vec<_>>()
+                .join(" or ")
+        );
+        let mut files = Vec::new();
+        let mut page_token: Option<String> = None;
+        loop {
+            let mut params: Vec<(&str, String)> = vec![
+                ("q", query.clone()),
+                (
+                    "fields",
+                    "nextPageToken,files(id,name,mimeType,modifiedTime)".to_string(),
+                ),
+                ("pageSize", DRIVE_PAGE_SIZE.to_string()),
+                // Shared drives and files shared *to* this account are in
+                // scope — the tenant's contact sheets may live on someone
+                // else's Drive.
+                ("includeItemsFromAllDrives", "true".to_string()),
+                ("supportsAllDrives", "true".to_string()),
+                ("spaces", "drive".to_string()),
+            ];
+            if let Some(token) = &page_token {
+                params.push(("pageToken", token.clone()));
+            }
+            let response = self
+                .http_client
+                .get("https://www.googleapis.com/drive/v3/files")
+                .bearer_auth(access_token)
+                .query(&params)
+                .send()
+                .await
+                .map_err(|e| format!("files.list request failed: {e}"))?;
+            if !response.status().is_success() {
+                let status = response.status().as_u16();
+                return Err(format!("files.list failed status={status}"));
+            }
+            let page: DriveFileList = response
+                .json()
+                .await
+                .map_err(|e| format!("files.list parse failed: {e}"))?;
+            files.extend(page.files);
+            match page.next_page_token {
+                Some(token) if files.len() < MAX_FILES_PER_CYCLE => {
+                    page_token = Some(token);
+                }
+                _ => break,
+            }
+        }
+        files.truncate(MAX_FILES_PER_CYCLE);
+        Ok(files)
+    }
+
+    /// One file: skip when unchanged, else fetch as a grid, extract, upsert.
+    async fn scan_file(
+        &self,
+        connection_id: Uuid,
+        file: &DriveFile,
+    ) -> Result<CycleCounts, String> {
+        let mut counts = CycleCounts::default();
+        let mtime = file.modified_time.clone().unwrap_or_default();
+
+        if !mtime.is_empty()
+            && self
+                .repo
+                .file_mtime(self.workspace_id, &file.id)
+                .await
+                .map_err(|e| e.to_string())?
+                .as_deref()
+                == Some(mtime.as_str())
+        {
+            counts.files_skipped_unchanged = 1;
+            return Ok(counts);
+        }
+
+        let grid = self.fetch_grid(connection_id, file).await?;
+        let grid: Vec<Vec<String>> = grid.into_iter().take(MAX_ROWS_PER_FILE + 1).collect();
+        let report = extract_contacts(&grid);
+        if report.no_email_column {
+            // Not a contact list — record the mtime so we do not re-export
+            // it every hour, and never count it as a failure.
+            // If the file *used to* yield contacts (its email column was
+            // edited away), an empty upsert marks those staged rows
+            // disappeared — the operator decides what that means.
+            self.repo
+                .upsert_contacts_for_source(
+                    self.workspace_id,
+                    "gdrive",
+                    &file.id,
+                    &file.name,
+                    &[],
+                    true,
+                )
+                .await
+                .map_err(|e: GDriveError| e.to_string())?;
+            self.repo
+                .record_file_state(
+                    self.workspace_id,
+                    &file.id,
+                    &file.name,
+                    &file.mime_type,
+                    &mtime,
+                    true,
+                    report.rows_read as i32,
+                    0,
+                )
+                .await
+                .map_err(|e| e.to_string())?;
+            counts.files_scanned = 1;
+            return Ok(counts);
+        }
+        let summary = self
+            .repo
+            .upsert_contacts_for_source(
+                self.workspace_id,
+                "gdrive",
+                &file.id,
+                &file.name,
+                &report.contacts,
+                true,
+            )
+            .await
+            .map_err(|e: GDriveError| e.to_string())?;
+        self.repo
+            .record_file_state(
+                self.workspace_id,
+                &file.id,
+                &file.name,
+                &file.mime_type,
+                &mtime,
+                false,
+                report.rows_read as i32,
+                report.contacts.len() as i32,
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+        counts.files_scanned = 1;
+        counts.contacts_upserted = summary.upserted;
+        counts.rows_without_email = report.rows_without_email;
+        counts.marked_disappeared = summary.marked_disappeared;
+        Ok(counts)
+    }
+
+    /// Turns one file into a grid of strings. Sheets export as CSV; real
+    /// spreadsheets download and parse through calamine; csv/tsv read raw.
+    async fn fetch_grid(
+        &self,
+        connection_id: Uuid,
+        file: &DriveFile,
+    ) -> Result<Vec<Vec<String>>, String> {
+        match file.mime_type.as_str() {
+            "application/vnd.google-apps.spreadsheet" => {
+                let csv_text = self
+                    .download(
+                        connection_id,
+                        &format!(
+                            "https://www.googleapis.com/drive/v3/files/{}/export?mimeType=text/csv",
+                            file.id
+                        ),
+                    )
+                    .await?;
+                parse_delimited(csv_text.as_bytes(), b',')
+            }
+            "text/csv" => {
+                let text = self.download_media(connection_id, &file.id).await?;
+                parse_delimited(text.as_bytes(), b',')
+            }
+            "text/tab-separated-values" => {
+                let text = self.download_media(connection_id, &file.id).await?;
+                parse_delimited(text.as_bytes(), b'\t')
+            }
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" => {
+                let bytes = self.download_media_bytes(connection_id, &file.id).await?;
+                parse_xlsx(&bytes)
+            }
+            other => Err(format!("unsupported mime {other}")),
+        }
+    }
+
+    /// The token refresh inside `access_token` may run once per call site;
+    /// fetching re-reads it each time so a rotated token is never stale.
+    async fn download(&self, connection_id: Uuid, url: &str) -> Result<String, String> {
+        let token = self.access_token_for_connection(connection_id).await?;
+        let response = self
+            .http_client
+            .get(url)
+            .bearer_auth(token)
+            .send()
+            .await
+            .map_err(|e| format!("download failed: {e}"))?;
+        if !response.status().is_success() {
+            return Err(format!(
+                "download failed status={}",
+                response.status().as_u16()
+            ));
+        }
+        response
+            .text()
+            .await
+            .map_err(|e| format!("download body read failed: {e}"))
+    }
+
+    async fn download_media(&self, connection_id: Uuid, file_id: &str) -> Result<String, String> {
+        self.download(
+            connection_id,
+            &format!("https://www.googleapis.com/drive/v3/files/{file_id}?alt=media"),
+        )
+        .await
+    }
+
+    async fn download_media_bytes(
+        &self,
+        connection_id: Uuid,
+        file_id: &str,
+    ) -> Result<Vec<u8>, String> {
+        let token = self.access_token_for_connection(connection_id).await?;
+        let response = self
+            .http_client
+            .get(format!(
+                "https://www.googleapis.com/drive/v3/files/{file_id}?alt=media"
+            ))
+            .bearer_auth(token)
+            .send()
+            .await
+            .map_err(|e| format!("download failed: {e}"))?;
+        if !response.status().is_success() {
+            return Err(format!(
+                "download failed status={}",
+                response.status().as_u16()
+            ));
+        }
+        response
+            .bytes()
+            .await
+            .map(|b| b.to_vec())
+            .map_err(|e| format!("download body read failed: {e}"))
+    }
+
+    /// Point-of-use token resolution for downloads — delegates to the same
+    /// decrypt/refresh path keyed by the connection's account ref.
+    async fn access_token_for_connection(&self, connection_id: Uuid) -> Result<String, String> {
+        access_token_for_connection(
+            &self.repo,
+            &self.http_client,
+            &self.response_encryption_key,
+            self.workspace_id,
+            connection_id,
+            "gdrive",
+            self.google_client_id.as_deref(),
+            self.google_client_secret.as_deref(),
+        )
+        .await
+    }
+}
+
+/// CSV/TSV → grid. A header row is required by the extractor downstream;
+/// blank trailing rows are dropped here.
+fn parse_delimited(bytes: &[u8], delimiter: u8) -> Result<Vec<Vec<String>>, String> {
+    let mut reader = csv::ReaderBuilder::new()
+        .delimiter(delimiter)
+        .has_headers(false)
+        .flexible(true)
+        .from_reader(bytes);
+    let mut grid: Vec<Vec<String>> = Vec::new();
+    for record in reader.records() {
+        let record = record.map_err(|e| format!("delimited parse failed: {e}"))?;
+        grid.push(record.iter().map(str::to_owned).collect());
+    }
+    while grid
+        .last()
+        .is_some_and(|row| row.iter().all(|c| c.trim().is_empty()))
+    {
+        grid.pop();
+    }
+    Ok(grid)
+}
+
+/// xlsx → grid via calamine. First non-empty sheet wins — the Drive CSV
+/// export of a Google Sheet has the same single-sheet semantics.
+fn parse_xlsx(bytes: &[u8]) -> Result<Vec<Vec<String>>, String> {
+    use calamine::{Data, Reader, Xlsx, open_workbook_from_rs};
+    let mut workbook: Xlsx<std::io::Cursor<&[u8]>> =
+        open_workbook_from_rs(std::io::Cursor::new(bytes))
+            .map_err(|e| format!("xlsx open failed: {e}"))?;
+    let names = workbook.sheet_names().to_owned();
+    for name in names {
+        let Ok(range) = workbook.worksheet_range(&name) else {
+            continue;
+        };
+        if range.is_empty() {
+            continue;
+        }
+        let grid: Vec<Vec<String>> = range
+            .rows()
+            .map(|row| {
+                row.iter()
+                    .map(|cell| match cell {
+                        Data::String(s) => s.clone(),
+                        Data::Float(f) => {
+                            if f.fract() == 0.0 {
+                                format!("{f:.0}")
+                            } else {
+                                f.to_string()
+                            }
+                        }
+                        Data::Int(i) => i.to_string(),
+                        Data::Bool(b) => b.to_string(),
+                        Data::DateTime(dt) => dt.to_string(),
+                        Data::DateTimeIso(s) | Data::DurationIso(s) => s.clone(),
+                        Data::Error(_) | Data::Empty => String::new(),
+                    })
+                    .collect()
+            })
+            .collect();
+        return Ok(grid);
+    }
+    Ok(Vec::new())
+}

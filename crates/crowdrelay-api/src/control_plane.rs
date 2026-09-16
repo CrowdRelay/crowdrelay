@@ -281,6 +281,22 @@ pub(crate) fn router(state: crate::AppState) -> Router {
             post(crate::connections_simple::create_reddit_connection),
         )
         .route(
+            "/v1/control-plane/gdrive/contacts",
+            get(crate::gdrive::list_contacts),
+        )
+        .route(
+            "/v1/control-plane/gdrive/scan",
+            post(crate::gdrive::scan_now),
+        )
+        .route(
+            "/v1/control-plane/gdrive/contacts/{contact_id}/promote",
+            post(crate::gdrive::promote_contact),
+        )
+        .route(
+            "/v1/control-plane/gdrive/contacts/{contact_id}/dismiss",
+            post(crate::gdrive::dismiss_contact),
+        )
+        .route(
             "/v1/control-plane/community-posts/{community_post_id}/register-manual",
             post(crate::fanbase::register_manual_community_post),
         )

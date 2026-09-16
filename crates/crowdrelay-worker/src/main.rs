@@ -44,6 +44,8 @@ use crowdrelay_worker::{
     discovery::{DiscoveryConfig, RedditDiscoveryWorker, XDiscoveryWorker},
     draws::{WeightedDrawWorker, WeightedDrawWorkerConfig},
     event_sync::{EventSyncWorker, EventSyncWorkerConfig},
+    gdrive_contacts_sync::GDriveContactsSyncWorker,
+    gmail_contacts_sync::GmailContactsSyncWorker,
     growth_metric_sync::GrowthMetricSyncWorker,
     growth_readiness::{GrowthReadiness, GrowthReadinessHealth},
     leadership::acquire_leadership,
@@ -753,6 +755,27 @@ async fn run(database: PgPool, config: &Config, standby: bool) -> Result<()> {
     let video_source_sync = VideoSourceSyncWorker::new(database.clone(), workspace_id.into_uuid())
         .context("invalid video source sync worker configuration")?;
 
+    // Google Drive contacts sync — scans the connected Drive's tabular
+    // files for contact rows and stages them for operator review. Nothing
+    // here classifies: promote routes through fan_import (pending + DOI)
+    // or the outreach screening queue.
+    let gdrive_contacts_sync = GDriveContactsSyncWorker::new(
+        database.clone(),
+        workspace_id.into_uuid(),
+        config.response_encryption_key.clone(),
+    )
+    .context("invalid gdrive contacts sync worker configuration")?;
+
+    // Gmail contacts sync — headers-only harvest of correspondent addresses
+    // into the same staged review queue; the email dedup converges both
+    // intakes into one contact layer.
+    let gmail_contacts_sync = GmailContactsSyncWorker::new(
+        database.clone(),
+        workspace_id.into_uuid(),
+        config.response_encryption_key.clone(),
+    )
+    .context("invalid gmail contacts sync worker configuration")?;
+
     let (shutdown_sender, shutdown_receiver) = watch::channel(false);
     let reminder_shutdown = shutdown_receiver.clone();
     let nearby_gig_shutdown = shutdown_receiver.clone();
@@ -779,6 +802,8 @@ async fn run(database: PgPool, config: &Config, standby: bool) -> Result<()> {
     let community_join_executor_shutdown = shutdown_receiver.clone();
     let growth_metric_sync_shutdown = shutdown_receiver.clone();
     let video_source_sync_shutdown = shutdown_receiver.clone();
+    let gdrive_contacts_sync_shutdown = shutdown_receiver.clone();
+    let gmail_contacts_sync_shutdown = shutdown_receiver.clone();
     let attribution_shutdown = shutdown_receiver.clone();
     let community_intel_shutdown = shutdown_receiver.clone();
 
@@ -1005,6 +1030,16 @@ async fn run(database: PgPool, config: &Config, standby: bool) -> Result<()> {
     runtime_tasks.spawn(async move {
         let _ = video_source_sync.run(video_source_sync_shutdown).await;
         "video source sync"
+    });
+    runtime_tasks.spawn(async move {
+        let _ = gdrive_contacts_sync
+            .run(gdrive_contacts_sync_shutdown)
+            .await;
+        "gdrive contacts sync"
+    });
+    runtime_tasks.spawn(async move {
+        let _ = gmail_contacts_sync.run(gmail_contacts_sync_shutdown).await;
+        "gmail contacts sync"
     });
     runtime_tasks.spawn(async move {
         attribution_worker.run(attribution_shutdown).await;

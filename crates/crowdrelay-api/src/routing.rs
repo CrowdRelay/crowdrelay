@@ -55,6 +55,22 @@ pub(super) fn application_routes(state: AppState) -> Router {
             get(connections_tiktok::callback),
         )
         .route(
+            "/v1/public/connections/gdrive/authorize",
+            get(connections_gdrive::authorize),
+        )
+        .route(
+            "/v1/public/connections/gdrive/callback",
+            get(connections_gdrive::callback),
+        )
+        .route(
+            "/v1/public/connections/gmail/authorize",
+            get(connections_gmail::authorize),
+        )
+        .route(
+            "/v1/public/connections/gmail/callback",
+            get(connections_gmail::callback),
+        )
+        .route(
             "/v1/admin/connections/discord",
             post(connections_simple::create_discord_connection),
         )

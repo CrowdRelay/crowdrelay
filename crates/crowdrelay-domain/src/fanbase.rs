@@ -97,10 +97,12 @@ pub enum Platform {
     Bluesky,
     Bandcamp,
     X,
+    Gdrive,
+    Gmail,
 }
 
 impl Platform {
-    pub const ALL: [Platform; 18] = [
+    pub const ALL: [Platform; 20] = [
         Platform::Meta,
         Platform::Tiktok,
         Platform::GoogleAds,
@@ -119,6 +121,8 @@ impl Platform {
         Platform::Bluesky,
         Platform::Bandcamp,
         Platform::X,
+        Platform::Gdrive,
+        Platform::Gmail,
     ];
 
     pub const fn as_str(self) -> &'static str {
@@ -141,6 +145,8 @@ impl Platform {
             Self::Bluesky => "bluesky",
             Self::Bandcamp => "bandcamp",
             Self::X => "x",
+            Self::Gdrive => "gdrive",
+            Self::Gmail => "gmail",
         }
     }
 
@@ -160,7 +166,9 @@ impl Platform {
     /// context, so polling it here would write the same series twice.
     pub const fn polled_by_growth_metric_sync(self) -> bool {
         match self {
-            Self::Meta | Self::GoogleAds | Self::Bandsintown => false,
+            // Google Drive feeds the contacts staging table, not metric
+            // series — the gdrive worker owns it.
+            Self::Meta | Self::GoogleAds | Self::Bandsintown | Self::Gdrive | Self::Gmail => false,
             // Reddit is polled via the agents service /reddit/observe
             // endpoint, which uses the official OAuth API. The old proxy-based
             // scrape was abandoned (Reddit blocks datacenter IPs), but the
@@ -223,6 +231,8 @@ impl Platform {
             Self::Bluesky => "Bluesky",
             Self::Bandcamp => "Bandcamp",
             Self::X => "X",
+            Self::Gdrive => "Google Drive",
+            Self::Gmail => "Gmail",
         }
     }
 }
@@ -345,7 +355,9 @@ mod tests {
                 | Platform::Discogs
                 | Platform::Bluesky
                 | Platform::Bandcamp
-                | Platform::X => {}
+                | Platform::X
+                | Platform::Gdrive
+                | Platform::Gmail => {}
             }
         }
         let mut keys: Vec<&str> = Platform::ALL.iter().map(|p| p.as_str()).collect();

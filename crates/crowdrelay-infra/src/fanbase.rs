@@ -111,7 +111,7 @@ impl PostgresFanbaseRepository {
     /// ensures tokens encrypted for one platform cannot be decrypted for
     /// another.
     fn token_aad(workspace_id: Uuid, platform: &str, account_id: &str) -> Vec<u8> {
-        format!("crowdrelay.fanbase.oauth.{platform}.v1\0{workspace_id}\0{account_id}").into_bytes()
+        fanbase_token_aad(workspace_id, platform, account_id)
     }
 
     fn encrypt_token(
@@ -252,6 +252,15 @@ impl PostgresFanbaseRepository {
 // n8n's encrypted credential store for Path B); `credential_ref` is the
 // opaque handle the sync layer uses to resolve it at runtime.
 // ---------------------------------------------------------------------------
+
+/// Associated data for OAuth token encryption/decryption. Binds the
+/// ciphertext to workspace + platform + account so a token copied between
+/// any of those axes will not decrypt. The gdrive worker needs the same
+/// AAD the API wrote with — keep this the single formula.
+#[must_use]
+pub fn fanbase_token_aad(workspace_id: Uuid, platform: &str, account_id: &str) -> Vec<u8> {
+    format!("crowdrelay.fanbase.oauth.{platform}.v1\0{workspace_id}\0{account_id}").into_bytes()
+}
 
 #[derive(Debug, sqlx::FromRow)]
 pub struct ConnectionRow {
@@ -495,6 +504,128 @@ impl PostgresFanbaseRepository {
             .execute(&self.pool)
             .await
             .map_err(Self::unexpected)?;
+        Ok(())
+    }
+
+    /// Upserts a Google Drive connection with OAuth tokens. Called by the
+    /// Google OAuth callback after a successful token exchange — same
+    /// encrypted-column shape as TikTok, platform 'gdrive'. The gdrive
+    /// contacts worker listens on the same NOTIFY for its wake.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn upsert_gdrive_connection(
+        &self,
+        workspace_id: Uuid,
+        google_user_id: &str,
+        access_token: &str,
+        refresh_token: &str,
+        expires_at: time::OffsetDateTime,
+        scope: &str,
+        label: &str,
+    ) -> Result<(), FanbaseError> {
+        self.upsert_google_connection(
+            "gdrive",
+            workspace_id,
+            google_user_id,
+            access_token,
+            refresh_token,
+            expires_at,
+            scope,
+            label,
+        )
+        .await
+    }
+
+    /// Upserts a Gmail connection with OAuth tokens — platform 'gmail', a
+    /// grant of its own (gmail.readonly is a restricted scope; connecting
+    /// Drive must not silently grant the mailbox too).
+    #[allow(clippy::too_many_arguments)]
+    pub async fn upsert_gmail_connection(
+        &self,
+        workspace_id: Uuid,
+        google_user_id: &str,
+        access_token: &str,
+        refresh_token: &str,
+        expires_at: time::OffsetDateTime,
+        scope: &str,
+        label: &str,
+    ) -> Result<(), FanbaseError> {
+        self.upsert_google_connection(
+            "gmail",
+            workspace_id,
+            google_user_id,
+            access_token,
+            refresh_token,
+            expires_at,
+            scope,
+            label,
+        )
+        .await
+    }
+
+    /// Shared body for the two Google connections — identical encrypted
+    /// column shape, differing only in platform name and AAD binding.
+    #[allow(clippy::too_many_arguments)]
+    async fn upsert_google_connection(
+        &self,
+        platform: &str,
+        workspace_id: Uuid,
+        google_user_id: &str,
+        access_token: &str,
+        refresh_token: &str,
+        expires_at: time::OffsetDateTime,
+        scope: &str,
+        label: &str,
+    ) -> Result<(), FanbaseError> {
+        let encrypted_access =
+            self.encrypt_token(access_token, workspace_id, platform, google_user_id)?;
+        let encrypted_refresh =
+            self.encrypt_token(refresh_token, workspace_id, platform, google_user_id)?;
+        let credential_ref = format!("{platform}:{google_user_id}");
+        sqlx::query(
+            r#"
+            INSERT INTO fanbase_connections (
+                workspace_id, platform, external_account_ref,
+                credential_ref, label, status, provider_account_id,
+                encrypted_access_token, encrypted_refresh_token,
+                token_expires_at, token_scope, token_type
+            )
+            VALUES ($1, $9, $2, $3, $4, 'connected', $2,
+                    $5, $6, $7, $8, 'bearer')
+            ON CONFLICT (workspace_id, platform, external_account_ref)
+            DO UPDATE SET
+                credential_ref = EXCLUDED.credential_ref,
+                label = EXCLUDED.label,
+                encrypted_access_token = EXCLUDED.encrypted_access_token,
+                encrypted_refresh_token = EXCLUDED.encrypted_refresh_token,
+                token_expires_at = EXCLUDED.token_expires_at,
+                token_scope = EXCLUDED.token_scope,
+                status = 'connected',
+                -- A reconnect is the fix for whatever the last sync error
+                -- was; keeping it would show a stale failure until the
+                -- next cycle proves otherwise.
+                last_sync_error = NULL,
+                last_sync_failed_at = NULL,
+                updated_at = now()
+            "#,
+        )
+        .bind(workspace_id)
+        .bind(google_user_id)
+        .bind(&credential_ref)
+        .bind(label)
+        .bind(&encrypted_access)
+        .bind(&encrypted_refresh)
+        .bind(expires_at)
+        .bind(scope)
+        .bind(platform)
+        .execute(&self.pool)
+        .await
+        .map_err(Self::unexpected)?;
+        sqlx::query(&format!(
+            "SELECT pg_notify('growth_metric_sync', '{platform}-connected')"
+        ))
+        .execute(&self.pool)
+        .await
+        .map_err(Self::unexpected)?;
         Ok(())
     }
 
