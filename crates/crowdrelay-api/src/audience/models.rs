@@ -425,9 +425,13 @@ pub struct CityVenueRow {
     city_slug: String,
     city_name: String,
     country_code: String,
-    /// Published/completed shows marked at this room across all
-    /// contributing workspaces.
+    /// Shows this room has already seen — published/completed marks whose
+    /// start time has passed, across all contributing workspaces.
     shows_played: i64,
+    /// Published marks still ahead — nights the room has booked but not
+    /// yet hosted. Kept separate from `shows_played`: a future booking is
+    /// not a played record.
+    shows_booked: i64,
     /// Distinct workspaces that contributed a mark. The only cross-tenant
     /// fact the read exposes — a count, never which tenants.
     contributors: i64,
@@ -436,9 +440,9 @@ pub struct CityVenueRow {
     /// it stays out of the average rather than reading as zero. NULL when
     /// no marked show sold tickets through us.
     typical_draw: Option<f64>,
-    /// Fans who marked interest in at least two shows at this room — the
-    /// room's regulars, the cross-tenant knowledge a single band's own
-    /// history cannot produce.
+    /// Buyers (by email) with paid orders at two or more shows at this
+    /// room — the room's regulars, and the cross-tenant knowledge a single
+    /// band's own history cannot produce.
     repeat_attenders: i64,
     #[serde(with = "time::serde::rfc3339::option")]
     last_played_at: Option<OffsetDateTime>,

@@ -408,6 +408,8 @@ fn is_control_plane_management_path(path: &str) -> bool {
                 | "/v1/control-plane/webhook-endpoints"
                 | "/v1/control-plane/audience/overview"
                 | "/v1/control-plane/audience/acquisition-sources"
+                | "/v1/control-plane/audience/city-funnel"
+                | "/v1/control-plane/audience/city-venues"
                 | "/v1/control-plane/audience/fans"
                 | "/v1/control-plane/audience/segments"
                 | "/v1/control-plane/community-intelligence/communities"

@@ -451,15 +451,24 @@ pub async fn city_venues(State(state): State<crate::AppState>, headers: HeaderMa
              AND ticket_order.status IN ('paid', 'partially_refunded')
             GROUP BY marks.venue_id, marks.event_id
         ), repeaters AS (
+            -- A repeat attender is a person who PAID for shows at the room
+            -- at least twice — declared interest is not attendance, and the
+            -- buyer's email is the only identity that survives across
+            -- tenants. Two bands sharing a room's regulars is exactly the
+            -- cross-tenant knowledge this registry exists to surface.
             SELECT marked.venue_id, count(*)::bigint AS repeat_attenders
             FROM (
-                SELECT mark.venue_id, interest.fan_id
-                FROM event_interests AS interest
+                SELECT mark.venue_id, lower(btrim(ticket_order.buyer_email)) AS buyer
+                FROM ticket_orders AS ticket_order
+                JOIN ticket_sales AS sale
+                  ON sale.workspace_id = ticket_order.workspace_id
+                 AND sale.id = ticket_order.ticket_sale_id
                 JOIN place_venue_marks AS mark
-                  ON mark.event_id = interest.event_id
-                 AND mark.workspace_id = interest.workspace_id
-                GROUP BY mark.venue_id, interest.fan_id
-                HAVING count(DISTINCT interest.event_id) >= 2
+                  ON mark.event_id = sale.event_id
+                 AND mark.workspace_id = sale.workspace_id
+                WHERE ticket_order.status IN ('paid', 'partially_refunded')
+                GROUP BY mark.venue_id, lower(btrim(ticket_order.buyer_email))
+                HAVING count(DISTINCT sale.event_id) >= 2
             ) AS marked
             GROUP BY marked.venue_id
         )
@@ -469,7 +478,14 @@ pub async fn city_venues(State(state): State<crate::AppState>, headers: HeaderMa
             city.slug AS city_slug,
             city.name AS city_name,
             city.country_code,
-            count(marks.event_id)::bigint AS shows_played,
+            -- Played is past tense — a booked future night is not a show
+            -- the room has seen yet; it reads separately.
+            count(marks.event_id) FILTER (
+                WHERE marks.starts_at <= now()
+            )::bigint AS shows_played,
+            count(marks.event_id) FILTER (
+                WHERE marks.starts_at > now() AND marks.status = 'published'
+            )::bigint AS shows_booked,
             count(DISTINCT marks.workspace_id)::bigint AS contributors,
             avg(draw.paid_orders) AS typical_draw,
             COALESCE(repeaters.repeat_attenders, 0)::bigint AS repeat_attenders,

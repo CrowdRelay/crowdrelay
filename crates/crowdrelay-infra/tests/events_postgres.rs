@@ -525,6 +525,75 @@ async fn events_mark_the_shared_venue_registry() -> Result<(), Box<dyn std::erro
             .fetch_one(&pool)
             .await?;
     assert_eq!(after_cancel, 0, "a cancelled show never happened");
+
+    // Draft inserts mark nothing.
+    let draft_id = Uuid::now_v7();
+    sqlx::query(
+        r#"
+        INSERT INTO events (
+            id, workspace_id, city_id, slug, title, venue, starts_at, status
+        )
+        SELECT $1, workspace_id, city_id, 'draft-no-mark', 'Draft', 'Test Club',
+               now() + interval '30 days', 'draft'
+        FROM events WHERE id = $2
+        "#,
+    )
+    .bind(draft_id)
+    .bind(event_b)
+    .execute(&pool)
+    .await?;
+    let draft_marks =
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM place_venue_marks WHERE event_id = $1")
+            .bind(draft_id)
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(draft_marks, 0, "a draft is not a played room");
+
+    // Losing the venue name retracts the mark the same way cancel does.
+    sqlx::query("UPDATE events SET venue = NULL WHERE id = $1")
+        .bind(event_b)
+        .execute(&pool)
+        .await?;
+    let after_null =
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM place_venue_marks WHERE event_id = $1")
+            .bind(event_b)
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(after_null, 0, "no named room, no claim");
+
+    // A name past the domain's bound does not mark — and must not fail the
+    // event write that triggered it.
+    let oversized = "x".repeat(501);
+    sqlx::query("UPDATE events SET venue = $1, status = 'published' WHERE id = $2")
+        .bind(&oversized)
+        .bind(event_b)
+        .execute(&pool)
+        .await?;
+    let oversized_marks =
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM place_venue_marks WHERE event_id = $1")
+            .bind(event_b)
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(
+        oversized_marks, 0,
+        "an over-length name is not a room record"
+    );
+
+    // Deleting the event cascades its mark.
+    sqlx::query("UPDATE events SET venue = 'Test Club' WHERE id = $1")
+        .bind(event_b)
+        .execute(&pool)
+        .await?;
+    sqlx::query("DELETE FROM events WHERE id = $1")
+        .bind(event_b)
+        .execute(&pool)
+        .await?;
+    let after_delete =
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM place_venue_marks WHERE event_id = $1")
+            .bind(event_b)
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(after_delete, 0, "delete cascades");
     Ok(())
 }
 

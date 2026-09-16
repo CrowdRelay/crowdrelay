@@ -8676,10 +8676,11 @@ paths:
                     city_slug: { type: string }
                     city_name: { type: string }
                     country_code: { type: string }
-                    shows_played: { type: integer, format: int64 }
+                    shows_played: { type: integer, format: int64, description: 'Shows already started/completed at the room.' }
+                    shows_booked: { type: integer, format: int64, description: 'Published shows still ahead.' }
                     contributors: { type: integer, format: int64 }
                     typical_draw: { type: number, format: double, nullable: true }
-                    repeat_attenders: { type: integer, format: int64 }
+                    repeat_attenders: { type: integer, format: int64, description: 'Buyers with paid orders at 2+ shows at the room.' }
                     last_played_at: { type: string, format: date-time, nullable: true }
                     next_show_at: { type: string, format: date-time, nullable: true }
         '401':
