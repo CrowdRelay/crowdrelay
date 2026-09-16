@@ -2,13 +2,17 @@
 mod tests {
     use super::*;
     use crowdrelay_domain::{
-        TeamOpportunityId, TicketTypeId,
+        EventId, ReleasePlanId, TeamOpportunityId, TicketTypeId,
         live_opportunities::{
             LiveOpportunityKind, LiveOpportunityPolicy, LiveOpportunitySnapshot,
             live_opportunity_score,
         },
         autonomy::{AutonomyLevel, Confidence, PolicyDisposition},
         pricing::TicketYieldPolicy,
+        release_autopilot::{
+            ReleaseAutopilotPolicy, ReleaseMilestone, ReleaseMilestoneHistory,
+            ReleasePlanSnapshot, ReleaseTier, ShowWeekCollision,
+        },
     };
 
     #[test]
@@ -236,6 +240,166 @@ mod tests {
             "and the band the confidence gate rejects runs right up to it, so \
              minimum_score is not the floor an operator gets"
         );
+        Ok(())
+    }
+    fn release_policy() -> AutopilotPolicy {
+        AutopilotPolicy {
+            context: AutopilotContext::Release,
+            enabled: true,
+            autonomy_level: AutonomyLevel::Recommend,
+            minimum_confidence: Confidence::from_basis_points(1)
+                .unwrap_or_else(|_| Confidence::saturating_from_basis_points(1)),
+            max_actions_24h: 10,
+            config: AutopilotPolicyConfig::Release(ReleaseAutopilotPolicy::default()),
+            version: 1,
+            guarded_until: None,
+            guardrail_reason: None,
+        }
+    }
+
+    /// Ten days out with the calendar seeded and the pitch already done is the
+    /// fan-warmup slot — an owned-audience send, which is the kind §4i-2 holds.
+    fn warmup_due() -> (ReleasePlanSnapshot, OffsetDateTime) {
+        let now = OffsetDateTime::UNIX_EPOCH + time::Duration::days(20_000);
+        (
+            ReleasePlanSnapshot {
+                release_id: ReleasePlanId::new(),
+                title: "Signal Lost".to_string(),
+                release_at: now + time::Duration::days(10),
+                active: true,
+                tier: ReleaseTier::Track,
+                assets_ready: true,
+                communication_enabled: true,
+                press_enabled: true,
+                editorial_pitch_completed_at: Some(now),
+                editorial_pitch_escalated_at: None,
+                history: ReleaseMilestoneHistory {
+                    calendar_seeded: true,
+                    ..ReleaseMilestoneHistory::default()
+                },
+            },
+            now,
+        )
+    }
+
+    fn show_this_week(now: OffsetDateTime, title: &str) -> ShowWeekCollision {
+        ShowWeekCollision {
+            event_id: EventId::new(),
+            title: title.to_string(),
+            starts_at: now + time::Duration::days(1),
+            week_start: now.date()
+                - time::Duration::days(i64::from(now.weekday().number_days_from_monday())),
+        }
+    }
+
+    #[test]
+    fn an_owned_audience_milestone_holds_when_the_week_already_has_a_show()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (snapshot, now) = warmup_due();
+        let shows = [show_this_week(now, "Klub Hybrydy")];
+        let candidate = release_candidate(snapshot, &release_policy(), now, &shows)?
+            .ok_or_else(|| std::io::Error::other("held candidate expected"))?;
+        assert_eq!(candidate.decision_kind, "hold_release_milestone_collision");
+        assert_eq!(candidate.disposition, PolicyDisposition::Deny);
+        // The decision names the moment it protected — the rule's receipt, not
+        // a side channel.
+        assert_eq!(
+            candidate.input_snapshot["collision"]["protected_shows"][0]["title"],
+            "Klub Hybrydy"
+        );
+        assert_eq!(
+            candidate.input_snapshot["collision"]["held_milestone"],
+            "fan_warmup"
+        );
+        assert!(candidate.decision_key.contains(":hold:"));
+        Ok(())
+    }
+
+    #[test]
+    fn every_show_in_the_collision_week_is_named()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (snapshot, now) = warmup_due();
+        let shows = [
+            show_this_week(now, "Friday gig"),
+            show_this_week(now, "Sunday gig"),
+        ];
+        let candidate = release_candidate(snapshot, &release_policy(), now, &shows)?
+            .ok_or_else(|| std::io::Error::other("held candidate expected"))?;
+        assert_eq!(
+            candidate.input_snapshot["collision"]["protected_shows"]
+                .as_array()
+                .map_or(0, Vec::len),
+            2
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_held_milestone_offers_itself_again_under_the_ordinary_key()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (snapshot, now) = warmup_due();
+        let held = release_candidate(
+            snapshot.clone(),
+            &release_policy(),
+            now,
+            &[show_this_week(now, "Klub Hybrydy")],
+        )?
+        .ok_or_else(|| std::io::Error::other("held candidate expected"))?;
+        // The week cleared: no collision, same milestone, ordinary key — a
+        // fresh decision row, not an amendment to the hold.
+        let clear = release_candidate(snapshot, &release_policy(), now, &[])?
+            .ok_or_else(|| std::io::Error::other("execute candidate expected"))?;
+        assert_eq!(clear.decision_kind, "execute_release_milestone");
+        assert_ne!(held.decision_key, clear.decision_key);
+        assert!(!clear.decision_key.contains(":hold:"));
+        assert_eq!(
+            held.action_idempotency_key.split(":hold:").next(),
+            Some(clear.action_idempotency_key.as_str())
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn press_and_internal_milestones_do_not_hold_for_a_show_week()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (mut snapshot, now) = warmup_due();
+        let shows = [show_this_week(now, "Klub Hybrydy")];
+        // Eighteen days out is the press window — third-party attention, not
+        // the fans' week.
+        snapshot.release_at = now + time::Duration::days(18);
+        let press = release_candidate(snapshot.clone(), &release_policy(), now, &shows)?
+            .ok_or_else(|| std::io::Error::other("press candidate expected"))?;
+        assert_eq!(press.decision_kind, "execute_release_milestone");
+        assert!(matches!(
+            press.action,
+            AutopilotActionPayload::ExecuteReleaseMilestone {
+                milestone: ReleaseMilestone::StartPress,
+                ..
+            }
+        ));
+        // Thirty days out is the calendar seed — internal, reaches nobody.
+        snapshot.release_at = now + time::Duration::days(30);
+        snapshot.history.calendar_seeded = false;
+        let calendar = release_candidate(snapshot, &release_policy(), now, &shows)?
+            .ok_or_else(|| std::io::Error::other("calendar candidate expected"))?;
+        assert_eq!(calendar.decision_kind, "execute_release_milestone");
+        assert!(matches!(
+            calendar.action,
+            AutopilotActionPayload::ExecuteReleaseMilestone {
+                milestone: ReleaseMilestone::SeedCalendar,
+                ..
+            }
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn a_milestone_already_sent_never_enters_the_collision_check()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (mut snapshot, now) = warmup_due();
+        snapshot.history.fan_warmup_sent = true;
+        let shows = [show_this_week(now, "Klub Hybrydy")];
+        assert!(release_candidate(snapshot, &release_policy(), now, &shows)?.is_none());
         Ok(())
     }
 }

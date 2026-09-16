@@ -8,7 +8,8 @@
 use std::time::Duration;
 
 use crowdrelay_application::autopilot::{
-    AutopilotActionRepository, AutopilotDecisionRepository, AutopilotTeamStateRepository,
+    ActionSubject, AutopilotActionPayload, AutopilotActionRepository, AutopilotContext,
+    AutopilotDecisionRepository, AutopilotTeamStateRepository, DecisionCandidate,
     UpsertReleasePlan,
 };
 use crowdrelay_application::{IdempotencyKey, RepositoryError};
@@ -730,5 +731,291 @@ async fn the_sustain_milestone_writes_the_r3_report_and_binds_the_release_campai
         gaps.contains(&"streams_not_measured"),
         "listens are never claimed without listen data: {gaps:?}"
     );
+    Ok(())
+}
+
+/// §4i-2: the week holding a published show is the show's week. The collision
+/// read is what the release evaluator consults before letting an
+/// owned-audience milestone spend that week a second time.
+#[tokio::test]
+#[ignore = "needs a live postgres"]
+async fn the_collision_week_names_every_live_show_and_ignores_the_rest()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = fixture("collision").await?;
+    let insert = |slug: &str, title: &str, status: &str, offset: &str| {
+        let pool = fixture.pool.clone();
+        let workspace_id = fixture.workspace_id;
+        let slug = slug.to_string();
+        let title = title.to_string();
+        let status = status.to_string();
+        let offset = offset.to_string();
+        async move {
+            sqlx::query(
+                "INSERT INTO events (id, workspace_id, slug, title, starts_at, status, published_at)
+                 VALUES ($1, $2, $3, $4, date_trunc('week', now()) + ($5)::interval, $6,
+                         CASE WHEN $6 IN ('published','completed') THEN now() ELSE NULL END)",
+            )
+            .bind(uuid::Uuid::now_v7())
+            .bind(workspace_id.into_uuid())
+            .bind(slug)
+            .bind(title)
+            .bind(offset)
+            .bind(status)
+            .execute(&pool)
+            .await
+        }
+    };
+    // The completed show sits at the week's own Monday — always at or before
+    // `now` inside the week, so a finished event has an honest past starts_at.
+    insert("this-monday", "Monday gig", "completed", "0 days").await?;
+    insert("this-friday", "Friday gig", "published", "4 days").await?;
+    insert("next-week", "Next week's gig", "published", "9 days").await?;
+    insert("draft-show", "Draft gig", "draft", "1 day").await?;
+    insert("cancelled-show", "Cancelled gig", "cancelled", "1 day").await?;
+
+    // An unvalidated timezone must not break the read: the show falls back to
+    // its UTC week and still collides rather than erroring the whole cycle.
+    sqlx::query(
+        "INSERT INTO events (id, workspace_id, slug, title, starts_at, status, published_at, timezone)
+         VALUES ($1, $2, 'bogus-tz', 'Weird-zone gig',
+                 date_trunc('week', now()) + interval '2 days', 'published', now(), 'Mars/Olympus')",
+    )
+    .bind(uuid::Uuid::now_v7())
+    .bind(fixture.workspace_id.into_uuid())
+    .execute(&fixture.pool)
+    .await?;
+
+    // A different workspace's show on the same night is not this tenant's
+    // collision.
+    let other_workspace = WorkspaceId::new();
+    sqlx::query("INSERT INTO workspaces (id, slug, name) VALUES ($1, $2, $3)")
+        .bind(other_workspace.into_uuid())
+        .bind(format!("other-{}", other_workspace.into_uuid().simple()))
+        .bind("Other")
+        .execute(&fixture.pool)
+        .await?;
+    sqlx::query(
+        "INSERT INTO events (id, workspace_id, slug, title, starts_at, status, published_at)
+         VALUES ($1, $2, 'foreign-show', 'Foreign gig', date_trunc('week', now()) + interval '3 days', 'published', now())",
+    )
+    .bind(uuid::Uuid::now_v7())
+    .bind(other_workspace.into_uuid())
+    .execute(&fixture.pool)
+    .await?;
+
+    let shows = fixture
+        .repository
+        .load_colliding_show_week(fixture.workspace_id, fixture.now)
+        .await?;
+    let titles = shows
+        .iter()
+        .map(|show| show.title.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        titles,
+        ["Monday gig", "Weird-zone gig", "Friday gig"],
+        "both live shows this week, in order, and nothing else: {titles:?}"
+    );
+    Ok(())
+}
+
+/// §4i-2's central guarantee at the persistence layer: a collision-week hold
+/// writes exactly one decision row and no action, and once the week clears
+/// the ordinary execute key still creates the send — the hold never consumed
+/// the milestone's keys.
+#[tokio::test]
+#[ignore = "needs a live postgres"]
+async fn a_held_milestone_dedupes_in_week_and_refires_after_it_clears()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = fixture("refire").await?;
+    sqlx::query(
+        "INSERT INTO viryaos_autopilot_policies
+         (workspace_id, context, enabled, autonomy_level, max_actions_24h)
+         VALUES ($1, 'release', true, 'require_approval', 10)
+         ON CONFLICT (workspace_id, context) DO UPDATE
+         SET enabled = true, autonomy_level = 'require_approval', max_actions_24h = 10",
+    )
+    .bind(fixture.workspace_id.into_uuid())
+    .execute(&fixture.pool)
+    .await?;
+
+    let release_id = fixture
+        .repository
+        .upsert_release_plan(
+            fixture.workspace_id,
+            UpsertReleasePlan {
+                release_id: None,
+                source_key: "collision-plan".into(),
+                title: "Signal Lost".into(),
+                release_at: fixture.now + time::Duration::days(4),
+                listen_url: None,
+                tier: Some(ReleaseTier::Single),
+                active: true,
+                assets_ready: true,
+                communication_enabled: true,
+                press_enabled: true,
+                expected_version: 0,
+            },
+            &idem("collision-plan"),
+            None,
+        )
+        .await?
+        .release_id;
+    let action = AutopilotActionPayload::ExecuteReleaseMilestone {
+        release_id,
+        title: "Signal Lost".to_string(),
+        release_at: fixture.now + time::Duration::days(4),
+        milestone: crowdrelay_domain::release_autopilot::ReleaseMilestone::FanWarmup,
+    };
+    let held = DecisionCandidate {
+        context: AutopilotContext::Release,
+        subject: ActionSubject::ReleasePlan(release_id),
+        decision_kind: "hold_release_milestone_collision",
+        confidence: crowdrelay_domain::autonomy::Confidence::saturating_from_basis_points(9_200),
+        disposition: crowdrelay_domain::autonomy::PolicyDisposition::Deny,
+        reason: "a live show this week keeps the week's attention",
+        input_snapshot: serde_json::json!({
+            "collision": {
+                "protected_shows": [{"title": "Friday gig"}],
+                "held_milestone": "fan_warmup",
+            },
+        }),
+        policy_snapshot: serde_json::json!({}),
+        action: action.clone(),
+        decision_key: format!("decision:release:v1:{release_id}:fan_warmup:0:hold:2026-09-14"),
+        action_idempotency_key: format!("action:release:{release_id}:fan_warmup:hold:2026-09-14"),
+    };
+    let trace = crowdrelay_domain::TraceContext::root(fixture.workspace_id);
+
+    let first = fixture
+        .repository
+        .persist_candidate(fixture.workspace_id, &held, &trace)
+        .await?;
+    assert!(first.decision_created);
+    assert!(!first.action_created);
+
+    // Every later cycle in the same show week must not recount the row.
+    let again = fixture
+        .repository
+        .persist_candidate(fixture.workspace_id, &held, &trace)
+        .await?;
+    assert!(
+        !again.decision_created,
+        "a re-evaluated hold dedupes against the row it already wrote"
+    );
+    let decisions = sqlx::query_scalar::<_, i64>(
+        "SELECT count(*) FROM viryaos_autopilot_decisions WHERE workspace_id=$1",
+    )
+    .bind(fixture.workspace_id.into_uuid())
+    .fetch_one(&fixture.pool)
+    .await?;
+    assert_eq!(decisions, 1);
+
+    // The week clears: the ordinary candidate fires under its own key.
+    let execute = DecisionCandidate {
+        decision_kind: "execute_release_milestone",
+        disposition: crowdrelay_domain::autonomy::PolicyDisposition::RequireApproval,
+        reason: "release timeline has a deterministic milestone due",
+        input_snapshot: serde_json::json!({}),
+        decision_key: format!("decision:release:v1:{release_id}:fan_warmup:0"),
+        action_idempotency_key: format!("action:release:{release_id}:fan_warmup"),
+        ..held
+    };
+    let fired = fixture
+        .repository
+        .persist_candidate(fixture.workspace_id, &execute, &trace)
+        .await?;
+    assert!(fired.decision_created);
+    assert!(
+        fired.action_created,
+        "the milestone re-fires after the week clears"
+    );
+    Ok(())
+}
+
+/// The same hold from the debt side: a milestone the collision rule held is a
+/// decision the system made, and `release_milestones_missed` must not report
+/// it as work the band neglected.
+#[tokio::test]
+#[ignore = "needs a live postgres"]
+async fn a_held_milestone_is_not_growth_debt() -> Result<(), Box<dyn std::error::Error>> {
+    let fixture = fixture("debt").await?;
+    sqlx::query(
+        "INSERT INTO viryaos_autopilot_policies
+         (workspace_id, context, enabled, autonomy_level, max_actions_24h)
+         VALUES ($1, 'release', true, 'require_approval', 10)
+         ON CONFLICT (workspace_id, context) DO UPDATE
+         SET enabled = true, autonomy_level = 'require_approval', max_actions_24h = 10",
+    )
+    .bind(fixture.workspace_id.into_uuid())
+    .execute(&fixture.pool)
+    .await?;
+    let release_id = fixture
+        .repository
+        .upsert_release_plan(
+            fixture.workspace_id,
+            UpsertReleasePlan {
+                release_id: None,
+                source_key: "held-plan".into(),
+                title: "Signal Lost".into(),
+                release_at: fixture.now + time::Duration::days(10),
+                listen_url: None,
+                tier: Some(ReleaseTier::Single),
+                active: true,
+                assets_ready: true,
+                communication_enabled: true,
+                press_enabled: true,
+                expected_version: 0,
+            },
+            &idem("held-plan"),
+            None,
+        )
+        .await?
+        .release_id;
+
+    let held = DecisionCandidate {
+        context: AutopilotContext::Release,
+        subject: ActionSubject::ReleasePlan(release_id),
+        decision_kind: "hold_release_milestone_collision",
+        confidence: crowdrelay_domain::autonomy::Confidence::saturating_from_basis_points(9_200),
+        disposition: crowdrelay_domain::autonomy::PolicyDisposition::Deny,
+        reason: "a live show this week keeps the week's attention",
+        input_snapshot: serde_json::json!({
+            "collision": {
+                "protected_shows": [{"title": "Friday gig"}],
+                "held_milestone": "fan_warmup",
+            },
+        }),
+        policy_snapshot: serde_json::json!({}),
+        action: AutopilotActionPayload::ExecuteReleaseMilestone {
+            release_id,
+            title: "Signal Lost".to_string(),
+            release_at: fixture.now + time::Duration::days(10),
+            milestone: crowdrelay_domain::release_autopilot::ReleaseMilestone::FanWarmup,
+        },
+        decision_key: format!("decision:release:v1:{release_id}:fan_warmup:0:hold:2026-09-14"),
+        action_idempotency_key: format!("action:release:{release_id}:fan_warmup:hold:2026-09-14"),
+    };
+    let trace = crowdrelay_domain::TraceContext::root(fixture.workspace_id);
+    fixture
+        .repository
+        .persist_candidate(fixture.workspace_id, &held, &trace)
+        .await?;
+
+    let debts = fixture
+        .repository
+        .load_growth_debt_observations(fixture.workspace_id, fixture.now)
+        .await?;
+    let missed = debts
+        .iter()
+        .find(|debt| {
+            debt.subject
+                == crowdrelay_domain::growth_debt::GrowthDebtSubject::ReleasePlan(release_id)
+        })
+        .expect("an active plan with unsent milestones still reports a row");
+    // Nine rungs tracked (press on), none completed, one deliberately held:
+    // the debt is the eight the band still owes, not nine.
+    assert_eq!(missed.tracked_items, 9);
+    assert_eq!(missed.outstanding_items, 8);
     Ok(())
 }

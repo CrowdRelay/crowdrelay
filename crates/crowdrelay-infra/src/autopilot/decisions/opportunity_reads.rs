@@ -362,6 +362,56 @@ macro_rules! decision_opportunity_reads {
         }).await
     }
 
+    async fn load_colliding_show_week_impl(
+        &self,
+        workspace_id: WorkspaceId,
+        now: OffsetDateTime,
+    ) -> Result<Vec<ShowWeekCollision>, RepositoryError> {
+        self.bounded(async {
+            // §4i-2: the week that contains a show is the show's week. A
+            // release's owned-audience milestones landing in it hold — the
+            // gig is the place-bound moment; the milestone can fire next
+            // week and keep its meaning. Press and internal milestones are
+            // not fan attention and are unaffected.
+            let rows = sqlx::query_as::<_, (Uuid, String, OffsetDateTime, time::Date)>(
+                r#"
+                SELECT events.id, events.title, events.starts_at,
+                       date_trunc('week', events.starts_at AT TIME ZONE COALESCE(zone.name, 'UTC'))::date
+                           AS week_start
+                FROM events
+                -- The week a show occupies is its own local week: a gig at
+                -- 00:30 Monday in Warsaw belongs to the week that just started
+                -- there, not to the UTC week still ending. `pg_timezone_names`
+                -- guards the zone lookup — an unvalidated value falls back to
+                -- UTC instead of failing every release evaluation in the
+                -- workspace.
+                LEFT JOIN pg_timezone_names AS zone ON zone.name = events.timezone
+                WHERE events.workspace_id = $1
+                  AND events.status IN ('published', 'completed')
+                  AND date_trunc('week', events.starts_at AT TIME ZONE COALESCE(zone.name, 'UTC'))
+                      = date_trunc('week', $2 AT TIME ZONE COALESCE(zone.name, 'UTC'))
+                ORDER BY events.starts_at, events.id
+                LIMIT 8
+                "#,
+            )
+            .bind(workspace_id.into_uuid())
+            .bind(now)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(map_sqlx)?;
+            Ok(rows
+                .into_iter()
+                .map(|(id, title, starts_at, week_start)| ShowWeekCollision {
+                    event_id: crowdrelay_domain::EventId::from_uuid(id),
+                    title,
+                    starts_at,
+                    week_start,
+                })
+                .collect())
+        })
+        .await
+    }
+
     async fn load_release_milestone_marks_impl(
         &self,
         workspace_id: WorkspaceId,
@@ -390,6 +440,43 @@ macro_rules! decision_opportunity_reads {
                 .filter_map(|(release_id, milestone, completed_at)| {
                     ReleaseMilestone::parse(&milestone)
                         .map(|m| (ReleasePlanId::from_uuid(release_id), m, completed_at))
+                })
+                .collect())
+        }).await
+    }
+
+    async fn load_held_release_milestones_impl(
+        &self,
+        workspace_id: WorkspaceId,
+        release_ids: &[ReleasePlanId],
+    ) -> Result<Vec<(ReleasePlanId, ReleaseMilestone)>, RepositoryError> {
+        if release_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.bounded(async {
+            let ids: Vec<Uuid> = release_ids.iter().map(|id| id.into_uuid()).collect();
+            let rows = sqlx::query_as::<_, (Uuid, String)>(
+                r#"
+                SELECT DISTINCT subject_id,
+                       input_snapshot -> 'collision' ->> 'held_milestone' AS milestone
+                FROM viryaos_autopilot_decisions
+                WHERE workspace_id = $1
+                  AND decision_kind = 'hold_release_milestone_collision'
+                  AND subject_kind = 'release_plan'
+                  AND subject_id = ANY($2)
+                  AND input_snapshot -> 'collision' ->> 'held_milestone' IS NOT NULL
+                "#,
+            )
+            .bind(workspace_id.into_uuid())
+            .bind(&ids)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(map_sqlx)?;
+            Ok(rows
+                .into_iter()
+                .filter_map(|(release_id, milestone)| {
+                    ReleaseMilestone::parse(&milestone)
+                        .map(|m| (ReleasePlanId::from_uuid(release_id), m))
                 })
                 .collect())
         }).await

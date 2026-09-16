@@ -137,6 +137,7 @@ use crowdrelay_domain::{
     promotion::PromotionPerformanceSnapshot,
     release_autopilot::{
         ReleaseMilestone, ReleaseMilestoneHistory, ReleasePlanSnapshot, ReleaseTier,
+        ShowWeekCollision,
     },
     show_growth::ShowGrowthSnapshot,
     show_operations::ShowTaskSnapshot,

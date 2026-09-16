@@ -32,7 +32,7 @@ use crowdrelay_domain::{
     plays::{PlayKind, PlayPolicy},
     pricing::TicketYieldSnapshot,
     promotion::PromotionPerformanceSnapshot,
-    release_autopilot::{ReleaseMilestone, ReleasePlanSnapshot},
+    release_autopilot::{ReleaseMilestone, ReleasePlanSnapshot, ShowWeekCollision},
     show_growth::ShowGrowthSnapshot,
     show_operations::ShowTaskSnapshot,
     target_discovery::OutreachSupplySnapshot,
@@ -192,6 +192,15 @@ pub trait AutopilotDecisionRepository: Send + Sync {
         now: OffsetDateTime,
     ) -> Result<Vec<ReleasePlanSnapshot>, RepositoryError>;
 
+    /// Shows whose `starts_at` sits inside `now`'s ISO week — the moments a
+    /// release milestone collides with when it lands this week (§4i-2).
+    /// Empty means no collision and costs one small query per cycle.
+    async fn load_colliding_show_week(
+        &self,
+        workspace_id: WorkspaceId,
+        now: OffsetDateTime,
+    ) -> Result<Vec<ShowWeekCollision>, RepositoryError>;
+
     /// The recorded milestone marks for a set of release plans: what the
     /// ladder actually got to, and when. The timeline view is built from
     /// these rather than from the snapshot's done/not-done booleans, so a
@@ -201,6 +210,16 @@ pub trait AutopilotDecisionRepository: Send + Sync {
         workspace_id: WorkspaceId,
         release_ids: &[ReleasePlanId],
     ) -> Result<Vec<(ReleasePlanId, ReleaseMilestone, OffsetDateTime)>, RepositoryError>;
+
+    /// The milestones a §4i-2 collision hold recorded for each plan — read
+    /// from the decision ledger (`hold_release_milestone_collision`), because
+    /// a held step never earns a milestone mark and would otherwise look
+    /// merely due. The timeline renders these as held, not missing.
+    async fn load_held_release_milestones(
+        &self,
+        workspace_id: WorkspaceId,
+        release_ids: &[ReleasePlanId],
+    ) -> Result<Vec<(ReleasePlanId, ReleaseMilestone)>, RepositoryError>;
 
     async fn load_live_opportunity_snapshots(
         &self,

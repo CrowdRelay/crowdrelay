@@ -4,8 +4,10 @@
 enum DecisionActionOutcome {
     /// Quota check throttled — no decision or action created.
     Throttled,
-    /// Decision created, but disposition doesn't produce an action.
-    NoAction,
+    /// Decision row present, but disposition doesn't produce an action.
+    /// `decision_created` is false when the INSERT deduped against a row a
+    /// prior cycle already wrote — the report must not recount it.
+    NoAction { decision_created: bool },
     /// Action INSERT conflicted on an uncovered unique index (e.g. the
     /// inflight-subject partial index) and the existing row could not be
     /// located. The decision was created but no action is safe to reference.
@@ -140,7 +142,9 @@ async fn persist_decision_and_action_tx(
         | PolicyDisposition::Deny => None,
     };
     let Some(status) = status else {
-        return Ok(DecisionActionOutcome::NoAction);
+        return Ok(DecisionActionOutcome::NoAction {
+            decision_created: inserted_decision.is_some(),
+        });
     };
     let action_id = Uuid::now_v7();
     let action_trace = TraceContext::for_action(
@@ -429,8 +433,8 @@ macro_rules! decision_persist {
                     quota_throttled: false,
                     action_id: None,
                 },
-                DecisionActionOutcome::NoAction => CandidatePersistence {
-                    decision_created: true,
+                DecisionActionOutcome::NoAction { decision_created } => CandidatePersistence {
+                    decision_created,
                     action_created: false,
                     quota_throttled: false,
                     action_id: None,
@@ -501,10 +505,10 @@ macro_rules! decision_persist {
                         action_id: None,
                     });
                 }
-                DecisionActionOutcome::NoAction => {
+                DecisionActionOutcome::NoAction { decision_created } => {
                     transaction.commit().await.map_err(map_sqlx)?;
                     return Ok(CandidatePersistence {
-                        decision_created: true,
+                        decision_created,
                         action_created: false,
                         quota_throttled: false,
                         action_id: None,
@@ -666,8 +670,8 @@ macro_rules! decision_persist {
                     quota_throttled: false,
                     action_id: None,
                 },
-                DecisionActionOutcome::NoAction => CandidatePersistence {
-                    decision_created: true,
+                DecisionActionOutcome::NoAction { decision_created } => CandidatePersistence {
+                    decision_created,
                     action_created: false,
                     quota_throttled: false,
                     action_id: None,

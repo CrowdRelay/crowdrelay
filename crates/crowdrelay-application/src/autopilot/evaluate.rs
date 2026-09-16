@@ -57,7 +57,7 @@ use crowdrelay_domain::{
     promotion::{PromotionBudgetDecision, PromotionPerformanceSnapshot, evaluate_promotion_budget},
     release_autopilot::{
         ReleaseAutopilotPolicy, ReleaseDecision, ReleaseMilestone, ReleasePlanSnapshot,
-        evaluate_release,
+        ShowWeekCollision, evaluate_release,
     },
     show_operations::{ShowOperationsDecision, ShowTaskSnapshot, evaluate_show_task},
     target_discovery::{OutreachSupplyDecision, OutreachSupplySnapshot, evaluate_outreach_supply},
@@ -392,8 +392,21 @@ where
                         .repository
                         .load_release_plan_snapshots(self.workspace_id, now)
                         .await?;
+                    // §4i-2: loaded once per cycle — the week that holds a live
+                    // show is the same week for every release under review.
+                    // Skipped entirely when no release is active: a tenant
+                    // with nothing to protect owes the query nothing.
+                    let collisions = if snapshots.is_empty() {
+                        Vec::new()
+                    } else {
+                        self.repository
+                            .load_colliding_show_week(self.workspace_id, now)
+                            .await?
+                    };
                     for snapshot in snapshots {
-                        if let Some(candidate) = release_candidate(snapshot, &policy, now)? {
+                        if let Some(candidate) =
+                            release_candidate(snapshot, &policy, now, &collisions)?
+                        {
                             self.persist(&candidate, &mut limits, &mut report).await?;
                         }
                     }
@@ -843,18 +856,25 @@ where
                 .flatten(),
             ..*limits.usage
         };
-        let clamped = match check_envelope(class, limits.envelope, &subject_usage) {
-            EnvelopeVerdict::Allow => clamped,
-            EnvelopeVerdict::Hold(block) => {
-                report.actions_held = report.actions_held.saturating_add(1);
-                // A rehearsal produces the decision and its evidence but
-                // nothing anybody can press send on. Every other block still
-                // offers the work to a human, because "the budget is spent" is
-                // not the same as "this should not happen".
-                if block.may_offer_for_approval() {
-                    clamp_disposition(clamped, AutonomyLevel::RequireApproval)
-                } else {
-                    clamp_disposition(clamped, AutonomyLevel::Recommend)
+        // A candidate already denied by policy (the §4i-2 show-week hold is
+        // one) owes the envelope nothing — counting it as a held action on top
+        // of the hold decision would report the same refusal twice.
+        let clamped = if matches!(clamped, PolicyDisposition::Deny) {
+            clamped
+        } else {
+            match check_envelope(class, limits.envelope, &subject_usage) {
+                EnvelopeVerdict::Allow => clamped,
+                EnvelopeVerdict::Hold(block) => {
+                    report.actions_held = report.actions_held.saturating_add(1);
+                    // A rehearsal produces the decision and its evidence but
+                    // nothing anybody can press send on. Every other block still
+                    // offers the work to a human, because "the budget is spent" is
+                    // not the same as "this should not happen".
+                    if block.may_offer_for_approval() {
+                        clamp_disposition(clamped, AutonomyLevel::RequireApproval)
+                    } else {
+                        clamp_disposition(clamped, AutonomyLevel::Recommend)
+                    }
                 }
             }
         };

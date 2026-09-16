@@ -150,6 +150,23 @@ impl AutopilotDecisionRepository for PostgresAutopilotRepository {
             .await
     }
 
+    async fn load_colliding_show_week(
+        &self,
+        workspace_id: WorkspaceId,
+        now: OffsetDateTime,
+    ) -> Result<Vec<ShowWeekCollision>, RepositoryError> {
+        self.load_colliding_show_week_impl(workspace_id, now).await
+    }
+
+    async fn load_held_release_milestones(
+        &self,
+        workspace_id: WorkspaceId,
+        release_ids: &[ReleasePlanId],
+    ) -> Result<Vec<(ReleasePlanId, ReleaseMilestone)>, RepositoryError> {
+        self.load_held_release_milestones_impl(workspace_id, release_ids)
+            .await
+    }
+
     async fn load_release_milestone_marks(
         &self,
         workspace_id: WorkspaceId,

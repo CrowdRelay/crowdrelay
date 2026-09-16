@@ -202,6 +202,7 @@ pub(in crate::autopilot) async fn load_growth_debt_observations(
                     $3::bigint
                         - CASE WHEN plan.press_enabled THEN 0 ELSE 1 END
                         - COALESCE(recorded.completed, 0)
+                        - COALESCE(held.held, 0)
                 )::bigint AS outstanding_items,
                 ($3::bigint
                     - CASE WHEN plan.press_enabled THEN 0 ELSE 1 END)::bigint
@@ -218,6 +219,27 @@ pub(in crate::autopilot) async fn load_growth_debt_observations(
                 WHERE milestone.workspace_id = plan.workspace_id
                   AND milestone.release_id = plan.id
             ) AS recorded ON true
+            -- A milestone held by the §4i-2 show-week collision was a
+            -- decision, not neglect: without this the superseded rung is
+            -- counted as missed work the band never chose to skip.
+            LEFT JOIN LATERAL (
+                SELECT count(DISTINCT
+                       decision.input_snapshot -> 'collision' ->> 'held_milestone'
+                    )::bigint AS held
+                FROM viryaos_autopilot_decisions AS decision
+                WHERE decision.workspace_id = plan.workspace_id
+                  AND decision.decision_kind = 'hold_release_milestone_collision'
+                  AND decision.subject_kind = 'release_plan'
+                  AND decision.subject_id = plan.id
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM viryaos_release_milestones AS done
+                      WHERE done.workspace_id = plan.workspace_id
+                        AND done.release_id = plan.id
+                        AND done.milestone =
+                            decision.input_snapshot -> 'collision' ->> 'held_milestone'
+                  )
+            ) AS held ON true
             WHERE plan.workspace_id = $1
               AND plan.active
               -- A filler plan owes no vertical — the tier is the band's call,

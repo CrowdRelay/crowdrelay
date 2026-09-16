@@ -264,6 +264,7 @@ fn release_candidate(
     snapshot: ReleasePlanSnapshot,
     policy: &AutopilotPolicy,
     now: OffsetDateTime,
+    collisions: &[ShowWeekCollision],
 ) -> Result<Option<DecisionCandidate>, serde_json::Error> {
     let AutopilotPolicyConfig::Release(domain_policy) = &policy.config else {
         return Ok(None);
@@ -282,7 +283,6 @@ fn release_candidate(
         }
         ReleaseDecision::Hold(_) => return Ok(None),
     };
-    let disposition = disposition(policy.autonomy_level, confidence, policy.minimum_confidence);
     let milestone_key = match milestone {
         ReleaseMilestone::SeedCalendar => "seed_calendar",
         ReleaseMilestone::EditorialPitch => "editorial_pitch",
@@ -294,6 +294,68 @@ fn release_candidate(
         ReleaseMilestone::Sustain => "sustain",
         ReleaseMilestone::Wrap => "wrap",
     };
+    // §4i-2: a week that contains a live show is the show's week. An
+    // owned-audience milestone due in it holds rather than spending the same
+    // fan attention twice — the send is dropped, never the cap raised. The
+    // hold is its own decision row under a week-keyed key, naming the show it
+    // protects, so the ledger shows what was held and the ordinary execute
+    // key stays untouched: when the week clears, the same milestone offers
+    // itself again and goes out. Press and internal milestones reach no fans
+    // and are unaffected.
+    let action = AutopilotActionPayload::ExecuteReleaseMilestone {
+        release_id: snapshot.release_id,
+        title: snapshot.title.clone(),
+        release_at: snapshot.release_at,
+        milestone,
+    };
+    if matches!(action.action_class(), ActionClass::OwnedAudience)
+        && let Some(first_show) = collisions.first()
+    {
+        // The hold names the collision's own week — the earliest show's local
+        // Monday — so the ledger label is the frame the collision was judged
+        // in rather than a UTC week that can disagree with it at a boundary.
+        let week_start = first_show.week_start;
+        return Ok(Some(DecisionCandidate {
+            context: policy.context,
+            subject: ActionSubject::ReleasePlan(snapshot.release_id),
+            decision_kind: "hold_release_milestone_collision",
+            confidence,
+            disposition: PolicyDisposition::Deny,
+            reason: "a live show this week keeps the week's attention; the milestone holds rather than spend \
+                     the same fans twice",
+            input_snapshot: {
+                // Same flat shape as the execute row plus the collision — a
+                // reader keying on `release_at` finds it on hold rows too.
+                let mut input = serde_json::to_value(&snapshot)?;
+                if let Some(fields) = input.as_object_mut() {
+                    fields.insert("collision".to_string(), serde_json::json!({
+                    "protected_shows": collisions.iter().map(|show| serde_json::json!({
+                        "event_id": show.event_id,
+                        "title": show.title,
+                        "starts_at": show.starts_at,
+                    })).collect::<Vec<_>>(),
+                    "held_milestone": milestone_key,
+                }));
+                }
+                input
+            },
+            policy_snapshot: policy_evidence(policy, domain_policy)?,
+            action,
+            decision_key: format!(
+                "decision:release:v{}:{}:{}:{}:hold:{}",
+                policy.version,
+                snapshot.release_id,
+                milestone_key,
+                snapshot.release_at.unix_timestamp(),
+                week_start,
+            ),
+            action_idempotency_key: format!(
+                "action:release:{}:{milestone_key}:hold:{}",
+                snapshot.release_id, week_start
+            ),
+        }));
+    }
+    let disposition = disposition(policy.autonomy_level, confidence, policy.minimum_confidence);
     Ok(Some(DecisionCandidate {
         context: policy.context,
         subject: ActionSubject::ReleasePlan(snapshot.release_id),
@@ -303,12 +365,7 @@ fn release_candidate(
         reason: "release timeline has a deterministic milestone due",
         input_snapshot: serde_json::to_value(&snapshot)?,
         policy_snapshot: policy_evidence(policy, domain_policy)?,
-        action: AutopilotActionPayload::ExecuteReleaseMilestone {
-            release_id: snapshot.release_id,
-            title: snapshot.title.clone(),
-            release_at: snapshot.release_at,
-            milestone,
-        },
+        action,
         decision_key: format!(
             "decision:release:v{}:{}:{}:{}",
             policy.version,

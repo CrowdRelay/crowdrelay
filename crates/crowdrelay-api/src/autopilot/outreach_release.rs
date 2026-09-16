@@ -828,12 +828,15 @@ pub async fn list_release_plans(
         })
         .unwrap_or_default();
     let release_ids: Vec<ReleasePlanId> = plans.iter().map(|plan| plan.release_id).collect();
-    let marks = match state
-        .autopilot
-        .load_release_milestone_marks(state.ops.workspace_id(), &release_ids)
-        .await
-    {
-        Ok(marks) => marks,
+    let (marks, held) = match tokio::try_join!(
+        state
+            .autopilot
+            .load_release_milestone_marks(state.ops.workspace_id(), &release_ids),
+        state
+            .autopilot
+            .load_held_release_milestones(state.ops.workspace_id(), &release_ids),
+    ) {
+        Ok(results) => results,
         Err(error) => return repository_problem(error, request_id(&headers)),
     };
     private_json(
@@ -846,10 +849,21 @@ pub async fn list_release_plans(
                     .filter(|(release_id, _, _)| *release_id == plan.release_id)
                     .map(|(_, milestone, at)| (*milestone, *at))
                     .collect();
+                let held_for_plan: Vec<ReleaseMilestone> = held
+                    .iter()
+                    .filter(|(release_id, _)| *release_id == plan.release_id)
+                    .map(|(_, milestone)| *milestone)
+                    .collect();
                 ReleasePlanView {
                     snapshot: plan,
                     lifecycle: release_phase(plan, release_policy, now),
-                    timeline: release_timeline(plan, &completed, release_policy, now),
+                    timeline: release_timeline(
+                        plan,
+                        &completed,
+                        &held_for_plan,
+                        release_policy,
+                        now,
+                    ),
                 }
             })
             .collect::<Vec<_>>(),

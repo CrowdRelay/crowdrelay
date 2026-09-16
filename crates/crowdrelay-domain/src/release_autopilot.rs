@@ -81,6 +81,20 @@ pub struct ReleasePlanSnapshot {
     pub history: ReleaseMilestoneHistory,
 }
 
+/// A live show whose `starts_at` sits in the same ISO week as the moment
+/// under evaluation — the collision a release milestone must name when it
+/// holds (§4i-2).
+#[derive(Clone, Debug)]
+pub struct ShowWeekCollision {
+    pub event_id: crate::EventId,
+    pub title: String,
+    pub starts_at: OffsetDateTime,
+    /// Monday of the show's own local week — the frame the collision is
+    /// judged in, and the label a hold names. Computed in `events.timezone`,
+    /// not UTC: a gig at 00:30 local Monday already occupies the new week.
+    pub week_start: time::Date,
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(default)]
 pub struct ReleaseAutopilotPolicy {
@@ -379,6 +393,9 @@ pub enum ReleaseStepState {
     /// A plan-level gate holds it: missing assets or communication switched
     /// off. Same holds the evaluator answers with.
     Blocked,
+    /// §4i-2: the step's window collided with a live show's week and the send
+    /// was held on purpose — a recorded decision, not a step nobody ran.
+    Held,
 }
 
 /// One rung of the release ladder as a page renders it.
@@ -403,6 +420,7 @@ pub struct ReleaseTimelineStep {
 pub fn release_timeline(
     snapshot: &ReleasePlanSnapshot,
     completed: &[(ReleaseMilestone, OffsetDateTime)],
+    held: &[ReleaseMilestone],
     policy: ReleaseAutopilotPolicy,
     now: OffsetDateTime,
 ) -> Vec<ReleaseTimelineStep> {
@@ -453,7 +471,7 @@ pub fn release_timeline(
                     .find(|(m, _)| *m == milestone)
                     .map(|(_, at)| *at)
             };
-            let state = step_state(snapshot, milestone, completed_at, due_at, now);
+            let state = step_state(snapshot, milestone, completed_at, due_at, now, held);
             ReleaseTimelineStep {
                 milestone,
                 offset_days: i32::try_from(offset).unwrap_or(i32::MAX),
@@ -471,9 +489,15 @@ fn step_state(
     completed_at: Option<OffsetDateTime>,
     due_at: OffsetDateTime,
     now: OffsetDateTime,
+    held: &[ReleaseMilestone],
 ) -> ReleaseStepState {
     if completed_at.is_some() {
+        // A milestone held in one week and sent the next is Done — the hold
+        // is history, not state.
         return ReleaseStepState::Done;
+    }
+    if held.contains(&milestone) {
+        return ReleaseStepState::Held;
     }
     if milestone == ReleaseMilestone::EditorialPitch && snapshot.history.editorial_pitch_parked {
         return ReleaseStepState::Parked;
@@ -675,7 +699,7 @@ mod tests {
         let mut filler = snapshot(20);
         filler.tier = ReleaseTier::Filler;
         filler.editorial_pitch_completed_at = None;
-        let timeline = release_timeline(&filler, &[], policy, now());
+        let timeline = release_timeline(&filler, &[], &[], policy, now());
         assert!(
             timeline
                 .iter()
@@ -683,7 +707,7 @@ mod tests {
         );
         // A completion already recorded still reads done — the facts win.
         let completed = [(ReleaseMilestone::SeedCalendar, now())];
-        let timeline = release_timeline(&filler, &completed, policy, now());
+        let timeline = release_timeline(&filler, &completed, &[], policy, now());
         let calendar = timeline
             .iter()
             .find(|step| step.milestone == ReleaseMilestone::SeedCalendar)
@@ -724,7 +748,7 @@ mod tests {
         let policy = ReleaseAutopilotPolicy::default();
         let mut s = snapshot(50);
         s.editorial_pitch_completed_at = None;
-        let timeline = release_timeline(&s, &[], policy, now());
+        let timeline = release_timeline(&s, &[], &[], policy, now());
         assert_eq!(timeline.len(), 9);
         let offsets: Vec<i32> = timeline.iter().map(|step| step.offset_days).collect();
         assert_eq!(offsets, [-42, -28, -28, -21, -14, -7, 0, 3, 14]);
@@ -738,6 +762,48 @@ mod tests {
     }
 
     #[test]
+    fn a_collision_held_rung_reports_held_until_it_sends() {
+        let policy = ReleaseAutopilotPolicy::default();
+        // R-10: the fan-warmup window is open and unrecorded — due, unless a
+        // §4i-2 hold already answered for it.
+        let s = {
+            let mut s = snapshot(10);
+            s.history.calendar_seeded = true;
+            s
+        };
+        let at = |timeline: &[ReleaseTimelineStep], m: ReleaseMilestone| {
+            timeline
+                .iter()
+                .find(|step| step.milestone == m)
+                .expect("every rung is present")
+                .state
+        };
+        let clear = release_timeline(&s, &[], &[], policy, now());
+        assert_eq!(
+            at(&clear, ReleaseMilestone::FanWarmup),
+            ReleaseStepState::Due
+        );
+
+        let held = release_timeline(&s, &[], &[ReleaseMilestone::FanWarmup], policy, now());
+        assert_eq!(
+            at(&held, ReleaseMilestone::FanWarmup),
+            ReleaseStepState::Held
+        );
+        // A held rung that later sent is done — the hold is history, not state.
+        let sent = release_timeline(
+            &s,
+            &[(ReleaseMilestone::FanWarmup, now())],
+            &[ReleaseMilestone::FanWarmup],
+            policy,
+            now(),
+        );
+        assert_eq!(
+            at(&sent, ReleaseMilestone::FanWarmup),
+            ReleaseStepState::Done
+        );
+    }
+
+    #[test]
     fn the_timeline_marks_due_done_and_parked_honestly() {
         let policy = ReleaseAutopilotPolicy::default();
         // R-20: calendar, pitch and announcement windows are all open.
@@ -747,7 +813,7 @@ mod tests {
         s.editorial_pitch_completed_at = None;
         let calendar_done = now() - Duration::days(2);
         let completed = [(ReleaseMilestone::SeedCalendar, calendar_done)];
-        let timeline = release_timeline(&s, &completed, policy, now());
+        let timeline = release_timeline(&s, &completed, &[], policy, now());
         let at = |m: ReleaseMilestone| {
             timeline
                 .iter()
@@ -781,7 +847,7 @@ mod tests {
         let mut s = snapshot(20);
         s.press_enabled = false;
         s.assets_ready = false;
-        let timeline = release_timeline(&s, &[], policy, now());
+        let timeline = release_timeline(&s, &[], &[], policy, now());
         let at = |m: ReleaseMilestone| {
             timeline
                 .iter()
