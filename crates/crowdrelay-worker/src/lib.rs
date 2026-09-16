@@ -45,6 +45,7 @@ pub mod leadership;
 pub mod nearby_gigs;
 pub mod ops_watchdog;
 pub mod outbox;
+pub mod peer_observation;
 pub mod push_delivery;
 pub mod receipt_reconciliation;
 pub mod reminders;

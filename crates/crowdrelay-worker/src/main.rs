@@ -50,6 +50,7 @@ use crowdrelay_worker::{
     nearby_gigs::{DEFAULT_POLL_INTERVAL as NEARBY_GIG_POLL_INTERVAL, NearbyGigScheduler},
     ops_watchdog::OpsWatchdogWorker,
     outbox::{MapSecretProvider, OutboxWorker, OutboxWorkerConfig, SecretProvider, SecretValue},
+    peer_observation::PeerObservationWorker,
     push_delivery::PushDeliveryWorker,
     receipt_reconciliation::ReceiptReconciliationWorker,
     reminders::EventReminderScheduler,
@@ -75,6 +76,9 @@ const OPS_WATCHDOG_INTERVAL: Duration = Duration::from_secs(5 * 60);
 const RECEIPT_RECONCILIATION_INTERVAL: Duration = Duration::from_secs(15 * 60);
 /// Reddit public search tolerates slow, sparse polling.
 const DISCOVERY_SWEEP_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
+/// Peer feeds change at human speed; a few hours of lag is invisible to a
+/// weekly-content trend detector, and the dedup index makes resweeps free.
+const PEER_OBSERVATION_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
 /// The graph changes at human speed; an hour of decay lag is invisible.
 const AUDIENCE_GRAPH_SWEEP_INTERVAL: Duration = Duration::from_secs(60 * 60);
 /// Agent outcome polling cadence. Outcomes are not time-critical — the
@@ -591,6 +595,20 @@ async fn run(database: PgPool, config: &Config, standby: bool) -> Result<()> {
         AUDIENCE_GRAPH_SWEEP_INTERVAL,
         config.database.operation_timeout,
     );
+    // Peer observation sweeps stay dark until the operator confirms peers;
+    // an empty watch list makes each pass a cheap no-op.
+    let peer_observation = match PeerObservationWorker::new(
+        database.clone(),
+        workspace_id,
+        PEER_OBSERVATION_INTERVAL,
+        config.database.operation_timeout,
+    ) {
+        Ok(worker) => Some(worker),
+        Err(error) => {
+            tracing::warn!(error = %error, "peer observation disabled: HTTP client build failed");
+            None
+        }
+    };
     // Discovery sweeps stay dark until an operator configures queries; the
     // adapter then runs on the same polite cadence as every other worker.
     let discovery_config = DiscoveryConfig::from_env();
@@ -750,6 +768,7 @@ async fn run(database: PgPool, config: &Config, standby: bool) -> Result<()> {
     let discovery_shutdown = shutdown_receiver.clone();
     let x_discovery_shutdown = shutdown_receiver.clone();
     let audience_graph_shutdown = shutdown_receiver.clone();
+    let peer_observation_shutdown = shutdown_receiver.clone();
     let ad_conversion_shutdown = shutdown_receiver.clone();
     let agent_outcome_shutdown = shutdown_receiver.clone();
     let community_executor_shutdown = shutdown_receiver.clone();
@@ -869,6 +888,12 @@ async fn run(database: PgPool, config: &Config, standby: bool) -> Result<()> {
         audience_graph_sweeper.run(audience_graph_shutdown).await;
         "audience graph sweeper"
     });
+    if let Some(worker) = peer_observation {
+        runtime_tasks.spawn(async move {
+            worker.run(peer_observation_shutdown).await;
+            "peer observation worker"
+        });
+    }
     if let Some(worker) = reddit_discovery {
         runtime_tasks.spawn(async move {
             worker.run(discovery_shutdown).await;

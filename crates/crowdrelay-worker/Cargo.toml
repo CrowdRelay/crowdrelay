@@ -30,6 +30,8 @@ crowdrelay-domain = { path = "../crowdrelay-domain" }
 crowdrelay-brain = { path = "../crowdrelay-brain" }
 crowdrelay-application = { path = "../crowdrelay-application" }
 crowdrelay-infra = { path = "../crowdrelay-infra" }
+roxmltree = "0.21.1"
+futures-util = "0.3.34"
 
 [dev-dependencies]
 # The outreach import test writes a CSV fixture to a real path, because the
