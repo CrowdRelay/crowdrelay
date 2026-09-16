@@ -344,7 +344,19 @@ impl AutopilotWorker {
         match evaluator.execute(now).await {
             Ok(report) => {
                 north_star_observed = report.north_star_observed;
-                wait_reason = report.gi_wait_reason.clone();
+                // A quiet cycle owes its reason in full: the portfolio's WAIT
+                // math and, when the watcher found nothing, the missing
+                // material itself. Both ride the same column — an operator
+                // reading "why did nothing happen" needs the two halves, not
+                // whichever one got stored first.
+                wait_reason = match (
+                    report.supply_wait_reason.clone(),
+                    report.gi_wait_reason.clone(),
+                ) {
+                    (Some(supply), Some(gi)) => Some(format!("{supply}; {gi}")),
+                    (Some(supply), None) => Some(supply),
+                    (None, gi) => gi,
+                };
                 tracing::info!(
                     decisions = report.decisions,
                     actions_enqueued = report.actions_enqueued,

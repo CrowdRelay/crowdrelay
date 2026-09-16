@@ -523,7 +523,8 @@ async fn compose_briefing(
     // ── What changed in the last 24h ──────────────────────────────────
     let material_landed: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM viryaos_content_sources
-         WHERE workspace_id = $1 AND source_kind IN ('video','story')
+         WHERE workspace_id = $1
+           AND source_kind IN ('video','story','release','social_post')
            AND created_at > $2 - INTERVAL '24 hours'",
     )
     .bind(ws)

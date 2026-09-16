@@ -65,6 +65,11 @@ pub struct AutopilotCycleReport {
     pub gi_candidates: u32,
     /// Diagnostic: WAIT reason if the portfolio selected nothing.
     pub gi_wait_reason: Option<String>,
+    /// Diagnostic: why the content-supply context stayed quiet this cycle —
+    /// set only when the watcher ran and found no live material, so a quiet
+    /// week records *that it had nothing to say* rather than reading like a
+    /// machine that merely lost the portfolio vote.
+    pub supply_wait_reason: Option<String>,
     /// Diagnostic: GI dispatch details for operator visibility.
     pub gi_dispatch_log: Vec<String>,
     /// Communities the brain wants to post to and cannot, because nobody has

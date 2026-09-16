@@ -6,14 +6,14 @@ use async_trait::async_trait;
 use crowdrelay_application::autopilot::{
     AutopilotBeaconStateRepository, AutopilotContentStateRepository, AutopilotControlMutation,
     AutopilotExperimentStateRepository, AutopilotOutreachStateRepository,
-    AutopilotTeamStateRepository, BeaconMutation, ContentSourceMutation, ContentSourceView,
-    CreateExperiment, ExperimentAssignmentSource, ExperimentAssignmentVariant, ExperimentMutation,
-    ExperimentObservation, OutreachOpportunityMutation, OutreachTargetMutation, PromoterPosition,
-    RecordBeaconReply, RecordDeliveryFault, RecordOutreachReply, RecordPlaylistPlacement,
-    RecordTeamOpportunityProgress, RecordTeamOpportunityTerms, ReleasePlanMutation,
-    ReportSuggestionOutcome, TeamOpportunityKind, TeamOpportunityMutation, TeamOpportunityProgress,
-    UpsertBeacon, UpsertContentSource, UpsertOutreachOpportunity, UpsertOutreachTarget,
-    UpsertReleasePlan, UpsertTeamOpportunity,
+    AutopilotTeamStateRepository, BeaconMutation, ContentSourceMutation, ContentSourceSendView,
+    ContentSourceView, CreateExperiment, ExperimentAssignmentSource, ExperimentAssignmentVariant,
+    ExperimentMutation, ExperimentObservation, OutreachOpportunityMutation, OutreachTargetMutation,
+    PromoterPosition, RecordBeaconReply, RecordDeliveryFault, RecordOutreachReply,
+    RecordPlaylistPlacement, RecordTeamOpportunityProgress, RecordTeamOpportunityTerms,
+    ReleasePlanMutation, ReportSuggestionOutcome, TeamOpportunityKind, TeamOpportunityMutation,
+    TeamOpportunityProgress, UpsertBeacon, UpsertContentSource, UpsertOutreachOpportunity,
+    UpsertOutreachTarget, UpsertReleasePlan, UpsertTeamOpportunity,
 };
 use crowdrelay_application::{IdempotencyKey, RequestId};
 use crowdrelay_domain::{
@@ -739,6 +739,56 @@ impl AutopilotContentStateRepository for PostgresAutopilotRepository {
             .await
             .map_err(map_sqlx)?;
 
+            // The sends trail per source — every content-supply action the
+            // machine took on it, with whether it actually emitted. Bounded
+            // like the sources themselves; one query, grouped in Rust, beats
+            // a per-source round trip or a lateral join that duplicates the
+            // row payload per send.
+            let send_rows = sqlx::query_as::<
+                _,
+                (
+                    Uuid,
+                    Uuid,
+                    Option<String>,
+                    String,
+                    OffsetDateTime,
+                    Option<OffsetDateTime>,
+                ),
+            >(
+                r#"
+                SELECT action.subject_id, action.id,
+                       action.payload->>'artifact', action.status,
+                       action.created_at, emission.emitted_at
+                FROM viryaos_autopilot_actions AS action
+                LEFT JOIN viryaos_autopilot_action_emissions AS emission
+                  ON emission.workspace_id = action.workspace_id
+                 AND emission.action_id = action.id
+                WHERE action.workspace_id = $1
+                  AND action.context = 'content_supply'
+                  AND action.subject_id IS NOT NULL
+                ORDER BY action.created_at DESC
+                LIMIT 2000
+                "#,
+            )
+            .bind(workspace_id.into_uuid())
+            .fetch_all(&self.pool)
+            .await
+            .map_err(map_sqlx)?;
+            let mut sends_by_source: std::collections::HashMap<Uuid, Vec<ContentSourceSendView>> =
+                std::collections::HashMap::new();
+            for (subject_id, action_id, artifact, status, created_at, emitted_at) in send_rows {
+                sends_by_source
+                    .entry(subject_id)
+                    .or_default()
+                    .push(ContentSourceSendView {
+                        action_id,
+                        artifact: artifact.unwrap_or_else(|| "unknown".to_owned()),
+                        status,
+                        created_at,
+                        emitted_at,
+                    });
+            }
+
             rows.into_iter()
                 .map(
                     |(
@@ -764,6 +814,7 @@ impl AutopilotContentStateRepository for PostgresAutopilotRepository {
                             format_key,
                             version,
                             active,
+                            sends: sends_by_source.remove(&id).unwrap_or_default(),
                         })
                     },
                 )
@@ -1219,6 +1270,7 @@ const fn content_source_kind_str(value: ContentSourceKind) -> &'static str {
         ContentSourceKind::ShowCompleted => "show_completed",
         ContentSourceKind::Video => "video",
         ContentSourceKind::Story => "story",
+        ContentSourceKind::SocialPost => "social_post",
     }
 }
 

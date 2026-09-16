@@ -55,10 +55,12 @@ use crowdrelay_worker::{
     peer_observation::PeerObservationWorker,
     push_delivery::PushDeliveryWorker,
     receipt_reconciliation::ReceiptReconciliationWorker,
+    release_source_sync::ReleaseSourceSyncWorker,
     reminders::EventReminderScheduler,
     replay::run_replay,
     retention::{RetentionWorker, RetentionWorkerConfig},
     social_post_executor::SocialPostExecutorWorker,
+    social_post_source_sync::SocialPostSourceSyncWorker,
     telegram_executor::TelegramExecutorWorker,
     video_source_sync::VideoSourceSyncWorker,
 };
@@ -706,7 +708,7 @@ async fn run(database: PgPool, config: &Config, standby: bool) -> Result<()> {
     let growth_metric_sync = GrowthMetricSyncWorker::new(
         database.clone(),
         youtube_api_key,
-        facebook_page_access_token,
+        facebook_page_access_token.clone(),
         config.agent_service_url.clone(),
         agent_service_auth_key.clone(),
         tiktok_client_key,
@@ -755,6 +757,24 @@ async fn run(database: PgPool, config: &Config, standby: bool) -> Result<()> {
     let video_source_sync = VideoSourceSyncWorker::new(database.clone(), workspace_id.into_uuid())
         .context("invalid video source sync worker configuration")?;
 
+    // Release source sync — watches connected Spotify/Bandcamp/SoundCloud
+    // accounts and registers new releases as trusted `release` content
+    // sources. This is how a new release reaches the content loop on its own.
+    let release_source_sync =
+        ReleaseSourceSyncWorker::new(database.clone(), workspace_id.into_uuid())
+            .context("invalid release source sync worker configuration")?;
+
+    // Social post source sync — the band's own Facebook/Instagram posts become
+    // `social_post` content sources through the same Page token the metric
+    // sync reads with. X connections are logged-not-watched: no credential
+    // exists for them, and pretending coverage would be the dishonest version.
+    let social_post_source_sync = SocialPostSourceSyncWorker::new(
+        database.clone(),
+        workspace_id.into_uuid(),
+        facebook_page_access_token.clone(),
+    )
+    .context("invalid social post source sync worker configuration")?;
+
     // Google Drive contacts sync — scans the connected Drive's tabular
     // files for contact rows and stages them for operator review. Nothing
     // here classifies: promote routes through fan_import (pending + DOI)
@@ -802,6 +822,8 @@ async fn run(database: PgPool, config: &Config, standby: bool) -> Result<()> {
     let community_join_executor_shutdown = shutdown_receiver.clone();
     let growth_metric_sync_shutdown = shutdown_receiver.clone();
     let video_source_sync_shutdown = shutdown_receiver.clone();
+    let release_source_sync_shutdown = shutdown_receiver.clone();
+    let social_post_source_sync_shutdown = shutdown_receiver.clone();
     let gdrive_contacts_sync_shutdown = shutdown_receiver.clone();
     let gmail_contacts_sync_shutdown = shutdown_receiver.clone();
     let attribution_shutdown = shutdown_receiver.clone();
@@ -1030,6 +1052,16 @@ async fn run(database: PgPool, config: &Config, standby: bool) -> Result<()> {
     runtime_tasks.spawn(async move {
         let _ = video_source_sync.run(video_source_sync_shutdown).await;
         "video source sync"
+    });
+    runtime_tasks.spawn(async move {
+        let _ = release_source_sync.run(release_source_sync_shutdown).await;
+        "release source sync"
+    });
+    runtime_tasks.spawn(async move {
+        let _ = social_post_source_sync
+            .run(social_post_source_sync_shutdown)
+            .await;
+        "social post source sync"
     });
     runtime_tasks.spawn(async move {
         let _ = gdrive_contacts_sync

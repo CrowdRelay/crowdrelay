@@ -24,7 +24,10 @@ use crowdrelay_domain::{
         evaluate_booking_followup, evaluate_booking_opportunity, select_booking_target,
     },
     campaign_lifecycle::{EventCampaignDecision, EventCampaignSnapshot, evaluate_event_campaign},
-    content_supply::{ContentSupplyDecision, ContentSupplySnapshot, evaluate_content_supply},
+    content_supply::{
+        ContentSupplyDecision, ContentSupplyHoldReason, ContentSupplySnapshot,
+        evaluate_content_supply,
+    },
     deliverability::{DeliverabilityPolicy, ramped_ceiling},
     experimentation::{ExperimentDecision, ExperimentSnapshot, evaluate_experiment},
     free_reach::{
@@ -347,10 +350,47 @@ where
                         .repository
                         .load_content_supply_snapshots(self.workspace_id, now)
                         .await?;
-                    for snapshot in snapshots {
-                        if let Some(candidate) = content_candidate(&snapshot, &policy, now)? {
+                    // The stop rule: no live material is not a quiet portfolio,
+                    // it is the band having done nothing public lately — and
+                    // the cycle owes that explanation rather than a generic
+                    // "nothing scored". "Live" is the evaluator's own verdict:
+                    // a shelf of expired sources must not read as activity, so
+                    // the count asks the same question the candidates do.
+                    let AutopilotPolicyConfig::ContentSupply(supply_policy) = &policy.config else {
+                        continue;
+                    };
+                    let live = snapshots
+                        .iter()
+                        .filter(|snapshot| {
+                            !matches!(
+                                evaluate_content_supply(snapshot, *supply_policy, now),
+                                ContentSupplyDecision::Hold(
+                                    ContentSupplyHoldReason::InvalidSnapshot
+                                        | ContentSupplyHoldReason::StaleSource
+                                )
+                            )
+                        })
+                        .count();
+                    let mut produced = 0usize;
+                    for snapshot in &snapshots {
+                        if let Some(candidate) = content_candidate(snapshot, &policy, now)? {
+                            produced += 1;
                             self.persist(&candidate, &mut limits, &mut report).await?;
                         }
+                    }
+                    if live == 0 {
+                        report.supply_wait_reason = Some(if snapshots.is_empty() {
+                            "no live material — no event, release, show, video, post or story is on file"
+                                .to_owned()
+                        } else {
+                            "no live material — everything on file is retired or past its shareable window"
+                                .to_owned()
+                        });
+                    } else if produced == 0 {
+                        report.supply_wait_reason = Some(
+                            "material on file has produced everything owed — waiting for something new to share"
+                                .to_owned(),
+                        );
                     }
                 }
                 AutopilotContext::Experimentation => {

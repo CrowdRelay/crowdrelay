@@ -888,6 +888,7 @@ pub(super) fn parse_content_source_kind(value: &str) -> Result<ContentSourceKind
         "show_completed" => Ok(ContentSourceKind::ShowCompleted),
         "video" => Ok(ContentSourceKind::Video),
         "story" => Ok(ContentSourceKind::Story),
+        "social_post" => Ok(ContentSourceKind::SocialPost),
         _ => Err(RepositoryError::Unexpected),
     }
 }

@@ -209,7 +209,7 @@ pub(in crate::autopilot) async fn settle_capture_plans(
             sqlx::query_scalar::<_, i64>(
                 r#"SELECT COUNT(*) FROM viryaos_content_sources s
                    WHERE s.workspace_id=$1 AND s.active
-                     AND s.source_kind IN ('video','story')
+                     AND s.source_kind IN ('video','story','social_post')
                      AND s.occurred_at >= $2 AND s.occurred_at < $3"#,
             )
             .bind(workspace_id.into_uuid())

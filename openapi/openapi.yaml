@@ -11847,7 +11847,7 @@ components:
 
     ContentSourceKind:
       type: string
-      enum: [event, release, show_completed, video, story]
+      enum: [event, release, show_completed, video, story, social_post]
     ContentSourceRequest:
       type: object
       additionalProperties: false
