@@ -177,6 +177,10 @@ pub async fn put_listing(
                 && claim.label.chars().count() <= 120
                 && !claim.basis.trim().is_empty()
                 && claim.basis.chars().count() <= 200
+                // A claim is a count or a date — a negative number is not a
+                // thing the band can stand behind, and the public page
+                // refuses the whole listing over one.
+                && claim.value.is_none_or(|value| value >= 0)
         });
     if !bounded {
         return Problem::bad_request(request_id_value)
@@ -295,7 +299,10 @@ pub struct RepresentationTargetBody {
     accepts_outreach_basis: Option<String>,
     #[serde(default = "default_true")]
     active: bool,
-    #[serde(default = "default_true")]
+    /// Confirmed means the band attests the address reaches the person —
+    /// it must be said, not defaulted, or the NotVerified gate is a
+    /// pretense on this feature's primary path.
+    #[serde(default)]
     verified: bool,
     do_not_contact: bool,
     #[serde(default)]
@@ -451,14 +458,18 @@ pub async fn request_representation_approach(
         )
         .await
     {
-        Ok(ApproachOutcome::Queued { action_id }) | Ok(ApproachOutcome::Replayed { action_id }) => {
-            (
-                StatusCode::ACCEPTED,
-                [(axum::http::header::CACHE_CONTROL, "private, no-store")],
-                Json(json!({ "action_id": action_id, "status": "awaiting_approval" })),
-            )
-                .into_response()
-        }
+        Ok(ApproachOutcome::Queued { action_id }) => (
+            StatusCode::ACCEPTED,
+            [(axum::http::header::CACHE_CONTROL, "private, no-store")],
+            Json(json!({ "action_id": action_id, "status": "awaiting_approval" })),
+        )
+            .into_response(),
+        Ok(ApproachOutcome::Replayed { action_id, status }) => (
+            StatusCode::ACCEPTED,
+            [(axum::http::header::CACHE_CONTROL, "private, no-store")],
+            Json(json!({ "action_id": action_id, "status": status })),
+        )
+            .into_response(),
         Err(error) => representation_problem(error, request_id_value),
     }
 }

@@ -303,6 +303,10 @@ pub(in crate::autopilot) async fn load_outreach_snapshots(
          AND target.id = opportunity.target_id
         WHERE opportunity.workspace_id = $1
           AND opportunity.active
+          -- Representation targets are approached by the band's own request,
+          -- never by an auto-pitched opportunity; a stray row for one must not
+          -- reach `parse_outreach_kind` and poison the whole context.
+          AND target.target_kind IN ('playlist','radio','press','creator','support_slot','endorsement','media_patronage')
         ORDER BY opportunity.relevance_basis_points DESC, opportunity.id
         LIMIT $2
         "#,
