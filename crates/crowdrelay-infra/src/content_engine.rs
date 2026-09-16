@@ -1063,9 +1063,9 @@ impl PostgresContentEngineRepository {
 
     /// Raises a suggestion. The caller — the suggestion engine — has already
     /// applied `distribution_promise_is_empty`; an empty promise never
-    /// reaches this table. This is a raw insert: the open-format and
-    /// declined-format suppression live in `refresh_suggestions`' ranking
-    /// inputs, so a caller bypassing that path bypasses the queue rules too.
+    /// reaches this table. A raw insert: the open-format and declined-format
+    /// suppression live in `refresh_suggestions`' inputs, so a caller
+    /// bypassing that path bypasses the queue rules too.
     pub async fn create_suggestion(
         &self,
         workspace_id: WorkspaceId,
@@ -1115,6 +1115,7 @@ impl PostgresContentEngineRepository {
             SELECT * FROM viryaos_content_suggestions
             WHERE workspace_id = $1 AND status IN ('raised', 'approved')
               AND (status = 'approved' OR expires_at IS NULL OR expires_at > now())
+              AND (status <> 'approved' OR suggested_before IS NULL OR suggested_before >= CURRENT_DATE)
             ORDER BY created_at DESC
             "#,
         )

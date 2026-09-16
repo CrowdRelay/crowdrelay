@@ -916,8 +916,8 @@ const PL: &[(&str, &str)] = &[
         "Wysłanego pusha nie da się cofnąć — przeczytaj dokładnie",
     ),
     (
-        "Approved stays open until the band reports done, declined, or done differently",
-        "Zatwierdzone zostaje otwarte, dopóki zespół nie zgłosi: zrobione, odrzucone albo zrobione inaczej",
+        "Approved stays open until the band reports done, declined, or done differently — or the beat's day passes unreported",
+        "Zatwierdzone zostaje otwarte, dopóki zespół nie zgłosi: zrobione, odrzucone albo zrobione inaczej — albo dopóki nie minie dzień odcinka bez zgłoszenia",
     ),
     (
         "Beats in the spine then surface as ordinary suggestions under the same policy",

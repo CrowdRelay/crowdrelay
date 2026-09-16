@@ -216,7 +216,13 @@ impl PostgresAutopilotRepository {
                         .rows_affected();
                         // The outcome row pairs with the transition or it
                         // does not exist — an already-resolved suggestion
-                        // earns no second verdict.
+                        // earns no second verdict. The corner case is a
+                        // decline racing the expiry sweep: a suggestion
+                        // flipped `expired` mid-cancel matches no row, so
+                        // the cancel commits while the "not for us" is
+                        // dropped — the format is not suppressed and a
+                        // re-raised beat will earn the verdict on the next
+                        // refusal.
                         if changed > 0 {
                             sqlx::query(
                                 r#"

@@ -647,7 +647,9 @@ pub enum AutopilotActionPayload {
     /// distribution promise; this action is the surface the band answers on.
     ///
     /// Approving marks the suggestion `approved` — the work is committed and
-    /// stays open until the band reports done, declined or done-differently.
+    /// stays open until the band reports done, declined or done-differently,
+    /// or until the beat's day passes unreported (the sweep resolves it
+    /// `expired` — the window closed; whether it happened is unmeasured).
     /// Cancelling resolves it `declined`: "not for us" is a first-class taste
     /// signal the engine learns from, not a dismissal.
     RaiseContentSuggestion {

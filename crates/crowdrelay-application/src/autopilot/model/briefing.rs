@@ -533,7 +533,7 @@ impl AutopilotActionPayload {
                 why_it_matters: "The content engine ranked this beat against everything else the band could make — it is the suggestion, not one of thirty.".into(),
                 steps: vec![
                     BriefingStep { what_to_do: "Read the reason and who it reaches".into(), why_it_matters: "A suggestion with no real audience is not raised; check the promise is still true".into() },
-                    BriefingStep { what_to_do: "Click APPROVE to commit to the beat".into(), why_it_matters: "Approved stays open until the band reports done, declined, or done differently".into() },
+                    BriefingStep { what_to_do: "Click APPROVE to commit to the beat".into(), why_it_matters: "Approved stays open until the band reports done, declined, or done differently — or the beat's day passes unreported".into() },
                 ],
                 content: {
                     let mut fields = vec![

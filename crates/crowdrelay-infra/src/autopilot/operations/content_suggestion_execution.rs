@@ -14,8 +14,10 @@ pub(in crate::autopilot) async fn approve_content_suggestion(
 ) -> Result<(), RepositoryError> {
     // Approval commits the band to the beat: raised → approved is the
     // transition nobody else may write, and the row stays open until the band
-    // reports an outcome. A lapsed suggestion is a dead ask — the window it
-    // argued for has passed, and committing the band to it now would be a lie.
+    // reports an outcome or the beat's day passes unreported — the suggestion
+    // sweep resolves an overdue commitment `expired` then. A lapsed suggestion
+    // is a dead ask — the window it argued for has passed, and committing the
+    // band to it now would be a lie.
     let changed = sqlx::query(
         r#"
         UPDATE viryaos_content_suggestions
