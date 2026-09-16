@@ -59,6 +59,7 @@ impl AutopilotOutreachStateRepository for PostgresAutopilotRepository {
                 "active": command.active,
                 "verified": command.verified,
                 "accepts_outreach": command.accepts_outreach,
+                "accepts_outreach_basis": &command.accepts_outreach_basis,
                 "do_not_contact": command.do_not_contact,
                 "expected_version": command.expected_version,
             });
@@ -78,30 +79,32 @@ impl AutopilotOutreachStateRepository for PostgresAutopilotRepository {
                 sqlx::query_scalar::<_, i64>(r#"
                     INSERT INTO viryaos_outreach_targets(
                         id,workspace_id,target_kind,display_name,contact_email,priority,
-                        relationship_score,active,verified,accepts_outreach,do_not_contact
-                    ) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+                        relationship_score,active,verified,accepts_outreach,accepts_outreach_basis,do_not_contact
+                    ) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
                     RETURNING version
                 "#)
                 .bind(target_id.into_uuid()).bind(workspace_id.into_uuid())
                 .bind(outreach_target_kind_str(command.kind)).bind(command.display_name.trim())
                 .bind(command.contact_email.trim().to_ascii_lowercase()).bind(i32::from(command.priority))
                 .bind(i32::from(command.relationship_score)).bind(command.active).bind(command.verified)
-                .bind(command.accepts_outreach).bind(command.do_not_contact)
+                .bind(command.accepts_outreach).bind(command.accepts_outreach_basis.as_deref().map(str::trim))
+                .bind(command.do_not_contact)
                 .fetch_one(&mut *tx).await.map_err(map_sqlx)?
             } else {
                 sqlx::query_scalar::<_, i64>(r#"
                     UPDATE viryaos_outreach_targets
                     SET target_kind=$3,display_name=$4,contact_email=$5,priority=$6,
                         relationship_score=$7,active=$8,verified=$9,accepts_outreach=$10,
-                        do_not_contact=$11,version=version+1
-                    WHERE workspace_id=$1 AND id=$2 AND version=$12
+                        accepts_outreach_basis=$11,do_not_contact=$12,version=version+1
+                    WHERE workspace_id=$1 AND id=$2 AND version=$13
                     RETURNING version
                 "#)
                 .bind(workspace_id.into_uuid()).bind(target_id.into_uuid())
                 .bind(outreach_target_kind_str(command.kind)).bind(command.display_name.trim())
                 .bind(command.contact_email.trim().to_ascii_lowercase()).bind(i32::from(command.priority))
                 .bind(i32::from(command.relationship_score)).bind(command.active).bind(command.verified)
-                .bind(command.accepts_outreach).bind(command.do_not_contact).bind(command.expected_version)
+                .bind(command.accepts_outreach).bind(command.accepts_outreach_basis.as_deref().map(str::trim))
+                .bind(command.do_not_contact).bind(command.expected_version)
                 .fetch_optional(&mut *tx).await.map_err(map_sqlx)?.ok_or(RepositoryError::Conflict)?
             };
             sqlx::query(r#"
@@ -109,7 +112,8 @@ impl AutopilotOutreachStateRepository for PostgresAutopilotRepository {
                 SELECT workspace_id,id,version,jsonb_build_object(
                     'target_kind',target_kind,'display_name',display_name,'contact_email',contact_email,
                     'priority',priority,'relationship_score',relationship_score,'active',active,
-                    'verified',verified,'accepts_outreach',accepts_outreach,'do_not_contact',do_not_contact)
+                    'verified',verified,'accepts_outreach',accepts_outreach,
+                    'accepts_outreach_basis',accepts_outreach_basis,'do_not_contact',do_not_contact)
                 FROM viryaos_outreach_targets WHERE workspace_id=$1 AND id=$2 AND version=$3
             "#).bind(workspace_id.into_uuid()).bind(target_id.into_uuid()).bind(version)
               .execute(&mut *tx).await.map_err(map_sqlx)?;
@@ -1193,6 +1197,8 @@ const fn outreach_target_kind_str(kind: OutreachTargetKind) -> &'static str {
         OutreachTargetKind::SupportSlot => "support_slot",
         OutreachTargetKind::Endorsement => "endorsement",
         OutreachTargetKind::MediaPatronage => "media_patronage",
+        OutreachTargetKind::Agent => "agent",
+        OutreachTargetKind::Label => "label",
     }
 }
 

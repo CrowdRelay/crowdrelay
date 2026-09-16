@@ -206,6 +206,8 @@ pub struct OutreachTargetRequest {
     active: bool,
     verified: bool,
     accepts_outreach: bool,
+    #[serde(default)]
+    accepts_outreach_basis: Option<String>,
     do_not_contact: bool,
     expected_version: i64,
 }

@@ -64,6 +64,7 @@ mod area_admin;
 mod audience;
 mod audience_graph;
 mod autopilot;
+mod band_listing;
 mod beacon_signal;
 mod commerce;
 mod community_intelligence_routes;
@@ -1009,7 +1010,7 @@ struct Problem {
     r#type: &'static str,
     title: &'static str,
     status: u16,
-    detail: &'static str,
+    detail: std::borrow::Cow<'static, str>,
     #[serde(skip)]
     cache_control: &'static str,
     #[serde(skip)]
@@ -1024,7 +1025,9 @@ impl Problem {
             r#type: "https://crowdrelay.dev/problems/dependency-unavailable",
             title: "Service temporarily unavailable",
             status: StatusCode::SERVICE_UNAVAILABLE.as_u16(),
-            detail: "A required dependency is unavailable. Retry later.",
+            detail: std::borrow::Cow::Borrowed(
+                "A required dependency is unavailable. Retry later.",
+            ),
             cache_control: "no-store",
             retry_after_seconds: None,
             request_id,
@@ -1036,7 +1039,7 @@ impl Problem {
             r#type: "https://crowdrelay.dev/problems/bad-request",
             title: "Bad request",
             status: StatusCode::BAD_REQUEST.as_u16(),
-            detail: "The request could not be parsed or validated.",
+            detail: std::borrow::Cow::Borrowed("The request could not be parsed or validated."),
             cache_control: "no-store",
             retry_after_seconds: None,
             request_id,
@@ -1050,7 +1053,7 @@ impl Problem {
             r#type: "https://crowdrelay.dev/problems/bad-request",
             title: "Bad request",
             status: StatusCode::BAD_REQUEST.as_u16(),
-            detail,
+            detail: std::borrow::Cow::Borrowed(detail),
             cache_control: "no-store",
             retry_after_seconds: None,
             request_id,
@@ -1062,7 +1065,9 @@ impl Problem {
             r#type: "https://crowdrelay.dev/problems/unauthorized",
             title: "Authentication required",
             status: StatusCode::UNAUTHORIZED.as_u16(),
-            detail: "Valid authentication is required for this operation.",
+            detail: std::borrow::Cow::Borrowed(
+                "Valid authentication is required for this operation.",
+            ),
             cache_control: "no-store",
             retry_after_seconds: None,
             request_id,
@@ -1074,7 +1079,9 @@ impl Problem {
             r#type: "https://crowdrelay.dev/problems/not-found",
             title: "Resource not found",
             status: StatusCode::NOT_FOUND.as_u16(),
-            detail: "The requested resource does not exist or is inactive.",
+            detail: std::borrow::Cow::Borrowed(
+                "The requested resource does not exist or is inactive.",
+            ),
             cache_control: "no-store",
             retry_after_seconds: None,
             request_id,
@@ -1094,6 +1101,12 @@ impl Problem {
     /// Where the repository knows why — an action that already ran, an approval
     /// window that closed — that reason reaches the operator instead.
     fn conflict_because(detail: &'static str, request_id: Option<String>) -> Self {
+        Self::conflict_owned(std::borrow::Cow::Borrowed(detail), request_id)
+    }
+
+    /// A conflict carrying a reason the domain wrote at runtime — a gate
+    /// refusal the band reads, where the sentence is not known statically.
+    fn conflict_owned(detail: std::borrow::Cow<'static, str>, request_id: Option<String>) -> Self {
         Self {
             r#type: "https://crowdrelay.dev/problems/conflict",
             title: "Request conflicts with existing state",
@@ -1110,7 +1123,9 @@ impl Problem {
             r#type: "https://crowdrelay.dev/problems/policy-violation",
             title: "Request violates signup policy",
             status: StatusCode::UNPROCESSABLE_ENTITY.as_u16(),
-            detail: "The supplied values do not satisfy the signup policy.",
+            detail: std::borrow::Cow::Borrowed(
+                "The supplied values do not satisfy the signup policy.",
+            ),
             cache_control: "no-store",
             retry_after_seconds: None,
             request_id,
@@ -1122,7 +1137,7 @@ impl Problem {
             r#type: "https://crowdrelay.dev/problems/payload-too-large",
             title: "Request payload is too large",
             status: StatusCode::PAYLOAD_TOO_LARGE.as_u16(),
-            detail: "The request body exceeds the permitted size.",
+            detail: std::borrow::Cow::Borrowed("The request body exceeds the permitted size."),
             cache_control: "no-store",
             retry_after_seconds: None,
             request_id,
@@ -1134,7 +1149,9 @@ impl Problem {
             r#type: "https://crowdrelay.dev/problems/rate-limited",
             title: "Too many requests",
             status: StatusCode::TOO_MANY_REQUESTS.as_u16(),
-            detail: "The request exceeded the permitted rate. Retry after the indicated interval.",
+            detail: std::borrow::Cow::Borrowed(
+                "The request exceeded the permitted rate. Retry after the indicated interval.",
+            ),
             cache_control: "no-store",
             retry_after_seconds: Some(1),
             request_id,
@@ -1146,7 +1163,7 @@ impl Problem {
             r#type: "https://crowdrelay.dev/problems/internal",
             title: "Internal server error",
             status: StatusCode::INTERNAL_SERVER_ERROR.as_u16(),
-            detail: "The request could not be completed.",
+            detail: std::borrow::Cow::Borrowed("The request could not be completed."),
             cache_control: "no-store",
             retry_after_seconds: None,
             request_id,

@@ -45,6 +45,11 @@ const OUTREACH_KINDS: &[&str] = &[
     "creator",
 ];
 const BOOKING_KINDS: &[&str] = &["venue", "promoter", "festival"];
+// Agents and labels the band already dealt with file onto the
+// representation list — a different home from the press kinds because the
+// consent they carry is different: not "published a route", but "the band
+// says why they would hear from it", stated before the first approach.
+const REPRESENTATION_KINDS: &[&str] = &["agent", "label"];
 
 #[derive(Serialize)]
 pub struct DriveContact {
@@ -229,7 +234,11 @@ pub async fn promote_contact(
                 .filter(|k| !k.is_empty())
                 .map(|k| k.to_ascii_lowercase().replace([' ', '-'], "_"));
             let kind = match normalized_kind.as_deref() {
-                Some(k) if OUTREACH_KINDS.contains(&k) || BOOKING_KINDS.contains(&k) => {
+                Some(k)
+                    if OUTREACH_KINDS.contains(&k)
+                        || BOOKING_KINDS.contains(&k)
+                        || REPRESENTATION_KINDS.contains(&k) =>
+                {
                     k.to_owned()
                 }
                 Some(_) => return Problem::bad_request(request_id_value).into_response(),
@@ -239,6 +248,24 @@ pub async fn promote_contact(
                     .unwrap_or_else(|| "press".to_owned()),
             };
             let kind = kind.as_str();
+            if REPRESENTATION_KINDS.contains(&kind) {
+                return match repo
+                    .promote_beacon_representation(workspace_id, &contact, kind)
+                    .await
+                {
+                    Ok(()) => (
+                        StatusCode::OK,
+                        Json(serde_json::json!({ "beacon_outcome": "promoted" })),
+                    )
+                        .into_response(),
+                    Err(error) => {
+                        tracing::warn!(%error, "gdrive representation promote failed");
+                        Problem::service_unavailable(request_id_value)
+                            .private()
+                            .into_response()
+                    }
+                };
+            }
             if BOOKING_KINDS.contains(&kind) {
                 return match repo
                     .promote_beacon_booking(

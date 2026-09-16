@@ -88,7 +88,11 @@ pub(super) async fn schedule_effect_measurement(
             0.0,
             now + time::Duration::days(7),
         )),
-        AutopilotActionPayload::RequestOutreach { target_id, .. } => plans.push((
+        AutopilotActionPayload::RequestOutreach { target_id, .. }
+        // An approach is measured the way a pitch is: did the contact write
+        // back inside the week. The kind it is approached about lives on
+        // the target, so the reply count needs no new measurement kind.
+        | AutopilotActionPayload::RequestRepresentationApproach { target_id, .. } => plans.push((
             AutopilotMeasurementKind::OutreachReply7d,
             target_id.into_uuid(),
             0.0,

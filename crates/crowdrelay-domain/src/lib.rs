@@ -106,6 +106,7 @@ pub mod publish_guard;
 pub mod referrals;
 pub mod release_autopilot;
 pub mod reply_triage;
+pub mod representation;
 pub mod scan_scope;
 pub mod show_growth;
 pub mod show_operations;

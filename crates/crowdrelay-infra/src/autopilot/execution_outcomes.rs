@@ -49,6 +49,9 @@ pub(super) async fn record_execution_outcome(
             bundle_price_minor, ..
         } => ("merch_bundle_price_minor", *bundle_price_minor as f64, None),
         AutopilotActionPayload::RequestOutreach { .. } => ("outreach_requested", 1.0, None),
+        AutopilotActionPayload::RequestRepresentationApproach { .. } => {
+            ("representation_approach_requested", 1.0, None)
+        }
         AutopilotActionPayload::RequestBeaconDiscovery { .. } => ("beacon_discovery_requested", 1.0, None),
         AutopilotActionPayload::RequestOutreachDiscovery { .. } => ("outreach_discovery_requested", 1.0, None),
         AutopilotActionPayload::RequestBookingTargetDiscovery { .. } => ("booking_target_discovery_requested", 1.0, None),

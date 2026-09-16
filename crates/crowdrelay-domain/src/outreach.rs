@@ -22,6 +22,8 @@ pub enum OutreachTargetKind {
     SupportSlot,
     Endorsement,
     MediaPatronage,
+    Agent,
+    Label,
 }
 
 impl OutreachTargetKind {
@@ -35,6 +37,8 @@ impl OutreachTargetKind {
             Self::SupportSlot => "support_slot",
             Self::Endorsement => "endorsement",
             Self::MediaPatronage => "media_patronage",
+            Self::Agent => "agent",
+            Self::Label => "label",
         }
     }
 
@@ -48,12 +52,14 @@ impl OutreachTargetKind {
             "support_slot" => Some(Self::SupportSlot),
             "endorsement" => Some(Self::Endorsement),
             "media_patronage" => Some(Self::MediaPatronage),
+            "agent" => Some(Self::Agent),
+            "label" => Some(Self::Label),
             _ => None,
         }
     }
 
     #[must_use]
-    pub const fn all() -> [Self; 7] {
+    pub const fn all() -> [Self; 9] {
         [
             Self::Playlist,
             Self::Radio,
@@ -62,7 +68,19 @@ impl OutreachTargetKind {
             Self::SupportSlot,
             Self::Endorsement,
             Self::MediaPatronage,
+            Self::Agent,
+            Self::Label,
         ]
+    }
+
+    /// Whether this is a representation contact — a booking agent or a
+    /// label the band approaches for its career rather than a channel it
+    /// pitches a release to. Representation kinds carry the consent basis
+    /// rule: `accepts_outreach` may only be true when a basis was stated,
+    /// which `review_approach` and the schema CHECK enforce together.
+    #[must_use]
+    pub const fn is_representation(self) -> bool {
+        matches!(self, Self::Agent | Self::Label)
     }
 }
 

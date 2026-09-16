@@ -440,6 +440,74 @@ impl PostgresGDriveRepository {
         Ok(())
     }
 
+    /// Promotes a contact onto the representation list — an agent or label
+    /// the band's own files already knew. First-party provenance is why
+    /// `verified` lands true: the address came out of the band's drive, not
+    /// a researched guess. Consent is *not* presumed — `accepts_outreach`
+    /// stays false and the basis stays empty until the band says why this
+    /// contact accepts approaches, which the schema CHECK requires anyway.
+    ///
+    /// One address is one target (`UNIQUE (workspace_id, contact_email)`):
+    /// if the email is already filed under another kind the kind is left
+    /// alone — a press writer who also books acts keeps their existing
+    /// row, and the contact still counts as filed.
+    pub async fn promote_beacon_representation(
+        &self,
+        workspace_id: Uuid,
+        contact: &DriveContactRow,
+        target_kind: &str,
+    ) -> Result<(), GDriveError> {
+        if !matches!(target_kind, "agent" | "label") {
+            return Err(GDriveError::InvalidKind);
+        }
+        let mut tx = self.pool.begin().await?;
+        let display_name: String = contact
+            .display_name
+            .clone()
+            .or_else(|| contact.organization.clone())
+            .unwrap_or_else(|| contact.normalized_email.clone())
+            .trim()
+            .chars()
+            .take(200)
+            .collect();
+        let display_name = if display_name.is_empty() {
+            contact.normalized_email.trim().chars().take(200).collect()
+        } else {
+            display_name
+        };
+        sqlx::query(
+            r#"
+            INSERT INTO viryaos_outreach_targets
+                (workspace_id, target_kind, display_name, contact_email,
+                 active, verified, accepts_outreach, do_not_contact)
+            VALUES ($1, $2, $3, $4, true, true, false, false)
+            ON CONFLICT (workspace_id, contact_email) DO UPDATE SET
+                target_kind = CASE
+                    WHEN viryaos_outreach_targets.target_kind IN ('agent','label')
+                        THEN EXCLUDED.target_kind
+                    ELSE viryaos_outreach_targets.target_kind
+                END,
+                display_name = EXCLUDED.display_name,
+                updated_at = now()
+            "#,
+        )
+        .bind(workspace_id)
+        .bind(target_kind)
+        .bind(&display_name)
+        .bind(&contact.normalized_email)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            "UPDATE viryaos_drive_contacts SET beacon_outcome = 'promoted' WHERE workspace_id = $1 AND id = $2",
+        )
+        .bind(workspace_id)
+        .bind(contact.id)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
     /// Promotes a contact into booking supply: a `viryaos_booking_candidates`
     /// row, admitted on first-party grounds — the band's own sent mail is the
     /// evidence (`source_reference` carries the thread), which is exactly what

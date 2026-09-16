@@ -491,6 +491,26 @@ pub enum AutopilotActionPayload {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         wave_id: Option<uuid::Uuid>,
     },
+    /// Ask the platform to introduce the band to a representation contact —
+    /// a booking agent or a label the band wants carrying its career. The
+    /// published listing is the pitch: the emitted event carries its
+    /// redacted claims and share link, and dispatch refuses if the listing
+    /// has been unlisted since the approach was requested.
+    ///
+    /// The agent's address never reaches the band, so the send is brokered
+    /// and our reputation rides on it — which is why the consent, evidence
+    /// and allowance gates in `crowdrelay_domain::representation` run again
+    /// in the execution arm rather than only at request time.
+    RequestRepresentationApproach {
+        target_id: OutreachTargetId,
+        target_version: i64,
+        target_name: String,
+        /// One line of the band's own words under the listing — "we met
+        /// after the Wrocław show". Capped at the API boundary; absent means
+        /// the listing speaks alone.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        note: Option<String>,
+    },
     /// Read a public playlist and report whether the track is in it.
     ///
     /// Contacts nobody and changes nothing outside the workspace, so it is
@@ -879,6 +899,7 @@ impl AutopilotActionPayload {
             // approach to each of them.
             Self::RequestBookingOutreach { .. }
             | Self::RequestOutreach { .. }
+            | Self::RequestRepresentationApproach { .. }
             | Self::RequestBeaconOutreach { .. }
             // A partner being asked to carry invite codes is a real-world
             // approach to somebody else's community, not a message to ours.
@@ -997,6 +1018,7 @@ impl AutopilotActionPayload {
             Self::RequestAudienceCampaign { .. } => "audience.campaign.request",
             Self::RequestMerchBundle { .. } => "merch.bundle.request",
             Self::RequestOutreach { .. } => "outreach.request",
+            Self::RequestRepresentationApproach { .. } => "representation.approach.request",
             Self::RequestBeaconDiscovery { .. } => "beacon.discovery.request",
             Self::RequestBookingTargetDiscovery { .. } => "booking.target_discovery.request",
             Self::RequestBeaconInviteBatch { .. } => "beacon.invite_batch.request",
