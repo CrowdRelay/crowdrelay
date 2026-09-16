@@ -157,7 +157,7 @@ impl PostgresContentEngineRepository {
         let trends = self.list_trends(workspace_id).await?;
         let anchors = self.arc_anchors(workspace_id, today).await?;
 
-        let feasible: Vec<_> = formats
+        let mut feasible: Vec<_> = formats
             .into_iter()
             .filter(|entry| entry.capability_gap(&profile).is_none())
             .collect();
@@ -233,6 +233,10 @@ impl PostgresContentEngineRepository {
         }
 
         let declined = self.declined_anchor_ids(&mut tx, workspace_id).await?;
+        // A declined format is taste, not timing — a spine built on it
+        // would re-ask the same "not for us" inside a season's clothing.
+        let declined_formats = self.declined_format_keys(&mut tx, workspace_id).await?;
+        feasible.retain(|entry| !declined_formats.contains(&entry.key));
         let proposed = propose_arc(&ArcInputs {
             anchors: &anchors,
             feasible_formats: &feasible,

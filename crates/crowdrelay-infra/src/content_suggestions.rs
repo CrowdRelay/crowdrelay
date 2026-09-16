@@ -2,10 +2,12 @@
 //! deterministic ranker, persist the survivors.
 //!
 //! `crowdrelay-brain::content_suggestions` is pure; this module is where
-//! its inputs come from. The reads happen on a consistent snapshot inside
-//! one transaction under the same per-workspace advisory lock the trend
-//! refresh uses — two sweeps racing a suggestion pass cannot interleave
-//! reads and writes into a duplicate raise.
+//! its inputs come from. Slowly-changing inputs (catalogue, trends,
+//! reach) are read before the transaction as a deliberately loose
+//! snapshot; the correctness-critical reads — open suggestions, declined
+//! formats, headroom — run inside it under the per-workspace advisory
+//! lock `"{ws}:suggestions"`, so two sweeps racing a suggestion pass
+//! cannot interleave into a duplicate raise.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -34,6 +36,13 @@ struct ReachRow {
 struct OpenSuggestionKeyRow {
     format_key: Option<String>,
 }
+
+/// How long a band's "not for us" keeps a format out of the queue. An arc
+/// decline is "not this season" and cools the anchor for a fortnight; a
+/// suggestion decline is the format itself, so the window runs half a
+/// season — long enough that re-asking reads as not listening, short
+/// enough that a genuinely changed band can be argued back by evidence.
+pub(crate) const TASTE_COOLDOWN_DAYS: i64 = 42;
 
 #[derive(Debug, FromRow)]
 struct HistoryRow {
@@ -178,6 +187,36 @@ impl PostgresContentEngineRepository {
     /// `raised` suggestions. Returns the rows written — an empty vec is a
     /// truthful "nothing worth the band's time today".
     ///
+    /// Format keys the band declined inside [`TASTE_COOLDOWN_DAYS`] — the
+    /// "not for us" the ranker honours. Only `declined` counts: `expired`
+    /// is timing and `done_differently` is a version of yes. Bespoke
+    /// concepts carry no catalogue key, so nothing here can suppress them
+    /// — recorded, but not a taste signal the engine can act on. The read
+    /// runs inside the caller's transaction so a decline committed before
+    /// the lock applies to this sweep.
+    pub(crate) async fn declined_format_keys(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        workspace_id: WorkspaceId,
+    ) -> Result<BTreeSet<String>> {
+        let keys = sqlx::query_scalar::<_, String>(
+            r#"
+            SELECT DISTINCT s.format_key
+            FROM viryaos_suggestion_outcomes AS o
+            JOIN viryaos_content_suggestions AS s
+              ON s.workspace_id = o.workspace_id AND s.id = o.suggestion_id
+            WHERE o.workspace_id = $1 AND o.outcome = 'declined'
+              AND o.resolved_at >= now() - make_interval(days => $2)
+              AND s.format_key IS NOT NULL
+            "#,
+        )
+        .bind(workspace_id.into_uuid())
+        .bind(i32::try_from(TASTE_COOLDOWN_DAYS).unwrap_or(i32::MAX))
+        .fetch_all(&mut **tx)
+        .await?;
+        Ok(keys.into_iter().collect())
+    }
+
     /// The input reads happen before the transaction — they are a loose
     /// snapshot of slowly-changing state (formats, trends, reach), and
     /// holding a connection across them would starve a one-connection
@@ -274,12 +313,15 @@ impl PostgresContentEngineRepository {
             return Ok(Vec::new());
         }
 
+        let declined_format_keys = self.declined_format_keys(&mut tx, workspace_id).await?;
+
         let ranked = rank_suggestions(&RankingInputs {
             formats: &formats,
             profile: &profile,
             trends: &trends,
             production: &production,
             open_format_keys: &open_format_keys,
+            declined_format_keys: &declined_format_keys,
             arc_format_keys: &arc_keys,
             outcome_counts: &outcome_counts,
             suggestion_counts: &suggestion_counts,

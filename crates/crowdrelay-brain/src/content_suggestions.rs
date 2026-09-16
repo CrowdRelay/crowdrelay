@@ -270,6 +270,10 @@ pub struct RankingInputs<'a> {
     pub production: &'a [ScheduledProduction],
     /// Format keys with an open suggestion already — never re-raise.
     pub open_format_keys: &'a BTreeSet<String>,
+    /// Format keys the band declined inside the taste cooldown — a "not
+    /// for us" is a verdict, not a pause, so the concept stays out of the
+    /// queue until the window lapses and evidence can argue it back.
+    pub declined_format_keys: &'a BTreeSet<String>,
     /// Format key → arc id, written into an active arc's spine.
     pub arc_format_keys: &'a BTreeMap<String, Uuid>,
     /// Outcome count per format key — what the band has already tried.
@@ -298,7 +302,10 @@ pub fn rank_suggestions(inputs: &RankingInputs<'_>) -> Vec<ScoredSuggestion> {
     let arc_active = !inputs.arc_format_keys.is_empty();
     let mut scored: Vec<ScoredSuggestion> = Vec::new();
     for entry in inputs.formats {
-        if !entry.active || inputs.open_format_keys.contains(&entry.key) {
+        if !entry.active
+            || inputs.open_format_keys.contains(&entry.key)
+            || inputs.declined_format_keys.contains(&entry.key)
+        {
             continue;
         }
         if entry.capability_gap(inputs.profile).is_some() {
@@ -521,6 +528,7 @@ mod tests {
         trends: &'a [ContentTrend],
         production: &'a [ScheduledProduction],
         open: &'a BTreeSet<String>,
+        declined: &'a BTreeSet<String>,
         arc: &'a BTreeMap<String, Uuid>,
         outcomes: &'a BTreeMap<String, u32>,
         suggestions: &'a BTreeMap<String, u32>,
@@ -532,6 +540,7 @@ mod tests {
             trends,
             production,
             open_format_keys: open,
+            declined_format_keys: declined,
             arc_format_keys: arc,
             outcome_counts: outcomes,
             suggestion_counts: suggestions,
@@ -558,6 +567,7 @@ mod tests {
             &[],
             &[],
             &BTreeSet::new(),
+            &BTreeSet::new(),
             &BTreeMap::new(),
             &BTreeMap::new(),
             &BTreeMap::new(),
@@ -582,6 +592,7 @@ mod tests {
             &profile(),
             &[],
             &[],
+            &BTreeSet::new(),
             &BTreeSet::new(),
             &BTreeMap::new(),
             &BTreeMap::new(),
@@ -610,6 +621,7 @@ mod tests {
             &profile(),
             &[],
             &shoot,
+            &BTreeSet::new(),
             &BTreeSet::new(),
             &BTreeMap::new(),
             &BTreeMap::new(),
@@ -647,6 +659,7 @@ mod tests {
             &profile(),
             &[],
             &far,
+            &BTreeSet::new(),
             &BTreeSet::new(),
             &BTreeMap::new(),
             &BTreeMap::new(),
@@ -689,6 +702,7 @@ mod tests {
             std::slice::from_ref(&trend),
             &[],
             &BTreeSet::new(),
+            &BTreeSet::new(),
             &BTreeMap::new(),
             &BTreeMap::new(),
             &BTreeMap::new(),
@@ -699,6 +713,7 @@ mod tests {
             &profile(),
             &[],
             &[],
+            &BTreeSet::new(),
             &BTreeSet::new(),
             &BTreeMap::new(),
             &BTreeMap::new(),
@@ -727,6 +742,7 @@ mod tests {
             &profile(),
             &[],
             &[],
+            &BTreeSet::new(),
             &BTreeSet::new(),
             &BTreeMap::new(),
             &BTreeMap::new(),
@@ -820,6 +836,7 @@ mod tests {
             &profile(),
             &[],
             &shoot,
+            &BTreeSet::new(),
             &BTreeSet::new(),
             &arc,
             &BTreeMap::new(),

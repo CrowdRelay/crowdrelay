@@ -1063,7 +1063,9 @@ impl PostgresContentEngineRepository {
 
     /// Raises a suggestion. The caller — the suggestion engine — has already
     /// applied `distribution_promise_is_empty`; an empty promise never
-    /// reaches this table.
+    /// reaches this table. This is a raw insert: the open-format and
+    /// declined-format suppression live in `refresh_suggestions`' ranking
+    /// inputs, so a caller bypassing that path bypasses the queue rules too.
     pub async fn create_suggestion(
         &self,
         workspace_id: WorkspaceId,
