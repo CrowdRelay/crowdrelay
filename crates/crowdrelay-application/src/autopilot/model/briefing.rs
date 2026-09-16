@@ -219,6 +219,19 @@ impl AutopilotActionPayload {
                 ],
                 deadline_note: String::new(),
             },
+            Self::RequestRepresentationApproach { target_name, note, .. } => ActionBriefing {
+                summary: format!("Approach for representation: {}", target_name),
+                why_it_matters: "The platform sends this on the band's behalf — the agent never sees the address until they reply. The published listing is the pitch, and it costs one of the month's few approaches.".into(),
+                steps: vec![
+                    BriefingStep { what_to_do: "Check the listing is published and the opt-in basis is true".into(), why_it_matters: "Dispatch refuses without both".into() },
+                    BriefingStep { what_to_do: "Click APPROVE to send it".into(), why_it_matters: "The approach goes out once, and cannot be recalled".into() },
+                ],
+                content: vec![
+                    BriefingField { label: "Contact".into(), value: target_name.clone() },
+                    BriefingField { label: "Note".into(), value: note.clone().unwrap_or_else(|| "—".into()) },
+                ],
+                deadline_note: String::new(),
+            },
             Self::VerifyPlaylistPlacement { playlist_external_id, track_external_id, checkpoint, .. } => ActionBriefing {
                 summary: format!("Verify the playlist (check {})", checkpoint),
                 why_it_matters: "This checks whether the track is on the playlist. It reads public data and contacts nobody.".into(),

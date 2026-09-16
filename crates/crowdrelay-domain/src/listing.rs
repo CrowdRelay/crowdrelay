@@ -41,7 +41,7 @@ use serde::{Deserialize, Serialize};
 use crate::value_tier::MetricValueTier;
 
 /// One published claim: a number the band chose to show, and what backs it.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ListedClaim {
     /// What is being claimed, in the band's words — "reachable fans in Wrocław".
     pub label: String,
@@ -76,7 +76,7 @@ pub enum ListingVisibility {
 }
 
 /// A band's published profile. Composed by the band, revocable by the band.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct BandListing {
     pub act_name: String,
     /// Free-form tags, the same shape as a venue's genre and a format's

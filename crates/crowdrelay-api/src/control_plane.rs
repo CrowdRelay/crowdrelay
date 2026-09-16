@@ -300,6 +300,40 @@ pub(crate) fn router(state: crate::AppState) -> Router {
             "/v1/control-plane/gdrive/contacts/{contact_id}/dismiss",
             post(crate::gdrive::dismiss_contact),
         )
+        // ── Listing + representation (§4h-12) ─────────────────────────
+        // The band's public-when-shared profile: the editor reads the whole
+        // state, `save` writes the draft only, and `publish`/`unlist` are the
+        // only visibility transitions. `rotate-token` revokes links already
+        // sent — the token is the admission, so rotating it is the revoke.
+        .route(
+            "/v1/control-plane/listing",
+            get(crate::band_listing::get_listing).post(crate::band_listing::put_listing),
+        )
+        .route(
+            "/v1/control-plane/listing/publish",
+            post(crate::band_listing::publish_listing),
+        )
+        .route(
+            "/v1/control-plane/listing/unlist",
+            post(crate::band_listing::unlist_listing),
+        )
+        .route(
+            "/v1/control-plane/listing/rotate-token",
+            post(crate::band_listing::rotate_listing_token),
+        )
+        // Representation contacts are upserted here rather than through
+        // the generic admin target route — this one pins the kind to
+        // agent/label so it cannot be used to hide a press contact's
+        // address from the band.
+        .route(
+            "/v1/control-plane/representation/targets",
+            get(crate::band_listing::list_representation_targets)
+                .post(crate::band_listing::upsert_representation_target),
+        )
+        .route(
+            "/v1/control-plane/representation/approach",
+            post(crate::band_listing::request_representation_approach),
+        )
         .route(
             "/v1/control-plane/community-posts/{community_post_id}/register-manual",
             post(crate::fanbase::register_manual_community_post),

@@ -236,6 +236,10 @@ pub struct UpsertOutreachTarget {
     pub verified: bool,
     pub accepts_outreach: bool,
     pub do_not_contact: bool,
+    /// The stated reason this contact accepts approaches — required when a
+    /// representation kind (agent, label) carries `accepts_outreach`; the
+    /// schema CHECK refuses the flag without it.
+    pub accepts_outreach_basis: Option<String>,
     pub expected_version: i64,
 }
 

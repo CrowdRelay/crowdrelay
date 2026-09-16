@@ -5,6 +5,7 @@ fn executor_capability_for_event(event_type: &str) -> &'static str {
         "crowdrelay.booking.outreach_requested" => "booking.outreach",
         "crowdrelay.merch.bundle_requested" => "merch.bundle",
         "crowdrelay.outreach.requested" => "outreach.send",
+        "crowdrelay.representation.approach_requested" => "representation.approach",
         "crowdrelay.beacon.discovery_requested" => "beacon.discovery",
         "crowdrelay.outreach.discovery_requested" => "outreach.discovery",
         "crowdrelay.booking.target_discovery_requested" => "booking.discovery",
@@ -105,6 +106,7 @@ pub const fn payload_requires_executor(payload: &AutopilotActionPayload) -> bool
                 | AutopilotActionPayload::RequestBookingOutreach { .. }
                 | AutopilotActionPayload::RequestMerchBundle { .. }
                 | AutopilotActionPayload::RequestOutreach { .. }
+                | AutopilotActionPayload::RequestRepresentationApproach { .. }
                 | AutopilotActionPayload::RequestBeaconDiscovery { .. }
                 | AutopilotActionPayload::RequestOutreachDiscovery { .. }
                 | AutopilotActionPayload::RequestBeaconInviteBatch { .. }
@@ -154,6 +156,7 @@ pub(in crate::autopilot) fn executor_capability_for_payload(
         AutopilotActionPayload::RequestBookingOutreach { .. } => "booking.outreach",
         AutopilotActionPayload::RequestMerchBundle { .. } => "merch.bundle",
         AutopilotActionPayload::RequestOutreach { .. } => "outreach.send",
+        AutopilotActionPayload::RequestRepresentationApproach { .. } => "representation.approach",
         AutopilotActionPayload::RequestBeaconDiscovery { .. } => "beacon.discovery",
         AutopilotActionPayload::RequestOutreachDiscovery { .. } => "outreach.discovery",
         AutopilotActionPayload::RequestBookingTargetDiscovery { .. } => "booking.discovery",

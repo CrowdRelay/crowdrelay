@@ -187,6 +187,7 @@ pub async fn upsert_outreach_target(
         verified: request.verified,
         accepts_outreach: request.accepts_outreach,
         do_not_contact: request.do_not_contact,
+        accepts_outreach_basis: request.accepts_outreach_basis,
         expected_version: request.expected_version,
     };
     match state

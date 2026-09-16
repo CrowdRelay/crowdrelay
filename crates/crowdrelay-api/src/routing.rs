@@ -393,6 +393,12 @@ pub(super) fn application_routes(state: AppState) -> Router {
             "/v1/public/proofs/draws/{draw_slug}",
             get(proofs::public_draw),
         )
+        // A band's published listing, addressed by its share token rather
+        // than any workspace identifier — the link is the admission.
+        .route(
+            "/v1/public/listings/{token}",
+            get(crate::band_listing::public_listing),
+        )
         .route("/v1/public/events/{slug}", get(events::get_event))
         .route(
             "/v1/public/events/{slug}/tickets",
