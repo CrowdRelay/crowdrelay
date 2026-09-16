@@ -61,6 +61,9 @@ struct ReminderRow {
     source_kind: String,
     source_ref: Option<String>,
     event_title: Option<String>,
+    plan_title: Option<String>,
+    plan_scheduled_for: Option<time::Date>,
+    plan_items: Option<serde_json::Value>,
     display_name: String,
     normalized_email: String,
     due_at: Option<OffsetDateTime>,
@@ -82,6 +85,15 @@ impl PostgresAutopilotRepository {
             let mut tx = self.pool.begin().await.map_err(map_sqlx)?;
             let crew_locale = crew_locale_in_tx(&mut tx, workspace_id).await;
 
+            // Production-day housekeeping runs even where the roster is
+            // empty: shows still project into production days and open
+            // plans still settle — a memberless workspace loses routing,
+            // not the lifecycle. Settle runs before close so a plan that
+            // reaches its verdict this sweep takes its assignment down
+            // with it instead of one sweep later.
+            super::capture_plans::project_shows_to_production_events(&mut tx, workspace_id, now)
+                .await?;
+            super::capture_plans::settle_capture_plans(&mut tx, workspace_id, now.date()).await?;
             close_resolved_assignments(&mut tx, workspace_id, now).await?;
             let team = load_team_routing(&mut tx, workspace_id, now).await?;
             if team.is_empty() {
@@ -140,14 +152,12 @@ impl PostgresAutopilotRepository {
                 WITH task(item_key) AS (VALUES
                     ('staff_assigned'),('offline_snapshot_ready'),('gate_device_charged'),
                     ('backup_device_ready'),('network_tested'),('guestlist_checked'),
-                    ('capture_plan'),('post_show_reconciliation')
+                    ('post_show_reconciliation')
                 )
                 SELECT event.id event_id, event.title event_title, task.item_key task_key,
                        event.starts_at,
                        CASE WHEN task.item_key = 'post_show_reconciliation'
                             THEN event.starts_at + INTERVAL '36 hours'
-                            WHEN task.item_key = 'capture_plan'
-                            THEN event.starts_at
                             ELSE event.starts_at - INTERVAL '2 hours' END due_at
                 FROM events event CROSS JOIN task
                 LEFT JOIN show_checklist_items checklist
@@ -166,8 +176,6 @@ impl PostgresAutopilotRepository {
                   AND CASE
                       WHEN task.item_key = 'post_show_reconciliation'
                           THEN $2 >= event.starts_at + INTERVAL '6 hours'
-                      WHEN task.item_key = 'capture_plan'
-                          THEN $2 BETWEEN event.starts_at - INTERVAL '30 hours' AND event.starts_at
                       ELSE $2 >= event.starts_at - INTERVAL '72 hours'
                   END
                 ORDER BY due_at, event.id, task.item_key
@@ -296,6 +304,16 @@ impl PostgresAutopilotRepository {
                 assigned = assigned.saturating_add(1);
             }
 
+            assigned = assigned.saturating_add(
+                super::capture_plans::issue_capture_plans(
+                    &mut tx,
+                    workspace_id,
+                    now,
+                    &mut mutable_team,
+                )
+                .await?,
+            );
+
             tx.commit().await.map_err(map_sqlx)?;
             Ok(assigned)
         })
@@ -324,6 +342,8 @@ impl PostgresAutopilotRepository {
                        action.id action_id,
                        action.action_kind, action.context, assignment.source_kind,
                        assignment.source_ref, event.title event_title,
+                       day.title plan_title, day.scheduled_for plan_scheduled_for,
+                       plan.items plan_items,
                        member.display_name, member.normalized_email,
                        assignment.due_at, assignment.reminder_count,
                        action.payload
@@ -338,6 +358,13 @@ impl PostgresAutopilotRepository {
                   ON assignment.source_kind='show_task'
                  AND event.workspace_id=assignment.workspace_id
                  AND event.id=assignment.source_id
+                LEFT JOIN viryaos_capture_plans plan
+                  ON assignment.source_kind='capture_plan'
+                 AND plan.workspace_id=assignment.workspace_id
+                 AND plan.id=assignment.source_id
+                LEFT JOIN viryaos_production_events day
+                  ON day.workspace_id=assignment.workspace_id
+                 AND day.id=plan.production_event_id
                 WHERE assignment.workspace_id=$1
                   AND assignment.status='open'
                   AND assignment.next_reminder_at IS NOT NULL
@@ -374,6 +401,11 @@ impl PostgresAutopilotRepository {
                 let next = next_reminder_at(now, row.due_at, row.reminder_count);
                 let title = if row.source_kind == "show_task" {
                     friendly_show_task_title(row.source_ref.as_deref().unwrap_or("show_task"))
+                } else if row.source_kind == "capture_plan" {
+                    match row.plan_title.as_deref() {
+                        Some(plan_title) => format!("Zabezpiecz materiał: {plan_title}"),
+                        None => "Zabezpiecz materiał".to_owned(),
+                    }
                 } else {
                     friendly_action_title(row.action_kind.as_deref().unwrap_or("approval"))
                 };
@@ -384,6 +416,29 @@ impl PostgresAutopilotRepository {
                         )
                     } else {
                         "To zadanie nadal czeka na Twoje domknięcie.".to_owned()
+                    }
+                } else if row.source_kind == "capture_plan" {
+                    // The reminder re-lists the shots — the member should not
+                    // have to dig the first email out of their inbox.
+                    let items = row
+                        .plan_items
+                        .as_ref()
+                        .and_then(|items| items.as_array())
+                        .map(|list| {
+                            list.iter()
+                                .filter_map(|entry| entry["item"].as_str().map(str::to_owned))
+                                .collect::<Vec<_>>()
+                        })
+                        .unwrap_or_default();
+                    match (row.plan_title.as_deref(), row.plan_scheduled_for) {
+                        (Some(plan_title), Some(scheduled_for)) => {
+                            super::capture_plans::capture_plan_detail(
+                                plan_title,
+                                scheduled_for,
+                                &items,
+                            )
+                        }
+                        _ => "Lista ujęć nadal czeka na wykonanie.".to_owned(),
                     }
                 } else if let Some(payload_json) = row.payload.as_ref() {
                     enriched_task_detail(payload_json, row.due_at, row.due_at, crew_locale)
@@ -473,6 +528,27 @@ async fn close_resolved_assignments(
              AND event.status NOT IN ('published','completed')"#,
     )
     .bind(workspace_id.into_uuid())
+    .execute(&mut **tx)
+    .await
+    .map_err(map_sqlx)?;
+
+    // A settled capture plan settles its assignment the same way a done
+    // checklist item does: `done` is work finished, `abandoned` is a day
+    // that passed — chasing either is noise.
+    sqlx::query(
+        r#"UPDATE viryaos_team_assignments assignment
+           SET status = CASE WHEN plan.status='done' THEN 'done' ELSE 'cancelled' END,
+               completed_at = CASE WHEN plan.status='done' THEN $2 ELSE NULL END,
+               next_reminder_at = NULL
+           FROM viryaos_capture_plans plan
+           WHERE assignment.workspace_id=$1 AND assignment.status='open'
+             AND assignment.source_kind='capture_plan'
+             AND plan.workspace_id=assignment.workspace_id
+             AND plan.id=assignment.source_id
+             AND plan.status IN ('done','abandoned')"#,
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(now)
     .execute(&mut **tx)
     .await
     .map_err(map_sqlx)?;
@@ -791,17 +867,10 @@ pub(super) fn friendly_action_title(action_kind: &str) -> String {
 }
 
 fn show_task_detail(task: &UnassignedShowTaskRow) -> String {
-    if task.task_key == "capture_plan" {
-        format!(
-            "Koncert: {}. Termin koncertu: {}.\n\nUjęcia do zrobienia:\n1. Szerokie ujęcie sali w szczycie setu.\n2. 20–30 s wideo z jednego utworu — materiał pod harvest T+3.\n3. Rytuał skanowania — uchwyć fana skanującego kod QR.",
-            task.event_title, task.starts_at
-        )
-    } else {
-        format!(
-            "Koncert: {}. Termin koncertu: {}.",
-            task.event_title, task.starts_at
-        )
-    }
+    format!(
+        "Koncert: {}. Termin koncertu: {}.",
+        task.event_title, task.starts_at
+    )
 }
 
 fn friendly_show_task_title(task_key: &str) -> String {
@@ -812,7 +881,6 @@ fn friendly_show_task_title(task_key: &str) -> String {
         "backup_device_ready" => "Przygotuj urządzenie zapasowe".into(),
         "network_tested" => "Przetestuj internet na wejściu".into(),
         "guestlist_checked" => "Sprawdź guestlistę".into(),
-        "capture_plan" => "Zabezpiecz materiał z koncertu".into(),
         "post_show_reconciliation" => "Zrób rozliczenie po koncercie".into(),
         "post_show_report" => "Domknij raport po koncercie".into(),
         other => format!("Domknij zadanie koncertowe: {}", other.replace('_', " ")),
@@ -918,7 +986,7 @@ fn enriched_task_detail(
     text
 }
 
-fn parse_team_skill(value: &str) -> Option<TeamSkill> {
+pub(super) fn parse_team_skill(value: &str) -> Option<TeamSkill> {
     TeamSkill::parse(value)
 }
 

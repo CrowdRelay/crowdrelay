@@ -119,7 +119,11 @@ fn task_owner<'a>(facts: &'a TimelineFacts, item_key: &str) -> Option<&'a str> {
         .assignments
         .iter()
         .find(|a| {
-            a.status == "open" && a.source_kind == "show_task"
+            a.status == "open"
+                && (a.source_kind == "show_task"
+                    // The real capture plan owns its checklist step too —
+                    // its source_ref arrives synthesized as 'capture_plan'.
+                    || a.source_kind == "capture_plan")
                 && a.source_ref.as_deref() == Some(item_key)
         })
         .and_then(|a| a.display_name.as_deref())

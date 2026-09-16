@@ -41,6 +41,11 @@ pub enum ContentEngineError {
     /// proposed again — the reason is the suppression record.
     #[error("a rejection must carry its reason")]
     MissingReason,
+    /// The one-open-plan-per-day index refused the insert — surfaced as
+    /// a domain answer rather than a raw 23505 so the caller can tell a
+    /// conflict from a database failure.
+    #[error("an open capture plan already exists for the production event")]
+    PlanAlreadyOpen,
     #[error("content engine database operation failed")]
     Database(sqlx::Error),
 }
@@ -905,6 +910,7 @@ impl PostgresContentEngineRepository {
                 id, workspace_id, production_event_id, items, assignee_member_id
             )
             VALUES ($1, $2, $3, $4, $5)
+            ON CONFLICT DO NOTHING
             RETURNING *
             "#,
         )
@@ -913,8 +919,9 @@ impl PostgresContentEngineRepository {
         .bind(plan.production_event_id.into_uuid())
         .bind(&plan.items)
         .bind(plan.assignee_member_id.map(WorkspaceMemberId::into_uuid))
-        .fetch_one(&self.pool)
-        .await?;
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or(ContentEngineError::PlanAlreadyOpen)?;
         CapturePlan::try_from(row)
     }
 

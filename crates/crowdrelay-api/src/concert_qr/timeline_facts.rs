@@ -289,6 +289,9 @@ async fn load_timeline_facts(
     // stores the event id there directly (source_ref names the checklist
     // item), an autopilot_action stores the action's subject — the event —
     // the same way. `source_ref` distinguishes the task inside the event.
+    // Capture-plan assignments key the *plan* instead, so the second arm
+    // walks plan → production day → gig; the synthesized source_ref names
+    // the step the assignment owns.
     let assignments = sqlx::query_as::<_, TimelineAssignmentRow>(
         r#"
         SELECT assignment.source_kind, assignment.source_ref,
@@ -300,7 +303,25 @@ async fn load_timeline_facts(
           ON member.workspace_id = assignment.workspace_id
          AND member.id = assignment.assignee_member_id
         WHERE assignment.workspace_id = $1 AND assignment.source_id = $2
-        ORDER BY assignment.due_at NULLS LAST
+        UNION ALL
+        SELECT assignment.source_kind, 'capture_plan'::text AS source_ref,
+               assignment.action_id,
+               assignment.status, assignment.due_at,
+               member.display_name
+        FROM viryaos_team_assignments AS assignment
+        JOIN viryaos_capture_plans AS plan
+          ON plan.workspace_id = assignment.workspace_id
+         AND plan.id = assignment.source_id
+        JOIN viryaos_production_events AS day
+          ON day.workspace_id = plan.workspace_id
+         AND day.id = plan.production_event_id
+        JOIN workspace_members AS member
+          ON member.workspace_id = assignment.workspace_id
+         AND member.id = assignment.assignee_member_id
+        WHERE assignment.workspace_id = $1
+          AND assignment.source_kind = 'capture_plan'
+          AND day.event_id = $2
+        ORDER BY due_at NULLS LAST
         "#,
     )
     .bind(workspace_id)

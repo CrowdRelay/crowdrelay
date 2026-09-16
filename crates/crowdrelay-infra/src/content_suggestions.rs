@@ -121,6 +121,7 @@ impl PostgresContentEngineRepository {
                  jsonb_array_elements(spine) AS beat
             WHERE workspace_id = $1
               AND status IN ('approved','active')
+              AND jsonb_typeof(spine) = 'array'
               AND beat ? 'format_key'
               AND beat->>'format_key' IS NOT NULL
             ORDER BY beat->>'format_key', created_at DESC

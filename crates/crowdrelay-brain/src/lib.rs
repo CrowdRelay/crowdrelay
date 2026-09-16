@@ -46,6 +46,7 @@ pub mod bayesian;
 pub mod beta;
 pub mod bridge;
 pub mod calibration;
+pub mod capture_plans;
 pub mod causal_model;
 pub mod change_point;
 pub mod content_arcs;

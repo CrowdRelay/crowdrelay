@@ -1,0 +1,638 @@
+use std::time::Duration;
+
+use crowdrelay_domain::WorkspaceId;
+use crowdrelay_infra::{autopilot::PostgresAutopilotRepository, config::DatabaseConfig};
+use serde_json::json;
+use sqlx::postgres::PgPoolOptions;
+use time::OffsetDateTime;
+use uuid::Uuid;
+
+async fn repository()
+-> Result<(PostgresAutopilotRepository, sqlx::PgPool), Box<dyn std::error::Error>> {
+    let database_url =
+        std::env::var("CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL").map_err(|error| {
+            format!(
+                "CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL must target a disposable database: {error}"
+            )
+        })?;
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&database_url)
+        .await?;
+    crowdrelay_infra::database::MIGRATOR.run(&pool).await?;
+    let database = DatabaseConfig {
+        url: database_url,
+        max_connections: 4,
+        connect_timeout: Duration::from_secs(3),
+        ping_timeout: Duration::from_secs(2),
+        operation_timeout: Duration::from_secs(5),
+        lock_timeout: Duration::from_secs(1),
+    };
+    Ok((
+        PostgresAutopilotRepository::new(pool.clone(), &database),
+        pool,
+    ))
+}
+
+async fn seed_workspace(
+    pool: &sqlx::PgPool,
+    workspace_id: WorkspaceId,
+) -> Result<(), Box<dyn std::error::Error>> {
+    sqlx::query("INSERT INTO workspaces (id, slug, name) VALUES ($1, $2, $3)")
+        .bind(workspace_id.into_uuid())
+        .bind(format!(
+            "capture-plan-{}",
+            workspace_id.into_uuid().simple()
+        ))
+        .bind("Capture Plan Test")
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+async fn seed_member(
+    pool: &sqlx::PgPool,
+    workspace_id: WorkspaceId,
+    member_key: &str,
+    skills: &[&str],
+) -> Result<Uuid, Box<dyn std::error::Error>> {
+    let member_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO workspace_members (workspace_id, normalized_email, display_name, role, status)
+         VALUES ($1, $2, $3, 'staff', 'active') RETURNING id",
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(format!(
+        "{member_key}-{}@example.test",
+        workspace_id.into_uuid().simple()
+    ))
+    .bind(format!("Crew {member_key}"))
+    .fetch_one(pool)
+    .await?;
+    let skills_csv = skills
+        .iter()
+        .map(|skill| format!("'{skill}'"))
+        .collect::<Vec<_>>()
+        .join(",");
+    sqlx::query(&format!(
+        "INSERT INTO viryaos_team_profiles
+             (workspace_id, member_id, member_key, active, skills)
+         VALUES ($1, $2, '{member_key}', true, ARRAY[{skills_csv}]::text[])"
+    ))
+    .bind(workspace_id.into_uuid())
+    .bind(member_id)
+    .execute(pool)
+    .await?;
+    Ok(member_id)
+}
+
+async fn seed_team_email_executor(
+    pool: &sqlx::PgPool,
+    workspace_id: WorkspaceId,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let now = OffsetDateTime::now_utc();
+    sqlx::query(
+        r#"INSERT INTO viryaos_executor_instances (
+            workspace_id, executor_id, version, manifest_sha, observed_at, expires_at
+        ) VALUES ($1,'n8n-capture-plan-test','test','test-manifest',$2,$3)"#,
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(now)
+    .bind(now + time::Duration::minutes(10))
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        r#"INSERT INTO viryaos_executor_capabilities (
+            workspace_id, executor_id, capability, capability_version, observed_at, expires_at
+        ) VALUES ($1,'n8n-capture-plan-test','team.email','1',$2,$3)"#,
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(now)
+    .bind(now + time::Duration::minutes(10))
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn seed_production_event(
+    pool: &sqlx::PgPool,
+    workspace_id: WorkspaceId,
+    kind: &str,
+    scheduled_for: time::Date,
+    status: &str,
+    event_id: Option<Uuid>,
+) -> Result<Uuid, Box<dyn std::error::Error>> {
+    Ok(sqlx::query_scalar(
+        "INSERT INTO viryaos_production_events
+             (id, workspace_id, kind, title, scheduled_for, status, event_id)
+         VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id",
+    )
+    .bind(Uuid::now_v7())
+    .bind(workspace_id.into_uuid())
+    .bind(kind)
+    .bind(format!("{kind} day"))
+    .bind(scheduled_for)
+    .bind(status)
+    .bind(event_id)
+    .fetch_one(pool)
+    .await?)
+}
+
+async fn seed_plan(
+    pool: &sqlx::PgPool,
+    workspace_id: WorkspaceId,
+    production_event_id: Uuid,
+    status: &str,
+    assignee: Option<Uuid>,
+) -> Result<Uuid, Box<dyn std::error::Error>> {
+    Ok(sqlx::query_scalar(
+        "INSERT INTO viryaos_capture_plans
+             (id, workspace_id, production_event_id, items, assignee_member_id, status, issued_at)
+         VALUES ($1,$2,$3,$4,$5,$6,CASE WHEN $6='issued' THEN now() END) RETURNING id",
+    )
+    .bind(Uuid::now_v7())
+    .bind(workspace_id.into_uuid())
+    .bind(production_event_id)
+    .bind(json!([{"item": "coverage", "skill": "video"}]))
+    .bind(assignee)
+    .bind(status)
+    .fetch_one(pool)
+    .await?)
+}
+
+async fn seed_assignment(
+    pool: &sqlx::PgPool,
+    workspace_id: WorkspaceId,
+    plan_id: Uuid,
+    member_id: Uuid,
+) -> Result<(), Box<dyn std::error::Error>> {
+    sqlx::query(
+        "INSERT INTO viryaos_team_assignments
+             (id, workspace_id, source_kind, source_id, assignee_member_id, required_skill)
+         VALUES ($1,$2,'capture_plan',$3,$4,'video')",
+    )
+    .bind(Uuid::now_v7())
+    .bind(workspace_id.into_uuid())
+    .bind(plan_id)
+    .bind(member_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn seed_source(
+    pool: &sqlx::PgPool,
+    workspace_id: WorkspaceId,
+    source_key: &str,
+    occurred_at: OffsetDateTime,
+) -> Result<(), Box<dyn std::error::Error>> {
+    sqlx::query(
+        "INSERT INTO viryaos_content_sources
+             (workspace_id, source_kind, source_key, title, occurred_at, expires_at)
+         VALUES ($1,'video',$2,$3,$4,$5)",
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(source_key)
+    .bind(format!("Material {source_key}"))
+    .bind(occurred_at)
+    .bind(occurred_at + time::Duration::days(45))
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn a_show_becomes_a_production_day_and_the_plan_reaches_the_camera_holder()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (repo, pool) = repository().await?;
+    let workspace_id = WorkspaceId::new();
+    seed_workspace(&pool, workspace_id).await?;
+    seed_team_email_executor(&pool, workspace_id).await?;
+    // Two camera-capable members so the six checklist tasks the same show
+    // routes cannot starve the plan of an assignee — the competition is
+    // the honest load, two holders is the honest roster.
+    seed_member(&pool, workspace_id, "crew-a", &["video", "photography"]).await?;
+    seed_member(&pool, workspace_id, "crew-b", &["video", "social"]).await?;
+
+    // Tonight's published gig — `date_trunc` keeps the fixture on today's
+    // date whatever hour the suite runs at.
+    let event_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO events (id, workspace_id, slug, title, starts_at, status, published_at)
+         VALUES ($1,$2,$3,$4, date_trunc('day', now()) + interval '20 hours', 'published', now())
+         RETURNING id",
+    )
+    .bind(Uuid::now_v7())
+    .bind(workspace_id.into_uuid())
+    .bind(format!("show-{}", workspace_id.into_uuid().simple()))
+    .bind("Tonight's gig")
+    .fetch_one(&pool)
+    .await?;
+
+    let now = OffsetDateTime::now_utc();
+    repo.reconcile_team_handoffs(workspace_id, now).await?;
+
+    // The gig projected into a production day.
+    let day: Option<(Uuid, String)> = sqlx::query_as(
+        "SELECT id, kind FROM viryaos_production_events
+         WHERE workspace_id=$1 AND event_id=$2",
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(event_id)
+    .fetch_optional(&pool)
+    .await?;
+    let (day_id, kind) = day.expect("a published show projects a production day");
+    assert_eq!(kind, "show");
+
+    // The day carries an issued plan with a real shot list and an
+    // assignee — the baseline coverage shot exists even with no needs.
+    let plan: Option<(Uuid, String, Option<Uuid>, serde_json::Value)> = sqlx::query_as(
+        "SELECT id, status, assignee_member_id, items FROM viryaos_capture_plans
+         WHERE workspace_id=$1 AND production_event_id=$2",
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(day_id)
+    .fetch_optional(&pool)
+    .await?;
+    let (plan_id, plan_status, assignee, items) =
+        plan.expect("the sweep issues a plan for the day");
+    assert_eq!(plan_status, "issued");
+    assert!(assignee.is_some(), "a camera holder was found");
+    assert!(
+        items.as_array().is_some_and(|list| !list.is_empty()),
+        "the plan carries a shot list"
+    );
+
+    // The assignment points at the plan and the email is queued.
+    let assignment: Option<(String, Uuid)> = sqlx::query_as(
+        "SELECT status, id FROM viryaos_team_assignments
+         WHERE workspace_id=$1 AND source_kind='capture_plan' AND source_id=$2",
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(plan_id)
+    .fetch_optional(&pool)
+    .await?;
+    let (assignment_status, assignment_id) = assignment.expect("the plan routed to a member");
+    assert_eq!(assignment_status, "open");
+    let email_actions: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM viryaos_autopilot_actions
+         WHERE workspace_id=$1 AND action_kind='team.assignment.email' AND subject_id=$2",
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(assignment_id)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(email_actions, 1, "the shot list was emailed once");
+
+    // The checklist's bare item is satisfied by the real plan, not nagged
+    // beside it — and no bare capture_plan task was assigned either.
+    let checklist: Option<String> = sqlx::query_scalar(
+        "SELECT status FROM show_checklist_items
+         WHERE workspace_id=$1 AND event_id=$2 AND item_key='capture_plan'",
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(event_id)
+    .fetch_optional(&pool)
+    .await?;
+    assert_eq!(checklist.as_deref(), Some("done"));
+    let bare_tasks: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM viryaos_team_assignments
+         WHERE workspace_id=$1 AND source_kind='show_task' AND source_ref='capture_plan'",
+    )
+    .bind(workspace_id.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(bare_tasks, 0);
+
+    // A draft waiting for a holder routes the moment the roster can hold
+    // it — a member joining mid-week must not lose the day.
+    let today = now.date();
+    let photo_day =
+        seed_production_event(&pool, workspace_id, "photoshoot", today, "scheduled", None).await?;
+    let draft_plan = seed_plan(&pool, workspace_id, photo_day, "draft", None).await?;
+
+    // Second sweep: the show's day is planned already — no twin plan, no
+    // twin assignment — while the waiting draft gets issued and routed.
+    repo.reconcile_team_handoffs(workspace_id, OffsetDateTime::now_utc())
+        .await?;
+    let plans: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM viryaos_capture_plans
+         WHERE workspace_id=$1 AND production_event_id=$2",
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(day_id)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(plans, 1, "the open plan dedups the next sweep");
+    let retried: Option<(String, Option<Uuid>)> =
+        sqlx::query_as("SELECT status, assignee_member_id FROM viryaos_capture_plans WHERE id=$1")
+            .bind(draft_plan)
+            .fetch_optional(&pool)
+            .await?;
+    let (retried_status, retried_assignee) = retried.expect("the draft plan row exists");
+    assert_eq!(retried_status, "issued", "the draft was offered again");
+    assert!(retried_assignee.is_some());
+    let draft_assignment: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM viryaos_team_assignments
+         WHERE workspace_id=$1 AND source_kind='capture_plan' AND source_id=$2 AND status='open'",
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(draft_plan)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(draft_assignment, 1);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn the_harvest_counts_sources_and_settles_plans() -> Result<(), Box<dyn std::error::Error>> {
+    let (repo, pool) = repository().await?;
+    let workspace_id = WorkspaceId::new();
+    seed_workspace(&pool, workspace_id).await?;
+    // Settling runs before the roster check, so a bare member for the
+    // assignment foreign keys is enough — no profile, no executor.
+    let member_id = seed_member(&pool, workspace_id, "lens", &["video"]).await?;
+    // No team profile: the member exists for the FK, but the routing
+    // roster stays empty and the sweep still settles — the point of
+    // running housekeeping before the team check.
+    sqlx::query("DELETE FROM viryaos_team_profiles WHERE workspace_id=$1")
+        .bind(workspace_id.into_uuid())
+        .execute(&pool)
+        .await?;
+
+    let today = OffsetDateTime::now_utc().date();
+
+    // A — the day yielded the target: done.
+    let day_a = seed_production_event(
+        &pool,
+        workspace_id,
+        "shoot",
+        today - time::Duration::days(1),
+        "scheduled",
+        None,
+    )
+    .await?;
+    let plan_a = seed_plan(&pool, workspace_id, day_a, "issued", Some(member_id)).await?;
+    seed_assignment(&pool, workspace_id, plan_a, member_id).await?;
+    for i in 0..3 {
+        seed_source(
+            &pool,
+            workspace_id,
+            &format!("footage:a-{i}"),
+            OffsetDateTime::now_utc() - time::Duration::days(1),
+        )
+        .await?;
+    }
+
+    // B — window lapsed eight days back with only machine-written
+    // projection rows inside it: a show happening is not footage of the
+    // show, and a release dropping nearby is not either — the calendar
+    // and discography kinds never count. Far enough back that A's
+    // sources stay outside the window.
+    let gig_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO events (id, workspace_id, slug, title, starts_at, status, published_at)
+         VALUES ($1,$2,$3,$4, now() - interval '8 days', 'published', now() - interval '12 days')
+         RETURNING id",
+    )
+    .bind(Uuid::now_v7())
+    .bind(workspace_id.into_uuid())
+    .bind(format!("gig-{}", workspace_id.into_uuid().simple()))
+    .bind("Last week's gig")
+    .fetch_one(&pool)
+    .await?;
+    let day_b = seed_production_event(
+        &pool,
+        workspace_id,
+        "show",
+        today - time::Duration::days(8),
+        "scheduled",
+        Some(gig_id),
+    )
+    .await?;
+    let plan_b = seed_plan(&pool, workspace_id, day_b, "issued", Some(member_id)).await?;
+    seed_assignment(&pool, workspace_id, plan_b, member_id).await?;
+    sqlx::query(
+        "INSERT INTO viryaos_content_sources
+             (workspace_id, source_kind, source_key, title, occurred_at, expires_at)
+         VALUES ($1,'show_completed',$2,'The gig itself',$3,$4)",
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(format!("show_completed:{gig_id}"))
+    .bind(OffsetDateTime::now_utc() - time::Duration::days(5))
+    .bind(OffsetDateTime::now_utc() + time::Duration::days(40))
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO viryaos_content_sources
+             (workspace_id, source_kind, source_key, title, occurred_at, expires_at)
+         VALUES ($1,'release',$2,'An album drop, not footage',$3,$4)",
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(format!("release:{gig_id}"))
+    .bind(OffsetDateTime::now_utc() - time::Duration::days(6))
+    .bind(OffsetDateTime::now_utc() + time::Duration::days(39))
+    .execute(&pool)
+    .await?;
+
+    // C — the day was cancelled: abandoned regardless of yield.
+    let day_c = seed_production_event(
+        &pool,
+        workspace_id,
+        "studio",
+        today + time::Duration::days(1),
+        "cancelled",
+        None,
+    )
+    .await?;
+    let plan_c = seed_plan(&pool, workspace_id, day_c, "issued", Some(member_id)).await?;
+    seed_assignment(&pool, workspace_id, plan_c, member_id).await?;
+
+    // D — inside the window, under target: still waiting. Scheduled today
+    // so the older scenarios' sources all predate its window.
+    let day_d =
+        seed_production_event(&pool, workspace_id, "rehearsal", today, "scheduled", None).await?;
+    let plan_d = seed_plan(&pool, workspace_id, day_d, "issued", Some(member_id)).await?;
+    seed_assignment(&pool, workspace_id, plan_d, member_id).await?;
+    seed_source(
+        &pool,
+        workspace_id,
+        "footage:d-0",
+        OffsetDateTime::now_utc(),
+    )
+    .await?;
+
+    // E — a draft that outlived its day was never issued: abandoned.
+    let day_e = seed_production_event(
+        &pool,
+        workspace_id,
+        "photoshoot",
+        today - time::Duration::days(1),
+        "scheduled",
+        None,
+    )
+    .await?;
+    let plan_e = seed_plan(&pool, workspace_id, day_e, "draft", None).await?;
+
+    repo.reconcile_team_handoffs(workspace_id, OffsetDateTime::now_utc())
+        .await?;
+
+    let statuses: Vec<(Uuid, String)> =
+        sqlx::query_as("SELECT id, status FROM viryaos_capture_plans WHERE workspace_id=$1")
+            .bind(workspace_id.into_uuid())
+            .fetch_all(&pool)
+            .await?;
+    let status_of = |plan: Uuid| {
+        statuses
+            .iter()
+            .find(|(id, _)| *id == plan)
+            .map(|(_, status)| status.as_str())
+    };
+    assert_eq!(status_of(plan_a), Some("done"), "target met settles");
+    assert_eq!(
+        status_of(plan_b),
+        Some("abandoned"),
+        "the auto-projection row is not footage"
+    );
+    assert_eq!(
+        status_of(plan_c),
+        Some("abandoned"),
+        "cancelled is cancelled"
+    );
+    assert_eq!(
+        status_of(plan_d),
+        Some("issued"),
+        "the window is still open"
+    );
+    assert_eq!(
+        status_of(plan_e),
+        Some("abandoned"),
+        "a stale draft cannot hold the slot"
+    );
+
+    // Assignments follow their plans: done for the filmed day, cancelled
+    // for the lost ones, still open for the one inside its window.
+    let assignments: Vec<(Uuid, String)> = sqlx::query_as(
+        "SELECT source_id, status FROM viryaos_team_assignments
+         WHERE workspace_id=$1 AND source_kind='capture_plan'",
+    )
+    .bind(workspace_id.into_uuid())
+    .fetch_all(&pool)
+    .await?;
+    let assignment_of = |plan: Uuid| {
+        assignments
+            .iter()
+            .find(|(id, _)| *id == plan)
+            .map(|(_, status)| status.as_str())
+    };
+    assert_eq!(assignment_of(plan_a), Some("done"));
+    assert_eq!(assignment_of(plan_b), Some("cancelled"));
+    assert_eq!(assignment_of(plan_c), Some("cancelled"));
+    assert_eq!(assignment_of(plan_d), Some("open"));
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn a_moved_or_cancelled_gig_carries_its_production_day_with_it()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (repo, pool) = repository().await?;
+    let workspace_id = WorkspaceId::new();
+    seed_workspace(&pool, workspace_id).await?;
+    seed_team_email_executor(&pool, workspace_id).await?;
+    seed_member(&pool, workspace_id, "crew-a", &["video", "photography"]).await?;
+
+    // Tomorrow's gig projects a production day and issues a plan.
+    let event_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO events (id, workspace_id, slug, title, starts_at, status, published_at)
+         VALUES ($1,$2,$3,$4, date_trunc('day', now()) + interval '44 hours', 'published', now())
+         RETURNING id",
+    )
+    .bind(Uuid::now_v7())
+    .bind(workspace_id.into_uuid())
+    .bind(format!("moved-{}", workspace_id.into_uuid().simple()))
+    .bind("The gig that will move")
+    .fetch_one(&pool)
+    .await?;
+    repo.reconcile_team_handoffs(workspace_id, OffsetDateTime::now_utc())
+        .await?;
+
+    let day: Option<(Uuid, time::Date)> = sqlx::query_as(
+        "SELECT id, scheduled_for FROM viryaos_production_events
+         WHERE workspace_id=$1 AND event_id=$2",
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(event_id)
+    .fetch_optional(&pool)
+    .await?;
+    let (day_id, first_day) = day.expect("the gig projected a production day");
+
+    // The gig moves a week out and gets retitled: the projected day and
+    // the member's deadline follow instead of pointing at a day that no
+    // longer exists.
+    sqlx::query(
+        "UPDATE events SET title='The moved gig', starts_at = starts_at + interval '7 days'
+         WHERE id=$1",
+    )
+    .bind(event_id)
+    .execute(&pool)
+    .await?;
+    repo.reconcile_team_handoffs(workspace_id, OffsetDateTime::now_utc())
+        .await?;
+    let moved: Option<(time::Date, String)> =
+        sqlx::query_as("SELECT scheduled_for, title FROM viryaos_production_events WHERE id=$1")
+            .bind(day_id)
+            .fetch_optional(&pool)
+            .await?;
+    let (moved_day, moved_title) = moved.expect("the day row is still there");
+    assert_eq!(moved_day, first_day + time::Duration::days(7));
+    assert_eq!(moved_title, "The moved gig");
+    let moved_due: Option<OffsetDateTime> = sqlx::query_scalar(
+        "SELECT assignment.due_at FROM viryaos_team_assignments assignment
+         JOIN viryaos_capture_plans plan ON plan.id = assignment.source_id
+         WHERE assignment.workspace_id=$1 AND plan.production_event_id=$2
+           AND assignment.source_kind='capture_plan'",
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(day_id)
+    .fetch_optional(&pool)
+    .await?;
+    assert_eq!(
+        moved_due.map(|due| due.date()),
+        Some(moved_day + time::Duration::days(1)),
+        "the member's deadline moved with the day"
+    );
+
+    // The gig is cancelled outright: the day dies, the plan abandons and
+    // the open assignment cancels — nobody gets reminded to film a show
+    // that is not happening.
+    sqlx::query("UPDATE events SET status='cancelled' WHERE id=$1")
+        .bind(event_id)
+        .execute(&pool)
+        .await?;
+    repo.reconcile_team_handoffs(workspace_id, OffsetDateTime::now_utc())
+        .await?;
+    let day_status: Option<String> =
+        sqlx::query_scalar("SELECT status FROM viryaos_production_events WHERE id=$1")
+            .bind(day_id)
+            .fetch_optional(&pool)
+            .await?;
+    assert_eq!(day_status.as_deref(), Some("cancelled"));
+    let plan_status: Option<String> =
+        sqlx::query_scalar("SELECT status FROM viryaos_capture_plans WHERE production_event_id=$1")
+            .bind(day_id)
+            .fetch_optional(&pool)
+            .await?;
+    assert_eq!(plan_status.as_deref(), Some("abandoned"));
+    let assignment_status: Option<String> = sqlx::query_scalar(
+        "SELECT assignment.status FROM viryaos_team_assignments assignment
+         JOIN viryaos_capture_plans plan ON plan.id = assignment.source_id
+         WHERE assignment.workspace_id=$1 AND plan.production_event_id=$2
+           AND assignment.source_kind='capture_plan'",
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(day_id)
+    .fetch_optional(&pool)
+    .await?;
+    assert_eq!(assignment_status.as_deref(), Some("cancelled"));
+    Ok(())
+}

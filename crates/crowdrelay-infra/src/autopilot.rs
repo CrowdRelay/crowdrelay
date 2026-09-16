@@ -2,6 +2,7 @@
 
 mod actions;
 mod actions_execution;
+mod capture_plans;
 mod control;
 mod cycle_trigger;
 pub use cycle_trigger::{
