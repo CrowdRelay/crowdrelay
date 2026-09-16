@@ -250,7 +250,7 @@ impl PostgresAutopilotRepository {
                     &action.context,
                     &member.normalized_email,
                     &member.display_name,
-                    friendly_action_title(&action.action_kind),
+                    friendly_action_title(&action.action_kind, crew_locale),
                     enriched_task_detail(
                         &action.payload,
                         action.approval_expires_at,
@@ -309,8 +309,8 @@ impl PostgresAutopilotRepository {
                     "show_operations",
                     &member.normalized_email,
                     &member.display_name,
-                    friendly_show_task_title(&task.task_key),
-                    show_task_detail(&task),
+                    friendly_show_task_title(&task.task_key, crew_locale),
+                    show_task_detail(&task, crew_locale),
                     Some(task.due_at),
                     0,
                     None,
@@ -328,6 +328,7 @@ impl PostgresAutopilotRepository {
                     workspace_id,
                     now,
                     &mut mutable_team,
+                    crew_locale,
                 )
                 .await?,
             );
@@ -418,22 +419,41 @@ impl PostgresAutopilotRepository {
                 let reminder_number = row.reminder_count.saturating_add(1);
                 let next = next_reminder_at(now, row.due_at, row.reminder_count);
                 let title = if row.source_kind == "show_task" {
-                    friendly_show_task_title(row.source_ref.as_deref().unwrap_or("show_task"))
+                    friendly_show_task_title(
+                        row.source_ref.as_deref().unwrap_or("show_task"),
+                        crew_locale,
+                    )
                 } else if row.source_kind == "capture_plan" {
-                    match row.plan_title.as_deref() {
-                        Some(plan_title) => format!("Zabezpiecz materiał: {plan_title}"),
-                        None => "Zabezpiecz materiał".to_owned(),
+                    match (row.plan_title.as_deref(), crew_locale) {
+                        (Some(plan_title), BriefingLocale::Pl) => {
+                            format!("Zabezpiecz materiał: {plan_title}")
+                        }
+                        (Some(plan_title), BriefingLocale::En) => {
+                            format!("Secure the footage: {plan_title}")
+                        }
+                        (None, BriefingLocale::Pl) => "Zabezpiecz materiał".to_owned(),
+                        (None, BriefingLocale::En) => "Secure the footage".to_owned(),
                     }
                 } else {
-                    friendly_action_title(row.action_kind.as_deref().unwrap_or("approval"))
+                    friendly_action_title(
+                        row.action_kind.as_deref().unwrap_or("approval"),
+                        crew_locale,
+                    )
                 };
                 let detail = if row.source_kind == "show_task" {
-                    if let Some(event_title) = row.event_title.as_deref() {
-                        format!(
+                    match (row.event_title.as_deref(), crew_locale) {
+                        (Some(event_title), BriefingLocale::Pl) => format!(
                             "To zadanie dotyczące koncertu {event_title} nadal czeka na domknięcie."
-                        )
-                    } else {
-                        "To zadanie nadal czeka na Twoje domknięcie.".to_owned()
+                        ),
+                        (Some(event_title), BriefingLocale::En) => format!(
+                            "The task for the {event_title} show is still waiting to be closed."
+                        ),
+                        (None, BriefingLocale::Pl) => {
+                            "To zadanie nadal czeka na Twoje domknięcie.".to_owned()
+                        }
+                        (None, BriefingLocale::En) => {
+                            "This task is still waiting for you to close it.".to_owned()
+                        }
                     }
                 } else if row.source_kind == "capture_plan" {
                     // The reminder re-lists the shots — the member should not
@@ -448,20 +468,37 @@ impl PostgresAutopilotRepository {
                                 .collect::<Vec<_>>()
                         })
                         .unwrap_or_default();
-                    match (row.plan_title.as_deref(), row.plan_scheduled_for) {
-                        (Some(plan_title), Some(scheduled_for)) => {
+                    match (
+                        row.plan_title.as_deref(),
+                        row.plan_scheduled_for,
+                        crew_locale,
+                    ) {
+                        (Some(plan_title), Some(scheduled_for), _) => {
                             super::capture_plans::capture_plan_detail(
                                 plan_title,
                                 scheduled_for,
                                 &items,
+                                crew_locale,
                             )
                         }
-                        _ => "Lista ujęć nadal czeka na wykonanie.".to_owned(),
+                        (_, _, BriefingLocale::Pl) => {
+                            "Lista ujęć nadal czeka na wykonanie.".to_owned()
+                        }
+                        (_, _, BriefingLocale::En) => {
+                            "The shot list is still waiting to be done.".to_owned()
+                        }
                     }
                 } else if let Some(payload_json) = row.payload.as_ref() {
                     enriched_task_detail(payload_json, row.due_at, row.due_at, crew_locale)
                 } else {
-                    "To zadanie nadal czeka na Twoją decyzję lub wykonanie.".to_owned()
+                    match crew_locale {
+                        BriefingLocale::Pl => {
+                            "To zadanie nadal czeka na Twoją decyzję lub wykonanie.".to_owned()
+                        }
+                        BriefingLocale::En => {
+                            "This task is still waiting for your decision or action.".to_owned()
+                        }
+                    }
                 };
                 queue_team_email_action(
                     &mut tx,
@@ -885,37 +922,113 @@ pub(super) fn assignment_need(context: &str, action_kind: &str) -> TeamAssignmen
     }
 }
 
-pub(super) fn friendly_action_title(action_kind: &str) -> String {
-    match action_kind {
-        "opportunity.live.apply" => "Sprawdź i zatwierdź zgłoszenie koncertowe".into(),
-        "funding.application.submit" => "Sprawdź i zatwierdź wysłanie wniosku".into(),
-        "promotion.budget_change.request" => "Sprawdź zmianę budżetu promocji".into(),
-        "agent.content.request" => "Zatwierdź treść od agenta".into(),
-        "outreach.target.request" => "Zatwierdź cel outreach".into(),
-        "outreach.request" => "Zatwierdź cel outreach".into(),
-        other => format!("VIRYA OS — {}", other.replace(['.', '_'], " ")),
+pub(super) fn friendly_action_title(action_kind: &str, locale: BriefingLocale) -> String {
+    let title = match (action_kind, locale) {
+        ("opportunity.live.apply", BriefingLocale::Pl) => {
+            "Sprawdź i zatwierdź zgłoszenie koncertowe"
+        }
+        ("opportunity.live.apply", BriefingLocale::En) => "Check and approve the show application",
+        ("funding.application.submit", BriefingLocale::Pl) => {
+            "Sprawdź i zatwierdź wysłanie wniosku"
+        }
+        ("funding.application.submit", BriefingLocale::En) => {
+            "Check and approve the funding application"
+        }
+        ("promotion.budget_change.request", BriefingLocale::Pl) => {
+            "Sprawdź zmianę budżetu promocji"
+        }
+        ("promotion.budget_change.request", BriefingLocale::En) => {
+            "Check the promotion budget change"
+        }
+        ("agent.content.request", BriefingLocale::Pl) => "Zatwierdź treść od agenta",
+        ("agent.content.request", BriefingLocale::En) => "Approve the agent's content",
+        ("agent.run.request", BriefingLocale::Pl) => "Zatwierdź uruchomienie agenta",
+        ("agent.run.request", BriefingLocale::En) => "Approve the agent run",
+        ("audience.campaign.request", BriefingLocale::Pl) => "Zatwierdź kampanię do fanów",
+        ("audience.campaign.request", BriefingLocale::En) => "Approve the fan campaign",
+        ("beacon.discovery.request", BriefingLocale::Pl) => "Zatwierdź wyszukiwanie Beaconów",
+        ("beacon.discovery.request", BriefingLocale::En) => "Approve the Beacon search",
+        ("beacon.outreach.request", BriefingLocale::Pl) => "Zatwierdź outreach do Beacona",
+        ("beacon.outreach.request", BriefingLocale::En) => "Approve the Beacon outreach",
+        ("community.engage.request", BriefingLocale::Pl) => "Zatwierdź publikację w społeczności",
+        ("community.engage.request", BriefingLocale::En) => "Approve the community post",
+        ("content.arc.raise", BriefingLocale::Pl) => "Zatwierdź łuk treści",
+        ("content.arc.raise", BriefingLocale::En) => "Approve the content arc",
+        ("content.artifact.request", BriefingLocale::Pl) => "Zatwierdź artefakt treści",
+        ("content.artifact.request", BriefingLocale::En) => "Approve the content artifact",
+        ("content.suggestion.raise", BriefingLocale::Pl) => "Zatwierdź sugestię treści",
+        ("content.suggestion.raise", BriefingLocale::En) => "Approve the content suggestion",
+        ("fan.lifecycle.message.request", BriefingLocale::Pl) => "Zatwierdź wiadomość do fana",
+        ("fan.lifecycle.message.request", BriefingLocale::En) => "Approve the fan message",
+        ("growth.opportunity.raise", BriefingLocale::Pl) => "Zatwierdź szansę wzrostu",
+        ("growth.opportunity.raise", BriefingLocale::En) => "Approve the growth opportunity",
+        ("outreach.discovery.request", BriefingLocale::Pl) => {
+            "Zatwierdź wyszukiwanie celów outreach"
+        }
+        ("outreach.discovery.request", BriefingLocale::En) => "Approve the outreach search",
+        ("outreach.target.request" | "outreach.request", BriefingLocale::Pl) => {
+            "Zatwierdź cel outreach"
+        }
+        ("outreach.target.request" | "outreach.request", BriefingLocale::En) => {
+            "Approve the outreach target"
+        }
+        ("show.growth.request", BriefingLocale::Pl) => "Zatwierdź działanie wzrostu koncertu",
+        ("show.growth.request", BriefingLocale::En) => "Approve the show growth action",
+        ("show.task.complete", BriefingLocale::Pl) => "Domknij zadanie koncertowe",
+        ("show.task.complete", BriefingLocale::En) => "Close the show task",
+        ("show.task.escalate", BriefingLocale::Pl) => "Eskaluj zadanie koncertowe",
+        ("show.task.escalate", BriefingLocale::En) => "Escalate the show task",
+        ("signal.push.request", BriefingLocale::Pl) => "Zatwierdź push Signal",
+        ("signal.push.request", BriefingLocale::En) => "Approve the Signal push",
+        (other, _) => return format!("VIRYA OS — {}", other.replace(['.', '_'], " ")),
+    };
+    title.to_owned()
+}
+
+fn show_task_detail(task: &UnassignedShowTaskRow, locale: BriefingLocale) -> String {
+    let starts_at = format!(
+        "{} {:02}:{:02} UTC",
+        task.starts_at.date(),
+        task.starts_at.hour(),
+        task.starts_at.minute()
+    );
+    match locale {
+        BriefingLocale::Pl => format!(
+            "Koncert: {}. Termin koncertu: {}.",
+            task.event_title, starts_at
+        ),
+        BriefingLocale::En => format!("Show: {}. Showtime: {}.", task.event_title, starts_at),
     }
 }
 
-fn show_task_detail(task: &UnassignedShowTaskRow) -> String {
-    format!(
-        "Koncert: {}. Termin koncertu: {}.",
-        task.event_title, task.starts_at
-    )
-}
-
-fn friendly_show_task_title(task_key: &str) -> String {
-    match task_key {
-        "staff_assigned" => "Potwierdź obsadę koncertu".into(),
-        "offline_snapshot_ready" => "Przygotuj offline snapshot na koncert".into(),
-        "gate_device_charged" => "Naładuj urządzenie wejściowe".into(),
-        "backup_device_ready" => "Przygotuj urządzenie zapasowe".into(),
-        "network_tested" => "Przetestuj internet na wejściu".into(),
-        "guestlist_checked" => "Sprawdź guestlistę".into(),
-        "post_show_reconciliation" => "Zrób rozliczenie po koncercie".into(),
-        "post_show_report" => "Domknij raport po koncercie".into(),
-        other => format!("Domknij zadanie koncertowe: {}", other.replace('_', " ")),
-    }
+fn friendly_show_task_title(task_key: &str, locale: BriefingLocale) -> String {
+    let title = match (task_key, locale) {
+        ("staff_assigned", BriefingLocale::Pl) => "Potwierdź obsadę koncertu",
+        ("staff_assigned", BriefingLocale::En) => "Confirm the show staffing",
+        ("offline_snapshot_ready", BriefingLocale::Pl) => "Przygotuj offline snapshot na koncert",
+        ("offline_snapshot_ready", BriefingLocale::En) => {
+            "Prepare the offline snapshot for the show"
+        }
+        ("gate_device_charged", BriefingLocale::Pl) => "Naładuj urządzenie wejściowe",
+        ("gate_device_charged", BriefingLocale::En) => "Charge the gate device",
+        ("backup_device_ready", BriefingLocale::Pl) => "Przygotuj urządzenie zapasowe",
+        ("backup_device_ready", BriefingLocale::En) => "Prepare the backup device",
+        ("network_tested", BriefingLocale::Pl) => "Przetestuj internet na wejściu",
+        ("network_tested", BriefingLocale::En) => "Test the gate internet",
+        ("guestlist_checked", BriefingLocale::Pl) => "Sprawdź guestlistę",
+        ("guestlist_checked", BriefingLocale::En) => "Check the guest list",
+        ("post_show_reconciliation", BriefingLocale::Pl) => "Zrób rozliczenie po koncercie",
+        ("post_show_reconciliation", BriefingLocale::En) => "Do the post-show reconciliation",
+        ("post_show_report", BriefingLocale::Pl) => "Domknij raport po koncercie",
+        ("post_show_report", BriefingLocale::En) => "Close out the post-show report",
+        (other, BriefingLocale::Pl) => {
+            return format!("Domknij zadanie koncertowe: {}", other.replace('_', " "));
+        }
+        (other, BriefingLocale::En) => {
+            return format!("Close the show task: {}", other.replace('_', " "));
+        }
+    };
+    title.to_owned()
 }
 
 /// Builds an enriched `task_detail` string from the action payload's briefing.
@@ -927,7 +1040,7 @@ fn friendly_show_task_title(task_key: &str) -> String {
 ///
 /// A missing or unreadable row is the source language rather than an error: a
 /// task email that arrives in English is usable, one that fails to send is not.
-async fn crew_locale_in_tx(
+pub(super) async fn crew_locale_in_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     workspace_id: WorkspaceId,
 ) -> BriefingLocale {

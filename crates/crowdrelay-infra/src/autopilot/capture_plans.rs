@@ -275,6 +275,7 @@ pub(in crate::autopilot) async fn issue_capture_plans(
     workspace_id: WorkspaceId,
     now: OffsetDateTime,
     mutable_team: &mut [TeamRoutingRow],
+    crew_locale: crowdrelay_application::autopilot::BriefingLocale,
 ) -> Result<u32, RepositoryError> {
     // `today` is bound as a DATE so the window compares dates to dates —
     // casting the instant session-side would let the connection's
@@ -425,6 +426,7 @@ pub(in crate::autopilot) async fn issue_capture_plans(
                 &shots,
                 now,
                 mutable_team,
+                crew_locale,
             )
             .await?,
         );
@@ -497,6 +499,7 @@ pub(in crate::autopilot) async fn issue_capture_plans(
                 &shots,
                 now,
                 mutable_team,
+                crew_locale,
             )
             .await?,
         );
@@ -540,6 +543,7 @@ async fn route_capture_plan(
     shots: &[CaptureShot],
     now: OffsetDateTime,
     mutable_team: &mut [TeamRoutingRow],
+    crew_locale: crowdrelay_application::autopilot::BriefingLocale,
 ) -> Result<u32, RepositoryError> {
     let member = mutable_team
         .get_mut(member_index)
@@ -579,7 +583,14 @@ async fn route_capture_plan(
         "show_operations",
         &member.normalized_email,
         &member.display_name,
-        format!("Zabezpiecz materiał: {day_title}"),
+        match crew_locale {
+            crowdrelay_application::autopilot::BriefingLocale::Pl => {
+                format!("Zabezpiecz materiał: {day_title}")
+            }
+            crowdrelay_application::autopilot::BriefingLocale::En => {
+                format!("Secure the footage: {day_title}")
+            }
+        },
         capture_plan_detail(
             day_title,
             scheduled_for,
@@ -587,6 +598,7 @@ async fn route_capture_plan(
                 .iter()
                 .map(|shot| shot.item.clone())
                 .collect::<Vec<_>>(),
+            crew_locale,
         ),
         Some(due_at),
         0,
@@ -632,14 +644,25 @@ pub(super) fn capture_plan_detail(
     day_title: &str,
     scheduled_for: time::Date,
     items: &[String],
+    locale: crowdrelay_application::autopilot::BriefingLocale,
 ) -> String {
-    let mut text =
-        format!("Dzień produkcyjny: {day_title}. Data: {scheduled_for}.\n\nUjęcia do zrobienia:");
+    use crowdrelay_application::autopilot::BriefingLocale;
+    let mut text = match locale {
+        BriefingLocale::Pl => format!(
+            "Dzień produkcyjny: {day_title}. Data: {scheduled_for}.\n\nUjęcia do zrobienia:"
+        ),
+        BriefingLocale::En => {
+            format!("Production day: {day_title}. Date: {scheduled_for}.\n\nShots to take:")
+        }
+    };
     for (i, item) in items.iter().enumerate() {
         text.push_str(&format!("\n{}. {}.", i + 1, item));
     }
-    text.push_str(
-        "\n\nPo dniu wrzuć materiał jako źródła treści — harvest liczy ujęcia do 3 dni po dniu produkcyjnym.",
-    );
+    text.push_str(match locale {
+        BriefingLocale::Pl =>
+            "\n\nPo dniu wrzuć materiał jako źródła treści — harvest liczy ujęcia do 3 dni po dniu produkcyjnym.",
+        BriefingLocale::En =>
+            "\n\nAfter the day, upload the material as content sources — the harvest counts shots up to 3 days after the production day.",
+    });
     text
 }

@@ -1053,6 +1053,17 @@ impl AutopilotControlRepository for PostgresAutopilotRepository {
                 super::executor_capability_available(&mut transaction, workspace_id, "team.email")
                     .await?;
             if team_email_live {
+                let crew_locale =
+                    super::team::crew_locale_in_tx(&mut transaction, workspace_id).await;
+                let title = super::team::friendly_action_title(&action.1, crew_locale);
+                let detail = match crew_locale {
+                    crowdrelay_application::autopilot::BriefingLocale::Pl => {
+                        format!("Wymaga Twojej decyzji w VIRYA OS: {title}.")
+                    }
+                    crowdrelay_application::autopilot::BriefingLocale::En => {
+                        format!("Needs your decision in VIRYA OS: {title}.")
+                    }
+                };
                 super::team::queue_team_email_action(
                     &mut transaction,
                     workspace_id,
@@ -1060,8 +1071,8 @@ impl AutopilotControlRepository for PostgresAutopilotRepository {
                     &action.0,
                     &member.3,
                     &member.2,
-                    super::team::friendly_action_title(&action.1),
-                    format!("Wymaga Twojej decyzji w VIRYA OS: {}.", action.1),
+                    title,
+                    detail,
                     due_at,
                     0,
                     Some(action_id.into_uuid()),

@@ -467,7 +467,7 @@ async fn compose_briefing(
         for ask in &asks {
             let summary = serde_json::from_value::<AutopilotActionPayload>(ask.payload.clone())
                 .map(|payload| payload.briefing().localized(locale).summary)
-                .unwrap_or_else(|_| ask.action_kind.clone());
+                .unwrap_or_else(|_| super::team::friendly_action_title(&ask.action_kind, locale));
             let summary = if summary.chars().count() > 90 {
                 format!("{}…", summary.chars().take(89).collect::<String>())
             } else {

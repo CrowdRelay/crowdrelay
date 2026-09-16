@@ -52,7 +52,7 @@ impl AutopilotActionPayload {
                 if is_version {
                     version = segment;
                 } else {
-                    name_parts.extend(segment.split('_'));
+                    name_parts.extend(segment.split(['_', '-']));
                 }
             }
             let name = name_parts.join(" ");
@@ -62,6 +62,35 @@ impl AutopilotActionPayload {
                 None => name,
             };
             if version.is_empty() { name } else { format!("{name} {version}") }
+        };
+
+        // `{:?}` on a domain enum is the variant name the compiler knows —
+        // `PostShowThanks`, `ReleaseAssetsMissing` — one word where a person
+        // reads three. The variant names are already the right words, they
+        // only need their boundaries back.
+        let friendly_enum = |value: &dyn std::fmt::Debug| {
+            let debug = format!("{value:?}");
+            let mut words = String::with_capacity(debug.len() + 4);
+            for (i, ch) in debug.chars().enumerate() {
+                if ch.is_uppercase() && i > 0 {
+                    words.push(' ');
+                    words.extend(ch.to_lowercase());
+                } else {
+                    words.push(ch);
+                }
+            }
+            let mut chars = words.chars();
+            match chars.next() {
+                Some(first) => first.to_uppercase().chain(chars).collect::<String>(),
+                None => words,
+            }
+        };
+
+        // The RFC3339 wire form is the worst date a person can be shown.
+        // Values are not localized, so the format is the language-neutral one
+        // everyone already reads: 2026-09-19 06:42 UTC.
+        let friendly_datetime = |at: OffsetDateTime| {
+            format!("{} {:02}:{:02} UTC", at.date(), at.hour(), at.minute())
         };
 
         match self {
@@ -94,7 +123,7 @@ impl AutopilotActionPayload {
                 deadline_note: String::new(),
             },
             Self::RequestFanLifecycleMessage { fan_id, template_key } => ActionBriefing {
-                summary: format!("Send a message to a fan: {}", template_key),
+                summary: format!("Send a message to a fan: {}", friendly_template(template_key)),
                 why_it_matters: "This goes to a fan who consented to be contacted. A sent message cannot be recalled.".into(),
                 steps: vec![
                     BriefingStep { what_to_do: "Read the message body and its template".into(), why_it_matters: "Make sure the tone fits".into() },
@@ -142,13 +171,13 @@ impl AutopilotActionPayload {
                 ],
                 content: vec![
                     BriefingField { label: "Target".into(), value: target_name.clone() },
-                    BriefingField { label: "Phase".into(), value: format!("{:?}", phase) },
+                    BriefingField { label: "Phase".into(), value: friendly_enum(phase) },
                     BriefingField { label: "Outcome".into(), value: format!("{}", score) },
                 ],
                 deadline_note: String::new(),
             },
             Self::RequestAudienceCampaign { event_id, phase, template_key } => ActionBriefing {
-                summary: format!("Kampania audience: {}", template_key),
+                summary: format!("Audience campaign: {}", friendly_template(template_key)),
                 why_it_matters: "The campaign reaches fans tied to this event. A sent campaign cannot be recalled.".into(),
                 steps: vec![
                     BriefingStep { what_to_do: "Check the template and the campaign phase".into(), why_it_matters: "Make sure the content suits this phase".into() },
@@ -156,7 +185,7 @@ impl AutopilotActionPayload {
                 ],
                 content: vec![
                     BriefingField { label: "Event".into(), value: short_ref(event_id) },
-                    BriefingField { label: "Phase".into(), value: format!("{:?}", phase) },
+                    BriefingField { label: "Phase".into(), value: friendly_enum(phase) },
                     BriefingField { label: "Template".into(), value: friendly_template(template_key) },
                 ],
                 deadline_note: String::new(),
@@ -169,10 +198,10 @@ impl AutopilotActionPayload {
                     BriefingStep { what_to_do: "Click APPROVE to create it".into(), why_it_matters: "Once approved the bundle goes on sale".into() },
                 ],
                 content: vec![
-                    BriefingField { label: "Produkt A".into(), value: product_a.to_string() },
-                    BriefingField { label: "Produkt B".into(), value: product_b.to_string() },
-                    BriefingField { label: "Cena zestawu".into(), value: format_minor(*bundle_price_minor) },
-                    BriefingField { label: "Afinitet".into(), value: format!("{}%", affinity_basis_points / 100) },
+                    BriefingField { label: "Product A".into(), value: product_a.to_string() },
+                    BriefingField { label: "Product B".into(), value: product_b.to_string() },
+                    BriefingField { label: "Bundle price".into(), value: format_minor(*bundle_price_minor) },
+                    BriefingField { label: "Affinity".into(), value: format!("{}%", affinity_basis_points / 100) },
                 ],
                 deadline_note: String::new(),
             },
@@ -185,7 +214,7 @@ impl AutopilotActionPayload {
                 ],
                 content: vec![
                     BriefingField { label: "Target".into(), value: target_name.clone() },
-                    BriefingField { label: "Phase".into(), value: format!("{:?}", phase) },
+                    BriefingField { label: "Phase".into(), value: friendly_enum(phase) },
                     BriefingField { label: "Template".into(), value: friendly_template(template_key) },
                 ],
                 deadline_note: String::new(),
@@ -199,15 +228,15 @@ impl AutopilotActionPayload {
                 content: vec![
                     BriefingField { label: "Playlist ID".into(), value: playlist_external_id.clone() },
                     BriefingField { label: "Track ID".into(), value: track_external_id.clone() },
-                    BriefingField { label: "Punkt kontrolny".into(), value: checkpoint.to_string() },
+                    BriefingField { label: "Checkpoint".into(), value: checkpoint.to_string() },
                 ],
                 deadline_note: String::new(),
             },
             Self::RequestBeaconDiscovery { event_id, target_count } => ActionBriefing {
                 summary: format!("Find {} local Beacons", target_count),
-                why_it_matters: "System przeszuka lokalne Beacony w okolicy wydarzenia. To odczyt danych — nie kontaktuje nikogo.".into(),
+                why_it_matters: "The system searches local Beacons near the event. It reads data and contacts nobody.".into(),
                 steps: vec![
-                    BriefingStep { what_to_do: "Click APPROVE to run the search".into(), why_it_matters: "System znajdzie potencjalne Beacony dla wydarzenia".into() },
+                    BriefingStep { what_to_do: "Click APPROVE to run the search".into(), why_it_matters: "The system finds candidate Beacons for the event".into() },
                 ],
                 content: vec![
                     BriefingField { label: "Event".into(), value: short_ref(event_id) },
@@ -233,7 +262,7 @@ impl AutopilotActionPayload {
                 summary: format!("Find {} outreach candidates", requested_candidates),
                 why_it_matters: "The system searches published sources for submission routes. It reads public data and contacts nobody.".into(),
                 steps: vec![
-                    BriefingStep { what_to_do: "Click APPROVE to run the search".into(), why_it_matters: "System znajdzie potencjalne cele outreach".into() },
+                    BriefingStep { what_to_do: "Click APPROVE to run the search".into(), why_it_matters: "The system finds candidate outreach targets".into() },
                 ],
                 content: vec![
                     BriefingField { label: "Candidates".into(), value: requested_candidates.to_string() },
@@ -242,9 +271,9 @@ impl AutopilotActionPayload {
             },
             Self::RequestBookingTargetDiscovery { requested_count } => ActionBriefing {
                 summary: format!("Find {} booking targets", requested_count),
-                why_it_matters: "System przeszuka opublikowane trasy venue/promoter. Odczyt danych publicznych — nie kontaktuje nikogo.".into(),
+                why_it_matters: "The system searches published venue and promoter routes. It reads public data and contacts nobody.".into(),
                 steps: vec![
-                    BriefingStep { what_to_do: "Click APPROVE to run the search".into(), why_it_matters: "System znajdzie potencjalne cele bookingowe".into() },
+                    BriefingStep { what_to_do: "Click APPROVE to run the search".into(), why_it_matters: "The system finds candidate booking targets".into() },
                 ],
                 content: vec![
                     BriefingField { label: "Targets".into(), value: requested_count.to_string() },
@@ -252,7 +281,7 @@ impl AutopilotActionPayload {
                 deadline_note: String::new(),
             },
             Self::RequestBeaconOutreach { beacon_id, event_id, phase, template_key, .. } => ActionBriefing {
-                summary: format!("Beacon contact: {}", template_key),
+                summary: format!("Beacon contact: {}", friendly_template(template_key)),
                 why_it_matters: "This approaches a Beacon about an event. You get one chance at contact.".into(),
                 steps: vec![
                     BriefingStep { what_to_do: "Check the Beacon, the phase and the template".into(), why_it_matters: "Make sure the message fits".into() },
@@ -261,7 +290,7 @@ impl AutopilotActionPayload {
                 content: vec![
                     BriefingField { label: "Beacon".into(), value: short_ref(beacon_id) },
                     BriefingField { label: "Event".into(), value: short_ref(event_id) },
-                    BriefingField { label: "Phase".into(), value: format!("{:?}", phase) },
+                    BriefingField { label: "Phase".into(), value: friendly_enum(phase) },
                     BriefingField { label: "Template".into(), value: friendly_template(template_key) },
                 ],
                 deadline_note: String::new(),
@@ -281,7 +310,7 @@ impl AutopilotActionPayload {
                         label: "Reaches fans".into(),
                         value: send_at.map_or_else(
                             || "on approval".to_owned(),
-                            |at| at.to_string(),
+                            friendly_datetime,
                         ),
                     },
                 ],
@@ -314,17 +343,17 @@ impl AutopilotActionPayload {
                     ];
                     for alloc in allocations {
                         fields.push(BriefingField {
-                            label: format!("Wariant {}", alloc.variant_id),
+                            label: format!("Variant {}", alloc.variant_id),
                             value: format!("{}%", alloc.allocation_basis_points / 100),
                         });
                     }
-                    fields.push(BriefingField { label: "Finish".into(), value: if *complete { "tak" } else { "nie" }.into() });
+                    fields.push(BriefingField { label: "Finish".into(), value: if *complete { "yes" } else { "no" }.into() });
                     fields
                 },
                 deadline_note: String::new(),
             },
             Self::CompleteShowTask { event_id, task } => ActionBriefing {
-                summary: format!("Zadanie koncertowe: {:?}", task),
+                summary: format!("Show task: {}", friendly_enum(task)),
                 why_it_matters: "This is an operational task for a show. Marking it done closes that item on the checklist.".into(),
                 steps: vec![
                     BriefingStep { what_to_do: "Confirm the task is actually done".into(), why_it_matters: "Tick this only if the work was actually done".into() },
@@ -332,12 +361,12 @@ impl AutopilotActionPayload {
                 ],
                 content: vec![
                     BriefingField { label: "Event".into(), value: short_ref(event_id) },
-                    BriefingField { label: "Task".into(), value: format!("{:?}", task) },
+                    BriefingField { label: "Task".into(), value: friendly_enum(task) },
                 ],
                 deadline_note: String::new(),
             },
             Self::EscalateShowTask { event_id, task } => ActionBriefing {
-                summary: format!("Eskaluj zadanie koncertowe: {:?}", task),
+                summary: format!("Escalate the show task: {}", friendly_enum(task)),
                 why_it_matters: "Escalating marks the task as needing urgent attention and raises its priority in the queue.".into(),
                 steps: vec![
                     BriefingStep { what_to_do: "Read why the task needs escalating".into(), why_it_matters: "Understand the problem before acting".into() },
@@ -345,7 +374,7 @@ impl AutopilotActionPayload {
                 ],
                 content: vec![
                     BriefingField { label: "Event".into(), value: short_ref(event_id) },
-                    BriefingField { label: "Task".into(), value: format!("{:?}", task) },
+                    BriefingField { label: "Task".into(), value: friendly_enum(task) },
                 ],
                 deadline_note: String::new(),
             },
@@ -373,13 +402,13 @@ impl AutopilotActionPayload {
                 ],
                 content: vec![
                     BriefingField { label: "Title".into(), value: title.clone() },
-                    BriefingField { label: "Data release".into(), value: release_at.format(&time::format_description::well_known::Rfc3339).unwrap_or_default() },
-                    BriefingField { label: "Milestone".into(), value: format!("{:?}", milestone) },
+                    BriefingField { label: "Release date".into(), value: release_at.date().to_string() },
+                    BriefingField { label: "Milestone".into(), value: friendly_enum(milestone) },
                 ],
                 deadline_note: String::new(),
             },
             Self::EscalateEditorialPitch { title, due_at, .. } => ActionBriefing {
-                summary: format!("Eskaluj pitch editorial: {}", title),
+                summary: format!("Escalate the editorial pitch: {}", title),
                 why_it_matters: "This is a reminder about an unsent Spotify Editorial pitch. A nudge inside the workspace; it contacts nobody outside.".into(),
                 steps: vec![
                     BriefingStep { what_to_do: "Check the title and the deadline".into(), why_it_matters: "Understand what is overdue".into() },
@@ -387,12 +416,12 @@ impl AutopilotActionPayload {
                 ],
                 content: vec![
                     BriefingField { label: "Title".into(), value: title.clone() },
-                    BriefingField { label: "Deadline".into(), value: due_at.format(&time::format_description::well_known::Rfc3339).unwrap_or_default() },
+                    BriefingField { label: "Deadline".into(), value: friendly_datetime(*due_at) },
                 ],
                 deadline_note: String::new(),
             },
             Self::ApplyLiveOpportunity { opportunity_id, opportunity_kind, score } => ActionBriefing {
-                summary: format!("Send a show application: {:?}", opportunity_kind),
+                summary: format!("Send a show application: {}", friendly_enum(opportunity_kind)),
                 why_it_matters: "This applies to a show or festival. Applying commits the calendar.".into(),
                 steps: vec![
                     BriefingStep { what_to_do: "Check the application type and the result".into(), why_it_matters: "Make sure this is the right opportunity".into() },
@@ -400,13 +429,13 @@ impl AutopilotActionPayload {
                 ],
                 content: vec![
                     BriefingField { label: "Opportunity".into(), value: short_ref(opportunity_id) },
-                    BriefingField { label: "Type".into(), value: format!("{:?}", opportunity_kind) },
+                    BriefingField { label: "Type".into(), value: friendly_enum(opportunity_kind) },
                     BriefingField { label: "Outcome".into(), value: score.to_string() },
                 ],
                 deadline_note: String::new(),
             },
             Self::CounterLiveOpportunityTerms { opportunity_id, ask_minor, currency, round } => ActionBriefing {
-                summary: format!("Kontruj warunki: {} {} (runda {})", format_minor(*ask_minor), currency, round),
+                summary: format!("Counter the terms: {} {} (round {})", format_minor(*ask_minor), currency, round),
                 why_it_matters: "This counters a promoter's fee. Sending it changes the terms under negotiation.".into(),
                 steps: vec![
                     BriefingStep { what_to_do: "Check the amount and the currency".into(), why_it_matters: "Make sure the amount is acceptable".into() },
@@ -416,12 +445,12 @@ impl AutopilotActionPayload {
                     BriefingField { label: "Opportunity".into(), value: short_ref(opportunity_id) },
                     BriefingField { label: "Amount".into(), value: format_minor(*ask_minor) },
                     BriefingField { label: "Currency".into(), value: currency.clone() },
-                    BriefingField { label: "Runda".into(), value: round.to_string() },
+                    BriefingField { label: "Round".into(), value: round.to_string() },
                 ],
                 deadline_note: String::new(),
             },
             Self::AcceptLiveOpportunityTerms { opportunity_id, fee_minor, currency } => ActionBriefing {
-                summary: format!("Akceptuj warunki: {} {}", format_minor(*fee_minor), currency),
+                summary: format!("Accept the terms: {} {}", format_minor(*fee_minor), currency),
                 why_it_matters: "Accepting a fee commits both the calendar and the money. It cannot be undone.".into(),
                 steps: vec![
                     BriefingStep { what_to_do: "Check the amount and the currency".into(), why_it_matters: "This is a commitment — make sure the terms are good".into() },
@@ -435,10 +464,10 @@ impl AutopilotActionPayload {
                 deadline_note: String::new(),
             },
             Self::PrepareFundingPackage { opportunity_id } => ActionBriefing {
-                summary: "Przygotuj pakiet finansowania".into(),
+                summary: "Prepare the funding package".into(),
                 why_it_matters: "This assembles the funding application documents. Internal only; it contacts nobody outside.".into(),
                 steps: vec![
-                    BriefingStep { what_to_do: "Click APPROVE to assemble the package".into(), why_it_matters: "System zbierze wymagane dokumenty".into() },
+                    BriefingStep { what_to_do: "Click APPROVE to assemble the package".into(), why_it_matters: "The system assembles the required documents".into() },
                 ],
                 content: vec![
                     BriefingField { label: "Opportunity".into(), value: short_ref(opportunity_id) },
@@ -461,20 +490,20 @@ impl AutopilotActionPayload {
                 summary: format!("Growth opportunity: {} — {}", platform_label(platform), metric_key),
                 why_it_matters: "An external metric moved. That is a signal something is happening and may deserve a response.".into(),
                 steps: vec![
-                    BriefingStep { what_to_do: "Read the recommended action".into(), why_it_matters: "Zrozum co system proponuje i dlaczego".into() },
+                    BriefingStep { what_to_do: "Read the recommended action".into(), why_it_matters: "Understand what the system proposes and why".into() },
                     BriefingStep { what_to_do: "Click APPROVE to schedule the action".into(), why_it_matters: "Once approved the action joins the queue".into() },
                 ],
                 content: vec![
                     BriefingField { label: "Platform".into(), value: platform_label(platform) },
-                    BriefingField { label: "Metryka".into(), value: metric_key.clone() },
-                    BriefingField { label: "Signal".into(), value: format!("{:?}", signal) },
-                    BriefingField { label: "Odchylenie".into(), value: format!("{}%", deviation_basis_points / 100) },
+                    BriefingField { label: "Metric".into(), value: metric_key.clone() },
+                    BriefingField { label: "Signal".into(), value: friendly_enum(signal) },
+                    BriefingField { label: "Deviation".into(), value: format!("{}%", deviation_basis_points / 100) },
                     BriefingField { label: "Recommended action".into(), value: recommended_action.clone() },
                 ],
                 deadline_note: String::new(),
             },
             Self::IssueReferralCode { fan_id } => ActionBriefing {
-                summary: "Wydaj kod referencyjny fanowi".into(),
+                summary: "Issue a referral code to a fan".into(),
                 why_it_matters: "A referral code is growth that scales with the audience. The fan must have consented.".into(),
                 steps: vec![
                     BriefingStep { what_to_do: "Click APPROVE to issue the code".into(), why_it_matters: "Once approved the fan receives their referral code".into() },
@@ -485,16 +514,16 @@ impl AutopilotActionPayload {
                 deadline_note: String::new(),
             },
             Self::RaiseGrowthDebt { debt_kind, recommended_action, overdue_basis_points, outstanding_items, tracked_items, .. } => ActionBriefing {
-                summary: format!("Growth debt: {:?}", debt_kind),
+                summary: format!("Growth debt: {}", friendly_enum(debt_kind)),
                 why_it_matters: "This is work that was committed to and never done. The longer it waits, the harder it is to catch up.".into(),
                 steps: vec![
                     BriefingStep { what_to_do: "Read the recommended action".into(), why_it_matters: "Understand what is overdue, and why".into() },
                     BriefingStep { what_to_do: "Click APPROVE to schedule the catch-up".into(), why_it_matters: "Once approved the action joins the queue".into() },
                 ],
                 content: vec![
-                    BriefingField { label: "Debt type".into(), value: format!("{:?}", debt_kind) },
+                    BriefingField { label: "Debt type".into(), value: friendly_enum(debt_kind) },
                     BriefingField { label: "Recommended action".into(), value: recommended_action.clone() },
-                    BriefingField { label: "Po terminie".into(), value: format!("{}%", overdue_basis_points / 100) },
+                    BriefingField { label: "Overdue".into(), value: format!("{}%", overdue_basis_points / 100) },
                     BriefingField { label: "Overdue items".into(), value: format!("{} / {}", outstanding_items, tracked_items) },
                 ],
                 deadline_note: String::new(),
@@ -509,13 +538,13 @@ impl AutopilotActionPayload {
                 content: {
                     let mut fields = vec![
                         BriefingField { label: "Concept".into(), value: concept.clone() },
-                        BriefingField { label: "Dlaczego teraz".into(), value: reason.clone() },
+                        BriefingField { label: "Why now".into(), value: reason.clone() },
                     ];
                     if let Some(key) = format_key {
                         fields.push(BriefingField { label: "Format".into(), value: key.clone() });
                     }
                     fields.push(BriefingField {
-                        label: "Kto to zobaczy".into(),
+                        label: "Who sees it".into(),
                         value: promise_to_text(distribution_promise),
                     });
                     fields
@@ -546,7 +575,7 @@ impl AutopilotActionPayload {
                 deadline_note: String::new(),
             },
             Self::RunPlayStep { play_id, play_kind, step_index, step_kind, event_id, fan_id, template_key } => ActionBriefing {
-                summary: format!("Krok play: {:?} (krok {})", play_kind, step_index),
+                summary: format!("Play step: {} (step {})", friendly_enum(play_kind), step_index),
                 why_it_matters: "This is one step of a play campaign, for one fan. A sent message cannot be recalled.".into(),
                 steps: vec![
                     BriefingStep { what_to_do: "Check the step type and the template".into(), why_it_matters: "Make sure the content suits this step".into() },
@@ -555,8 +584,8 @@ impl AutopilotActionPayload {
                 content: {
                     let mut fields = vec![
                         BriefingField { label: "Play".into(), value: short_ref(play_id) },
-                        BriefingField { label: "Play type".into(), value: format!("{:?}", play_kind) },
-                        BriefingField { label: "Krok".into(), value: format!("{}: {:?}", step_index, step_kind) },
+                        BriefingField { label: "Play type".into(), value: friendly_enum(play_kind) },
+                        BriefingField { label: "Step".into(), value: format!("{}: {}", step_index, friendly_enum(step_kind)) },
                         BriefingField { label: "Template".into(), value: friendly_template(template_key) },
                     ];
                     if let Some(eid) = event_id {
@@ -570,7 +599,7 @@ impl AutopilotActionPayload {
                 deadline_note: String::new(),
             },
             Self::SendTeamAssignmentEmail { task_title, task_detail, reminder_number, .. } => ActionBriefing {
-                summary: if *reminder_number > 0 { format!("Przypomnienie: {}", task_title) } else { task_title.clone() },
+                summary: if *reminder_number > 0 { format!("Reminder: {}", task_title) } else { task_title.clone() },
                 why_it_matters: "This emails a task assignment to a crew member. Reminders keep going until the task is closed.".into(),
                 steps: vec![
                     BriefingStep { what_to_do: "Read the task body".into(), why_it_matters: "Make sure the task is unambiguous".into() },
@@ -579,7 +608,7 @@ impl AutopilotActionPayload {
                 content: vec![
                     BriefingField { label: "Task title".into(), value: task_title.clone() },
                     BriefingField { label: "Details".into(), value: truncate(task_detail.clone(), 2000) },
-                    BriefingField { label: "Przypomnienie".into(), value: reminder_number.to_string() },
+                    BriefingField { label: "Reminder".into(), value: reminder_number.to_string() },
                 ],
                 deadline_note: String::new(),
             },
@@ -611,10 +640,10 @@ impl AutopilotActionPayload {
                     // Approving a pitch without seeing the recipient is
                     // approving half the decision.
                     if let Some(name) = recipient_name {
-                        fields.push(BriefingField { label: "Odbiorca".into(), value: name.clone() });
+                        fields.push(BriefingField { label: "Recipient".into(), value: name.clone() });
                     }
                     if let Some(email) = recipient_email {
-                        fields.push(BriefingField { label: "Adres".into(), value: email.clone() });
+                        fields.push(BriefingField { label: "Address".into(), value: email.clone() });
                     }
                     // Extract channel/destination from draft if present so the
                     // operator knows where the content will be published.
@@ -644,21 +673,21 @@ impl AutopilotActionPayload {
                         BriefingField { label: "Name".into(), value: display_name.clone() },
                     ];
                     if let Some(email) = contact_email {
-                        fields.push(BriefingField { label: "Email kontaktowy".into(), value: email.clone() });
+                        fields.push(BriefingField { label: "Contact email".into(), value: email.clone() });
                     }
                     if let Some(domain) = contact_domain {
-                        fields.push(BriefingField { label: "Domena".into(), value: domain.clone() });
+                        fields.push(BriefingField { label: "Domain".into(), value: domain.clone() });
                     }
                     if let Some(sub) = subreddit {
                         fields.push(BriefingField { label: "Subreddit".into(), value: sub.clone() });
                     }
                     if !why_fit.is_empty() {
-                        fields.push(BriefingField { label: "Dlaczego pasuje".into(), value: truncate(why_fit.clone(), 500) });
+                        fields.push(BriefingField { label: "Why it fits".into(), value: truncate(why_fit.clone(), 500) });
                     }
                     if let Some(urls) = evidence_urls.as_array() {
                         let url_list = urls.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>().join(", ");
                         if !url_list.is_empty() {
-                            fields.push(BriefingField { label: "Dowody".into(), value: truncate(url_list, 500) });
+                            fields.push(BriefingField { label: "Evidence".into(), value: truncate(url_list, 500) });
                         }
                     }
                     fields
@@ -666,7 +695,7 @@ impl AutopilotActionPayload {
                 deadline_note: String::new(),
             },
             Self::RequestAgentRun { template_id, prompt, priority, tier } => ActionBriefing {
-                summary: format!("Uruchom agenta: {}", template_id),
+                summary: format!("Run the agent: {}", template_id),
                 why_it_matters: "The deterministic brain dispatches an LLM worker to gather intelligence or draft content. The agent decides nothing — it only supplies material.".into(),
                 steps: vec![
                     BriefingStep { what_to_do: "Check the template and the priority".into(), why_it_matters: "Make sure the task makes sense".into() },
@@ -675,7 +704,7 @@ impl AutopilotActionPayload {
                 content: vec![
                     BriefingField { label: "Template".into(), value: template_id.clone() },
                     BriefingField { label: "Priority".into(), value: priority.to_string() },
-                    BriefingField { label: "Tier".into(), value: format!("{:?}", tier) },
+                    BriefingField { label: "Tier".into(), value: friendly_enum(tier) },
                     BriefingField { label: "Prompt".into(), value: truncate(prompt.clone(), 2000) },
                 ],
                 deadline_note: String::new(),
@@ -697,7 +726,7 @@ impl AutopilotActionPayload {
                 deadline_note: String::new(),
             },
             Self::RequestSignalPush { title, body, target_path, event_id, segment, .. } => ActionBriefing {
-                summary: format!("Powiadomienie push: {}", title),
+                summary: format!("Push notification: {}", title),
                 why_it_matters: "The push reaches fans who consented to notifications. A sent push cannot be recalled.".into(),
                 steps: vec![
                     BriefingStep { what_to_do: "Read the notification title and body".into(), why_it_matters: "A sent push cannot be recalled — read it closely".into() },
@@ -707,7 +736,7 @@ impl AutopilotActionPayload {
                     BriefingField { label: "Title".into(), value: title.clone() },
                     BriefingField { label: "Body".into(), value: truncate(body.clone(), 2000) },
                     BriefingField { label: "Link".into(), value: target_path.clone().unwrap_or("—".into()) },
-                    BriefingField { label: "Segment".into(), value: segment.clone().unwrap_or("wszyscy".into()) },
+                    BriefingField { label: "Segment".into(), value: segment.clone().unwrap_or("everyone".into()) },
                     BriefingField { label: "Event".into(), value: event_id.map(|id| id.to_string()).unwrap_or("—".into()) },
                 ],
                 deadline_note: String::new(),
