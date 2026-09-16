@@ -177,9 +177,10 @@ impl AttestedMetric {
                  orders are excluded; partially refunded orders are counted once."
             }
             Self::ObservedAttendance => {
-                "Distinct check-ins scanned at the door. This is observed attendance rather \
-                 than an estimate from ticket sales, and it is normally lower than tickets \
-                 sold because not everyone who buys turns up."
+                "Distinct people scanned at the door — somebody scanned twice is one \
+                 attender. Observed attendance rather than an estimate from ticket sales, \
+                 and normally lower than tickets sold because not everyone who buys \
+                 turns up."
             }
             Self::RepeatAttenders => {
                 "People who paid for at least two different shows by this act, matched on \

@@ -23,6 +23,7 @@
 pub mod acquisition;
 pub mod admission;
 pub mod area_admin;
+pub mod attestation;
 pub mod audience_graph;
 pub mod autopilot;
 pub mod beacon_signal;
