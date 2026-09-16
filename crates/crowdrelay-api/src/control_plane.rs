@@ -329,6 +329,14 @@ pub(crate) fn router(state: crate::AppState) -> Router {
             get(crate::audience::acquisition_sources),
         )
         .route(
+            "/v1/control-plane/audience/city-funnel",
+            get(crate::audience::city_funnel),
+        )
+        .route(
+            "/v1/control-plane/audience/city-venues",
+            get(crate::audience::city_venues),
+        )
+        .route(
             "/v1/control-plane/audience/fans",
             get(crate::audience::list_fans),
         )

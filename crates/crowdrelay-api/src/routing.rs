@@ -611,6 +611,10 @@ pub(super) fn application_routes(state: AppState) -> Router {
             get(audience::city_funnel),
         )
         .route(
+            "/v1/admin/analytics/city-venues",
+            get(audience::city_venues),
+        )
+        .route(
             "/v1/admin/analytics/ad-conversion",
             get(audience::ad_conversion_overview),
         )

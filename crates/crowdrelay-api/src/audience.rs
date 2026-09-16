@@ -421,6 +421,83 @@ pub async fn city_funnel(
     private_json(result, &headers)
 }
 
+/// The shared venue registry read (§4f-2): one row per room that any
+/// tenant's published or completed event has marked, with the aggregates
+/// the room record exists for — how many shows it has seen, how many
+/// tenants have played it, what a night there typically draws through our
+/// ticket sales, and how many fans keep coming back. Aggregates only: a
+/// mark is one tenant's private contribution, and nothing on this row
+/// names a contributor. `typical_draw` averages only shows that had a
+/// ticket sale at all — an unticketed night is unmeasurable, not a zero.
+pub async fn city_venues(State(state): State<crate::AppState>, headers: HeaderMap) -> Response {
+    let result = sqlx::query_as::<_, CityVenueRow>(
+        r#"
+        WITH marks AS (
+            SELECT mark.venue_id, mark.event_id, mark.workspace_id,
+                   event.starts_at, event.status
+            FROM place_venue_marks AS mark
+            JOIN events AS event
+              ON event.id = mark.event_id
+        ), per_show_draw AS (
+            SELECT marks.venue_id, marks.event_id,
+                   count(ticket_order.id)::double precision AS paid_orders
+            FROM marks
+            JOIN ticket_sales AS sale
+              ON sale.workspace_id = marks.workspace_id
+             AND sale.event_id = marks.event_id
+            LEFT JOIN ticket_orders AS ticket_order
+              ON ticket_order.workspace_id = sale.workspace_id
+             AND ticket_order.ticket_sale_id = sale.id
+             AND ticket_order.status IN ('paid', 'partially_refunded')
+            GROUP BY marks.venue_id, marks.event_id
+        ), repeaters AS (
+            SELECT marked.venue_id, count(*)::bigint AS repeat_attenders
+            FROM (
+                SELECT mark.venue_id, interest.fan_id
+                FROM event_interests AS interest
+                JOIN place_venue_marks AS mark
+                  ON mark.event_id = interest.event_id
+                 AND mark.workspace_id = interest.workspace_id
+                GROUP BY mark.venue_id, interest.fan_id
+                HAVING count(DISTINCT interest.event_id) >= 2
+            ) AS marked
+            GROUP BY marked.venue_id
+        )
+        SELECT
+            venue.id AS venue_id,
+            venue.display_name,
+            city.slug AS city_slug,
+            city.name AS city_name,
+            city.country_code,
+            count(marks.event_id)::bigint AS shows_played,
+            count(DISTINCT marks.workspace_id)::bigint AS contributors,
+            avg(draw.paid_orders) AS typical_draw,
+            COALESCE(repeaters.repeat_attenders, 0)::bigint AS repeat_attenders,
+            max(marks.starts_at) FILTER (WHERE marks.starts_at <= now()) AS last_played_at,
+            min(marks.starts_at) FILTER (
+                WHERE marks.starts_at > now() AND marks.status = 'published'
+            ) AS next_show_at
+        FROM place_venues AS venue
+        JOIN cities AS city
+          ON city.id = venue.city_id
+        LEFT JOIN marks
+          ON marks.venue_id = venue.id
+        LEFT JOIN per_show_draw AS draw
+          ON draw.venue_id = marks.venue_id
+         AND draw.event_id = marks.event_id
+        LEFT JOIN repeaters
+          ON repeaters.venue_id = venue.id
+        GROUP BY venue.id, venue.display_name, city.slug, city.name,
+                 city.country_code, repeaters.repeat_attenders
+        ORDER BY shows_played DESC, venue.display_name, venue.id
+        LIMIT 500
+        "#,
+    )
+    .fetch_all(&state.database)
+    .await;
+    private_json(result, &headers)
+}
+
 /// Ad conversion measurement: fan transfer from paid ad platforms into CrowdRelay.
 ///
 /// Returns per-platform counts of attributed signups, successfully forwarded

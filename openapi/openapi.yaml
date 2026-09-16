@@ -8649,6 +8649,43 @@ paths:
           $ref: '#/components/responses/Problem'
         '503':
           $ref: '#/components/responses/Problem'
+  /admin/analytics/city-venues:
+    get:
+      operationId: getAdminAudienceCityVenues
+      summary: Read the shared venue registry (per-room aggregates across tenants)
+      description: |
+        One row per room any tenant's published or completed event has marked.
+        Shows played, contributing workspace count, typical paid-ticket draw
+        (averaged only over shows that had a ticket sale), repeat attenders
+        (fans interested in 2+ shows at the room), and last/next show dates.
+        Aggregates only — no tenant's raw rows are exposed.
+      security:
+      - adminBearer: []
+      responses:
+        '200':
+          description: Per-room aggregates across all contributing tenants.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    venue_id: { type: string, format: uuid }
+                    display_name: { type: string }
+                    city_slug: { type: string }
+                    city_name: { type: string }
+                    country_code: { type: string }
+                    shows_played: { type: integer, format: int64 }
+                    contributors: { type: integer, format: int64 }
+                    typical_draw: { type: number, format: double, nullable: true }
+                    repeat_attenders: { type: integer, format: int64 }
+                    last_played_at: { type: string, format: date-time, nullable: true }
+                    next_show_at: { type: string, format: date-time, nullable: true }
+        '401':
+          $ref: '#/components/responses/Problem'
+        '503':
+          $ref: '#/components/responses/Problem'
   /admin/analytics/ad-conversion:
     get:
       operationId: getAdminAdConversionOverview

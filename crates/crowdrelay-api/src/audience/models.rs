@@ -414,6 +414,38 @@ pub struct CityFunnelRow {
     organise_score_bp: i64,
 }
 
+/// One row of the shared venue registry read (§4f-2). A venue is a global
+/// object — one room no matter how many tenants marked it — and every
+/// number on this row is an aggregate over contributed marks, never a
+/// tenant's raw row. `contributors` is a count, not an identity.
+#[derive(Debug, Serialize, FromRow)]
+pub struct CityVenueRow {
+    venue_id: Uuid,
+    display_name: String,
+    city_slug: String,
+    city_name: String,
+    country_code: String,
+    /// Published/completed shows marked at this room across all
+    /// contributing workspaces.
+    shows_played: i64,
+    /// Distinct workspaces that contributed a mark. The only cross-tenant
+    /// fact the read exposes — a count, never which tenants.
+    contributors: i64,
+    /// Mean paid ticket orders per show at this room, over shows that had
+    /// a ticket sale at all. An unticketed show's draw is unmeasurable, so
+    /// it stays out of the average rather than reading as zero. NULL when
+    /// no marked show sold tickets through us.
+    typical_draw: Option<f64>,
+    /// Fans who marked interest in at least two shows at this room — the
+    /// room's regulars, the cross-tenant knowledge a single band's own
+    /// history cannot produce.
+    repeat_attenders: i64,
+    #[serde(with = "time::serde::rfc3339::option")]
+    last_played_at: Option<OffsetDateTime>,
+    #[serde(with = "time::serde::rfc3339::option")]
+    next_show_at: Option<OffsetDateTime>,
+}
+
 #[derive(Debug, Serialize, FromRow)]
 pub struct ReferralConversionRow {
     /// Total referral attributions (people who used a code).

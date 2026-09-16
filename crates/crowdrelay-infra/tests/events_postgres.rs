@@ -449,6 +449,85 @@ async fn seed_fixture(
     Ok(event_id)
 }
 
+/// §4f-2 venue registry: a published event marks its room, a rename
+/// re-points the mark onto the same normalised venue, a cancellation
+/// retracts it, and two workspaces naming the same room share one venue
+/// row while keeping separate marks — contribution without exposure.
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_EVENT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn events_mark_the_shared_venue_registry() -> Result<(), Box<dyn std::error::Error>> {
+    let database_url = std::env::var("CROWDRELAY_EVENT_TEST_DATABASE_URL").map_err(|e| {
+        format!("CROWDRELAY_EVENT_TEST_DATABASE_URL must target a disposable database: {e}")
+    })?;
+    let pool = PgPoolOptions::new()
+        .max_connections(8)
+        .connect(&database_url)
+        .await?;
+    crowdrelay_infra::database::MIGRATOR.run(&pool).await?;
+
+    let workspace_a = WorkspaceId::new();
+    let workspace_b = WorkspaceId::new();
+    let slug_a = WorkspaceSlug::parse(format!("venue-a-{}", workspace_a.into_uuid().simple()))?;
+    let slug_b = WorkspaceSlug::parse(format!("venue-b-{}", workspace_b.into_uuid().simple()))?;
+    let starts_at = OffsetDateTime::now_utc() - time::Duration::days(30);
+    let event_a = seed_fixture(&pool, workspace_a, &slug_a, starts_at).await?;
+    let event_b = seed_fixture(&pool, workspace_b, &slug_b, starts_at).await?;
+
+    // Both fixtures seed venue 'Test Club' in 'wroclaw' → one shared room,
+    // two private marks.
+    let (venue_count, mark_count, contributors) = sqlx::query_as::<_, (i64, i64, i64)>(
+        r#"
+        SELECT count(DISTINCT v.id), count(m.id), count(DISTINCT m.workspace_id)
+        FROM place_venues v
+        JOIN place_venue_marks m ON m.venue_id = v.id
+        WHERE m.event_id IN ($1, $2)
+        "#,
+    )
+    .bind(event_a)
+    .bind(event_b)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(venue_count, 1, "same room in the same city is one venue");
+    assert_eq!(mark_count, 2);
+    assert_eq!(contributors, 2);
+
+    // Rename with different casing/whitespace → the mark re-points, not
+    // duplicates.
+    sqlx::query("UPDATE events SET venue = '  test CLUB ' WHERE id = $1")
+        .bind(event_a)
+        .execute(&pool)
+        .await?;
+    let name_keys = sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT count(*) FROM place_venues v
+        JOIN cities c ON c.id = v.city_id
+        WHERE c.slug = 'wroclaw' AND v.name_key = 'test club'
+        "#,
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(name_keys, 1, "casing/whitespace still one room");
+    let still_marked =
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM place_venue_marks WHERE event_id = $1")
+            .bind(event_a)
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(still_marked, 1);
+
+    // Cancel → the claim the event made retracts.
+    sqlx::query("UPDATE events SET status = 'cancelled' WHERE id = $1")
+        .bind(event_a)
+        .execute(&pool)
+        .await?;
+    let after_cancel =
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM place_venue_marks WHERE event_id = $1")
+            .bind(event_a)
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(after_cancel, 0, "a cancelled show never happened");
+    Ok(())
+}
+
 fn test_sensitive_response_codec() -> SensitiveResponseCodec {
     SensitiveResponseCodec::new(SensitiveResponseKey::derive_from_secret(
         b"events-integration-response-secret",
