@@ -726,6 +726,10 @@ impl GmailContactsSyncWorker {
                 organization: None,
                 phone: None,
                 suggested_kind: None,
+                // Mail headers carry no city — the column stays a Drive
+                // fact and a Gmail sighting never overwrites it
+                // (COALESCE in the upsert).
+                city: None,
                 notes: None,
             })
             .collect();

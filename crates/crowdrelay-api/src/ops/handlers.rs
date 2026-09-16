@@ -664,6 +664,8 @@ fn signal_overview_from_row(
             event_interests_30d: row.event_interests_30d,
             nearby_notifications_30d: row.nearby_notifications_30d,
             pending_city_requests: row.pending_city_requests,
+            archive_imported: row.archive_imported,
+            archive_confirmed: row.archive_confirmed,
         },
         top_cities,
         retention_loop: SignalRetentionLoop {

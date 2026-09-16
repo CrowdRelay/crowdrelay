@@ -64,7 +64,7 @@ class BeaconSignalModeV2Contract(unittest.TestCase):
         self.assertNotIn("invite_token text", MIGRATION)
         self.assertNotIn("INSERT INTO outbox_events", ADMIN.split("pub async fn create_invite_batch", 1)[1].split("pub async fn admin_dashboard", 1)[0])
         self.assertIn("SET revoked_at=COALESCE(revoked_at, now())", LIFECYCLE)
-        self.assertIn("COALESCE(profile.status, '') <> 'active'", LIFECYCLE)
+        self.assertIn("COALESCE(profile.status,'') NOT IN ('active','paused','revoked')", LIFECYCLE)
         self.assertIn("InviteDeliveryCopy", API)
         self.assertIn("version: 2", API)
         self.assertIn("version: u8", LIFECYCLE)

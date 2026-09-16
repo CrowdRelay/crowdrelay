@@ -23,9 +23,9 @@ impl BeaconSignalRepository for PostgresBeaconReleaseRepository {
             BeaconSignalRepositoryError::Unavailable
         })?;
         // Beacon lookup.
-        let beacon = sqlx::query_as::<_, (String, bool, bool, bool, bool)>(
+        let beacon = sqlx::query_as::<_, (String, Option<String>, bool, bool, bool, bool)>(
             r#"
-            SELECT display_name, active, verified, accepts_outreach, do_not_contact
+            SELECT display_name, contact_email, active, verified, accepts_outreach, do_not_contact
             FROM viryaos_beacons
             WHERE workspace_id = $1 AND id = $2
             FOR UPDATE
@@ -35,21 +35,25 @@ impl BeaconSignalRepository for PostgresBeaconReleaseRepository {
         .bind(beacon_id)
         .fetch_optional(&mut *tx)
         .await;
-        let (display_name, active, verified, accepts_outreach, do_not_contact) = match beacon {
-            Ok(Some(value)) => value,
-            Ok(None) => return Err(BeaconSignalRepositoryError::NotFound),
-            Err(error) => {
-                tracing::warn!(%error, %beacon_id, "beacon invite lookup failed");
-                return Err(BeaconSignalRepositoryError::Unavailable);
-            }
-        };
+        let (display_name, contact_email, active, verified, accepts_outreach, do_not_contact) =
+            match beacon {
+                Ok(Some(value)) => value,
+                Ok(None) => return Err(BeaconSignalRepositoryError::NotFound),
+                Err(error) => {
+                    tracing::warn!(%error, %beacon_id, "beacon invite lookup failed");
+                    return Err(BeaconSignalRepositoryError::Unavailable);
+                }
+            };
         if !active || !verified || !accepts_outreach || do_not_contact {
             return Err(BeaconSignalRepositoryError::Conflict);
         }
-        // Check existing profile status.
-        let existing_status = sqlx::query_scalar::<_, String>(
+        // Check existing profile status. A live invite is already on its way —
+        // minting a second token under it would mail the person again; an
+        // expired one may be re-sent. `paused`/`revoked` stay reachable here:
+        // the per-beacon call is the deliberate revive path the batch excludes.
+        let existing = sqlx::query_as::<_, (String, Option<OffsetDateTime>)>(
             r#"
-            SELECT status
+            SELECT status, invite_expires_at
             FROM viryaos_beacon_signal_profiles
             WHERE workspace_id=$1 AND beacon_id=$2
             FOR UPDATE
@@ -59,14 +63,68 @@ impl BeaconSignalRepository for PostgresBeaconReleaseRepository {
         .bind(beacon_id)
         .fetch_optional(&mut *tx)
         .await;
-        match existing_status {
-            Ok(Some(status)) if status == "active" => {
+        match existing {
+            Ok(Some((status, invite_expires_at)))
+                if status == "active"
+                    || (status == "invited"
+                        && invite_expires_at.is_some_and(|at| at > OffsetDateTime::now_utc())) =>
+            {
                 return Err(BeaconSignalRepositoryError::Conflict);
             }
             Ok(_) => {}
             Err(error) => {
                 tracing::warn!(%error, %beacon_id, "beacon signal profile state lookup failed");
                 return Err(BeaconSignalRepositoryError::Unavailable);
+            }
+        }
+        // One invitation per email address. The beacon unique key is
+        // (kind, city, email), so the same address can sit on two rows; a live
+        // invite or an active membership under any sibling row already covers
+        // it, and mailing the person twice is the failure this refuses.
+        // The advisory lock orders this against the batch mint, which takes
+        // the same key before re-checking coverage — the lock is what makes
+        // the EXISTS below see a concurrent winner's invite.
+        if let Some(email) = contact_email {
+            if let Err(error) =
+                sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended(lower($1), 0))")
+                    .bind(&email)
+                    .execute(&mut *tx)
+                    .await
+            {
+                tracing::warn!(%error, %beacon_id, "beacon invite email lock failed");
+                return Err(BeaconSignalRepositoryError::Unavailable);
+            }
+            let covered = sqlx::query_scalar::<_, bool>(
+                r#"
+                SELECT EXISTS (
+                    SELECT 1
+                    FROM viryaos_beacons covered
+                    JOIN viryaos_beacon_signal_profiles covered_profile
+                      ON covered_profile.workspace_id=covered.workspace_id
+                     AND covered_profile.beacon_id=covered.id
+                    WHERE covered.workspace_id=$1
+                      AND covered.id <> $2
+                      AND lower(covered.contact_email)=lower($3)
+                      AND (
+                          covered_profile.status='active'
+                          OR (covered_profile.status='invited'
+                              AND covered_profile.invite_expires_at > now())
+                      )
+                )
+                "#,
+            )
+            .bind(workspace_id)
+            .bind(beacon_id)
+            .bind(email)
+            .fetch_one(&mut *tx)
+            .await;
+            match covered {
+                Ok(true) => return Err(BeaconSignalRepositoryError::Conflict),
+                Ok(false) => {}
+                Err(error) => {
+                    tracing::warn!(%error, %beacon_id, "beacon invite email coverage lookup failed");
+                    return Err(BeaconSignalRepositoryError::Unavailable);
+                }
             }
         }
         // Upsert profile.

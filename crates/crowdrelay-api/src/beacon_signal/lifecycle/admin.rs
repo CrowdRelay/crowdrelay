@@ -156,6 +156,7 @@ pub async fn admin_dashboard(State(state): State<crate::AppState>, headers: Head
                COALESCE(profile.nearby_gigs_enabled,false) AS nearby_gigs_enabled,
                COALESCE(profile.invite_count,0) AS invite_count,
                profile.last_invited_at,
+               profile.invite_expires_at,
                profile.joined_at,
                profile.last_seen_at,
                COALESCE(session_counts.active_sessions,0)::bigint AS active_sessions,

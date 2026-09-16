@@ -462,6 +462,13 @@ pub struct SignalActivitySummary {
     event_interests_30d: i64,
     nearby_notifications_30d: i64,
     pending_city_requests: i64,
+    /// Every contact the Drive/Gmail archive ever staged — the "imported"
+    /// half of the archive line.
+    archive_imported: i64,
+    /// Of those addresses, how many are confirmed fans now (active +
+    /// current marketing consent). The line reads `confirmed / imported`,
+    /// never `imported` alone.
+    archive_confirmed: i64,
 }
 
 /// The retention loop end to end: a fan asks for a city, the city gets
@@ -530,6 +537,8 @@ struct SignalSummaryRow {
     pushes_sent: i64,
     pushes_delivered: i64,
     pushes_failed: i64,
+    archive_imported: i64,
+    archive_confirmed: i64,
 }
 
 #[derive(Debug, FromRow)]

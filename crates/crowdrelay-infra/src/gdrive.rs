@@ -48,6 +48,9 @@ pub struct DriveContactRow {
     pub organization: Option<String>,
     pub phone: Option<String>,
     pub suggested_kind: Option<String>,
+    /// The city the sheet placed this contact in — free text, resolved
+    /// against `cities` only when a booking promote needs it.
+    pub city: Option<String>,
     pub notes: Option<String>,
     pub source_file_id: String,
     pub source_file_name: String,
@@ -200,15 +203,16 @@ impl PostgresGDriveRepository {
                 r#"
                 INSERT INTO viryaos_drive_contacts (
                     workspace_id, normalized_email, display_name, organization,
-                    phone, suggested_kind, notes, source_file_id, source_file_name,
+                    phone, suggested_kind, city, notes, source_file_id, source_file_name,
                     sources, last_seen_at, disappeared_at
                 )
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, ARRAY[$10]::text[], now(), NULL)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, ARRAY[$11]::text[], now(), NULL)
                 ON CONFLICT (workspace_id, normalized_email) DO UPDATE SET
                     display_name = COALESCE(EXCLUDED.display_name, viryaos_drive_contacts.display_name),
                     organization = COALESCE(EXCLUDED.organization, viryaos_drive_contacts.organization),
                     phone = COALESCE(EXCLUDED.phone, viryaos_drive_contacts.phone),
                     suggested_kind = COALESCE(EXCLUDED.suggested_kind, viryaos_drive_contacts.suggested_kind),
+                    city = COALESCE(EXCLUDED.city, viryaos_drive_contacts.city),
                     notes = COALESCE(EXCLUDED.notes, viryaos_drive_contacts.notes),
                     source_file_id = EXCLUDED.source_file_id,
                     source_file_name = EXCLUDED.source_file_name,
@@ -224,6 +228,7 @@ impl PostgresGDriveRepository {
             .bind(&contact.organization)
             .bind(&contact.phone)
             .bind(&contact.suggested_kind)
+            .bind(&contact.city)
             .bind(&contact.notes)
             .bind(ref_id)
             .bind(&ref_name)
@@ -280,7 +285,7 @@ impl PostgresGDriveRepository {
         sqlx::query_as::<_, DriveContactRow>(
             r#"
             SELECT id, normalized_email, display_name, organization, phone,
-                   suggested_kind, notes, source_file_id, source_file_name, sources,
+                   suggested_kind, city, notes, source_file_id, source_file_name, sources,
                    last_seen_at, disappeared_at, fan_outcome, beacon_outcome
             FROM viryaos_drive_contacts
             WHERE workspace_id = $1
@@ -316,7 +321,7 @@ impl PostgresGDriveRepository {
             UPDATE viryaos_drive_contacts SET {column} = $3
             WHERE workspace_id = $1 AND id = $2
             RETURNING id, normalized_email, display_name, organization, phone,
-                      suggested_kind, notes, source_file_id, source_file_name, sources,
+                      suggested_kind, city, notes, source_file_id, source_file_name, sources,
                       last_seen_at, disappeared_at, fan_outcome, beacon_outcome
             "#
         );
@@ -338,7 +343,7 @@ impl PostgresGDriveRepository {
         sqlx::query_as::<_, DriveContactRow>(
             r#"
             SELECT id, normalized_email, display_name, organization, phone,
-                   suggested_kind, notes, source_file_id, source_file_name, sources,
+                   suggested_kind, city, notes, source_file_id, source_file_name, sources,
                    last_seen_at, disappeared_at, fan_outcome, beacon_outcome
             FROM viryaos_drive_contacts
             WHERE workspace_id = $1 AND id = $2
@@ -501,32 +506,63 @@ impl PostgresGDriveRepository {
                 None => return Ok(BookingPromoteOutcome::UnknownCity),
             },
             None => {
-                // Only a single-city match resolves: two rooms sharing the
-                // name pick nothing — guessing a city files the candidate
-                // against the wrong place.
-                let matches = sqlx::query_scalar::<_, Uuid>(
-                    r#"
-                    SELECT DISTINCT v.city_id
-                    FROM place_venues v
-                    JOIN place_venue_marks m
-                      ON m.venue_id = v.id AND m.workspace_id = $1
-                    WHERE v.name_key = place_venue_key($2)
-                       OR v.name_key = place_venue_key(COALESCE($3, ''))
-                    "#,
-                )
-                .bind(workspace_id)
-                .bind(&display_name)
-                .bind(contact.organization.as_deref().unwrap_or_default())
-                .fetch_all(&self.pool)
-                .await?;
-                match matches.as_slice() {
-                    [only] => {
-                        sqlx::query_scalar::<_, String>("SELECT slug FROM cities WHERE id = $1")
-                            .bind(*only)
-                            .fetch_optional(&self.pool)
-                            .await?
+                // The sheet's own city column resolves next, by slug or by
+                // an unambiguous name — "Wrocław" and "wroclaw" land on the
+                // same slug. A name two catalogued cities share picks
+                // nothing, the way two rooms sharing a name pick nothing:
+                // guessing files the candidate against the wrong place.
+                let staged = contact
+                    .city
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|c| !c.is_empty());
+                let staged_slug = match staged {
+                    Some(city) => {
+                        let slugs = sqlx::query_scalar::<_, String>(
+                            "SELECT DISTINCT slug FROM cities \
+                             WHERE slug = lower(btrim($1)) \
+                                OR lower(btrim(name)) = lower(btrim($1))",
+                        )
+                        .bind(city)
+                        .fetch_all(&self.pool)
+                        .await?;
+                        match slugs.as_slice() {
+                            [only] => Some(only.clone()),
+                            _ => None,
+                        }
                     }
-                    _ => None,
+                    None => None,
+                };
+                match staged_slug {
+                    Some(slug) => Some(slug),
+                    None => {
+                        let matches = sqlx::query_scalar::<_, Uuid>(
+                            r#"
+                            SELECT DISTINCT v.city_id
+                            FROM place_venues v
+                            JOIN place_venue_marks m
+                              ON m.venue_id = v.id AND m.workspace_id = $1
+                            WHERE v.name_key = place_venue_key($2)
+                               OR v.name_key = place_venue_key(COALESCE($3, ''))
+                            "#,
+                        )
+                        .bind(workspace_id)
+                        .bind(&display_name)
+                        .bind(contact.organization.as_deref().unwrap_or_default())
+                        .fetch_all(&self.pool)
+                        .await?;
+                        match matches.as_slice() {
+                            [only] => {
+                                sqlx::query_scalar::<_, String>(
+                                    "SELECT slug FROM cities WHERE id = $1",
+                                )
+                                .bind(*only)
+                                .fetch_optional(&self.pool)
+                                .await?
+                            }
+                            _ => None,
+                        }
+                    }
                 }
             }
         };

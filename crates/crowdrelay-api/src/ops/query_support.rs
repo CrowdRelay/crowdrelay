@@ -9,6 +9,13 @@ async fn load_signal_summary(state: &OpsState) -> Result<SignalSummaryRow, OpsEr
               AND purpose = 'marketing'
             ORDER BY fan_id, recorded_at DESC, id DESC
         ),
+        first_touch AS (
+            SELECT DISTINCT ON (fan_id)
+                   fan_id, source AS first_touch_source
+            FROM fan_acquisition_events
+            WHERE workspace_id = $1
+            ORDER BY fan_id, occurred_at, id
+        ),
         fan_summary AS (
             SELECT
                 count(*) AS total_fans,
@@ -16,15 +23,26 @@ async fn load_signal_summary(state: &OpsState) -> Result<SignalSummaryRow, OpsEr
                 count(*) FILTER (WHERE status = 'pending') AS pending_fans,
                 count(*) FILTER (WHERE status = 'unsubscribed') AS unsubscribed_fans,
                 count(*) FILTER (WHERE status = 'suppressed') AS suppressed_fans,
+                -- Recovery is not acquisition: a fan whose first touch was an
+                -- imported list (`fan_import:%`, the only source shape
+                -- `import_batch` writes) confirmed an address we already had;
+                -- they did not find the band. Fans with no acquisition event
+                -- at all predate the ledger and still count.
                 count(*) FILTER (
                     WHERE status = 'active'
                       AND created_at >= now() - interval '7 days'
+                      AND (first_touch.first_touch_source IS NULL
+                           OR left(first_touch.first_touch_source, 11) <> 'fan_import')
                 ) AS new_fans_7d,
                 count(*) FILTER (
                     WHERE status = 'active'
                       AND created_at >= now() - interval '30 days'
+                      AND (first_touch.first_touch_source IS NULL
+                           OR left(first_touch.first_touch_source, 11) <> 'fan_import')
                 ) AS new_fans_30d
             FROM fans
+            LEFT JOIN first_touch
+              ON first_touch.fan_id = fans.id
             WHERE workspace_id = $1
         ),
         consent_summary AS (
@@ -129,6 +147,27 @@ async fn load_signal_summary(state: &OpsState) -> Result<SignalSummaryRow, OpsEr
                 count(*) AS nearby_notifications_total
             FROM nearby_gig_notifications
             WHERE workspace_id = $1
+        ),
+        -- The archive line: every contact the Drive/Gmail scan ever staged
+        -- (the denominator is the whole past the band digitised, reviewed or
+        -- not), and how many of those addresses are confirmed fans now —
+        -- an active fan holding current marketing consent on the contact's
+        -- own address. A pending fan who never clicked the opt-in is
+        -- imported, not confirmed.
+        archive_summary AS (
+            SELECT
+                count(*) AS archive_imported,
+                count(*) FILTER (
+                    WHERE fan.status = 'active'
+                      AND consent.granted
+                ) AS archive_confirmed
+            FROM viryaos_drive_contacts AS contact
+            LEFT JOIN fans AS fan
+              ON fan.workspace_id = contact.workspace_id
+             AND fan.normalized_email = contact.normalized_email
+            LEFT JOIN latest_marketing AS consent
+              ON consent.fan_id = fan.id
+            WHERE contact.workspace_id = $1
         )
         SELECT
             fan_summary.total_fans,
@@ -154,7 +193,9 @@ async fn load_signal_summary(state: &OpsState) -> Result<SignalSummaryRow, OpsEr
             push_summary.pushes_queued,
             push_summary.pushes_sent,
             push_summary.pushes_delivered,
-            push_summary.pushes_failed
+            push_summary.pushes_failed,
+            archive_summary.archive_imported,
+            archive_summary.archive_confirmed
         FROM fan_summary
         CROSS JOIN consent_summary
         CROSS JOIN location_summary
@@ -162,6 +203,7 @@ async fn load_signal_summary(state: &OpsState) -> Result<SignalSummaryRow, OpsEr
         CROSS JOIN interest_summary
         CROSS JOIN notification_summary
         CROSS JOIN push_summary
+        CROSS JOIN archive_summary
         "#,
     )
     .bind(state.workspace_id.into_uuid())
@@ -655,6 +697,8 @@ mod signal_tests {
                 pushes_sent: 9,
                 pushes_delivered: 8,
                 pushes_failed: 1,
+                archive_imported: 12,
+                archive_confirmed: 5,
             },
             vec![SignalCitySummary {
                 slug: "wroclaw".to_owned(),
@@ -687,6 +731,10 @@ mod signal_tests {
         ] {
             assert!(json.contains(stage), "missing retention stage {stage}");
         }
+        // The archive line is part of the fan count — imported never appears
+        // without the confirmed half next to it.
+        assert!(json.contains("\"archive_imported\":12"));
+        assert!(json.contains("\"archive_confirmed\":5"));
         assert!(!json.contains("email"));
         assert!(!json.contains("display_name"));
         assert!(!json.contains("fan_id"));
