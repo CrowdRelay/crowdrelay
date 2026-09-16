@@ -124,6 +124,7 @@ typed_uuid_id!(
     CapturePlanId,
     ArcId,
     ContentSuggestionId,
+    ContentTrendId,
 );
 
 #[cfg(test)]

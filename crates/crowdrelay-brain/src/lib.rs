@@ -48,6 +48,7 @@ pub mod bridge;
 pub mod calibration;
 pub mod causal_model;
 pub mod change_point;
+pub mod content_trends;
 pub mod context_effect;
 pub mod credit_ledger;
 pub mod decision_value;

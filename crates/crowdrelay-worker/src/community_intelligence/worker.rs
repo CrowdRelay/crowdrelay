@@ -275,6 +275,9 @@ impl CommunityIntelligenceWorker {
 
         let mut success_count = 0u32;
         let mut fail_count = 0u32;
+        // Workspaces whose fan items changed this sweep — trends refresh
+        // once per workspace at the end, not once per place.
+        let mut touched_workspaces = std::collections::BTreeSet::new();
 
         for place in &places {
             let adapter_place = super::adapter::AdapterPlace::from(place);
@@ -290,6 +293,7 @@ impl CommunityIntelligenceWorker {
                         fail_count += 1;
                     } else {
                         success_count += 1;
+                        touched_workspaces.insert(place.workspace_id);
                     }
                 }
                 Err(AdapterError::StructureChanged) => {
@@ -339,6 +343,24 @@ impl CommunityIntelligenceWorker {
                 failed = fail_count,
                 "source sweep complete"
             );
+        }
+
+        // Facts landed — re-distill each touched workspace's trends once,
+        // so a hot community does not wait for the next peer sweep to be
+        // seen. A refresh failure is logged, not fatal to the sweep.
+        let today = time::OffsetDateTime::now_utc().date();
+        for workspace in touched_workspaces {
+            if let Err(error) = self
+                .content_repo
+                .refresh_trends(WorkspaceId::from_uuid(workspace), today)
+                .await
+            {
+                warn!(
+                    workspace_id = %workspace,
+                    error = %error,
+                    "content trend refresh failed"
+                );
+            }
         }
 
         Ok(())

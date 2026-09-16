@@ -18,14 +18,14 @@ use serde_json::Value;
 use time::{Date, OffsetDateTime};
 
 use crate::{
-    ArcId, CapturePlanId, ContentSuggestionId, EventId, PeerId, ProductionEventId, WorkspaceId,
-    WorkspaceMemberId, team_operations::TeamSkill,
+    ArcId, CapturePlanId, ContentSuggestionId, ContentTrendId, EventId, PeerId, ProductionEventId,
+    WorkspaceId, WorkspaceMemberId, team_operations::TeamSkill,
 };
 
 macro_rules! str_enum {
     ($(#[$meta:meta])* pub enum $name:ident { $($variant:ident => $text:literal),+ $(,)? }) => {
         $(#[$meta])*
-        #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
+        #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
         #[serde(rename_all = "snake_case")]
         pub enum $name {
             $($variant),+
@@ -489,6 +489,54 @@ pub fn parse_format_skill(value: &str) -> Option<TeamSkill> {
 /// allowed — but these five are the dimensions the trend detector (3.5b)
 /// aggregates over.
 pub const TREND_DIMENSIONS: &[&str] = &["format", "theme", "styling", "timing", "platform"];
+
+str_enum! {
+    /// One of the five dimensions the trend detector aggregates over.
+    /// Kept in sync with `TREND_DIMENSIONS` — the const is for watch_for
+    /// normalization, the enum is for rows.
+    pub enum TrendDimension {
+        Format => "format",
+        Theme => "theme",
+        Styling => "styling",
+        Timing => "timing",
+        Platform => "platform",
+    }
+}
+
+str_enum! {
+    /// A trend's lifecycle. `emerging` is a loud single source; `confirmed`
+    /// needs ≥2 distinct origins (the "strongest at ≥2 sources" rule);
+    /// `faded` was live and stopped appearing — fading is a fact, not a
+    /// deletion.
+    pub enum TrendStatus {
+        Emerging => "emerging",
+        Confirmed => "confirmed",
+        Faded => "faded",
+    }
+}
+
+/// A detected pattern over the observation facts, with the rows that
+/// produced it linked as evidence so the reading is auditable.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ContentTrend {
+    pub id: ContentTrendId,
+    pub workspace_id: WorkspaceId,
+    pub dimension: TrendDimension,
+    /// The pattern key inside the dimension: "playthrough", "youtube",
+    /// "friday".
+    pub pattern: String,
+    /// 0..=10000 bp.
+    pub strength: i32,
+    /// Distinct origins (peer ids + place ids) the evidence came from.
+    pub sources: i32,
+    /// {"peer": [ids], "fan": [ids]} — BIGINT ids from both tables.
+    pub evidence: Value,
+    pub status: TrendStatus,
+    pub first_seen: Date,
+    pub last_seen: Date,
+    pub created_at: OffsetDateTime,
+    pub updated_at: OffsetDateTime,
+}
 
 /// `watch_for` and `genre_fit` are `text[]` columns; the row readers hand
 /// them back as `Vec<String>` already lowercased so comparisons never depend

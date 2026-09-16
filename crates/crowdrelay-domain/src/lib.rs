@@ -144,12 +144,12 @@ pub use fan_lifecycle::{
 pub use ids::{
     AdmissionPassId, AdmissionPoolId, ArcId, AutopilotActionId, AutopilotDecisionId,
     AutopilotMeasurementId, BeaconId, BookingTargetId, CampaignId, CapturePlanId, CityId,
-    ContentSourceId, ContentSuggestionId, EventId, ExperimentId, ExperimentVariantId, FanId,
-    GrowthMetricSeriesId, MarketSignalId, MerchCouponId, MerchProductId, MerchVariantId,
-    OutreachOpportunityId, OutreachTargetId, PassSessionId, PeerId, PlayId, ProductionEventId,
-    PromotionCampaignId, ReferralAttributionId, ReleasePlanId, RewardDrawId, RewardGrantId,
-    RewardRuleId, SmartLinkId, TeamAssignmentId, TeamOpportunityId, TicketTypeId, VisitorId,
-    WorkspaceId, WorkspaceMemberId, WorkspaceMemberSessionId,
+    ContentSourceId, ContentSuggestionId, ContentTrendId, EventId, ExperimentId,
+    ExperimentVariantId, FanId, GrowthMetricSeriesId, MarketSignalId, MerchCouponId,
+    MerchProductId, MerchVariantId, OutreachOpportunityId, OutreachTargetId, PassSessionId, PeerId,
+    PlayId, ProductionEventId, PromotionCampaignId, ReferralAttributionId, ReleasePlanId,
+    RewardDrawId, RewardGrantId, RewardRuleId, SmartLinkId, TeamAssignmentId, TeamOpportunityId,
+    TicketTypeId, VisitorId, WorkspaceId, WorkspaceMemberId, WorkspaceMemberSessionId,
 };
 pub use referrals::{
     CouponCode, CouponCodeError, CouponRedemptionResult, CouponStatus, FanSessionToken,

@@ -519,3 +519,82 @@ async fn fan_observations_deduplicate_and_scope_to_the_place()
     assert!(repo.recent_fan_observations(theirs, 10).await?.is_empty());
     Ok(())
 }
+
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and disposable PostgreSQL"]
+async fn trends_detect_corroboration_and_fade() -> Result<(), Box<dyn std::error::Error>> {
+    let (repo, pool) = repository().await?;
+    let workspace_id = WorkspaceId::new();
+    seed_workspace(&pool, workspace_id).await?;
+
+    // Two peers agreeing on a format inside the window is the confirmed
+    // case — corroboration is the claim.
+    let today = time::OffsetDateTime::now_utc().date();
+    let recent = today - time::Duration::days(3);
+    for name in ["Peer Alpha", "Peer Beta"] {
+        let peer = repo
+            .create_peer(
+                workspace_id,
+                &NewPeer {
+                    name: name.to_owned(),
+                    handles: json!({}),
+                    tier: PeerTier::NearPeer,
+                    watch_for: vec![],
+                    why: "trend fixture".to_owned(),
+                    proposed_by: "operator".to_owned(),
+                    confirmed: true,
+                },
+            )
+            .await?
+            .expect("peer lands");
+        for (day, fact) in [
+            (recent, "new playthrough of the single"),
+            (today, "another playthrough video"),
+        ] {
+            repo.record_observation(
+                workspace_id,
+                &NewPeerObservation {
+                    peer_id: peer.id,
+                    observed_at: day,
+                    platform: "youtube".to_owned(),
+                    kind: "video".to_owned(),
+                    fact: fact.to_owned(),
+                    url: None,
+                    metrics: json!({}),
+                },
+            )
+            .await?;
+        }
+    }
+
+    let live = repo.refresh_trends(workspace_id, today).await?;
+    assert!(live > 0, "corroborating facts should produce trends");
+
+    let trends = repo.list_trends(workspace_id).await?;
+    let playthrough = trends
+        .iter()
+        .find(|t| t.pattern == "playthrough")
+        .expect("the agreed format is a trend");
+    assert_eq!(playthrough.status.as_str(), "confirmed");
+    assert_eq!(playthrough.sources, 2);
+    assert!(
+        playthrough.evidence["peer"].as_array().unwrap().len() >= 3,
+        "the evidence links are the claim's receipts"
+    );
+
+    // A second workspace shares nothing.
+    let theirs = WorkspaceId::new();
+    seed_workspace(&pool, theirs).await?;
+    assert!(repo.list_trends(theirs).await?.is_empty());
+
+    // When the facts age out of the window, the trend fades instead of
+    // vanishing — fading is a fact, not a deletion.
+    let later = today + time::Duration::days(60);
+    assert_eq!(repo.refresh_trends(workspace_id, later).await?, 0);
+    let faded = repo.list_trends(workspace_id).await?;
+    assert!(
+        faded.iter().all(|t| t.status.as_str() == "faded"),
+        "a pattern that stopped appearing says so"
+    );
+    Ok(())
+}

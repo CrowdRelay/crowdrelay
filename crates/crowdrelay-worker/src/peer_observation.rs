@@ -227,6 +227,20 @@ impl PeerObservationWorker {
                 }
             }
         }
+
+        // The facts landed; now the detector distills them — both tables,
+        // so fan-side rows written by the community worker count too. A
+        // detection failure must not fail the sweep that produced the data.
+        match repository.refresh_trends(self.workspace_id, today).await {
+            Ok(live) if live > 0 => {
+                tracing::info!(live, "content trends refreshed");
+            }
+            Ok(_) => {}
+            Err(error) => {
+                tracing::warn!(error = %error, "content trend refresh failed");
+            }
+        }
+
         Ok(recorded)
     }
 

@@ -50,11 +50,14 @@ impl From<sqlx::Error> for ContentEngineError {
     }
 }
 
-type Result<T> = std::result::Result<T, ContentEngineError>;
+/// `pub(crate)` so the trend-extension module shares the error vocabulary.
+pub(crate) type Result<T> = std::result::Result<T, ContentEngineError>;
 
 #[derive(Clone)]
 pub struct PostgresContentEngineRepository {
-    pool: PgPool,
+    /// `pub(crate)` so extension impl blocks (content_trends.rs) reach it —
+    /// inherent impls in sibling modules cannot touch private fields.
+    pub(crate) pool: PgPool,
 }
 
 // ── Rows ──────────────────────────────────────────────────────────────────
