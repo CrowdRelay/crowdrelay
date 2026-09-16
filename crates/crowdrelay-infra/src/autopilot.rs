@@ -12,6 +12,7 @@ pub use cycle_trigger::{
     daily_north_star, open_cycle_run, preview_autopilot_cycle, request_autopilot_cycle,
 };
 mod control_mutations;
+mod control_pipeline;
 mod decisions;
 mod deliverability;
 mod executor_circuit;
