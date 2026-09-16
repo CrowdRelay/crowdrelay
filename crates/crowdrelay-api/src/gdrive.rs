@@ -8,8 +8,11 @@
 //! - `promote: fan` routes through `fan_import::import_batch` — the same
 //!   pending + double-opt-in path every fan import uses. A spreadsheet can
 //!   never create an `active` fan.
-//! - `promote: beacon` writes a `proposed` `agent_outreach_targets` row —
-//!   the screening queue, same as the curated-CRM import.
+//! - `promote: beacon` writes a `proposed` `agent_outreach_targets` row for
+//!   press-side kinds — the screening queue, same as the curated-CRM import —
+//!   or an admitted `viryaos_booking_candidates` row for venue/promoter/
+//!   festival kinds. Booking candidates are city-scoped: the request's `city`
+//!   wins, else an unambiguous `place_venues` name match resolves the room.
 //! - `dismiss` records the decision so a re-scan never re-suggests.
 
 use axum::{
@@ -29,7 +32,11 @@ const ACCESS_RESEND_COOLDOWN_SECONDS: i64 = 300;
 
 /// Beacon/outreach target kinds — mirrors the CHECK on
 /// `agent_outreach_targets.target_kind`.
-const TARGET_KINDS: &[&str] = &[
+/// Press-side kinds land in `agent_outreach_targets`; booking-side kinds are
+/// supply for `viryaos_booking_candidates` — a promoter is who books the
+/// room, not who writes about the band, and the two pipelines measure
+/// different outcomes.
+const OUTREACH_KINDS: &[&str] = &[
     "press",
     "radio",
     "playlist",
@@ -37,6 +44,7 @@ const TARGET_KINDS: &[&str] = &[
     "endorsement",
     "creator",
 ];
+const BOOKING_KINDS: &[&str] = &["venue", "promoter", "festival"];
 
 #[derive(Serialize)]
 pub struct DriveContact {
@@ -65,6 +73,11 @@ pub struct PromoteRequest {
     /// Beacon target kind. Falls back to the file's `suggested_kind`,
     /// then to `press` when the file said nothing.
     kind: Option<String>,
+    /// City slug for booking kinds — booking candidates are city-scoped.
+    /// Absent a slug, the venue registry is consulted for an unambiguous
+    /// name match; neither resolving returns 400 rather than filing a
+    /// candidate that can never promote.
+    city: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -206,18 +219,73 @@ pub async fn promote_contact(
             if contact.beacon_outcome != "staged" {
                 return Problem::bad_request(request_id_value).into_response();
             }
-            let kind = request
+            // Same normalisation the file extractor applies — "Venue" and
+            // "venue" must file the same way, and an explicit kind the
+            // vocabulary does not know is a caller bug, not a press contact.
+            let normalized_kind = request
                 .kind
                 .as_deref()
                 .map(str::trim)
                 .filter(|k| !k.is_empty())
-                .or(contact.suggested_kind.as_deref())
-                .unwrap_or("press");
-            let kind = if TARGET_KINDS.contains(&kind) {
-                kind
-            } else {
-                "press"
+                .map(|k| k.to_ascii_lowercase().replace([' ', '-'], "_"));
+            let kind = match normalized_kind.as_deref() {
+                Some(k) if OUTREACH_KINDS.contains(&k) || BOOKING_KINDS.contains(&k) => {
+                    k.to_owned()
+                }
+                Some(_) => return Problem::bad_request(request_id_value).into_response(),
+                None => contact
+                    .suggested_kind
+                    .clone()
+                    .unwrap_or_else(|| "press".to_owned()),
             };
+            let kind = kind.as_str();
+            if BOOKING_KINDS.contains(&kind) {
+                return match repo
+                    .promote_beacon_booking(
+                        workspace_id,
+                        &contact,
+                        kind,
+                        request.city.as_deref(),
+                    )
+                    .await
+                {
+                    Ok(crowdrelay_infra::gdrive::BookingPromoteOutcome::Done) => (
+                        StatusCode::OK,
+                        Json(serde_json::json!({ "beacon_outcome": "promoted" })),
+                    )
+                        .into_response(),
+                    Ok(crowdrelay_infra::gdrive::BookingPromoteOutcome::CityRequired) => {
+                        Problem::conflict_because(
+                            "Booking contacts are filed per city — pass `city` or play the room first so the registry can place it.",
+                            request_id_value,
+                        )
+                        .private()
+                        .into_response()
+                    }
+                    Ok(crowdrelay_infra::gdrive::BookingPromoteOutcome::UnknownCity) => {
+                        Problem::conflict_because(
+                            "That city is not in the catalogue yet — use the slug form, e.g. `wroclaw`.",
+                            request_id_value,
+                        )
+                        .private()
+                        .into_response()
+                    }
+                    Ok(crowdrelay_infra::gdrive::BookingPromoteOutcome::RouteRefused) => {
+                        Problem::conflict_because(
+                            "A candidate at this address was refused before — the refusal stands.",
+                            request_id_value,
+                        )
+                        .private()
+                        .into_response()
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, "gdrive booking promote failed");
+                        Problem::service_unavailable(request_id_value)
+                            .private()
+                            .into_response()
+                    }
+                };
+            }
             match repo.promote_beacon(workspace_id, &contact, kind).await {
                 Ok(()) => (
                     StatusCode::OK,

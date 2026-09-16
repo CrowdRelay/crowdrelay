@@ -94,6 +94,14 @@ fn kind_for(raw: &str) -> Option<&'static str> {
         }
         "endorsement" | "endorser" => Some("endorsement"),
         "creator" | "influencer" | "youtuber" | "streamer" | "tiktok" => Some("creator"),
+        // Booking supply, not outreach: the kind names which queue the
+        // promote lands in (viryaos_booking_candidates), never the press
+        // outreach vocabulary.
+        // "agent" and "club" stay unmapped on purpose: a press agent or a
+        // fan club typed in a role column must not cross into booking supply.
+        "promoter" | "booking" | "booker" | "booking_agent" | "talent_buyer" => Some("promoter"),
+        "venue" | "room" | "hall" | "live_venue" | "concert_venue" | "music_venue" => Some("venue"),
+        "festival" | "fest" | "festival_organizer" | "festival_organiser" => Some("festival"),
         _ => None,
     }
 }

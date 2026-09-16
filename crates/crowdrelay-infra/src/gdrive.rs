@@ -21,6 +21,23 @@ pub enum GDriveError {
     Database(#[from] sqlx::Error),
     #[error("drive contact not found")]
     NotFound,
+    #[error("not a booking target kind")]
+    InvalidKind,
+}
+
+/// What a booking-kind promote did. The non-`Done` arms are not errors: the
+/// contact stays `staged` and the caller tells the operator what is missing.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum BookingPromoteOutcome {
+    Done,
+    /// No city was given and the venue registry could not place the name.
+    CityRequired,
+    /// A city was given that is not in the catalogue — a typo the operator
+    /// can fix, not a state to file.
+    UnknownCity,
+    /// A candidate for the same route was already refused; the promote did
+    /// not overturn that decision.
+    RouteRefused,
 }
 
 #[derive(Debug, Clone, sqlx::FromRow)]
@@ -357,6 +374,19 @@ impl PostgresGDriveRepository {
             .chars()
             .take(200)
             .collect();
+        // A whitespace-only display name would fail `btrim <> ''` at write.
+        let display_name = if display_name.is_empty() {
+            contact
+                .organization
+                .clone()
+                .unwrap_or_else(|| contact.normalized_email.clone())
+                .trim()
+                .chars()
+                .take(200)
+                .collect()
+        } else {
+            display_name
+        };
         let domain = contact
             .normalized_email
             .rsplit_once('@')
@@ -408,6 +438,162 @@ impl PostgresGDriveRepository {
         .await?;
         tx.commit().await?;
         Ok(())
+    }
+
+    /// Promotes a contact into booking supply: a `viryaos_booking_candidates`
+    /// row, admitted on first-party grounds — the band's own sent mail is the
+    /// evidence (`source_reference` carries the thread), which is exactly what
+    /// `screen_candidate`'s inferred-route refusal exists to distinguish from.
+    /// A candidate is still not a target: `confirm_booking_candidate` and its
+    /// city requirement still stand between this row and outreach.
+    ///
+    /// Booking targets are city-scoped, so the candidate needs one: the
+    /// explicit `city_slug` wins; absent that, an unambiguous `place_venues`
+    /// name match resolves the room the band already played. Anything else
+    /// refuses with [`BookingPromoteOutcome::CityRequired`] — a candidate with
+    /// no city can never promote and nothing would fix it later.
+    pub async fn promote_beacon_booking(
+        &self,
+        workspace_id: Uuid,
+        contact: &DriveContactRow,
+        target_kind: &str,
+        city_slug: Option<&str>,
+    ) -> Result<BookingPromoteOutcome, GDriveError> {
+        if !matches!(target_kind, "venue" | "promoter" | "festival") {
+            return Err(GDriveError::InvalidKind);
+        }
+        // Whitespace-only display names are storable in staging but dead in
+        // candidates (`btrim <> ''`) — fall through to org/email instead of
+        // failing the write.
+        let display_name: String = contact
+            .display_name
+            .clone()
+            .or_else(|| contact.organization.clone())
+            .unwrap_or_else(|| contact.normalized_email.clone())
+            .trim()
+            .chars()
+            .take(200)
+            .collect();
+        let display_name = if display_name.is_empty() {
+            contact
+                .organization
+                .clone()
+                .unwrap_or_else(|| contact.normalized_email.clone())
+                .trim()
+                .chars()
+                .take(200)
+                .collect()
+        } else {
+            display_name
+        };
+        let city_slug = match city_slug.map(str::trim).filter(|c| !c.is_empty()) {
+            // An explicit slug must name a real city — a typo filed here is
+            // an admitted candidate that can never confirm and can never be
+            // refiled (route-identity conflict), so the check happens now.
+            Some(slug) => match sqlx::query_scalar::<_, String>(
+                "SELECT slug FROM cities WHERE slug = lower(btrim($1))",
+            )
+            .bind(slug)
+            .fetch_optional(&self.pool)
+            .await?
+            {
+                Some(resolved) => Some(resolved),
+                None => return Ok(BookingPromoteOutcome::UnknownCity),
+            },
+            None => {
+                // Only a single-city match resolves: two rooms sharing the
+                // name pick nothing — guessing a city files the candidate
+                // against the wrong place.
+                let matches = sqlx::query_scalar::<_, Uuid>(
+                    r#"
+                    SELECT DISTINCT v.city_id
+                    FROM place_venues v
+                    JOIN place_venue_marks m
+                      ON m.venue_id = v.id AND m.workspace_id = $1
+                    WHERE v.name_key = place_venue_key($2)
+                       OR v.name_key = place_venue_key(COALESCE($3, ''))
+                    "#,
+                )
+                .bind(workspace_id)
+                .bind(&display_name)
+                .bind(contact.organization.as_deref().unwrap_or_default())
+                .fetch_all(&self.pool)
+                .await?;
+                match matches.as_slice() {
+                    [only] => {
+                        sqlx::query_scalar::<_, String>("SELECT slug FROM cities WHERE id = $1")
+                            .bind(*only)
+                            .fetch_optional(&self.pool)
+                            .await?
+                    }
+                    _ => None,
+                }
+            }
+        };
+        let Some(city_slug) = city_slug else {
+            return Ok(BookingPromoteOutcome::CityRequired);
+        };
+        let mut tx = self.pool.begin().await?;
+        let evidence = {
+            let mut parts = vec![format!("thread: {}", contact.source_file_name)];
+            if let Some(notes) = &contact.notes {
+                parts.push(notes.clone());
+            }
+            if let Some(org) = &contact.organization {
+                parts.push(format!("org={org}"));
+            }
+            let joined = parts.join(" · ");
+            joined.chars().take(4000).collect::<String>()
+        };
+        // fit_basis_points sits at the discovery floor on purpose: a
+        // first-party contact is not scored for fit — the band's own thread
+        // is the admission — but it must not read *below* the floor to any
+        // consumer that applies it to admitted rows.
+        let status = sqlx::query_scalar::<_, String>(
+            r#"
+            INSERT INTO viryaos_booking_candidates (
+                workspace_id, target_kind, display_name, city_slug,
+                route_kind, route_value, source, source_reference,
+                evidence, fit_basis_points, status
+            ) VALUES ($1,$2,$3,$4,'email',$5,'contact_scan',$6,$7,6000,'admitted')
+            ON CONFLICT (workspace_id, route_kind, lower(btrim(route_value))) DO UPDATE SET
+                city_slug = COALESCE(viryaos_booking_candidates.city_slug, EXCLUDED.city_slug)
+            RETURNING status
+            "#,
+        )
+        .bind(workspace_id)
+        .bind(target_kind)
+        .bind(&display_name)
+        .bind(&city_slug)
+        .bind(&contact.normalized_email)
+        // source_reference names the thread/file the address came from — the
+        // reviewer must be able to place who this is, not trust the kind.
+        .bind(
+            contact
+                .source_file_name
+                .chars()
+                .take(500)
+                .collect::<String>(),
+        )
+        .bind(&evidence)
+        .fetch_one(&mut *tx)
+        .await?;
+        if status == "refused" {
+            // The route was durably refused before — a promote must not
+            // quietly overturn that, and the contact must not read as
+            // resolved when nothing actionable exists.
+            tx.rollback().await?;
+            return Ok(BookingPromoteOutcome::RouteRefused);
+        }
+        sqlx::query(
+            "UPDATE viryaos_drive_contacts SET beacon_outcome = 'promoted' WHERE workspace_id = $1 AND id = $2",
+        )
+        .bind(workspace_id)
+        .bind(contact.id)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(BookingPromoteOutcome::Done)
     }
 
     /// Marks a contact's fan outcome promoted. The fan write itself goes
