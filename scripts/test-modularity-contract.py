@@ -73,6 +73,7 @@ CONTRACT = {
     "crates/crowdrelay-infra/src/autopilot/decisions.rs": [
         "decisions/core_reads.rs",
         "decisions/opportunity_reads.rs",
+        "decisions/cycle_reads.rs",
         "decisions/persist.rs",
     ],
     "crates/crowdrelay-api/src/commerce/campaigns.rs": [

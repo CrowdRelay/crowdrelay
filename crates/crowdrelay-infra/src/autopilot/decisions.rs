@@ -4,6 +4,7 @@ use super::*;
 
 include!("decisions/core_reads.rs");
 include!("decisions/opportunity_reads.rs");
+include!("decisions/cycle_reads.rs");
 include!("decisions/persist.rs");
 
 // Keep the heavy SQL implementations outside the `async_trait` procedural
@@ -15,6 +16,7 @@ include!("decisions/persist.rs");
 impl PostgresAutopilotRepository {
     decision_core_reads!();
     decision_opportunity_reads!();
+    decision_cycle_reads!();
     decision_persist!();
 }
 
