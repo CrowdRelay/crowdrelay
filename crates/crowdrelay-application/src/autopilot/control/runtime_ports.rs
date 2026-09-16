@@ -48,6 +48,14 @@ pub trait AutopilotControlRepository: Send + Sync {
         workspace_id: WorkspaceId,
     ) -> Result<AutopilotControlOverview, RepositoryError>;
 
+    /// The content page's own queue slice — pending content actions plus the
+    /// material count and the titles they cite — without the overview's
+    /// cockpit-wide fan-out.
+    async fn load_content_pipeline(
+        &self,
+        workspace_id: WorkspaceId,
+    ) -> Result<ContentPipeline, RepositoryError>;
+
     /// Delivery-side progress for the growth loop. Separate from the control
     /// overview because it reads the campaign delivery ledger rather than the
     /// action queue, and operators need it even when no action is pending.

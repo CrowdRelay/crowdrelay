@@ -134,6 +134,34 @@ pub async fn overview(State(state): State<AppState>, headers: HeaderMap) -> Resp
     }
 }
 
+/// The content page's own read model: live material count, its approval
+/// queue slice, and the titles those drafts cite.
+///
+/// Separate from `overview` on purpose — the cockpit overview fans out across
+/// eleven reads to staff every panel, while this page only needs its own
+/// slice (three concurrent reads plus a title join). Pointing the page at the
+/// overview made its first paint pay for work it never renders.
+pub async fn content_pipeline(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    match read(
+        &state,
+        3,
+        state
+            .autopilot
+            .load_content_pipeline(state.ops.workspace_id()),
+    )
+    .await
+    {
+        Ok(pipeline) => private_json(
+            StatusCode::OK,
+            OverviewResponse {
+                runtime_enabled: state.autopilot_runtime_enabled,
+                overview: pipeline,
+            },
+        ),
+        Err(error) => repository_problem(error, request_id(&headers)),
+    }
+}
+
 /// Delivery-side growth progress for the Control Plane.
 ///
 /// `overview` reports the action queue; this reports whether the external n8n

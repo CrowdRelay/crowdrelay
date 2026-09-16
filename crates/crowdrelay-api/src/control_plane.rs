@@ -417,6 +417,13 @@ pub(crate) fn router(state: crate::AppState) -> Router {
             get(crate::autopilot::list_content_sources)
                 .post(crate::autopilot::upsert_content_source),
         )
+        // The content page's pipeline read: pending drafts, live material
+        // count, and the titles those drafts cite — one narrow read model
+        // instead of the cockpit-wide overview fan-out.
+        .route(
+            "/v1/control-plane/content/pipeline",
+            get(crate::autopilot::content_pipeline),
+        )
         // ── Outreach & booking discovery ──────────────────────────────
         // Candidate queues for the growth pipeline: what the agent found,
         // and the two decisions a human can make about one finding.

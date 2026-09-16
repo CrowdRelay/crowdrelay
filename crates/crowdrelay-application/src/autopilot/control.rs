@@ -260,6 +260,24 @@ pub struct RumMetricSummary {
     pub p95: f64,
 }
 
+/// The content page's pipeline read: which pieces of real material are live,
+/// which drafts wait on a person, and what each draft was built from.
+///
+/// Deliberately separate from [`AutopilotControlOverview`]: the overview fans
+/// out across eleven reads to staff the whole cockpit, while the content page
+/// only needs its own queue slice — asking for the overview here made the
+/// page's first paint pay for reads it never renders.
+#[derive(Clone, Debug, Serialize)]
+pub struct ContentPipeline {
+    /// Content sources still usable as material (active and unexpired).
+    pub live_sources: i64,
+    /// Content actions waiting for approval, oldest first.
+    pub pending: Vec<PendingAutopilotAction>,
+    /// `content_source_id` → title for every source a pending payload cites,
+    /// so the page can say what a draft is built from without a second fetch.
+    pub source_titles: std::collections::BTreeMap<String, String>,
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct AutopilotControlOverview {
     pub policies: Vec<AutopilotPolicySummary>,
