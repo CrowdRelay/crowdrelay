@@ -17,7 +17,7 @@ DOMAIN = ROOT / "crates/crowdrelay-domain/src/action_class.rs"
 MODEL = ROOT / "crates/crowdrelay-application/src/autopilot/model.rs"
 EVALUATE = ROOT / "crates/crowdrelay-application/src/autopilot/evaluate.rs"
 EVALUATE_TYPES = ROOT / "crates/crowdrelay-application/src/autopilot/evaluate/types.rs"
-LOADER = ROOT / "crates/crowdrelay-infra/src/autopilot/decisions/opportunity_reads.rs"
+LOADER = ROOT / "crates/crowdrelay-infra/src/autopilot/decisions/cycle_reads.rs"
 
 CLASSES = ("first_party_reversible", "owned_audience", "third_party", "paid")
 

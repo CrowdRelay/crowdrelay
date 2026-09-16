@@ -16,7 +16,7 @@ MIGRATION = ROOT / "migrations/0076_viryaos_growth_envelope.sql"
 DOMAIN = ROOT / "crates/crowdrelay-domain/src/growth_envelope.rs"
 EVALUATE = ROOT / "crates/crowdrelay-application/src/autopilot/evaluate.rs"
 EVALUATE_TYPES = ROOT / "crates/crowdrelay-application/src/autopilot/evaluate/types.rs"
-LOADER = ROOT / "crates/crowdrelay-infra/src/autopilot/decisions/opportunity_reads.rs"
+LOADER = ROOT / "crates/crowdrelay-infra/src/autopilot/decisions/cycle_reads.rs"
 PERSIST = ROOT / "crates/crowdrelay-infra/src/autopilot/decisions/persist.rs"
 MODEL = ROOT / "crates/crowdrelay-application/src/autopilot/model.rs"
 
