@@ -1527,4 +1527,29 @@ mod tests {
         assert_eq!(subject.kind(), "workspace");
         assert_eq!(subject.uuid(), workspace_id.into_uuid());
     }
+
+    /// The content-artifact briefing shows the operator-facing names, not the
+    /// machine keys: the artifact kind is a label and the template contract
+    /// loses its `content.` namespace but keeps its version.
+    #[test]
+    fn content_artifact_briefing_shows_names_not_keys() {
+        let briefing = AutopilotActionPayload::RequestContentArtifact {
+            source_id: ContentSourceId::new(),
+            source_version: 1,
+            artifact: ContentArtifactKind::SocialFeed,
+            template_key: "content.social_feed.v1".to_owned(),
+        }
+        .briefing();
+
+        assert_eq!(briefing.summary, "Content artifact: Social feed");
+        let field = |label: &str| {
+            briefing
+                .content
+                .iter()
+                .find(|f| f.label == label)
+                .map(|f| f.value.as_str())
+        };
+        assert_eq!(field("Artifact"), Some("Social feed"));
+        assert_eq!(field("Template"), Some("Social feed v1"));
+    }
 }

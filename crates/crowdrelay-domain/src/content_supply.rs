@@ -37,6 +37,21 @@ pub enum ContentArtifactKind {
 }
 
 impl ContentArtifactKind {
+    /// The operator-facing name — briefings and panels read this, not the
+    /// serde key or the Debug form.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::SignalPush => "Signal push",
+            Self::NewsletterBlock => "Newsletter block",
+            Self::SocialFeed => "Social feed",
+            Self::SocialStory => "Social story",
+            Self::LiveListing => "Live listing",
+            Self::PressHook => "Press hook",
+            Self::PostShowRecap => "Post-show recap",
+        }
+    }
+
     #[must_use]
     pub const fn template_key(self) -> &'static str {
         match self {

@@ -128,6 +128,7 @@ const PL: &[(&str, &str)] = &[
     ("Winning variant", "Zwycięski wariant"),
     ("Product", "Produkt"),
     ("Source", "Źródło"),
+    ("Artifact", "Artefakt"),
     ("Template", "Szablon"),
     ("Phase", "Etap"),
     ("Tier", "Poziom"),

@@ -86,6 +86,42 @@ mod tests {
         assert_ne!(PRESS_PITCH_CAPABILITY, "agent.content");
     }
 
+    #[test]
+    fn the_deadline_note_reads_as_a_date_a_person_recognises() {
+        use crowdrelay_application::autopilot::BriefingLocale;
+        let utc = |day: u8, month: time::Month, hour: u8, minute: u8| {
+            time::Date::from_calendar_date(2026, month, day)
+                .unwrap()
+                .with_hms(hour, minute, 0)
+                .unwrap()
+                .assume_utc()
+        };
+        // 2026-09-19 is a Saturday.
+        let due = utc(19, time::Month::September, 4, 42);
+        assert_eq!(
+            format_deadline_note(None, Some(due), BriefingLocale::Pl),
+            "Termin: sobota, 19 września 2026, 04:42 UTC"
+        );
+        assert_eq!(
+            format_deadline_note(Some(due), None, BriefingLocale::En),
+            "Deadline: Saturday, 19 September 2026, 04:42 UTC"
+        );
+        // The assignment deadline outranks the approval window, and a missing
+        // deadline says so instead of rendering an epoch.
+        let later = utc(1, time::Month::October, 12, 0);
+        assert!(
+            format_deadline_note(Some(due), Some(later), BriefingLocale::En).contains("October")
+        );
+        assert_eq!(
+            format_deadline_note(None, None, BriefingLocale::Pl),
+            "Brak twardego terminu"
+        );
+        assert_eq!(
+            format_deadline_note(None, None, BriefingLocale::En),
+            "No hard deadline"
+        );
+    }
+
     /// And the channel templates must keep passing on `agent.content`.
     ///
     /// Their executors claim them in-process by direct SQL, so gating them
@@ -178,7 +214,8 @@ fn pending_action(
     // Same briefing the task email carries, in the same language — the panel
     // and the email are two views of one handoff and must not disagree.
     let mut briefing = payload.briefing().localized(locale);
-    briefing.deadline_note = format_deadline_note(row.approval_expires_at, row.assignment_due_at);
+    briefing.deadline_note =
+        format_deadline_note(row.approval_expires_at, row.assignment_due_at, locale);
     Ok(PendingAutopilotAction {
         required_capability: required_capability.map(ToOwned::to_owned),
         executor_ready,
@@ -207,22 +244,56 @@ fn pending_action(
     })
 }
 
-/// Formats a deadline note in Polish from the action's deadline fields.
-/// Prefers `assignment_due_at` (the team assignment deadline) over
-/// `approval_expires_at` (the autopilot approval window).
+/// Formats a deadline note from the action's deadline fields, in the
+/// briefing's locale. Prefers `assignment_due_at` (the team assignment
+/// deadline) over `approval_expires_at` (the autopilot approval window).
+///
+/// An RFC3339 timestamp is a machine's answer — a crew member reads
+/// "sobota, 19 września 2026, 06:42", not "2026-09-19T04:42:11.379054Z".
+/// The zone suffix stays because the value is UTC and shifting it into a
+/// guessed local zone would lie about the moment.
+const PL_WEEKDAYS: [&str; 7] = [
+    "poniedziałek", "wtorek", "środa", "czwartek", "piątek", "sobota", "niedziela",
+];
+const PL_MONTHS: [&str; 12] = [
+    "stycznia", "lutego", "marca", "kwietnia", "maja", "czerwca", "lipca",
+    "sierpnia", "września", "października", "listopada", "grudnia",
+];
+
 pub(super) fn format_deadline_note(
     approval_expires_at: Option<OffsetDateTime>,
     assignment_due_at: Option<OffsetDateTime>,
+    locale: crowdrelay_application::autopilot::BriefingLocale,
 ) -> String {
+    use crowdrelay_application::autopilot::BriefingLocale;
     let deadline = assignment_due_at.or(approval_expires_at);
-    match deadline {
-        Some(dt) => {
-            let formatted = dt
-                .format(&time::format_description::well_known::Rfc3339)
-                .unwrap_or_default();
-            format!("Termin: {}", formatted)
-        }
-        None => "Brak twardego terminu".into(),
+    match (deadline, locale) {
+        (Some(dt), BriefingLocale::Pl) => format!(
+            "Termin: {}, {} {} {}, {:02}:{:02} UTC",
+            PL_WEEKDAYS
+                .get(usize::from(dt.weekday().number_from_monday() - 1))
+                .copied()
+                .unwrap_or_default(),
+            dt.day(),
+            PL_MONTHS
+                .get(usize::from(u8::from(dt.month()) - 1))
+                .copied()
+                .unwrap_or_default(),
+            dt.year(),
+            dt.hour(),
+            dt.minute()
+        ),
+        (Some(dt), BriefingLocale::En) => format!(
+            "Deadline: {}, {} {} {}, {:02}:{:02} UTC",
+            dt.weekday(),
+            dt.day(),
+            dt.month(),
+            dt.year(),
+            dt.hour(),
+            dt.minute()
+        ),
+        (None, BriefingLocale::Pl) => "Brak twardego terminu".into(),
+        (None, BriefingLocale::En) => "No hard deadline".into(),
     }
 }
 

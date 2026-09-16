@@ -956,7 +956,7 @@ fn enriched_task_detail(
         return frame.unreadable.to_owned();
     };
     let mut briefing = payload.briefing().localized(locale);
-    briefing.deadline_note = format_deadline_note(approval_expires_at, assignment_due_at);
+    briefing.deadline_note = format_deadline_note(approval_expires_at, assignment_due_at, locale);
 
     let mut text = format!(
         "{}\n\n{}: {}\n\n{}:",

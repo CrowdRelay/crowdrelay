@@ -37,6 +37,33 @@ impl AutopilotActionPayload {
             }
         };
 
+        // A template key is a versioned contract name (`content.social_feed.v1`),
+        // not prose — the crew reads the name and the version, not the
+        // machine namespace. `content.` carries nothing the artifact label
+        // does not already say, so it drops; every other segment stays.
+        let friendly_template = |key: &str| {
+            let key = key.strip_prefix("content.").unwrap_or(key);
+            let mut version = "";
+            let mut name_parts = Vec::new();
+            for segment in key.split('.') {
+                let is_version = segment
+                    .strip_prefix('v')
+                    .is_some_and(|rest| !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit()));
+                if is_version {
+                    version = segment;
+                } else {
+                    name_parts.extend(segment.split('_'));
+                }
+            }
+            let name = name_parts.join(" ");
+            let mut chars = name.chars();
+            let name = match chars.next() {
+                Some(first) => first.to_uppercase().chain(chars).collect::<String>(),
+                None => name,
+            };
+            if version.is_empty() { name } else { format!("{name} {version}") }
+        };
+
         match self {
             Self::ChangeTicketPrice { ticket_type_id, from_minor, to_minor } => ActionBriefing {
                 summary: format!("Change ticket price: {} → {}", format_minor(*from_minor), format_minor(*to_minor)),
@@ -75,7 +102,7 @@ impl AutopilotActionPayload {
                 ],
                 content: vec![
                     BriefingField { label: "Fan".into(), value: short_ref(fan_id) },
-                    BriefingField { label: "Template".into(), value: template_key.clone() },
+                    BriefingField { label: "Template".into(), value: friendly_template(template_key) },
                 ],
                 deadline_note: String::new(),
             },
@@ -130,7 +157,7 @@ impl AutopilotActionPayload {
                 content: vec![
                     BriefingField { label: "Event".into(), value: short_ref(event_id) },
                     BriefingField { label: "Phase".into(), value: format!("{:?}", phase) },
-                    BriefingField { label: "Template".into(), value: template_key.clone() },
+                    BriefingField { label: "Template".into(), value: friendly_template(template_key) },
                 ],
                 deadline_note: String::new(),
             },
@@ -159,7 +186,7 @@ impl AutopilotActionPayload {
                 content: vec![
                     BriefingField { label: "Target".into(), value: target_name.clone() },
                     BriefingField { label: "Phase".into(), value: format!("{:?}", phase) },
-                    BriefingField { label: "Template".into(), value: template_key.clone() },
+                    BriefingField { label: "Template".into(), value: friendly_template(template_key) },
                 ],
                 deadline_note: String::new(),
             },
@@ -235,7 +262,7 @@ impl AutopilotActionPayload {
                     BriefingField { label: "Beacon".into(), value: short_ref(beacon_id) },
                     BriefingField { label: "Event".into(), value: short_ref(event_id) },
                     BriefingField { label: "Phase".into(), value: format!("{:?}", phase) },
-                    BriefingField { label: "Template".into(), value: template_key.clone() },
+                    BriefingField { label: "Template".into(), value: friendly_template(template_key) },
                 ],
                 deadline_note: String::new(),
             },
@@ -249,7 +276,7 @@ impl AutopilotActionPayload {
                 content: vec![
                     BriefingField { label: "Event".into(), value: short_ref(event_id) },
                     BriefingField { label: "Lever".into(), value: lever.as_str().into() },
-                    BriefingField { label: "Template".into(), value: template_key.clone() },
+                    BriefingField { label: "Template".into(), value: friendly_template(template_key) },
                     BriefingField {
                         label: "Reaches fans".into(),
                         value: send_at.map_or_else(
@@ -261,15 +288,15 @@ impl AutopilotActionPayload {
                 deadline_note: String::new(),
             },
             Self::RequestContentArtifact { source_id, artifact, template_key, .. } => ActionBriefing {
-                summary: format!("Content artefact: {}", template_key),
+                summary: format!("Content artifact: {}", artifact.label()),
                 why_it_matters: "The system generates a content artefact — an image, a piece of copy — from a source. Internal only.".into(),
                 steps: vec![
                     BriefingStep { what_to_do: "Click APPROVE to generate it".into(), why_it_matters: "The system builds an artefact from the named source".into() },
                 ],
                 content: vec![
                     BriefingField { label: "Source".into(), value: short_ref(source_id) },
-                    BriefingField { label: "Artefakt".into(), value: format!("{:?}", artifact) },
-                    BriefingField { label: "Template".into(), value: template_key.clone() },
+                    BriefingField { label: "Artifact".into(), value: artifact.label().into() },
+                    BriefingField { label: "Template".into(), value: friendly_template(template_key) },
                 ],
                 deadline_note: String::new(),
             },
@@ -530,7 +557,7 @@ impl AutopilotActionPayload {
                         BriefingField { label: "Play".into(), value: short_ref(play_id) },
                         BriefingField { label: "Play type".into(), value: format!("{:?}", play_kind) },
                         BriefingField { label: "Krok".into(), value: format!("{}: {:?}", step_index, step_kind) },
-                        BriefingField { label: "Template".into(), value: template_key.clone() },
+                        BriefingField { label: "Template".into(), value: friendly_template(template_key) },
                     ];
                     if let Some(eid) = event_id {
                         fields.push(BriefingField { label: "Event".into(), value: short_ref(eid) });
