@@ -174,7 +174,18 @@ pub async fn referral_conversion(
 /// Poznań and Warszawa produce four shows." This endpoint tells the operator
 /// which cities are close to that threshold, broken down by signups,
 /// 30d-active, and consented fans. The `bookable` flag marks cities that
-/// have crossed the minimum — 50 active fans by default, configurable.
+/// have crossed the minimum — 50 active fans, the plan's implied floor.
+///
+/// `new_30d` is the trend edge — fans who declared interest in the city
+/// inside the last 30 days, so a city that is growing reads differently
+/// from one that is merely large. `reachable` is the nearby-gig emitter's
+/// own gate, mirrored exactly: location preference with nearby gigs
+/// enabled, account `active`, marketing consent granted, and the fan's
+/// city within their chosen radius of this one — the count of fans a
+/// booked show there would actually page, not the count who follow it.
+/// `venues`/`promoters`/`festivals` count the confirmed bookable targets
+/// in that city — the "what's there" inventory beside the fans, so a
+/// city with reach and no room reads as the gap it is.
 pub async fn city_funnel(State(state): State<crate::AppState>, headers: HeaderMap) -> Response {
     let now = OffsetDateTime::now_utc();
     let result = sqlx::query_as::<_, CityFunnelRow>(
@@ -185,15 +196,28 @@ pub async fn city_funnel(State(state): State<crate::AppState>, headers: HeaderMa
                 city.slug AS city_slug,
                 city.name AS city_name,
                 city.country_code,
-                fan.id AS fan_id,
+                city.region,
                 fan.normalized_email,
-                fan.last_activity_at,
+                interest.created_at AS interest_created_at,
+                -- fan_consents is append-only: consent means the LATEST
+                -- row for the purpose is granted, not that any row ever
+                -- was — a check-in withdrawal must drop the fan out of
+                -- every count on this row.
                 EXISTS (
                     SELECT 1 FROM fan_consents AS consent
                     WHERE consent.workspace_id = fan.workspace_id
                       AND consent.fan_id = fan.id
                       AND consent.purpose = 'marketing'
                       AND consent.granted
+                      AND consent.id = (
+                          SELECT newest.id
+                          FROM fan_consents AS newest
+                          WHERE newest.workspace_id = consent.workspace_id
+                            AND newest.fan_id = consent.fan_id
+                            AND newest.purpose = consent.purpose
+                          ORDER BY newest.recorded_at DESC, newest.id DESC
+                          LIMIT 1
+                      )
                 ) AS consented,
                 fan_last_meaningful_action(
                     fan.workspace_id, fan.id, fan.normalized_email
@@ -205,27 +229,144 @@ pub async fn city_funnel(State(state): State<crate::AppState>, headers: HeaderMa
               ON fan.workspace_id = interest.workspace_id
              AND fan.id = interest.fan_id
             WHERE interest.workspace_id = $1
-              AND fan.status <> 'closed'
+              -- 'merged' rows are dedup tombstones whose identity moved
+              -- to the surviving fan; everything else, pending included,
+              -- is a real member of the fanbase a city count should name.
+              AND fan.status <> 'merged'
+        ),
+        agg AS (
+            SELECT
+                city_id,
+                city_slug,
+                city_name,
+                country_code,
+                region,
+                count(*)::bigint AS fans,
+                count(*) FILTER (
+                    WHERE interest_created_at BETWEEN $2 - INTERVAL '30 days' AND $2
+                )::bigint AS new_30d,
+                count(*) FILTER (
+                    WHERE last_meaningful_action_at IS NOT NULL
+                      AND last_meaningful_action_at BETWEEN $2 - INTERVAL '30 days' AND $2
+                      AND consented
+                )::bigint AS active_30d,
+                count(*) FILTER (WHERE consented)::bigint AS consented
+            FROM city_fans
+            GROUP BY city_id, city_slug, city_name, country_code, region
+        ),
+        reachable AS (
+            -- The nearby-gig gate applied city-by-city over the funnel's
+            -- own candidate set: fans whose location preference is enabled,
+            -- account active, marketing consent granted, and whose city sits
+            -- inside their radius of this one. A fan following Kraków from
+            -- Katowice still counts for Kraków — the emitter would page them.
+            SELECT
+                agg.city_id,
+                count(*)::bigint AS reachable
+            FROM agg
+            JOIN cities AS city
+              ON city.id = agg.city_id
+             AND city.latitude IS NOT NULL
+             AND city.longitude IS NOT NULL
+            JOIN fan_location_preferences AS preferences
+              ON preferences.workspace_id = $1
+             AND preferences.nearby_gigs_enabled
+            JOIN cities AS fan_city
+              ON fan_city.id = preferences.city_id
+             AND fan_city.latitude IS NOT NULL
+             AND fan_city.longitude IS NOT NULL
+            JOIN fans AS fan
+              ON fan.workspace_id = preferences.workspace_id
+             AND fan.id = preferences.fan_id
+             AND fan.status = 'active'
+            WHERE EXISTS (
+                SELECT 1
+                FROM fan_consents AS consent
+                WHERE consent.workspace_id = fan.workspace_id
+                  AND consent.fan_id = fan.id
+                  AND consent.purpose = 'marketing'
+                  AND consent.granted
+                  AND consent.id = (
+                      SELECT newest.id
+                      FROM fan_consents AS newest
+                      WHERE newest.workspace_id = consent.workspace_id
+                        AND newest.fan_id = consent.fan_id
+                        AND newest.purpose = consent.purpose
+                      ORDER BY newest.recorded_at DESC, newest.id DESC
+                      LIMIT 1
+                  )
+            )
+              -- The emitter's own bound: one degree of latitude is
+              -- 111.19 km wherever you stand, so a pair further apart
+              -- than the radius in latitude alone can never be inside it.
+              AND abs(fan_city.latitude - city.latitude)
+                  <= (preferences.radius_km + 1)::double precision / 111.0
+              -- Rounded, matching the emitter's distance_km comparison: a
+              -- fan at 50.4 km with radius 50 is paged, not dropped.
+              AND ROUND(6371 * 2 * ASIN(LEAST(1.0, SQRT(
+                    POWER(SIN(RADIANS(fan_city.latitude - city.latitude) / 2), 2)
+                    + COS(RADIANS(city.latitude)) * COS(RADIANS(fan_city.latitude))
+                    * POWER(SIN(RADIANS(fan_city.longitude - city.longitude) / 2), 2)
+                  ))))::integer <= preferences.radius_km
+            GROUP BY agg.city_id
+        ),
+        supply AS (
+            -- Confirmed bookable inventory per city: booking targets with a
+            -- real route that are still on the board. Candidates awaiting
+            -- screening do not count — "what's there" means what we could
+            -- actually write to this week.
+            SELECT
+                agg.city_id,
+                count(*) FILTER (WHERE target.target_kind = 'venue')::bigint AS venues,
+                count(*) FILTER (WHERE target.target_kind = 'promoter')::bigint AS promoters,
+                count(*) FILTER (WHERE target.target_kind = 'festival')::bigint AS festivals
+            FROM agg
+            JOIN viryaos_booking_targets AS target
+              ON target.workspace_id = $1
+             AND target.city_id = agg.city_id
+             AND target.active
+             AND target.accepts_booking
+            GROUP BY agg.city_id
+        ),
+        shows AS (
+            -- The gap edge: when we last played each city and when we next
+            -- will. NULL last = never on record; NULL next = nothing
+            -- coming — fans + no next show is the organise-now signal.
+            SELECT
+                agg.city_id,
+                max(events.starts_at) FILTER (WHERE events.starts_at <= $2) AS last_show_at,
+                min(events.starts_at) FILTER (WHERE events.starts_at > $2) AS next_show_at
+            FROM agg
+            JOIN events
+              ON events.workspace_id = $1
+             AND events.city_id = agg.city_id
+             AND events.status IN ('published', 'completed')
+            GROUP BY agg.city_id
         )
         SELECT
-            city_slug,
-            city_name,
-            country_code,
-            count(*)::bigint AS fans,
-            count(*) FILTER (
-                WHERE last_meaningful_action_at IS NOT NULL
-                  AND last_meaningful_action_at BETWEEN $2 - INTERVAL '30 days' AND $2
-                  AND consented
-            )::bigint AS active_30d,
-            count(*) FILTER (WHERE consented)::bigint AS consented,
-            (count(*) FILTER (
-                WHERE last_meaningful_action_at IS NOT NULL
-                  AND last_meaningful_action_at BETWEEN $2 - INTERVAL '30 days' AND $2
-                  AND consented
-            ) >= 50)::bool AS bookable
-        FROM city_fans
-        GROUP BY city_slug, city_name, country_code
-        ORDER BY active_30d DESC, fans DESC, city_slug
+            agg.city_slug,
+            agg.city_name,
+            agg.country_code,
+            agg.region,
+            agg.fans,
+            agg.new_30d,
+            agg.active_30d,
+            agg.consented,
+            (agg.active_30d >= 50)::bool AS bookable,
+            COALESCE(reach.reachable, 0)::bigint AS reachable,
+            COALESCE(supply.venues, 0)::bigint AS venues,
+            COALESCE(supply.promoters, 0)::bigint AS promoters,
+            COALESCE(supply.festivals, 0)::bigint AS festivals,
+            shows.last_show_at,
+            shows.next_show_at
+        FROM agg
+        LEFT JOIN reachable AS reach
+          ON reach.city_id = agg.city_id
+        LEFT JOIN supply
+          ON supply.city_id = agg.city_id
+        LEFT JOIN shows
+          ON shows.city_id = agg.city_id
+        ORDER BY agg.active_30d DESC, agg.fans DESC, agg.city_slug, agg.city_id
         LIMIT 100
         "#,
     )

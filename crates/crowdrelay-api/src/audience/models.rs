@@ -376,13 +376,34 @@ pub struct CityFunnelRow {
     city_slug: String,
     city_name: String,
     country_code: String,
+    region: Option<String>,
     fans: i64,
+    /// Fans who declared interest in this city inside the last 30 days —
+    /// the trend edge: a small city growing fast reads differently from a
+    /// large one standing still.
+    new_30d: i64,
     active_30d: i64,
     consented: i64,
     /// Whether this city has enough active fans to be worth booking.
     /// Threshold is 50 active fans — the plan's "two hundred in four cities
     /// produce four shows" implies ~50 per city as the minimum.
     bookable: bool,
+    /// Fans the nearby-gig emitter would actually page for a show here:
+    /// location preference enabled, account active, marketing consent,
+    /// fan's city inside their chosen radius of this one.
+    reachable: i64,
+    /// Confirmed bookable targets in this city by kind — active with
+    /// accepts_booking; the "what's there" inventory beside the fans.
+    venues: i64,
+    promoters: i64,
+    festivals: i64,
+    /// Last published show in this city — NULL means never on record.
+    #[serde(with = "time::serde::rfc3339::option")]
+    last_show_at: Option<OffsetDateTime>,
+    /// Next published show in this city — NULL with real fans is the
+    /// organise-now gap.
+    #[serde(with = "time::serde::rfc3339::option")]
+    next_show_at: Option<OffsetDateTime>,
 }
 
 #[derive(Debug, Serialize, FromRow)]
