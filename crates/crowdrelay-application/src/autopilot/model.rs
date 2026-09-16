@@ -31,6 +31,7 @@ use crowdrelay_domain::{
     pricing::TicketYieldPolicy,
     promotion::PromotionBudgetPolicy,
     release_autopilot::{ReleaseAutopilotPolicy, ReleaseMilestone},
+    representation::RepresentationPolicy,
     show_growth::{ShowGrowthLever, ShowGrowthPolicy},
     show_operations::{ShowOperationsPolicy, ShowTaskKind},
     target_discovery::OutreachSupplyPolicy,
@@ -73,6 +74,10 @@ pub enum AutopilotContext {
     /// queue surfaces each raised suggestion with its evidence and the band
     /// commits — creative work stays human in every posture.
     ContentStrategy,
+    /// Representation approaches: the band picks a consented agent or label
+    /// and the approach queues for approval. Deterministic gates own whether
+    /// one may go out — consent, activity, verification, monthly allowance.
+    Representation,
 }
 
 impl AutopilotContext {
@@ -81,7 +86,7 @@ impl AutopilotContext {
     /// Storage parsing is derived from this list rather than restating the
     /// names: a context the policy table can hold but a reader cannot parse
     /// fails the whole overview read, not just its own row.
-    pub const ALL: [Self; 23] = [
+    pub const ALL: [Self; 24] = [
         Self::TicketYield,
         Self::FanLifecycle,
         Self::CampaignLifecycle,
@@ -105,6 +110,7 @@ impl AutopilotContext {
         Self::GrowthIntelligence,
         Self::Plays,
         Self::ContentStrategy,
+        Self::Representation,
     ];
 
     /// Parse the stored representation written by [`Self::as_str`].
@@ -141,6 +147,7 @@ impl AutopilotContext {
             Self::GrowthIntelligence => "growth_intelligence",
             Self::Plays => "plays",
             Self::ContentStrategy => "content_strategy",
+            Self::Representation => "representation",
         }
     }
 }
@@ -171,6 +178,7 @@ pub enum AutopilotPolicyConfig {
     GrowthIntelligence(GrowthIntelligencePolicy),
     Plays(PlayPolicy),
     ContentStrategy(ContentStrategyPolicy),
+    Representation(RepresentationPolicy),
 }
 
 impl AutopilotPolicyConfig {
@@ -261,6 +269,9 @@ impl AutopilotPolicyConfig {
             AutopilotContext::Plays => Self::parse_into(raw, Self::Plays, PlayPolicy::default()),
             AutopilotContext::ContentStrategy => {
                 Self::parse_into(raw, Self::ContentStrategy, ContentStrategyPolicy::default())
+            }
+            AutopilotContext::Representation => {
+                Self::parse_into(raw, Self::Representation, RepresentationPolicy::default())
             }
         }
     }

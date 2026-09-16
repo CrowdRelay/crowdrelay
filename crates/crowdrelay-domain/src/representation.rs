@@ -31,6 +31,15 @@
 /// rather than making the band reason about a rolling window.
 pub const MONTHLY_APPROACH_ALLOWANCE: u32 = 4;
 
+/// Per-workspace tuning for the representation context. Empty on purpose:
+/// the allowance lives in `MONTHLY_APPROACH_ALLOWANCE` and the gates in
+/// `review_approach`, so there is nothing here to turn — the policy row
+/// carries posture (`require_approval`), not knobs. The type exists so a
+/// `representation` policy row parses like every other context's.
+#[derive(Clone, Copy, Debug, Default, serde::Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct RepresentationPolicy {}
+
 /// The state an approach is decided on. Everything the gate needs, gathered
 /// by the caller — the function itself is pure so the rule is testable and
 /// the same check runs at request time and again at dispatch.
