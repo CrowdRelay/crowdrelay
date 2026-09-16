@@ -614,6 +614,12 @@ where
                         }
                     }
                 }
+                AutopilotContext::Representation => {
+                    // Approaches are band-initiated: the evaluator never
+                    // proposes one. The policy row exists so posture can be
+                    // read and changed, not so a cycle can volunteer the
+                    // band's name to an agent.
+                }
             }
         }
 

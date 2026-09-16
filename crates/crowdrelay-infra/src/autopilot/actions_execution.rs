@@ -304,6 +304,69 @@ impl PostgresAutopilotRepository {
                     )
                     .await?;
                 }
+                AutopilotActionPayload::RequestRepresentationApproach {
+                    target_id,
+                    target_version,
+                    target_name: _,
+                    note,
+                } => {
+                    let target = crate::representation::lock_representation_for_execution(
+                        &mut transaction,
+                        workspace_id,
+                        *target_id,
+                        *target_version,
+                        now,
+                    )
+                    .await?;
+                    reserve_contact_window(
+                        &mut transaction,
+                        workspace_id,
+                        action.id,
+                        "representation",
+                        &target.1,
+                        now,
+                    )
+                    .await?;
+                    // The listing is the pitch: the lock just proved it is
+                    // published, and the payload is what an admitted reader
+                    // would see — the domain-redacted claims plus the token
+                    // the share link is built from. The band's note rides
+                    // along when it gave one.
+                    let listing = crate::band_listing::PostgresBandListingRepository::new(
+                        self.pool.clone(),
+                    )
+                    .load_state(workspace_id.into_uuid())
+                    .await
+                    .map_err(|_| RepositoryError::Unexpected)?
+                    .ok_or(RepositoryError::Conflict)?;
+                    let redacted = crowdrelay_domain::listing::redact(&listing.listing)
+                        .ok_or(RepositoryError::Conflict)?;
+                    emit_external_action(
+                        &mut transaction,
+                        workspace_id,
+                        action.id,
+                        "crowdrelay.representation.approach_requested",
+                        json!({
+                            "action_id": action.id,
+                            "target_id": target_id,
+                            "target_name": target.0,
+                            "target_kind": target.2,
+                            "contact_email": target.1,
+                            "note": note,
+                            "share_token": listing.share_token,
+                            "listing": redacted,
+                        }),
+                    )
+                    .await?;
+                    crate::representation::record_approach_sent(
+                        &mut transaction,
+                        workspace_id,
+                        action.id,
+                        *target_id,
+                        now,
+                    )
+                    .await?;
+                }
                 AutopilotActionPayload::RequestOutreachDiscovery { requested_candidates } => {
                     let policy = crowdrelay_domain::target_discovery::TargetDiscoveryPolicy::default();
                     emit_external_action(
@@ -1040,7 +1103,15 @@ impl PostgresAutopilotRepository {
                     let promoted = sqlx::query(
                         r#"
                         UPDATE agent_outreach_targets
-                        SET status = 'promoted', screened_at = COALESCE(screened_at, now())
+                        SET status = 'promoted',
+                            screened_at = COALESCE(screened_at, now()),
+                            -- Promotion means the operator confirmed a real
+                            -- published route; for these kinds a published
+                            -- pitch route is the consent. Rows without an
+                            -- address stay consented-out — a name alone is a
+                            -- lead, not a recipient.
+                            accepts_outreach = accepts_outreach
+                                OR (contact_email IS NOT NULL AND btrim(contact_email) <> '')
                         WHERE workspace_id = $1
                           AND target_kind = $2
                           AND display_name = $3

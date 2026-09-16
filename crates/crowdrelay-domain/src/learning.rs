@@ -666,13 +666,15 @@ mod tests {
             crate::outreach::OutreachTargetKind::SupportSlot,
             crate::outreach::OutreachTargetKind::Endorsement,
             crate::outreach::OutreachTargetKind::MediaPatronage,
+            crate::outreach::OutreachTargetKind::Agent,
+            crate::outreach::OutreachTargetKind::Label,
         ] {
             assert_eq!(
                 crate::outreach::OutreachTargetKind::parse(kind.as_str()),
                 Some(kind)
             );
         }
-        assert_eq!(crate::outreach::OutreachTargetKind::all().len(), 7);
+        assert_eq!(crate::outreach::OutreachTargetKind::all().len(), 9);
     }
 
     // ---------------------------------------------------------------------

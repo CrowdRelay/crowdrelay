@@ -41,6 +41,7 @@ KNOWN_WRITERS = {
     "crates/crowdrelay-infra/src/autopilot/decisions/persist.rs",
     "crates/crowdrelay-infra/src/autopilot/decline_advisories.rs",
     "crates/crowdrelay-infra/src/autopilot/team.rs",
+    "crates/crowdrelay-infra/src/representation.rs",
     "crates/crowdrelay-worker/src/agent_outcomes.rs",
 }
 

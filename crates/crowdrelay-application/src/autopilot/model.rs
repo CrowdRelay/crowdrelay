@@ -31,6 +31,7 @@ use crowdrelay_domain::{
     pricing::TicketYieldPolicy,
     promotion::PromotionBudgetPolicy,
     release_autopilot::{ReleaseAutopilotPolicy, ReleaseMilestone},
+    representation::RepresentationPolicy,
     show_growth::{ShowGrowthLever, ShowGrowthPolicy},
     show_operations::{ShowOperationsPolicy, ShowTaskKind},
     target_discovery::OutreachSupplyPolicy,
@@ -73,6 +74,10 @@ pub enum AutopilotContext {
     /// queue surfaces each raised suggestion with its evidence and the band
     /// commits — creative work stays human in every posture.
     ContentStrategy,
+    /// Representation approaches: the band picks a consented agent or label
+    /// and the approach queues for approval. Deterministic gates own whether
+    /// one may go out — consent, activity, verification, monthly allowance.
+    Representation,
 }
 
 impl AutopilotContext {
@@ -81,7 +86,7 @@ impl AutopilotContext {
     /// Storage parsing is derived from this list rather than restating the
     /// names: a context the policy table can hold but a reader cannot parse
     /// fails the whole overview read, not just its own row.
-    pub const ALL: [Self; 23] = [
+    pub const ALL: [Self; 24] = [
         Self::TicketYield,
         Self::FanLifecycle,
         Self::CampaignLifecycle,
@@ -105,6 +110,7 @@ impl AutopilotContext {
         Self::GrowthIntelligence,
         Self::Plays,
         Self::ContentStrategy,
+        Self::Representation,
     ];
 
     /// Parse the stored representation written by [`Self::as_str`].
@@ -141,6 +147,7 @@ impl AutopilotContext {
             Self::GrowthIntelligence => "growth_intelligence",
             Self::Plays => "plays",
             Self::ContentStrategy => "content_strategy",
+            Self::Representation => "representation",
         }
     }
 }
@@ -171,6 +178,7 @@ pub enum AutopilotPolicyConfig {
     GrowthIntelligence(GrowthIntelligencePolicy),
     Plays(PlayPolicy),
     ContentStrategy(ContentStrategyPolicy),
+    Representation(RepresentationPolicy),
 }
 
 impl AutopilotPolicyConfig {
@@ -261,6 +269,9 @@ impl AutopilotPolicyConfig {
             AutopilotContext::Plays => Self::parse_into(raw, Self::Plays, PlayPolicy::default()),
             AutopilotContext::ContentStrategy => {
                 Self::parse_into(raw, Self::ContentStrategy, ContentStrategyPolicy::default())
+            }
+            AutopilotContext::Representation => {
+                Self::parse_into(raw, Self::Representation, RepresentationPolicy::default())
             }
         }
     }
@@ -490,6 +501,26 @@ pub enum AutopilotActionPayload {
         /// own like every other.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         wave_id: Option<uuid::Uuid>,
+    },
+    /// Ask the platform to introduce the band to a representation contact —
+    /// a booking agent or a label the band wants carrying its career. The
+    /// published listing is the pitch: the emitted event carries its
+    /// redacted claims and share link, and dispatch refuses if the listing
+    /// has been unlisted since the approach was requested.
+    ///
+    /// The agent's address never reaches the band, so the send is brokered
+    /// and our reputation rides on it — which is why the consent, evidence
+    /// and allowance gates in `crowdrelay_domain::representation` run again
+    /// in the execution arm rather than only at request time.
+    RequestRepresentationApproach {
+        target_id: OutreachTargetId,
+        target_version: i64,
+        target_name: String,
+        /// One line of the band's own words under the listing — "we met
+        /// after the Wrocław show". Capped at the API boundary; absent means
+        /// the listing speaks alone.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        note: Option<String>,
     },
     /// Read a public playlist and report whether the track is in it.
     ///
@@ -879,6 +910,7 @@ impl AutopilotActionPayload {
             // approach to each of them.
             Self::RequestBookingOutreach { .. }
             | Self::RequestOutreach { .. }
+            | Self::RequestRepresentationApproach { .. }
             | Self::RequestBeaconOutreach { .. }
             // A partner being asked to carry invite codes is a real-world
             // approach to somebody else's community, not a message to ours.
@@ -997,6 +1029,7 @@ impl AutopilotActionPayload {
             Self::RequestAudienceCampaign { .. } => "audience.campaign.request",
             Self::RequestMerchBundle { .. } => "merch.bundle.request",
             Self::RequestOutreach { .. } => "outreach.request",
+            Self::RequestRepresentationApproach { .. } => "representation.approach.request",
             Self::RequestBeaconDiscovery { .. } => "beacon.discovery.request",
             Self::RequestBookingTargetDiscovery { .. } => "booking.target_discovery.request",
             Self::RequestBeaconInviteBatch { .. } => "beacon.invite_batch.request",

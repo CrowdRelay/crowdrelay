@@ -73,6 +73,10 @@
         /v1/control-plane/gdrive/contacts \
         /v1/control-plane/gdrive/contacts/* \
         /v1/control-plane/gdrive/scan \
+        /v1/control-plane/listing \
+        /v1/control-plane/listing/* \
+        /v1/control-plane/representation/targets \
+        /v1/control-plane/representation/approach \
 
 	handle /healthz/ready {
 		rewrite * /v1/health/ready

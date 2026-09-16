@@ -679,6 +679,12 @@ fn outreach_candidate(
         crowdrelay_domain::outreach::OutreachTargetKind::MediaPatronage => {
             "outreach.media_patronage.v1"
         }
+        // Representation contacts are approached by the band through the
+        // approach path, where consent, allowance and the published listing
+        // are the gates. The evaluator proposing one would be an autopilot
+        // pitching an agent — exactly the posture §4h-12 forbids.
+        crowdrelay_domain::outreach::OutreachTargetKind::Agent
+        | crowdrelay_domain::outreach::OutreachTargetKind::Label => return Ok(None),
     };
     Ok(Some(DecisionCandidate {
         context: policy.context,

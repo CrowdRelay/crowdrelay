@@ -23,6 +23,7 @@ fn parse_policy(row: PolicyRow) -> Result<AutopilotPolicy, RepositoryError> {
         "growth_intelligence" => AutopilotContext::GrowthIntelligence,
         "plays" => AutopilotContext::Plays,
         "content_strategy" => AutopilotContext::ContentStrategy,
+        "representation" => AutopilotContext::Representation,
         _ => return Err(RepositoryError::Unexpected),
     };
     let autonomy_level = parse_autonomy_level(&row.autonomy_level)?;

@@ -69,9 +69,7 @@ fn header_contains(header: &str, patterns: &[&str]) -> bool {
 /// "home town" matching while a glued word like "hometown" stays out.
 fn header_names_city(header: &str, patterns: &[&str]) -> bool {
     let normalized = header.trim().to_lowercase().replace([' ', '-'], "_");
-    normalized
-        .split('_')
-        .any(|token| patterns.contains(&token))
+    normalized.split('_').any(|token| patterns.contains(&token))
 }
 
 const EMAIL_HEADERS: &[&str] = &["email", "e_mail", "mail"];

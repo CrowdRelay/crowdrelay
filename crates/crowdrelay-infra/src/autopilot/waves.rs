@@ -181,7 +181,7 @@ impl PostgresAutopilotRepository {
                     wave_id: row.id,
                     snapshot: WaveSnapshot {
                         anchor: parse_wave_anchor(&row.anchor_kind, row.anchor_id)?,
-                        target_kind: parse_outreach_target_kind(&row.target_kind)
+                        target_kind: OutreachTargetKind::parse(&row.target_kind)
                             .ok_or(RepositoryError::Unexpected)?,
                         state: WaveState::parse(&row.state).ok_or(RepositoryError::Unexpected)?,
                         opened_at: row.opened_at,
@@ -219,7 +219,7 @@ impl PostgresAutopilotRepository {
                 anchors.push(OutreachWaveAnchor {
                     anchor: parse_wave_anchor(&row.anchor_kind, row.anchor_id)?,
                     anchor_at: row.anchor_at,
-                    target_kind: parse_outreach_target_kind(&row.target_kind)
+                    target_kind: OutreachTargetKind::parse(&row.target_kind)
                         .ok_or(RepositoryError::Unexpected)?,
                     // Carried rather than filtered in SQL: the refusal to open
                     // is a domain rule somebody can read.
@@ -466,19 +466,8 @@ const fn outreach_target_kind_str(kind: OutreachTargetKind) -> &'static str {
         OutreachTargetKind::SupportSlot => "support_slot",
         OutreachTargetKind::Endorsement => "endorsement",
         OutreachTargetKind::MediaPatronage => "media_patronage",
-    }
-}
-
-fn parse_outreach_target_kind(value: &str) -> Option<OutreachTargetKind> {
-    match value {
-        "playlist" => Some(OutreachTargetKind::Playlist),
-        "radio" => Some(OutreachTargetKind::Radio),
-        "press" => Some(OutreachTargetKind::Press),
-        "creator" => Some(OutreachTargetKind::Creator),
-        "support_slot" => Some(OutreachTargetKind::SupportSlot),
-        "endorsement" => Some(OutreachTargetKind::Endorsement),
-        "media_patronage" => Some(OutreachTargetKind::MediaPatronage),
-        _ => None,
+        OutreachTargetKind::Agent => "agent",
+        OutreachTargetKind::Label => "label",
     }
 }
 

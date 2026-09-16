@@ -14,11 +14,15 @@ struct PressRecipient {
 
 /// Picks the press target a pitch should go to.
 ///
-/// Promoted targets first — an operator has looked at those and kept them —
-/// then proposed ones, so the loop is not blocked waiting for promotion. Least
-/// recently pitched first, so the same journalist is not contacted twice while
-/// others have never been approached. `contact_email IS NOT NULL` is the whole
-/// point: a press target without an address is a lead, not a recipient.
+/// Only promoted targets — promotion is the moment an operator confirmed a
+/// published route, and the promote path is what sets `accepts_outreach`.
+/// Proposed rows are research guesses: the address may be real, but nobody
+/// has established that the contact accepts pitches, so they are leads, not
+/// recipients. `do_not_contact` binds absolutely — a contact that asked not
+/// to be mailed stays unmailed whatever its status. Least recently pitched
+/// first, so the same journalist is not contacted twice while others have
+/// never been approached. `contact_email IS NOT NULL` is the whole point: a
+/// press target without an address is a lead, not a recipient.
 async fn press_recipient(
     pool: &PgPool,
     workspace_id: WorkspaceId,
@@ -29,7 +33,9 @@ async fn press_recipient(
         FROM agent_outreach_targets AS target
         WHERE target.workspace_id = $1
           AND target.target_kind = 'press'
-          AND target.status IN ('promoted', 'proposed')
+          AND target.status = 'promoted'
+          AND target.accepts_outreach
+          AND NOT target.do_not_contact
           AND target.contact_email IS NOT NULL
           AND btrim(target.contact_email) <> ''
         ORDER BY

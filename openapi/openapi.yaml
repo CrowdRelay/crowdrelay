@@ -1250,6 +1250,94 @@ paths:
           description: Cached representation is still current.
         '400': &id002
           $ref: '#/components/responses/Problem'
+  /public/listings/{token}:
+    get:
+      operationId: getPublicListing
+      summary: Read a band's published listing by share token
+      description: The share token is the whole credential. A correct token on a published
+        listing returns the domain-redacted profile — act name, genre tags, cities,
+        supported claims, published dates and what the band is seeking. A wrong,
+        rotated or unlisted token is the same 404, so a reader cannot tell "never
+        existed" from "taken down".
+      parameters:
+      - in: path
+        name: token
+        required: true
+        schema:
+          type: string
+          format: uuid
+      responses:
+        '200':
+          description: The published, redacted listing.
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                example: public, max-age=60
+            X-Request-ID:
+              $ref: '#/components/headers/RequestId'
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                - act_name
+                - genre_tags
+                - cities
+                - claims
+                - published_dates
+                - seeking
+                - visibility
+                properties:
+                  act_name:
+                    type: string
+                    maxLength: 160
+                  genre_tags:
+                    type: array
+                    maxItems: 12
+                    items:
+                      type: string
+                  cities:
+                    type: array
+                    maxItems: 40
+                    items:
+                      type: string
+                  claims:
+                    type: array
+                    maxItems: 24
+                    items:
+                      type: object
+                      required: [label, value, tier, basis]
+                      properties:
+                        label:
+                          type: string
+                          maxLength: 120
+                        value:
+                          type: integer
+                          minimum: 0
+                        tier:
+                          type: string
+                          enum: [vanity, intermediate, downstream]
+                        basis:
+                          type: string
+                          maxLength: 200
+                  published_dates:
+                    type: array
+                    maxItems: 40
+                    items:
+                      type: string
+                  seeking:
+                    type: array
+                    maxItems: 8
+                    items:
+                      type: string
+                  visibility:
+                    type: string
+                    enum: [admitted_readers]
+        '404':
+          $ref: '#/components/responses/Problem'
+        '503':
+          $ref: '#/components/responses/Problem'
   /public/synesthesia/runs:
     post:
       operationId: startSynesthesiaRun
@@ -11106,7 +11194,7 @@ components:
         runtime_enabled: { type: boolean }
         policies:
           type: array
-          maxItems: 23
+          maxItems: 24
           items: { $ref: '#/components/schemas/AutopilotPolicySummary' }
         promotion_budget_guardrails:
           type: array
