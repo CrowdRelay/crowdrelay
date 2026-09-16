@@ -68,6 +68,10 @@ mod phase {
     /// this alone took no action at all, which is a different situation from a
     /// phase falling over mid-cycle.
     pub const PARK_CHECK: &str = "park_check";
+    /// Re-tuning worker call parameters from the LLM call telemetry tail.
+    /// Its failure leaves the previous tuning row in effect — a degraded
+    /// cycle tunes nothing, it never untunes.
+    pub const LLM_TUNING: &str = "llm_tuning";
 }
 
 /// Which phases of a cycle fell over.
@@ -741,6 +745,22 @@ impl AutopilotWorker {
             Err(error) => {
                 degraded.failed(phase::REPLY_TRIAGE_CLAIM);
                 tracing::warn!(error = %error, "ViryaOS reply triage claim failed");
+            }
+        }
+
+        // LLM call tuning runs last: it reads the call tail the agent service
+        // wrote since the previous cycle and persists the next decision for
+        // the runner to resolve. It is measurement-and-knob work, not
+        // action — a failure here must never stall the cycle's real work,
+        // and a stale tuning row is a smaller harm than a stalled one.
+        match self.repository.retune_llm(self.workspace_id, now).await {
+            Ok(tuning) if !tuning.reason.is_empty() => {
+                tracing::info!(reason = %tuning.reason, "ViryaOS re-tuned LLM call parameters");
+            }
+            Ok(_) => {}
+            Err(error) => {
+                degraded.failed(phase::LLM_TUNING);
+                tracing::warn!(error = %error, "ViryaOS LLM call tuning failed");
             }
         }
 
