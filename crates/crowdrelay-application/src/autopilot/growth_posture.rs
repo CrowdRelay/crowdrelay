@@ -225,6 +225,21 @@ mod tests {
     }
 
     #[test]
+    fn the_band_decides_what_it_makes_in_every_posture() {
+        // Content strategy is creative work, not spend — but the reason is
+        // the same: the engine proposes and the band commits. Full send
+        // widens pitching, never the band's own creative call.
+        for posture in [GrowthPosture::Working, GrowthPosture::FullSend] {
+            assert_eq!(
+                posture.context_level(AutopilotContext::ContentStrategy),
+                AutonomyLevel::RequireApproval,
+                "{} must keep content_strategy approval-gated",
+                posture.as_str()
+            );
+        }
+    }
+
+    #[test]
     fn full_send_promotes_only_audience_and_free_pitching() {
         use AutopilotContext as C;
         for context in [C::FanLifecycle, C::Plays, C::Outreach, C::Beacon] {

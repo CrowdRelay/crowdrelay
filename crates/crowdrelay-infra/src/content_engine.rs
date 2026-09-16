@@ -1105,6 +1105,7 @@ impl PostgresContentEngineRepository {
             r#"
             SELECT * FROM viryaos_content_suggestions
             WHERE workspace_id = $1 AND status IN ('raised', 'approved')
+              AND (status = 'approved' OR expires_at IS NULL OR expires_at > now())
             ORDER BY created_at DESC
             "#,
         )

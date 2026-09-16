@@ -2,16 +2,17 @@
 
 use crowdrelay_brain::{AgentTier, GrowthIntelligencePolicy};
 use crowdrelay_domain::{
-    AutopilotActionId, BeaconId, BookingTargetId, CityId, ContentSourceId, EventId, ExperimentId,
-    ExperimentVariantId, FanId, GrowthMetricSeriesId, MerchProductId, MerchVariantId,
-    OutreachOpportunityId, OutreachTargetId, PlayId, PromotionCampaignId, ReleasePlanId,
-    TeamOpportunityId, TicketTypeId, WorkspaceId,
+    AutopilotActionId, BeaconId, BookingTargetId, CityId, ContentSourceId, ContentSuggestionId,
+    EventId, ExperimentId, ExperimentVariantId, FanId, GrowthMetricSeriesId, MerchProductId,
+    MerchVariantId, OutreachOpportunityId, OutreachTargetId, PlayId, PromotionCampaignId,
+    ReleasePlanId, TeamOpportunityId, TicketTypeId, WorkspaceId,
     action_class::ActionClass,
     audience_lifecycle::FanLifecyclePolicy,
     autonomy::{AutonomyLevel, Confidence, PolicyDisposition},
     beacons::{BeaconCampaignPolicy, BeaconOutreachPhase},
     booking::{BookingOpportunityPolicy, BookingOutreachPhase},
     campaign_lifecycle::{EventCampaignPhase, EventCampaignPolicy},
+    content_engine::ContentStrategyPolicy,
     content_supply::{ContentArtifactKind, ContentSupplyPolicy},
     experimentation::ExperimentPolicy,
     free_reach::{WaveAnchor, WaveExpiry},
@@ -68,6 +69,10 @@ pub enum AutopilotContext {
     /// cycle and forgets; a play carries a campaign across cycles, restarts and
     /// deploys, which is what lets the agent do step two of anything.
     Plays,
+    /// The suggestion engine's route to the band. Strategy proposes; the
+    /// queue surfaces each raised suggestion with its evidence and the band
+    /// commits — creative work stays human in every posture.
+    ContentStrategy,
 }
 
 impl AutopilotContext {
@@ -76,7 +81,7 @@ impl AutopilotContext {
     /// Storage parsing is derived from this list rather than restating the
     /// names: a context the policy table can hold but a reader cannot parse
     /// fails the whole overview read, not just its own row.
-    pub const ALL: [Self; 22] = [
+    pub const ALL: [Self; 23] = [
         Self::TicketYield,
         Self::FanLifecycle,
         Self::CampaignLifecycle,
@@ -99,6 +104,7 @@ impl AutopilotContext {
         Self::OutreachSupply,
         Self::GrowthIntelligence,
         Self::Plays,
+        Self::ContentStrategy,
     ];
 
     /// Parse the stored representation written by [`Self::as_str`].
@@ -134,6 +140,7 @@ impl AutopilotContext {
             Self::OutreachSupply => "outreach_supply",
             Self::GrowthIntelligence => "growth_intelligence",
             Self::Plays => "plays",
+            Self::ContentStrategy => "content_strategy",
         }
     }
 }
@@ -163,6 +170,7 @@ pub enum AutopilotPolicyConfig {
     OutreachSupply(OutreachSupplyPolicy),
     GrowthIntelligence(GrowthIntelligencePolicy),
     Plays(PlayPolicy),
+    ContentStrategy(ContentStrategyPolicy),
 }
 
 impl AutopilotPolicyConfig {
@@ -251,6 +259,9 @@ impl AutopilotPolicyConfig {
                 GrowthIntelligencePolicy::default(),
             ),
             AutopilotContext::Plays => Self::parse_into(raw, Self::Plays, PlayPolicy::default()),
+            AutopilotContext::ContentStrategy => {
+                Self::parse_into(raw, Self::ContentStrategy, ContentStrategyPolicy::default())
+            }
         }
     }
 
@@ -313,6 +324,9 @@ pub enum ActionSubject {
     /// Supply is a property of the whole workspace rather than of any one row,
     /// so the sweep that replenishes it has the workspace as its subject.
     Workspace(WorkspaceId),
+    /// One raised content suggestion — the queue entry that asks the band to
+    /// commit to a beat. The UUID is `viryaos_content_suggestions.id`.
+    ContentSuggestion(ContentSuggestionId),
 }
 
 impl From<GrowthDebtSubject> for ActionSubject {
@@ -350,6 +364,7 @@ impl ActionSubject {
             Self::OutreachTarget(_) => "outreach_target",
             Self::TargetCommunity(_) => "target_community",
             Self::Workspace(_) => "workspace",
+            Self::ContentSuggestion(_) => "content_suggestion",
         }
     }
 
@@ -394,6 +409,7 @@ impl ActionSubject {
             Self::OutreachTarget(id) => id.into_uuid(),
             Self::TargetCommunity(id) => id,
             Self::Workspace(id) => id.into_uuid(),
+            Self::ContentSuggestion(id) => id.into_uuid(),
         }
     }
 }
@@ -620,6 +636,27 @@ pub enum AutopilotActionPayload {
     IssueReferralCode {
         fan_id: FanId,
     },
+    /// The content engine's ask: commit to this beat. The suggestion row
+    /// already carries the concept, the reason, the evidence and the
+    /// distribution promise; this action is the surface the band answers on.
+    ///
+    /// Approving marks the suggestion `approved` — the work is committed and
+    /// stays open until the band reports done, declined or done-differently.
+    /// Cancelling resolves it `declined`: "not for us" is a first-class taste
+    /// signal the engine learns from, not a dismissal.
+    RaiseContentSuggestion {
+        suggestion_id: ContentSuggestionId,
+        /// The catalogue entry this beat maps to; `None` for bespoke concepts.
+        format_key: Option<String>,
+        concept: String,
+        /// Why this beat and why now, verbatim from the ranked suggestion —
+        /// the queue must show the argument, not a key into it.
+        reason: String,
+        /// Who the piece would actually reach, clause by clause — the part
+        /// that makes the suggestion worth reading, so it rides in the
+        /// payload rather than a join away.
+        distribution_promise: serde_json::Value,
+    },
     /// Work that was committed to and then left undone. One action kind covers
     /// every debt kind on purpose: the ranked queue compares them against each
     /// other, and four look-alike action kinds would only make that harder.
@@ -819,6 +856,10 @@ impl AutopilotActionPayload {
             | Self::RaiseGrowthOpportunity { .. }
             | Self::RaiseGrowthDebt { .. }
             | Self::IssueReferralCode { .. }
+            // Raising a suggestion flips one row inside the workspace. It
+            // reaches nobody — the promises it names are carried out by
+            // separately classed actions, each gated on its own reach.
+            | Self::RaiseContentSuggestion { .. }
             | Self::SendTeamAssignmentEmail { .. }
             // A public read. It contacts nobody and changes nothing, which is
             // exactly why it may run unattended: the whole point is checking a
@@ -916,6 +957,7 @@ impl AutopilotActionPayload {
             Self::RaiseGrowthOpportunity { .. } => "growth.opportunity.raise",
             Self::RaiseGrowthDebt { .. } => "growth.debt.raise",
             Self::IssueReferralCode { .. } => "referral.code.issue",
+            Self::RaiseContentSuggestion { .. } => "content.suggestion.raise",
             Self::RunPlayStep { .. } => "play.step.run",
             Self::SendTeamAssignmentEmail { .. } => "team.assignment.email",
             Self::RequestAgentContent { .. } => "agent.content.request",
@@ -969,6 +1011,57 @@ fn platform_label(platform: &MetricPlatform) -> String {
         MetricPlatform::Bluesky => "Bluesky".into(),
         MetricPlatform::Bandcamp => "Bandcamp".into(),
         MetricPlatform::X => "X".into(),
+    }
+}
+
+/// Renders a suggestion's distribution promise as one readable line.
+///
+/// The promise is clause-keyed JSON — `{"communities": ["r/Metal", ...],
+/// "press_contacts": 11, "consented_fans": 340, "peer_audience": [...]}` —
+/// and the queue must show *who* the piece reaches, not a count of clauses.
+/// A clause that is absent was not promised; a clause that is present gets
+/// names, because "these four communities" is the argument and "4" is not.
+fn promise_to_text(promise: &serde_json::Value) -> String {
+    let Some(map) = promise.as_object() else {
+        return "—".to_owned();
+    };
+    let mut clauses: Vec<String> = Vec::new();
+    if let Some(communities) = map
+        .get("communities")
+        .and_then(serde_json::Value::as_array)
+        .filter(|list| !list.is_empty())
+    {
+        let names: Vec<&str> = communities.iter().filter_map(|v| v.as_str()).collect();
+        clauses.push(format!(
+            "{} communities ({})",
+            names.len(),
+            names.join(", ")
+        ));
+    }
+    if let Some(press) = map
+        .get("press_contacts")
+        .and_then(serde_json::Value::as_u64)
+    {
+        clauses.push(format!("{press} press contacts"));
+    }
+    if let Some(fans) = map
+        .get("consented_fans")
+        .and_then(serde_json::Value::as_u64)
+    {
+        clauses.push(format!("{fans} consented fans"));
+    }
+    if let Some(peers) = map
+        .get("peer_audience")
+        .and_then(serde_json::Value::as_array)
+        .filter(|list| !list.is_empty())
+    {
+        let names: Vec<&str> = peers.iter().filter_map(|v| v.as_str()).collect();
+        clauses.push(format!("peer audiences ({})", names.join(", ")));
+    }
+    if clauses.is_empty() {
+        "—".to_owned()
+    } else {
+        clauses.join("; ")
     }
 }
 

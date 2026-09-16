@@ -75,6 +75,11 @@ fn payload_signals(
             Some(overdue_basis_points.saturating_sub(10_000)),
             Some(recommended_action),
         ),
+        AutopilotActionPayload::RaiseContentSuggestion { reason, .. } => {
+            // The suggestion's own "why now" is the recommended action — the
+            // queue should argue the beat, not name a kind.
+            (None, None, Some(reason))
+        }
         other => (None, None, Some(other.action_kind().to_owned())),
     }
 }
@@ -147,6 +152,15 @@ pub(in crate::autopilot) async fn load_next_best_actions(
                 WHERE decision.subject_kind = 'team_opportunity'
                   AND opportunity.workspace_id = decision.workspace_id
                   AND opportunity.id = decision.subject_id
+                UNION ALL
+                -- The suggestion's own "make it by" date; its expiry is the
+                -- fallback for suggestions the calendar, not a production
+                -- day, bound.
+                SELECT COALESCE(suggestion.suggested_before::timestamptz, suggestion.expires_at)
+                FROM viryaos_content_suggestions AS suggestion
+                WHERE decision.subject_kind = 'content_suggestion'
+                  AND suggestion.workspace_id = decision.workspace_id
+                  AND suggestion.id = decision.subject_id
                 UNION ALL
                 SELECT action.approval_expires_at
                 WHERE action.approval_expires_at IS NOT NULL

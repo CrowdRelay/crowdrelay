@@ -216,6 +216,38 @@ impl PostgresContentEngineRepository {
             .execute(&mut *tx)
             .await?;
 
+        // A raised suggestion whose window passed is a dead ask, and the open
+        // queue counts it as live until something resolves it — three lapsed
+        // rows would silently hold every slot forever. Expiry is a first-class
+        // outcome, resolved here inside the lock before headroom is counted,
+        // so a pass always sees the queue as it actually is. `approved` rows
+        // are the band's commitment, not an ask — they do not lapse.
+        let lapsed = sqlx::query_scalar::<_, Uuid>(
+            r#"
+            UPDATE viryaos_content_suggestions
+            SET status = 'expired', updated_at = now()
+            WHERE workspace_id = $1 AND status = 'raised'
+              AND expires_at IS NOT NULL AND expires_at <= now()
+            RETURNING id
+            "#,
+        )
+        .bind(ws)
+        .fetch_all(&mut *tx)
+        .await?;
+        for suggestion_id in lapsed {
+            sqlx::query(
+                r#"
+                INSERT INTO viryaos_suggestion_outcomes (
+                    workspace_id, suggestion_id, outcome, decided_by, reason
+                ) VALUES ($1, $2, 'expired', 'system', 'the window this beat was for has passed')
+                "#,
+            )
+            .bind(ws)
+            .bind(suggestion_id)
+            .execute(&mut *tx)
+            .await?;
+        }
+
         // The open queue is the Pareto cut: it holds at most `limit` live
         // suggestions, so a pass tops up to the limit rather than appending
         // it. `open_format_keys` suppresses re-raising; `open_count` (which

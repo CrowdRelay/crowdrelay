@@ -472,6 +472,29 @@ impl AutopilotActionPayload {
                 ],
                 deadline_note: String::new(),
             },
+            Self::RaiseContentSuggestion { format_key, concept, reason, distribution_promise, .. } => ActionBriefing {
+                summary: format!("Make this: {}", concept),
+                why_it_matters: "The content engine ranked this beat against everything else the band could make — it is the suggestion, not one of thirty.".into(),
+                steps: vec![
+                    BriefingStep { what_to_do: "Read the reason and who it reaches".into(), why_it_matters: "A suggestion with no real audience is not raised; check the promise is still true".into() },
+                    BriefingStep { what_to_do: "Click APPROVE to commit to the beat".into(), why_it_matters: "Approved stays open until the band reports done, declined, or done differently".into() },
+                ],
+                content: {
+                    let mut fields = vec![
+                        BriefingField { label: "Concept".into(), value: concept.clone() },
+                        BriefingField { label: "Dlaczego teraz".into(), value: reason.clone() },
+                    ];
+                    if let Some(key) = format_key {
+                        fields.push(BriefingField { label: "Format".into(), value: key.clone() });
+                    }
+                    fields.push(BriefingField {
+                        label: "Kto to zobaczy".into(),
+                        value: promise_to_text(distribution_promise),
+                    });
+                    fields
+                },
+                deadline_note: String::new(),
+            },
             Self::RunPlayStep { play_id, play_kind, step_index, step_kind, event_id, fan_id, template_key } => ActionBriefing {
                 summary: format!("Krok play: {:?} (krok {})", play_kind, step_index),
                 why_it_matters: "This is one step of a play campaign, for one fan. A sent message cannot be recalled.".into(),

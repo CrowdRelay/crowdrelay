@@ -893,5 +893,37 @@ macro_rules! decision_opportunity_reads {
         ))
         .await
     }
+
+    async fn load_open_content_suggestions_impl(
+        &self,
+        workspace_id: WorkspaceId,
+        now: OffsetDateTime,
+    ) -> Result<Vec<crowdrelay_domain::content_engine::ContentSuggestion>, RepositoryError> {
+        self.bounded(async {
+            // `raised` only, and still inside its window: an approved row is
+            // committed work the queue already asked about, and an expired
+            // one is a dead question.
+            let rows = sqlx::query_as::<_, crate::content_engine::SuggestionRow>(
+                r#"
+                SELECT * FROM viryaos_content_suggestions
+                WHERE workspace_id = $1 AND status = 'raised'
+                  AND (expires_at IS NULL OR expires_at > $2)
+                ORDER BY created_at
+                "#,
+            )
+            .bind(workspace_id.into_uuid())
+            .bind(now)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(map_sqlx)?;
+            rows.into_iter()
+                .map(|row| {
+                    crowdrelay_domain::content_engine::ContentSuggestion::try_from(row)
+                        .map_err(|_| RepositoryError::Unexpected)
+                })
+                .collect()
+        })
+        .await
+    }
     };
 }

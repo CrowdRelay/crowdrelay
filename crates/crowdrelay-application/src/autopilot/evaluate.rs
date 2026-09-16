@@ -70,6 +70,7 @@ use super::{model::*, ports::AutopilotDecisionRepository};
 mod beacons;
 mod booking_supply;
 mod commercial;
+mod content_strategy;
 mod growth_debt;
 mod growth_intelligence;
 mod growth_metrics;
@@ -85,6 +86,7 @@ use commercial::{
     booking_candidate, booking_followup_candidate, campaign_lifecycle_candidate, funding_candidate,
     merch_candidate, merch_price_candidate,
 };
+use content_strategy::content_strategy_candidate;
 use crowdrelay_domain::worker_template::WorkerTemplate;
 use growth_debt::growth_debt_candidate;
 use growth_intelligence::{
@@ -576,6 +578,17 @@ where
                     )
                     .await?;
                 }
+                AutopilotContext::ContentStrategy => {
+                    let suggestions = self
+                        .repository
+                        .load_open_content_suggestions(self.workspace_id, now)
+                        .await?;
+                    for suggestion in &suggestions {
+                        if let Some(candidate) = content_strategy_candidate(suggestion, &policy)? {
+                            self.persist(&candidate, &mut limits, &mut report).await?;
+                        }
+                    }
+                }
             }
         }
 
@@ -909,4 +922,5 @@ include!("evaluate/hypothesis_validation.rs");
 include!("evaluate/tests.rs");
 include!("evaluate/growth_metrics_tests.rs");
 include!("evaluate/growth_debt_tests.rs");
+include!("evaluate/content_strategy_tests.rs");
 include!("evaluate/plays_tests.rs");

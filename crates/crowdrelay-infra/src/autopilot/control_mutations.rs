@@ -163,6 +163,61 @@ impl PostgresAutopilotRepository {
                 .execute(&mut *transaction)
                 .await
                 .map_err(map_sqlx)?;
+
+                // A cancelled content suggestion is the band's "not for us" —
+                // a first-class taste signal, not a dismissal. Resolve the row
+                // declined and write its outcome in the same transaction, so a
+                // rejection cannot leave a zombie suggestion holding headroom
+                // in the open queue while its ask is dead.
+                let payload = sqlx::query_scalar::<_, serde_json::Value>(
+                    r#"
+                    SELECT payload FROM viryaos_autopilot_actions
+                    WHERE workspace_id = $1 AND id = $2
+                    "#,
+                )
+                .bind(workspace_id.into_uuid())
+                .bind(action_id.into_uuid())
+                .fetch_one(&mut *transaction)
+                .await
+                .map_err(map_sqlx)?;
+                if let Ok(AutopilotActionPayload::RaiseContentSuggestion {
+                    suggestion_id,
+                    ..
+                }) = serde_json::from_value::<AutopilotActionPayload>(payload)
+                {
+                    let changed = sqlx::query(
+                        r#"
+                        UPDATE viryaos_content_suggestions
+                        SET status = 'declined', updated_at = now()
+                        WHERE workspace_id = $1 AND id = $2 AND status IN ('raised', 'approved')
+                        "#,
+                    )
+                    .bind(workspace_id.into_uuid())
+                    .bind(suggestion_id.into_uuid())
+                    .execute(&mut *transaction)
+                    .await
+                    .map_err(map_sqlx)?
+                    .rows_affected();
+                    // The outcome row pairs with the transition or it does
+                    // not exist — an already-resolved suggestion earns no
+                    // second verdict.
+                    if changed > 0 {
+                        sqlx::query(
+                            r#"
+                            INSERT INTO viryaos_suggestion_outcomes (
+                                workspace_id, suggestion_id, outcome, decided_by, reason, results
+                            ) VALUES ($1, $2, 'declined', $3, $4, '{}'::jsonb)
+                            "#,
+                        )
+                        .bind(workspace_id.into_uuid())
+                        .bind(suggestion_id.into_uuid())
+                        .bind("operator:admin_api_key")
+                        .bind("cancelled in the approval queue")
+                        .execute(&mut *transaction)
+                        .await
+                        .map_err(map_sqlx)?;
+                    }
+                }
             }
             transaction.commit().await.map_err(map_sqlx)?;
             Ok(AutopilotControlMutation {
@@ -238,6 +293,41 @@ impl PostgresAutopilotRepository {
                 UPDATE viryaos_autopilot_actions
                 SET status = 'cancelled', finished_at = now()
                 WHERE workspace_id = $1 AND decision_id = $2 AND status = 'awaiting_approval'
+                "#,
+            )
+            .bind(workspace_id.into_uuid())
+            .bind(decision_id.into_uuid())
+            .execute(&mut *transaction)
+            .await
+            .map_err(map_sqlx)?;
+            // "We did this ourselves" about a suggestion ask is the best
+            // answer the engine can get: the beat happened. Resolve the row
+            // done with its outcome so the cancelled ask cannot strand it in
+            // the open queue and the band's initiative counts as the success
+            // it is.
+            sqlx::query(
+                r#"
+                WITH resolved AS (
+                    UPDATE viryaos_content_suggestions AS suggestion
+                    SET status = 'done', updated_at = now()
+                    WHERE suggestion.workspace_id = $1
+                      AND suggestion.status = 'raised'
+                      AND EXISTS (
+                          SELECT 1 FROM viryaos_autopilot_actions AS action
+                          WHERE action.workspace_id = suggestion.workspace_id
+                            AND action.decision_id = $2
+                            AND action.subject_kind = 'content_suggestion'
+                            AND action.subject_id = suggestion.id
+                            AND action.status = 'cancelled'
+                      )
+                    RETURNING suggestion.id
+                )
+                INSERT INTO viryaos_suggestion_outcomes (
+                    workspace_id, suggestion_id, outcome, decided_by, reason
+                )
+                SELECT $1, resolved.id, 'done', 'operator:admin_api_key',
+                       'handled outside the system'
+                FROM resolved
                 "#,
             )
             .bind(workspace_id.into_uuid())

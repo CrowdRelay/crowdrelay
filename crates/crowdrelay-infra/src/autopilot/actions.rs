@@ -281,6 +281,43 @@ impl PostgresAutopilotRepository {
             .execute(&mut *transaction)
             .await
             .map_err(map_sqlx)?;
+            // A suggestion whose ask died in the queue — window lapsed or
+            // evidence too thin to ask — is itself dead. Without this pair it
+            // stays `raised` forever: invisible to the evaluator (which skips
+            // lapsed rows), uncountable as a lesson, and holding a slot in
+            // the three-deep open queue until nothing new can be suggested.
+            sqlx::query(
+                r#"
+                WITH resolved AS (
+                    UPDATE viryaos_content_suggestions AS suggestion
+                    SET status = 'expired', updated_at = $2
+                    WHERE suggestion.workspace_id = $1
+                      AND suggestion.status = 'raised'
+                      AND EXISTS (
+                          SELECT 1 FROM viryaos_autopilot_actions AS action
+                          WHERE action.workspace_id = suggestion.workspace_id
+                            AND action.subject_kind = 'content_suggestion'
+                            AND action.subject_id = suggestion.id
+                            AND action.status = 'cancelled'
+                            AND action.last_error_kind
+                                IN ('approval_expired', 'insufficient_evidence')
+                            AND action.finished_at = $2
+                      )
+                    RETURNING suggestion.id
+                )
+                INSERT INTO viryaos_suggestion_outcomes (
+                    workspace_id, suggestion_id, outcome, decided_by, reason
+                )
+                SELECT $1, resolved.id, 'expired', 'system',
+                       'the approval window closed unanswered'
+                FROM resolved
+                "#,
+            )
+            .bind(workspace_id.into_uuid())
+            .bind(now)
+            .execute(&mut *transaction)
+            .await
+            .map_err(map_sqlx)?;
             // Close the attempt too, not only the action.
             //
             // This sweep reaps an action whose worker claimed it and then died:

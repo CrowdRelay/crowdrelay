@@ -338,6 +338,15 @@ impl AutopilotDecisionRepository for PostgresAutopilotRepository {
             .await
     }
 
+    async fn load_open_content_suggestions(
+        &self,
+        workspace_id: WorkspaceId,
+        now: OffsetDateTime,
+    ) -> Result<Vec<crowdrelay_domain::content_engine::ContentSuggestion>, RepositoryError> {
+        self.load_open_content_suggestions_impl(workspace_id, now)
+            .await
+    }
+
     async fn mark_insights_consumed(
         &self,
         workspace_id: WorkspaceId,

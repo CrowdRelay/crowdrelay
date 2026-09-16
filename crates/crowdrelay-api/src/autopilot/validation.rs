@@ -128,6 +128,7 @@ fn parse_context(value: &str) -> Option<AutopilotContext> {
         "outreach_supply" => Some(AutopilotContext::OutreachSupply),
         "plays" => Some(AutopilotContext::Plays),
         "growth_intelligence" => Some(AutopilotContext::GrowthIntelligence),
+        "content_strategy" => Some(AutopilotContext::ContentStrategy),
         _ => None,
     }
 }

@@ -142,6 +142,15 @@ pub(super) async fn schedule_effect_measurement(
             // ticket or merch movement. Phase 5 adds the measurement kind that
             // can read those honestly.
         }
+        AutopilotActionPayload::RaiseContentSuggestion { .. } => {
+            // No plan here either, for the strongest reason of the three:
+            // approving a suggestion publishes nothing — the band commits to
+            // making the beat. Measuring fan growth from the approval date
+            // would attribute a number to a decision, not to content. The
+            // suggestion's own outcome ledger is the receipt: when the band
+            // reports done or done-differently, `results` carries the
+            // measured reach and the learning loop reads it there.
+        }
         AutopilotActionPayload::RequestShowGrowth { event_id, lever, .. } => {
             use crowdrelay_domain::show_growth::ShowGrowthLever;
 

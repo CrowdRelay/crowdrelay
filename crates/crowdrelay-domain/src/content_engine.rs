@@ -597,6 +597,23 @@ pub struct ContentTrend {
     pub updated_at: OffsetDateTime,
 }
 
+/// Tunables for the `content_strategy` autopilot context — the surface that
+/// carries raised suggestions into the approval queue.
+///
+/// Kept deliberately thin: the floor and the cap an operator tunes are the
+/// policy row's own columns (`minimum_confidence_basis_points`,
+/// `max_actions_24h`), and the ranking itself already happened in the
+/// engine. What remains is a filter on what reaches the human.
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Serialize)]
+#[serde(default)]
+pub struct ContentStrategyPolicy {
+    /// Only queue suggestions whose EFE score clears this floor. `None`
+    /// trusts the engine's own cut — everything it raised is worth one
+    /// pair of eyes. A measured default belongs to the learning loop, not
+    /// to a guess made before the scores exist.
+    pub minimum_efe_score: Option<f64>,
+}
+
 /// `watch_for` and `genre_fit` are `text[]` columns; the row readers hand
 /// them back as `Vec<String>` already lowercased so comparisons never depend
 /// on how the operator typed them.

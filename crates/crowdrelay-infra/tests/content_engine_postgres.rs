@@ -941,3 +941,80 @@ async fn suggestion_engine_raises_only_what_the_band_can_do()
     }
     Ok(())
 }
+
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn a_lapsed_suggestion_expires_and_frees_its_queue_slot()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (repo, pool) = repository().await?;
+    let workspace_id = WorkspaceId::new();
+    seed_workspace(&pool, workspace_id).await?;
+    let suffix = workspace_id.into_uuid().simple().to_string();
+    let member_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO workspace_members (workspace_id, normalized_email, role, status)
+         VALUES ($1, $2, 'staff', 'active') RETURNING id",
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(format!("lapse-{suffix}@example.test"))
+    .fetch_one(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO viryaos_team_profiles
+             (workspace_id, member_id, member_key, active, skills)
+         VALUES ($1, $2, 'crew', true, ARRAY['social']::text[])",
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(member_id)
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO discovery_places (workspace_id, place_kind, platform, name, url, status)
+         VALUES ($1, 'subreddit', 'reddit', 'r/Metal', $2, 'active')",
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(format!("https://reddit.com/r/metal-{suffix}"))
+    .execute(&pool)
+    .await?;
+
+    // Three lapsed raised rows would fill the open queue forever: the
+    // evaluator skips lapsed rows, nothing else resolves them, and headroom
+    // never returns.
+    for ordinal in 0..3 {
+        sqlx::query(
+            "INSERT INTO viryaos_content_suggestions (
+                 id, workspace_id, format_key, concept, reason, evidence,
+                 distribution_promise, status, expires_at
+             ) VALUES ($1,$2,'playthrough',$3,'stale ask','{}',
+                       '{\"consented_fans\":4}','raised', now() - interval '2 days')",
+        )
+        .bind(Uuid::now_v7())
+        .bind(workspace_id.into_uuid())
+        .bind(format!("Lapsed {ordinal}"))
+        .execute(&pool)
+        .await?;
+    }
+
+    let today = time::OffsetDateTime::now_utc().date();
+    let raised = repo.refresh_suggestions(workspace_id, today).await?;
+
+    let (expired, outcomes): (i64, i64) = sqlx::query_as(
+        "SELECT
+             (SELECT count(*) FROM viryaos_content_suggestions
+               WHERE workspace_id = $1 AND status = 'expired'),
+             (SELECT count(*) FROM viryaos_suggestion_outcomes
+               WHERE workspace_id = $1 AND outcome = 'expired')",
+    )
+    .bind(workspace_id.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        (expired, outcomes),
+        (3, 3),
+        "every lapsed ask resolves with its outcome — the queue cannot leak"
+    );
+    assert!(
+        !raised.is_empty(),
+        "headroom returns the same pass — the engine must not stall on ghosts"
+    );
+    Ok(())
+}

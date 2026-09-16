@@ -345,6 +345,16 @@ pub trait AutopilotDecisionRepository: Send + Sync {
         now: OffsetDateTime,
     ) -> Result<Vec<GrowthDebtObservation>, RepositoryError>;
 
+    /// Returns the content suggestions still waiting on the band — rows the
+    /// engine raised that have neither been answered nor expired. The
+    /// context surfaces each as an approval-queue action; `approved` rows
+    /// are already committed work and never re-queue.
+    async fn load_open_content_suggestions(
+        &self,
+        workspace_id: WorkspaceId,
+        now: OffsetDateTime,
+    ) -> Result<Vec<crowdrelay_domain::content_engine::ContentSuggestion>, RepositoryError>;
+
     /// Returns one snapshot per worker template that the brain may dispatch.
     /// Each snapshot carries the hours since the last run and the workspace's
     /// current situation (upcoming events, fan growth, unengaged targets).

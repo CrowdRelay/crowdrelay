@@ -675,6 +675,10 @@ impl PostgresAutopilotRepository {
                     // auto-sending an outreach message here would move paid,
                     // outward-facing work behind an observation quota.
                 }
+                AutopilotActionPayload::RaiseContentSuggestion { suggestion_id, .. } => {
+                    operations::approve_content_suggestion(&mut transaction, workspace_id, *suggestion_id)
+                        .await?;
+                }
                 AutopilotActionPayload::RequestShowGrowth {
                     event_id,
                     lever,
