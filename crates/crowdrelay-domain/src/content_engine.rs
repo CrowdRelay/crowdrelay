@@ -13,6 +13,8 @@
 //! - status graphs (peer confirmation, arc approval, capture-plan issuing)
 //!   only move forward — `*_can_transition`.
 
+use std::collections::BTreeSet;
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use time::{Date, OffsetDateTime};
@@ -294,6 +296,66 @@ impl ContentFormatEntry {
             self.effort_standalone
         }
     }
+
+    /// The first reason the band cannot execute this format today, if any.
+    ///
+    /// `None` means feasible. A gap is information, not an exclusion order —
+    /// the suggestion engine decides whether to hide the format, offer it as
+    /// a capability-building stretch, or ask for a skill hire. What it can
+    /// never do is present a `video` beat to a band with no one who films.
+    #[must_use]
+    pub fn capability_gap(&self, profile: &CapabilityProfile) -> Option<CapabilityGap> {
+        if self.skill != TeamSkill::General && !profile.skills.contains(&self.skill) {
+            return Some(CapabilityGap::MissingSkill(self.skill));
+        }
+        match self.requires {
+            FormatRequirement::Release if !profile.has_release_material => {
+                Some(CapabilityGap::RequiresRelease)
+            }
+            FormatRequirement::Show if !profile.has_show_material => {
+                Some(CapabilityGap::RequiresShow)
+            }
+            FormatRequirement::Release | FormatRequirement::Show | FormatRequirement::Nothing => {
+                None
+            }
+        }
+    }
+}
+
+/// What a tenant's roster can execute and what raw material exists right
+/// now — the honest gate between "the catalogue offers it" and "the band
+/// can do it."
+///
+/// `General` work routes to anyone, so it never gates. Everything else is
+/// measured, not declared: `skills` is the union over *active* team
+/// profiles, `has_release_material` means an active release plan inside
+/// the material window (a single that dropped last week still feeds a
+/// lyric video), `has_show_material` means a published future event.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct CapabilityProfile {
+    pub skills: BTreeSet<TeamSkill>,
+    pub has_release_material: bool,
+    pub has_show_material: bool,
+}
+
+/// Why a format is currently off-limits — surfaced verbatim in a
+/// suggestion's "why not" so the gap is a plan, not silence.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CapabilityGap {
+    MissingSkill(TeamSkill),
+    RequiresRelease,
+    RequiresShow,
+}
+
+impl CapabilityGap {
+    #[must_use]
+    pub fn describe(self) -> String {
+        match self {
+            Self::MissingSkill(skill) => format!("nobody on the roster holds {}", skill.as_str()),
+            Self::RequiresRelease => "needs a release to point at".to_owned(),
+            Self::RequiresShow => "needs a show to point at".to_owned(),
+        }
+    }
 }
 
 /// A named artist the band watches. Operator-curated — `proposed_by` records
@@ -478,10 +540,7 @@ pub fn distribution_promise_is_empty(promise: &Value) -> bool {
 /// decoded before they reach the table.
 #[must_use]
 pub fn parse_format_skill(value: &str) -> Option<TeamSkill> {
-    TeamSkill::ALL
-        .iter()
-        .copied()
-        .find(|skill| skill.as_str() == value)
+    TeamSkill::parse(value)
 }
 
 /// The trend dimensions an observation can feed and a `watch_for` can name.
@@ -582,28 +641,91 @@ mod tests {
         assert_eq!(PeerTier::NearPeer.as_str(), "near_peer");
     }
 
-    #[test]
-    fn marginal_effort_is_what_a_covered_day_costs() {
-        let entry = ContentFormatEntry {
+    fn format_entry(skill: TeamSkill, requires: FormatRequirement) -> ContentFormatEntry {
+        ContentFormatEntry {
             key: "making_of".to_owned(),
             name: "Making-of".to_owned(),
             category: FormatCategory::Release,
             purpose: FormatPurpose::Retention,
             effort_standalone: Effort::Medium,
             effort_marginal: Effort::Low,
-            skill: TeamSkill::Video,
-            requires: FormatRequirement::Release,
+            skill,
+            requires,
             distribution: "video artifact → YouTube".to_owned(),
             cadence: FormatCadence::ReleaseTied,
             genre_fit: vec![],
             notes: String::new(),
             active: true,
-        };
+        }
+    }
+
+    fn profile(
+        skills: &[TeamSkill],
+        has_release_material: bool,
+        has_show_material: bool,
+    ) -> CapabilityProfile {
+        CapabilityProfile {
+            skills: skills.iter().copied().collect(),
+            has_release_material,
+            has_show_material,
+        }
+    }
+
+    #[test]
+    fn marginal_effort_is_what_a_covered_day_costs() {
+        let entry = format_entry(TeamSkill::Video, FormatRequirement::Release);
         assert_eq!(entry.effort_for(false), Effort::Medium);
         assert_eq!(
             entry.effort_for(true),
             Effort::Low,
             "a shoot already happening makes the making-of near-free"
+        );
+    }
+
+    #[test]
+    fn no_filmmaker_means_no_video_suggestion() {
+        let entry = format_entry(TeamSkill::Video, FormatRequirement::Nothing);
+        let band_without_film = profile(&[TeamSkill::Social], true, true);
+        assert_eq!(
+            entry.capability_gap(&band_without_film),
+            Some(CapabilityGap::MissingSkill(TeamSkill::Video)),
+            "the suggestion engine must never offer a video beat to a band with no filmmaker"
+        );
+        let band_with_film = profile(&[TeamSkill::Video], true, true);
+        assert_eq!(entry.capability_gap(&band_with_film), None);
+    }
+
+    #[test]
+    fn general_work_never_gates_on_skills() {
+        let entry = format_entry(TeamSkill::General, FormatRequirement::Nothing);
+        assert_eq!(entry.capability_gap(&CapabilityProfile::default()), None);
+    }
+
+    #[test]
+    fn material_requirements_gate_independently() {
+        let release_tied = format_entry(TeamSkill::Social, FormatRequirement::Release);
+        assert_eq!(
+            release_tied.capability_gap(&profile(&[TeamSkill::Social], false, true)),
+            Some(CapabilityGap::RequiresRelease)
+        );
+        let show_tied = format_entry(TeamSkill::Social, FormatRequirement::Show);
+        assert_eq!(
+            show_tied.capability_gap(&profile(&[TeamSkill::Social], true, false)),
+            Some(CapabilityGap::RequiresShow)
+        );
+        // The missing material is reported even when the skill is covered —
+        // the band can post, but there is nothing to point the post at.
+        assert_eq!(
+            release_tied.capability_gap(&profile(&[TeamSkill::Social], true, true)),
+            None
+        );
+    }
+
+    #[test]
+    fn a_gap_describes_the_fix_not_just_the_block() {
+        assert_eq!(
+            CapabilityGap::MissingSkill(TeamSkill::Photography).describe(),
+            "nobody on the roster holds photography"
         );
     }
 

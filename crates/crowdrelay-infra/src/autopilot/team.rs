@@ -919,21 +919,7 @@ fn enriched_task_detail(
 }
 
 fn parse_team_skill(value: &str) -> Option<TeamSkill> {
-    match value {
-        "general" => Some(TeamSkill::General),
-        "operations" => Some(TeamSkill::Operations),
-        "booking" => Some(TeamSkill::Booking),
-        "approval" => Some(TeamSkill::Approval),
-        "technical" => Some(TeamSkill::Technical),
-        "visual" => Some(TeamSkill::Visual),
-        "video" => Some(TeamSkill::Video),
-        "photography" => Some(TeamSkill::Photography),
-        "social" => Some(TeamSkill::Social),
-        "english_copy" => Some(TeamSkill::EnglishCopy),
-        "polish_copy" => Some(TeamSkill::PolishCopy),
-        "people" => Some(TeamSkill::People),
-        _ => None,
-    }
+    TeamSkill::parse(value)
 }
 
 fn bounded_u16(value: i64) -> u16 {

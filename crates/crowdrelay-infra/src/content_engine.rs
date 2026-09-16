@@ -16,12 +16,13 @@ use crowdrelay_domain::{
     ArcId, CapturePlanId, ContentSuggestionId, EventId, PeerId, ProductionEventId, WorkspaceId,
     WorkspaceMemberId,
     content_engine::{
-        Arc, ArcStatus, CapturePlan, CapturePlanStatus, ContentFormatEntry, ContentSuggestion,
-        Effort, FanObservation, FormatCadence, FormatCategory, FormatPurpose, FormatRequirement,
-        Peer, PeerObservation, PeerStatus, PeerTier, ProductionEvent, ProductionEventKind,
-        ProductionEventStatus, SuggestionOutcome, SuggestionOutcomeKind, SuggestionStatus,
-        normalize_watch_for, parse_format_skill,
+        Arc, ArcStatus, CapabilityProfile, CapturePlan, CapturePlanStatus, ContentFormatEntry,
+        ContentSuggestion, Effort, FanObservation, FormatCadence, FormatCategory, FormatPurpose,
+        FormatRequirement, Peer, PeerObservation, PeerStatus, PeerTier, ProductionEvent,
+        ProductionEventKind, ProductionEventStatus, SuggestionOutcome, SuggestionOutcomeKind,
+        SuggestionStatus, normalize_watch_for, parse_format_skill,
     },
+    team_operations::TeamSkill,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -205,6 +206,19 @@ impl TryFrom<FormatEntryRow> for ContentFormatEntry {
             active: row.active,
         })
     }
+}
+
+/// How far past release day a plan still counts as material — a lyric
+/// video for a single that dropped last week is still executable. Kept
+/// narrow on purpose: a quarter-old release is a catalogue item, not a
+/// current campaign input.
+const RELEASE_MATERIAL_TRAILING_DAYS: i32 = 30;
+
+#[derive(Debug, FromRow)]
+struct CapabilityProfileRow {
+    skills: Vec<String>,
+    has_release_material: bool,
+    has_show_material: bool,
 }
 
 #[derive(Debug, FromRow)]
@@ -734,6 +748,68 @@ impl PostgresContentEngineRepository {
         .fetch_all(&self.pool)
         .await?;
         rows.into_iter().map(ContentFormatEntry::try_from).collect()
+    }
+
+    /// What this roster can execute right now — the profile every
+    /// suggestion is checked against before it is offered.
+    ///
+    /// Skills are the union over members routable *today* — both
+    /// `profile.active` and `member.status = 'active'`, the same pair the
+    /// assignment loader requires. A member disabled at the identity level
+    /// cannot receive the beat either, so their skills must not count.
+    ///
+    /// Release material means an active plan whose date is upcoming or no
+    /// more than `RELEASE_MATERIAL_TRAILING_DAYS` behind — announce formats
+    /// need the upcoming side, sustain formats the trailing side. The check
+    /// is deliberately tier-blind (a `filler` plan still counts): whether a
+    /// release is *worth* a beat is the suggestion engine's timing call,
+    /// not the capability gate's.
+    ///
+    /// Show material means a published event that has not ended —
+    /// `COALESCE(ends_at, starts_at)` so a gig in progress still feeds
+    /// `aftermovie`/`tour_diary` capture. A draft is not material because
+    /// nothing public points at it.
+    pub async fn capability_profile(&self, workspace_id: WorkspaceId) -> Result<CapabilityProfile> {
+        let row = sqlx::query_as::<_, CapabilityProfileRow>(
+            r#"
+            SELECT
+                COALESCE(
+                    (SELECT array_agg(DISTINCT skill)
+                     FROM viryaos_team_profiles p
+                     JOIN workspace_members m
+                       ON m.workspace_id = p.workspace_id
+                      AND m.id = p.member_id
+                      AND m.status = 'active'
+                     CROSS JOIN unnest(p.skills) AS skill
+                     WHERE p.workspace_id = $1 AND p.active
+                       AND skill IS NOT NULL),
+                    ARRAY[]::text[]
+                ) AS skills,
+                EXISTS (
+                    SELECT 1 FROM viryaos_release_plans
+                    WHERE workspace_id = $1 AND active
+                      AND release_at >= now() - make_interval(days => $2)
+                ) AS has_release_material,
+                EXISTS (
+                    SELECT 1 FROM events
+                    WHERE workspace_id = $1 AND status = 'published'
+                      AND COALESCE(ends_at, starts_at) > now()
+                ) AS has_show_material
+            "#,
+        )
+        .bind(workspace_id.into_uuid())
+        .bind(RELEASE_MATERIAL_TRAILING_DAYS)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(CapabilityProfile {
+            skills: row
+                .skills
+                .into_iter()
+                .filter_map(|skill| TeamSkill::parse(&skill))
+                .collect(),
+            has_release_material: row.has_release_material,
+            has_show_material: row.has_show_material,
+        })
     }
 
     // Production events ────────────────────────────────────────────────────

@@ -11,6 +11,7 @@ use crowdrelay_domain::{
         ArcStatus, PeerStatus, PeerTier, ProductionEventKind, ProductionEventStatus,
         SuggestionOutcomeKind,
     },
+    team_operations::TeamSkill,
 };
 use crowdrelay_infra::content_engine::{
     ContentEngineError, NewArc, NewCapturePlan, NewFanObservation, NewOutcome, NewPeer,
@@ -19,6 +20,7 @@ use crowdrelay_infra::content_engine::{
 use serde_json::json;
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use time::{Date, Month};
+use uuid::Uuid;
 
 fn date(year: i32, month: u8, day: u8) -> Date {
     Date::from_calendar_date(year, Month::try_from(month).expect("valid month"), day)
@@ -596,5 +598,148 @@ async fn trends_detect_corroboration_and_fade() -> Result<(), Box<dyn std::error
         faded.iter().all(|t| t.status.as_str() == "faded"),
         "a pattern that stopped appearing says so"
     );
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and disposable PostgreSQL"]
+async fn capability_profile_reads_roster_and_material() -> Result<(), Box<dyn std::error::Error>> {
+    let (repo, pool) = repository().await?;
+    let workspace_id = WorkspaceId::new();
+    seed_workspace(&pool, workspace_id).await?;
+
+    // Empty roster, no material — nothing is covered.
+    let bare = repo.capability_profile(workspace_id).await?;
+    assert!(bare.skills.is_empty());
+    assert!(!bare.has_release_material);
+    assert!(!bare.has_show_material);
+
+    // A member is the FK anchor for a team profile; the profile carries
+    // the skills.
+    let member_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO workspace_members (workspace_id, normalized_email, role, status)
+         VALUES ($1, $2, 'staff', 'active') RETURNING id",
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(format!(
+        "filmer-{}@example.test",
+        workspace_id.into_uuid().simple()
+    ))
+    .fetch_one(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO viryaos_team_profiles
+             (workspace_id, member_id, member_key, active, skills)
+         VALUES ($1, $2, 'filmer', true, ARRAY['video','photography']::text[])",
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(member_id)
+    .execute(&pool)
+    .await?;
+
+    // An inactive profile must not widen capability — someone who left is
+    // not capacity.
+    let gone_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO workspace_members (workspace_id, normalized_email, role, status)
+         VALUES ($1, $2, 'staff', 'active') RETURNING id",
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(format!(
+        "gone-{}@example.test",
+        workspace_id.into_uuid().simple()
+    ))
+    .fetch_one(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO viryaos_team_profiles
+             (workspace_id, member_id, member_key, active, skills)
+         VALUES ($1, $2, 'gone', false, ARRAY['english_copy']::text[])",
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(gone_id)
+    .execute(&pool)
+    .await?;
+
+    // The second switch: a member disabled at the identity level with an
+    // active profile cannot receive work either — routing requires both.
+    let disabled_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO workspace_members (workspace_id, normalized_email, role, status)
+         VALUES ($1, $2, 'staff', 'disabled') RETURNING id",
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(format!(
+        "disabled-{}@example.test",
+        workspace_id.into_uuid().simple()
+    ))
+    .fetch_one(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO viryaos_team_profiles
+             (workspace_id, member_id, member_key, active, skills)
+         VALUES ($1, $2, 'disabled', true, ARRAY['polish_copy']::text[])",
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(disabled_id)
+    .execute(&pool)
+    .await?;
+
+    // A published future show and an active upcoming release are material;
+    // a draft show and a spent release are not.
+    let slug_suffix = workspace_id.into_uuid().simple().to_string();
+    sqlx::query(
+        "INSERT INTO events (workspace_id, slug, title, starts_at, status, published_at)
+         VALUES ($1, $2, 'Cap Show', now() + interval '20 days', 'published', now())",
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(format!("cap-show-{slug_suffix}"))
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO events (workspace_id, slug, title, starts_at, status)
+         VALUES ($1, $2, 'Draft Show', now() + interval '20 days', 'draft')",
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(format!("cap-draft-{slug_suffix}"))
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO viryaos_release_plans (workspace_id, source_key, title, release_at, active)
+         VALUES ($1, $2, 'Cap Release', now() + interval '14 days', true)",
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(format!("cap-rel-{slug_suffix}"))
+    .execute(&pool)
+    .await?;
+
+    let capable = repo.capability_profile(workspace_id).await?;
+    assert!(
+        capable.skills.contains(&TeamSkill::Video)
+            && capable.skills.contains(&TeamSkill::Photography),
+        "the active roster's union is the capability: {capable:?}"
+    );
+    assert!(
+        !capable.skills.contains(&TeamSkill::EnglishCopy),
+        "an inactive profile's skill must not count"
+    );
+    assert!(
+        !capable.skills.contains(&TeamSkill::PolishCopy),
+        "a disabled member's skill must not count — routing cannot reach them either"
+    );
+    assert!(
+        capable.has_show_material,
+        "a published future show is material"
+    );
+    assert!(
+        capable.has_release_material,
+        "an active upcoming release is material"
+    );
+
+    // Isolation: another workspace reads its own empty truth.
+    let other = WorkspaceId::new();
+    seed_workspace(&pool, other).await?;
+    let theirs = repo.capability_profile(other).await?;
+    assert!(theirs.skills.is_empty());
+    assert!(!theirs.has_show_material);
+    assert!(!theirs.has_release_material);
     Ok(())
 }

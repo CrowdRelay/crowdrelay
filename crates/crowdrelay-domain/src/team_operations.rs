@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::WorkspaceMemberId;
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TeamSkill {
     General,
@@ -44,6 +44,17 @@ impl TeamSkill {
         Self::PolishCopy,
         Self::People,
     ];
+
+    /// The catalogue-side inverse of `as_str` — anything the seed or a
+    /// roster row writes must round-trip through this, or a format routes
+    /// to a skill nobody can hold.
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        Self::ALL
+            .iter()
+            .find(|skill| skill.as_str() == value)
+            .copied()
+    }
 
     #[must_use]
     pub const fn as_str(self) -> &'static str {
