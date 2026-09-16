@@ -617,14 +617,17 @@ impl PostgresGDriveRepository {
     /// Connections due for a sync: status connected on the given intake
     /// platform ('gdrive' | 'gmail'). Returns (id, external_account_ref) —
     /// tokens are decrypted in the worker at point of use.
+    /// `(id, account_ref, scan_scope)` — the scope is the tenant's chosen
+    /// read boundary; NULL means the question was never answered and the
+    /// worker must scan nothing rather than default to everything.
     pub async fn due_connections(
         &self,
         workspace_id: Uuid,
         platform: &str,
-    ) -> Result<Vec<(Uuid, String)>, GDriveError> {
-        sqlx::query_as::<_, (Uuid, String)>(
+    ) -> Result<Vec<(Uuid, String, Option<serde_json::Value>)>, GDriveError> {
+        sqlx::query_as::<_, (Uuid, String, Option<serde_json::Value>)>(
             r#"
-            SELECT id, external_account_ref
+            SELECT id, external_account_ref, scan_scope
             FROM fanbase_connections
             WHERE workspace_id = $1 AND platform = $2 AND status = 'connected'
             "#,
@@ -725,18 +728,31 @@ impl PostgresGDriveRepository {
     /// Advances the cursor only after a cycle's upserts committed — a crash
     /// before this write re-reads the same history page next cycle, and the
     /// email dedup makes the re-read a no-op.
+    ///
+    /// The write is compare-and-swap on the cursor the cycle started from:
+    /// a scope change clears `sync_cursor`, and an in-flight cycle that read
+    /// the old cursor must not resurrect it — that would cancel the new
+    /// boundary's fresh sweep. A CAS miss is silent on purpose: the scope
+    /// change wins and the next cycle re-sweeps under it.
     pub async fn set_sync_cursor(
         &self,
         workspace_id: Uuid,
         connection_id: Uuid,
         cursor: &str,
+        expected: Option<&str>,
     ) -> Result<(), GDriveError> {
         sqlx::query(
-            "UPDATE fanbase_connections SET sync_cursor = $3, updated_at = now() WHERE workspace_id = $1 AND id = $2",
+            r#"
+            UPDATE fanbase_connections
+            SET sync_cursor = $3, updated_at = now()
+            WHERE workspace_id = $1 AND id = $2
+              AND sync_cursor IS NOT DISTINCT FROM $4
+            "#,
         )
         .bind(workspace_id)
         .bind(connection_id)
         .bind(cursor)
+        .bind(expected)
         .execute(&self.pool)
         .await?;
         Ok(())

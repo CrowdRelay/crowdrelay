@@ -18,6 +18,7 @@
 use std::time::Duration;
 
 use crowdrelay_domain::drive_contacts::extract_contacts;
+use crowdrelay_domain::scan_scope::ScanScope;
 use crowdrelay_infra::{
     gdrive::{GDriveError, PostgresGDriveRepository},
     sensitive_response::SensitiveResponseKey,
@@ -33,6 +34,11 @@ use uuid::Uuid;
 const SYNC_INTERVAL: Duration = Duration::from_secs(60 * 60);
 /// Bound on Drive files considered per cycle.
 const MAX_FILES_PER_CYCLE: usize = 200;
+/// A folder scope walks this many levels deep and this many folders wide —
+/// past that the scope is truncated, never unbounded.
+const MAX_FOLDER_DEPTH: usize = 8;
+const MAX_FOLDER_IDS: usize = 64;
+const FOLDER_MIME: &str = "application/vnd.google-apps.folder";
 /// Bound on rows read per file — a contact list beyond that is not a
 /// contact list.
 const MAX_ROWS_PER_FILE: usize = 5000;
@@ -180,8 +186,11 @@ impl GDriveContactsSyncWorker {
                 return;
             }
         };
-        for (connection_id, account_ref) in connections {
-            if let Err(error) = self.sync_connection(connection_id, &account_ref).await {
+        for (connection_id, account_ref, scan_scope) in connections {
+            if let Err(error) = self
+                .sync_connection(connection_id, &account_ref, scan_scope.as_ref())
+                .await
+            {
                 tracing::warn!(%error, connection_id = %connection_id, "gdrive contacts sync failed");
                 let message = error.to_string();
                 // Expired means "needs an operator reconnect", not "Google
@@ -208,9 +217,31 @@ impl GDriveContactsSyncWorker {
         }
     }
 
-    async fn sync_connection(&self, connection_id: Uuid, account_ref: &str) -> Result<(), String> {
+    async fn sync_connection(
+        &self,
+        connection_id: Uuid,
+        account_ref: &str,
+        scan_scope: Option<&serde_json::Value>,
+    ) -> Result<(), String> {
+        // 1A.6: the tenant's chosen boundary. NULL is "never chose" — nothing
+        // scans until they do, and the message is why, not an error shrug.
+        let scope = match ScanScope::stored("gdrive", scan_scope) {
+            Ok(Some(scope)) => scope,
+            Ok(None) => {
+                return Err(
+                    "nothing scanned — choose a folder, a shared drive, or the whole account for this connection"
+                        .to_string(),
+                );
+            }
+            Err(_) => {
+                return Err(
+                    "the stored scan scope is not one this connection understands — set it again"
+                        .to_string(),
+                );
+            }
+        };
         let access_token = self.access_token(connection_id, account_ref).await?;
-        let files = self.list_tabular_files(&access_token).await?;
+        let files = self.list_tabular_files(&access_token, &scope).await?;
 
         let mut counts = CycleCounts::default();
         for file in files.iter().take(MAX_FILES_PER_CYCLE) {
@@ -264,16 +295,122 @@ impl GDriveContactsSyncWorker {
         .await
     }
 
-    /// All tabular files in the Drive, paginated and bounded.
-    async fn list_tabular_files(&self, access_token: &str) -> Result<Vec<DriveFile>, String> {
-        let query = format!(
-            "trashed = false and ({})",
-            TABULAR_MIMES
+    /// The folder ids the scope names plus every subfolder beneath them —
+    /// Drive's `in parents` matches direct children only, so a scoped folder
+    /// means walking the tree. Bounded like everything else: past the caps
+    /// the tree is simply truncated, not unbounded.
+    async fn expand_folder_tree(
+        &self,
+        access_token: &str,
+        roots: &[String],
+    ) -> Result<Vec<String>, String> {
+        let mut all: Vec<String> = roots.to_vec();
+        let mut frontier: Vec<String> = roots.to_vec();
+        // Depth and breadth both capped — a pathological tree stops at a
+        // finite read, not an infinite loop.
+        for _ in 0..MAX_FOLDER_DEPTH {
+            if frontier.is_empty() || all.len() >= MAX_FOLDER_IDS {
+                break;
+            }
+            let parents = frontier
                 .iter()
-                .map(|m| format!("mimeType = '{m}'"))
+                .map(|id| format!("'{id}' in parents"))
                 .collect::<Vec<_>>()
-                .join(" or ")
-        );
+                .join(" or ");
+            let mut children: Vec<String> = Vec::new();
+            // A level can hold more subfolders than one page returns —
+            // page until the level is exhausted or the id cap is.
+            let mut page_token: Option<String> = None;
+            loop {
+                let mut params: Vec<(&str, String)> = vec![
+                    (
+                        "q",
+                        format!("trashed = false and mimeType = '{FOLDER_MIME}' and ({parents})"),
+                    ),
+                    ("fields", "nextPageToken,files(id)".to_string()),
+                    ("pageSize", "100".to_string()),
+                    ("includeItemsFromAllDrives", "true".to_string()),
+                    ("supportsAllDrives", "true".to_string()),
+                    ("spaces", "drive".to_string()),
+                ];
+                if let Some(token) = &page_token {
+                    params.push(("pageToken", token.clone()));
+                }
+                let response = self
+                    .http_client
+                    .get("https://www.googleapis.com/drive/v3/files")
+                    .bearer_auth(access_token)
+                    .query(&params)
+                    .send()
+                    .await
+                    .map_err(|e| format!("folder list request failed: {e}"))?;
+                if !response.status().is_success() {
+                    return Err(format!(
+                        "folder list failed status={}",
+                        response.status().as_u16()
+                    ));
+                }
+                let page: DriveFileList = response
+                    .json()
+                    .await
+                    .map_err(|e| format!("folder list parse failed: {e}"))?;
+                children.extend(
+                    page.files
+                        .into_iter()
+                        .map(|f| f.id)
+                        .filter(|id| !all.contains(id)),
+                );
+                match page.next_page_token {
+                    Some(token) if all.len() + children.len() < MAX_FOLDER_IDS => {
+                        page_token = Some(token)
+                    }
+                    _ => break,
+                }
+            }
+            if children.is_empty() {
+                break;
+            }
+            all.extend(children.iter().cloned());
+            frontier = children;
+        }
+        all.truncate(MAX_FOLDER_IDS);
+        Ok(all)
+    }
+
+    /// Tabular files inside the tenant's chosen scope, paginated and
+    /// bounded. `WholeAccount` is the historical query; `Folders` expands
+    /// subfolders before listing (Drive has no recursive `in parents`);
+    /// `SharedDrive` pins the corpus to one drive; `Since` is a date floor.
+    async fn list_tabular_files(
+        &self,
+        access_token: &str,
+        scope: &ScanScope,
+    ) -> Result<Vec<DriveFile>, String> {
+        let tabular = TABULAR_MIMES
+            .iter()
+            .map(|m| format!("mimeType = '{m}'"))
+            .collect::<Vec<_>>()
+            .join(" or ");
+        let mut query = format!("trashed = false and ({tabular})");
+        // Folder scope names the folders the tenant picked; the tabular
+        // files are whatever sits inside them, recursively.
+        let folder_ids: Vec<String> = match scope {
+            ScanScope::Folders { folder_ids } => {
+                self.expand_folder_tree(access_token, folder_ids).await?
+            }
+            _ => Vec::new(),
+        };
+        if !folder_ids.is_empty() {
+            let parents = folder_ids
+                .iter()
+                .map(|id| format!("'{id}' in parents"))
+                .collect::<Vec<_>>()
+                .join(" or ");
+            query = format!("{query} and ({parents})");
+        }
+        if let ScanScope::Since { since } = scope {
+            query = format!("{query} and modifiedTime >= '{}T00:00:00Z'", since);
+        }
         let mut files = Vec::new();
         let mut page_token: Option<String> = None;
         loop {
@@ -291,6 +428,10 @@ impl GDriveContactsSyncWorker {
                 ("supportsAllDrives", "true".to_string()),
                 ("spaces", "drive".to_string()),
             ];
+            if let ScanScope::SharedDrive { drive_id } = scope {
+                params.push(("corpora", "drive".to_string()));
+                params.push(("driveId", drive_id.clone()));
+            }
             if let Some(token) = &page_token {
                 params.push(("pageToken", token.clone()));
             }

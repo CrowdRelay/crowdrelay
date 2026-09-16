@@ -770,3 +770,144 @@ async fn upsert_conflict_marks_only_the_created_fan_as_new() -> Result<(), sqlx:
     assert_eq!(arrivals, 1, "one purchase, one provenance row");
     Ok(())
 }
+
+/// 1A.6 — the scan boundary on a connection is tenant-chosen, stored, and a
+/// scope change clears the incremental cursor so the new boundary sweeps
+/// fresh instead of resuming inside the old one.
+#[tokio::test]
+#[ignore = "requires an explicit CROWDRELAY_TEST_DATABASE_URL PostgreSQL database"]
+async fn connection_scan_scope_is_stored_and_a_change_resets_the_cursor()
+-> Result<(), Box<dyn std::error::Error>> {
+    use crowdrelay_infra::fanbase::PostgresFanbaseRepository;
+    use crowdrelay_infra::gdrive::PostgresGDriveRepository;
+
+    let pool = pool().await;
+    crowdrelay_infra::database::MIGRATOR.run(&pool).await?;
+    let workspace = seed_workspace(&pool, "scope").await;
+    let repo = PostgresFanbaseRepository::new(pool.clone());
+    let gdrive = PostgresGDriveRepository::new(pool.clone());
+
+    let connection_id = repo
+        .create_connection(workspace, "gmail", "band@x.test", "cred", "Band mailbox")
+        .await?;
+
+    // A brand-new connection has never answered the scope question — the
+    // worker reads `None` and scans nothing.
+    let due = gdrive.due_connections(workspace, "gmail").await?;
+    let (_, _, stored) = due
+        .iter()
+        .find(|(id, _, _)| *id == connection_id)
+        .expect("connection is due");
+    assert!(stored.is_none(), "a new connection stores no scope");
+
+    // Platform comes back so the API can validate before it writes.
+    let platform = repo.connection_platform(workspace, connection_id).await?;
+    assert_eq!(platform.as_deref(), Some("gmail"));
+
+    // Writing a scope stores it and clears any incremental cursor — the new
+    // boundary is a new read, not a resumption of the old one.
+    sqlx::query("UPDATE fanbase_connections SET sync_cursor = '99999' WHERE id = $1")
+        .bind(connection_id)
+        .execute(&pool)
+        .await?;
+    repo.update_scan_scope(
+        workspace,
+        connection_id,
+        Some(&serde_json::json!({"kind": "sent_only"})),
+    )
+    .await?;
+    let cursor: Option<String> =
+        sqlx::query_scalar("SELECT sync_cursor FROM fanbase_connections WHERE id = $1")
+            .bind(connection_id)
+            .fetch_one(&pool)
+            .await?;
+    assert!(cursor.is_none(), "scope change clears the cursor");
+
+    // A cycle that read the cursor *before* the scope change must not
+    // resurrect it: the compare-and-swap drops the stale write so the new
+    // boundary keeps its fresh sweep. A fresh cycle (expected = NULL)
+    // still lands its cursor.
+    gdrive
+        .set_sync_cursor(workspace, connection_id, "11111", Some("99999"))
+        .await?;
+    let cursor: Option<String> =
+        sqlx::query_scalar("SELECT sync_cursor FROM fanbase_connections WHERE id = $1")
+            .bind(connection_id)
+            .fetch_one(&pool)
+            .await?;
+    assert!(cursor.is_none(), "a stale cycle must not undo the scope change");
+    gdrive
+        .set_sync_cursor(workspace, connection_id, "22222", None)
+        .await?;
+    let cursor: Option<String> =
+        sqlx::query_scalar("SELECT sync_cursor FROM fanbase_connections WHERE id = $1")
+            .bind(connection_id)
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(cursor.as_deref(), Some("22222"), "a fresh cycle advances");
+
+    // Re-saving the identical scope keeps the cursor — nothing about the
+    // read changed.
+    repo.update_scan_scope(
+        workspace,
+        connection_id,
+        Some(&serde_json::json!({"kind": "sent_only"})),
+    )
+    .await?;
+    let cursor: Option<String> =
+        sqlx::query_scalar("SELECT sync_cursor FROM fanbase_connections WHERE id = $1")
+            .bind(connection_id)
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(cursor.as_deref(), Some("22222"), "same scope keeps the cursor");
+
+    // The stored scope comes back through both read paths.
+    let due = gdrive.due_connections(workspace, "gmail").await?;
+    let (_, _, stored) = due
+        .iter()
+        .find(|(id, _, _)| *id == connection_id)
+        .expect("connection is due");
+    assert_eq!(
+        stored
+            .as_ref()
+            .and_then(|v| v.get("kind"))
+            .and_then(|k| k.as_str()),
+        Some("sent_only")
+    );
+    let listed = repo.list_connections(workspace).await?;
+    let row = listed
+        .iter()
+        .find(|c| c.id == connection_id)
+        .expect("listed");
+    assert_eq!(
+        row.scan_scope
+            .as_ref()
+            .and_then(|v| v.get("kind"))
+            .and_then(|k| k.as_str()),
+        Some("sent_only")
+    );
+
+    // The scope CHECK refuses a vocabulary the platform does not have — a
+    // Drive folder on a Gmail row is a bug caught at the column, not in the
+    // worker mid-cycle.
+    let bad = sqlx::query(
+        "UPDATE fanbase_connections SET scan_scope = '{\"kind\":\"folder\",\"folder_ids\":[\"x\"]}' WHERE id = $1",
+    )
+    .bind(connection_id)
+    .execute(&pool)
+    .await;
+    assert!(bad.is_err(), "platform-foreign scope must fail the CHECK");
+
+    // Clearing the scope is legal and means "scans nothing".
+    repo.update_scan_scope(workspace, connection_id, None)
+        .await?;
+    let listed = repo.list_connections(workspace).await?;
+    let row = listed
+        .iter()
+        .find(|c| c.id == connection_id)
+        .expect("listed");
+    assert!(row.scan_scope.is_none());
+
+    cleanup(&pool, &[workspace]).await;
+    Ok(())
+}

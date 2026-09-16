@@ -278,6 +278,10 @@ pub struct ConnectionRow {
     /// had never once succeeded.
     pub last_sync_error: Option<String>,
     pub last_sync_failed_at: Option<time::OffsetDateTime>,
+    /// The tenant's chosen read boundary for the scan-capable platforms
+    /// (gdrive, gmail). NULL means the question was never answered and the
+    /// connector scans nothing rather than everything.
+    pub scan_scope: Option<serde_json::Value>,
     pub created_at: time::OffsetDateTime,
 }
 
@@ -290,7 +294,7 @@ impl PostgresFanbaseRepository {
             r#"
             SELECT id, platform, external_account_ref, credential_ref,
                    status, label, last_sync_at, last_sync_error,
-                   last_sync_failed_at, created_at
+                   last_sync_failed_at, scan_scope, created_at
             FROM fanbase_connections
             WHERE workspace_id = $1
             ORDER BY created_at, label
@@ -355,6 +359,63 @@ impl PostgresFanbaseRepository {
         if affected.rows_affected() == 0 {
             return Err(FanbaseError::NotFound);
         }
+        Ok(())
+    }
+
+    /// The connection's platform — a scope write validates against it, so
+    /// the API needs it before it may update.
+    pub async fn connection_platform(
+        &self,
+        workspace_id: Uuid,
+        connection_id: Uuid,
+    ) -> Result<Option<String>, FanbaseError> {
+        sqlx::query_scalar::<_, String>(
+            "SELECT platform FROM fanbase_connections WHERE workspace_id = $1 AND id = $2",
+        )
+        .bind(workspace_id)
+        .bind(connection_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(Self::unexpected)
+    }
+
+    /// Writes the tenant's chosen scan boundary. When the boundary actually
+    /// changed the incremental cursor clears — a cursor from a different
+    /// read is not a resumption point — and the scan workers wake so the
+    /// new scope's first sweep is now, not on the next hourly tick. Saving
+    /// the identical scope back keeps the cursor; nothing about the read
+    /// changed.
+    pub async fn update_scan_scope(
+        &self,
+        workspace_id: Uuid,
+        connection_id: Uuid,
+        scan_scope: Option<&serde_json::Value>,
+    ) -> Result<(), FanbaseError> {
+        let affected = sqlx::query(
+            r#"
+            UPDATE fanbase_connections
+            SET scan_scope = $3,
+                sync_cursor = CASE WHEN scan_scope IS DISTINCT FROM $3
+                                   THEN NULL ELSE sync_cursor END,
+                updated_at = now()
+            WHERE workspace_id = $1 AND id = $2
+            "#,
+        )
+        .bind(workspace_id)
+        .bind(connection_id)
+        .bind(scan_scope)
+        .execute(&self.pool)
+        .await
+        .map_err(Self::unexpected)?;
+        if affected.rows_affected() == 0 {
+            return Err(FanbaseError::NotFound);
+        }
+        // Both contact scanners listen on this channel — the payload is a
+        // wake signal, not a filter.
+        sqlx::query("SELECT pg_notify('gdrive_contacts', 'scan-scope-changed')")
+            .execute(&self.pool)
+            .await
+            .map_err(Self::unexpected)?;
         Ok(())
     }
 

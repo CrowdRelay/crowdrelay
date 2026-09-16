@@ -269,6 +269,10 @@ pub async fn list_fanbase_connections(
                         // cycle, so the console needs both facts.
                         "last_sync_error": c.last_sync_error,
                         "last_sync_failed_at": c.last_sync_failed_at,
+                        // The tenant's chosen read boundary — the console
+                        // renders it so "what does the scan read" is a
+                        // question with a visible answer.
+                        "scan_scope": c.scan_scope,
                         "created_at": c.created_at,
                     })
                 })
@@ -280,6 +284,80 @@ pub async fn list_fanbase_connections(
             )
                 .into_response()
         }
+        Err(error) => error_response(error, request_id_value),
+    }
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UpdateScanScopeRequest {
+    /// The chosen boundary — `{kind: ...}` — or null to unset it, which
+    /// stops the scan entirely (an unset scope reads nothing). The key is
+    /// required: a body without `scope` is a malformed request, not a quiet
+    /// "clear it".
+    scope: serde_json::Value,
+}
+
+/// Sets or clears the scan boundary on a connection. The vocabulary is
+/// per-platform and validated by `ScanScope::parse` — a Drive scope on a
+/// Gmail connection (or a shape neither understands) is a 400 with the
+/// reason, not a row that fails later in the worker.
+pub async fn update_connection_scan_scope(
+    State(state): State<crate::AppState>,
+    headers: HeaderMap,
+    Path(connection_id): Path<Uuid>,
+    payload: Result<Json<UpdateScanScopeRequest>, JsonRejection>,
+) -> Response {
+    let request_id_value = request_id(&headers);
+    let Ok(Json(body)) = payload else {
+        return Problem::bad_request(request_id_value).into_response();
+    };
+    let repo = crowdrelay_infra::fanbase::PostgresFanbaseRepository::new(state.database.clone());
+    let platform = match repo
+        .connection_platform(workspace(&state), connection_id)
+        .await
+    {
+        Ok(Some(platform)) => platform,
+        Ok(None) => return Problem::not_found(request_id_value).into_response(),
+        Err(error) => return error_response(error, request_id_value),
+    };
+    // A malformed scope is a 400 at write time — never a row the worker
+    // discovers is unreadable mid-cycle.
+    if !body.scope.is_object() && !body.scope.is_null() {
+        return Problem::bad_request_because("scope must be an object or null.", request_id_value)
+            .into_response();
+    }
+    let new_scope = if body.scope.is_null() {
+        None
+    } else {
+        Some(&body.scope)
+    };
+    if let Some(scope) = new_scope {
+        use crowdrelay_domain::scan_scope::ScanScopeError;
+        match crowdrelay_domain::scan_scope::ScanScope::parse(&platform, scope) {
+            Ok(_) => {}
+            Err(ScanScopeError::KindNotForPlatform) => {
+                return Problem::bad_request_because(
+                    "That scan scope does not exist for this connection's platform.",
+                    request_id_value,
+                )
+                .into_response();
+            }
+            Err(ScanScopeError::Malformed) => {
+                return Problem::bad_request_because(
+                    "The scan scope is missing a field or a field is not the expected shape.",
+                    request_id_value,
+                )
+                .into_response();
+            }
+        }
+    }
+    match repo
+        .update_scan_scope(workspace(&state), connection_id, new_scope)
+        .await
+    {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(FanbaseError::NotFound) => Problem::not_found(request_id_value).into_response(),
         Err(error) => error_response(error, request_id_value),
     }
 }

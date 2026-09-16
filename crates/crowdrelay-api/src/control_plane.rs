@@ -233,6 +233,10 @@ pub(crate) fn router(state: crate::AppState) -> Router {
             axum::routing::delete(crate::fanbase::delete_fanbase_connection),
         )
         .route(
+            "/v1/control-plane/fanbases/connections/{connection_id}/scan-scope",
+            axum::routing::patch(crate::fanbase::update_connection_scan_scope),
+        )
+        .route(
             "/v1/control-plane/connections/discord",
             post(crate::connections_simple::create_discord_connection),
         )
