@@ -743,3 +743,201 @@ async fn capability_profile_reads_roster_and_material() -> Result<(), Box<dyn st
     assert!(!theirs.has_release_material);
     Ok(())
 }
+
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and disposable PostgreSQL"]
+async fn suggestion_engine_raises_only_what_the_band_can_do()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (repo, pool) = repository().await?;
+    let workspace_id = WorkspaceId::new();
+    seed_workspace(&pool, workspace_id).await?;
+    let suffix = workspace_id.into_uuid().simple().to_string();
+
+    // A roster covering every catalogue skill — capability is then decided
+    // by material alone, which the fixtures supply.
+    let member_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO workspace_members (workspace_id, normalized_email, role, status)
+         VALUES ($1, $2, 'staff', 'active') RETURNING id",
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(format!("crew-{suffix}@example.test"))
+    .fetch_one(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO viryaos_team_profiles
+             (workspace_id, member_id, member_key, active, skills)
+         VALUES ($1, $2, 'crew', true,
+                 ARRAY['general','operations','booking','approval','technical',
+                       'visual','video','photography','social','english_copy',
+                       'polish_copy','people']::text[])",
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(member_id)
+    .execute(&pool)
+    .await?;
+
+    // Material: an upcoming release and a published show.
+    sqlx::query(
+        "INSERT INTO viryaos_release_plans (workspace_id, source_key, title, release_at, active)
+         VALUES ($1, $2, 'Sug Release', now() + interval '14 days', true)",
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(format!("sug-rel-{suffix}"))
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO events (workspace_id, slug, title, starts_at, status, published_at)
+         VALUES ($1, $2, 'Sug Show', now() + interval '30 days', 'published', now())",
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(format!("sug-show-{suffix}"))
+    .execute(&pool)
+    .await?;
+
+    // A scheduled shoot — the harvest rule should price covered formats
+    // marginally.
+    repo.create_production_event(
+        workspace_id,
+        &NewProductionEvent {
+            kind: ProductionEventKind::Shoot,
+            title: "Video day".to_owned(),
+            scheduled_for: time::OffsetDateTime::now_utc().date() + time::Duration::days(5),
+            event_id: None,
+            notes: String::new(),
+        },
+    )
+    .await?;
+
+    // Reach: one admitted community, one consented fan, one press route.
+    sqlx::query(
+        "INSERT INTO discovery_places (workspace_id, place_kind, platform, name, url, status)
+         VALUES ($1, 'subreddit', 'reddit', 'r/Metal', $2, 'active')",
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(format!("https://reddit.com/r/metal-{suffix}"))
+    .execute(&pool)
+    .await?;
+    let fan_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO fans (workspace_id, normalized_email, status)
+         VALUES ($1, $2, 'active') RETURNING id",
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(format!("fan-{suffix}@example.test"))
+    .fetch_one(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO fan_consents (workspace_id, fan_id, purpose, granted, policy_version, source)
+         VALUES ($1, $2, 'marketing', true, 'v1', 'test')",
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(fan_id)
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO viryaos_outreach_candidates
+             (workspace_id, target_kind, display_name, source, source_reference,
+              evidence, route_kind, route_value, route_is_published, status)
+         VALUES ($1, 'press', 'Test Zine', 'operator_import', 'fixture',
+                 'named in fixture', 'email', 'zine@example.test', true, 'admitted')",
+    )
+    .bind(workspace_id.into_uuid())
+    .execute(&pool)
+    .await?;
+
+    let today = time::OffsetDateTime::now_utc().date();
+    let raised = repo.refresh_suggestions(workspace_id, today).await?;
+    assert!(
+        !raised.is_empty() && raised.len() <= 3,
+        "the engine ranks then cuts to the vital few: {}",
+        raised.len()
+    );
+    for suggestion in &raised {
+        assert_eq!(suggestion.status.as_str(), "raised");
+        assert!(
+            !crowdrelay_domain::content_engine::distribution_promise_is_empty(
+                &suggestion.distribution_promise
+            ),
+            "an empty promise must never reach the table: {}",
+            suggestion.format_key.as_deref().unwrap_or("?")
+        );
+        assert!(
+            suggestion.reason.contains("communities") || suggestion.reason.contains("fans"),
+            "the reason names what it reaches: {}",
+            suggestion.reason
+        );
+    }
+    let has_community_clause = raised.iter().any(|s| {
+        s.distribution_promise
+            .get("communities")
+            .and_then(|v| v.as_array())
+            .is_some_and(|a| !a.is_empty())
+    });
+    let has_fan_clause = raised
+        .iter()
+        .any(|s| s.distribution_promise.get("consented_fans").is_some());
+    assert!(
+        has_community_clause && has_fan_clause,
+        "the promise names the real surfaces"
+    );
+
+    // Idempotent: open suggestions suppress re-raising the same format —
+    // a second pass has nothing new to say.
+    let again = repo.refresh_suggestions(workspace_id, today).await?;
+    assert!(
+        again.is_empty(),
+        "open suggestions must not be re-raised, got {}",
+        again.len()
+    );
+
+    // The video gap end to end: a workspace whose roster holds only
+    // `social` never receives a video format.
+    let other = WorkspaceId::new();
+    seed_workspace(&pool, other).await?;
+    let osuffix = other.into_uuid().simple().to_string();
+    let omember: Uuid = sqlx::query_scalar(
+        "INSERT INTO workspace_members (workspace_id, normalized_email, role, status)
+         VALUES ($1, $2, 'staff', 'active') RETURNING id",
+    )
+    .bind(other.into_uuid())
+    .bind(format!("solo-{osuffix}@example.test"))
+    .fetch_one(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO viryaos_team_profiles
+             (workspace_id, member_id, member_key, active, skills)
+         VALUES ($1, $2, 'solo', true, ARRAY['social']::text[])",
+    )
+    .bind(other.into_uuid())
+    .bind(omember)
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO discovery_places (workspace_id, place_kind, platform, name, url, status)
+         VALUES ($1, 'subreddit', 'reddit', 'r/Metal', $2, 'active')",
+    )
+    .bind(other.into_uuid())
+    .bind(format!("https://reddit.com/r/metal-{osuffix}"))
+    .execute(&pool)
+    .await?;
+    let theirs = repo.refresh_suggestions(other, today).await?;
+    const VIDEO_KEYS: &[&str] = &[
+        "playthrough",
+        "official_video",
+        "making_of",
+        "peer_cover",
+        "live_session",
+        "soundcheck_clip",
+        "aftermovie",
+        "gear_rundown",
+        "rehearsal_clip",
+        "old_material_reaction",
+    ];
+    for suggestion in &theirs {
+        let key = suggestion.format_key.as_deref().unwrap_or_default();
+        assert!(
+            !VIDEO_KEYS.contains(&key),
+            "a video suggestion reached a band with no filmmaker: {key}"
+        );
+    }
+    Ok(())
+}

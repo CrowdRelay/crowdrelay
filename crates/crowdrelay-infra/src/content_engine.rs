@@ -329,7 +329,7 @@ impl TryFrom<ArcRow> for Arc {
 }
 
 #[derive(Debug, FromRow)]
-struct SuggestionRow {
+pub(crate) struct SuggestionRow {
     id: Uuid,
     workspace_id: Uuid,
     arc_id: Option<Uuid>,

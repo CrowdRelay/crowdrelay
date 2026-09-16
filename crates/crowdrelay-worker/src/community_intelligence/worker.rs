@@ -350,15 +350,25 @@ impl CommunityIntelligenceWorker {
         // seen. A refresh failure is logged, not fatal to the sweep.
         let today = time::OffsetDateTime::now_utc().date();
         for workspace in touched_workspaces {
+            let workspace_id = WorkspaceId::from_uuid(workspace);
+            if let Err(error) = self.content_repo.refresh_trends(workspace_id, today).await {
+                warn!(
+                    workspace_id = %workspace,
+                    error = %error,
+                    "content trend refresh failed"
+                );
+            }
+            // Fan-side signal is suggestion evidence too — a hot community
+            // should reach the queue without waiting for the peer sweep.
             if let Err(error) = self
                 .content_repo
-                .refresh_trends(WorkspaceId::from_uuid(workspace), today)
+                .refresh_suggestions(workspace_id, today)
                 .await
             {
                 warn!(
                     workspace_id = %workspace,
                     error = %error,
-                    "content trend refresh failed"
+                    "content suggestion refresh failed"
                 );
             }
         }

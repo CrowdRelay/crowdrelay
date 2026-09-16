@@ -241,6 +241,21 @@ impl PeerObservationWorker {
             }
         }
 
+        // Fresh trends are the suggestion engine's newest evidence — a
+        // refresh failure must not fail the sweep that produced the facts.
+        match repository
+            .refresh_suggestions(self.workspace_id, today)
+            .await
+        {
+            Ok(raised) if !raised.is_empty() => {
+                tracing::info!(raised = raised.len(), "content suggestions refreshed");
+            }
+            Ok(_) => {}
+            Err(error) => {
+                tracing::warn!(error = %error, "content suggestion refresh failed");
+            }
+        }
+
         Ok(recorded)
     }
 
