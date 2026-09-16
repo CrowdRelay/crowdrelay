@@ -333,3 +333,127 @@ async fn a_new_day_supersedes_yesterdays_briefing() -> Result<(), Box<dyn std::e
     assert_eq!(briefing_emails(&pool, workspace_id).await?, 2);
     Ok(())
 }
+
+/// §4b-4 — the scoreboard line: conversions in 30d and the top channel's
+/// and city's share. Three conversions across two channels and two cities
+/// render the leader's share; a workspace with no conversions gets the
+/// honest flat line — "nothing is working yet" is information, not a gap
+/// the briefing papered over.
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn the_briefing_reports_fan_concentration_and_says_so_when_flat()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (repository, pool) = repository().await?;
+    let workspace_id = WorkspaceId::new();
+    seed_workspace(&pool, workspace_id).await?;
+    seed_member(&pool, workspace_id, "reader").await?;
+    seed_team_email_executor(&pool, workspace_id).await?;
+    sqlx::query(
+        "INSERT INTO tenant_settings (workspace_id, key, value) VALUES ($1, 'crew_locale', 'en')",
+    )
+    .bind(workspace_id.into_uuid())
+    .execute(&pool)
+    .await?;
+
+    // Two conversions through r/punk smart links from Warsaw fans, one
+    // through a QR at a Kraków show — the leader carries two of three.
+    let warsaw: Uuid = sqlx::query_scalar(
+        "INSERT INTO cities (id, slug, name, country_code) VALUES ($1, 'warsaw', 'Warsaw', 'PL')
+         ON CONFLICT (country_code, slug) DO UPDATE SET name = EXCLUDED.name RETURNING id",
+    )
+    .bind(Uuid::now_v7())
+    .fetch_one(&pool)
+    .await?;
+    let krakow: Uuid = sqlx::query_scalar(
+        "INSERT INTO cities (id, slug, name, country_code) VALUES ($1, 'krakow', 'Kraków', 'PL')
+         ON CONFLICT (country_code, slug) DO UPDATE SET name = EXCLUDED.name RETURNING id",
+    )
+    .bind(Uuid::now_v7())
+    .fetch_one(&pool)
+    .await?;
+    let conversions = [
+        ("smart_link", "r/punk", warsaw),
+        ("smart_link", "r/punk", warsaw),
+        ("qr_code", "Kraków show", krakow),
+    ];
+    for (index, (channel, community, city)) in conversions.iter().enumerate() {
+        let fan_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO fans (workspace_id, normalized_email, status)
+             VALUES ($1, $2, 'active') RETURNING id",
+        )
+        .bind(workspace_id.into_uuid())
+        .bind(format!(
+            "fan-{index}-{}@example.test",
+            workspace_id.into_uuid().simple()
+        ))
+        .fetch_one(&pool)
+        .await?;
+        sqlx::query(
+            "INSERT INTO fan_city_interests (workspace_id, fan_id, city_id) VALUES ($1, $2, $3)",
+        )
+        .bind(workspace_id.into_uuid())
+        .bind(fan_id)
+        .bind(city)
+        .execute(&pool)
+        .await?;
+        sqlx::query(
+            "INSERT INTO fan_provenance_events
+                 (workspace_id, fan_id, event_kind, channel, community, occurred_at)
+             VALUES ($1, $2, 'conversion', $3, $4, now())",
+        )
+        .bind(workspace_id.into_uuid())
+        .bind(fan_id)
+        .bind(channel)
+        .bind(community)
+        .execute(&pool)
+        .await?;
+    }
+
+    let morning = datetime!(2026-10-05 10:00 UTC);
+    let issued = repository
+        .reconcile_team_handoffs(workspace_id, morning)
+        .await?;
+    assert_eq!(issued, 1);
+
+    let briefings = briefing_rows(&pool, workspace_id).await?;
+    assert_eq!(briefings.len(), 1);
+    let (_, _, _, body) = &briefings[0];
+    assert!(
+        body.contains("fans (30d): 3"),
+        "the conversion count is the scoreboard: {body}"
+    );
+    assert!(
+        body.contains("smart_link 66%"),
+        "the top channel's share is named: {body}"
+    );
+    assert!(
+        body.contains("Warsaw 66%"),
+        "the top city's share is named: {body}"
+    );
+
+    // A second tenant with no conversions still gets the line — flat is
+    // an answer, not an absence. And its rows must not leak tenant data.
+    let quiet = WorkspaceId::new();
+    seed_workspace(&pool, quiet).await?;
+    seed_member(&pool, quiet, "quiet-reader").await?;
+    seed_team_email_executor(&pool, quiet).await?;
+    sqlx::query(
+        "INSERT INTO tenant_settings (workspace_id, key, value) VALUES ($1, 'crew_locale', 'en')",
+    )
+    .bind(quiet.into_uuid())
+    .execute(&pool)
+    .await?;
+    let issued = repository.reconcile_team_handoffs(quiet, morning).await?;
+    assert_eq!(issued, 1);
+    let briefings = briefing_rows(&pool, quiet).await?;
+    let (_, _, _, quiet_body) = &briefings[0];
+    assert!(
+        quiet_body.contains("fans (30d): no conversions"),
+        "zero conversions renders the honest flat line: {quiet_body}"
+    );
+    assert!(
+        !quiet_body.contains("smart_link") && !quiet_body.contains("Warsaw"),
+        "another tenant's concentration must not leak: {quiet_body}"
+    );
+    Ok(())
+}

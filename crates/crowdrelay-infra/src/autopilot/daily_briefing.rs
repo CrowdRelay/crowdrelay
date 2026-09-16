@@ -49,6 +49,8 @@ struct BriefingFrame {
     no_plan: &'static str,
     yield_label: &'static str,
     unmeasured: &'static str,
+    fans_label: &'static str,
+    fans_flat: &'static str,
 }
 
 const fn briefing_frame(locale: BriefingLocale) -> BriefingFrame {
@@ -68,6 +70,8 @@ const fn briefing_frame(locale: BriefingLocale) -> BriefingFrame {
             no_plan: "brak planu",
             yield_label: "zbiór",
             unmeasured: "brak pomiaru",
+            fans_label: "fani (30 dni)",
+            fans_flat: "brak konwersji — nic jeszcze nie działa, i to też jest wiedza",
         },
         BriefingLocale::En => BriefingFrame {
             title: "ViryaOS — morning briefing",
@@ -84,6 +88,8 @@ const fn briefing_frame(locale: BriefingLocale) -> BriefingFrame {
             no_plan: "no plan",
             yield_label: "harvest",
             unmeasured: "unmeasured",
+            fans_label: "fans (30d)",
+            fans_flat: "no conversions — nothing is working yet, worth knowing",
         },
     }
 }
@@ -123,6 +129,12 @@ struct RecentDayRow {
     plan_status: Option<String>,
     sources_landed: Option<i32>,
     planned: Option<i32>,
+}
+
+#[derive(Debug, FromRow)]
+struct TopShareRow {
+    label: String,
+    fans: i64,
 }
 
 /// Issues today's briefing once per tenant-local day, to every active
@@ -496,6 +508,52 @@ async fn compose_briefing(
     .await
     .map_err(map_sqlx)?;
 
+    // ── Concentration (§4b-4) ─────────────────────────────────────────
+    // Share of new fans carried by the top channel and city. A flat
+    // spread — or zero conversions — is the honest answer that nothing
+    // is compounding yet; the line renders either way rather than only
+    // celebrating when a leader exists. (Format concentration is not
+    // here: no recorded edge joins a conversion to the content format
+    // that produced it, and a permanently-NULL share is worse than no
+    // share. The gap is tracked in the plan.)
+    let fans_30d: i64 = sqlx::query_scalar(
+        "SELECT COUNT(DISTINCT fan_id) FROM fan_provenance_events
+         WHERE workspace_id = $1 AND event_kind = 'conversion'
+           AND occurred_at > $2 - INTERVAL '30 days'",
+    )
+    .bind(ws)
+    .bind(now)
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(map_sqlx)?;
+    let top_channel = sqlx::query_as::<_, TopShareRow>(
+        "SELECT channel AS label, COUNT(DISTINCT fan_id) AS fans
+         FROM fan_provenance_events
+         WHERE workspace_id = $1 AND event_kind = 'conversion'
+           AND occurred_at > $2 - INTERVAL '30 days'
+         GROUP BY channel ORDER BY fans DESC, label LIMIT 1",
+    )
+    .bind(ws)
+    .bind(now)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(map_sqlx)?;
+    let top_city = sqlx::query_as::<_, TopShareRow>(
+        "SELECT c.name AS label, COUNT(DISTINCT e.fan_id) AS fans
+         FROM fan_provenance_events e
+         JOIN fan_city_interests i
+           ON i.workspace_id = e.workspace_id AND i.fan_id = e.fan_id
+         JOIN cities c ON c.id = i.city_id
+         WHERE e.workspace_id = $1 AND e.event_kind = 'conversion'
+           AND e.occurred_at > $2 - INTERVAL '30 days'
+         GROUP BY c.name ORDER BY fans DESC, label LIMIT 1",
+    )
+    .bind(ws)
+    .bind(now)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(map_sqlx)?;
+
     // ── Assemble ──────────────────────────────────────────────────────
     let mut sections_map = serde_json::Map::new();
     sections_map.insert("arc_active".to_owned(), arc_line.is_some().into());
@@ -506,6 +564,29 @@ async fn compose_briefing(
         frame.arc,
         arc_line.as_deref().unwrap_or(frame.no_arc)
     ));
+
+    sections_map.insert("fans_30d".to_owned(), fans_30d.into());
+    if fans_30d == 0 {
+        body.push_str(&format!("{}: {}\n", frame.fans_label, frame.fans_flat));
+    } else {
+        // `channel` is NOT NULL, so a conversion always has a channel
+        // share; the city share only appears when the converting fan
+        // declared one — unattributed fans are absent, not zero.
+        let mut shares: Vec<String> = Vec::new();
+        for top in [&top_channel, &top_city].into_iter().flatten() {
+            shares.push(format!(
+                "{} {}%",
+                top.label,
+                top.fans * 100 / fans_30d.max(1)
+            ));
+        }
+        body.push_str(&format!(
+            "{}: {} — {}\n",
+            frame.fans_label,
+            fans_30d,
+            shares.join(" · ")
+        ));
+    }
 
     if pending_total > 0 {
         sections_map.insert("pending_asks".to_owned(), pending_total.into());
@@ -599,10 +680,13 @@ async fn compose_briefing(
         ));
     }
 
-    // The arc line is always present — "no active arc" is itself the
-    // answer to the briefing's first question. On a quiet day the briefing
-    // says so under it rather than sending an empty page.
-    if sections_map.is_empty() {
+    // The arc and fans lines are always present — the scoreboard is not
+    // content. A quiet day is one where nothing else landed; the briefing
+    // says so under the scoreboard rather than sending an empty page.
+    if sections_map
+        .keys()
+        .all(|key| key == "arc_active" || key == "fans_30d")
+    {
         body.push_str(&format!("\n{}", frame.nothing));
     }
 

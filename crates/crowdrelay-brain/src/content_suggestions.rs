@@ -74,6 +74,20 @@ pub const EMERGING_TREND_LIFT: f64 = 1.125;
 /// Pareto says two or three, not everything over a threshold.
 pub const DEFAULT_LIMIT: usize = 3;
 
+/// A concept that has been offered this many times without ever being
+/// produced has had its chances — the tail names it, the queue stops
+/// offering it. Six is the §4b-4 bound: enough attempts that "the band
+/// never got to it" stops being the plausible story.
+pub const STALE_ATTEMPT_LIMIT: u32 = 6;
+
+/// The §4b-4 stale rule, one spelling for every caller: offered at least
+/// [`STALE_ATTEMPT_LIMIT`] times and never once produced. `done` and
+/// `done_differently` count as production; `declined` and `expired` are
+/// attempts. Callers count offers and productions, this decides.
+pub fn is_stale(offered: u32, produced: u32) -> bool {
+    offered >= STALE_ATTEMPT_LIMIT && produced == 0
+}
+
 /// Expected-fans priors per purpose until this tenant has measured
 /// outcomes. Acquisition buys new fans, conversion moves the ones we
 /// have, credibility compounds slowly, retention holds. These are
@@ -274,6 +288,10 @@ pub struct RankingInputs<'a> {
     /// for us" is a verdict, not a pause, so the concept stays out of the
     /// queue until the window lapses and evidence can argue it back.
     pub declined_format_keys: &'a BTreeSet<String>,
+    /// Format keys that ran out of road on their own: suggested at least
+    /// [`STALE_ATTEMPT_LIMIT`] times and never once produced — a stale
+    /// concept retires itself instead of being offered a seventh time.
+    pub retired_format_keys: &'a BTreeSet<String>,
     /// Format key → arc id, written into an active arc's spine.
     pub arc_format_keys: &'a BTreeMap<String, Uuid>,
     /// Outcome count per format key — what the band has already tried.
@@ -305,6 +323,7 @@ pub fn rank_suggestions(inputs: &RankingInputs<'_>) -> Vec<ScoredSuggestion> {
         if !entry.active
             || inputs.open_format_keys.contains(&entry.key)
             || inputs.declined_format_keys.contains(&entry.key)
+            || inputs.retired_format_keys.contains(&entry.key)
         {
             continue;
         }
@@ -541,6 +560,7 @@ mod tests {
             production,
             open_format_keys: open,
             declined_format_keys: declined,
+            retired_format_keys: &EMPTY_KEYS,
             arc_format_keys: arc,
             outcome_counts: outcomes,
             suggestion_counts: suggestions,
@@ -728,6 +748,8 @@ mod tests {
         );
     }
 
+    static EMPTY_KEYS: BTreeSet<String> = BTreeSet::new();
+
     #[test]
     fn rank_then_cut_keeps_only_the_vital_few() {
         let formats = vec![
@@ -863,6 +885,52 @@ mod tests {
                 .and_then(|s| s.arc_id),
             Some(arc_id),
             "the spine beat carries the arc it serves"
+        );
+    }
+
+    /// §4b-4 — a concept that has been offered six times and never
+    /// produced is retired, not re-offered: the filter is a hard stop on
+    /// the same footing as an open row or a declined taste signal.
+    #[test]
+    fn a_stale_concept_retires_itself() {
+        let formats = vec![
+            entry("playthrough", TeamSkill::Video, FormatRequirement::Nothing),
+            entry(
+                "rehearsal_clip",
+                TeamSkill::Video,
+                FormatRequirement::Nothing,
+            ),
+        ];
+        let empty: BTreeSet<String> = BTreeSet::new();
+        let empty_arc: BTreeMap<String, Uuid> = BTreeMap::new();
+        let empty_counts: BTreeMap<String, u32> = BTreeMap::new();
+        let retired: BTreeSet<String> = ["playthrough".to_owned()].into_iter().collect();
+        let profile = profile();
+        let reach = reach();
+        let base = inputs(
+            &formats,
+            &profile,
+            &[],
+            &[],
+            &empty,
+            &empty,
+            &empty_arc,
+            &empty_counts,
+            &empty_counts,
+            &reach,
+        );
+        let ranked = rank_suggestions(&RankingInputs {
+            retired_format_keys: &retired,
+            ..base
+        });
+        let keys: Vec<&str> = ranked.iter().map(|s| s.format_key.as_str()).collect();
+        assert!(
+            !keys.contains(&"playthrough"),
+            "six attempts without a single production retires the concept: {keys:?}"
+        );
+        assert!(
+            keys.contains(&"rehearsal_clip"),
+            "the fresh concept still ranks: {keys:?}"
         );
     }
 }
