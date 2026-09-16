@@ -26,7 +26,8 @@ use serde::Deserialize;
 use uuid::Uuid;
 
 use super::adapter::{
-    AdapterError, AdapterPlace, ParsedEntity, ParsedObservation, RateLimitPolicy, SourceAdapter,
+    AdapterError, AdapterPlace, ParsedEntity, ParsedItem, ParsedObservation, RateLimitPolicy,
+    SourceAdapter,
 };
 
 const COLLECTOR_VERSION: &str = "reddit-browser-v1";
@@ -93,10 +94,16 @@ struct ObserveResponse {
 #[derive(Debug, Deserialize)]
 struct ObservedPost {
     title: String,
+    /// Reddit's post id — the permalink is built from it, so the evidence
+    /// link rides with the fact instead of requiring a second fetch.
+    #[serde(default)]
+    id: Option<String>,
     #[serde(default)]
     score: Option<i64>,
     #[serde(default)]
     num_comments: Option<i64>,
+    #[serde(default)]
+    created_utc: Option<i64>,
     #[serde(default)]
     link_flair_text: Option<String>,
 }
@@ -307,6 +314,32 @@ fn parse_observation(
 
     let entities = extract_entities(observed);
 
+    // Each sampled post is also a fan-side fact: its title is what people
+    // engaged with, its score/comments are how much. The trend detector
+    // reads these rows next to what the peers publish.
+    let items = observed
+        .posts
+        .iter()
+        .filter(|post| !post.title.trim().is_empty())
+        .map(|post| ParsedItem {
+            title: post.title.trim().to_owned(),
+            published: post
+                .created_utc
+                .and_then(|secs| time::OffsetDateTime::from_unix_timestamp(secs).ok())
+                .map(|t| t.date()),
+            url: post
+                .id
+                .as_deref()
+                .filter(|id| id.chars().all(|c| c.is_ascii_alphanumeric()))
+                .map(|id| format!("https://www.reddit.com/comments/{id}")),
+            metrics: serde_json::json!({
+                "score": post.score,
+                "comments": post.num_comments,
+                "flair": post.link_flair_text,
+            }),
+        })
+        .collect();
+
     Ok(ParsedObservation {
         source: "reddit".to_owned(),
         source_url: source_url.to_owned(),
@@ -314,6 +347,7 @@ fn parse_observation(
         raw_activity_metrics: metrics,
         observation_quality: quality,
         entities,
+        items,
     })
 }
 
@@ -384,8 +418,10 @@ mod tests {
     fn post(title: &str) -> ObservedPost {
         ObservedPost {
             title: title.to_owned(),
+            id: Some("abc123".to_owned()),
             score: Some(10),
             num_comments: Some(3),
+            created_utc: Some(1_757_800_000),
             link_flair_text: None,
         }
     }
@@ -454,6 +490,35 @@ mod tests {
             thin.observation_quality < full.observation_quality,
             "two posts should not be as trustworthy as twenty",
         );
+    }
+
+    #[test]
+    fn posts_become_dated_fan_items() {
+        let parsed = parse_observation(
+            &observation(Some(100), vec![post("What albums this week?")]),
+            "u",
+        )
+        .expect("should parse");
+        assert_eq!(parsed.items.len(), 1);
+        let item = &parsed.items[0];
+        assert_eq!(item.title, "What albums this week?");
+        assert!(item.published.is_some(), "created_utc anchors the date");
+        assert_eq!(
+            item.url.as_deref(),
+            Some("https://www.reddit.com/comments/abc123"),
+            "the evidence link is built from the post id"
+        );
+        assert_eq!(item.metrics["score"], 10);
+        assert_eq!(item.metrics["comments"], 3);
+    }
+
+    #[test]
+    fn an_untitled_post_is_no_fact() {
+        let mut blank = post(" ");
+        blank.title = "   ".to_owned();
+        let parsed =
+            parse_observation(&observation(Some(100), vec![blank]), "u").expect("should parse");
+        assert!(parsed.items.is_empty());
     }
 
     #[test]

@@ -116,6 +116,9 @@ impl SourceAdapter for BrutallandAdapter {
             raw_activity_metrics: parsed.metrics,
             observation_quality: parsed.quality,
             entities: parsed.entities,
+            // An index page carries no dated items — its signal stays in
+            // the entities and aggregate metrics.
+            items: Vec::new(),
         })
     }
 }

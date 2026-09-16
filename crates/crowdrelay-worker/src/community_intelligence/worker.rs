@@ -13,8 +13,10 @@ use tokio::sync::watch;
 use tokio::time::Instant;
 use tracing::{error, info, warn};
 
+use crowdrelay_domain::WorkspaceId;
 use crowdrelay_domain::community_intelligence::{validate_entity, validate_observation};
 use crowdrelay_infra::community_intelligence::PostgresCommunityIntelligenceRepository;
+use crowdrelay_infra::content_engine::{NewFanObservation, PostgresContentEngineRepository};
 
 use super::adapter::{AdapterError, ParsedEntity, ParsedObservation, SourceAdapter};
 
@@ -123,12 +125,19 @@ fn jitter_interval(interval: Duration) -> Duration {
     }
 }
 
+/// Fan-side items persisted per place per sweep. Reddit's sample is 25 and
+/// an adapter that starts returning more should not write unboundedly.
+const MAX_FAN_ITEMS_PER_PLACE: usize = 50;
+
 /// The community intelligence worker. Runs as a background loop alongside
 /// the other worker loops. Leadership is at the process level — only one
 /// worker process runs at a time, so all loops run when the process is active.
 pub struct CommunityIntelligenceWorker {
     adapters: Vec<Arc<dyn SourceAdapter>>,
     repo: Arc<PostgresCommunityIntelligenceRepository>,
+    /// Writes the fan-side item rows; places carry their own workspace, so
+    /// this must exist independently of `self.workspace_id`.
+    content_repo: PostgresContentEngineRepository,
     pool: sqlx::PgPool,
     /// The workspace this process serves. Carried so the sweep schedule reads
     /// this tenant's observation history rather than the whole table.
@@ -145,6 +154,7 @@ impl CommunityIntelligenceWorker {
         Self {
             adapters,
             repo,
+            content_repo: PostgresContentEngineRepository::new(pool.clone()),
             pool,
             workspace_id,
         }
@@ -375,6 +385,50 @@ impl CommunityIntelligenceWorker {
             .insert_observation(place.workspace_id, place.id, &observation, &entities)
             .await
             .map_err(|e| e.to_string())?;
+
+        // Each post fans engaged with lands as a dated fact on the
+        // demand-side table — the trend detector reads it next to the
+        // peers' own output. The dedup index absorbs a post that stays hot
+        // across sweeps; a single bad row must not fail the observation.
+        let workspace_id = WorkspaceId::from_uuid(place.workspace_id);
+        let today = time::OffsetDateTime::now_utc().date();
+        let mut item_failures = 0_u32;
+        for item in parsed.items.iter().take(MAX_FAN_ITEMS_PER_PLACE) {
+            // Same rules the peer sweep applies: no blank facts, no items
+            // dated in a future that has not happened.
+            if item.title.trim().is_empty() || item.published.is_some_and(|date| date > today) {
+                continue;
+            }
+            let fan_observation = NewFanObservation {
+                place_id: place.id,
+                observed_at: item.published.unwrap_or(today),
+                platform: parsed.source.clone(),
+                kind: "post".to_owned(),
+                fact: item.title.clone(),
+                url: item.url.clone(),
+                metrics: item.metrics.clone(),
+            };
+            if let Err(error) = self
+                .content_repo
+                .record_fan_observation(workspace_id, &fan_observation)
+                .await
+            {
+                item_failures += 1;
+                warn!(
+                    place_id = %place.id,
+                    fact = %item.title,
+                    error = %error,
+                    "fan observation insert failed"
+                );
+            }
+        }
+        if item_failures > 0 {
+            warn!(
+                place_id = %place.id,
+                failed = item_failures,
+                "fan observation items dropped this sweep"
+            );
+        }
 
         Ok(())
     }

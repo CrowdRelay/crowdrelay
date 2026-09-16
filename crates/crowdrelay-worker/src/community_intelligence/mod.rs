@@ -4,15 +4,15 @@
 //! ```text
 //! SourceAdapter.fetch()
 //!       ↓
-//! ParsedObservation
-//!       ↓
-//! ValidatedObservation (domain validation)
+//! ParsedObservation ── entities ────────────────→ community_entities
+//!       │                metrics ───────────────→ community_observations
+//!       └── items (dated posts fans engaged with) → viryaos_fan_observations
 //!       ↓
 //! Worker → Repository.insert_observation()
 //! ```
 //!
-//! Sprint A implements one adapter (Brutalland). Sprint B will add
-//! Metal Archives and Orbis Metallum adapters following the same trait.
+//! Adapters today: Brutalland (forum index) and Reddit (through the agent
+//! service's logged-in browser — the only read path Reddit left open).
 
 pub mod adapter;
 pub mod brutalland;

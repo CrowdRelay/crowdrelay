@@ -55,6 +55,22 @@ pub struct ParsedObservation {
     pub raw_activity_metrics: serde_json::Value,
     pub observation_quality: i32,
     pub entities: Vec<ParsedEntity>,
+    /// The individual posts/threads fans engaged with — the fan-side facts
+    /// that sit next to peer observations for the trend detector. An index
+    /// parser that sees no dated items leaves this empty.
+    pub items: Vec<ParsedItem>,
+}
+
+/// One dated item fans engaged with — a post title with its engagement.
+#[derive(Debug)]
+pub struct ParsedItem {
+    pub title: String,
+    /// The item's own date when the source reports one; the worker falls
+    /// back to the sweep day.
+    pub published: Option<time::Date>,
+    pub url: Option<String>,
+    /// Engagement as the source reported it — {"score": ..., "comments": ...}.
+    pub metrics: serde_json::Value,
 }
 
 /// A parsed entity — extracted from the community surface.

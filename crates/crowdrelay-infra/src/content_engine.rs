@@ -17,8 +17,8 @@ use crowdrelay_domain::{
     WorkspaceMemberId,
     content_engine::{
         Arc, ArcStatus, CapturePlan, CapturePlanStatus, ContentFormatEntry, ContentSuggestion,
-        Effort, FormatCadence, FormatCategory, FormatPurpose, FormatRequirement, Peer,
-        PeerObservation, PeerStatus, PeerTier, ProductionEvent, ProductionEventKind,
+        Effort, FanObservation, FormatCadence, FormatCategory, FormatPurpose, FormatRequirement,
+        Peer, PeerObservation, PeerStatus, PeerTier, ProductionEvent, ProductionEventKind,
         ProductionEventStatus, SuggestionOutcome, SuggestionOutcomeKind, SuggestionStatus,
         normalize_watch_for, parse_format_skill,
     },
@@ -119,6 +119,35 @@ impl From<ObservationRow> for PeerObservation {
             id: row.id,
             workspace_id: WorkspaceId::from_uuid(row.workspace_id),
             peer_id: PeerId::from_uuid(row.peer_id),
+            observed_at: row.observed_at,
+            platform: row.platform,
+            kind: row.kind,
+            fact: row.fact,
+            url: row.url,
+            metrics: row.metrics,
+        }
+    }
+}
+
+#[derive(Debug, FromRow)]
+struct FanObservationRow {
+    id: i64,
+    workspace_id: Uuid,
+    place_id: Uuid,
+    observed_at: Date,
+    platform: String,
+    kind: String,
+    fact: String,
+    url: Option<String>,
+    metrics: serde_json::Value,
+}
+
+impl From<FanObservationRow> for FanObservation {
+    fn from(row: FanObservationRow) -> Self {
+        Self {
+            id: row.id,
+            workspace_id: WorkspaceId::from_uuid(row.workspace_id),
+            place_id: row.place_id,
             observed_at: row.observed_at,
             platform: row.platform,
             kind: row.kind,
@@ -395,6 +424,19 @@ pub struct NewPeerObservation {
     pub metrics: serde_json::Value,
 }
 
+/// The demand-side twin of `NewPeerObservation`: a community post fans
+/// engaged with, keyed to the `discovery_places` row it surfaced in.
+#[derive(Clone, Debug)]
+pub struct NewFanObservation {
+    pub place_id: Uuid,
+    pub observed_at: Date,
+    pub platform: String,
+    pub kind: String,
+    pub fact: String,
+    pub url: Option<String>,
+    pub metrics: serde_json::Value,
+}
+
 #[derive(Clone, Debug)]
 pub struct NewProductionEvent {
     pub kind: ProductionEventKind,
@@ -615,6 +657,60 @@ impl PostgresContentEngineRepository {
         .fetch_all(&self.pool)
         .await?;
         Ok(rows.into_iter().map(PeerObservation::from).collect())
+    }
+
+    /// Records one fan-side fact. Same dedup contract as
+    /// `record_observation`: a post that stays hot for a week returns
+    /// `None` on the resweep instead of a second row.
+    pub async fn record_fan_observation(
+        &self,
+        workspace_id: WorkspaceId,
+        observation: &NewFanObservation,
+    ) -> Result<Option<i64>> {
+        let id = sqlx::query_scalar::<_, i64>(
+            r#"
+            INSERT INTO viryaos_fan_observations (
+                workspace_id, place_id, observed_at, platform, kind, fact, url, metrics
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            ON CONFLICT DO NOTHING
+            RETURNING id
+            "#,
+        )
+        .bind(workspace_id.into_uuid())
+        .bind(observation.place_id)
+        .bind(observation.observed_at)
+        .bind(&observation.platform)
+        .bind(&observation.kind)
+        .bind(&observation.fact)
+        .bind(&observation.url)
+        .bind(&observation.metrics)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(id)
+    }
+
+    /// Recent fan-side facts across the workspace's communities — the
+    /// demand-side tail the trend detector reads next to peer rows.
+    pub async fn recent_fan_observations(
+        &self,
+        workspace_id: WorkspaceId,
+        limit: i64,
+    ) -> Result<Vec<FanObservation>> {
+        let rows = sqlx::query_as::<_, FanObservationRow>(
+            r#"
+            SELECT id, workspace_id, place_id, observed_at, platform, kind, fact, url, metrics
+            FROM viryaos_fan_observations
+            WHERE workspace_id = $1
+            ORDER BY observed_at DESC, id DESC
+            LIMIT $2
+            "#,
+        )
+        .bind(workspace_id.into_uuid())
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.into_iter().map(FanObservation::from).collect())
     }
 
     // Catalogue ────────────────────────────────────────────────────────────

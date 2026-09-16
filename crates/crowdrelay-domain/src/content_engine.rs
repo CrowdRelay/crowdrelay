@@ -338,6 +338,26 @@ pub struct PeerObservation {
     pub metrics: Value,
 }
 
+/// One dated fact about what an admitted community's fans engaged with —
+/// the demand-side twin of `PeerObservation` (what peers publish). The
+/// trend detector reads both; `place_id` is a `discovery_places` row, kept
+/// untyped like the community-intelligence code that owns those places.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FanObservation {
+    pub id: i64,
+    pub workspace_id: WorkspaceId,
+    pub place_id: uuid::Uuid,
+    /// The post's own date when the source reports it, else the sweep day.
+    pub observed_at: Date,
+    pub platform: String,
+    pub kind: String,
+    /// The thing people engaged with: the post title, one line.
+    pub fact: String,
+    pub url: Option<String>,
+    /// Score/comments as the source reported them.
+    pub metrics: Value,
+}
+
 /// A day the band generates material. When it is a show, `event_id` is the
 /// gig — the T-21 ladder already knows the date and venue.
 #[derive(Clone, Debug, PartialEq)]

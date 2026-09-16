@@ -13,8 +13,8 @@ use crowdrelay_domain::{
     },
 };
 use crowdrelay_infra::content_engine::{
-    ContentEngineError, NewArc, NewCapturePlan, NewOutcome, NewPeer, NewPeerObservation,
-    NewProductionEvent, NewSuggestion, PostgresContentEngineRepository,
+    ContentEngineError, NewArc, NewCapturePlan, NewFanObservation, NewOutcome, NewPeer,
+    NewPeerObservation, NewProductionEvent, NewSuggestion, PostgresContentEngineRepository,
 };
 use serde_json::json;
 use sqlx::{PgPool, postgres::PgPoolOptions};
@@ -462,5 +462,60 @@ async fn a_second_workspace_sees_nothing() -> Result<(), Box<dyn std::error::Err
         matches!(cross, Err(ContentEngineError::InvalidTransition)),
         "the workspace clause makes a foreign id a no-match"
     );
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and disposable PostgreSQL"]
+async fn fan_observations_deduplicate_and_scope_to_the_place()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (repo, pool) = repository().await?;
+    let workspace_id = WorkspaceId::new();
+    seed_workspace(&pool, workspace_id).await?;
+
+    // Fan rows hang off a discovery_places row — the community the posts
+    // were seen in.
+    let place_id = sqlx::query_scalar::<_, uuid::Uuid>(
+        "INSERT INTO discovery_places (workspace_id, place_kind, platform, name, url)
+         VALUES ($1, 'subreddit', 'reddit', 'r/testmetal', 'https://www.reddit.com/r/testmetal')
+         RETURNING id",
+    )
+    .bind(workspace_id.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+
+    let post = NewFanObservation {
+        place_id,
+        observed_at: date(2026, 9, 14),
+        platform: "reddit".to_owned(),
+        kind: "post".to_owned(),
+        fact: "What albums this week?".to_owned(),
+        url: Some("https://www.reddit.com/comments/abc123".to_owned()),
+        metrics: json!({"score": 412, "comments": 96}),
+    };
+    assert!(
+        repo.record_fan_observation(workspace_id, &post)
+            .await?
+            .is_some()
+    );
+    // A post that stays hot reappears in every sweep; the dedup index, not
+    // luck, is what keeps the second sighting from becoming a second row.
+    assert!(
+        repo.record_fan_observation(workspace_id, &post)
+            .await?
+            .is_none(),
+        "the same fact at the same place+date must not record twice"
+    );
+
+    let tail = repo.recent_fan_observations(workspace_id, 10).await?;
+    assert_eq!(tail.len(), 1);
+    assert_eq!(tail[0].fact, "What albums this week?");
+    assert_eq!(tail[0].place_id, place_id);
+    assert_eq!(tail[0].metrics["score"], json!(412));
+
+    // Another workspace sees none of it.
+    let theirs = WorkspaceId::new();
+    seed_workspace(&pool, theirs).await?;
+    assert!(repo.recent_fan_observations(theirs, 10).await?.is_empty());
     Ok(())
 }
