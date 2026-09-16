@@ -10931,7 +10931,7 @@ components:
         runtime_enabled: { type: boolean }
         policies:
           type: array
-          maxItems: 22
+          maxItems: 23
           items: { $ref: '#/components/schemas/AutopilotPolicySummary' }
         promotion_budget_guardrails:
           type: array

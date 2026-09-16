@@ -48,6 +48,8 @@ KNOWN_UNMEASURED = {
     "ExecuteReleaseMilestone",
     "IssueReferralCode",
     "PrepareFundingPackage",
+    "RaiseContentArc",
+    "RaiseContentSuggestion",
     "RaiseGrowthDebt",
     "RaiseGrowthOpportunity",
     "RequestBeaconDiscovery",
