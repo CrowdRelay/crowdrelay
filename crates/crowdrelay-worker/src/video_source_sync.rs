@@ -5,7 +5,17 @@
 //! pasting a link: the feed entry becomes a `viryaos_content_sources` row the
 //! engager may draft from, and the content-supply evaluator schedules its
 //! artifacts. The watcher only records facts the feed carries — video id,
-//! title, publish time, link — never a story around them.
+//! title, publish time, link, and the description the band typed under the
+//! video — never a story around them.
+//!
+//! The description is the one piece of real prose this feed carries, and it
+//! was dropped until now. That mattered more than it looks. The agent
+//! templates' VOICE rule tells the model to match the band's own writing, and
+//! what a `video` source actually held was a title, a URL and a channel id —
+//! not a word anybody wrote. A model asked to match a voice with no sample of
+//! it does not write plainly; it invents a personality. The description lands
+//! in `metadata.body`, the same key the console's story panel writes, so
+//! `list_voice_samples` picks it up without a second code path.
 //!
 //! Wake paths: a `growth_metric_sync` NOTIFY (the fanbase_connections trigger
 //! fires it when a YouTube connection appears or changes) and a periodic
@@ -55,12 +65,26 @@ pub struct VideoSourceSyncWorker {
     workspace_id: Uuid,
 }
 
+/// The longest description kept as a voice sample.
+///
+/// A YouTube description runs to 5,000 characters and the tail is usually
+/// credits, links, label boilerplate and a hashtag block — none of which is
+/// how the band writes a sentence. The opening paragraphs are, and they are
+/// what a reader sees before "show more". Keeping the head bounds the prompt
+/// cost and drops the part that would teach the model to write in hashtags.
+const MAX_DESCRIPTION_CHARS: usize = 1_000;
+
 /// One `<entry>` from a channel's Atom feed.
 #[derive(Debug)]
 struct FeedEntry {
     video_id: String,
     title: String,
     published: Option<OffsetDateTime>,
+    /// What the band typed under the video. `None` when the feed carries no
+    /// `<media:description>` or it is blank — an absent description is absent,
+    /// never an empty string, so `list_voice_samples` can exclude it on the
+    /// same `btrim(...) <> ''` test it applies to every other source.
+    description: Option<String>,
 }
 
 impl VideoSourceSyncWorker {
@@ -237,12 +261,17 @@ impl VideoSourceSyncWorker {
         if title.trim().is_empty() {
             return Ok(());
         }
+        // `body` carries the band's own description. The key is shared with
+        // the console's story panel on purpose: `list_voice_samples` selects
+        // `metadata->>'body'` and does not care which writer put it there, so
+        // one key means one voice path rather than two that can diverge.
         let metadata = json!({
             "url": format!("https://youtu.be/{}", entry.video_id),
             "video_id": entry.video_id,
             "channel_id": channel_id,
             "published_at": entry.published.map(|t| t.unix_timestamp()),
             "origin": "youtube_feed",
+            "body": entry.description,
         });
 
         let mut tx = self.pool.begin().await.map_err(|e| format!("begin: {e}"))?;
@@ -336,11 +365,24 @@ fn parse_feed(body: &str) -> Vec<FeedEntry> {
         let published = extract_tag(block, "published").and_then(|s| {
             OffsetDateTime::parse(&s, &time::format_description::well_known::Rfc3339).ok()
         });
+        // The description sits inside `<media:group>`, and `extract_tag` finds
+        // the first match in the whole entry block, which is the right one —
+        // an entry carries exactly one. Truncation counts characters rather
+        // than bytes so a Polish or emoji-carrying description is never cut
+        // mid-codepoint.
+        let description = extract_tag(block, "media:description").map(|text| {
+            if text.chars().count() > MAX_DESCRIPTION_CHARS {
+                text.chars().take(MAX_DESCRIPTION_CHARS).collect()
+            } else {
+                text
+            }
+        });
         if let (Some(video_id), Some(title)) = (video_id, title) {
             entries.push(FeedEntry {
                 video_id,
                 title,
                 published,
+                description,
             });
         }
         let Some(next) = after_open.get(end + "</entry>".len()..) else {
@@ -389,6 +431,9 @@ mod tests {
     <yt:videoId>abc123XYZ_-</yt:videoId>
     <title>Virya — Ashes (Official Video)</title>
     <published>2026-09-10T17:00:00+00:00</published>
+    <media:group>
+      <media:description>Wrote this one in a week. Recorded it in two.</media:description>
+    </media:group>
   </entry>
   <entry>
     <yt:videoId>def456</yt:videoId>
@@ -413,6 +458,45 @@ mod tests {
     #[test]
     fn empty_feed_yields_no_entries() {
         assert!(parse_feed("<feed><title>x</title></feed>").is_empty());
+    }
+
+    /// The description is the only prose a YouTube feed carries, and dropping
+    /// it left the VOICE rule pointing at a title and a URL.
+    #[test]
+    fn the_bands_own_description_is_kept() {
+        let entries = parse_feed(SAMPLE_FEED);
+        assert_eq!(
+            entries[0].description.as_deref(),
+            Some("Wrote this one in a week. Recorded it in two.")
+        );
+    }
+
+    /// A video with no description is absent, never an empty string — the
+    /// voice-sample read excludes a blank body, and an empty string would pass
+    /// that filter while teaching the model nothing.
+    #[test]
+    fn a_missing_description_stays_absent() {
+        let entries = parse_feed(SAMPLE_FEED);
+        assert_eq!(entries[1].description, None);
+    }
+
+    /// The tail of a long description is credits, links and hashtags. Keeping
+    /// it would teach the model to write in hashtags, which is the opposite of
+    /// what the sample is for.
+    #[test]
+    fn a_long_description_keeps_its_head_and_never_splits_a_character() {
+        // Two-byte characters throughout: a byte-wise truncation at 1,000
+        // would land mid-codepoint and panic.
+        let long = "ż".repeat(MAX_DESCRIPTION_CHARS + 500);
+        let feed = format!(
+            "<feed><entry><yt:videoId>x1</yt:videoId><title>t</title>\
+             <media:group><media:description>{long}</media:description></media:group>\
+             </entry></feed>"
+        );
+        let entries = parse_feed(&feed);
+        let kept = entries[0].description.as_deref().expect("description kept");
+        assert_eq!(kept.chars().count(), MAX_DESCRIPTION_CHARS);
+        assert!(kept.chars().all(|c| c == 'ż'));
     }
 
     #[test]
