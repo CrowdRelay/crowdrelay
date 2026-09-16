@@ -241,6 +241,20 @@ impl PeerObservationWorker {
             }
         }
 
+        // The season's shape comes before the beats that fill it: arc
+        // lifecycle (approved arcs activate, active arcs complete) and any
+        // new proposal run first, so a just-activated arc's spine is what
+        // the suggestion pass reads.
+        match repository.refresh_arcs(self.workspace_id, today).await {
+            Ok(proposed) if !proposed.is_empty() => {
+                tracing::info!(proposed = proposed.len(), "content arc proposed");
+            }
+            Ok(_) => {}
+            Err(error) => {
+                tracing::warn!(error = %error, "content arc refresh failed");
+            }
+        }
+
         // Fresh trends are the suggestion engine's newest evidence — a
         // refresh failure must not fail the sweep that produced the facts.
         match repository

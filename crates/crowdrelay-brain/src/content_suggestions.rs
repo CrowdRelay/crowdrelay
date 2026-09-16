@@ -19,9 +19,12 @@
 //!    cost term is denominated in the band's own hours, so a near-free beat
 //!    under a scheduled production day outranks a whole extra day unless
 //!    the second is dramatically better (§4b-3: marginal, not absolute).
-//! 4. **Arc lift.** A beat the band already approved into an active arc's
-//!    spine outranks an equivalent orphan — the arc is the shape the band
-//!    chose; suggestions fill it, they do not redraw it.
+//! 4. **Arc lift and refusal.** A beat the band already approved into an
+//!    active arc's spine outranks an equivalent orphan — the arc is the
+//!    shape the band chose; suggestions fill it, they do not redraw it.
+//!    While an arc runs, a format outside its spine is refused outright
+//!    unless a production deadline (`suggested_before`) makes it urgent
+//!    and time-boxed — §4b-4's "no suggestion without a current arc".
 //! 5. **Rank, then cut (§4b-4).** The engine emits the top `limit` (2–3),
 //!    not everything above a threshold. The tail is named in the caller's
 //!    summary, not offered.
@@ -288,6 +291,11 @@ pub struct RankingInputs<'a> {
 #[must_use]
 pub fn rank_suggestions(inputs: &RankingInputs<'_>) -> Vec<ScoredSuggestion> {
     let horizon_end = inputs.today + time::Duration::days(COVERAGE_HORIZON_DAYS);
+    // The band approved a shape for the season — while an arc runs,
+    // formats outside its spine are noise unless a deadline makes them
+    // urgent. A production-covered beat carries `suggested_before` and is
+    // exactly that: time-boxed, or it waits for the next arc.
+    let arc_active = !inputs.arc_format_keys.is_empty();
     let mut scored: Vec<ScoredSuggestion> = Vec::new();
     for entry in inputs.formats {
         if !entry.active || inputs.open_format_keys.contains(&entry.key) {
@@ -338,6 +346,9 @@ pub fn rank_suggestions(inputs: &RankingInputs<'_>) -> Vec<ScoredSuggestion> {
 
         let arc_id = inputs.arc_format_keys.get(&entry.key).cloned();
         let arc_hit = arc_id.is_some();
+        if arc_active && !arc_hit && suggested_before.is_none() {
+            continue;
+        }
         let mut lift = trend_lift;
         if arc_hit {
             lift *= ARC_LIFT;
@@ -779,5 +790,62 @@ mod tests {
         assert!(pattern_lifts("cover", "peer_cover"));
         assert!(pattern_lifts("cover", "fan_cover_feature"));
         assert!(!pattern_lifts("rehearsal", "playthrough"));
+    }
+
+    #[test]
+    fn an_active_arc_refuses_orphans_but_not_deadlines() {
+        let arc_id = Uuid::from_u128(42);
+        let arc: BTreeMap<String, Uuid> =
+            [("playthrough".to_owned(), arc_id)].into_iter().collect();
+        let formats = vec![
+            entry("playthrough", TeamSkill::Video, FormatRequirement::Nothing),
+            entry(
+                "official_video",
+                TeamSkill::Video,
+                FormatRequirement::Nothing,
+            ),
+            entry(
+                "rehearsal_clip",
+                TeamSkill::Video,
+                FormatRequirement::Nothing,
+            ),
+        ];
+        let shoot = [ScheduledProduction {
+            id: "shoot-1".to_owned(),
+            kind: ProductionEventKind::Shoot,
+            scheduled_for: today() + time::Duration::days(9),
+        }];
+        let ranked = rank_suggestions(&inputs(
+            &formats,
+            &profile(),
+            &[],
+            &shoot,
+            &BTreeSet::new(),
+            &arc,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &reach(),
+        ));
+        let keys: Vec<&str> = ranked.iter().map(|s| s.format_key.as_str()).collect();
+        assert!(
+            keys.contains(&"playthrough"),
+            "a spine beat still ranks: {keys:?}"
+        );
+        assert!(
+            keys.contains(&"official_video"),
+            "a shoot-covered orphan is the urgent, time-boxed exception: {keys:?}"
+        );
+        assert!(
+            !keys.contains(&"rehearsal_clip"),
+            "an orphan with no deadline waits for the next arc: {keys:?}"
+        );
+        assert_eq!(
+            ranked
+                .iter()
+                .find(|s| s.format_key == "playthrough")
+                .and_then(|s| s.arc_id),
+            Some(arc_id),
+            "the spine beat carries the arc it serves"
+        );
     }
 }

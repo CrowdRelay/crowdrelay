@@ -140,6 +140,7 @@ pub(super) async fn record_execution_outcome(
         AutopilotActionPayload::RaiseContentSuggestion { .. } => {
             ("content_suggestion_raised", 1.0, None)
         }
+        AutopilotActionPayload::RaiseContentArc { .. } => ("content_arc_raised", 1.0, None),
     };
     sqlx::query(
         r#"

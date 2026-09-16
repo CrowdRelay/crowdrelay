@@ -358,6 +358,15 @@ impl CommunityIntelligenceWorker {
                     "content trend refresh failed"
                 );
             }
+            // Arc lifecycle advances here too — an approved arc reaching its
+            // horizon should not wait for the peer sweep to go active.
+            if let Err(error) = self.content_repo.refresh_arcs(workspace_id, today).await {
+                warn!(
+                    workspace_id = %workspace,
+                    error = %error,
+                    "content arc refresh failed"
+                );
+            }
             // Fan-side signal is suggestion evidence too — a hot community
             // should reach the queue without waiting for the peer sweep.
             if let Err(error) = self

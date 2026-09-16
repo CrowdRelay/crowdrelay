@@ -35,6 +35,8 @@ mod acquisition_channels;
 pub(in crate::autopilot) mod attribution;
 pub(in crate::autopilot) mod belief_revisions;
 mod chief;
+mod content_arc_execution;
+mod content_artifact_execution;
 mod content_suggestion_execution;
 mod discovery;
 pub(in crate::autopilot) mod evidence;
@@ -56,6 +58,8 @@ mod snapshots;
 
 pub(super) use acquisition_channels::*;
 pub(super) use chief::*;
+pub(super) use content_arc_execution::*;
+pub(super) use content_artifact_execution::*;
 pub(super) use content_suggestion_execution::*;
 pub(super) use discovery::*;
 pub(super) use execution::*;

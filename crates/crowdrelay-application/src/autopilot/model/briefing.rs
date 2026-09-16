@@ -495,6 +495,29 @@ impl AutopilotActionPayload {
                 },
                 deadline_note: String::new(),
             },
+            Self::RaiseContentArc { title, summary: arc_summary, horizon_start, horizon_end, beats, .. } => ActionBriefing {
+                summary: format!("Commit to the season: {}", title),
+                why_it_matters: "The arc is the shape every beat for the next weeks serves. Approving it once replaces dozens of smaller asks — beats inside it still surface, but under a plan the band already chose.".into(),
+                steps: vec![
+                    BriefingStep { what_to_do: "Read the spine and the anchor it is built around".into(), why_it_matters: "The band approves the plan, not each step — this is the one creative decision".into() },
+                    BriefingStep { what_to_do: "Click APPROVE to commit to the arc".into(), why_it_matters: "Beats in the spine then surface as ordinary suggestions under the same policy".into() },
+                ],
+                content: {
+                    let mut fields = vec![
+                        BriefingField { label: "Arc".into(), value: title.clone() },
+                        BriefingField { label: "Plan".into(), value: arc_summary.clone() },
+                        BriefingField { label: "Beats".into(), value: beats.to_string() },
+                    ];
+                    if let (Some(start), Some(end)) = (horizon_start, horizon_end) {
+                        fields.push(BriefingField {
+                            label: "Horizon".into(),
+                            value: format!("{start} → {end}"),
+                        });
+                    }
+                    fields
+                },
+                deadline_note: String::new(),
+            },
             Self::RunPlayStep { play_id, play_kind, step_index, step_kind, event_id, fan_id, template_key } => ActionBriefing {
                 summary: format!("Krok play: {:?} (krok {})", play_kind, step_index),
                 why_it_matters: "This is one step of a play campaign, for one fan. A sent message cannot be recalled.".into(),

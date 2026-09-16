@@ -1,8 +1,9 @@
-//! Content-suggestion candidate mapping. The engine already ranked and
-//! filtered; this module only turns each `raised` row into a durable,
-//! idempotent approval-queue action under the usual authority gate.
+//! Content-strategy candidate mapping. The engine already ranked and
+//! filtered; this module only turns each `raised` suggestion or `proposed`
+//! arc into a durable, idempotent approval-queue action under the usual
+//! authority gate.
 
-use crowdrelay_domain::content_engine::ContentSuggestion;
+use crowdrelay_domain::content_engine::{Arc, ContentSuggestion};
 use serde_json::Value;
 
 use super::{policy_evidence, *};
@@ -102,5 +103,67 @@ pub(super) fn content_strategy_candidate(
         // band's answer — re-raising the same row would be the engine
         // arguing with the person who already said no.
         action_idempotency_key: format!("action:content-suggestion:{}", suggestion.id.into_uuid()),
+    }))
+}
+
+/// The arc ask sits above the beat asks: approving it is the season's one
+/// creative decision, so its confidence reads what the proposal rests on —
+/// a real dated anchor is the base, corroborated trends are the bonus.
+fn arc_confidence(arc: &Arc) -> Confidence {
+    let mut basis_points: u32 = 6_500;
+    if arc
+        .evidence
+        .get("trend_ids")
+        .and_then(Value::as_array)
+        .is_some_and(|ids| !ids.is_empty())
+    {
+        basis_points = basis_points.saturating_add(1_500);
+    }
+    Confidence::saturating_from_basis_points(u16::try_from(basis_points).unwrap_or(u16::MAX))
+}
+
+pub(super) fn content_arc_candidate(
+    arc: &Arc,
+    policy: &AutopilotPolicy,
+) -> Result<Option<DecisionCandidate>, serde_json::Error> {
+    let AutopilotPolicyConfig::ContentStrategy(domain_policy) = &policy.config else {
+        return Ok(None);
+    };
+    let confidence = arc_confidence(arc);
+    let disposition = disposition(policy.autonomy_level, confidence, policy.minimum_confidence);
+    Ok(Some(DecisionCandidate {
+        context: policy.context,
+        subject: ActionSubject::ContentArc(arc.id),
+        decision_kind: "raise_content_arc",
+        confidence,
+        disposition,
+        reason: "a season's shape built around real dated material",
+        input_snapshot: serde_json::json!({
+            "arc_id": arc.id.into_uuid(),
+            "title": arc.title,
+            "summary": arc.summary,
+            "horizon_start": arc.horizon_start.map(|date| date.to_string()),
+            "horizon_end": arc.horizon_end.map(|date| date.to_string()),
+            "spine": arc.spine,
+            "evidence": arc.evidence,
+        }),
+        policy_snapshot: policy_evidence(policy, domain_policy)?,
+        action: AutopilotActionPayload::RaiseContentArc {
+            arc_id: arc.id,
+            title: arc.title.clone(),
+            summary: arc.summary.clone(),
+            horizon_start: arc.horizon_start.map(|date| date.to_string()),
+            horizon_end: arc.horizon_end.map(|date| date.to_string()),
+            beats: u32::try_from(arc.spine.as_array().map_or(0, std::vec::Vec::len))
+                .unwrap_or(u32::MAX),
+        },
+        decision_key: format!(
+            "decision:content-strategy:v{}:arc:{}",
+            policy.version,
+            arc.id.into_uuid()
+        ),
+        // One ask per arc, ever — a declined arc retires and its anchor
+        // cools down; re-raising it would argue with the band's answer.
+        action_idempotency_key: format!("action:content-arc:{}", arc.id.into_uuid()),
     }))
 }

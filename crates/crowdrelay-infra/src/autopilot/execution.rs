@@ -142,7 +142,8 @@ pub(super) async fn schedule_effect_measurement(
             // ticket or merch movement. Phase 5 adds the measurement kind that
             // can read those honestly.
         }
-        AutopilotActionPayload::RaiseContentSuggestion { .. } => {
+        AutopilotActionPayload::RaiseContentSuggestion { .. }
+        | AutopilotActionPayload::RaiseContentArc { .. } => {
             // No plan here either, for the strongest reason of the three:
             // approving a suggestion publishes nothing — the band commits to
             // making the beat. Measuring fan growth from the approval date

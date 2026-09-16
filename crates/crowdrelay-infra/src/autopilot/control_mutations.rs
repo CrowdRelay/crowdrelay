@@ -180,43 +180,61 @@ impl PostgresAutopilotRepository {
                 .fetch_one(&mut *transaction)
                 .await
                 .map_err(map_sqlx)?;
-                if let Ok(AutopilotActionPayload::RaiseContentSuggestion {
-                    suggestion_id,
-                    ..
-                }) = serde_json::from_value::<AutopilotActionPayload>(payload)
-                {
-                    let changed = sqlx::query(
-                        r#"
-                        UPDATE viryaos_content_suggestions
-                        SET status = 'declined', updated_at = now()
-                        WHERE workspace_id = $1 AND id = $2 AND status IN ('raised', 'approved')
-                        "#,
-                    )
-                    .bind(workspace_id.into_uuid())
-                    .bind(suggestion_id.into_uuid())
-                    .execute(&mut *transaction)
-                    .await
-                    .map_err(map_sqlx)?
-                    .rows_affected();
-                    // The outcome row pairs with the transition or it does
-                    // not exist — an already-resolved suggestion earns no
-                    // second verdict.
-                    if changed > 0 {
+                match serde_json::from_value::<AutopilotActionPayload>(payload) {
+                    Ok(AutopilotActionPayload::RaiseContentArc { arc_id, .. }) => {
+                        // A cancelled arc ask is the band's "not this season"
+                        // — retire it so the open-arc check frees the slot and
+                        // the anchor cooldown remembers the answer.
                         sqlx::query(
                             r#"
-                            INSERT INTO viryaos_suggestion_outcomes (
-                                workspace_id, suggestion_id, outcome, decided_by, reason, results
-                            ) VALUES ($1, $2, 'declined', $3, $4, '{}'::jsonb)
+                            UPDATE viryaos_arcs
+                            SET status = 'retired', updated_at = now()
+                            WHERE workspace_id = $1 AND id = $2 AND status = 'proposed'
                             "#,
                         )
                         .bind(workspace_id.into_uuid())
-                        .bind(suggestion_id.into_uuid())
-                        .bind("operator:admin_api_key")
-                        .bind("cancelled in the approval queue")
+                        .bind(arc_id.into_uuid())
                         .execute(&mut *transaction)
                         .await
                         .map_err(map_sqlx)?;
                     }
+                    Ok(AutopilotActionPayload::RaiseContentSuggestion {
+                        suggestion_id, ..
+                    }) => {
+                        let changed = sqlx::query(
+                            r#"
+                            UPDATE viryaos_content_suggestions
+                            SET status = 'declined', updated_at = now()
+                            WHERE workspace_id = $1 AND id = $2 AND status IN ('raised', 'approved')
+                            "#,
+                        )
+                        .bind(workspace_id.into_uuid())
+                        .bind(suggestion_id.into_uuid())
+                        .execute(&mut *transaction)
+                        .await
+                        .map_err(map_sqlx)?
+                        .rows_affected();
+                        // The outcome row pairs with the transition or it
+                        // does not exist — an already-resolved suggestion
+                        // earns no second verdict.
+                        if changed > 0 {
+                            sqlx::query(
+                                r#"
+                                INSERT INTO viryaos_suggestion_outcomes (
+                                    workspace_id, suggestion_id, outcome, decided_by, reason, results
+                                ) VALUES ($1, $2, 'declined', $3, $4, '{}'::jsonb)
+                                "#,
+                            )
+                            .bind(workspace_id.into_uuid())
+                            .bind(suggestion_id.into_uuid())
+                            .bind("operator:admin_api_key")
+                            .bind("cancelled in the approval queue")
+                            .execute(&mut *transaction)
+                            .await
+                            .map_err(map_sqlx)?;
+                        }
+                    }
+                    _ => {}
                 }
             }
             transaction.commit().await.map_err(map_sqlx)?;
@@ -328,6 +346,31 @@ impl PostgresAutopilotRepository {
                 SELECT $1, resolved.id, 'done', 'operator:admin_api_key',
                        'handled outside the system'
                 FROM resolved
+                "#,
+            )
+            .bind(workspace_id.into_uuid())
+            .bind(decision_id.into_uuid())
+            .execute(&mut *transaction)
+            .await
+            .map_err(map_sqlx)?;
+            // An arc ask handled outside the system means the season's shape
+            // is being lived without it — retire the row so the open-arc
+            // slot frees and the anchor cooldown stops the engine re-asking
+            // a plan the band is already running.
+            sqlx::query(
+                r#"
+                UPDATE viryaos_arcs AS arc
+                SET status = 'retired', updated_at = now()
+                WHERE arc.workspace_id = $1
+                  AND arc.status = 'proposed'
+                  AND EXISTS (
+                      SELECT 1 FROM viryaos_autopilot_actions AS action
+                      WHERE action.workspace_id = arc.workspace_id
+                        AND action.decision_id = $2
+                        AND action.subject_kind = 'content_arc'
+                        AND action.subject_id = arc.id
+                        AND action.status = 'cancelled'
+                  )
                 "#,
             )
             .bind(workspace_id.into_uuid())

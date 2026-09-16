@@ -318,6 +318,33 @@ impl PostgresAutopilotRepository {
             .execute(&mut *transaction)
             .await
             .map_err(map_sqlx)?;
+            // The same death, one level up: a proposed arc whose ask lapsed
+            // retires — the open-arc check counts `proposed` as live, so a
+            // zombie here would block every future season silently. The
+            // anchor's cooldown keeps the next proposal honest.
+            sqlx::query(
+                r#"
+                UPDATE viryaos_arcs AS arc
+                SET status = 'retired', updated_at = $2
+                WHERE arc.workspace_id = $1
+                  AND arc.status = 'proposed'
+                  AND EXISTS (
+                      SELECT 1 FROM viryaos_autopilot_actions AS action
+                      WHERE action.workspace_id = arc.workspace_id
+                        AND action.subject_kind = 'content_arc'
+                        AND action.subject_id = arc.id
+                        AND action.status = 'cancelled'
+                        AND action.last_error_kind
+                            IN ('approval_expired', 'insufficient_evidence')
+                        AND action.finished_at = $2
+                  )
+                "#,
+            )
+            .bind(workspace_id.into_uuid())
+            .bind(now)
+            .execute(&mut *transaction)
+            .await
+            .map_err(map_sqlx)?;
             // Close the attempt too, not only the action.
             //
             // This sweep reaps an action whose worker claimed it and then died:
@@ -379,6 +406,37 @@ impl PostgresAutopilotRepository {
             // agent service is still working, incrementing `attempt_count`
             // and eventually reaping the action as `failed` even though the
             // agent service is still running.
+            //
+            // A terminally failed arc ask is the same dead question the
+            // approval-expiry pair above resolves, with worse timing: the
+            // band never saw it, the idempotency key is spent, so no ask can
+            // ever be re-raised — the proposal would hold the season slot
+            // until its horizon lapsed, up to a full quarter of silence.
+            // `failed` is terminal on this ledger, so the retirement does
+            // not care when the ask died — and it runs after the reap above
+            // so an ask this sweep just killed is resolved in the same
+            // transaction.
+            sqlx::query(
+                r#"
+                UPDATE viryaos_arcs AS arc
+                SET status = 'retired', updated_at = $2
+                WHERE arc.workspace_id = $1
+                  AND arc.status = 'proposed'
+                  AND EXISTS (
+                      SELECT 1 FROM viryaos_autopilot_actions AS action
+                      WHERE action.workspace_id = arc.workspace_id
+                        AND action.subject_kind = 'content_arc'
+                        AND action.subject_id = arc.id
+                        AND action.status = 'failed'
+                  )
+                "#,
+            )
+            .bind(workspace_id.into_uuid())
+            .bind(now)
+            .execute(&mut *transaction)
+            .await
+            .map_err(map_sqlx)?;
+
             let candidates = sqlx::query_as::<_, ClaimedActionRow>(
                 r#"
                 SELECT id, payload, attempt_count AS attempt_number

@@ -289,7 +289,7 @@ impl TryFrom<CapturePlanRow> for CapturePlan {
 }
 
 #[derive(Debug, FromRow)]
-struct ArcRow {
+pub(crate) struct ArcRow {
     id: Uuid,
     workspace_id: Uuid,
     title: String,

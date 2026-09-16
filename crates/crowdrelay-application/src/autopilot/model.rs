@@ -2,10 +2,10 @@
 
 use crowdrelay_brain::{AgentTier, GrowthIntelligencePolicy};
 use crowdrelay_domain::{
-    AutopilotActionId, BeaconId, BookingTargetId, CityId, ContentSourceId, ContentSuggestionId,
-    EventId, ExperimentId, ExperimentVariantId, FanId, GrowthMetricSeriesId, MerchProductId,
-    MerchVariantId, OutreachOpportunityId, OutreachTargetId, PlayId, PromotionCampaignId,
-    ReleasePlanId, TeamOpportunityId, TicketTypeId, WorkspaceId,
+    ArcId, AutopilotActionId, BeaconId, BookingTargetId, CityId, ContentSourceId,
+    ContentSuggestionId, EventId, ExperimentId, ExperimentVariantId, FanId, GrowthMetricSeriesId,
+    MerchProductId, MerchVariantId, OutreachOpportunityId, OutreachTargetId, PlayId,
+    PromotionCampaignId, ReleasePlanId, TeamOpportunityId, TicketTypeId, WorkspaceId,
     action_class::ActionClass,
     audience_lifecycle::FanLifecyclePolicy,
     autonomy::{AutonomyLevel, Confidence, PolicyDisposition},
@@ -327,6 +327,10 @@ pub enum ActionSubject {
     /// One raised content suggestion — the queue entry that asks the band to
     /// commit to a beat. The UUID is `viryaos_content_suggestions.id`.
     ContentSuggestion(ContentSuggestionId),
+    /// One proposed arc — the queue entry that asks the band to commit to a
+    /// season's shape. The UUID is `viryaos_arcs.id`. The arc, not any beat
+    /// inside it, is the approval unit.
+    ContentArc(ArcId),
 }
 
 impl From<GrowthDebtSubject> for ActionSubject {
@@ -365,6 +369,7 @@ impl ActionSubject {
             Self::TargetCommunity(_) => "target_community",
             Self::Workspace(_) => "workspace",
             Self::ContentSuggestion(_) => "content_suggestion",
+            Self::ContentArc(_) => "content_arc",
         }
     }
 
@@ -410,6 +415,7 @@ impl ActionSubject {
             Self::TargetCommunity(id) => id,
             Self::Workspace(id) => id.into_uuid(),
             Self::ContentSuggestion(id) => id.into_uuid(),
+            Self::ContentArc(id) => id.into_uuid(),
         }
     }
 }
@@ -657,6 +663,30 @@ pub enum AutopilotActionPayload {
         /// payload rather than a join away.
         distribution_promise: serde_json::Value,
     },
+    /// One proposed campaign arc. Approving is the single creative decision
+    /// the band makes about the season: the spine, the horizon, the anchor
+    /// it is built around. The beats inside it then surface as ordinary
+    /// suggestions under the same policy — the band approved the shape once;
+    /// it is not re-asked about every beat that fills it.
+    ///
+    /// Approving transitions the arc `proposed → approved` (it goes `active`
+    /// when its horizon opens). Cancelling retires it: a declined arc is a
+    /// taste signal that also puts its anchor in cooldown so the engine does
+    /// not re-ask the same campaign next week.
+    RaiseContentArc {
+        arc_id: ArcId,
+        title: String,
+        /// What the campaign argues and what the spine does, verbatim from
+        /// the proposal — the queue must show the plan, not a key into it.
+        summary: String,
+        /// ISO dates; `None` only if the proposal carries no horizon, which
+        /// the proposer never emits — the fields stay honest anyway.
+        horizon_start: Option<String>,
+        horizon_end: Option<String>,
+        /// How many dated beats the spine holds — the size of the commitment
+        /// being asked for, readable without expanding the snapshot.
+        beats: u32,
+    },
     /// Work that was committed to and then left undone. One action kind covers
     /// every debt kind on purpose: the ranked queue compares them against each
     /// other, and four look-alike action kinds would only make that harder.
@@ -856,10 +886,12 @@ impl AutopilotActionPayload {
             | Self::RaiseGrowthOpportunity { .. }
             | Self::RaiseGrowthDebt { .. }
             | Self::IssueReferralCode { .. }
-            // Raising a suggestion flips one row inside the workspace. It
-            // reaches nobody — the promises it names are carried out by
-            // separately classed actions, each gated on its own reach.
+            // Raising a suggestion or an arc flips one row inside the
+            // workspace. It reaches nobody — the promises they name are
+            // carried out by separately classed actions, each gated on its
+            // own reach.
             | Self::RaiseContentSuggestion { .. }
+            | Self::RaiseContentArc { .. }
             | Self::SendTeamAssignmentEmail { .. }
             // A public read. It contacts nobody and changes nothing, which is
             // exactly why it may run unattended: the whole point is checking a
@@ -958,6 +990,7 @@ impl AutopilotActionPayload {
             Self::RaiseGrowthDebt { .. } => "growth.debt.raise",
             Self::IssueReferralCode { .. } => "referral.code.issue",
             Self::RaiseContentSuggestion { .. } => "content.suggestion.raise",
+            Self::RaiseContentArc { .. } => "content.arc.raise",
             Self::RunPlayStep { .. } => "play.step.run",
             Self::SendTeamAssignmentEmail { .. } => "team.assignment.email",
             Self::RequestAgentContent { .. } => "agent.content.request",

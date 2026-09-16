@@ -925,5 +925,39 @@ macro_rules! decision_opportunity_reads {
         })
         .await
     }
+
+    async fn load_proposed_content_arcs_impl(
+        &self,
+        workspace_id: WorkspaceId,
+        now: OffsetDateTime,
+    ) -> Result<Vec<crowdrelay_domain::content_engine::Arc>, RepositoryError> {
+        self.bounded(async {
+            // `proposed` only, and still inside its window: approved and
+            // active arcs are the season already chosen, retired ones are
+            // answers, and a proposal whose horizon closed between sweeps is
+            // a dead question — asking it now would only produce an approval
+            // that conflicts against a retired row.
+            let rows = sqlx::query_as::<_, crate::content_engine::ArcRow>(
+                r#"
+                SELECT * FROM viryaos_arcs
+                WHERE workspace_id = $1 AND status = 'proposed'
+                  AND (horizon_end IS NULL OR horizon_end >= $2::date)
+                ORDER BY created_at
+                "#,
+            )
+            .bind(workspace_id.into_uuid())
+            .bind(now.date())
+            .fetch_all(&self.pool)
+            .await
+            .map_err(map_sqlx)?;
+            rows.into_iter()
+                .map(|row| {
+                    crowdrelay_domain::content_engine::Arc::try_from(row)
+                        .map_err(|_| RepositoryError::Unexpected)
+                })
+                .collect()
+        })
+        .await
+    }
     };
 }

@@ -347,6 +347,15 @@ impl AutopilotDecisionRepository for PostgresAutopilotRepository {
             .await
     }
 
+    async fn load_proposed_content_arcs(
+        &self,
+        workspace_id: WorkspaceId,
+        now: OffsetDateTime,
+    ) -> Result<Vec<crowdrelay_domain::content_engine::Arc>, RepositoryError> {
+        self.load_proposed_content_arcs_impl(workspace_id, now)
+            .await
+    }
+
     async fn mark_insights_consumed(
         &self,
         workspace_id: WorkspaceId,

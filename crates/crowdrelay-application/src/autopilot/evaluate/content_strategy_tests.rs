@@ -3,7 +3,9 @@ mod content_strategy_candidate_tests {
     use super::*;
     use crowdrelay_domain::{
         autonomy::{AutonomyLevel, Confidence, PolicyDisposition},
-        content_engine::{ContentStrategyPolicy, ContentSuggestion, Effort, SuggestionStatus},
+        content_engine::{
+            Arc, ArcStatus, ContentStrategyPolicy, ContentSuggestion, Effort, SuggestionStatus,
+        },
     };
     use serde_json::json;
     use time::OffsetDateTime;
@@ -143,6 +145,95 @@ mod content_strategy_candidate_tests {
                 PolicyDisposition::ObserveOnly | PolicyDisposition::RecommendOnly
             ));
         }
+        Ok(())
+    }
+
+    fn arc() -> Arc {
+        Arc {
+            id: crowdrelay_domain::ArcId::from_uuid(uuid::Uuid::from_u128(88)),
+            workspace_id: WorkspaceId::from_uuid(uuid::Uuid::from_u128(7)),
+            title: "Single: release".to_owned(),
+            summary: "A 4-beat run at Single — 2026-10-02 to 2026-11-06.".to_owned(),
+            horizon_start: Some(time::Date::from_calendar_date(2026, time::Month::October, 2).unwrap()),
+            horizon_end: Some(time::Date::from_calendar_date(2026, time::Month::November, 6).unwrap()),
+            spine: json!([
+                {"at": "2026-10-10", "beat": "Playthrough", "format_key": "playthrough"},
+                {"at": "2026-10-20", "beat": "Making of", "format_key": "making_of"}
+            ]),
+            evidence: json!({
+                "anchor": {"kind": "release", "id": "rel-1", "name": "Single", "date": "2026-10-30"},
+                "trend_ids": [uuid::Uuid::from_u128(9)],
+                "format_keys": ["playthrough", "making_of"]
+            }),
+            status: ArcStatus::Proposed,
+            approved_at: None,
+            approved_by: None,
+            created_at: OffsetDateTime::UNIX_EPOCH,
+            updated_at: OffsetDateTime::UNIX_EPOCH,
+        }
+    }
+
+    #[test]
+    fn a_proposed_arc_lands_as_one_queue_entry_with_its_plan(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let arc = arc();
+        let candidate = content_arc_candidate(
+            &arc,
+            &policy(AutonomyLevel::RequireApproval, ContentStrategyPolicy::default())?,
+        )?
+        .ok_or_else(|| std::io::Error::other("candidate expected"))?;
+
+        assert_eq!(candidate.context, AutopilotContext::ContentStrategy);
+        assert_eq!(candidate.disposition, PolicyDisposition::RequireApproval);
+        assert_eq!(candidate.decision_kind, "raise_content_arc");
+        assert_eq!(
+            candidate.subject,
+            ActionSubject::ContentArc(arc.id),
+            "the arc, not a beat inside it, is what the band approves"
+        );
+        // One ask per arc, ever — a declined season is a taste signal the
+        // cooldown remembers, not a question to re-ask.
+        assert_eq!(
+            candidate.action_idempotency_key,
+            format!("action:content-arc:{}", arc.id.into_uuid())
+        );
+        let AutopilotActionPayload::RaiseContentArc {
+            arc_id,
+            title,
+            beats,
+            ..
+        } = candidate.action
+        else {
+            return Err(std::io::Error::other("wrong payload").into());
+        };
+        assert_eq!(arc_id, arc.id);
+        assert_eq!(title, arc.title);
+        assert_eq!(beats, 2, "the spine's size rides the ask");
+        Ok(())
+    }
+
+    #[test]
+    fn a_corroborated_arc_carries_more_confidence_than_a_bare_anchor(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let policy =
+            policy(AutonomyLevel::RequireApproval, ContentStrategyPolicy::default())?;
+        let bare = Arc {
+            evidence: json!({"anchor": {"kind": "release", "id": "rel-1"}, "trend_ids": []}),
+            ..arc()
+        };
+        let corroborated = arc();
+        let bare_bp = content_arc_candidate(&bare, &policy)?
+            .ok_or_else(|| std::io::Error::other("candidate expected"))?
+            .confidence
+            .basis_points();
+        let corroborated_bp = content_arc_candidate(&corroborated, &policy)?
+            .ok_or_else(|| std::io::Error::other("candidate expected"))?
+            .confidence
+            .basis_points();
+        assert!(
+            corroborated_bp > bare_bp,
+            "trend evidence must move the ask: {corroborated_bp} vs {bare_bp}"
+        );
         Ok(())
     }
 }

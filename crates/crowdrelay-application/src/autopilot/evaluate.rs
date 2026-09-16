@@ -86,7 +86,7 @@ use commercial::{
     booking_candidate, booking_followup_candidate, campaign_lifecycle_candidate, funding_candidate,
     merch_candidate, merch_price_candidate,
 };
-use content_strategy::content_strategy_candidate;
+use content_strategy::{content_arc_candidate, content_strategy_candidate};
 use crowdrelay_domain::worker_template::WorkerTemplate;
 use growth_debt::growth_debt_candidate;
 use growth_intelligence::{
@@ -579,6 +579,18 @@ where
                     .await?;
                 }
                 AutopilotContext::ContentStrategy => {
+                    // The season's shape asks first: an arc the band has not
+                    // answered outranks the beats that would fill it — until
+                    // the shape is chosen, beats are noise.
+                    for arc in &self
+                        .repository
+                        .load_proposed_content_arcs(self.workspace_id, now)
+                        .await?
+                    {
+                        if let Some(candidate) = content_arc_candidate(arc, &policy)? {
+                            self.persist(&candidate, &mut limits, &mut report).await?;
+                        }
+                    }
                     let suggestions = self
                         .repository
                         .load_open_content_suggestions(self.workspace_id, now)

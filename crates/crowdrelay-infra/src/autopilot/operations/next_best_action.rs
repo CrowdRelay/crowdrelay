@@ -80,6 +80,11 @@ fn payload_signals(
             // queue should argue the beat, not name a kind.
             (None, None, Some(reason))
         }
+        AutopilotActionPayload::RaiseContentArc { summary, .. } => {
+            // The plan is the ask — the board should read the season's shape,
+            // not a kind name.
+            (None, None, Some(summary))
+        }
         other => (None, None, Some(other.action_kind().to_owned())),
     }
 }
@@ -161,6 +166,14 @@ pub(in crate::autopilot) async fn load_next_best_actions(
                 WHERE decision.subject_kind = 'content_suggestion'
                   AND suggestion.workspace_id = decision.workspace_id
                   AND suggestion.id = decision.subject_id
+                UNION ALL
+                -- The season's close is the arc's real deadline — an
+                -- unanswered plan dies when its window does.
+                SELECT arc.horizon_end::timestamptz
+                FROM viryaos_arcs AS arc
+                WHERE decision.subject_kind = 'content_arc'
+                  AND arc.workspace_id = decision.workspace_id
+                  AND arc.id = decision.subject_id
                 UNION ALL
                 SELECT action.approval_expires_at
                 WHERE action.approval_expires_at IS NOT NULL

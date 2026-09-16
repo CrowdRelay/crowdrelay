@@ -355,6 +355,15 @@ pub trait AutopilotDecisionRepository: Send + Sync {
         now: OffsetDateTime,
     ) -> Result<Vec<crowdrelay_domain::content_engine::ContentSuggestion>, RepositoryError>;
 
+    /// Returns arcs still waiting on the band's one approval — `proposed`
+    /// rows only. An approved or active arc is already the season's shape,
+    /// and a retired one is a no the cooldown remembers.
+    async fn load_proposed_content_arcs(
+        &self,
+        workspace_id: WorkspaceId,
+        now: OffsetDateTime,
+    ) -> Result<Vec<crowdrelay_domain::content_engine::Arc>, RepositoryError>;
+
     /// Returns one snapshot per worker template that the brain may dispatch.
     /// Each snapshot carries the hours since the last run and the workspace's
     /// current situation (upcoming events, fan growth, unengaged targets).
