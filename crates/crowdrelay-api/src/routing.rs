@@ -413,6 +413,12 @@ pub(super) fn application_routes(state: AppState) -> Router {
             "/v1/public/attestations/verify/{digest}",
             get(crate::attestation::verify_attestation),
         )
+        // And where that digest sits in the public transparency ledger —
+        // `anchored: false` is a stated state, not a 404.
+        .route(
+            "/v1/public/attestations/digest/{digest}/anchor",
+            get(crate::attestation::attestation_anchor),
+        )
         .route("/v1/public/events/{slug}", get(events::get_event))
         .route(
             "/v1/public/events/{slug}/tickets",

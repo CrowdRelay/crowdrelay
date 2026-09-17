@@ -318,3 +318,55 @@ pub async fn verify_attestation(
         Err(error) => problem(&error, request_id(&headers)),
     }
 }
+
+/// `GET /v1/public/attestations/digest/{digest}/anchor` — where the document
+/// sits in the transparency ledger.
+///
+/// The verify route answers "did we issue this"; this one answers "can a buyer
+/// check that against a public root rather than trusting our HMAC". Two
+/// answers that are not errors and must not read as one: `anchored: false`
+/// means the document is ours and no batch has committed it yet — a stated
+/// state, because "we cannot find this" reads like "this was forged" — while a
+/// digest no attestation carries is still a 404.
+pub async fn attestation_anchor(
+    State(state): State<crate::AppState>,
+    Path(digest): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    // Stricter than the verify route on purpose: this endpoint is asked by a
+    // machine comparing digests, and a malformed one is a client bug worth a
+    // 400 rather than a quiet "no record". Stored digests are lowercase hex by
+    // CHECK, so an uppercase presentation can only ever miss.
+    if digest.len() != 64
+        || !digest
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Problem::bad_request(request_id(&headers)).into_response();
+    }
+    match repo(&state).anchor_for_digest(&digest).await {
+        Ok(Some(anchor)) => (
+            StatusCode::OK,
+            [(axum::http::header::CACHE_CONTROL, "public, max-age=60")],
+            Json(json!({
+                "anchored": true,
+                "anchor": anchor,
+                // Points at the existing public inclusion route, so a reader
+                // holding this response needs nothing else to fetch the Merkle
+                // path to the batch root.
+                "inclusion_proof_path": format!(
+                    "/v1/public/proofs/batches/{}/attestation/{}",
+                    anchor.batch_id, anchor.attestation_id
+                ),
+            })),
+        )
+            .into_response(),
+        Ok(None) => (
+            StatusCode::OK,
+            [(axum::http::header::CACHE_CONTROL, "public, max-age=60")],
+            Json(json!({ "anchored": false })),
+        )
+            .into_response(),
+        Err(error) => problem(&error, request_id(&headers)),
+    }
+}
