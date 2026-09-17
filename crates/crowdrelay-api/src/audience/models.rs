@@ -462,6 +462,11 @@ pub struct CityVenueRow {
     /// room — the room's regulars, and the cross-tenant knowledge a single
     /// band's own history cannot produce.
     repeat_attenders: i64,
+    /// Distinct acts on this room's bills — across every tenant — whose
+    /// genre set intersects the requesting workspace's listing genres
+    /// (§12-5). A floor, not a guess: a peer act with no genre claims
+    /// counts as nothing rather than as a maybe.
+    comparable_acts: i64,
     #[serde(with = "time::serde::rfc3339::option")]
     last_played_at: Option<OffsetDateTime>,
     #[serde(with = "time::serde::rfc3339::option")]
