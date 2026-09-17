@@ -1338,6 +1338,73 @@ paths:
           $ref: '#/components/responses/Problem'
         '503':
           $ref: '#/components/responses/Problem'
+  /public/attestations/{token}:
+    get:
+      operationId: getPublicAttestation
+      summary: Read an audience attestation by share token
+      description: The share token is the whole credential — the same shape as a
+        published band listing. A correct token on a live attestation returns the
+        figures as issued plus a verification block, so the reader sees the document
+        and whether it still stands in one answer. A wrong, rotated or revoked token
+        is the same 404, so a reader cannot tell "never existed" from "withdrawn".
+      parameters:
+      - in: path
+        name: token
+        required: true
+        schema:
+          type: string
+          format: uuid
+      responses:
+        '200':
+          description: The attestation and its current verification state.
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                example: public, max-age=60
+            X-Request-ID:
+              $ref: '#/components/headers/RequestId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AttestationReaderView'
+        '404':
+          $ref: '#/components/responses/PrivateProblem'
+        '503':
+          $ref: '#/components/responses/PrivateProblem'
+  /public/attestations/verify/{digest}:
+    get:
+      operationId: verifyPublicAttestation
+      summary: Verify an audience attestation by digest, no credential needed
+      description: Somebody holding a printed or forwarded document types the digest
+        and learns whether CrowdRelay issued it and whether it still stands. A wrong
+        or invented digest is a 404 — the honest answer is that there is no record of
+        that document. The digest is exactly 64 hexadecimal characters.
+      parameters:
+      - in: path
+        name: digest
+        required: true
+        schema:
+          type: string
+          pattern: '^[0-9a-fA-F]{64}$'
+      responses:
+        '200':
+          description: The attestation and its verification verdict.
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                example: public, max-age=60
+            X-Request-ID:
+              $ref: '#/components/headers/RequestId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AttestationReaderView'
+        '404':
+          $ref: '#/components/responses/PrivateProblem'
+        '503':
+          $ref: '#/components/responses/PrivateProblem'
   /public/synesthesia/runs:
     post:
       operationId: startSynesthesiaRun
@@ -9763,6 +9830,93 @@ components:
           schema:
             $ref: '#/components/schemas/Problem'
   schemas:
+    AttestationReaderView:
+      type: object
+      additionalProperties: false
+      required: [act, issued_at, valid_until, digest, figures, verification]
+      properties:
+        act:
+          type: string
+          maxLength: 160
+        issued_at:
+          type: integer
+          description: Unix timestamp of issue.
+        valid_until:
+          type: integer
+          description: Unix timestamp after which the figures are out of date.
+        digest:
+          type: string
+          pattern: '^[0-9a-f]{64}$'
+        figures:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required: [metric, method, scope, value, reads_as, window_days, observed_at]
+            properties:
+              metric:
+                type: string
+                enum: [reachable_fans, active_fans, tickets_sold, observed_attendance, repeat_attenders, connected_followers]
+              method:
+                type: string
+                description: How the figure was counted, in reader terms.
+              scope:
+                type: object
+                additionalProperties: false
+                required: [kind]
+                properties:
+                  kind:
+                    type: string
+                    enum: [everywhere, city, event]
+                  value:
+                    type: string
+                    description: City name or event slug when kind is city or event.
+              value:
+                type: object
+                additionalProperties: false
+                required: [kind, value]
+                properties:
+                  kind:
+                    type: string
+                    enum: [exact, fewer_than]
+                  value:
+                    type: integer
+                    minimum: 0
+                    description: The figure itself when exact; an upper bound when fewer_than.
+              reads_as:
+                type: string
+                description: The value rendered for a person, e.g. "fewer than 12".
+              window_days:
+                type: integer
+                minimum: 0
+                description: Lookback the measurement used; 0 is a lifetime figure.
+              observed_at:
+                type: integer
+                description: Unix timestamp the measurement ran.
+        verification:
+          type: object
+          additionalProperties: false
+          required: [verdict, unedited, issued_by_us, current, revoked]
+          properties:
+            verdict:
+              type: string
+              enum:
+              - not issued by CrowdRelay
+              - issued by CrowdRelay, but edited since
+              - issued by CrowdRelay, then withdrawn by the act
+              - issued by CrowdRelay, unedited, but out of date
+              - issued by CrowdRelay, unedited, current
+            unedited:
+              type: boolean
+              description: The recomputed digest matches the stored digest.
+            issued_by_us:
+              type: boolean
+              description: The signature over the digest is CrowdRelay's.
+            current:
+              type: boolean
+              description: Inside the validity window at the moment of asking.
+            revoked:
+              type: boolean
     BeaconNetworkDiscoveryRun:
       type: object
       additionalProperties: false

@@ -75,6 +75,8 @@
         /v1/control-plane/gdrive/scan \
         /v1/control-plane/listing \
         /v1/control-plane/listing/* \
+        /v1/control-plane/attestations \
+        /v1/control-plane/attestations/* \
         /v1/control-plane/representation/targets \
         /v1/control-plane/representation/approach \
 
