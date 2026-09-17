@@ -18,7 +18,7 @@ use crowdrelay_application::{
     EventActEntry, EventCache, IdempotencyKey, ListFanEventInterests, MAX_PUBLIC_EVENT_LIMIT,
     RegisterEventInterest, RegisterEventInterestCommand, RegisterEventInterestCommandArgs,
     ReplaceEventActs, ReplaceEventActsCommand, RepositoryError, RequestId, SetEventCounterparty,
-    SetEventCounterpartyCommand,
+    SetEventCounterpartyCommand, SetEventSupportSlots, SetEventSupportSlotsCommand,
 };
 use crowdrelay_domain::{
     CampaignId, EventAction, EventActionKind, EventSlug, PublicEvent, WorkspaceId,
@@ -63,6 +63,7 @@ pub struct EventState {
     list_fan_interests: ListFanEventInterests,
     replace_acts: ReplaceEventActs,
     set_counterparty: SetEventCounterparty,
+    set_support_slots: SetEventSupportSlots,
     action_submitter: EventActionSubmitter,
     action_metrics_reader: EventActionMetricsReader,
 }
@@ -78,6 +79,7 @@ impl EventState {
         list_fan_interests: ListFanEventInterests,
         replace_acts: ReplaceEventActs,
         set_counterparty: SetEventCounterparty,
+        set_support_slots: SetEventSupportSlots,
         action_submitter: EventActionSubmitter,
         action_metrics_reader: EventActionMetricsReader,
     ) -> Self {
@@ -88,6 +90,7 @@ impl EventState {
             list_fan_interests,
             replace_acts,
             set_counterparty,
+            set_support_slots,
             action_submitter,
             action_metrics_reader,
         }
@@ -822,6 +825,15 @@ pub async fn replace_event_acts(
 /// representable.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct SetEventSupportSlotsRequest {
+    /// How many places on the bill the promoter has offered. `null` clears the
+    /// declaration back to unstated, which is not the same as `0` — zero is
+    /// the answer that the bill is full.
+    open_support_slots: Option<u8>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SetEventCounterpartyRequest {
     counterparty_name: Option<String>,
     counterparty_email: Option<String>,
@@ -846,6 +858,58 @@ fn valid_counterparty_email(email: &str) -> bool {
 
 /// Sets the event's counterparty contact (staff/admin). The T+7 post-show
 /// report is emailed to this address alongside the band.
+/// `PUT /v1/{admin,staff}/events/{slug}/support-slots` — the promoter offered
+/// places on this bill (4V.5).
+///
+/// Declared, never inferred. The roster planner ranks filling one of these
+/// above booking a new night, because the room, the date and the promoter are
+/// already committed — but only a person knows whether the offer was made, and
+/// a roster that asks for a place nobody offered spends the relationship the
+/// proposal was meant to build.
+pub async fn set_event_support_slots(
+    State(state): State<crate::AppState>,
+    Path(raw_slug): Path<String>,
+    headers: HeaderMap,
+    body: Result<Json<SetEventSupportSlotsRequest>, JsonRejection>,
+) -> Response {
+    let request_id_value = request_id(&headers);
+    let Json(payload) = match body {
+        Ok(value) => value,
+        Err(rejection) => {
+            let problem = if rejection.status() == StatusCode::PAYLOAD_TOO_LARGE {
+                Problem::payload_too_large(request_id_value)
+            } else {
+                Problem::bad_request(request_id_value)
+            };
+            return problem.private().into_response();
+        }
+    };
+    // The column's own CHECK is 0..=4. Rejected here rather than at the write
+    // so the operator gets a 400 naming their input instead of a 500 naming
+    // ours — and four is already a bill nobody plays.
+    if payload.open_support_slots.is_some_and(|slots| slots > 4) {
+        return Problem::bad_request(request_id_value)
+            .private()
+            .into_response();
+    }
+    let command = SetEventSupportSlotsCommand {
+        workspace_id: state.events.workspace_id,
+        event_slug: raw_slug.trim().to_ascii_lowercase(),
+        open_support_slots: payload.open_support_slots,
+    };
+    match state.events.set_support_slots.execute(&command).await {
+        Ok(()) => (
+            StatusCode::OK,
+            [(CACHE_CONTROL, HeaderValue::from_static(PRIVATE_NO_STORE))],
+            Json(serde_json::json!({
+                "open_support_slots": command.open_support_slots,
+            })),
+        )
+            .into_response(),
+        Err(error) => repository_problem(error, request_id_value).into_response(),
+    }
+}
+
 pub async fn set_event_counterparty(
     State(state): State<crate::AppState>,
     Path(raw_slug): Path<String>,

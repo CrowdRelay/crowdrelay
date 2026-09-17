@@ -495,6 +495,16 @@ pub(super) fn application_routes(state: AppState) -> Router {
             "/v1/admin/events/{slug}/counterparty",
             put(events::set_event_counterparty),
         )
+        // 4V.5: the promoter offered places on this bill. Declared by a
+        // person on both surfaces the bill itself is edited from.
+        .route(
+            "/v1/staff/events/{slug}/support-slots",
+            put(events::set_event_support_slots),
+        )
+        .route(
+            "/v1/admin/events/{slug}/support-slots",
+            put(events::set_event_support_slots),
+        )
         .route(
             "/v1/internal/ticket-orders/{order_id}/stripe-checkout",
             post(ticketing::bind_stripe_checkout),

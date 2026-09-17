@@ -55,6 +55,14 @@ struct TimelineEventView {
     /// What the night knows about the room itself — the beacon-campaign
     /// record keyed to this event (relationship status, last reply, notes).
     venue_knowledge: Vec<serde_json::Value>,
+    /// Who else plays, in the order the bill puts them, each with its own
+    /// ticket link (4V.5b).
+    ///
+    /// `event_acts` has held this since migration 0271 and nothing rendered
+    /// it: the gig page described nine steps of work and could not say who
+    /// the night actually was. The bill is the first thing a band member
+    /// checks and the first thing a promoter asks about.
+    bill: Vec<serde_json::Value>,
 }
 
 /// `GET /v1/control-plane/events/{event_slug}/timeline` — the nine-step
@@ -99,6 +107,7 @@ pub async fn control_plane_event_timeline(
                 status: facts.event.status.clone(),
                 starts_at: format_time(facts.event.starts_at),
                 ends_at: facts.event.ends_at.map(format_time),
+                bill: bill_view(&facts.crossbill_acts),
                 counterparty_name: facts.event.counterparty_name.clone(),
                 counterparty_email: facts.event.counterparty_email.clone(),
                 venue_knowledge: facts
@@ -118,6 +127,28 @@ pub async fn control_plane_event_timeline(
         }),
     )
         .into_response()
+}
+
+/// The bill as the page reads it (4V.5b).
+///
+/// The order is the bill's own — the query returns it by `position`, and this
+/// preserves that rather than sorting by name: who opens and who closes is a
+/// decision somebody made, and re-ordering it on the page rewrites it.
+///
+/// A missing ticket link stays null. At this size a support act often sells
+/// through its own page and often has no link at all, and inventing the
+/// headline show's link for them would send buyers to the wrong checkout.
+fn bill_view(acts: &[TimelineActRow]) -> Vec<serde_json::Value> {
+    acts.iter()
+        .map(|act| {
+            serde_json::json!({
+                "slug": act.act_slug,
+                "name": act.act_name,
+                "position": act.position,
+                "ticket_url": act.ticket_url,
+            })
+        })
+        .collect()
 }
 
 fn task_owner<'a>(facts: &'a TimelineFacts, item_key: &str) -> Option<&'a str> {

@@ -15,7 +15,7 @@ use std::{
 use async_trait::async_trait;
 use crowdrelay_application::{
     EventRepository, RegisterEventInterestCommand, ReplaceEventActsCommand, RepositoryError,
-    SetEventCounterpartyCommand,
+    SetEventCounterpartyCommand, SetEventSupportSlotsCommand,
 };
 use crowdrelay_domain::{
     CampaignId, CityId, EventAction, EventCity, EventId, EventInterestResult, EventSlug,
@@ -571,6 +571,53 @@ impl PostgresEventRepository {
             .map_err(EventStoreError::from_sqlx)
     }
 
+    /// 4V.5: records the promoter's offer of places on this bill.
+    ///
+    /// Draft and published only. A completed night cannot offer a place — the
+    /// bill it had is history — and a cancelled one has no bill at all. That
+    /// is a narrower rule than the counterparty's on purpose: contact details
+    /// are confirmed around show day, an open slot is not.
+    async fn set_event_support_slots_inner(
+        &self,
+        command: &SetEventSupportSlotsCommand,
+    ) -> Result<(), EventStoreError> {
+        let mut transaction = self
+            .pool
+            .begin()
+            .await
+            .map_err(EventStoreError::from_sqlx)?;
+        let workspace_id =
+            trusted_workspace_id_in_transaction(&mut transaction, &self.workspace_slug).await?;
+        if workspace_id != command.workspace_id {
+            return Err(EventStoreError::NotFound);
+        }
+
+        let updated = sqlx::query(
+            r#"
+            UPDATE events
+            SET open_support_slots = $3,
+                updated_at = now()
+            WHERE workspace_id = $1
+                AND slug = $2
+                AND status IN ('draft', 'published')
+            "#,
+        )
+        .bind(workspace_id.into_uuid())
+        .bind(command.event_slug.as_str())
+        .bind(command.open_support_slots.map(i16::from))
+        .execute(&mut *transaction)
+        .await
+        .map_err(EventStoreError::from_sqlx)?;
+        if updated.rows_affected() == 0 {
+            return Err(EventStoreError::NotFound);
+        }
+
+        transaction
+            .commit()
+            .await
+            .map_err(EventStoreError::from_sqlx)
+    }
+
     async fn set_event_counterparty_inner(
         &self,
         command: &SetEventCounterpartyCommand,
@@ -747,6 +794,15 @@ impl EventRepository for PostgresEventRepository {
         command: &SetEventCounterpartyCommand,
     ) -> Result<(), RepositoryError> {
         self.bounded(self.set_event_counterparty_inner(command))
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn set_event_support_slots(
+        &self,
+        command: &SetEventSupportSlotsCommand,
+    ) -> Result<(), RepositoryError> {
+        self.bounded(self.set_event_support_slots_inner(command))
             .await
             .map_err(Into::into)
     }

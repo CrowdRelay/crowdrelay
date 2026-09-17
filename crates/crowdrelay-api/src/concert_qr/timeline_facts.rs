@@ -26,7 +26,13 @@ struct TimelineEventRow {
 struct TimelineActRow {
     act_slug: String,
     act_name: String,
+    /// Where on the bill. The order is the night's own — headliner last is a
+    /// choice somebody made, and re-sorting it alphabetically on the page
+    /// would quietly rewrite it.
     position: i32,
+    /// This act's own ticket link, when the bill carries one. A support act
+    /// selling through its own page is the normal case at this size, and a
+    /// page that lists the act without the link sends the reader looking.
     ticket_url: Option<String>,
 }
 

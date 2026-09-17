@@ -370,6 +370,7 @@ async fn run(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
     a_roster_capacity_is_stated_or_absent(pool).await?;
     shared_fans_measure_overlap_without_naming_anybody(pool).await?;
     an_overlap_is_measured_in_each_city_separately(pool).await?;
+    a_declared_open_slot_reaches_the_roster_planner(pool).await?;
 
     Ok(())
 }
@@ -550,6 +551,109 @@ async fn an_overlap_is_measured_in_each_city_separately(
     );
 
     Ok(())
+}
+
+/// 4V.5 — a promoter's offer of a place on the bill reaches the planner.
+///
+/// The roster's cheapest move only exists when somebody declares it. This
+/// drives the whole path: a published show with `open_support_slots` set is a
+/// slot, and everything else — an unstated bill, a bill declared full, a draft
+/// show, a night that already happened — is not.
+async fn a_declared_open_slot_reaches_the_roster_planner(
+    pool: &PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use crowdrelay_infra::gig_planning::roster_opportunity;
+
+    let label = organization(pool, "label-slots").await?;
+    let act = org_workspace(pool, label, "slot-act").await?;
+    let lodz = city(pool, "lodz").await?;
+
+    let slot_show = published_show(pool, act, lodz, "with-room", 40).await?;
+    let _silent_show = published_show(pool, act, lodz, "nobody-said", 45).await?;
+    let full_show = published_show(pool, act, lodz, "bill-is-full", 50).await?;
+    sqlx::query("UPDATE events SET open_support_slots = 1 WHERE id = $1")
+        .bind(slot_show)
+        .execute(pool)
+        .await?;
+    // Declared full. A zero is an answer somebody gave, and the planner acts
+    // on it exactly as it acts on silence: no slot. The difference matters to
+    // the operator reading it, not to the plan.
+    sqlx::query("UPDATE events SET open_support_slots = 0 WHERE id = $1")
+        .bind(full_show)
+        .execute(pool)
+        .await?;
+
+    let opportunity = roster_opportunity(pool, label, 2, OffsetDateTime::now_utc()).await?;
+    assert_eq!(
+        opportunity.open_slots.len(),
+        1,
+        "exactly the declared slot is a slot, got {:?}",
+        opportunity
+            .open_slots
+            .iter()
+            .map(|slot| slot.venue.as_str())
+            .collect::<Vec<_>>()
+    );
+    let slot = &opportunity.open_slots[0];
+    assert_eq!(slot.city, "lodz");
+    assert_eq!(slot.headliner, "slot-act");
+    assert!(
+        (39..=41).contains(&slot.days_until_show),
+        "the lead time is the show's own, got {}",
+        slot.days_until_show
+    );
+    // The silent show is not a slot and is not an error either — nobody has
+    // said, which is the state most shows are in.
+    assert!(
+        !opportunity
+            .open_slots
+            .iter()
+            .any(|slot| slot.venue.contains("nobody")),
+        "a show nobody has spoken about was read as an offer"
+    );
+
+    // A draft show is not a commitment anybody made, and a night that already
+    // happened cannot offer a place on its bill.
+    let draft = published_show(pool, act, lodz, "still-a-draft", 60).await?;
+    sqlx::query("UPDATE events SET status = 'draft', open_support_slots = 2 WHERE id = $1")
+        .bind(draft)
+        .execute(pool)
+        .await?;
+    let past = published_show(pool, act, lodz, "last-month", -30).await?;
+    sqlx::query("UPDATE events SET open_support_slots = 2 WHERE id = $1")
+        .bind(past)
+        .execute(pool)
+        .await?;
+    let opportunity = roster_opportunity(pool, label, 2, OffsetDateTime::now_utc()).await?;
+    assert_eq!(
+        opportunity.open_slots.len(),
+        1,
+        "a draft or a past show was read as an open slot"
+    );
+
+    Ok(())
+}
+
+/// A published show at a fixed distance from now, returning its id.
+async fn published_show(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    city_id: Uuid,
+    slug: &str,
+    days_from_now: i64,
+) -> Result<Uuid, Box<dyn std::error::Error>> {
+    Ok(sqlx::query_scalar::<_, Uuid>(
+        "INSERT INTO events
+            (workspace_id, city_id, slug, title, venue, starts_at, status, published_at)
+         VALUES ($1, $2, $3, $3, $3, now() + ($4 || ' days')::interval, 'published', now())
+         RETURNING id",
+    )
+    .bind(workspace_id)
+    .bind(city_id)
+    .bind(slug)
+    .bind(days_from_now.to_string())
+    .fetch_one(pool)
+    .await?)
 }
 
 async fn a_roster_capacity_is_stated_or_absent(
