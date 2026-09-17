@@ -469,6 +469,71 @@ pub struct NextBestAction {
     pub briefing: Option<ActionBriefing>,
 }
 
+/// One row of the scout shortlist — every tracked opportunity, whether or not
+/// it is currently actionable.
+///
+/// A view, not a stored row: every field is read from
+/// `viryaos_team_opportunities` plus the newest autopilot decision naming the
+/// opportunity as its subject. Ineligible and stale rows stay on the list with
+/// their reason — a shortlist that silently drops what it rejected is a
+/// shortlist the operator has to double-check by hand.
+#[derive(Clone, Debug, Serialize)]
+pub struct OpportunityShortlistEntry {
+    pub opportunity_id: uuid::Uuid,
+    pub kind: String,
+    pub source: String,
+    pub external_key: String,
+    pub title: String,
+    pub organization: String,
+    /// The link the finding stands on. `None` means no usable destination was
+    /// ever supplied — such rows are always `stale_reason = "no_destination"`.
+    pub destination_url: Option<String>,
+    #[serde(with = "time::serde::rfc3339::option")]
+    pub source_observed_at: Option<OffsetDateTime>,
+    #[serde(with = "time::serde::rfc3339::option")]
+    pub deadline: Option<OffsetDateTime>,
+    pub status: String,
+    /// Why a terminal row closed. `null` for live rows.
+    pub status_reason: Option<String>,
+    pub eligible: bool,
+    /// Money fields stay `null` when unknown — never `0`, which would read as
+    /// "free" or "unpaid" to somebody scanning the list.
+    pub expected_fee_minor: Option<i64>,
+    pub estimated_cost_minor: Option<i64>,
+    pub application_fee_minor: Option<i64>,
+    pub fit_basis_points: u16,
+    pub reputation_basis_points: u16,
+    pub confidence_basis_points: u16,
+    /// Why the row cannot be worked right now, when it cannot:
+    /// `no_destination`, `stale_observation`, `deadline_passed`,
+    /// `ineligible`, `closed`.
+    pub stale_reason: Option<String>,
+    /// Newest autopilot decision naming this opportunity, if any.
+    pub latest_decision_id: Option<uuid::Uuid>,
+    pub latest_decision_kind: Option<String>,
+    pub latest_decision_status: Option<String>,
+    /// Whether the cost figure came from the tour-economics engine rather
+    /// than from whatever was typed in.
+    pub costed_from_logistics: bool,
+}
+
+/// The scout shortlist: what was found, what it would cost, and what
+/// happened to it. `degraded` names the sections that could not be read —
+/// the answer is still 200, and the absent sections stay `null`-shaped.
+#[derive(Clone, Debug, Serialize)]
+pub struct OpportunityShortlist {
+    pub generated_at: OffsetDateTime,
+    pub entries: Vec<OpportunityShortlistEntry>,
+    /// Rows whose `stale_reason` is set.
+    pub stale_count: i64,
+    /// Rows whose status is terminal (`lost`, `dismissed`, `won`).
+    pub closed_count: i64,
+    /// Rows not eligible for any pipeline path.
+    pub ineligible_count: i64,
+    /// Sections that could not be read this time.
+    pub degraded: Vec<String>,
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct ChiefOfStaffShowTask {
     pub event_id: EventId,

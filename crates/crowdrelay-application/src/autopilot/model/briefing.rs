@@ -630,6 +630,19 @@ impl AutopilotActionPayload {
                 ],
                 deadline_note: String::new(),
             },
+            Self::IssueCounterpartyReport { opportunity_id, event_id } => ActionBriefing {
+                summary: "Send the post-show report to the promoter".into(),
+                why_it_matters: "The next ask rides on proof. The report from the last show goes out before the counter-offer does.".into(),
+                steps: vec![
+                    BriefingStep { what_to_do: "Check the report covers the last show they put on".into(), why_it_matters: "The promoter reads it as the band's case for the next ask".into() },
+                    BriefingStep { what_to_do: "Click APPROVE to send the report".into(), why_it_matters: "Once approved the report is sent to the counterparty".into() },
+                ],
+                content: vec![
+                    BriefingField { label: "Opportunity".into(), value: short_ref(opportunity_id) },
+                    BriefingField { label: "Show".into(), value: short_ref(event_id) },
+                ],
+                deadline_note: String::new(),
+            },
             Self::PrepareFundingPackage { opportunity_id } => ActionBriefing {
                 summary: "Prepare the funding package".into(),
                 why_it_matters: "This assembles the funding application documents. Internal only; it contacts nobody outside.".into(),

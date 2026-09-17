@@ -894,6 +894,15 @@ pub enum AutopilotActionPayload {
         fee_minor: i64,
         currency: String,
     },
+    /// Issue the post-show report owed to this counterparty before the first
+    /// counter goes out (§3.7): the ask rides on proof, and the proof is the
+    /// report from the last show they put on. Emits the same
+    /// `post_show_report_due` event the checklist path emits, so the report
+    /// machinery stays the single writer.
+    IssueCounterpartyReport {
+        opportunity_id: TeamOpportunityId,
+        event_id: EventId,
+    },
     PrepareFundingPackage {
         opportunity_id: TeamOpportunityId,
     },
@@ -1194,6 +1203,10 @@ impl AutopilotActionPayload {
             // band's calendar and money. Neither is ours to take back.
             | Self::CounterLiveOpportunityTerms { .. }
             | Self::AcceptLiveOpportunityTerms { .. }
+            // The report goes to the counterparty — somebody else's inbox —
+            // and a sent report cannot be unsent, same as the counter it
+            // precedes.
+            | Self::IssueCounterpartyReport { .. }
             | Self::SubmitFundingApplication { .. }
             // A community post reaches somebody else's platform — Reddit,
             // forums — and once posted it cannot be unsent. The operator
@@ -1716,6 +1729,11 @@ pub struct LiveTermsSnapshot {
     /// The negotiation's currency, carried from the row rather than assumed:
     /// a counter quoted in the wrong one is a different offer.
     pub currency: String,
+    /// A post-show report still owed to this counterparty, by event id. The
+    /// first counter of a negotiation waits on it — the report is the proof
+    /// the band's case for the next ask is real, and it goes out before the
+    /// ask does. `None` when nothing is owed or the report already went.
+    pub report_pending_event_id: Option<EventId>,
 }
 
 /// Ending a negotiation without an acceptance, and why.

@@ -13,7 +13,7 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-/// The eight outcome kinds the agents service may emit. Mirrors the zod enum
+/// The outcome kinds the agents service may emit. Mirrors the zod enum
 /// in `crowdrelay-agents/src/agent/structured.ts`.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -26,6 +26,9 @@ pub enum OutcomeKind {
     CampaignInsight,
     ReleasePlanNote,
     GenericInsight,
+    /// Scout discoveries: each item lands as a `viryaos_team_opportunities`
+    /// row and a review decision, never as an application.
+    OpportunityFindings,
 }
 
 impl OutcomeKind {
@@ -40,6 +43,7 @@ impl OutcomeKind {
             Self::CampaignInsight => "campaign_insight",
             Self::ReleasePlanNote => "release_plan_note",
             Self::GenericInsight => "generic_insight",
+            Self::OpportunityFindings => "opportunity_findings",
         }
     }
 
@@ -49,7 +53,7 @@ impl OutcomeKind {
         match self {
             Self::PressPitch | Self::SocialPost => "promotion_budget",
             Self::SignalPush | Self::AudienceSegments => "fan_lifecycle",
-            Self::OutreachTargets => "booking_opportunity",
+            Self::OutreachTargets | Self::OpportunityFindings => "booking_opportunity",
             Self::CampaignInsight | Self::ReleasePlanNote | Self::GenericInsight => {
                 "growth_intelligence"
             }
@@ -61,9 +65,11 @@ impl OutcomeKind {
     #[must_use]
     pub const fn disposition(self) -> &'static str {
         match self {
-            Self::PressPitch | Self::SocialPost | Self::SignalPush | Self::OutreachTargets => {
-                "require_approval"
-            }
+            Self::PressPitch
+            | Self::SocialPost
+            | Self::SignalPush
+            | Self::OutreachTargets
+            | Self::OpportunityFindings => "require_approval",
             Self::AudienceSegments
             | Self::CampaignInsight
             | Self::ReleasePlanNote
@@ -79,6 +85,7 @@ impl OutcomeKind {
             Self::SignalPush => "agent_signal_push_proposal",
             Self::AudienceSegments => "agent_segment_proposal",
             Self::OutreachTargets => "agent_target_proposal",
+            Self::OpportunityFindings => "agent_opportunity_finding",
             Self::CampaignInsight | Self::ReleasePlanNote | Self::GenericInsight => "agent_insight",
         }
     }
@@ -369,6 +376,7 @@ pub fn validate(
         "campaign_insight" => OutcomeKind::CampaignInsight,
         "release_plan_note" => OutcomeKind::ReleasePlanNote,
         "generic_insight" => OutcomeKind::GenericInsight,
+        "opportunity_findings" => OutcomeKind::OpportunityFindings,
         other => return Err(OutcomeValidationError::UnknownKind(other.to_owned())),
     };
     let self_reported_confidence = ModelSelfReportedConfidence::parse(confidence_basis_points)?;

@@ -402,6 +402,10 @@ pub enum TeamOpportunityKind {
     ReviewContest,
     SupportSlot,
     Funding,
+    Booking,
+    Press,
+    Interview,
+    Sync,
 }
 
 impl TeamOpportunityKind {
@@ -413,6 +417,10 @@ impl TeamOpportunityKind {
             Self::ReviewContest => "review_contest",
             Self::SupportSlot => "support_slot",
             Self::Funding => "funding",
+            Self::Booking => "booking",
+            Self::Press => "press",
+            Self::Interview => "interview",
+            Self::Sync => "sync",
         }
     }
 }
@@ -449,6 +457,10 @@ pub struct UpsertTeamOpportunity {
     /// promoter or festival list is a suggestion an operator confirms here,
     /// never an automatic grant.
     pub strategic_value_basis_points: u16,
+    /// When the source was actually observed — not when the row was written.
+    /// `None` means there is no dated source evidence and the finding is not
+    /// considered observed; staleness is measured from this, not `created_at`.
+    pub source_observed_at: Option<OffsetDateTime>,
     pub expected_version: i64,
 }
 
@@ -471,11 +483,15 @@ pub enum TeamOpportunityProgress {
     Dismissed,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct RecordTeamOpportunityProgress {
     pub opportunity_id: TeamOpportunityId,
     pub progress: TeamOpportunityProgress,
     pub occurred_at: OffsetDateTime,
+    /// Required for terminal states (`lost`, `dismissed`): a row that closes
+    /// says why, so a refusal teaches the pipeline instead of disappearing.
+    /// Ignored for non-terminal progress.
+    pub reason: Option<String>,
 }
 
 /// Where the promoter stands right now.

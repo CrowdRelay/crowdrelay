@@ -407,6 +407,23 @@ fn live_terms_candidate(
         TermsDecision::Hold | TermsDecision::Decline { .. } | TermsDecision::Expire => {
             return Ok(None);
         }
+        // Report before ask: the first counter to a counterparty that is still
+        // owed a post-show report waits until the report is out. The ask rides
+        // on proof; sending the counter first spends the relationship on a
+        // number the band has not yet evidenced.
+        TermsDecision::Counter { round: 1, .. }
+            if let Some(event_id) = snapshot.report_pending_event_id =>
+        {
+            (
+                "issue_counterparty_report",
+                "a post-show report is still owed to this counterparty, and the report goes \
+                 out before the first ask does — the ask rides on that proof",
+                AutopilotActionPayload::IssueCounterpartyReport {
+                    opportunity_id: snapshot.terms.opportunity_id,
+                    event_id,
+                },
+            )
+        }
         TermsDecision::Counter { ask_minor, round } => (
             "counter_live_opportunity_terms",
             "the offer on the table is below what this show costs to play, and the counter is \
