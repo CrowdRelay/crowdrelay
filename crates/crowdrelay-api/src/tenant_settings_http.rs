@@ -98,6 +98,15 @@ pub async fn get_brand_settings(
             let mut settings = HashMap::new();
             let effective: &crowdrelay_infra::tenant_settings::TenantBrandSettings =
                 effective.as_ref();
+            // The weekly ask ceiling (§4i-6) has no default — the panel shows
+            // the tenant's number when set and empty when uncapped.
+            settings.insert(
+                "team_weekly_ask_ceiling".to_owned(),
+                overrides
+                    .get("team_weekly_ask_ceiling")
+                    .cloned()
+                    .unwrap_or_default(),
+            );
             settings.insert(
                 "member_site_base_url".to_owned(),
                 effective.member_site_base_url.clone(),
@@ -232,6 +241,14 @@ fn validate_value(key: &str, value: &str) -> bool {
             .parse::<u8>()
             .ok()
             .is_some_and(|moments| (1..=4).contains(&moments));
+    }
+    // §4i-6: the weekly ask ceiling is a small integer; 0 would silently
+    // disable every handoff, so the floor is 1 and the ceiling generous.
+    if key == "team_weekly_ask_ceiling" {
+        return value
+            .parse::<u16>()
+            .ok()
+            .is_some_and(|asks| (1..=500).contains(&asks));
     }
     true
 }

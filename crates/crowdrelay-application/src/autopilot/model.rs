@@ -1006,7 +1006,10 @@ impl AutopilotActionPayload {
                 | ReleaseMilestone::FanWarmup
                 | ReleaseMilestone::Countdown
                 | ReleaseMilestone::ReleaseDay
-                | ReleaseMilestone::Sustain => ActionClass::OwnedAudience,
+                | ReleaseMilestone::Sustain
+                // The rotation writes to the same consented owned audience —
+                // it spends from the same budget, never beside it (§4i-4).
+                | ReleaseMilestone::CatalogueRotation => ActionClass::OwnedAudience,
                 // Parking the editorial pitch writes a task inside the
                 // workspace. It reaches nobody: the form itself is a human's to
                 // submit, and the agent never claims otherwise.

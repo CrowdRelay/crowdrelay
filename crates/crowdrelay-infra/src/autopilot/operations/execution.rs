@@ -325,9 +325,16 @@ pub(in crate::autopilot) async fn execute_release_milestone(
             }
             seed_release_outreach(tx, workspace_id, release_id, title, release_at, now).await?;
         }
-        Announcement | FanWarmup | Countdown | ReleaseDay | Wrap => {
+        Announcement | FanWarmup | Countdown | ReleaseDay | Wrap | CatalogueRotation => {
             if !locked.3 {
                 return Err(RepositoryError::Conflict);
+            }
+            if milestone == Countdown {
+                // 1R.5: the pre-save push aims at the fans first-party edges
+                // say are most likely to listen — ranked and tagged before the
+                // campaign so the segment resolves against real rows, and the
+                // named list rides the outcome report for day one.
+                tag_likely_listeners(tx, workspace_id, action_id, release_id, title, now).await?;
             }
             execute_release_campaign(
                 tx,
@@ -339,6 +346,22 @@ pub(in crate::autopilot) async fn execute_release_milestone(
                 now,
             )
             .await?;
+            if milestone == Wrap {
+                // Gap 2 / 1R.7: the second wave gets the same honest outcome
+                // read the first wave got — the wrap send's own receipts are
+                // inside the transaction already.
+                release_r3_report::issue_release_outcome_report(
+                    tx,
+                    workspace_id,
+                    action_id,
+                    release_id,
+                    title,
+                    release_at,
+                    now,
+                    release_r3_report::REPORT_KIND_R14,
+                )
+                .await?;
+            }
         }
         Sustain => {
             if !locked.3 {
@@ -357,7 +380,7 @@ pub(in crate::autopilot) async fn execute_release_milestone(
             // The R+3 read rides the sustain milestone — same due date, same
             // transaction. It comes after the campaign so the phase's own
             // send appears in the receipts the report carries.
-            release_r3_report::issue_release_r3_report(
+            release_r3_report::issue_release_outcome_report(
                 tx,
                 workspace_id,
                 action_id,
@@ -365,6 +388,7 @@ pub(in crate::autopilot) async fn execute_release_milestone(
                 title,
                 release_at,
                 now,
+                release_r3_report::REPORT_KIND_R3,
             )
             .await?;
         }
@@ -409,75 +433,6 @@ async fn seed_release_calendar(
           .bind(workspace_id.into_uuid()).bind(release_id.into_uuid()).bind(&calendar_key).bind(format!("VIRYA · {title} · {label}")).bind(starts_at).bind(action_id.into_uuid()).bind(outbox_id)
           .execute(&mut **tx).await.map_err(map_sqlx)?;
     }
-    Ok(())
-}
-
-async fn execute_release_campaign(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    workspace_id: WorkspaceId,
-    action_id: crowdrelay_domain::AutopilotActionId,
-    release_id: crowdrelay_domain::ReleasePlanId,
-    title: &str,
-    milestone: crowdrelay_domain::release_autopilot::ReleaseMilestone,
-    now: OffsetDateTime,
-) -> Result<(), RepositoryError> {
-    let feature=sqlx::query_scalar::<_,bool>("SELECT COALESCE((SELECT enabled FROM ecosystem_feature_flags WHERE workspace_id=$1 AND key='communication_campaigns_enabled'),false)")
-      .bind(workspace_id.into_uuid()).fetch_one(&mut **tx).await.map_err(map_sqlx)?;
-    if !feature {
-        return Err(RepositoryError::Conflict);
-    }
-    let phase = release_milestone_str(milestone);
-    let segment_slug = format!("viryaos-release-{}", release_id);
-    let campaign_slug = format!("viryaos-release-{}-{}", release_id, phase);
-    let segment_id=sqlx::query_scalar::<_,Uuid>(r#"INSERT INTO audience_segments(workspace_id,slug,name,description,filter,active) VALUES($1,$2,$3,'VIRYA OS release audience',jsonb_build_object('statuses',jsonb_build_array('active'),'marketing_consent',true),true) ON CONFLICT(workspace_id,slug) DO UPDATE SET active=true RETURNING id"#)
-      .bind(workspace_id.into_uuid()).bind(&segment_slug).bind(format!("{title} · release audience")).fetch_one(&mut **tx).await.map_err(map_sqlx)?;
-    let template = format!("release.{phase}.v1");
-    let growth_goal = match milestone {
-        crowdrelay_domain::release_autopilot::ReleaseMilestone::FanWarmup => "referral",
-        crowdrelay_domain::release_autopilot::ReleaseMilestone::Wrap => "retention",
-        _ => "engagement",
-    };
-    let campaign = sqlx::query_as::<_, (Uuid, String)>(
-        r#"
-        INSERT INTO communication_campaigns(
-            workspace_id,segment_id,slug,name,channel,template_key,content
-        ) VALUES(
-            $1,$2,$3,$4,'email',$5,
-            jsonb_build_object(
-                'release_id',$6::uuid,
-                'managed_by','viryaos',
-                'growth_goal',$7::text
-            )
-        )
-        ON CONFLICT(workspace_id,slug)
-        DO UPDATE SET template_key=communication_campaigns.template_key
-        RETURNING id,status
-        "#,
-    )
-    .bind(workspace_id.into_uuid())
-    .bind(segment_id)
-    .bind(&campaign_slug)
-    // communication_campaigns.name is CHECKed at 160 chars while a plan title
-    // allows 240; an over-long title must not wedge every milestone send.
-    .bind(format!(
-        "{} · {phase}",
-        title.chars().take(140).collect::<String>()
-    ))
-    .bind(&template)
-    .bind(release_id.into_uuid())
-    .bind(growth_goal)
-    .fetch_one(&mut **tx)
-    .await
-    .map_err(map_sqlx)?;
-    if campaign.1 == "draft" {
-        let outbox_id=sqlx::query_scalar::<_,Uuid>(r#"INSERT INTO outbox_events(workspace_id,event_type,event_version,payload,available_at) VALUES($1,'communication.campaign_due',1,jsonb_build_object('campaign_id',$2::uuid,'campaign_slug',$3::text,'channel','email','segment_id',$4::uuid,'template_key',$5::text),$6) RETURNING id"#)
-          .bind(workspace_id.into_uuid()).bind(campaign.0).bind(&campaign_slug).bind(segment_id).bind(&template).bind(now).fetch_one(&mut **tx).await.map_err(map_sqlx)?;
-        sqlx::query("UPDATE communication_campaigns SET status='scheduled',scheduled_at=$3,dispatch_event_id=$4 WHERE workspace_id=$1 AND id=$2 AND status='draft'")
-          .bind(workspace_id.into_uuid()).bind(campaign.0).bind(now).bind(outbox_id).execute(&mut **tx).await.map_err(map_sqlx)?;
-    } else if !matches!(campaign.1.as_str(), "scheduled" | "completed") {
-        return Err(RepositoryError::Conflict);
-    }
-    let _ = action_id;
     Ok(())
 }
 
@@ -994,6 +949,7 @@ pub(in crate::autopilot) const fn release_milestone_str(
         ReleaseDay => "release_day",
         Sustain => "sustain",
         Wrap => "wrap",
+        CatalogueRotation => "catalogue_rotation",
     }
 }
 
@@ -1161,6 +1117,7 @@ pub(in crate::autopilot) async fn execute_signal_push(
             SegmentBind::MinReferrals(v) => query.bind(v),
             SegmentBind::Synesthesia(v) => query.bind(v),
             SegmentBind::TagsAll(v) => query.bind(v),
+            SegmentBind::ExcludedCampaignSlugs(v) => query.bind(v),
         };
     }
 

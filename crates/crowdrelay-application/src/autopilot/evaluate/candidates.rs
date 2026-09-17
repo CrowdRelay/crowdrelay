@@ -293,6 +293,7 @@ fn release_candidate(
         ReleaseMilestone::ReleaseDay => "release_day",
         ReleaseMilestone::Sustain => "sustain",
         ReleaseMilestone::Wrap => "wrap",
+        ReleaseMilestone::CatalogueRotation => "catalogue_rotation",
     };
     // §4i-2: a week that contains a live show is the show's week. An
     // owned-audience milestone due in it holds rather than spending the same

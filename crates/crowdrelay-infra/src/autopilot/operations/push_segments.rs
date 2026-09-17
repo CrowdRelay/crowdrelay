@@ -29,6 +29,10 @@ pub(in crate::autopilot) struct SegmentFilter {
     min_qualified_referrals: Option<i64>,
     synesthesia_completed: Option<bool>,
     tags_all: Vec<String>,
+    /// Campaigns whose delivered-or-claimed sends mark a fan as reached — the
+    /// release late waves subtract them so "you might have missed it" only
+    /// goes to fans the earlier phases never contacted.
+    excluded_campaign_slugs: Vec<String>,
 }
 
 impl SegmentFilter {
@@ -40,6 +44,7 @@ impl SegmentFilter {
             || self.min_qualified_referrals.is_some()
             || self.synesthesia_completed.is_some()
             || !self.tags_all.is_empty()
+            || !self.excluded_campaign_slugs.is_empty()
     }
 
     /// Build the SQL fragment and collect bind values for the segment filter.
@@ -129,6 +134,27 @@ impl SegmentFilter {
                 )"
             ));
             binds.push(SegmentBind::TagsAll(std::mem::take(&mut self.tags_all)));
+            bind_idx += 1;
+        }
+
+        if !self.excluded_campaign_slugs.is_empty() {
+            let b = bind_idx;
+            conditions.push(format!(
+                "AND NOT EXISTS (
+                    SELECT 1
+                    FROM communication_campaign_deliveries reached
+                    JOIN communication_campaigns reached_campaign
+                      ON reached_campaign.workspace_id = reached.workspace_id
+                     AND reached_campaign.id = reached.campaign_id
+                    WHERE reached.workspace_id = fan.workspace_id
+                      AND reached.fan_id = fan.id
+                      AND reached.status IN ('delivered', 'claimed')
+                      AND reached_campaign.slug = ANY(${b}::text[])
+                )"
+            ));
+            binds.push(SegmentBind::ExcludedCampaignSlugs(std::mem::take(
+                &mut self.excluded_campaign_slugs,
+            )));
         }
 
         (conditions.join("\n          "), binds)
@@ -143,6 +169,7 @@ pub(in crate::autopilot) enum SegmentBind {
     MinReferrals(i64),
     Synesthesia(bool),
     TagsAll(Vec<String>),
+    ExcludedCampaignSlugs(Vec<String>),
 }
 
 /// Load a segment's JSONB filter from `audience_segments` and parse it into a
@@ -213,7 +240,8 @@ pub(in crate::autopilot) async fn resolve_segment_filter(
 /// Parse a JSONB filter object into a validated `SegmentFilter`.
 ///
 /// Validates that:
-/// - `statuses`, `city_slugs`, `tags_all` are JSON arrays of strings
+/// - `statuses`, `city_slugs`, `tags_all`, `excluded_campaign_slugs` are JSON
+///   arrays of strings
 /// - `min_qualified_referrals` is a JSON number (or absent)
 /// - `synesthesia_completed` is a JSON boolean (or absent)
 ///
@@ -249,5 +277,6 @@ fn parse_segment_filter(filter: &serde_json::Value) -> Option<SegmentFilter> {
             _ => None,
         }),
         tags_all: parse_string_array("tags_all")?,
+        excluded_campaign_slugs: parse_string_array("excluded_campaign_slugs")?,
     })
 }

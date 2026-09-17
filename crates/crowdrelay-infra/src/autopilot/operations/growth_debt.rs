@@ -276,6 +276,11 @@ pub(in crate::autopilot) async fn load_growth_debt_observations(
             WHERE plan.workspace_id = $1
               AND plan.active
               AND plan.release_at > $2
+              -- A filler owes no assets gate (§4i-0c): a demo is posted or
+              -- it is not — the recording is the content, and flagging a
+              -- missing listen URL on it manufactures debt the band cannot
+              -- act on.
+              AND plan.tier <> 'filler'
               AND (plan.listen_url IS NULL OR NOT plan.assets_ready)
         ),
         stale_contacts AS (

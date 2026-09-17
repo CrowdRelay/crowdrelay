@@ -30,6 +30,8 @@ mod show_cost;
 mod state;
 mod success_evidence;
 mod team;
+mod team_release;
+mod team_routing;
 mod terms;
 mod tuning;
 mod waves;
@@ -451,6 +453,7 @@ struct ReleaseSnapshotRow {
     editorial_pitch_completed_at: Option<OffsetDateTime>,
     editorial_pitch_escalated_at: Option<OffsetDateTime>,
     wrap_sent: bool,
+    catalogue_rotation_sent: bool,
 }
 
 #[derive(Debug, FromRow)]

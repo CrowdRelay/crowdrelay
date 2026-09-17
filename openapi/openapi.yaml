@@ -3617,6 +3617,23 @@ paths:
         '401': { $ref: '#/components/responses/PrivateProblem' }
         '409': { $ref: '#/components/responses/PrivateProblem' }
         '503': { $ref: '#/components/responses/PrivateProblem' }
+  /admin/autopilot/release-outcomes:
+    get:
+      operationId: listAutopilotReleaseOutcomes
+      summary: Recorded per-release outcome reports (R+3 and R+14)
+      description: Raw outcome rows keyed by release — observed first-party figures plus the tenant-baseline comparison and the stated evidence gaps. Returns records, never a computed per-tier winner; the caller renders the n.
+      security:
+      - adminBearer: []
+      responses:
+        '200':
+          description: Release outcome reports, newest first
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/AutopilotReleaseOutcome' }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
   /admin/autopilot/manager-config/booking-policy:
     get:
       operationId: getAutopilotManagerBookingPolicy
@@ -11560,7 +11577,7 @@ components:
     ReleaseMilestoneHistory:
       type: object
       additionalProperties: false
-      required: [calendar_seeded, editorial_pitch_parked, announcement_sent, press_started, fan_warmup_sent, countdown_sent, release_day_sent, sustain_sent, wrap_sent]
+      required: [calendar_seeded, editorial_pitch_parked, announcement_sent, press_started, fan_warmup_sent, countdown_sent, release_day_sent, sustain_sent, wrap_sent, catalogue_rotation_sent]
       properties:
         calendar_seeded: { type: boolean }
         editorial_pitch_parked: { type: boolean }
@@ -11571,6 +11588,7 @@ components:
         release_day_sent: { type: boolean }
         sustain_sent: { type: boolean }
         wrap_sent: { type: boolean }
+        catalogue_rotation_sent: { type: boolean }
     ReleaseTimelineStep:
       type: object
       additionalProperties: false
@@ -11578,7 +11596,7 @@ components:
       properties:
         milestone:
           type: string
-          enum: [seed_calendar, editorial_pitch, announcement, start_press, fan_warmup, countdown, release_day, sustain, wrap]
+          enum: [seed_calendar, editorial_pitch, announcement, start_press, fan_warmup, countdown, release_day, sustain, wrap, catalogue_rotation]
         offset_days:
           type: integer
           description: Days relative to the release — -28 is R-28, 3 is R+3.
@@ -11618,6 +11636,20 @@ components:
           type: array
           items: { $ref: '#/components/schemas/ReleaseTimelineStep' }
           description: Every rung of the release ladder with its R-offset, due date and honest state — the page that opens the timeline.
+    AutopilotReleaseOutcome:
+      type: object
+      additionalProperties: false
+      required: [release_id, title, tier, release_at, report_kind, generated_at, window_days, verdict, payload]
+      properties:
+        release_id: { type: string, format: uuid }
+        title: { type: string }
+        tier: { type: string, enum: [single, track, filler] }
+        release_at: { type: string, format: date-time }
+        report_kind: { type: string, enum: [release_r3, release_r14] }
+        generated_at: { type: string, format: date-time }
+        window_days: { type: integer }
+        verdict: { type: string, description: "The honest verdict — e.g. above_trend, flat, insufficient_evidence — never a claim the records cannot carry." }
+        payload: { type: object, description: "The whole report as emitted: observed figures, baseline comparison, evidence gaps." }
     AutopilotOutreachWaveView:
       type: object
       additionalProperties: true

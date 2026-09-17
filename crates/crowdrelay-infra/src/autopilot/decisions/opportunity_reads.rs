@@ -325,12 +325,17 @@ macro_rules! decision_opportunity_reads {
                        EXISTS(SELECT 1 FROM viryaos_release_milestones m WHERE m.workspace_id=plan.workspace_id AND m.release_id=plan.id AND m.milestone='release_day') release_day_sent,
                        EXISTS(SELECT 1 FROM viryaos_release_milestones m WHERE m.workspace_id=plan.workspace_id AND m.release_id=plan.id AND m.milestone='sustain') sustain_sent,
                        EXISTS(SELECT 1 FROM viryaos_release_milestones m WHERE m.workspace_id=plan.workspace_id AND m.release_id=plan.id AND m.milestone='wrap') wrap_sent,
+                       EXISTS(SELECT 1 FROM viryaos_release_milestones m WHERE m.workspace_id=plan.workspace_id AND m.release_id=plan.id AND m.milestone='catalogue_rotation') catalogue_rotation_sent,
                        EXISTS(SELECT 1 FROM viryaos_release_milestones m WHERE m.workspace_id=plan.workspace_id AND m.release_id=plan.id AND m.milestone='editorial_pitch') editorial_pitch_parked,
                        plan.editorial_pitch_completed_at,
                        plan.editorial_pitch_escalated_at
                 FROM viryaos_release_plans plan
                 WHERE plan.workspace_id=$1 AND plan.active
-                  AND plan.release_at BETWEEN $2 - INTERVAL '30 days' AND $2 + INTERVAL '180 days'
+                  -- The lookback must outlast the ladder's last rung (the
+                  -- R+30 catalogue rotation) with slack to catch up after a
+                  -- quiet stretch — a plan that leaves the window can never
+                  -- have its last milestone evaluated again.
+                  AND plan.release_at BETWEEN $2 - INTERVAL '45 days' AND $2 + INTERVAL '180 days'
                 ORDER BY plan.release_at, plan.id
                 LIMIT $3
             "#)
@@ -357,6 +362,7 @@ macro_rules! decision_opportunity_reads {
                     press_started: row.press_started, fan_warmup_sent: row.fan_warmup_sent,
                     countdown_sent: row.countdown_sent, release_day_sent: row.release_day_sent,
                     sustain_sent: row.sustain_sent, wrap_sent: row.wrap_sent,
+                    catalogue_rotation_sent: row.catalogue_rotation_sent,
                 },
             }).collect())
         }).await

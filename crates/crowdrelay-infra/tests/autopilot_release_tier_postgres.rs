@@ -1019,3 +1019,55 @@ async fn a_held_milestone_is_not_growth_debt() -> Result<(), Box<dyn std::error:
     assert_eq!(missed.outstanding_items, 8);
     Ok(())
 }
+
+/// §4i-0c: a demo is posted or it is not — a filler-tier plan owes no assets
+/// gate, so `release_assets_missing` must not fire on it. The track-tier plan
+/// beside it proves the gate still works for the releases it exists to guard.
+#[tokio::test]
+#[ignore = "needs a live postgres"]
+async fn a_filler_plan_owes_no_assets_gate() -> Result<(), Box<dyn std::error::Error>> {
+    let fixture = fixture("filler-assets").await?;
+    for (key, tier) in [
+        ("demo-filler", Some(ReleaseTier::Filler)),
+        ("real-track", Some(ReleaseTier::Track)),
+    ] {
+        fixture
+            .repository
+            .upsert_release_plan(
+                fixture.workspace_id,
+                UpsertReleasePlan {
+                    release_id: None,
+                    source_key: key.into(),
+                    title: format!("{key} title"),
+                    release_at: fixture.now + time::Duration::days(30),
+                    listen_url: None,
+                    tier,
+                    active: true,
+                    assets_ready: false,
+                    communication_enabled: true,
+                    press_enabled: true,
+                    expected_version: 0,
+                },
+                &idem(key),
+                None,
+            )
+            .await?;
+    }
+
+    let debts = fixture
+        .repository
+        .load_growth_debt_observations(fixture.workspace_id, fixture.now)
+        .await?;
+    let asset_debts: Vec<_> = debts
+        .iter()
+        .filter(|debt| {
+            debt.kind == crowdrelay_domain::growth_debt::GrowthDebtKind::ReleaseAssetsMissing
+        })
+        .collect();
+    assert_eq!(
+        asset_debts.len(),
+        1,
+        "only the track-tier plan owes the assets gate"
+    );
+    Ok(())
+}

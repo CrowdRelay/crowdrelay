@@ -15,10 +15,8 @@
 //!   assignment + reminder machinery every human handoff uses.
 
 use super::{
-    team::{
-        TeamRoutingRow, first_reminder_at, parse_team_skill, queue_team_email_action,
-        select_member_index,
-    },
+    team::{first_reminder_at, queue_team_email_action},
+    team_routing::{TeamRoutingRow, parse_team_skill, select_member_index},
     *,
 };
 use crowdrelay_brain::capture_plans::{
