@@ -154,6 +154,71 @@ pub(in crate::autopilot) async fn project_shows_to_production_events(
     Ok(())
 }
 
+/// Every published gig gets a door QR campaign whether or not anyone
+/// remembered to create one. The 2026-09-11 show ran its whole announce leg
+/// and never had a scan leg at all — `create_campaign` only answers an
+/// explicit POST, so "print the QR" could not happen without somebody knowing
+/// the campaign had to exist first. The machine mints the campaign; the only
+/// human step left is printing.
+///
+/// Idempotent on the event: any existing campaign row for the event —
+/// operator-made, revoked, or an earlier auto-mint — blocks the insert, so a
+/// deliberate revoke is never undone and a hand-entered campaign is never
+/// duplicated. Runs on the projection's window (now −2d … +60d), which also
+/// backfills shows published before this existed.
+///
+/// The window is the door's, keyed off the show: opens four hours before
+/// start (early doors, soundcheck crowds) and closes twelve hours after —
+/// inside the API's −24h/+36h bounds and the table's 14-day CHECK.
+pub(in crate::autopilot) async fn mint_door_campaigns(
+    tx: &mut Transaction<'_, Postgres>,
+    workspace_id: WorkspaceId,
+    now: OffsetDateTime,
+) -> Result<(), RepositoryError> {
+    sqlx::query(
+        r#"
+        WITH minted AS (
+            INSERT INTO concert_qr_campaigns (
+                id, workspace_id, event_id, label, valid_from, valid_until,
+                announced_from_stage, created_at, updated_at
+            )
+            SELECT uuidv7(), event.workspace_id, event.id, 'Door',
+                   event.starts_at - INTERVAL '4 hours',
+                   event.starts_at + INTERVAL '12 hours',
+                   false, $2, $2
+            FROM events event
+            WHERE event.workspace_id = $1
+              AND event.status = 'published'
+              AND event.starts_at >= $2 - INTERVAL '2 days'
+              AND event.starts_at <= $2 + INTERVAL '60 days'
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM concert_qr_campaigns existing
+                  WHERE existing.workspace_id = event.workspace_id
+                    AND existing.event_id = event.id
+              )
+            RETURNING workspace_id, id, event_id
+        )
+        INSERT INTO audit_events (
+            workspace_id, actor_kind, action, target_type, target_id, metadata
+        )
+        SELECT minted.workspace_id, 'service', 'concert_qr.auto_minted',
+               'concert_qr_campaign', minted.id::text,
+               jsonb_build_object(
+                   'event_id', minted.event_id,
+                   'source', 'show_projection'
+               )
+        FROM minted
+        "#,
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(now)
+    .execute(&mut **tx)
+    .await
+    .map_err(map_sqlx)?;
+    Ok(())
+}
+
 #[derive(Debug, FromRow)]
 struct OpenCapturePlanRow {
     id: Uuid,

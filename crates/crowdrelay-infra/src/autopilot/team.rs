@@ -71,6 +71,10 @@ impl PostgresAutopilotRepository {
             // with it instead of one sweep later.
             super::capture_plans::project_shows_to_production_events(&mut tx, workspace_id, now)
                 .await?;
+            // The door QR is part of the same housekeeping: a published show
+            // mints its campaign here so the scan leg exists even when nobody
+            // remembered to create one (the 2026-09-11 finding).
+            super::capture_plans::mint_door_campaigns(&mut tx, workspace_id, now).await?;
             super::capture_plans::settle_capture_plans(&mut tx, workspace_id, now.date()).await?;
             close_resolved_assignments(&mut tx, workspace_id, now).await?;
             // Checked without erroring, because an operator who has gated
