@@ -18,12 +18,16 @@ struct TimelineEventRow {
     status: String,
     starts_at: OffsetDateTime,
     ends_at: Option<OffsetDateTime>,
+    counterparty_name: Option<String>,
+    counterparty_email: Option<String>,
 }
 
 #[derive(Debug, FromRow)]
 struct TimelineActRow {
     act_slug: String,
     act_name: String,
+    position: i32,
+    ticket_url: Option<String>,
 }
 
 #[derive(Debug, FromRow)]
@@ -162,7 +166,8 @@ async fn load_timeline_facts(
 ) -> Result<Option<TimelineFacts>, sqlx::Error> {
     let Some(event) = sqlx::query_as::<_, TimelineEventRow>(
         r#"
-        SELECT id, slug, title, venue, venue_address, status, starts_at, ends_at
+        SELECT id, slug, title, venue, venue_address, status, starts_at, ends_at,
+               counterparty_name, counterparty_email
         FROM events
         WHERE workspace_id = $1 AND slug = $2
           AND status IN ('published','completed')
@@ -472,7 +477,7 @@ async fn load_timeline_facts(
     // cooldown are the honest bound, not a made-up per-show limit.
     let crossbill_acts = sqlx::query_as::<_, TimelineActRow>(
         r#"
-        SELECT act_slug, act_name
+        SELECT act_slug, act_name, position, ticket_url
         FROM event_acts
         WHERE workspace_id = $1 AND event_id = $2
         ORDER BY position, act_slug
