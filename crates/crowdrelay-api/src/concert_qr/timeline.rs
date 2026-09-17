@@ -63,6 +63,9 @@ struct TimelineEventView {
     /// the night actually was. The bill is the first thing a band member
     /// checks and the first thing a promoter asks about.
     bill: Vec<serde_json::Value>,
+    /// The shared night this event resolves to, when it does — the key the
+    /// "Shared night" block calls back with (4V.6b).
+    place_event_id: Option<Uuid>,
 }
 
 /// `GET /v1/control-plane/events/{event_slug}/timeline` — the nine-step
@@ -108,6 +111,7 @@ pub async fn control_plane_event_timeline(
                 starts_at: format_time(facts.event.starts_at),
                 ends_at: facts.event.ends_at.map(format_time),
                 bill: bill_view(&facts.crossbill_acts),
+                place_event_id: facts.event.place_event_id,
                 counterparty_name: facts.event.counterparty_name.clone(),
                 counterparty_email: facts.event.counterparty_email.clone(),
                 venue_knowledge: facts

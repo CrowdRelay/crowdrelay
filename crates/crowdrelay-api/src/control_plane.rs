@@ -400,6 +400,34 @@ pub(crate) fn router(state: crate::AppState) -> Router {
             "/v1/control-plane/representation/approach",
             post(crate::band_listing::request_representation_approach),
         )
+        // ── The shared night (§12-9) ────────────────────────────────
+        // One read whose payload is the caller's resolved lens, and the
+        // five writes around it: contribute, revoke, mint/revoke the
+        // organiser link, and the billed act confirming itself. The lens
+        // is never a parameter — the repository derives it from who is
+        // asking, and a caller with no relationship gets the same 404 as
+        // a night that does not exist.
+        .route(
+            "/v1/control-plane/nights/{place_event_id}",
+            get(crate::night::get_night),
+        )
+        .route(
+            "/v1/control-plane/nights/{place_event_id}/contributions",
+            post(crate::night::upsert_night_contribution),
+        )
+        .route(
+            "/v1/control-plane/nights/{place_event_id}/contributions/{kind}",
+            axum::routing::delete(crate::night::revoke_night_contribution),
+        )
+        .route(
+            "/v1/control-plane/nights/{place_event_id}/organiser-link",
+            post(crate::night::mint_night_organiser_link)
+                .delete(crate::night::revoke_night_organiser_link),
+        )
+        .route(
+            "/v1/control-plane/nights/{place_event_id}/acts/{act_slug}/confirm",
+            post(crate::night::confirm_night_act),
+        )
         .route(
             "/v1/control-plane/community-posts/{community_post_id}/register-manual",
             post(crate::fanbase::register_manual_community_post),

@@ -88,6 +88,7 @@ mod gig_planning;
 mod http_metrics;
 mod meta;
 mod mobile_fan;
+mod night;
 mod ops;
 mod ops_routes;
 mod ops_summary;
@@ -481,6 +482,39 @@ fn is_control_plane_management_path(path: &str) -> bool {
             "/decide",
         )
         || one_segment_with_suffix(path, "/v1/control-plane/fanbases/", "/ingest")
+        // The shared night (§12-9). A control-plane path missing from this
+        // list answers 404 rather than saying it was refused — both halves
+        // of every pattern below are covered so a forgotten entry ships as
+        // a missing route, not a silent one.
+        || one_segment_after(path, "/v1/control-plane/nights/")
+        || one_segment_with_suffix(path, "/v1/control-plane/nights/", "/contributions")
+        || one_segment_with_suffix(path, "/v1/control-plane/nights/", "/organiser-link")
+        || night_contribution_path(path)
+        || night_act_confirm_path(path)
+}
+
+/// `/v1/control-plane/nights/{id}/contributions/{kind}` — one variable
+/// segment, a fixed middle, one variable segment.
+fn night_contribution_path(path: &str) -> bool {
+    path.strip_prefix("/v1/control-plane/nights/")
+        .and_then(|tail| tail.split_once("/contributions/"))
+        .is_some_and(|(id, kind)| {
+            !id.is_empty() && !id.contains('/') && !kind.is_empty() && !kind.contains('/')
+        })
+}
+
+/// `/v1/control-plane/nights/{id}/acts/{act_slug}/confirm` — two variable
+/// segments around a fixed middle with a fixed tail.
+fn night_act_confirm_path(path: &str) -> bool {
+    path.strip_prefix("/v1/control-plane/nights/")
+        .and_then(|tail| tail.split_once("/acts/"))
+        .is_some_and(|(id, rest)| {
+            !id.is_empty()
+                && !id.contains('/')
+                && rest
+                    .strip_suffix("/confirm")
+                    .is_some_and(|slug| !slug.is_empty() && !slug.contains('/'))
+        })
 }
 
 async fn enforce_privileged_namespace(

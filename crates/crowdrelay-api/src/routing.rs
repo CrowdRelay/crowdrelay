@@ -404,6 +404,10 @@ pub(super) fn application_routes(state: AppState) -> Router {
             "/v1/public/attestations/{token}",
             get(crate::attestation::public_attestation),
         )
+        // The shared night, by the organiser link a participant minted —
+        // the token is the whole credential and the answer is always the
+        // organiser lens (§12-9).
+        .route("/v1/public/nights/{token}", get(crate::night::public_night))
         // And by digest, with no credential of any kind. This is the route a
         // label's lawyer uses: handed a document, they check it against us
         // without asking the band for access to anything. Presenting a digest

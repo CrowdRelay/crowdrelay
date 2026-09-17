@@ -60,6 +60,7 @@ mod timeline_tests {
                 ends_at: None,
                 counterparty_name: None,
                 counterparty_email: None,
+                place_event_id: None,
             },
             emissions: Vec::new(),
             surfaces: Vec::new(),
