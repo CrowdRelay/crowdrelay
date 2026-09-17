@@ -1290,4 +1290,64 @@ mod tests {
         assert_eq!(actions[1].act_slug(), Some("opener"));
         Ok(())
     }
+
+    /// The measurement ledger is an operator surface on both authorities:
+    /// `/v1/admin` takes the admin key, `/v1/control-plane` takes the
+    /// control-plane key, and neither honours the other's. The test pool is
+    /// lazy-dead, so an authorized call reaching the read model reports 503 —
+    /// anything short of that means the request never got that far.
+    #[tokio::test]
+    async fn measurement_ledger_sits_behind_both_authority_boundaries()
+    -> Result<(), Box<dyn std::error::Error>> {
+        const ADMIN_KEY: &str = "test-admin-api-key-123456789012";
+        const STAFF_KEY: &str = "test-staff-api-key-123456789012";
+        const CONTROL_PLANE_KEY: &str = "test-control-plane-key-123456789012";
+
+        let app = test_router()?;
+
+        for request in [
+            Request::builder()
+                .uri("/v1/admin/autopilot/measurement")
+                .body(Body::empty())?,
+            Request::builder()
+                .uri("/v1/control-plane/autopilot/measurement")
+                .body(Body::empty())?,
+            Request::builder()
+                .uri("/v1/admin/autopilot/measurement")
+                .header(AUTHORIZATION, format!("Bearer {CONTROL_PLANE_KEY}"))
+                .body(Body::empty())?,
+            Request::builder()
+                .uri("/v1/admin/autopilot/measurement")
+                .header(AUTHORIZATION, format!("Bearer {STAFF_KEY}"))
+                .body(Body::empty())?,
+            Request::builder()
+                .uri("/v1/control-plane/autopilot/measurement")
+                .header(AUTHORIZATION, format!("Bearer {ADMIN_KEY}"))
+                .body(Body::empty())?,
+        ] {
+            let response = app.clone().oneshot(request).await?;
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        }
+
+        for (uri, token) in [
+            ("/v1/admin/autopilot/measurement", ADMIN_KEY),
+            ("/v1/control-plane/autopilot/measurement", CONTROL_PLANE_KEY),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(uri)
+                        .header(AUTHORIZATION, format!("Bearer {token}"))
+                        .body(Body::empty())?,
+                )
+                .await?;
+            assert_eq!(
+                response.status(),
+                StatusCode::SERVICE_UNAVAILABLE,
+                "{uri} with the right key should reach the read model"
+            );
+        }
+        Ok(())
+    }
 }

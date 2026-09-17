@@ -90,6 +90,7 @@ pub mod learning;
 pub mod listing;
 pub mod live_opportunities;
 pub mod market_intelligence;
+pub mod measurement;
 pub mod merch_bundle;
 pub mod merchandising;
 pub mod negotiation;

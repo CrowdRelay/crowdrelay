@@ -738,6 +738,10 @@ pub(super) fn application_routes(state: AppState) -> Router {
             get(autopilot::scorecard_handler),
         )
         .route(
+            "/v1/admin/autopilot/measurement",
+            get(autopilot::measurement_handler),
+        )
+        .route(
             "/v1/admin/autopilot/next-best-actions",
             get(autopilot::next_best_actions),
         )

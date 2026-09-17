@@ -3335,6 +3335,31 @@ paths:
                         executor_id: { type: string, nullable: true }
         '401': { $ref: '#/components/responses/PrivateProblem' }
         '503': { $ref: '#/components/responses/PrivateProblem' }
+  /admin/autopilot/measurement:
+    get:
+      operationId: getAutopilotMeasurement
+      summary: The measurement ledger — the plan's fifteen claims, each with its number or the reason it cannot be measured
+      description: >
+        The plan's fifteen claims judged on rates, not totals, over a 90-day
+        window. A rate is stated only when its denominator clears `rate_floor`;
+        below it the counts are shown and the rate is not. A claim this build
+        cannot measure reports `state: unmeasured` with the reason instead.
+        `room_leak` is judged per show at floor 1 — one show is one
+        observation — and `archive_worth_mining` is not windowed: the archive
+        is a stock, not a flow.
+      security:
+      - adminBearer: []
+      responses:
+        '200':
+          description: Measurement ledger.
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/PrivateNoStore'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MeasurementLedger' }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
   /admin/autopilot/acquisition-channels:
     get:
       operationId: getAutopilotAcquisitionChannels
@@ -12216,6 +12241,87 @@ components:
           type: array
           maxItems: 3
           items: { $ref: '#/components/schemas/UnattributedGroup' }
+    Measure:
+      description: >
+        What a claim's measurement resolves to, discriminated by `state`.
+        `rate` is stated only when the denominator cleared the floor;
+        `below_floor` shows the counts and the floor it needed instead;
+        `unmeasured` carries the reason this build cannot measure the claim.
+      oneOf:
+        - type: object
+          additionalProperties: false
+          required: [state, numerator, denominator, basis_points]
+          properties:
+            state: { type: string, enum: [rate] }
+            numerator: { type: integer, format: int64 }
+            denominator: { type: integer, format: int64 }
+            basis_points: { type: integer, minimum: 0, maximum: 10000 }
+        - type: object
+          additionalProperties: false
+          required: [state, numerator, denominator, floor]
+          properties:
+            state: { type: string, enum: [below_floor] }
+            numerator: { type: integer, format: int64 }
+            denominator: { type: integer, format: int64 }
+            floor: { type: integer, format: int64 }
+        - type: object
+          additionalProperties: false
+          required: [state, value, unit]
+          properties:
+            state: { type: string, enum: [count] }
+            value: { type: integer, format: int64 }
+            unit: { type: string }
+        - type: object
+          additionalProperties: false
+          required: [state, median, n]
+          properties:
+            state: { type: string, enum: [minutes] }
+            median: { type: number, format: double }
+            n: { type: integer, format: int64 }
+        - type: object
+          additionalProperties: false
+          required: [state, median, n]
+          properties:
+            state: { type: string, enum: [days] }
+            median: { type: number, format: double }
+            n: { type: integer, format: int64 }
+        - type: object
+          additionalProperties: false
+          required: [state, reason]
+          properties:
+            state: { type: string, enum: [unmeasured] }
+            reason: { type: string }
+    MeasurementBreakdown:
+      type: object
+      additionalProperties: false
+      required: [label, measure]
+      properties:
+        label: { type: string }
+        measure: { $ref: '#/components/schemas/Measure' }
+    MeasurementClaim:
+      type: object
+      additionalProperties: false
+      required: [key, claim, measured_as, window_days, measure, breakdown]
+      properties:
+        key: { type: string }
+        claim: { type: string, description: The plan's words for the claim. }
+        measured_as: { type: string, description: The plan's words for how it is measured. }
+        window_days: { type: integer, minimum: 0, description: 0 means the claim is not windowed — the archive is a stock, not a flow. }
+        measure: { $ref: '#/components/schemas/Measure' }
+        breakdown:
+          type: array
+          items: { $ref: '#/components/schemas/MeasurementBreakdown' }
+    MeasurementLedger:
+      type: object
+      additionalProperties: false
+      required: [observed_at, window_days, rate_floor, claims]
+      properties:
+        observed_at: { type: string, format: date-time }
+        window_days: { type: integer, minimum: 0 }
+        rate_floor: { type: integer, format: int64 }
+        claims:
+          type: array
+          items: { $ref: '#/components/schemas/MeasurementClaim' }
     TourEconomicsPolicy:
       type: object
       additionalProperties: false

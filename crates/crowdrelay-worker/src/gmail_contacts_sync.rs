@@ -39,6 +39,7 @@ use crowdrelay_infra::{
 };
 use sqlx::{PgPool, postgres::PgListener};
 use thiserror::Error;
+use time::OffsetDateTime;
 use tokio::{sync::watch, time::interval};
 use uuid::Uuid;
 
@@ -745,11 +746,84 @@ impl GmailContactsSyncWorker {
             )
             .await
             .map_err(|e: GDriveError| e.to_string())?;
+        // An inbound sighting is the reply side of counterparty pull: one
+        // timestamp per address, recorded only after the contact row the
+        // upsert just wrote exists, and only when the message's own
+        // `internalDate` parses — the same instant the floor check used.
+        if let Some((email, at)) =
+            inbound_sighting(&from, self_email, message.internal_date.as_deref())
+        {
+            self.repo
+                .record_inbound_sighting(self.workspace_id, &email, at)
+                .await
+                .map_err(|e: GDriveError| e.to_string())?;
+        }
         Ok(summary.upserted)
+    }
+}
+
+/// An inbound sighting is one `From` contact that is not the tenant's own
+/// mailbox (`extract_header_contacts` already excludes it), on a message
+/// whose `internalDate` parses to an instant. The band's own outbound mail,
+/// a missing or malformed header, and a missing date all record nothing.
+fn inbound_sighting(
+    from_header: &str,
+    self_email: &str,
+    internal_date_ms: Option<&str>,
+) -> Option<(String, OffsetDateTime)> {
+    let ms = internal_date_ms?.parse::<i64>().ok()?;
+    let at = OffsetDateTime::from_unix_timestamp_nanos(i128::from(ms) * 1_000_000).ok()?;
+    match extract_header_contacts(&[from_header.to_string()], self_email).as_slice() {
+        [contact] => Some((contact.email.clone(), at)),
+        _ => None,
     }
 }
 
 enum HistoryError {
     StaleCursor,
     Other(String),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_inbound_from_header_records_the_counterpartys_sighting() {
+        let ms = "1727740800000";
+        let (email, at) =
+            inbound_sighting("Promoter <promo@venue.pl>", "band@virya.music", Some(ms))
+                .expect("one non-self From contact is a sighting");
+        assert_eq!(email, "promo@venue.pl");
+        assert_eq!(
+            at,
+            OffsetDateTime::from_unix_timestamp_nanos(1_727_740_800_000_000_000).expect("in range")
+        );
+    }
+
+    #[test]
+    fn the_tenants_own_outbound_mail_records_nothing() {
+        assert_eq!(
+            inbound_sighting(
+                "Band <band@virya.music>",
+                "band@virya.music",
+                Some("1727740800000")
+            ),
+            None
+        );
+        assert_eq!(
+            inbound_sighting("Promoter <promo@venue.pl>", "band@virya.music", None),
+            None,
+            "no internalDate, no sighting"
+        );
+        assert_eq!(
+            inbound_sighting(
+                "Promoter <promo@venue.pl>",
+                "band@virya.music",
+                Some("not-a-timestamp")
+            ),
+            None,
+            "an unparseable internalDate records nothing"
+        );
+    }
 }
