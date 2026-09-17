@@ -159,6 +159,10 @@ async fn run_cases(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
                     room.booking_email = Some("klub@stodola.pl".to_owned());
                     room.public_terms =
                         PublicTerms::Published("hire rate card: 1200 EUR".to_owned());
+                    // The rate card is on the room's own site, which is what
+                    // makes it the room's public claim rather than one
+                    // tenant's private knowledge.
+                    room.source_url = "https://stodola.pl/wynajem".to_owned();
                 },
                 |view| {
                     view.target_fit = Some("High".to_owned());
@@ -178,6 +182,22 @@ async fn run_cases(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
                 },
                 |_| {},
             ),
+            // Terms a researcher found somewhere that is not the room's own
+            // page. The column asks for what the venue publishes; what a
+            // researcher actually types is what they have, and "they quote 30%
+            // of the door" is somebody's negotiating position. Kept, scoped to
+            // the tenant who found it.
+            venue(
+                "Klub D",
+                "wroclaw",
+                |room| {
+                    room.website = Some("https://klubd.pl".to_owned());
+                    room.public_terms =
+                        PublicTerms::Published("they quote 30% of the door".to_owned());
+                    room.source_url = "https://someforum.example/thread/91".to_owned();
+                },
+                |_| {},
+            ),
             // A city the catalogue does not hold: counted, never guessed.
             venue(
                 "Klub C",
@@ -192,7 +212,7 @@ async fn run_cases(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let summary = repo.import_sheet(workspace, &report).await?;
-    assert_eq!(summary.imported, 2);
+    assert_eq!(summary.imported, 3);
     assert_eq!(summary.unknown_city, 1);
 
     // ── The room is one identity row, keyed the way the registry keys it. ──
@@ -244,10 +264,27 @@ async fn run_cases(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
     );
 
     // The room published the terms itself — the one case a terms fact may
-    // be global.
+    // be global, and the source link is on the room's own host.
     assert_eq!(
         fact(&stodola_facts, "public_terms"),
         Some(("hire rate card: 1200 EUR".to_owned(), None))
+    );
+
+    // The same column, sourced from a forum thread, is one tenant's knowledge.
+    // Publishing it would hand every other tenant a promoter's negotiating
+    // position, which is the thing §4h-9 forbids.
+    let klub_d = sqlx::query_scalar::<_, Uuid>(
+        "SELECT id FROM place_venues \
+         WHERE name_key = place_venue_key('Klub D') \
+           AND city_id = (SELECT id FROM cities WHERE slug = 'wroclaw')",
+    )
+    .fetch_one(pool)
+    .await?;
+    let klub_d_facts = facts(pool, klub_d).await?;
+    assert_eq!(
+        fact(&klub_d_facts, "public_terms"),
+        Some(("they quote 30% of the door".to_owned(), Some(workspace))),
+        "terms from somebody else's page were published to every tenant"
     );
 
     // ── Contact and judgement are never global. ──────────────────────────
@@ -316,6 +353,10 @@ async fn run_cases(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
         "Wrocław",
         |room| {
             room.capacity = Some(1600);
+            // The same source: a fact keys on where the claim came from, so a
+            // re-read of the same page refreshes it. A different page would be
+            // a different claim, and stacking those two is correct.
+            room.source_url = "https://stodola.pl/wynajem".to_owned();
         },
         |_| {},
     );

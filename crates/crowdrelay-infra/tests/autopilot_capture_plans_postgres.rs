@@ -710,8 +710,36 @@ async fn a_published_show_mints_its_door_campaign_once_and_only_once()
     .execute(&pool)
     .await?;
 
+    // A night that finished yesterday: inside the projection's own two-day
+    // look-back, and outside the door's window. Minting for it would create a
+    // QR that is expired the moment it exists — a scan page that says "this
+    // campaign has closed" where the honest answer is that the night is over.
+    let past_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO events (id, workspace_id, slug, title, starts_at, status, published_at)
+         VALUES ($1,$2,$3,$4, now() - interval '30 hours', 'published', now())
+         RETURNING id",
+    )
+    .bind(Uuid::now_v7())
+    .bind(workspace_id.into_uuid())
+    .bind(format!("past-{}", workspace_id.into_uuid().simple()))
+    .bind("Last night's gig")
+    .fetch_one(&pool)
+    .await?;
+
     repo.reconcile_team_handoffs(workspace_id, OffsetDateTime::now_utc())
         .await?;
+
+    let past_campaigns: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM concert_qr_campaigns WHERE workspace_id=$1 AND event_id=$2",
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(past_id)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        past_campaigns, 0,
+        "a show whose door closed yesterday was given a QR born expired"
+    );
 
     let campaigns: Vec<(String, bool)> = sqlx::query_as(
         "SELECT label, active FROM concert_qr_campaigns

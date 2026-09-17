@@ -158,6 +158,20 @@ async fn run(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
         voice("Gazeta").ok_or("the local paper is missing")?.state,
         HelperState::Ready
     );
+    // Contactable first. The status column sorts 'promoted' before 'proposed',
+    // so ordering by it descending put every staged row above every ready one
+    // — and the limit is applied after the sort, so a workspace with forty
+    // staged contacts would have seen none it could write to.
+    assert_eq!(
+        helpers.voices[0].state,
+        HelperState::Ready,
+        "a staged contact outranked one that can be written to: {:?}",
+        helpers
+            .voices
+            .iter()
+            .map(|helper| (helper.display_name.as_str(), helper.state))
+            .collect::<Vec<_>>()
+    );
     assert_eq!(
         voice("Radio Nowe")
             .ok_or("the staged station is missing")?
@@ -181,6 +195,24 @@ async fn run(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(
         helpers.contacts_unplaced, 1,
         "the national title was not counted as unplaced"
+    );
+    // A community is an outreach target carrying a place, and it can never be
+    // placed in a city — the place graph records a country and nothing finer.
+    // The first version of this count asked `discovery_places` for a status
+    // its CHECK does not allow, so it could only ever answer zero: a measured
+    // absence that was really an unasked question.
+    community(pool, act, "r/wroclaw").await?;
+    community(pool, act, "r/polishmetal").await?;
+    let with_communities = who_can_help(pool, act, "friday")
+        .await?
+        .ok_or("the show produced no helper read")?;
+    assert_eq!(
+        with_communities.communities_unplaced, 2,
+        "communities the workspace holds were not counted"
+    );
+    assert_eq!(
+        with_communities.contacts_unplaced, 1,
+        "a community was counted as an unplaced press contact as well"
     );
 
     let booker = |name: &str| {
@@ -380,6 +412,38 @@ async fn press(
     .bind(accepts_outreach)
     .bind(do_not_contact)
     .bind(city_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// A community the workspace has on file: an outreach target attached to a
+/// place. Placeless by construction — `discovery_places` records a country.
+async fn community(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    name: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let place = sqlx::query_scalar::<_, Uuid>(
+        "INSERT INTO discovery_places
+            (workspace_id, place_kind, platform, name, url, country_code, status)
+         VALUES ($1, 'subreddit', 'reddit', $2, $3, 'PL', 'active')
+         RETURNING id",
+    )
+    .bind(workspace_id)
+    .bind(name)
+    .bind(format!("https://www.reddit.com/{name}"))
+    .fetch_one(pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO agent_outreach_targets
+            (workspace_id, target_kind, display_name, status, place_id,
+             screening_verdict)
+         VALUES ($1, 'media_patronage', $2, 'promoted', $3, 'admitted')",
+    )
+    .bind(workspace_id)
+    .bind(name)
+    .bind(place)
     .execute(pool)
     .await?;
     Ok(())

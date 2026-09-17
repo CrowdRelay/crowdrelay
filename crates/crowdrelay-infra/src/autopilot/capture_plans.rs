@@ -164,8 +164,10 @@ pub(in crate::autopilot) async fn project_shows_to_production_events(
 /// Idempotent on the event: any existing campaign row for the event —
 /// operator-made, revoked, or an earlier auto-mint — blocks the insert, so a
 /// deliberate revoke is never undone and a hand-entered campaign is never
-/// duplicated. Runs on the projection's window (now −2d … +60d), which also
-/// backfills shows published before this existed.
+/// duplicated. Runs over the shows whose door is still open — the projection's
+/// window narrowed at the near end, because a campaign for a night that
+/// finished yesterday is born expired — and so still backfills every show
+/// published before this existed whose QR could still be scanned.
 ///
 /// The window is the door's, keyed off the show: opens four hours before
 /// start (early doors, soundcheck crowds) and closes twelve hours after —
