@@ -530,6 +530,10 @@ struct ContentRow {
     source_version: i64,
     occurred_at: OffsetDateTime,
     expires_at: OffsetDateTime,
+    title: String,
+    post_url: Option<String>,
+    post_platform: Option<String>,
+    post_body: Option<String>,
     communication_enabled: Option<bool>,
     press_enabled: Option<bool>,
     release_tier: Option<String>,
@@ -550,6 +554,16 @@ pub(in crate::autopilot) async fn load_content_supply_snapshots(
             source.version AS source_version,
             source.occurred_at,
             source.expires_at,
+            source.title,
+            -- The synced post's own fields — only meaningful on a
+            -- `social_post` source, where the relay reads them verbatim.
+            -- On every other kind they ride along unused.
+            CASE WHEN source.source_kind = 'social_post'
+                 THEN source.metadata->>'url' END AS post_url,
+            CASE WHEN source.source_kind = 'social_post'
+                 THEN source.metadata->>'platform' END AS post_platform,
+            CASE WHEN source.source_kind = 'social_post'
+                 THEN source.metadata->>'body' END AS post_body,
             -- The three switches are release-plan vocabulary, so the read is
             -- scoped to release rows: a video or event whose own metadata
             -- happens to carry a `tier` key must not inherit release gating.
@@ -622,9 +636,10 @@ pub(in crate::autopilot) async fn load_content_supply_snapshots(
 
     rows.into_iter()
         .map(|row| {
+            let source_kind = parse_content_source_kind(&row.source_kind)?;
             Ok(ContentSupplySnapshot {
                 source_id: ContentSourceId::from_uuid(row.source_id),
-                source_kind: parse_content_source_kind(&row.source_kind)?,
+                source_kind,
                 source_version: row.source_version,
                 occurred_at: row.occurred_at,
                 expires_at: row.expires_at,
@@ -641,6 +656,56 @@ pub(in crate::autopilot) async fn load_content_supply_snapshots(
                     .iter()
                     .map(|value| parse_artifact(value))
                     .collect::<Result<_, _>>()?,
+                social_post: if source_kind == ContentSourceKind::SocialPost {
+                    Some(SocialPostFact {
+                        title: row.title.clone(),
+                        url: row.post_url.clone(),
+                        platform: row
+                            .post_platform
+                            .clone()
+                            .unwrap_or_else(|| "unknown".to_owned()),
+                        body: row.post_body.clone(),
+                    })
+                } else {
+                    None
+                },
+            })
+        })
+        .collect()
+}
+
+/// The communities a synced band post may be relayed into. The predicate is
+/// the same one the community executor re-checks at post time — admitted by
+/// screening and promoted — so a relay can only name a place the second wall
+/// would still let through.
+pub(in crate::autopilot) async fn load_relay_community_targets(
+    repo: &PostgresAutopilotRepository,
+    workspace_id: WorkspaceId,
+) -> Result<Vec<CommunityRelayTarget>, RepositoryError> {
+    let rows = sqlx::query_as::<_, (Uuid, String)>(
+        r#"
+        SELECT id, subreddit
+        FROM agent_outreach_targets
+        WHERE workspace_id = $1
+          AND target_kind = 'community'
+          AND screening_verdict = 'admitted'
+          AND status = 'promoted'
+          AND subreddit IS NOT NULL
+          AND btrim(subreddit) <> ''
+        ORDER BY created_at, id
+        LIMIT 50
+        "#,
+    )
+    .bind(workspace_id.into_uuid())
+    .fetch_all(&repo.pool)
+    .await
+    .map_err(map_sqlx)?;
+
+    rows.into_iter()
+        .map(|(id, subreddit)| {
+            Ok(CommunityRelayTarget {
+                target_id: OutreachTargetId::from_uuid(id),
+                subreddit,
             })
         })
         .collect()

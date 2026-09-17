@@ -127,3 +127,239 @@ pub(super) async fn ensure_dispatch_envelope(
     .await?;
     Ok(())
 }
+
+/// Builds the `send_evidence` value an outward emission must carry (2.1).
+///
+/// The constructor refuses blank facts; the gate in [`emit_external_action`]
+/// refuses the whole send when the key is absent. Building it here and failing
+/// is the same refusal one layer earlier, with the call site named.
+pub(super) fn send_evidence(
+    source_id: impl Into<String>,
+    recipient_reason: impl Into<String>,
+) -> Result<Value, RepositoryError> {
+    crowdrelay_domain::outward_evidence::OutwardEvidence::new(source_id, recipient_reason)
+        .map(|evidence| evidence.to_json())
+        .map_err(|refusal| RepositoryError::ConflictBecause(refusal.message()))
+}
+
+/// Emits an outward send with `send_evidence` built and attached (2.1).
+///
+/// Call sites hand over the payload without the key plus the two facts the
+/// evidence needs; a blank fact refuses the send before it is expressed. This
+/// is the shape an outward emission is supposed to take — the gate in
+/// [`emit_external_action`] is the backstop for a hand-rolled call, not the
+/// intended path.
+pub(super) async fn emit_outward_action(
+    transaction: &mut Transaction<'_, Postgres>,
+    workspace_id: WorkspaceId,
+    action_id: AutopilotActionId,
+    event_type: &'static str,
+    source_id: impl Into<String>,
+    recipient_reason: impl Into<String>,
+    mut payload: Value,
+) -> Result<(), RepositoryError> {
+    if let Some(map) = payload.as_object_mut() {
+        map.insert(
+            "send_evidence".to_owned(),
+            send_evidence(source_id, recipient_reason)?,
+        );
+    }
+    emit_external_action(transaction, workspace_id, action_id, event_type, payload).await
+}
+
+/// The evidence gate every outward send must pass (2.1/2.2).
+///
+/// Bound on the action's durable `action_class` — the same classification the
+/// envelope charged at decision time — not on anything the payload claims. An
+/// outward send without `send_evidence` is refused, a third-party send whose
+/// draft is byte-identical to one that already went out is refused, and the
+/// refusal lands inside the caller's transaction so the whole emission rolls
+/// back rather than partially sending.
+async fn gate_outward_emission(
+    transaction: &mut Transaction<'_, Postgres>,
+    workspace_id: WorkspaceId,
+    action_id: AutopilotActionId,
+    event_type: &str,
+    payload: &mut Value,
+) -> Result<(), RepositoryError> {
+    let gate_row = sqlx::query_as::<_, (Option<String>, Uuid)>(
+        r#"
+        SELECT action_class, subject_id
+        FROM viryaos_autopilot_actions
+        WHERE workspace_id = $1 AND id = $2
+        "#,
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(action_id.into_uuid())
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(map_sqlx)?;
+    // The emission hangs off the action row — emitting for an action that does
+    // not exist is a wiring bug, not a missing row.
+    let Some((class_raw, subject_id)) = gate_row else {
+        return Err(RepositoryError::NotFound);
+    };
+    let Some(class) = class_raw
+        .as_deref()
+        .and_then(crowdrelay_domain::action_class::ActionClass::parse)
+    else {
+        return Ok(());
+    };
+    if !class.is_outward() {
+        return Ok(());
+    }
+
+    let evidence = crowdrelay_domain::outward_evidence::OutwardEvidence::from_payload(payload)
+        .map_err(|refusal| RepositoryError::ConflictBecause(refusal.message()))?;
+
+    // `last_contact_at` is measured, never claimed: the newest outward touch
+    // on this subject, read from the durable action rows. A first contact
+    // reads `NULL` — the honest answer to "when did we last reach them".
+    let last_contact = sqlx::query_scalar::<_, Option<OffsetDateTime>>(
+        r#"
+        SELECT max(created_at)
+        FROM viryaos_autopilot_actions
+        WHERE workspace_id = $1
+          AND subject_id = $2
+          AND action_class IN ('owned_audience', 'third_party')
+          AND status <> 'cancelled'
+          AND id <> $3
+        "#,
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(subject_id)
+    .bind(action_id.into_uuid())
+    .fetch_one(&mut **transaction)
+    .await
+    .map_err(map_sqlx)?;
+    payload["send_evidence"] = evidence.with_last_contact(last_contact).to_json();
+
+    // Identical-draft refusal (2.2). A third-party send whose text already
+    // went out — on the same event type, to anyone — is a broadcast wearing a
+    // pitch's costume. Owned-audience sends are exempt on purpose: one text to
+    // many consented fans is what a broadcast *is*.
+    if class == crowdrelay_domain::action_class::ActionClass::ThirdParty {
+        let draft = payload.get("draft").filter(|value| value.is_object()).cloned();
+        let body = payload.get("body").and_then(Value::as_str).map(str::to_owned);
+        let title = payload.get("title").and_then(Value::as_str).map(str::to_owned);
+        if draft.is_some() || body.is_some() {
+            let duplicated = sqlx::query_scalar::<_, bool>(
+                r#"
+                SELECT EXISTS (
+                    SELECT 1
+                    FROM viryaos_autopilot_action_emissions emission
+                    JOIN outbox_events outbound
+                      ON outbound.id = emission.outbox_event_id
+                     AND outbound.workspace_id = emission.workspace_id
+                    WHERE emission.workspace_id = $1
+                      AND outbound.event_type = $2
+                      AND emission.action_id <> $3
+                      AND (
+                          ($4::jsonb IS NOT NULL AND outbound.payload->'draft' = $4)
+                          OR ($5::text IS NOT NULL
+                              AND outbound.payload->>'body' = $5
+                              AND outbound.payload->>'title' IS NOT DISTINCT FROM $6)
+                      )
+                )
+                "#,
+            )
+            .bind(workspace_id.into_uuid())
+            .bind(event_type)
+            .bind(action_id.into_uuid())
+            .bind(draft)
+            .bind(body)
+            .bind(title)
+            .fetch_one(&mut **transaction)
+            .await
+            .map_err(map_sqlx)?;
+            if duplicated {
+                return Err(RepositoryError::ConflictBecause(
+                    "third-party send refused: this exact draft already went out — \
+                     a broadcast is not a pitch",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+pub(super) async fn emit_external_action(
+    transaction: &mut Transaction<'_, Postgres>,
+    workspace_id: WorkspaceId,
+    action_id: AutopilotActionId,
+    event_type: &'static str,
+    mut payload: Value,
+) -> Result<(), RepositoryError> {
+    gate_outward_emission(transaction, workspace_id, action_id, event_type, &mut payload).await?;
+    ensure_executor_capability(
+        transaction,
+        workspace_id,
+        executor_capability_for_emission(event_type, &payload),
+    )
+    .await?;
+    let emission_key = format!("autopilot-action:{}", action_id);
+    let outbox_id = Uuid::now_v7();
+    // Propagate trace context (trace_id, causation_id) from the autopilot
+    // action onto the outbox event so the trace spine stays continuous from
+    // decision → action → outbox delivery. The action_id is already a bind
+    // parameter; we join to fetch its trace columns inside the same CTE so
+    // the outbox insert and the emission insert commit atomically.
+    let inserted = sqlx::query_scalar::<_, Uuid>(
+        r#"
+        WITH action_trace AS (
+            SELECT trace_id, causation_id
+            FROM viryaos_autopilot_actions
+            WHERE id = $2
+        ), emission AS (
+            INSERT INTO viryaos_autopilot_action_emissions (
+                workspace_id, action_id, emission_key, outbox_event_id
+            ) VALUES ($1,$2,$3,$4)
+            ON CONFLICT (workspace_id, emission_key) DO NOTHING
+            RETURNING outbox_event_id
+        ), outbox AS (
+            INSERT INTO outbox_events (
+                id, workspace_id, event_type, event_version, payload,
+                request_id, max_attempts, trace_id, causation_id, action_id
+            )
+            SELECT $4,$1,$5,$6,$7,$3,12,at.trace_id,at.causation_id,$2
+            FROM emission CROSS JOIN action_trace at
+            RETURNING id
+        )
+        SELECT id FROM outbox
+        "#,
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(action_id.into_uuid())
+    .bind(&emission_key)
+    .bind(outbox_id)
+    .bind(event_type)
+    .bind(EXTERNAL_ACTION_EVENT_VERSION)
+    .bind(payload)
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(map_sqlx)?;
+    if inserted.is_some() {
+        return Ok(());
+    }
+
+    let exists = sqlx::query_scalar::<_, bool>(
+        r#"
+        SELECT EXISTS (
+            SELECT 1
+            FROM viryaos_autopilot_action_emissions
+            WHERE workspace_id = $1 AND emission_key = $2 AND action_id = $3
+        )
+        "#,
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(&emission_key)
+    .bind(action_id.into_uuid())
+    .fetch_one(&mut **transaction)
+    .await
+    .map_err(map_sqlx)?;
+    if exists {
+        Ok(())
+    } else {
+        Err(RepositoryError::Conflict)
+    }
+}

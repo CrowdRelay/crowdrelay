@@ -110,6 +110,13 @@ pub(in crate::autopilot) async fn record_booking_reply(
     }).await
 }
 
+/// The estimate's own assumption, stated beside it so a panel cannot show the
+/// number without it: flat per-kind minutes (10 for outreach/application work,
+/// 9 for show growth, 8 for content/funding prep, 5 for campaigns and merch,
+/// 3 for pricing and experiments, 2 otherwise). It is what the work might have
+/// cost a person, not what the agent measured.
+const ESTIMATED_MINUTES_BASIS: &str = "per-kind assumption: outreach/booking/application 10m, show growth 9m, content and funding prep 8m, campaigns, merch and lifecycle 5m, pricing and experiments 3m, other 2m — not measured";
+
 #[derive(Debug, FromRow)]
 struct ChiefStatsRow {
     executed_24h: i64,
@@ -119,6 +126,8 @@ struct ChiefStatsRow {
     executor_failed_24h: i64,
     awaiting_approval: i64,
     estimated_minutes_saved_24h: i64,
+    median_assignment_turnaround_minutes_7d: Option<i64>,
+    assignments_completed_7d: i64,
     measured_improved_7d: i64,
     measured_neutral_7d: i64,
     measured_worsened_7d: i64,
@@ -220,6 +229,18 @@ pub(in crate::autopilot) async fn load_chief_of_staff(
                          AND report.status='succeeded'
                    )
                )) estimated_minutes_saved_24h,
+            (SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY
+                       extract(epoch from completed_at - assigned_at) / 60)::bigint
+             FROM viryaos_team_assignments
+             WHERE workspace_id=$1 AND status='done' AND completed_at IS NOT NULL
+               AND completed_at >= $2 - INTERVAL '7 days'
+               AND completed_at > assigned_at
+            ) median_assignment_turnaround_minutes_7d,
+            (SELECT count(*)::bigint FROM viryaos_team_assignments
+             WHERE workspace_id=$1 AND status='done' AND completed_at IS NOT NULL
+               AND completed_at >= $2 - INTERVAL '7 days'
+               AND completed_at > assigned_at
+            ) assignments_completed_7d,
             (SELECT count(*)::bigint FROM viryaos_autopilot_outcomes
               WHERE workspace_id=$1 AND measurement_id IS NOT NULL AND observed_at >= $2 - INTERVAL '7 days' AND effect_assessment='improved') measured_improved_7d,
             (SELECT count(*)::bigint FROM viryaos_autopilot_outcomes
@@ -383,6 +404,9 @@ pub(in crate::autopilot) async fn load_chief_of_staff(
         executor_failed_24h: stats.executor_failed_24h,
         needs_you,
         estimated_minutes_saved_24h: stats.estimated_minutes_saved_24h,
+        estimated_minutes_basis: ESTIMATED_MINUTES_BASIS,
+        median_assignment_turnaround_minutes_7d: stats.median_assignment_turnaround_minutes_7d,
+        assignments_completed_7d: stats.assignments_completed_7d,
         measured_improved_7d: stats.measured_improved_7d,
         measured_neutral_7d: stats.measured_neutral_7d,
         measured_worsened_7d: stats.measured_worsened_7d,

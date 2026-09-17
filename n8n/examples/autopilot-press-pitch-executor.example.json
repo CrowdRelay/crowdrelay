@@ -1,0 +1,135 @@
+{
+  "name": "CrowdRelay — Autopilot press-pitch executor",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "press-pitch-trigger",
+      "name": "Called by verified ingress",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [0, 0]
+    },
+    {
+      "parameters": {
+        "jsCode": "// One event, one journalist, one send — a press pitch is a\n// first approach to somebody else's relationship, never a blast.\nconst e = $json;\nif (!e || e.type !== 'crowdrelay.agent.content_requested' || e.version !== 1) return [];\nconst d = e.data ?? {};\nif (d.template_id !== 'press-pitch') return [];\nif (!d.action_id || !d.recipient_email) return [];\n// The dispatch gate's half of the contract rides on the event: a send\n// without send_evidence means the gate was bypassed upstream, and this\n// executor refuses rather than mailing on a payload nobody evidenced.\nif (!d.send_evidence || !d.send_evidence.source_id || !d.send_evidence.recipient_reason) {\n  throw new Error('press pitch refused: send_evidence missing — dispatch gate bypassed');\n}\nconst draft = d.draft ?? {};\nconst subject = String(draft.subject ?? '').trim();\nconst body = String(draft.body ?? draft.draft_text ?? '').trim();\nif (!subject || !body) throw new Error('press pitch draft has no subject/body');\nconst replyTo = $env.VIRYA_PRESS_REPLY_TO || $env.VIRYA_OUTREACH_FROM_EMAIL;\nif (!replyTo) throw new Error('Missing monitored reply-to configuration');\nreturn [{ json: {\n  event_id: e.id,\n  action_id: String(d.action_id),\n  recipient_email: String(d.recipient_email),\n  recipient_name: d.recipient_name ?? null,\n  recipient_target_id: d.recipient_target_id ?? null,\n  subject,\n  body,\n  reply_to: replyTo,\n  send_evidence: d.send_evidence,\n}}];"
+      },
+      "id": "press-pitch-validate",
+      "name": "Validate and prepare pitch",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [220, 0]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.CROWDRELAY_INTERNAL_BASE_URL + '/v1/internal/autopilot/actions/' + $json.action_id + '/execution-claim' }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "={{ 'Bearer ' + $env.CROWDRELAY_COMMERCE_TOKEN }}"
+            },
+            {
+              "name": "x-virya-executor-id",
+              "value": "={{ $env.VIRYA_N8N_EXECUTOR_ID }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ JSON.stringify({executor_id:$env.VIRYA_N8N_EXECUTOR_ID,version:'1',observed_at:new Date().toISOString(),expires_at:new Date(Date.now()+30*60*1000).toISOString(),capabilities:['agent.content.press_pitch']}) }}",
+        "options": { "timeout": 10000 }
+      },
+      "id": "press-pitch-claim",
+      "name": "Claim action once",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [440, 0]
+    },
+    {
+      "parameters": {
+        "jsCode": "const claim = $json;\nconst intent = $('Validate and prepare pitch').first().json;\nif (claim.disposition !== 'claimed') return [];\nif (!claim.claim_token) throw new Error('Missing claim token');\nreturn [{ json: { ...intent, claim_token: claim.claim_token } }];"
+      },
+      "id": "press-pitch-claim-gate",
+      "name": "Fail-closed claim gate",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [660, 0]
+    },
+    {
+      "parameters": {
+        "sendTo": "={{ $json.recipient_email }}",
+        "subject": "={{ $json.subject }}",
+        "message": "={{ $json.body }}",
+        "options": {
+          "appendAttribution": false,
+          "replyTo": "={{ $json.reply_to }}"
+        }
+      },
+      "id": "press-pitch-send",
+      "name": "Send the pitch (Gmail)",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [880, 0]
+    },
+    {
+      "parameters": {
+        "jsCode": "const intent = $('Fail-closed claim gate').first().json;\nconst failed = Boolean($json.error);\nconst ref = $json.threadId || $json.thread_id || $json.id || null;\nreturn [{ json: {\n  action_id: intent.action_id,\n  receipt_key: `press_pitch:${intent.action_id}:email`,\n  executor_id: $env.VIRYA_N8N_EXECUTOR_ID,\n  status: failed ? 'failed' : 'succeeded',\n  claim_token: intent.claim_token,\n  provider_reference: failed ? null : (ref ? String(ref) : null),\n  error_kind: failed ? 'gmail_send_failed' : null,\n  metadata: {\n    channel: 'email',\n    recipient_target_id: intent.recipient_target_id,\n    send_evidence: intent.send_evidence,\n  },\n  occurred_at: new Date().toISOString(),\n}}];"
+      },
+      "id": "press-pitch-receipt",
+      "name": "Build send receipt",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1100, 0]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.CROWDRELAY_INTERNAL_BASE_URL + '/v1/internal/autopilot/actions/' + $json.action_id + '/execution-report' }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "={{ 'Bearer ' + $env.CROWDRELAY_COMMERCE_TOKEN }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ JSON.stringify({receipt_key:$json.receipt_key,executor_id:$json.executor_id,status:$json.status,claim_token:$json.claim_token,provider_reference:$json.provider_reference,error_kind:$json.error_kind,metadata:$json.metadata,occurred_at:$json.occurred_at}) }}",
+        "options": { "timeout": 10000 }
+      },
+      "id": "press-pitch-report",
+      "name": "Report provider receipt",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1320, 0]
+    }
+  ],
+  "connections": {
+    "Called by verified ingress": {
+      "main": [[{ "node": "Validate and prepare pitch", "type": "main", "index": 0 }]]
+    },
+    "Validate and prepare pitch": {
+      "main": [[{ "node": "Claim action once", "type": "main", "index": 0 }]]
+    },
+    "Claim action once": {
+      "main": [[{ "node": "Fail-closed claim gate", "type": "main", "index": 0 }]]
+    },
+    "Fail-closed claim gate": {
+      "main": [[{ "node": "Send the pitch (Gmail)", "type": "main", "index": 0 }]]
+    },
+    "Send the pitch (Gmail)": {
+      "main": [[{ "node": "Build send receipt", "type": "main", "index": 0 }]]
+    },
+    "Build send receipt": {
+      "main": [[{ "node": "Report provider receipt", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": { "executionOrder": "v1" },
+  "active": false
+}

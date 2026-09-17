@@ -34,6 +34,11 @@ pub struct GrowthEnvelope {
     /// Approaches to venues, curators and press in a rolling seven days. Low on
     /// purpose even once the ceiling is widened: these are finite relationships.
     pub weekly_third_party_touches: u32,
+    /// Third-party approaches in a rolling twenty-four hours — the ceiling that
+    /// sits atop the per-subject cooldown. The weekly budget bounds a week;
+    /// this bounds a bad morning: a wrong segment that mails every venue at
+    /// 09:00 cannot be unmailed at 09:05.
+    pub daily_third_party_touches: u32,
     /// No subject hears from the agent twice inside this many hours, whichever
     /// play wants to reach them.
     pub subject_cooldown_hours: u32,
@@ -55,6 +60,10 @@ impl Default for GrowthEnvelope {
             // would pick, and raising them is a row update.
             weekly_owned_audience_touches: 200,
             weekly_third_party_touches: 10,
+            // A handful of real approaches a day is a band hustling; more is
+            // a blast. Per-subject cooldown stays the sharper instrument —
+            // this is the volume wall behind it.
+            daily_third_party_touches: 3,
             subject_cooldown_hours: 168,
             max_recipients_per_step: 250,
             parked: false,
@@ -78,6 +87,20 @@ impl GrowthEnvelope {
             ActionClass::FirstPartyReversible | ActionClass::Paid => None,
         }
     }
+
+    /// The daily budget for one class, where it has one. Only third-party
+    /// work gets a second wall: an owned-audience burst reaches people who
+    /// asked to hear from the band, a third-party burst spends a finite
+    /// reputation the band cannot buy back.
+    #[must_use]
+    pub const fn daily_budget(&self, class: ActionClass) -> Option<u32> {
+        match class {
+            ActionClass::ThirdParty => Some(self.daily_third_party_touches),
+            ActionClass::OwnedAudience | ActionClass::FirstPartyReversible | ActionClass::Paid => {
+                None
+            }
+        }
+    }
 }
 
 /// What the workspace has already spent, measured from the durable action rows.
@@ -85,6 +108,9 @@ impl GrowthEnvelope {
 pub struct EnvelopeUsage {
     pub owned_audience_touches_7d: u32,
     pub third_party_touches_7d: u32,
+    /// Third-party approaches in the last 24 hours — the spend the daily
+    /// ceiling measures against.
+    pub third_party_touches_24h: u32,
     /// Hours since the agent last reached *this* subject through any outward
     /// action. `None` when it never has.
     pub hours_since_subject_touched: Option<u32>,
@@ -97,6 +123,16 @@ impl EnvelopeUsage {
             ActionClass::OwnedAudience => self.owned_audience_touches_7d,
             ActionClass::ThirdParty => self.third_party_touches_7d,
             ActionClass::FirstPartyReversible | ActionClass::Paid => 0,
+        }
+    }
+
+    /// The last 24 hours' spend for classes with a daily wall. Classes
+    /// without one read as zero — there is nothing for it to measure.
+    #[must_use]
+    pub const fn spent_today(&self, class: ActionClass) -> u32 {
+        match class {
+            ActionClass::ThirdParty => self.third_party_touches_24h,
+            ActionClass::OwnedAudience | ActionClass::FirstPartyReversible | ActionClass::Paid => 0,
         }
     }
 }
@@ -117,6 +153,11 @@ pub enum EnvelopeBlock {
         spent: u32,
         budget: u32,
     },
+    /// The rolling day ran out before the rolling week did.
+    DailyBudgetExhausted {
+        spent: u32,
+        budget: u32,
+    },
     SubjectInCooldown {
         hours_remaining: u32,
     },
@@ -129,6 +170,7 @@ impl EnvelopeBlock {
             Self::AgentDisabled => "agent_disabled",
             Self::DryRun => "dry_run",
             Self::WeeklyBudgetExhausted { .. } => "weekly_budget_exhausted",
+            Self::DailyBudgetExhausted { .. } => "daily_budget_exhausted",
             Self::SubjectInCooldown { .. } => "subject_in_cooldown",
         }
     }
@@ -178,6 +220,12 @@ pub fn check_envelope(
         let spent = usage.spent(class);
         if spent >= budget {
             return EnvelopeVerdict::Hold(EnvelopeBlock::WeeklyBudgetExhausted { spent, budget });
+        }
+    }
+    if let Some(budget) = envelope.daily_budget(class) {
+        let spent = usage.spent_today(class);
+        if spent >= budget {
+            return EnvelopeVerdict::Hold(EnvelopeBlock::DailyBudgetExhausted { spent, budget });
         }
     }
     if let Some(hours) = usage.hours_since_subject_touched
@@ -321,6 +369,7 @@ mod tests {
         let usage = EnvelopeUsage {
             owned_audience_touches_7d: 50,
             third_party_touches_7d: 0,
+            third_party_touches_24h: 0,
             hours_since_subject_touched: None,
         };
         assert!(matches!(
@@ -381,6 +430,7 @@ mod tests {
         let usage = EnvelopeUsage {
             owned_audience_touches_7d: 10_000,
             third_party_touches_7d: 10_000,
+            third_party_touches_24h: 0,
             hours_since_subject_touched: Some(0),
         };
         assert_eq!(

@@ -82,9 +82,9 @@ async fn seed_workspace(pool: &PgPool) -> Result<Uuid, Box<dyn std::error::Error
 }
 
 /// Two paid orders across two events by one buyer, plus a third buyer with one
-/// order. Gives `tickets_sold = 3` and `repeat_attenders = 1`, which are
-/// different numbers — a fixture where they coincide cannot tell the two
-/// queries apart.
+/// order. Gives `tickets_sold = 4` across 3 orders (one order carries two
+/// tickets — a fixture where orders equal tickets could not tell the join
+/// apart) and `repeat_attenders = 1`.
 async fn seed_ticket_history(
     pool: &PgPool,
     workspace_id: Uuid,
@@ -92,10 +92,10 @@ async fn seed_ticket_history(
     let city = sqlx::query_scalar::<_, Uuid>("SELECT id FROM cities LIMIT 1")
         .fetch_one(pool)
         .await?;
-    for (email, event_index) in [
-        ("returning@example.com", 0),
-        ("returning@example.com", 1),
-        ("once@example.com", 2),
+    for (email, event_index, quantity) in [
+        ("returning@example.com", 0, 2),
+        ("returning@example.com", 1, 1),
+        ("once@example.com", 2, 1),
     ] {
         let event_id = sqlx::query_scalar::<_, Uuid>(
             r#"
@@ -163,7 +163,10 @@ async fn seed_ticket_history(
         // `paid_at` is not decoration: a CHECK ties it to the status, so an
         // order marked paid without it is rejected. That constraint is why the
         // measurement query can trust `status` alone.
-        sqlx::query(
+        // `paid_at` is not decoration: a CHECK ties it to the status, so an
+        // order marked paid without it is rejected. That constraint is why the
+        // measurement query can trust `status` alone.
+        let order_id = sqlx::query_scalar::<_, Uuid>(
             r#"
             INSERT INTO ticket_orders
                 (workspace_id, ticket_sale_id, public_reference, buyer_email, status,
@@ -172,6 +175,7 @@ async fn seed_ticket_history(
                  checkout_token_hash, expires_at, paid_at)
             VALUES ($1, $2, $3, $4, 'paid', 'PLN', 5000, 4630, 370, 800,
                     $5, $6, $7, now() + interval '1 day', now() - interval '29 days')
+            RETURNING id
             "#,
         )
         .bind(workspace_id)
@@ -188,9 +192,45 @@ async fn seed_ticket_history(
         .bind(Uuid::now_v7().to_string())
         .bind(vec![0u8; 32])
         .bind(vec![1u8; 32])
-        .execute(pool)
+        .fetch_one(pool)
         .await
         .map_err(|error| format!("order for {email}: {error}"))?;
+
+        // The figure sums items, not orders — an order with no item row is
+        // not a sale of anything, so every fixture order carries one.
+        let ticket_type_id = sqlx::query_scalar::<_, Uuid>(
+            r#"
+            INSERT INTO ticket_types
+                (workspace_id, ticket_sale_id, slug, name, price_gross_minor)
+            VALUES ($1, $2, $3, 'General', 5000)
+            ON CONFLICT (workspace_id, ticket_sale_id, slug) DO UPDATE
+              SET name = EXCLUDED.name
+            RETURNING id
+            "#,
+        )
+        .bind(workspace_id)
+        .bind(sale_id)
+        .bind(format!("general-{event_index}"))
+        .fetch_one(pool)
+        .await
+        .map_err(|error| format!("ticket type {event_index}: {error}"))?;
+        sqlx::query(
+            r#"
+            INSERT INTO ticket_order_items
+                (workspace_id, ticket_order_id, ticket_type_id, quantity,
+                 unit_gross_minor, unit_net_minor, unit_vat_minor,
+                 total_gross_minor, total_net_minor, total_vat_minor)
+            VALUES ($1, $2, $3, $4, 2500, 2315, 185,
+                    2500 * $4, 2315 * $4, 185 * $4)
+            "#,
+        )
+        .bind(workspace_id)
+        .bind(order_id)
+        .bind(ticket_type_id)
+        .bind(quantity)
+        .execute(pool)
+        .await
+        .map_err(|error| format!("order item {event_index}: {error}"))?;
     }
     Ok(())
 }
@@ -223,8 +263,8 @@ async fn run(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
         .ok_or("tickets_sold was not measured")?;
     assert_eq!(
         tickets.value,
-        crowdrelay_domain::attestation::PublishedValue::Exact(3),
-        "three paid orders did not count as three"
+        crowdrelay_domain::attestation::PublishedValue::Exact(4),
+        "three paid orders carrying four tickets did not count as four"
     );
 
     let repeats = issued
@@ -325,6 +365,23 @@ async fn run(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(
         after_revoke.verdict(),
         "issued by CrowdRelay, then withdrawn by the act"
+    );
+
+    // A retried revoke finds the row already withdrawn — that is the same
+    // outcome the caller asked for, not an error. A digest the workspace
+    // never issued stays NotFound either way.
+    repository
+        .revoke(workspace, &issued.digest, now)
+        .await
+        .expect("a repeated revoke must be idempotent");
+    assert!(
+        matches!(
+            repository
+                .revoke(workspace, "sha256:never-issued", now)
+                .await,
+            Err(AttestationError::NotFound)
+        ),
+        "revoking a digest that was never issued must stay NotFound"
     );
 
     // Rotating the token kills the link that was sent.

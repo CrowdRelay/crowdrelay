@@ -148,6 +148,18 @@ pub enum AttestationError {
 /// Four independent answers, never collapsed. A document can be authentic and
 /// expired, or unedited and forged — and a single `valid: bool` would make both
 /// of those read as "no" with no way to tell which.
+/// One row of the operator's attestation list — enough to manage the document,
+/// not enough to reconstruct it.
+#[derive(Clone, Debug)]
+pub struct AttestationSummary {
+    pub digest: String,
+    pub act_name: String,
+    pub share_token: Uuid,
+    pub issued_at: OffsetDateTime,
+    pub valid_until: OffsetDateTime,
+    pub revoked: bool,
+}
+
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct VerifiedAttestation {
     pub attestation: Attestation,
@@ -375,10 +387,26 @@ impl PostgresAttestationRepository {
         .execute(&self.pool)
         .await?
         .rows_affected();
-        if changed == 0 {
-            return Err(AttestationError::NotFound);
+        if changed == 1 {
+            return Ok(());
         }
-        Ok(())
+        // A retry after a committed revoke finds the row already withdrawn.
+        // That is success, not absence — the document is still queryable and
+        // reports revoked, so the operator's retry must not fail. Only a
+        // digest the workspace never issued is NotFound.
+        let exists = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(SELECT 1 FROM viryaos_attestations
+             WHERE workspace_id = $1 AND digest = $2)",
+        )
+        .bind(workspace_id)
+        .bind(digest)
+        .fetch_one(&self.pool)
+        .await?;
+        if exists {
+            Ok(())
+        } else {
+            Err(AttestationError::NotFound)
+        }
     }
 
     /// Mints a fresh token, killing every link already sent.
@@ -396,6 +424,38 @@ impl PostgresAttestationRepository {
         .fetch_optional(&self.pool)
         .await?
         .ok_or(AttestationError::NotFound)
+    }
+
+    /// The operator's list: every document this workspace issued, newest
+    /// first, with the state that decides what each row still means. The
+    /// figures stay on the document itself — a summary that re-measured would
+    /// contradict the "a stored attestation is never edited" rule this type
+    /// exists to keep.
+    pub async fn list_for_workspace(
+        &self,
+        workspace_id: Uuid,
+    ) -> Result<Vec<AttestationSummary>, AttestationError> {
+        let rows = sqlx::query(
+            "SELECT digest, act_name, share_token, issued_at, valid_until, revoked_at
+             FROM viryaos_attestations
+             WHERE workspace_id = $1
+             ORDER BY issued_at DESC
+             LIMIT 200",
+        )
+        .bind(workspace_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .iter()
+            .map(|row| AttestationSummary {
+                digest: row.get("digest"),
+                act_name: row.get("act_name"),
+                share_token: row.get("share_token"),
+                issued_at: row.get("issued_at"),
+                valid_until: row.get("valid_until"),
+                revoked: row.get::<Option<OffsetDateTime>, _>("revoked_at").is_some(),
+            })
+            .collect())
     }
 
     // ── Measurement (4A.2) ──────────────────────────────────────────────────
@@ -462,13 +522,19 @@ impl PostgresAttestationRepository {
     }
 
     async fn tickets_sold(&self, workspace_id: Uuid) -> Result<Option<u32>, AttestationError> {
-        // Paid and partially-refunded, matching `city_venues`' own definition of
-        // a sold ticket. A fully refunded order is not a sale.
+        // Paid and partially-refunded, matching the rest of the system's own
+        // definition of a sold ticket: the sum of order items, not the count
+        // of orders — one order can carry a whole group's tickets. A fully
+        // refunded order is not a sale.
         let value = sqlx::query_scalar::<_, i64>(
             r#"
-            SELECT count(*)::bigint
-            FROM ticket_orders
-            WHERE workspace_id = $1 AND status IN ('paid', 'partially_refunded')
+            SELECT COALESCE(SUM(item.quantity), 0)::bigint
+            FROM ticket_orders AS orders
+            JOIN ticket_order_items AS item
+              ON item.workspace_id = orders.workspace_id
+             AND item.ticket_order_id = orders.id
+            WHERE orders.workspace_id = $1
+              AND orders.status IN ('paid', 'partially_refunded')
             "#,
         )
         .bind(workspace_id)

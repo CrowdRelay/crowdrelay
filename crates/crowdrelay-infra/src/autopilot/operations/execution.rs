@@ -62,11 +62,18 @@ pub(in crate::autopilot) async fn execute_audience_campaign(
       RETURNING id,status,scheduled_at
     "#).bind(workspace_id.into_uuid()).bind(segment_id).bind(&campaign_slug).bind(format!("{} · {}",row.1,phase_key)).bind(template_key).bind(event_id.into_uuid()).fetch_one(&mut **tx).await.map_err(map_sqlx)?;
     if campaign.1 == "draft" {
+        // The outbox row carries the action's trace spine — `ops/trace` shows
+        // the decision → action → campaign hop, not a context-free orphan.
         let outbox_id=sqlx::query_scalar::<_,Uuid>(r#"
-          INSERT INTO outbox_events(workspace_id,event_type,event_version,payload,available_at)
-          VALUES($1,'communication.campaign_due',1,jsonb_build_object('campaign_id',$2::uuid,'campaign_slug',$3::text,'channel','email','segment_id',$4::uuid,'template_key',$5::text),$6)
+          INSERT INTO outbox_events(workspace_id,event_type,event_version,payload,available_at,trace_id,causation_id,action_id)
+          SELECT $1,'communication.campaign_due',1,jsonb_build_object('campaign_id',$2::uuid,'campaign_slug',$3::text,'channel','email','segment_id',$4::uuid,'template_key',$5::text,'send_evidence',jsonb_build_object('source_id',$7::text,'recipient_reason',$8::text)),$6,at.trace_id,at.causation_id,at.id
+          FROM viryaos_autopilot_actions at WHERE at.id=$9
           RETURNING id
-        "#).bind(workspace_id.into_uuid()).bind(campaign.0).bind(&campaign_slug).bind(segment_id).bind(template_key).bind(now).fetch_one(&mut **tx).await.map_err(map_sqlx)?;
+        "#).bind(workspace_id.into_uuid()).bind(campaign.0).bind(&campaign_slug).bind(segment_id).bind(template_key).bind(now)
+          .bind(format!("event-campaign:{campaign_slug}"))
+          .bind("marketing-consent segment — every fan in it opted in")
+          .bind(action_id.into_uuid())
+          .fetch_one(&mut **tx).await.map_err(map_sqlx)?;
         sqlx::query("UPDATE communication_campaigns SET status='scheduled',scheduled_at=$3,dispatch_event_id=$4 WHERE workspace_id=$1 AND id=$2 AND status='draft'")
             .bind(workspace_id.into_uuid()).bind(campaign.0).bind(now).bind(outbox_id).execute(&mut **tx).await.map_err(map_sqlx)?;
     } else if !matches!(campaign.1.as_str(), "scheduled" | "completed") {
@@ -597,6 +604,16 @@ pub(in crate::autopilot) async fn execute_live_opportunity(
         json!({
             "action_id": action_id,
             "opportunity_id": opportunity_id,
+            "send_evidence": crate::autopilot::send_evidence(
+                format!("live-opportunity:{opportunity_id}"),
+                format!(
+                    "application to a scored {} opportunity — score {score}",
+                    serde_json::to_value(kind)
+                        .ok()
+                        .and_then(|v| v.as_str().map(str::to_owned))
+                        .unwrap_or_else(|| format!("{kind:?}")),
+                ),
+            )?,
             "kind": kind,
             "score": score,
             "title": row.0,
@@ -710,6 +727,13 @@ pub(in crate::autopilot) async fn execute_live_opportunity_terms(
         json!({
             "action_id": action_id,
             "opportunity_id": opportunity_id,
+            "send_evidence": crate::autopilot::send_evidence(
+                format!("live-opportunity:{opportunity_id}"),
+                format!(
+                    "negotiation {} round {round} — terms row locked, floor checked",
+                    if accept { "acceptance" } else { "counter" },
+                ),
+            )?,
             "title": row.0,
             "organization": row.1,
             "contact_email": row.2,
@@ -869,6 +893,10 @@ pub(in crate::autopilot) async fn submit_funding_application(
         json!({
             "action_id": action_id,
             "opportunity_id": opportunity_id,
+            "send_evidence": crate::autopilot::send_evidence(
+                format!("funding-opportunity:{opportunity_id}"),
+                "eligible funding application, package ready, deadline open, human approved",
+            )?,
             "title": row.0,
             "organization": row.1,
             "destination_url": row.2,
@@ -1019,132 +1047,5 @@ pub(in crate::autopilot) async fn execute_agent_run(
     .execute(&mut **tx)
     .await
     .map_err(map_sqlx)?;
-    Ok(())
-}
-
-/// Materializes an approved Signal push as `fan_push_deliveries` rows for all
-/// consented fans with active push endpoints. The PushDeliveryWorker then
-/// sends them via FCM/Web Push.
-///
-/// Idempotency: `UNIQUE (workspace_id, source_kind, source_id, endpoint_id)`
-/// on `fan_push_deliveries` means a retry of the same action + endpoint is a
-/// no-op. `source_id` is the autopilot action id.
-///
-/// When `segment` is `Some(slug)`, the slug is resolved against the
-/// `audience_segments` table. If a matching active segment is found, its
-/// JSONB filter is parsed into a typed `SegmentFilter` and applied as
-/// additional fan predicates so only segment members receive the push.
-/// If the slug is not found, inactive, or the filter has invalid field
-/// types, the push falls back to broadcasting to all consented fans with
-/// active endpoints (the original behavior). See `push_segments.rs` for
-/// filter resolution and SQL generation.
-#[allow(clippy::too_many_arguments)]
-pub(in crate::autopilot) async fn execute_signal_push(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    workspace_id: WorkspaceId,
-    action_id: crowdrelay_domain::AutopilotActionId,
-    title: &str,
-    body: &str,
-    target_path: Option<&str>,
-    _event_id: Option<&uuid::Uuid>,
-    segment: Option<&str>,
-    _now: OffsetDateTime,
-) -> Result<(), RepositoryError> {
-    let action_uuid = action_id.into_uuid();
-    let collapse_key = format!("agent:{action_uuid}");
-    let target = target_path.unwrap_or("/my-signal/");
-
-    // Resolve the segment filter if a slug was provided. Falls back to
-    // None (broadcast) if the slug is missing, not found, inactive, or
-    // the filter has invalid field types.
-    let mut segment_filter = resolve_segment_filter(tx, workspace_id, segment).await;
-
-    // Build the segment clause + typed bind values. Only fields present
-    // in the filter generate SQL conditions, avoiding unnecessary
-    // correlated subqueries for absent fields.
-    let (segment_clause, segment_binds) = segment_filter
-        .as_mut()
-        .map(|f| f.sql_clause(7))
-        .unwrap_or_default();
-
-    let sql = format!(
-        r#"
-        INSERT INTO fan_push_deliveries
-            (workspace_id, fan_id, endpoint_id, source_kind, source_id,
-             category, title, body, target_path, collapse_key)
-        SELECT endpoint.workspace_id, endpoint.fan_id, endpoint.id,
-               'agent_signal_push', $2,
-               'community', $3, $4, $5, $6
-        FROM fan_push_endpoints endpoint
-        JOIN fans fan
-          ON fan.workspace_id = endpoint.workspace_id
-         AND fan.id = endpoint.fan_id
-        WHERE endpoint.workspace_id = $1
-          AND endpoint.active
-          AND endpoint.invalidated_at IS NULL
-          AND fan.status = 'active'
-          AND EXISTS (
-              SELECT 1 FROM fan_consents consent
-              WHERE consent.workspace_id = endpoint.workspace_id
-                AND consent.fan_id = endpoint.fan_id
-                AND consent.purpose = 'marketing'
-                AND consent.granted
-                AND consent.id = (
-                    SELECT newest.id FROM fan_consents newest
-                    WHERE newest.workspace_id = consent.workspace_id
-                      AND newest.fan_id = consent.fan_id
-                      AND newest.purpose = consent.purpose
-                    ORDER BY newest.recorded_at DESC, newest.id DESC LIMIT 1
-                )
-          )
-          {segment_clause}
-        ON CONFLICT (workspace_id, source_kind, source_id, endpoint_id) DO NOTHING
-        "#
-    );
-
-    let mut query = sqlx::query(&sql)
-        .bind(workspace_id.into_uuid())
-        .bind(action_uuid)
-        .bind(title)
-        .bind(body)
-        .bind(target)
-        .bind(&collapse_key);
-
-    for bind in segment_binds {
-        query = match bind {
-            SegmentBind::Statuses(v) => query.bind(v),
-            SegmentBind::CitySlugs(v) => query.bind(v),
-            SegmentBind::MinReferrals(v) => query.bind(v),
-            SegmentBind::Synesthesia(v) => query.bind(v),
-            SegmentBind::TagsAll(v) => query.bind(v),
-            SegmentBind::ExcludedCampaignSlugs(v) => query.bind(v),
-        };
-    }
-
-    let inserted = query.execute(&mut **tx).await.map_err(map_sqlx)?;
-
-    // Record a reach event for the unified reach ledger. Signal pushes are
-    // broadcast reaches — one action reaches many fans. The estimated_reach
-    // is the number of eligible endpoints that received the push (from the
-    // INSERT ... ON CONFLICT row count above).
-    let estimated_reach = inserted.rows_affected() as i32;
-    // Zero endpoints inserted means zero reach — the credit allocator divides
-    // fan outcomes by reach, so a fabricated denominator of 1 would invent
-    // credit from nothing. A reach of 0 is the honest report: no audience was
-    // reached, so no outcome can be attributed to this push.
-    let estimated_reach = if estimated_reach > 0 {
-        estimated_reach
-    } else {
-        0
-    };
-    sqlx::query(r#"INSERT INTO viryaos_reach_events (workspace_id, action_id, recipient_kind, recipient_id, channel, template_id, estimated_reach, status, metadata) VALUES ($1, $2, 'platform_audience', 'signal_fans', 'signal_push', 'signal-inviter', $4, 'sent', jsonb_build_object('title', $3)) ON CONFLICT (action_id, recipient_id, channel) WHERE action_id IS NOT NULL DO NOTHING"#)
-        .bind(workspace_id.into_uuid())
-        .bind(action_uuid)
-        .bind(title)
-        .bind(estimated_reach)
-        .execute(&mut **tx)
-        .await
-        .map_err(map_sqlx)?;
-
     Ok(())
 }

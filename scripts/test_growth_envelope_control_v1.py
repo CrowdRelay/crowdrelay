@@ -38,6 +38,7 @@ FIELDS = (
     "dry_run",
     "weekly_owned_audience_touches",
     "weekly_third_party_touches",
+    "daily_third_party_touches",
     "subject_cooldown_hours",
     "max_recipients_per_step",
 )

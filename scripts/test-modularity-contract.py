@@ -132,6 +132,7 @@ CONTRACT = {
     "crates/crowdrelay-application/src/autopilot/evaluate.rs": [
         "evaluate/types.rs",
         "evaluate/candidates.rs",
+        "evaluate/candidates_relay.rs",
         "evaluate/supply_quiet.rs",
         "evaluate/tests.rs",
     ],

@@ -78,11 +78,15 @@ impl PostgresAutopilotRepository {
                     } else {
                         None
                     };
-                    emit_external_action(
+                    emit_outward_action(
                         &mut transaction,
                         workspace_id,
                         action.id,
                         "crowdrelay.fan_lifecycle.message_requested",
+                        format!("fan-lifecycle:{fan_id}"),
+                        format!(
+                            "consented fan, lifecycle template {template_key} — marketing consent is re-checked at send"
+                        ),
                         json!({
                             "action_id": action.id,
                             "fan_id": fan_id,
@@ -155,11 +159,15 @@ impl PostgresAutopilotRepository {
                         now,
                     )
                     .await?;
-                    emit_external_action(
+                    emit_outward_action(
                         &mut transaction,
                         workspace_id,
                         action.id,
                         "crowdrelay.booking.outreach_requested",
+                        format!("booking-target:{target_id}"),
+                        format!(
+                            "screened booking target, {phase:?} phase, score {score} — locked under version {target_version}"
+                        ),
                         json!({
                             "action_id": action.id,
                             "city_id": city_id,
@@ -271,11 +279,15 @@ impl PostgresAutopilotRepository {
                     // read than one assembled first.
                     let evidence =
                         waves::evidence_packet(&mut transaction, workspace_id, now).await?;
-                    emit_external_action(
+                    emit_outward_action(
                         &mut transaction,
                         workspace_id,
                         action.id,
                         "crowdrelay.outreach.requested",
+                        format!("outreach-target:{target_id}"),
+                        format!(
+                            "verified outreach target, accepts outreach, not suppressed — locked at version {target_version}"
+                        ),
                         json!({
                             "action_id": action.id,
                             "opportunity_id": opportunity_id,
@@ -341,11 +353,13 @@ impl PostgresAutopilotRepository {
                     .ok_or(RepositoryError::Conflict)?;
                     let redacted = crowdrelay_domain::listing::redact(&listing.listing)
                         .ok_or(RepositoryError::Conflict)?;
-                    emit_external_action(
+                    emit_outward_action(
                         &mut transaction,
                         workspace_id,
                         action.id,
                         "crowdrelay.representation.approach_requested",
+                        format!("representation-target:{target_id}"),
+                        "screened representation target — locked under version, published listing attached",
                         json!({
                             "action_id": action.id,
                             "target_id": target_id,
@@ -546,11 +560,13 @@ impl PostgresAutopilotRepository {
                     // answers yes, so every signup they produce is attributed
                     // and consented by construction — neither the executor
                     // nor the partner invents either.
-                    emit_external_action(
+                    emit_outward_action(
                         &mut transaction,
                         workspace_id,
                         action.id,
                         "crowdrelay.beacon.invite_batch_requested",
+                        format!("beacon:{beacon_id}"),
+                        "verified beacon partner, accepts outreach — invite batch for its community",
                         json!({
                             "action_id": action.id,
                             "beacon_id": beacon_id,
@@ -582,121 +598,18 @@ impl PostgresAutopilotRepository {
                     phase,
                     template_key,
                 } => {
-                    let target = sqlx::query_as::<_, (String, String, String, String, Option<String>, OffsetDateTime, String, Option<String>)>(
-                        r#"
-                        SELECT beacon.beacon_kind, beacon.display_name, beacon.contact_email,
-                               event.title, event.venue, event.starts_at, event.slug, event.ticket_url
-                        FROM viryaos_beacons AS beacon
-                        JOIN events AS event
-                          ON event.workspace_id = beacon.workspace_id AND event.id = $3
-                        WHERE beacon.workspace_id = $1 AND beacon.id = $2
-                          AND beacon.version = $4
-                          AND beacon.active AND beacon.verified AND beacon.accepts_outreach
-                          AND NOT beacon.do_not_contact
-                          AND beacon.contact_email IS NOT NULL
-                          AND event.status IN ('published','completed')
-                        FOR SHARE OF beacon, event
-                        "#,
-                    )
-                    .bind(workspace_id.into_uuid())
-                    .bind(beacon_id.into_uuid())
-                    .bind(event_id.into_uuid())
-                    .bind(beacon_version)
-                    .fetch_optional(&mut *transaction)
-                    .await
-                    .map_err(map_sqlx)?
-                    .ok_or(RepositoryError::Conflict)?;
-                    let beacon_kind = operations::parse_beacon_kind(&target.0)?;
-                    let allowed_offers = beacon_kind.offer_keys_for_phase(*phase);
-                    reserve_contact_window(
+                    execute_beacon_outreach(
                         &mut transaction,
                         workspace_id,
                         action.id,
-                        "beacon",
-                        &target.2,
+                        *beacon_id,
+                        *event_id,
+                        *beacon_version,
+                        phase,
+                        template_key,
                         now,
                     )
                     .await?;
-                    let city = sqlx::query_scalar::<_, Option<String>>(
-                        r#"
-                        SELECT city.name
-                        FROM events AS event
-                        LEFT JOIN cities AS city ON city.id = event.city_id
-                        WHERE event.workspace_id = $1 AND event.id = $2
-                        "#,
-                    )
-                    .bind(workspace_id.into_uuid())
-                    .bind(event_id.into_uuid())
-                    .fetch_one(&mut *transaction)
-                    .await
-                    .map_err(map_sqlx)?;
-                    let show_url = format!("https://virya.music/pl/live/{}/", target.6);
-                    emit_external_action(
-                        &mut transaction,
-                        workspace_id,
-                        action.id,
-                        "crowdrelay.beacon.outreach_requested",
-                        json!({
-                            "action_id": action.id,
-                            "beacon_id": beacon_id,
-                            "beacon_kind": target.0,
-                            "beacon_name": target.1,
-                            "contact_email": target.2,
-                            "event": {
-                                "id": event_id,
-                                "title": target.3,
-                                "venue": target.4,
-                                "city": city,
-                                "starts_at": target.5,
-                                "slug": target.6,
-                                "ticket_url": target.7,
-                                "show_url": show_url,
-                            },
-                            "phase": phase,
-                            "template_key": template_key,
-                            "personalization_contract": {
-                                "local_reason_required": true,
-                                "human_tone": true,
-                                "allowed_offers": allowed_offers,
-                                "epk_url": "https://virya.music/pl/epk/",
-                                "single_primary_ask": true,
-                                "use_event_ticket_url_when_cta_is_relevant": true,
-                                "use_verified_press_or_live_proof_only": true,
-                                "never_invent_local_connection_or_editorial_interest": true,
-                            },
-                        }),
-                    )
-                    .await?;
-                    sqlx::query(
-                        r#"
-                        INSERT INTO viryaos_beacon_campaigns (
-                            workspace_id, beacon_id, event_id, status, last_phase,
-                            last_outreach_at, followup_count
-                        ) VALUES ($1,$2,$3,'contacted',$4,$5,1)
-                        ON CONFLICT (workspace_id, beacon_id, event_id) DO UPDATE
-                        SET status = CASE
-                                WHEN viryaos_beacon_campaigns.status IN ('interested','partner')
-                                THEN viryaos_beacon_campaigns.status
-                                ELSE 'contacted'
-                            END,
-                            last_phase = EXCLUDED.last_phase,
-                            last_outreach_at = EXCLUDED.last_outreach_at,
-                            followup_count = viryaos_beacon_campaigns.followup_count + 1
-                        "#,
-                    )
-                    .bind(workspace_id.into_uuid())
-                    .bind(beacon_id.into_uuid())
-                    .bind(event_id.into_uuid())
-                    .bind(match phase {
-                        crowdrelay_domain::beacons::BeaconOutreachPhase::Initial => "initial",
-                        crowdrelay_domain::beacons::BeaconOutreachPhase::CollaborationFollowUp => "collaboration_follow_up",
-                        crowdrelay_domain::beacons::BeaconOutreachPhase::LocalPush => "local_push",
-                        crowdrelay_domain::beacons::BeaconOutreachPhase::PostShowThanks => "post_show_thanks",
-                    })
-                    .bind(now)
-                    .execute(&mut *transaction)
-                    .await
-                    .map_err(map_sqlx)?;
                 }
                 AutopilotActionPayload::RaiseGrowthOpportunity { .. } => {
                     // Deliberately no side effect. The finding is the work: the
@@ -1060,22 +973,39 @@ impl PostgresAutopilotRepository {
                     // is the only thing the mailer sees. Emitting a pitch
                     // without an address published a draft to nobody, which is
                     // how every press pitch in production ended.
-                    emit_external_action(
-                        &mut transaction,
-                        workspace_id,
-                        action.id,
-                        "crowdrelay.agent.content_requested",
-                        json!({
-                            "action_id": action.id,
-                            "template_id": template_id,
-                            "task_id": task_id,
-                            "draft": draft,
-                            "recipient_email": recipient_email,
-                            "recipient_name": recipient_name,
-                            "recipient_target_id": recipient_target_id,
-                        }),
-                    )
-                    .await?;
+                    let event = json!({
+                        "action_id": action.id,
+                        "template_id": template_id,
+                        "task_id": task_id,
+                        "draft": draft,
+                        "recipient_email": recipient_email,
+                        "recipient_name": recipient_name,
+                        "recipient_target_id": recipient_target_id,
+                    });
+                    // A draft with an address is an outward send — the payload
+                    // classes itself third-party for exactly this shape, so the
+                    // gate will demand the evidence a channel draft can omit.
+                    if recipient_email.is_some() || recipient_target_id.is_some() {
+                        emit_outward_action(
+                            &mut transaction,
+                            workspace_id,
+                            action.id,
+                            "crowdrelay.agent.content_requested",
+                            format!("agent-task:{task_id}"),
+                            "agent-drafted pitch to a recipient the operator approved",
+                            event,
+                        )
+                        .await?;
+                    } else {
+                        emit_external_action(
+                            &mut transaction,
+                            workspace_id,
+                            action.id,
+                            "crowdrelay.agent.content_requested",
+                            event,
+                        )
+                        .await?;
+                    }
                 }
                 AutopilotActionPayload::RequestOutreachTarget {
                     target_kind,
@@ -1159,11 +1089,13 @@ impl PostgresAutopilotRepository {
                     body,
                     smart_link,
                 } => {
-                    emit_external_action(
+                    emit_outward_action(
                         &mut transaction,
                         workspace_id,
                         action.id,
                         "crowdrelay.community.engagement_requested",
+                        format!("community-target:{target_id}"),
+                        format!("community screened and admitted — {platform}/{subreddit:?}"),
                         json!({
                             "action_id": action.id,
                             "target_id": target_id,

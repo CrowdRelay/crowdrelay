@@ -25,8 +25,8 @@ use crowdrelay_domain::{
     },
     campaign_lifecycle::{EventCampaignDecision, EventCampaignSnapshot, evaluate_event_campaign},
     content_supply::{
-        ContentSupplyDecision, ContentSupplyHoldReason, ContentSupplySnapshot,
-        evaluate_content_supply,
+        CommunityRelayTarget, ContentSourceKind, ContentSupplyDecision, ContentSupplyHoldReason,
+        ContentSupplySnapshot, evaluate_content_supply,
     },
     deliverability::{DeliverabilityPolicy, ramped_ceiling},
     experimentation::{ExperimentDecision, ExperimentSnapshot, evaluate_experiment},
@@ -358,9 +358,22 @@ where
                     if !matches!(policy.config, AutopilotPolicyConfig::ContentSupply(_)) {
                         continue;
                     }
+                    // Admitted communities are loaded once, and only when a
+                    // fresh synced post could be relayed into them — a cycle
+                    // with no relay material owes the read nothing.
+                    let communities = if snapshots
+                        .iter()
+                        .any(|snapshot| snapshot.source_kind == ContentSourceKind::SocialPost)
+                    {
+                        self.repository
+                            .load_relay_community_targets(self.workspace_id)
+                            .await?
+                    } else {
+                        Vec::new()
+                    };
                     let mut produced = 0usize;
                     for snapshot in &snapshots {
-                        if let Some(candidate) = content_candidate(snapshot, &policy, now)? {
+                        for candidate in content_candidates(snapshot, &policy, &communities, now)? {
                             produced += 1;
                             self.persist(&candidate, &mut limits, &mut report).await?;
                         }
@@ -943,6 +956,11 @@ where
                 ActionClass::ThirdParty => {
                     limits.usage.third_party_touches_7d =
                         limits.usage.third_party_touches_7d.saturating_add(1);
+                    // The daily wall spends from the same send — leaving it
+                    // stale would let one cycle enqueue a week of third-party
+                    // touches against a day-sized ceiling.
+                    limits.usage.third_party_touches_24h =
+                        limits.usage.third_party_touches_24h.saturating_add(1);
                 }
                 ActionClass::FirstPartyReversible | ActionClass::Paid => {}
             }
@@ -970,6 +988,7 @@ fn deterministic_roll(key: &str) -> f64 {
 
 include!("evaluate/types.rs");
 include!("evaluate/candidates.rs");
+include!("evaluate/candidates_relay.rs");
 include!("evaluate/supply_quiet.rs");
 include!("evaluate/growth_intelligence_context.rs");
 include!("evaluate/hypothesis_validation.rs");

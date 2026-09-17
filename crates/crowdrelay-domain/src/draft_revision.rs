@@ -79,6 +79,29 @@ impl RevisionRefusal {
             Self::NoChange => "the revision is identical to the draft".to_owned(),
         }
     }
+
+    /// The refusal as a `&'static str` for `RepositoryError::ConflictBecause`.
+    ///
+    /// The full [`Self::message`] names the field; the repository error cannot
+    /// carry an owned string, so the wire reason states the rule the field
+    /// broke. The HTTP layer pre-validates field names itself, so an operator
+    /// who hits this got past that check — usually a stale modal rather than
+    /// a real attempt at a locked field.
+    #[must_use]
+    pub fn conflict_reason(&self) -> &'static str {
+        match self {
+            Self::FieldNotRevisable { .. } => {
+                "draft revision refused: that field cannot be revised — a revision changes                  the words a human reads, not who reads them, what they cost, or what they point at"
+            }
+            Self::FieldEmptied { .. } => {
+                "draft revision refused: a revision may not empty a field — reject the draft instead"
+            }
+            Self::FieldTooLong { .. } => {
+                "draft revision refused: the revision is longer than the allowed multiple                  of the original"
+            }
+            Self::NoChange => "draft revision refused: the revision makes no change",
+        }
+    }
 }
 
 /// The hard ceiling on any revised field, and the multiple of the original a
@@ -155,6 +178,55 @@ pub fn review_revision(
     }
 
     Ok(changed)
+}
+
+/// The fields a payload lets an operator revise, with their current text.
+///
+/// One definition feeds both ends of the flow: the briefing renders this map
+/// as the editable surface, and the approve path feeds it to
+/// [`review_revision`] before writing anything. The two must never disagree —
+/// a field the operator could see but the gate refused is a trap, and a field
+/// the gate accepted but the operator never saw is a hole.
+///
+/// Sources: top-level string fields on the allowlist, plus the same fields
+/// nested under `draft` — an agent-content payload carries its words there.
+/// Non-string fields are skipped: a revisable field that is not text is the
+/// payload's business, not the operator's.
+#[must_use]
+pub fn revisable_fields(payload: &serde_json::Value) -> BTreeMap<String, String> {
+    let mut fields = BTreeMap::new();
+    let mut collect = |object: Option<&serde_json::Map<String, serde_json::Value>>| {
+        let Some(object) = object else { return };
+        for field in REVISABLE_FIELDS {
+            if let Some(serde_json::Value::String(text)) = object.get(*field) {
+                fields.insert((*field).to_owned(), text.clone());
+            }
+        }
+    };
+    collect(payload.as_object());
+    collect(payload.get("draft").and_then(serde_json::Value::as_object));
+    fields
+}
+
+/// Writes an accepted revision back into the payload it was reviewed against.
+///
+/// A field lands everywhere it appears as a string — top level and inside
+/// `draft` — so a payload that carries the same words in two places stays
+/// consistent rather than sending one and recording the other.
+pub fn apply_revision(payload: &mut serde_json::Value, changed: &BTreeMap<String, String>) {
+    let apply_to = |object: &mut serde_json::Map<String, serde_json::Value>| {
+        for (field, revised) in changed {
+            if matches!(object.get(field), Some(serde_json::Value::String(_))) {
+                object.insert(field.clone(), serde_json::Value::String(revised.clone()));
+            }
+        }
+    };
+    if let Some(object) = payload.as_object_mut() {
+        apply_to(object);
+        if let Some(serde_json::Value::Object(draft)) = object.get_mut("draft") {
+            apply_to(draft);
+        }
+    }
 }
 
 /// How far the operator moved the machine's words, in changed characters.
@@ -341,6 +413,61 @@ mod tests {
         let changed = review_revision(&draft, &revision(&[("task_title", "Shoot the gig")]))
             .expect("revision accepted");
         assert_eq!(revision_distance(&draft, &changed), 1);
+    }
+
+    /// The map the operator edits and the map the gate reviews are the same
+    /// extraction — a field missing from one but present in the other is the
+    /// trap this exists to prevent.
+    #[test]
+    fn revisable_fields_covers_top_level_and_draft() {
+        let payload = serde_json::json!({
+            "task_title": "Film three shots",
+            "recipient_email": "tomek@example.test",
+            "fee_minor": 4200,
+            "draft": {
+                "subject": "Virya at Progresja",
+                "body": "hello",
+                "platform": "instagram"
+            }
+        });
+        let fields = revisable_fields(&payload);
+        assert_eq!(
+            fields.keys().map(String::as_str).collect::<Vec<_>>(),
+            vec!["body", "subject", "task_title"]
+        );
+        // Recipients and fees exist in the payload but not in the map — a
+        // revision against them must be refused, never silently applied.
+        assert!(!fields.contains_key("recipient_email"));
+        assert!(!fields.contains_key("fee_minor"));
+    }
+
+    #[test]
+    fn apply_revision_lands_where_the_field_lives() {
+        let mut payload = serde_json::json!({
+            "task_title": "Film three shots",
+            "draft": {"subject": "old", "platform": "instagram"}
+        });
+        apply_revision(
+            &mut payload,
+            &BTreeMap::from([
+                ("task_title".to_owned(), "Film the encore".to_owned()),
+                ("subject".to_owned(), "new subject".to_owned()),
+            ]),
+        );
+        assert_eq!(payload["task_title"], "Film the encore");
+        assert_eq!(payload["draft"]["subject"], "new subject");
+        // Untouched and non-revisable fields stay put.
+        assert_eq!(payload["draft"]["platform"], "instagram");
+    }
+
+    #[test]
+    fn apply_revision_never_adds_a_field_the_payload_lacks() {
+        let mut payload = serde_json::json!({"task_title": "Film three shots"});
+        apply_revision(
+            &mut payload,
+            &BTreeMap::from([("body".to_owned(), "surprise".to_owned())]),
+        );
+        assert!(payload.get("body").is_none());
     }
 
     #[test]

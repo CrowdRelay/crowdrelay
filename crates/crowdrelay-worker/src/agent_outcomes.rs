@@ -77,6 +77,8 @@ pub enum AgentOutcomeError {
          add a contact_email to an agent_outreach_targets row with target_kind='press'"
     )]
     NoPressRecipient,
+    #[error("agent outcome payload does not match the action schema")]
+    UnpersistablePayload,
 }
 
 /// Why an outcome was rejected by the data-quality guard. Stored in
@@ -796,7 +798,6 @@ impl AgentOutcomeWorker {
                         "source_id": item.and_then(|i| i.get("source_id")).and_then(Value::as_str),
                     }),
                     "community.engage.request",
-                    "third_party",
                 ))
             } else {
                 match outcome.kind {
@@ -828,7 +829,6 @@ impl AgentOutcomeWorker {
                                 "recipient_target_id": recipient.id,
                             }),
                             "agent.content.request",
-                            "first_party_reversible",
                         ))
                     }
                     OutcomeKind::SocialPost => Some((
@@ -838,7 +838,6 @@ impl AgentOutcomeWorker {
                             "draft": outcome.payload.item.clone().unwrap_or(Value::Null),
                         }),
                         "agent.content.request",
-                        "first_party_reversible",
                     )),
                     OutcomeKind::SignalPush => {
                         let item = outcome.payload.item.as_ref();
@@ -873,7 +872,6 @@ impl AgentOutcomeWorker {
                                 "segment": segment,
                             }),
                             "signal.push.request",
-                            "owned_audience",
                         ))
                     }
                     OutcomeKind::OutreachTargets => {
@@ -925,7 +923,6 @@ impl AgentOutcomeWorker {
                                     "subreddit": subreddit,
                                 }),
                                 "outreach.target.request",
-                                "first_party_reversible",
                             ))
                         }
                     }
@@ -942,8 +939,23 @@ impl AgentOutcomeWorker {
                     }
                 }
             };
-            let inserted_action = if let Some((payload, action_kind, action_class)) = action_details
-            {
+            let inserted_action = if let Some((payload, action_kind)) = action_details {
+                // The durable class derives from the payload itself, never
+                // from a literal beside it: a press pitch carrying a recipient
+                // is third-party, and a hand-written `first_party_reversible`
+                // here once let one walk past the evidence gate.
+                let parsed = serde_json::from_value::<
+                    crowdrelay_application::autopilot::AutopilotActionPayload,
+                >(payload.clone())
+                .map_err(|error| {
+                    tracing::warn!(
+                        %error,
+                        "agent outcome payload does not match its schema — refusing to persist an action that cannot execute"
+                    );
+                    AgentOutcomeError::UnpersistablePayload
+                })?;
+                let action_class = parsed.action_class().as_str();
+
                 if auto_execute {
                     sqlx::query_scalar::<_, Uuid>(
                         r#"

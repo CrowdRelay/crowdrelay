@@ -30,7 +30,17 @@ fn transition_conflict_reason(status: &str, expired: bool) -> &'static str {
     }
 }
 
+/// The applied-revision bundle the approve path carries between the payload
+/// rewrite and the ledger insert: the new payload, the fields that changed,
+/// and the draft as it stood before the revision.
+type AppliedRevision = (
+    serde_json::Value,
+    std::collections::BTreeMap<String, String>,
+    std::collections::BTreeMap<String, String>,
+);
+
 impl PostgresAutopilotRepository {
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn control_action_transition(
         &self,
         workspace_id: WorkspaceId,
@@ -39,11 +49,21 @@ impl PostgresAutopilotRepository {
         request_id: Option<&RequestId>,
         operator_action: &'static str,
         target_status: &'static str,
+        revision: Option<&std::collections::BTreeMap<String, String>>,
     ) -> Result<AutopilotControlMutation, RepositoryError> {
         self.bounded(async {
             let mut transaction = self.pool.begin().await.map_err(map_sqlx)?;
             let operation_id = Uuid::now_v7();
-            let details = json!({"requested_status": target_status});
+            // The audit row records which fields the operator meant to edit —
+            // names only; the before/after text lives in
+            // `viryaos_draft_revisions` once the edit is accepted.
+            let details = match revision {
+                Some(revision) => json!({
+                    "requested_status": target_status,
+                    "revision_fields": revision.keys().collect::<Vec<_>>(),
+                }),
+                None => json!({"requested_status": target_status}),
+            };
             let replay = operator_actions::insert_operator_action(
                 &mut transaction,
                 workspace_id,
@@ -76,14 +96,20 @@ impl PostgresAutopilotRepository {
                 });
             }
 
-            let updated = if target_status == "queued" {
-                sqlx::query_scalar::<_, String>(
+            // Approve-with-revision: the operator's edit is reviewed against
+            // the stored payload before anything moves — a refused revision
+            // refuses the whole approval rather than silently approving the
+            // original. Locking the row here keeps the payload we reviewed the
+            // payload we write; the status UPDATE below then cannot race a
+            // concurrent cancel into rewriting a draft that was just edited.
+            let mut revised: Option<AppliedRevision> = None;
+            if let Some(revision) = revision
+                && target_status == "queued"
+                && let Some((payload,)) = sqlx::query_as::<_, (serde_json::Value,)>(
                     r#"
-                    UPDATE viryaos_autopilot_actions
-                    SET status = 'queued', approved_at = now(), approved_by = 'operator:admin_api_key'
+                    SELECT payload FROM viryaos_autopilot_actions
                     WHERE workspace_id = $1 AND id = $2 AND status = 'awaiting_approval'
-                      AND (approval_expires_at IS NULL OR approval_expires_at > now())
-                    RETURNING status
+                    FOR UPDATE
                     "#,
                 )
                 .bind(workspace_id.into_uuid())
@@ -91,6 +117,55 @@ impl PostgresAutopilotRepository {
                 .fetch_optional(&mut *transaction)
                 .await
                 .map_err(map_sqlx)?
+            {
+                let draft = crowdrelay_domain::draft_revision::revisable_fields(&payload);
+                let changed = crowdrelay_domain::draft_revision::review_revision(&draft, revision)
+                    .map_err(|refusal| {
+                        RepositoryError::ConflictBecause(refusal.conflict_reason())
+                    })?;
+                let mut applied = payload;
+                crowdrelay_domain::draft_revision::apply_revision(&mut applied, &changed);
+                revised = Some((applied, changed, draft));
+                // A missing row falls through to the ordinary UPDATE below,
+                // which reports the action's real state instead of a revision
+                // refusal for a draft that is no longer approvable.
+            }
+
+            let updated = if target_status == "queued" {
+                let query = if revised.is_some() {
+                    // The reviewed words replace the draft in the same
+                    // statement that flips the status — the queue never holds
+                    // an approved action carrying the unapproved text.
+                    sqlx::query_scalar::<_, String>(
+                        r#"
+                        UPDATE viryaos_autopilot_actions
+                        SET status = 'queued', payload = $3,
+                            approved_at = now(), approved_by = 'operator:admin_api_key'
+                        WHERE workspace_id = $1 AND id = $2 AND status = 'awaiting_approval'
+                          AND (approval_expires_at IS NULL OR approval_expires_at > now())
+                        RETURNING status
+                        "#,
+                    )
+                    .bind(workspace_id.into_uuid())
+                    .bind(action_id.into_uuid())
+                    .bind(revised.as_ref().map(|(payload, _, _)| payload.clone()))
+                } else {
+                    sqlx::query_scalar::<_, String>(
+                        r#"
+                        UPDATE viryaos_autopilot_actions
+                        SET status = 'queued', approved_at = now(), approved_by = 'operator:admin_api_key'
+                        WHERE workspace_id = $1 AND id = $2 AND status = 'awaiting_approval'
+                          AND (approval_expires_at IS NULL OR approval_expires_at > now())
+                        RETURNING status
+                        "#,
+                    )
+                    .bind(workspace_id.into_uuid())
+                    .bind(action_id.into_uuid())
+                };
+                query
+                    .fetch_optional(&mut *transaction)
+                    .await
+                    .map_err(map_sqlx)?
             } else {
                 sqlx::query_scalar::<_, String>(
                     r#"
@@ -150,6 +225,43 @@ impl PostgresAutopilotRepository {
                 .execute(&mut *transaction)
                 .await
                 .map_err(map_sqlx)?;
+
+                // §4d-3.1 — every edited field gets its own ledger row: the
+                // machine's words, the band's words, and how far they moved.
+                // This is the voice signal, not an edit log — the distance is
+                // what §4d-3.2 reads to know whether drafts are getting closer.
+                if let Some((_, changed, draft_before)) = &revised {
+                    for (field, after) in changed {
+                        let before = draft_before.get(field).cloned().unwrap_or_default();
+                        // Per-field distance under the same rule the total
+                        // uses, so the ledger and the trend measure one thing.
+                        let mut single = std::collections::BTreeMap::new();
+                        single.insert(field.clone(), after.clone());
+                        let distance =
+                            crowdrelay_domain::draft_revision::revision_distance(
+                                draft_before,
+                                &single,
+                            );
+                        sqlx::query(
+                            r#"
+                            INSERT INTO viryaos_draft_revisions
+                                (workspace_id, action_id, operation_id, field,
+                                 before_text, after_text, distance_chars)
+                            VALUES ($1, $2, $3, $4, $5, $6, $7)
+                            "#,
+                        )
+                        .bind(workspace_id.into_uuid())
+                        .bind(action_id.into_uuid())
+                        .bind(operation_id)
+                        .bind(field)
+                        .bind(before)
+                        .bind(after)
+                        .bind(i64::try_from(distance).unwrap_or(i64::MAX))
+                        .execute(&mut *transaction)
+                        .await
+                        .map_err(map_sqlx)?;
+                    }
+                }
             } else {
                 sqlx::query(
                     r#"

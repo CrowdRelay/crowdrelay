@@ -750,6 +750,7 @@ impl AutopilotControlRepository for PostgresAutopilotRepository {
                 "dry_run": command.dry_run,
                 "weekly_owned_audience_touches": command.weekly_owned_audience_touches,
                 "weekly_third_party_touches": command.weekly_third_party_touches,
+                "daily_third_party_touches": command.daily_third_party_touches,
                 "subject_cooldown_hours": command.subject_cooldown_hours,
                 "max_recipients_per_step": command.max_recipients_per_step,
                 "parked": command.parked,
@@ -1112,6 +1113,7 @@ impl AutopilotControlRepository for PostgresAutopilotRepository {
         action_id: AutopilotActionId,
         idempotency_key: &IdempotencyKey,
         request_id: Option<&RequestId>,
+        revision: Option<&std::collections::BTreeMap<String, String>>,
     ) -> Result<AutopilotControlMutation, RepositoryError> {
         self.control_action_transition(
             workspace_id,
@@ -1120,6 +1122,7 @@ impl AutopilotControlRepository for PostgresAutopilotRepository {
             request_id,
             "approve_autopilot_action",
             "queued",
+            revision,
         )
         .await
     }
@@ -1138,6 +1141,7 @@ impl AutopilotControlRepository for PostgresAutopilotRepository {
             request_id,
             "cancel_autopilot_action",
             "cancelled",
+            None,
         )
         .await
     }

@@ -170,8 +170,54 @@ pub async fn approve_action(
     State(state): State<AppState>,
     Path(action_id): Path<String>,
     headers: HeaderMap,
+    body: axum::body::Bytes,
 ) -> Response {
-    mutate_action(state, headers, action_id, true).await
+    // Raw bytes rather than `Option<Json<_>>`: a malformed revision body must
+    // fail loudly, not silently degrade into an approve of the original draft.
+    let revision = if body.is_empty() {
+        None
+    } else {
+        match serde_json::from_slice::<ApproveActionRequest>(&body) {
+            Ok(request) => request.revision,
+            Err(_) => {
+                return Problem::bad_request(request_id(&headers))
+                    .private()
+                    .into_response();
+            }
+        }
+    };
+    // Field names are checkable here — the allowlist is static. Naming the
+    // field beats the repository's static refusal, and `RevisionRefusal`
+    // already wrote the sentence.
+    if let Some(revision) = &revision {
+        for field in revision.keys() {
+            if !crowdrelay_domain::draft_revision::REVISABLE_FIELDS.contains(&field.as_str()) {
+                return Problem::conflict_owned(
+                    crowdrelay_domain::draft_revision::RevisionRefusal::FieldNotRevisable {
+                        field: field.clone(),
+                    }
+                    .message()
+                    .into(),
+                    request_id(&headers),
+                )
+                .private()
+                .into_response();
+            }
+            if revision[field].trim().is_empty() {
+                return Problem::conflict_owned(
+                    crowdrelay_domain::draft_revision::RevisionRefusal::FieldEmptied {
+                        field: field.clone(),
+                    }
+                    .message()
+                    .into(),
+                    request_id(&headers),
+                )
+                .private()
+                .into_response();
+            }
+        }
+    }
+    mutate_action(state, headers, action_id, true, revision).await
 }
 
 pub async fn cancel_action(
@@ -179,7 +225,7 @@ pub async fn cancel_action(
     Path(action_id): Path<String>,
     headers: HeaderMap,
 ) -> Response {
-    mutate_action(state, headers, action_id, false).await
+    mutate_action(state, headers, action_id, false, None).await
 }
 
 /// Records that a human handled this finding outside the system.
@@ -257,6 +303,7 @@ async fn mutate_action(
     headers: HeaderMap,
     action_id: String,
     approve: bool,
+    revision: Option<std::collections::BTreeMap<String, String>>,
 ) -> Response {
     let action_id = match Uuid::parse_str(&action_id) {
         Ok(value) => AutopilotActionId::from_uuid(value),
@@ -279,6 +326,7 @@ async fn mutate_action(
                 action_id,
                 &idempotency_key,
                 request_id_value.as_ref(),
+                revision.as_ref(),
             )
             .await
     } else {

@@ -343,6 +343,10 @@ pub(in crate::autopilot) async fn issue_release_outcome_report(
         json!({
             "action_id": action_id,
             "release_id": release_id,
+            "send_evidence": crate::autopilot::send_evidence(
+                format!("release:{release_id}:{kind}"),
+                "release outcome report to the band — first-party numbers only",
+            )?,
             "release": {
                 "title": title,
                 "release_at": release_at,

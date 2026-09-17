@@ -103,7 +103,7 @@ use crowdrelay_domain::{
     },
     booking_discovery::BookingSupplySnapshot,
     campaign_lifecycle::EventCampaignSnapshot,
-    content_supply::ContentSupplySnapshot,
+    content_supply::{CommunityRelayTarget, ContentSupplySnapshot},
     deliverability::DeliverabilitySnapshot,
     experimentation::ExperimentSnapshot,
     free_reach::{WaveAnchor, WaveSnapshot, WaveState},
@@ -298,6 +298,7 @@ struct GrowthEnvelopeRow {
     dry_run: bool,
     weekly_owned_audience_touches: i32,
     weekly_third_party_touches: i32,
+    daily_third_party_touches: i32,
     subject_cooldown_hours: i32,
     max_recipients_per_step: i32,
     parked: bool,
@@ -623,6 +624,7 @@ struct ExistingOperatorActionRow {
 include!("autopilot/mapping.rs");
 
 include!("autopilot/execution.rs");
+include!("autopilot/execution_beacon.rs");
 include!("autopilot/execution_dispatch.rs");
 include!("autopilot/execution_outcomes.rs");
 include!("autopilot/execution_preflight.rs");

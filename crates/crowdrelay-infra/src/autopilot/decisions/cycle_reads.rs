@@ -51,7 +51,8 @@ macro_rules! decision_cycle_reads {
             let envelope = sqlx::query_as::<_, GrowthEnvelopeRow>(
                 r#"
                 SELECT agent_enabled, dry_run, weekly_owned_audience_touches,
-                       weekly_third_party_touches, subject_cooldown_hours,
+                       weekly_third_party_touches, daily_third_party_touches,
+                       subject_cooldown_hours,
                        max_recipients_per_step, parked
                 FROM viryaos_growth_envelope
                 WHERE workspace_id = $1
@@ -73,6 +74,8 @@ macro_rules! decision_cycle_reads {
                 .unwrap_or(0),
                 weekly_third_party_touches: bounded_u32(i64::from(row.weekly_third_party_touches))
                     .unwrap_or(0),
+                daily_third_party_touches: bounded_u32(i64::from(row.daily_third_party_touches))
+                    .unwrap_or(0),
                 subject_cooldown_hours: bounded_u32(i64::from(row.subject_cooldown_hours))
                     .unwrap_or(0),
                 max_recipients_per_step: bounded_u32(i64::from(row.max_recipients_per_step))
@@ -83,9 +86,10 @@ macro_rules! decision_cycle_reads {
             // Cancelled actions are excluded: an approval that was refused is
             // not a touch anybody received. Everything else counts, including
             // failures, because a send that errored may still have gone out.
-            let spend = sqlx::query_as::<_, (String, i64)>(
+            let spend = sqlx::query_as::<_, (String, i64, i64)>(
                 r#"
-                SELECT action_class, count(*)::bigint
+                SELECT action_class, count(*)::bigint,
+                       count(*) FILTER (WHERE created_at >= $2 - INTERVAL '24 hours')::bigint
                 FROM viryaos_autopilot_actions
                 WHERE workspace_id = $1
                   AND action_class IN ('owned_audience', 'third_party')
@@ -101,11 +105,15 @@ macro_rules! decision_cycle_reads {
             .map_err(map_sqlx)?;
 
             let mut usage = EnvelopeUsage::default();
-            for (class, count) in spend {
-                let count = bounded_u32(count).unwrap_or(u32::MAX);
+            for (class, count_7d, count_24h) in spend {
+                let count = bounded_u32(count_7d).unwrap_or(u32::MAX);
                 match ActionClass::parse(&class) {
                     Some(ActionClass::OwnedAudience) => usage.owned_audience_touches_7d = count,
-                    Some(ActionClass::ThirdParty) => usage.third_party_touches_7d = count,
+                    Some(ActionClass::ThirdParty) => {
+                        usage.third_party_touches_7d = count;
+                        usage.third_party_touches_24h =
+                            bounded_u32(count_24h).unwrap_or(u32::MAX);
+                    }
                     _ => {}
                 }
             }

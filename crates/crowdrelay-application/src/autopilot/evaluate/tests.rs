@@ -402,4 +402,163 @@ mod tests {
         assert!(release_candidate(snapshot, &release_policy(), now, &shows)?.is_none());
         Ok(())
     }
+
+    #[test]
+    fn a_fresh_synced_post_relays_to_owned_channel_and_admitted_communities()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use crowdrelay_domain::{
+            ContentSourceId, OutreachTargetId,
+            content_supply::{
+                CommunityRelayTarget, ContentSupplyPolicy, ContentSupplySnapshot, SocialPostFact,
+            },
+        };
+        let now = OffsetDateTime::now_utc();
+        let snapshot = ContentSupplySnapshot {
+            source_id: ContentSourceId::new(),
+            source_kind: ContentSourceKind::SocialPost,
+            source_version: 3,
+            occurred_at: now - time::Duration::hours(5),
+            expires_at: now + time::Duration::days(39),
+            communication_enabled: None,
+            press_enabled: None,
+            release_tier: None,
+            completed_artifacts: Vec::new(),
+            in_flight_artifacts: Vec::new(),
+            social_post: Some(SocialPostFact {
+                title: "soundcheck done".to_owned(),
+                url: Some("https://instagram.com/p/abc".to_owned()),
+                platform: "instagram".to_owned(),
+                body: Some("soundcheck done — see you tonight".to_owned()),
+            }),
+        };
+        let policy = AutopilotPolicy {
+            context: AutopilotContext::ContentSupply,
+            enabled: true,
+            autonomy_level: AutonomyLevel::BoundedAuto,
+            minimum_confidence: Confidence::from_basis_points(5_000)?,
+            max_actions_24h: 10,
+            config: AutopilotPolicyConfig::ContentSupply(ContentSupplyPolicy::default()),
+            version: 1,
+            guarded_until: None,
+            guardrail_reason: None,
+        };
+        let communities = vec![
+            CommunityRelayTarget {
+                target_id: OutreachTargetId::new(),
+                subreddit: "indieheads".to_owned(),
+            },
+            CommunityRelayTarget {
+                target_id: OutreachTargetId::new(),
+                subreddit: "listentothis".to_owned(),
+            },
+        ];
+
+        let candidates = content_candidates(&snapshot, &policy, &communities, now)?;
+        assert_eq!(candidates.len(), 3);
+
+        // The owned-channel carry is a push, not a new broadcast.
+        match &candidates[0].action {
+            AutopilotActionPayload::RequestSignalPush { title, body, .. } => {
+                assert_eq!(title, "soundcheck done");
+                assert!(body.contains("soundcheck done — see you tonight"));
+                assert!(body.contains("https://instagram.com/p/abc"));
+            }
+            other => return Err(format!("expected signal push, got {other:?}").into()),
+        }
+        assert_eq!(
+            candidates[0].action.action_class(),
+            ActionClass::OwnedAudience
+        );
+
+        // Each admitted community gets the band's own words, attributed.
+        for (candidate, target) in candidates[1..].iter().zip(&communities) {
+            match &candidate.action {
+                AutopilotActionPayload::RequestCommunityEngagement {
+                    target_id,
+                    subreddit,
+                    title,
+                    body,
+                    ..
+                } => {
+                    assert_eq!(*target_id, target.target_id.into_uuid());
+                    assert_eq!(subreddit.as_deref(), Some(target.subreddit.as_str()));
+                    assert_eq!(title, "soundcheck done");
+                    assert!(body.contains("Originally posted on instagram"));
+                    assert!(body.contains("https://instagram.com/p/abc"));
+                }
+                other => {
+                    return Err(format!("expected community engagement, got {other:?}").into())
+                }
+            }
+            assert_eq!(candidate.action.action_class(), ActionClass::ThirdParty);
+            assert_eq!(candidate.decision_kind, "relay_owned_post");
+            // The community is the subject — the inflight-subject index must
+            // see N community relays as N different subjects, or the second
+            // onward folds into the first and one post reaches one community.
+            assert_eq!(
+                candidate.subject,
+                crate::autopilot::model::ActionSubject::TargetCommunity(
+                    target.target_id.into_uuid()
+                )
+            );
+        }
+
+        // A caption edit bumps the source version; the relay keys stay put, so
+        // the same post can never be carried twice.
+        let mut edited = snapshot.clone();
+        edited.source_version = 4;
+        let again = content_candidates(&edited, &policy, &communities, now)?;
+        for (first, second) in candidates.iter().zip(&again) {
+            assert_eq!(first.action_idempotency_key, second.action_idempotency_key);
+            assert_eq!(first.decision_key, second.decision_key);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn a_relay_with_no_admitted_communities_still_reaches_the_owned_channel()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use crowdrelay_domain::{
+            ContentSourceId,
+            content_supply::{ContentSupplyPolicy, ContentSupplySnapshot, SocialPostFact},
+        };
+        let now = OffsetDateTime::now_utc();
+        let snapshot = ContentSupplySnapshot {
+            source_id: ContentSourceId::new(),
+            source_kind: ContentSourceKind::SocialPost,
+            source_version: 1,
+            occurred_at: now - time::Duration::hours(1),
+            expires_at: now + time::Duration::days(44),
+            communication_enabled: None,
+            press_enabled: None,
+            release_tier: None,
+            completed_artifacts: Vec::new(),
+            in_flight_artifacts: Vec::new(),
+            social_post: Some(SocialPostFact {
+                title: "new demo up".to_owned(),
+                url: None,
+                platform: "facebook".to_owned(),
+                body: None,
+            }),
+        };
+        let policy = AutopilotPolicy {
+            context: AutopilotContext::ContentSupply,
+            enabled: true,
+            autonomy_level: AutonomyLevel::BoundedAuto,
+            minimum_confidence: Confidence::from_basis_points(5_000)?,
+            max_actions_24h: 10,
+            config: AutopilotPolicyConfig::ContentSupply(ContentSupplyPolicy::default()),
+            version: 1,
+            guarded_until: None,
+            guardrail_reason: None,
+        };
+
+        let candidates = content_candidates(&snapshot, &policy, &[], now)?;
+        assert_eq!(candidates.len(), 1);
+        assert!(matches!(
+            candidates[0].action,
+            AutopilotActionPayload::RequestSignalPush { .. }
+        ));
+        Ok(())
+    }
 }

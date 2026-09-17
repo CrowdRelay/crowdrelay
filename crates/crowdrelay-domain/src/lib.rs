@@ -96,6 +96,7 @@ pub mod negotiation;
 pub mod next_best_action;
 pub mod objectives;
 pub mod outreach;
+pub mod outward_evidence;
 pub mod performance;
 pub mod place;
 pub mod play_measurement;
