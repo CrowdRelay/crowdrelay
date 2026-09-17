@@ -30,3 +30,19 @@ ALTER TABLE viryaos_team_opportunities
     CHECK (status_reason IS NULL OR (
         char_length(btrim(status_reason)) BETWEEN 1 AND 240
     ));
+
+-- The agents service writes one agent_outcomes row per finding; the kind
+-- must exist in the table's vocabulary or the insert dies on the CHECK.
+ALTER TABLE agent_outcomes
+    DROP CONSTRAINT IF EXISTS agent_outcomes_kind_check,
+    ADD CONSTRAINT agent_outcomes_kind_check CHECK (kind IN (
+        'press_pitch',
+        'social_post',
+        'signal_push',
+        'audience_segments',
+        'outreach_targets',
+        'campaign_insight',
+        'release_plan_note',
+        'generic_insight',
+        'opportunity_findings'
+    ));
