@@ -24,6 +24,14 @@ struct TimelineEventRow {
 struct TimelineActRow {
     act_slug: String,
     act_name: String,
+    /// Where on the bill. The order is the night's own — headliner last is a
+    /// choice somebody made, and re-sorting it alphabetically on the page
+    /// would quietly rewrite it.
+    position: i32,
+    /// This act's own ticket link, when the bill carries one. A support act
+    /// selling through its own page is the normal case at this size, and a
+    /// page that lists the act without the link sends the reader looking.
+    ticket_url: Option<String>,
 }
 
 #[derive(Debug, FromRow)]
@@ -472,7 +480,7 @@ async fn load_timeline_facts(
     // cooldown are the honest bound, not a made-up per-show limit.
     let crossbill_acts = sqlx::query_as::<_, TimelineActRow>(
         r#"
-        SELECT act_slug, act_name
+        SELECT act_slug, act_name, position, ticket_url
         FROM event_acts
         WHERE workspace_id = $1 AND event_id = $2
         ORDER BY position, act_slug

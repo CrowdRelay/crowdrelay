@@ -6,6 +6,47 @@
 mod timeline_tests {
     use super::*;
 
+    fn act(slug: &str, name: &str, position: i32, ticket_url: Option<&str>) -> TimelineActRow {
+        TimelineActRow {
+            act_slug: slug.to_string(),
+            act_name: name.to_string(),
+            position,
+            ticket_url: ticket_url.map(ToString::to_string),
+        }
+    }
+
+    /// 4V.5b: the bill renders in the order the night has, with each act's own
+    /// link, and a missing link stays missing.
+    ///
+    /// `event_acts` has carried this since migration 0271 and the gig page
+    /// never showed it — a page that described nine steps of work and could
+    /// not say who was playing.
+    #[test]
+    fn the_bill_keeps_the_night_s_own_order_and_links() {
+        let rows = vec![
+            act("opener", "Opener", 0, None),
+            act("virya", "Virya", 1, Some("https://tickets.example/virya")),
+        ];
+        let bill = bill_view(&rows);
+        assert_eq!(bill.len(), 2);
+        assert_eq!(bill[0]["name"], "Opener");
+        assert_eq!(bill[1]["name"], "Virya");
+        // Position travels, so a console can say "opens" and "headlines"
+        // without re-deriving the order from the array index.
+        assert_eq!(bill[0]["position"], 0);
+        assert_eq!(bill[1]["position"], 1);
+        // An act with no link of its own is null, never the other act's link.
+        assert!(bill[0]["ticket_url"].is_null());
+        assert_eq!(bill[1]["ticket_url"], "https://tickets.example/virya");
+    }
+
+    /// A solo night is an empty bill, not a bill of one that reads as a
+    /// co-headline.
+    #[test]
+    fn a_solo_night_has_no_support_on_the_page() {
+        assert!(bill_view(&[]).is_empty());
+    }
+
     fn facts(now: OffsetDateTime) -> TimelineFacts {
         TimelineFacts {
             event: TimelineEventRow {
