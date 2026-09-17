@@ -104,6 +104,18 @@ impl AttestationSigningKey {
     /// so that caller definitely exists.
     fn verify(&self, digest: &str, signature: &str) -> bool {
         let expected = self.sign(digest);
+        // An empty expectation never verifies.
+        //
+        // `sign` returns an empty string when HMAC initialisation fails, which
+        // it cannot with a fixed 32-byte key — but the crate denies
+        // `expect_used`, so the impossible branch has to return *something*,
+        // and "" compared against "" is `true`. That would make every
+        // signature valid at exactly the moment signing stopped working. The
+        // column's CHECK keeps an empty signature out of the table, so this
+        // guards the presented side rather than the stored one.
+        if expected.is_empty() || signature.is_empty() {
+            return false;
+        }
         if expected.len() != signature.len() {
             return false;
         }
@@ -214,7 +226,23 @@ impl PostgresAttestationRepository {
             INSERT INTO viryaos_attestations
                 (workspace_id, act_name, figures, issued_at, valid_until, digest, signature)
             VALUES ($1, $2, $3, $4, $5, $6, $7)
-            ON CONFLICT (digest) DO NOTHING
+            -- A digest collides only when the same workspace issues the same
+            -- figures inside the same second, because the act name and both
+            -- timestamps are inside it. That is the same document, so the
+            -- content columns are left alone — the immutability trigger would
+            -- reject changing them anyway.
+            --
+            -- But it is NOT a no-op. A band that revokes a document sent to the
+            -- wrong person and immediately re-issues used to get `DO NOTHING`
+            -- and their old token back, still pointing at the revoked row: they
+            -- believed they had a fresh link, the recipient saw "withdrawn by
+            -- the act", and nothing said otherwise. Re-issuing is an explicit
+            -- act, so it clears the revocation and mints a new token — the old
+            -- link stays dead, which is the safe direction.
+            ON CONFLICT (digest) DO UPDATE
+            SET revoked_at = NULL,
+                share_token = gen_random_uuid()
+            WHERE viryaos_attestations.workspace_id = EXCLUDED.workspace_id
             "#,
         )
         .bind(workspace_id)
@@ -578,6 +606,15 @@ mod tests {
 
     fn key() -> AttestationSigningKey {
         AttestationSigningKey::derive_from_secret(b"an-attestation-signing-secret")
+    }
+
+    /// The failure mode a lint fix introduced: `sign` cannot return an error,
+    /// so its unreachable branch returns `String::new()`, and an empty
+    /// expectation compared against an empty presentation is equal. Every
+    /// signature would verify at exactly the moment signing broke.
+    #[test]
+    fn an_empty_signature_never_verifies() {
+        assert!(!key().verify(&"a".repeat(64), ""));
     }
 
     #[test]
