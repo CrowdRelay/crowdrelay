@@ -78,23 +78,39 @@ async fn workspace(pool: &PgPool) -> Result<Uuid, Box<dyn std::error::Error>> {
 }
 
 async fn city(pool: &PgPool, slug: &str) -> Result<Uuid, Box<dyn std::error::Error>> {
+    city_in(pool, slug, "PL", 51.1, 17.0).await
+}
+
+async fn city_in(
+    pool: &PgPool,
+    slug: &str,
+    country_code: &str,
+    latitude: f64,
+    longitude: f64,
+) -> Result<Uuid, Box<dyn std::error::Error>> {
     // Coordinates matter: the reachability gate excludes a city without them,
     // and a fixture without coordinates would silently measure zero and pass a
     // test that proved nothing.
     sqlx::query(
         "INSERT INTO cities (slug, name, country_code, latitude, longitude)
-         VALUES ($1, $1, 'PL', 51.1, 17.0)
+         VALUES ($1, $1, $2, $3, $4)
          ON CONFLICT (country_code, slug)
-         DO UPDATE SET latitude = 51.1, longitude = 17.0",
+         DO UPDATE SET latitude = $3, longitude = $4",
     )
     .bind(slug)
+    .bind(country_code)
+    .bind(latitude)
+    .bind(longitude)
     .execute(pool)
     .await?;
     Ok(
-        sqlx::query_scalar::<_, Uuid>("SELECT id FROM cities WHERE country_code='PL' AND slug=$1")
-            .bind(slug)
-            .fetch_one(pool)
-            .await?,
+        sqlx::query_scalar::<_, Uuid>(
+            "SELECT id FROM cities WHERE country_code = $2 AND slug = $1",
+        )
+        .bind(slug)
+        .bind(country_code)
+        .fetch_one(pool)
+        .await?,
     )
 }
 
@@ -204,7 +220,8 @@ async fn run(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
         .ok_or("the city with sixty fans and two shows was not considered")?;
 
     assert_eq!(
-        wro.reachable_fans, 60,
+        wro.reachable_fans,
+        Some(60),
         "the reachability gate did not count fans who satisfy all four conditions"
     );
     assert!(!wro.has_upcoming_show, "a completed show read as upcoming");
@@ -602,4 +619,134 @@ async fn stated_intent_comes_from_the_act_that_stated_it(
     );
 
     Ok(())
+}
+
+/// Two catalogue rows may share a slug — the unique key is
+/// `(country_code, slug)`, not slug alone. The planner must keep them as two
+/// cities, each with its own evidence: a pipeline keyed on the slug merges
+/// them into one phantom opportunity whose reach unions both radii and whose
+/// room is whichever country the query happened to order first.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn two_cities_sharing_a_slug_do_not_share_their_evidence()
+-> Result<(), Box<dyn std::error::Error>> {
+    let database = DisposableDatabase::create().await?;
+    let result = async {
+        let act = workspace(&database.pool).await?;
+        let now = OffsetDateTime::now_utc();
+        // Wrocław, Poland — and a German namesake hundreds of kilometres away.
+        // Same slug, different city, different audience.
+        let wroclaw_pl = city_in(&database.pool, "wroclaw", "PL", 51.1, 17.0).await?;
+        let wroclaw_de = city_in(&database.pool, "wroclaw", "DE", 48.0, 7.85).await?;
+        for index in 0..60 {
+            reachable_fan(
+                &database.pool,
+                act,
+                wroclaw_pl,
+                &format!("pl{index}@example.com"),
+            )
+            .await?;
+        }
+        for index in 0..30 {
+            reachable_fan(
+                &database.pool,
+                act,
+                wroclaw_de,
+                &format!("de{index}@example.com"),
+            )
+            .await?;
+        }
+        played_show(&database.pool, act, wroclaw_pl, "Klub X", "show-pl", 40).await?;
+        played_show(&database.pool, act, wroclaw_de, "Forum Y", "show-de", 40).await?;
+
+        let opportunities = city_opportunities(&database.pool, act, now).await?;
+        let pl = opportunities
+            .iter()
+            .find(|city| city.city_id.into_uuid() == wroclaw_pl)
+            .ok_or("the PL city did not surface as its own opportunity")?;
+        let de = opportunities
+            .iter()
+            .find(|city| city.city_id.into_uuid() == wroclaw_de)
+            .ok_or("the DE namesake did not surface as its own opportunity")?;
+
+        assert_eq!(
+            pl.city, de.city,
+            "the fixture does not test what it claims unless both rows share the slug"
+        );
+        assert_eq!(
+            pl.reachable_fans,
+            Some(60),
+            "the PL count picked up the DE radius — the cities merged"
+        );
+        assert_eq!(
+            de.reachable_fans,
+            Some(30),
+            "the DE count picked up the PL radius — the cities merged"
+        );
+        assert_eq!(
+            pl.venue.as_ref().map(|venue| venue.name.as_str()),
+            Some("Klub X"),
+            "the PL proposal named the DE room"
+        );
+        assert_eq!(
+            de.venue.as_ref().map(|venue| venue.name.as_str()),
+            Some("Forum Y"),
+            "the DE proposal named the PL room"
+        );
+        Ok(())
+    }
+    .await;
+    database.drop_database().await;
+    result
+}
+
+/// Reachability has three honest answers, not two: a measured count (which
+/// may be zero), or unmeasurable. A city without coordinates and a city that
+/// is simply unknown both answer `None` — folding either into zero would put
+/// "only 0 people asked to hear from you" on a city the system never counted.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn an_unlocatable_city_is_unmeasurable_not_zero() -> Result<(), Box<dyn std::error::Error>> {
+    let database = DisposableDatabase::create().await?;
+    let result = async {
+        let pool = &database.pool;
+        let workspace = workspace(pool).await?;
+
+        // Measured, and the measurement is nobody.
+        let empty_city = city_in(pool, "pustkow", "PL", 50.0, 20.0).await?;
+        assert_eq!(
+            crowdrelay_infra::place_reach::reachable_in_city(pool, workspace, empty_city).await?,
+            Some(0),
+            "a coordinate-carrying city with no fans nearby is a measured zero"
+        );
+
+        // Present in the catalogue but unlocatable — nothing to anchor a
+        // radius to.
+        sqlx::query(
+            "INSERT INTO cities (slug, name, country_code, latitude, longitude)
+             VALUES ('nowhere', 'Nowhere', 'PL', NULL, NULL)",
+        )
+        .execute(pool)
+        .await?;
+        let nowhere: Uuid = sqlx::query_scalar("SELECT id FROM cities WHERE slug = 'nowhere'")
+            .fetch_one(pool)
+            .await?;
+        assert_eq!(
+            crowdrelay_infra::place_reach::reachable_in_city(pool, workspace, nowhere).await?,
+            None,
+            "a city without coordinates cannot be measured"
+        );
+
+        // Not in the catalogue at all.
+        assert_eq!(
+            crowdrelay_infra::place_reach::reachable_in_city(pool, workspace, Uuid::now_v7())
+                .await?,
+            None,
+            "an unknown city cannot be measured"
+        );
+        Ok(())
+    }
+    .await;
+    database.drop_database().await;
+    result
 }

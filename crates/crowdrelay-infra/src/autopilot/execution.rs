@@ -804,7 +804,7 @@ pub(super) async fn schedule_effect_measurement(
             ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$8,
                 (SELECT trace_id FROM viryaos_autopilot_actions WHERE id = $3)
             )
-            ON CONFLICT (workspace_id, action_id, measurement_kind) DO NOTHING
+            ON CONFLICT (workspace_id, action_id, measurement_kind, subject_id) DO NOTHING
             "#,
         )
         .bind(Uuid::now_v7())

@@ -46,6 +46,7 @@ const MAX_CITIES_CONSIDERED: i64 = 40;
 
 #[derive(Debug, sqlx::FromRow)]
 struct CityRow {
+    city_id: Uuid,
     city_slug: String,
     active_30d: i64,
     last_show_at: Option<OffsetDateTime>,
@@ -103,7 +104,8 @@ async fn candidate_cities(
             -- Played is past tense and booked is future. Collapsing them would
             -- make a city with a show next month look like a city that was
             -- served last month, and those want opposite proposals.
-            SELECT city.slug AS city_slug,
+            SELECT city.id AS city_id,
+                   city.slug AS city_slug,
                    max(event.starts_at) FILTER (WHERE event.starts_at <= $2) AS last_show_at,
                    min(event.starts_at) FILTER (
                        WHERE event.starts_at > $2 AND event.status = 'published'
@@ -112,9 +114,13 @@ async fn candidate_cities(
             JOIN cities AS city ON city.id = event.city_id
             WHERE event.workspace_id = $1
               AND event.status IN ('published', 'completed')
-            GROUP BY city.slug
+            GROUP BY city.id, city.slug
         )
-        SELECT COALESCE(interested.city_slug, shows.city_slug) AS city_slug,
+        -- Identity is the id, not the slug: the catalogue is unique on
+        -- (country_code, slug), so a bare slug can merge two cities' evidence
+        -- into one phantom opportunity.
+        SELECT COALESCE(interested.city_id, shows.city_id) AS city_id,
+               COALESCE(interested.city_slug, shows.city_slug) AS city_slug,
                COALESCE(count(interested.fan_id) FILTER (
                    WHERE interested.last_action_at > $2 - INTERVAL '30 days'
                ), 0)::bigint AS active_30d,
@@ -124,8 +130,9 @@ async fn candidate_cities(
         -- FULL JOIN because a city the band has played and has no fans in yet
         -- is still a real opportunity — it is the one where the room already
         -- knows them.
-        FULL JOIN shows ON shows.city_slug = interested.city_slug
-        GROUP BY COALESCE(interested.city_slug, shows.city_slug)
+        FULL JOIN shows ON shows.city_id = interested.city_id
+        GROUP BY COALESCE(interested.city_id, shows.city_id),
+                 COALESCE(interested.city_slug, shows.city_slug)
         ORDER BY active_30d DESC, city_slug
         LIMIT $3
         "#,
@@ -146,7 +153,7 @@ async fn candidate_cities(
 async fn best_venue(
     pool: &PgPool,
     workspace_id: Uuid,
-    city_slug: &str,
+    city_id: Uuid,
     now: OffsetDateTime,
 ) -> Result<Option<VenueEvidence>, sqlx::Error> {
     let row = sqlx::query_as::<_, VenueRow>(
@@ -190,7 +197,7 @@ async fn best_venue(
                FLOOR(EXTRACT(EPOCH FROM ($3 - max(target.last_outreach_at))) / 86400)::bigint
                    AS contact_verified_days_ago
         FROM place_venues AS venue
-        JOIN cities AS city ON city.id = venue.city_id
+        JOIN cities AS city ON city.id = venue.city_id AND city.id = $2
         LEFT JOIN marks ON marks.venue_id = venue.id
         LEFT JOIN per_show
           ON per_show.venue_id = marks.venue_id
@@ -201,14 +208,13 @@ async fn best_venue(
         LEFT JOIN viryaos_booking_targets AS target
           ON target.venue_id = venue.id
          AND target.workspace_id = $1
-        WHERE city.slug = $2
         GROUP BY venue.id, venue.display_name
         ORDER BY count(marks.event_id) DESC, venue.display_name
         LIMIT 1
         "#,
     )
     .bind(workspace_id)
-    .bind(city_slug)
+    .bind(city_id)
     .bind(now)
     .fetch_optional(pool)
     .await?;
@@ -281,7 +287,7 @@ impl PromoterTarget {
 pub async fn promoter_targets_in_city(
     pool: &PgPool,
     workspace_id: Uuid,
-    city_slug: &str,
+    city_id: Uuid,
 ) -> Result<Vec<PromoterTarget>, sqlx::Error> {
     let rows = sqlx::query_as::<_, PromoterRow>(
         r#"
@@ -296,9 +302,8 @@ pub async fn promoter_targets_in_city(
                      AND interaction.direction = 'inbound'
                ) AS answered_last_time
         FROM viryaos_booking_targets AS target
-        JOIN cities AS city ON city.id = target.city_id
         WHERE target.workspace_id = $1
-          AND city.slug = $2
+          AND target.city_id = $2
           AND target.target_kind IN ('promoter', 'venue')
           AND target.active
           AND target.accepts_booking
@@ -307,7 +312,7 @@ pub async fn promoter_targets_in_city(
         "#,
     )
     .bind(workspace_id)
-    .bind(city_slug)
+    .bind(city_id)
     .fetch_all(pool)
     .await?;
 
@@ -326,9 +331,9 @@ pub async fn promoter_targets_in_city(
 async fn promoters_in_city(
     pool: &PgPool,
     workspace_id: Uuid,
-    city_slug: &str,
+    city_id: Uuid,
 ) -> Result<Vec<PromoterRef>, sqlx::Error> {
-    Ok(promoter_targets_in_city(pool, workspace_id, city_slug)
+    Ok(promoter_targets_in_city(pool, workspace_id, city_id)
         .await?
         .iter()
         .map(PromoterTarget::as_promoter_ref)
@@ -363,21 +368,19 @@ pub async fn city_opportunities(
     let cities = candidate_cities(pool, workspace_id, now).await?;
     let mut opportunities = Vec::with_capacity(cities.len());
     for city in cities {
-        let reachable = reachable_in_city(pool, workspace_id, &city.city_slug)
-            .await?
-            // A city with no coordinates cannot be measured for reach. Zero is
-            // the honest floor here rather than a guess: the planner will
-            // refuse it for being under the threshold, which is the right
-            // answer for a city we cannot size.
-            .unwrap_or(0);
+        // `None` means the city cannot be measured — no coordinates on
+        // record. Handed through as `None` so the planner refuses it as
+        // unmeasurable rather than inventing a zero it never counted.
+        let reachable = reachable_in_city(pool, workspace_id, city.city_id).await?;
         opportunities.push(CityOpportunity {
+            city_id: crowdrelay_domain::CityId::from_uuid(city.city_id),
             city: city.city_slug.clone(),
             reachable_fans: reachable,
             active_fans_30d: bounded_u16(city.active_30d).into(),
             months_since_show: months_between(city.last_show_at, now),
             has_upcoming_show: city.next_show_at.is_some(),
-            venue: best_venue(pool, workspace_id, &city.city_slug, now).await?,
-            promoters: promoters_in_city(pool, workspace_id, &city.city_slug).await?,
+            venue: best_venue(pool, workspace_id, city.city_id, now).await?,
+            promoters: promoters_in_city(pool, workspace_id, city.city_id).await?,
             // Needs the support-slot entity (4V.5). Empty produces a solo
             // proposal, which is correct rather than incomplete.
             co_bill: Vec::new(),
@@ -470,6 +473,7 @@ pub async fn roster_opportunity(
             .iter()
             .map(|city| CityReach {
                 city: city.city.clone(),
+                city_id: city.city_id,
                 reachable: city.reachable_fans,
             })
             .collect();
@@ -522,7 +526,7 @@ pub async fn roster_opportunity(
         // matter here and those are workspace-independent for the registry
         // half.
         for city in per_city {
-            if !cities.iter().any(|seen| seen.city == city.city) {
+            if !cities.iter().any(|seen| seen.city_id == city.city_id) {
                 cities.push(city);
             }
         }
@@ -561,6 +565,10 @@ pub struct ProposalOutcome {
     pub action_status: String,
     /// Promoters the letter went to.
     pub recipients: u32,
+    /// The catalogue id of `city`, from the decision's subject. The slug in
+    /// `city` is for reading; this is the identity a display-name lookup or a
+    /// same-slug sibling needs.
+    pub city_id: Uuid,
     /// Promoters who answered inside the seven-day window.
     pub replies: u32,
     /// Reply windows still open — a proposal with any of these is in flight
@@ -612,6 +620,7 @@ pub struct GigPlanTrackRecord {
 #[derive(Debug, sqlx::FromRow)]
 struct ProposalOutcomeRow {
     evaluated_at: OffsetDateTime,
+    city_id: Uuid,
     city: Option<String>,
     venue: Option<String>,
     reasons: serde_json::Value,
@@ -648,7 +657,8 @@ pub async fn proposal_track_record(
                    decision.input_snapshot ->> 'venue' AS venue,
                    decision.input_snapshot -> 'reasons' AS reasons,
                    action.id AS action_id,
-                   action.status AS action_status
+                   action.status AS action_status,
+                   action.payload AS action_payload
             FROM viryaos_autopilot_decisions AS decision
             JOIN viryaos_autopilot_actions AS action
               ON action.workspace_id = decision.workspace_id
@@ -657,7 +667,6 @@ pub async fn proposal_track_record(
               AND decision.decision_kind = 'gig.proposal.approved'
         ), reply_counts AS (
             SELECT outcome.action_id,
-                   count(*)::bigint AS measured,
                    count(*) FILTER (WHERE outcome.observed_value > 0)::bigint AS replies
             FROM viryaos_autopilot_outcomes AS outcome
             JOIN proposals ON proposals.action_id = outcome.action_id
@@ -673,11 +682,17 @@ pub async fn proposal_track_record(
             GROUP BY measurement.action_id
         )
         SELECT proposals.evaluated_at,
+               proposals.city_id,
                proposals.city,
                proposals.venue,
                proposals.reasons,
                proposals.action_status,
-               COALESCE(reply_counts.measured, 0) AS recipients,
+               -- The room the letter addressed, from the action's own payload.
+               -- Measurement outcomes would undercount it: a recipient whose
+               -- observation failed is still somebody we wrote to.
+               COALESCE(
+                   jsonb_array_length(proposals.action_payload -> 'recipients'), 0
+               )::bigint AS recipients,
                COALESCE(reply_counts.replies, 0) AS replies,
                COALESCE(unfinished.n, 0) AS unfinished,
                EXISTS (
@@ -706,6 +721,7 @@ pub async fn proposal_track_record(
         let reasons: Vec<crowdrelay_domain::gig_plan::Reason> = serde_json::from_value(row.reasons)
             .map_err(|error| sqlx::Error::Decode(Box::new(error).into()))?;
         proposals.push(ProposalOutcome {
+            city_id: row.city_id,
             city: row.city.unwrap_or_default(),
             venue: row.venue.unwrap_or_default(),
             approved_at: row.evaluated_at,

@@ -78,7 +78,10 @@ fn resolve_intent(param: Option<&str>, stored: TenantIntent) -> TenantIntent {
 /// One city that produced no proposal, with the sentence explaining it.
 #[derive(Debug, Serialize)]
 struct PassedOver {
-    /// The catalogue slug — the key an approval names.
+    /// The catalogue row's id — a slug is only unique per country, so the id
+    /// is the identity.
+    city_id: Uuid,
+    /// The catalogue slug.
     city: String,
     /// The name a person reads — "Wrocław", not "wroclaw".
     city_name: String,
@@ -132,26 +135,28 @@ struct TrackRecordView {
     by_reason: Vec<crowdrelay_infra::gig_planning::ReasonScore>,
 }
 
-/// Every slug the response mentions, resolved to the catalogue's display
-/// names in one read. A slug with no catalogue row displays as itself —
-/// ugly, but honest, and it cannot happen for a slug the evidence read
-/// produced.
+/// Every city the response mentions, resolved to the catalogue's display
+/// names in one read — keyed by id because a slug is only unique per country
+/// and `WHERE slug = ANY(...)` could hand back the wrong country's name. A
+/// city with no catalogue row displays as its slug — ugly, but honest, and
+/// it cannot happen for a city the evidence read produced.
 async fn city_names(
     pool: &sqlx::PgPool,
-    slugs: &[String],
-) -> Result<std::collections::HashMap<String, String>, sqlx::Error> {
-    sqlx::query_as::<_, (String, String)>("SELECT slug, name FROM cities WHERE slug = ANY($1)")
-        .bind(slugs)
+    city_ids: &[Uuid],
+) -> Result<std::collections::HashMap<Uuid, String>, sqlx::Error> {
+    sqlx::query_as::<_, (Uuid, String)>("SELECT id, name FROM cities WHERE id = ANY($1)")
+        .bind(city_ids)
         .fetch_all(pool)
         .await
         .map(|rows| rows.into_iter().collect())
 }
 
 fn display_name<'a>(
-    names: &'a std::collections::HashMap<String, String>,
+    names: &'a std::collections::HashMap<Uuid, String>,
+    city_id: Uuid,
     slug: &'a str,
 ) -> &'a str {
-    names.get(slug).map_or(slug, String::as_str)
+    names.get(&city_id).map_or(slug, String::as_str)
 }
 
 #[derive(Debug, Serialize)]
@@ -259,6 +264,7 @@ pub async fn band_gig_plan(
                     _ => None,
                 };
                 passed_over.push(PassedOver {
+                    city_id: opportunity.city_id.into_uuid(),
                     city: opportunity.city.clone(),
                     // Filled after the loop, when every slug the response
                     // mentions is known and one lookup resolves them all.
@@ -274,7 +280,12 @@ pub async fn band_gig_plan(
                             // contact for a named room does not re-ask the
                             // capacity question.
                             match subject {
-                                ResearchSubject::Rooms => capacity_band(opportunity.reachable_fans),
+                                // An unmeasurable city gets no band — the
+                                // brief asks for rooms, not for a size the
+                                // system never counted.
+                                ResearchSubject::Rooms => {
+                                    opportunity.reachable_fans.and_then(capacity_band)
+                                }
                                 ResearchSubject::BookingContact { .. } => None,
                             },
                         )
@@ -305,21 +316,17 @@ pub async fn band_gig_plan(
     });
     proposals.truncate(MAX_PROPOSALS);
 
-    // One lookup resolves every slug the response mentions to its display
-    // name — the slug stays the key (it is what an approval names), the name
-    // is what a person reads.
-    let slugs: Vec<String> = proposals
+    // One lookup resolves every city the response mentions to its display
+    // name — keyed by id since a slug can name a city in each of two
+    // countries. The slug stays on the payload for reading; the id is the key
+    // an approval names.
+    let city_ids: Vec<Uuid> = proposals
         .iter()
-        .map(|proposal| proposal.city.clone())
-        .chain(passed_over.iter().map(|entry| entry.city.clone()))
-        .chain(
-            track_record
-                .proposals
-                .iter()
-                .map(|outcome| outcome.city.clone()),
-        )
+        .map(|proposal| proposal.city_id.into_uuid())
+        .chain(passed_over.iter().map(|entry| entry.city_id))
+        .chain(track_record.proposals.iter().map(|outcome| outcome.city_id))
         .collect();
-    let names = match city_names(&state.database, &slugs).await {
+    let names = match city_names(&state.database, &city_ids).await {
         Ok(names) => names,
         Err(error) => {
             tracing::warn!(%error, "gig plan city-name read failed");
@@ -329,7 +336,7 @@ pub async fn band_gig_plan(
         }
     };
     for entry in &mut passed_over {
-        entry.city_name = display_name(&names, &entry.city).to_owned();
+        entry.city_name = display_name(&names, entry.city_id, &entry.city).to_owned();
     }
 
     (
@@ -338,7 +345,8 @@ pub async fn band_gig_plan(
             proposals: proposals
                 .into_iter()
                 .map(|plan| ProposalView {
-                    city_name: display_name(&names, &plan.city).to_owned(),
+                    city_name: display_name(&names, plan.city_id.into_uuid(), &plan.city)
+                        .to_owned(),
                     plan,
                 })
                 .collect(),
@@ -351,7 +359,7 @@ pub async fn band_gig_plan(
                     .proposals
                     .into_iter()
                     .map(|outcome| OutcomeView {
-                        city_name: display_name(&names, &outcome.city).to_owned(),
+                        city_name: display_name(&names, outcome.city_id, &outcome.city).to_owned(),
                         outcome,
                     })
                     .collect(),
@@ -365,10 +373,14 @@ pub async fn band_gig_plan(
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ApproveProposalRequest {
-    /// The city whose proposal the band is approving. The proposal itself is
-    /// recomputed rather than replayed from the screen: evidence that moved
-    /// between the read and the click wins, and the band is told what moved.
-    city: String,
+    /// The catalogue id of the city whose proposal the band is approving —
+    /// the same `city_id` the proposal was served with. A slug would do for
+    /// most cities, but the catalogue is only unique per country and an
+    /// approval is exactly where a wrong-city resolution cannot be afforded.
+    /// The proposal itself is recomputed rather than replayed from the
+    /// screen: evidence that moved between the read and the click wins, and
+    /// the band is told what moved.
+    city_id: Uuid,
 }
 
 #[derive(Debug, Serialize)]
@@ -423,7 +435,7 @@ pub async fn approve_gig_proposal(
     match approve_proposal(
         &state.database,
         workspace_id,
-        request.city.trim(),
+        request.city_id,
         &idempotency_key,
         OffsetDateTime::now_utc(),
     )

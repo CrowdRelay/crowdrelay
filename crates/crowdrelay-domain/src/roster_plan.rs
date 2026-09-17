@@ -94,7 +94,11 @@ pub struct RosterAct {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct CityReach {
     pub city: String,
-    pub reachable: u32,
+    /// Identity, not the slug: two catalogue cities can share a slug.
+    pub city_id: crate::CityId,
+    /// `None` means this city cannot be measured for the act — distinct from
+    /// a measured zero.
+    pub reachable: Option<u32>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -104,12 +108,15 @@ pub struct ActOverlap {
 }
 
 impl RosterAct {
+    /// `None` means the act's reach in this city was never measured or the
+    /// city cannot be measured — a caller deciding on it must not read that
+    /// as a counted zero.
     #[must_use]
-    pub fn reach_in(&self, city: &str) -> u32 {
+    pub fn reach_in(&self, city: crate::CityId) -> Option<u32> {
         self.reach_by_city
             .iter()
-            .find(|reach| reach.city == city)
-            .map_or(0, |reach| reach.reachable)
+            .find(|reach| reach.city_id == city)
+            .and_then(|reach| reach.reachable)
     }
 
     /// `None` when the two acts have never been measured against each other.
@@ -142,6 +149,8 @@ impl RosterAct {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct OpenSupportSlot {
     pub city: String,
+    /// Identity, not the slug: two catalogue cities can share a slug.
+    pub city_id: crate::CityId,
     pub venue: String,
     /// The act whose show this is. They are not a candidate for their own
     /// support slot.
@@ -324,7 +333,7 @@ pub struct RosterRun {
 /// to know whether the system made a mistake or a choice.
 fn choose_headliner<'a>(
     acts: &[&'a RosterAct],
-    city: &str,
+    city: crate::CityId,
 ) -> Option<(&'a RosterAct, Option<String>)> {
     let best = acts
         .iter()
@@ -337,7 +346,9 @@ fn choose_headliner<'a>(
                 .then_with(|| right.name.cmp(&left.name))
         })
         .copied()?;
-    let best_reach = best.reach_in(city);
+    // An act nobody can measure cannot headline — `None` reads as no
+    // candidate here, which is what a zero already meant.
+    let best_reach = best.reach_in(city)?;
     if best_reach == 0 {
         return None;
     }
@@ -356,7 +367,10 @@ fn choose_headliner<'a>(
         .iter()
         .copied()
         .filter(|act| act.is_starved() && act.name != best.name)
-        .filter(|act| act.reach_in(city) >= floor && act.reach_in(city) > 0)
+        .filter(|act| {
+            act.reach_in(city)
+                .is_some_and(|reach| reach >= floor && reach > 0)
+        })
         .max_by(|left, right| {
             left.reach_in(city)
                 .cmp(&right.reach_in(city))
@@ -399,7 +413,7 @@ fn choose_headliner<'a>(
 fn choose_support<'a>(
     acts: &[&'a RosterAct],
     headliner: &RosterAct,
-    city: &str,
+    city: crate::CityId,
 ) -> Option<(&'a RosterAct, u32)> {
     acts.iter()
         .copied()
@@ -409,7 +423,7 @@ fn choose_support<'a>(
             if overlap > PAIRING_OVERLAP_CEILING_BASIS_POINTS {
                 return None;
             }
-            let reach = act.reach_in(city);
+            let reach = act.reach_in(city)?;
             let shared =
                 u32::try_from(u64::from(reach) * u64::from(overlap) / 10_000).unwrap_or(reach);
             let adds = reach.saturating_sub(shared);
@@ -445,7 +459,7 @@ pub fn plan_roster_run(opportunity: &RosterOpportunity) -> Result<RosterRun, Ros
     let mut moves: Vec<RosterMove> = Vec::new();
     let mut refused: Vec<(String, CitySkipped)> = Vec::new();
     let mut committed_acts: Vec<String> = Vec::new();
-    let mut committed_cities: Vec<String> = Vec::new();
+    let mut committed_cities: Vec<crate::CityId> = Vec::new();
 
     // ── Support slots first ─────────────────────────────────────────────────
     //
@@ -473,7 +487,7 @@ pub fn plan_roster_run(opportunity: &RosterOpportunity) -> Result<RosterRun, Ros
             .filter(|act| !committed_acts.contains(&act.name))
             .filter(|act| act.name != slot.headliner)
             .collect();
-        let Some((support, adds)) = choose_support(&candidates, headliner, &slot.city) else {
+        let Some((support, adds)) = choose_support(&candidates, headliner, slot.city_id) else {
             continue;
         };
 
@@ -482,7 +496,9 @@ pub fn plan_roster_run(opportunity: &RosterOpportunity) -> Result<RosterRun, Ros
             adds_reachable: adds,
         }];
         reasons.push(Reason::ReachableAudience {
-            reachable: support.reach_in(&slot.city),
+            // `adds > 0` from `choose_support` proves the reach was measured,
+            // so the zero here is unreachable rather than a claim.
+            reachable: support.reach_in(slot.city_id).unwrap_or(0),
         });
         moves.push(RosterMove::FillSupportSlot {
             city: slot.city.clone(),
@@ -494,7 +510,7 @@ pub fn plan_roster_run(opportunity: &RosterOpportunity) -> Result<RosterRun, Ros
             reasons,
         });
         committed_acts.push(support.name.clone());
-        committed_cities.push(slot.city.clone());
+        committed_cities.push(slot.city_id);
     }
 
     // ── Then new nights ─────────────────────────────────────────────────────
@@ -502,7 +518,7 @@ pub fn plan_roster_run(opportunity: &RosterOpportunity) -> Result<RosterRun, Ros
         if moves.len() >= usize::from(opportunity.packages_this_period) {
             break;
         }
-        if committed_cities.contains(&city.city) {
+        if committed_cities.contains(&city.city_id) {
             // A roster running two of its own shows in one city in one period
             // is competing with itself for the same room.
             continue;
@@ -512,7 +528,7 @@ pub fn plan_roster_run(opportunity: &RosterOpportunity) -> Result<RosterRun, Ros
             .copied()
             .filter(|act| !committed_acts.contains(&act.name))
             .collect();
-        let Some((headliner, fairness_note)) = choose_headliner(&candidates, &city.city) else {
+        let Some((headliner, fairness_note)) = choose_headliner(&candidates, city.city_id) else {
             // Every act who could play here is already committed. Recorded
             // rather than skipped: a city that vanishes reads to a manager as
             // a city that was never considered, and they would answer it by
@@ -526,7 +542,7 @@ pub fn plan_roster_run(opportunity: &RosterOpportunity) -> Result<RosterRun, Ros
         // The headliner's reach is what the city is evaluated on, because the
         // headliner is who has to fill it.
         let mut as_seen_by_headliner = city.clone();
-        as_seen_by_headliner.reachable_fans = headliner.reach_in(&city.city);
+        as_seen_by_headliner.reachable_fans = headliner.reach_in(city.city_id);
         let plan = match plan_gig(&as_seen_by_headliner, headliner.intent) {
             Ok(plan) => plan,
             Err(refusal) => {
@@ -535,7 +551,7 @@ pub fn plan_roster_run(opportunity: &RosterOpportunity) -> Result<RosterRun, Ros
             }
         };
 
-        let support = choose_support(&candidates, headliner, &city.city);
+        let support = choose_support(&candidates, headliner, city.city_id);
         let combined = plan.reach.reachable + support.map_or(0, |(_, adds)| adds);
         let mut reasons = plan.reasons.clone();
         if let Some((act, adds)) = support {
@@ -556,7 +572,7 @@ pub fn plan_roster_run(opportunity: &RosterOpportunity) -> Result<RosterRun, Ros
             caveats: plan.caveats.clone(),
             fairness_note,
         });
-        committed_cities.push(city.city.clone());
+        committed_cities.push(city.city_id);
         committed_acts.push(headliner.name.clone());
         if let Some((act, _)) = support {
             committed_acts.push(act.name.clone());
@@ -600,10 +616,23 @@ mod tests {
         }
     }
 
+    /// A stable id per fixture name — acts' `reach_by_city` rows pair with
+    /// the city fixtures through it, the way production pairs on `city_id`.
+    fn city_id(name: &str) -> crate::CityId {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        name.hash(&mut hasher);
+        let hash = hasher.finish();
+        crate::CityId::from_uuid(uuid::Uuid::from_u128(
+            u128::from(hash) << 64 | u128::from(!hash),
+        ))
+    }
+
     fn city(name: &str) -> CityOpportunity {
         CityOpportunity {
+            city_id: city_id(name),
             city: name.to_owned(),
-            reachable_fans: 240,
+            reachable_fans: Some(240),
             active_fans_30d: 60,
             months_since_show: Some(14),
             has_upcoming_show: false,
@@ -627,7 +656,8 @@ mod tests {
                 .iter()
                 .map(|(city, reachable)| CityReach {
                     city: (*city).to_owned(),
-                    reachable: *reachable,
+                    city_id: city_id(city),
+                    reachable: Some(*reachable),
                 })
                 .collect(),
             overlap_with: Vec::new(),
@@ -800,6 +830,7 @@ mod tests {
         );
         opportunity.open_slots = vec![OpenSupportSlot {
             city: "Wrocław".to_owned(),
+            city_id: city_id("Wrocław"),
             venue: "Klub X".to_owned(),
             headliner: "Head".to_owned(),
             days_until_show: 30,
@@ -824,6 +855,7 @@ mod tests {
         );
         opportunity.open_slots = vec![OpenSupportSlot {
             city: "Wrocław".to_owned(),
+            city_id: city_id("Wrocław"),
             venue: "Klub X".to_owned(),
             headliner: "Head".to_owned(),
             days_until_show: MINIMUM_SLOT_LEAD_DAYS - 1,

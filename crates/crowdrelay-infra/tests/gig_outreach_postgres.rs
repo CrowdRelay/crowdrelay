@@ -14,8 +14,12 @@
 use std::time::Duration;
 
 use crowdrelay_application::IdempotencyKey;
-use crowdrelay_application::autopilot::AutopilotActionRepository;
+use crowdrelay_application::autopilot::{
+    AutopilotActionRepository, AutopilotMeasurementKind, AutopilotMeasurementRepository,
+    ClaimedAutopilotMeasurement, assess_measurement_effect,
+};
 use crowdrelay_domain::WorkspaceId;
+use crowdrelay_domain::ids::{AutopilotActionId, AutopilotMeasurementId};
 use crowdrelay_infra::gig_outreach::{GigOutreachError, GigOutreachOutcome, approve_gig_proposal};
 use crowdrelay_infra::{autopilot::PostgresAutopilotRepository, config::DatabaseConfig};
 use sqlx::{Connection, PgConnection, PgPool, postgres::PgPoolOptions};
@@ -96,7 +100,7 @@ async fn run(pool: &PgPool, url: &str) -> Result<(), Box<dyn std::error::Error>>
 
     // ── The approval ────────────────────────────────────────────────────────
     let key = IdempotencyKey::parse("gig-approve-1").expect("valid key");
-    let outcome = approve_gig_proposal(pool, act, "wroclaw", &key, now).await?;
+    let outcome = approve_gig_proposal(pool, act, wroclaw, &key, now).await?;
     let (action_id, recipients, opening_line) = match outcome {
         GigOutreachOutcome::Queued {
             action_id,
@@ -165,7 +169,7 @@ async fn run(pool: &PgPool, url: &str) -> Result<(), Box<dyn std::error::Error>>
     assert_eq!(decision_kind, "gig.proposal.approved");
 
     // ── The same click twice ────────────────────────────────────────────────
-    let replay = approve_gig_proposal(pool, act, "wroclaw", &key, now).await?;
+    let replay = approve_gig_proposal(pool, act, wroclaw, &key, now).await?;
     match replay {
         GigOutreachOutcome::Replayed {
             action_id: replayed,
@@ -245,7 +249,7 @@ async fn run(pool: &PgPool, url: &str) -> Result<(), Box<dyn std::error::Error>>
     .execute(pool)
     .await?;
     let second_key = IdempotencyKey::parse("gig-approve-2").expect("valid key");
-    match approve_gig_proposal(pool, act, "wroclaw", &second_key, now).await {
+    match approve_gig_proposal(pool, act, wroclaw, &second_key, now).await {
         Err(GigOutreachError::Refused(sentence)) => assert!(
             sentence.contains("already a show"),
             "the refusal did not say what changed: {sentence}"
@@ -256,7 +260,7 @@ async fn run(pool: &PgPool, url: &str) -> Result<(), Box<dyn std::error::Error>>
     }
 
     // A city nobody has an audience in is not on the board at all.
-    match approve_gig_proposal(pool, act, "lisboa", &second_key, now).await {
+    match approve_gig_proposal(pool, act, Uuid::now_v7(), &second_key, now).await {
         Err(GigOutreachError::NotFound) => {}
         other => return Err(format!("an unknown city was not refused: {other:?}").into()),
     }
@@ -287,6 +291,7 @@ async fn a_settled_proposal_has_its_reasons_scored() -> Result<(), Box<dyn std::
         }
         played_show(pool, act, wroclaw, "Klub X", "show-1", 40).await?;
         promoter(pool, act, wroclaw, "Anna", "anna@example.com", 70).await?;
+        promoter(pool, act, wroclaw, "Bogdan", "bogdan@example.com", 60).await?;
         let anna = sqlx::query_scalar::<_, Uuid>(
             "SELECT id FROM viryaos_booking_targets
              WHERE workspace_id = $1 AND contact_email = 'anna@example.com'",
@@ -294,10 +299,17 @@ async fn a_settled_proposal_has_its_reasons_scored() -> Result<(), Box<dyn std::
         .bind(act)
         .fetch_one(pool)
         .await?;
+        let bogdan = sqlx::query_scalar::<_, Uuid>(
+            "SELECT id FROM viryaos_booking_targets
+             WHERE workspace_id = $1 AND contact_email = 'bogdan@example.com'",
+        )
+        .bind(act)
+        .fetch_one(pool)
+        .await?;
 
         let key = IdempotencyKey::parse("gig-score-1").expect("valid key");
         let GigOutreachOutcome::Queued { action_id, .. } =
-            approve_gig_proposal(pool, act, "wroclaw", &key, now).await?
+            approve_gig_proposal(pool, act, wroclaw, &key, now).await?
         else {
             return Err("the proposal did not queue".into());
         };
@@ -336,46 +348,62 @@ async fn a_settled_proposal_has_its_reasons_scored() -> Result<(), Box<dyn std::
             .execute(pool)
             .await?;
         }
-        let measurement_id = Uuid::now_v7();
-        sqlx::query(
-            "INSERT INTO viryaos_autopilot_measurements
-                (id, workspace_id, action_id, measurement_kind, subject_id,
-                 action_finished_at, baseline_value, due_at, status,
-                 available_at, started_at, finished_at)
-             VALUES ($1, $2, $3, 'booking_reply_7d', $4, $5, 0,
-                     $5 + interval '7 days', 'succeeded', $5, $5, $6)",
-        )
-        .bind(measurement_id)
-        .bind(act)
-        .bind(action_id)
-        .bind(anna)
-        .bind(now)
-        .bind(now + time::Duration::days(7))
-        .execute(pool)
-        .await?;
-        let decision_id = sqlx::query_scalar::<_, Uuid>(
-            "SELECT decision_id FROM viryaos_autopilot_actions
-             WHERE workspace_id = $1 AND id = $2",
-        )
-        .bind(act)
-        .bind(action_id)
-        .fetch_one(pool)
-        .await?;
-        sqlx::query(
-            "INSERT INTO viryaos_autopilot_outcomes
-                (workspace_id, decision_id, action_id, measurement_id,
-                 metric_key, observed_value, baseline_value,
-                 effect_assessment, delta_basis_points, observed_at)
-             VALUES ($1, $2, $3, $4, 'effect.booking_reply_7d', 1.0, 0,
-                     'improved', 10000, $5)",
-        )
-        .bind(act)
-        .bind(decision_id)
-        .bind(action_id)
-        .bind(measurement_id)
-        .bind(now + time::Duration::days(3))
-        .execute(pool)
-        .await?;
+        // One measurement per recipient — the letter went to two promoters and
+        // each gets their own reply window. Under the old
+        // (action, measurement_kind) uniqueness the second row could not exist;
+        // under the old outcome index the second completion raised instead of
+        // settling. Both recipients are driven through the repository's real
+        // completion so a regression in either key fails here.
+        let repository = PostgresAutopilotRepository::new(
+            pool.clone(),
+            &DatabaseConfig {
+                url: database.url.clone(),
+                max_connections: 4,
+                connect_timeout: Duration::from_secs(3),
+                ping_timeout: Duration::from_secs(2),
+                operation_timeout: Duration::from_secs(10),
+                lock_timeout: Duration::from_secs(1),
+            },
+        );
+        for subject in [anna, bogdan] {
+            let measurement_id = Uuid::now_v7();
+            sqlx::query(
+                "INSERT INTO viryaos_autopilot_measurements
+                    (id, workspace_id, action_id, measurement_kind, subject_id,
+                     action_finished_at, baseline_value, due_at, status,
+                     available_at, started_at)
+                 VALUES ($1, $2, $3, 'booking_reply_7d', $4, $5, 0,
+                         $5 + interval '7 days', 'processing', $5, $5)",
+            )
+            .bind(measurement_id)
+            .bind(act)
+            .bind(action_id)
+            .bind(subject)
+            .bind(now)
+            .execute(pool)
+            .await?;
+            let measurement = ClaimedAutopilotMeasurement {
+                id: AutopilotMeasurementId::from(measurement_id),
+                action_id: AutopilotActionId::from(action_id),
+                kind: AutopilotMeasurementKind::BookingReply7d,
+                subject_id: subject,
+                baseline_value: 0.0,
+                action_finished_at: now,
+                attempt_number: 1,
+            };
+            let effect = assess_measurement_effect(&measurement, 1.0)
+                .ok_or("a reply the worker could not classify")?;
+            AutopilotMeasurementRepository::complete_measurement(
+                &repository,
+                WorkspaceId::from_uuid(act),
+                &measurement,
+                1.0,
+                effect,
+                now + time::Duration::days(3),
+            )
+            .await
+            .map_err(|error| format!("the second recipient's outcome did not settle: {error}"))?;
+        }
 
         // And the band gets the show — the outcome the proposal was for.
         sqlx::query(
@@ -397,7 +425,11 @@ async fn a_settled_proposal_has_its_reasons_scored() -> Result<(), Box<dyn std::
             .find(|entry| entry.city == "wroclaw")
             .ok_or("the settled proposal vanished from the track record")?;
         assert!(proposal.is_settled(), "a finished window did not settle");
-        assert_eq!(proposal.replies, 1, "Anna's reply did not score");
+        assert_eq!(
+            proposal.recipients, 2,
+            "the letter went to two promoters and the record must say so"
+        );
+        assert_eq!(proposal.replies, 2, "both replies did not score");
         assert!(
             proposal.show_booked,
             "the show the letter produced did not score"

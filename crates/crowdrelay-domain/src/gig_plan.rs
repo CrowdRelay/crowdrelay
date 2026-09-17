@@ -211,9 +211,15 @@ pub struct CoBillAct {
 /// What the planner knows about one city.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct CityOpportunity {
+    /// The catalogue row this evidence belongs to. `city` is the slug, and a
+    /// slug is only unique per country — two catalogues rows can share one —
+    /// so identity is the id, and the string is for reading.
+    pub city_id: crate::CityId,
     pub city: String,
-    /// Consented fans inside the radius they chose.
-    pub reachable_fans: u32,
+    /// Consented fans inside the radius they chose. `None` means the city
+    /// cannot be measured — no coordinates on record — which is not the same
+    /// claim as a measured zero.
+    pub reachable_fans: Option<u32>,
     /// Fans with recorded activity in the last 30 days.
     pub active_fans_30d: u32,
     /// `None` means never played here — not "played here zero months ago".
@@ -269,6 +275,10 @@ pub enum GigRefusal {
     },
     /// Too few people within reach for a show to be about the audience.
     TooFewReachable { reachable: u32, floor: u32 },
+    /// The city cannot be sized — no coordinates on record to measure
+    /// against. Distinct from a measured zero: the audience may be large,
+    /// we just cannot say.
+    AudienceNotMeasurable,
     /// The tenant said they are not booking right now.
     NotWhatTheTenantIsDoing { intent: TenantIntent },
 }
@@ -314,6 +324,10 @@ impl GigRefusal {
                  {floor} a show is a favour somebody does you rather than a gig. Play it if \
                  you want to — the data does not support calling it a plan"
             ),
+            Self::AudienceNotMeasurable => {
+                "we cannot size the audience here — the city has no coordinates on record,                  so there is nothing to measure reach against. The show may still be worth                  playing; the data just cannot say"
+                    .to_owned()
+            }
             Self::NotWhatTheTenantIsDoing { intent } => match intent {
                 TenantIntent::HeadsDown => {
                     "you said you are writing or recording, so this is not a proposal — it \
@@ -350,6 +364,9 @@ pub struct ReachEstimate {
 /// The proposal.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct GigPlan {
+    /// The catalogue id of `city` — what an approval names. The slug is only
+    /// unique per country, so it cannot stand in for identity.
+    pub city_id: crate::CityId,
     pub city: String,
     pub venue: String,
     /// Who to write to, strongest relationship first.
@@ -458,9 +475,15 @@ pub fn plan_gig(
     if intent == TenantIntent::HeadsDown {
         return Err(GigRefusal::NotWhatTheTenantIsDoing { intent });
     }
-    if opportunity.reachable_fans < MINIMUM_REACHABLE_FOR_A_GIG {
+    // Unmeasurable is its own refusal, not a zero. A city without
+    // coordinates may have thousands of fans; reporting "0 asked to hear
+    // from you" would be a measurement the system never made.
+    let Some(reachable_fans) = opportunity.reachable_fans else {
+        return Err(GigRefusal::AudienceNotMeasurable);
+    };
+    if reachable_fans < MINIMUM_REACHABLE_FOR_A_GIG {
         return Err(GigRefusal::TooFewReachable {
-            reachable: opportunity.reachable_fans,
+            reachable: reachable_fans,
             floor: MINIMUM_REACHABLE_FOR_A_GIG,
         });
     }
@@ -506,7 +529,7 @@ pub fn plan_gig(
     }
 
     reasons.push(Reason::ReachableAudience {
-        reachable: opportunity.reachable_fans,
+        reachable: reachable_fans,
     });
 
     if let Some(draw) = venue.typical_draw {
@@ -515,7 +538,7 @@ pub fn plan_gig(
 
     match opportunity.months_since_show {
         None => reasons.push(Reason::NeverPlayedButHasFans {
-            reachable: opportunity.reachable_fans,
+            reachable: reachable_fans,
         }),
         // Twelve months with an audience still active is the clearest "go
         // back" signal there is: they have not forgotten, and they have not
@@ -648,17 +671,25 @@ pub fn plan_gig(
             .to_owned(),
     };
 
+    // One name, one entry — two targets can share a display name, and a
+    // contact list that reads "Anna, Anna" resolves to the same person twice
+    // when the letter is addressed.
+    let mut seen_names = std::collections::HashSet::new();
+    let contact = ranked
+        .iter()
+        .filter(|promoter| seen_names.insert(promoter.name.as_str()))
+        .map(|promoter| promoter.name.clone())
+        .collect();
+
     Ok(GigPlan {
+        city_id: opportunity.city_id,
         city: opportunity.city.clone(),
         venue: venue.name.clone(),
-        contact: ranked
-            .iter()
-            .map(|promoter| promoter.name.clone())
-            .collect(),
+        contact,
         invite_to_bill,
         reasons,
         reach: ReachEstimate {
-            reachable: opportunity.reachable_fans,
+            reachable: reachable_fans,
             added_by_co_bill,
             room_typical_draw: venue.typical_draw,
             basis,
@@ -687,8 +718,9 @@ mod tests {
 
     fn opportunity() -> CityOpportunity {
         CityOpportunity {
+            city_id: crate::CityId::from_uuid(uuid::Uuid::from_u128(0x47)),
             city: "Wrocław".to_owned(),
-            reachable_fans: 240,
+            reachable_fans: Some(240),
             active_fans_30d: 60,
             months_since_show: Some(14),
             has_upcoming_show: false,
@@ -726,7 +758,7 @@ mod tests {
     #[test]
     fn a_city_with_almost_nobody_in_it_is_refused() {
         let mut thin = opportunity();
-        thin.reachable_fans = MINIMUM_REACHABLE_FOR_A_GIG - 1;
+        thin.reachable_fans = Some(MINIMUM_REACHABLE_FOR_A_GIG - 1);
         assert_eq!(
             plan_gig(&thin, TenantIntent::BookingShows),
             Err(GigRefusal::TooFewReachable {
@@ -737,8 +769,28 @@ mod tests {
         // Exactly at the floor proposes. An off-by-one here silently removes a
         // band of real cities from every suggestion they ever get.
         let mut at_floor = opportunity();
-        at_floor.reachable_fans = MINIMUM_REACHABLE_FOR_A_GIG;
+        at_floor.reachable_fans = Some(MINIMUM_REACHABLE_FOR_A_GIG);
         assert!(plan_gig(&at_floor, TenantIntent::BookingShows).is_ok());
+    }
+
+    /// A city that cannot be measured is not a city measured at zero. The
+    /// two refusals have to stay distinct: "nobody asked" and "we cannot
+    /// tell" send the band to different work.
+    #[test]
+    fn an_unmeasurable_city_is_not_a_zero_audience() {
+        let mut unmeasurable = opportunity();
+        unmeasurable.reachable_fans = None;
+        assert_eq!(
+            plan_gig(&unmeasurable, TenantIntent::BookingShows),
+            Err(GigRefusal::AudienceNotMeasurable)
+        );
+
+        let mut measured_empty = opportunity();
+        measured_empty.reachable_fans = Some(0);
+        assert!(matches!(
+            plan_gig(&measured_empty, TenantIntent::BookingShows),
+            Err(GigRefusal::TooFewReachable { reachable: 0, .. })
+        ));
     }
 
     #[test]

@@ -92,7 +92,7 @@ pub enum GigOutreachOutcome {
 pub async fn approve_gig_proposal(
     pool: &PgPool,
     workspace_id: Uuid,
-    city: &str,
+    city_id: Uuid,
     idempotency_key: &IdempotencyKey,
     now: OffsetDateTime,
 ) -> Result<GigOutreachOutcome, GigOutreachError> {
@@ -106,25 +106,28 @@ pub async fn approve_gig_proposal(
     let settings = TenantSettingsRepository::new(pool.clone());
     let intent = stated_intent(&settings, workspace_id).await?;
     let opportunities = city_opportunities(pool, workspace_id, now).await?;
+    // Matched on the catalogue id, not the slug — two cities in different
+    // countries can share one slug, and the proposal a band approved belongs
+    // to exactly one of them.
     let opportunity = opportunities
         .iter()
-        .find(|candidate| candidate.city == city)
+        .find(|candidate| candidate.city_id == CityId::from_uuid(city_id))
         .ok_or(GigOutreachError::NotFound)?;
 
     let plan = plan_gig(opportunity, intent)
         .map_err(|refusal| GigOutreachError::Refused(refusal.message()))?;
 
-    let recipients = recipients_for(pool, workspace_id, city, &plan).await?;
+    let recipients = recipients_for(pool, workspace_id, city_id, &plan).await?;
     if recipients.is_empty() {
         return Err(GigOutreachError::Refused(format!(
             "nobody who books in {city} is contactable any more. The proposal named \
              {named}, and none of them is still an active booking contact — check the \
              booking list before writing",
+            city = opportunity.city,
             named = plan.contact.join(", ")
         )));
     }
 
-    let city_id = city_id_for(pool, city).await?;
     let payload = AutopilotActionPayload::RequestGigOutreach {
         city_id: CityId::from_uuid(city_id),
         venue: plan.venue.clone(),
@@ -209,28 +212,22 @@ fn reason_sentence(reason: &crowdrelay_domain::gig_plan::Reason) -> String {
 async fn recipients_for(
     pool: &PgPool,
     workspace_id: Uuid,
-    city: &str,
+    city_id: Uuid,
     plan: &GigPlan,
 ) -> Result<Vec<(Uuid, i64, String)>, GigOutreachError> {
-    let targets = promoter_targets_in_city(pool, workspace_id, city).await?;
+    let targets = promoter_targets_in_city(pool, workspace_id, city_id).await?;
+    // The plan names promoters by display name, and two targets may share one.
+    // Each name resolves to the strongest-ranked match, and each resolved
+    // target appears once — the contact governor's same-action dedupe is a
+    // safety net, not the mechanism.
+    let mut seen = std::collections::HashSet::new();
     Ok(plan
         .contact
         .iter()
-        .filter_map(|name| {
-            targets
-                .iter()
-                .find(|target| &target.name == name)
-                .map(|target| (target.target_id, target.target_version, target.name.clone()))
-        })
+        .filter_map(|name| targets.iter().find(|target| &target.name == name))
+        .filter(|target| seen.insert(target.target_id))
+        .map(|target| (target.target_id, target.target_version, target.name.clone()))
         .collect())
-}
-
-async fn city_id_for(pool: &PgPool, city: &str) -> Result<Uuid, GigOutreachError> {
-    sqlx::query_scalar::<_, Uuid>("SELECT id FROM cities WHERE slug = $1 ORDER BY id LIMIT 1")
-        .bind(city)
-        .fetch_optional(pool)
-        .await?
-        .ok_or(GigOutreachError::NotFound)
 }
 
 async fn existing_action(

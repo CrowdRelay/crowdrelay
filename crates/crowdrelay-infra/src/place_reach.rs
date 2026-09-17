@@ -89,11 +89,18 @@ const REACHABLE_AUDIENCE_EMAILS: &str = r#"
       )
 "#;
 
-/// Reachable, consented people for one city slug.
+/// Reachable, consented people for one city.
 ///
 /// `Ok(None)` means the city is not in the catalogue or has no coordinates —
 /// unmeasurable, which is not the same as nobody being there. Callers must
-/// carry that distinction rather than folding it to zero.
+/// carry that distinction rather than folding it to zero. A plain aggregate
+/// over the join always returns a row, so the target's own survival of the
+/// WHERE clause is what separates "measured nobody" from "cannot measure":
+/// `count(DISTINCT target.id)` is zero exactly when the city fell out.
+///
+/// Keyed by id rather than slug: the catalogue is unique on
+/// `(country_code, slug)`, so a bare slug can name two cities and union two
+/// cities' radii into one count.
 ///
 /// # Errors
 ///
@@ -101,48 +108,55 @@ const REACHABLE_AUDIENCE_EMAILS: &str = r#"
 pub async fn reachable_in_city(
     pool: &PgPool,
     workspace_id: Uuid,
-    city_slug: &str,
+    city_id: Uuid,
 ) -> Result<Option<u32>, sqlx::Error> {
     let consent = LATEST_MARKETING_GRANT.replace("{fan}", "fan");
     let value = sqlx::query_scalar::<_, Option<i64>>(&format!(
         r#"
-        SELECT count(DISTINCT fan.id)::bigint
+        -- LEFT JOINs keep the target row when nobody qualifies, which is
+        -- what separates the two honest answers: the city survives the WHERE
+        -- clause exactly when it exists and carries coordinates, so
+        -- count(target.id) > 0 means measurable and count(DISTINCT fan.id)
+        -- is then the measured number — including a real zero. When the city
+        -- fell out, both counts are zero and the answer is NULL.
+        SELECT CASE WHEN count(target.id) = 0 THEN NULL
+                    ELSE count(DISTINCT fan.id) END::bigint
         FROM cities AS target
-        JOIN fan_location_preferences AS preferences
+        LEFT JOIN fan_location_preferences AS preferences
           ON preferences.workspace_id = $1
          AND preferences.nearby_gigs_enabled
-        JOIN cities AS fan_city
+        LEFT JOIN cities AS fan_city
           ON fan_city.id = preferences.city_id
          AND fan_city.latitude IS NOT NULL
          AND fan_city.longitude IS NOT NULL
-        JOIN fans AS fan
+        LEFT JOIN fans AS fan
           ON fan.workspace_id = preferences.workspace_id
          AND fan.id = preferences.fan_id
          AND fan.status = 'active'
-        WHERE target.slug = $2
-          AND target.latitude IS NOT NULL
-          AND target.longitude IS NOT NULL
-          AND {consent}
+         AND {consent}
           -- The emitter's own pre-filter: one degree of latitude is 111.19 km
           -- wherever you stand, so a pair further apart than the radius in
           -- latitude alone can never be inside it. Kept because dropping it
           -- changes the plan from an index scan to a full haversine over every
           -- preference row.
-          AND abs(fan_city.latitude - target.latitude)
+         AND abs(fan_city.latitude - target.latitude)
               <= (preferences.radius_km + 1)::double precision / 111.0
           -- Rounded, matching the nearby-gig emitter exactly: a fan at 50.4 km
           -- with a 50 km radius is paged, so they are reachable. An unrounded
           -- comparison here would promise a promoter people the system will
           -- never actually notify.
-          AND ROUND(6371 * 2 * ASIN(LEAST(1.0, SQRT(
+         AND ROUND(6371 * 2 * ASIN(LEAST(1.0, SQRT(
                 POWER(SIN(RADIANS(fan_city.latitude - target.latitude) / 2), 2)
                 + COS(RADIANS(target.latitude)) * COS(RADIANS(fan_city.latitude))
                 * POWER(SIN(RADIANS(fan_city.longitude - target.longitude) / 2), 2)
               ))))::integer <= preferences.radius_km
+        WHERE target.id = $2
+          AND target.latitude IS NOT NULL
+          AND target.longitude IS NOT NULL
         "#
     ))
     .bind(workspace_id)
-    .bind(city_slug)
+    .bind(city_id)
     .fetch_optional(pool)
     .await?
     .flatten();
