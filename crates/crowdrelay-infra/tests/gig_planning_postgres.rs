@@ -302,7 +302,13 @@ async fn run(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
     let plan = plan_gig(wro, TenantIntent::BookingShows).expect("proposes with a route");
     assert_eq!(plan.city, "wroclaw");
     assert_eq!(plan.venue, "Klub X");
-    assert_eq!(plan.contact, vec!["Anna"]);
+    assert_eq!(
+        plan.contact
+            .iter()
+            .map(|contact| contact.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["Anna"]
+    );
     // The unmeasured facts travel as caveats rather than vanishing.
     assert!(
         plan.caveats.iter().any(|note| note.contains("unmeasured")),
@@ -363,6 +369,7 @@ async fn run(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
     stated_intent_comes_from_the_act_that_stated_it(pool, act).await?;
     a_roster_capacity_is_stated_or_absent(pool).await?;
     shared_fans_measure_overlap_without_naming_anybody(pool).await?;
+    an_overlap_is_measured_in_each_city_separately(pool).await?;
 
     Ok(())
 }
@@ -377,7 +384,7 @@ async fn shared_fans_measure_overlap_without_naming_anybody(
     pool: &PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use crowdrelay_infra::gig_planning::roster_opportunity;
-    use crowdrelay_infra::place_reach::audience_overlaps;
+    use crowdrelay_infra::place_reach::audience_overlaps_by_city;
 
     let label = organization(pool, "label-overlap").await?;
     let head = org_workspace(pool, label, "headliner").await?;
@@ -414,7 +421,7 @@ async fn shared_fans_measure_overlap_without_naming_anybody(
     .await?;
     reachable_fan(pool, support, city_id, "gone@example.com").await?;
 
-    let overlaps = audience_overlaps(pool, &[head, support]).await?;
+    let overlaps = audience_overlaps_by_city(pool, &[head, support], &[city_id]).await?;
     let pair = overlaps
         .iter()
         .find(|pair| {
@@ -441,7 +448,7 @@ async fn shared_fans_measure_overlap_without_naming_anybody(
         .find(|act| act.name == "headliner")
         .ok_or("the headliner was absent from its own roster read")?;
     assert_eq!(
-        headliner.overlap_with_act("support"),
+        headliner.overlap_with_act("support", crowdrelay_domain::CityId::from_uuid(city_id)),
         Some(5_000),
         "the measured share did not reach the planner"
     );
@@ -460,7 +467,7 @@ async fn shared_fans_measure_overlap_without_naming_anybody(
         .find(|act| act.name == "stranger")
         .ok_or("a third act vanished from the roster read")?;
     assert_eq!(
-        stranger_act.overlap_with_act("headliner"),
+        stranger_act.overlap_with_act("headliner", crowdrelay_domain::CityId::from_uuid(own)),
         Some(0),
         "two acts that were measured and share nobody did not report zero"
     );
@@ -489,6 +496,62 @@ async fn org_workspace(
 /// Driven against the real table because the whole value of the setting is the
 /// difference between "never stated" and a number, and that difference is a
 /// `NULL` row rather than a branch anybody can unit test.
+/// The overlap two acts have is a fact about one city, not about the roster.
+///
+/// Driven against real rows because the whole point is a query: two acts can
+/// share almost nobody in one city and almost everybody in another, and a
+/// single national number applied to both is the pairing mistake the ceiling
+/// exists to prevent, wearing the ceiling's own clothes.
+async fn an_overlap_is_measured_in_each_city_separately(
+    pool: &PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use crowdrelay_infra::place_reach::audience_overlaps_by_city;
+
+    let label = organization(pool, "label-two-cities").await?;
+    let left = org_workspace(pool, label, "left-act").await?;
+    let right = org_workspace(pool, label, "right-act").await?;
+    // Real coordinates, far enough apart that a fan of one is outside the
+    // other's radius — every fixture city sharing one point would make every
+    // fan reachable everywhere and the per-city claim untestable.
+    let home = city_in(pool, "katowice", "PL", 50.26, 19.02).await?;
+    let away = city_in(pool, "szczecin", "PL", 53.43, 14.55).await?;
+
+    // In their shared home city both acts reach the same two people.
+    for index in 0..2 {
+        reachable_fan(pool, left, home, &format!("home{index}@example.com")).await?;
+        reachable_fan(pool, right, home, &format!("home{index}@example.com")).await?;
+    }
+    // Away, each reaches two of their own and nobody in common.
+    for index in 0..2 {
+        reachable_fan(pool, left, away, &format!("left{index}@example.com")).await?;
+        reachable_fan(pool, right, away, &format!("right{index}@example.com")).await?;
+    }
+
+    let overlaps = audience_overlaps_by_city(pool, &[left, right], &[home, away]).await?;
+    let share_in = |city_id: Uuid| {
+        overlaps
+            .iter()
+            .find(|overlap| {
+                overlap.city_id == city_id
+                    && (overlap.workspace_a == left || overlap.workspace_b == left)
+                    && (overlap.workspace_a == right || overlap.workspace_b == right)
+            })
+            .and_then(|overlap| overlap.share_of(left))
+    };
+    assert_eq!(
+        share_in(home),
+        Some(10_000),
+        "two acts reaching the same people at home did not measure as one audience"
+    );
+    assert_eq!(
+        share_in(away),
+        Some(0),
+        "the home city's share leaked into a city where the acts share nobody"
+    );
+
+    Ok(())
+}
+
 async fn a_roster_capacity_is_stated_or_absent(
     pool: &PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {

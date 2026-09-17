@@ -186,6 +186,33 @@ async fn run(pool: &PgPool, url: &str) -> Result<(), Box<dyn std::error::Error>>
     // executor exists at all — with an empty registry nothing is gated, which
     // is deliberate and is why this seeds one before asserting the park.
     advertise(pool, act, "booking.outreach", now).await?;
+
+    // With a registry that cannot send this letter, a *new* approval is
+    // refused rather than queued. The alternative is what production would
+    // have done: accept the band's yes, park the action, and cancel it a day
+    // later by a sweep nothing shows them.
+    let refused_key = IdempotencyKey::parse("gig-approve-blocked").expect("valid key");
+    match approve_gig_proposal(pool, act, wroclaw, &refused_key, now).await {
+        Err(GigOutreachError::Refused(sentence)) => assert!(
+            sentence.contains("nothing can send this letter yet"),
+            "the refusal did not name the missing sender: {sentence}"
+        ),
+        other => {
+            return Err(
+                format!("an approval was taken with nothing able to send it: {other:?}").into(),
+            );
+        }
+    }
+    // And nothing was written for it — a refused approval leaves no action to
+    // cancel later.
+    let actions_now = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM viryaos_autopilot_actions WHERE workspace_id = $1",
+    )
+    .bind(act)
+    .fetch_one(pool)
+    .await?;
+    assert_eq!(actions_now, 1, "a refused approval still queued an action");
+
     let parked = repository(pool, url)
         .claim_due_autonomous_actions(WorkspaceId::from_uuid(act), 8, now)
         .await?;
@@ -264,6 +291,197 @@ async fn run(pool: &PgPool, url: &str) -> Result<(), Box<dyn std::error::Error>>
         Err(GigOutreachError::NotFound) => {}
         other => return Err(format!("an unknown city was not refused: {other:?}").into()),
     }
+
+    two_promoters_with_one_name_both_receive_the_letter(pool).await?;
+    a_second_approval_for_a_city_already_written_to_is_a_sentence(pool).await?;
+    a_reply_belongs_to_the_letter_that_preceded_it(pool).await?;
+
+    Ok(())
+}
+
+/// Approving a city whose letter is still in flight is answered, not crashed.
+///
+/// The action ledger has a partial unique index over the unfinished states, so
+/// the second write collides. Left to the database, the band's second click
+/// returned a unique-violation — a 503 that says the system is broken when the
+/// truth is that they already said yes.
+async fn a_second_approval_for_a_city_already_written_to_is_a_sentence(
+    pool: &PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let now = OffsetDateTime::now_utc();
+    let act = workspace(pool).await?;
+    let lublin = city_in(pool, "lublin", "PL", 51.25, 22.57).await?;
+    for index in 0..60 {
+        reachable_fan(pool, act, lublin, &format!("lublin{index}@example.com")).await?;
+    }
+    played_show(pool, act, lublin, "Klub L", "lublin-show", 30).await?;
+    promoter(pool, act, lublin, "Ewa", "ewa@example.com", 70).await?;
+
+    let first = IdempotencyKey::parse("gig-lublin-1").expect("valid key");
+    let GigOutreachOutcome::Queued { .. } =
+        approve_gig_proposal(pool, act, lublin, &first, now).await?
+    else {
+        return Err("the first Lublin approval did not queue".into());
+    };
+
+    // A different key, so this is a genuinely new approval rather than a replay.
+    let second = IdempotencyKey::parse("gig-lublin-2").expect("valid key");
+    match approve_gig_proposal(pool, act, lublin, &second, now).await {
+        Err(GigOutreachError::Refused(sentence)) => assert!(
+            sentence.contains("already approved this city"),
+            "the second approval did not explain itself: {sentence}"
+        ),
+        other => {
+            return Err(format!("a second letter to one city was accepted: {other:?}").into());
+        }
+    }
+
+    Ok(())
+}
+
+/// One reply, one letter: the most recent outbound touch before it.
+///
+/// A promoter written to twice in a week — a booking approach and a gig
+/// proposal's letter — used to answer both, because each measurement asked
+/// only "was there an inbound inside my seven days". One reply became two
+/// successes, and the reason tally believed twice as much evidence existed as
+/// there was.
+async fn a_reply_belongs_to_the_letter_that_preceded_it(
+    pool: &PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let act = workspace(pool).await?;
+    let city_id = city_in(pool, "reply-owner", "PL", 51.75, 19.46).await?;
+    promoter(pool, act, city_id, "Dorota", "dorota@example.com", 70).await?;
+    let target = sqlx::query_scalar::<_, Uuid>(
+        "SELECT id FROM viryaos_booking_targets
+         WHERE workspace_id = $1 AND contact_email = 'dorota@example.com'",
+    )
+    .bind(act)
+    .fetch_one(pool)
+    .await?;
+
+    let first_letter = OffsetDateTime::now_utc() - time::Duration::days(5);
+    let second_letter = first_letter + time::Duration::days(2);
+    let reply_at = second_letter + time::Duration::hours(6);
+    for (phase, direction, at, key) in [
+        ("initial", "outbound", first_letter, "letter-one"),
+        ("initial", "outbound", second_letter, "letter-two"),
+        ("initial", "inbound", reply_at, "the-reply"),
+    ] {
+        sqlx::query(
+            "INSERT INTO viryaos_booking_interactions
+                (workspace_id, target_id, direction, phase, source_key, occurred_at)
+             VALUES ($1, $2, $3, $4, $5, $6)",
+        )
+        .bind(act)
+        .bind(target)
+        .bind(direction)
+        .bind(phase)
+        .bind(key)
+        .bind(at)
+        .execute(pool)
+        .await?;
+    }
+
+    // The observation is the same query the worker runs, asked once per letter.
+    let observed = |sent_at: OffsetDateTime| async move {
+        sqlx::query_scalar::<_, f64>(
+            r#"
+            SELECT CASE WHEN EXISTS (
+                SELECT 1 FROM viryaos_booking_interactions AS reply
+                WHERE reply.workspace_id=$1 AND reply.target_id=$2
+                  AND reply.direction='inbound'
+                  AND reply.occurred_at >= $3
+                  AND reply.occurred_at < $3 + INTERVAL '7 days'
+                  AND NOT EXISTS (
+                      SELECT 1 FROM viryaos_booking_interactions AS newer
+                      WHERE newer.workspace_id=reply.workspace_id
+                        AND newer.target_id=reply.target_id
+                        AND newer.direction='outbound'
+                        AND newer.occurred_at > $3
+                        AND newer.occurred_at <= reply.occurred_at
+                  )
+            ) THEN 1.0::double precision ELSE 0.0::double precision END
+            "#,
+        )
+        .bind(act)
+        .bind(target)
+        .bind(sent_at)
+        .fetch_one(pool)
+        .await
+    };
+    assert!(
+        (observed(second_letter).await? - 1.0).abs() < f64::EPSILON,
+        "the letter the promoter actually answered did not get the reply"
+    );
+    assert!(
+        observed(first_letter).await?.abs() < f64::EPSILON,
+        "an older letter still claimed a reply that came after a newer one"
+    );
+
+    Ok(())
+}
+
+/// Two people who book the same city can share a display name, and both are
+/// recipients.
+///
+/// The booking list is unique on the contact address, so the name is not an
+/// identity. Resolving the letter by name addressed the highest-ranked
+/// namesake twice and never wrote to the other, while the console showed both
+/// — which quietly breaks the promise that everybody who books the room hears.
+async fn two_promoters_with_one_name_both_receive_the_letter(
+    pool: &PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let now = OffsetDateTime::now_utc();
+    let act = workspace(pool).await?;
+    let poznan = city_in(pool, "poznan-namesakes", "PL", 52.4, 16.9).await?;
+    for index in 0..60 {
+        reachable_fan(
+            pool,
+            act,
+            poznan,
+            &format!("namesake-fan{index}@example.com"),
+        )
+        .await?;
+    }
+    played_show(pool, act, poznan, "Klub Y", "namesake-show", 30).await?;
+    // Two different people, one name, two addresses — which is exactly what
+    // the booking list's own uniqueness allows.
+    promoter(pool, act, poznan, "Anna", "anna.one@example.com", 70).await?;
+    promoter(pool, act, poznan, "Anna", "anna.two@example.com", 60).await?;
+
+    let key = IdempotencyKey::parse("gig-namesakes").expect("valid key");
+    let GigOutreachOutcome::Queued {
+        action_id,
+        recipients,
+        ..
+    } = approve_gig_proposal(pool, act, poznan, &key, now).await?
+    else {
+        return Err("the namesake proposal did not queue".into());
+    };
+    assert_eq!(
+        recipients.len(),
+        2,
+        "a promoter sharing a name with another was dropped: {recipients:?}"
+    );
+
+    let addressed = sqlx::query_scalar::<_, serde_json::Value>(
+        "SELECT payload -> 'recipients' FROM viryaos_autopilot_actions
+         WHERE workspace_id = $1 AND id = $2",
+    )
+    .bind(act)
+    .bind(action_id)
+    .fetch_one(pool)
+    .await?;
+    let ids: Vec<String> = addressed
+        .as_array()
+        .ok_or("the recipient set is not an array")?
+        .iter()
+        .filter_map(|entry| entry.get("target_id").and_then(|id| id.as_str()))
+        .map(ToOwned::to_owned)
+        .collect();
+    assert_eq!(ids.len(), 2, "two recipients, two rows: {ids:?}");
+    assert_ne!(ids[0], ids[1], "one promoter was addressed twice");
 
     Ok(())
 }
@@ -458,6 +676,65 @@ async fn a_settled_proposal_has_its_reasons_scored() -> Result<(), Box<dyn std::
             assert_eq!(score.shows, 1, "reason {kind} did not see the show");
         }
 
+        // The named room is the stronger signal, and it is reported apart from
+        // "a show in that city": the letter asked for Klub X and Klub X is
+        // what happened.
+        assert!(
+            proposal.show_booked_at_venue,
+            "a show at the room the letter named did not register as one"
+        );
+
+        // A show created outside the attribution window is not this
+        // proposal's. Unbounded, every city the band ever plays eventually
+        // marks every proposal ever made for it a success, and a tally where
+        // every reason works is one nobody can act on.
+        let late_city = city_in(pool, "late-city", "PL", 54.35, 18.65).await?;
+        let late_key = IdempotencyKey::parse("gig-score-late").expect("valid key");
+        for index in 0..60 {
+            reachable_fan(pool, act, late_city, &format!("late{index}@example.com")).await?;
+        }
+        played_show(pool, act, late_city, "Klub Z", "late-show", 30).await?;
+        promoter(pool, act, late_city, "Celina", "celina@example.com", 70).await?;
+        let GigOutreachOutcome::Queued {
+            action_id: late_action,
+            ..
+        } = approve_gig_proposal(pool, act, late_city, &late_key, now).await?
+        else {
+            return Err("the late-city proposal did not queue".into());
+        };
+        // Approved a year ago, from the ledger's point of view.
+        sqlx::query(
+            "UPDATE viryaos_autopilot_decisions SET evaluated_at = now() - interval '365 days'
+             WHERE workspace_id = $1
+               AND id = (SELECT decision_id FROM viryaos_autopilot_actions
+                         WHERE workspace_id = $1 AND id = $2)",
+        )
+        .bind(act)
+        .bind(late_action)
+        .execute(pool)
+        .await?;
+        sqlx::query(
+            "INSERT INTO events
+                (workspace_id, city_id, slug, title, venue, starts_at,
+                 status, published_at)
+             VALUES ($1, $2, 'much-later', 'Much Later', 'Klub Z',
+                     now() + interval '20 days', 'published', now())",
+        )
+        .bind(act)
+        .bind(late_city)
+        .execute(pool)
+        .await?;
+        let record = proposal_track_record(pool, act).await?;
+        let late = record
+            .proposals
+            .iter()
+            .find(|entry| entry.city == "late-city")
+            .ok_or("the year-old proposal vanished from the track record")?;
+        assert!(
+            !late.show_booked,
+            "a show booked a year after the approval was credited to it"
+        );
+
         Ok::<(), Box<dyn std::error::Error>>(())
     }
     .await;
@@ -490,19 +767,36 @@ async fn workspace(pool: &PgPool) -> Result<Uuid, Box<dyn std::error::Error>> {
 }
 
 async fn city(pool: &PgPool, slug: &str) -> Result<Uuid, Box<dyn std::error::Error>> {
+    city_in(pool, slug, "PL", 51.1, 17.0).await
+}
+
+async fn city_in(
+    pool: &PgPool,
+    slug: &str,
+    country_code: &str,
+    latitude: f64,
+    longitude: f64,
+) -> Result<Uuid, Box<dyn std::error::Error>> {
     sqlx::query(
         "INSERT INTO cities (slug, name, country_code, latitude, longitude)
-         VALUES ($1, $1, 'PL', 51.1, 17.0)
-         ON CONFLICT (country_code, slug) DO UPDATE SET latitude = 51.1",
+         VALUES ($1, $1, $2, $3, $4)
+         ON CONFLICT (country_code, slug)
+         DO UPDATE SET latitude = $3, longitude = $4",
     )
     .bind(slug)
+    .bind(country_code)
+    .bind(latitude)
+    .bind(longitude)
     .execute(pool)
     .await?;
     Ok(
-        sqlx::query_scalar::<_, Uuid>("SELECT id FROM cities WHERE country_code='PL' AND slug=$1")
-            .bind(slug)
-            .fetch_one(pool)
-            .await?,
+        sqlx::query_scalar::<_, Uuid>(
+            "SELECT id FROM cities WHERE country_code = $2 AND slug = $1",
+        )
+        .bind(slug)
+        .bind(country_code)
+        .fetch_one(pool)
+        .await?,
     )
 }
 

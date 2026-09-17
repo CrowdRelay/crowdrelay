@@ -270,13 +270,60 @@ pub(in crate::autopilot) async fn executor_registry_is_active(
     .map_err(map_sqlx)
 }
 
-/// Non-failing probe for callers that treat a missing executor as a soft
-/// skip (best-effort notifications) instead of refusing the operation.
-pub(in crate::autopilot) async fn executor_capability_available(
-    transaction: &mut Transaction<'_, Postgres>,
+/// Whether an approval taken right now could actually be executed (4G.4).
+///
+/// # Why an approval needs to ask
+///
+/// The dispatcher parks an action whose capability nobody advertises, and the
+/// stale sweep cancels it `NO_EXECUTOR_GRACE` later with `no_executor`. For
+/// work the brain proposed that is the right shape: the decision cost nobody
+/// anything. For work a **person just approved** it is a silent loss — the
+/// band read the reasons, said "write to these three promoters", got an
+/// acknowledgement, and a day later the letter was cancelled by a sweep
+/// nothing shows them. Approvals that cannot be executed must be refused at
+/// the moment of asking, with the sentence that says why.
+///
+/// Fail-open on an empty registry, exactly as the dispatcher's own gate does:
+/// a workspace where nothing has ever advertised anything is not a workspace
+/// where everything is blocked.
+///
+/// # Errors
+///
+/// Propagates the database error.
+pub async fn capability_is_serviceable(
+    pool: &sqlx::PgPool,
     workspace_id: WorkspaceId,
     capability: &str,
 ) -> Result<bool, RepositoryError> {
+    let registry_active = sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS (SELECT 1 FROM viryaos_executor_instances WHERE workspace_id=$1)",
+    )
+    .bind(workspace_id.into_uuid())
+    .fetch_one(pool)
+    .await
+    .map_err(map_sqlx)?;
+    if !registry_active {
+        return Ok(true);
+    }
+    capability_is_advertised(pool, workspace_id, capability)
+        .await
+        .map_err(map_sqlx)
+}
+
+/// The advertisement predicate itself: a live capability, on a live executor,
+/// whose circuit breaker is not holding it open.
+///
+/// One definition, two callers — the dispatcher's transaction-scoped probe and
+/// the approval-time check above. A second copy would be a gate that drifts,
+/// and a gate that drifts admits work the other one refuses.
+async fn capability_is_advertised<'e, E>(
+    executor: E,
+    workspace_id: WorkspaceId,
+    capability: &str,
+) -> Result<bool, sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = Postgres>,
+{
     sqlx::query_scalar::<_, bool>(
         r#"
         SELECT EXISTS (
@@ -298,9 +345,20 @@ pub(in crate::autopilot) async fn executor_capability_available(
     )
     .bind(workspace_id.into_uuid())
     .bind(capability)
-    .fetch_one(&mut **transaction)
+    .fetch_one(executor)
     .await
-    .map_err(map_sqlx)
+}
+
+/// Non-failing probe for callers that treat a missing executor as a soft
+/// skip (best-effort notifications) instead of refusing the operation.
+pub(in crate::autopilot) async fn executor_capability_available(
+    transaction: &mut Transaction<'_, Postgres>,
+    workspace_id: WorkspaceId,
+    capability: &str,
+) -> Result<bool, RepositoryError> {
+    capability_is_advertised(&mut **transaction, workspace_id, capability)
+        .await
+        .map_err(map_sqlx)
 }
 
 /// Reserves the next contact window for one address, across the whole
