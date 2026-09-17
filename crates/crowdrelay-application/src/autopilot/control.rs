@@ -508,10 +508,12 @@ pub struct OpportunityShortlistEntry {
     /// `no_destination`, `stale_observation`, `deadline_passed`,
     /// `ineligible`, `closed`.
     pub stale_reason: Option<String>,
-    /// Newest autopilot decision naming this opportunity, if any.
+    /// Newest autopilot decision naming this opportunity, if any. The
+    /// disposition is what a decision records — `require_approval` and its
+    /// siblings — not a lifecycle status.
     pub latest_decision_id: Option<uuid::Uuid>,
     pub latest_decision_kind: Option<String>,
-    pub latest_decision_status: Option<String>,
+    pub latest_decision_disposition: Option<String>,
     /// Whether the cost figure came from the tour-economics engine rather
     /// than from whatever was typed in.
     pub costed_from_logistics: bool,

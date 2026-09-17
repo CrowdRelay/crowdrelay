@@ -3794,6 +3794,30 @@ paths:
                 items: { $ref: '#/components/schemas/NextBestAction' }
         '401': { $ref: '#/components/responses/PrivateProblem' }
         '503': { $ref: '#/components/responses/PrivateProblem' }
+  /admin/autopilot/opportunity-shortlist:
+    get:
+      operationId: getAutopilotOpportunityShortlist
+      summary: Read the scout shortlist — every tracked opportunity with its link, costed figures, staleness and newest decision
+      description: >
+        Returns every tracked opportunity, including closed, ineligible and stale rows: a
+        review surface that hides its rejections makes the operator re-check them by hand.
+        `stale_reason` names why a row cannot be worked right now (closed, ineligible,
+        no_destination, stale_observation, deadline_passed). Money fields stay null when
+        unknown rather than reading as zero. `degraded` names the sections that could not
+        be read; the response is still 200.
+      security:
+      - adminBearer: []
+      responses:
+        '200':
+          description: The tracked opportunity list with per-row staleness and decision correlation.
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/PrivateNoStore'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/OpportunityShortlist' }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
   /admin/autopilot/decisions/{decision_id}/handled-externally:
     post:
       operationId: markAutopilotDecisionHandledExternally
@@ -13745,17 +13769,29 @@ components:
       enum: [poland, east_germany, czechia_slovakia, far_shot]
     TeamOpportunityKind:
       type: string
-      enum: [festival, showcase, review_contest, support_slot, funding]
+      enum: [festival, showcase, review_contest, support_slot, funding, booking, press, interview, sync]
+      description: >
+        festival/showcase/review_contest/support_slot are the live-application kinds the
+        evaluator may advance; funding keeps its own pipeline; booking/press/interview/sync
+        are scout-only review leads that never enter the live evaluator.
     TeamOpportunityDiscoveryRequest:
       type: object
       additionalProperties: false
-      required: [source, external_key, title, summary]
+      required: [source, external_key, title, destination_url, summary]
       properties:
         source: { type: string, minLength: 1, maxLength: 64, pattern: '^[A-Za-z0-9_.:-]+$' }
         external_key: { type: string, minLength: 1, maxLength: 240 }
         title: { type: string, minLength: 1, maxLength: 240 }
-        destination_url: { type: [string, 'null'], maxLength: 1000 }
+        destination_url:
+          type: string
+          minLength: 1
+          maxLength: 1000
+          description: The link the finding stands on. Required — a discovery without a usable destination is refused, not stored.
         summary: { type: string, maxLength: 8000 }
+        source_observed_at:
+          type: [string, 'null']
+          format: date-time
+          description: When the scout observed the source. Absent means the finding carries no dated source evidence; must not be more than a day in the future.
     TeamOpportunityRequest:
       type: object
       additionalProperties: false
@@ -13798,6 +13834,10 @@ components:
           description: >
             Operator-confirmed prestige, 0..=10000. A name match against a landmark promoter or
             festival list is a suggestion an operator confirms here, never an automatic grant.
+        source_observed_at:
+          type: [string, 'null']
+          format: date-time
+          description: When the source was actually observed. Absent leaves the stored observation alone rather than borrowing the write time.
         expected_version: { type: integer, format: int64, minimum: 0 }
     TeamOpportunityMutation:
       type: object
@@ -13937,6 +13977,11 @@ components:
       properties:
         progress: { type: string, enum: [package_ready, submitted, replied, won, lost, dismissed] }
         occurred_at: { type: string, format: date-time }
+        reason:
+          type: [string, 'null']
+          minLength: 1
+          maxLength: 240
+          description: Required for lost and dismissed — a row that closes says why, so a refusal teaches the pipeline instead of disappearing.
 
     ContentSourceKind:
       type: string
@@ -14288,6 +14333,68 @@ components:
           description: >
             Human-readable briefing generated from the action payload. Null when the
             payload could not be parsed or carried no briefing.
+    OpportunityShortlist:
+      type: object
+      additionalProperties: false
+      required: [generated_at, entries, stale_count, closed_count, ineligible_count, degraded]
+      properties:
+        generated_at: { type: string, format: date-time }
+        entries:
+          type: array
+          items: { $ref: '#/components/schemas/OpportunityShortlistEntry' }
+        stale_count: { type: integer, format: int64, minimum: 0 }
+        closed_count: { type: integer, format: int64, minimum: 0 }
+        ineligible_count: { type: integer, format: int64, minimum: 0 }
+        degraded:
+          type: array
+          items: { type: string }
+          description: Sections that could not be read this time; the response is still 200.
+    OpportunityShortlistEntry:
+      type: object
+      additionalProperties: false
+      required: [opportunity_id, kind, source, external_key, title, organization, status, eligible, fit_basis_points, reputation_basis_points, confidence_basis_points, costed_from_logistics]
+      properties:
+        opportunity_id: { type: string, format: uuid }
+        kind: { $ref: '#/components/schemas/TeamOpportunityKind' }
+        source: { type: string, maxLength: 64 }
+        external_key: { type: string, maxLength: 240 }
+        title: { type: string, maxLength: 240 }
+        organization: { type: string, maxLength: 240 }
+        destination_url:
+          type: string
+          nullable: true
+          maxLength: 1000
+          description: The link the finding stands on. Null means no usable destination was ever supplied.
+        source_observed_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: When the source was actually observed — not when the row was written.
+        deadline: { type: string, format: date-time, nullable: true }
+        status: { type: string, maxLength: 32 }
+        status_reason:
+          type: string
+          nullable: true
+          maxLength: 240
+          description: Why a terminal row closed. Null for live rows.
+        eligible: { type: boolean }
+        expected_fee_minor: { type: integer, format: int64, nullable: true }
+        estimated_cost_minor: { type: integer, format: int64, nullable: true }
+        application_fee_minor: { type: integer, format: int64, nullable: true }
+        fit_basis_points: { type: integer, minimum: 0, maximum: 10000 }
+        reputation_basis_points: { type: integer, minimum: 0, maximum: 10000 }
+        confidence_basis_points: { type: integer, minimum: 0, maximum: 10000 }
+        stale_reason:
+          type: string
+          nullable: true
+          enum: [closed, ineligible, no_destination, stale_observation, deadline_passed]
+          description: Why the row cannot be worked right now, when it cannot.
+        latest_decision_id: { type: string, format: uuid, nullable: true }
+        latest_decision_kind: { type: string, nullable: true, maxLength: 96 }
+        latest_decision_disposition: { type: string, nullable: true, maxLength: 32 }
+        costed_from_logistics:
+          type: boolean
+          description: Whether the cost figure came from the tour-economics engine rather than whatever was typed in.
     ActionBriefing:
       type: object
       additionalProperties: false

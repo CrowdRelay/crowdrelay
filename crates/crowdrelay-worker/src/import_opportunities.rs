@@ -249,8 +249,8 @@ pub async fn import_opportunities(
                  organization, destination_url, contact_email, country_code,
                  fit_basis_points, confidence_basis_points,
                  strategic_value_basis_points, verified_destination, deadline,
-                 eligible, metadata, status)
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,'new')
+                 eligible, metadata, status, source_observed_at)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,'new',$17)
             ON CONFLICT (workspace_id, source, external_key) DO UPDATE SET
                 -- Contact details and the deadline are what a re-import is for:
                 -- the sheet is the band's live record and CrowdRelay's copy goes
@@ -276,6 +276,12 @@ pub async fn import_opportunities(
                 -- happens not to carry the note.
                 verified_destination = viryaos_team_opportunities.verified_destination
                     OR EXCLUDED.verified_destination,
+                -- A re-import that still carries the link is a fresh
+                -- observation of it; a row that lost its link keeps whatever
+                -- observation it had rather than fabricating one.
+                source_observed_at = COALESCE(
+                    EXCLUDED.source_observed_at,
+                    viryaos_team_opportunities.source_observed_at),
                 title = EXCLUDED.title,
                 -- `status`, `eligible` and `metadata` are deliberately absent.
                 -- Status is the loop's own record of what it did — a re-import
@@ -307,6 +313,9 @@ pub async fn import_opportunities(
         .bind(deadline)
         .bind(eligible)
         .bind(metadata(&row))
+        // The link is dated source evidence: a row that carries one was
+        // observed at import time, and one without was never observed.
+        .bind((!row.destination_url.trim().is_empty()).then(OffsetDateTime::now_utc))
         .execute(pool)
         .await?;
         summary.written += 1;

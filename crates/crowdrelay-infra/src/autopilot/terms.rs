@@ -94,6 +94,16 @@ impl PostgresAutopilotRepository {
         let opportunities = self
             .load_live_opportunity_snapshots_for(workspace_id, now, &["submitted", "replied"])
             .await?;
+        // A post-show report is owed to a counterparty when a past show naming
+        // them has no `post_show_report` checklist item done. Matched on the
+        // counterparty's email first (strongest) and their name otherwise.
+        let pending_reports = self
+            .load_pending_counterparty_reports(
+                workspace_id,
+                now,
+                &rows.iter().map(|row| row.opportunity_id).collect::<Vec<_>>(),
+            )
+            .await?;
         let mut snapshots = Vec::with_capacity(rows.len());
         for row in rows {
             let Some(opportunity) = opportunities
@@ -126,9 +136,68 @@ impl PostgresAutopilotRepository {
                 },
                 opportunity: *opportunity,
                 currency: row.currency,
+                report_pending_event_id: pending_reports.get(&row.opportunity_id).copied(),
             });
         }
         Ok(snapshots)
+    }
+
+    /// The newest past show per opportunity whose counterparty is still owed a
+    /// post-show report. An opportunity names its counterparty by contact
+    /// email and organization; a show names them by `counterparty_email` /
+    /// `counterparty_name`. Email matches first — a name alone is a guess.
+    async fn load_pending_counterparty_reports(
+        &self,
+        workspace_id: WorkspaceId,
+        now: OffsetDateTime,
+        opportunity_ids: &[Uuid],
+    ) -> Result<std::collections::HashMap<Uuid, EventId>, RepositoryError> {
+        if opportunity_ids.is_empty() {
+            return Ok(std::collections::HashMap::new());
+        }
+        let rows = self
+            .bounded(async {
+                sqlx::query_as::<_, (Uuid, Uuid)>(
+                    r#"
+                    SELECT DISTINCT ON (o.id) o.id AS opportunity_id, e.id AS event_id
+                    FROM viryaos_team_opportunities o
+                    JOIN events e
+                      ON e.workspace_id = o.workspace_id
+                     AND e.status IN ('published', 'completed')
+                     AND e.starts_at <= $2
+                     AND (
+                          (o.contact_email IS NOT NULL
+                           AND e.counterparty_email IS NOT NULL
+                           AND lower(e.counterparty_email) = lower(o.contact_email))
+                          OR (e.counterparty_name IS NOT NULL
+                              AND lower(btrim(e.counterparty_name)) = lower(btrim(o.organization)))
+                     )
+                    WHERE o.workspace_id = $1
+                      AND o.id = ANY($3)
+                      AND NOT EXISTS (
+                          SELECT 1 FROM show_checklist_items sci
+                          WHERE sci.workspace_id = e.workspace_id
+                            AND sci.event_id = e.id
+                            AND sci.item_key = 'post_show_report'
+                            AND sci.status = 'done'
+                      )
+                    ORDER BY o.id, e.starts_at DESC
+                    "#,
+                )
+                .bind(workspace_id.into_uuid())
+                .bind(now)
+                .bind(opportunity_ids)
+                .fetch_all(&self.pool)
+                .await
+                .map_err(map_sqlx)
+            })
+            .await?;
+        Ok(rows
+            .into_iter()
+            .map(|(opportunity_id, event_id)| {
+                (opportunity_id, EventId::from_uuid(event_id))
+            })
+            .collect())
     }
 
     pub(super) async fn settle_live_opportunity_terms_impl(

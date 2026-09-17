@@ -309,6 +309,9 @@ pub(super) async fn schedule_effect_measurement(
         // A seventy-two hour window after a counter measures nothing.
         | AutopilotActionPayload::CounterLiveOpportunityTerms { .. }
         | AutopilotActionPayload::AcceptLiveOpportunityTerms { .. }
+        // The report's effect is the negotiation it unblocks, measured where
+        // the negotiation is measured — not a send receipt for an email.
+        | AutopilotActionPayload::IssueCounterpartyReport { .. }
         | AutopilotActionPayload::PrepareFundingPackage { .. }
         | AutopilotActionPayload::SubmitFundingApplication { .. }
         // An invitation is measured by whether the person joined, not by

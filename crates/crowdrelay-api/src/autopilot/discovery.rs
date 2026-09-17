@@ -1,6 +1,6 @@
 use super::*;
 use crowdrelay_domain::live_opportunities::{
-    LiveOpportunityDiscovery, LiveOpportunityKind, evaluate_live_opportunity_discovery,
+    LiveOpportunityDiscovery, ScoutOpportunityKind, evaluate_scout_discovery,
 };
 
 #[derive(Debug, Deserialize)]
@@ -9,8 +9,15 @@ pub struct TeamOpportunityDiscoveryRequest {
     source: String,
     external_key: String,
     title: String,
-    destination_url: Option<String>,
+    /// The link the finding stands on. Required: a discovery without a usable
+    /// destination is not a finding — it is text that cannot be checked.
+    destination_url: String,
     summary: String,
+    /// When the scout actually observed the source. `None` means the finding
+    /// carries no dated source evidence and lands as unobserved rather than
+    /// silently borrowing the write time.
+    #[serde(default, with = "time::serde::rfc3339::option")]
+    source_observed_at: Option<OffsetDateTime>,
 }
 
 pub async fn discover_team_opportunity(
@@ -18,6 +25,9 @@ pub async fn discover_team_opportunity(
     headers: HeaderMap,
     Json(request): Json<TeamOpportunityDiscoveryRequest>,
 ) -> Response {
+    let observed_too_far_ahead = request
+        .source_observed_at
+        .is_some_and(|at| at > OffsetDateTime::now_utc() + time::Duration::days(1));
     let invalid = !valid_market_source(&request.source)
         || request.external_key.trim().is_empty()
         || request.external_key.len() > 240
@@ -28,10 +38,9 @@ pub async fn discover_team_opportunity(
             .summary
             .chars()
             .any(|character| character.is_control() && !matches!(character, '\n' | '\r' | '\t'))
-        || request
-            .destination_url
-            .as_ref()
-            .is_some_and(|value| value.trim().is_empty() || value.len() > 1_000);
+        || request.destination_url.trim().is_empty()
+        || request.destination_url.len() > 1_000
+        || observed_too_far_ahead;
     if invalid {
         return Problem::bad_request(request_id(&headers))
             .private()
@@ -41,17 +50,21 @@ pub async fn discover_team_opportunity(
         Ok(value) => value,
         Err(response) => return response,
     };
-    let Some(assessment) = evaluate_live_opportunity_discovery(&LiveOpportunityDiscovery {
+    let Some(assessment) = evaluate_scout_discovery(&LiveOpportunityDiscovery {
         title: &request.title,
         summary: &request.summary,
     }) else {
         return private_json(StatusCode::OK, serde_json::json!({"accepted": false}));
     };
     let kind = match assessment.kind {
-        LiveOpportunityKind::Festival => TeamOpportunityKind::Festival,
-        LiveOpportunityKind::Showcase => TeamOpportunityKind::Showcase,
-        LiveOpportunityKind::ReviewContest => TeamOpportunityKind::ReviewContest,
-        LiveOpportunityKind::SupportSlot => TeamOpportunityKind::SupportSlot,
+        ScoutOpportunityKind::Festival => TeamOpportunityKind::Festival,
+        ScoutOpportunityKind::Showcase => TeamOpportunityKind::Showcase,
+        ScoutOpportunityKind::ReviewContest => TeamOpportunityKind::ReviewContest,
+        ScoutOpportunityKind::SupportSlot => TeamOpportunityKind::SupportSlot,
+        ScoutOpportunityKind::Booking => TeamOpportunityKind::Booking,
+        ScoutOpportunityKind::Press => TeamOpportunityKind::Press,
+        ScoutOpportunityKind::Interview => TeamOpportunityKind::Interview,
+        ScoutOpportunityKind::Sync => TeamOpportunityKind::Sync,
     };
     let request_id_value = parsed_request_id(&headers);
     let command = UpsertTeamOpportunity {
@@ -61,7 +74,7 @@ pub async fn discover_team_opportunity(
         source: request.source,
         external_key: request.external_key,
         title: request.title,
-        destination_url: request.destination_url,
+        destination_url: Some(request.destination_url),
         contact_email: None,
         verified_destination: false,
         fit_basis_points: assessment.fit_basis_points,
@@ -93,6 +106,7 @@ pub async fn discover_team_opportunity(
         // nothing on its own. Text-based discovery never sets this above
         // Standard.
         strategic_value_basis_points: 0,
+        source_observed_at: request.source_observed_at,
         expected_version: 0,
     };
     match state

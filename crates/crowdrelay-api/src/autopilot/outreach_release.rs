@@ -444,6 +444,7 @@ pub async fn upsert_team_opportunity(
         travel_band: request.travel_band,
         metadata: request.metadata,
         strategic_value_basis_points: request.strategic_value_basis_points,
+        source_observed_at: request.source_observed_at,
         expected_version: request.expected_version,
     };
     match state
@@ -481,6 +482,7 @@ pub async fn record_team_opportunity_progress(
         opportunity_id: TeamOpportunityId::from_uuid(opportunity_id),
         progress: request.progress,
         occurred_at: request.occurred_at,
+        reason: request.reason,
     };
     match state
         .autopilot

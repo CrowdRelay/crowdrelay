@@ -295,11 +295,12 @@ impl AutopilotTeamStateRepository for PostgresAutopilotRepository {
                         currency, expected_fee_minor, estimated_cost_minor, application_fee_minor,
                         requires_contract, exclusive, eligible, funding_amount_minor,
                         own_contribution_minor, deadline, event_starts_at, country_code,
-                        travel_band, metadata, strategic_value_basis_points
+                        travel_band, metadata, strategic_value_basis_points,
+                        source_observed_at
                     ) VALUES(
                         $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,
                         $13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,
-                        $25,$26,$27,$28
+                        $25,$26,$27,$28,$29
                     )
                     RETURNING version
                     "#,
@@ -332,6 +333,7 @@ impl AutopilotTeamStateRepository for PostgresAutopilotRepository {
                 .bind(command.travel_band.map(|band| band.as_str()))
                 .bind(&command.metadata)
                 .bind(i32::from(command.strategic_value_basis_points))
+                .bind(command.source_observed_at)
                 .fetch_one(&mut *tx)
                 .await
                 .map_err(map_sqlx)?
@@ -368,6 +370,7 @@ impl AutopilotTeamStateRepository for PostgresAutopilotRepository {
                         travel_band=$24,
                         metadata=$25,
                         strategic_value_basis_points=$26,
+                        source_observed_at=$28,
                         version=version+1
                     WHERE workspace_id=$1 AND id=$2 AND version=$27
                     RETURNING version
@@ -400,6 +403,7 @@ impl AutopilotTeamStateRepository for PostgresAutopilotRepository {
                 .bind(&command.metadata)
                 .bind(i32::from(command.strategic_value_basis_points))
                 .bind(expected)
+                .bind(command.source_observed_at)
                 .fetch_optional(&mut *tx)
                 .await
                 .map_err(map_sqlx)?
@@ -711,10 +715,22 @@ impl AutopilotTeamStateRepository for PostgresAutopilotRepository {
                 TeamOpportunityProgress::Lost => "lost",
                 TeamOpportunityProgress::Dismissed => "dismissed",
             };
+            // A refusal is a finding, not a disposal: `lost` and `dismissed`
+            // must say why, or the same dead lead is scouted again next cycle.
+            // `won` needs none — the result is its own reason.
+            let reason = command.reason.as_deref().map(str::trim);
+            if matches!(
+                command.progress,
+                TeamOpportunityProgress::Lost | TeamOpportunityProgress::Dismissed
+            ) && reason.is_none_or(|value| value.is_empty() || value.len() > 240)
+            {
+                return Err(RepositoryError::Unexpected);
+            }
             let details = json!({
                 "opportunity_id": command.opportunity_id,
                 "progress": progress,
                 "occurred_at": command.occurred_at,
+                "reason": reason,
             });
             if let Some(existing) = super::insert_operator_action(
                 &mut tx,
@@ -739,6 +755,9 @@ impl AutopilotTeamStateRepository for PostgresAutopilotRepository {
                 });
             }
 
+            // Terminal writes carry the reason into `status_reason`; live
+            // transitions leave it alone rather than nulling a reason an
+            // earlier close recorded.
             let sql = match command.progress {
                 TeamOpportunityProgress::PackageReady => {
                     "UPDATE viryaos_team_opportunities \
@@ -779,12 +798,18 @@ impl AutopilotTeamStateRepository for PostgresAutopilotRepository {
                        AND status IN ('new','prepared','awaiting_approval','submission_requested')"
                 }
             };
-            let changed = sqlx::query(sql)
+            let mut query = sqlx::query(sql)
                 .bind(workspace_id.into_uuid())
-                .bind(command.opportunity_id.into_uuid())
-                .execute(&mut *tx)
-                .await
-                .map_err(map_sqlx)?;
+                .bind(command.opportunity_id.into_uuid());
+            if matches!(
+                command.progress,
+                TeamOpportunityProgress::Won
+                    | TeamOpportunityProgress::Lost
+                    | TeamOpportunityProgress::Dismissed
+            ) {
+                query = query.bind(reason);
+            }
+            let changed = query.execute(&mut *tx).await.map_err(map_sqlx)?;
             if changed.rows_affected() != 1 {
                 return Err(RepositoryError::Conflict);
             }

@@ -776,6 +776,10 @@ pub(super) fn application_routes(state: AppState) -> Router {
             get(autopilot::next_best_actions),
         )
         .route(
+            "/v1/admin/autopilot/opportunity-shortlist",
+            get(autopilot::opportunity_shortlist),
+        )
+        .route(
             "/v1/admin/autopilot/acquisition-channels",
             get(autopilot::acquisition_channels),
         )
