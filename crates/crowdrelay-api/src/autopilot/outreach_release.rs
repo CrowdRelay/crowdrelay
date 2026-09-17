@@ -871,6 +871,59 @@ pub async fn list_release_plans(
     )
 }
 
+/// One recorded release outcome (1R.12). The payload is the whole report —
+/// observed figures, the baseline comparison, the evidence gaps — so the
+/// surface renders the same numbers the band was sent rather than a second,
+/// quietly recomputed set.
+#[derive(Debug, sqlx::FromRow, serde::Serialize)]
+struct ReleaseOutcomeRow {
+    release_id: Uuid,
+    title: String,
+    tier: String,
+    release_at: OffsetDateTime,
+    report_kind: String,
+    generated_at: OffsetDateTime,
+    window_days: i32,
+    verdict: String,
+    payload: serde_json::Value,
+}
+
+/// §4i-3's honest comparison: what previous releases of each tier actually
+/// produced, recorded from the first one. The tier picker reads this — a
+/// release-level sample stays thin for years, so the endpoint returns raw
+/// records and never a per-tier "winner". The caller renders the n.
+pub async fn list_release_outcomes(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Response {
+    let rows = sqlx::query_as::<_, ReleaseOutcomeRow>(
+        r#"
+        SELECT outcome.release_id, plan.title, outcome.tier, outcome.release_at,
+               outcome.report_kind, outcome.generated_at, outcome.window_days,
+               outcome.verdict, outcome.payload
+        FROM viryaos_release_outcomes outcome
+        JOIN viryaos_release_plans plan
+          ON plan.workspace_id = outcome.workspace_id
+         AND plan.id = outcome.release_id
+        WHERE outcome.workspace_id = $1
+        ORDER BY outcome.release_at DESC, outcome.report_kind
+        LIMIT 60
+        "#,
+    )
+    .bind(state.ops.workspace_id().into_uuid())
+    .fetch_all(&state.database)
+    .await;
+    match rows {
+        Ok(rows) => private_json(StatusCode::OK, rows),
+        Err(error) => {
+            tracing::warn!(%error, "could not list release outcomes");
+            Problem::service_unavailable(request_id(&headers))
+                .private()
+                .into_response()
+        }
+    }
+}
+
 /// Free-reach waves still drafting or waiting on a human. This is the queue an
 /// approval decision reads: a sealed wave with pitches in it, not a promise.
 #[derive(serde::Serialize)]

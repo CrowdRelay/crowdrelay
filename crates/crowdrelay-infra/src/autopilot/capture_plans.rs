@@ -15,10 +15,8 @@
 //!   assignment + reminder machinery every human handoff uses.
 
 use super::{
-    team::{
-        TeamRoutingRow, first_reminder_at, parse_team_skill, queue_team_email_action,
-        select_member_index,
-    },
+    team::{first_reminder_at, queue_team_email_action},
+    team_routing::{TeamRoutingRow, parse_team_skill, select_member_index},
     *,
 };
 use crowdrelay_brain::capture_plans::{
@@ -209,7 +207,7 @@ pub(in crate::autopilot) async fn settle_capture_plans(
             sqlx::query_scalar::<_, i64>(
                 r#"SELECT COUNT(*) FROM viryaos_content_sources s
                    WHERE s.workspace_id=$1 AND s.active
-                     AND s.source_kind IN ('video','story')
+                     AND s.source_kind IN ('video','story','social_post')
                      AND s.occurred_at >= $2 AND s.occurred_at < $3"#,
             )
             .bind(workspace_id.into_uuid())
@@ -650,6 +648,7 @@ async fn route_capture_plan(
 
     member.open_assignments = member.open_assignments.saturating_add(1);
     member.recent_assignments = member.recent_assignments.saturating_add(1);
+    member.asks_last_7d = member.asks_last_7d.saturating_add(1);
     Ok(1)
 }
 

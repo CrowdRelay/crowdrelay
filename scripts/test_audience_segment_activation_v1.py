@@ -42,6 +42,7 @@ TABLE = "audience_segments"
 FORCING_STATEMENT_COUNT = 3
 FORCING_FILES = (
     "crates/crowdrelay-infra/src/autopilot/operations/execution.rs",
+    "crates/crowdrelay-infra/src/autopilot/operations/release_waves.rs",
     "crates/crowdrelay-infra/src/autopilot/operations/show_growth_execution.rs",
 )
 

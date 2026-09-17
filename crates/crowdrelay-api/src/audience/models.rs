@@ -151,6 +151,12 @@ pub struct AudienceFilter {
     /// The welcome is the fan's one contact for the night, so campaigns use
     /// this to keep the next send from double-contacting them.
     excluded_scan_checkin_event_slugs: Vec<String>,
+    /// Campaigns whose confirmed-or-claimed deliveries mark a fan as already
+    /// reached. The release late waves ("you might have missed it",
+    /// catalogue rotation) use this so the second send provably skips every
+    /// fan an earlier phase contacted — a `failed` delivery did not reach
+    /// them, so it does not exclude.
+    excluded_campaign_slugs: Vec<String>,
     synesthesia_completed: Option<bool>,
     marketing_consent: Option<bool>,
     tags_all: Vec<String>,
@@ -185,6 +191,10 @@ impl AudienceFilter {
                 .iter()
                 .all(|value| valid_slug(value))
             && self
+                .excluded_campaign_slugs
+                .iter()
+                .all(|value| valid_slug(value))
+            && self
                 .min_qualified_referrals
                 .is_none_or(|value| (0..=1_000_000).contains(&value))
             && self.tags_all.iter().all(|value| valid_tag(value))
@@ -195,6 +205,7 @@ impl AudienceFilter {
             && self.purchased_event_slugs.len() <= 50
             && self.excluded_purchased_event_slugs.len() <= 50
             && self.excluded_scan_checkin_event_slugs.len() <= 50
+            && self.excluded_campaign_slugs.len() <= 50
             && self.tags_all.len() <= 50
     }
 }

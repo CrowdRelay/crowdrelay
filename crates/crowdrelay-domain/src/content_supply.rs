@@ -22,6 +22,11 @@ pub enum ContentSourceKind {
     /// A first-person account the tenant entered through the control plane —
     /// the only first-person material an agent may narrate.
     Story,
+    /// A post the band itself published on an owned social account (a synced
+    /// fact — title, link, timestamp — never a paraphrase). It exists so the
+    /// watcher sees the band alive and the relay path has something real to
+    /// carry; what it owes is decided by the relay work, not assumed here.
+    SocialPost,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Ord, PartialOrd, Serialize)]
@@ -253,6 +258,10 @@ fn required_artifacts(kind: ContentSourceKind) -> &'static [ContentArtifactKind]
         ContentSourceKind::ShowCompleted => POST,
         // A story is share material, not an announcement: feed artifacts only.
         ContentSourceKind::Story => SOCIAL,
+        // A synced social post owes no artifact yet — relaying it is the
+        // amplification work (2.11), and drafting a post *about* a post is
+        // the shapeless echo the artifact list exists to prevent.
+        ContentSourceKind::SocialPost => &[],
     }
 }
 
@@ -495,6 +504,27 @@ mod tests {
             ContentArtifactKind::SocialStory,
             ContentArtifactKind::NewsletterBlock,
         ];
+        assert_eq!(
+            evaluate_content_supply(&snapshot, ContentSupplyPolicy::default(), now()),
+            ContentSupplyDecision::Hold(ContentSupplyHoldReason::Complete),
+        );
+    }
+
+    #[test]
+    fn a_synced_social_post_is_live_material_but_owes_no_artifact() {
+        let snapshot = ContentSupplySnapshot {
+            source_id: ContentSourceId::new(),
+            source_kind: ContentSourceKind::SocialPost,
+            source_version: 1,
+            occurred_at: now() - Duration::hours(6),
+            expires_at: now() + Duration::days(44),
+            communication_enabled: None,
+            press_enabled: None,
+            release_tier: None,
+            completed_artifacts: Vec::new(),
+            in_flight_artifacts: Vec::new(),
+        };
+
         assert_eq!(
             evaluate_content_supply(&snapshot, ContentSupplyPolicy::default(), now()),
             ContentSupplyDecision::Hold(ContentSupplyHoldReason::Complete),

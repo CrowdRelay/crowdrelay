@@ -27,6 +27,13 @@ fn executor_capability_for_event(event_type: &str) -> &'static str {
         // "unknown" and fails closed wherever executors are registered, which
         // would wedge the whole sustain arm on every retry.
         "crowdrelay.release.r3_report_due" => "show.escalation",
+        // The R+14 outcome read is the same delivery class — an email to the
+        // band with the second wave's receipts.
+        "crowdrelay.release.r14_report_due" => "show.escalation",
+        // The named likely-listener list is likewise a note to the band, not
+        // a task — the pre-save send itself is the campaign, this is its
+        // day-one evidence.
+        "crowdrelay.release.likely_listeners" => "show.escalation",
         // Same class again: a parked or escalated editorial pitch is a note to
         // the band about work that needs a human, not an executor task.
         "crowdrelay.release.editorial_pitch_parked" => "show.escalation",

@@ -408,8 +408,11 @@ async fn announce_release_inner(
         ON CONFLICT(workspace_id,source_kind,source_key) DO UPDATE SET
             title=EXCLUDED.title,
             occurred_at=EXCLUDED.occurred_at,
-            expires_at=EXCLUDED.expires_at,
-            metadata=EXCLUDED.metadata,
+            expires_at=GREATEST(viryaos_content_sources.expires_at,EXCLUDED.expires_at),
+            -- The sync workers key the same `spotify:{id}` row and carry the
+            -- provider fields (url, body, origin); merge so an announce cannot
+            -- strip them — shared keys take the operator's write.
+            metadata=viryaos_content_sources.metadata||EXCLUDED.metadata,
             active=true,
             version=viryaos_content_sources.version+1
         "#,

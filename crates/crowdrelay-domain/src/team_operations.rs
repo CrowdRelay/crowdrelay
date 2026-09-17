@@ -85,6 +85,15 @@ pub struct TeamMemberRoutingSnapshot {
     pub open_assignments: u16,
     /// Assignments created in the recent balancing window.
     pub recent_assignments: u16,
+    /// Assignments handed to this member in the last seven days — the
+    /// weekly-ask side of §4i-6's "the machinery must not eat its own
+    /// supply". `daily_briefing` rows never count: a read is not an ask.
+    pub asks_last_7d: u16,
+    /// The member's own weekly ceiling (§4i-6) — set by them, enforced by the
+    /// router. `None` means uncapped; at the cap the work routes elsewhere or
+    /// waits, and an ask nobody under cap can take is the system's to report,
+    /// not the member's to absorb.
+    pub weekly_ask_ceiling: Option<u16>,
     /// 100 = normal capacity. Lower values allow temporary load reduction.
     pub capacity_basis_points: u16,
     /// How reliably this member finishes work of this kind, unprompted.
@@ -119,6 +128,31 @@ pub struct TeamAssignmentDecision {
     pub route_score: i32,
 }
 
+/// Why an ask could not be routed (§4i-6). The distinction matters to the
+/// person reading it: "nobody has the skill" is a roster gap, "everyone who
+/// could is at their weekly ceiling" is the ceiling doing its job — the ask
+/// waits rather than landing on somebody's plate uncounted.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TeamRoutingRefusal {
+    /// No active member has the primary, secondary, or generalist skill.
+    NoSkillMatch,
+    /// The skill exists on the roster but every member who holds it is at
+    /// their weekly ask ceiling.
+    AllEligibleAtCeiling,
+    /// Nobody on the roster can take work at all — inactive or zero capacity.
+    NoRoutableMembers,
+}
+
+impl TeamRoutingRefusal {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::NoSkillMatch => "no_skill_match",
+            Self::AllEligibleAtCeiling => "all_eligible_at_weekly_ceiling",
+            Self::NoRoutableMembers => "no_routable_members",
+        }
+    }
+}
+
 /// Capability first, fairness second. Stable member-key tie breaking keeps
 /// retries deterministic while still distributing work as workloads change.
 /// What a member with no completed history scores.
@@ -133,19 +167,56 @@ pub fn select_team_assignee(
     members: &[TeamMemberRoutingSnapshot],
     need: TeamAssignmentNeed,
 ) -> Option<TeamAssignmentDecision> {
-    members
+    select_team_assignee_explained(members, need).ok()
+}
+
+/// `select_team_assignee` with the refusal spelled out. The sweep records the
+/// reason so a waiting ask is visible as waiting — never silently dropped.
+pub fn select_team_assignee_explained(
+    members: &[TeamMemberRoutingSnapshot],
+    need: TeamAssignmentNeed,
+) -> Result<TeamAssignmentDecision, TeamRoutingRefusal> {
+    let routable: Vec<&TeamMemberRoutingSnapshot> = members
         .iter()
         .filter(|member| member.active && member.capacity_basis_points > 0)
-        .filter_map(|member| {
+        .collect();
+    if routable.is_empty() {
+        return Err(TeamRoutingRefusal::NoRoutableMembers);
+    }
+    let skilled: Vec<&TeamMemberRoutingSnapshot> = routable
+        .into_iter()
+        .filter(|member| {
+            member.skills.contains(&need.primary_skill)
+                || need
+                    .secondary_skill
+                    .is_some_and(|skill| member.skills.contains(&skill))
+                || (need.allow_generalist && member.skills.contains(&TeamSkill::General))
+        })
+        .collect();
+    if skilled.is_empty() {
+        return Err(TeamRoutingRefusal::NoSkillMatch);
+    }
+    // §4i-6: the weekly ask ceiling is the member's own number, and the
+    // router honours it the same way it honours `active` — over the cap
+    // is not a worse score, it is not eligible.
+    let eligible: Vec<&TeamMemberRoutingSnapshot> = skilled
+        .into_iter()
+        .filter(|member| {
+            member
+                .weekly_ask_ceiling
+                .is_none_or(|ceiling| member.asks_last_7d < ceiling)
+        })
+        .collect();
+    if eligible.is_empty() {
+        return Err(TeamRoutingRefusal::AllEligibleAtCeiling);
+    }
+    eligible
+        .into_iter()
+        .map(|member| {
             let primary = member.skills.contains(&need.primary_skill);
             let secondary = need
                 .secondary_skill
                 .is_some_and(|skill| member.skills.contains(&skill));
-            let general = need.allow_generalist && member.skills.contains(&TeamSkill::General);
-            if !primary && !secondary && !general {
-                return None;
-            }
-
             let skill_score = if primary {
                 10_000
             } else if secondary {
@@ -162,11 +233,11 @@ pub fn select_team_assignee(
             // someone unqualified just because they answer quickly.
             let follow_through_bonus =
                 i32::from(member.follow_through_basis_points.min(10_000)) * 2_500 / 10_000;
-            Some(TeamAssignmentDecision {
+            TeamAssignmentDecision {
                 member_id: member.member_id,
                 member_key: member.member_key.clone(),
                 route_score: skill_score + capacity_bonus + follow_through_bonus - load_penalty,
-            })
+            }
         })
         .max_by(|left, right| {
             left.route_score
@@ -175,6 +246,7 @@ pub fn select_team_assignee(
                 // smallest key. No RNG means retries cannot reshuffle ownership.
                 .then_with(|| right.member_key.cmp(&left.member_key))
         })
+        .ok_or(TeamRoutingRefusal::NoSkillMatch)
 }
 
 #[cfg(test)]
@@ -250,6 +322,73 @@ mod tests {
         );
     }
 
+    /// §4i-6: the weekly ceiling is a hard eligibility gate, not a score —
+    /// a member at their cap cannot win an ask even on a perfect record.
+    #[test]
+    fn a_member_at_the_weekly_ceiling_is_not_eligible() {
+        let need = TeamAssignmentNeed {
+            primary_skill: TeamSkill::Social,
+            secondary_skill: None,
+            allow_generalist: false,
+        };
+        let mut capped = member("a-capped", vec![TeamSkill::Social], 0);
+        capped.weekly_ask_ceiling = Some(3);
+        capped.asks_last_7d = 3;
+        let free = member("b-free", vec![TeamSkill::Social], 5);
+
+        let decision =
+            select_team_assignee(&[capped, free], need).expect("an uncapped member exists");
+        assert_eq!(decision.member_key, "b-free");
+    }
+
+    /// The refusal names the reason: "everyone who could is at the ceiling"
+    /// is a different operator action than "nobody has the skill".
+    #[test]
+    fn refusal_distinguishes_ceiling_from_missing_skill() {
+        let need = TeamAssignmentNeed {
+            primary_skill: TeamSkill::Video,
+            secondary_skill: None,
+            allow_generalist: false,
+        };
+
+        let mut capped = member("a-capped", vec![TeamSkill::Video], 0);
+        capped.weekly_ask_ceiling = Some(2);
+        capped.asks_last_7d = 2;
+        assert_eq!(
+            select_team_assignee_explained(&[capped], need),
+            Err(TeamRoutingRefusal::AllEligibleAtCeiling)
+        );
+
+        let wrong_skill = member("b-wrong", vec![TeamSkill::Social], 0);
+        assert_eq!(
+            select_team_assignee_explained(&[wrong_skill], need),
+            Err(TeamRoutingRefusal::NoSkillMatch)
+        );
+
+        let mut inactive = member("c-inactive", vec![TeamSkill::Video], 0);
+        inactive.active = false;
+        assert_eq!(
+            select_team_assignee_explained(&[inactive], need),
+            Err(TeamRoutingRefusal::NoRoutableMembers)
+        );
+    }
+
+    /// Uncapped is the default: no ceiling set means the ceiling never bites.
+    #[test]
+    fn no_ceiling_means_uncapped() {
+        let need = TeamAssignmentNeed {
+            primary_skill: TeamSkill::Social,
+            secondary_skill: None,
+            allow_generalist: false,
+        };
+        let mut busy = member("a-busy", vec![TeamSkill::Social], 0);
+        busy.asks_last_7d = 400;
+        assert!(
+            select_team_assignee(&[busy], need).is_some(),
+            "no ceiling set must not cap anyone"
+        );
+    }
+
     fn member(key: &str, skills: Vec<TeamSkill>, open: u16) -> TeamMemberRoutingSnapshot {
         TeamMemberRoutingSnapshot {
             member_id: WorkspaceMemberId::new(),
@@ -258,6 +397,8 @@ mod tests {
             skills,
             open_assignments: open,
             recent_assignments: 0,
+            asks_last_7d: 0,
+            weekly_ask_ceiling: None,
             capacity_basis_points: 10_000,
             // Neutral by default so existing cases test the rules they were
             // written for. A member with no history scores neutral in

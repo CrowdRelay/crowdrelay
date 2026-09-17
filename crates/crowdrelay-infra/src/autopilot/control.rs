@@ -992,10 +992,10 @@ impl AutopilotControlRepository for PostgresAutopilotRepository {
             // click assignment always splits work evenly across the team.
             let resolved_member_key = if member_key == "auto" {
                 let team =
-                    super::team::load_team_routing(&mut transaction, workspace_id, OffsetDateTime::now_utc())
+                    super::team_routing::load_team_routing(&mut transaction, workspace_id, OffsetDateTime::now_utc())
                         .await?;
                 let need = super::team::assignment_need(&action.0, &action.1);
-                let index = super::team::select_member_index(&team, need)
+                let index = super::team_routing::select_member_index(&team, need)
                     .ok_or(RepositoryError::Conflict)?;
                 team.get(index)
                     .map(|member| member.member_key.clone())

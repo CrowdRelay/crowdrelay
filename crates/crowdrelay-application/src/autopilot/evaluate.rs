@@ -24,7 +24,10 @@ use crowdrelay_domain::{
         evaluate_booking_followup, evaluate_booking_opportunity, select_booking_target,
     },
     campaign_lifecycle::{EventCampaignDecision, EventCampaignSnapshot, evaluate_event_campaign},
-    content_supply::{ContentSupplyDecision, ContentSupplySnapshot, evaluate_content_supply},
+    content_supply::{
+        ContentSupplyDecision, ContentSupplyHoldReason, ContentSupplySnapshot,
+        evaluate_content_supply,
+    },
     deliverability::{DeliverabilityPolicy, ramped_ceiling},
     experimentation::{ExperimentDecision, ExperimentSnapshot, evaluate_experiment},
     free_reach::{
@@ -347,11 +350,23 @@ where
                         .repository
                         .load_content_supply_snapshots(self.workspace_id, now)
                         .await?;
-                    for snapshot in snapshots {
-                        if let Some(candidate) = content_candidate(&snapshot, &policy, now)? {
+                    // The stop rule: no live material is not a quiet
+                    // portfolio, it is the band having done nothing public
+                    // lately — `supply_quiet_reason` names which quiet the
+                    // cycle is in rather than reporting a generic "nothing
+                    // scored". A non-supply config still skips the loop.
+                    if !matches!(policy.config, AutopilotPolicyConfig::ContentSupply(_)) {
+                        continue;
+                    }
+                    let mut produced = 0usize;
+                    for snapshot in &snapshots {
+                        if let Some(candidate) = content_candidate(snapshot, &policy, now)? {
+                            produced += 1;
                             self.persist(&candidate, &mut limits, &mut report).await?;
                         }
                     }
+                    report.supply_wait_reason =
+                        supply_quiet_reason(&snapshots, &policy, produced, now);
                 }
                 AutopilotContext::Experimentation => {
                     let snapshots = self
@@ -955,6 +970,7 @@ fn deterministic_roll(key: &str) -> f64 {
 
 include!("evaluate/types.rs");
 include!("evaluate/candidates.rs");
+include!("evaluate/supply_quiet.rs");
 include!("evaluate/growth_intelligence_context.rs");
 include!("evaluate/hypothesis_validation.rs");
 include!("evaluate/tests.rs");

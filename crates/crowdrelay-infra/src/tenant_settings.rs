@@ -30,7 +30,7 @@ pub const DEFAULT_CREW_LOCALE: &str = "en";
 
 /// The keys an operator may edit. Anything else stays internal even if a row
 /// somehow appears, so the HTTP surface cannot be used to smuggle state.
-pub const EDITABLE_KEYS: [&str; 10] = [
+pub const EDITABLE_KEYS: [&str; 11] = [
     KEY_MEMBER_SITE_BASE_URL,
     KEY_MEMBER_AREA_PATH,
     KEY_SYNESTHESIA_CAMPAIGN_SLUG,
@@ -41,6 +41,7 @@ pub const EDITABLE_KEYS: [&str; 10] = [
     KEY_GROWTH_CADENCE_MOMENTS_PER_MONTH,
     KEY_GROWTH_CADENCE_FILLERS_ENABLED,
     KEY_CREW_LOCALE,
+    KEY_TEAM_WEEKLY_ASK_CEILING,
 ];
 
 const KEY_MEMBER_SITE_BASE_URL: &str = "member_site_base_url";
@@ -59,6 +60,10 @@ pub const KEY_GROWTH_CADENCE_FILLERS_ENABLED: &str = "growth_cadence_fillers_ena
 /// and in the staff panel. It is a tenant preference, not a compiled-in
 /// assumption: Virya is Polish and the next tenant may not be.
 pub const KEY_CREW_LOCALE: &str = "crew_locale";
+/// §4i-6: the weekly ceiling on asks any one team member can be handed — the
+/// composer's own number, enforced by `select_team_assignee`. Absent means
+/// uncapped; a present value binds every active member the same way.
+pub const KEY_TEAM_WEEKLY_ASK_CEILING: &str = "team_weekly_ask_ceiling";
 
 const CACHE_TTL: Duration = Duration::from_secs(60);
 

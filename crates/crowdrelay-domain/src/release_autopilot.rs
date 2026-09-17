@@ -23,6 +23,8 @@ pub struct ReleaseMilestoneHistory {
     pub release_day_sent: bool,
     pub sustain_sent: bool,
     pub wrap_sent: bool,
+    /// R+30: the catalogue send to fans no earlier phase reached (§4i-4).
+    pub catalogue_rotation_sent: bool,
 }
 
 /// The band's call about what kind of release this is (§4i-3). Recording it
@@ -111,6 +113,8 @@ pub struct ReleaseAutopilotPolicy {
     pub countdown_days_before: u32,
     pub sustain_days_after: u32,
     pub wrap_days_after: u32,
+    /// How long after release the catalogue-rotation send goes out (§4i-4).
+    pub catalogue_rotation_days_after: u32,
 }
 
 impl Default for ReleaseAutopilotPolicy {
@@ -130,6 +134,7 @@ impl Default for ReleaseAutopilotPolicy {
             countdown_days_before: 7,
             sustain_days_after: 3,
             wrap_days_after: 14,
+            catalogue_rotation_days_after: 30,
         }
     }
 }
@@ -154,6 +159,10 @@ pub enum ReleaseMilestone {
     ReleaseDay,
     Sustain,
     Wrap,
+    /// R+30: a fan who joined in month twenty has never heard month three.
+    /// The rotation send reaches only fans no earlier phase reached,
+    /// labelled as catalogue, spending from the same attention budget.
+    CatalogueRotation,
 }
 
 impl ReleaseMilestone {
@@ -170,6 +179,7 @@ impl ReleaseMilestone {
             Self::ReleaseDay => "release_day",
             Self::Sustain => "sustain",
             Self::Wrap => "wrap",
+            Self::CatalogueRotation => "catalogue_rotation",
         }
     }
 
@@ -185,6 +195,7 @@ impl ReleaseMilestone {
             "release_day" => Some(Self::ReleaseDay),
             "sustain" => Some(Self::Sustain),
             "wrap" => Some(Self::Wrap),
+            "catalogue_rotation" => Some(Self::CatalogueRotation),
             _ => None,
         }
     }
@@ -201,6 +212,7 @@ impl ReleaseMilestone {
             Self::ReleaseDay => "release.day.v1",
             Self::Sustain => "release.sustain.v1",
             Self::Wrap => "release.wrap.v1",
+            Self::CatalogueRotation => "release.catalogue_rotation.v1",
         }
     }
 }
@@ -289,6 +301,13 @@ pub fn evaluate_release(
             }
         }
     }
+    if until <= -Duration::days(i64::from(policy.catalogue_rotation_days_after)) {
+        return if snapshot.history.catalogue_rotation_sent {
+            ReleaseDecision::Hold(ReleaseHoldReason::AlreadyDone)
+        } else {
+            request(ReleaseMilestone::CatalogueRotation, 9_500)
+        };
+    }
     if until <= -Duration::days(i64::from(policy.wrap_days_after)) {
         return if snapshot.history.wrap_sent {
             ReleaseDecision::Hold(ReleaseHoldReason::AlreadyDone)
@@ -357,6 +376,7 @@ const fn valid_policy(policy: ReleaseAutopilotPolicy) -> bool {
         && policy.fan_warmup_days_before >= policy.countdown_days_before
         && policy.countdown_days_before > 0
         && policy.wrap_days_after > policy.sustain_days_after
+        && policy.catalogue_rotation_days_after > policy.wrap_days_after
 }
 
 /// How far the release itself has come (§4i-1): the read-model phase an
@@ -425,7 +445,7 @@ pub fn release_timeline(
     now: OffsetDateTime,
 ) -> Vec<ReleaseTimelineStep> {
     let at = |days: i64| snapshot.release_at + Duration::days(days);
-    let rungs: [(ReleaseMilestone, i64); 9] = [
+    let rungs: [(ReleaseMilestone, i64); 10] = [
         (
             ReleaseMilestone::SeedCalendar,
             -i64::from(policy.calendar_lead_days),
@@ -456,6 +476,10 @@ pub fn release_timeline(
             i64::from(policy.sustain_days_after),
         ),
         (ReleaseMilestone::Wrap, i64::from(policy.wrap_days_after)),
+        (
+            ReleaseMilestone::CatalogueRotation,
+            i64::from(policy.catalogue_rotation_days_after),
+        ),
     ];
     rungs
         .iter()
@@ -536,10 +560,15 @@ pub fn release_phase(
         return ReleasePhase::Inactive;
     }
     let until = snapshot.release_at - now;
-    if until <= -Duration::days(i64::from(policy.wrap_days_after)) || snapshot.history.wrap_sent {
+    // The ladder's last rung is the R+30 catalogue rotation, so a release is
+    // Complete only once that send is recorded or its window has passed.
+    if until <= -Duration::days(i64::from(policy.catalogue_rotation_days_after))
+        || snapshot.history.catalogue_rotation_sent
+    {
         return ReleasePhase::Complete;
     }
-    if until <= -Duration::days(i64::from(policy.sustain_days_after)) {
+    if until <= -Duration::days(i64::from(policy.sustain_days_after)) || snapshot.history.wrap_sent
+    {
         return ReleasePhase::Sustaining;
     }
     if until <= Duration::days(i64::from(policy.countdown_days_before)) {
@@ -749,9 +778,9 @@ mod tests {
         let mut s = snapshot(50);
         s.editorial_pitch_completed_at = None;
         let timeline = release_timeline(&s, &[], &[], policy, now());
-        assert_eq!(timeline.len(), 9);
+        assert_eq!(timeline.len(), 10);
         let offsets: Vec<i32> = timeline.iter().map(|step| step.offset_days).collect();
-        assert_eq!(offsets, [-42, -28, -28, -21, -14, -7, 0, 3, 14]);
+        assert_eq!(offsets, [-42, -28, -28, -21, -14, -7, 0, 3, 14, 30]);
         // Nothing recorded yet: everything ahead is upcoming, nothing claims
         // a completion that never happened.
         assert!(
@@ -885,12 +914,24 @@ mod tests {
             release_phase(&snapshot(-5), policy, now()),
             ReleasePhase::Sustaining
         );
+        // R+20: the wrap went out but the catalogue rotation is still ahead —
+        // the release is not done yet.
         assert_eq!(
             release_phase(&snapshot(-20), policy, now()),
+            ReleasePhase::Sustaining
+        );
+        assert_eq!(
+            release_phase(&snapshot(-35), policy, now()),
             ReleasePhase::Complete
         );
         let mut wrapped = snapshot(-5);
         wrapped.history.wrap_sent = true;
+        assert_eq!(
+            release_phase(&wrapped, policy, now()),
+            ReleasePhase::Sustaining
+        );
+        // A rotation that already sent ends the phase even inside the window.
+        wrapped.history.catalogue_rotation_sent = true;
         assert_eq!(
             release_phase(&wrapped, policy, now()),
             ReleasePhase::Complete

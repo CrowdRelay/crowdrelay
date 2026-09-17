@@ -4,34 +4,11 @@
 //! only assigns an owner, schedules bounded reminders, and queues provider-
 //! confirmed email actions through the existing Autopilot execution plane.
 
+use super::team_routing::{load_team_routing, select_member_index_explained};
 use super::*;
 use crowdrelay_application::autopilot::BriefingLocale;
-use crowdrelay_domain::{
-    WorkspaceMemberId,
-    team_operations::{
-        TeamAssignmentNeed, TeamMemberRoutingSnapshot, TeamSkill, select_team_assignee,
-    },
-};
+use crowdrelay_domain::team_operations::{TeamAssignmentNeed, TeamSkill};
 use time::Duration as TimeDuration;
-
-#[derive(Debug, FromRow)]
-pub(in crate::autopilot) struct TeamRoutingRow {
-    pub member_id: Uuid,
-    pub member_key: String,
-    pub display_name: String,
-    pub normalized_email: String,
-    pub active: bool,
-    pub skills: Vec<String>,
-    pub capacity_basis_points: i32,
-    pub open_assignments: i64,
-    pub recent_assignments: i64,
-    pub follow_through_basis_points: i32,
-    /// Skills this member has settled history for, paired 1:1 with
-    /// `skill_follow_through`. Two arrays rather than a map because SQLx
-    /// decodes `text[]` and `int[]` directly.
-    pub skill_follow_through_skills: Vec<String>,
-    pub skill_follow_through: Vec<i32>,
-}
 
 #[derive(Debug, FromRow)]
 struct UnassignedApprovalRow {
@@ -62,6 +39,7 @@ struct ReminderRow {
     source_ref: Option<String>,
     event_title: Option<String>,
     plan_title: Option<String>,
+    release_title: Option<String>,
     plan_scheduled_for: Option<time::Date>,
     plan_items: Option<serde_json::Value>,
     display_name: String,
@@ -215,8 +193,26 @@ impl PostgresAutopilotRepository {
             let mut mutable_team = team;
             for action in approvals {
                 let need = assignment_need(&action.context, &action.action_kind);
-                let Some(member_index) = select_member_index(&mutable_team, need) else {
-                    continue;
+                let member_index = match select_member_index_explained(&mutable_team, need) {
+                    Ok(index) => index,
+                    Err(refusal) => {
+                        // §4i-6: the ask waits — and says so. The action stays
+                        // awaiting_approval; if it expires unassigned the
+                        // briefing counts it dropped.
+                        super::team_release::record_ask_refusal(
+                            &mut tx,
+                            workspace_id,
+                            "autopilot_action",
+                            action.subject_id,
+                            None,
+                            Some(action.id),
+                            action.approval_expires_at,
+                            need,
+                            refusal,
+                        )
+                        .await?;
+                        continue;
+                    }
                 };
                 let member = mutable_team
                     .get_mut(member_index)
@@ -269,13 +265,40 @@ impl PostgresAutopilotRepository {
                 .await?;
                 member.open_assignments = member.open_assignments.saturating_add(1);
                 member.recent_assignments = member.recent_assignments.saturating_add(1);
+                member.asks_last_7d = member.asks_last_7d.saturating_add(1);
                 assigned = assigned.saturating_add(1);
             }
 
+            assigned = assigned.saturating_add(
+                super::team_release::issue_release_making_of_asks(
+                    &mut tx,
+                    workspace_id,
+                    now,
+                    &mut mutable_team,
+                    crew_locale,
+                )
+                .await?,
+            );
+
             for task in show_tasks {
                 let need = assignment_need("show_operations", &task.task_key);
-                let Some(member_index) = select_member_index(&mutable_team, need) else {
-                    continue;
+                let member_index = match select_member_index_explained(&mutable_team, need) {
+                    Ok(index) => index,
+                    Err(refusal) => {
+                        super::team_release::record_ask_refusal(
+                            &mut tx,
+                            workspace_id,
+                            "show_task",
+                            task.event_id,
+                            Some(&task.task_key),
+                            None,
+                            Some(task.due_at),
+                            need,
+                            refusal,
+                        )
+                        .await?;
+                        continue;
+                    }
                 };
                 let member = mutable_team
                     .get_mut(member_index)
@@ -323,6 +346,7 @@ impl PostgresAutopilotRepository {
                 .await?;
                 member.open_assignments = member.open_assignments.saturating_add(1);
                 member.recent_assignments = member.recent_assignments.saturating_add(1);
+                member.asks_last_7d = member.asks_last_7d.saturating_add(1);
                 assigned = assigned.saturating_add(1);
             }
 
@@ -365,6 +389,7 @@ impl PostgresAutopilotRepository {
                        action.id action_id,
                        action.action_kind, action.context, assignment.source_kind,
                        assignment.source_ref, event.title event_title,
+                       release.title release_title,
                        day.title plan_title, day.scheduled_for plan_scheduled_for,
                        plan.items plan_items,
                        member.display_name, member.normalized_email,
@@ -385,6 +410,10 @@ impl PostgresAutopilotRepository {
                   ON assignment.source_kind='capture_plan'
                  AND plan.workspace_id=assignment.workspace_id
                  AND plan.id=assignment.source_id
+                LEFT JOIN viryaos_release_plans release
+                  ON assignment.source_kind='release_making_of'
+                 AND release.workspace_id=assignment.workspace_id
+                 AND release.id=assignment.source_id
                 LEFT JOIN viryaos_production_events day
                   ON day.workspace_id=assignment.workspace_id
                  AND day.id=plan.production_event_id
@@ -427,6 +456,17 @@ impl PostgresAutopilotRepository {
                         row.source_ref.as_deref().unwrap_or("show_task"),
                         crew_locale,
                     )
+                } else if row.source_kind == "release_making_of" {
+                    match (row.release_title.as_deref(), crew_locale) {
+                        (Some(plan_title), BriefingLocale::Pl) => {
+                            format!("Making-of do wydania: {plan_title}")
+                        }
+                        (Some(plan_title), BriefingLocale::En) => {
+                            format!("Making-of for the release: {plan_title}")
+                        }
+                        (None, BriefingLocale::Pl) => "Making-of do wydania".to_owned(),
+                        (None, BriefingLocale::En) => "Making-of for the release".to_owned(),
+                    }
                 } else if row.source_kind == "capture_plan" {
                     match (row.plan_title.as_deref(), crew_locale) {
                         (Some(plan_title), BriefingLocale::Pl) => {
@@ -457,6 +497,21 @@ impl PostgresAutopilotRepository {
                         }
                         (None, BriefingLocale::En) => {
                             "This task is still waiting for you to close it.".to_owned()
+                        }
+                    }
+                } else if row.source_kind == "release_making_of" {
+                    match (row.release_title.as_deref(), crew_locale) {
+                        (Some(plan_title), BriefingLocale::Pl) => format!(
+                            "Premiera „{plan_title}” zbliża się — materiał making-of nadal czeka na zarchiwizowanie i oznaczenie."
+                        ),
+                        (Some(plan_title), BriefingLocale::En) => format!(
+                            "\"{plan_title}\" is still inside its making-of window — the material is waiting to be filed and marked."
+                        ),
+                        (None, BriefingLocale::Pl) => {
+                            "Materiał making-of nadal czeka na zarchiwizowanie.".to_owned()
+                        }
+                        (None, BriefingLocale::En) => {
+                            "The making-of material is still waiting to be filed.".to_owned()
                         }
                     }
                 } else if row.source_kind == "capture_plan" {
@@ -611,6 +666,8 @@ async fn close_resolved_assignments(
     .execute(&mut **tx)
     .await
     .map_err(map_sqlx)?;
+
+    super::team_release::close_release_making_of_assignments(tx, workspace_id, now).await?;
     Ok(())
 }
 
@@ -715,156 +772,6 @@ pub(super) async fn queue_team_email_action(
     .await
     .map_err(map_sqlx)?;
     Ok(())
-}
-
-pub(in crate::autopilot) async fn load_team_routing(
-    tx: &mut Transaction<'_, Postgres>,
-    workspace_id: WorkspaceId,
-    now: OffsetDateTime,
-) -> Result<Vec<TeamRoutingRow>, RepositoryError> {
-    sqlx::query_as::<_, TeamRoutingRow>(
-        r#"SELECT profile.member_id, profile.member_key, member.display_name,
-                  member.normalized_email, profile.active, profile.skills,
-                  profile.capacity_basis_points,
-                  -- 'daily_briefing' rows are reads, not work: they are
-                  -- excluded everywhere in this roster so the one the sweep
-                  -- hands every member each morning neither consumes
-                  -- capacity nor teaches the follow-through metric that
-                  -- the member "settles work without completing it".
-                  COUNT(assignment.id) FILTER (
-                      WHERE assignment.status='open'
-                        AND assignment.source_kind <> 'daily_briefing'
-                  ) open_assignments,
-                  COUNT(assignment.id) FILTER (
-                      WHERE assignment.assigned_at >= $2 - INTERVAL '30 days'
-                        AND assignment.source_kind <> 'daily_briefing'
-                  ) recent_assignments,
-                  -- Follow-through: of the work this member was given and that
-                  -- has had time to be done, how much did they actually finish,
-                  -- and how much chasing did it take?
-                  --
-                  -- Each completion is worth 10000 minus 2500 per reminder, so
-                  -- a task done unprompted counts fully and one that needed
-                  -- three reminders counts for little. Anything settled and not
-                  -- completed counts zero. Members with no settled history get
-                  -- the neutral score instead of a zero they did not earn.
-                  --
-                  -- Only assignments older than a day are considered, so work
-                  -- handed out this morning is not scored as ignored.
-                  COALESCE((
-                      SELECT AVG(
-                          CASE WHEN history.completed_at IS NOT NULL
-                               THEN GREATEST(0, 10000 - 2500 * LEAST(4, COALESCE(history.reminder_count, 0)))
-                               ELSE 0
-                          END
-                      )::integer
-                      FROM viryaos_team_assignments history
-                      WHERE history.workspace_id = profile.workspace_id
-                        AND history.assignee_member_id = profile.member_id
-                        AND history.status <> 'open'
-                        AND history.source_kind <> 'daily_briefing'
-                        AND history.assigned_at < $2 - INTERVAL '1 day'
-                  ), 5000) AS follow_through_basis_points,
-                  -- The same measure, split by the skill the work needed.
-                  -- Whole-member reliability answers "does this person finish
-                  -- things"; routing needs "does this person finish *this*".
-                  -- Someone who never gets round to press mail may be the
-                  -- first to edit a video, and averaging the two hides both.
-                  COALESCE(per_skill.skills, ARRAY[]::text[]) AS skill_follow_through_skills,
-                  COALESCE(per_skill.scores, ARRAY[]::integer[]) AS skill_follow_through
-           FROM viryaos_team_profiles profile
-           JOIN workspace_members member
-             ON member.workspace_id=profile.workspace_id AND member.id=profile.member_id
-           LEFT JOIN viryaos_team_assignments assignment
-             ON assignment.workspace_id=profile.workspace_id AND assignment.assignee_member_id=profile.member_id
-           LEFT JOIN LATERAL (
-               SELECT array_agg(skill.required_skill ORDER BY skill.required_skill) AS skills,
-                      array_agg(skill.score ORDER BY skill.required_skill) AS scores
-               FROM (
-                   SELECT history.required_skill,
-                          AVG(
-                              CASE WHEN history.completed_at IS NOT NULL
-                                   THEN GREATEST(0, 10000 - 2500 * LEAST(4, COALESCE(history.reminder_count, 0)))
-                                   ELSE 0
-                              END
-                          )::integer AS score
-                   FROM viryaos_team_assignments history
-                   WHERE history.workspace_id = profile.workspace_id
-                     AND history.assignee_member_id = profile.member_id
-                     AND history.status <> 'open'
-                     AND history.source_kind <> 'daily_briefing'
-                     AND history.assigned_at < $2 - INTERVAL '1 day'
-                   GROUP BY history.required_skill
-               ) skill
-           ) per_skill ON true
-           WHERE profile.workspace_id=$1 AND profile.active AND member.status='active'
-           -- `profile.workspace_id` is grouped because the follow-through
-           -- subquery correlates on it. Postgres only infers functional
-           -- dependency from a grouped primary key, and this table's key is
-           -- (workspace_id, member_id) — grouping half of it left the other
-           -- half ungrouped, and the scalar subquery in the SELECT list is
-           -- evaluated after grouping, so the planner refused the whole
-           -- statement with "subquery uses ungrouped column
-           -- profile.workspace_id from outer query". Every autopilot cycle
-           -- then reported a failed phase and no human handoff was ever
-           -- assigned. The WHERE clause already pins the column to one value,
-           -- so grouping by it changes no result.
-           GROUP BY profile.workspace_id, profile.member_id, profile.member_key, member.display_name,
-                    member.normalized_email, profile.active, profile.skills, profile.capacity_basis_points,
-                    per_skill.skills, per_skill.scores
-           ORDER BY profile.member_key"#,
-    )
-    .bind(workspace_id.into_uuid()).bind(now)
-    .fetch_all(&mut **tx).await.map_err(map_sqlx)
-}
-
-/// This member's follow-through on the skill actually being routed.
-///
-/// Falls back to their overall record when they have no settled history for
-/// this skill, and to neutral when they have none at all. Whole-member
-/// reliability is the weaker signal: the reason to measure at all is that
-/// people are not uniformly diligent, and averaging across every kind of work
-/// hides exactly the difference routing needs to see. Someone who never gets
-/// round to press mail may be first to cut a video.
-fn follow_through_for(member: &TeamRoutingRow, need: TeamAssignmentNeed) -> u16 {
-    let wanted = need.primary_skill.as_str();
-    member
-        .skill_follow_through_skills
-        .iter()
-        .position(|skill| skill == wanted)
-        .and_then(|index| member.skill_follow_through.get(index).copied())
-        .map_or_else(
-            || bounded_u16(i64::from(member.follow_through_basis_points)),
-            |score| bounded_u16(i64::from(score)),
-        )
-}
-
-/// Skill-fit-first, fairness-second selection over the live routing snapshot.
-/// Shared by the scheduled routers and the `member_key="auto"` assignment path.
-pub(in crate::autopilot) fn select_member_index(
-    team: &[TeamRoutingRow],
-    need: TeamAssignmentNeed,
-) -> Option<usize> {
-    let snapshots = team
-        .iter()
-        .map(|member| TeamMemberRoutingSnapshot {
-            member_id: WorkspaceMemberId::from_uuid(member.member_id),
-            member_key: member.member_key.clone(),
-            active: member.active,
-            skills: member
-                .skills
-                .iter()
-                .filter_map(|skill| parse_team_skill(skill))
-                .collect(),
-            open_assignments: bounded_u16(member.open_assignments),
-            recent_assignments: bounded_u16(member.recent_assignments),
-            capacity_basis_points: bounded_u16(i64::from(member.capacity_basis_points)),
-            follow_through_basis_points: follow_through_for(member, need),
-        })
-        .collect::<Vec<_>>();
-    let decision = select_team_assignee(&snapshots, need)?;
-    team.iter()
-        .position(|member| member.member_id == decision.member_id.into_uuid())
 }
 
 pub(super) fn assignment_need(context: &str, action_kind: &str) -> TeamAssignmentNeed {
@@ -1172,14 +1079,6 @@ fn enriched_task_detail(
         text.push('…');
     }
     text
-}
-
-pub(super) fn parse_team_skill(value: &str) -> Option<TeamSkill> {
-    TeamSkill::parse(value)
-}
-
-fn bounded_u16(value: i64) -> u16 {
-    u16::try_from(value.clamp(0, i64::from(u16::MAX))).unwrap_or(u16::MAX)
 }
 
 pub(super) fn first_reminder_at(

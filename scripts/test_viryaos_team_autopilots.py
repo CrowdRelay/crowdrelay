@@ -26,6 +26,8 @@ class TeamAutopilotsContract(unittest.TestCase):
 
     def test_release_drives_calendar_campaign_press_patronage_and_endorsement(self):
         source = text("crates/crowdrelay-infra/src/autopilot/operations/execution.rs")
+        # The campaign arm moved to release_waves.rs — same contract, new home.
+        source += text("crates/crowdrelay-infra/src/autopilot/operations/release_waves.rs")
         self.assertIn("crowdrelay.calendar.upsert_requested", source)
         self.assertIn("communication.campaign_due", source)
         self.assertIn("release.press.v1", source)

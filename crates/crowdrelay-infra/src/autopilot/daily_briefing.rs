@@ -54,6 +54,18 @@ struct BriefingFrame {
     fans_format_unrecorded: &'static str,
     awaiting_report: &'static str,
     beat_label: &'static str,
+    /// §4i-6: asks handed out per member this week, against the tenant's own
+    /// ceiling — the load the router enforces, made visible instead of
+    /// silently accumulating on whoever answers fastest.
+    capacity: &'static str,
+    /// Asks that died waiting — approvals that expired without anybody ever
+    /// being assigned, or deferred asks whose deadline lapsed unresolved.
+    /// The drop is stated, not silently absorbed.
+    capacity_dropped: &'static str,
+    /// Asks the router refused (no skill match, or everyone eligible at the
+    /// weekly ceiling) that remain unassigned inside their window.
+    capacity_waiting: &'static str,
+    ceiling_label: &'static str,
 }
 
 const fn briefing_frame(locale: BriefingLocale) -> BriefingFrame {
@@ -78,6 +90,10 @@ const fn briefing_frame(locale: BriefingLocale) -> BriefingFrame {
             fans_format_unrecorded: "format niezapisany",
             awaiting_report: "Czeka na raport",
             beat_label: "beat",
+            capacity: "Prośby w tym tygodniu",
+            capacity_dropped: "przepadło bez przypisania",
+            capacity_waiting: "czeka — nikt wolny lub bez umiejętności",
+            ceiling_label: "limit",
         },
         BriefingLocale::En => BriefingFrame {
             title: "ViryaOS — morning briefing",
@@ -99,6 +115,10 @@ const fn briefing_frame(locale: BriefingLocale) -> BriefingFrame {
             fans_format_unrecorded: "format unrecorded",
             awaiting_report: "Awaiting your report",
             beat_label: "beat",
+            capacity: "Asks this week",
+            capacity_dropped: "dropped unassigned",
+            capacity_waiting: "waiting — nobody free or no skill match",
+            ceiling_label: "ceiling",
         },
     }
 }
@@ -523,7 +543,8 @@ async fn compose_briefing(
     // ── What changed in the last 24h ──────────────────────────────────
     let material_landed: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM viryaos_content_sources
-         WHERE workspace_id = $1 AND source_kind IN ('video','story')
+         WHERE workspace_id = $1
+           AND source_kind IN ('video','story','release','social_post')
            AND created_at > $2 - INTERVAL '24 hours'",
     )
     .bind(ws)
@@ -713,6 +734,157 @@ async fn compose_briefing(
         }
         if open_tasks_total > open_tasks.iter().map(|row| row.open_count).sum::<i64>() {
             body.push_str("\n- …");
+        }
+        body.push('\n');
+    }
+
+    // ── Capacity (§4i-6) ────────────────────────────────────────────────
+    // Asks handed out per member over the last seven days beside the
+    // tenant's own weekly ceiling, plus the asks that expired never having
+    // been assigned — the load and the dropped work, stated together.
+    let weekly_ceiling: Option<i64> = sqlx::query_scalar::<_, String>(
+        "SELECT value FROM tenant_settings
+         WHERE workspace_id = $1 AND key = 'team_weekly_ask_ceiling'",
+    )
+    .bind(ws)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(map_sqlx)?
+    .and_then(|value| value.trim().parse::<i64>().ok());
+    let weekly_asks = sqlx::query_as::<_, (String, i64)>(
+        r#"
+        SELECT COALESCE(member.display_name, member.normalized_email) AS display_name,
+               COUNT(assignment.id) AS asks
+        FROM viryaos_team_profiles profile
+        JOIN workspace_members member
+          ON member.workspace_id = profile.workspace_id
+         AND member.id = profile.member_id
+        LEFT JOIN viryaos_team_assignments assignment
+          ON assignment.workspace_id = profile.workspace_id
+         AND assignment.assignee_member_id = profile.member_id
+         AND assignment.assigned_at >= $2 - INTERVAL '7 days'
+         AND assignment.source_kind <> 'daily_briefing'
+        WHERE profile.workspace_id = $1
+          AND profile.active
+          AND member.status = 'active'
+        GROUP BY member.id, member.display_name, member.normalized_email
+        ORDER BY asks DESC, 1
+        LIMIT 6
+        "#,
+    )
+    .bind(ws)
+    .bind(now)
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(map_sqlx)?;
+    let dropped_asks: i64 = sqlx::query_scalar(
+        r#"SELECT COUNT(*) FROM viryaos_autopilot_actions action
+           WHERE action.workspace_id = $1
+             AND action.status = 'cancelled'
+             AND action.last_error_kind = 'approval_expired'
+             AND action.finished_at >= $2 - INTERVAL '7 days'
+             AND NOT EXISTS (
+                 SELECT 1 FROM viryaos_team_assignments assignment
+                 WHERE assignment.workspace_id = action.workspace_id
+                   AND assignment.action_id = action.id)"#,
+    )
+    .bind(ws)
+    .bind(now)
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(map_sqlx)?;
+    // §4i-6 "waiting": asks the router refused and nothing has picked up
+    // since — the deferral audit row exists, no matching assignment landed,
+    // and for action-backed asks the action still waits on approval. A past
+    // deadline or a cancelled action moves the count to dropped, not here.
+    let waiting_asks: i64 = sqlx::query_scalar(
+        r#"SELECT COUNT(*) FROM (
+             SELECT DISTINCT audit.target_type, audit.target_id
+             FROM audit_events audit
+             WHERE audit.workspace_id = $1
+               AND audit.action = 'team.ask_deferred'
+               AND audit.occurred_at >= $2 - INTERVAL '7 days'
+               AND NOT EXISTS (
+                   SELECT 1 FROM viryaos_team_assignments assignment
+                   WHERE assignment.workspace_id = audit.workspace_id
+                     AND (
+                         (assignment.action_id IS NOT NULL
+                          AND assignment.action_id::text = audit.metadata->>'action_id')
+                         OR (assignment.source_kind = audit.metadata->>'source_kind'
+                             AND assignment.source_id::text = audit.metadata->>'source_id'
+                             AND assignment.source_ref IS NOT DISTINCT FROM audit.metadata->>'source_ref')
+                     ))
+               AND (audit.metadata->>'action_id' IS NULL OR EXISTS (
+                   SELECT 1 FROM viryaos_autopilot_actions act
+                   WHERE act.workspace_id = audit.workspace_id
+                     AND act.id::text = audit.metadata->>'action_id'
+                     AND act.status = 'awaiting_approval'))
+               AND (audit.metadata->>'deadline_at' IS NULL
+                    OR (audit.metadata->>'deadline_at')::timestamptz > $2)
+           ) waiting"#,
+    )
+    .bind(ws)
+    .bind(now)
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(map_sqlx)?;
+    // Non-action asks have no approval expiry to count them: a deferred ask
+    // whose deadline passed unresolved is the "dropped and says why" case.
+    let dropped_unassigned: i64 = sqlx::query_scalar(
+        r#"SELECT COUNT(*) FROM (
+             SELECT DISTINCT audit.target_type, audit.target_id
+             FROM audit_events audit
+             WHERE audit.workspace_id = $1
+               AND audit.action = 'team.ask_deferred'
+               AND audit.occurred_at >= $2 - INTERVAL '30 days'
+               AND audit.metadata->>'action_id' IS NULL
+               AND audit.metadata->>'deadline_at' IS NOT NULL
+               AND (audit.metadata->>'deadline_at')::timestamptz <= $2
+               AND NOT EXISTS (
+                   SELECT 1 FROM viryaos_team_assignments assignment
+                   WHERE assignment.workspace_id = audit.workspace_id
+                     AND assignment.source_kind = audit.metadata->>'source_kind'
+                     AND assignment.source_id::text = audit.metadata->>'source_id'
+                     AND assignment.source_ref IS NOT DISTINCT FROM audit.metadata->>'source_ref')
+           ) dropped"#,
+    )
+    .bind(ws)
+    .bind(now)
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(map_sqlx)?;
+
+    if !weekly_asks.is_empty() || dropped_asks + dropped_unassigned > 0 || waiting_asks > 0 {
+        sections_map.insert(
+            "capacity_asks_7d".to_owned(),
+            weekly_asks
+                .iter()
+                .map(|(_, asks)| *asks)
+                .sum::<i64>()
+                .into(),
+        );
+        if waiting_asks > 0 {
+            sections_map.insert("capacity_waiting".to_owned(), waiting_asks.into());
+        }
+        let dropped_total = dropped_asks + dropped_unassigned;
+        if dropped_total > 0 {
+            sections_map.insert("capacity_dropped_7d".to_owned(), dropped_total.into());
+        }
+        body.push_str(&format!("\n{}:", frame.capacity));
+        for (name, asks) in &weekly_asks {
+            match weekly_ceiling {
+                Some(ceiling) => body.push_str(&format!(
+                    "\n- {name}: {asks} ({} {ceiling})",
+                    frame.ceiling_label
+                )),
+                None => body.push_str(&format!("\n- {name}: {asks}")),
+            }
+        }
+        if waiting_asks > 0 {
+            body.push_str(&format!("\n- {waiting_asks} {}", frame.capacity_waiting));
+        }
+        if dropped_total > 0 {
+            body.push_str(&format!("\n- {dropped_total} {}", frame.capacity_dropped));
         }
         body.push('\n');
     }

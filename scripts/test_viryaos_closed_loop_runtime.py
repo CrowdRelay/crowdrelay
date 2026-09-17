@@ -112,8 +112,12 @@ class ViryaOsClosedLoopRuntime(unittest.TestCase):
 
     def test_optional_deadline_calendar_never_blocks_primary_provider_action(self):
         execution = (ROOT / 'crates/crowdrelay-infra/src/autopilot/operations/execution.rs').read_text()
+        # execute_release_campaign moved to release_waves.rs — the release
+        # slice is seed_release_calendar through the end of that function.
+        waves = (ROOT / 'crates/crowdrelay-infra/src/autopilot/operations/release_waves.rs').read_text()
         deadline = execution[execution.index('async fn seed_deadline_calendar'):execution.index('pub(in crate::autopilot) async fn execute_live_opportunity')]
-        release = execution[execution.index('async fn seed_release_calendar'):execution.index('async fn execute_release_campaign')]
+        release = execution[execution.index('async fn seed_release_calendar'):execution.index('async fn seed_deadline_calendar')]
+        release += waves[:waves.index('fn earlier_release_campaign_slugs')]
         self.assertIn('Err(RepositoryError::Unavailable) => return Ok(())', deadline)
         self.assertNotIn('Err(RepositoryError::Unavailable) => return Ok(())', release)
 

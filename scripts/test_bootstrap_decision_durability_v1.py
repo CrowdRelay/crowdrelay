@@ -162,7 +162,9 @@ class BootstrapDecisionDurability(unittest.TestCase):
             r"m\.status\s*=\s*'active'",
             "gate operation should still require an active member",
         )
-        team = (ROOT / "crates/crowdrelay-infra/src/autopilot/team.rs").read_text()
+        # The roster read moved to team_routing.rs when team.rs split; the
+        # gate pins the same requirement at its new home.
+        team = (ROOT / "crates/crowdrelay-infra/src/autopilot/team_routing.rs").read_text()
         self.assertRegex(
             team,
             r"profile\.active AND member\.status\s*=\s*'active'",

@@ -584,6 +584,23 @@ pub struct ContentSourceView {
     pub format_key: Option<String>,
     pub version: i64,
     pub active: bool,
+    /// What this source produced, newest first — each content-supply action
+    /// taken against it with the artifact it carried and whether it actually
+    /// left the building. Retiring a source must answer "what already went
+    /// out", so the tombstone never hides the trail it made.
+    pub sends: Vec<ContentSourceSendView>,
+}
+
+/// One artifact the machine produced from a source. `emitted_at` is the
+/// moment it reached the outbox — `None` means drafted or still in flight,
+/// never silently "sent".
+#[derive(Clone, Debug, Serialize)]
+pub struct ContentSourceSendView {
+    pub action_id: uuid::Uuid,
+    pub artifact: String,
+    pub status: String,
+    pub created_at: OffsetDateTime,
+    pub emitted_at: Option<OffsetDateTime>,
 }
 /// The two outcomes an operator may report on an approved suggestion.
 /// `declined` and `expired` are not reportable — one is a decision verb on

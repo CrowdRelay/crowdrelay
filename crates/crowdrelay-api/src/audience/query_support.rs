@@ -287,6 +287,7 @@ async fn segment_member_count(
         .bind(filter.marketing_consent)
         .bind(&filter.tags_all)
         .bind(&filter.excluded_scan_checkin_event_slugs)
+        .bind(&filter.excluded_campaign_slugs)
         .fetch_one(&state.database)
         .await
 }
@@ -298,7 +299,7 @@ async fn segment_member_ids(
     limit: i64,
 ) -> Result<Vec<Uuid>, sqlx::Error> {
     let sql = format!(
-        "SELECT fan.id FROM fans fan WHERE {} ORDER BY fan.updated_at DESC, fan.id DESC LIMIT $13",
+        "SELECT fan.id FROM fans fan WHERE {} ORDER BY fan.updated_at DESC, fan.id DESC LIMIT $14",
         segment_predicate()
     );
     sqlx::query_scalar::<_, Uuid>(&sql)
@@ -314,6 +315,7 @@ async fn segment_member_ids(
         .bind(filter.marketing_consent)
         .bind(&filter.tags_all)
         .bind(&filter.excluded_scan_checkin_event_slugs)
+        .bind(&filter.excluded_campaign_slugs)
         .bind(limit)
         .fetch_all(&state.database)
         .await
@@ -351,10 +353,10 @@ async fn ensure_recipient_snapshot(
     let sql = format!(
         r#"
         INSERT INTO communication_campaign_recipients (workspace_id, campaign_id, fan_id)
-        SELECT $1, $13, fan.id
+        SELECT $1, $14, fan.id
         FROM fans fan
         WHERE {}
-          AND ($14::boolean = false OR EXISTS (
+          AND ($15::boolean = false OR EXISTS (
               SELECT 1
               FROM fan_consents consent
               WHERE consent.workspace_id = fan.workspace_id
@@ -388,6 +390,7 @@ async fn ensure_recipient_snapshot(
         .bind(filter.marketing_consent)
         .bind(&filter.tags_all)
         .bind(&filter.excluded_scan_checkin_event_slugs)
+        .bind(&filter.excluded_campaign_slugs)
         .bind(campaign_id)
         .bind(require_marketing)
         .execute(&mut *transaction)
@@ -607,6 +610,17 @@ fn segment_predicate() -> &'static str {
               AND welcomed.identity_source = 'email_claim'
               AND welcomed_event.slug = ANY($12::text[])
         ))
+        AND (cardinality($13::text[]) = 0 OR NOT EXISTS (
+            SELECT 1
+            FROM communication_campaign_deliveries reached
+            JOIN communication_campaigns reached_campaign
+              ON reached_campaign.workspace_id = reached.workspace_id
+             AND reached_campaign.id = reached.campaign_id
+            WHERE reached.workspace_id = fan.workspace_id
+              AND reached.fan_id = fan.id
+              AND reached.status IN ('delivered', 'claimed')
+              AND reached_campaign.slug = ANY($13::text[])
+        ))
     "#
 }
 
@@ -770,6 +784,7 @@ mod tests {
             purchased_event_slugs: Vec::new(),
             excluded_purchased_event_slugs: Vec::new(),
             excluded_scan_checkin_event_slugs: Vec::new(),
+            excluded_campaign_slugs: vec!["viryaos-release-abc-wrap".to_owned()],
             synesthesia_completed: Some(true),
             marketing_consent: Some(true),
             tags_all: vec!["ambassador".to_owned()],

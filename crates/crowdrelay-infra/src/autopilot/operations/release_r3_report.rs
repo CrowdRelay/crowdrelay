@@ -1,5 +1,5 @@
-//! The R+3 release outcome report — the honest read on "who arrived because
-//! of this release," three days out.
+//! The release outcome reports — the honest read on "who arrived because of
+//! this release," at R+3 and again at R+14 once the second wave has run.
 //!
 //! Same discipline as the T+7 show report: `observed` is first-party evidence
 //! (acquisition events and clicks bound to the release's campaign, delivery
@@ -7,20 +7,46 @@
 //! suggests against the tenant's own trailing baseline, and `evidence_gaps`
 //! names what cannot be claimed — streams above all, since no platform play
 //! count reaches this system. A recipient can repeat every figure.
+//!
+//! Every report also lands a `viryaos_release_outcomes` row (1R.12): the
+//! outbox payload reaches the band, but learning needs a row it can join —
+//! tier × timing × verdict — from the first release onward.
 
 use super::*;
 
 /// Baseline comparison window and the honesty thresholds, kept as constants so
 /// the payload's stated formula matches the code exactly.
 const BASELINE_DAYS: i64 = 28;
-const REPORT_WINDOW_DAYS: i64 = 3;
 const MIN_BASELINE_DAYS: i64 = 7;
 
-/// Emits `crowdrelay.release.r3_report_due` inside the sustain-milestone
-/// transaction. The caller's row lock already proved the plan is live and the
-/// milestone due; the report reads the campaign binding lazily so a plan whose
-/// listen_url arrived late still names the gap rather than skipping it.
-pub(in crate::autopilot) async fn issue_release_r3_report(
+/// The report the sustain milestone emits three days out.
+pub(in crate::autopilot) const REPORT_KIND_R3: &str = "release_r3";
+/// The report the wrap milestone emits fourteen days out — the same read
+/// over the full window, plus the second wave's own receipts and the
+/// missed-it count its segment was built from.
+pub(in crate::autopilot) const REPORT_KIND_R14: &str = "release_r14";
+
+fn window_days(kind: &str) -> i64 {
+    match kind {
+        REPORT_KIND_R14 => 14,
+        _ => 3,
+    }
+}
+
+fn event_type(kind: &str) -> &'static str {
+    match kind {
+        REPORT_KIND_R14 => "crowdrelay.release.r14_report_due",
+        _ => "crowdrelay.release.r3_report_due",
+    }
+}
+
+/// Emits the report inside the milestone transaction and persists the same
+/// figures as a `viryaos_release_outcomes` row. The caller's row lock already
+/// proved the plan is live and the milestone due; the report reads the
+/// campaign binding lazily so a plan whose listen_url arrived late still
+/// names the gap rather than skipping it.
+#[allow(clippy::too_many_arguments)]
+pub(in crate::autopilot) async fn issue_release_outcome_report(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     workspace_id: WorkspaceId,
     action_id: crowdrelay_domain::AutopilotActionId,
@@ -28,13 +54,27 @@ pub(in crate::autopilot) async fn issue_release_r3_report(
     title: &str,
     release_at: OffsetDateTime,
     now: OffsetDateTime,
+    kind: &str,
 ) -> Result<(), RepositoryError> {
+    let window = window_days(kind);
     let campaign_ids = sqlx::query_scalar::<_, Uuid>(
         "SELECT id FROM campaigns WHERE workspace_id = $1 AND release_plan_id = $2",
     )
     .bind(workspace_id.into_uuid())
     .bind(release_id.into_uuid())
     .fetch_all(&mut **tx)
+    .await
+    .map_err(map_sqlx)?;
+
+    // The plan's own tier rides the record — release-level learning is the
+    // tier × timing × outcome join, and it only exists if collected before
+    // the sample is large enough to read.
+    let tier = sqlx::query_scalar::<_, String>(
+        "SELECT tier FROM viryaos_release_plans WHERE workspace_id = $1 AND id = $2",
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(release_id.into_uuid())
+    .fetch_one(&mut **tx)
     .await
     .map_err(map_sqlx)?;
 
@@ -104,7 +144,7 @@ pub(in crate::autopilot) async fn issue_release_r3_report(
         )
         .bind(workspace_id.into_uuid())
         .bind(release_at)
-        .bind(REPORT_WINDOW_DAYS as i32)
+        .bind(window as i32)
         .bind(BASELINE_DAYS as i32)
         .fetch_one(&mut **tx)
         .await
@@ -127,7 +167,7 @@ pub(in crate::autopilot) async fn issue_release_r3_report(
     )
     .bind(workspace_id.into_uuid())
     .bind(release_at)
-    .bind(REPORT_WINDOW_DAYS as i32)
+    .bind(window as i32)
     .fetch_all(&mut **tx)
     .await
     .map_err(map_sqlx)?;
@@ -148,7 +188,7 @@ pub(in crate::autopilot) async fn issue_release_r3_report(
     // The honest verdict: a window is only "above trend" against a baseline
     // long enough to be a trend, and only when the count clears both a real
     // number and twice what the baseline would have produced anyway.
-    let expected = baseline_acquisitions as f64 / baseline_days as f64 * REPORT_WINDOW_DAYS as f64;
+    let expected = baseline_acquisitions as f64 / baseline_days as f64 * window as f64;
     let verdict = if baseline_days < MIN_BASELINE_DAYS {
         "insufficient_evidence"
     } else if window_acquisitions >= 3 && (window_acquisitions as f64) >= expected * 2.0 {
@@ -171,58 +211,144 @@ pub(in crate::autopilot) async fn issue_release_r3_report(
         evidence_gaps.push("no_active_band_recipient");
     }
 
+    // The second wave's own read (1R.7): how many consented fans no earlier
+    // phase reached — the audience the wrap was built for — and how the wrap
+    // itself delivered. Only the R+14 report carries it; at R+3 the wave has
+    // not run and reporting a zero would imply it had.
+    let mut report = json!({
+        "kind": kind,
+        "generated_at": now,
+        "tier": tier,
+        "window": {
+            "from": release_at,
+            "to": release_at + time::Duration::days(window),
+        },
+        "observed": {
+            "fans_acquired_via_release_campaign": bound_acquisitions,
+            "release_link_clicks": release_clicks,
+            "release_link_clickers": release_clickers,
+        },
+        "inferred": {
+            "window_acquisitions": window_acquisitions,
+            "baseline_acquisitions_28d": baseline_acquisitions,
+            "baseline_days": baseline_days,
+            "expected_window_acquisitions": expected,
+            "verdict": verdict,
+            "verdict_formula": format!(
+                "above_trend when window >= 3 and >= 2 * (baseline/{BASELINE_DAYS}d * {window}d); insufficient_evidence under {MIN_BASELINE_DAYS} baseline days"
+            ),
+            "cities_of_window_arrivals": window_cities
+                .iter()
+                .map(|(name, arrivals)| json!({"city": name, "arrivals": arrivals}))
+                .collect::<Vec<_>>(),
+        },
+        "campaigns": campaigns
+            .iter()
+            .map(|row| json!({
+                "slug": row.0,
+                "template_key": row.1,
+                "status": row.2,
+                "scheduled_at": row.3,
+                "recipients": row.4,
+                "delivered": row.5,
+                "completed_at": row.6,
+            }))
+            .collect::<Vec<_>>(),
+        "evidence_gaps": evidence_gaps,
+    });
+    if kind == REPORT_KIND_R14 {
+        // Same "reached" definition the wrap segment enforces: a delivered or
+        // claimed send. A fan whose earlier send failed is genuinely missed —
+        // counting them as reached here would contradict the audience the
+        // campaign just built.
+        // `missed` is counted directly as consented-and-never-reached, not
+        // derived by subtraction: earlier sends also reached fans who have
+        // since gone inactive or withdrawn consent, and netting them out
+        // would hide genuinely missed fans behind them.
+        let (earlier_phase_reach, consented_total, missed) = sqlx::query_as::<_, (i64, i64, i64)>(
+            r#"
+            WITH consented AS (
+                SELECT fan.id
+                FROM fans fan
+                WHERE fan.workspace_id = $1 AND fan.status = 'active'
+                  AND EXISTS (
+                      SELECT 1 FROM fan_consents consent
+                      WHERE consent.workspace_id = fan.workspace_id
+                        AND consent.fan_id = fan.id
+                        AND consent.purpose = 'marketing'
+                        AND consent.granted
+                        AND consent.id = (
+                            SELECT newest.id FROM fan_consents newest
+                            WHERE newest.workspace_id = consent.workspace_id
+                              AND newest.fan_id = consent.fan_id
+                              AND newest.purpose = consent.purpose
+                            ORDER BY newest.recorded_at DESC, newest.id DESC
+                            LIMIT 1)))
+            SELECT
+                (SELECT count(DISTINCT reached.fan_id)
+                 FROM communication_campaign_deliveries reached
+                 JOIN communication_campaigns c
+                   ON c.workspace_id = reached.workspace_id AND c.id = reached.campaign_id
+                 WHERE reached.workspace_id = $1
+                   AND reached.status IN ('delivered', 'claimed')
+                   AND c.slug = ANY($2)),
+                (SELECT count(*) FROM consented),
+                (SELECT count(*) FROM consented
+                 WHERE NOT EXISTS (
+                     SELECT 1
+                     FROM communication_campaign_deliveries reached
+                     JOIN communication_campaigns c
+                       ON c.workspace_id = reached.workspace_id
+                      AND c.id = reached.campaign_id
+                     WHERE reached.workspace_id = $1
+                       AND reached.fan_id = consented.id
+                       AND reached.status IN ('delivered', 'claimed')
+                       AND c.slug = ANY($2)))
+            "#,
+        )
+        .bind(workspace_id.into_uuid())
+        .bind(
+            [
+                "announcement",
+                "fan_warmup",
+                "countdown",
+                "release_day",
+                "sustain",
+            ]
+            .iter()
+            .map(|phase| format!("viryaos-release-{release_id}-{phase}"))
+            .collect::<Vec<_>>(),
+        )
+        .fetch_one(&mut **tx)
+        .await
+        .map_err(map_sqlx)?;
+        if let Some(object) = report.as_object_mut() {
+            object.insert(
+                "second_wave".to_string(),
+                json!({
+                    "earlier_phase_recipients": earlier_phase_reach,
+                    "consented_active_fans": consented_total,
+                    "missed_first_waves": missed,
+                    "note": "received an earlier send is not the same as listened — the wrap reached fans the record shows were never sent to; clicks above it are anonymous and cannot be joined to fans",
+                }),
+            );
+        }
+    }
+
     crate::autopilot::emit_external_action(
         tx,
         workspace_id,
         action_id,
-        "crowdrelay.release.r3_report_due",
+        event_type(kind),
         json!({
             "action_id": action_id,
             "release_id": release_id,
             "release": {
                 "title": title,
                 "release_at": release_at,
+                "tier": tier,
             },
-            "report": {
-                "kind": "release_r3",
-                "generated_at": now,
-                "window": {
-                    "from": release_at,
-                    "to": release_at + time::Duration::days(REPORT_WINDOW_DAYS),
-                },
-                "observed": {
-                    "fans_acquired_via_release_campaign": bound_acquisitions,
-                    "release_link_clicks": release_clicks,
-                    "release_link_clickers": release_clickers,
-                },
-                "inferred": {
-                    "window_acquisitions": window_acquisitions,
-                    "baseline_acquisitions_28d": baseline_acquisitions,
-                    "baseline_days": baseline_days,
-                    "expected_window_acquisitions": expected,
-                    "verdict": verdict,
-                    "verdict_formula": format!(
-                        "above_trend when window >= 3 and >= 2 * (baseline/{BASELINE_DAYS}d * {REPORT_WINDOW_DAYS}d); insufficient_evidence under {MIN_BASELINE_DAYS} baseline days"
-                    ),
-                    "cities_of_window_arrivals": window_cities
-                        .iter()
-                        .map(|(name, arrivals)| json!({"city": name, "arrivals": arrivals}))
-                        .collect::<Vec<_>>(),
-                },
-                "campaigns": campaigns
-                    .iter()
-                    .map(|row| json!({
-                        "slug": row.0,
-                        "template_key": row.1,
-                        "status": row.2,
-                        "scheduled_at": row.3,
-                        "recipients": row.4,
-                        "delivered": row.5,
-                        "completed_at": row.6,
-                    }))
-                    .collect::<Vec<_>>(),
-                "evidence_gaps": evidence_gaps,
-            },
+            "report": report,
             "recipients": {
                 "band": band
                     .iter()
@@ -243,5 +369,39 @@ pub(in crate::autopilot) async fn issue_release_r3_report(
         }),
     )
     .await?;
+
+    // The durable learning record (1R.12): same figures, queryable. The row
+    // upserts on the milestone key so a re-fired send cannot double-count.
+    sqlx::query(
+        r#"
+        INSERT INTO viryaos_release_outcomes (
+            workspace_id, release_id, report_kind, tier, release_at,
+            generated_at, window_days, verdict, action_id, payload
+        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+        ON CONFLICT (workspace_id, release_id, report_kind) DO UPDATE SET
+            -- Tier can be re-decided between the R+3 and R+14 reports; the
+            -- stored row is what the tier × timing × verdict join reads, so
+            -- it must follow the plan, not freeze at first write.
+            tier = EXCLUDED.tier,
+            release_at = EXCLUDED.release_at,
+            generated_at = EXCLUDED.generated_at,
+            verdict = EXCLUDED.verdict,
+            action_id = EXCLUDED.action_id,
+            payload = EXCLUDED.payload
+        "#,
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(release_id.into_uuid())
+    .bind(kind)
+    .bind(&tier)
+    .bind(release_at)
+    .bind(now)
+    .bind(window as i32)
+    .bind(verdict)
+    .bind(action_id.into_uuid())
+    .bind(&report)
+    .execute(&mut **tx)
+    .await
+    .map_err(map_sqlx)?;
     Ok(())
 }
