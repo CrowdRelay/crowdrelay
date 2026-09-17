@@ -4,6 +4,7 @@
   "crates/crowdrelay-infra/src/audience_graph.rs": 1,
   "crates/crowdrelay-infra/src/autopilot/operations/attribution.rs": 2,
   "crates/crowdrelay-infra/src/autopilot/operations/experiment_assignments.rs": 1,
+  "crates/crowdrelay-infra/src/attestation.rs": 2,
   "crates/crowdrelay-worker/src/agent_outcomes.rs": 2,
   "crates/crowdrelay-worker/src/community_executor.rs": 8,
   "crates/crowdrelay-worker/src/discord_executor.rs": 5,

@@ -198,6 +198,12 @@ test-postgres-env:
     do
       {{CARGO}} test --locked --package crowdrelay-worker "$filter" -- --ignored --test-threads=1
     done
+    # Same for the ops-signal test inside the api crate's lib tests.
+    for filter in \
+      archive_confirmation_is_not_organic_growth
+    do
+      {{CARGO}} test --locked --package crowdrelay-api "$filter" -- --ignored --test-threads=1
+    done
 
 # Alias kept for muscle memory from the Makefile days
 test-postgres: test-postgres-env

@@ -441,6 +441,9 @@ jobs:
             a_transient_failure_defers_the_draft_and_spares_the_action
             an_exhausted_draft_fails_and_corrects_the_ledger
           )
+          api_filters=(
+            archive_confirmation_is_not_organic_growth
+          )
 
           run_suite() {
             local package="$1" target="$2" db="$3"
@@ -494,6 +497,22 @@ jobs:
               --test-threads=1
           }
 
+          # Same shape for lib-module Postgres tests in other crates — the
+          # ops signal summary's archive/organic split lives in the api lib.
+          run_api_filter() {
+            local filter="$1" db="$2"
+            local url="postgres://crowdrelay:crowdrelay-ci-only@127.0.0.1:5432/${db}"
+            CROWDRELAY_DATABASE_URL="$url" \
+            CROWDRELAY_TEST_DATABASE_URL="$url" \
+            cargo test --locked \
+              --package crowdrelay-api \
+              "$filter" \
+              -- \
+              --ignored \
+              --nocapture \
+              --test-threads=1
+          }
+
           if [ "${PG_SHARDS}" -le 1 ]; then
             # Serial fallback: every suite against the shared `crowdrelay`
             # database, exactly the historical behavior.
@@ -507,6 +526,11 @@ jobs:
             for filter in "${worker_filters[@]}"; do
               printf '::group::crowdrelay-worker / %s\n' "$filter"
               run_worker_filter "$filter" "crowdrelay"
+              echo '::endgroup::'
+            done
+            for filter in "${api_filters[@]}"; do
+              printf '::group::crowdrelay-api / %s\n' "$filter"
+              run_api_filter "$filter" "crowdrelay"
               echo '::endgroup::'
             done
           else
@@ -541,6 +565,11 @@ jobs:
                 for filter in "${worker_filters[@]}"; do
                   printf '::group::crowdrelay-worker / %s\n' "$filter"
                   run_worker_filter "$filter" "ci_worker_filters"
+                  echo '::endgroup::'
+                done
+                for filter in "${api_filters[@]}"; do
+                  printf '::group::crowdrelay-api / %s\n' "$filter"
+                  run_api_filter "$filter" "ci_worker_filters"
                   echo '::endgroup::'
                 done
               fi

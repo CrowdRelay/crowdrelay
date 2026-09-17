@@ -32,13 +32,13 @@ async fn load_signal_summary(state: &OpsState) -> Result<SignalSummaryRow, OpsEr
                     WHERE status = 'active'
                       AND created_at >= now() - interval '7 days'
                       AND (first_touch.first_touch_source IS NULL
-                           OR left(first_touch.first_touch_source, 11) <> 'fan_import')
+                           OR left(first_touch.first_touch_source, 10) <> 'fan_import')
                 ) AS new_fans_7d,
                 count(*) FILTER (
                     WHERE status = 'active'
                       AND created_at >= now() - interval '30 days'
                       AND (first_touch.first_touch_source IS NULL
-                           OR left(first_touch.first_touch_source, 11) <> 'fan_import')
+                           OR left(first_touch.first_touch_source, 10) <> 'fan_import')
                 ) AS new_fans_30d
             FROM fans
             LEFT JOIN first_touch
@@ -667,7 +667,7 @@ async fn load_delivery_results(
 
 #[cfg(test)]
 mod signal_tests {
-    use super::{SignalCitySummary, SignalSummaryRow, signal_overview_from_row};
+    use super::{OpsState, SignalCitySummary, SignalSummaryRow, signal_overview_from_row};
 
     #[test]
     fn signal_overview_payload_is_aggregate_only() {
@@ -738,6 +738,122 @@ mod signal_tests {
         assert!(!json.contains("email"));
         assert!(!json.contains("display_name"));
         assert!(!json.contains("fan_id"));
+    }
+
+    /// Recovery is not acquisition — the honesty property this whole feature
+    /// stands on, pinned against a real schema. A fan whose first touch was
+    /// an imported list confirmed an address the band already had; counting
+    /// them as new would quietly re-inflate the growth number every archive
+    /// sweep produces.
+    #[tokio::test]
+    #[ignore = "requires a disposable postgres database"]
+    async fn archive_confirmation_is_not_organic_growth() {
+        let database_url = std::env::var("CROWDRELAY_TEST_DATABASE_URL")
+            .expect("set CROWDRELAY_TEST_DATABASE_URL to a disposable database");
+        let pool = sqlx::PgPool::connect(&database_url)
+            .await
+            .expect("connect to the disposable database");
+        let workspace_id = uuid::Uuid::now_v7();
+        sqlx::query("INSERT INTO workspaces (id, slug, name) VALUES ($1, $2, $3)")
+            .bind(workspace_id)
+            .bind(format!("archive-signal-{}", workspace_id.simple()))
+            .bind("Archive signal E2E")
+            .execute(&pool)
+            .await
+            .expect("insert workspace");
+
+        // Three live fans: one found the band, one came back through the
+        // archive, one predates the ledger and is not new.
+        for (email, created_days_ago) in [
+            ("organic@example.com", 0i64),
+            ("archived@example.com", 0),
+            ("old@example.com", 40),
+            ("pending@example.com", 0),
+        ] {
+            sqlx::query(
+                "INSERT INTO fans (id, workspace_id, normalized_email, status, created_at) \
+                 VALUES (gen_random_uuid(), $1, $2, $3, now() - make_interval(days => $4))",
+            )
+            .bind(workspace_id)
+            .bind(email)
+            .bind(if email == "pending@example.com" {
+                "pending"
+            } else {
+                "active"
+            })
+            .bind(created_days_ago as i32)
+            .execute(&pool)
+            .await
+            .expect("insert fan");
+        }
+        for (email, source) in [
+            ("organic@example.com", "landing_page"),
+            ("archived@example.com", "fan_import:gdrive"),
+        ] {
+            sqlx::query(
+                "INSERT INTO fan_acquisition_events \
+                 (workspace_id, fan_id, source, request_id, occurred_at) \
+                 SELECT $1, id, $3, 'req', now() FROM fans \
+                 WHERE workspace_id = $1 AND normalized_email = $2",
+            )
+            .bind(workspace_id)
+            .bind(email)
+            .bind(source)
+            .execute(&pool)
+            .await
+            .expect("insert acquisition event");
+        }
+        // The archived fan holds current marketing consent — a confirmation.
+        sqlx::query(
+            "INSERT INTO fan_consents \
+             (workspace_id, fan_id, purpose, granted, policy_version, source, recorded_at) \
+             SELECT $1, id, 'marketing', true, 'v1', 'double_opt_in', now() FROM fans \
+             WHERE workspace_id = $1 AND normalized_email = 'archived@example.com'",
+        )
+        .bind(workspace_id)
+        .execute(&pool)
+        .await
+        .expect("insert consent");
+
+        // The archive: one confirmed, one pending opt-in, one still an
+        // address on a sheet.
+        for email in [
+            "archived@example.com",
+            "pending@example.com",
+            "nobody@example.com",
+        ] {
+            sqlx::query(
+                "INSERT INTO viryaos_drive_contacts \
+                 (id, workspace_id, normalized_email, suggested_kind, \
+                  source_file_id, source_file_name, sources) \
+                 VALUES (gen_random_uuid(), $1, $2, 'press', 'file-1', 'list.xlsx', '{gdrive}')",
+            )
+            .bind(workspace_id)
+            .bind(email)
+            .execute(&pool)
+            .await
+            .expect("insert drive contact");
+        }
+
+        let state = OpsState::new(
+            crowdrelay_domain::WorkspaceId::from_uuid(workspace_id),
+            pool,
+            std::time::Duration::from_secs(10),
+        );
+        let row = super::load_signal_summary(&state)
+            .await
+            .expect("signal summary");
+
+        assert_eq!(row.total_fans, 4);
+        // Only the organic fan is new — the archive confirmation and the
+        // still-pending opt-in do not inflate acquisition, and the
+        // pre-ledger fan is not new either.
+        assert_eq!(row.new_fans_7d, 1);
+        assert_eq!(row.new_fans_30d, 1);
+        // The whole staged archive is imported; only the active fan with
+        // current consent is confirmed.
+        assert_eq!(row.archive_imported, 3);
+        assert_eq!(row.archive_confirmed, 1);
     }
 }
 
