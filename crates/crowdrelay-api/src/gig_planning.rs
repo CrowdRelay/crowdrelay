@@ -185,6 +185,16 @@ struct BandPlanResponse {
     /// that has produced a show before deserves to be read differently from
     /// one that has never been tested.
     track_record: TrackRecordView,
+    /// What this act says it sounds like, or absent when it has never said
+    /// (§4h-8 / 5.21).
+    ///
+    /// Returned beside the proposals because it is the input the roster's
+    /// package matcher will judge a shared bill on, and an act that has not
+    /// declared one cannot be paired at all — the console can ask for it at
+    /// the moment the band is reading about rooms rather than in a settings
+    /// screen nobody opens.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    act_style: Option<String>,
     /// Whether approving a proposal would actually send anything.
     ///
     /// False means no connected sender advertises gig outreach, so the
@@ -285,6 +295,16 @@ pub async fn band_gig_plan(
     let genre = listing
         .map(|listing| listing.genre_tags.join(" / "))
         .filter(|joined| !joined.is_empty());
+
+    let act_style = match settings.act_style(workspace_id).await {
+        Ok(style) => style,
+        Err(error) => {
+            tracing::warn!(%error, "act style read failed");
+            return Problem::service_unavailable(request_id(&headers))
+                .private()
+                .into_response();
+        }
+    };
 
     // Asked here so the console can grey the approve button rather than
     // discovering the refusal after the band has read three proposals and
@@ -417,6 +437,7 @@ pub async fn band_gig_plan(
             cities_considered: considered,
             intent: intent.as_str(),
             intent_is_stored: intent == stored,
+            act_style,
             can_send,
             send_blocked_reason: (!can_send).then_some(SEND_CHANNEL_MISSING),
             track_record: TrackRecordView {

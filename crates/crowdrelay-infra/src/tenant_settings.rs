@@ -30,7 +30,7 @@ pub const DEFAULT_CREW_LOCALE: &str = "en";
 
 /// The keys an operator may edit. Anything else stays internal even if a row
 /// somehow appears, so the HTTP surface cannot be used to smuggle state.
-pub const EDITABLE_KEYS: [&str; 12] = [
+pub const EDITABLE_KEYS: [&str; 13] = [
     KEY_MEMBER_SITE_BASE_URL,
     KEY_MEMBER_AREA_PATH,
     KEY_SYNESTHESIA_CAMPAIGN_SLUG,
@@ -43,6 +43,7 @@ pub const EDITABLE_KEYS: [&str; 12] = [
     KEY_CREW_LOCALE,
     KEY_TEAM_WEEKLY_ASK_CEILING,
     KEY_TENANT_INTENT,
+    KEY_ACT_STYLE,
 ];
 
 const KEY_MEMBER_SITE_BASE_URL: &str = "member_site_base_url";
@@ -73,6 +74,19 @@ pub const KEY_TEAM_WEEKLY_ASK_CEILING: &str = "team_weekly_ask_ceiling";
 /// heads-down silently withholds every gig proposal they would have wanted,
 /// and the band never learns a suggestion was withheld.
 pub const KEY_TENANT_INTENT: &str = "tenant_intent";
+/// §4h-8 / 5.21: what this act sounds like, in the act's own words.
+///
+/// `genre_fit` exists on the content-format catalogue and nothing describes
+/// the *act*. The roster's package matcher needs it to judge whether two acts
+/// belong on one bill, and the declaration is the operator's — never a model's
+/// guess from the catalogue, for the same reason `growth_debt` reads the
+/// tenant's own declarations about release assets rather than inferring them:
+/// an act mislabelled by a guess gets proposed onto bills it does not fit, and
+/// nobody can see why.
+///
+/// Absent means the act has not said. That is a real state and the planner
+/// reads it as unmeasured, not as "no style".
+pub const KEY_ACT_STYLE: &str = "act_style";
 
 const CACHE_TTL: Duration = Duration::from_secs(60);
 
@@ -295,6 +309,28 @@ impl TenantSettingsRepository {
         )
         .bind(workspace_id)
         .bind(KEY_TENANT_INTENT)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(stored
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty()))
+    }
+
+    /// What the act says it sounds like, or `None` when it has never said.
+    ///
+    /// Raw text, exactly as `crew_locale` returns a raw tag: this repository
+    /// stays free of the pairing vocabulary, and the caller decides what to do
+    /// with a declaration nobody has made.
+    ///
+    /// # Errors
+    ///
+    /// Propagates the database error.
+    pub async fn act_style(&self, workspace_id: Uuid) -> Result<Option<String>, sqlx::Error> {
+        let stored: Option<String> = sqlx::query_scalar(
+            "SELECT value FROM tenant_settings WHERE workspace_id = $1 AND key = $2",
+        )
+        .bind(workspace_id)
+        .bind(KEY_ACT_STYLE)
         .fetch_optional(&self.pool)
         .await?;
         Ok(stored
