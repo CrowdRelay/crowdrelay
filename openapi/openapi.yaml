@@ -17936,3 +17936,75 @@ components:
           - string
           - 'null'
           format: date-time
+    PublicAttestation:
+      type: object
+      additionalProperties: false
+      required:
+      - act
+      - issued_at
+      - valid_until
+      - digest
+      - figures
+      - verification
+      properties:
+        act:
+          type: string
+        issued_at:
+          type: integer
+          description: Unix timestamp.
+        valid_until:
+          type: integer
+          description: Unix timestamp.
+        digest:
+          type: string
+          description: 64 lowercase hex characters.
+        figures:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required:
+            - metric
+            - method
+            - scope
+            - reads_as
+            - window_days
+            - observed_at
+            properties:
+              metric:
+                type: string
+              method:
+                type: string
+              scope:
+                type: string
+              reads_as:
+                type: string
+                description: The figure in the plain sentence a reader was shown.
+              window_days:
+                type: integer
+              observed_at:
+                type: integer
+                description: Unix timestamp.
+        verification:
+          type: object
+          additionalProperties: false
+          required:
+          - verdict
+          - unedited
+          - issued_by_us
+          - current
+          - revoked
+          properties:
+            verdict:
+              type: string
+              description: One plain sentence — e.g. "issued by CrowdRelay,
+                unedited, current" or "issued by CrowdRelay, then withdrawn by
+                the act".
+            unedited:
+              type: boolean
+            issued_by_us:
+              type: boolean
+            current:
+              type: boolean
+            revoked:
+              type: boolean
