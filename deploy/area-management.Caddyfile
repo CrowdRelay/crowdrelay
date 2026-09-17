@@ -71,6 +71,8 @@
         /v1/control-plane/audience-graph/places/import \
         /v1/control-plane/events \
         /v1/control-plane/events/* \
+        /v1/control-plane/nights \
+        /v1/control-plane/nights/* \
         /v1/control-plane/community-posts \
         /v1/control-plane/community-posts/* \
         /v1/control-plane/social-posts/* \
