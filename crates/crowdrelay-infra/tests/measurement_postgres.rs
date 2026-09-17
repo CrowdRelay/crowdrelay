@@ -90,6 +90,21 @@ async fn seed_fan(
     Ok(id)
 }
 
+async fn seed_member(
+    pool: &PgPool,
+    workspace_id: Uuid,
+) -> Result<Uuid, Box<dyn std::error::Error>> {
+    sqlx::query_scalar(
+        "INSERT INTO workspace_members (workspace_id, normalized_email, display_name, role, status) \
+         VALUES ($1, $2, 'Crew Test', 'staff', 'active') RETURNING id",
+    )
+    .bind(workspace_id)
+    .bind(format!("crew-{}@example.test", Uuid::now_v7().simple()))
+    .fetch_one(pool)
+    .await
+    .map_err(Into::into)
+}
+
 /// The latest `fan_consents` row wins. `granted` on the newest row is the
 /// consent state; an earlier granted row followed by a revocation reads as
 /// revoked, which is the whole point of the `latest_marketing` CTE.
@@ -434,6 +449,124 @@ async fn run(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
             floor: 20,
         },
         "five observations is below the floor — the rate is not stated"
+    );
+
+    // ── drift_caught: days between a slipped due date and the first ────────
+    //    reminder that told someone. Two told assignments (gaps of 2 and 4
+    //    days → median 3.0) and one open, past-due assignment nobody has been
+    //    told about — the breakdown row that says how bad the silence is.
+    let drift_ws = seed_workspace(pool).await?;
+    let member = seed_member(pool, drift_ws).await?;
+    for (days_overdue, told_after_days) in [(10_i64, Some(2_i64)), (6, Some(4)), (3, None)] {
+        let due = OffsetDateTime::now_utc() - time::Duration::days(days_overdue);
+        sqlx::query(
+            "INSERT INTO viryaos_team_assignments
+                 (id, workspace_id, source_kind, source_id, assignee_member_id,
+                  required_skill, status, due_at, first_overdue_reminder_at)
+             VALUES ($1, $2, 'show_task', $3, $4, 'video', 'open', $5, $6)",
+        )
+        .bind(Uuid::now_v7())
+        .bind(drift_ws)
+        .bind(Uuid::now_v7())
+        .bind(member)
+        .bind(due)
+        .bind(told_after_days.map(|days| due + time::Duration::days(days)))
+        .execute(pool)
+        .await?;
+    }
+    let drift = sqlx::query(measurement_queries::DRIFT_CAUGHT_SQL)
+        .bind(drift_ws)
+        .bind(OffsetDateTime::now_utc())
+        .fetch_one(pool)
+        .await?;
+    let (n, median_days, slipped_untold): (i64, Option<f64>, i64) = {
+        use sqlx::Row;
+        (
+            drift.try_get("n")?,
+            drift.try_get("median_days")?,
+            drift.try_get("slipped_untold")?,
+        )
+    };
+    assert_eq!(n, 2, "only the two told assignments count");
+    assert!(
+        (median_days.ok_or("median over two rows is never NULL")? - 3.0).abs() < 1e-9,
+        "median of 2 and 4 days is 3.0"
+    );
+    assert_eq!(slipped_untold, 1, "the untold slip is the honest number");
+
+    // The reminder sweep's UPDATE stamps `first_overdue_reminder_at` once and
+    // only once — the same statement text team.rs runs. Three assignments in
+    // a fourth workspace keep these rows out of the counts above: one already
+    // stamped (COALESCE must not move it), one past due and never stamped
+    // ($3 lands), one not yet due (stays NULL — a pre-due reminder is not
+    // "the slip was told").
+    let sweep_ws = seed_workspace(pool).await?;
+    let sweep_member = seed_member(pool, sweep_ws).await?;
+    let sweep_now = OffsetDateTime::now_utc();
+    let stamped_due = sweep_now - time::Duration::days(8);
+    let stamped_at = stamped_due + time::Duration::days(1);
+    let mut ids = Vec::new();
+    for (due, first) in [
+        (stamped_due, Some(stamped_at)),
+        (sweep_now - time::Duration::days(5), None),
+        (sweep_now + time::Duration::days(2), None),
+    ] {
+        let id = Uuid::now_v7();
+        sqlx::query(
+            "INSERT INTO viryaos_team_assignments
+                 (id, workspace_id, source_kind, source_id, assignee_member_id,
+                  required_skill, status, due_at, first_overdue_reminder_at)
+             VALUES ($1, $2, 'show_task', $3, $4, 'video', 'open', $5, $6)",
+        )
+        .bind(id)
+        .bind(sweep_ws)
+        .bind(Uuid::now_v7())
+        .bind(sweep_member)
+        .bind(due)
+        .bind(first)
+        .execute(pool)
+        .await?;
+        ids.push(id);
+    }
+    let sweep_update = r#"UPDATE viryaos_team_assignments
+       SET last_reminded_at=$3, next_reminder_at=$4,
+           reminder_count=reminder_count+1,
+           first_overdue_reminder_at = COALESCE(first_overdue_reminder_at, CASE WHEN due_at IS NOT NULL AND $3 > due_at THEN $3 END)
+       WHERE workspace_id=$1 AND id=$2 AND status='open'"#;
+    let next = sweep_now + time::Duration::days(1);
+    for id in &ids {
+        sqlx::query(sweep_update)
+            .bind(sweep_ws)
+            .bind(*id)
+            .bind(sweep_now)
+            .bind(next)
+            .execute(pool)
+            .await?;
+    }
+    let read_stamp = |id: Uuid| async move {
+        sqlx::query_scalar::<_, Option<OffsetDateTime>>(
+            "SELECT first_overdue_reminder_at FROM viryaos_team_assignments \
+             WHERE workspace_id = $1 AND id = $2",
+        )
+        .bind(sweep_ws)
+        .bind(id)
+        .fetch_one(pool)
+        .await
+    };
+    assert_eq!(
+        read_stamp(ids[0]).await?,
+        Some(stamped_at),
+        "an earlier stamp is kept — the FIRST overdue reminder is the answer"
+    );
+    assert_eq!(
+        read_stamp(ids[1]).await?,
+        Some(sweep_now),
+        "the first reminder after the due date stamps the slip-to-told gap"
+    );
+    assert_eq!(
+        read_stamp(ids[2]).await?,
+        None,
+        "a reminder before the due date is not the slip being told"
     );
 
     Ok(())

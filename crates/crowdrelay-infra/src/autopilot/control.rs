@@ -1038,6 +1038,7 @@ impl AutopilotControlRepository for PostgresAutopilotRepository {
                     status='open', due_at=EXCLUDED.due_at,
                     assigned_at=now(), last_reminded_at=NULL,
                     next_reminder_at=EXCLUDED.next_reminder_at,
+                    first_overdue_reminder_at=NULL,
                     reminder_count=0, completed_at=NULL
                 RETURNING id
                 "#,

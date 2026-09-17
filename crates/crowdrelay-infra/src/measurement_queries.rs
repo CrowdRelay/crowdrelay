@@ -113,6 +113,24 @@ SELECT (SELECT count(*) FROM due) AS planned,
        (SELECT COALESCE(sum(LEAST(d.n, (SELECT count(*) FROM due WHERE due.arc_id = d.arc_id))), 0)::bigint FROM delivered d) AS delivered
 "#;
 
+/// Claim 8 — "Drift caught early": median days between a slipped due date and
+/// the first reminder that told someone. `slipped_untold` is the companion
+/// count — open, past due, and nobody has been reminded yet.
+pub const DRIFT_CAUGHT_SQL: &str = r#"
+SELECT count(*) AS n,
+       percentile_cont(0.5) WITHIN GROUP (
+           ORDER BY EXTRACT(EPOCH FROM (first_overdue_reminder_at - due_at))::double precision / 86400.0
+       ) AS median_days,
+       (SELECT count(*) FROM viryaos_team_assignments late
+         WHERE late.workspace_id = $1 AND late.status = 'open'
+           AND late.due_at IS NOT NULL AND late.due_at < $2
+           AND late.first_overdue_reminder_at IS NULL) AS slipped_untold
+FROM viryaos_team_assignments
+WHERE workspace_id = $1
+  AND due_at IS NOT NULL AND first_overdue_reminder_at IS NOT NULL
+  AND due_at >= $2 - interval '90 days' AND due_at <= $2
+"#;
+
 /// Claim 9 — "The room stops leaking": scans ÷ room size, per show. The master
 /// variable. `room_size` is nullable — a show with no admission capacity on
 /// record is unmeasured, not zero.

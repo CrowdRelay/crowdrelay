@@ -577,7 +577,8 @@ impl PostgresAutopilotRepository {
                 sqlx::query(
                     r#"UPDATE viryaos_team_assignments
                        SET last_reminded_at=$3, next_reminder_at=$4,
-                           reminder_count=reminder_count+1
+                           reminder_count=reminder_count+1,
+                           first_overdue_reminder_at = COALESCE(first_overdue_reminder_at, CASE WHEN due_at IS NOT NULL AND $3 > due_at THEN $3 END)
                        WHERE workspace_id=$1 AND id=$2 AND status='open'"#,
                 )
                 .bind(workspace_id.into_uuid())

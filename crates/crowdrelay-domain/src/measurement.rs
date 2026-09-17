@@ -33,6 +33,8 @@ pub enum Measure {
     Count { value: i64, unit: &'static str },
     /// A median duration in minutes over `n` observations.
     Minutes { median: f64, n: i64 },
+    /// A median duration in days over `n` observations.
+    Days { median: f64, n: i64 },
     /// This build cannot measure the claim; the reason is the value.
     Unmeasured { reason: &'static str },
 }
@@ -203,5 +205,10 @@ mod tests {
         })
         .expect("serializes");
         assert_eq!(rate["state"], "rate");
+
+        let days = serde_json::to_value(Measure::Days { median: 3.0, n: 2 }).expect("serializes");
+        assert_eq!(days["state"], "days");
+        assert_eq!(days["median"], 3.0);
+        assert_eq!(days["n"], 2);
     }
 }

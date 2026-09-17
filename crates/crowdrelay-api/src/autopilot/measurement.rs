@@ -51,6 +51,13 @@ struct PlanFollowedRow {
 }
 
 #[derive(Debug, FromRow)]
+struct DriftCaughtRow {
+    n: i64,
+    median_days: Option<f64>,
+    slipped_untold: i64,
+}
+
+#[derive(Debug, FromRow)]
 struct RoomLeakRow {
     // `slug` is selected but unused — the breakdown label is title + date.
     title: String,
@@ -149,6 +156,12 @@ async fn load_measurement_ledger(
         .await?;
 
     let plan = sqlx::query_as::<_, PlanFollowedRow>(measurement_queries::PLAN_FOLLOWED_SQL)
+        .bind(workspace_id)
+        .bind(now)
+        .fetch_one(pool)
+        .await?;
+
+    let drift = sqlx::query_as::<_, DriftCaughtRow>(measurement_queries::DRIFT_CAUGHT_SQL)
         .bind(workspace_id)
         .bind(now)
         .fetch_one(pool)
@@ -269,13 +282,32 @@ async fn load_measurement_ledger(
         Measure::rate(plan.delivered, plan.planned),
     ));
 
-    // 8. "Drift caught early" — days between slip and told.
-    claims.push(unmeasured(
+    // 8. "Drift caught early" — days between slip and told. `slipped_untold`
+    //    is always reported: a drift nobody was reminded about is the worst
+    //    case of the claim, not a reason to stay silent.
+    let mut drift_caught = claim(
         "drift_caught",
         "Drift caught early",
         "days between slip and told",
-        "needs the first reminder after a due date; viryaos_team_assignments keeps only last_reminded_at",
-    ));
+        if drift.n > 0 {
+            Measure::Days {
+                median: drift.median_days.unwrap_or(0.0),
+                n: drift.n,
+            }
+        } else {
+            Measure::Unmeasured {
+                reason: "no assignment has slipped and been reminded yet",
+            }
+        },
+    );
+    drift_caught.breakdown = vec![Breakdown {
+        label: "slipped, not yet told".to_owned(),
+        measure: Measure::Count {
+            value: drift.slipped_untold,
+            unit: "open assignments past due",
+        },
+    }];
+    claims.push(drift_caught);
 
     // 9. "The room stops leaking" — scans ÷ room size, per show. The master
     //    variable. One show is one observation, so the per-show floor is 1,

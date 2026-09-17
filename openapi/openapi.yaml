@@ -12280,6 +12280,13 @@ components:
             n: { type: integer, format: int64 }
         - type: object
           additionalProperties: false
+          required: [state, median, n]
+          properties:
+            state: { type: string, enum: [days] }
+            median: { type: number, format: double }
+            n: { type: integer, format: int64 }
+        - type: object
+          additionalProperties: false
           required: [state, reason]
           properties:
             state: { type: string, enum: [unmeasured] }

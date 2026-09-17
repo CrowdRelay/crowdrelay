@@ -131,6 +131,7 @@ pub(in crate::autopilot) async fn project_shows_to_production_events(
                 ELSE NULL
             END,
             last_reminded_at = NULL,
+            first_overdue_reminder_at = NULL,
             reminder_count = 0
         FROM viryaos_capture_plans plan
         JOIN viryaos_production_events day
