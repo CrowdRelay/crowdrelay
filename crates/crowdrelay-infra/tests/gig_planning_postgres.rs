@@ -14,7 +14,8 @@
 //! them; these are driven for the same reason.
 
 use crowdrelay_domain::gig_plan::{GigRefusal, TenantIntent, plan_gig};
-use crowdrelay_infra::gig_planning::city_opportunities;
+use crowdrelay_infra::gig_planning::{city_opportunities, stated_intent};
+use crowdrelay_infra::tenant_settings::{KEY_TENANT_INTENT, TenantSettingsRepository};
 use sqlx::{Connection, PgConnection, PgPool, postgres::PgPoolOptions};
 use time::OffsetDateTime;
 use uuid::Uuid;
@@ -337,6 +338,78 @@ async fn run(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
         plan_gig(wro, TenantIntent::BookingShows),
         Err(GigRefusal::AlreadyBooked),
         "a city with a show on the calendar was proposed as a gap"
+    );
+
+    stated_intent_comes_from_the_act_that_stated_it(pool, act).await?;
+
+    Ok(())
+}
+
+/// §4G.2: the intent is a stored setting, and it is read per workspace.
+///
+/// The roster planner asks each act's own workspace, never the label's, because
+/// an act that says it is recording must not be proposed by somebody else's
+/// preference. This drives the read against a real row rather than trusting the
+/// key string, which is the half a unit test cannot check: a typo in
+/// `KEY_TENANT_INTENT` would read `None` forever and every band would silently
+/// look unstated.
+async fn stated_intent_comes_from_the_act_that_stated_it(
+    pool: &PgPool,
+    act: Uuid,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let settings = TenantSettingsRepository::new(pool.clone());
+
+    // Never asked is not the same as asked and declined to say. Both plan as
+    // `Unstated`, and the console shows the difference.
+    assert_eq!(
+        settings.tenant_intent(act).await?,
+        None,
+        "an act that has never stated an intent reported a stored one"
+    );
+    assert_eq!(
+        stated_intent(&settings, act).await?,
+        TenantIntent::Unstated,
+        "an unstated act did not resolve to Unstated"
+    );
+
+    for intent in TenantIntent::all() {
+        settings
+            .set_setting(act, KEY_TENANT_INTENT, intent.as_str())
+            .await?;
+        assert_eq!(
+            stated_intent(&settings, act).await?,
+            intent,
+            "the stored intent did not survive the round trip through the settings row"
+        );
+    }
+
+    // A hand-edited row the vocabulary does not recognise plans as `Unstated`:
+    // weaker, and it says the timing is unverified. It must never read as
+    // `HeadsDown`, because withholding every proposal on the strength of a typo
+    // is the failure nobody would ever report.
+    settings
+        .set_setting(act, KEY_TENANT_INTENT, "touring")
+        .await?;
+    assert_eq!(
+        stated_intent(&settings, act).await?,
+        TenantIntent::Unstated,
+        "an unreadable stored value did not fall back to Unstated"
+    );
+
+    // A second act in the same database keeps its own answer. One act's
+    // heads-down must not silence a labelmate.
+    let other = workspace(pool).await?;
+    settings
+        .set_setting(act, KEY_TENANT_INTENT, TenantIntent::HeadsDown.as_str())
+        .await?;
+    assert_eq!(
+        stated_intent(&settings, act).await?,
+        TenantIntent::HeadsDown
+    );
+    assert_eq!(
+        stated_intent(&settings, other).await?,
+        TenantIntent::Unstated,
+        "one act's stated intent leaked into another workspace"
     );
 
     Ok(())

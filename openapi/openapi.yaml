@@ -6809,7 +6809,7 @@ paths:
         required: true
         schema:
           type: string
-          enum: [member_site_base_url, member_area_path, synesthesia_campaign_slug, signal_enabled, synesthesia_enabled, north_star_metric, social_auto_post, growth_cadence_moments_per_month, growth_cadence_fillers_enabled]
+          enum: [member_site_base_url, member_area_path, synesthesia_campaign_slug, signal_enabled, synesthesia_enabled, north_star_metric, social_auto_post, growth_cadence_moments_per_month, growth_cadence_fillers_enabled, crew_locale, team_weekly_ask_ceiling, tenant_intent]
       requestBody:
         required: true
         content:
@@ -6825,6 +6825,39 @@ paths:
         '200':
           description: The effective value after the write.
         '422':
+          $ref: '#/components/responses/Problem'
+  /admin/roster-plan:
+    get:
+      operationId: planRosterRun
+      summary: What this roster should do next, across every act in the organisation
+      description: >
+        Admin rather than control-plane on purpose: an organisation spans
+        workspaces and the control-plane surface is scoped to one tenant by
+        construction, so a roster read accepting a workspace token would be one
+        tenant reading its labelmates' audiences. A refusal is returned as 200
+        with its sentence — a roster that cannot be planned is an answer, not a
+        failure to render.
+      security:
+      - adminBearer: []
+      parameters:
+      - in: query
+        name: organization_id
+        required: true
+        schema: { type: string, format: uuid }
+      - in: query
+        name: packages_this_period
+        required: true
+        description: >
+          How many packages the roster can actually run this period. Required
+          because there is no defensible default, and a planner that invents one
+          produces a plan nobody agreed to staff.
+        schema: { type: integer, minimum: 0, maximum: 65535 }
+      responses:
+        '200':
+          description: The plan, or the refusal that explains why there is none.
+        '401':
+          $ref: '#/components/responses/Problem'
+        '503':
           $ref: '#/components/responses/Problem'
   /admin/portfolio/case-study:
     get:

@@ -91,6 +91,68 @@ pub enum TenantIntent {
     HeadsDown,
 }
 
+impl TenantIntent {
+    /// The stored form. One vocabulary for the query string, the settings row
+    /// and the console, so a band that picks "heads down" in one place is heads
+    /// down in all three.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Unstated => "unstated",
+            Self::BookingShows => "booking_shows",
+            Self::WorkingARelease => "working_a_release",
+            Self::HeadsDown => "heads_down",
+        }
+    }
+
+    /// Parses a stored or submitted value.
+    ///
+    /// Returns `None` for anything unrecognised rather than falling back to a
+    /// variant. The caller decides what an unreadable value means, and the two
+    /// callers decide differently: a settings write rejects it, while a read
+    /// keeps whatever the tenant last stated rather than silently demoting a
+    /// stated intent to `Unstated`.
+    #[must_use]
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw.trim() {
+            "unstated" => Some(Self::Unstated),
+            "booking_shows" => Some(Self::BookingShows),
+            "working_a_release" => Some(Self::WorkingARelease),
+            "heads_down" => Some(Self::HeadsDown),
+            _ => None,
+        }
+    }
+
+    /// Every variant, for a console that must offer all of them.
+    ///
+    /// Served rather than retyped in the UI: an intent the band cannot select
+    /// is an intent the planner will never respect.
+    #[must_use]
+    pub const fn all() -> [Self; 4] {
+        [
+            Self::Unstated,
+            Self::BookingShows,
+            Self::WorkingARelease,
+            Self::HeadsDown,
+        ]
+    }
+
+    /// What the band reads next to the choice.
+    #[must_use]
+    pub const fn describe(self) -> &'static str {
+        match self {
+            Self::Unstated => {
+                "No stated plan. Proposals arrive on evidence and say the timing is unverified."
+            }
+            Self::BookingShows => "Actively looking for shows. Proposals arrive freely.",
+            Self::WorkingARelease => {
+                "A release is the focus. Shows are proposed as launch nights, not as detours."
+            }
+            Self::HeadsDown => "Writing or recording. No gig proposals until this changes.",
+        }
+    }
+}
+
 /// A room, as the registry and the researched sheet know it.
 ///
 /// Every field is `Option` where the fact may genuinely be unknown, because
@@ -898,5 +960,47 @@ mod tests {
         let second = plan_gig(&many, TenantIntent::BookingShows).expect("proposes");
         assert_eq!(first, second);
         assert_eq!(first.contact, vec!["Ada", "Zed"]);
+    }
+
+    /// Both directions, over every variant. A stored intent that parses back to
+    /// something else is a band told "heads down" that keeps getting gigs, and
+    /// the failure would be invisible until somebody complained.
+    #[test]
+    fn every_intent_round_trips_through_its_stored_form() {
+        for intent in TenantIntent::all() {
+            assert_eq!(TenantIntent::parse(intent.as_str()), Some(intent));
+        }
+        // And no two variants share a stored form.
+        let mut stored: Vec<&str> = TenantIntent::all()
+            .into_iter()
+            .map(TenantIntent::as_str)
+            .collect();
+        stored.sort_unstable();
+        let distinct = stored.len();
+        stored.dedup();
+        assert_eq!(stored.len(), distinct);
+    }
+
+    /// Unrecognised is `None`, never a variant. The caller decides, and the two
+    /// callers decide differently on purpose.
+    #[test]
+    fn an_unreadable_value_parses_to_nothing_rather_than_to_unstated() {
+        assert_eq!(TenantIntent::parse(""), None);
+        assert_eq!(TenantIntent::parse("Booking_Shows"), None);
+        assert_eq!(TenantIntent::parse("touring"), None);
+        // Whitespace around a real value is a stored-row artefact, not a typo.
+        assert_eq!(
+            TenantIntent::parse(" heads_down "),
+            Some(TenantIntent::HeadsDown)
+        );
+    }
+
+    /// The console renders `describe`; an empty one would be a radio button
+    /// with no label.
+    #[test]
+    fn every_intent_carries_a_sentence_a_band_can_choose_from() {
+        for intent in TenantIntent::all() {
+            assert!(intent.describe().len() > 30, "{}", intent.as_str());
+        }
     }
 }

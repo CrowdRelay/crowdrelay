@@ -30,7 +30,7 @@ pub const DEFAULT_CREW_LOCALE: &str = "en";
 
 /// The keys an operator may edit. Anything else stays internal even if a row
 /// somehow appears, so the HTTP surface cannot be used to smuggle state.
-pub const EDITABLE_KEYS: [&str; 11] = [
+pub const EDITABLE_KEYS: [&str; 12] = [
     KEY_MEMBER_SITE_BASE_URL,
     KEY_MEMBER_AREA_PATH,
     KEY_SYNESTHESIA_CAMPAIGN_SLUG,
@@ -42,6 +42,7 @@ pub const EDITABLE_KEYS: [&str; 11] = [
     KEY_GROWTH_CADENCE_FILLERS_ENABLED,
     KEY_CREW_LOCALE,
     KEY_TEAM_WEEKLY_ASK_CEILING,
+    KEY_TENANT_INTENT,
 ];
 
 const KEY_MEMBER_SITE_BASE_URL: &str = "member_site_base_url";
@@ -64,6 +65,14 @@ pub const KEY_CREW_LOCALE: &str = "crew_locale";
 /// composer's own number, enforced by `select_team_assignee`. Absent means
 /// uncapped; a present value binds every active member the same way.
 pub const KEY_TEAM_WEEKLY_ASK_CEILING: &str = "team_weekly_ask_ceiling";
+/// §4G.2: what the tenant says they are working on, which the gig planner
+/// outranks its own evidence with.
+///
+/// Absent means `unstated`, and absent is what it stays until the band says
+/// otherwise — this value is never inferred from activity. Guessing a band is
+/// heads-down silently withholds every gig proposal they would have wanted,
+/// and the band never learns a suggestion was withheld.
+pub const KEY_TENANT_INTENT: &str = "tenant_intent";
 
 const CACHE_TTL: Duration = Duration::from_secs(60);
 
@@ -261,6 +270,36 @@ impl TenantSettingsRepository {
             .map(|tag| tag.trim().to_owned())
             .filter(|tag| !tag.is_empty())
             .unwrap_or_else(|| DEFAULT_CREW_LOCALE.to_owned()))
+    }
+
+    /// What the tenant last said they are working on, as stored.
+    ///
+    /// Returns the raw value rather than a parsed intent so this repository
+    /// stays free of the planner's vocabulary, exactly as `crew_locale` stays
+    /// free of the briefing vocabulary. `None` means the band has never stated
+    /// one, which the planner reads as `Unstated` — and it must stay `None`
+    /// rather than becoming a stored "unstated", because the console shows the
+    /// difference between a band that chose to say nothing and one that was
+    /// never asked.
+    ///
+    /// Not cached: the planner reads it once per plan, and a band that switches
+    /// to heads-down expects the next proposal to stop, not the one after the
+    /// TTL.
+    ///
+    /// # Errors
+    ///
+    /// Propagates the database error.
+    pub async fn tenant_intent(&self, workspace_id: Uuid) -> Result<Option<String>, sqlx::Error> {
+        let stored: Option<String> = sqlx::query_scalar(
+            "SELECT value FROM tenant_settings WHERE workspace_id = $1 AND key = $2",
+        )
+        .bind(workspace_id)
+        .bind(KEY_TENANT_INTENT)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(stored
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty()))
     }
 
     pub async fn cadence_settings(

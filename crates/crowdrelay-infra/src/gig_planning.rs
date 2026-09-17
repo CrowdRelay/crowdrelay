@@ -34,6 +34,7 @@ use time::OffsetDateTime;
 use uuid::Uuid;
 
 use crate::place_reach::reachable_in_city;
+use crate::tenant_settings::TenantSettingsRepository;
 
 /// How many cities the planner considers in one pass.
 ///
@@ -332,6 +333,34 @@ pub async fn city_opportunities(
     Ok(opportunities)
 }
 
+/// What one workspace has stated it is working on, or `Unstated`.
+///
+/// One resolution for the band route and the roster route. Two readers of the
+/// same setting would eventually disagree about what an unreadable value means,
+/// and the disagreement would show up as a band receiving proposals on one
+/// surface and not the other.
+///
+/// A stored value nobody recognises resolves to `Unstated`: the vocabulary is
+/// validated on write, so an unreadable row is a hand edit, and proposing with
+/// the timing marked unverified is the weakest thing the planner can do with it.
+/// It is never read as `HeadsDown` — silently withholding every proposal on the
+/// strength of a typo is the failure nobody would report.
+///
+/// # Errors
+///
+/// Propagates the database error.
+pub async fn stated_intent(
+    settings: &TenantSettingsRepository,
+    workspace_id: Uuid,
+) -> Result<TenantIntent, sqlx::Error> {
+    Ok(settings
+        .tenant_intent(workspace_id)
+        .await?
+        .as_deref()
+        .and_then(TenantIntent::parse)
+        .unwrap_or_default())
+}
+
 /// The roster's view: every act in the organisation, and the cities any of them
 /// could play.
 ///
@@ -364,11 +393,13 @@ pub async fn roster_opportunity(
 
     let mut acts = Vec::with_capacity(members.len());
     let mut cities: Vec<CityOpportunity> = Vec::new();
+    let settings = TenantSettingsRepository::new(pool.clone());
 
     for member in members {
         let act_workspace: Uuid = member.get("id");
         let act_name: String = member.get("name");
         let per_city = city_opportunities(pool, act_workspace, now).await?;
+        let intent = stated_intent(&settings, act_workspace).await?;
 
         let reach_by_city = per_city
             .iter()
@@ -385,11 +416,11 @@ pub async fn roster_opportunity(
 
         acts.push(RosterAct {
             name: act_name,
-            // Per-act intent is a tenant setting that does not exist yet
-            // (4G.2). `Unstated` is the honest default: it proposes on
-            // evidence and says the timing is unverified, rather than
-            // inferring a plan the act never stated.
-            intent: TenantIntent::Unstated,
+            // Each act's own word, read from its own workspace (4G.2). A label
+            // cannot state it for them and the roster planner cannot overrule
+            // it: an act that says it is recording is not proposed, whatever
+            // the roster would prefer.
+            intent,
             months_since_last_show,
             reach_by_city,
             // Cross-workspace overlap is 4G.3b. Empty means the planner will

@@ -20,7 +20,8 @@ use axum::{
 };
 use crowdrelay_domain::gig_plan::{GigPlan, TenantIntent, plan_gig};
 use crowdrelay_domain::roster_plan::{RosterRefusal, RosterRun, plan_roster_run};
-use crowdrelay_infra::gig_planning::{city_opportunities, roster_opportunity};
+use crowdrelay_infra::gig_planning::{city_opportunities, roster_opportunity, stated_intent};
+use crowdrelay_infra::tenant_settings::TenantSettingsRepository;
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use uuid::Uuid;
@@ -36,23 +37,31 @@ const MAX_PROPOSALS: usize = 3;
 
 #[derive(Debug, Deserialize)]
 pub struct PlanParams {
-    /// What the tenant says they are working on. Absent means `Unstated`,
-    /// which proposes on evidence and says the timing is unverified — never
-    /// inferred, because guessing a band is heads-down and silently
-    /// withholding gigs is worse than asking.
+    /// A one-off override of the stored intent, for asking "what would this
+    /// look like if we were booking?". Absent — the normal case — uses what the
+    /// band stored in the console.
     intent: Option<String>,
 }
 
-fn parse_intent(raw: Option<&str>) -> TenantIntent {
-    match raw {
-        Some("booking_shows") => TenantIntent::BookingShows,
-        Some("working_a_release") => TenantIntent::WorkingARelease,
-        Some("heads_down") => TenantIntent::HeadsDown,
-        // An unrecognised value reads as unstated rather than as an error. A
-        // typo in a query string must not withhold a proposal, and must not
-        // silently pick a plan the tenant did not state either.
-        _ => TenantIntent::Unstated,
-    }
+/// Which intent this request plans against.
+///
+/// Precedence, and each step is deliberate:
+///
+/// 1. A **recognised** query parameter wins. It is somebody typing an intent at
+///    the moment they ask, which is as explicit as a statement gets.
+/// 2. Otherwise the **stored** setting — what the band last said in the
+///    console. This is the normal path, and it is why the setting exists: a
+///    band that sets "heads down" must stop receiving proposals without having
+///    to remember a query string.
+/// 3. Otherwise `Unstated`, which proposes on evidence and says the timing is
+///    unverified.
+///
+/// An **unrecognised** parameter falls through to the stored value rather than
+/// resolving to `Unstated`. A typo in a URL must never quietly discard what the
+/// band actually stated — that is how a heads-down band starts getting gig
+/// proposals again and nobody can say why.
+fn resolve_intent(param: Option<&str>, stored: TenantIntent) -> TenantIntent {
+    param.and_then(TenantIntent::parse).unwrap_or(stored)
 }
 
 /// One city that produced no proposal, with the sentence explaining it.
@@ -73,6 +82,15 @@ struct BandPlanResponse {
     /// How many cities were looked at. Without it, an empty answer is
     /// indistinguishable from a planner that never ran.
     cities_considered: usize,
+    /// The intent this plan was made against, in its stored form. Returned
+    /// because every proposal's `fits_intent` sentence depends on it: a band
+    /// reading "you said the release is the focus" must be able to see that
+    /// this is what the system has on file, and change it if it is wrong.
+    intent: &'static str,
+    /// Whether the intent came from the stored setting rather than from the
+    /// query string. False for a one-off override, so the console never shows a
+    /// preview as though it were the band's settled answer.
+    intent_is_stored: bool,
 }
 
 /// `GET /v1/control-plane/gig-plan` — what this band should book next.
@@ -82,8 +100,23 @@ pub async fn band_gig_plan(
     headers: HeaderMap,
 ) -> Response {
     let workspace_id = state.ticketing.workspace_id().into_uuid();
-    let intent = parse_intent(params.intent.as_deref());
     let now = OffsetDateTime::now_utc();
+
+    let settings = TenantSettingsRepository::new(state.database.clone());
+    let stored = match stated_intent(&settings, workspace_id).await {
+        Ok(stored) => stored,
+        Err(error) => {
+            // The stored intent is not a detail of the answer, it is what the
+            // band asked the planner to respect. Planning without it could
+            // hand gig proposals to a band that said it is recording, so the
+            // read failing fails the request.
+            tracing::warn!(%error, "stated intent read failed");
+            return Problem::service_unavailable(request_id(&headers))
+                .private()
+                .into_response();
+        }
+    };
+    let intent = resolve_intent(params.intent.as_deref(), stored);
 
     let opportunities = match city_opportunities(&state.database, workspace_id, now).await {
         Ok(opportunities) => opportunities,
@@ -135,6 +168,8 @@ pub async fn band_gig_plan(
             proposals,
             passed_over,
             cities_considered: considered,
+            intent: intent.as_str(),
+            intent_is_stored: intent == stored,
         }),
     )
         .into_response()
@@ -202,26 +237,64 @@ mod tests {
     use super::*;
     use crowdrelay_domain::gig_plan::GigRefusal;
 
+    /// The normal path: no parameter, so the plan runs against what the band
+    /// stored. Without this, the setting exists and nothing reads it.
     #[test]
-    fn an_unknown_intent_is_unstated_rather_than_a_guess() {
-        assert_eq!(parse_intent(None), TenantIntent::Unstated);
-        assert_eq!(parse_intent(Some("nonsense")), TenantIntent::Unstated);
-        assert_eq!(parse_intent(Some("")), TenantIntent::Unstated);
+    fn the_stored_intent_is_what_a_plain_request_plans_against() {
+        assert_eq!(
+            resolve_intent(None, TenantIntent::HeadsDown),
+            TenantIntent::HeadsDown
+        );
+        assert_eq!(
+            resolve_intent(None, TenantIntent::Unstated),
+            TenantIntent::Unstated
+        );
     }
 
-    /// Every variant round-trips, or a band setting "heads down" in the console
-    /// silently keeps receiving gig proposals.
+    /// An explicit, recognised parameter is somebody stating an intent at the
+    /// moment they ask, and it wins.
     #[test]
-    fn every_intent_the_console_can_send_is_understood() {
+    fn a_recognised_parameter_overrides_the_stored_intent() {
         assert_eq!(
-            parse_intent(Some("booking_shows")),
+            resolve_intent(Some("booking_shows"), TenantIntent::Unstated),
             TenantIntent::BookingShows
         );
         assert_eq!(
-            parse_intent(Some("working_a_release")),
+            resolve_intent(Some("working_a_release"), TenantIntent::BookingShows),
             TenantIntent::WorkingARelease
         );
-        assert_eq!(parse_intent(Some("heads_down")), TenantIntent::HeadsDown);
+        assert_eq!(
+            resolve_intent(Some("heads_down"), TenantIntent::BookingShows),
+            TenantIntent::HeadsDown
+        );
+    }
+
+    /// The bug this ordering exists to prevent: a typo in a URL discarding what
+    /// the band stated, so a band that said it is recording gets proposals
+    /// again and nobody can say why.
+    #[test]
+    fn a_typo_keeps_the_stored_intent_rather_than_discarding_it() {
+        assert_eq!(
+            resolve_intent(Some("headsdown"), TenantIntent::HeadsDown),
+            TenantIntent::HeadsDown
+        );
+        assert_eq!(
+            resolve_intent(Some(""), TenantIntent::WorkingARelease),
+            TenantIntent::WorkingARelease
+        );
+        assert_eq!(
+            resolve_intent(Some("Booking_Shows"), TenantIntent::HeadsDown),
+            TenantIntent::HeadsDown
+        );
+    }
+
+    /// The console must be able to tell a settled answer from a preview.
+    #[test]
+    fn an_override_is_distinguishable_from_the_stored_answer() {
+        let stored = TenantIntent::HeadsDown;
+        let overridden = resolve_intent(Some("booking_shows"), stored);
+        assert_ne!(overridden, stored);
+        assert_eq!(resolve_intent(None, stored), stored);
     }
 
     #[test]

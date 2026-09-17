@@ -209,6 +209,10 @@ pub(crate) fn router(state: crate::AppState) -> Router {
             get(crate::tenant_settings_http::list_north_star_options),
         )
         .route(
+            "/v1/control-plane/tenant-settings/intents",
+            get(crate::tenant_settings_http::list_tenant_intent_options),
+        )
+        .route(
             "/v1/control-plane/tenant-settings",
             get(crate::tenant_settings_http::get_brand_settings),
         )
