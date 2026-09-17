@@ -227,9 +227,8 @@ fn parse_finding_timestamp(
     if text.is_empty() {
         return Ok(None);
     }
-    let parsed =
-        OffsetDateTime::parse(text, &time::format_description::well_known::Rfc3339)
-            .map_err(|_| OutcomeRejection::InvalidFindingTimestamp)?;
+    let parsed = OffsetDateTime::parse(text, &time::format_description::well_known::Rfc3339)
+        .map_err(|_| OutcomeRejection::InvalidFindingTimestamp)?;
     if parsed > OffsetDateTime::now_utc() + Duration::from_secs(86_400) {
         return Err(OutcomeRejection::InvalidFindingTimestamp);
     }
@@ -244,8 +243,7 @@ fn parse_finding_date(value: Option<&Value>) -> Option<OffsetDateTime> {
     if text.is_empty() {
         return None;
     }
-    if let Ok(parsed) =
-        OffsetDateTime::parse(text, &time::format_description::well_known::Rfc3339)
+    if let Ok(parsed) = OffsetDateTime::parse(text, &time::format_description::well_known::Rfc3339)
     {
         return Some(parsed);
     }
@@ -1612,10 +1610,8 @@ impl AgentOutcomeWorker {
         // declared kind is a fallback for text the keyword matcher cannot
         // see through, scored at the floor because the text could not support
         // its own claim.
-        let discovery = crowdrelay_domain::live_opportunities::LiveOpportunityDiscovery {
-            title,
-            summary,
-        };
+        let discovery =
+            crowdrelay_domain::live_opportunities::LiveOpportunityDiscovery { title, summary };
         let (kind, fit, reputation, confidence_basis_points) =
             match crowdrelay_domain::live_opportunities::evaluate_scout_discovery(&discovery) {
                 Some(assessment) => (

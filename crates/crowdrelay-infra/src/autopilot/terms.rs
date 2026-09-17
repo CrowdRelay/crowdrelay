@@ -101,7 +101,10 @@ impl PostgresAutopilotRepository {
             .load_pending_counterparty_reports(
                 workspace_id,
                 now,
-                &rows.iter().map(|row| row.opportunity_id).collect::<Vec<_>>(),
+                &rows
+                    .iter()
+                    .map(|row| row.opportunity_id)
+                    .collect::<Vec<_>>(),
             )
             .await?;
         let mut snapshots = Vec::with_capacity(rows.len());
@@ -194,9 +197,7 @@ impl PostgresAutopilotRepository {
             .await?;
         Ok(rows
             .into_iter()
-            .map(|(opportunity_id, event_id)| {
-                (opportunity_id, EventId::from_uuid(event_id))
-            })
+            .map(|(opportunity_id, event_id)| (opportunity_id, EventId::from_uuid(event_id)))
             .collect())
     }
 

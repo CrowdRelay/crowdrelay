@@ -67,9 +67,7 @@ fn stale_reason(row: &ShortlistRow, now: OffsetDateTime) -> Option<&'static str>
         return Some("no_destination");
     }
     let observed = row.source_observed_at;
-    if observed.is_none()
-        || observed.is_some_and(|at| now - at > scout_observation_stale_after())
-    {
+    if observed.is_none() || observed.is_some_and(|at| now - at > scout_observation_stale_after()) {
         return Some("stale_observation");
     }
     // A deadline that passed matters only while nothing has been sent — the
@@ -161,64 +159,64 @@ pub(in crate::autopilot) async fn load_opportunity_shortlist(
                 let costed = estimate_show_cost(
                     &ShowLogistics {
                         distance_km: row.distance_km.and_then(|km| u32::try_from(km).ok()),
-                        nights_away: row
-                            .nights_away
-                            .and_then(|nights| u8::try_from(nights).ok()),
+                        nights_away: row.nights_away.and_then(|nights| u8::try_from(nights).ok()),
                         offered_fee_minor: row.expected_fee_minor,
                         application_fee_minor: row.application_fee_minor,
                     },
                     &tour_policy,
                 );
-                Ok(crowdrelay_application::autopilot::OpportunityShortlistEntry {
-                    opportunity_id: row.opportunity_id,
-                    kind: row.opportunity_kind.clone(),
-                    source: row.source.clone(),
-                    external_key: row.external_key.clone(),
-                    title: row.title.clone(),
-                    organization: row.organization.clone(),
-                    destination_url: row.destination_url.clone(),
-                    source_observed_at: row.source_observed_at,
-                    deadline: row.deadline,
-                    status: row.status.clone(),
-                    status_reason: row.status_reason.clone(),
-                    eligible: row.eligible,
-                    // The columns default to 0 and cannot tell "free" from
-                    // "never entered" — a scout row's money is unentered
-                    // until a human types it. `None` keeps unknown reading
-                    // as unknown instead of as free.
-                    expected_fee_minor: (row.expected_fee_minor > 0)
-                        .then_some(row.expected_fee_minor),
-                    estimated_cost_minor: Some(costed
-                        .cost()
-                        .map_or(row.estimated_cost_minor, |cost| cost.total_cost_minor))
+                Ok(
+                    crowdrelay_application::autopilot::OpportunityShortlistEntry {
+                        opportunity_id: row.opportunity_id,
+                        kind: row.opportunity_kind.clone(),
+                        source: row.source.clone(),
+                        external_key: row.external_key.clone(),
+                        title: row.title.clone(),
+                        organization: row.organization.clone(),
+                        destination_url: row.destination_url.clone(),
+                        source_observed_at: row.source_observed_at,
+                        deadline: row.deadline,
+                        status: row.status.clone(),
+                        status_reason: row.status_reason.clone(),
+                        eligible: row.eligible,
+                        // The columns default to 0 and cannot tell "free" from
+                        // "never entered" — a scout row's money is unentered
+                        // until a human types it. `None` keeps unknown reading
+                        // as unknown instead of as free.
+                        expected_fee_minor: (row.expected_fee_minor > 0)
+                            .then_some(row.expected_fee_minor),
+                        estimated_cost_minor: Some(
+                            costed
+                                .cost()
+                                .map_or(row.estimated_cost_minor, |cost| cost.total_cost_minor),
+                        )
                         .filter(|value| *value > 0),
-                    application_fee_minor: (row.application_fee_minor > 0)
-                        .then_some(row.application_fee_minor),
-                    currency: row.currency.clone(),
-                    fit_basis_points: u16::try_from(row.fit_basis_points)
-                        .map_err(|_| RepositoryError::Unexpected)?,
-                    reputation_basis_points: u16::try_from(row.reputation_basis_points)
-                        .map_err(|_| RepositoryError::Unexpected)?,
-                    confidence_basis_points: u16::try_from(row.confidence_basis_points)
-                        .map_err(|_| RepositoryError::Unexpected)?,
-                    stale_reason: reason.map(str::to_owned),
-                    latest_decision_id: row.latest_decision_id,
-                    latest_decision_kind: row.latest_decision_kind.clone(),
-                    latest_decision_disposition: row.latest_decision_disposition.clone(),
-                    costed_from_logistics: costed.cost().is_some(),
-                })
+                        application_fee_minor: (row.application_fee_minor > 0)
+                            .then_some(row.application_fee_minor),
+                        currency: row.currency.clone(),
+                        fit_basis_points: u16::try_from(row.fit_basis_points)
+                            .map_err(|_| RepositoryError::Unexpected)?,
+                        reputation_basis_points: u16::try_from(row.reputation_basis_points)
+                            .map_err(|_| RepositoryError::Unexpected)?,
+                        confidence_basis_points: u16::try_from(row.confidence_basis_points)
+                            .map_err(|_| RepositoryError::Unexpected)?,
+                        stale_reason: reason.map(str::to_owned),
+                        latest_decision_id: row.latest_decision_id,
+                        latest_decision_kind: row.latest_decision_kind.clone(),
+                        latest_decision_disposition: row.latest_decision_disposition.clone(),
+                        costed_from_logistics: costed.cost().is_some(),
+                    },
+                )
             })
             .collect::<Result<Vec<_>, RepositoryError>>()?;
 
-        Ok(
-            crowdrelay_application::autopilot::OpportunityShortlist {
-                generated_at: now,
-                entries,
-                stale_count,
-                closed_count,
-                ineligible_count,
-                degraded: Vec::new(),
-            },
-        )
+        Ok(crowdrelay_application::autopilot::OpportunityShortlist {
+            generated_at: now,
+            entries,
+            stale_count,
+            closed_count,
+            ineligible_count,
+            degraded: Vec::new(),
+        })
     }
 }

@@ -221,10 +221,7 @@ pub async fn next_best_actions(State(state): State<AppState>, headers: HeaderMap
 /// figures, staleness and newest decision — including the closed, ineligible
 /// and stale rows, because a review surface that hides its rejections makes
 /// the operator re-check them by hand.
-pub async fn opportunity_shortlist(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-) -> Response {
+pub async fn opportunity_shortlist(State(state): State<AppState>, headers: HeaderMap) -> Response {
     match read(
         &state,
         1,

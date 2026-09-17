@@ -809,20 +809,15 @@ async fn finding_valid_inner(pool: &PgPool) -> Result<()> {
         opportunity_count(pool, ws).await? == 1,
         "a valid finding must land exactly one opportunity row"
     );
-    let (kind, verified, requires_contract, observed, status): (
-        String,
-        bool,
-        bool,
-        bool,
-        String,
-    ) = sqlx::query_as(
-        "SELECT opportunity_kind, verified_destination, requires_contract, \
+    let (kind, verified, requires_contract, observed, status): (String, bool, bool, bool, String) =
+        sqlx::query_as(
+            "SELECT opportunity_kind, verified_destination, requires_contract, \
                 source_observed_at IS NOT NULL, status \
          FROM viryaos_team_opportunities WHERE workspace_id = $1",
-    )
-    .bind(ws.into_uuid())
-    .fetch_one(pool)
-    .await?;
+        )
+        .bind(ws.into_uuid())
+        .fetch_one(pool)
+        .await?;
     ensure!(kind == "press", "the scout kind must land, got {kind}");
     ensure!(
         !verified && requires_contract && status == "new",
@@ -900,6 +895,9 @@ async fn finding_reemit_inner(pool: &PgPool) -> Result<()> {
     .bind(ws.into_uuid())
     .fetch_one(pool)
     .await?;
-    ensure!(version == 2, "the re-emit must bump the row version, got {version}");
+    ensure!(
+        version == 2,
+        "the re-emit must bump the row version, got {version}"
+    );
     Ok(())
 }
