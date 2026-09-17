@@ -439,7 +439,33 @@ pub async fn city_funnel(
 /// `workspace_id IS NULL` so a contributor-private fact never leaks into
 /// this cross-tenant read. `typical_draw` averages only shows that had a
 /// ticket sale at all — an unticketed night is unmeasurable, not a zero.
+/// `comparable_acts` (§12-5, 4V.6) counts distinct acts on this room's bills
+/// — any tenant's — whose genre set intersects the requesting workspace's
+/// own listing genres, resolved through the genre-alias map on both sides.
+/// A name-only peer with no genre claims is honestly not counted: the count
+/// is a floor, not a guess.
 pub async fn city_venues(State(state): State<crate::AppState>, headers: HeaderMap) -> Response {
+    let workspace_id = state.ticketing.workspace_id().into_uuid();
+    // The requesting tenant's own genre set, one scalar up front — the
+    // "mine" half of every comparability test below. A failed read degrades
+    // to an empty set rather than failing the venue list over it.
+    let my_genres = match sqlx::query_scalar::<_, Vec<String>>(
+        r#"
+        SELECT COALESCE(array_agg(DISTINCT lower(btrim(g))), '{}')
+        FROM viryaos_band_listings AS bl, unnest(bl.genre_tags) AS g
+        WHERE bl.workspace_id = $1
+        "#,
+    )
+    .bind(workspace_id)
+    .fetch_one(&state.database)
+    .await
+    {
+        Ok(genres) => genres,
+        Err(error) => {
+            tracing::warn!(%error, "tenant genre read failed; comparable_acts reads as zero");
+            Vec::new()
+        }
+    };
     let mut result = sqlx::query_as::<_, CityVenueRow>(
         r#"
         WITH marks AS (
@@ -498,6 +524,48 @@ pub async fn city_venues(State(state): State<crate::AppState>, headers: HeaderMa
                          WHEN 'event_evidence' THEN 2 WHEN 'open_directory' THEN 3
                          ELSE 4 END,
                      f.observed_at DESC
+        ), act_genres AS (
+            -- An act's genre set: tenant acts carry theirs on the band
+            -- listing, peer acts on the attributed place_peer_act_genres
+            -- rows. Tags stay raw here — normalization happens once, at
+            -- comparison time in `comparable`.
+            SELECT a.act_workspace_id AS act_id_ws, NULL::uuid AS peer_id, g AS genre
+            FROM event_acts AS a
+            JOIN viryaos_band_listings AS bl
+              ON bl.workspace_id = a.act_workspace_id
+            CROSS JOIN LATERAL unnest(bl.genre_tags) AS g
+            UNION ALL
+            SELECT NULL, pag.peer_act_id, pag.genre_tag
+            FROM place_peer_act_genres AS pag
+        ), comparable AS (
+            -- A bill act counts when its genre set intersects the requesting
+            -- workspace's own. Both sides resolve through the alias map:
+            -- free text is the display form, canonical is what matches.
+            SELECT m.venue_id,
+                   count(DISTINCT COALESCE(a.act_workspace_id::text, a.peer_act_id::text))::bigint
+                       AS comparable_acts
+            FROM place_venue_marks AS m
+            JOIN event_acts AS a
+              ON a.event_id = m.event_id
+             AND a.workspace_id = m.workspace_id
+            WHERE EXISTS (
+                SELECT 1
+                FROM (
+                    SELECT COALESCE(mine_alias.canonical, mine_tag.genre) AS genre
+                    FROM unnest($2::text[]) AS mine_tag(genre)
+                    LEFT JOIN place_genre_aliases AS mine_alias
+                      ON mine_alias.alias = mine_tag.genre
+                ) AS mine
+                JOIN (
+                    SELECT COALESCE(their_alias.canonical, lower(btrim(ag.genre))) AS genre
+                    FROM act_genres AS ag
+                    LEFT JOIN place_genre_aliases AS their_alias
+                      ON their_alias.alias = lower(btrim(ag.genre))
+                    WHERE ag.act_id_ws = a.act_workspace_id
+                       OR ag.peer_id = a.peer_act_id
+                ) AS theirs ON theirs.genre = mine.genre
+            )
+            GROUP BY m.venue_id
         )
         SELECT
             venue.id AS venue_id,
@@ -516,6 +584,7 @@ pub async fn city_venues(State(state): State<crate::AppState>, headers: HeaderMa
             count(DISTINCT marks.workspace_id)::bigint AS contributors,
             avg(draw.paid_orders) AS typical_draw,
             COALESCE(repeaters.repeat_attenders, 0)::bigint AS repeat_attenders,
+            COALESCE(comparable.comparable_acts, 0)::bigint AS comparable_acts,
             max(marks.starts_at) FILTER (WHERE marks.starts_at <= now()) AS last_played_at,
             min(marks.starts_at) FILTER (
                 WHERE marks.starts_at > now() AND marks.status = 'published'
@@ -549,6 +618,8 @@ pub async fn city_venues(State(state): State<crate::AppState>, headers: HeaderMa
          AND draw.event_id = marks.event_id
         LEFT JOIN repeaters
           ON repeaters.venue_id = venue.id
+        LEFT JOIN comparable
+          ON comparable.venue_id = venue.id
         LEFT JOIN resolved AS cap
           ON cap.venue_id = venue.id AND cap.attribute = 'capacity'
         LEFT JOIN resolved AS gen
@@ -560,11 +631,14 @@ pub async fn city_venues(State(state): State<crate::AppState>, headers: HeaderMa
         LEFT JOIN resolved AS stat
           ON stat.venue_id = venue.id AND stat.attribute = 'status'
         GROUP BY venue.id, venue.display_name, city.slug, city.name,
-                 city.country_code, repeaters.repeat_attenders
+                 city.country_code, repeaters.repeat_attenders,
+                 comparable.comparable_acts
         ORDER BY shows_played DESC, venue.display_name, venue.id
         LIMIT 500
         "#,
     )
+    .bind(workspace_id)
+    .bind(&my_genres)
     .fetch_all(&state.database)
     .await;
     if let Ok(rows) = &mut result {
@@ -601,6 +675,7 @@ async fn assess_venue_rows(state: &crate::AppState, rows: &mut [CityVenueRow]) {
             shows_played: row.shows_played,
             shows_booked: row.shows_booked,
             repeat_attenders: row.repeat_attenders,
+            comparable_acts: row.comparable_acts,
             typical_draw: row.typical_draw,
             last_played_at: row.last_played_at,
             next_show_at: row.next_show_at,

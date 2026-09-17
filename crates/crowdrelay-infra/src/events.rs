@@ -555,6 +555,98 @@ impl PostgresEventRepository {
             .map_err(EventStoreError::from_sqlx)?;
         }
 
+        // 4V.6: the bill is the richest booking signal in the business, so
+        // every name on it resolves inside this same transaction. A slug hit
+        // or a listing's act-name hit on exactly one workspace links the
+        // tenant; candidates naming two different workspaces are ambiguous
+        // and resolve nothing rather than picking one.
+        for act in &command.acts {
+            sqlx::query(
+                r#"
+                UPDATE event_acts AS a
+                SET act_workspace_id = resolved.workspace_id
+                FROM (
+                    -- uuid has no ordering, so no min(): the HAVING
+                    -- guarantees one distinct value and [1] lifts it out.
+                    SELECT (array_agg(candidate.workspace_id))[1] AS workspace_id
+                    FROM (
+                        SELECT w.id AS workspace_id
+                        FROM workspaces AS w
+                        WHERE w.slug = $3
+                        UNION ALL
+                        SELECT bl.workspace_id
+                        FROM viryaos_band_listings AS bl
+                        WHERE lower(btrim(bl.act_name)) = lower(btrim($4))
+                    ) AS candidate
+                    HAVING count(DISTINCT candidate.workspace_id) = 1
+                ) AS resolved
+                WHERE a.workspace_id = $1
+                  AND a.event_id = $2
+                  AND a.act_slug = $3
+                "#,
+            )
+            .bind(workspace_id.into_uuid())
+            .bind(event_id)
+            .bind(act.act_slug.as_str())
+            .bind(act.act_name.as_str())
+            .execute(&mut *transaction)
+            .await
+            .map_err(EventStoreError::from_sqlx)?;
+        }
+
+        // Every still-unlinked name is a band that is not a tenant — mint or
+        // re-link its peer act, the global identity every tenant's bills
+        // point at. place_venue_key() is reused on purpose: it is generic
+        // lower/trim/collapse normalization, not venue-specific.
+        let unresolved = sqlx::query_as::<_, (String, String)>(
+            r#"
+            SELECT act_slug, act_name
+            FROM event_acts
+            WHERE workspace_id = $1
+              AND event_id = $2
+              AND act_workspace_id IS NULL
+              AND peer_act_id IS NULL
+            "#,
+        )
+        .bind(workspace_id.into_uuid())
+        .bind(event_id)
+        .fetch_all(&mut *transaction)
+        .await
+        .map_err(EventStoreError::from_sqlx)?;
+
+        for (act_slug, act_name) in unresolved {
+            // ON CONFLICT DO UPDATE — not DO NOTHING — so RETURNING hands
+            // back the existing row's id on a name_key collision, which is
+            // the re-link path for a band already on somebody else's bill.
+            let peer_act_id = sqlx::query_scalar::<_, Uuid>(
+                r#"
+                INSERT INTO place_peer_acts (name_key, display_name)
+                VALUES (place_venue_key($1), left(btrim($1), 500))
+                ON CONFLICT (name_key) DO UPDATE SET display_name = EXCLUDED.display_name
+                RETURNING id
+                "#,
+            )
+            .bind(&act_name)
+            .fetch_one(&mut *transaction)
+            .await
+            .map_err(EventStoreError::from_sqlx)?;
+
+            sqlx::query(
+                r#"
+                UPDATE event_acts
+                SET peer_act_id = $3
+                WHERE workspace_id = $1 AND event_id = $2 AND act_slug = $4
+                "#,
+            )
+            .bind(workspace_id.into_uuid())
+            .bind(event_id)
+            .bind(peer_act_id)
+            .bind(act_slug.as_str())
+            .execute(&mut *transaction)
+            .await
+            .map_err(EventStoreError::from_sqlx)?;
+        }
+
         // event_acts writes do not touch the events row, so its updated_at
         // trigger never fires — bump it explicitly so cache readers and
         // consumers ordering on updated_at see the bill change.

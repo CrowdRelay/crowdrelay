@@ -80,6 +80,10 @@ pub struct VenueEvidence {
     pub shows_booked: i64,
     /// Buyers who paid for at least two shows here.
     pub repeat_attenders: i64,
+    /// Acts on this room's bills whose genres intersect the tenant's own —
+    /// counted from bills, not asserted. A floor, not a guess: a name-only
+    /// peer act with no genre claims honestly counts as nothing.
+    pub comparable_acts: i64,
     /// Mean paid orders over the room's ticketed shows. `None` means no
     /// marked show sold tickets through us — unmeasured, not zero.
     pub typical_draw: Option<f64>,
@@ -122,17 +126,21 @@ impl EvidenceLocale {
 /// One because-clause, typed so tests assert the *fact chosen*, not a string.
 ///
 /// The ordering [`assess`] applies is the "strongest facts" rule, strongest
-/// first: shows the room has played, fans who keep coming back, a show in
-/// the last 90 days, a night already booked forward, a booking contact
-/// checked inside 60 days, then the registry facts — capacity, genres — and
-/// last the measured draw. A sentence lists at most the first three, so the
-/// tail exists only as tie-break depth.
+/// first: shows the room has played, fans who keep coming back, comparable
+/// acts the room's bills have already hosted, a show in the last 90 days, a
+/// night already booked forward, a booking contact checked inside 60 days,
+/// then the registry facts — capacity, genres — and last the measured draw.
+/// A sentence lists at most the first three, so the tail exists only as
+/// tie-break depth.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum EvidenceClause {
     /// All-time shows already played in the room.
     PlayedShows { count: i64 },
     /// Buyers who paid for two or more shows here.
     RepeatAttenders { count: i64 },
+    /// Acts on the room's bills whose genres intersect the tenant's — the
+    /// comparable-acts edge §12-1 calls the one that matters.
+    ComparableActs { count: i64 },
     /// Mean paid orders over ticketed shows, rounded.
     TypicalDraw { draw: i64 },
     /// The room's capacity as the winning source states it.
@@ -198,6 +206,11 @@ fn clauses_in_strength_order(evidence: &VenueEvidence, now: OffsetDateTime) -> V
     if evidence.repeat_attenders > 0 {
         clauses.push(EvidenceClause::RepeatAttenders {
             count: evidence.repeat_attenders,
+        });
+    }
+    if evidence.comparable_acts > 0 {
+        clauses.push(EvidenceClause::ComparableActs {
+            count: evidence.comparable_acts,
         });
     }
     if let Some(last_played_at) = evidence.last_played_at {
@@ -275,6 +288,22 @@ fn clause_text(clause: &EvidenceClause, locale: EvidenceLocale) -> String {
         (EvidenceClause::RepeatAttenders { count }, EvidenceLocale::Pl) => {
             format!("{count} fanów kupiło tu bilety na co najmniej dwa koncerty")
         }
+        (EvidenceClause::ComparableActs { count }, EvidenceLocale::En) if *count == 1 => {
+            "1 comparable act has played here".to_owned()
+        }
+        (EvidenceClause::ComparableActs { count }, EvidenceLocale::En) => {
+            format!("{count} comparable acts have played here")
+        }
+        (EvidenceClause::ComparableActs { count }, EvidenceLocale::Pl) => format!(
+            "{} tu już {count} {}",
+            polish_played(*count),
+            polish_count(
+                *count,
+                "pokrewny zespół",
+                "pokrewne zespoły",
+                "pokrewnych zespołów"
+            )
+        ),
         (EvidenceClause::RecentlyPlayed { days_ago }, EvidenceLocale::En) => {
             format!("the last show there was {}", age_english(*days_ago))
         }
@@ -386,22 +415,50 @@ fn english_plural<'a>(count: i64, one: &'a str, many: &'a str) -> &'a str {
     if count == 1 { one } else { many }
 }
 
-/// Polish count agreement: 1 koncert, 2–4 koncerty, 5+ koncertów — with the
-/// teen exception (12–14 take `many`) and the pattern repeating on the tens
-/// (22–24 → `few`, 25+ → `many`).
-fn polish_count<'a>(count: i64, one: &'a str, few: &'a str, many: &'a str) -> &'a str {
+/// The Polish count class: one, the 2–4 few, or many — with the teen
+/// exception (12–14 take `many`) and the pattern repeating on the tens
+/// (22–24 → `few`, 25+ → `many`). Shared by noun and verb so the two halves
+/// of a clause can never disagree.
+#[derive(Clone, Copy)]
+enum PolishForm {
+    One,
+    Few,
+    Many,
+}
+
+fn polish_form(count: i64) -> PolishForm {
     let count = count.unsigned_abs();
     if count == 1 {
-        return one;
+        return PolishForm::One;
     }
     let rem100 = count % 100;
     if (12..=14).contains(&rem100) {
-        return many;
+        return PolishForm::Many;
     }
     if (2..=4).contains(&(count % 10)) {
-        return few;
+        return PolishForm::Few;
     }
-    many
+    PolishForm::Many
+}
+
+/// Polish count agreement: 1 koncert, 2–4 koncerty, 5+ koncertów.
+fn polish_count<'a>(count: i64, one: &'a str, few: &'a str, many: &'a str) -> &'a str {
+    match polish_form(count) {
+        PolishForm::One => one,
+        PolishForm::Few => few,
+        PolishForm::Many => many,
+    }
+}
+
+/// The verb half of the comparable-acts clause — "grał" / "grały" /
+/// "grało" — inflected on the same one/few/many split as the noun it leads
+/// into.
+fn polish_played(count: i64) -> &'static str {
+    match polish_form(count) {
+        PolishForm::One => "grał",
+        PolishForm::Few => "grały",
+        PolishForm::Many => "grało",
+    }
 }
 
 #[cfg(test)]
@@ -444,6 +501,7 @@ mod tests {
             shows_played: 14,
             shows_booked: 1,
             repeat_attenders: 9,
+            comparable_acts: 0,
             typical_draw: Some(87.4),
             last_played_at: Some(now() - Duration::days(11)),
             next_show_at: Some(now() + Duration::days(20)),
@@ -624,6 +682,98 @@ mod tests {
                 .iter()
                 .all(|clause| !matches!(clause, EvidenceClause::RecentlyPlayed { .. })),
             "a 100-day-old show is not recent: {clauses:?}"
+        );
+    }
+
+    /// Comparable acts sit between repeat attenders and the recency clause —
+    /// the edge §12-1 calls the one that matters, outranked only by the
+    /// room's own played history and its regulars.
+    #[test]
+    fn comparable_acts_rank_after_repeat_attenders_and_before_recency() {
+        let room = VenueEvidence {
+            repeat_attenders: 4,
+            comparable_acts: 3,
+            last_played_at: Some(now() - Duration::days(11)),
+            ..exists_only_room()
+        };
+        let VenueAssessment::WorthContact { sentence, clauses } =
+            assess(&room, now(), EvidenceLocale::En)
+        else {
+            panic!("comparable bills plus regulars are above the floor")
+        };
+        assert_eq!(
+            clauses,
+            vec![
+                EvidenceClause::RepeatAttenders { count: 4 },
+                EvidenceClause::ComparableActs { count: 3 },
+                EvidenceClause::RecentlyPlayed { days_ago: 11 },
+            ]
+        );
+        assert_eq!(
+            sentence,
+            "Klub Y is worth contacting, because 4 fans bought tickets for at \
+             least two shows here, 3 comparable acts have played here and the \
+             last show there was 11 days ago."
+        );
+    }
+
+    /// A comparable-acts count on its own is above the floor — bills are
+    /// evidence, and the singular form agrees with its verb.
+    #[test]
+    fn one_comparable_act_carries_a_sentence_in_english() {
+        let room = VenueEvidence {
+            comparable_acts: 1,
+            ..exists_only_room()
+        };
+        let VenueAssessment::WorthContact { sentence, clauses } =
+            assess(&room, now(), EvidenceLocale::En)
+        else {
+            panic!("a comparable act is evidence")
+        };
+        assert_eq!(clauses, vec![EvidenceClause::ComparableActs { count: 1 }]);
+        assert_eq!(
+            sentence,
+            "Klub Y is worth contacting, because 1 comparable act has played here."
+        );
+    }
+
+    /// Polish needs the verb to agree — grał / grały / grało — on the same
+    /// one/few/many split the noun takes.
+    #[test]
+    fn comparable_acts_read_polish_with_the_right_verb_form() {
+        let clause = |count: i64| {
+            clause_text(
+                &EvidenceClause::ComparableActs { count },
+                EvidenceLocale::Pl,
+            )
+        };
+        assert_eq!(clause(1), "grał tu już 1 pokrewny zespół");
+        assert_eq!(clause(3), "grały tu już 3 pokrewne zespoły");
+        assert_eq!(clause(5), "grało tu już 5 pokrewnych zespołów");
+        // The teen exception takes the many form on both words.
+        assert_eq!(clause(12), "grało tu już 12 pokrewnych zespołów");
+        assert_eq!(clause(23), "grały tu już 23 pokrewne zespoły");
+    }
+
+    /// Zero comparable acts is an absent clause, never a weak one — a
+    /// name-only bill contributes nothing the sentence may cite.
+    #[test]
+    fn no_comparable_acts_produces_no_clause() {
+        let room = VenueEvidence {
+            shows_played: 6,
+            comparable_acts: 0,
+            ..exists_only_room()
+        };
+        let VenueAssessment::WorthContact { clauses, .. } =
+            assess(&room, now(), EvidenceLocale::En)
+        else {
+            panic!("played shows alone are above the floor")
+        };
+        assert!(
+            clauses
+                .iter()
+                .all(|clause| !matches!(clause, EvidenceClause::ComparableActs { .. })),
+            "a zero count must not appear: {clauses:?}"
         );
     }
 
