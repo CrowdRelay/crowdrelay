@@ -849,6 +849,7 @@ async fn an_operator_campaign_blocks_the_auto_mint_and_revoke_sticks()
 }
 
 #[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn a_moved_show_moves_its_door_window_until_the_first_checkin()
 -> Result<(), Box<dyn std::error::Error>> {
     let (repo, pool) = repository().await?;
