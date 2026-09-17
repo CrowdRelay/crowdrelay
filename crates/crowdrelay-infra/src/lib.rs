@@ -64,3 +64,4 @@ pub mod representation;
 pub mod sensitive_response;
 pub mod signal_installations;
 pub mod tenant_settings;
+pub mod venue_seed;

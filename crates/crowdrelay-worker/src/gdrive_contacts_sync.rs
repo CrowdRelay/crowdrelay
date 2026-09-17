@@ -19,9 +19,11 @@ use std::time::Duration;
 
 use crowdrelay_domain::drive_contacts::extract_contacts;
 use crowdrelay_domain::scan_scope::ScanScope;
+use crowdrelay_domain::venue_seed::extract_seed_sheet;
 use crowdrelay_infra::{
     gdrive::{GDriveError, PostgresGDriveRepository},
     sensitive_response::SensitiveResponseKey,
+    venue_seed::PostgresVenueSeedRepository,
 };
 
 use crate::google_oauth::{access_token_for_connection, resolve_google_access_token};
@@ -105,6 +107,12 @@ struct CycleCounts {
     contacts_upserted: u64,
     rows_without_email: usize,
     marked_disappeared: u64,
+    /// A venue seed sheet is not a contact list: rows that imported into
+    /// the venue registry, rows refused, and rooms whose city the
+    /// catalogue does not know.
+    venues_imported: u64,
+    venue_refusals: usize,
+    venues_unknown_city: u64,
 }
 
 impl GDriveContactsSyncWorker {
@@ -253,6 +261,9 @@ impl GDriveContactsSyncWorker {
                     counts.contacts_upserted += file_counts.contacts_upserted;
                     counts.rows_without_email += file_counts.rows_without_email;
                     counts.marked_disappeared += file_counts.marked_disappeared;
+                    counts.venues_imported += file_counts.venues_imported;
+                    counts.venue_refusals += file_counts.venue_refusals;
+                    counts.venues_unknown_city += file_counts.venues_unknown_city;
                 }
                 Err(error) => {
                     counts.files_failed += 1;
@@ -273,6 +284,9 @@ impl GDriveContactsSyncWorker {
             contacts_upserted = counts.contacts_upserted,
             rows_without_email = counts.rows_without_email,
             marked_disappeared = counts.marked_disappeared,
+            venues_imported = counts.venues_imported,
+            venue_refusals = counts.venue_refusals,
+            venues_unknown_city = counts.venues_unknown_city,
             "gdrive contacts sync cycle complete"
         );
         Ok(())
@@ -487,6 +501,48 @@ impl GDriveContactsSyncWorker {
 
         let grid = self.fetch_grid(connection_id, file).await?;
         let grid: Vec<Vec<String>> = grid.into_iter().take(MAX_ROWS_PER_FILE + 1).collect();
+
+        // A researched venue sheet is not a contact list: the venue check
+        // runs first and never falls through to extract_contacts — a seed
+        // row may carry an Email column and must not stage the room as a
+        // contact for it. Its rows import into the shared venue registry
+        // as attributed facts instead.
+        if let Some(report) = extract_seed_sheet(&grid) {
+            let summary = PostgresVenueSeedRepository::new(self.repo.pool().clone())
+                .import_sheet(self.workspace_id, &report)
+                .await
+                .map_err(|e: sqlx::Error| e.to_string())?;
+            self.repo
+                .record_file_state(
+                    self.workspace_id,
+                    &file.id,
+                    &file.name,
+                    &file.mime_type,
+                    &mtime,
+                    true,
+                    (report.venues.len() + report.refusals.len()) as i32,
+                    summary.imported as i32,
+                )
+                .await
+                .map_err(|e| e.to_string())?;
+            if !report.refusals.is_empty() {
+                tracing::info!(
+                    file = %file.name,
+                    refusals = ?report
+                        .refusals
+                        .iter()
+                        .map(|(row, refusal)| (*row, refusal.message()))
+                        .collect::<Vec<_>>(),
+                    "venue seed rows refused"
+                );
+            }
+            counts.files_scanned = 1;
+            counts.venues_imported = summary.imported;
+            counts.venue_refusals = report.refusals.len();
+            counts.venues_unknown_city = summary.unknown_city;
+            return Ok(counts);
+        }
+
         let report = extract_contacts(&grid);
         if report.no_email_column {
             // Not a contact list — record the mtime so we do not re-export

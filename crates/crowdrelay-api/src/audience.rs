@@ -425,9 +425,13 @@ pub async fn city_funnel(
 /// tenant's published or completed event has marked, with the aggregates
 /// the room record exists for — how many shows it has seen, how many
 /// tenants have played it, what a night there typically draws through our
-/// ticket sales, and how many fans keep coming back. Aggregates only: a
-/// mark is one tenant's private contribution, and nothing on this row
-/// names a contributor. `typical_draw` averages only shows that had a
+/// ticket sales, and how many fans keep coming back — plus the resolved
+/// facts about the room (capacity, genres, website, address, status), each
+/// carrying the provenance that won it and when it was observed.
+/// Aggregates only: a mark is one tenant's private contribution, and
+/// nothing on this row names a contributor — the facts are filtered to
+/// `workspace_id IS NULL` so a contributor-private fact never leaks into
+/// this cross-tenant read. `typical_draw` averages only shows that had a
 /// ticket sale at all — an unticketed night is unmeasurable, not a zero.
 pub async fn city_venues(State(state): State<crate::AppState>, headers: HeaderMap) -> Response {
     let result = sqlx::query_as::<_, CityVenueRow>(
@@ -471,6 +475,23 @@ pub async fn city_venues(State(state): State<crate::AppState>, headers: HeaderMa
                 HAVING count(DISTINCT sale.event_id) >= 2
             ) AS marked
             GROUP BY marked.venue_id
+        ), resolved AS (
+            -- The first non-expired fact per attribute in provenance trust
+            -- order: played beats researched beats evidence beats a
+            -- directory. workspace_id IS NULL is the load-bearing filter —
+            -- this read is global, and a contributor's private fact (a
+            -- booking address, a fit judgement) must never surface here.
+            SELECT DISTINCT ON (f.venue_id, f.attribute)
+                   f.venue_id, f.attribute, f.value, f.provenance, f.observed_at
+            FROM place_venue_facts AS f
+            WHERE (f.expires_at IS NULL OR f.expires_at > now())
+              AND f.workspace_id IS NULL
+            ORDER BY f.venue_id, f.attribute,
+                     CASE f.provenance
+                         WHEN 'played' THEN 0 WHEN 'researched' THEN 1
+                         WHEN 'event_evidence' THEN 2 WHEN 'open_directory' THEN 3
+                         ELSE 4 END,
+                     f.observed_at DESC
         )
         SELECT
             venue.id AS venue_id,
@@ -492,7 +513,26 @@ pub async fn city_venues(State(state): State<crate::AppState>, headers: HeaderMa
             max(marks.starts_at) FILTER (WHERE marks.starts_at <= now()) AS last_played_at,
             min(marks.starts_at) FILTER (
                 WHERE marks.starts_at > now() AND marks.status = 'published'
-            ) AS next_show_at
+            ) AS next_show_at,
+            -- Each resolved join yields at most one row per venue —
+            -- DISTINCT ON (venue_id, attribute) — so max() lifts the single
+            -- surviving fact out of the aggregate rather than choosing
+            -- between rival claims.
+            max(cap.value) AS capacity_fact,
+            max(cap.provenance) AS capacity_provenance,
+            max(cap.observed_at) AS capacity_observed_at,
+            max(gen.value) AS genres_fact,
+            max(gen.provenance) AS genres_provenance,
+            max(gen.observed_at) AS genres_observed_at,
+            max(web.value) AS website_fact,
+            max(web.provenance) AS website_provenance,
+            max(web.observed_at) AS website_observed_at,
+            max(addr.value) AS address_fact,
+            max(addr.provenance) AS address_provenance,
+            max(addr.observed_at) AS address_observed_at,
+            max(stat.value) AS status_fact,
+            max(stat.provenance) AS status_provenance,
+            max(stat.observed_at) AS status_observed_at
         FROM place_venues AS venue
         JOIN cities AS city
           ON city.id = venue.city_id
@@ -503,6 +543,16 @@ pub async fn city_venues(State(state): State<crate::AppState>, headers: HeaderMa
          AND draw.event_id = marks.event_id
         LEFT JOIN repeaters
           ON repeaters.venue_id = venue.id
+        LEFT JOIN resolved AS cap
+          ON cap.venue_id = venue.id AND cap.attribute = 'capacity'
+        LEFT JOIN resolved AS gen
+          ON gen.venue_id = venue.id AND gen.attribute = 'genres'
+        LEFT JOIN resolved AS web
+          ON web.venue_id = venue.id AND web.attribute = 'website'
+        LEFT JOIN resolved AS addr
+          ON addr.venue_id = venue.id AND addr.attribute = 'address'
+        LEFT JOIN resolved AS stat
+          ON stat.venue_id = venue.id AND stat.attribute = 'status'
         GROUP BY venue.id, venue.display_name, city.slug, city.name,
                  city.country_code, repeaters.repeat_attenders
         ORDER BY shows_played DESC, venue.display_name, venue.id
