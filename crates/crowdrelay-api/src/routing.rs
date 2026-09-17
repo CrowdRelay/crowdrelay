@@ -399,6 +399,20 @@ pub(super) fn application_routes(state: AppState) -> Router {
             "/v1/public/listings/{token}",
             get(crate::band_listing::public_listing),
         )
+        // An audience attestation, by the link the band sent.
+        .route(
+            "/v1/public/attestations/{token}",
+            get(crate::attestation::public_attestation),
+        )
+        // And by digest, with no credential of any kind. This is the route a
+        // label's lawyer uses: handed a document, they check it against us
+        // without asking the band for access to anything. Presenting a digest
+        // proves nothing and therefore costs nothing to accept — the digest is
+        // printed on the document it describes.
+        .route(
+            "/v1/public/attestations/verify/{digest}",
+            get(crate::attestation::verify_attestation),
+        )
         .route("/v1/public/events/{slug}", get(events::get_event))
         .route(
             "/v1/public/events/{slug}/tickets",

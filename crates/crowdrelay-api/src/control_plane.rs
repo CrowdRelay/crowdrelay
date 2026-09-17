@@ -321,6 +321,23 @@ pub(crate) fn router(state: crate::AppState) -> Router {
             "/v1/control-plane/listing/rotate-token",
             post(crate::band_listing::rotate_listing_token),
         )
+        // Audience attestations. The tenant decides whether a document exists
+        // and who gets the link; it never decides what the document says, so
+        // the issue body carries city slugs and nothing else. Revoking
+        // withdraws without deleting the record of having issued, and rotating
+        // mints a fresh link — revoke-by-rotation, same as the listing.
+        .route(
+            "/v1/control-plane/attestations",
+            post(crate::attestation::issue_attestation),
+        )
+        .route(
+            "/v1/control-plane/attestations/{digest}/revoke",
+            post(crate::attestation::revoke_attestation),
+        )
+        .route(
+            "/v1/control-plane/attestations/{digest}/rotate",
+            post(crate::attestation::rotate_attestation_link),
+        )
         // Representation contacts are upserted here rather than through
         // the generic admin target route — this one pins the kind to
         // agent/label so it cannot be used to hide a press contact's
