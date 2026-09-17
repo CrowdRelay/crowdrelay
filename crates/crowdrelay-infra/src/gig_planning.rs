@@ -28,7 +28,7 @@
 //! than to guess, so it runs today and improves when those land.
 
 use crowdrelay_domain::gig_plan::{CityOpportunity, PromoterRef, TenantIntent, VenueEvidence};
-use crowdrelay_domain::roster_plan::{CityReach, RosterAct, RosterOpportunity};
+use crowdrelay_domain::roster_plan::{CityReach, OpenSupportSlot, RosterAct, RosterOpportunity};
 use sqlx::{PgPool, Row};
 use time::OffsetDateTime;
 use uuid::Uuid;
@@ -564,15 +564,82 @@ pub async fn roster_opportunity(
         }
     }
 
+    let open_slots = open_support_slots(pool, &member_ids, now).await?;
+
     Ok(RosterOpportunity {
         acts,
         cities,
-        // The support-slot entity is 4V.5. Empty means the planner proposes
-        // only new bookings — it loses its cheapest move and keeps every other
-        // one.
-        open_slots: Vec::new(),
+        open_slots,
         packages_this_period,
     })
+}
+
+/// Confirmed shows across the organisation that have room on the bill (4V.5).
+///
+/// The roster's cheapest move: the room is held, the promoter is committed and
+/// the date is set, so filling the slot costs an ask rather than a booking.
+///
+/// Only what a person declared. `events.open_support_slots` is set when the
+/// promoter offers the place; a bill nobody has spoken about is NULL and is not
+/// a slot. Inferring one from the bill's length would have the roster ask for a
+/// place that was never offered, which costs the relationship the proposal
+/// exists to build.
+///
+/// Published shows only, and only ahead of now: a slot on a night that already
+/// happened is not an opportunity, and a draft show is not a commitment
+/// anybody made.
+///
+/// # Errors
+///
+/// Propagates the database error.
+async fn open_support_slots(
+    pool: &PgPool,
+    member_ids: &[Uuid],
+    now: OffsetDateTime,
+) -> Result<Vec<OpenSupportSlot>, sqlx::Error> {
+    let rows = sqlx::query_as::<_, SupportSlotRow>(
+        r#"
+        SELECT city.slug AS city_slug,
+               city.id AS city_id,
+               COALESCE(NULLIF(btrim(event.venue), ''), 'the room') AS venue,
+               workspace.name AS headliner,
+               FLOOR(EXTRACT(EPOCH FROM (event.starts_at - $2)) / 86400)::bigint
+                   AS days_until_show
+        FROM events AS event
+        JOIN cities AS city ON city.id = event.city_id
+        JOIN workspaces AS workspace ON workspace.id = event.workspace_id
+        WHERE event.workspace_id = ANY($1)
+          AND event.status = 'published'
+          AND event.starts_at > $2
+          AND event.open_support_slots > 0
+        ORDER BY event.starts_at
+        LIMIT 40
+        "#,
+    )
+    .bind(member_ids)
+    .bind(now)
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(|row| OpenSupportSlot {
+            city: row.city_slug,
+            city_id: crowdrelay_domain::CityId::from_uuid(row.city_id),
+            venue: row.venue,
+            headliner: row.headliner,
+            days_until_show: bounded_u16(row.days_until_show),
+        })
+        .collect())
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct SupportSlotRow {
+    city_slug: String,
+    city_id: Uuid,
+    venue: String,
+    headliner: String,
+    days_until_show: i64,
 }
 
 // ── 4G.5: what an approved proposal actually produced ──────────────────────

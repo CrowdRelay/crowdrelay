@@ -100,7 +100,8 @@ pub use events::{
     ListFanEventInterests, LoadEvents, LoadEventsError, MAX_PUBLIC_EVENT_LIMIT,
     RegisterEventInterest, RegisterEventInterestCommand, RegisterEventInterestCommandArgs,
     RegisterEventInterestCommandError, ReplaceEventActs, ReplaceEventActsCommand,
-    SetEventCounterparty, SetEventCounterpartyCommand,
+    SetEventCounterparty, SetEventCounterpartyCommand, SetEventSupportSlots,
+    SetEventSupportSlotsCommand,
 };
 pub use fan_identity::{
     DismissMergeCandidateCommand, FanIdentifierView, FanIdentity, FanIdentityError,

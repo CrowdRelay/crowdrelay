@@ -325,6 +325,15 @@ pub struct ReplaceEventActsCommand {
 /// Command: sets or clears the show's counterparty — the promoter or booker
 /// the T+7 report is delivered to alongside the band. `None` clears the
 /// field; the report then honestly records `no_counterparty_on_record`.
+pub struct SetEventSupportSlotsCommand {
+    pub workspace_id: WorkspaceId,
+    pub event_slug: String,
+    /// How many places on the bill the promoter has offered. `None` clears the
+    /// declaration back to "nobody has said", which is not the same as zero:
+    /// zero is the answer that the bill is full.
+    pub open_support_slots: Option<u8>,
+}
+
 pub struct SetEventCounterpartyCommand {
     pub workspace_id: WorkspaceId,
     pub event_slug: String,
@@ -367,6 +376,14 @@ pub trait EventRepository: Send + Sync {
     async fn set_event_counterparty(
         &self,
         command: &SetEventCounterpartyCommand,
+    ) -> Result<(), RepositoryError>;
+    /// Records how many support places this show's promoter has offered, or
+    /// clears the declaration. Draft and published shows accept it; a night
+    /// that already happened cannot offer a place on its bill. `NotFound` when
+    /// the slug does not resolve inside the workspace.
+    async fn set_event_support_slots(
+        &self,
+        command: &SetEventSupportSlotsCommand,
     ) -> Result<(), RepositoryError>;
 }
 
@@ -485,6 +502,36 @@ impl ReplaceEventActs {
     /// Replaces the event's bill atomically.
     pub async fn execute(&self, command: &ReplaceEventActsCommand) -> Result<(), RepositoryError> {
         self.repository.replace_event_acts(command).await
+    }
+}
+
+/// Use case: records how many places on a show's bill are open (4V.5).
+///
+/// Declared by a person, never inferred from the bill's length: a roster that
+/// asks a promoter for a place they never offered spends the relationship the
+/// proposal was meant to build.
+#[derive(Clone)]
+pub struct SetEventSupportSlots {
+    repository: Arc<dyn EventRepository>,
+}
+
+impl SetEventSupportSlots {
+    /// Creates the support-slot use case.
+    #[must_use]
+    pub fn new(repository: Arc<dyn EventRepository>) -> Self {
+        Self { repository }
+    }
+
+    /// Writes the declaration; `None` clears it back to unstated.
+    ///
+    /// # Errors
+    ///
+    /// Propagates the repository error.
+    pub async fn execute(
+        &self,
+        command: &SetEventSupportSlotsCommand,
+    ) -> Result<(), RepositoryError> {
+        self.repository.set_event_support_slots(command).await
     }
 }
 

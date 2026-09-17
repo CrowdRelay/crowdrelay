@@ -2159,6 +2159,94 @@ paths:
         '503':
           $ref: '#/components/responses/PrivateProblem'
 
+  /admin/events/{slug}/support-slots:
+    put:
+      operationId: setEventSupportSlotsAdmin
+      summary: Record how many places on this bill the promoter has offered
+      description: >-
+        Declared by a person, never inferred. The roster planner ranks filling
+        an open place above booking a new night — the room, the date and the
+        promoter are already committed — but only somebody who spoke to the
+        promoter knows whether the offer was made. Null clears the declaration
+        back to unstated, which is not the same as 0: zero is the answer that
+        the bill is full. Draft and published shows accept it; a night that
+        already happened cannot offer a place on its bill.
+      security:
+      - adminBearer: []
+      parameters:
+      - in: path
+        name: slug
+        required: true
+        schema:
+          type: string
+          minLength: 1
+          maxLength: 128
+          pattern: ^[a-z0-9][a-z0-9_-]*$
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SetEventSupportSlotsRequest'
+      responses:
+        '200':
+          description: The declaration as stored.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SetEventSupportSlotsRequest'
+        '400':
+          $ref: '#/components/responses/PrivateProblem'
+        '401':
+          $ref: '#/components/responses/PrivateProblem'
+        '404':
+          $ref: '#/components/responses/PrivateProblem'
+        '413':
+          $ref: '#/components/responses/PrivateProblem'
+        '503':
+          $ref: '#/components/responses/PrivateProblem'
+  /staff/events/{slug}/support-slots:
+    put:
+      operationId: setEventSupportSlotsStaff
+      summary: Record how many places on this bill the promoter has offered
+      description: >-
+        The staff surface for the same declaration, on the same screen the bill
+        itself is edited from.
+      security:
+      - staffBearer: []
+      parameters:
+      - in: path
+        name: slug
+        required: true
+        schema:
+          type: string
+          minLength: 1
+          maxLength: 128
+          pattern: ^[a-z0-9][a-z0-9_-]*$
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SetEventSupportSlotsRequest'
+      responses:
+        '200':
+          description: The declaration as stored.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SetEventSupportSlotsRequest'
+        '400':
+          $ref: '#/components/responses/PrivateProblem'
+        '401':
+          $ref: '#/components/responses/PrivateProblem'
+        '404':
+          $ref: '#/components/responses/PrivateProblem'
+        '413':
+          $ref: '#/components/responses/PrivateProblem'
+        '503':
+          $ref: '#/components/responses/PrivateProblem'
+
   /staff/events/{slug}/acts:
     put:
       operationId: replaceEventActsStaff
@@ -14541,6 +14629,20 @@ components:
           description: >-
             The act's own tagged ticket link. Absent acts fall back to the
             event's shared ticket URL at redirect time.
+    SetEventSupportSlotsRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        open_support_slots:
+          type:
+          - integer
+          - 'null'
+          minimum: 0
+          maximum: 4
+          description: >-
+            How many places on the bill the promoter has offered. Null clears
+            the declaration back to unstated — absent means nobody has said,
+            and 0 means the bill is full. Four is already a bill nobody plays.
     SetEventCounterpartyRequest:
       type: object
       additionalProperties: false
