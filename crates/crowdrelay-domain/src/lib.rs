@@ -81,6 +81,7 @@ pub mod fan_lifecycle;
 pub mod fanbase;
 pub mod free_reach;
 pub mod funding;
+pub mod gig_plan;
 pub mod growth_debt;
 pub mod growth_envelope;
 pub mod growth_metrics;
