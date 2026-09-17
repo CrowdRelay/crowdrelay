@@ -48,6 +48,10 @@ struct TimelineEventView {
     status: String,
     starts_at: String,
     ends_at: Option<String>,
+    /// Who the T+7 report mails besides the band — on the event block so the
+    /// gig page's setup card can edit what it shows, not just report the gap.
+    counterparty_name: Option<String>,
+    counterparty_email: Option<String>,
     /// What the night knows about the room itself — the beacon-campaign
     /// record keyed to this event (relationship status, last reply, notes).
     venue_knowledge: Vec<serde_json::Value>,
@@ -95,6 +99,8 @@ pub async fn control_plane_event_timeline(
                 status: facts.event.status.clone(),
                 starts_at: format_time(facts.event.starts_at),
                 ends_at: facts.event.ends_at.map(format_time),
+                counterparty_name: facts.event.counterparty_name.clone(),
+                counterparty_email: facts.event.counterparty_email.clone(),
                 venue_knowledge: facts
                     .venue_beacons
                     .iter()
@@ -220,7 +226,12 @@ fn build_steps(facts: &TimelineFacts, now: OffsetDateTime) -> Vec<TimelineStepVi
             "acts": facts
                 .crossbill_acts
                 .iter()
-                .map(|a| serde_json::json!({"slug": a.act_slug, "name": a.act_name}))
+                .map(|a| serde_json::json!({
+                    "slug": a.act_slug,
+                    "name": a.act_name,
+                    "position": a.position,
+                    "ticket_url": a.ticket_url,
+                }))
                 .collect::<Vec<_>>(),
             "cap_per_month": facts.crossbill_edge.as_ref().map(|e| e.max_campaigns_per_month),
             "cooldown_days": facts.crossbill_edge.as_ref().map(|e| e.cooldown_days),

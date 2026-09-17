@@ -165,8 +165,15 @@ class ControlPlaneTimelineContract(unittest.TestCase):
         self.assertIn("venue_address", self.source)
 
     def test_no_credentials_or_fan_rows_in_the_shape(self) -> None:
-        for leaked in ("token", "signing_key", "fan_id", "email"):
+        for leaked in ("token", "signing_key", "fan_id"):
             self.assertNotIn(leaked, self.source)
+        # `email` stays banned outside the event's own counterparty pair —
+        # the operator-entered T+7 recipient the gig page edits, already
+        # exposed on this surface by the report view's recipients block.
+        self.assertNotIn(
+            "email",
+            re.sub(r"counterparty_(name|email)", "", self.source),
+        )
         # The scan step counts the room; it never returns who is in it.
         self.assertIn("count(*)::bigint FROM concert_checkins", self.source)
 

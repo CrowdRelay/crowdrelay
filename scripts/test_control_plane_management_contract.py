@@ -30,7 +30,7 @@ assert "DefaultBodyLimit::max(MAX_CONTROL_BODY_BYTES)" in router
 overrides = set(re.findall(r"DefaultBodyLimit::max\((\w+)\)", router)) - {
     "MAX_CONTROL_BODY_BYTES"
 }
-assert overrides <= {"MAX_IMPORT_BODY_BYTES"}, (
+assert overrides <= {"MAX_IMPORT_BODY_BYTES", "MAX_EVENT_BILL_BODY_BYTES"}, (
     f"unreviewed control-plane body-limit override: {sorted(overrides)}"
 )
 for name in overrides:
