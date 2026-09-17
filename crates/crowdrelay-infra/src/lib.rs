@@ -50,6 +50,7 @@ pub mod gig_planning;
 pub mod measurement_queries;
 pub mod mobile_fan;
 pub mod observability;
+pub mod organization_settings;
 pub mod place_reach;
 pub mod portfolio;
 pub mod proofs;

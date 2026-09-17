@@ -15,6 +15,9 @@
 
 use crowdrelay_domain::gig_plan::{GigRefusal, TenantIntent, plan_gig};
 use crowdrelay_infra::gig_planning::{city_opportunities, stated_intent};
+use crowdrelay_infra::organization_settings::{
+    KEY_ROSTER_PACKAGES_PER_PERIOD, OrganizationSettingsRepository,
+};
 use crowdrelay_infra::tenant_settings::{KEY_TENANT_INTENT, TenantSettingsRepository};
 use sqlx::{Connection, PgConnection, PgPool, postgres::PgPoolOptions};
 use time::OffsetDateTime;
@@ -341,8 +344,76 @@ async fn run(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
     );
 
     stated_intent_comes_from_the_act_that_stated_it(pool, act).await?;
+    a_roster_capacity_is_stated_or_absent(pool).await?;
 
     Ok(())
+}
+
+/// §4G.2b: the roster's capacity is a stored organisation setting.
+///
+/// Driven against the real table because the whole value of the setting is the
+/// difference between "never stated" and a number, and that difference is a
+/// `NULL` row rather than a branch anybody can unit test.
+async fn a_roster_capacity_is_stated_or_absent(
+    pool: &PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let settings = OrganizationSettingsRepository::new(pool.clone());
+    let label = organization(pool, "label-one").await?;
+    let other_label = organization(pool, "label-two").await?;
+
+    assert_eq!(
+        settings.packages_this_period(label).await?,
+        None,
+        "a roster that has never stated a capacity reported one"
+    );
+
+    settings
+        .set(label, KEY_ROSTER_PACKAGES_PER_PERIOD, "3")
+        .await?;
+    assert_eq!(settings.packages_this_period(label).await?, Some(3));
+
+    // An upsert replaces rather than duplicating: the primary key is
+    // (organization_id, key), and a second row would make the answer depend on
+    // which one the reader saw first.
+    settings
+        .set(label, KEY_ROSTER_PACKAGES_PER_PERIOD, "5")
+        .await?;
+    assert_eq!(settings.packages_this_period(label).await?, Some(5));
+    assert_eq!(settings.list(label).await?.len(), 1);
+
+    // One label's number never sizes another's plan.
+    assert_eq!(
+        settings.packages_this_period(other_label).await?,
+        None,
+        "one organisation's capacity leaked into another"
+    );
+
+    // A hand-edited row outside the bounds reads as absent rather than being
+    // clamped. Clamping would size a plan by a number nobody chose, and the
+    // manager would have no way to tell.
+    settings
+        .set(label, KEY_ROSTER_PACKAGES_PER_PERIOD, "40")
+        .await?;
+    assert_eq!(
+        settings.packages_this_period(label).await?,
+        None,
+        "an out-of-range stored capacity was clamped instead of refused"
+    );
+    settings
+        .set(label, KEY_ROSTER_PACKAGES_PER_PERIOD, "not a number")
+        .await?;
+    assert_eq!(settings.packages_this_period(label).await?, None);
+
+    Ok(())
+}
+
+async fn organization(pool: &PgPool, slug: &str) -> Result<Uuid, Box<dyn std::error::Error>> {
+    Ok(sqlx::query_scalar::<_, Uuid>(
+        "INSERT INTO organizations (slug, name) VALUES ($1, $1) RETURNING id",
+    )
+    .bind(slug)
+    .fetch_one(pool)
+    .await?)
 }
 
 /// §4G.2: the intent is a stored setting, and it is read per workspace.

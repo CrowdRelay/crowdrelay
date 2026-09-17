@@ -21,6 +21,9 @@ use axum::{
 use crowdrelay_domain::gig_plan::{GigPlan, TenantIntent, plan_gig};
 use crowdrelay_domain::roster_plan::{RosterRefusal, RosterRun, plan_roster_run};
 use crowdrelay_infra::gig_planning::{city_opportunities, roster_opportunity, stated_intent};
+use crowdrelay_infra::organization_settings::{
+    KEY_ROSTER_PACKAGES_PER_PERIOD, OrganizationSettingsRepository, PACKAGES_PER_PERIOD_RANGE,
+};
 use crowdrelay_infra::tenant_settings::TenantSettingsRepository;
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
@@ -178,10 +181,19 @@ pub async fn band_gig_plan(
 #[derive(Debug, Deserialize)]
 pub struct RosterPlanParams {
     organization_id: Uuid,
-    /// How many packages the roster can actually run this period. Required:
-    /// there is no defensible default, and a planner that invents one produces
-    /// a plan nobody agreed to staff.
-    packages_this_period: u16,
+    /// A one-off override of the stored capacity, for asking what a bigger or
+    /// smaller period would look like. Absent — the normal case — uses the
+    /// number the manager set (4G.2b).
+    packages_this_period: Option<u16>,
+}
+
+/// How many packages this plan is sized for, and where that number came from.
+///
+/// Neither source may be invented. A planner that picks a default produces a
+/// plan nobody agreed to staff, and the manager discovers that when the third
+/// package needs people who are already busy.
+fn resolve_packages(param: Option<u16>, stored: Option<u16>) -> Option<u16> {
+    param.or(stored)
 }
 
 #[derive(Debug, Serialize)]
@@ -191,6 +203,15 @@ enum RosterPlanResponse {
     /// A refusal is a real answer and is returned as one, with the sentence.
     Refused {
         refused: String,
+    },
+    /// Not a refusal: a question. The roster has never said how many packages
+    /// it can run, and no plan can be sized until it does. Separated from
+    /// `Refused` because the two need different consoles — a refusal is read
+    /// and accepted, this one is answered in a single field and the plan
+    /// appears.
+    NeedsSetting {
+        needs_setting: &'static str,
+        message: String,
     },
 }
 
@@ -206,10 +227,42 @@ pub async fn roster_gig_plan(
     headers: HeaderMap,
 ) -> Response {
     let now = OffsetDateTime::now_utc();
+
+    let organization_settings = OrganizationSettingsRepository::new(state.database.clone());
+    let stored = match organization_settings
+        .packages_this_period(params.organization_id)
+        .await
+    {
+        Ok(stored) => stored,
+        Err(error) => {
+            tracing::warn!(%error, "roster capacity read failed");
+            return Problem::service_unavailable(request_id(&headers))
+                .private()
+                .into_response();
+        }
+    };
+    let Some(packages_this_period) = resolve_packages(params.packages_this_period, stored) else {
+        return (
+            StatusCode::OK,
+            Json(RosterPlanResponse::NeedsSetting {
+                needs_setting: KEY_ROSTER_PACKAGES_PER_PERIOD,
+                message: format!(
+                    "Nobody has said how many packages this roster can run in a period, so \
+                     there is nothing to size a plan against. Set it between {} and {} and \
+                     the plan appears — it is the one number the planner will not invent, \
+                     because a plan nobody agreed to staff costs more than no plan.",
+                    PACKAGES_PER_PERIOD_RANGE.start(),
+                    PACKAGES_PER_PERIOD_RANGE.end()
+                ),
+            }),
+        )
+            .into_response();
+    };
+
     let opportunity = match roster_opportunity(
         &state.database,
         params.organization_id,
-        params.packages_this_period,
+        packages_this_period,
         now,
     )
     .await
@@ -295,6 +348,17 @@ mod tests {
         let overridden = resolve_intent(Some("booking_shows"), stored);
         assert_ne!(overridden, stored);
         assert_eq!(resolve_intent(None, stored), stored);
+    }
+
+    /// §4G.2b: the roster's capacity is stated, never invented. Both sources
+    /// are a person saying a number; absent stays absent all the way to the
+    /// answer, which asks for it instead of sizing a plan nobody agreed to.
+    #[test]
+    fn a_roster_capacity_comes_from_a_person_or_from_nowhere() {
+        assert_eq!(resolve_packages(None, Some(3)), Some(3));
+        assert_eq!(resolve_packages(Some(5), Some(3)), Some(5));
+        assert_eq!(resolve_packages(Some(5), None), Some(5));
+        assert_eq!(resolve_packages(None, None), None);
     }
 
     #[test]

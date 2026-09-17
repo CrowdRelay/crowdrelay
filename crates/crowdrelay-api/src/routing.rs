@@ -778,6 +778,17 @@ pub(super) fn application_routes(state: AppState) -> Router {
             "/v1/admin/roster-plan",
             get(crate::gig_planning::roster_gig_plan),
         )
+        // The roster's own numbers, on the same surface as its plan for the
+        // same reason: these belong to the organisation, and a workspace token
+        // must not be able to read or set what a labelmate's plan is sized by.
+        .route(
+            "/v1/admin/organizations/{organization_id}/settings",
+            get(crate::organization_settings_http::get_organization_settings),
+        )
+        .route(
+            "/v1/admin/organizations/{organization_id}/settings/{key}",
+            put(crate::organization_settings_http::upsert_organization_setting),
+        )
         .route(
             "/v1/admin/autopilot/booking-targets",
             post(autopilot::upsert_booking_target),

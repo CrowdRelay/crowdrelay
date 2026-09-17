@@ -6846,16 +6846,98 @@ paths:
         schema: { type: string, format: uuid }
       - in: query
         name: packages_this_period
-        required: true
+        required: false
         description: >
-          How many packages the roster can actually run this period. Required
-          because there is no defensible default, and a planner that invents one
-          produces a plan nobody agreed to staff.
-        schema: { type: integer, minimum: 0, maximum: 65535 }
+          A one-off override of the stored capacity. Absent uses the
+          organisation's `roster_packages_per_period` setting. When neither
+          exists the response is 200 carrying `needs_setting` — the planner
+          will not invent a capacity, because a plan nobody agreed to staff
+          costs more than no plan.
+        schema: { type: integer, minimum: 1, maximum: 12 }
       responses:
         '200':
-          description: The plan, or the refusal that explains why there is none.
+          description: >
+            The plan, the refusal that explains why there is none, or the
+            setting that has to be answered before a plan can be sized.
         '401':
+          $ref: '#/components/responses/Problem'
+        '503':
+          $ref: '#/components/responses/Problem'
+  /admin/organizations/{organization_id}/settings:
+    get:
+      operationId: getOrganizationSettings
+      summary: The roster's own settings, as stated
+      description: >
+        Only what has been set. There is no shipped default to merge over: a
+        roster that has never stated its capacity has not got one, and the
+        planner says so rather than planning against a guess.
+      security:
+      - adminBearer: []
+      parameters:
+      - in: path
+        name: organization_id
+        required: true
+        schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: The stored settings and the keys an operator may edit.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [settings, editable_keys]
+                properties:
+                  settings:
+                    type: object
+                    additionalProperties:
+                      type: string
+                  editable_keys:
+                    type: array
+                    items:
+                      type: string
+        '401':
+          $ref: '#/components/responses/Problem'
+        '503':
+          $ref: '#/components/responses/Problem'
+  /admin/organizations/{organization_id}/settings/{key}:
+    put:
+      operationId: upsertOrganizationSetting
+      summary: Set one of the roster's own numbers
+      security:
+      - adminBearer: []
+      parameters:
+      - in: path
+        name: organization_id
+        required: true
+        schema: { type: string, format: uuid }
+      - in: path
+        name: key
+        required: true
+        schema:
+          type: string
+          enum: [roster_packages_per_period]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [value]
+              properties:
+                value:
+                  type: string
+                  maxLength: 512
+                  description: >
+                    `roster_packages_per_period` is 1 to 12. A value the reader
+                    would discard is refused rather than stored, so the manager
+                    and the planner never disagree about whether the roster is
+                    sized.
+      responses:
+        '200':
+          description: The value that was accepted.
+        '401':
+          $ref: '#/components/responses/Problem'
+        '422':
           $ref: '#/components/responses/Problem'
         '503':
           $ref: '#/components/responses/Problem'

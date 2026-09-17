@@ -91,6 +91,7 @@ mod mobile_fan;
 mod ops;
 mod ops_routes;
 mod ops_summary;
+mod organization_settings_http;
 mod portfolio;
 mod proofs;
 mod push;
