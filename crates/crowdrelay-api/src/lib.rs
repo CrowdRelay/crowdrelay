@@ -84,6 +84,7 @@ mod fan_lifecycle;
 mod fan_privacy;
 mod fanbase;
 mod gdrive;
+mod gig_planning;
 mod http_metrics;
 mod meta;
 mod mobile_fan;

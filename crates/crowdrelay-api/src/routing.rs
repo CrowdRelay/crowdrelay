@@ -769,6 +769,15 @@ pub(super) fn application_routes(state: AppState) -> Router {
             "/v1/admin/autopilot/policies/{context}",
             post(autopilot::set_authority),
         )
+        // The roster's plan. Admin rather than control-plane on purpose: an
+        // organisation spans workspaces, and the control-plane surface is
+        // scoped to one tenant by construction — a roster read accepting a
+        // workspace token would be one tenant reading its labelmates'
+        // audiences.
+        .route(
+            "/v1/admin/roster-plan",
+            get(crate::gig_planning::roster_gig_plan),
+        )
         .route(
             "/v1/admin/autopilot/booking-targets",
             post(autopilot::upsert_booking_target),

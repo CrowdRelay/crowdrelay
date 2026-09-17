@@ -325,6 +325,14 @@ pub(crate) fn router(state: crate::AppState) -> Router {
             "/v1/control-plane/listing/rotate-token",
             post(crate::band_listing::rotate_listing_token),
         )
+        // What to book next, and why. A refusal is part of the answer and
+        // comes back 200 with its sentence: "nobody has played a room here"
+        // tells the band what to go and find, and a 4xx would make the console
+        // treat the most useful half of the output as a failure.
+        .route(
+            "/v1/control-plane/gig-plan",
+            get(crate::gig_planning::band_gig_plan),
+        )
         // Audience attestations. The tenant decides whether a document exists
         // and who gets the link; it never decides what the document says, so
         // the issue body carries city slugs and nothing else. Revoking
