@@ -1402,6 +1402,44 @@ paths:
             application/problem+json:
               schema: { $ref: '#/components/schemas/Problem' }
         '503': { $ref: '#/components/responses/PrivateProblem' }
+  /public/attestations/digest/{digest}/anchor:
+    get:
+      operationId: getAttestationAnchor
+      summary: Read where an attestation sits in the public transparency ledger
+      description: >-
+        The verify route answers "did we issue this"; this one answers "can a
+        buyer check that against a public root rather than trusting our HMAC".
+        `anchored: false` is a stated state — the document is ours but no batch
+        has committed it yet — not an error, because "we cannot find this" reads
+        like "this was forged". A digest no attestation carries is still a 404.
+        The digest is exactly 64 lowercase hexadecimal characters.
+      parameters:
+      - in: path
+        name: digest
+        required: true
+        schema:
+          type: string
+          pattern: '^[0-9a-f]{64}$'
+      responses:
+        '200':
+          description: The anchor state for the attestation carrying this digest.
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                example: public, max-age=60
+            X-Request-ID:
+              $ref: '#/components/headers/RequestId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AttestationAnchorResponse'
+        '400':
+          $ref: '#/components/responses/PrivateProblem'
+        '404':
+          $ref: '#/components/responses/PrivateProblem'
+        '503':
+          $ref: '#/components/responses/PrivateProblem'
   /public/synesthesia/runs:
     post:
       operationId: startSynesthesiaRun
@@ -5892,7 +5930,7 @@ paths:
       - in: path
         name: source_kind
         required: true
-        schema: { type: string, enum: [audit_event, operator_action, reward_draw_run] }
+        schema: { type: string, enum: [audit_event, operator_action, reward_draw_run, attestation] }
       - in: path
         name: source_id
         required: true
@@ -9987,6 +10025,29 @@ components:
           schema:
             $ref: '#/components/schemas/Problem'
   schemas:
+    AttestationAnchor:
+      type: object
+      additionalProperties: false
+      required: [attestation_id, batch_id, sequence, leaf_sha256, root_sha256, batch_status, batched_at, confirmed_at]
+      properties:
+        attestation_id: { type: string, format: uuid }
+        batch_id: { type: string, format: uuid }
+        sequence: { type: integer, minimum: 0 }
+        leaf_sha256: { type: string, pattern: '^[0-9a-f]{64}$' }
+        root_sha256: { type: string, pattern: '^[0-9a-f]{64}$' }
+        batch_status: { type: string, enum: [queued, processing, confirmed, failed, dead] }
+        batched_at: { type: string, format: date-time }
+        confirmed_at: { type: [string, 'null'], format: date-time }
+    AttestationAnchorResponse:
+      type: object
+      additionalProperties: false
+      required: [anchored]
+      properties:
+        anchored: { type: boolean }
+        anchor: { $ref: '#/components/schemas/AttestationAnchor' }
+        inclusion_proof_path:
+          type: string
+          description: Path of the public inclusion-proof route for this attestation's leaf, e.g. /v1/public/proofs/batches/{batch_id}/attestation/{attestation_id}. Present only when anchored is true.
     BeaconNetworkDiscoveryRun:
       type: object
       additionalProperties: false

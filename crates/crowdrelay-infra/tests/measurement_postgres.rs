@@ -502,7 +502,11 @@ async fn run(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
     // "the slip was told").
     let sweep_ws = seed_workspace(pool).await?;
     let sweep_member = seed_member(pool, sweep_ws).await?;
-    let sweep_now = OffsetDateTime::now_utc();
+    // timestamptz stores microseconds; truncate the seed or the ns tail of
+    // now_utc() fails the round-trip assertion below (~999/1000 runs).
+    let now_untruncated = OffsetDateTime::now_utc();
+    let sweep_now =
+        now_untruncated.replace_nanosecond(now_untruncated.nanosecond() / 1000 * 1000)?;
     let stamped_due = sweep_now - time::Duration::days(8);
     let stamped_at = stamped_due + time::Duration::days(1);
     let mut ids = Vec::new();

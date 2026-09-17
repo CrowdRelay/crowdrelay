@@ -96,7 +96,7 @@ pub async fn public_inclusion(
 ) -> Response {
     if !matches!(
         source_kind.as_str(),
-        "audit_event" | "operator_action" | "reward_draw_run"
+        "audit_event" | "operator_action" | "reward_draw_run" | "attestation"
     ) {
         return ProofError::BadRequest.into_response(request_id(&headers));
     }
@@ -308,6 +308,27 @@ async fn create_audit_batch(
                   WHERE item.workspace_id = action.workspace_id
                     AND item.source_kind = 'operator_action'
                     AND item.source_id = action.id
+              )
+            UNION ALL
+            -- The leaf is identity + digest + when, and the exclusions are
+            -- deliberate: `signature` is our word for the document, and the
+            -- anchor exists so a reader does not have to take it; `revoked_at`
+            -- is a later, mutable fact while the leaf is the issued state; and
+            -- `figures`, `act_name` and `valid_until` are already covered by
+            -- `digest`, the canonical SHA-256 over them.
+            SELECT 'attestation'::text,
+                   att.id,
+                   att.issued_at,
+                   jsonb_build_array(
+                       'crowdrelay/attestation/v1', att.id, att.digest, att.issued_at
+                   )::text
+            FROM viryaos_attestations AS att
+            WHERE att.workspace_id = $1
+              AND NOT EXISTS (
+                  SELECT 1 FROM external_proof_items AS item
+                  WHERE item.workspace_id = att.workspace_id
+                    AND item.source_kind = 'attestation'
+                    AND item.source_id = att.id
               )
         )
         SELECT source_kind, source_id, occurred_at, canonical

@@ -87,3 +87,21 @@
         Ok(())
     }
 
+    #[tokio::test]
+    async fn attestation_anchor_rejects_a_malformed_digest_before_any_query()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let app = test_router()?;
+        for uri in [
+            "/v1/public/attestations/digest/not-a-digest/anchor",
+            "/v1/public/attestations/digest/AAAA/anchor",
+            "/v1/public/attestations/digest/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaAA/anchor",
+        ] {
+            let response = app
+                .clone()
+                .oneshot(Request::builder().uri(uri).body(Body::empty())?)
+                .await?;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{uri}");
+        }
+        Ok(())
+    }
+

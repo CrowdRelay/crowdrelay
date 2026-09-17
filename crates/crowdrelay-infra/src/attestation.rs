@@ -192,6 +192,33 @@ impl VerifiedAttestation {
     }
 }
 
+/// Where an attestation sits in the transparency ledger, if it has been
+/// batched.
+///
+/// The anchor is what turns "trust our HMAC" into "check a public root": the
+/// batch committed a leaf over the attestation's identity, digest and issue
+/// time, and `leaf_sha256` plus `sequence` is everything a reader needs to
+/// fetch the Merkle path from the public inclusion route.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct AttestationAnchor {
+    pub attestation_id: Uuid,
+    pub batch_id: Uuid,
+    pub sequence: i32,
+    /// Hex SHA-256 of this attestation's leaf.
+    pub leaf_sha256: String,
+    /// Hex SHA-256 of the batch root the leaf feeds.
+    pub root_sha256: String,
+    /// `external_proof_batches.status`, as stored.
+    pub batch_status: String,
+    /// `external_proof_batches.created_at` — when the batch committed.
+    #[serde(with = "time::serde::rfc3339")]
+    pub batched_at: OffsetDateTime,
+    /// `external_proof_batches.confirmed_at` — when the external anchor landed,
+    /// if it has.
+    #[serde(with = "time::serde::rfc3339::option")]
+    pub confirmed_at: Option<OffsetDateTime>,
+}
+
 #[derive(Clone)]
 pub struct PostgresAttestationRepository {
     pool: PgPool,
@@ -456,6 +483,61 @@ impl PostgresAttestationRepository {
                 revoked: row.get::<Option<OffsetDateTime>, _>("revoked_at").is_some(),
             })
             .collect())
+    }
+
+    /// Where an attestation sits in the transparency ledger, if a batch has
+    /// included it yet.
+    ///
+    /// `Ok(None)` is a stated state — the attestation exists, no batch has
+    /// committed it — and never a 404, because "we cannot find this" reads to
+    /// a sceptical reader exactly like "this was forged" (the same rule the
+    /// revoke path follows). `Err(NotFound)` is reserved for a digest no
+    /// attestation carries.
+    pub async fn anchor_for_digest(
+        &self,
+        digest: &str,
+    ) -> Result<Option<AttestationAnchor>, AttestationError> {
+        let row = sqlx::query(
+            r#"
+            SELECT att.id AS attestation_id,
+                   item.batch_id AS batch_id,
+                   item.sequence AS sequence,
+                   item.leaf_sha256 AS leaf_sha256,
+                   batch.root_sha256 AS root_sha256,
+                   batch.status AS batch_status,
+                   batch.created_at AS batched_at,
+                   batch.confirmed_at AS confirmed_at
+            FROM viryaos_attestations AS att
+            LEFT JOIN external_proof_items AS item
+              ON item.workspace_id = att.workspace_id
+             AND item.source_kind = 'attestation'
+             AND item.source_id = att.id
+            LEFT JOIN external_proof_batches AS batch
+              ON batch.workspace_id = item.workspace_id
+             AND batch.id = item.batch_id
+            WHERE att.digest = $1
+            "#,
+        )
+        .bind(digest)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or(AttestationError::NotFound)?;
+
+        let Some(batch_id) = row.get::<Option<Uuid>, _>("batch_id") else {
+            return Ok(None);
+        };
+        let leaf_sha256: Vec<u8> = row.get("leaf_sha256");
+        let root_sha256: Vec<u8> = row.get("root_sha256");
+        Ok(Some(AttestationAnchor {
+            attestation_id: row.get("attestation_id"),
+            batch_id,
+            sequence: row.get("sequence"),
+            leaf_sha256: hex::encode(leaf_sha256),
+            root_sha256: hex::encode(root_sha256),
+            batch_status: row.get("batch_status"),
+            batched_at: row.get("batched_at"),
+            confirmed_at: row.get("confirmed_at"),
+        }))
     }
 
     // ── Measurement (4A.2) ──────────────────────────────────────────────────
