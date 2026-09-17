@@ -845,3 +845,95 @@ async fn an_operator_campaign_blocks_the_auto_mint_and_revoke_sticks()
     assert_eq!((count, active), (1, 0), "a revoked door stays revoked");
     Ok(())
 }
+
+#[tokio::test]
+async fn a_moved_show_moves_its_door_window_until_the_first_checkin()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (repo, pool) = repository().await?;
+    let workspace_id = WorkspaceId::new();
+    seed_workspace(&pool, workspace_id).await?;
+
+    let show_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO events (id, workspace_id, slug, title, starts_at, status, published_at)
+         VALUES ($1,$2,$3,$4, now() + interval '10 days', 'published', now())
+         RETURNING id",
+    )
+    .bind(Uuid::now_v7())
+    .bind(workspace_id.into_uuid())
+    .bind(format!("moved-{}", workspace_id.into_uuid().simple()))
+    .bind("The moved gig")
+    .fetch_one(&pool)
+    .await?;
+
+    repo.reconcile_team_handoffs(workspace_id, OffsetDateTime::now_utc())
+        .await?;
+
+    // The gig moves a week out — the minted window follows the show, so a
+    // reprinted QR works instead of every scan refusing on a dead window.
+    sqlx::query("UPDATE events SET starts_at = starts_at + interval '7 days' WHERE id=$1")
+        .bind(show_id)
+        .execute(&pool)
+        .await?;
+    repo.reconcile_team_handoffs(workspace_id, OffsetDateTime::now_utc())
+        .await?;
+    let (valid_from, valid_until): (OffsetDateTime, OffsetDateTime) = sqlx::query_as(
+        "SELECT valid_from, valid_until FROM concert_qr_campaigns
+         WHERE workspace_id=$1 AND event_id=$2",
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(show_id)
+    .fetch_one(&pool)
+    .await?;
+    let starts_at: OffsetDateTime = sqlx::query_scalar("SELECT starts_at FROM events WHERE id=$1")
+        .bind(show_id)
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(valid_from, starts_at - time::Duration::hours(4));
+    assert_eq!(valid_until, starts_at + time::Duration::hours(12));
+
+    // Once somebody has scanned, the window is history — a further move
+    // leaves it alone.
+    let campaign_id: Uuid = sqlx::query_scalar(
+        "SELECT id FROM concert_qr_campaigns WHERE workspace_id=$1 AND event_id=$2",
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(show_id)
+    .fetch_one(&pool)
+    .await?;
+    let fan_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO fans (id, workspace_id, normalized_email, status)
+         VALUES ($1,$2,$3,'active') RETURNING id",
+    )
+    .bind(Uuid::now_v7())
+    .bind(workspace_id.into_uuid())
+    .bind(format!(
+        "scanner-{}@example.test",
+        workspace_id.into_uuid().simple()
+    ))
+    .fetch_one(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO concert_checkins (id, workspace_id, event_id, campaign_id, fan_id)
+         VALUES ($1,$2,$3,$4,$5)",
+    )
+    .bind(Uuid::now_v7())
+    .bind(workspace_id.into_uuid())
+    .bind(show_id)
+    .bind(campaign_id)
+    .bind(fan_id)
+    .execute(&pool)
+    .await?;
+    sqlx::query("UPDATE events SET starts_at = starts_at + interval '2 days' WHERE id=$1")
+        .bind(show_id)
+        .execute(&pool)
+        .await?;
+    repo.reconcile_team_handoffs(workspace_id, OffsetDateTime::now_utc())
+        .await?;
+    let still: OffsetDateTime =
+        sqlx::query_scalar("SELECT valid_until FROM concert_qr_campaigns WHERE id=$1")
+            .bind(campaign_id)
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(still, valid_until, "a scanned campaign's window is history");
+    Ok(())
+}
