@@ -1440,6 +1440,127 @@ paths:
           $ref: '#/components/responses/PrivateProblem'
         '503':
           $ref: '#/components/responses/PrivateProblem'
+  /public/nights/{token}:
+    get:
+      operationId: getPublicNight
+      summary: Read a shared night by organiser link token
+      description: >-
+        One venue's night seen through the organiser lens: the venue and date,
+        the lineup with each act's confirmation flag, the combined reachable
+        audience the billed acts chose to contribute, tickets sold across the
+        night's events, the room's resolved capacity, the aggregate payout
+        total, and each contributor's announcement state. The token is the
+        whole credential — minted by a participating workspace, valid for 30
+        days, revocable at any time. A wrong, revoked or expired token is the
+        same 404, so a reader cannot tell "never existed" from "taken down".
+        Per-act terms and per-workspace audience parts are never present: the
+        payload carries sums only.
+      parameters:
+      - in: path
+        name: token
+        required: true
+        schema:
+          type: string
+          format: uuid
+      responses:
+        '200':
+          description: The night through the organiser lens.
+          headers:
+            Cache-Control:
+              description: Short-lived — a revocation must show within about a minute.
+              schema:
+                type: string
+                example: public, max-age=60
+            X-Request-ID:
+              $ref: '#/components/headers/RequestId'
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                - place_event_id
+                - lens
+                - venue
+                - event_date
+                - lineup
+                - status
+                - combined_reachable
+                - tickets_sold
+                - capacity
+                - payout_total_minor
+                - announce
+                properties:
+                  place_event_id:
+                    type: string
+                    format: uuid
+                  lens:
+                    type: string
+                    enum: [organiser]
+                  venue:
+                    type: object
+                    required: [display_name, city_name]
+                    properties:
+                      display_name:
+                        type: string
+                      city_name:
+                        type: string
+                  event_date:
+                    type: string
+                    format: date
+                    description: The night the rendezvous is keyed on — UTC date of the events' starts_at.
+                  lineup:
+                    type: array
+                    items:
+                      type: object
+                      required: [act_slug, name, position, confirmed]
+                      properties:
+                        act_slug:
+                          type: string
+                        name:
+                          type: string
+                        position:
+                          type: integer
+                        confirmed:
+                          type: boolean
+                          description: True only when the act's own workspace confirmed the bill row.
+                  status:
+                    type: object
+                    description: Roll-up of the night's events by status; a cancelled show stays on the calendar.
+                    additionalProperties:
+                      type: integer
+                  combined_reachable:
+                    type: integer
+                    nullable: true
+                    description: Sum of contributed reachable_fans. Null when no act contributed a draw estimate — absent is a fact about consent, never 0.
+                  tickets_sold:
+                    type: integer
+                    description: Sum of ticket_order_items.quantity over the night's paid and partially-refunded orders.
+                  capacity:
+                    type: integer
+                    nullable: true
+                    description: The venue's resolved capacity fact; null when the registry holds no global claim.
+                  payout_total_minor:
+                    type: integer
+                    nullable: true
+                    description: Sum of contributed terms.amount_minor. The payer reads the total; the parts never leave their workspaces.
+                  announce:
+                    type: array
+                    items:
+                      type: object
+                      required: [act, state]
+                      properties:
+                        act:
+                          type: string
+                          nullable: true
+                        state:
+                          type: string
+                          enum: [planned, announced, done]
+        '404':
+          description: No live link carries this token — wrong, revoked, expired or never minted.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
   /public/synesthesia/runs:
     post:
       operationId: startSynesthesiaRun

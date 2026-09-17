@@ -50,6 +50,7 @@ pub mod gig_outreach;
 pub mod gig_planning;
 pub mod measurement_queries;
 pub mod mobile_fan;
+pub mod night;
 pub mod observability;
 pub mod organization_settings;
 pub mod place_reach;

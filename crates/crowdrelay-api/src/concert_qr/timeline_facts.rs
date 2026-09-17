@@ -20,6 +20,9 @@ struct TimelineEventRow {
     ends_at: Option<OffsetDateTime>,
     counterparty_name: Option<String>,
     counterparty_email: Option<String>,
+    /// The shared night this event landed on, when the venue registry
+    /// resolved one — the rendezvous block reads from here (4V.6b).
+    place_event_id: Option<Uuid>,
 }
 
 #[derive(Debug, FromRow)]
@@ -173,7 +176,7 @@ async fn load_timeline_facts(
     let Some(event) = sqlx::query_as::<_, TimelineEventRow>(
         r#"
         SELECT id, slug, title, venue, venue_address, status, starts_at, ends_at,
-               counterparty_name, counterparty_email
+               counterparty_name, counterparty_email, place_event_id
         FROM events
         WHERE workspace_id = $1 AND slug = $2
           AND status IN ('published','completed')

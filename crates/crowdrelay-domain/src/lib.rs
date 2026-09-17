@@ -96,6 +96,7 @@ pub mod merch_bundle;
 pub mod merchandising;
 pub mod negotiation;
 pub mod next_best_action;
+pub mod night;
 pub mod objectives;
 pub mod outreach;
 pub mod outward_evidence;
