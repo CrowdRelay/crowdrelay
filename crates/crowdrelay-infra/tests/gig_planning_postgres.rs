@@ -1,0 +1,752 @@
+//! The planners are pure and well tested. This checks the half that is not:
+//! that the evidence handed to them is the evidence the database holds.
+//!
+//! Every distinction the domain depends on is a `NULL` here — a city never
+//! played, a room with no ticketed show, a venue with no booking target — and
+//! every one of them is a column that could be folded to zero by a `COALESCE`
+//! somebody adds to make a query tidier. Folding any of them makes the planner
+//! confident about something nobody measured, and a confident wrong proposal
+//! costs a band a week.
+//!
+//! SQLx runs these queries at runtime by design, so a column that does not
+//! exist is a production failure with no compile-time warning. Four such
+//! mistakes were caught by driving the attestation queries rather than reading
+//! them; these are driven for the same reason.
+
+use crowdrelay_domain::gig_plan::{GigRefusal, TenantIntent, plan_gig};
+use crowdrelay_infra::gig_planning::{city_opportunities, stated_intent};
+use crowdrelay_infra::organization_settings::{
+    KEY_ROSTER_PACKAGES_PER_PERIOD, OrganizationSettingsRepository,
+};
+use crowdrelay_infra::tenant_settings::{KEY_TENANT_INTENT, TenantSettingsRepository};
+use sqlx::{Connection, PgConnection, PgPool, postgres::PgPoolOptions};
+use time::OffsetDateTime;
+use uuid::Uuid;
+
+struct DisposableDatabase {
+    pool: PgPool,
+    admin_url: String,
+    name: String,
+}
+
+impl DisposableDatabase {
+    async fn create() -> Result<Self, Box<dyn std::error::Error>> {
+        let base = std::env::var("CROWDRELAY_TEST_DATABASE_URL")
+            .map_err(|_| "CROWDRELAY_TEST_DATABASE_URL must target a disposable database")?;
+        let name = format!("crowdrelay_gigplan_{}", Uuid::now_v7().simple());
+        let mut admin = PgConnection::connect(&base).await?;
+        sqlx::query(&format!("CREATE DATABASE {name}"))
+            .execute(&mut admin)
+            .await?;
+        drop(admin);
+        let (head, _) = base.rsplit_once('/').ok_or("database url has no path")?;
+        let pool = PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&format!("{head}/{name}"))
+            .await?;
+        crowdrelay_infra::database::MIGRATOR.run(&pool).await?;
+        Ok(Self {
+            pool,
+            admin_url: base,
+            name,
+        })
+    }
+
+    async fn drop_database(self) {
+        let Self {
+            pool,
+            admin_url,
+            name,
+        } = self;
+        pool.close().await;
+        if let Ok(mut admin) = PgConnection::connect(&admin_url).await {
+            let _ = sqlx::query(&format!("DROP DATABASE IF EXISTS {name} WITH (FORCE)"))
+                .execute(&mut admin)
+                .await;
+        }
+    }
+}
+
+async fn workspace(pool: &PgPool) -> Result<Uuid, Box<dyn std::error::Error>> {
+    let id = Uuid::now_v7();
+    sqlx::query("INSERT INTO workspaces (id, slug, name) VALUES ($1, $2, 'Test Act')")
+        .bind(id)
+        .bind(format!("ws-{}", id.simple()))
+        .execute(pool)
+        .await?;
+    Ok(id)
+}
+
+async fn city(pool: &PgPool, slug: &str) -> Result<Uuid, Box<dyn std::error::Error>> {
+    city_in(pool, slug, "PL", 51.1, 17.0).await
+}
+
+async fn city_in(
+    pool: &PgPool,
+    slug: &str,
+    country_code: &str,
+    latitude: f64,
+    longitude: f64,
+) -> Result<Uuid, Box<dyn std::error::Error>> {
+    // Coordinates matter: the reachability gate excludes a city without them,
+    // and a fixture without coordinates would silently measure zero and pass a
+    // test that proved nothing.
+    sqlx::query(
+        "INSERT INTO cities (slug, name, country_code, latitude, longitude)
+         VALUES ($1, $1, $2, $3, $4)
+         ON CONFLICT (country_code, slug)
+         DO UPDATE SET latitude = $3, longitude = $4",
+    )
+    .bind(slug)
+    .bind(country_code)
+    .bind(latitude)
+    .bind(longitude)
+    .execute(pool)
+    .await?;
+    Ok(
+        sqlx::query_scalar::<_, Uuid>(
+            "SELECT id FROM cities WHERE country_code = $2 AND slug = $1",
+        )
+        .bind(slug)
+        .bind(country_code)
+        .fetch_one(pool)
+        .await?,
+    )
+}
+
+/// A fan who is active, consented, opted into nearby gigs and inside the
+/// radius. All four are required, which is the point: a fixture that satisfies
+/// three of them measures zero and would make a green test out of a broken
+/// gate.
+async fn reachable_fan(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    city_id: Uuid,
+    email: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let fan = sqlx::query_scalar::<_, Uuid>(
+        "INSERT INTO fans (workspace_id, normalized_email, status)
+         VALUES ($1, $2, 'active') RETURNING id",
+    )
+    .bind(workspace_id)
+    .bind(email)
+    .fetch_one(pool)
+    .await?;
+    sqlx::query(
+        // `policy_version` and `source` are NOT NULL with CHECKs against blank.
+        // Spelled
+        // out rather than defaulted: a fixture that sidesteps a real
+        // constraint proves nothing about the real table.
+        "INSERT INTO fan_consents
+            (workspace_id, fan_id, purpose, granted, policy_version, source, recorded_at)
+         VALUES ($1, $2, 'marketing', true, 'v1', 'signup', now())",
+    )
+    .bind(workspace_id)
+    .bind(fan)
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO fan_location_preferences
+            (workspace_id, fan_id, city_id, radius_km, nearby_gigs_enabled)
+         VALUES ($1, $2, $3, 50, true)",
+    )
+    .bind(workspace_id)
+    .bind(fan)
+    .bind(city_id)
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO fan_city_interests (workspace_id, fan_id, city_id)
+         VALUES ($1, $2, $3) ON CONFLICT DO NOTHING",
+    )
+    .bind(workspace_id)
+    .bind(fan)
+    .bind(city_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// A completed show, which marks the room in the shared registry through the
+/// trigger from migration 0290.
+async fn played_show(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    city_id: Uuid,
+    venue: &str,
+    slug: &str,
+    days_ago: i64,
+) -> Result<Uuid, Box<dyn std::error::Error>> {
+    Ok(sqlx::query_scalar::<_, Uuid>(
+        "INSERT INTO events (workspace_id, city_id, slug, title, venue, starts_at, status)
+         VALUES ($1, $2, $3, $3, $4, now() - ($5 || ' days')::interval, 'completed')
+         RETURNING id",
+    )
+    .bind(workspace_id)
+    .bind(city_id)
+    .bind(slug)
+    .bind(venue)
+    .bind(days_ago.to_string())
+    .fetch_one(pool)
+    .await?)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn the_evidence_handed_to_the_planner_is_what_the_database_holds()
+-> Result<(), Box<dyn std::error::Error>> {
+    let database = DisposableDatabase::create().await?;
+    let result = run(&database.pool).await;
+    database.drop_database().await;
+    result
+}
+
+async fn run(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
+    let act = workspace(pool).await?;
+    let wroclaw = city(pool, "wroclaw").await?;
+    let now = OffsetDateTime::now_utc();
+
+    // Sixty reachable people, above the planner's floor of fifty.
+    for index in 0..60 {
+        reachable_fan(pool, act, wroclaw, &format!("fan{index}@example.com")).await?;
+    }
+    played_show(pool, act, wroclaw, "Klub X", "show-1", 400).await?;
+    played_show(pool, act, wroclaw, "Klub X", "show-2", 40).await?;
+
+    let opportunities = city_opportunities(pool, act, now).await?;
+    let wro = opportunities
+        .iter()
+        .find(|city| city.city == "wroclaw")
+        .ok_or("the city with sixty fans and two shows was not considered")?;
+
+    assert_eq!(
+        wro.reachable_fans,
+        Some(60),
+        "the reachability gate did not count fans who satisfy all four conditions"
+    );
+    assert!(!wro.has_upcoming_show, "a completed show read as upcoming");
+
+    let venue = wro
+        .venue
+        .as_ref()
+        .ok_or("a room marked by two completed shows produced no venue evidence")?;
+    assert_eq!(venue.name, "Klub X");
+    // One of the two shows is inside twelve months; the 400-day-old one is not.
+    // A window that counted both would overstate how active the room is.
+    assert_eq!(
+        venue.shows_last_12_months, 1,
+        "the twelve-month window counted a show from over a year ago"
+    );
+    assert!(
+        venue.days_since_last_event.is_some_and(|days| days <= 41),
+        "days since the last event did not come from the most recent show: {:?}",
+        venue.days_since_last_event
+    );
+
+    // ── The NULLs the planner's whole value rests on ────────────────────────
+    assert!(
+        venue.typical_draw.is_none(),
+        "a room with no ticketed show reported a draw instead of an absence"
+    );
+    assert!(
+        venue.capacity.is_none(),
+        "a room with no booking target reported a capacity from nowhere"
+    );
+    assert!(
+        !venue.has_booking_route,
+        "a room nobody has a booking target for claimed a route"
+    );
+    assert!(
+        venue.contact_verified_days_ago.is_none(),
+        "a contact nobody has ever written to reported a verification age"
+    );
+    assert_eq!(
+        venue.comparable_acts, 0,
+        "comparable acts must stay zero until the peer-act graph exists"
+    );
+
+    // The planner refuses this city — no route to anybody — and that refusal is
+    // the correct, useful answer rather than a failure.
+    assert_eq!(
+        plan_gig(wro, TenantIntent::BookingShows),
+        Err(GigRefusal::NoContactableRoute {
+            venue: "Klub X".to_owned()
+        }),
+        "a room with no contactable route was proposed anyway"
+    );
+
+    // ── Give it a promoter, and it proposes ─────────────────────────────────
+    sqlx::query(
+        "INSERT INTO viryaos_booking_targets
+            (workspace_id, city_id, target_kind, display_name, contact_email,
+             relationship_score, capacity)
+         VALUES ($1, $2, 'promoter', 'Anna', 'anna@example.com', 70, 300)",
+    )
+    .bind(act)
+    .bind(wroclaw)
+    .execute(pool)
+    .await?;
+
+    let with_promoter = city_opportunities(pool, act, now).await?;
+    let wro = with_promoter
+        .iter()
+        .find(|city| city.city == "wroclaw")
+        .ok_or("city vanished after adding a promoter")?;
+    assert_eq!(wro.promoters.len(), 1);
+    assert_eq!(wro.promoters[0].name, "Anna");
+    assert!(
+        !wro.promoters[0].answered_last_time,
+        "a promoter who has never replied was recorded as having answered"
+    );
+
+    let plan = plan_gig(wro, TenantIntent::BookingShows).expect("proposes with a route");
+    assert_eq!(plan.city, "wroclaw");
+    assert_eq!(plan.venue, "Klub X");
+    assert_eq!(plan.contact, vec!["Anna"]);
+    // The unmeasured facts travel as caveats rather than vanishing.
+    assert!(
+        plan.caveats.iter().any(|note| note.contains("unmeasured")),
+        "the unmeasured draw did not reach the band: {:?}",
+        plan.caveats
+    );
+
+    // ── A city the band has never played stays absent, not zero ─────────────
+    let praha = city(pool, "praha").await?;
+    for index in 0..60 {
+        reachable_fan(pool, act, praha, &format!("praha{index}@example.com")).await?;
+    }
+    let never_played = city_opportunities(pool, act, now).await?;
+    let pra = never_played
+        .iter()
+        .find(|city| city.city == "praha")
+        .ok_or("a city with sixty fans and no history was not considered")?;
+    assert!(
+        pra.months_since_show.is_none(),
+        "a city never played reported a month count instead of an absence"
+    );
+    assert!(
+        pra.venue.is_none(),
+        "a city with no marked room produced venue evidence from nowhere"
+    );
+    assert_eq!(
+        plan_gig(pra, TenantIntent::BookingShows),
+        Err(GigRefusal::NoRoomOnRecord)
+    );
+
+    // ── A booked show closes the gap ────────────────────────────────────────
+    sqlx::query(
+        // `published_at` is required by CHECK whenever the status is
+        // published — a published event with no publication time is a state
+        // the schema refuses, and the fixture has to respect that or it is
+        // testing a row production could never hold.
+        "INSERT INTO events
+            (workspace_id, city_id, slug, title, venue, starts_at, status, published_at)
+         VALUES ($1, $2, 'upcoming', 'Upcoming', 'Klub X', now() + interval '30 days',
+                 'published', now())",
+    )
+    .bind(act)
+    .bind(wroclaw)
+    .execute(pool)
+    .await?;
+    let after_booking = city_opportunities(pool, act, now).await?;
+    let wro = after_booking
+        .iter()
+        .find(|city| city.city == "wroclaw")
+        .ok_or("city vanished after a booking")?;
+    assert!(wro.has_upcoming_show);
+    assert_eq!(
+        plan_gig(wro, TenantIntent::BookingShows),
+        Err(GigRefusal::AlreadyBooked),
+        "a city with a show on the calendar was proposed as a gap"
+    );
+
+    stated_intent_comes_from_the_act_that_stated_it(pool, act).await?;
+    a_roster_capacity_is_stated_or_absent(pool).await?;
+    shared_fans_measure_overlap_without_naming_anybody(pool).await?;
+
+    Ok(())
+}
+
+/// §4G.3b: two acts in one organisation share part of an audience, and the
+/// roster planner prices a co-bill by it.
+///
+/// The only identity that crosses a workspace is `normalized_email`, and the
+/// only thing that comes back is a count — the test asserts the shares, and
+/// the shape of the query is what keeps a list from ever being readable.
+async fn shared_fans_measure_overlap_without_naming_anybody(
+    pool: &PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use crowdrelay_infra::gig_planning::roster_opportunity;
+    use crowdrelay_infra::place_reach::audience_overlaps;
+
+    let label = organization(pool, "label-overlap").await?;
+    let head = org_workspace(pool, label, "headliner").await?;
+    let support = org_workspace(pool, label, "support").await?;
+    let city_id = city(pool, "poznan").await?;
+
+    // The headliner reaches four people; two of them also follow the support.
+    for index in 0..4 {
+        reachable_fan(pool, head, city_id, &format!("head{index}@example.com")).await?;
+    }
+    for index in 0..2 {
+        reachable_fan(pool, support, city_id, &format!("head{index}@example.com")).await?;
+    }
+    // And two the headliner does not reach at all.
+    for index in 0..2 {
+        reachable_fan(pool, support, city_id, &format!("own{index}@example.com")).await?;
+    }
+    // A fan who withdrew consent is not shared, whatever the email says.
+    let withdrawn = sqlx::query_scalar::<_, Uuid>(
+        "INSERT INTO fans (workspace_id, normalized_email, status)
+         VALUES ($1, 'gone@example.com', 'active') RETURNING id",
+    )
+    .bind(head)
+    .fetch_one(pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO fan_consents
+            (workspace_id, fan_id, purpose, granted, policy_version, source, recorded_at)
+         VALUES ($1, $2, 'marketing', false, 'v1', 'signup', now())",
+    )
+    .bind(head)
+    .bind(withdrawn)
+    .execute(pool)
+    .await?;
+    reachable_fan(pool, support, city_id, "gone@example.com").await?;
+
+    let overlaps = audience_overlaps(pool, &[head, support]).await?;
+    let pair = overlaps
+        .iter()
+        .find(|pair| {
+            (pair.workspace_a == head && pair.workspace_b == support)
+                || (pair.workspace_a == support && pair.workspace_b == head)
+        })
+        .ok_or("two acts sharing two fans produced no overlap row")?;
+    // Two of the headliner's four are shared: 5000bp. Two of the support's
+    // five are shared: 4000bp — the share is of the asked side's audience,
+    // and the two directions are different answers to different questions.
+    assert_eq!(
+        pair.shared, 2,
+        "a consent-withdrawn address counted as shared"
+    );
+    assert_eq!(pair.share_of(head), Some(5_000));
+    assert_eq!(pair.share_of(support), Some(4_000));
+
+    // The roster planner sees the same number the gate measured — keyed by the
+    // other act's name, which is the currency `ActOverlap` trades in.
+    let opportunity = roster_opportunity(pool, label, 2, OffsetDateTime::now_utc()).await?;
+    let headliner = opportunity
+        .acts
+        .iter()
+        .find(|act| act.name == "headliner")
+        .ok_or("the headliner was absent from its own roster read")?;
+    assert_eq!(
+        headliner.overlap_with_act("support"),
+        Some(5_000),
+        "the measured share did not reach the planner"
+    );
+
+    // Two acts that share *nobody* measure zero — a measured zero is the
+    // co-bill the planner should propose, because the audiences do not
+    // cannibalise. Only an act with no reachable audience at all is absent,
+    // and absent reads as unmeasured rather than as separate.
+    let stranger = org_workspace(pool, label, "stranger").await?;
+    let own = city(pool, "gdansk").await?;
+    reachable_fan(pool, stranger, own, "solo@example.com").await?;
+    let opportunity = roster_opportunity(pool, label, 2, OffsetDateTime::now_utc()).await?;
+    let stranger_act = opportunity
+        .acts
+        .iter()
+        .find(|act| act.name == "stranger")
+        .ok_or("a third act vanished from the roster read")?;
+    assert_eq!(
+        stranger_act.overlap_with_act("headliner"),
+        Some(0),
+        "two acts that were measured and share nobody did not report zero"
+    );
+
+    Ok(())
+}
+
+async fn org_workspace(
+    pool: &PgPool,
+    organization_id: Uuid,
+    name: &str,
+) -> Result<Uuid, Box<dyn std::error::Error>> {
+    let id = Uuid::now_v7();
+    sqlx::query("INSERT INTO workspaces (id, slug, name, organization_id) VALUES ($1, $2, $3, $4)")
+        .bind(id)
+        .bind(format!("ws-{}", id.simple()))
+        .bind(name)
+        .bind(organization_id)
+        .execute(pool)
+        .await?;
+    Ok(id)
+}
+
+/// §4G.2b: the roster's capacity is a stored organisation setting.
+///
+/// Driven against the real table because the whole value of the setting is the
+/// difference between "never stated" and a number, and that difference is a
+/// `NULL` row rather than a branch anybody can unit test.
+async fn a_roster_capacity_is_stated_or_absent(
+    pool: &PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let settings = OrganizationSettingsRepository::new(pool.clone());
+    let label = organization(pool, "label-one").await?;
+    let other_label = organization(pool, "label-two").await?;
+
+    assert_eq!(
+        settings.packages_this_period(label).await?,
+        None,
+        "a roster that has never stated a capacity reported one"
+    );
+
+    settings
+        .set(label, KEY_ROSTER_PACKAGES_PER_PERIOD, "3")
+        .await?;
+    assert_eq!(settings.packages_this_period(label).await?, Some(3));
+
+    // An upsert replaces rather than duplicating: the primary key is
+    // (organization_id, key), and a second row would make the answer depend on
+    // which one the reader saw first.
+    settings
+        .set(label, KEY_ROSTER_PACKAGES_PER_PERIOD, "5")
+        .await?;
+    assert_eq!(settings.packages_this_period(label).await?, Some(5));
+    assert_eq!(settings.list(label).await?.len(), 1);
+
+    // One label's number never sizes another's plan.
+    assert_eq!(
+        settings.packages_this_period(other_label).await?,
+        None,
+        "one organisation's capacity leaked into another"
+    );
+
+    // A hand-edited row outside the bounds reads as absent rather than being
+    // clamped. Clamping would size a plan by a number nobody chose, and the
+    // manager would have no way to tell.
+    settings
+        .set(label, KEY_ROSTER_PACKAGES_PER_PERIOD, "40")
+        .await?;
+    assert_eq!(
+        settings.packages_this_period(label).await?,
+        None,
+        "an out-of-range stored capacity was clamped instead of refused"
+    );
+    settings
+        .set(label, KEY_ROSTER_PACKAGES_PER_PERIOD, "not a number")
+        .await?;
+    assert_eq!(settings.packages_this_period(label).await?, None);
+
+    Ok(())
+}
+
+async fn organization(pool: &PgPool, slug: &str) -> Result<Uuid, Box<dyn std::error::Error>> {
+    Ok(sqlx::query_scalar::<_, Uuid>(
+        "INSERT INTO organizations (slug, name) VALUES ($1, $1) RETURNING id",
+    )
+    .bind(slug)
+    .fetch_one(pool)
+    .await?)
+}
+
+/// §4G.2: the intent is a stored setting, and it is read per workspace.
+///
+/// The roster planner asks each act's own workspace, never the label's, because
+/// an act that says it is recording must not be proposed by somebody else's
+/// preference. This drives the read against a real row rather than trusting the
+/// key string, which is the half a unit test cannot check: a typo in
+/// `KEY_TENANT_INTENT` would read `None` forever and every band would silently
+/// look unstated.
+async fn stated_intent_comes_from_the_act_that_stated_it(
+    pool: &PgPool,
+    act: Uuid,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let settings = TenantSettingsRepository::new(pool.clone());
+
+    // Never asked is not the same as asked and declined to say. Both plan as
+    // `Unstated`, and the console shows the difference.
+    assert_eq!(
+        settings.tenant_intent(act).await?,
+        None,
+        "an act that has never stated an intent reported a stored one"
+    );
+    assert_eq!(
+        stated_intent(&settings, act).await?,
+        TenantIntent::Unstated,
+        "an unstated act did not resolve to Unstated"
+    );
+
+    for intent in TenantIntent::all() {
+        settings
+            .set_setting(act, KEY_TENANT_INTENT, intent.as_str())
+            .await?;
+        assert_eq!(
+            stated_intent(&settings, act).await?,
+            intent,
+            "the stored intent did not survive the round trip through the settings row"
+        );
+    }
+
+    // A hand-edited row the vocabulary does not recognise plans as `Unstated`:
+    // weaker, and it says the timing is unverified. It must never read as
+    // `HeadsDown`, because withholding every proposal on the strength of a typo
+    // is the failure nobody would ever report.
+    settings
+        .set_setting(act, KEY_TENANT_INTENT, "touring")
+        .await?;
+    assert_eq!(
+        stated_intent(&settings, act).await?,
+        TenantIntent::Unstated,
+        "an unreadable stored value did not fall back to Unstated"
+    );
+
+    // A second act in the same database keeps its own answer. One act's
+    // heads-down must not silence a labelmate.
+    let other = workspace(pool).await?;
+    settings
+        .set_setting(act, KEY_TENANT_INTENT, TenantIntent::HeadsDown.as_str())
+        .await?;
+    assert_eq!(
+        stated_intent(&settings, act).await?,
+        TenantIntent::HeadsDown
+    );
+    assert_eq!(
+        stated_intent(&settings, other).await?,
+        TenantIntent::Unstated,
+        "one act's stated intent leaked into another workspace"
+    );
+
+    Ok(())
+}
+
+/// Two catalogue rows may share a slug — the unique key is
+/// `(country_code, slug)`, not slug alone. The planner must keep them as two
+/// cities, each with its own evidence: a pipeline keyed on the slug merges
+/// them into one phantom opportunity whose reach unions both radii and whose
+/// room is whichever country the query happened to order first.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn two_cities_sharing_a_slug_do_not_share_their_evidence()
+-> Result<(), Box<dyn std::error::Error>> {
+    let database = DisposableDatabase::create().await?;
+    let result = async {
+        let act = workspace(&database.pool).await?;
+        let now = OffsetDateTime::now_utc();
+        // Wrocław, Poland — and a German namesake hundreds of kilometres away.
+        // Same slug, different city, different audience.
+        let wroclaw_pl = city_in(&database.pool, "wroclaw", "PL", 51.1, 17.0).await?;
+        let wroclaw_de = city_in(&database.pool, "wroclaw", "DE", 48.0, 7.85).await?;
+        for index in 0..60 {
+            reachable_fan(
+                &database.pool,
+                act,
+                wroclaw_pl,
+                &format!("pl{index}@example.com"),
+            )
+            .await?;
+        }
+        for index in 0..30 {
+            reachable_fan(
+                &database.pool,
+                act,
+                wroclaw_de,
+                &format!("de{index}@example.com"),
+            )
+            .await?;
+        }
+        played_show(&database.pool, act, wroclaw_pl, "Klub X", "show-pl", 40).await?;
+        played_show(&database.pool, act, wroclaw_de, "Forum Y", "show-de", 40).await?;
+
+        let opportunities = city_opportunities(&database.pool, act, now).await?;
+        let pl = opportunities
+            .iter()
+            .find(|city| city.city_id.into_uuid() == wroclaw_pl)
+            .ok_or("the PL city did not surface as its own opportunity")?;
+        let de = opportunities
+            .iter()
+            .find(|city| city.city_id.into_uuid() == wroclaw_de)
+            .ok_or("the DE namesake did not surface as its own opportunity")?;
+
+        assert_eq!(
+            pl.city, de.city,
+            "the fixture does not test what it claims unless both rows share the slug"
+        );
+        assert_eq!(
+            pl.reachable_fans,
+            Some(60),
+            "the PL count picked up the DE radius — the cities merged"
+        );
+        assert_eq!(
+            de.reachable_fans,
+            Some(30),
+            "the DE count picked up the PL radius — the cities merged"
+        );
+        assert_eq!(
+            pl.venue.as_ref().map(|venue| venue.name.as_str()),
+            Some("Klub X"),
+            "the PL proposal named the DE room"
+        );
+        assert_eq!(
+            de.venue.as_ref().map(|venue| venue.name.as_str()),
+            Some("Forum Y"),
+            "the DE proposal named the PL room"
+        );
+        Ok(())
+    }
+    .await;
+    database.drop_database().await;
+    result
+}
+
+/// Reachability has three honest answers, not two: a measured count (which
+/// may be zero), or unmeasurable. A city without coordinates and a city that
+/// is simply unknown both answer `None` — folding either into zero would put
+/// "only 0 people asked to hear from you" on a city the system never counted.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn an_unlocatable_city_is_unmeasurable_not_zero() -> Result<(), Box<dyn std::error::Error>> {
+    let database = DisposableDatabase::create().await?;
+    let result = async {
+        let pool = &database.pool;
+        let workspace = workspace(pool).await?;
+
+        // Measured, and the measurement is nobody.
+        let empty_city = city_in(pool, "pustkow", "PL", 50.0, 20.0).await?;
+        assert_eq!(
+            crowdrelay_infra::place_reach::reachable_in_city(pool, workspace, empty_city).await?,
+            Some(0),
+            "a coordinate-carrying city with no fans nearby is a measured zero"
+        );
+
+        // Present in the catalogue but unlocatable — nothing to anchor a
+        // radius to.
+        sqlx::query(
+            "INSERT INTO cities (slug, name, country_code, latitude, longitude)
+             VALUES ('nowhere', 'Nowhere', 'PL', NULL, NULL)",
+        )
+        .execute(pool)
+        .await?;
+        let nowhere: Uuid = sqlx::query_scalar("SELECT id FROM cities WHERE slug = 'nowhere'")
+            .fetch_one(pool)
+            .await?;
+        assert_eq!(
+            crowdrelay_infra::place_reach::reachable_in_city(pool, workspace, nowhere).await?,
+            None,
+            "a city without coordinates cannot be measured"
+        );
+
+        // Not in the catalogue at all.
+        assert_eq!(
+            crowdrelay_infra::place_reach::reachable_in_city(pool, workspace, Uuid::now_v7())
+                .await?,
+            None,
+            "an unknown city cannot be measured"
+        );
+        Ok(())
+    }
+    .await;
+    database.drop_database().await;
+    result
+}

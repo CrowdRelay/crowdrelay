@@ -91,6 +91,68 @@ pub enum TenantIntent {
     HeadsDown,
 }
 
+impl TenantIntent {
+    /// The stored form. One vocabulary for the query string, the settings row
+    /// and the console, so a band that picks "heads down" in one place is heads
+    /// down in all three.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Unstated => "unstated",
+            Self::BookingShows => "booking_shows",
+            Self::WorkingARelease => "working_a_release",
+            Self::HeadsDown => "heads_down",
+        }
+    }
+
+    /// Parses a stored or submitted value.
+    ///
+    /// Returns `None` for anything unrecognised rather than falling back to a
+    /// variant. The caller decides what an unreadable value means, and the two
+    /// callers decide differently: a settings write rejects it, while a read
+    /// keeps whatever the tenant last stated rather than silently demoting a
+    /// stated intent to `Unstated`.
+    #[must_use]
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw.trim() {
+            "unstated" => Some(Self::Unstated),
+            "booking_shows" => Some(Self::BookingShows),
+            "working_a_release" => Some(Self::WorkingARelease),
+            "heads_down" => Some(Self::HeadsDown),
+            _ => None,
+        }
+    }
+
+    /// Every variant, for a console that must offer all of them.
+    ///
+    /// Served rather than retyped in the UI: an intent the band cannot select
+    /// is an intent the planner will never respect.
+    #[must_use]
+    pub const fn all() -> [Self; 4] {
+        [
+            Self::Unstated,
+            Self::BookingShows,
+            Self::WorkingARelease,
+            Self::HeadsDown,
+        ]
+    }
+
+    /// What the band reads next to the choice.
+    #[must_use]
+    pub const fn describe(self) -> &'static str {
+        match self {
+            Self::Unstated => {
+                "No stated plan. Proposals arrive on evidence and say the timing is unverified."
+            }
+            Self::BookingShows => "Actively looking for shows. Proposals arrive freely.",
+            Self::WorkingARelease => {
+                "A release is the focus. Shows are proposed as launch nights, not as detours."
+            }
+            Self::HeadsDown => "Writing or recording. No gig proposals until this changes.",
+        }
+    }
+}
+
 /// A room, as the registry and the researched sheet know it.
 ///
 /// Every field is `Option` where the fact may genuinely be unknown, because
@@ -149,9 +211,15 @@ pub struct CoBillAct {
 /// What the planner knows about one city.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct CityOpportunity {
+    /// The catalogue row this evidence belongs to. `city` is the slug, and a
+    /// slug is only unique per country — two catalogues rows can share one —
+    /// so identity is the id, and the string is for reading.
+    pub city_id: crate::CityId,
     pub city: String,
-    /// Consented fans inside the radius they chose.
-    pub reachable_fans: u32,
+    /// Consented fans inside the radius they chose. `None` means the city
+    /// cannot be measured — no coordinates on record — which is not the same
+    /// claim as a measured zero.
+    pub reachable_fans: Option<u32>,
     /// Fans with recorded activity in the last 30 days.
     pub active_fans_30d: u32,
     /// `None` means never played here — not "played here zero months ago".
@@ -207,6 +275,10 @@ pub enum GigRefusal {
     },
     /// Too few people within reach for a show to be about the audience.
     TooFewReachable { reachable: u32, floor: u32 },
+    /// The city cannot be sized — no coordinates on record to measure
+    /// against. Distinct from a measured zero: the audience may be large,
+    /// we just cannot say.
+    AudienceNotMeasurable,
     /// The tenant said they are not booking right now.
     NotWhatTheTenantIsDoing { intent: TenantIntent },
 }
@@ -252,6 +324,10 @@ impl GigRefusal {
                  {floor} a show is a favour somebody does you rather than a gig. Play it if \
                  you want to — the data does not support calling it a plan"
             ),
+            Self::AudienceNotMeasurable => {
+                "we cannot size the audience here — the city has no coordinates on record,                  so there is nothing to measure reach against. The show may still be worth                  playing; the data just cannot say"
+                    .to_owned()
+            }
             Self::NotWhatTheTenantIsDoing { intent } => match intent {
                 TenantIntent::HeadsDown => {
                     "you said you are writing or recording, so this is not a proposal — it \
@@ -288,6 +364,9 @@ pub struct ReachEstimate {
 /// The proposal.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct GigPlan {
+    /// The catalogue id of `city` — what an approval names. The slug is only
+    /// unique per country, so it cannot stand in for identity.
+    pub city_id: crate::CityId,
     pub city: String,
     pub venue: String,
     /// Who to write to, strongest relationship first.
@@ -304,6 +383,76 @@ pub struct GigPlan {
     /// Stated plainly so the band checks it before acting. The planner knows
     /// what it does not know.
     pub caveats: Vec<String>,
+}
+
+impl GigPlan {
+    /// The first line of the outreach, built from the reason that carried the
+    /// proposal (4G.4).
+    ///
+    /// # Why the draft does not compose its own opening
+    ///
+    /// The reasons exist because a proposal and the letter it becomes must
+    /// state the same fact. A draft that writes its own first line is a second
+    /// code path describing one decision, and the first time the two disagree
+    /// the promoter has the wrong one in their inbox while the console shows
+    /// the right one.
+    ///
+    /// So this renders `reasons[0]` — already ordered strongest first by
+    /// `plan_gig`, and never empty — and nothing else. A fact a promoter can
+    /// check beats a sentence about how excited anybody is: "eleven acts from
+    /// this genre played your room last year" is an argument, "we love your
+    /// venue" is noise, and a promoter reading forty of these a week can tell
+    /// the difference in one line.
+    ///
+    /// It is a fact, not a finished email. The tenant's own voice writes the
+    /// rest — this module has never read a word the band wrote and must not
+    /// pretend to.
+    #[must_use]
+    pub fn opening_line(&self) -> String {
+        let city = &self.city;
+        let venue = &self.venue;
+        match self.reasons.first() {
+            Some(Reason::ComparableActsPlayedHere { count, of_shows }) => {
+                format!("{count} of the last {of_shows} shows at {venue} were acts from our genre.")
+            }
+            Some(Reason::ReachableAudience { reachable }) => format!(
+                "{reachable} people around {city} asked us to tell them when we play nearby."
+            ),
+            Some(Reason::RoomDraws { typical_draw }) => format!(
+                "Ticketed shows at {venue} average {typical_draw} paid tickets, which is the \
+                 size we are playing to."
+            ),
+            Some(Reason::NeverPlayedButHasFans { reachable }) => format!(
+                "{reachable} people around {city} asked to hear when we play nearby, and we \
+                 have never played the city."
+            ),
+            Some(Reason::OverdueReturn { months, active_30d }) => format!(
+                "We last played {city} {months} months ago, and {active_30d} people there \
+                 have been active with us in the last month."
+            ),
+            Some(Reason::CoBillAddsAudience {
+                act,
+                adds_reachable,
+            }) => format!(
+                "A bill with {act} reaches {adds_reachable} people around {city} that we do \
+                 not reach on our own."
+            ),
+            Some(Reason::WarmPromoter { name }) => {
+                format!("{name} — we spoke before, and we are looking at {city} again.")
+            }
+            Some(Reason::RoomIsActive {
+                days_since_last_event,
+            }) => format!(
+                "{venue} had something on {days_since_last_event} days ago, and we are \
+                 looking at {city}."
+            ),
+            // Unreachable by construction: `plan_gig` never returns a proposal
+            // with no reasons. Stated rather than unwrapped, because a panic
+            // here would be an outreach the band cannot send and cannot
+            // diagnose, and this sentence is still true.
+            None => format!("We are looking at {city}, and {venue} is the room."),
+        }
+    }
 }
 
 /// Decides whether to propose a gig in this city, and says why either way.
@@ -326,9 +475,15 @@ pub fn plan_gig(
     if intent == TenantIntent::HeadsDown {
         return Err(GigRefusal::NotWhatTheTenantIsDoing { intent });
     }
-    if opportunity.reachable_fans < MINIMUM_REACHABLE_FOR_A_GIG {
+    // Unmeasurable is its own refusal, not a zero. A city without
+    // coordinates may have thousands of fans; reporting "0 asked to hear
+    // from you" would be a measurement the system never made.
+    let Some(reachable_fans) = opportunity.reachable_fans else {
+        return Err(GigRefusal::AudienceNotMeasurable);
+    };
+    if reachable_fans < MINIMUM_REACHABLE_FOR_A_GIG {
         return Err(GigRefusal::TooFewReachable {
-            reachable: opportunity.reachable_fans,
+            reachable: reachable_fans,
             floor: MINIMUM_REACHABLE_FOR_A_GIG,
         });
     }
@@ -374,7 +529,7 @@ pub fn plan_gig(
     }
 
     reasons.push(Reason::ReachableAudience {
-        reachable: opportunity.reachable_fans,
+        reachable: reachable_fans,
     });
 
     if let Some(draw) = venue.typical_draw {
@@ -383,7 +538,7 @@ pub fn plan_gig(
 
     match opportunity.months_since_show {
         None => reasons.push(Reason::NeverPlayedButHasFans {
-            reachable: opportunity.reachable_fans,
+            reachable: reachable_fans,
         }),
         // Twelve months with an audience still active is the clearest "go
         // back" signal there is: they have not forgotten, and they have not
@@ -516,17 +671,25 @@ pub fn plan_gig(
             .to_owned(),
     };
 
+    // One name, one entry — two targets can share a display name, and a
+    // contact list that reads "Anna, Anna" resolves to the same person twice
+    // when the letter is addressed.
+    let mut seen_names = std::collections::HashSet::new();
+    let contact = ranked
+        .iter()
+        .filter(|promoter| seen_names.insert(promoter.name.as_str()))
+        .map(|promoter| promoter.name.clone())
+        .collect();
+
     Ok(GigPlan {
+        city_id: opportunity.city_id,
         city: opportunity.city.clone(),
         venue: venue.name.clone(),
-        contact: ranked
-            .iter()
-            .map(|promoter| promoter.name.clone())
-            .collect(),
+        contact,
         invite_to_bill,
         reasons,
         reach: ReachEstimate {
-            reachable: opportunity.reachable_fans,
+            reachable: reachable_fans,
             added_by_co_bill,
             room_typical_draw: venue.typical_draw,
             basis,
@@ -555,8 +718,9 @@ mod tests {
 
     fn opportunity() -> CityOpportunity {
         CityOpportunity {
+            city_id: crate::CityId::from_uuid(uuid::Uuid::from_u128(0x47)),
             city: "Wrocław".to_owned(),
-            reachable_fans: 240,
+            reachable_fans: Some(240),
             active_fans_30d: 60,
             months_since_show: Some(14),
             has_upcoming_show: false,
@@ -594,7 +758,7 @@ mod tests {
     #[test]
     fn a_city_with_almost_nobody_in_it_is_refused() {
         let mut thin = opportunity();
-        thin.reachable_fans = MINIMUM_REACHABLE_FOR_A_GIG - 1;
+        thin.reachable_fans = Some(MINIMUM_REACHABLE_FOR_A_GIG - 1);
         assert_eq!(
             plan_gig(&thin, TenantIntent::BookingShows),
             Err(GigRefusal::TooFewReachable {
@@ -605,8 +769,28 @@ mod tests {
         // Exactly at the floor proposes. An off-by-one here silently removes a
         // band of real cities from every suggestion they ever get.
         let mut at_floor = opportunity();
-        at_floor.reachable_fans = MINIMUM_REACHABLE_FOR_A_GIG;
+        at_floor.reachable_fans = Some(MINIMUM_REACHABLE_FOR_A_GIG);
         assert!(plan_gig(&at_floor, TenantIntent::BookingShows).is_ok());
+    }
+
+    /// A city that cannot be measured is not a city measured at zero. The
+    /// two refusals have to stay distinct: "nobody asked" and "we cannot
+    /// tell" send the band to different work.
+    #[test]
+    fn an_unmeasurable_city_is_not_a_zero_audience() {
+        let mut unmeasurable = opportunity();
+        unmeasurable.reachable_fans = None;
+        assert_eq!(
+            plan_gig(&unmeasurable, TenantIntent::BookingShows),
+            Err(GigRefusal::AudienceNotMeasurable)
+        );
+
+        let mut measured_empty = opportunity();
+        measured_empty.reachable_fans = Some(0);
+        assert!(matches!(
+            plan_gig(&measured_empty, TenantIntent::BookingShows),
+            Err(GigRefusal::TooFewReachable { reachable: 0, .. })
+        ));
     }
 
     #[test]
@@ -898,5 +1082,108 @@ mod tests {
         let second = plan_gig(&many, TenantIntent::BookingShows).expect("proposes");
         assert_eq!(first, second);
         assert_eq!(first.contact, vec!["Ada", "Zed"]);
+    }
+
+    /// Both directions, over every variant. A stored intent that parses back to
+    /// something else is a band told "heads down" that keeps getting gigs, and
+    /// the failure would be invisible until somebody complained.
+    #[test]
+    fn every_intent_round_trips_through_its_stored_form() {
+        for intent in TenantIntent::all() {
+            assert_eq!(TenantIntent::parse(intent.as_str()), Some(intent));
+        }
+        // And no two variants share a stored form.
+        let mut stored: Vec<&str> = TenantIntent::all()
+            .into_iter()
+            .map(TenantIntent::as_str)
+            .collect();
+        stored.sort_unstable();
+        let distinct = stored.len();
+        stored.dedup();
+        assert_eq!(stored.len(), distinct);
+    }
+
+    /// Unrecognised is `None`, never a variant. The caller decides, and the two
+    /// callers decide differently on purpose.
+    #[test]
+    fn an_unreadable_value_parses_to_nothing_rather_than_to_unstated() {
+        assert_eq!(TenantIntent::parse(""), None);
+        assert_eq!(TenantIntent::parse("Booking_Shows"), None);
+        assert_eq!(TenantIntent::parse("touring"), None);
+        // Whitespace around a real value is a stored-row artefact, not a typo.
+        assert_eq!(
+            TenantIntent::parse(" heads_down "),
+            Some(TenantIntent::HeadsDown)
+        );
+    }
+
+    /// §4G.4: the letter's first line is the proposal's strongest reason,
+    /// rendered once. Two code paths describing one decision drift, and the
+    /// one the promoter read is the one that counts.
+    #[test]
+    fn the_opening_line_states_the_reason_the_proposal_was_made_of() {
+        let plan = plan_gig(&opportunity(), TenantIntent::BookingShows).expect("proposes");
+        let opening = plan.opening_line();
+        match plan.reasons.first().expect("a proposal has reasons") {
+            Reason::ComparableActsPlayedHere { count, .. } => {
+                assert!(
+                    opening.contains(&count.to_string()),
+                    "the strongest reason's own number is missing: {opening}"
+                );
+                assert!(opening.contains(&plan.venue));
+            }
+            other => panic!("fixture changed shape: {other:?}"),
+        }
+    }
+
+    /// Every reason renders. A variant added without a sentence would send a
+    /// letter that opens with a fallback nobody chose, and nothing would fail.
+    #[test]
+    fn every_reason_produces_an_opening_a_promoter_can_read() {
+        let reasons = [
+            Reason::ComparableActsPlayedHere {
+                count: 4,
+                of_shows: 14,
+            },
+            Reason::ReachableAudience { reachable: 300 },
+            Reason::RoomDraws { typical_draw: 180 },
+            Reason::NeverPlayedButHasFans { reachable: 300 },
+            Reason::OverdueReturn {
+                months: 18,
+                active_30d: 90,
+            },
+            Reason::CoBillAddsAudience {
+                act: "Other Band".to_owned(),
+                adds_reachable: 120,
+            },
+            Reason::WarmPromoter {
+                name: "Anna".to_owned(),
+            },
+            Reason::RoomIsActive {
+                days_since_last_event: 12,
+            },
+        ];
+        let base = plan_gig(&opportunity(), TenantIntent::BookingShows).expect("proposes");
+        for reason in reasons {
+            let mut plan = base.clone();
+            plan.reasons = vec![reason.clone()];
+            let opening = plan.opening_line();
+            assert!(
+                opening.len() > 30 && opening.ends_with('.'),
+                "{reason:?} rendered as {opening:?}"
+            );
+            // A fact, not a feeling. The promoter reads forty of these a week.
+            assert!(!opening.to_lowercase().contains("love"), "{opening}");
+            assert!(!opening.contains('!'), "{opening}");
+        }
+    }
+
+    /// The console renders `describe`; an empty one would be a radio button
+    /// with no label.
+    #[test]
+    fn every_intent_carries_a_sentence_a_band_can_choose_from() {
+        for intent in TenantIntent::all() {
+            assert!(intent.describe().len() > 30, "{}", intent.as_str());
+        }
     }
 }

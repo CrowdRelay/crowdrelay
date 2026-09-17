@@ -1,0 +1,821 @@
+//! Builds what `domain::gig_plan` and `domain::roster_plan` decide on.
+//!
+//! The policy is in the domain: which city is worth playing, who headlines,
+//! what refuses and why. This file only gathers the evidence, and the split is
+//! load-bearing — every rule in those modules is a pure function over a struct,
+//! so the rules are testable without a database and this file cannot quietly
+//! introduce a sixth one in SQL.
+//!
+//! # Absent is not zero, all the way down
+//!
+//! Every read here preserves the difference. A city with no `place_venues` row
+//! has `venue: None`, which refuses with "no room on record" rather than
+//! proposing a nameless one. A room with no ticketed show has
+//! `typical_draw: None`, which becomes a caveat rather than a draw of zero. A
+//! city the band has never played has `months_since_show: None`, which is a
+//! different proposal from one they played last year.
+//!
+//! Folding any of those to zero would make the planner confident about things
+//! nobody measured, and a confident wrong proposal costs a band a week.
+//!
+//! # What is not gathered yet, and why that is fine
+//!
+//! `comparable_acts` needs the peer-act graph (4V.6) and arrives as `0`.
+//! `co_bill` needs the support-slot entity (4V.5) and arrives empty. Both
+//! degrade correctly: zero comparable acts produces the "no act from your
+//! genre has played here on record" caveat, which is true, and an empty
+//! co-bill produces a solo proposal. The planner is built to say less rather
+//! than to guess, so it runs today and improves when those land.
+
+use crowdrelay_domain::gig_plan::{CityOpportunity, PromoterRef, TenantIntent, VenueEvidence};
+use crowdrelay_domain::roster_plan::{CityReach, RosterAct, RosterOpportunity};
+use sqlx::{PgPool, Row};
+use time::OffsetDateTime;
+use uuid::Uuid;
+
+use crate::place_reach::{audience_overlaps, reachable_in_city};
+use crate::tenant_settings::TenantSettingsRepository;
+
+/// How many cities the planner considers in one pass.
+///
+/// The domain ranks and caps what it proposes; this only bounds the read. Forty
+/// is well past the point where a tenant has meaningful audience anywhere, and
+/// the query is per-city so an unbounded version would fan out badly on a
+/// roster.
+const MAX_CITIES_CONSIDERED: i64 = 40;
+
+#[derive(Debug, sqlx::FromRow)]
+struct CityRow {
+    city_id: Uuid,
+    city_slug: String,
+    active_30d: i64,
+    last_show_at: Option<OffsetDateTime>,
+    next_show_at: Option<OffsetDateTime>,
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct VenueRow {
+    display_name: String,
+    shows_last_12_months: i64,
+    days_since_last_event: Option<i64>,
+    typical_draw: Option<f64>,
+    capacity: Option<i32>,
+    has_booking_route: bool,
+    contact_verified_days_ago: Option<i64>,
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct PromoterRow {
+    id: Uuid,
+    version: i64,
+    display_name: String,
+    relationship_score: i32,
+    answered_last_time: bool,
+}
+
+/// Cities where this workspace has any audience at all, newest interest first.
+///
+/// Scoped to cities the tenant has a reason to care about — one with no fans
+/// and no history is not an opportunity, it is a map. `active_30d` counts fans
+/// with a recorded meaningful action, which is the same definition the funnel
+/// uses.
+async fn candidate_cities(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    now: OffsetDateTime,
+) -> Result<Vec<CityRow>, sqlx::Error> {
+    sqlx::query_as::<_, CityRow>(
+        r#"
+        WITH interested AS (
+            SELECT city.slug AS city_slug,
+                   city.id AS city_id,
+                   fan.id AS fan_id,
+                   fan_last_meaningful_action(
+                       fan.workspace_id, fan.id, fan.normalized_email
+                   ) AS last_action_at
+            FROM fan_city_interests AS interest
+            JOIN cities AS city ON city.id = interest.city_id
+            JOIN fans AS fan
+              ON fan.workspace_id = interest.workspace_id
+             AND fan.id = interest.fan_id
+             AND fan.status = 'active'
+            WHERE interest.workspace_id = $1
+        ), shows AS (
+            -- Played is past tense and booked is future. Collapsing them would
+            -- make a city with a show next month look like a city that was
+            -- served last month, and those want opposite proposals.
+            SELECT city.id AS city_id,
+                   city.slug AS city_slug,
+                   max(event.starts_at) FILTER (WHERE event.starts_at <= $2) AS last_show_at,
+                   min(event.starts_at) FILTER (
+                       WHERE event.starts_at > $2 AND event.status = 'published'
+                   ) AS next_show_at
+            FROM events AS event
+            JOIN cities AS city ON city.id = event.city_id
+            WHERE event.workspace_id = $1
+              AND event.status IN ('published', 'completed')
+            GROUP BY city.id, city.slug
+        )
+        -- Identity is the id, not the slug: the catalogue is unique on
+        -- (country_code, slug), so a bare slug can merge two cities' evidence
+        -- into one phantom opportunity.
+        SELECT COALESCE(interested.city_id, shows.city_id) AS city_id,
+               COALESCE(interested.city_slug, shows.city_slug) AS city_slug,
+               COALESCE(count(interested.fan_id) FILTER (
+                   WHERE interested.last_action_at > $2 - INTERVAL '30 days'
+               ), 0)::bigint AS active_30d,
+               max(shows.last_show_at) AS last_show_at,
+               min(shows.next_show_at) AS next_show_at
+        FROM interested
+        -- FULL JOIN because a city the band has played and has no fans in yet
+        -- is still a real opportunity — it is the one where the room already
+        -- knows them.
+        FULL JOIN shows ON shows.city_id = interested.city_id
+        GROUP BY COALESCE(interested.city_id, shows.city_id),
+                 COALESCE(interested.city_slug, shows.city_slug)
+        ORDER BY active_30d DESC, city_slug
+        LIMIT $3
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(now)
+    .bind(MAX_CITIES_CONSIDERED)
+    .fetch_all(pool)
+    .await
+}
+
+/// The best room on record in a city, with what we know about reaching it.
+///
+/// "Best" is the one with the most marked shows — the registry's own measure of
+/// a room that programmes. Capacity and the booking route come from the
+/// tenant's own booking target joined through migration 0296's `venue_id`,
+/// which is why that join had to exist before this could.
+async fn best_venue(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    city_id: Uuid,
+    now: OffsetDateTime,
+) -> Result<Option<VenueEvidence>, sqlx::Error> {
+    let row = sqlx::query_as::<_, VenueRow>(
+        r#"
+        WITH marks AS (
+            SELECT mark.venue_id, event.starts_at, sale.id AS sale_id,
+                   mark.workspace_id, mark.event_id
+            FROM place_venue_marks AS mark
+            JOIN events AS event ON event.id = mark.event_id
+            LEFT JOIN ticket_sales AS sale
+              ON sale.workspace_id = mark.workspace_id
+             AND sale.event_id = mark.event_id
+        ), per_show AS (
+            SELECT marks.venue_id, marks.event_id,
+                   count(ticket_order.id)::double precision AS paid_orders
+            FROM marks
+            JOIN ticket_orders AS ticket_order
+              ON ticket_order.workspace_id = marks.workspace_id
+             AND ticket_order.ticket_sale_id = marks.sale_id
+             AND ticket_order.status IN ('paid', 'partially_refunded')
+            GROUP BY marks.venue_id, marks.event_id
+        )
+        SELECT venue.display_name,
+               count(marks.event_id) FILTER (
+                   WHERE marks.starts_at > $3 - INTERVAL '12 months'
+                     AND marks.starts_at <= $3
+               )::bigint AS shows_last_12_months,
+               -- NULL when the room has never hosted anything we know about,
+               -- which the planner reads as "never seen" rather than "a long
+               -- time ago". The two need different next steps.
+               FLOOR(EXTRACT(EPOCH FROM (
+                   $3 - max(marks.starts_at) FILTER (WHERE marks.starts_at <= $3)
+               )) / 86400)::bigint AS days_since_last_event,
+               -- Averaged over ticketed shows only. An unticketed night is
+               -- unmeasurable, not a night nobody came to, so it stays out of
+               -- the mean instead of dragging it down.
+               avg(per_show.paid_orders) AS typical_draw,
+               max(target.capacity) AS capacity,
+               COALESCE(bool_or(target.active AND target.accepts_booking), false)
+                   AS has_booking_route,
+               FLOOR(EXTRACT(EPOCH FROM ($3 - max(target.last_outreach_at))) / 86400)::bigint
+                   AS contact_verified_days_ago
+        FROM place_venues AS venue
+        JOIN cities AS city ON city.id = venue.city_id AND city.id = $2
+        LEFT JOIN marks ON marks.venue_id = venue.id
+        LEFT JOIN per_show
+          ON per_show.venue_id = marks.venue_id
+         AND per_show.event_id = marks.event_id
+        -- The tenant's own booking target for this room, if they have one.
+        -- Scoped to the workspace: capacity is shared knowledge, but whether
+        -- *we* can write to the room is ours.
+        LEFT JOIN viryaos_booking_targets AS target
+          ON target.venue_id = venue.id
+         AND target.workspace_id = $1
+        GROUP BY venue.id, venue.display_name
+        ORDER BY count(marks.event_id) DESC, venue.display_name
+        LIMIT 1
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(city_id)
+    .bind(now)
+    .fetch_optional(pool)
+    .await?;
+
+    Ok(row.map(|row| VenueEvidence {
+        name: row.display_name,
+        shows_last_12_months: bounded_u16(row.shows_last_12_months),
+        // Needs the peer-act graph (4V.6). Zero is honest here: it produces the
+        // "no act from your genre has played here on record" caveat, which is
+        // exactly what we know.
+        comparable_acts: 0,
+        capacity: row.capacity.and_then(|value| u32::try_from(value).ok()),
+        typical_draw: row
+            .typical_draw
+            .map(|draw| u32::try_from(draw.round() as i64).unwrap_or(u32::MAX)),
+        contact_verified_days_ago: row
+            .contact_verified_days_ago
+            .and_then(|days| u16::try_from(days.max(0)).ok()),
+        days_since_last_event: row
+            .days_since_last_event
+            .and_then(|days| u16::try_from(days.max(0)).ok()),
+        has_booking_route: row.has_booking_route,
+    }))
+}
+
+/// Promoters this workspace can write to in a city.
+///
+/// `answered_last_time` is the strongest cheap signal there is about whether an
+/// approach is worth making, and it comes from the interaction ledger rather
+/// than from the relationship score, which moves for other reasons too.
+/// The same promoters the proposal names, carrying the row identity the
+/// outreach needs (4G.4).
+///
+/// `PromoterRef` is a domain type and has no identifiers on purpose — the
+/// planner decides on evidence, not on rows. But the letter has to be
+/// addressed, and matching the proposal's names back to rows afterwards would
+/// be a second read with its own ordering, its own `LIMIT`, and the chance of
+/// resolving a name to a different promoter than the one judged. So both come
+/// from this one query.
+#[derive(Clone, Debug)]
+pub struct PromoterTarget {
+    pub target_id: Uuid,
+    pub target_version: i64,
+    pub name: String,
+    pub relationship_score: u16,
+    pub answered_last_time: bool,
+}
+
+impl PromoterTarget {
+    /// What the planner judges: the same facts, without the row.
+    #[must_use]
+    pub fn as_promoter_ref(&self) -> PromoterRef {
+        PromoterRef {
+            name: self.name.clone(),
+            relationship_score: self.relationship_score,
+            answered_last_time: self.answered_last_time,
+            // Selected only when active and accepting booking, and
+            // `contact_email` is NOT NULL, so a selected row is contactable by
+            // construction.
+            has_route: true,
+        }
+    }
+}
+
+/// Everybody who books in this city, strongest relationship first.
+///
+/// # Errors
+///
+/// Propagates the database error.
+pub async fn promoter_targets_in_city(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    city_id: Uuid,
+) -> Result<Vec<PromoterTarget>, sqlx::Error> {
+    let rows = sqlx::query_as::<_, PromoterRow>(
+        r#"
+        SELECT target.id,
+               target.version,
+               target.display_name,
+               target.relationship_score,
+               EXISTS (
+                   SELECT 1 FROM viryaos_booking_interactions AS interaction
+                   WHERE interaction.workspace_id = target.workspace_id
+                     AND interaction.target_id = target.id
+                     AND interaction.direction = 'inbound'
+               ) AS answered_last_time
+        FROM viryaos_booking_targets AS target
+        WHERE target.workspace_id = $1
+          AND target.city_id = $2
+          AND target.target_kind IN ('promoter', 'venue')
+          AND target.active
+          AND target.accepts_booking
+        ORDER BY target.relationship_score DESC, target.display_name
+        LIMIT 8
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(city_id)
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(|row| PromoterTarget {
+            target_id: row.id,
+            target_version: row.version,
+            name: row.display_name,
+            relationship_score: bounded_u16(i64::from(row.relationship_score)),
+            answered_last_time: row.answered_last_time,
+        })
+        .collect())
+}
+
+async fn promoters_in_city(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    city_id: Uuid,
+) -> Result<Vec<PromoterRef>, sqlx::Error> {
+    Ok(promoter_targets_in_city(pool, workspace_id, city_id)
+        .await?
+        .iter()
+        .map(PromoterTarget::as_promoter_ref)
+        .collect())
+}
+
+fn bounded_u16(value: i64) -> u16 {
+    u16::try_from(value.clamp(0, i64::from(u16::MAX))).unwrap_or(u16::MAX)
+}
+
+/// Months between two instants, floored. `None` in means `None` out — a band
+/// that has never played a city is not a band that played it zero months ago.
+fn months_between(from: Option<OffsetDateTime>, now: OffsetDateTime) -> Option<u16> {
+    from.map(|then| {
+        let months = (i32::from(now.year() as i16) - i32::from(then.year() as i16)) * 12
+            + i32::from(u8::from(now.month()))
+            - i32::from(u8::from(then.month()));
+        bounded_u16(i64::from(months.max(0)))
+    })
+}
+
+/// Everything one workspace's gig planner decides on.
+///
+/// # Errors
+///
+/// Propagates the database error.
+pub async fn city_opportunities(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    now: OffsetDateTime,
+) -> Result<Vec<CityOpportunity>, sqlx::Error> {
+    let cities = candidate_cities(pool, workspace_id, now).await?;
+    let mut opportunities = Vec::with_capacity(cities.len());
+    for city in cities {
+        // `None` means the city cannot be measured — no coordinates on
+        // record. Handed through as `None` so the planner refuses it as
+        // unmeasurable rather than inventing a zero it never counted.
+        let reachable = reachable_in_city(pool, workspace_id, city.city_id).await?;
+        opportunities.push(CityOpportunity {
+            city_id: crowdrelay_domain::CityId::from_uuid(city.city_id),
+            city: city.city_slug.clone(),
+            reachable_fans: reachable,
+            active_fans_30d: bounded_u16(city.active_30d).into(),
+            months_since_show: months_between(city.last_show_at, now),
+            has_upcoming_show: city.next_show_at.is_some(),
+            venue: best_venue(pool, workspace_id, city.city_id, now).await?,
+            promoters: promoters_in_city(pool, workspace_id, city.city_id).await?,
+            // Needs the support-slot entity (4V.5). Empty produces a solo
+            // proposal, which is correct rather than incomplete.
+            co_bill: Vec::new(),
+        });
+    }
+    Ok(opportunities)
+}
+
+/// What one workspace has stated it is working on, or `Unstated`.
+///
+/// One resolution for the band route and the roster route. Two readers of the
+/// same setting would eventually disagree about what an unreadable value means,
+/// and the disagreement would show up as a band receiving proposals on one
+/// surface and not the other.
+///
+/// A stored value nobody recognises resolves to `Unstated`: the vocabulary is
+/// validated on write, so an unreadable row is a hand edit, and proposing with
+/// the timing marked unverified is the weakest thing the planner can do with it.
+/// It is never read as `HeadsDown` — silently withholding every proposal on the
+/// strength of a typo is the failure nobody would report.
+///
+/// # Errors
+///
+/// Propagates the database error.
+pub async fn stated_intent(
+    settings: &TenantSettingsRepository,
+    workspace_id: Uuid,
+) -> Result<TenantIntent, sqlx::Error> {
+    Ok(settings
+        .tenant_intent(workspace_id)
+        .await?
+        .as_deref()
+        .and_then(TenantIntent::parse)
+        .unwrap_or_default())
+}
+
+/// The roster's view: every act in the organisation, and the cities any of them
+/// could play.
+///
+/// Cities are gathered from the whole organisation rather than per act, because
+/// a city one act has an audience in is a city the roster can play — the
+/// planner decides which act, and it needs the option in front of it to do
+/// that.
+///
+/// # Errors
+///
+/// Propagates the database error.
+pub async fn roster_opportunity(
+    pool: &PgPool,
+    organization_id: Uuid,
+    packages_this_period: u16,
+    now: OffsetDateTime,
+) -> Result<RosterOpportunity, sqlx::Error> {
+    let members = sqlx::query(
+        r#"
+        SELECT workspace.id, workspace.name
+        FROM workspaces AS workspace
+        WHERE workspace.organization_id = $1
+        ORDER BY workspace.name, workspace.id
+        LIMIT 60
+        "#,
+    )
+    .bind(organization_id)
+    .fetch_all(pool)
+    .await?;
+
+    let mut acts = Vec::with_capacity(members.len());
+    let mut cities: Vec<CityOpportunity> = Vec::new();
+    let settings = TenantSettingsRepository::new(pool.clone());
+
+    // 4G.3b: what each pair of acts' audiences share, measured once for the
+    // whole organisation. `normalized_email` is the only cross-workspace
+    // identity, and only counts come back — a roster learns that two acts
+    // share 40% of an audience, never which people. A pair absent from the
+    // result has an empty side, which the planner reads as unmeasured rather
+    // than as separate.
+    let member_ids: Vec<Uuid> = members
+        .iter()
+        .map(|member| member.get::<Uuid, _>("id"))
+        .collect();
+    let overlaps = audience_overlaps(pool, &member_ids).await?;
+
+    for member in &members {
+        let act_workspace: Uuid = member.get("id");
+        let act_name: String = member.get("name");
+        let per_city = city_opportunities(pool, act_workspace, now).await?;
+        let intent = stated_intent(&settings, act_workspace).await?;
+
+        let reach_by_city = per_city
+            .iter()
+            .map(|city| CityReach {
+                city: city.city.clone(),
+                city_id: city.city_id,
+                reachable: city.reachable_fans,
+            })
+            .collect();
+
+        let months_since_last_show = per_city
+            .iter()
+            .filter_map(|city| city.months_since_show)
+            .min();
+
+        let overlap_with = overlaps
+            .iter()
+            .filter(|overlap| {
+                overlap.workspace_a == act_workspace || overlap.workspace_b == act_workspace
+            })
+            .filter_map(|overlap| {
+                let other_workspace = if overlap.workspace_a == act_workspace {
+                    overlap.workspace_b
+                } else {
+                    overlap.workspace_a
+                };
+                let other_name = members
+                    .iter()
+                    .find(|member| member.get::<Uuid, _>("id") == other_workspace)
+                    .map(|member| member.get::<String, _>("name"))?;
+                // The share is of *this* act's audience: how much of what the
+                // support could bring is already the headliner's.
+                let basis_points = overlap.share_of(act_workspace)?;
+                Some(crowdrelay_domain::roster_plan::ActOverlap {
+                    other_act: other_name,
+                    overlap_basis_points: basis_points,
+                })
+            })
+            .collect();
+
+        acts.push(RosterAct {
+            name: act_name,
+            // Each act's own word, read from its own workspace (4G.2). A label
+            // cannot state it for them and the roster planner cannot overrule
+            // it: an act that says it is recording is not proposed, whatever
+            // the roster would prefer.
+            intent,
+            months_since_last_show,
+            reach_by_city,
+            overlap_with,
+        });
+
+        // One entry per city across the roster. The first act to surface a
+        // city contributes its evidence; the planner substitutes whichever
+        // act's reach it is judging, so the room and promoter facts are what
+        // matter here and those are workspace-independent for the registry
+        // half.
+        for city in per_city {
+            if !cities.iter().any(|seen| seen.city_id == city.city_id) {
+                cities.push(city);
+            }
+        }
+    }
+
+    Ok(RosterOpportunity {
+        acts,
+        cities,
+        // The support-slot entity is 4V.5. Empty means the planner proposes
+        // only new bookings — it loses its cheapest move and keeps every other
+        // one.
+        open_slots: Vec::new(),
+        packages_this_period,
+    })
+}
+
+// ── 4G.5: what an approved proposal actually produced ──────────────────────
+//
+// The reasons a proposal carries are structured precisely so they can be
+// scored: "a room that books our genre", "240 reachable people", "the booker
+// answered last time" are hypotheses, and the honest question is which of
+// them turned out to predict a reply or a show. That tally is computed here
+// rather than written beside the decision — the decision's `input_snapshot`
+// already holds the reasons verbatim, and a second store would be a second
+// truth the first time they disagree.
+
+/// One approved proposal and what came of it, newest first.
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct ProposalOutcome {
+    pub city: String,
+    pub venue: String,
+    pub approved_at: OffsetDateTime,
+    /// The action's own status — `queued` for a letter parked on a missing
+    /// executor, `succeeded` once the outreach actually ran. A score only
+    /// exists once the letter left.
+    pub action_status: String,
+    /// Promoters the letter went to.
+    pub recipients: u32,
+    /// The catalogue id of `city`, from the decision's subject. The slug in
+    /// `city` is for reading; this is the identity a display-name lookup or a
+    /// same-slug sibling needs.
+    pub city_id: Uuid,
+    /// Promoters who answered inside the seven-day window.
+    pub replies: u32,
+    /// Reply windows still open — a proposal with any of these is in flight
+    /// and does not score yet.
+    pub unfinished_measurements: u32,
+    /// A real show appeared in the city after the approval. The strongest
+    /// signal there is — and the one worth waiting for.
+    pub show_booked: bool,
+    /// The reasons the approved proposal carried, as they were stored.
+    pub reasons: Vec<crowdrelay_domain::gig_plan::Reason>,
+}
+
+impl ProposalOutcome {
+    /// Every reply window has closed and the letter genuinely left — the two
+    /// conditions under which "nobody answered" is a fact rather than a guess.
+    #[must_use]
+    pub fn is_settled(&self) -> bool {
+        self.action_status == "succeeded"
+            && self.recipients > 0
+            && self.unfinished_measurements == 0
+    }
+}
+
+/// The tally the learning question is asked with: of the settled proposals
+/// that carried this reason, how many produced a reply, and how many a show.
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct ReasonScore {
+    /// The `Reason` variant tag — the vocabulary the proposals were made in.
+    pub kind: &'static str,
+    /// Settled proposals that carried it.
+    pub proposals: u32,
+    /// Of those, how many got at least one promoter reply.
+    pub replies: u32,
+    /// Of those, how many produced a show in the city.
+    pub shows: u32,
+}
+
+/// What approved proposals have produced, and which reasons were on the ones
+/// that worked.
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct GigPlanTrackRecord {
+    /// Every approved proposal, newest first — including the in-flight ones,
+    /// because a letter parked on a missing executor is a fact too.
+    pub proposals: Vec<ProposalOutcome>,
+    /// Per reason kind, over settled proposals only.
+    pub by_reason: Vec<ReasonScore>,
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct ProposalOutcomeRow {
+    evaluated_at: OffsetDateTime,
+    city_id: Uuid,
+    city: Option<String>,
+    venue: Option<String>,
+    reasons: serde_json::Value,
+    action_status: String,
+    recipients: i64,
+    replies: i64,
+    unfinished: i64,
+    show_booked: bool,
+}
+
+/// Reads the decision → action → measurement → event chain for every
+/// band-approved proposal (4G.5).
+///
+/// A reply is an inbound booking interaction measured by `BookingReply7d`
+/// inside seven days; a show is a non-cancelled event in the proposal's city
+/// created after the approval. Neither attribution is stronger than that —
+/// a reply timed to the outreach is the promoter's answer, and a show that
+/// appeared after the band wrote is the outcome the proposal was for.
+///
+/// # Errors
+///
+/// Propagates the database error.
+pub async fn proposal_track_record(
+    pool: &PgPool,
+    workspace_id: Uuid,
+) -> Result<GigPlanTrackRecord, sqlx::Error> {
+    let rows = sqlx::query_as::<_, ProposalOutcomeRow>(
+        r#"
+        WITH proposals AS (
+            SELECT decision.id AS decision_id,
+                   decision.evaluated_at,
+                   decision.subject_id AS city_id,
+                   decision.input_snapshot ->> 'city' AS city,
+                   decision.input_snapshot ->> 'venue' AS venue,
+                   decision.input_snapshot -> 'reasons' AS reasons,
+                   action.id AS action_id,
+                   action.status AS action_status,
+                   action.payload AS action_payload
+            FROM viryaos_autopilot_decisions AS decision
+            JOIN viryaos_autopilot_actions AS action
+              ON action.workspace_id = decision.workspace_id
+             AND action.decision_id = decision.id
+            WHERE decision.workspace_id = $1
+              AND decision.decision_kind = 'gig.proposal.approved'
+        ), reply_counts AS (
+            SELECT outcome.action_id,
+                   count(*) FILTER (WHERE outcome.observed_value > 0)::bigint AS replies
+            FROM viryaos_autopilot_outcomes AS outcome
+            JOIN proposals ON proposals.action_id = outcome.action_id
+            WHERE outcome.workspace_id = $1
+              AND outcome.metric_key = 'effect.booking_reply_7d'
+            GROUP BY outcome.action_id
+        ), unfinished AS (
+            SELECT measurement.action_id, count(*)::bigint AS n
+            FROM viryaos_autopilot_measurements AS measurement
+            JOIN proposals ON proposals.action_id = measurement.action_id
+            WHERE measurement.workspace_id = $1
+              AND measurement.status IN ('pending', 'processing')
+            GROUP BY measurement.action_id
+        )
+        SELECT proposals.evaluated_at,
+               proposals.city_id,
+               proposals.city,
+               proposals.venue,
+               proposals.reasons,
+               proposals.action_status,
+               -- The room the letter addressed, from the action's own payload.
+               -- Measurement outcomes would undercount it: a recipient whose
+               -- observation failed is still somebody we wrote to.
+               COALESCE(
+                   jsonb_array_length(proposals.action_payload -> 'recipients'), 0
+               )::bigint AS recipients,
+               COALESCE(reply_counts.replies, 0) AS replies,
+               COALESCE(unfinished.n, 0) AS unfinished,
+               EXISTS (
+                   SELECT 1 FROM events AS event
+                   WHERE event.workspace_id = $1
+                     AND event.city_id = proposals.city_id
+                     AND event.created_at >= proposals.evaluated_at
+                     AND event.status IN ('published', 'completed')
+               ) AS show_booked
+        FROM proposals
+        LEFT JOIN reply_counts ON reply_counts.action_id = proposals.action_id
+        LEFT JOIN unfinished ON unfinished.action_id = proposals.action_id
+        ORDER BY proposals.evaluated_at DESC
+        "#,
+    )
+    .bind(workspace_id)
+    .fetch_all(pool)
+    .await?;
+
+    let mut proposals = Vec::with_capacity(rows.len());
+    for row in rows {
+        // The reasons were written by `queue_outreach` as the same structured
+        // values the console showed. A snapshot that does not decode is a bug
+        // on the write side; dropping it would silently unscored a proposal,
+        // so it surfaces as a database error instead.
+        let reasons: Vec<crowdrelay_domain::gig_plan::Reason> = serde_json::from_value(row.reasons)
+            .map_err(|error| sqlx::Error::Decode(Box::new(error).into()))?;
+        proposals.push(ProposalOutcome {
+            city_id: row.city_id,
+            city: row.city.unwrap_or_default(),
+            venue: row.venue.unwrap_or_default(),
+            approved_at: row.evaluated_at,
+            action_status: row.action_status,
+            recipients: u32::try_from(row.recipients).unwrap_or(u32::MAX),
+            replies: u32::try_from(row.replies).unwrap_or(u32::MAX),
+            unfinished_measurements: u32::try_from(row.unfinished).unwrap_or(u32::MAX),
+            show_booked: row.show_booked,
+            reasons,
+        });
+    }
+
+    let mut by_reason_map: std::collections::BTreeMap<&'static str, ReasonScore> =
+        std::collections::BTreeMap::new();
+    for proposal in proposals.iter().filter(|proposal| proposal.is_settled()) {
+        for reason in &proposal.reasons {
+            let kind = reason_kind(reason);
+            let entry = by_reason_map.entry(kind).or_insert(ReasonScore {
+                kind,
+                proposals: 0,
+                replies: 0,
+                shows: 0,
+            });
+            entry.proposals += 1;
+            if proposal.replies > 0 {
+                entry.replies += 1;
+            }
+            if proposal.show_booked {
+                entry.shows += 1;
+            }
+        }
+    }
+    let mut by_reason: Vec<ReasonScore> = by_reason_map.into_values().collect();
+    // The reasons that have worked before come first — the whole point of the
+    // tally is that a track record should reorder what the band reads.
+    by_reason.sort_by(|left, right| {
+        right
+            .shows
+            .cmp(&left.shows)
+            .then_with(|| right.replies.cmp(&left.replies))
+            .then_with(|| left.kind.cmp(right.kind))
+    });
+
+    Ok(GigPlanTrackRecord {
+        proposals,
+        by_reason,
+    })
+}
+
+/// The variant tag, which is the vocabulary the tally speaks in.
+fn reason_kind(reason: &crowdrelay_domain::gig_plan::Reason) -> &'static str {
+    use crowdrelay_domain::gig_plan::Reason;
+    match reason {
+        Reason::ComparableActsPlayedHere { .. } => "comparable_acts_played_here",
+        Reason::ReachableAudience { .. } => "reachable_audience",
+        Reason::RoomDraws { .. } => "room_draws",
+        Reason::NeverPlayedButHasFans { .. } => "never_played_but_has_fans",
+        Reason::OverdueReturn { .. } => "overdue_return",
+        Reason::CoBillAddsAudience { .. } => "co_bill_adds_audience",
+        Reason::WarmPromoter { .. } => "warm_promoter",
+        Reason::RoomIsActive { .. } => "room_is_active",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `None` in, `None` out. A band that has never played a city is not a band
+    /// that played it zero months ago, and the whole proposal differs between
+    /// those two.
+    #[test]
+    fn a_city_never_played_stays_absent_rather_than_becoming_zero() {
+        let now = OffsetDateTime::UNIX_EPOCH;
+        assert_eq!(months_between(None, now), None);
+    }
+
+    #[test]
+    fn months_are_floored_and_never_negative() {
+        let now = OffsetDateTime::UNIX_EPOCH + time::Duration::days(400);
+        let then = OffsetDateTime::UNIX_EPOCH;
+        assert_eq!(months_between(Some(then), now), Some(13));
+
+        // A show timestamped in the future clamps to zero rather than
+        // underflowing into a very large gap, which would read as an overdue
+        // return to a city the band is playing next week.
+        let future = now + time::Duration::days(60);
+        assert_eq!(months_between(Some(future), now), Some(0));
+    }
+
+    #[test]
+    fn counts_clamp_instead_of_wrapping() {
+        assert_eq!(bounded_u16(-5), 0);
+        assert_eq!(bounded_u16(i64::from(u16::MAX) + 10), u16::MAX);
+        assert_eq!(bounded_u16(14), 14);
+    }
+}

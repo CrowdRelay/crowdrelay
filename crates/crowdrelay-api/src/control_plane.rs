@@ -209,6 +209,10 @@ pub(crate) fn router(state: crate::AppState) -> Router {
             get(crate::tenant_settings_http::list_north_star_options),
         )
         .route(
+            "/v1/control-plane/tenant-settings/intents",
+            get(crate::tenant_settings_http::list_tenant_intent_options),
+        )
+        .route(
             "/v1/control-plane/tenant-settings",
             get(crate::tenant_settings_http::get_brand_settings),
         )
@@ -324,6 +328,21 @@ pub(crate) fn router(state: crate::AppState) -> Router {
         .route(
             "/v1/control-plane/listing/rotate-token",
             post(crate::band_listing::rotate_listing_token),
+        )
+        // What to book next, and why. A refusal is part of the answer and
+        // comes back 200 with its sentence: "nobody has played a room here"
+        // tells the band what to go and find, and a 4xx would make the console
+        // treat the most useful half of the output as a failure.
+        .route(
+            "/v1/control-plane/gig-plan",
+            get(crate::gig_planning::band_gig_plan),
+        )
+        // Approving the proposal is the approval (4G.4): one action for the
+        // whole room, queued rather than parked for a second yes on another
+        // screen.
+        .route(
+            "/v1/control-plane/gig-plan/approve",
+            post(crate::gig_planning::approve_gig_proposal),
         )
         // Audience attestations. The tenant decides whether a document exists
         // and who gets the link; it never decides what the document says, so

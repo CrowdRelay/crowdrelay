@@ -13,6 +13,7 @@ use axum::{
     http::{HeaderMap, StatusCode, header::CACHE_CONTROL},
     response::{IntoResponse, Response},
 };
+use crowdrelay_domain::gig_plan::TenantIntent;
 use crowdrelay_infra::tenant_settings::{EDITABLE_KEYS, TenantSettingsRepository};
 use serde::Deserialize;
 use serde::Serialize;
@@ -68,6 +69,34 @@ pub async fn list_north_star_options(headers: HeaderMap) -> Response {
         .into_response()
 }
 
+/// The intents a band may state, from the planner's own vocabulary.
+///
+/// Served for the same reason the north stars are: the control plane used to
+/// keep its own copy of a domain list, and it silently stopped matching the day
+/// the list grew. An intent the console cannot offer is an intent the planner
+/// will never respect, and the band would have no way to find that out.
+pub async fn list_tenant_intent_options(headers: HeaderMap) -> Response {
+    let options: Vec<serde_json::Value> = TenantIntent::all()
+        .into_iter()
+        .map(|intent| {
+            serde_json::json!({
+                "value": intent.as_str(),
+                "description": intent.describe(),
+                // The one choice that stops proposals entirely. The console
+                // should say so at the moment of choosing, not afterwards.
+                "withholdsProposals": intent == TenantIntent::HeadsDown,
+            })
+        })
+        .collect();
+    let _ = request_id(&headers);
+    (
+        StatusCode::OK,
+        [(CACHE_CONTROL, PRIVATE_NO_STORE)],
+        Json(serde_json::json!({ "options": options })),
+    )
+        .into_response()
+}
+
 pub async fn get_brand_settings(
     State(state): State<crate::AppState>,
     headers: HeaderMap,
@@ -106,6 +135,17 @@ pub async fn get_brand_settings(
                     .get("team_weekly_ask_ceiling")
                     .cloned()
                     .unwrap_or_default(),
+            );
+            // §4G.2: absent means the band has never stated an intent, and the
+            // effective value is `unstated` — which the planner acts on. The
+            // `overridden` list still says whether they chose it or were never
+            // asked, and those read differently to an operator.
+            settings.insert(
+                "tenant_intent".to_owned(),
+                overrides
+                    .get("tenant_intent")
+                    .cloned()
+                    .unwrap_or_else(|| TenantIntent::default().as_str().to_owned()),
             );
             settings.insert(
                 "member_site_base_url".to_owned(),
@@ -234,6 +274,13 @@ fn validate_value(key: &str, value: &str) -> bool {
     if key == "north_star_metric" {
         return crowdrelay_domain::growth_metrics::NorthStarMetric::parse(value).is_some();
     }
+    // §4G.2: the gig planner reads this and refuses outright on `heads_down`.
+    // A value it cannot parse would be stored and then ignored, which is the
+    // worst of both — the band believes it said something and the planner never
+    // heard it. Rejected at the edge instead.
+    if key == "tenant_intent" {
+        return crowdrelay_domain::gig_plan::TenantIntent::parse(value).is_some();
+    }
     // The cadence commitment is 1–4 serious moments a month — past weekly,
     // nothing is a serious moment any more.
     if key == "growth_cadence_moments_per_month" {
@@ -313,7 +360,17 @@ pub async fn upsert_setting(
                                 "false"
                             }
                             .to_owned(),
-                            _ => effective.synesthesia_campaign_slug.clone(),
+                            "synesthesia_campaign_slug" => {
+                                effective.synesthesia_campaign_slug.clone()
+                            }
+                            // Keys `TenantBrandSettings` does not carry —
+                            // `crew_locale`, `team_weekly_ask_ceiling`,
+                            // `tenant_intent` — echo the value that was just
+                            // accepted. The previous fallback returned the
+                            // synesthesia campaign slug for all three, so a
+                            // console saving a crew locale was shown a campaign
+                            // slug as the new value.
+                            _ => request.value.trim().to_owned(),
                         };
                         serde_json::json!({ "key": key, "value": value })
                     }),

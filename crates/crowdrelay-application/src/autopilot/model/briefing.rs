@@ -176,6 +176,32 @@ impl AutopilotActionPayload {
                 ],
                 deadline_note: String::new(),
             },
+            Self::RequestGigOutreach { venue, recipients, opening_line, reasons, .. } => ActionBriefing {
+                summary: format!("Gig outreach: {} ({} to write to)", venue, recipients.len()),
+                why_it_matters: "Everybody who books this room hears about the same night, or nobody does. Writing to one promoter of three about one night reads as a snub to the other two.".into(),
+                steps: vec![
+                    BriefingStep { what_to_do: "Check who is on the list and that the room is right".into(), why_it_matters: "They all receive it together".into() },
+                    BriefingStep { what_to_do: "Read the opening line".into(), why_it_matters: "It is the fact the proposal was approved on, and the promoter will answer it".into() },
+                ],
+                content: {
+                    let mut fields = vec![
+                        BriefingField { label: "Room".into(), value: venue.clone() },
+                        BriefingField {
+                            label: "Writing to".into(),
+                            value: recipients.iter().map(|recipient| recipient.target_name.clone()).collect::<Vec<_>>().join(", "),
+                        },
+                        BriefingField { label: "Opens with".into(), value: opening_line.clone() },
+                    ];
+                    // Every reason travels, not a sample: the band answers for
+                    // this letter, and a reason it cannot see is one it cannot
+                    // defend when the promoter asks about it.
+                    for (index, reason) in reasons.iter().enumerate() {
+                        fields.push(BriefingField { label: format!("Reason {}", index + 1), value: reason.clone() });
+                    }
+                    fields
+                },
+                deadline_note: String::new(),
+            },
             Self::RequestAudienceCampaign { event_id, phase, template_key } => ActionBriefing {
                 summary: format!("Audience campaign: {}", friendly_template(template_key)),
                 why_it_matters: "The campaign reaches fans tied to this event. A sent campaign cannot be recalled.".into(),
