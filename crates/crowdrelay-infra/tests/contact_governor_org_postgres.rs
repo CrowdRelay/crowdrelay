@@ -132,6 +132,7 @@ async fn may_reserve(pool: &PgPool, workspace: Uuid, contact: &str, now: OffsetD
 }
 
 #[tokio::test]
+#[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn a_sibling_acts_cooldown_binds_the_whole_roster() {
     let pool = pool().await;
     let organization = seed_organization(&pool).await;
@@ -158,6 +159,7 @@ async fn a_sibling_acts_cooldown_binds_the_whole_roster() {
 }
 
 #[tokio::test]
+#[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn a_do_not_contact_on_one_act_binds_every_act() {
     let pool = pool().await;
     let organization = seed_organization(&pool).await;
@@ -179,6 +181,7 @@ async fn a_do_not_contact_on_one_act_binds_every_act() {
 }
 
 #[tokio::test]
+#[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn an_unrelated_workspace_is_not_bound() {
     // Two tenants who share nothing must not leak a contact decision to each
     // other: that would be one tenant learning another's suppression list.
@@ -200,6 +203,7 @@ async fn an_unrelated_workspace_is_not_bound() {
 }
 
 #[tokio::test]
+#[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn a_lone_tenant_reserves_exactly_as_before() {
     // Every tenant today has no organization. The gate must be vacuously true
     // for them, or this change alters live behaviour for the only customer.
@@ -220,6 +224,7 @@ async fn a_lone_tenant_reserves_exactly_as_before() {
 }
 
 #[tokio::test]
+#[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn an_act_does_not_block_itself() {
     // The sibling clause excludes the reserving workspace, because the row it
     // is about to update is its own — the per-workspace rules in the
