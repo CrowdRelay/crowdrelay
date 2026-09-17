@@ -63,6 +63,10 @@ fn executor_capability_for_event(event_type: &str) -> &'static str {
         "crowdrelay.ops.status_changed" => "ops.alert",
         "crowdrelay.promotion.budget_change_requested" => "promotion.budget",
         "crowdrelay.opportunity.application_requested" => "opportunity.application",
+        // The counterparty report is the same delivery class as the post-show
+        // report it precedes in the negotiation — a note to the humans around
+        // the deal — so it rides the same show.escalation executor.
+        "crowdrelay.opportunity.counterparty_report_issued" => "show.escalation",
         // One capability for both moves. An executor that can write to a
         // promoter can write either message, and splitting them would let a
         // workspace advertise the ability to accept without the ability to

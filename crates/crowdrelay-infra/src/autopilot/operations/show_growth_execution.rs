@@ -1148,3 +1148,32 @@ pub(in crate::autopilot) async fn issue_post_show_report(
     // (an odd path, but possible) the harvest source still registers here.
     ensure_show_completed_source(tx, workspace_id, event_id).await
 }
+
+/// The report a live-terms negotiation waits on before its first counter. It
+/// goes through `issue_post_show_report` — the one piece of machinery that
+/// owns the checklist item — so the sequencing rule and the checklist can
+/// never disagree about whether the report went. The emitted event then names
+/// the negotiation it unblocked, so the receipt trail reads "report sent for
+/// this opportunity" instead of an unattributed show task.
+pub(in crate::autopilot) async fn issue_counterparty_report(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    workspace_id: WorkspaceId,
+    action_id: crowdrelay_domain::AutopilotActionId,
+    opportunity_id: crowdrelay_domain::TeamOpportunityId,
+    event_id: EventId,
+    now: OffsetDateTime,
+) -> Result<(), RepositoryError> {
+    issue_post_show_report(tx, workspace_id, action_id, event_id, now).await?;
+    crate::autopilot::emit_external_action(
+        tx,
+        workspace_id,
+        action_id,
+        "crowdrelay.opportunity.counterparty_report_issued",
+        json!({
+            "action_id": action_id,
+            "opportunity_id": opportunity_id,
+            "event_id": event_id,
+        }),
+    )
+    .await
+}

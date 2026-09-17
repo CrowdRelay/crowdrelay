@@ -1013,31 +1013,8 @@ impl PostgresAutopilotRepository {
                     ).await?;
                 }
                 AutopilotActionPayload::IssueCounterpartyReport { opportunity_id, event_id } => {
-                    // Same writer as the checklist path: the report is issued
-                    // through the one piece of machinery that owns it, so the
-                    // sequencing rule and the checklist can never disagree
-                    // about whether the report went.
-                    operations::issue_post_show_report(
-                        &mut transaction,
-                        workspace_id,
-                        action.id,
-                        *event_id,
-                        now,
-                    )
-                    .await?;
-                    // The report names the negotiation it unblocked so the
-                    // receipt trail reads "report sent for this opportunity",
-                    // not an unattributed show task.
-                    emit_external_action(
-                        &mut transaction,
-                        workspace_id,
-                        action.id,
-                        "crowdrelay.opportunity.counterparty_report_issued",
-                        json!({
-                            "action_id": action.id,
-                            "opportunity_id": opportunity_id,
-                            "event_id": event_id,
-                        }),
+                    operations::issue_counterparty_report(
+                        &mut transaction, workspace_id, action.id, *opportunity_id, *event_id, now,
                     )
                     .await?;
                 }
