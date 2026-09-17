@@ -102,27 +102,150 @@ pub struct LiveOpportunityDiscoveryAssessment {
     pub confidence: Confidence,
 }
 
+/// How old a source observation may be before the finding stops counting as
+/// current. A festival page read last season is not the call it was — the
+/// shortlist marks it stale rather than dropping it, because a stale finding
+/// is still the answer to "what did we see and when".
 #[must_use]
-pub fn evaluate_live_opportunity_discovery(
+pub const fn scout_observation_stale_after() -> time::Duration {
+    time::Duration::days(45)
+}
+
+/// The full scout vocabulary: the four live-application kinds plus the
+/// opportunity classes that exist for an operator to review rather than for
+/// the pipeline to apply to — a booking lead, a press opening, an interview
+/// slot, a sync brief. Scout kinds never enter the live evaluator; they land
+/// on the shortlist a human works through.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScoutOpportunityKind {
+    Festival,
+    Showcase,
+    ReviewContest,
+    SupportSlot,
+    Booking,
+    Press,
+    Interview,
+    Sync,
+}
+
+impl ScoutOpportunityKind {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Festival => "festival",
+            Self::Showcase => "showcase",
+            Self::ReviewContest => "review_contest",
+            Self::SupportSlot => "support_slot",
+            Self::Booking => "booking",
+            Self::Press => "press",
+            Self::Interview => "interview",
+            Self::Sync => "sync",
+        }
+    }
+
+    /// The four kinds the live-application pipeline owns.
+    #[must_use]
+    pub const fn live_kind(self) -> Option<LiveOpportunityKind> {
+        match self {
+            Self::Festival => Some(LiveOpportunityKind::Festival),
+            Self::Showcase => Some(LiveOpportunityKind::Showcase),
+            Self::ReviewContest => Some(LiveOpportunityKind::ReviewContest),
+            Self::SupportSlot => Some(LiveOpportunityKind::SupportSlot),
+            _ => None,
+        }
+    }
+
+    /// Parses the wire spelling. `funding` is deliberately absent: its
+    /// pipeline needs structured amounts and deadlines a text finding
+    /// cannot honestly supply, so it keeps its own ingress.
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim() {
+            "festival" => Some(Self::Festival),
+            "showcase" => Some(Self::Showcase),
+            "review_contest" => Some(Self::ReviewContest),
+            "support_slot" => Some(Self::SupportSlot),
+            "booking" => Some(Self::Booking),
+            "press" => Some(Self::Press),
+            "interview" => Some(Self::Interview),
+            "sync" => Some(Self::Sync),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ScoutDiscoveryAssessment {
+    pub kind: ScoutOpportunityKind,
+    pub fit_basis_points: u16,
+    pub reputation_basis_points: u16,
+    pub confidence: Confidence,
+}
+
+/// Classifies a scouted finding into the opportunity vocabulary.
+///
+/// Order is precedence: the application-shaped kinds win over the lead kinds,
+/// so "festival booking window" stays a festival and "booking for a showcase
+/// slot" stays a showcase. A sync brief is the most specific lead and is
+/// checked before the generic booking words it often contains.
+#[must_use]
+pub fn evaluate_scout_discovery(
     discovery: &LiveOpportunityDiscovery<'_>,
-) -> Option<LiveOpportunityDiscoveryAssessment> {
+) -> Option<ScoutDiscoveryAssessment> {
     let text = format!("{} {}", discovery.title, discovery.summary).to_lowercase();
     let kind = if text.contains("festival") {
-        LiveOpportunityKind::Festival
+        ScoutOpportunityKind::Festival
     } else if text.contains("showcase") || text.contains("przegląd") {
-        LiveOpportunityKind::Showcase
+        ScoutOpportunityKind::Showcase
     } else if text.contains("support") {
-        LiveOpportunityKind::SupportSlot
+        ScoutOpportunityKind::SupportSlot
     } else if text.contains("review") || text.contains("contest") || text.contains("konkurs") {
-        LiveOpportunityKind::ReviewContest
+        ScoutOpportunityKind::ReviewContest
+    } else if text.contains("sync") || text.contains("licensing") || text.contains("soundtrack") {
+        ScoutOpportunityKind::Sync
+    } else if text.contains("interview") || text.contains("podcast") || text.contains("wywiad") {
+        ScoutOpportunityKind::Interview
+    } else if text.contains("press")
+        || text.contains("premiere")
+        || text.contains("coverage")
+        || text.contains("magazine")
+        || text.contains("zine")
+        || text.contains("radio")
+    {
+        ScoutOpportunityKind::Press
+    } else if text.contains("booking")
+        || text.contains("venue")
+        || text.contains("club")
+        || text.contains("promoter")
+        || text.contains("klub")
+    {
+        ScoutOpportunityKind::Booking
     } else {
         return None;
     };
-    Some(LiveOpportunityDiscoveryAssessment {
+    Some(ScoutDiscoveryAssessment {
         kind,
         fit_basis_points: 7_000,
         reputation_basis_points: 5_000,
         confidence: Confidence::saturating_from_basis_points(6_500),
+    })
+}
+
+/// Compatibility wrapper: the discovery endpoint's original four-kind view.
+/// Scout-only kinds classify under the wider assessor but return `None` here —
+/// they are review leads, not applications.
+#[must_use]
+pub fn evaluate_live_opportunity_discovery(
+    discovery: &LiveOpportunityDiscovery<'_>,
+) -> Option<LiveOpportunityDiscoveryAssessment> {
+    let assessed = evaluate_scout_discovery(discovery)?;
+    let kind = assessed.kind.live_kind()?;
+    Some(LiveOpportunityDiscoveryAssessment {
+        kind,
+        fit_basis_points: assessed.fit_basis_points,
+        reputation_basis_points: assessed.reputation_basis_points,
+        confidence: assessed.confidence,
     })
 }
 
