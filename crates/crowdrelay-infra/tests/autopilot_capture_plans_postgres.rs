@@ -669,6 +669,7 @@ async fn a_moved_or_cancelled_gig_carries_its_production_day_with_it()
 }
 
 #[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn a_published_show_mints_its_door_campaign_once_and_only_once()
 -> Result<(), Box<dyn std::error::Error>> {
     let (repo, pool) = repository().await?;
@@ -768,6 +769,7 @@ async fn a_published_show_mints_its_door_campaign_once_and_only_once()
 }
 
 #[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn an_operator_campaign_blocks_the_auto_mint_and_revoke_sticks()
 -> Result<(), Box<dyn std::error::Error>> {
     let (repo, pool) = repository().await?;
