@@ -166,7 +166,7 @@ pub(super) async fn record_execution_outcome(
         FROM viryaos_autopilot_actions AS action
         WHERE action.workspace_id = $1 AND action.id = $2
         ON CONFLICT (workspace_id, action_id, metric_key)
-            WHERE action_id IS NOT NULL DO NOTHING
+            WHERE action_id IS NOT NULL AND measurement_id IS NULL DO NOTHING
         "#,
     )
     .bind(workspace_id.into_uuid())
