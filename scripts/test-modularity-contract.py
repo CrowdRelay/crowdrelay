@@ -73,6 +73,7 @@ CONTRACT = {
     "crates/crowdrelay-infra/src/autopilot/decisions.rs": [
         "decisions/core_reads.rs",
         "decisions/opportunity_reads.rs",
+        "decisions/booking_reads.rs",
         "decisions/cycle_reads.rs",
         "decisions/persist.rs",
     ],
@@ -134,6 +135,7 @@ CONTRACT = {
         "evaluate/candidates.rs",
         "evaluate/candidates_relay.rs",
         "evaluate/supply_quiet.rs",
+        "evaluate/support.rs",
         "evaluate/tests.rs",
     ],
 }
