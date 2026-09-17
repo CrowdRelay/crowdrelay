@@ -339,6 +339,63 @@ async fn approach_gate_and_allowance_hold_at_request_time() -> Result<(), Box<dy
     Ok(())
 }
 
+/// Approaches waiting on approval spend the month's allowance before any
+/// send happens — otherwise the band could queue more than can ever send
+/// and the surplus would die in the queue as failed actions.
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn pending_approaches_spend_the_monthly_allowance() -> Result<(), Box<dyn std::error::Error>>
+{
+    let pool = test_pool().await?;
+    let workspace_id = insert_workspace(&pool).await?;
+    let listings = PostgresBandListingRepository::new(pool.clone());
+    let repo = PostgresRepresentationRepository::new(pool.clone());
+    let key = || IdempotencyKey::parse(format!("itest-{}", Uuid::now_v7())).unwrap();
+    listings.save(workspace_id, &listing("Virya")).await?;
+    listings.publish(workspace_id).await?;
+
+    for index in 0..MONTHLY_APPROACH_ALLOWANCE {
+        let agent = insert_target(
+            &pool,
+            workspace_id,
+            "agent",
+            &format!("pending{index}@example.com"),
+            true,
+            Some("asked for bands"),
+        )
+        .await?;
+        match repo
+            .request_approach(workspace_id, agent, None, &key())
+            .await?
+        {
+            ApproachOutcome::Queued { .. } => {}
+            other => panic!("expected queued, got {other:?}"),
+        }
+    }
+
+    // Zero approaches have sent — every one waits on approval — and the
+    // allowance is still spent.
+    let spare = insert_target(
+        &pool,
+        workspace_id,
+        "agent",
+        "spare@example.com",
+        true,
+        Some("asked for bands"),
+    )
+    .await?;
+    match repo
+        .request_approach(workspace_id, spare, None, &key())
+        .await
+    {
+        Err(RepresentationError::Refused(reason)) => {
+            assert!(reason.contains("month"), "unexpected refusal: {reason}")
+        }
+        other => panic!("expected allowance refusal, got {other:?}"),
+    }
+    Ok(())
+}
+
 #[tokio::test]
 #[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn idempotent_approach_replay_returns_the_same_action()
@@ -365,11 +422,19 @@ async fn idempotent_approach_replay_returns_the_same_action()
         .request_approach(workspace_id, agent, None, &key)
         .await?;
     let second = repo.request_approach(workspace_id, agent, None, &key).await;
-    // The retry finds the queued action under the key — but the pending
-    // check runs first and refuses with the honest sentence instead.
+    // The retry finds the queued action under the key before any gate runs
+    // — a resubmitted form gets the action it already queued, not a refusal.
     match (first, second) {
-        (ApproachOutcome::Queued { .. }, Err(RepresentationError::Refused(_))) => {}
-        other => panic!("expected queued-then-refused, got {other:?}"),
+        (
+            ApproachOutcome::Queued {
+                action_id: first_id,
+            },
+            Ok(ApproachOutcome::Replayed { action_id, status }),
+        ) => {
+            assert_eq!(action_id, first_id);
+            assert_eq!(status, "awaiting_approval");
+        }
+        other => panic!("expected queued-then-replayed, got {other:?}"),
     }
 
     // One decision, one action — the retry did not double-queue.

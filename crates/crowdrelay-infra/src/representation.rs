@@ -67,11 +67,12 @@ pub struct RepresentationTarget {
 }
 
 /// What `request_approach` did. `Replayed` means the same idempotency key
-/// already queued an approach — the caller gets the existing action id.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// already queued an approach — the caller gets the existing action id and
+/// its real stored status, which may already be `succeeded` or `failed`.
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ApproachOutcome {
     Queued { action_id: Uuid },
-    Replayed { action_id: Uuid },
+    Replayed { action_id: Uuid, status: String },
 }
 
 #[derive(Clone)]
@@ -171,6 +172,25 @@ impl PostgresRepresentationRepository {
             .execute(&mut *tx)
             .await?;
 
+        // A replay is answered before any gate runs: the key identifies
+        // this request, and a retried submit while the action still waits
+        // on approval returns the queued row rather than a refusal — the
+        // refusal below is for a *different* approach to the same contact.
+        if let Some((existing, status)) = sqlx::query_as::<_, (Uuid, String)>(
+            "SELECT id, status FROM viryaos_autopilot_actions WHERE workspace_id = $1 AND idempotency_key = $2 AND action_kind = 'representation.approach.request'",
+        )
+        .bind(workspace_id)
+        .bind(idempotency_key.as_str())
+        .fetch_optional(&mut *tx)
+        .await?
+        {
+            tx.commit().await?;
+            return Ok(ApproachOutcome::Replayed {
+                action_id: existing,
+                status,
+            });
+        }
+
         let target = sqlx::query(
             r#"
             SELECT display_name, target_kind, accepts_outreach,
@@ -212,24 +232,26 @@ impl PostgresRepresentationRepository {
         .fetch_one(&mut *tx)
         .await?;
 
-        // An already-queued approach to the same contact refuses here. The
-        // advisory lock above is what makes this check authoritative: two
-        // requests serialize on it, so the second one sees the first's row.
-        let already_pending = sqlx::query_scalar::<_, bool>(
+        // Approaches already in flight spend the month's allowance before
+        // approval drains them — without the workspace-wide count the band
+        // could queue more approaches than can ever send, and the surplus
+        // would surface as dead failed actions instead of a refusal on the
+        // form. The per-target count drives the "already waiting" refusal.
+        let (pending_for_target, pending_workspace) = sqlx::query_as::<_, (i64, i64)>(
             r#"
-            SELECT EXISTS(
-                SELECT 1 FROM viryaos_autopilot_actions
-                WHERE workspace_id = $1 AND context = 'representation'
-                  AND action_kind = 'representation.approach.request'
-                  AND subject_id = $2
-                  AND status IN ('awaiting_approval','queued','processing')
-            )
+            SELECT COUNT(*) FILTER (WHERE subject_id = $2),
+                   COUNT(*)
+            FROM viryaos_autopilot_actions
+            WHERE workspace_id = $1 AND context = 'representation'
+              AND action_kind = 'representation.approach.request'
+              AND status IN ('awaiting_approval','queued','processing')
             "#,
         )
         .bind(workspace_id)
         .bind(target_id)
         .fetch_one(&mut *tx)
         .await?;
+        let already_pending = pending_for_target > 0;
 
         let trimmed_note = note.map(str::trim).filter(|value| !value.is_empty());
         if let Some(value) = trimmed_note
@@ -249,8 +271,7 @@ impl PostgresRepresentationRepository {
             active: target.get("active"),
             verified: target.get("verified"),
             listing_published,
-            approaches_used_this_month: u32::try_from(used).unwrap_or(u32::MAX)
-                + u32::from(already_pending),
+            approaches_used_this_month: u32::try_from(used + pending_workspace).unwrap_or(u32::MAX),
             allowance: MONTHLY_APPROACH_ALLOWANCE,
         })
         .map_err(|refusal| RepresentationError::Refused(refusal.message()))?;
@@ -271,20 +292,6 @@ impl PostgresRepresentationRepository {
         let payload_json = serde_json::to_value(&payload).map_err(|_| {
             RepresentationError::Refused("the approach could not be encoded".to_owned())
         })?;
-
-        // A replay finds the action already queued under this key and
-        // returns it — no second decision, no second row.
-        if let Some(existing) = sqlx::query_scalar::<_, Uuid>(
-            "SELECT id FROM viryaos_autopilot_actions WHERE workspace_id = $1 AND idempotency_key = $2",
-        )
-        .bind(workspace_id)
-        .bind(idempotency_key.as_str())
-        .fetch_optional(&mut *tx)
-        .await?
-        {
-            tx.commit().await?;
-            return Ok(ApproachOutcome::Replayed { action_id: existing });
-        }
 
         let trace = TraceContext::root(crowdrelay_domain::WorkspaceId::from_uuid(workspace_id));
         let decision_key = format!("representation.approach:{}", idempotency_key.as_str());
