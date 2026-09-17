@@ -297,8 +297,37 @@ pub fn parse_seed_row(row: &SeedRow<'_>) -> Result<SeededVenue, SeedRefusal> {
 /// needs no email to be real).
 #[must_use]
 pub fn is_seed_sheet(header: &[String]) -> bool {
-    let has = |name: &str| header.iter().any(|cell| cell.trim() == name);
+    let has = |name: &str| {
+        header
+            .iter()
+            .any(|cell| canonical_column(cell) == Some(name))
+    };
     has(columns::NAME) && has(columns::CITY) && has(columns::SOURCE_URL)
+}
+
+/// The column this header cell names, if it names one.
+///
+/// Matched on a normalised form — trimmed, lowercased, spaces and hyphens read
+/// as underscores — so `Source_URL`, `Source URL` and `source url` are one
+/// column. The brief pins the exact header, and a sheet that came back through
+/// a spreadsheet's own export, a translation round-trip or somebody's retyping
+/// is still the sheet the operator was asked for. Read strictly, such a file
+/// falls through to the contact reader and every room in it is staged as a
+/// press contact — a misfile somebody then has to undo by hand.
+#[must_use]
+pub fn canonical_column(cell: &str) -> Option<&'static str> {
+    let normalise = |value: &str| {
+        value
+            .trim()
+            .to_lowercase()
+            .replace([' ', '-'], "_")
+            .replace("__", "_")
+    };
+    let cell = normalise(cell);
+    columns::ALL
+        .iter()
+        .copied()
+        .find(|name| normalise(name) == cell)
 }
 
 /// What one grid yielded: the venues that parsed and the rows that did not.
@@ -331,7 +360,13 @@ pub fn extract_seed_sheet(grid: &[Vec<String>]) -> Option<SeedSheetReport> {
     // a name wins — a sheet that repeats a header is ambiguous, not richer.
     let mut index: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
     for (i, cell) in header.iter().enumerate() {
-        index.entry(cell.trim()).or_insert(i);
+        // Keyed by the canonical column name, not the sheet's spelling, so a
+        // row lookup asks for `Source_URL` however the header wrote it. A cell
+        // naming no known column is dropped rather than carried: the parser
+        // reads by name, and an unknown name has no reader.
+        if let Some(name) = canonical_column(cell) {
+            index.entry(name).or_insert(i);
+        }
     }
     let mut report = SeedSheetReport::default();
     for (offset, row) in rows.iter().enumerate() {
@@ -695,6 +730,48 @@ mod tests {
             ],
         ];
         assert_eq!(extract_seed_sheet(&contacts), None);
+    }
+
+    /// The same sheet after a round trip through somebody's spreadsheet:
+    /// lowercased headers, a space where the brief wrote an underscore.
+    ///
+    /// Read strictly, this file is not a venue sheet, falls through to the
+    /// contact reader, and every room in it is staged as a press contact —
+    /// a misfile an operator then undoes by hand, one row at a time.
+    #[test]
+    fn a_sheet_whose_headers_were_retyped_is_still_a_venue_sheet() {
+        let header = vec![
+            "name".to_owned(),
+            "city".to_owned(),
+            "Source URL".to_owned(),
+            "CAPACITY".to_owned(),
+        ];
+        assert!(is_seed_sheet(&header));
+
+        let grid = vec![
+            header,
+            vec![
+                "Progresja".to_owned(),
+                "Warsaw".to_owned(),
+                "https://goout.net/en/progresja/vzxueb/".to_owned(),
+                "600".to_owned(),
+            ],
+        ];
+        let report = extract_seed_sheet(&grid).expect("a retyped header still reads as a sheet");
+        assert_eq!(report.venues.len(), 1);
+        assert_eq!(report.venues[0].room.name, "Progresja");
+        assert_eq!(report.venues[0].room.capacity, Some(600));
+        assert!(report.refusals.is_empty());
+    }
+
+    /// A column nobody here knows is dropped rather than carried: the parser
+    /// reads by name, and an unknown name has no reader.
+    #[test]
+    fn an_unknown_column_does_not_become_a_field() {
+        assert_eq!(canonical_column("Name"), Some("Name"));
+        assert_eq!(canonical_column("  source-url "), Some("Source_URL"));
+        assert_eq!(canonical_column("Phone"), None);
+        assert_eq!(canonical_column(""), None);
     }
 
     /// The tell the worker relies on: a venue sheet that also carries an
