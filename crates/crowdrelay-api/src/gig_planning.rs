@@ -24,7 +24,8 @@ use crowdrelay_domain::roster_plan::{RosterRefusal, RosterRun, plan_roster_run};
 use crowdrelay_domain::venue_seed::{self, ResearchSubject};
 use crowdrelay_infra::band_listing::PostgresBandListingRepository;
 use crowdrelay_infra::gig_outreach::{
-    GigOutreachError, GigOutreachOutcome, approve_gig_proposal as approve_proposal,
+    GigOutreachError, GigOutreachOutcome, SEND_CHANNEL_MISSING,
+    approve_gig_proposal as approve_proposal, gig_outreach_is_sendable,
 };
 use crowdrelay_infra::gig_planning::{
     city_opportunities, proposal_track_record, roster_opportunity, stated_intent,
@@ -184,6 +185,15 @@ struct BandPlanResponse {
     /// that has produced a show before deserves to be read differently from
     /// one that has never been tested.
     track_record: TrackRecordView,
+    /// Whether approving a proposal would actually send anything.
+    ///
+    /// False means no connected sender advertises gig outreach, so the
+    /// approval is refused rather than queued — the console must say so on the
+    /// proposal instead of offering a button its own backend will decline.
+    can_send: bool,
+    /// The sentence to show when `can_send` is false. Absent when it is true.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    send_blocked_reason: Option<&'static str>,
 }
 
 /// `GET /v1/control-plane/gig-plan` — what this band should book next.
@@ -211,10 +221,27 @@ pub async fn band_gig_plan(
     };
     let intent = resolve_intent(params.intent.as_deref(), stored);
 
-    let opportunities = match city_opportunities(&state.database, workspace_id, now).await {
-        Ok(opportunities) => opportunities,
-        Err(error) => {
+    // Bounded: the evidence read is one query per city, up to forty cities,
+    // and it holds a connection for as long as it runs. Unbounded, one slow
+    // read is a connection the ticketing path cannot have.
+    let opportunities = match tokio::time::timeout(
+        state.ticketing.operation_timeout(),
+        crate::ops::hold(
+            &state.read_budget,
+            city_opportunities(&state.database, workspace_id, now),
+        ),
+    )
+    .await
+    {
+        Ok(Ok(opportunities)) => opportunities,
+        Ok(Err(error)) => {
             tracing::warn!(%error, "gig plan evidence read failed");
+            return Problem::service_unavailable(request_id(&headers))
+                .private()
+                .into_response();
+        }
+        Err(_) => {
+            tracing::warn!("gig plan evidence read timed out");
             return Problem::service_unavailable(request_id(&headers))
                 .private()
                 .into_response();
@@ -239,17 +266,47 @@ pub async fn band_gig_plan(
     // genre so the sheet that comes back is about rooms that book this band,
     // not rooms in general. A band that never stated one gets a brief that
     // leaves the genre to the operator rather than inventing it.
-    let genre = PostgresBandListingRepository::new(state.database.clone())
+    // A read that failed is not a band without a genre. Swallowing the error
+    // produced a research brief that quietly asked for "rooms that book acts
+    // in the band's genre" — weaker, with nothing anywhere saying why — so the
+    // failure fails the request like every other evidence read here.
+    let listing = match PostgresBandListingRepository::new(state.database.clone())
         .load(workspace_id)
         .await
-        .ok()
-        .flatten()
+    {
+        Ok(listing) => listing,
+        Err(error) => {
+            tracing::warn!(%error, "band listing read failed");
+            return Problem::service_unavailable(request_id(&headers))
+                .private()
+                .into_response();
+        }
+    };
+    let genre = listing
         .map(|listing| listing.genre_tags.join(" / "))
         .filter(|joined| !joined.is_empty());
+
+    // Asked here so the console can grey the approve button rather than
+    // discovering the refusal after the band has read three proposals and
+    // decided. The approval asks again — this is the warning, not the gate.
+    let can_send = match gig_outreach_is_sendable(&state.database, workspace_id).await {
+        Ok(sendable) => sendable,
+        Err(error) => {
+            tracing::warn!(%error, "gig outreach sendability read failed");
+            return Problem::service_unavailable(request_id(&headers))
+                .private()
+                .into_response();
+        }
+    };
 
     let considered = opportunities.len();
     let mut proposals = Vec::new();
     let mut passed_over = Vec::new();
+    // What each refusal would need researched, held until the catalogue names
+    // are known. The brief is text a person pastes into an AI, and "venues in
+    // wroclaw" is a worse question than "venues in Wrocław" — the slug is our
+    // key, not a place anybody writes.
+    let mut pending_briefs: Vec<(usize, ResearchSubject, u32)> = Vec::new();
     for opportunity in &opportunities {
         match plan_gig(opportunity, intent) {
             Ok(plan) => proposals.push(plan),
@@ -263,6 +320,13 @@ pub async fn band_gig_plan(
                     }
                     _ => None,
                 };
+                if let Some(subject) = subject {
+                    pending_briefs.push((
+                        passed_over.len(),
+                        subject,
+                        opportunity.reachable_fans.unwrap_or(0),
+                    ));
+                }
                 passed_over.push(PassedOver {
                     city_id: opportunity.city_id.into_uuid(),
                     city: opportunity.city.clone(),
@@ -270,26 +334,7 @@ pub async fn band_gig_plan(
                     // mentions is known and one lookup resolves them all.
                     city_name: String::new(),
                     reason: refusal.message(),
-                    research_brief: subject.map(|subject| {
-                        venue_seed::research_brief(
-                            &subject,
-                            &opportunity.city,
-                            genre.as_deref(),
-                            // The band sizing a room to its draw only matters
-                            // when the ask is "find rooms"; finding the booking
-                            // contact for a named room does not re-ask the
-                            // capacity question.
-                            match subject {
-                                // An unmeasurable city gets no band — the
-                                // brief asks for rooms, not for a size the
-                                // system never counted.
-                                ResearchSubject::Rooms => {
-                                    opportunity.reachable_fans.and_then(capacity_band)
-                                }
-                                ResearchSubject::BookingContact { .. } => None,
-                            },
-                        )
-                    }),
+                    research_brief: None,
                 });
             }
         }
@@ -338,6 +383,24 @@ pub async fn band_gig_plan(
     for entry in &mut passed_over {
         entry.city_name = display_name(&names, entry.city_id, &entry.city).to_owned();
     }
+    for (index, subject, reachable) in pending_briefs {
+        let Some(entry) = passed_over.get_mut(index) else {
+            continue;
+        };
+        entry.research_brief = Some(venue_seed::research_brief(
+            &subject,
+            // The name a person would type, not the catalogue key.
+            &entry.city_name,
+            genre.as_deref(),
+            // The band sizing a room to its draw only matters when the ask is
+            // "find rooms"; finding the booking contact for a named room does
+            // not re-ask the capacity question.
+            match subject {
+                ResearchSubject::Rooms => capacity_band(reachable),
+                ResearchSubject::BookingContact { .. } => None,
+            },
+        ));
+    }
 
     (
         StatusCode::OK,
@@ -354,6 +417,8 @@ pub async fn band_gig_plan(
             cities_considered: considered,
             intent: intent.as_str(),
             intent_is_stored: intent == stored,
+            can_send,
+            send_blocked_reason: (!can_send).then_some(SEND_CHANNEL_MISSING),
             track_record: TrackRecordView {
                 proposals: track_record
                     .proposals
@@ -561,17 +626,33 @@ pub async fn roster_gig_plan(
             .into_response();
     };
 
-    let opportunity = match roster_opportunity(
-        &state.database,
-        params.organization_id,
-        packages_this_period,
-        now,
+    // The widest read on this surface: one funnel per act, one query per city
+    // inside each. Sixty acts of forty cities is thousands of round trips, and
+    // without a bound one roster's plan holds a connection for as long as that
+    // takes. The timeout says so out loud instead of degrading the whole API.
+    let opportunity = match tokio::time::timeout(
+        state.ticketing.operation_timeout(),
+        crate::ops::hold(
+            &state.read_budget,
+            roster_opportunity(
+                &state.database,
+                params.organization_id,
+                packages_this_period,
+                now,
+            ),
+        ),
     )
     .await
     {
-        Ok(opportunity) => opportunity,
-        Err(error) => {
+        Ok(Ok(opportunity)) => opportunity,
+        Ok(Err(error)) => {
             tracing::warn!(%error, "roster plan evidence read failed");
+            return Problem::service_unavailable(request_id(&headers))
+                .private()
+                .into_response();
+        }
+        Err(_) => {
+            tracing::warn!("roster plan evidence read timed out");
             return Problem::service_unavailable(request_id(&headers))
                 .private()
                 .into_response();

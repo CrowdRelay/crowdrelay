@@ -83,11 +83,17 @@ pub struct RosterAct {
     pub months_since_last_show: Option<u16>,
     /// Reachable, consented people this act has, per city.
     pub reach_by_city: Vec<CityReach>,
-    /// Share of this act's audience that overlaps each other act, in basis
-    /// points, keyed by the other act's name. Absent means unmeasured, and
-    /// unmeasured is treated as unknown rather than as zero — pairing two acts
-    /// on the assumption their audiences are separate is exactly the mistake
-    /// this number exists to prevent.
+    /// Share of this act's audience that overlaps each other act **in one
+    /// city**, in basis points. Absent means unmeasured, and unmeasured is
+    /// treated as unknown rather than as zero — pairing two acts on the
+    /// assumption their audiences are separate is exactly the mistake this
+    /// number exists to prevent.
+    ///
+    /// Per city, because that is where it is applied. Two acts can share 5% of
+    /// their audiences nationally and 90% in one city where both are local;
+    /// judging that city's bill on the national number puts two acts with one
+    /// audience on one poster and splits the door two ways, which is precisely
+    /// what `PAIRING_OVERLAP_CEILING_BASIS_POINTS` exists to stop.
     pub overlap_with: Vec<ActOverlap>,
 }
 
@@ -104,6 +110,8 @@ pub struct CityReach {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ActOverlap {
     pub other_act: String,
+    /// The city the share was measured in. Identity, not the slug.
+    pub city_id: crate::CityId,
     pub overlap_basis_points: u16,
 }
 
@@ -119,12 +127,15 @@ impl RosterAct {
             .and_then(|reach| reach.reachable)
     }
 
-    /// `None` when the two acts have never been measured against each other.
+    /// `None` when the two acts have never been measured against each other
+    /// **in this city**. A share measured somewhere else is not an answer
+    /// here, and reading it as one is how two acts with one local audience end
+    /// up on one poster.
     #[must_use]
-    pub fn overlap_with_act(&self, other: &str) -> Option<u16> {
+    pub fn overlap_with_act(&self, other: &str, city: crate::CityId) -> Option<u16> {
         self.overlap_with
             .iter()
-            .find(|overlap| overlap.other_act == other)
+            .find(|overlap| overlap.other_act == other && overlap.city_id == city)
             .map(|overlap| overlap.overlap_basis_points)
     }
 
@@ -203,7 +214,10 @@ pub enum RosterMove {
         headliner: String,
         /// Empty when no labelmate adds audience without splitting it.
         support: Option<String>,
-        contact: Vec<String>,
+        /// Who the letter goes to, each carrying the key that resolves the
+        /// booking row — a display name is not an identity, and two people who
+        /// book one city can share one.
+        contact: Vec<crate::gig_plan::PromoterContact>,
         combined_reachable: u32,
         reasons: Vec<Reason>,
         caveats: Vec<String>,
@@ -419,7 +433,7 @@ fn choose_support<'a>(
         .copied()
         .filter(|act| act.name != headliner.name)
         .filter_map(|act| {
-            let overlap = act.overlap_with_act(&headliner.name)?;
+            let overlap = act.overlap_with_act(&headliner.name, city)?;
             if overlap > PAIRING_OVERLAP_CEILING_BASIS_POINTS {
                 return None;
             }
@@ -638,6 +652,7 @@ mod tests {
             has_upcoming_show: false,
             venue: Some(venue()),
             promoters: vec![PromoterRef {
+                key: "anna".to_owned(),
                 name: "Anna".to_owned(),
                 relationship_score: 70,
                 answered_last_time: true,
@@ -664,9 +679,12 @@ mod tests {
         }
     }
 
-    fn with_overlap(mut act: RosterAct, other: &str, basis_points: u16) -> RosterAct {
+    /// An overlap measured in one city. Every fixture states the city, because
+    /// the planner will not accept a share measured anywhere else.
+    fn with_overlap(mut act: RosterAct, other: &str, city: &str, basis_points: u16) -> RosterAct {
         act.overlap_with.push(ActOverlap {
             other_act: other.to_owned(),
+            city_id: city_id(city),
             overlap_basis_points: basis_points,
         });
         act
@@ -761,7 +779,12 @@ mod tests {
         let adds = plan_roster_run(&roster(
             vec![
                 act("Head", &[("Wrocław", 240)], Some(1)),
-                with_overlap(act("Adds", &[("Wrocław", 200)], Some(3)), "Head", 2_000),
+                with_overlap(
+                    act("Adds", &[("Wrocław", 200)], Some(3)),
+                    "Head",
+                    "Wrocław",
+                    2_000,
+                ),
             ],
             vec![city("Wrocław")],
         ))
@@ -782,7 +805,12 @@ mod tests {
         let same_crowd = plan_roster_run(&roster(
             vec![
                 act("Head", &[("Wrocław", 240)], Some(1)),
-                with_overlap(act("Twin", &[("Wrocław", 200)], Some(3)), "Head", 9_000),
+                with_overlap(
+                    act("Twin", &[("Wrocław", 200)], Some(3)),
+                    "Head",
+                    "Wrocław",
+                    9_000,
+                ),
             ],
             vec![city("Wrocław")],
         ))
@@ -812,6 +840,58 @@ mod tests {
         }
     }
 
+    /// An overlap measured in another city is not an answer here.
+    ///
+    /// The failure this prevents: two acts share little nationally and almost
+    /// everything in the one city where both are local. Reading the national
+    /// share as the local one puts both on the poster, sells the same ticket
+    /// twice and splits the door — exactly what the ceiling exists to stop.
+    #[test]
+    fn an_overlap_measured_elsewhere_does_not_decide_this_city() {
+        let elsewhere = plan_roster_run(&roster(
+            vec![
+                act("Head", &[("Wrocław", 240)], Some(1)),
+                with_overlap(
+                    act("Local", &[("Wrocław", 200)], Some(3)),
+                    "Head",
+                    // Measured in Praha, proposed in Wrocław.
+                    "Praha",
+                    1_000,
+                ),
+            ],
+            vec![city("Wrocław")],
+        ))
+        .expect("plans");
+        match &elsewhere.moves[0] {
+            RosterMove::BookPackage { support, .. } => assert!(
+                support.is_none(),
+                "a share measured in another city was used to pair a bill here"
+            ),
+            other => panic!("expected a booking, got {other:?}"),
+        }
+
+        // The same pair, measured where the show is, pairs.
+        let here = plan_roster_run(&roster(
+            vec![
+                act("Head", &[("Wrocław", 240)], Some(1)),
+                with_overlap(
+                    act("Local", &[("Wrocław", 200)], Some(3)),
+                    "Head",
+                    "Wrocław",
+                    1_000,
+                ),
+            ],
+            vec![city("Wrocław")],
+        ))
+        .expect("plans");
+        match &here.moves[0] {
+            RosterMove::BookPackage { support, .. } => {
+                assert_eq!(support.as_deref(), Some("Local"));
+            }
+            other => panic!("expected a booking, got {other:?}"),
+        }
+    }
+
     // ── The cheapest move ───────────────────────────────────────────────────
 
     /// The Pareto move for a roster, and the thing a band alone cannot do.
@@ -823,6 +903,7 @@ mod tests {
                 with_overlap(
                     act("Mate", &[("Wrocław", 200), ("Praha", 50)], Some(8)),
                     "Head",
+                    "Wrocław",
                     1_000,
                 ),
             ],
@@ -849,7 +930,12 @@ mod tests {
         let mut opportunity = roster(
             vec![
                 act("Head", &[("Wrocław", 240)], Some(1)),
-                with_overlap(act("Mate", &[("Wrocław", 200)], Some(8)), "Head", 1_000),
+                with_overlap(
+                    act("Mate", &[("Wrocław", 200)], Some(8)),
+                    "Head",
+                    "Wrocław",
+                    1_000,
+                ),
             ],
             Vec::new(),
         );

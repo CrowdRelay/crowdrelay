@@ -82,6 +82,44 @@ pub enum GigOutreachOutcome {
     },
 }
 
+/// The capability an executor must advertise before a gig letter can leave.
+///
+/// Its own capability rather than `booking.outreach`: this event carries a
+/// recipient set and a different template, so an executor built for the
+/// single-promoter letter would claim it and have nothing to do with it.
+pub const GIG_OUTREACH_CAPABILITY: &str = "gig.outreach";
+
+/// What the band is told when no executor can send the letter.
+///
+/// Named rather than phrased at each call site, because the plan read and the
+/// approval must say the same thing: a console that offers a button its own
+/// backend will refuse is worse than one that greys it out.
+pub const SEND_CHANNEL_MISSING: &str = "nothing can send this letter yet — no connected sender advertises gig outreach, so an \
+     approval would be queued, parked and cancelled a day later without anybody hearing from \
+     you. Connect the sender first, and this proposal is still here.";
+
+/// Whether a gig letter approved right now could actually be sent.
+///
+/// # Errors
+///
+/// Propagates the database error.
+pub async fn gig_outreach_is_sendable(
+    pool: &PgPool,
+    workspace_id: Uuid,
+) -> Result<bool, GigOutreachError> {
+    crate::autopilot::capability_is_serviceable(
+        pool,
+        WorkspaceId::from_uuid(workspace_id),
+        GIG_OUTREACH_CAPABILITY,
+    )
+    .await
+    .map_err(|_| {
+        GigOutreachError::Database(sqlx::Error::Protocol(
+            "executor registry read failed".to_owned(),
+        ))
+    })
+}
+
 /// Approves the proposal for one city and queues the outreach it names.
 ///
 /// # Errors
@@ -103,6 +141,14 @@ pub async fn approve_gig_proposal(
         return Ok(GigOutreachOutcome::Replayed { action_id, status });
     }
 
+    // Asked before any evidence is read, because the answer does not depend on
+    // the evidence: if nothing can send this letter, approving it produces a
+    // queued action that parks and is cancelled a day later by a sweep nobody
+    // is watching. The band would have said yes to a send that never happened.
+    if !gig_outreach_is_sendable(pool, workspace_id).await? {
+        return Err(GigOutreachError::Refused(SEND_CHANNEL_MISSING.to_owned()));
+    }
+
     let settings = TenantSettingsRepository::new(pool.clone());
     let intent = stated_intent(&settings, workspace_id).await?;
     let opportunities = city_opportunities(pool, workspace_id, now).await?;
@@ -117,6 +163,19 @@ pub async fn approve_gig_proposal(
     let plan = plan_gig(opportunity, intent)
         .map_err(|refusal| GigOutreachError::Refused(refusal.message()))?;
 
+    // A letter to this city that has not finished yet is the same letter. The
+    // action ledger's in-flight index refuses the second write anyway, and a
+    // unique-violation reaching the band as a 503 says the system is broken
+    // when the truth is that they already said yes. Asked after the evidence,
+    // because a city that stopped being proposable has a better answer than
+    // this one: what changed.
+    if let Some(status) = inflight_status(pool, workspace_id, city_id).await? {
+        return Err(GigOutreachError::Refused(format!(
+            "you have already approved this city — the letter is {status}. Cancel it on the \
+             operations board if you want to write a different one."
+        )));
+    }
+
     let recipients = recipients_for(pool, workspace_id, city_id, &plan).await?;
     if recipients.is_empty() {
         return Err(GigOutreachError::Refused(format!(
@@ -124,7 +183,12 @@ pub async fn approve_gig_proposal(
              {named}, and none of them is still an active booking contact — check the \
              booking list before writing",
             city = opportunity.city,
-            named = plan.contact.join(", ")
+            named = plan
+                .contact
+                .iter()
+                .map(|contact| contact.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
         )));
     }
 
@@ -205,10 +269,12 @@ fn reason_sentence(reason: &crowdrelay_domain::gig_plan::Reason) -> String {
 
 /// The promoters the proposal named, in the order it ranked them.
 ///
-/// Resolved against the same read the planner judged, so a name cannot resolve
-/// to a different promoter than the one the proposal weighed. A name the read
-/// no longer returns is dropped rather than guessed at — the caller refuses
-/// when nothing survives.
+/// Resolved by the key the proposal carried — the booking target's own id —
+/// rather than by display name. Two people who book one city can both be
+/// "Anna", the booking list is unique on the address rather than the name, and
+/// name matching silently addressed one of them twice while never writing to
+/// the other. A key the read no longer returns is dropped rather than guessed
+/// at, and the caller refuses when nothing survives.
 async fn recipients_for(
     pool: &PgPool,
     workspace_id: Uuid,
@@ -216,18 +282,46 @@ async fn recipients_for(
     plan: &GigPlan,
 ) -> Result<Vec<(Uuid, i64, String)>, GigOutreachError> {
     let targets = promoter_targets_in_city(pool, workspace_id, city_id).await?;
-    // The plan names promoters by display name, and two targets may share one.
-    // Each name resolves to the strongest-ranked match, and each resolved
-    // target appears once — the contact governor's same-action dedupe is a
-    // safety net, not the mechanism.
-    let mut seen = std::collections::HashSet::new();
     Ok(plan
         .contact
         .iter()
-        .filter_map(|name| targets.iter().find(|target| &target.name == name))
-        .filter(|target| seen.insert(target.target_id))
+        .filter_map(|contact| {
+            targets
+                .iter()
+                .find(|target| target.target_id.to_string() == contact.key)
+        })
         .map(|target| (target.target_id, target.target_version, target.name.clone()))
         .collect())
+}
+
+/// The status of a gig letter for this city that has not finished yet, if one
+/// exists.
+///
+/// Mirrors `viryaos_autopilot_actions_inflight_subject_uidx` — the partial
+/// unique index on `(workspace_id, context, action_kind, subject_id)` over the
+/// unfinished states. Reading it rather than letting the insert collide keeps
+/// the answer a sentence the band can act on.
+async fn inflight_status(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    city_id: Uuid,
+) -> Result<Option<String>, GigOutreachError> {
+    Ok(sqlx::query_scalar::<_, String>(
+        r#"
+        SELECT status FROM viryaos_autopilot_actions
+        WHERE workspace_id = $1
+          AND context = 'booking_opportunity'
+          AND action_kind = 'gig.outreach.request'
+          AND subject_id = $2
+          AND status IN ('awaiting_approval', 'queued', 'processing')
+        ORDER BY created_at DESC
+        LIMIT 1
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(city_id)
+    .fetch_optional(pool)
+    .await?)
 }
 
 async fn existing_action(

@@ -130,12 +130,30 @@ pub(super) async fn observe(
                     (values.1 as f64 / values.0 as f64) * 10_000.0
                 }
             }
+            // A reply belongs to the last letter that preceded it, not to
+            // every letter whose window it happens to fall inside. A promoter
+            // written to twice in one week — a booking approach and a gig
+            // proposal's letter, say — used to answer both: one reply, two
+            // measurements, two successes, and a reason tally that believed
+            // twice as much evidence existed as there was. The `NOT EXISTS`
+            // gives the reply to whichever outbound touch was most recent
+            // before it.
             AutopilotMeasurementKind::BookingReply7d => sqlx::query_scalar::<_, f64>(
                 r#"
                 SELECT CASE WHEN EXISTS (
-                    SELECT 1 FROM viryaos_booking_interactions
-                    WHERE workspace_id=$1 AND target_id=$2 AND direction='inbound'
-                      AND occurred_at >= $3 AND occurred_at < $3 + INTERVAL '7 days'
+                    SELECT 1 FROM viryaos_booking_interactions AS reply
+                    WHERE reply.workspace_id=$1 AND reply.target_id=$2
+                      AND reply.direction='inbound'
+                      AND reply.occurred_at >= $3
+                      AND reply.occurred_at < $3 + INTERVAL '7 days'
+                      AND NOT EXISTS (
+                          SELECT 1 FROM viryaos_booking_interactions AS newer
+                          WHERE newer.workspace_id=reply.workspace_id
+                            AND newer.target_id=reply.target_id
+                            AND newer.direction='outbound'
+                            AND newer.occurred_at > $3
+                            AND newer.occurred_at <= reply.occurred_at
+                      )
                 ) THEN 1.0::double precision ELSE 0.0::double precision END
                 "#,
             )
