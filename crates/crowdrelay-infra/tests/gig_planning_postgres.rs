@@ -371,6 +371,7 @@ async fn run(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
     shared_fans_measure_overlap_without_naming_anybody(pool).await?;
     an_overlap_is_measured_in_each_city_separately(pool).await?;
     a_declared_open_slot_reaches_the_roster_planner(pool).await?;
+    an_act_style_is_declared_or_absent(pool).await?;
 
     Ok(())
 }
@@ -549,6 +550,42 @@ async fn an_overlap_is_measured_in_each_city_separately(
         Some(0),
         "the home city's share leaked into a city where the acts share nobody"
     );
+
+    Ok(())
+}
+
+/// §4h-8 / 5.21 — an act says what it sounds like, or it has not said.
+///
+/// The package matcher will judge a shared bill on this, and the whole point
+/// of the setting is that it is declared: an act mislabelled by a guess gets
+/// proposed onto bills it does not fit, and nobody can see why. Absent stays
+/// absent.
+async fn an_act_style_is_declared_or_absent(
+    pool: &PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use crowdrelay_infra::tenant_settings::{KEY_ACT_STYLE, TenantSettingsRepository};
+
+    let act = workspace(pool).await?;
+    let settings = TenantSettingsRepository::new(pool.clone());
+    assert_eq!(
+        settings.act_style(act).await?,
+        None,
+        "an act that has never said reported a style"
+    );
+
+    settings
+        .set_setting(act, KEY_ACT_STYLE, "  doom-leaning post-metal  ")
+        .await?;
+    assert_eq!(
+        settings.act_style(act).await?.as_deref(),
+        Some("doom-leaning post-metal"),
+        "the declaration did not survive the round trip"
+    );
+
+    // A blanked field is a retraction, not an empty style: the act goes back
+    // to having said nothing, which is what the pairing reads as unmeasured.
+    settings.set_setting(act, KEY_ACT_STYLE, "   ").await?;
+    assert_eq!(settings.act_style(act).await?, None);
 
     Ok(())
 }

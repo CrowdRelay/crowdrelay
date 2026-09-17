@@ -147,6 +147,14 @@ pub async fn get_brand_settings(
                     .cloned()
                     .unwrap_or_else(|| TenantIntent::default().as_str().to_owned()),
             );
+            // §5.21: absent is a real state — the act has not said what it
+            // sounds like, and the pairing that needs it says so rather than
+            // guessing. Empty string is how this surface spells absent, the
+            // same way the weekly ask ceiling does.
+            settings.insert(
+                "act_style".to_owned(),
+                overrides.get("act_style").cloned().unwrap_or_default(),
+            );
             settings.insert(
                 "member_site_base_url".to_owned(),
                 effective.member_site_base_url.clone(),
@@ -273,6 +281,12 @@ fn validate_value(key: &str, value: &str) -> bool {
     // North star metric must be a valid enum value.
     if key == "north_star_metric" {
         return crowdrelay_domain::growth_metrics::NorthStarMetric::parse(value).is_some();
+    }
+    // §4h-8 / 5.21: the act's own words for what it sounds like. Free text,
+    // because a controlled vocabulary would be a guess about scenes nobody
+    // here belongs to — bounded so it stays a descriptor rather than a bio.
+    if key == "act_style" {
+        return value.chars().count() <= 120;
     }
     // §4G.2: the gig planner reads this and refuses outright on `heads_down`.
     // A value it cannot parse would be stored and then ignored, which is the
