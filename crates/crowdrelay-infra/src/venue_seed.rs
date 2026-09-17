@@ -54,6 +54,21 @@ pub struct VenueSeedSummary {
     pub unknown_city: u64,
 }
 
+/// One attributed claim about a room, as `write_fact` takes it — a struct
+/// rather than nine positional arguments because the licence and the
+/// deletion clock are exactly the parameters a caller should have to name.
+pub struct VenueFactWrite<'a> {
+    pub venue_id: Uuid,
+    pub attribute: &'a str,
+    pub value: &'a str,
+    pub provenance: &'a str,
+    pub source_ref: &'a str,
+    pub observed_at: Option<OffsetDateTime>,
+    pub expires_at: Option<OffsetDateTime>,
+    pub workspace_id: Option<Uuid>,
+    pub licence: Option<&'a str>,
+}
+
 #[derive(Clone)]
 pub struct PostgresVenueSeedRepository {
     pool: PgPool,
@@ -63,6 +78,86 @@ impl PostgresVenueSeedRepository {
     #[must_use]
     pub fn new(pool: PgPool) -> Self {
         Self { pool }
+    }
+
+    /// One attributed claim about a room — the single upsert every fact
+    /// writer goes through, so the sheet importer and the open-directory
+    /// sweeps share one dedupe rule rather than two copies of it.
+    ///
+    /// `workspace_id` `None` writes the global row; `Some` writes the
+    /// contributor-private one. `provenance` names the fact's trust class
+    /// (the CHECK constraint on the column is the arbiter — an unknown class
+    /// fails the write rather than being filed silently). `expires_at` is a
+    /// deletion deadline, not a staleness hint: the hourly expiry sweep
+    /// deletes the row once it passes. `licence` is `Some("odbl")` for
+    /// OSM-derived facts — share-alike means the licence travels with the
+    /// fact — and `None` for everything else. A refresh of the same
+    /// (venue, attribute, provenance, source_ref, scope) claim rewrites the
+    /// value, the clock, the deadline and the licence together, so a
+    /// re-sweep updates the row rather than stacking a twin.
+    ///
+    /// Value and source_ref are capped at the CHECK bounds (2000) — a
+    /// source cell longer than that is truncated rather than failing the
+    /// venue's whole write over prose.
+    ///
+    /// # Errors
+    ///
+    /// Propagates the database error — including the CHECK violations a
+    /// caller earns for an unknown provenance, an over-long attribute, or a
+    /// licence other than `odbl`.
+    pub async fn write_fact<'e, E>(executor: E, fact: VenueFactWrite<'_>) -> Result<(), sqlx::Error>
+    where
+        E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+    {
+        let value: String = fact.value.chars().take(2000).collect();
+        let source_ref: String = fact.source_ref.chars().take(2000).collect();
+        // Two partial unique indexes back the dedupe (see migration 0308): a
+        // global fact conflicts on the four-column key, a private one on the
+        // key plus its workspace. One statement per scope — the arbiter's
+        // WHERE must match the index predicate for inference to find it.
+        let sql = if fact.workspace_id.is_some() {
+            r#"
+            INSERT INTO place_venue_facts
+                (venue_id, attribute, value, provenance, source_ref,
+                 observed_at, expires_at, workspace_id, licence)
+            VALUES ($1, $2, $3, $4, $5, COALESCE($6, now()), $7, $9, $8)
+            ON CONFLICT (venue_id, attribute, provenance, source_ref, workspace_id)
+            WHERE workspace_id IS NOT NULL
+            DO UPDATE SET value = EXCLUDED.value,
+                          observed_at = EXCLUDED.observed_at,
+                          expires_at = EXCLUDED.expires_at,
+                          licence = EXCLUDED.licence
+            "#
+        } else {
+            r#"
+            INSERT INTO place_venue_facts
+                (venue_id, attribute, value, provenance, source_ref,
+                 observed_at, expires_at, workspace_id, licence)
+            VALUES ($1, $2, $3, $4, $5, COALESCE($6, now()), $7, NULL, $8)
+            ON CONFLICT (venue_id, attribute, provenance, source_ref)
+            WHERE workspace_id IS NULL
+            DO UPDATE SET value = EXCLUDED.value,
+                          observed_at = EXCLUDED.observed_at,
+                          expires_at = EXCLUDED.expires_at,
+                          licence = EXCLUDED.licence
+            "#
+        };
+        let mut query = sqlx::query(sql)
+            .bind(fact.venue_id)
+            .bind(fact.attribute)
+            .bind(&value)
+            .bind(fact.provenance)
+            .bind(&source_ref)
+            .bind(fact.observed_at)
+            .bind(fact.expires_at)
+            .bind(fact.licence);
+        // $9 exists only in the private statement — Postgres refuses a bind
+        // the SQL does not name, so it is appended, not bound unconditionally.
+        if let Some(workspace_id) = fact.workspace_id {
+            query = query.bind(workspace_id);
+        }
+        query.execute(executor).await?;
+        Ok(())
     }
 
     /// Imports every parsed venue of one sheet. Each venue is its own
@@ -158,7 +253,7 @@ impl PostgresVenueSeedRepository {
 
         // Global half — the room as everyone sees it (workspace_id NULL).
         if let Some(capacity) = room.capacity {
-            write_fact(
+            researched_fact(
                 &mut tx,
                 venue_id,
                 "capacity",
@@ -170,7 +265,7 @@ impl PostgresVenueSeedRepository {
             .await?;
         }
         if !room.genre_tags.is_empty() {
-            write_fact(
+            researched_fact(
                 &mut tx,
                 venue_id,
                 "genres",
@@ -182,7 +277,7 @@ impl PostgresVenueSeedRepository {
             .await?;
         }
         if let Some(website) = &room.website {
-            write_fact(
+            researched_fact(
                 &mut tx,
                 venue_id,
                 "website",
@@ -194,7 +289,7 @@ impl PostgresVenueSeedRepository {
             .await?;
         }
         if let Some(address) = &room.address {
-            write_fact(
+            researched_fact(
                 &mut tx,
                 venue_id,
                 "address",
@@ -207,7 +302,7 @@ impl PostgresVenueSeedRepository {
         }
         // Only "closed" is ever written — see the module header.
         if room.closed {
-            write_fact(
+            researched_fact(
                 &mut tx,
                 venue_id,
                 "status",
@@ -219,7 +314,7 @@ impl PostgresVenueSeedRepository {
             .await?;
         }
         if !room.country.trim().is_empty() {
-            write_fact(
+            researched_fact(
                 &mut tx,
                 venue_id,
                 "country",
@@ -247,7 +342,7 @@ impl PostgresVenueSeedRepository {
                 .website
                 .as_deref()
                 .is_some_and(|website| same_host(website, &room.source_url));
-            write_fact(
+            researched_fact(
                 &mut tx,
                 venue_id,
                 "public_terms",
@@ -265,7 +360,7 @@ impl PostgresVenueSeedRepository {
 
         // Private half — one tenant's knowledge and judgement.
         if let Some(email) = &room.booking_email {
-            write_fact(
+            researched_fact(
                 &mut tx,
                 venue_id,
                 "booking_email",
@@ -277,7 +372,7 @@ impl PostgresVenueSeedRepository {
             .await?;
         }
         if matches!(room.public_terms, PublicTerms::SearchedNoneFound) {
-            write_fact(
+            researched_fact(
                 &mut tx,
                 venue_id,
                 "public_terms",
@@ -289,7 +384,7 @@ impl PostgresVenueSeedRepository {
             .await?;
         }
         if let Some(target_fit) = &venue.view.target_fit {
-            write_fact(
+            researched_fact(
                 &mut tx,
                 venue_id,
                 "target_fit",
@@ -301,7 +396,7 @@ impl PostgresVenueSeedRepository {
             .await?;
         }
         if let Some(angle) = &venue.view.outreach_angle {
-            write_fact(
+            researched_fact(
                 &mut tx,
                 venue_id,
                 "outreach_angle",
@@ -313,7 +408,7 @@ impl PostgresVenueSeedRepository {
             .await?;
         }
         if let Some(quality) = &venue.view.contact_quality {
-            write_fact(
+            researched_fact(
                 &mut tx,
                 venue_id,
                 "contact_quality",
@@ -325,7 +420,7 @@ impl PostgresVenueSeedRepository {
             .await?;
         }
         if let Some(notes) = &venue.view.notes {
-            write_fact(
+            researched_fact(
                 &mut tx,
                 venue_id,
                 "notes",
@@ -365,11 +460,12 @@ fn same_host(left: &str, right: &str) -> bool {
     }
 }
 
-/// One attributed claim. `workspace_id` `None` writes the global row;
-/// `Some` writes the contributor-private one. Value and source_ref are
-/// capped at the CHECK bounds (2000) — a sheet cell longer than that is
-/// truncated rather than failing the venue's whole import over prose.
-async fn write_fact(
+/// The sheet's own claims: `researched` provenance, no deletion clock, no
+/// licence. The shorthand exists so the import above reads as the list of
+/// attributes it writes rather than a wall of repeated constants — the
+/// upsert itself is `PostgresVenueSeedRepository::write_fact`, which every
+/// fact writer (this one included) shares.
+async fn researched_fact(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     venue_id: Uuid,
     attribute: &str,
@@ -378,42 +474,19 @@ async fn write_fact(
     observed_at: Option<OffsetDateTime>,
     workspace_id: Option<Uuid>,
 ) -> Result<(), sqlx::Error> {
-    let value: String = value.chars().take(2000).collect();
-    let source_ref: String = source_ref.chars().take(2000).collect();
-    // Two partial unique indexes back the dedupe (see migration 0308): a
-    // global fact conflicts on the four-column key, a private one on the
-    // key plus its workspace. One statement per scope — the arbiter's WHERE
-    // must match the index predicate for inference to find it.
-    let sql = if workspace_id.is_some() {
-        r#"
-        INSERT INTO place_venue_facts
-            (venue_id, attribute, value, provenance, source_ref, observed_at, workspace_id)
-        VALUES ($1, $2, $3, 'researched', $4, COALESCE($5, now()), $6)
-        ON CONFLICT (venue_id, attribute, provenance, source_ref, workspace_id)
-        WHERE workspace_id IS NOT NULL
-        DO UPDATE SET value = EXCLUDED.value, observed_at = EXCLUDED.observed_at
-        "#
-    } else {
-        r#"
-        INSERT INTO place_venue_facts
-            (venue_id, attribute, value, provenance, source_ref, observed_at, workspace_id)
-        VALUES ($1, $2, $3, 'researched', $4, COALESCE($5, now()), NULL)
-        ON CONFLICT (venue_id, attribute, provenance, source_ref)
-        WHERE workspace_id IS NULL
-        DO UPDATE SET value = EXCLUDED.value, observed_at = EXCLUDED.observed_at
-        "#
-    };
-    let mut query = sqlx::query(sql)
-        .bind(venue_id)
-        .bind(attribute)
-        .bind(&value)
-        .bind(&source_ref)
-        .bind(observed_at);
-    // $6 exists only in the private statement — Postgres refuses a bind
-    // the SQL does not name, so it is appended, not bound unconditionally.
-    if let Some(workspace_id) = workspace_id {
-        query = query.bind(workspace_id);
-    }
-    query.execute(&mut **tx).await?;
-    Ok(())
+    PostgresVenueSeedRepository::write_fact(
+        &mut **tx,
+        VenueFactWrite {
+            venue_id,
+            attribute,
+            value,
+            provenance: "researched",
+            source_ref,
+            observed_at,
+            expires_at: None,
+            workspace_id,
+            licence: None,
+        },
+    )
+    .await
 }

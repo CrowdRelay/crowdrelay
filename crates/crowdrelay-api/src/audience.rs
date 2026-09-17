@@ -513,6 +513,10 @@ pub async fn city_venues(State(state): State<crate::AppState>, headers: HeaderMa
             -- directory. workspace_id IS NULL is the load-bearing filter —
             -- this read is global, and a contributor's private fact (a
             -- booking address, a fit judgement) must never surface here.
+            -- `expires_at` is a deletion deadline, not a staleness hint —
+            -- the hourly `venue_fact_expiry` sweep deletes the row outright;
+            -- this filter covers only the lag between the deadline passing
+            -- and the next sweep.
             SELECT DISTINCT ON (f.venue_id, f.attribute)
                    f.venue_id, f.attribute, f.value, f.provenance, f.observed_at
             FROM place_venue_facts AS f

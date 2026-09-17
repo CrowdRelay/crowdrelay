@@ -51,6 +51,7 @@ use crowdrelay_worker::{
     leadership::acquire_leadership,
     nearby_gigs::{DEFAULT_POLL_INTERVAL as NEARBY_GIG_POLL_INTERVAL, NearbyGigScheduler},
     ops_watchdog::OpsWatchdogWorker,
+    osm_venue_sweep::OsmVenueSweepWorker,
     outbox::{MapSecretProvider, OutboxWorker, OutboxWorkerConfig, SecretProvider, SecretValue},
     peer_observation::PeerObservationWorker,
     push_delivery::PushDeliveryWorker,
@@ -62,6 +63,7 @@ use crowdrelay_worker::{
     social_post_executor::SocialPostExecutorWorker,
     social_post_source_sync::SocialPostSourceSyncWorker,
     telegram_executor::TelegramExecutorWorker,
+    venue_fact_expiry::VenueFactExpiryWorker,
     video_source_sync::VideoSourceSyncWorker,
 };
 use sqlx::PgPool;
@@ -85,6 +87,10 @@ const DISCOVERY_SWEEP_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
 const PEER_OBSERVATION_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
 /// The graph changes at human speed; an hour of decay lag is invisible.
 const AUDIENCE_GRAPH_SWEEP_INTERVAL: Duration = Duration::from_secs(60 * 60);
+/// A licensed venue fact's `expires_at` is a deletion deadline, not a
+/// staleness hint — an hour of lag past the deadline is small enough that
+/// the read-side filter covers the gap.
+const VENUE_FACT_EXPIRY_INTERVAL: Duration = Duration::from_secs(60 * 60);
 /// Agent outcome polling cadence. Outcomes are not time-critical — the
 /// operator approves them on the board — so 30s is plenty.
 const AGENT_OUTCOME_POLL_INTERVAL: Duration = Duration::from_secs(30);
@@ -796,6 +802,36 @@ async fn run(database: PgPool, config: &Config, standby: bool) -> Result<()> {
     )
     .context("invalid gmail contacts sync worker configuration")?;
 
+    // The venue-fact expiry sweep: `expires_at` is a licence deletion
+    // deadline, and deleting is the point — a filtered-but-present row is
+    // still data held past its licence. Runs unconditionally: when nothing
+    // is expired the statement is a no-op scan of an index.
+    let venue_fact_expiry = VenueFactExpiryWorker::new(
+        database.clone(),
+        VENUE_FACT_EXPIRY_INTERVAL,
+        config.database.operation_timeout,
+    );
+
+    // The OSM venue sweep mints shared `place_venues` rows and ODbL-flagged
+    // facts from a public upstream — it stays dark until an operator turns
+    // it on, because a writer into the shared registry earns its keep only
+    // after its output has been verified.
+    let osm_venue_sweep = if config.osm_venue_sweep_enabled {
+        match OsmVenueSweepWorker::standard(database.clone(), config.database.operation_timeout) {
+            Ok(worker) => Some(worker),
+            Err(error) => {
+                tracing::warn!(error = %error, "OSM venue sweep disabled: HTTP client build failed");
+                None
+            }
+        }
+    } else {
+        tracing::info!(
+            "OSM venue sweep is disabled; set CROWDRELAY_OSM_VENUE_SWEEP_ENABLED=true to mint \
+             venue rows and ODbL-flagged facts from OpenStreetMap"
+        );
+        None
+    };
+
     let (shutdown_sender, shutdown_receiver) = watch::channel(false);
     let reminder_shutdown = shutdown_receiver.clone();
     let nearby_gig_shutdown = shutdown_receiver.clone();
@@ -828,6 +864,8 @@ async fn run(database: PgPool, config: &Config, standby: bool) -> Result<()> {
     let gmail_contacts_sync_shutdown = shutdown_receiver.clone();
     let attribution_shutdown = shutdown_receiver.clone();
     let community_intel_shutdown = shutdown_receiver.clone();
+    let venue_fact_expiry_shutdown = shutdown_receiver.clone();
+    let osm_venue_sweep_shutdown = shutdown_receiver.clone();
 
     // Growth readiness summary: tells the operator exactly which growth
     // systems are active and what's missing. This is the single most
@@ -1081,6 +1119,16 @@ async fn run(database: PgPool, config: &Config, standby: bool) -> Result<()> {
         community_intel_worker.run(community_intel_shutdown).await;
         "community intelligence worker"
     });
+    runtime_tasks.spawn(async move {
+        venue_fact_expiry.run(venue_fact_expiry_shutdown).await;
+        "venue fact expiry sweep"
+    });
+    if let Some(worker) = osm_venue_sweep {
+        runtime_tasks.spawn(async move {
+            worker.run(osm_venue_sweep_shutdown).await;
+            "OSM venue sweep"
+        });
+    }
 
     let mut checks = interval(DATABASE_CHECK_INTERVAL);
     checks.set_missed_tick_behavior(MissedTickBehavior::Skip);

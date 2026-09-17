@@ -65,4 +65,5 @@ pub mod sensitive_response;
 pub mod show_helpers;
 pub mod signal_installations;
 pub mod tenant_settings;
+pub mod venue_directory;
 pub mod venue_seed;

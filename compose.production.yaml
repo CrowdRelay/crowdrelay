@@ -181,6 +181,14 @@ services:
       # CROWDRELAY_DISCOVERY_REDDIT_QUERIES" on every boot, which was
       # unactionable while compose dropped the variable.
       CROWDRELAY_DISCOVERY_REDDIT_QUERIES: ${CROWDRELAY_DISCOVERY_REDDIT_QUERIES:-}
+      # The OSM/Overpass venue sweep writes shared place_venues rows and
+      # ODbL-flagged facts. Off until its output has been verified in
+      # production — turning it on is a deliberate operator decision, not a
+      # deploy side effect.
+      CROWDRELAY_OSM_VENUE_SWEEP_ENABLED: ${CROWDRELAY_OSM_VENUE_SWEEP_ENABLED:-false}
+      # Optional Overpass mirror/self-hosted endpoint; unset means the public
+      # overpass-api.de interpreter.
+      CROWDRELAY_OSM_OVERPASS_URL: ${CROWDRELAY_OSM_OVERPASS_URL:-}
     volumes:
       - ${CROWDRELAY_FCM_SERVICE_ACCOUNT_HOST_FILE:-./secrets/virya-signal-firebase-service-account.json}:/run/secrets/firebase-service-account.json:ro
       - ${CROWDRELAY_WEBHOOK_SECRETS_HOST_FILE:-./deploy/webhook-secrets.production.json}:/run/secrets/crowdrelay-webhooks.json:ro

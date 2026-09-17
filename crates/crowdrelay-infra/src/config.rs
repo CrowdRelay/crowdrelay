@@ -67,6 +67,10 @@ const EVENT_REMINDER_POLL_INTERVAL_MS_KEY: &str = "CROWDRELAY_EVENT_REMINDER_POL
 const AUTOPILOT_ENABLED_KEY: &str = "CROWDRELAY_AUTOPILOT_ENABLED";
 const AUTOPILOT_POLL_INTERVAL_MS_KEY: &str = "CROWDRELAY_AUTOPILOT_POLL_INTERVAL_MS";
 const AGENT_OUTCOMES_ENABLED_KEY: &str = "CROWDRELAY_AGENT_OUTCOMES_ENABLED";
+/// The OSM/Overpass venue sweep (§12-3). Default OFF everywhere — it writes
+/// shared `place_venues`/`place_venue_facts` rows from a public upstream, so
+/// production enables it only after the sweep's output has been verified.
+const OSM_VENUE_SWEEP_ENABLED_KEY: &str = "CROWDRELAY_OSM_VENUE_SWEEP_ENABLED";
 const REDDIT_PROXY_URL_KEY: &str = "CROWDRELAY_REDDIT_PROXY_URL";
 const AGENT_SERVICE_URL_KEY: &str = "CROWDRELAY_AGENT_SERVICE_URL";
 /// YouTube Data API v3 key. Shared by the growth metric sync worker and
@@ -171,6 +175,7 @@ const KNOWN_KEYS: &[&str] = &[
     AUTOPILOT_ENABLED_KEY,
     AUTOPILOT_POLL_INTERVAL_MS_KEY,
     AGENT_OUTCOMES_ENABLED_KEY,
+    OSM_VENUE_SWEEP_ENABLED_KEY,
     REDDIT_PROXY_URL_KEY,
     AGENT_SERVICE_URL_KEY,
     YOUTUBE_API_KEY,
@@ -245,6 +250,10 @@ pub struct Config {
     /// When true, the agent outcome worker polls `agent_outcomes` and maps
     /// LLM-produced outcomes into autopilot decisions. Default ON.
     pub agent_outcomes_enabled: bool,
+    /// When true, the worker sweeps OpenStreetMap for real rooms in the
+    /// cities tenants care about and writes `open_directory`/ODbL facts.
+    /// Default OFF — a shared-registry writer stays dark until verified.
+    pub osm_venue_sweep_enabled: bool,
     /// Optional HTTP/HTTPS/SOCKS proxy URL for Reddit requests. Reddit blocks
     /// direct JSON API access from some IPs (403). When set, the discovery
     /// worker and community executor route Reddit requests through this proxy.
@@ -417,6 +426,11 @@ impl Config {
             AGENT_OUTCOMES_ENABLED_KEY,
             true,
         )?;
+        let osm_venue_sweep_enabled = parse_bool(
+            values.get(OSM_VENUE_SWEEP_ENABLED_KEY),
+            OSM_VENUE_SWEEP_ENABLED_KEY,
+            false,
+        )?;
         let reddit_proxy_url = values
             .get(REDDIT_PROXY_URL_KEY)
             .map(|v| v.trim())
@@ -497,6 +511,7 @@ impl Config {
             autopilot_enabled,
             autopilot_poll_interval,
             agent_outcomes_enabled,
+            osm_venue_sweep_enabled,
             reddit_proxy_url,
             agent_service_url,
             youtube_api_key,
