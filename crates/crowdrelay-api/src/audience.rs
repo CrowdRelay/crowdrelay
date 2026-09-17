@@ -14,7 +14,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use crowdrelay_domain::venue_evidence::{
-    EvidenceFact, EvidenceLocale, VenueAssessment, VenueEvidence, assess,
+    EvidenceFact, EvidenceLocale, VenueAssessment, VenueEvidence, assess, unchecked_sentence,
 };
 use crowdrelay_infra::tenant_settings::TenantSettingsRepository;
 use serde::{Deserialize, Serialize};
@@ -590,7 +590,8 @@ async fn assess_venue_rows(state: &crate::AppState, rows: &mut [CityVenueRow]) {
         .await
         .unwrap_or_default();
     let locale = EvidenceLocale::from_tag(&locale_tag);
-    let mut private_facts = private_venue_facts(state, workspace_id, rows).await;
+    let (mut private_facts, private_facts_degraded) =
+        private_venue_facts(state, workspace_id, rows).await;
     let now = OffsetDateTime::now_utc();
     for row in rows.iter_mut() {
         let evidence = VenueEvidence {
@@ -611,8 +612,17 @@ async fn assess_venue_rows(state: &crate::AppState, rows: &mut [CityVenueRow]) {
                 row.assessment_sentence = sentence;
             }
             VenueAssessment::InsufficientEvidence { sentence } => {
-                row.assessment = "insufficient_evidence".to_owned();
-                row.assessment_sentence = sentence;
+                // A refusal reached without the tenant's own facts is not a
+                // refusal: a fresh booking contact is evidence, and the read
+                // that holds it failed. Saying "no evidence" here would be a
+                // confident wrong answer produced by an outage.
+                if private_facts_degraded {
+                    row.assessment = "not_assessed".to_owned();
+                    row.assessment_sentence = unchecked_sentence(&row.display_name, locale);
+                } else {
+                    row.assessment = "insufficient_evidence".to_owned();
+                    row.assessment_sentence = sentence;
+                }
             }
         }
     }
@@ -683,7 +693,7 @@ async fn private_venue_facts(
     state: &crate::AppState,
     workspace_id: Uuid,
     rows: &[CityVenueRow],
-) -> HashMap<Uuid, Vec<EvidenceFact>> {
+) -> (HashMap<Uuid, Vec<EvidenceFact>>, bool) {
     let venue_ids: Vec<Uuid> = rows.iter().map(|row| row.venue_id).collect();
     let result = sqlx::query_as::<_, PrivateVenueFactRow>(
         r#"
@@ -723,9 +733,10 @@ async fn private_venue_facts(
         }
         Err(error) => {
             tracing::warn!(%error, "venue private-facts read failed; assessing without it");
+            return (by_venue, true);
         }
     }
-    by_venue
+    (by_venue, false)
 }
 
 /// Ad conversion measurement: fan transfer from paid ad platforms into CrowdRelay.

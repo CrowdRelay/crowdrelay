@@ -349,6 +349,28 @@ fn worth_sentence(name: &str, clauses: &[EvidenceClause], locale: EvidenceLocale
 /// The honest refusal — itself a full sentence, in the tenant's language.
 /// A room the graph knows nothing about gets told as known-nothing, so the
 /// next fact that lands changes the answer rather than confirming a guess.
+/// What a room reads as when the tenant's own facts could not be read.
+///
+/// Distinct from the refusal above, which says the graph knows nothing. This
+/// one says *we could not check*: a failed read of the caller's own contacts
+/// can turn a room the tenant has a fresh booking address for into "no
+/// evidence", and a confident wrong refusal is worse than an admitted gap.
+#[must_use]
+pub fn unchecked_sentence(name: &str, locale: EvidenceLocale) -> String {
+    match locale {
+        EvidenceLocale::En => format!(
+            "{name} — we could not read your own notes on this room just now, so this is \
+             not an answer yet. What the registry knows on its own was not enough to \
+             decide; try again in a moment."
+        ),
+        EvidenceLocale::Pl => format!(
+            "{name} — nie udało się teraz odczytać Waszych własnych notatek o tym miejscu, \
+             więc to jeszcze nie jest odpowiedź. To, co wie sam rejestr, nie wystarczyło do \
+             oceny; spróbujcie za chwilę."
+        ),
+    }
+}
+
 fn refusal_sentence(name: &str, locale: EvidenceLocale) -> String {
     match locale {
         EvidenceLocale::En => format!(
@@ -406,6 +428,23 @@ fn polish_count<'a>(count: i64, one: &'a str, few: &'a str, many: &'a str) -> &'
 
 #[cfg(test)]
 mod tests {
+
+    /// The unchecked sentence is distinct from the refusal in both languages,
+    /// and says the thing that separates them: nobody decided.
+    #[test]
+    fn an_unchecked_room_does_not_read_as_a_refusal() {
+        for locale in [EvidenceLocale::En, EvidenceLocale::Pl] {
+            let unchecked = unchecked_sentence("Klub X", locale);
+            let refused = refusal_sentence("Klub X", locale);
+            assert_ne!(unchecked, refused);
+            assert!(unchecked.contains("Klub X"));
+            assert!(
+                unchecked.len() > 60,
+                "the sentence has to explain itself: {unchecked}"
+            );
+        }
+    }
+
     use super::*;
     use time::Duration;
 
