@@ -34,8 +34,12 @@ pub(super) async fn issue_release_making_of_asks(
          AND assignment.source_id=plan.id
          -- The ask is keyed to the release window: a postponed release gets
          -- a fresh ask, and a row filed under a stale window (or plain
-         -- 'making_of' from before windowing) cannot block it.
-         AND assignment.source_ref = 'making_of:' || plan.release_at::date::text
+         -- 'making_of' from before windowing) cannot block it. UTC is pinned
+         -- because the write side derives the date from the OffsetDateTime,
+         -- which is always +00:00 — a session TimeZone shift would split the
+         -- key and the ask would cancel itself unread.
+         AND assignment.source_ref =
+             'making_of:' || (plan.release_at AT TIME ZONE 'UTC')::date::text
         WHERE plan.workspace_id=$1
           AND plan.active
           AND plan.tier <> 'filler'
@@ -191,7 +195,8 @@ pub(super) async fn close_release_making_of_assignments(
              AND plan.workspace_id=assignment.workspace_id
              AND plan.id=assignment.source_id
              AND (NOT plan.active OR plan.release_at < $2 - INTERVAL '7 days'
-                  OR assignment.source_ref <> 'making_of:' || plan.release_at::date::text)"#,
+                  OR assignment.source_ref <>
+                     'making_of:' || (plan.release_at AT TIME ZONE 'UTC')::date::text)"#,
     )
     .bind(workspace_id.into_uuid())
     .bind(now)
