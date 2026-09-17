@@ -261,8 +261,29 @@ pub(in crate::autopilot) async fn issue_release_outcome_report(
         // claimed send. A fan whose earlier send failed is genuinely missed —
         // counting them as reached here would contradict the audience the
         // campaign just built.
-        let (earlier_phase_reach, consented_total) = sqlx::query_as::<_, (i64, i64)>(
+        // `missed` is counted directly as consented-and-never-reached, not
+        // derived by subtraction: earlier sends also reached fans who have
+        // since gone inactive or withdrawn consent, and netting them out
+        // would hide genuinely missed fans behind them.
+        let (earlier_phase_reach, consented_total, missed) = sqlx::query_as::<_, (i64, i64, i64)>(
             r#"
+            WITH consented AS (
+                SELECT fan.id
+                FROM fans fan
+                WHERE fan.workspace_id = $1 AND fan.status = 'active'
+                  AND EXISTS (
+                      SELECT 1 FROM fan_consents consent
+                      WHERE consent.workspace_id = fan.workspace_id
+                        AND consent.fan_id = fan.id
+                        AND consent.purpose = 'marketing'
+                        AND consent.granted
+                        AND consent.id = (
+                            SELECT newest.id FROM fan_consents newest
+                            WHERE newest.workspace_id = consent.workspace_id
+                              AND newest.fan_id = consent.fan_id
+                              AND newest.purpose = consent.purpose
+                            ORDER BY newest.recorded_at DESC, newest.id DESC
+                            LIMIT 1)))
             SELECT
                 (SELECT count(DISTINCT reached.fan_id)
                  FROM communication_campaign_deliveries reached
@@ -271,21 +292,18 @@ pub(in crate::autopilot) async fn issue_release_outcome_report(
                  WHERE reached.workspace_id = $1
                    AND reached.status IN ('delivered', 'claimed')
                    AND c.slug = ANY($2)),
-                (SELECT count(*) FROM fans fan
-                 WHERE fan.workspace_id = $1 AND fan.status = 'active'
-                   AND EXISTS (
-                       SELECT 1 FROM fan_consents consent
-                       WHERE consent.workspace_id = fan.workspace_id
-                         AND consent.fan_id = fan.id
-                         AND consent.purpose = 'marketing'
-                         AND consent.granted
-                         AND consent.id = (
-                             SELECT newest.id FROM fan_consents newest
-                             WHERE newest.workspace_id = consent.workspace_id
-                               AND newest.fan_id = consent.fan_id
-                               AND newest.purpose = consent.purpose
-                             ORDER BY newest.recorded_at DESC, newest.id DESC
-                             LIMIT 1)))
+                (SELECT count(*) FROM consented),
+                (SELECT count(*) FROM consented
+                 WHERE NOT EXISTS (
+                     SELECT 1
+                     FROM communication_campaign_deliveries reached
+                     JOIN communication_campaigns c
+                       ON c.workspace_id = reached.workspace_id
+                      AND c.id = reached.campaign_id
+                     WHERE reached.workspace_id = $1
+                       AND reached.fan_id = consented.id
+                       AND reached.status IN ('delivered', 'claimed')
+                       AND c.slug = ANY($2)))
             "#,
         )
         .bind(workspace_id.into_uuid())
@@ -310,7 +328,7 @@ pub(in crate::autopilot) async fn issue_release_outcome_report(
                 json!({
                     "earlier_phase_recipients": earlier_phase_reach,
                     "consented_active_fans": consented_total,
-                    "missed_first_waves": (consented_total - earlier_phase_reach).max(0),
+                    "missed_first_waves": missed,
                     "note": "received an earlier send is not the same as listened — the wrap reached fans the record shows were never sent to; clicks above it are anonymous and cannot be joined to fans",
                 }),
             );
@@ -361,6 +379,11 @@ pub(in crate::autopilot) async fn issue_release_outcome_report(
             generated_at, window_days, verdict, action_id, payload
         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
         ON CONFLICT (workspace_id, release_id, report_kind) DO UPDATE SET
+            -- Tier can be re-decided between the R+3 and R+14 reports; the
+            -- stored row is what the tier × timing × verdict join reads, so
+            -- it must follow the plan, not freeze at first write.
+            tier = EXCLUDED.tier,
+            release_at = EXCLUDED.release_at,
             generated_at = EXCLUDED.generated_at,
             verdict = EXCLUDED.verdict,
             action_id = EXCLUDED.action_id,

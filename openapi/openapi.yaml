@@ -11604,8 +11604,8 @@ components:
         completed_at: { type: [string, 'null'], format: date-time }
         state:
           type: string
-          enum: [done, parked, due, upcoming, disabled, blocked]
-          description: done = recorded; parked = the editorial pitch is sitting with a human (parked, never claimed submitted); due = window open, nothing recorded; upcoming = ahead of window; disabled = the vertical is off for this rung — the step's own switch is off or the plan is tier filler, which owes no ladder; blocked = a plan-level gate holds it (missing assets or communication off).
+          enum: [done, parked, due, upcoming, held, disabled, blocked]
+          description: done = recorded; parked = the editorial pitch is sitting with a human (parked, never claimed submitted); due = window open, nothing recorded; upcoming = ahead of window; held = the step's week collided with a live show — the send is deferred to protect it, never dropped; disabled = the vertical is off for this rung — the step's own switch is off or the plan is tier filler, which owes no ladder; blocked = a plan-level gate holds it (missing assets or communication off).
     AutopilotReleasePlanSnapshot:
       type: object
       additionalProperties: false

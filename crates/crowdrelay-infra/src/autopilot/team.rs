@@ -39,6 +39,7 @@ struct ReminderRow {
     source_ref: Option<String>,
     event_title: Option<String>,
     plan_title: Option<String>,
+    release_title: Option<String>,
     plan_scheduled_for: Option<time::Date>,
     plan_items: Option<serde_json::Value>,
     display_name: String,
@@ -264,6 +265,7 @@ impl PostgresAutopilotRepository {
                 .await?;
                 member.open_assignments = member.open_assignments.saturating_add(1);
                 member.recent_assignments = member.recent_assignments.saturating_add(1);
+                member.asks_last_7d = member.asks_last_7d.saturating_add(1);
                 assigned = assigned.saturating_add(1);
             }
 
@@ -344,6 +346,7 @@ impl PostgresAutopilotRepository {
                 .await?;
                 member.open_assignments = member.open_assignments.saturating_add(1);
                 member.recent_assignments = member.recent_assignments.saturating_add(1);
+                member.asks_last_7d = member.asks_last_7d.saturating_add(1);
                 assigned = assigned.saturating_add(1);
             }
 
@@ -386,6 +389,7 @@ impl PostgresAutopilotRepository {
                        action.id action_id,
                        action.action_kind, action.context, assignment.source_kind,
                        assignment.source_ref, event.title event_title,
+                       release.title release_title,
                        day.title plan_title, day.scheduled_for plan_scheduled_for,
                        plan.items plan_items,
                        member.display_name, member.normalized_email,
@@ -406,6 +410,10 @@ impl PostgresAutopilotRepository {
                   ON assignment.source_kind='capture_plan'
                  AND plan.workspace_id=assignment.workspace_id
                  AND plan.id=assignment.source_id
+                LEFT JOIN viryaos_release_plans release
+                  ON assignment.source_kind='release_making_of'
+                 AND release.workspace_id=assignment.workspace_id
+                 AND release.id=assignment.source_id
                 LEFT JOIN viryaos_production_events day
                   ON day.workspace_id=assignment.workspace_id
                  AND day.id=plan.production_event_id
@@ -448,6 +456,17 @@ impl PostgresAutopilotRepository {
                         row.source_ref.as_deref().unwrap_or("show_task"),
                         crew_locale,
                     )
+                } else if row.source_kind == "release_making_of" {
+                    match (row.release_title.as_deref(), crew_locale) {
+                        (Some(plan_title), BriefingLocale::Pl) => {
+                            format!("Making-of do wydania: {plan_title}")
+                        }
+                        (Some(plan_title), BriefingLocale::En) => {
+                            format!("Making-of for the release: {plan_title}")
+                        }
+                        (None, BriefingLocale::Pl) => "Making-of do wydania".to_owned(),
+                        (None, BriefingLocale::En) => "Making-of for the release".to_owned(),
+                    }
                 } else if row.source_kind == "capture_plan" {
                     match (row.plan_title.as_deref(), crew_locale) {
                         (Some(plan_title), BriefingLocale::Pl) => {
@@ -478,6 +497,21 @@ impl PostgresAutopilotRepository {
                         }
                         (None, BriefingLocale::En) => {
                             "This task is still waiting for you to close it.".to_owned()
+                        }
+                    }
+                } else if row.source_kind == "release_making_of" {
+                    match (row.release_title.as_deref(), crew_locale) {
+                        (Some(plan_title), BriefingLocale::Pl) => format!(
+                            "Premiera „{plan_title}” zbliża się — materiał making-of nadal czeka na zarchiwizowanie i oznaczenie."
+                        ),
+                        (Some(plan_title), BriefingLocale::En) => format!(
+                            "\"{plan_title}\" is still inside its making-of window — the material is waiting to be filed and marked."
+                        ),
+                        (None, BriefingLocale::Pl) => {
+                            "Materiał making-of nadal czeka na zarchiwizowanie.".to_owned()
+                        }
+                        (None, BriefingLocale::En) => {
+                            "The making-of material is still waiting to be filed.".to_owned()
                         }
                     }
                 } else if row.source_kind == "capture_plan" {

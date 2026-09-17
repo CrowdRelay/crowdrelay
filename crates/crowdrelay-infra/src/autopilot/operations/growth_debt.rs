@@ -44,11 +44,11 @@ struct LastDebtSignalRow {
 }
 
 /// Milestones a release plan is expected to record, from the CHECK constraint
-/// on `viryaos_release_milestones` (migration 0039, widened to nine by
-/// `editorial_pitch` in 0100). The denominator is the declared set, not the
-/// recorded rows — otherwise a plan that recorded one milestone and stopped
-/// would report as 0% outstanding.
-const RELEASE_MILESTONE_COUNT: i64 = 9;
+/// on `viryaos_release_milestones` (migration 0039, widened by
+/// `editorial_pitch` in 0100 and `catalogue_rotation` in 0300). The
+/// denominator is the declared set, not the recorded rows — otherwise a plan
+/// that recorded one milestone and stopped would report as 0% outstanding.
+const RELEASE_MILESTONE_COUNT: i64 = 10;
 
 fn subject_of(row: &GrowthDebtRow) -> Option<GrowthDebtSubject> {
     match row.subject_kind.as_str() {

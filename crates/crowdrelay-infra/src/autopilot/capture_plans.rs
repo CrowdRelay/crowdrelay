@@ -648,6 +648,7 @@ async fn route_capture_plan(
 
     member.open_assignments = member.open_assignments.saturating_add(1);
     member.recent_assignments = member.recent_assignments.saturating_add(1);
+    member.asks_last_7d = member.asks_last_7d.saturating_add(1);
     Ok(1)
 }
 

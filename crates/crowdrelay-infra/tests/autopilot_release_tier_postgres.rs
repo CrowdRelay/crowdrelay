@@ -1013,10 +1013,10 @@ async fn a_held_milestone_is_not_growth_debt() -> Result<(), Box<dyn std::error:
                 == crowdrelay_domain::growth_debt::GrowthDebtSubject::ReleasePlan(release_id)
         })
         .expect("an active plan with unsent milestones still reports a row");
-    // Nine rungs tracked (press on), none completed, one deliberately held:
-    // the debt is the eight the band still owes, not nine.
-    assert_eq!(missed.tracked_items, 9);
-    assert_eq!(missed.outstanding_items, 8);
+    // Ten rungs tracked (press on), none completed, one deliberately held:
+    // the debt is the nine the band still owes, not ten.
+    assert_eq!(missed.tracked_items, 10);
+    assert_eq!(missed.outstanding_items, 9);
     Ok(())
 }
 

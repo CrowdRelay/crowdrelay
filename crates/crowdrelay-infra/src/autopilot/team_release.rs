@@ -32,6 +32,10 @@ pub(super) async fn issue_release_making_of_asks(
           ON assignment.workspace_id=plan.workspace_id
          AND assignment.source_kind='release_making_of'
          AND assignment.source_id=plan.id
+         -- The ask is keyed to the release window: a postponed release gets
+         -- a fresh ask, and a row filed under a stale window (or plain
+         -- 'making_of' from before windowing) cannot block it.
+         AND assignment.source_ref = 'making_of:' || plan.release_at::date::text
         WHERE plan.workspace_id=$1
           AND plan.active
           AND plan.tier <> 'filler'
@@ -74,7 +78,7 @@ pub(super) async fn issue_release_making_of_asks(
                     workspace_id,
                     "release_making_of",
                     plan_id,
-                    Some("making_of"),
+                    Some(&format!("making_of:{}", release_at.date())),
                     None,
                     Some(release_at + TimeDuration::days(7)),
                     need,
@@ -87,13 +91,14 @@ pub(super) async fn issue_release_making_of_asks(
         let member = mutable_team
             .get_mut(member_index)
             .ok_or(RepositoryError::Unexpected)?;
+        let source_ref = format!("making_of:{}", release_at.date());
         let assignment_id = Uuid::now_v7();
         let inserted = sqlx::query_scalar::<_, Uuid>(
             r#"
             INSERT INTO viryaos_team_assignments (
                 id, workspace_id, action_id, source_kind, source_id, source_ref,
                 assignee_member_id, required_skill, due_at, next_reminder_at
-            ) VALUES ($1,$2,NULL,'release_making_of',$3,'making_of',$4,$5,$6,$7)
+            ) VALUES ($1,$2,NULL,'release_making_of',$3,$4,$5,$6,$7,$8)
             ON CONFLICT DO NOTHING
             RETURNING id
             "#,
@@ -101,6 +106,7 @@ pub(super) async fn issue_release_making_of_asks(
         .bind(assignment_id)
         .bind(workspace_id.into_uuid())
         .bind(plan_id)
+        .bind(&source_ref)
         .bind(member.member_id)
         .bind(need.primary_skill.as_str())
         .bind(release_at)
@@ -140,6 +146,7 @@ pub(super) async fn issue_release_making_of_asks(
         .await?;
         member.open_assignments = member.open_assignments.saturating_add(1);
         member.recent_assignments = member.recent_assignments.saturating_add(1);
+        member.asks_last_7d = member.asks_last_7d.saturating_add(1);
         assigned = assigned.saturating_add(1);
     }
     Ok(assigned)
@@ -183,7 +190,8 @@ pub(super) async fn close_release_making_of_assignments(
              AND assignment.source_kind='release_making_of'
              AND plan.workspace_id=assignment.workspace_id
              AND plan.id=assignment.source_id
-             AND (NOT plan.active OR plan.release_at < $2 - INTERVAL '7 days')"#,
+             AND (NOT plan.active OR plan.release_at < $2 - INTERVAL '7 days'
+                  OR assignment.source_ref <> 'making_of:' || plan.release_at::date::text)"#,
     )
     .bind(workspace_id.into_uuid())
     .bind(now)
@@ -209,7 +217,15 @@ pub(super) async fn record_ask_refusal(
     need: TeamAssignmentNeed,
     refusal: TeamRoutingRefusal,
 ) -> Result<(), RepositoryError> {
-    let target_id = action_id.unwrap_or(source_id).to_string();
+    // The dedup identity is one row per ask: an autopilot action asks once,
+    // but a show event can carry several distinct checklist tasks — folding
+    // source_ref in keeps a refused "photos" task from swallowing the same
+    // event's refused "setlist" task.
+    let target_id = match (action_id, source_ref) {
+        (Some(action_id), _) => action_id.to_string(),
+        (None, Some(source_ref)) => format!("{source_id}:{source_ref}"),
+        (None, None) => source_id.to_string(),
+    };
     sqlx::query(
         r#"
         INSERT INTO audit_events (
