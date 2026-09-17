@@ -4,6 +4,7 @@ use super::*;
 
 include!("decisions/core_reads.rs");
 include!("decisions/opportunity_reads.rs");
+include!("decisions/booking_reads.rs");
 include!("decisions/cycle_reads.rs");
 include!("decisions/persist.rs");
 
@@ -16,6 +17,7 @@ include!("decisions/persist.rs");
 impl PostgresAutopilotRepository {
     decision_core_reads!();
     decision_opportunity_reads!();
+    decision_booking_reads!();
     decision_cycle_reads!();
     decision_persist!();
 }

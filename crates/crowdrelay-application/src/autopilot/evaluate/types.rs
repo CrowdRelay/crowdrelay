@@ -94,3 +94,8 @@ pub enum AutopilotError {
     #[error("autopilot decision serialization failed")]
     Serialization(#[from] serde_json::Error),
 }
+
+pub struct EvaluateAutopilot<'a, R> {
+    repository: &'a R,
+    workspace_id: WorkspaceId,
+}
