@@ -337,6 +337,13 @@ pub(crate) fn router(state: crate::AppState) -> Router {
             "/v1/control-plane/gig-plan",
             get(crate::gig_planning::band_gig_plan),
         )
+        // Approving the proposal is the approval (4G.4): one action for the
+        // whole room, queued rather than parked for a second yes on another
+        // screen.
+        .route(
+            "/v1/control-plane/gig-plan/approve",
+            post(crate::gig_planning::approve_gig_proposal),
+        )
         // Audience attestations. The tenant decides whether a document exists
         // and who gets the link; it never decides what the document says, so
         // the issue body carries city slugs and nothing else. Revoking

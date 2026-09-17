@@ -3,6 +3,14 @@ fn executor_capability_for_event(event_type: &str) -> &'static str {
         "crowdrelay.fan_lifecycle.message_requested" => "fan.lifecycle.message",
         "crowdrelay.merch.reorder_requested" => "merch.reorder",
         "crowdrelay.booking.outreach_requested" => "booking.outreach",
+        // Its own capability rather than riding `booking.outreach`, which is
+        // the opposite of the choice made for the report kinds above and for
+        // the same reason read the other way: this event carries a recipient
+        // set and a different template, so an executor that advertises
+        // `booking.outreach` would claim it and then have nothing to do with
+        // it. Until one advertises `gig.outreach` these park, which is the
+        // honest state — nothing was sent, and the board says so.
+        "crowdrelay.gig.outreach_requested" => "gig.outreach",
         "crowdrelay.merch.bundle_requested" => "merch.bundle",
         "crowdrelay.outreach.requested" => "outreach.send",
         "crowdrelay.representation.approach_requested" => "representation.approach",
@@ -111,6 +119,7 @@ pub const fn payload_requires_executor(payload: &AutopilotActionPayload) -> bool
             AutopilotActionPayload::RequestFanLifecycleMessage { .. }
                 | AutopilotActionPayload::RequestMerchReorder { .. }
                 | AutopilotActionPayload::RequestBookingOutreach { .. }
+                | AutopilotActionPayload::RequestGigOutreach { .. }
                 | AutopilotActionPayload::RequestMerchBundle { .. }
                 | AutopilotActionPayload::RequestOutreach { .. }
                 | AutopilotActionPayload::RequestRepresentationApproach { .. }
@@ -161,6 +170,7 @@ pub(in crate::autopilot) fn executor_capability_for_payload(
         AutopilotActionPayload::RequestFanLifecycleMessage { .. } => "fan.lifecycle.message",
         AutopilotActionPayload::RequestMerchReorder { .. } => "merch.reorder",
         AutopilotActionPayload::RequestBookingOutreach { .. } => "booking.outreach",
+        AutopilotActionPayload::RequestGigOutreach { .. } => "gig.outreach",
         AutopilotActionPayload::RequestMerchBundle { .. } => "merch.bundle",
         AutopilotActionPayload::RequestOutreach { .. } => "outreach.send",
         AutopilotActionPayload::RequestRepresentationApproach { .. } => "representation.approach",

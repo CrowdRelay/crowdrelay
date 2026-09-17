@@ -65,6 +65,8 @@ struct VenueRow {
 
 #[derive(Debug, sqlx::FromRow)]
 struct PromoterRow {
+    id: Uuid,
+    version: i64,
     display_name: String,
     relationship_score: i32,
     answered_last_time: bool,
@@ -237,14 +239,55 @@ async fn best_venue(
 /// `answered_last_time` is the strongest cheap signal there is about whether an
 /// approach is worth making, and it comes from the interaction ledger rather
 /// than from the relationship score, which moves for other reasons too.
-async fn promoters_in_city(
+/// The same promoters the proposal names, carrying the row identity the
+/// outreach needs (4G.4).
+///
+/// `PromoterRef` is a domain type and has no identifiers on purpose — the
+/// planner decides on evidence, not on rows. But the letter has to be
+/// addressed, and matching the proposal's names back to rows afterwards would
+/// be a second read with its own ordering, its own `LIMIT`, and the chance of
+/// resolving a name to a different promoter than the one judged. So both come
+/// from this one query.
+#[derive(Clone, Debug)]
+pub struct PromoterTarget {
+    pub target_id: Uuid,
+    pub target_version: i64,
+    pub name: String,
+    pub relationship_score: u16,
+    pub answered_last_time: bool,
+}
+
+impl PromoterTarget {
+    /// What the planner judges: the same facts, without the row.
+    #[must_use]
+    pub fn as_promoter_ref(&self) -> PromoterRef {
+        PromoterRef {
+            name: self.name.clone(),
+            relationship_score: self.relationship_score,
+            answered_last_time: self.answered_last_time,
+            // Selected only when active and accepting booking, and
+            // `contact_email` is NOT NULL, so a selected row is contactable by
+            // construction.
+            has_route: true,
+        }
+    }
+}
+
+/// Everybody who books in this city, strongest relationship first.
+///
+/// # Errors
+///
+/// Propagates the database error.
+pub async fn promoter_targets_in_city(
     pool: &PgPool,
     workspace_id: Uuid,
     city_slug: &str,
-) -> Result<Vec<PromoterRef>, sqlx::Error> {
+) -> Result<Vec<PromoterTarget>, sqlx::Error> {
     let rows = sqlx::query_as::<_, PromoterRow>(
         r#"
-        SELECT target.display_name,
+        SELECT target.id,
+               target.version,
+               target.display_name,
                target.relationship_score,
                EXISTS (
                    SELECT 1 FROM viryaos_booking_interactions AS interaction
@@ -270,15 +313,25 @@ async fn promoters_in_city(
 
     Ok(rows
         .into_iter()
-        .map(|row| PromoterRef {
+        .map(|row| PromoterTarget {
+            target_id: row.id,
+            target_version: row.version,
             name: row.display_name,
             relationship_score: bounded_u16(i64::from(row.relationship_score)),
             answered_last_time: row.answered_last_time,
-            // The row is only selected when it is active and accepts booking,
-            // and `viryaos_booking_targets.contact_email` is NOT NULL, so a
-            // selected row is by construction contactable.
-            has_route: true,
         })
+        .collect())
+}
+
+async fn promoters_in_city(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    city_slug: &str,
+) -> Result<Vec<PromoterRef>, sqlx::Error> {
+    Ok(promoter_targets_in_city(pool, workspace_id, city_slug)
+        .await?
+        .iter()
+        .map(PromoterTarget::as_promoter_ref)
         .collect())
 }
 

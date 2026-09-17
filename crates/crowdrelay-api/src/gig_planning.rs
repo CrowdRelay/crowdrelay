@@ -14,12 +14,16 @@
 
 use axum::{
     Json,
-    extract::{Query, State},
+    extract::{Query, State, rejection::JsonRejection},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
 };
+use crowdrelay_application::IdempotencyKey;
 use crowdrelay_domain::gig_plan::{GigPlan, TenantIntent, plan_gig};
 use crowdrelay_domain::roster_plan::{RosterRefusal, RosterRun, plan_roster_run};
+use crowdrelay_infra::gig_outreach::{
+    GigOutreachError, GigOutreachOutcome, approve_gig_proposal as approve_proposal,
+};
 use crowdrelay_infra::gig_planning::{city_opportunities, roster_opportunity, stated_intent};
 use crowdrelay_infra::organization_settings::{
     KEY_ROSTER_PACKAGES_PER_PERIOD, OrganizationSettingsRepository, PACKAGES_PER_PERIOD_RANGE,
@@ -176,6 +180,112 @@ pub async fn band_gig_plan(
         }),
     )
         .into_response()
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ApproveProposalRequest {
+    /// The city whose proposal the band is approving. The proposal itself is
+    /// recomputed rather than replayed from the screen: evidence that moved
+    /// between the read and the click wins, and the band is told what moved.
+    city: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(untagged)]
+enum ApproveProposalResponse {
+    Queued {
+        action_id: Uuid,
+        city: String,
+        venue: String,
+        /// Everybody who will receive it. All of them, or none — the contact
+        /// governor reserves the set inside one transaction.
+        recipients: Vec<String>,
+        /// The first line of the letter, which is the proposal's strongest
+        /// reason. Returned so the band reads what the promoter will read.
+        opening_line: String,
+    },
+    /// The same key already produced this outreach. The stored status travels
+    /// because it may already have run.
+    Replayed { action_id: Uuid, status: String },
+    /// The proposal no longer holds. A real answer, not an error: the sentence
+    /// says what changed and what to do about it.
+    Refused { refused: String },
+}
+
+/// `POST /v1/control-plane/gig-plan/approve` — yes, write to these people.
+///
+/// One action for the whole room (§12-6, 4G.4). Approving once is approving:
+/// the action is queued rather than parked for a second approval on another
+/// screen, because the band has just read the reasons, the caveats and the
+/// names. Every gate still runs again at dispatch.
+pub async fn approve_gig_proposal(
+    State(state): State<crate::AppState>,
+    headers: HeaderMap,
+    payload: Result<Json<ApproveProposalRequest>, JsonRejection>,
+) -> Response {
+    let request_id_value = request_id(&headers);
+    let Ok(Json(request)) = payload else {
+        return Problem::bad_request(request_id_value).into_response();
+    };
+    let Some(idempotency_key) = headers
+        .get(&crate::IDEMPOTENCY_KEY)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| IdempotencyKey::parse(value).ok())
+    else {
+        // Required rather than generated here: a retried click must not become
+        // a second letter to the same promoters, and only the caller knows
+        // which click this is.
+        return Problem::bad_request(request_id_value).into_response();
+    };
+
+    let workspace_id = state.ticketing.workspace_id().into_uuid();
+    match approve_proposal(
+        &state.database,
+        workspace_id,
+        request.city.trim(),
+        &idempotency_key,
+        OffsetDateTime::now_utc(),
+    )
+    .await
+    {
+        Ok(GigOutreachOutcome::Queued {
+            action_id,
+            city,
+            venue,
+            recipients,
+            opening_line,
+        }) => (
+            StatusCode::OK,
+            Json(ApproveProposalResponse::Queued {
+                action_id,
+                city,
+                venue,
+                recipients,
+                opening_line,
+            }),
+        )
+            .into_response(),
+        Ok(GigOutreachOutcome::Replayed { action_id, status }) => (
+            StatusCode::OK,
+            Json(ApproveProposalResponse::Replayed { action_id, status }),
+        )
+            .into_response(),
+        Err(GigOutreachError::Refused(sentence)) => (
+            StatusCode::OK,
+            Json(ApproveProposalResponse::Refused { refused: sentence }),
+        )
+            .into_response(),
+        Err(GigOutreachError::NotFound) => Problem::not_found(request_id_value)
+            .private()
+            .into_response(),
+        Err(GigOutreachError::Database(error)) => {
+            tracing::warn!(%error, "gig proposal approval failed");
+            Problem::service_unavailable(request_id_value)
+                .private()
+                .into_response()
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]

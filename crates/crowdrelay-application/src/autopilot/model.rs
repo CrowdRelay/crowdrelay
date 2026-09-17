@@ -439,6 +439,19 @@ pub struct ExperimentAllocation {
     pub allocation_basis_points: u16,
 }
 
+/// One promoter on a gig outreach, pinned to the row the proposal read.
+///
+/// The version is the whole of the optimistic concurrency: a target edited
+/// between the approval and the send fails the lock rather than being written
+/// to under stale terms. The address is not here and never is — it is read
+/// inside the sending transaction, after the gates.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct GigOutreachRecipient {
+    pub target_id: BookingTargetId,
+    pub target_version: i64,
+    pub target_name: String,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum AutopilotActionPayload {
@@ -521,6 +534,37 @@ pub enum AutopilotActionPayload {
         /// the listing speaks alone.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         note: Option<String>,
+    },
+    /// Write to everybody who books one room about one night (§12-6, 4G.4).
+    ///
+    /// # Why this is one action and not one per promoter
+    ///
+    /// A gig proposal names two or three people who book the same city. Queued
+    /// as separate actions they reserve contact windows separately, so the
+    /// governor can admit the first and refuse the second — and the band has
+    /// then written to one of three promoters about a night, which reads as
+    /// either a snub or a shambles depending on who compares notes. One action
+    /// with a recipient set reserves all of them inside one transaction:
+    /// everybody hears, or nobody does and the band is told why.
+    ///
+    /// The band approved the proposal, so this carries the reasons it was
+    /// approved on. `opening_line` is rendered by `domain::gig_plan` from the
+    /// same reason the console displayed, because a letter that argues
+    /// something the proposal did not say is a letter the band cannot defend.
+    RequestGigOutreach {
+        city_id: CityId,
+        /// The room the night is proposed at. Named in the letter, so a
+        /// promoter who books two rooms knows which one is meant.
+        venue: String,
+        /// Everybody who books here, in the order the proposal ranked them.
+        recipients: Vec<GigOutreachRecipient>,
+        /// The proposal's strongest reason as one sentence, from
+        /// `GigPlan::opening_line`.
+        opening_line: String,
+        /// Every reason the proposal was made of, as rendered sentences, so
+        /// the draft can use more than the first without re-deriving any of
+        /// them.
+        reasons: Vec<String>,
     },
     /// Read a public playlist and report whether the track is in it.
     ///
@@ -909,6 +953,7 @@ impl AutopilotActionPayload {
             // Somebody else's relationship, and the band gets one first
             // approach to each of them.
             Self::RequestBookingOutreach { .. }
+            | Self::RequestGigOutreach { .. }
             | Self::RequestOutreach { .. }
             | Self::RequestRepresentationApproach { .. }
             | Self::RequestBeaconOutreach { .. }
@@ -1032,6 +1077,7 @@ impl AutopilotActionPayload {
             Self::RequestMerchReorder { .. } => "merch.reorder.request",
             Self::ChangeMerchPrice { .. } => "merch.price.change",
             Self::RequestBookingOutreach { .. } => "booking.outreach.request",
+            Self::RequestGigOutreach { .. } => "gig.outreach.request",
             Self::RequestAudienceCampaign { .. } => "audience.campaign.request",
             Self::RequestMerchBundle { .. } => "merch.bundle.request",
             Self::RequestOutreach { .. } => "outreach.request",

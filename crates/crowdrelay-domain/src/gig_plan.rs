@@ -368,6 +368,76 @@ pub struct GigPlan {
     pub caveats: Vec<String>,
 }
 
+impl GigPlan {
+    /// The first line of the outreach, built from the reason that carried the
+    /// proposal (4G.4).
+    ///
+    /// # Why the draft does not compose its own opening
+    ///
+    /// The reasons exist because a proposal and the letter it becomes must
+    /// state the same fact. A draft that writes its own first line is a second
+    /// code path describing one decision, and the first time the two disagree
+    /// the promoter has the wrong one in their inbox while the console shows
+    /// the right one.
+    ///
+    /// So this renders `reasons[0]` — already ordered strongest first by
+    /// `plan_gig`, and never empty — and nothing else. A fact a promoter can
+    /// check beats a sentence about how excited anybody is: "eleven acts from
+    /// this genre played your room last year" is an argument, "we love your
+    /// venue" is noise, and a promoter reading forty of these a week can tell
+    /// the difference in one line.
+    ///
+    /// It is a fact, not a finished email. The tenant's own voice writes the
+    /// rest — this module has never read a word the band wrote and must not
+    /// pretend to.
+    #[must_use]
+    pub fn opening_line(&self) -> String {
+        let city = &self.city;
+        let venue = &self.venue;
+        match self.reasons.first() {
+            Some(Reason::ComparableActsPlayedHere { count, of_shows }) => {
+                format!("{count} of the last {of_shows} shows at {venue} were acts from our genre.")
+            }
+            Some(Reason::ReachableAudience { reachable }) => format!(
+                "{reachable} people around {city} asked us to tell them when we play nearby."
+            ),
+            Some(Reason::RoomDraws { typical_draw }) => format!(
+                "Ticketed shows at {venue} average {typical_draw} paid tickets, which is the \
+                 size we are playing to."
+            ),
+            Some(Reason::NeverPlayedButHasFans { reachable }) => format!(
+                "{reachable} people around {city} asked to hear when we play nearby, and we \
+                 have never played the city."
+            ),
+            Some(Reason::OverdueReturn { months, active_30d }) => format!(
+                "We last played {city} {months} months ago, and {active_30d} people there \
+                 have been active with us in the last month."
+            ),
+            Some(Reason::CoBillAddsAudience {
+                act,
+                adds_reachable,
+            }) => format!(
+                "A bill with {act} reaches {adds_reachable} people around {city} that we do \
+                 not reach on our own."
+            ),
+            Some(Reason::WarmPromoter { name }) => {
+                format!("{name} — we spoke before, and we are looking at {city} again.")
+            }
+            Some(Reason::RoomIsActive {
+                days_since_last_event,
+            }) => format!(
+                "{venue} had something on {days_since_last_event} days ago, and we are \
+                 looking at {city}."
+            ),
+            // Unreachable by construction: `plan_gig` never returns a proposal
+            // with no reasons. Stated rather than unwrapped, because a panic
+            // here would be an outreach the band cannot send and cannot
+            // diagnose, and this sentence is still true.
+            None => format!("We are looking at {city}, and {venue} is the room."),
+        }
+    }
+}
+
 /// Decides whether to propose a gig in this city, and says why either way.
 ///
 /// # Errors
@@ -993,6 +1063,67 @@ mod tests {
             TenantIntent::parse(" heads_down "),
             Some(TenantIntent::HeadsDown)
         );
+    }
+
+    /// §4G.4: the letter's first line is the proposal's strongest reason,
+    /// rendered once. Two code paths describing one decision drift, and the
+    /// one the promoter read is the one that counts.
+    #[test]
+    fn the_opening_line_states_the_reason_the_proposal_was_made_of() {
+        let plan = plan_gig(&opportunity(), TenantIntent::BookingShows).expect("proposes");
+        let opening = plan.opening_line();
+        match plan.reasons.first().expect("a proposal has reasons") {
+            Reason::ComparableActsPlayedHere { count, .. } => {
+                assert!(
+                    opening.contains(&count.to_string()),
+                    "the strongest reason's own number is missing: {opening}"
+                );
+                assert!(opening.contains(&plan.venue));
+            }
+            other => panic!("fixture changed shape: {other:?}"),
+        }
+    }
+
+    /// Every reason renders. A variant added without a sentence would send a
+    /// letter that opens with a fallback nobody chose, and nothing would fail.
+    #[test]
+    fn every_reason_produces_an_opening_a_promoter_can_read() {
+        let reasons = [
+            Reason::ComparableActsPlayedHere {
+                count: 4,
+                of_shows: 14,
+            },
+            Reason::ReachableAudience { reachable: 300 },
+            Reason::RoomDraws { typical_draw: 180 },
+            Reason::NeverPlayedButHasFans { reachable: 300 },
+            Reason::OverdueReturn {
+                months: 18,
+                active_30d: 90,
+            },
+            Reason::CoBillAddsAudience {
+                act: "Other Band".to_owned(),
+                adds_reachable: 120,
+            },
+            Reason::WarmPromoter {
+                name: "Anna".to_owned(),
+            },
+            Reason::RoomIsActive {
+                days_since_last_event: 12,
+            },
+        ];
+        let base = plan_gig(&opportunity(), TenantIntent::BookingShows).expect("proposes");
+        for reason in reasons {
+            let mut plan = base.clone();
+            plan.reasons = vec![reason.clone()];
+            let opening = plan.opening_line();
+            assert!(
+                opening.len() > 30 && opening.ends_with('.'),
+                "{reason:?} rendered as {opening:?}"
+            );
+            // A fact, not a feeling. The promoter reads forty of these a week.
+            assert!(!opening.to_lowercase().contains("love"), "{opening}");
+            assert!(!opening.contains('!'), "{opening}");
+        }
     }
 
     /// The console renders `describe`; an empty one would be a radio button

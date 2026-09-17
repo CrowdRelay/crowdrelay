@@ -46,6 +46,7 @@ pub mod fan_lifecycle;
 pub mod fan_privacy;
 pub mod fanbase;
 pub mod gdrive;
+pub mod gig_outreach;
 pub mod gig_planning;
 pub mod measurement_queries;
 pub mod mobile_fan;

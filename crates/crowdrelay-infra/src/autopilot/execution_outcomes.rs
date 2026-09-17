@@ -45,6 +45,14 @@ pub(super) async fn record_execution_outcome(
         AutopilotActionPayload::RequestAudienceCampaign { .. } => {
             ("audience_campaign_requested", 1.0, None)
         }
+        // The count, not a flag: a night offered to three promoters and a
+        // night offered to one are different asks, and 4G.5 scores replies
+        // against how many people were written to.
+        AutopilotActionPayload::RequestGigOutreach { recipients, .. } => (
+            "gig_outreach_recipients",
+            recipients.len() as f64,
+            None,
+        ),
         AutopilotActionPayload::RequestMerchBundle {
             bundle_price_minor, ..
         } => ("merch_bundle_price_minor", *bundle_price_minor as f64, None),

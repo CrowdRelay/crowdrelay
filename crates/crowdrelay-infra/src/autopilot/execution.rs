@@ -88,6 +88,21 @@ pub(super) async fn schedule_effect_measurement(
             0.0,
             now + time::Duration::days(7),
         )),
+        // One measurement per promoter written to, under the same kind a
+        // single booking approach uses. The question a reply answers is about
+        // that promoter, not about the batch — and 4G.5 asks which kind of
+        // evidence predicts a booking, which it cannot do if three promoters'
+        // silence arrives as one row.
+        AutopilotActionPayload::RequestGigOutreach { recipients, .. } => {
+            for recipient in recipients {
+                plans.push((
+                    AutopilotMeasurementKind::BookingReply7d,
+                    recipient.target_id.into_uuid(),
+                    0.0,
+                    now + time::Duration::days(7),
+                ));
+            }
+        }
         AutopilotActionPayload::RequestOutreach { target_id, .. }
         // An approach is measured the way a pitch is: did the contact write
         // back inside the week. The kind it is approached about lives on

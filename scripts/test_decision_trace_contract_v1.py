@@ -42,6 +42,11 @@ KNOWN_WRITERS = {
     "crates/crowdrelay-infra/src/autopilot/decline_advisories.rs",
     "crates/crowdrelay-infra/src/autopilot/team.rs",
     "crates/crowdrelay-infra/src/representation.rs",
+    # 4G.4: a band-approved gig proposal. Audited — it roots a trace with
+    # `TraceContext::root`, binds `trace_id` on the decision, and derives the
+    # action's trace with `TraceContext::for_action` carrying the decision as
+    # causation, so `ops/trace/{trace_id}` joins the approval to the letter.
+    "crates/crowdrelay-infra/src/gig_outreach.rs",
     "crates/crowdrelay-worker/src/agent_outcomes.rs",
 }
 

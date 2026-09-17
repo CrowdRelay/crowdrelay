@@ -210,6 +210,12 @@ impl PostgresAutopilotRepository {
                     .bind(action.id.into_uuid())
                     .execute(&mut *transaction).await.map_err(map_sqlx)?;
                 }
+                // §12-6, 4G.4: one letter to everybody who books the room, or
+                // none of it — the reservations are this transaction's.
+                AutopilotActionPayload::RequestGigOutreach { .. } => {
+                    operations::execute_gig_outreach(&mut transaction, workspace_id, action, now)
+                        .await?;
+                }
                 AutopilotActionPayload::RequestAudienceCampaign {
                     event_id,
                     phase,
