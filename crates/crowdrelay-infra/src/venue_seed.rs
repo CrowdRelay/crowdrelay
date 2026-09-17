@@ -230,9 +230,23 @@ impl PostgresVenueSeedRepository {
             )
             .await?;
         }
-        // The one terms result that may be global: the room itself
-        // published it.
+        // The one terms result that *may* be global — and only when the
+        // source is the room's own site.
+        //
+        // The column is called Public_Financial_Info and the brief asks for
+        // what the venue publishes, but a researcher types what they have:
+        // "they quote 30% of the door" is somebody's private negotiating
+        // position, and publishing it to every tenant is exactly what §4h-9
+        // forbids. So the claim is global when the row's own source link sits
+        // on the same host as the venue's website — the room saying it in
+        // public — and contributor-private otherwise. Nothing is lost either
+        // way; the scope is the difference between a fact about the room and
+        // a fact one tenant learned.
         if let PublicTerms::Published(text) = &room.public_terms {
+            let published_by_the_room = room
+                .website
+                .as_deref()
+                .is_some_and(|website| same_host(website, &room.source_url));
             write_fact(
                 &mut tx,
                 venue_id,
@@ -240,7 +254,11 @@ impl PostgresVenueSeedRepository {
                 text,
                 &room.source_url,
                 observed_at,
-                None,
+                if published_by_the_room {
+                    None
+                } else {
+                    Some(workspace_id)
+                },
             )
             .await?;
         }
@@ -321,6 +339,29 @@ impl PostgresVenueSeedRepository {
 
         tx.commit().await?;
         Ok(SeedOutcome::Imported)
+    }
+}
+
+/// Whether two URLs name the same host, ignoring scheme, `www.` and case.
+///
+/// Used to decide whether a terms claim came from the room's own page. A
+/// comparison that cannot parse either side answers `false`: the scope falls
+/// back to private, which is the direction that cannot leak.
+fn same_host(left: &str, right: &str) -> bool {
+    fn host(url: &str) -> Option<String> {
+        let rest = url
+            .trim()
+            .to_lowercase()
+            .split_once("//")
+            .map_or_else(|| url.trim().to_lowercase(), |(_, rest)| rest.to_owned());
+        let host = rest.split('/').next()?.split('@').next_back()?;
+        let host = host.split(':').next()?;
+        let host = host.strip_prefix("www.").unwrap_or(host);
+        (!host.is_empty()).then(|| host.to_owned())
+    }
+    match (host(left), host(right)) {
+        (Some(left), Some(right)) => left == right,
+        _ => false,
     }
 }
 

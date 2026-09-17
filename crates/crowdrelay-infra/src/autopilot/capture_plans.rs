@@ -164,8 +164,10 @@ pub(in crate::autopilot) async fn project_shows_to_production_events(
 /// Idempotent on the event: any existing campaign row for the event —
 /// operator-made, revoked, or an earlier auto-mint — blocks the insert, so a
 /// deliberate revoke is never undone and a hand-entered campaign is never
-/// duplicated. Runs on the projection's window (now −2d … +60d), which also
-/// backfills shows published before this existed.
+/// duplicated. Runs over the shows whose door is still open — the projection's
+/// window narrowed at the near end, because a campaign for a night that
+/// finished yesterday is born expired — and so still backfills every show
+/// published before this existed whose QR could still be scanned.
 ///
 /// The window is the door's, keyed off the show: opens four hours before
 /// start (early doors, soundcheck crowds) and closes twelve hours after —
@@ -189,7 +191,13 @@ pub(in crate::autopilot) async fn mint_door_campaigns(
             FROM events event
             WHERE event.workspace_id = $1
               AND event.status = 'published'
-              AND event.starts_at >= $2 - INTERVAL '2 days'
+              -- The projection's own window starts two days back, and a
+              -- campaign minted for a night that far past would open and shut
+              -- before anybody read it: its window is starts_at−4h…+12h, so a
+              -- show more than twelve hours old mints a QR that is expired the
+              -- moment it exists. The backfill still reaches every show whose
+              -- door has not closed yet.
+              AND event.starts_at > $2 - INTERVAL '12 hours'
               AND event.starts_at <= $2 + INTERVAL '60 days'
               AND NOT EXISTS (
                   SELECT 1

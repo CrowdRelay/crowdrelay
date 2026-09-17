@@ -22,12 +22,17 @@
 //!
 //! # What is honestly absent
 //!
-//! Admitted communities carry a country and no city (`discovery_places` has
+//! Communities carry a country and no city (`discovery_places` records
 //! `country_code` and nothing finer), so this read cannot place them. Rather
 //! than guess from a name, it counts them and says so: `communities_unplaced`
 //! is the number a city read would gain if the place graph ever carried one.
 //! Contacts whose own city is unknown are counted the same way — a national
 //! magazine belongs to no city and is not evidence of a broken import.
+//!
+//! Both counts come from `agent_outreach_targets`, split by whether the row
+//! carries a `place_id`: a community is a target attached to a place, a press
+//! contact is one that is not. One vocabulary, so the two numbers cannot
+//! overlap and neither can silently be zero.
 
 use serde::Serialize;
 use sqlx::PgPool;
@@ -76,8 +81,8 @@ pub struct ShowHelpers {
     /// a national title has no city — and reported so the number is not
     /// mistaken for a gap in the import.
     pub contacts_unplaced: u32,
-    /// Admitted communities we hold and cannot place, because the place graph
-    /// records a country and no city. The number a city read would gain.
+    /// Communities we hold and cannot place, because the place graph records
+    /// a country and no city. The number a city read would gain.
     pub communities_unplaced: u32,
 }
 
@@ -115,19 +120,24 @@ pub async fn who_can_help(
     let voices = local_voices(pool, workspace_id, city_id).await?;
     let bookers = local_bookers(pool, workspace_id, city_id, &city).await?;
 
-    let contacts_unplaced = sqlx::query_scalar::<_, i64>(
+    // Two counts, one query, over one vocabulary. The earlier version asked
+    // `discovery_places` for `status = 'admitted'`, and that column's CHECK is
+    // `active | archived | blocked` — the filter matched nothing, so the
+    // console reported "0 communities we cannot place" however many the
+    // workspace held. A count that can only be zero is worse than no count:
+    // it reads as a measured absence.
+    //
+    // A community is an outreach target carrying a `place_id`; a press
+    // contact is one without. Counted apart so neither number includes the
+    // other, and both mean what their name says.
+    let (contacts_unplaced, communities_unplaced) = sqlx::query_as::<_, (i64, i64)>(
         r#"
-        SELECT count(*)::bigint FROM agent_outreach_targets
-        WHERE workspace_id = $1 AND city_id IS NULL AND status <> 'discarded'
-        "#,
-    )
-    .bind(workspace_id)
-    .fetch_one(pool)
-    .await?;
-    let communities_unplaced = sqlx::query_scalar::<_, i64>(
-        r#"
-        SELECT count(*)::bigint FROM discovery_places
-        WHERE workspace_id = $1 AND status = 'admitted'
+        SELECT count(*) FILTER (WHERE place_id IS NULL)::bigint,
+               count(*) FILTER (WHERE place_id IS NOT NULL)::bigint
+        FROM agent_outreach_targets
+        WHERE workspace_id = $1
+          AND city_id IS NULL
+          AND status <> 'discarded'
         "#,
     )
     .bind(workspace_id)
@@ -163,7 +173,13 @@ async fn local_voices(
         WHERE workspace_id = $1
           AND city_id = $2
           AND status <> 'discarded'
-        ORDER BY status DESC, display_name
+        -- Contactable first, and by an explicit rank rather than by the
+        -- status text: 'promoted' sorts *before* 'proposed' alphabetically, so
+        -- `ORDER BY status DESC` put every staged row above every ready one —
+        -- and with the limit applied after the sort, a workspace with forty
+        -- staged contacts would have shown none of the ones it can actually
+        -- write to.
+        ORDER BY CASE WHEN status = 'promoted' THEN 0 ELSE 1 END, display_name
         LIMIT 40
         "#,
     )
@@ -281,13 +297,20 @@ async fn local_bookers(
     // by slug rather than id because the candidate table carries the city as
     // text — the seed's own column, resolved at promotion rather than at
     // staging.
+    // Matched on this city's own slug, which is all a staging row carries.
+    //
+    // The catalogue is unique on (country_code, slug), so a row staged for a
+    // namesake in another country matches here too, and this layer cannot
+    // tell them apart — the sheet never said which country it meant. That is
+    // why these are `needs_review` and not `ready`: promotion resolves the
+    // city properly (`promote_beacon_booking` refuses an ambiguous name
+    // outright), and nothing is written to a staged row until it does.
     let candidates = sqlx::query_as::<_, (Uuid, String, String, String)>(
         r#"
         SELECT candidate.id, candidate.target_kind, candidate.display_name, candidate.status
         FROM viryaos_booking_candidates AS candidate
-        JOIN cities AS city ON city.slug = candidate.city_slug
         WHERE candidate.workspace_id = $1
-          AND city.id = $2
+          AND candidate.city_slug = (SELECT slug FROM cities WHERE id = $2)
           AND candidate.promoted_at IS NULL
           AND candidate.status <> 'refused'
         ORDER BY candidate.display_name
