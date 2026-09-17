@@ -37,6 +37,7 @@ use crowdrelay_application::{IdempotencyKey, RepositoryError, RequestId};
 mod acquisition_channels;
 pub(in crate::autopilot) mod attribution;
 pub(in crate::autopilot) mod belief_revisions;
+mod booking_outreach_execution;
 mod chief;
 mod content_arc_execution;
 mod content_artifact_execution;
@@ -62,6 +63,7 @@ mod show_growth_execution;
 mod snapshots;
 
 pub(super) use acquisition_channels::*;
+pub(super) use booking_outreach_execution::*;
 pub(super) use chief::*;
 pub(super) use content_arc_execution::*;
 pub(super) use content_artifact_execution::*;

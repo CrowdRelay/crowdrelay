@@ -2,7 +2,7 @@
 mod tests {
     use super::*;
     use crowdrelay_domain::{
-        EventId, ReleasePlanId, TeamOpportunityId, TicketTypeId,
+        BookingTargetId, CityId, EventId, ReleasePlanId, TeamOpportunityId, TicketTypeId,
         live_opportunities::{
             LiveOpportunityKind, LiveOpportunityPolicy, LiveOpportunitySnapshot,
             live_opportunity_score,
@@ -559,6 +559,197 @@ mod tests {
             candidates[0].action,
             AutopilotActionPayload::RequestSignalPush { .. }
         ));
+        Ok(())
+    }
+
+    // ---- §12-6: booking proposal carries room, window and recipient set ----
+
+    fn booking_policy() -> Result<AutopilotPolicy, Box<dyn std::error::Error>> {
+        use crowdrelay_domain::booking::BookingOpportunityPolicy;
+        Ok(AutopilotPolicy {
+            context: AutopilotContext::BookingOpportunity,
+            enabled: true,
+            autonomy_level: AutonomyLevel::RequireApproval,
+            minimum_confidence: Confidence::from_basis_points(5_000)?,
+            max_actions_24h: 10,
+            config: AutopilotPolicyConfig::BookingOpportunity(
+                BookingOpportunityPolicy::default(),
+            ),
+            version: 1,
+            guarded_until: None,
+            guardrail_reason: None,
+        })
+    }
+
+    fn booking_city(city_id: CityId) -> CityOpportunitySnapshot {
+        CityOpportunitySnapshot {
+            city_id,
+            active_fans: 90,
+            new_fans_30d: 20,
+            event_interests: 40,
+            area_claims: 10,
+            months_since_last_show: Some(12),
+            market_evidence: None,
+            outreach_in_flight: false,
+            last_outreach_at: None,
+        }
+    }
+
+    fn booking_target(
+        city_id: CityId,
+        priority: u16,
+        venue_evidence: Option<crowdrelay_domain::booking::BookingVenueEvidence>,
+    ) -> BookingTargetSnapshot {
+        BookingTargetSnapshot {
+            target_id: BookingTargetId::new(),
+            city_id,
+            kind: crowdrelay_domain::booking::BookingTargetKind::Venue,
+            display_name: "Klub Test".to_owned(),
+            capacity: Some(200),
+            version: 1,
+            active: true,
+            accepts_booking: true,
+            priority,
+            relationship_score: 60,
+            outreach_in_flight: false,
+            last_outreach_at: None,
+            followup_count: 0,
+            last_reply: crowdrelay_domain::booking::BookingReplyDisposition::None,
+            venue_evidence,
+        }
+    }
+
+    #[test]
+    fn booking_candidate_carries_window_recipients_and_evidence()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use crowdrelay_domain::booking::BookingVenueEvidence;
+        use crowdrelay_domain::booking_window::{
+            BookingWindowInputSet, BookingWindowTargetInputs,
+        };
+        let now = OffsetDateTime::UNIX_EPOCH + time::Duration::days(20_000);
+        let city_id = CityId::new();
+        let evidence = BookingVenueEvidence {
+            shows_last_12m: 9,
+            comparable_acts: 3,
+            genres: Some("metal".to_owned()),
+            capacity: None,
+            days_since_last_event: Some(11),
+            booking_contact_days: None,
+        };
+        let anchor = booking_target(city_id, 90, Some(evidence.clone()));
+        let second = booking_target(city_id, 70, None);
+        let third = booking_target(city_id, 60, None);
+        // Beyond the cap of two extras — should not be picked.
+        let fourth = booking_target(city_id, 50, None);
+        let targets = vec![
+            anchor.clone(),
+            second.clone(),
+            third.clone(),
+            fourth.clone(),
+        ];
+        let mut window_inputs = BookingWindowInputSet::default();
+        // Two room shows 28 days apart, each booked ~42 days ahead.
+        let show = |days_ago: i64, lag: i64| {
+            let starts_at = now - time::Duration::days(days_ago);
+            (starts_at, starts_at - time::Duration::days(lag))
+        };
+        window_inputs.targets.push(BookingWindowTargetInputs {
+            target_id: anchor.target_id,
+            room_shows: vec![show(20, 42), show(48, 42)],
+            venue_coords: None,
+        });
+
+        let candidate = booking_candidate(
+            booking_city(city_id),
+            &targets,
+            &window_inputs,
+            &booking_policy()?,
+            now,
+        )?
+        .ok_or_else(|| std::io::Error::other("a candidate is expected"))?;
+
+        let AutopilotActionPayload::RequestBookingOutreach {
+            target_id,
+            proposed_window,
+            additional_recipients,
+            venue_evidence,
+            ..
+        } = &candidate.action
+        else {
+            return Err("expected RequestBookingOutreach".into());
+        };
+        assert_eq!(*target_id, anchor.target_id);
+        let window = proposed_window
+            .as_ref()
+            .ok_or_else(|| std::io::Error::other("a window is expected"))?;
+        assert_eq!(
+            window.start,
+            now.date() + time::Duration::days(42),
+            "median lead time sets the ask",
+        );
+        assert_eq!(
+            additional_recipients.as_slice(),
+            &[(second.target_id, 1), (third.target_id, 1)],
+        );
+        assert_eq!(venue_evidence.as_ref(), Some(&evidence));
+        assert_eq!(candidate.action.action_class(), ActionClass::ThirdParty);
+        Ok(())
+    }
+
+    #[test]
+    fn booking_decision_key_tracks_window_and_recipients()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use crowdrelay_domain::booking_window::{
+            BookingWindowInputSet, BookingWindowTargetInputs,
+        };
+        let now = OffsetDateTime::UNIX_EPOCH + time::Duration::days(20_000);
+        let city_id = CityId::new();
+        let anchor = booking_target(city_id, 90, None);
+        let extra = booking_target(city_id, 70, None);
+        let targets = vec![anchor.clone(), extra.clone()];
+        let policy = booking_policy()?;
+        let empty_inputs = BookingWindowInputSet::default();
+
+        let without_window =
+            booking_candidate(booking_city(city_id), &targets, &empty_inputs, &policy, now)?
+                .ok_or_else(|| std::io::Error::other("candidate expected"))?;
+        // No window inputs → no window; the second target still joins.
+        let AutopilotActionPayload::RequestBookingOutreach {
+            proposed_window,
+            additional_recipients,
+            ..
+        } = &without_window.action
+        else {
+            return Err("expected RequestBookingOutreach".into());
+        };
+        assert_eq!(*proposed_window, None);
+        assert_eq!(additional_recipients.len(), 1);
+
+        let mut with_room = empty_inputs.clone();
+        let show = |days_ago: i64, lag: i64| {
+            let starts_at = now - time::Duration::days(days_ago);
+            (starts_at, starts_at - time::Duration::days(lag))
+        };
+        with_room.targets.push(BookingWindowTargetInputs {
+            target_id: anchor.target_id,
+            room_shows: vec![show(20, 30), show(50, 30)],
+            venue_coords: None,
+        });
+        let with_window =
+            booking_candidate(booking_city(city_id), &targets, &with_room, &policy, now)?
+                .ok_or_else(|| std::io::Error::other("candidate expected"))?;
+        // A different proposal is a different decision — and the same action
+        // identity, since the anchor and the last-outreach basis are unchanged.
+        assert_ne!(with_window.decision_key, without_window.decision_key);
+        assert_eq!(
+            with_window.action_idempotency_key,
+            without_window.action_idempotency_key
+        );
+
+        // And a changed recipient set re-decides too.
+        let alone = booking_candidate(booking_city(city_id), &[anchor], &with_room, &policy, now)?
+            .ok_or_else(|| std::io::Error::other("candidate expected"))?;
+        assert_ne!(alone.decision_key, with_window.decision_key);
         Ok(())
     }
 }

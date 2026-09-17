@@ -20,9 +20,11 @@ use crowdrelay_domain::{
     booking::{
         BookingFollowUpDecision, BookingFollowUpPolicy, BookingOpportunityDecision,
         BookingOutreachPhase, BookingTargetDecision, BookingTargetSelectionPolicy,
-        BookingTargetSnapshot, CityOpportunitySnapshot, estimated_attendance,
-        evaluate_booking_followup, evaluate_booking_opportunity, select_booking_target,
+        BookingTargetSnapshot, CityOpportunitySnapshot, additional_booking_recipients,
+        estimated_attendance, evaluate_booking_followup, evaluate_booking_opportunity,
+        select_booking_target,
     },
+    booking_window::{BookingWindowInputSet, BookingWindowInputs, propose_booking_window},
     campaign_lifecycle::{EventCampaignDecision, EventCampaignSnapshot, evaluate_event_campaign},
     content_supply::{
         CommunityRelayTarget, ContentSourceKind, ContentSupplyDecision, ContentSupplyHoldReason,
@@ -239,6 +241,18 @@ where
                         .repository
                         .load_booking_target_snapshots(self.workspace_id, now)
                         .await?;
+                    // §12-6: the room history + own-calendar set the window
+                    // proposal reads. Loaded once per cycle — the own-show
+                    // half is the same for every city under review, and
+                    // without targets there is nobody to propose a window
+                    // for, so the read is skipped entirely.
+                    let window_inputs = if targets.is_empty() {
+                        BookingWindowInputSet::default()
+                    } else {
+                        self.repository
+                            .load_booking_window_inputs(self.workspace_id, now)
+                            .await?
+                    };
                     for target in &targets {
                         if let Some(candidate) = booking_followup_candidate(target, &policy, now)? {
                             self.persist(&candidate, &mut limits, &mut report).await?;
@@ -246,7 +260,7 @@ where
                     }
                     for snapshot in snapshots {
                         if let Some(candidate) =
-                            booking_candidate(snapshot, &targets, &policy, now)?
+                            booking_candidate(snapshot, &targets, &window_inputs, &policy, now)?
                         {
                             self.persist(&candidate, &mut limits, &mut report).await?;
                         }

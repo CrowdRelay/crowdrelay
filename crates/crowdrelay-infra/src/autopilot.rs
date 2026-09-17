@@ -98,10 +98,11 @@ use crowdrelay_domain::{
     autonomy::{AutonomyLevel, Confidence, PolicyDisposition},
     beacons::{BeaconCampaignSnapshot, BeaconDiscoverySnapshot, BeaconInviteSnapshot},
     booking::{
-        BookingOutreachPhase, BookingReplyDisposition, BookingTargetKind, BookingTargetSnapshot,
+        BookingReplyDisposition, BookingTargetKind, BookingTargetSnapshot, BookingVenueEvidence,
         CityOpportunitySnapshot,
     },
     booking_discovery::BookingSupplySnapshot,
+    booking_window::{BookingWindowInputSet, BookingWindowOwnShow, BookingWindowTargetInputs},
     campaign_lifecycle::EventCampaignSnapshot,
     content_supply::{CommunityRelayTarget, ContentSupplySnapshot},
     deliverability::DeliverabilitySnapshot,
@@ -402,6 +403,38 @@ struct BookingTargetRow {
     last_outreach_at: Option<OffsetDateTime>,
     followup_count: i32,
     last_reply_disposition: String,
+    /// The linked `place_venues` row, when the target resolved to one.
+    /// Everything below stays `NULL`/`0` when this is `NULL` — the snapshot
+    /// maps that to `venue_evidence: None`, not a row of zeroes.
+    venue_id: Option<Uuid>,
+    shows_last_12m: i64,
+    days_since_last_event: Option<i64>,
+    comparable_acts: i64,
+    venue_genres: Option<String>,
+    venue_capacity: Option<String>,
+    booking_contact_days: Option<i64>,
+}
+
+/// One own-calendar row for the window proposal: a published/draft event
+/// plus the coordinates of the city it happens in, when known.
+#[derive(Debug, FromRow)]
+struct BookingWindowOwnShowRow {
+    starts_at: OffsetDateTime,
+    slug: String,
+    status: String,
+    latitude: Option<f64>,
+    longitude: Option<f64>,
+}
+
+/// One room-history row joined through the venue-linked target it belongs
+/// to; `starts_at`/`created_at` are `NULL` on the left-join's empty side.
+#[derive(Debug, FromRow)]
+struct BookingWindowRoomRow {
+    target_id: Uuid,
+    starts_at: Option<OffsetDateTime>,
+    created_at: Option<OffsetDateTime>,
+    latitude: Option<f64>,
+    longitude: Option<f64>,
 }
 
 #[derive(Debug, FromRow)]

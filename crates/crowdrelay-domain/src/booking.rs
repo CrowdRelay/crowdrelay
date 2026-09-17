@@ -195,6 +195,35 @@ pub enum BookingFollowUpDecision {
     Request { confidence: Confidence },
 }
 
+/// Read-side evidence about the room a booking target points at, collected
+/// only when the target is venue-linked. `None` fields mean "not observed";
+/// they are never fabricated as zeroes, and this row is attached to a target
+/// only when a venue link exists — an unlinked target carries `None`, not an
+/// empty row.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct BookingVenueEvidence {
+    /// Published/completed shows marked at the room during the last 365 days,
+    /// across all tenants (`place_venue_marks` is shared graph data).
+    pub shows_last_12m: i64,
+    /// Distinct linked acts on room bills whose genres intersect the
+    /// requesting tenant's genres, canonicalised through
+    /// `place_genre_aliases`. The tenant's own acts are excluded.
+    pub comparable_acts: i64,
+    /// Resolved global `genres` fact for the room (`workspace_id IS NULL`,
+    /// trust-ordered, unexpired). `None` when the graph holds none.
+    pub genres: Option<String>,
+    /// Resolved global `capacity` fact for the room. `None` when the graph
+    /// holds none.
+    pub capacity: Option<String>,
+    /// Days since the newest past marked event at the room. `None` when the
+    /// room has no observed past event.
+    pub days_since_last_event: Option<i64>,
+    /// Age in days of the requesting workspace's freshest private
+    /// `booking_email` fact for this room. Freshness only — the email value
+    /// itself never leaves the facts table.
+    pub booking_contact_days: Option<i64>,
+}
+
 /// Operator-verified commercial contact available to the Booking bounded context.
 /// Contact details themselves stay in infrastructure; the domain only receives
 /// facts required to select a target safely and deterministically.
@@ -217,6 +246,8 @@ pub struct BookingTargetSnapshot {
     pub last_outreach_at: Option<OffsetDateTime>,
     pub followup_count: u16,
     pub last_reply: BookingReplyDisposition,
+    /// Evidence for the linked room; `None` when the target has no venue link.
+    pub venue_evidence: Option<BookingVenueEvidence>,
 }
 
 #[must_use]
@@ -316,6 +347,54 @@ const fn capacity_fit_score(capacity: Option<u32>, expected_attendance: u32) -> 
     }
 }
 
+/// The deterministic score `select_booking_target` ranks targets by, or `None`
+/// when the target is ineligible. Priority is the operator-owned commercial
+/// intent and must remain the dominant selector. Relationship quality refines
+/// it, while capacity fit is deliberately bounded so a "perfect room" can't
+/// override a materially stronger trusted relationship.
+///
+/// `enforce_cooldown` is `true` when picking the anchor — a target inside its
+/// cooldown window must not be contacted. Additional recipients on an already
+/// approved outreach pass `false`: the email is going out either way, and a
+/// room the tenant last wrote to six months ago is a perfectly good second
+/// recipient for the same booking run.
+#[must_use]
+fn target_selection_score(
+    target: &BookingTargetSnapshot,
+    city_id: CityId,
+    expected_attendance: u32,
+    policy: &BookingTargetSelectionPolicy,
+    now: OffsetDateTime,
+    enforce_cooldown: bool,
+) -> Option<u16> {
+    let cooldown = Duration::days(i64::from(policy.target_cooldown_days));
+    if target.city_id != city_id
+        || target.version <= 0
+        || !target.active
+        || !target.accepts_booking
+        || target.priority > 100
+        || target.relationship_score > 100
+        || target.priority < policy.minimum_priority
+        || target.outreach_in_flight
+        || target.last_outreach_at.is_some_and(|at| at > now)
+        || (enforce_cooldown
+            && target
+                .last_outreach_at
+                .is_some_and(|at| now - at < cooldown))
+    {
+        return None;
+    }
+    let capacity_fit = capacity_fit_score(target.capacity, expected_attendance);
+    Some(
+        target
+            .priority
+            .saturating_mul(60)
+            .saturating_add(target.relationship_score.saturating_mul(25))
+            .saturating_add(capacity_fit.saturating_mul(15))
+            / 100,
+    )
+}
+
 /// Chooses one verified target. Stable ordering makes the decision reproducible:
 /// operator-owned priority dominates, relationship quality refines the choice,
 /// verified capacity fit contributes a bounded bonus, and the typed UUID provides
@@ -331,36 +410,13 @@ pub fn select_booking_target(
     if policy.minimum_priority > 100 || policy.algorithm_version == 0 {
         return BookingTargetDecision::NoEligibleTarget;
     }
-    let cooldown = Duration::days(i64::from(policy.target_cooldown_days));
     let mut best: Option<(&BookingTargetSnapshot, u16)> = None;
     for target in targets {
-        if target.city_id != city_id
-            || target.version <= 0
-            || !target.active
-            || !target.accepts_booking
-            || target.priority > 100
-            || target.relationship_score > 100
-            || target.priority < policy.minimum_priority
-            || target.outreach_in_flight
-            || target.last_outreach_at.is_some_and(|at| at > now)
-            || target
-                .last_outreach_at
-                .is_some_and(|at| now - at < cooldown)
-        {
+        let Some(score) =
+            target_selection_score(target, city_id, expected_attendance, &policy, now, true)
+        else {
             continue;
-        }
-
-        let capacity_fit = capacity_fit_score(target.capacity, expected_attendance);
-        // Priority is the operator-owned commercial intent and must remain
-        // the dominant selector. Relationship quality refines it, while
-        // capacity fit is deliberately bounded so a "perfect room" can't
-        // override a materially stronger trusted relationship.
-        let score = target
-            .priority
-            .saturating_mul(60)
-            .saturating_add(target.relationship_score.saturating_mul(25))
-            .saturating_add(capacity_fit.saturating_mul(15))
-            / 100;
+        };
         let replace = best.is_none_or(|(current, current_score)| {
             score > current_score
                 || (score == current_score
@@ -383,6 +439,54 @@ pub fn select_booking_target(
             selection_score: score,
         },
     )
+}
+
+/// Maximum number of additional recipients a booking outreach may carry on
+/// top of its anchor. Hard bound so a crowded city can never turn one
+/// approval into an unbounded mail-merge.
+pub const MAX_ADDITIONAL_BOOKING_RECIPIENTS: usize = 4;
+
+/// Picks extra same-city recipients for an already-approved booking outreach.
+/// The anchor is excluded; survivors are the next best targets under the same
+/// deterministic score the anchor selection uses, ordered by score then the
+/// same priority/recency/id tie-break, capped at `limit`.
+///
+/// The cooldown gate is deliberately relaxed here: the outreach exists
+/// because the anchor passed the full gate, and copying a room the tenant
+/// already wrote to once is bounded extra reach, not a new touch pattern.
+/// `outreach_in_flight` still excludes a target mid-conversation.
+#[must_use]
+pub fn additional_booking_recipients(
+    city_id: CityId,
+    expected_attendance: u32,
+    targets: &[BookingTargetSnapshot],
+    anchor_id: BookingTargetId,
+    policy: &BookingTargetSelectionPolicy,
+    now: OffsetDateTime,
+    limit: usize,
+) -> Vec<(BookingTargetId, i64)> {
+    let mut ranked: Vec<(&BookingTargetSnapshot, u16)> = targets
+        .iter()
+        .filter(|target| target.target_id != anchor_id)
+        .filter_map(|target| {
+            target_selection_score(target, city_id, expected_attendance, policy, now, false)
+                .map(|score| (target, score))
+        })
+        .collect();
+    ranked.sort_by(|(a, a_score), (b, b_score)| {
+        b_score
+            .cmp(a_score)
+            .then_with(|| b.priority.cmp(&a.priority))
+            // Older outreach first — None (never contacted) wins over any
+            // timestamp, matching the anchor tie-break.
+            .then_with(|| a.last_outreach_at.cmp(&b.last_outreach_at))
+            .then_with(|| a.target_id.cmp(&b.target_id))
+    });
+    ranked
+        .into_iter()
+        .take(limit.min(MAX_ADDITIONAL_BOOKING_RECIPIENTS))
+        .map(|(target, _)| (target.target_id, target.version))
+        .collect()
 }
 
 #[cfg(test)]
@@ -480,6 +584,7 @@ mod tests {
             last_outreach_at: None,
             followup_count: 0,
             last_reply: BookingReplyDisposition::None,
+            venue_evidence: None,
         }
     }
 
@@ -586,6 +691,7 @@ mod tests {
             last_outreach_at: Some(now() - Duration::days(6)),
             followup_count: 0,
             last_reply: BookingReplyDisposition::None,
+            venue_evidence: None,
         };
         assert!(matches!(
             evaluate_booking_followup(&target, BookingFollowUpPolicy::default(), now()),
@@ -606,6 +712,66 @@ mod tests {
         let mut city = strong_city();
         city.market_evidence = None;
         assert_eq!(estimated_attendance(city), 62);
+    }
+
+    #[test]
+    fn additional_recipients_skip_the_anchor_and_stay_deterministic() {
+        let city = CityId::new();
+        let anchor = target(city, 100, 100);
+        let mid = target(city, 80, 80);
+        let weak = target(city, 50, 50);
+        let other_city = target(CityId::new(), 100, 100);
+        let picked = additional_booking_recipients(
+            city,
+            100,
+            &[
+                weak.clone(),
+                anchor.clone(),
+                mid.clone(),
+                other_city.clone(),
+            ],
+            anchor.target_id,
+            &BookingTargetSelectionPolicy::default(),
+            now(),
+            4,
+        );
+        assert_eq!(picked, vec![(mid.target_id, 1), (weak.target_id, 1)]);
+        // Order in the input must not matter: the same set reversed picks the
+        // same recipients in the same order.
+        let reversed = additional_booking_recipients(
+            city,
+            100,
+            &[other_city, mid.clone(), anchor.clone(), weak.clone()],
+            anchor.target_id,
+            &BookingTargetSelectionPolicy::default(),
+            now(),
+            4,
+        );
+        assert_eq!(reversed, vec![(mid.target_id, 1), (weak.target_id, 1)]);
+    }
+
+    #[test]
+    fn additional_recipients_never_exceed_the_cap_and_keep_flying_targets_out() {
+        let city = CityId::new();
+        let anchor = target(city, 100, 100);
+        let mut inflight = target(city, 90, 90);
+        inflight.outreach_in_flight = true;
+        let others: Vec<BookingTargetSnapshot> = (0..6).map(|_| target(city, 70, 70)).collect();
+        let mut pool = vec![anchor.clone(), inflight];
+        pool.extend(others.iter().cloned());
+        let picked = additional_booking_recipients(
+            city,
+            100,
+            &pool,
+            anchor.target_id,
+            &BookingTargetSelectionPolicy::default(),
+            now(),
+            6,
+        );
+        // Six candidates, a cap of four, one in flight: at most four real
+        // picks and the in-flight target is never among them.
+        assert_eq!(picked.len(), 4);
+        assert!(picked.iter().all(|(id, _)| *id != anchor.target_id));
     }
 
     #[test]

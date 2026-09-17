@@ -101,6 +101,15 @@ impl AutopilotDecisionRepository for PostgresAutopilotRepository {
             .await
     }
 
+    async fn load_booking_window_inputs(
+        &self,
+        workspace_id: WorkspaceId,
+        now: OffsetDateTime,
+    ) -> Result<BookingWindowInputSet, RepositoryError> {
+        self.load_booking_window_inputs_impl(workspace_id, now)
+            .await
+    }
+
     async fn load_outreach_snapshots(
         &self,
         workspace_id: WorkspaceId,

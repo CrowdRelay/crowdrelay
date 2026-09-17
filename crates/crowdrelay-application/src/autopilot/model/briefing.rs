@@ -162,18 +162,37 @@ impl AutopilotActionPayload {
                 ],
                 deadline_note: String::new(),
             },
-            Self::RequestBookingOutreach { target_name, score, phase, .. } => ActionBriefing {
-                summary: format!("Booking contact: {}", target_name),
+            Self::RequestBookingOutreach { target_name, score, phase, proposed_window, additional_recipients, .. } => ActionBriefing {
+                summary: if additional_recipients.is_empty() {
+                    format!("Booking contact: {}", target_name)
+                } else {
+                    format!("Booking contact: {} (+{} more)", target_name, additional_recipients.len())
+                },
                 why_it_matters: "This is the first approach to a promoter. You get one chance at contact, so the message has to be right.".into(),
                 steps: vec![
                     BriefingStep { what_to_do: "Check the target name and the contact phase".into(), why_it_matters: "Make sure this is the right promoter".into() },
-                    BriefingStep { what_to_do: "Click APPROVE to send it".into(), why_it_matters: "Once approved the message is sent".into() },
+                    BriefingStep { what_to_do: "Click APPROVE to send it".into(), why_it_matters: "Once approved the message is sent to every listed recipient".into() },
                 ],
-                content: vec![
-                    BriefingField { label: "Target".into(), value: target_name.clone() },
-                    BriefingField { label: "Phase".into(), value: friendly_enum(phase) },
-                    BriefingField { label: "Outcome".into(), value: format!("{}", score) },
-                ],
+                content: {
+                    let mut fields = vec![
+                        BriefingField { label: "Target".into(), value: target_name.clone() },
+                        BriefingField { label: "Phase".into(), value: friendly_enum(phase) },
+                        BriefingField { label: "Outcome".into(), value: format!("{}", score) },
+                    ];
+                    if let Some(window) = proposed_window {
+                        fields.push(BriefingField {
+                            label: "Proposed window".into(),
+                            value: format!("{} → {}", window.start, window.end),
+                        });
+                    }
+                    if !additional_recipients.is_empty() {
+                        fields.push(BriefingField {
+                            label: "Also writing to".into(),
+                            value: format!("{} more target(s) in the same city", additional_recipients.len()),
+                        });
+                    }
+                    fields
+                },
                 deadline_note: String::new(),
             },
             Self::RequestGigOutreach { venue, recipients, opening_line, reasons, .. } => ActionBriefing {

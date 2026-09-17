@@ -13,6 +13,7 @@ use crowdrelay_domain::{
     autonomy::AutonomyLevel,
     beacons::{BeaconCampaignSnapshot, BeaconDiscoverySnapshot, BeaconInviteSnapshot},
     booking::{BookingTargetSnapshot, CityOpportunitySnapshot},
+    booking_window::BookingWindowInputSet,
     campaign_lifecycle::EventCampaignSnapshot,
     content_supply::{CommunityRelayTarget, ContentSupplySnapshot},
     experimentation::ExperimentSnapshot,
@@ -155,6 +156,16 @@ pub trait AutopilotDecisionRepository: Send + Sync {
         workspace_id: WorkspaceId,
         now: OffsetDateTime,
     ) -> Result<Vec<BookingTargetSnapshot>, RepositoryError>;
+
+    /// The window-proposal inputs for the same cycle's target set (§12-6):
+    /// the workspace's own show calendar once, plus each venue-linked
+    /// target's room history and coordinates. Targets without a venue link
+    /// simply have no entry — `booking_candidate` treats that as `None`.
+    async fn load_booking_window_inputs(
+        &self,
+        workspace_id: WorkspaceId,
+        now: OffsetDateTime,
+    ) -> Result<BookingWindowInputSet, RepositoryError>;
 
     async fn load_outreach_snapshots(
         &self,
