@@ -11,12 +11,18 @@ use axum::{
     http::{HeaderMap, Request, header::CACHE_CONTROL},
     middleware::{Next, from_fn_with_state},
     response::{IntoResponse, Response},
-    routing::{get, post},
+    routing::{get, post, put},
 };
 use serde::Serialize;
 use uuid::Uuid;
 
 const MAX_CONTROL_BODY_BYTES: usize = 8 * 1024;
+/// Body limit for the event bill replacement alone.
+///
+/// The handler accepts up to 32 acts with names and per-act ticket URLs, so
+/// the router-wide 8 KiB would reject a full valid bill the staff surface
+/// (16 KiB) accepts. Sized to match that surface exactly.
+const MAX_EVENT_BILL_BODY_BYTES: usize = 16 * 1024;
 /// Body limit for the audience-graph bulk import alone.
 ///
 /// `MAX_IMPORT_PLACES` is 500, and a place carries a name, URL, genres and
@@ -122,6 +128,19 @@ pub(crate) fn router(state: crate::AppState) -> Router {
         .route(
             "/v1/control-plane/events/{event_slug}/who-can-help",
             get(crate::concert_qr::control_plane_event_helpers),
+        )
+        // The operator's two show writes: the bill (crossbill's input — the
+        // timeline already renders it) and the counterparty the T+7 report
+        // ships to. Same handlers staff/admin mount; the control-plane
+        // prefix is what puts them on the operator's credential.
+        .route(
+            "/v1/control-plane/events/{event_slug}/acts",
+            put(crate::events::replace_event_acts)
+                .layer(DefaultBodyLimit::max(MAX_EVENT_BILL_BODY_BYTES)),
+        )
+        .route(
+            "/v1/control-plane/events/{event_slug}/counterparty",
+            put(crate::events::set_event_counterparty),
         )
         .route(
             "/v1/control-plane/autopilot/cycle/preview",

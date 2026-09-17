@@ -58,6 +58,8 @@ mod timeline_tests {
                 status: "published".to_string(),
                 starts_at: now + Duration::days(10),
                 ends_at: None,
+                counterparty_name: None,
+                counterparty_email: None,
             },
             emissions: Vec::new(),
             surfaces: Vec::new(),

@@ -429,6 +429,13 @@ pub struct CityFunnelRow {
 /// object — one room no matter how many tenants marked it — and every
 /// number on this row is an aggregate over contributed marks, never a
 /// tenant's raw row. `contributors` is a count, not an identity.
+///
+/// The `*_fact` triples are the resolved claims from `place_venue_facts`:
+/// the first non-expired global fact per attribute in provenance trust
+/// order, with the provenance that won it and when it was observed. NULL
+/// means "not known" — never a zero or an empty string — and the query
+/// filters to `workspace_id IS NULL`, so a tenant's private knowledge (a
+/// booking address, a fit judgement) can never appear here.
 #[derive(Debug, Serialize, FromRow)]
 pub struct CityVenueRow {
     venue_id: Uuid,
@@ -459,6 +466,31 @@ pub struct CityVenueRow {
     last_played_at: Option<OffsetDateTime>,
     #[serde(with = "time::serde::rfc3339::option")]
     next_show_at: Option<OffsetDateTime>,
+    /// How many people fit in the room, as the winning source claims it.
+    capacity_fact: Option<String>,
+    capacity_provenance: Option<String>,
+    #[serde(with = "time::serde::rfc3339::option")]
+    capacity_observed_at: Option<OffsetDateTime>,
+    /// The room's genres as a ", "-joined tag list — a bias, never a
+    /// filter.
+    genres_fact: Option<String>,
+    genres_provenance: Option<String>,
+    #[serde(with = "time::serde::rfc3339::option")]
+    genres_observed_at: Option<OffsetDateTime>,
+    website_fact: Option<String>,
+    website_provenance: Option<String>,
+    #[serde(with = "time::serde::rfc3339::option")]
+    website_observed_at: Option<OffsetDateTime>,
+    address_fact: Option<String>,
+    address_provenance: Option<String>,
+    #[serde(with = "time::serde::rfc3339::option")]
+    address_observed_at: Option<OffsetDateTime>,
+    /// Only ever "closed" — the absence of a status fact IS the active
+    /// claim, so this row never carries "active" as a value.
+    status_fact: Option<String>,
+    status_provenance: Option<String>,
+    #[serde(with = "time::serde::rfc3339::option")]
+    status_observed_at: Option<OffsetDateTime>,
 }
 
 #[derive(Debug, Serialize, FromRow)]

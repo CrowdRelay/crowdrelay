@@ -667,3 +667,181 @@ async fn a_moved_or_cancelled_gig_carries_its_production_day_with_it()
     assert_eq!(assignment_status.as_deref(), Some("cancelled"));
     Ok(())
 }
+
+#[tokio::test]
+async fn a_published_show_mints_its_door_campaign_once_and_only_once()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (repo, pool) = repository().await?;
+    let workspace_id = WorkspaceId::new();
+    seed_workspace(&pool, workspace_id).await?;
+
+    // A published gig inside the projection window, plus a draft and a
+    // far-out published gig that must not mint anything yet.
+    let show_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO events (id, workspace_id, slug, title, starts_at, status, published_at)
+         VALUES ($1,$2,$3,$4, now() + interval '10 days', 'published', now())
+         RETURNING id",
+    )
+    .bind(Uuid::now_v7())
+    .bind(workspace_id.into_uuid())
+    .bind(format!("door-{}", workspace_id.into_uuid().simple()))
+    .bind("The door gig")
+    .fetch_one(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO events (id, workspace_id, slug, title, starts_at, status)
+         VALUES ($1,$2,$3,$4, now() + interval '10 days', 'draft')",
+    )
+    .bind(Uuid::now_v7())
+    .bind(workspace_id.into_uuid())
+    .bind(format!("draft-{}", workspace_id.into_uuid().simple()))
+    .bind("Unpublished gig")
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO events (id, workspace_id, slug, title, starts_at, status, published_at)
+         VALUES ($1,$2,$3,$4, now() + interval '90 days', 'published', now())",
+    )
+    .bind(Uuid::now_v7())
+    .bind(workspace_id.into_uuid())
+    .bind(format!("far-{}", workspace_id.into_uuid().simple()))
+    .bind("Far out gig")
+    .execute(&pool)
+    .await?;
+
+    repo.reconcile_team_handoffs(workspace_id, OffsetDateTime::now_utc())
+        .await?;
+
+    let campaigns: Vec<(String, bool)> = sqlx::query_as(
+        "SELECT label, active FROM concert_qr_campaigns
+         WHERE workspace_id=$1 AND event_id=$2",
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(show_id)
+    .fetch_all(&pool)
+    .await?;
+    assert_eq!(
+        campaigns.as_slice(),
+        &[("Door".to_owned(), true)],
+        "one door campaign, minted by the sweep"
+    );
+
+    // The window is the door's: opens before start, closes into the night.
+    let (valid_from, valid_until): (OffsetDateTime, OffsetDateTime) = sqlx::query_as(
+        "SELECT valid_from, valid_until FROM concert_qr_campaigns
+         WHERE workspace_id=$1 AND event_id=$2",
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(show_id)
+    .fetch_one(&pool)
+    .await?;
+    let starts_at: OffsetDateTime = sqlx::query_scalar("SELECT starts_at FROM events WHERE id=$1")
+        .bind(show_id)
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(valid_from, starts_at - time::Duration::hours(4));
+    assert_eq!(valid_until, starts_at + time::Duration::hours(12));
+
+    // A second sweep mints nothing — the row itself is the idempotency mark.
+    repo.reconcile_team_handoffs(workspace_id, OffsetDateTime::now_utc())
+        .await?;
+    let count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM concert_qr_campaigns
+         WHERE workspace_id=$1 AND event_id=$2",
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(show_id)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(count, 1);
+
+    // The mint is on the audit trail as the machine's own act.
+    let audit: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM audit_events
+         WHERE workspace_id=$1 AND action='concert_qr.auto_minted'",
+    )
+    .bind(workspace_id.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(audit, 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_operator_campaign_blocks_the_auto_mint_and_revoke_sticks()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (repo, pool) = repository().await?;
+    let workspace_id = WorkspaceId::new();
+    seed_workspace(&pool, workspace_id).await?;
+
+    let show_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO events (id, workspace_id, slug, title, starts_at, status, published_at)
+         VALUES ($1,$2,$3,$4, now() + interval '10 days', 'published', now())
+         RETURNING id",
+    )
+    .bind(Uuid::now_v7())
+    .bind(workspace_id.into_uuid())
+    .bind(format!("hand-{}", workspace_id.into_uuid().simple()))
+    .bind("Hand-entered gig")
+    .fetch_one(&pool)
+    .await?;
+    // The operator made their own campaign first — the machine must not
+    // stack a second one on top of it.
+    sqlx::query(
+        "INSERT INTO concert_qr_campaigns (
+             id, workspace_id, event_id, label, valid_from, valid_until
+         ) VALUES ($1,$2,$3,'Merch table', now(), now() + interval '10 days')",
+    )
+    .bind(Uuid::now_v7())
+    .bind(workspace_id.into_uuid())
+    .bind(show_id)
+    .execute(&pool)
+    .await?;
+    repo.reconcile_team_handoffs(workspace_id, OffsetDateTime::now_utc())
+        .await?;
+    let count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM concert_qr_campaigns
+         WHERE workspace_id=$1 AND event_id=$2",
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(show_id)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(count, 1, "the operator's campaign stands alone");
+
+    // A revoked campaign is a decision, not a gap — revoke the auto-minted
+    // one on the sibling fixture and confirm the sweep does not re-mint.
+    let revoked_show: Uuid = sqlx::query_scalar(
+        "INSERT INTO events (id, workspace_id, slug, title, starts_at, status, published_at)
+         VALUES ($1,$2,$3,$4, now() + interval '12 days', 'published', now())
+         RETURNING id",
+    )
+    .bind(Uuid::now_v7())
+    .bind(workspace_id.into_uuid())
+    .bind(format!("revoked-{}", workspace_id.into_uuid().simple()))
+    .bind("Revoked gig")
+    .fetch_one(&pool)
+    .await?;
+    repo.reconcile_team_handoffs(workspace_id, OffsetDateTime::now_utc())
+        .await?;
+    sqlx::query(
+        "UPDATE concert_qr_campaigns SET active=false, revoked_at=now()
+         WHERE workspace_id=$1 AND event_id=$2",
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(revoked_show)
+    .execute(&pool)
+    .await?;
+    repo.reconcile_team_handoffs(workspace_id, OffsetDateTime::now_utc())
+        .await?;
+    let (count, active): (i64, i64) = sqlx::query_as(
+        "SELECT COUNT(*), COUNT(*) FILTER (WHERE active)
+         FROM concert_qr_campaigns WHERE workspace_id=$1 AND event_id=$2",
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(revoked_show)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!((count, active), (1, 0), "a revoked door stays revoked");
+    Ok(())
+}
