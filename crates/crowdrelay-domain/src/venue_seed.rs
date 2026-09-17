@@ -287,6 +287,73 @@ pub fn parse_seed_row(row: &SeedRow<'_>) -> Result<SeededVenue, SeedRefusal> {
     })
 }
 
+/// Whether a header row is the researched-venue sheet this module parses.
+///
+/// The brief pins the header, so detection is the brief's own contract: a
+/// sheet carrying `Name`, `City` and `Source_URL` is a venue sheet no matter
+/// what else it carries. That matters in both directions — a contact list
+/// never has a `Source_URL` column, and a venue sheet that *also* has an
+/// `Email` column is still a venue sheet (the seed's own rows prove a room
+/// needs no email to be real).
+#[must_use]
+pub fn is_seed_sheet(header: &[String]) -> bool {
+    let has = |name: &str| header.iter().any(|cell| cell.trim() == name);
+    has(columns::NAME) && has(columns::CITY) && has(columns::SOURCE_URL)
+}
+
+/// What one grid yielded: the venues that parsed and the rows that did not.
+///
+/// Refusals keep their 1-based sheet row number — the number a spreadsheet
+/// shows its operator — so a refusal reads "row 17 has no source link", not
+/// "record 15 failed".
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct SeedSheetReport {
+    pub venues: Vec<SeededVenue>,
+    /// (1-based sheet row number, refusal) so the operator can fix the sheet.
+    pub refusals: Vec<(usize, SeedRefusal)>,
+}
+
+/// Reads one whole grid as a venue sheet, or declines it.
+///
+/// `None` means the header is not the seed sheet's — the file is somebody
+/// else's table and the caller should try its other readers. `Some` means
+/// the header matched, and every non-empty row below it was either parsed
+/// into a venue or refused with a reason that names the column problem.
+/// Pure: no IO, no clock — what the sheet said is the whole input.
+#[must_use]
+pub fn extract_seed_sheet(grid: &[Vec<String>]) -> Option<SeedSheetReport> {
+    let (header, rows) = grid.split_first()?;
+    if !is_seed_sheet(header) {
+        return None;
+    }
+    // Column name → cell index, read off the sheet's own header so a sheet
+    // with extra or reordered columns still parses. The first occurrence of
+    // a name wins — a sheet that repeats a header is ambiguous, not richer.
+    let mut index: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
+    for (i, cell) in header.iter().enumerate() {
+        index.entry(cell.trim()).or_insert(i);
+    }
+    let mut report = SeedSheetReport::default();
+    for (offset, row) in rows.iter().enumerate() {
+        // A row of only whitespace is the tail of an edited sheet, not a
+        // venue missing everything.
+        if row.iter().all(|cell| cell.trim().is_empty()) {
+            continue;
+        }
+        let seed_row: SeedRow<'_> = index
+            .iter()
+            .filter_map(|(name, i)| row.get(*i).map(|cell| (*name, cell.as_str())))
+            .collect();
+        match parse_seed_row(&seed_row) {
+            Ok(venue) => report.venues.push(venue),
+            // offset counts from the first data row; +2 lands on the sheet's
+            // own row number (header is row 1, first data row is row 2).
+            Err(refusal) => report.refusals.push((offset + 2, refusal)),
+        }
+    }
+    Some(report)
+}
+
 /// What a gig-plan refusal can ask somebody to go and find (4G.6).
 ///
 /// The operator already keeps research in Drive sheets and already pays for
@@ -602,5 +669,102 @@ mod tests {
         ] {
             assert!(refusal.message().len() > 20, "{:?}", refusal);
         }
+    }
+
+    /// A grid with no header row at all is not a venue sheet — and neither
+    /// is one whose header is a contact list's. `Source_URL` is the column
+    /// no contact export carries, which is what makes it the tell.
+    #[test]
+    fn a_sheet_without_the_seed_header_is_not_a_seed_sheet() {
+        assert_eq!(extract_seed_sheet(&[]), None);
+        assert_eq!(extract_seed_sheet(&[vec![]]), None);
+
+        // A contact list: email/phone headers, no Source_URL.
+        let contacts = vec![
+            vec![
+                "Name".to_owned(),
+                "Email".to_owned(),
+                "Phone".to_owned(),
+                "City".to_owned(),
+            ],
+            vec![
+                "Somebody".to_owned(),
+                "a@b.c".to_owned(),
+                "+48".to_owned(),
+                "Warsaw".to_owned(),
+            ],
+        ];
+        assert_eq!(extract_seed_sheet(&contacts), None);
+    }
+
+    /// The tell the worker relies on: a venue sheet that also carries an
+    /// Email column is still a venue sheet. If the venue check ever ran
+    /// second, this grid would stage rooms as contacts.
+    #[test]
+    fn a_venue_sheet_with_an_email_column_is_still_a_venue_sheet() {
+        let mut header: Vec<String> = columns::ALL.iter().map(|s| (*s).to_owned()).collect();
+        header.push("Phone".to_owned());
+        assert!(is_seed_sheet(&header));
+
+        let mut row: Vec<String> = vec![String::new(); header.len()];
+        for (i, cell) in header.iter().enumerate() {
+            let value = match cell.as_str() {
+                "Name" => "Progresja",
+                "City" => "Warsaw",
+                "Source_URL" => "https://goout.net/en/progresja/vzxueb/",
+                "Email" => "klub@progresja.com",
+                _ => "",
+            };
+            row[i] = value.to_owned();
+        }
+        let grid = vec![header, row];
+        let report = extract_seed_sheet(&grid).expect("a venue sheet with Email parses as venues");
+        assert_eq!(report.venues.len(), 1);
+        assert_eq!(report.venues[0].room.name, "Progresja");
+        assert!(report.refusals.is_empty());
+    }
+
+    /// A full seed grid: good rows become venues, bad rows keep the sheet's
+    /// own row numbers so the operator can find them, and a blank tail row
+    /// is neither.
+    #[test]
+    fn a_seed_grid_reports_venues_and_numbered_refusals() {
+        let header: Vec<String> = columns::ALL.iter().map(|s| (*s).to_owned()).collect();
+        let cell = |name: &str, value: &str, row: &mut Vec<String>| {
+            let i = header.iter().position(|h| h == name).expect("column");
+            row[i] = value.to_owned();
+        };
+        let mut good = vec![String::new(); header.len()];
+        cell("Name", "Stodoła", &mut good);
+        cell("City", "Warsaw", &mut good);
+        cell(
+            "Source_URL",
+            "https://goout.net/en/stodola/vzgueb/",
+            &mut good,
+        );
+
+        let mut no_source = vec![String::new(); header.len()];
+        cell("Name", "Rumour Club", &mut no_source);
+        cell("City", "Warsaw", &mut no_source);
+
+        let blank = vec![String::new(); header.len()];
+
+        let mut no_name = vec![String::new(); header.len()];
+        cell("City", "Warsaw", &mut no_name);
+        cell("Source_URL", "https://example.com/x", &mut no_name);
+
+        let grid = vec![header, good, no_source, blank, no_name];
+        let report = extract_seed_sheet(&grid).expect("the seed header parses");
+        assert_eq!(report.venues.len(), 1);
+        assert_eq!(report.venues[0].room.name, "Stodoła");
+        // Sheet rows: header is 1, good is 2, no_source is 3, blank is
+        // skipped entirely, no_name is 5.
+        assert_eq!(
+            report.refusals,
+            vec![
+                (3, SeedRefusal::MissingSource),
+                (5, SeedRefusal::MissingName),
+            ]
+        );
     }
 }
