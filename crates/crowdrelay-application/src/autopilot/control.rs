@@ -501,6 +501,8 @@ pub struct OpportunityShortlistEntry {
     pub expected_fee_minor: Option<i64>,
     pub estimated_cost_minor: Option<i64>,
     pub application_fee_minor: Option<i64>,
+    /// The row's own ISO currency for those amounts.
+    pub currency: String,
     pub fit_basis_points: u16,
     pub reputation_basis_points: u16,
     pub confidence_basis_points: u16,

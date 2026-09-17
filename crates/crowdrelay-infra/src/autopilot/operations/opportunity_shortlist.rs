@@ -38,6 +38,7 @@ struct ShortlistRow {
     expected_fee_minor: i64,
     estimated_cost_minor: i64,
     application_fee_minor: i64,
+    currency: String,
     distance_km: Option<i32>,
     nights_away: Option<i32>,
     fit_basis_points: i32,
@@ -106,6 +107,7 @@ pub(in crate::autopilot) async fn load_opportunity_shortlist(
                 opportunity.expected_fee_minor,
                 opportunity.estimated_cost_minor,
                 opportunity.application_fee_minor,
+                opportunity.currency,
                 opportunity.distance_km,
                 opportunity.nights_away,
                 opportunity.fit_basis_points,
@@ -180,11 +182,19 @@ pub(in crate::autopilot) async fn load_opportunity_shortlist(
                     status: row.status.clone(),
                     status_reason: row.status_reason.clone(),
                     eligible: row.eligible,
-                    expected_fee_minor: Some(row.expected_fee_minor),
+                    // The columns default to 0 and cannot tell "free" from
+                    // "never entered" — a scout row's money is unentered
+                    // until a human types it. `None` keeps unknown reading
+                    // as unknown instead of as free.
+                    expected_fee_minor: (row.expected_fee_minor > 0)
+                        .then_some(row.expected_fee_minor),
                     estimated_cost_minor: Some(costed
                         .cost()
-                        .map_or(row.estimated_cost_minor, |cost| cost.total_cost_minor)),
-                    application_fee_minor: Some(row.application_fee_minor),
+                        .map_or(row.estimated_cost_minor, |cost| cost.total_cost_minor))
+                        .filter(|value| *value > 0),
+                    application_fee_minor: (row.application_fee_minor > 0)
+                        .then_some(row.application_fee_minor),
+                    currency: row.currency.clone(),
                     fit_basis_points: u16::try_from(row.fit_basis_points)
                         .map_err(|_| RepositoryError::Unexpected)?,
                     reputation_basis_points: u16::try_from(row.reputation_basis_points)

@@ -176,6 +176,13 @@ pub(crate) fn router(state: crate::AppState) -> Router {
             "/v1/control-plane/autopilot/next-best-actions",
             get(crate::autopilot::next_best_actions),
         )
+        // The scout shortlist: every tracked opportunity with its link,
+        // costed figures, staleness and newest decision — the review surface
+        // scout findings land on.
+        .route(
+            "/v1/control-plane/autopilot/opportunity-shortlist",
+            get(crate::autopilot::opportunity_shortlist),
+        )
         .route(
             "/v1/control-plane/autopilot/scorecard",
             get(crate::autopilot::scorecard_handler),
