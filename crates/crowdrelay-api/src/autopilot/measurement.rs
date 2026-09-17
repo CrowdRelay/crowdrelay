@@ -90,6 +90,12 @@ struct SourceRoiRow {
     engaged_30d: i64,
 }
 
+#[derive(Debug, FromRow)]
+struct CounterpartyPullRow {
+    delivered: i64,
+    conversations: i64,
+}
+
 fn claim(
     key: &'static str,
     claim: &'static str,
@@ -198,6 +204,14 @@ async fn load_measurement_ledger(
         .bind(now)
         .fetch_all(pool)
         .await?;
+
+    let counterparty_pull = sqlx::query_as::<_, CounterpartyPullRow>(
+        measurement_queries::COUNTERPARTY_PULL_SQL,
+    )
+    .bind(workspace_id)
+    .bind(now)
+    .fetch_one(pool)
+    .await?;
 
     let mut claims: Vec<Claim> = Vec::with_capacity(15);
 
@@ -427,12 +441,23 @@ async fn load_measurement_ledger(
     ));
 
     // 15. "Counterparty pull" — non-tenant artifacts delivered → follow-up
-    //     conversations.
-    claims.push(unmeasured(
+    //     conversations. One report is one observation, so the floor is 1,
+    //    same reasoning as per-show room leak.
+    claims.push(claim(
         "counterparty_pull",
         "Counterparty pull",
         "non-tenant artifacts delivered → follow-up conversations",
-        "T+7 counterparty reports leave through email outside the reach ledger; no reply join exists yet",
+        if counterparty_pull.delivered == 0 {
+            Measure::Unmeasured {
+                reason: "no T+7 report has been delivered to a counterparty yet",
+            }
+        } else {
+            Measure::rate_with_floor(
+                counterparty_pull.conversations,
+                counterparty_pull.delivered,
+                1,
+            )
+        },
     ));
 
     Ok(MeasurementLedger {

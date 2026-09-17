@@ -236,3 +236,28 @@ WHERE f.workspace_id = $1
 GROUP BY 1
 ORDER BY acquired DESC, channel
 "#;
+
+/// Claim 15 — "Counterparty pull": delivered T+7 counterparty reports that
+/// became a follow-up conversation — an inbound message from that address
+/// after the report left. `delivered_at` (not `created_at`): the claim says
+/// delivered, and an outbox row that never left is not an artifact anyone
+/// could answer.
+pub const COUNTERPARTY_PULL_SQL: &str = r#"
+WITH reports AS (
+    SELECT o.delivered_at AS sent_at,
+           lower(btrim(o.payload -> 'report' -> 'counterparty' ->> 'email')) AS email
+    FROM outbox_events o
+    WHERE o.workspace_id = $1
+      AND o.event_type = 'crowdrelay.show.post_show_report_due'
+      AND o.delivered_at IS NOT NULL
+      AND o.payload -> 'report' -> 'counterparty' ->> 'email' IS NOT NULL
+      AND o.delivered_at >= $2 - interval '90 days' AND o.delivered_at <= $2
+)
+SELECT count(*) AS delivered,
+       count(*) FILTER (WHERE EXISTS (
+           SELECT 1 FROM viryaos_drive_contacts d
+           WHERE d.workspace_id = $1
+             AND d.normalized_email = r.email
+             AND d.last_inbound_at > r.sent_at)) AS conversations
+FROM reports r
+"#;

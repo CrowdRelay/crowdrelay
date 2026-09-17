@@ -569,5 +569,80 @@ async fn run(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
         "a reminder before the due date is not the slip being told"
     );
 
+    // ── counterparty_pull: delivered T+7 reports → follow-up ───────────────
+    //    conversations. Two delivered reports; the first counterparty wrote
+    //    back after it landed, the second's last inbound predates the report
+    //    and is not a conversation. 1/2 → 5000 basis points at floor 1.
+    let pull_ws = seed_workspace(pool).await?;
+    for email in ["a@x.pl", "b@x.pl"] {
+        sqlx::query(
+            "INSERT INTO outbox_events (workspace_id, event_type, payload, status, delivered_at) \
+             VALUES ($1, 'crowdrelay.show.post_show_report_due', $2, 'delivered', \
+                     now() - interval '5 days')",
+        )
+        .bind(pull_ws)
+        .bind(serde_json::json!({"report": {"counterparty": {"email": email}}}))
+        .execute(pool)
+        .await?;
+    }
+    for (email, last_inbound) in [
+        (
+            "a@x.pl",
+            OffsetDateTime::now_utc() - time::Duration::days(3),
+        ),
+        (
+            "b@x.pl",
+            OffsetDateTime::now_utc() - time::Duration::days(10),
+        ),
+    ] {
+        sqlx::query(
+            "INSERT INTO viryaos_drive_contacts
+                 (workspace_id, normalized_email, source_file_id, source_file_name, last_inbound_at)
+             VALUES ($1, $2, 'msg-1', 'gmail sync', $3)",
+        )
+        .bind(pull_ws)
+        .bind(email)
+        .bind(last_inbound)
+        .execute(pool)
+        .await?;
+    }
+    let pull = sqlx::query(measurement_queries::COUNTERPARTY_PULL_SQL)
+        .bind(pull_ws)
+        .bind(OffsetDateTime::now_utc())
+        .fetch_one(pool)
+        .await?;
+    let (delivered, conversations): (i64, i64) = {
+        use sqlx::Row;
+        (pull.try_get("delivered")?, pull.try_get("conversations")?)
+    };
+    assert_eq!((delivered, conversations), (2, 1));
+    assert_eq!(
+        Measure::rate_with_floor(conversations, delivered, 1),
+        Measure::Rate {
+            numerator: 1,
+            denominator: 2,
+            basis_points: 5_000,
+        },
+        "one answered report out of two delivered is stated at floor 1"
+    );
+
+    // `record_inbound_sighting` is monotonic: an earlier `at` never lowers
+    // the stored stamp.
+    let repo = crowdrelay_infra::gdrive::PostgresGDriveRepository::new(pool.clone());
+    let earlier = OffsetDateTime::now_utc() - time::Duration::days(9);
+    repo.record_inbound_sighting(pull_ws, "a@x.pl", earlier)
+        .await?;
+    let stored: OffsetDateTime = sqlx::query_scalar(
+        "SELECT last_inbound_at FROM viryaos_drive_contacts \
+         WHERE workspace_id = $1 AND normalized_email = 'a@x.pl'",
+    )
+    .bind(pull_ws)
+    .fetch_one(pool)
+    .await?;
+    assert!(
+        stored > earlier,
+        "an earlier sighting must not lower last_inbound_at"
+    );
+
     Ok(())
 }
