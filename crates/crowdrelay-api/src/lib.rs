@@ -403,6 +403,7 @@ fn is_control_plane_management_path(path: &str) -> bool {
                 | "/v1/control-plane/autopilot/beacon-release-campaigns"
                 | "/v1/control-plane/autopilot/plays"
                 | "/v1/control-plane/autopilot/scorecard"
+                | "/v1/control-plane/autopilot/measurement"
                 | "/v1/control-plane/autopilot/reply-triage"
                 | "/v1/control-plane/autopilot/next-best-actions"
                 | "/v1/control-plane/autopilot/learning-loop"

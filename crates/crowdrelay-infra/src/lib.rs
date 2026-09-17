@@ -46,6 +46,7 @@ pub mod fan_lifecycle;
 pub mod fan_privacy;
 pub mod fanbase;
 pub mod gdrive;
+pub mod measurement_queries;
 pub mod mobile_fan;
 pub mod observability;
 pub mod portfolio;

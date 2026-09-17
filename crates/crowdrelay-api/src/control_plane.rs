@@ -151,6 +151,10 @@ pub(crate) fn router(state: crate::AppState) -> Router {
             get(crate::autopilot::scorecard_handler),
         )
         .route(
+            "/v1/control-plane/autopilot/measurement",
+            get(crate::autopilot::measurement_handler),
+        )
+        .route(
             "/v1/control-plane/autopilot/reply-triage",
             get(crate::autopilot::reply_triage_handler),
         )

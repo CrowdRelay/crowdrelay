@@ -375,12 +375,11 @@ async fn checkin_against_another_fans_ticket_order_records_a_candidate() -> Resu
     // expires_at must equal the campaign's own valid_until — recomputing
     // now()+1d on the Rust side straddles a second boundary against the SQL
     // now() the helper used, and check_in rejects a mismatched expiry.
-    let campaign_valid_until: OffsetDateTime = sqlx::query_scalar(
-        "SELECT valid_until FROM concert_qr_campaigns WHERE id = $1",
-    )
-    .bind(campaign_id)
-    .fetch_one(&pool)
-    .await?;
+    let campaign_valid_until: OffsetDateTime =
+        sqlx::query_scalar("SELECT valid_until FROM concert_qr_campaigns WHERE id = $1")
+            .bind(campaign_id)
+            .fetch_one(&pool)
+            .await?;
     let pool_id = Uuid::now_v7();
     sqlx::query(
         "INSERT INTO admission_pools (id, workspace_id, event_id, name, capacity, slug) \
