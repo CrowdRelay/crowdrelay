@@ -116,6 +116,13 @@ pub(crate) fn router(state: crate::AppState) -> Router {
             "/v1/control-plane/events/{event_slug}/report",
             get(crate::concert_qr::control_plane_event_report),
         )
+        // §4h-11: the contacts who could fill this room, read against the
+        // date. As an inventory nobody opens the list; against Friday in
+        // Wrocław, a Wrocław paper is worth a minute this week.
+        .route(
+            "/v1/control-plane/events/{event_slug}/who-can-help",
+            get(crate::concert_qr::control_plane_event_helpers),
+        )
         .route(
             "/v1/control-plane/autopilot/cycle/preview",
             get(crate::autopilot::preview_autopilot_cycle),
