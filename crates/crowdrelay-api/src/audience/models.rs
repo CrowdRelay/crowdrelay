@@ -491,6 +491,29 @@ pub struct CityVenueRow {
     status_provenance: Option<String>,
     #[serde(with = "time::serde::rfc3339::option")]
     status_observed_at: Option<OffsetDateTime>,
+    /// §12-1: the verdict half of the evidence answer — `worth_contact` or
+    /// `insufficient_evidence`. Not a column: the registry query knows the
+    /// facts, and `venue_evidence::assess` fills this in after the fetch.
+    #[sqlx(default)]
+    assessment: String,
+    /// The one-sentence answer in the tenant's crew locale — the
+    /// worth-contact because-list over the strongest facts, or the honest
+    /// refusal. Filled after the query, same as `assessment`.
+    #[sqlx(default)]
+    assessment_sentence: String,
+}
+
+/// One tenant-private resolved venue fact. `private_venue_facts` reads the
+/// caller's own `booking_email`/`target_fit`/`contact_quality` claims for
+/// the listed rooms so the sentence can count a fresh contact as evidence —
+/// the private *value* never appears on the shared row, only its age does.
+#[derive(Debug, FromRow)]
+pub struct PrivateVenueFactRow {
+    venue_id: Uuid,
+    attribute: String,
+    value: String,
+    provenance: String,
+    observed_at: OffsetDateTime,
 }
 
 #[derive(Debug, Serialize, FromRow)]
