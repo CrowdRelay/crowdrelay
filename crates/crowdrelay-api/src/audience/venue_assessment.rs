@@ -122,6 +122,9 @@ fn venue_row_facts(row: &CityVenueRow) -> Vec<EvidenceFact> {
 /// One query, resolved `DISTINCT ON (venue_id, attribute)` in the same
 /// provenance trust order the global facts resolve in, so a private fact's
 /// *age* can feed `BookingContactFresh` while its value stays off the row.
+/// `expires_at` is a deletion deadline, not a staleness hint — the hourly
+/// `venue_fact_expiry` sweep removes expired private facts too; this filter
+/// covers only the lag until it does.
 /// A failed read degrades to "no private facts": the clause simply never
 /// forms rather than the list failing over it.
 async fn private_venue_facts(
