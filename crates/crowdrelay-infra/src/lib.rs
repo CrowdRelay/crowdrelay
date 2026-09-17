@@ -62,5 +62,6 @@ pub mod referrals;
 pub mod regional;
 pub mod representation;
 pub mod sensitive_response;
+pub mod show_helpers;
 pub mod signal_installations;
 pub mod tenant_settings;

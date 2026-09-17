@@ -382,6 +382,31 @@ impl PostgresGDriveRepository {
         .ok_or(GDriveError::NotFound)
     }
 
+    /// The catalogue city a staged contact's own city column names, if it
+    /// names one unambiguously.
+    ///
+    /// Slug or display name — "Wrocław" and "wroclaw" land on the same row.
+    /// A name two catalogued cities share resolves to nothing, exactly as the
+    /// booking half treats it: guessing files a contact against the wrong
+    /// place, and a press contact filed in the wrong city is worse than one
+    /// filed in none, because the wrong city's show will suggest it.
+    async fn staged_city_id(&self, city: Option<&str>) -> Result<Option<Uuid>, GDriveError> {
+        let Some(city) = city.map(str::trim).filter(|value| !value.is_empty()) else {
+            return Ok(None);
+        };
+        let matches = sqlx::query_scalar::<_, Uuid>(
+            "SELECT id FROM cities \
+             WHERE slug = lower(btrim($1)) OR lower(btrim(name)) = lower(btrim($1))",
+        )
+        .bind(city)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(match matches.as_slice() {
+            [only] => Some(*only),
+            _ => None,
+        })
+    }
+
     /// Promotes a staged contact to the outreach pipeline: a `proposed`
     /// `agent_outreach_targets` row — the same status and the same conflict
     /// key the curated-CRM import uses, so screening and operator approval
@@ -393,6 +418,12 @@ impl PostgresGDriveRepository {
         contact: &DriveContactRow,
         target_kind: &str,
     ) -> Result<(), GDriveError> {
+        // §4h-11 / 3.9: a press contact keeps the city the sheet placed it in,
+        // when the catalogue recognises one. Unlike the booking half, a missing
+        // city is not a refusal — a national magazine is somewhere in the sense
+        // that matters to nobody, and demanding one would either lose the
+        // contact or file it under a city it does not belong to.
+        let city_id = self.staged_city_id(contact.city.as_deref()).await?;
         let mut tx = self.pool.begin().await?;
         // display_name is capped at 200 by the outreach CHECK — an email
         // fallback can reach 254, so truncate rather than fail the promote.
@@ -436,11 +467,15 @@ impl PostgresGDriveRepository {
             r#"
             INSERT INTO agent_outreach_targets
                 (workspace_id, target_kind, display_name, contact_email,
-                 contact_domain, why_fit, evidence, status)
-            VALUES ($1,$2,$3,$4,$5,$6,$7,'proposed')
+                 contact_domain, why_fit, evidence, status, city_id)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,'proposed',$8)
             ON CONFLICT (workspace_id, display_name, target_kind) DO UPDATE SET
                 contact_email = COALESCE(EXCLUDED.contact_email, agent_outreach_targets.contact_email),
                 contact_domain = COALESCE(EXCLUDED.contact_domain, agent_outreach_targets.contact_domain),
+                -- A city already on file wins: it was resolved once and may
+                -- have been corrected by hand since. A re-import that knows
+                -- less must not erase what the operator knows.
+                city_id = COALESCE(agent_outreach_targets.city_id, EXCLUDED.city_id),
                 why_fit = COALESCE(NULLIF(EXCLUDED.why_fit, ''), agent_outreach_targets.why_fit),
                 evidence = CASE
                     WHEN jsonb_array_length(EXCLUDED.evidence) > 0 THEN EXCLUDED.evidence
@@ -458,6 +493,7 @@ impl PostgresGDriveRepository {
             "source": contact.sources.join("+"),
             "file": contact.source_file_name,
         }]))
+        .bind(city_id)
         .execute(&mut *tx)
         .await?;
         sqlx::query(
