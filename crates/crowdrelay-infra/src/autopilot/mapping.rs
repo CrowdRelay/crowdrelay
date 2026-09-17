@@ -145,6 +145,17 @@ fn booking_snapshot(
 fn booking_target_snapshot(
     row: BookingTargetRow,
 ) -> Result<BookingTargetSnapshot, RepositoryError> {
+    // The evidence row exists only when the target is venue-linked — the
+    // query's laterals all key on venue_id, so an unlinked target yields the
+    // column defaults and maps to `None`, not to a fabricated all-zero row.
+    let venue_evidence = row.venue_id.map(|_| BookingVenueEvidence {
+        shows_last_12m: row.shows_last_12m,
+        comparable_acts: row.comparable_acts,
+        genres: row.venue_genres.clone(),
+        capacity: row.venue_capacity.clone(),
+        days_since_last_event: row.days_since_last_event,
+        booking_contact_days: row.booking_contact_days,
+    });
     Ok(BookingTargetSnapshot {
         target_id: BookingTargetId::from_uuid(row.target_id),
         city_id: CityId::from_uuid(row.city_id),
@@ -165,6 +176,7 @@ fn booking_target_snapshot(
         followup_count: u16::try_from(row.followup_count)
             .map_err(|_| RepositoryError::Unexpected)?,
         last_reply: parse_booking_reply_disposition(&row.last_reply_disposition)?,
+        venue_evidence,
     })
 }
 

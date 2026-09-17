@@ -185,6 +185,7 @@ pub(super) fn merch_price_candidate(
 pub(super) fn booking_candidate(
     snapshot: CityOpportunitySnapshot,
     targets: &[BookingTargetSnapshot],
+    window_inputs: &BookingWindowInputSet,
     policy: &AutopilotPolicy,
     now: OffsetDateTime,
 ) -> Result<Option<DecisionCandidate>, serde_json::Error> {
@@ -215,6 +216,41 @@ pub(super) fn booking_candidate(
     let Some(target_snapshot) = targets.iter().find(|target| target.target_id == target_id) else {
         return Ok(None);
     };
+    // §12-6: the proposed window rides on the selected target's room history
+    // plus the shared own-calendar — `None` is a first-class answer, not a
+    // fallback date.
+    let proposed_window = window_inputs
+        .targets
+        .iter()
+        .find(|input| input.target_id == target_id)
+        .and_then(|input| {
+            propose_booking_window(
+                &BookingWindowInputs {
+                    room_shows: input.room_shows.clone(),
+                    own_shows: window_inputs.own_shows.clone(),
+                    venue_coords: input.venue_coords,
+                },
+                now,
+            )
+        });
+    // "Write to A, B and C" is one action — the next-ranked eligible targets
+    // in the same city come along under the same approval. Two beyond the
+    // anchor: enough to make the letter the city's booking desks actually
+    // compare notes on, bounded so it can never become a mail-merge.
+    let additional_recipients = additional_booking_recipients(
+        snapshot.city_id,
+        expected_attendance,
+        targets,
+        target_id,
+        &target_policy,
+        now,
+        2,
+    );
+    let mut recipient_ids: Vec<String> = additional_recipients
+        .iter()
+        .map(|(id, _)| id.to_string())
+        .collect();
+    recipient_ids.sort_unstable();
     let disposition = disposition(policy.autonomy_level, confidence, policy.minimum_confidence);
     let subject = ActionSubject::City(snapshot.city_id);
     Ok(Some(DecisionCandidate {
@@ -229,6 +265,8 @@ pub(super) fn booking_candidate(
             "target": target_snapshot,
             "selection_score": selection_score,
             "expected_attendance": expected_attendance,
+            "proposed_window": proposed_window,
+            "additional_recipients": additional_recipients,
         }),
         policy_snapshot: policy_evidence(
             policy,
@@ -244,9 +282,12 @@ pub(super) fn booking_candidate(
             target_name: target_snapshot.display_name.clone(),
             score,
             phase: BookingOutreachPhase::Initial,
+            proposed_window: proposed_window.clone(),
+            additional_recipients,
+            venue_evidence: target_snapshot.venue_evidence.clone(),
         },
         decision_key: format!(
-            "decision:booking:v{}:{}:{}:tv{}:{}:{}:{}:{}:{}:{}:{}:{}:{}",
+            "decision:booking:v{}:{}:{}:tv{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}",
             policy.version,
             snapshot.city_id,
             target_id,
@@ -266,6 +307,16 @@ pub(super) fn booking_candidate(
             snapshot
                 .last_outreach_at
                 .map_or(0, OffsetDateTime::unix_timestamp),
+            // The proposal's dates and recipient set are decision inputs: a
+            // changed window or a changed list is a different proposal and
+            // must re-decide rather than ride on the old answer.
+            proposed_window.as_ref().map_or(0, |window| {
+                window.start.midnight().assume_utc().unix_timestamp()
+            }),
+            proposed_window.as_ref().map_or(0, |window| {
+                window.end.midnight().assume_utc().unix_timestamp()
+            }),
+            recipient_ids.join(","),
         ),
         action_idempotency_key: format!(
             "action:booking:{}:{}:tv{}:{}",
@@ -314,6 +365,12 @@ pub(super) fn booking_followup_candidate(
             target_name: target.display_name.clone(),
             score: 0,
             phase: BookingOutreachPhase::FollowUp,
+            // A follow-up re-asks the question the initial send already
+            // posed — it neither re-derives a window nor copies new
+            // recipients onto a thread they were never part of.
+            proposed_window: None,
+            additional_recipients: Vec::new(),
+            venue_evidence: target.venue_evidence.clone(),
         },
         decision_key: format!(
             "decision:booking-followup:v{}:{}:tv{}:{}:{}",

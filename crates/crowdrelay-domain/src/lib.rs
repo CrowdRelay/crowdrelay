@@ -63,6 +63,7 @@ pub mod beacon_release;
 pub mod beacons;
 pub mod booking;
 pub mod booking_discovery;
+pub mod booking_window;
 pub mod calendar_routing;
 pub mod campaign_lifecycle;
 pub mod community_intelligence;

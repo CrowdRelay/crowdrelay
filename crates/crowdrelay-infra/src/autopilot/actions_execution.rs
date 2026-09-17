@@ -134,81 +134,17 @@ impl PostgresAutopilotRepository {
                     )
                     .await?;
                 }
-                AutopilotActionPayload::RequestBookingOutreach {
-                    city_id,
-                    target_id,
-                    target_version,
-                    target_name: _,
-                    score,
-                    phase,
-                } => {
-                    let target = lock_booking_target_for_execution(
+                // §12-6: the anchor plus its same-city recipients are one
+                // letter — every recipient is locked and reserved inside this
+                // transaction, and the first failure rolls back all of them.
+                AutopilotActionPayload::RequestBookingOutreach { .. } => {
+                    operations::execute_booking_outreach(
                         &mut transaction,
                         workspace_id,
-                        *city_id,
-                        *target_id,
-                        *target_version,
-                    )
-                    .await?;
-                    reserve_contact_window(
-                        &mut transaction,
-                        workspace_id,
-                        action.id,
-                        "booking_opportunity",
-                        &target.2,
+                        action,
                         now,
                     )
                     .await?;
-                    emit_outward_action(
-                        &mut transaction,
-                        workspace_id,
-                        action.id,
-                        "crowdrelay.booking.outreach_requested",
-                        format!("booking-target:{target_id}"),
-                        format!(
-                            "screened booking target, {phase:?} phase, score {score} — locked under version {target_version}"
-                        ),
-                        json!({
-                            "action_id": action.id,
-                            "city_id": city_id,
-                            "target_id": target_id,
-                            "target_kind": target.0,
-                            "target_name": target.1,
-                            "contact_email": target.2,
-                            "template_key": match phase { BookingOutreachPhase::Initial => "booking.opportunity.v1", BookingOutreachPhase::FollowUp => "booking.followup.v1" },
-                            "phase": phase,
-                            "score": score,
-                        }),
-                    )
-                    .await?;
-                    let changed = sqlx::query(
-                        r#"
-                        UPDATE viryaos_booking_targets
-                        SET last_outreach_at = $4
-                        WHERE workspace_id = $1 AND id = $2 AND version = $3
-                        "#,
-                    )
-                    .bind(workspace_id.into_uuid())
-                    .bind(target_id.into_uuid())
-                    .bind(target_version)
-                    .bind(now)
-                    .execute(&mut *transaction)
-                    .await
-                    .map_err(map_sqlx)?;
-                    if changed.rows_affected() != 1 { return Err(RepositoryError::Conflict); }
-                    sqlx::query(r#"
-                        INSERT INTO viryaos_booking_interactions(
-                            workspace_id,target_id,direction,phase,source_key,occurred_at,metadata
-                        ) VALUES($1,$2,'outbound',$3,$4,$5,jsonb_build_object('action_id',$6::uuid))
-                        ON CONFLICT(workspace_id,target_id,source_key) DO NOTHING
-                    "#)
-                    .bind(workspace_id.into_uuid())
-                    .bind(target_id.into_uuid())
-                    .bind(match phase { BookingOutreachPhase::Initial => "initial", BookingOutreachPhase::FollowUp => "followup" })
-                    .bind(format!("autopilot:{}", action.id))
-                    .bind(now)
-                    .bind(action.id.into_uuid())
-                    .execute(&mut *transaction).await.map_err(map_sqlx)?;
                 }
                 // §12-6, 4G.4: one letter to everybody who books the room, or
                 // none of it — the reservations are this transaction's.

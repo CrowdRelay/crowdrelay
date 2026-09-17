@@ -375,6 +375,90 @@ fn worth_sentence(name: &str, clauses: &[EvidenceClause], locale: EvidenceLocale
     }
 }
 
+/// The booking outreach first line (§12-6) — one honest sentence composed
+/// directly from a [`crate::booking::BookingVenueEvidence`] row.
+///
+/// The lean evidence row is what the target snapshot carries, so this is the
+/// venue sentence's smaller sibling rather than [`assess`]: no refusal, just
+/// `None` when there is nothing true to say — the outreach then ships with no
+/// first line rather than a fabricated one. Clauses come strongest first:
+/// the room's last-year shows, comparable acts on its bills, then at most one
+/// resolved global fact (genres or capacity), so the line stays a fact and
+/// not a paragraph.
+#[must_use]
+pub fn booking_evidence_line(
+    evidence: &crate::booking::BookingVenueEvidence,
+    locale: EvidenceLocale,
+) -> Option<String> {
+    let mut clauses: Vec<String> = Vec::new();
+    if evidence.shows_last_12m > 0 {
+        let count = evidence.shows_last_12m;
+        clauses.push(match locale {
+            EvidenceLocale::En => format!(
+                "{count} {} in the last year",
+                english_plural(count, "show", "shows")
+            ),
+            EvidenceLocale::Pl => format!(
+                "{count} {} w ostatnim roku",
+                polish_count(count, "koncert", "koncerty", "koncertów")
+            ),
+        });
+    }
+    if evidence.comparable_acts > 0 {
+        let count = evidence.comparable_acts;
+        clauses.push(match locale {
+            EvidenceLocale::En if count == 1 => "1 comparable act on its bills".to_owned(),
+            EvidenceLocale::En => format!("{count} comparable acts on its bills"),
+            EvidenceLocale::Pl => format!(
+                "{} na jego afiszu {count} {}",
+                polish_played(count),
+                polish_count(
+                    count,
+                    "pokrewny zespół",
+                    "pokrewne zespoły",
+                    "pokrewnych zespołów"
+                )
+            ),
+        });
+    }
+    // One resolved fact at most — genres say who the room books, capacity
+    // says how big a night it runs; both together is a list, not a line.
+    if let Some(genres) = evidence
+        .genres
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        clauses.push(match locale {
+            EvidenceLocale::En => format!("programmes {genres}"),
+            EvidenceLocale::Pl => format!("ma w repertuarze {genres}"),
+        });
+    } else if let Some(capacity) = evidence
+        .capacity
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        clauses.push(match locale {
+            EvidenceLocale::En => format!("listed capacity {capacity}"),
+            EvidenceLocale::Pl => format!("deklarowana pojemność {capacity}"),
+        });
+    }
+    if clauses.is_empty() {
+        return None;
+    }
+    let mut line = clauses
+        .into_iter()
+        .take(MAX_CLAUSES)
+        .collect::<Vec<_>>()
+        .join(", ");
+    if let Some(first) = line.get_mut(..1) {
+        first.make_ascii_uppercase();
+    }
+    line.push('.');
+    Some(line)
+}
+
 /// The honest refusal — itself a full sentence, in the tenant's language.
 /// A room the graph knows nothing about gets told as known-nothing, so the
 /// next fact that lands changes the answer rather than confirming a guess.
@@ -853,6 +937,51 @@ mod tests {
         assert_eq!(EvidenceLocale::from_tag("en-IE"), EvidenceLocale::En);
         assert_eq!(EvidenceLocale::from_tag(""), EvidenceLocale::En);
         assert_eq!(EvidenceLocale::default(), EvidenceLocale::En);
+    }
+
+    /// The booking first line says only what the row actually knows.
+    #[test]
+    fn booking_line_says_the_strongest_facts_and_nothing_else() {
+        use crate::booking::BookingVenueEvidence;
+        let evidence = BookingVenueEvidence {
+            shows_last_12m: 9,
+            comparable_acts: 3,
+            genres: Some("metal, rock".to_owned()),
+            capacity: Some("300".to_owned()),
+            days_since_last_event: Some(11),
+            booking_contact_days: Some(18),
+        };
+        assert_eq!(
+            booking_evidence_line(&evidence, EvidenceLocale::En),
+            Some(
+                "9 shows in the last year, 3 comparable acts on its bills, programmes metal, rock."
+                    .to_owned()
+            )
+        );
+        assert_eq!(
+            booking_evidence_line(&evidence, EvidenceLocale::Pl),
+            Some(
+                "9 koncertów w ostatnim roku, grały na jego afiszu 3 pokrewne zespoły, \
+                 ma w repertuarze metal, rock."
+                    .to_owned()
+            )
+        );
+    }
+
+    /// An evidence row of unknowns produces no line — never a zero claim.
+    #[test]
+    fn booking_line_refuses_to_fabricate_when_nothing_is_known() {
+        use crate::booking::BookingVenueEvidence;
+        let evidence = BookingVenueEvidence {
+            shows_last_12m: 0,
+            comparable_acts: 0,
+            genres: None,
+            capacity: None,
+            days_since_last_event: None,
+            booking_contact_days: None,
+        };
+        assert_eq!(booking_evidence_line(&evidence, EvidenceLocale::En), None);
+        assert_eq!(booking_evidence_line(&evidence, EvidenceLocale::Pl), None);
     }
 
     /// One and two clauses join without the comma the three-clause form has.

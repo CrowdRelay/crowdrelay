@@ -82,12 +82,28 @@ pub(super) async fn schedule_effect_measurement(
             f64::from(*roas_basis_points),
             now + time::Duration::days(7),
         )),
-        AutopilotActionPayload::RequestBookingOutreach { target_id, .. } => plans.push((
-            AutopilotMeasurementKind::BookingReply7d,
-            target_id.into_uuid(),
-            0.0,
-            now + time::Duration::days(7),
-        )),
+        // One measurement per booking desk written to, same as a gig batch —
+        // a reply (or a silence) belongs to its target, not to the letter.
+        AutopilotActionPayload::RequestBookingOutreach {
+            target_id,
+            additional_recipients,
+            ..
+        } => {
+            plans.push((
+                AutopilotMeasurementKind::BookingReply7d,
+                target_id.into_uuid(),
+                0.0,
+                now + time::Duration::days(7),
+            ));
+            for (extra_id, _) in additional_recipients {
+                plans.push((
+                    AutopilotMeasurementKind::BookingReply7d,
+                    extra_id.into_uuid(),
+                    0.0,
+                    now + time::Duration::days(7),
+                ));
+            }
+        }
         // One measurement per promoter written to, under the same kind a
         // single booking approach uses. The question a reply answers is about
         // that promoter, not about the batch — and 4G.5 asks which kind of

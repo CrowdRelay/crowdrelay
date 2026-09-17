@@ -10,7 +10,8 @@ use crowdrelay_domain::{
     audience_lifecycle::FanLifecyclePolicy,
     autonomy::{AutonomyLevel, Confidence, PolicyDisposition},
     beacons::{BeaconCampaignPolicy, BeaconOutreachPhase},
-    booking::{BookingOpportunityPolicy, BookingOutreachPhase},
+    booking::{BookingOpportunityPolicy, BookingOutreachPhase, BookingVenueEvidence},
+    booking_window::ProposedWindow,
     campaign_lifecycle::{EventCampaignPhase, EventCampaignPolicy},
     content_engine::ContentStrategyPolicy,
     content_supply::{ContentArtifactKind, ContentSupplyPolicy},
@@ -487,6 +488,21 @@ pub enum AutopilotActionPayload {
         target_name: String,
         score: u16,
         phase: BookingOutreachPhase,
+        /// §12-6: the derived window — `None` means no basis, and the action
+        /// still carries the room; "sometime in spring" is what the band
+        /// would have written anyway.
+        #[serde(default)]
+        proposed_window: Option<ProposedWindow>,
+        /// §12-6: "write to A, B and C" is ONE action — the next-ranked
+        /// same-city targets copied on the same letter, each
+        /// (target_id, expected_version). The governor reserves all or none.
+        #[serde(default)]
+        additional_recipients: Vec<(BookingTargetId, i64)>,
+        /// The evidence row the operator approved — carried verbatim so the
+        /// send renders its `first_line_fact` from the same facts the
+        /// approval showed. `None` for an unlinked or evidenceless room.
+        #[serde(default)]
+        venue_evidence: Option<BookingVenueEvidence>,
     },
     RequestAudienceCampaign {
         event_id: EventId,
@@ -1670,5 +1686,85 @@ mod tests {
         };
         assert_eq!(field("Artifact"), Some("Social feed"));
         assert_eq!(field("Template"), Some("Social feed v1"));
+    }
+
+    /// §12-6: the booking payload round-trips with its window, recipient set
+    /// and evidence row intact — the whole proposal is persisted as JSONB.
+    #[test]
+    fn booking_outreach_payload_round_trips_window_recipients_and_evidence()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use crowdrelay_domain::booking::BookingVenueEvidence;
+        use crowdrelay_domain::booking_window::{ProposedWindow, WindowBasis};
+        let day = time::Date::from_calendar_date(2026, time::Month::April, 10)?;
+        let payload = AutopilotActionPayload::RequestBookingOutreach {
+            city_id: CityId::new(),
+            target_id: BookingTargetId::new(),
+            target_version: 3,
+            target_name: "Klub X".to_owned(),
+            score: 71,
+            phase: BookingOutreachPhase::Initial,
+            proposed_window: Some(ProposedWindow {
+                start: day,
+                end: day + time::Duration::days(28),
+                basis: vec![
+                    WindowBasis::LeadTime { median_days: 42 },
+                    WindowBasis::RoomRhythm {
+                        median_gap_days: 28,
+                    },
+                    WindowBasis::AdjacentShow {
+                        event_slug: "krakow-night".to_owned(),
+                        distance_km: 252,
+                    },
+                ],
+            }),
+            additional_recipients: vec![(BookingTargetId::new(), 2)],
+            venue_evidence: Some(BookingVenueEvidence {
+                shows_last_12m: 9,
+                comparable_acts: 3,
+                genres: Some("metal, rock".to_owned()),
+                capacity: Some("300".to_owned()),
+                days_since_last_event: Some(11),
+                booking_contact_days: Some(18),
+            }),
+        };
+        let json = serde_json::to_value(&payload)?;
+        let back: AutopilotActionPayload = serde_json::from_value(json.clone())?;
+        assert_eq!(back, payload);
+        // The outward-facing shape the spec asks for.
+        assert_eq!(json["kind"], serde_json::json!("request_booking_outreach"));
+        assert_eq!(
+            json["additional_recipients"].as_array().map(Vec::len),
+            Some(1)
+        );
+        Ok(())
+    }
+
+    /// Payloads written before the window existed must still parse — the new
+    /// fields are all serde-defaulted.
+    #[test]
+    fn booking_outreach_payload_without_window_still_parses()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let legacy = serde_json::json!({
+            "kind": "request_booking_outreach",
+            "city_id": uuid::Uuid::now_v7(),
+            "target_id": uuid::Uuid::now_v7(),
+            "target_version": 1,
+            "target_name": "Klub Y",
+            "score": 60,
+            "phase": "initial",
+        });
+        let AutopilotActionPayload::RequestBookingOutreach {
+            proposed_window,
+            additional_recipients,
+            venue_evidence,
+            ..
+        } = serde_json::from_value(legacy)?
+        else {
+            panic!("the legacy payload must still parse as RequestBookingOutreach")
+        };
+        assert_eq!(proposed_window, None);
+        assert!(additional_recipients.is_empty());
+        assert_eq!(venue_evidence, None);
+        Ok(())
     }
 }
