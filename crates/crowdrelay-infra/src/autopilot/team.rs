@@ -9,7 +9,8 @@ use crowdrelay_application::autopilot::BriefingLocale;
 use crowdrelay_domain::{
     WorkspaceMemberId,
     team_operations::{
-        TeamAssignmentNeed, TeamMemberRoutingSnapshot, TeamSkill, select_team_assignee,
+        TeamAssignmentNeed, TeamAssignmentRefusal, TeamMemberRoutingSnapshot, TeamSkill,
+        route_team_assignment, select_team_assignee,
     },
 };
 use time::Duration as TimeDuration;
@@ -213,9 +214,20 @@ impl PostgresAutopilotRepository {
             .map_err(map_sqlx)?;
 
             let mut mutable_team = team;
+            // Counted rather than logged per item: a full crew parks every
+            // approval in the batch, and thirty identical warnings is how an
+            // operator learns to filter the log that was supposed to tell them
+            // something. One line at the end, with the count.
+            let mut parked_on_capacity = 0u32;
             for action in approvals {
                 let need = assignment_need(&action.context, &action.action_kind);
                 let Some(member_index) = select_member_index(&mutable_team, need) else {
+                    if matches!(
+                        routing_refusal(&mutable_team, need),
+                        Some(TeamAssignmentRefusal::EveryoneAtCapacity { .. })
+                    ) {
+                        parked_on_capacity = parked_on_capacity.saturating_add(1);
+                    }
                     continue;
                 };
                 let member = mutable_team
@@ -275,6 +287,12 @@ impl PostgresAutopilotRepository {
             for task in show_tasks {
                 let need = assignment_need("show_operations", &task.task_key);
                 let Some(member_index) = select_member_index(&mutable_team, need) else {
+                    if matches!(
+                        routing_refusal(&mutable_team, need),
+                        Some(TeamAssignmentRefusal::EveryoneAtCapacity { .. })
+                    ) {
+                        parked_on_capacity = parked_on_capacity.saturating_add(1);
+                    }
                     continue;
                 };
                 let member = mutable_team
@@ -336,6 +354,20 @@ impl PostgresAutopilotRepository {
                 )
                 .await?,
             );
+
+            // The one line an operator can act on. Work held back because the
+            // crew is full is not a failure — it is the ceiling doing its job —
+            // but it is invisible without saying so, and "the system stopped
+            // giving me tasks" reads like a broken system rather than a full
+            // one.
+            if parked_on_capacity > 0 {
+                tracing::info!(
+                    workspace_id = %workspace_id.into_uuid(),
+                    parked = parked_on_capacity,
+                    ceiling = crowdrelay_domain::team_operations::MAX_OPEN_ASSIGNMENTS_PER_MEMBER,
+                    "work is waiting because every crew member who could take it is at the open-assignment ceiling"
+                );
+            }
 
             tx.commit().await.map_err(map_sqlx)?;
             Ok(assigned)
@@ -839,14 +871,16 @@ fn follow_through_for(member: &TeamRoutingRow, need: TeamAssignmentNeed) -> u16 
         )
 }
 
-/// Skill-fit-first, fairness-second selection over the live routing snapshot.
-/// Shared by the scheduled routers and the `member_key="auto"` assignment path.
-pub(in crate::autopilot) fn select_member_index(
+/// Builds the routing snapshot the domain decides on.
+///
+/// Split out so the selection and the refusal read the same rows: two
+/// snapshots built two ways is how "who did it pick" and "why did it not pick"
+/// end up disagreeing.
+fn routing_snapshots(
     team: &[TeamRoutingRow],
     need: TeamAssignmentNeed,
-) -> Option<usize> {
-    let snapshots = team
-        .iter()
+) -> Vec<TeamMemberRoutingSnapshot> {
+    team.iter()
         .map(|member| TeamMemberRoutingSnapshot {
             member_id: WorkspaceMemberId::from_uuid(member.member_id),
             member_key: member.member_key.clone(),
@@ -861,7 +895,29 @@ pub(in crate::autopilot) fn select_member_index(
             capacity_basis_points: bounded_u16(i64::from(member.capacity_basis_points)),
             follow_through_basis_points: follow_through_for(member, need),
         })
-        .collect::<Vec<_>>();
+        .collect()
+}
+
+/// Why nothing was assigned, for the surfaces that report rather than act.
+///
+/// `select_member_index` returning `None` covers two situations that want
+/// opposite responses — nobody holds the skill, or everybody who does is at
+/// `MAX_OPEN_ASSIGNMENTS_PER_MEMBER`. A caller that cannot distinguish them
+/// answers a workload problem by hiring and a hiring problem by waiting.
+pub(in crate::autopilot) fn routing_refusal(
+    team: &[TeamRoutingRow],
+    need: TeamAssignmentNeed,
+) -> Option<TeamAssignmentRefusal> {
+    route_team_assignment(&routing_snapshots(team, need), need).err()
+}
+
+/// Skill-fit-first, fairness-second selection over the live routing snapshot.
+/// Shared by the scheduled routers and the `member_key="auto"` assignment path.
+pub(in crate::autopilot) fn select_member_index(
+    team: &[TeamRoutingRow],
+    need: TeamAssignmentNeed,
+) -> Option<usize> {
+    let snapshots = routing_snapshots(team, need);
     let decision = select_team_assignee(&snapshots, need)?;
     team.iter()
         .position(|member| member.member_id == decision.member_id.into_uuid())
@@ -1112,6 +1168,12 @@ struct DetailFrame {
     steps: &'static str,
     content: &'static str,
     unreadable: &'static str,
+    /// Roughly how long. A person holding one task reads the whole briefing;
+    /// a person holding nine is sorting, and cannot sort without this.
+    effort: &'static str,
+    /// What happens if nobody does it. A severity label is not weighable
+    /// against the other eight things on somebody's list; a consequence is.
+    if_skipped: &'static str,
 }
 
 const fn detail_frame(locale: BriefingLocale) -> DetailFrame {
@@ -1121,12 +1183,16 @@ const fn detail_frame(locale: BriefingLocale) -> DetailFrame {
             steps: "Kroki",
             content: "Treść",
             unreadable: "Nie udało się odczytać szczegółów zadania. Otwórz panel operacyjny, aby zobaczyć pełne dane.",
+            effort: "Ile to zajmie",
+            if_skipped: "Co jeśli tego nie zrobisz",
         },
         BriefingLocale::En => DetailFrame {
             why: "Why this matters",
             steps: "Steps",
             content: "Details",
             unreadable: "This task's details could not be read. Open the operations panel to see the full record.",
+            effort: "How long this takes",
+            if_skipped: "If nobody does it",
         },
     }
 }
@@ -1146,9 +1212,20 @@ fn enriched_task_detail(
     let mut briefing = payload.briefing().localized(locale);
     briefing.deadline_note = format_deadline_note(approval_expires_at, assignment_due_at, locale);
 
+    // Effort and consequence go directly under the summary, ahead of the
+    // steps. Somebody triaging nine tasks reads two lines and stops; putting
+    // "how long" at the bottom means it is read only by people who already
+    // decided to do the task, which is the wrong half of the audience.
     let mut text = format!(
-        "{}\n\n{}: {}\n\n{}:",
-        briefing.summary, frame.why, briefing.why_it_matters, frame.steps
+        "{}\n\n{}: {}\n{}: {}\n\n{}: {}\n\n{}:",
+        briefing.summary,
+        frame.effort,
+        payload.effort().describe(locale),
+        frame.if_skipped,
+        payload.if_skipped(locale),
+        frame.why,
+        briefing.why_it_matters,
+        frame.steps
     );
     for (i, step) in briefing.steps.iter().enumerate() {
         text.push_str(&format!(
@@ -1229,6 +1306,61 @@ mod tests {
         );
         assert_eq!(subject, "VIRYA — new task: Approve the content artifact");
         assert_eq!(greeting, "Hi Wojtek!");
+    }
+
+    /// A crew member holding nine tasks is sorting, not reading. The two
+    /// lines that let them sort are the effort band and the consequence, and
+    /// both have to survive the email body's 1,800-character truncation —
+    /// which they do by sitting directly under the summary rather than at the
+    /// bottom with the deadline.
+    #[test]
+    fn a_task_says_how_long_it_takes_and_what_happens_if_it_is_skipped() {
+        use crowdrelay_application::autopilot::AutopilotActionPayload;
+
+        let payload = AutopilotActionPayload::RequestSignalPush {
+            task_id: Uuid::nil(),
+            title: "New show".to_owned(),
+            body: "We play Friday".to_owned(),
+            target_path: None,
+            event_id: None,
+            segment: None,
+        };
+        let payload_json = serde_json::to_value(&payload).expect("payload serialises");
+
+        for locale in [BriefingLocale::En, BriefingLocale::Pl] {
+            let frame = detail_frame(locale);
+            let detail = enriched_task_detail(&payload_json, None, None, locale);
+            assert!(
+                detail.contains(frame.effort),
+                "{locale:?} body has no effort line: {detail}"
+            );
+            assert!(
+                detail.contains(frame.if_skipped),
+                "{locale:?} body has no consequence line: {detail}"
+            );
+            // Ahead of the steps, because a person deciding whether to open
+            // the task at all never reaches the steps.
+            let effort_at = detail.find(frame.effort).expect("effort present");
+            let steps_at = detail.find(frame.steps).expect("steps present");
+            assert!(
+                effort_at < steps_at,
+                "the effort line sits below the steps, where a triaging reader will not see it"
+            );
+        }
+    }
+
+    /// An unreadable payload must not lose the frame it would otherwise carry
+    /// — a crew member who gets a bare error line has no idea what arrived.
+    #[test]
+    fn an_unreadable_payload_still_says_something_useful() {
+        let detail = enriched_task_detail(
+            &serde_json::json!({"nonsense": true}),
+            None,
+            None,
+            BriefingLocale::En,
+        );
+        assert_eq!(detail, detail_frame(BriefingLocale::En).unreadable);
+        assert!(detail.contains("operations panel"));
     }
 
     #[test]

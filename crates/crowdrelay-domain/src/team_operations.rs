@@ -128,6 +128,104 @@ pub struct TeamAssignmentDecision {
 /// would prove them either way.
 pub const NEUTRAL_FOLLOW_THROUGH_BASIS_POINTS: u16 = 5_000;
 
+/// How many open assignments one person may hold before the system stops
+/// adding to the pile.
+///
+/// The load penalty below spreads work across people who *could* do it. It was
+/// never a ceiling, and in the shape this product actually ships in there is
+/// nobody to spread to: a solo act is its own social, visual and copy skill, so
+/// every task routes to one person and the penalty subtracts from a score that
+/// wins anyway. The operator's own words for the result were "flooded with
+/// tasks I don't really fully understand".
+///
+/// Seven is a working week's worth of small jobs, and it is chosen to be
+/// obviously finite rather than to be precise. What matters is that a ceiling
+/// exists: past it, the honest answer is that the crew is full, and handing
+/// somebody a twelfth task they will not read is worse than telling the system
+/// to wait.
+///
+/// This is the cadence rule from the plan applied to people rather than to
+/// content. The machine issues a rhythm somebody can actually hold.
+pub const MAX_OPEN_ASSIGNMENTS_PER_MEMBER: u16 = 7;
+
+/// Why nobody was assigned.
+///
+/// Distinguished from "no decision" on purpose. A caller that cannot tell the
+/// difference between *nobody has this skill* and *everybody who has it is
+/// buried* will do the same thing in both cases, and those want opposite
+/// responses: the first needs a person hired or a skill widened, the second
+/// needs the work to wait.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TeamAssignmentRefusal {
+    /// No active member holds the skill, at any load.
+    NobodyWithTheSkill,
+    /// Somebody could do it, and everybody who could is at the ceiling.
+    /// Carries the smallest open-assignment count on the bench, so a caller can
+    /// say *how* full rather than only *that* it is full.
+    EveryoneAtCapacity { lowest_open_assignments: u16 },
+}
+
+impl TeamAssignmentRefusal {
+    /// What to tell the operator. Written for somebody deciding what to do
+    /// next, not for a log.
+    #[must_use]
+    pub fn message(self) -> String {
+        match self {
+            Self::NobodyWithTheSkill => {
+                "nobody on the crew has this skill and is available — widen the skill on \
+                 somebody, or this kind of work has no owner"
+                    .to_owned()
+            }
+            Self::EveryoneAtCapacity {
+                lowest_open_assignments,
+            } => format!(
+                "everybody who could take this already holds {lowest_open_assignments} open \
+                 tasks, and the ceiling is {MAX_OPEN_ASSIGNMENTS_PER_MEMBER}. This one waits \
+                 until something closes — a task nobody reads is not delegation."
+            ),
+        }
+    }
+}
+
+/// Picks an assignee, or says why it did not.
+///
+/// # Errors
+///
+/// Refuses when nobody active holds the skill, and when everybody who holds it
+/// is already at [`MAX_OPEN_ASSIGNMENTS_PER_MEMBER`].
+pub fn route_team_assignment(
+    members: &[TeamMemberRoutingSnapshot],
+    need: TeamAssignmentNeed,
+) -> Result<TeamAssignmentDecision, TeamAssignmentRefusal> {
+    // Who *could* do it, ignoring load. Computed first so the refusal can tell
+    // "no skill" apart from "no room" — a caller that cannot distinguish those
+    // will respond to a hiring problem by waiting, and to a workload problem by
+    // hiring.
+    let capable = members
+        .iter()
+        .filter(|member| member.active && member.capacity_basis_points > 0)
+        .filter(|member| {
+            member.skills.contains(&need.primary_skill)
+                || need
+                    .secondary_skill
+                    .is_some_and(|skill| member.skills.contains(&skill))
+                || (need.allow_generalist && member.skills.contains(&TeamSkill::General))
+        })
+        .collect::<Vec<_>>();
+
+    if capable.is_empty() {
+        return Err(TeamAssignmentRefusal::NobodyWithTheSkill);
+    }
+
+    select_team_assignee(members, need).ok_or_else(|| TeamAssignmentRefusal::EveryoneAtCapacity {
+        lowest_open_assignments: capable
+            .iter()
+            .map(|member| member.open_assignments)
+            .min()
+            .unwrap_or(MAX_OPEN_ASSIGNMENTS_PER_MEMBER),
+    })
+}
+
 #[must_use]
 pub fn select_team_assignee(
     members: &[TeamMemberRoutingSnapshot],
@@ -136,6 +234,11 @@ pub fn select_team_assignee(
     members
         .iter()
         .filter(|member| member.active && member.capacity_basis_points > 0)
+        // The ceiling. The load penalty below spreads work between people who
+        // could take it; it never stopped work reaching somebody who already
+        // has too much, because a penalty subtracts from a score that still
+        // wins when there is nobody to lose to.
+        .filter(|member| member.open_assignments < MAX_OPEN_ASSIGNMENTS_PER_MEMBER)
         .filter_map(|member| {
             let primary = member.skills.contains(&need.primary_skill);
             let secondary = need
@@ -263,6 +366,120 @@ mod tests {
             // written for. A member with no history scores neutral in
             // production too — see `NEUTRAL_FOLLOW_THROUGH_BASIS_POINTS`.
             follow_through_basis_points: NEUTRAL_FOLLOW_THROUGH_BASIS_POINTS,
+        }
+    }
+
+    // ── The ceiling ─────────────────────────────────────────────────────────
+    //
+    // The load penalty spread work between people who could take it. It was
+    // never a ceiling, and a solo act is its own social, visual and copy skill
+    // — so every task routed to one person and the penalty subtracted from a
+    // score that won anyway. The operator's word for the result was "flooded".
+
+    #[test]
+    fn a_buried_member_stops_receiving_work_even_with_nobody_to_hand_it_to() {
+        let need = TeamAssignmentNeed {
+            primary_skill: TeamSkill::Social,
+            secondary_skill: None,
+            allow_generalist: false,
+        };
+        let only_person = vec![member(
+            "solo",
+            vec![TeamSkill::Social],
+            MAX_OPEN_ASSIGNMENTS_PER_MEMBER,
+        )];
+        assert_eq!(
+            route_team_assignment(&only_person, need),
+            Err(TeamAssignmentRefusal::EveryoneAtCapacity {
+                lowest_open_assignments: MAX_OPEN_ASSIGNMENTS_PER_MEMBER,
+            }),
+            "the only capable person was at the ceiling and still got the task"
+        );
+
+        // One below the ceiling still takes it: the rule is a bound, not a
+        // discouragement, and an off-by-one here costs the crew a task's worth
+        // of capacity every week.
+        let with_room = vec![member(
+            "solo",
+            vec![TeamSkill::Social],
+            MAX_OPEN_ASSIGNMENTS_PER_MEMBER - 1,
+        )];
+        assert!(route_team_assignment(&with_room, need).is_ok());
+    }
+
+    #[test]
+    fn a_full_bench_reads_differently_from_an_empty_one() {
+        // These want opposite responses — one needs a skill widened, the other
+        // needs the work to wait — so a caller must be able to tell them apart.
+        let need = TeamAssignmentNeed {
+            primary_skill: TeamSkill::Social,
+            secondary_skill: None,
+            allow_generalist: false,
+        };
+        let wrong_skills = vec![member("visual-only", vec![TeamSkill::Visual], 0)];
+        assert_eq!(
+            route_team_assignment(&wrong_skills, need),
+            Err(TeamAssignmentRefusal::NobodyWithTheSkill)
+        );
+
+        let buried = vec![
+            member(
+                "a",
+                vec![TeamSkill::Social],
+                MAX_OPEN_ASSIGNMENTS_PER_MEMBER,
+            ),
+            member(
+                "b",
+                vec![TeamSkill::Social],
+                MAX_OPEN_ASSIGNMENTS_PER_MEMBER + 4,
+            ),
+        ];
+        assert_eq!(
+            route_team_assignment(&buried, need),
+            Err(TeamAssignmentRefusal::EveryoneAtCapacity {
+                // The least-buried person, so the operator hears how far off
+                // the crew is rather than only that it is off.
+                lowest_open_assignments: MAX_OPEN_ASSIGNMENTS_PER_MEMBER,
+            })
+        );
+    }
+
+    #[test]
+    fn a_member_with_room_wins_over_one_at_the_ceiling_regardless_of_skill_fit() {
+        // Capability normally beats availability by 3,000 points. The ceiling
+        // is not a penalty, so it outranks that: a specialist who cannot take
+        // the work is not a candidate at all.
+        let need = TeamAssignmentNeed {
+            primary_skill: TeamSkill::Social,
+            secondary_skill: None,
+            allow_generalist: true,
+        };
+        let members = vec![
+            member(
+                "buried-specialist",
+                vec![TeamSkill::Social],
+                MAX_OPEN_ASSIGNMENTS_PER_MEMBER,
+            ),
+            member("free-generalist", vec![TeamSkill::General], 0),
+        ];
+        let decision = route_team_assignment(&members, need).expect("somebody can take it");
+        assert_eq!(decision.member_key, "free-generalist");
+    }
+
+    #[test]
+    fn a_refusal_tells_the_operator_what_to_do_about_it() {
+        for refusal in [
+            TeamAssignmentRefusal::NobodyWithTheSkill,
+            TeamAssignmentRefusal::EveryoneAtCapacity {
+                lowest_open_assignments: 9,
+            },
+        ] {
+            let message = refusal.message();
+            assert!(message.len() > 40, "too terse: {message}");
+            assert!(
+                !message.contains("Err(") && !message.contains("None"),
+                "leaks Rust at the operator: {message}"
+            );
         }
     }
 

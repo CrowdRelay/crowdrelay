@@ -774,3 +774,176 @@ impl AutopilotActionPayload {
         }
     }
 }
+
+/// Roughly how long this takes, and what happens if nobody does it.
+///
+/// # Why this exists apart from the briefing itself
+///
+/// A briefing already says what the task is, why it matters and what the steps
+/// are. Somebody holding one task reads all of that. Somebody holding nine
+/// reads none of it, because with nine open tasks the question stops being
+/// "what is this" and becomes "which of these do I do now, and what breaks if
+/// I leave the rest until Thursday". Neither answer was anywhere in the
+/// system.
+///
+/// Both values are deliberately coarse. A per-variant table of minute
+/// estimates would be nine hundred lines of numbers nobody measured, and it
+/// would rot the first time a step changed. What a person needs is the band —
+/// two minutes, a quarter hour, or set aside real time — and an honest
+/// sentence about the cost of not doing it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TaskEffort {
+    /// Read something and press a button.
+    Quick,
+    /// Read carefully, maybe edit, then decide.
+    Considered,
+    /// Real work away from the screen: filming, writing, travelling.
+    SetAsideTime,
+}
+
+impl TaskEffort {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Quick => "quick",
+            Self::Considered => "considered",
+            Self::SetAsideTime => "set_aside_time",
+        }
+    }
+
+    /// The band in the crew's language, phrased as a range because a single
+    /// number would be a precision nobody measured.
+    #[must_use]
+    pub const fn describe(self, locale: crate::autopilot::BriefingLocale) -> &'static str {
+        use crate::autopilot::BriefingLocale::{En, Pl};
+        match (self, locale) {
+            (Self::Quick, En) => "about 2 minutes",
+            (Self::Quick, Pl) => "około 2 minut",
+            (Self::Considered, En) => "about 10–15 minutes",
+            (Self::Considered, Pl) => "około 10–15 minut",
+            (Self::SetAsideTime, En) => "set aside real time — an hour or more",
+            (Self::SetAsideTime, Pl) => "zarezerwuj czas — godzina lub więcej",
+        }
+    }
+}
+
+impl AutopilotActionPayload {
+    /// How much of somebody's day this asks for.
+    ///
+    /// Derived from what the action is rather than declared per variant.
+    /// Approvals over text somebody else drafted are quick; anything that
+    /// reaches a stranger deserves a careful read; anything that asks the band
+    /// to make something is real work.
+    #[must_use]
+    pub fn effort(&self) -> TaskEffort {
+        use crowdrelay_domain::action_class::ActionClass;
+        match self {
+            // The band has to produce something. No amount of tooling makes
+            // filming a video a ten-minute job, and pretending otherwise is
+            // how a plan ends up with a cadence nobody can hold.
+            Self::RequestContentArtifact { .. } | Self::PrepareFundingPackage { .. } => {
+                TaskEffort::SetAsideTime
+            }
+            _ => match self.action_class() {
+                // It reaches somebody outside, or it spends money. Read it
+                // properly: a sent message cannot be unsent.
+                ActionClass::ThirdParty | ActionClass::Paid | ActionClass::OwnedAudience => {
+                    TaskEffort::Considered
+                }
+                ActionClass::FirstPartyReversible => TaskEffort::Quick,
+            },
+        }
+    }
+
+    /// What happens if this is left undone.
+    ///
+    /// Written as a consequence rather than a severity label. "High priority"
+    /// tells a person nothing they can weigh against the other eight things on
+    /// their list; "the show is in four days and nobody outside the band knows"
+    /// does.
+    #[must_use]
+    pub fn if_skipped(&self, locale: crate::autopilot::BriefingLocale) -> String {
+        use crate::autopilot::BriefingLocale::{En, Pl};
+        use crowdrelay_domain::action_class::ActionClass;
+        match self.action_class() {
+            ActionClass::ThirdParty => match locale {
+                En => "Nothing reaches anybody. The opportunity passes quietly — there is no retry, because the moment it was timed for will have gone.".to_owned(),
+                Pl => "Nic do nikogo nie trafi. Okazja przejdzie bez śladu — nie ma ponowienia, bo moment, na który była wyliczona, minie.".to_owned(),
+            },
+            ActionClass::OwnedAudience => match locale {
+                En => "Your own fans hear nothing this time. They stay on the list, but the reason to stay gets thinner each time it happens.".to_owned(),
+                Pl => "Twoi fani tym razem nic nie usłyszą. Zostaną na liście, ale powód, żeby zostać, słabnie z każdym takim razem.".to_owned(),
+            },
+            ActionClass::Paid => match locale {
+                En => "Nothing is spent, which is safe. The budget simply goes unused for this window rather than carrying over.".to_owned(),
+                Pl => "Nic nie zostanie wydane, więc jest bezpiecznie. Budżet po prostu przepadnie w tym oknie, nie przechodzi dalej.".to_owned(),
+            },
+            ActionClass::FirstPartyReversible => match locale {
+                En => "Nothing breaks. This one can wait, and doing it later costs the same as doing it now.".to_owned(),
+                Pl => "Nic się nie stanie. To może poczekać — później kosztuje tyle samo co teraz.".to_owned(),
+            },
+        }
+    }
+}
+
+#[cfg(test)]
+mod effort_tests {
+    use super::*;
+    use crate::autopilot::BriefingLocale;
+
+    /// The whole point is telling a two-minute job apart from an afternoon.
+    /// A scale where everything lands in one band is a scale nobody can sort by.
+    #[test]
+    fn the_bands_are_actually_different() {
+        assert_ne!(TaskEffort::Quick, TaskEffort::SetAsideTime);
+        for locale in [BriefingLocale::En, BriefingLocale::Pl] {
+            let bands = [
+                TaskEffort::Quick.describe(locale),
+                TaskEffort::Considered.describe(locale),
+                TaskEffort::SetAsideTime.describe(locale),
+            ];
+            let mut unique = bands.to_vec();
+            unique.sort_unstable();
+            unique.dedup();
+            assert_eq!(unique.len(), 3, "two bands read the same in {locale:?}");
+            for band in bands {
+                assert!(!band.is_empty());
+            }
+        }
+    }
+
+    /// A consequence, in both languages, with no Rust in it.
+    #[test]
+    fn every_consequence_reads_as_a_sentence() {
+        let payload = AutopilotActionPayload::RequestSignalPush {
+            title: "New show".to_owned(),
+            body: "We play Friday".to_owned(),
+            task_id: uuid::Uuid::nil(),
+            target_path: None,
+            event_id: None,
+            segment: None,
+        };
+        for locale in [BriefingLocale::En, BriefingLocale::Pl] {
+            let sentence = payload.if_skipped(locale);
+            assert!(sentence.len() > 40, "too terse: {sentence}");
+            assert!(sentence.ends_with('.'), "not a sentence: {sentence}");
+            assert!(!sentence.contains("None") && !sentence.contains("Err("));
+        }
+    }
+
+    /// A push reaches real people who opted in, so it is never a two-minute
+    /// rubber stamp — that classification is the difference between reading a
+    /// message and skimming it.
+    #[test]
+    fn anything_that_reaches_a_person_is_never_quick() {
+        let payload = AutopilotActionPayload::RequestSignalPush {
+            title: "New show".to_owned(),
+            body: "We play Friday".to_owned(),
+            task_id: uuid::Uuid::nil(),
+            target_path: None,
+            event_id: None,
+            segment: None,
+        };
+        assert_ne!(payload.effort(), TaskEffort::Quick);
+    }
+}
