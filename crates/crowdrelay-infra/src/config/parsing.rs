@@ -437,6 +437,21 @@ pub(super) fn parse_optional_secret_hash(
     Ok(Some(Sha256::digest(value.as_bytes()).into()))
 }
 
+/// Derives the attestation signing key from the same configured secret.
+///
+/// Deliberately not its own environment variable. A deploy missing one more
+/// secret would fail closed in a way nobody notices until a buyer's verify link
+/// reports "not issued by CrowdRelay", and the two keys are already unrelated:
+/// each hashes the secret under its own domain separator, so recovering one
+/// from the other means inverting SHA-256.
+///
+/// Validation belongs to `parse_response_encryption_key`, which the caller runs
+/// against the same value and which rejects anything this would accept.
+fn derive_attestation_signing_key(value: Option<&String>) -> AttestationSigningKey {
+    let secret = value.map_or(LOCAL_RESPONSE_ENCRYPTION_SECRET, String::as_str);
+    AttestationSigningKey::derive_from_secret(secret.as_bytes())
+}
+
 fn parse_response_encryption_key(
     value: Option<&String>,
     production: bool,

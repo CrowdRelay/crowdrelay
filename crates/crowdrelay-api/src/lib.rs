@@ -61,6 +61,7 @@ mod acquisition;
 mod admission;
 mod area;
 mod area_admin;
+mod attestation;
 mod audience;
 mod audience_graph;
 mod autopilot;
@@ -179,6 +180,9 @@ pub struct AppState {
     pub(crate) tenant: tenant::TenantProfile,
     /// Encryption key for OAuth token storage (TikTok, future providers).
     pub(crate) response_encryption_key: SensitiveResponseKey,
+    /// Signing key for audience attestations. A document's signature is the
+    /// only part a stranger can check against us rather than against itself.
+    pub(crate) attestation_signing_key: crowdrelay_infra::attestation::AttestationSigningKey,
     /// Shared HTTP client for outbound OAuth token exchanges.
     pub(crate) http_client: reqwest::Client,
     /// Provider verifiers for connection creation probes.
@@ -214,6 +218,7 @@ impl AppState {
         push: push::PushPublicState,
         tenant: tenant::TenantProfile,
         response_encryption_key: SensitiveResponseKey,
+        attestation_signing_key: crowdrelay_infra::attestation::AttestationSigningKey,
         provider_verifiers: crowdrelay_infra::provider_verification::ProviderVerifiers,
     ) -> Self {
         let ecosystem = PostgresEcosystemRepository::new(database.clone());
@@ -249,6 +254,7 @@ impl AppState {
             push,
             tenant,
             response_encryption_key,
+            attestation_signing_key,
             http_client: reqwest::Client::new(),
             provider_verifiers,
             read_budget,

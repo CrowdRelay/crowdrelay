@@ -340,6 +340,34 @@ async fn run(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
         "an old share link still resolved after rotation"
     );
 
+    // ── Re-issuing an identical document un-revokes it. ─────────────────────
+    //
+    // A digest collides only when the same workspace issues the same figures
+    // inside the same second. That used to be `DO NOTHING`, so a band that
+    // revoked a link sent to the wrong person and immediately re-issued got
+    // their old token back, still pointing at the revoked row: they believed
+    // they had a fresh link, the recipient read "withdrawn by the act", and
+    // nothing anywhere said otherwise.
+    let reissued = repository
+        .issue_for_workspace(workspace, "Virya", &["wroclaw".to_owned()], now)
+        .await?;
+    assert_eq!(
+        reissued.digest, issued.digest,
+        "identical facts at the same instant should be the same document"
+    );
+    let after_reissue = repository.verify_digest(&issued.digest, now).await?;
+    assert!(
+        !after_reissue.revoked,
+        "re-issuing left the document withdrawn, so the band's new link was dead on arrival"
+    );
+    let reissued_token = repository
+        .share_token_for(workspace, &issued.digest)
+        .await?;
+    assert_ne!(
+        reissued_token, fresh,
+        "re-issue handed back the previous token, so a link the band meant to retire stayed live"
+    );
+
     // ── Expiry is read at the moment of asking, not baked in. ───────────────
     let later = now + time::Duration::days(31);
     let expired = repository.verify_digest(&issued.digest, later).await?;
