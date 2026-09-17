@@ -191,13 +191,10 @@ pub(in crate::autopilot) async fn mint_door_campaigns(
             FROM events event
             WHERE event.workspace_id = $1
               AND event.status = 'published'
-              -- The projection's own window starts two days back, and a
-              -- campaign minted for a night that far past would open and shut
-              -- before anybody read it: its window is starts_at−4h…+12h, so a
-              -- show more than twelve hours old mints a QR that is expired the
-              -- moment it exists. The backfill still reaches every show whose
-              -- door has not closed yet.
-              AND event.starts_at > $2 - INTERVAL '12 hours'
+              -- Not the projection's −2d floor: a show whose door window
+              -- has already closed gets a dead-on-arrival campaign, and the
+              -- API's own validation would refuse that insert anyway.
+              AND event.starts_at + INTERVAL '12 hours' > $2
               AND event.starts_at <= $2 + INTERVAL '60 days'
               AND NOT EXISTS (
                   SELECT 1
@@ -217,6 +214,49 @@ pub(in crate::autopilot) async fn mint_door_campaigns(
                    'source', 'show_projection'
                )
         FROM minted
+        "#,
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(now)
+    .execute(&mut **tx)
+    .await
+    .map_err(map_sqlx)?;
+
+    // A moved gig moves the door with it. The QR's signed token carries
+    // `valid_until`, so a show rescheduled after the mint leaves every
+    // printed code dead AND blocks re-mint (a row exists) — the exact dead
+    // scan leg the mint exists to prevent. Auto-minted rows are recognisable
+    // by their exact shape ('Door' label, all context fields unset); once a
+    // check-in lands the window is history rather than policy, so it stops
+    // following. An operator who PATCHes context onto the campaign breaks
+    // the shape match and owns the window from then on.
+    sqlx::query(
+        r#"
+        UPDATE concert_qr_campaigns campaign
+        SET valid_from = event.starts_at - INTERVAL '4 hours',
+            valid_until = event.starts_at + INTERVAL '12 hours'
+        FROM events event
+        WHERE event.workspace_id = $1
+          AND event.id = campaign.event_id
+          AND campaign.workspace_id = $1
+          AND event.status = 'published'
+          AND event.starts_at >= $2 - INTERVAL '2 days'
+          AND event.starts_at <= $2 + INTERVAL '60 days'
+          AND campaign.label = 'Door'
+          AND campaign.placement IS NULL
+          AND campaign.incentive IS NULL
+          AND campaign.max_checkins IS NULL
+          AND campaign.announced_from_stage = false
+          AND campaign.active
+          AND campaign.revoked_at IS NULL
+          AND (campaign.valid_from IS DISTINCT FROM event.starts_at - INTERVAL '4 hours'
+               OR campaign.valid_until IS DISTINCT FROM event.starts_at + INTERVAL '12 hours')
+          AND NOT EXISTS (
+              SELECT 1
+              FROM concert_checkins checkin
+              WHERE checkin.workspace_id = campaign.workspace_id
+                AND checkin.campaign_id = campaign.id
+          )
         "#,
     )
     .bind(workspace_id.into_uuid())

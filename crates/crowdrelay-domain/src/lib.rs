@@ -122,6 +122,7 @@ pub mod tour_economics;
 pub mod trace;
 pub mod value_tier;
 pub mod values;
+pub mod venue_evidence;
 pub mod venue_seed;
 pub mod worker_template;
 
