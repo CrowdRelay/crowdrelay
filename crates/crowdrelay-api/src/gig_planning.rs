@@ -19,12 +19,16 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use crowdrelay_application::IdempotencyKey;
-use crowdrelay_domain::gig_plan::{GigPlan, TenantIntent, plan_gig};
+use crowdrelay_domain::gig_plan::{GigPlan, GigRefusal, TenantIntent, plan_gig};
 use crowdrelay_domain::roster_plan::{RosterRefusal, RosterRun, plan_roster_run};
+use crowdrelay_domain::venue_seed::{self, ResearchSubject};
+use crowdrelay_infra::band_listing::PostgresBandListingRepository;
 use crowdrelay_infra::gig_outreach::{
     GigOutreachError, GigOutreachOutcome, approve_gig_proposal as approve_proposal,
 };
-use crowdrelay_infra::gig_planning::{city_opportunities, roster_opportunity, stated_intent};
+use crowdrelay_infra::gig_planning::{
+    city_opportunities, proposal_track_record, roster_opportunity, stated_intent,
+};
 use crowdrelay_infra::organization_settings::{
     KEY_ROSTER_PACKAGES_PER_PERIOD, OrganizationSettingsRepository, PACKAGES_PER_PERIOD_RANGE,
 };
@@ -74,14 +78,86 @@ fn resolve_intent(param: Option<&str>, stored: TenantIntent) -> TenantIntent {
 /// One city that produced no proposal, with the sentence explaining it.
 #[derive(Debug, Serialize)]
 struct PassedOver {
+    /// The catalogue slug — the key an approval names.
     city: String,
+    /// The name a person reads — "Wrocław", not "wroclaw".
+    city_name: String,
     reason: String,
+    /// When the refusal is something research can fix, the question to go and
+    /// answer — a prompt the operator pastes into whatever AI they already
+    /// use, whose answer lands back in the venues sheet (4G.6). Absent for
+    /// refusals research cannot change: "you said you are recording" is not a
+    /// missing fact.
+    research_brief: Option<String>,
+}
+
+/// The capacity band a room search should stay inside for this city.
+///
+/// A room bigger than the consented audience is a proposal built on strangers
+/// showing up; one under fifty is a pub night, not a gig. The band is the
+/// honest ceiling — nobody can sell more tickets than people who asked to
+/// hear about them. Rounded to fifties because the sheet's capacities are
+/// estimates and false precision reads as measured fact.
+fn capacity_band(reachable: u32) -> Option<(u32, u32)> {
+    if reachable == 0 {
+        return None;
+    }
+    let low = (reachable / 4).max(50) / 50 * 50;
+    let high = reachable.div_ceil(50) * 50;
+    Some((low, high.max(low)))
+}
+
+/// A proposal as the console reads it: the domain's plan plus the city's
+/// display name, flattened so the payload is the plan itself. `city` stays
+/// the catalogue slug — it is the key an approval names — while `city_name`
+/// is what the band reads.
+#[derive(Debug, Serialize)]
+struct ProposalView {
+    city_name: String,
+    #[serde(flatten)]
+    plan: GigPlan,
+}
+
+/// The same for a track-record entry.
+#[derive(Debug, Serialize)]
+struct OutcomeView {
+    city_name: String,
+    #[serde(flatten)]
+    outcome: crowdrelay_infra::gig_planning::ProposalOutcome,
+}
+
+#[derive(Debug, Serialize)]
+struct TrackRecordView {
+    proposals: Vec<OutcomeView>,
+    by_reason: Vec<crowdrelay_infra::gig_planning::ReasonScore>,
+}
+
+/// Every slug the response mentions, resolved to the catalogue's display
+/// names in one read. A slug with no catalogue row displays as itself —
+/// ugly, but honest, and it cannot happen for a slug the evidence read
+/// produced.
+async fn city_names(
+    pool: &sqlx::PgPool,
+    slugs: &[String],
+) -> Result<std::collections::HashMap<String, String>, sqlx::Error> {
+    sqlx::query_as::<_, (String, String)>("SELECT slug, name FROM cities WHERE slug = ANY($1)")
+        .bind(slugs)
+        .fetch_all(pool)
+        .await
+        .map(|rows| rows.into_iter().collect())
+}
+
+fn display_name<'a>(
+    names: &'a std::collections::HashMap<String, String>,
+    slug: &'a str,
+) -> &'a str {
+    names.get(slug).map_or(slug, String::as_str)
 }
 
 #[derive(Debug, Serialize)]
 struct BandPlanResponse {
     /// Ranked, strongest first, capped at `MAX_PROPOSALS`.
-    proposals: Vec<GigPlan>,
+    proposals: Vec<ProposalView>,
     /// Every city considered and not proposed. The band's own judgement often
     /// beats the bar, and they cannot apply it to a city they were never told
     /// about.
@@ -98,6 +174,11 @@ struct BandPlanResponse {
     /// query string. False for a one-off override, so the console never shows a
     /// preview as though it were the band's settled answer.
     intent_is_stored: bool,
+    /// What approved proposals actually produced, and which reasons were on
+    /// the ones that worked (4G.5). Read beside the new proposals: a reason
+    /// that has produced a show before deserves to be read differently from
+    /// one that has never been tested.
+    track_record: TrackRecordView,
 }
 
 /// `GET /v1/control-plane/gig-plan` — what this band should book next.
@@ -135,16 +216,71 @@ pub async fn band_gig_plan(
         }
     };
 
+    let track_record = match proposal_track_record(&state.database, workspace_id).await {
+        Ok(record) => record,
+        Err(error) => {
+            // The same rule as the evidence read above: the track record is
+            // part of the answer now — a console that renders proposals beside
+            // a silently-absent history would let the band believe nothing has
+            // ever been tried.
+            tracing::warn!(%error, "gig plan track record read failed");
+            return Problem::service_unavailable(request_id(&headers))
+                .private()
+                .into_response();
+        }
+    };
+
+    // The band's own word for what it plays — the research brief names the
+    // genre so the sheet that comes back is about rooms that book this band,
+    // not rooms in general. A band that never stated one gets a brief that
+    // leaves the genre to the operator rather than inventing it.
+    let genre = PostgresBandListingRepository::new(state.database.clone())
+        .load(workspace_id)
+        .await
+        .ok()
+        .flatten()
+        .map(|listing| listing.genre_tags.join(" / "))
+        .filter(|joined| !joined.is_empty());
+
     let considered = opportunities.len();
     let mut proposals = Vec::new();
     let mut passed_over = Vec::new();
     for opportunity in &opportunities {
         match plan_gig(opportunity, intent) {
             Ok(plan) => proposals.push(plan),
-            Err(refusal) => passed_over.push(PassedOver {
-                city: opportunity.city.clone(),
-                reason: refusal.message(),
-            }),
+            Err(refusal) => {
+                let subject = match &refusal {
+                    GigRefusal::NoRoomOnRecord => Some(ResearchSubject::Rooms),
+                    GigRefusal::NoContactableRoute { venue } => {
+                        Some(ResearchSubject::BookingContact {
+                            venue: venue.clone(),
+                        })
+                    }
+                    _ => None,
+                };
+                passed_over.push(PassedOver {
+                    city: opportunity.city.clone(),
+                    // Filled after the loop, when every slug the response
+                    // mentions is known and one lookup resolves them all.
+                    city_name: String::new(),
+                    reason: refusal.message(),
+                    research_brief: subject.map(|subject| {
+                        venue_seed::research_brief(
+                            &subject,
+                            &opportunity.city,
+                            genre.as_deref(),
+                            // The band sizing a room to its draw only matters
+                            // when the ask is "find rooms"; finding the booking
+                            // contact for a named room does not re-ask the
+                            // capacity question.
+                            match subject {
+                                ResearchSubject::Rooms => capacity_band(opportunity.reachable_fans),
+                                ResearchSubject::BookingContact { .. } => None,
+                            },
+                        )
+                    }),
+                });
+            }
         }
     }
 
@@ -169,14 +305,58 @@ pub async fn band_gig_plan(
     });
     proposals.truncate(MAX_PROPOSALS);
 
+    // One lookup resolves every slug the response mentions to its display
+    // name — the slug stays the key (it is what an approval names), the name
+    // is what a person reads.
+    let slugs: Vec<String> = proposals
+        .iter()
+        .map(|proposal| proposal.city.clone())
+        .chain(passed_over.iter().map(|entry| entry.city.clone()))
+        .chain(
+            track_record
+                .proposals
+                .iter()
+                .map(|outcome| outcome.city.clone()),
+        )
+        .collect();
+    let names = match city_names(&state.database, &slugs).await {
+        Ok(names) => names,
+        Err(error) => {
+            tracing::warn!(%error, "gig plan city-name read failed");
+            return Problem::service_unavailable(request_id(&headers))
+                .private()
+                .into_response();
+        }
+    };
+    for entry in &mut passed_over {
+        entry.city_name = display_name(&names, &entry.city).to_owned();
+    }
+
     (
         StatusCode::OK,
         Json(BandPlanResponse {
-            proposals,
+            proposals: proposals
+                .into_iter()
+                .map(|plan| ProposalView {
+                    city_name: display_name(&names, &plan.city).to_owned(),
+                    plan,
+                })
+                .collect(),
             passed_over,
             cities_considered: considered,
             intent: intent.as_str(),
             intent_is_stored: intent == stored,
+            track_record: TrackRecordView {
+                proposals: track_record
+                    .proposals
+                    .into_iter()
+                    .map(|outcome| OutcomeView {
+                        city_name: display_name(&names, &outcome.city).to_owned(),
+                        outcome,
+                    })
+                    .collect(),
+                by_reason: track_record.by_reason,
+            },
         }),
     )
         .into_response()

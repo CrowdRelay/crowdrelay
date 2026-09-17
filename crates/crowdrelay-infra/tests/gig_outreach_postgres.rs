@@ -264,6 +264,175 @@ async fn run(pool: &PgPool, url: &str) -> Result<(), Box<dyn std::error::Error>>
     Ok(())
 }
 
+/// 4G.5 — a settled proposal has its reasons scored.
+///
+/// The whole reason `Reason` is structured is that "which kind of evidence
+/// predicts a booking" is a question the system can answer about itself. This
+/// drives the chain the measurements travel: approve → the letter goes out →
+/// a promoter answers inside the window → a show lands on the calendar — and
+/// then asks the tally whether it saw what happened.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn a_settled_proposal_has_its_reasons_scored() -> Result<(), Box<dyn std::error::Error>> {
+    use crowdrelay_infra::gig_planning::proposal_track_record;
+
+    let database = DisposableDatabase::create().await?;
+    let pool = &database.pool;
+    let result = async {
+        let now = OffsetDateTime::now_utc();
+        let act = workspace(pool).await?;
+        let wroclaw = city(pool, "wroclaw").await?;
+        for index in 0..60 {
+            reachable_fan(pool, act, wroclaw, &format!("fan{index}@example.com")).await?;
+        }
+        played_show(pool, act, wroclaw, "Klub X", "show-1", 40).await?;
+        promoter(pool, act, wroclaw, "Anna", "anna@example.com", 70).await?;
+        let anna = sqlx::query_scalar::<_, Uuid>(
+            "SELECT id FROM viryaos_booking_targets
+             WHERE workspace_id = $1 AND contact_email = 'anna@example.com'",
+        )
+        .bind(act)
+        .fetch_one(pool)
+        .await?;
+
+        let key = IdempotencyKey::parse("gig-score-1").expect("valid key");
+        let GigOutreachOutcome::Queued { action_id, .. } =
+            approve_gig_proposal(pool, act, "wroclaw", &key, now).await?
+        else {
+            return Err("the proposal did not queue".into());
+        };
+
+        // Before the letter runs there is no track record to read — an
+        // unexecuted approval is a promise, not an outcome.
+        let record = proposal_track_record(pool, act).await?;
+        let proposal = record
+            .proposals
+            .iter()
+            .find(|entry| entry.city == "wroclaw")
+            .ok_or("the approved proposal is absent from its own track record")?;
+        assert!(
+            !proposal.is_settled(),
+            "a letter that never left must not score"
+        );
+        assert!(
+            record.by_reason.is_empty(),
+            "an unsettled proposal must not move the tallies"
+        );
+
+        // The letter leaves and Anna answers inside the week — the rows the
+        // measurement pipeline itself writes, driven the way it writes them.
+        // The ledger enforces the real transition chain, so the fixture walks
+        // it rather than teleporting the action to succeeded.
+        for status in ["processing", "succeeded"] {
+            sqlx::query(
+                "UPDATE viryaos_autopilot_actions
+                 SET status = $3, finished_at = $4
+                 WHERE workspace_id = $1 AND id = $2",
+            )
+            .bind(act)
+            .bind(action_id)
+            .bind(status)
+            .bind(now)
+            .execute(pool)
+            .await?;
+        }
+        let measurement_id = Uuid::now_v7();
+        sqlx::query(
+            "INSERT INTO viryaos_autopilot_measurements
+                (id, workspace_id, action_id, measurement_kind, subject_id,
+                 action_finished_at, baseline_value, due_at, status,
+                 available_at, started_at, finished_at)
+             VALUES ($1, $2, $3, 'booking_reply_7d', $4, $5, 0,
+                     $5 + interval '7 days', 'succeeded', $5, $5, $6)",
+        )
+        .bind(measurement_id)
+        .bind(act)
+        .bind(action_id)
+        .bind(anna)
+        .bind(now)
+        .bind(now + time::Duration::days(7))
+        .execute(pool)
+        .await?;
+        let decision_id = sqlx::query_scalar::<_, Uuid>(
+            "SELECT decision_id FROM viryaos_autopilot_actions
+             WHERE workspace_id = $1 AND id = $2",
+        )
+        .bind(act)
+        .bind(action_id)
+        .fetch_one(pool)
+        .await?;
+        sqlx::query(
+            "INSERT INTO viryaos_autopilot_outcomes
+                (workspace_id, decision_id, action_id, measurement_id,
+                 metric_key, observed_value, baseline_value,
+                 effect_assessment, delta_basis_points, observed_at)
+             VALUES ($1, $2, $3, $4, 'effect.booking_reply_7d', 1.0, 0,
+                     'improved', 10000, $5)",
+        )
+        .bind(act)
+        .bind(decision_id)
+        .bind(action_id)
+        .bind(measurement_id)
+        .bind(now + time::Duration::days(3))
+        .execute(pool)
+        .await?;
+
+        // And the band gets the show — the outcome the proposal was for.
+        sqlx::query(
+            "INSERT INTO events
+                (workspace_id, city_id, slug, title, venue, starts_at,
+                 status, published_at)
+             VALUES ($1, $2, 'the-gig', 'The Gig', 'Klub X',
+                     now() + interval '45 days', 'published', now())",
+        )
+        .bind(act)
+        .bind(wroclaw)
+        .execute(pool)
+        .await?;
+
+        let record = proposal_track_record(pool, act).await?;
+        let proposal = record
+            .proposals
+            .iter()
+            .find(|entry| entry.city == "wroclaw")
+            .ok_or("the settled proposal vanished from the track record")?;
+        assert!(proposal.is_settled(), "a finished window did not settle");
+        assert_eq!(proposal.replies, 1, "Anna's reply did not score");
+        assert!(
+            proposal.show_booked,
+            "the show the letter produced did not score"
+        );
+        assert!(
+            !proposal.reasons.is_empty(),
+            "the scored proposal lost the reasons it was approved on"
+        );
+
+        // Every reason the proposal carried is now a tally with a reply and a
+        // show against it — which is the answer "did the evidence hold".
+        for reason in &proposal.reasons {
+            let kind = serde_json::to_value(reason)
+                .expect("reason encodes")
+                .get("kind")
+                .and_then(|value| value.as_str())
+                .expect("a reason always has a kind")
+                .to_owned();
+            let score = record
+                .by_reason
+                .iter()
+                .find(|score| score.kind == kind)
+                .unwrap_or_else(|| panic!("reason {kind} was carried but never scored"));
+            assert_eq!(score.proposals, 1);
+            assert_eq!(score.replies, 1, "reason {kind} did not see the reply");
+            assert_eq!(score.shows, 1, "reason {kind} did not see the show");
+        }
+
+        Ok::<(), Box<dyn std::error::Error>>(())
+    }
+    .await;
+    database.drop_database().await;
+    result
+}
+
 fn repository(pool: &PgPool, url: &str) -> PostgresAutopilotRepository {
     PostgresAutopilotRepository::new(
         pool.clone(),

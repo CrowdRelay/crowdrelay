@@ -33,7 +33,7 @@ use sqlx::{PgPool, Row};
 use time::OffsetDateTime;
 use uuid::Uuid;
 
-use crate::place_reach::reachable_in_city;
+use crate::place_reach::{audience_overlaps, reachable_in_city};
 use crate::tenant_settings::TenantSettingsRepository;
 
 /// How many cities the planner considers in one pass.
@@ -448,7 +448,19 @@ pub async fn roster_opportunity(
     let mut cities: Vec<CityOpportunity> = Vec::new();
     let settings = TenantSettingsRepository::new(pool.clone());
 
-    for member in members {
+    // 4G.3b: what each pair of acts' audiences share, measured once for the
+    // whole organisation. `normalized_email` is the only cross-workspace
+    // identity, and only counts come back — a roster learns that two acts
+    // share 40% of an audience, never which people. A pair absent from the
+    // result has an empty side, which the planner reads as unmeasured rather
+    // than as separate.
+    let member_ids: Vec<Uuid> = members
+        .iter()
+        .map(|member| member.get::<Uuid, _>("id"))
+        .collect();
+    let overlaps = audience_overlaps(pool, &member_ids).await?;
+
+    for member in &members {
         let act_workspace: Uuid = member.get("id");
         let act_name: String = member.get("name");
         let per_city = city_opportunities(pool, act_workspace, now).await?;
@@ -467,6 +479,31 @@ pub async fn roster_opportunity(
             .filter_map(|city| city.months_since_show)
             .min();
 
+        let overlap_with = overlaps
+            .iter()
+            .filter(|overlap| {
+                overlap.workspace_a == act_workspace || overlap.workspace_b == act_workspace
+            })
+            .filter_map(|overlap| {
+                let other_workspace = if overlap.workspace_a == act_workspace {
+                    overlap.workspace_b
+                } else {
+                    overlap.workspace_a
+                };
+                let other_name = members
+                    .iter()
+                    .find(|member| member.get::<Uuid, _>("id") == other_workspace)
+                    .map(|member| member.get::<String, _>("name"))?;
+                // The share is of *this* act's audience: how much of what the
+                // support could bring is already the headliner's.
+                let basis_points = overlap.share_of(act_workspace)?;
+                Some(crowdrelay_domain::roster_plan::ActOverlap {
+                    other_act: other_name,
+                    overlap_basis_points: basis_points,
+                })
+            })
+            .collect();
+
         acts.push(RosterAct {
             name: act_name,
             // Each act's own word, read from its own workspace (4G.2). A label
@@ -476,11 +513,7 @@ pub async fn roster_opportunity(
             intent,
             months_since_last_show,
             reach_by_city,
-            // Cross-workspace overlap is 4G.3b. Empty means the planner will
-            // not pair acts at all, which is the safe direction: assuming two
-            // audiences are separate is the mistake the number exists to
-            // prevent.
-            overlap_with: Vec::new(),
+            overlap_with,
         });
 
         // One entry per city across the roster. The first act to surface a
@@ -504,6 +537,237 @@ pub async fn roster_opportunity(
         open_slots: Vec::new(),
         packages_this_period,
     })
+}
+
+// ── 4G.5: what an approved proposal actually produced ──────────────────────
+//
+// The reasons a proposal carries are structured precisely so they can be
+// scored: "a room that books our genre", "240 reachable people", "the booker
+// answered last time" are hypotheses, and the honest question is which of
+// them turned out to predict a reply or a show. That tally is computed here
+// rather than written beside the decision — the decision's `input_snapshot`
+// already holds the reasons verbatim, and a second store would be a second
+// truth the first time they disagree.
+
+/// One approved proposal and what came of it, newest first.
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct ProposalOutcome {
+    pub city: String,
+    pub venue: String,
+    pub approved_at: OffsetDateTime,
+    /// The action's own status — `queued` for a letter parked on a missing
+    /// executor, `succeeded` once the outreach actually ran. A score only
+    /// exists once the letter left.
+    pub action_status: String,
+    /// Promoters the letter went to.
+    pub recipients: u32,
+    /// Promoters who answered inside the seven-day window.
+    pub replies: u32,
+    /// Reply windows still open — a proposal with any of these is in flight
+    /// and does not score yet.
+    pub unfinished_measurements: u32,
+    /// A real show appeared in the city after the approval. The strongest
+    /// signal there is — and the one worth waiting for.
+    pub show_booked: bool,
+    /// The reasons the approved proposal carried, as they were stored.
+    pub reasons: Vec<crowdrelay_domain::gig_plan::Reason>,
+}
+
+impl ProposalOutcome {
+    /// Every reply window has closed and the letter genuinely left — the two
+    /// conditions under which "nobody answered" is a fact rather than a guess.
+    #[must_use]
+    pub fn is_settled(&self) -> bool {
+        self.action_status == "succeeded"
+            && self.recipients > 0
+            && self.unfinished_measurements == 0
+    }
+}
+
+/// The tally the learning question is asked with: of the settled proposals
+/// that carried this reason, how many produced a reply, and how many a show.
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct ReasonScore {
+    /// The `Reason` variant tag — the vocabulary the proposals were made in.
+    pub kind: &'static str,
+    /// Settled proposals that carried it.
+    pub proposals: u32,
+    /// Of those, how many got at least one promoter reply.
+    pub replies: u32,
+    /// Of those, how many produced a show in the city.
+    pub shows: u32,
+}
+
+/// What approved proposals have produced, and which reasons were on the ones
+/// that worked.
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct GigPlanTrackRecord {
+    /// Every approved proposal, newest first — including the in-flight ones,
+    /// because a letter parked on a missing executor is a fact too.
+    pub proposals: Vec<ProposalOutcome>,
+    /// Per reason kind, over settled proposals only.
+    pub by_reason: Vec<ReasonScore>,
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct ProposalOutcomeRow {
+    evaluated_at: OffsetDateTime,
+    city: Option<String>,
+    venue: Option<String>,
+    reasons: serde_json::Value,
+    action_status: String,
+    recipients: i64,
+    replies: i64,
+    unfinished: i64,
+    show_booked: bool,
+}
+
+/// Reads the decision → action → measurement → event chain for every
+/// band-approved proposal (4G.5).
+///
+/// A reply is an inbound booking interaction measured by `BookingReply7d`
+/// inside seven days; a show is a non-cancelled event in the proposal's city
+/// created after the approval. Neither attribution is stronger than that —
+/// a reply timed to the outreach is the promoter's answer, and a show that
+/// appeared after the band wrote is the outcome the proposal was for.
+///
+/// # Errors
+///
+/// Propagates the database error.
+pub async fn proposal_track_record(
+    pool: &PgPool,
+    workspace_id: Uuid,
+) -> Result<GigPlanTrackRecord, sqlx::Error> {
+    let rows = sqlx::query_as::<_, ProposalOutcomeRow>(
+        r#"
+        WITH proposals AS (
+            SELECT decision.id AS decision_id,
+                   decision.evaluated_at,
+                   decision.subject_id AS city_id,
+                   decision.input_snapshot ->> 'city' AS city,
+                   decision.input_snapshot ->> 'venue' AS venue,
+                   decision.input_snapshot -> 'reasons' AS reasons,
+                   action.id AS action_id,
+                   action.status AS action_status
+            FROM viryaos_autopilot_decisions AS decision
+            JOIN viryaos_autopilot_actions AS action
+              ON action.workspace_id = decision.workspace_id
+             AND action.decision_id = decision.id
+            WHERE decision.workspace_id = $1
+              AND decision.decision_kind = 'gig.proposal.approved'
+        ), reply_counts AS (
+            SELECT outcome.action_id,
+                   count(*)::bigint AS measured,
+                   count(*) FILTER (WHERE outcome.observed_value > 0)::bigint AS replies
+            FROM viryaos_autopilot_outcomes AS outcome
+            JOIN proposals ON proposals.action_id = outcome.action_id
+            WHERE outcome.workspace_id = $1
+              AND outcome.metric_key = 'effect.booking_reply_7d'
+            GROUP BY outcome.action_id
+        ), unfinished AS (
+            SELECT measurement.action_id, count(*)::bigint AS n
+            FROM viryaos_autopilot_measurements AS measurement
+            JOIN proposals ON proposals.action_id = measurement.action_id
+            WHERE measurement.workspace_id = $1
+              AND measurement.status IN ('pending', 'processing')
+            GROUP BY measurement.action_id
+        )
+        SELECT proposals.evaluated_at,
+               proposals.city,
+               proposals.venue,
+               proposals.reasons,
+               proposals.action_status,
+               COALESCE(reply_counts.measured, 0) AS recipients,
+               COALESCE(reply_counts.replies, 0) AS replies,
+               COALESCE(unfinished.n, 0) AS unfinished,
+               EXISTS (
+                   SELECT 1 FROM events AS event
+                   WHERE event.workspace_id = $1
+                     AND event.city_id = proposals.city_id
+                     AND event.created_at >= proposals.evaluated_at
+                     AND event.status IN ('published', 'completed')
+               ) AS show_booked
+        FROM proposals
+        LEFT JOIN reply_counts ON reply_counts.action_id = proposals.action_id
+        LEFT JOIN unfinished ON unfinished.action_id = proposals.action_id
+        ORDER BY proposals.evaluated_at DESC
+        "#,
+    )
+    .bind(workspace_id)
+    .fetch_all(pool)
+    .await?;
+
+    let mut proposals = Vec::with_capacity(rows.len());
+    for row in rows {
+        // The reasons were written by `queue_outreach` as the same structured
+        // values the console showed. A snapshot that does not decode is a bug
+        // on the write side; dropping it would silently unscored a proposal,
+        // so it surfaces as a database error instead.
+        let reasons: Vec<crowdrelay_domain::gig_plan::Reason> = serde_json::from_value(row.reasons)
+            .map_err(|error| sqlx::Error::Decode(Box::new(error).into()))?;
+        proposals.push(ProposalOutcome {
+            city: row.city.unwrap_or_default(),
+            venue: row.venue.unwrap_or_default(),
+            approved_at: row.evaluated_at,
+            action_status: row.action_status,
+            recipients: u32::try_from(row.recipients).unwrap_or(u32::MAX),
+            replies: u32::try_from(row.replies).unwrap_or(u32::MAX),
+            unfinished_measurements: u32::try_from(row.unfinished).unwrap_or(u32::MAX),
+            show_booked: row.show_booked,
+            reasons,
+        });
+    }
+
+    let mut by_reason_map: std::collections::BTreeMap<&'static str, ReasonScore> =
+        std::collections::BTreeMap::new();
+    for proposal in proposals.iter().filter(|proposal| proposal.is_settled()) {
+        for reason in &proposal.reasons {
+            let kind = reason_kind(reason);
+            let entry = by_reason_map.entry(kind).or_insert(ReasonScore {
+                kind,
+                proposals: 0,
+                replies: 0,
+                shows: 0,
+            });
+            entry.proposals += 1;
+            if proposal.replies > 0 {
+                entry.replies += 1;
+            }
+            if proposal.show_booked {
+                entry.shows += 1;
+            }
+        }
+    }
+    let mut by_reason: Vec<ReasonScore> = by_reason_map.into_values().collect();
+    // The reasons that have worked before come first — the whole point of the
+    // tally is that a track record should reorder what the band reads.
+    by_reason.sort_by(|left, right| {
+        right
+            .shows
+            .cmp(&left.shows)
+            .then_with(|| right.replies.cmp(&left.replies))
+            .then_with(|| left.kind.cmp(right.kind))
+    });
+
+    Ok(GigPlanTrackRecord {
+        proposals,
+        by_reason,
+    })
+}
+
+/// The variant tag, which is the vocabulary the tally speaks in.
+fn reason_kind(reason: &crowdrelay_domain::gig_plan::Reason) -> &'static str {
+    use crowdrelay_domain::gig_plan::Reason;
+    match reason {
+        Reason::ComparableActsPlayedHere { .. } => "comparable_acts_played_here",
+        Reason::ReachableAudience { .. } => "reachable_audience",
+        Reason::RoomDraws { .. } => "room_draws",
+        Reason::NeverPlayedButHasFans { .. } => "never_played_but_has_fans",
+        Reason::OverdueReturn { .. } => "overdue_return",
+        Reason::CoBillAddsAudience { .. } => "co_bill_adds_audience",
+        Reason::WarmPromoter { .. } => "warm_promoter",
+        Reason::RoomIsActive { .. } => "room_is_active",
+    }
 }
 
 #[cfg(test)]

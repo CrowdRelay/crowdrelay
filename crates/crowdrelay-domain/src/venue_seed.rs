@@ -43,6 +43,53 @@
 
 use serde::{Deserialize, Serialize};
 
+/// The sheet's column names, in header order.
+///
+/// The research brief (4G.6) tells the operator's tool to answer with exactly
+/// this header, and `parse_seed_row` reads through these same names — so a
+/// column the prompt asks for is always a column the intake reads, and a
+/// rename fails in a test rather than in somebody's Drive.
+pub mod columns {
+    pub const NAME: &str = "Name";
+    pub const CITY: &str = "City";
+    pub const COUNTRY: &str = "Country";
+    pub const ADDRESS: &str = "Address";
+    pub const WEBSITE: &str = "Website";
+    pub const AUDIENCE_GENRE: &str = "Audience_Genre";
+    pub const CAPACITY: &str = "Capacity";
+    pub const BOOKING_CONTACT: &str = "Booking_Contact";
+    pub const EMAIL: &str = "Email";
+    pub const PUBLIC_FINANCIAL_INFO: &str = "Public_Financial_Info";
+    pub const STATUS: &str = "Status";
+    pub const SOURCE_URL: &str = "Source_URL";
+    pub const RESEARCH_DATE: &str = "Research_Date";
+    pub const TARGET_FIT: &str = "Target_Fit";
+    pub const CONTACT_QUALITY: &str = "Contact_Quality";
+    pub const OUTREACH_ANGLE: &str = "Outreach_Angle";
+    pub const NOTES: &str = "Notes";
+
+    /// The header row, in the order the seed itself was written in.
+    pub const ALL: &[&str] = &[
+        NAME,
+        CITY,
+        COUNTRY,
+        ADDRESS,
+        WEBSITE,
+        AUDIENCE_GENRE,
+        CAPACITY,
+        BOOKING_CONTACT,
+        EMAIL,
+        PUBLIC_FINANCIAL_INFO,
+        STATUS,
+        SOURCE_URL,
+        RESEARCH_DATE,
+        TARGET_FIT,
+        CONTACT_QUALITY,
+        OUTREACH_ANGLE,
+        NOTES,
+    ];
+}
+
 /// What a public-terms search found, which is not the same as what the terms
 /// are.
 ///
@@ -202,17 +249,17 @@ pub type SeedRow<'a> = std::collections::BTreeMap<&'a str, &'a str>;
 pub fn parse_seed_row(row: &SeedRow<'_>) -> Result<SeededVenue, SeedRefusal> {
     let get = |key: &str| clean(row.get(key).copied());
 
-    let name = get("Name").ok_or(SeedRefusal::MissingName)?;
-    let city = get("City").ok_or(SeedRefusal::MissingCity)?;
-    let source_url = get("Source_URL").ok_or(SeedRefusal::MissingSource)?;
+    let name = get(columns::NAME).ok_or(SeedRefusal::MissingName)?;
+    let city = get(columns::CITY).ok_or(SeedRefusal::MissingCity)?;
+    let source_url = get(columns::SOURCE_URL).ok_or(SeedRefusal::MissingSource)?;
 
     // "Booking_Contact" is the column a researcher fills when the address is
     // specifically for booking; "Email" is whatever general address was found.
     // Prefer the booking one and fall back, because pitching a general inbox is
     // better than pitching nobody.
-    let booking_email = get("Booking_Contact").or_else(|| get("Email"));
+    let booking_email = get(columns::BOOKING_CONTACT).or_else(|| get(columns::EMAIL));
 
-    let closed = get("Status")
+    let closed = get(columns::STATUS)
         .map(|status| status.eq_ignore_ascii_case("closed"))
         .unwrap_or(false);
 
@@ -220,24 +267,97 @@ pub fn parse_seed_row(row: &SeedRow<'_>) -> Result<SeededVenue, SeedRefusal> {
         room: SeededRoom {
             name,
             city,
-            country: get("Country").unwrap_or_default(),
-            address: get("Address"),
-            website: get("Website"),
-            genre_tags: genre_tags(row.get("Audience_Genre").copied()),
-            capacity: capacity(row.get("Capacity").copied()),
+            country: get(columns::COUNTRY).unwrap_or_default(),
+            address: get(columns::ADDRESS),
+            website: get(columns::WEBSITE),
+            genre_tags: genre_tags(row.get(columns::AUDIENCE_GENRE).copied()),
+            capacity: capacity(row.get(columns::CAPACITY).copied()),
             booking_email,
-            public_terms: public_terms(row.get("Public_Financial_Info").copied()),
+            public_terms: public_terms(row.get(columns::PUBLIC_FINANCIAL_INFO).copied()),
             source_url,
-            researched_on: get("Research_Date"),
+            researched_on: get(columns::RESEARCH_DATE),
             closed,
         },
         view: SeededRoomView {
-            target_fit: get("Target_Fit"),
-            outreach_angle: get("Outreach_Angle"),
-            contact_quality: get("Contact_Quality"),
-            notes: get("Notes"),
+            target_fit: get(columns::TARGET_FIT),
+            outreach_angle: get(columns::OUTREACH_ANGLE),
+            contact_quality: get(columns::CONTACT_QUALITY),
+            notes: get(columns::NOTES),
         },
     })
+}
+
+/// What a gig-plan refusal can ask somebody to go and find (4G.6).
+///
+/// The operator already keeps research in Drive sheets and already pays for
+/// (or freely uses) an AI assistant. When the planner refuses for want of a
+/// room or a route, the honest next step is not "wait for the system to grow
+/// a researcher" — it is handing the operator a question that is already
+/// correctly specified, so the answer lands back through the intake without
+/// editing.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ResearchSubject {
+    /// No room on record in this city: go and find the rooms.
+    Rooms,
+    /// A room is on record but nobody who books it is reachable: go and find
+    /// the booking contact for *this* room, not rooms in general.
+    BookingContact { venue: String },
+}
+
+/// A prompt the operator can paste into whatever AI they already use.
+///
+/// The column list is rendered from [`columns::ALL`] — the same names the
+/// parser reads — so a sheet produced from this prompt parses without the
+/// operator editing it, which is the whole point of the delegation.
+///
+/// `genre` is the band's own word for what they play (the listing's
+/// `genre_tags`). `None` leaves the genre to the operator rather than
+/// inventing one, because a prompt that names a genre the band does not play
+/// returns a sheet of rooms that were never going to fit.
+///
+/// `capacity_range` bounds the search to rooms the band could plausibly fill.
+/// `None` asks without a range rather than guessing one.
+#[must_use]
+pub fn research_brief(
+    subject: &ResearchSubject,
+    city: &str,
+    genre: Option<&str>,
+    capacity_range: Option<(u32, u32)>,
+) -> String {
+    let genre_clause = match genre {
+        Some(genre) => format!(" that book {genre} acts"),
+        None => " that book acts in the band's genre".to_owned(),
+    };
+    let capacity_clause = match capacity_range {
+        Some((low, high)) if low == high => {
+            format!(" and hold roughly {low} people")
+        }
+        Some((low, high)) => format!(" and hold roughly {low}–{high} people"),
+        None => String::new(),
+    };
+    let ask = match subject {
+        ResearchSubject::Rooms => format!(
+            "Research live-music venues in {city}{genre_clause}{capacity_clause}. \
+             A room that has stopped programming is still useful — mark its Status \
+             \"Closed\" rather than dropping it, so it is not researched twice."
+        ),
+        ResearchSubject::BookingContact { venue } => format!(
+            "{venue} in {city} is the right room and we have no way to reach \
+             whoever books it. Find the booking contact — the address that \
+             books the room, not the general inbox — and the venue row for it."
+        ),
+    };
+    format!(
+        "{ask}\n\nReturn one row per venue with exactly this header:\n{header}\n\n\
+         Rules: Source_URL is required on every row — a room with no link is a \
+         rumour, and the intake will drop it. Booking_Contact only when the \
+         address is specifically for booking; use Email for a general address. \
+         Public_Financial_Info records what the venue publishes — write \"No \
+         public booking deal terms found in reviewed public source\" when \
+         nothing is published. Research_Date is today. Drop the result in the \
+         venues sheet in Drive and the intake reads it back.",
+        header = columns::ALL.join(", ")
+    )
 }
 
 #[cfg(test)]
@@ -412,6 +532,65 @@ mod tests {
                 "capacity {written:?}"
             );
         }
+    }
+
+    /// 4G.6's done-when: a refusal produces a prompt, and the sheet that comes
+    /// back parses without editing. The brief's header is the parser's column
+    /// list rendered, so the proof is mechanical — take the header line out of
+    /// the prompt verbatim and drive a row built on those names through the
+    /// parser.
+    #[test]
+    fn a_briefs_header_parses_without_editing() {
+        let brief = research_brief(
+            &ResearchSubject::Rooms,
+            "wroclaw",
+            Some("metal"),
+            Some((150, 600)),
+        );
+        assert!(brief.contains("wroclaw"));
+        assert!(brief.contains("metal"));
+        assert!(brief.contains("150–600"));
+
+        // The header line as the operator's tool would echo it back.
+        let header_line = brief
+            .lines()
+            .find(|line| line.contains("Source_URL"))
+            .expect("the brief carries the column header");
+        let names: Vec<&str> = header_line.split(',').map(str::trim).collect();
+        assert_eq!(names, columns::ALL, "the brief drifted from the parser");
+
+        let mut row = SeedRow::new();
+        for name in &names {
+            row.insert(*name, "x");
+        }
+        // The three columns the intake refuses without get real values; the
+        // rest prove only that the names resolve.
+        row.insert(columns::NAME, "Progresja");
+        row.insert(columns::CITY, "Warsaw");
+        row.insert(columns::SOURCE_URL, "https://example.com/p");
+        row.insert(columns::STATUS, "Active");
+        row.insert(columns::CAPACITY, "600");
+        let parsed = parse_seed_row(&row).expect("the brief's own sheet parses");
+        assert_eq!(parsed.room.name, "Progresja");
+    }
+
+    /// The other refusal shape: the room is known, the route is not. The
+    /// brief names the venue rather than asking for rooms in general.
+    #[test]
+    fn a_contact_refusal_asks_about_the_room_not_the_city() {
+        let brief = research_brief(
+            &ResearchSubject::BookingContact {
+                venue: "Klub X".to_owned(),
+            },
+            "wroclaw",
+            None,
+            None,
+        );
+        assert!(brief.contains("Klub X"));
+        assert!(brief.contains("booking contact"));
+        assert!(!brief.contains("venues in wroclaw"));
+        // No genre was stated and none is invented.
+        assert!(brief.contains("band's genre") || !brief.contains("genre"));
     }
 
     #[test]

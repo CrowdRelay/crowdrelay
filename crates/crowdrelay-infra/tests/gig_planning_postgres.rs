@@ -345,8 +345,126 @@ async fn run(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
 
     stated_intent_comes_from_the_act_that_stated_it(pool, act).await?;
     a_roster_capacity_is_stated_or_absent(pool).await?;
+    shared_fans_measure_overlap_without_naming_anybody(pool).await?;
 
     Ok(())
+}
+
+/// §4G.3b: two acts in one organisation share part of an audience, and the
+/// roster planner prices a co-bill by it.
+///
+/// The only identity that crosses a workspace is `normalized_email`, and the
+/// only thing that comes back is a count — the test asserts the shares, and
+/// the shape of the query is what keeps a list from ever being readable.
+async fn shared_fans_measure_overlap_without_naming_anybody(
+    pool: &PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use crowdrelay_infra::gig_planning::roster_opportunity;
+    use crowdrelay_infra::place_reach::audience_overlaps;
+
+    let label = organization(pool, "label-overlap").await?;
+    let head = org_workspace(pool, label, "headliner").await?;
+    let support = org_workspace(pool, label, "support").await?;
+    let city_id = city(pool, "poznan").await?;
+
+    // The headliner reaches four people; two of them also follow the support.
+    for index in 0..4 {
+        reachable_fan(pool, head, city_id, &format!("head{index}@example.com")).await?;
+    }
+    for index in 0..2 {
+        reachable_fan(pool, support, city_id, &format!("head{index}@example.com")).await?;
+    }
+    // And two the headliner does not reach at all.
+    for index in 0..2 {
+        reachable_fan(pool, support, city_id, &format!("own{index}@example.com")).await?;
+    }
+    // A fan who withdrew consent is not shared, whatever the email says.
+    let withdrawn = sqlx::query_scalar::<_, Uuid>(
+        "INSERT INTO fans (workspace_id, normalized_email, status)
+         VALUES ($1, 'gone@example.com', 'active') RETURNING id",
+    )
+    .bind(head)
+    .fetch_one(pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO fan_consents
+            (workspace_id, fan_id, purpose, granted, policy_version, source, recorded_at)
+         VALUES ($1, $2, 'marketing', false, 'v1', 'signup', now())",
+    )
+    .bind(head)
+    .bind(withdrawn)
+    .execute(pool)
+    .await?;
+    reachable_fan(pool, support, city_id, "gone@example.com").await?;
+
+    let overlaps = audience_overlaps(pool, &[head, support]).await?;
+    let pair = overlaps
+        .iter()
+        .find(|pair| {
+            (pair.workspace_a == head && pair.workspace_b == support)
+                || (pair.workspace_a == support && pair.workspace_b == head)
+        })
+        .ok_or("two acts sharing two fans produced no overlap row")?;
+    // Two of the headliner's four are shared: 5000bp. Two of the support's
+    // five are shared: 4000bp — the share is of the asked side's audience,
+    // and the two directions are different answers to different questions.
+    assert_eq!(
+        pair.shared, 2,
+        "a consent-withdrawn address counted as shared"
+    );
+    assert_eq!(pair.share_of(head), Some(5_000));
+    assert_eq!(pair.share_of(support), Some(4_000));
+
+    // The roster planner sees the same number the gate measured — keyed by the
+    // other act's name, which is the currency `ActOverlap` trades in.
+    let opportunity = roster_opportunity(pool, label, 2, OffsetDateTime::now_utc()).await?;
+    let headliner = opportunity
+        .acts
+        .iter()
+        .find(|act| act.name == "headliner")
+        .ok_or("the headliner was absent from its own roster read")?;
+    assert_eq!(
+        headliner.overlap_with_act("support"),
+        Some(5_000),
+        "the measured share did not reach the planner"
+    );
+
+    // Two acts that share *nobody* measure zero — a measured zero is the
+    // co-bill the planner should propose, because the audiences do not
+    // cannibalise. Only an act with no reachable audience at all is absent,
+    // and absent reads as unmeasured rather than as separate.
+    let stranger = org_workspace(pool, label, "stranger").await?;
+    let own = city(pool, "gdansk").await?;
+    reachable_fan(pool, stranger, own, "solo@example.com").await?;
+    let opportunity = roster_opportunity(pool, label, 2, OffsetDateTime::now_utc()).await?;
+    let stranger_act = opportunity
+        .acts
+        .iter()
+        .find(|act| act.name == "stranger")
+        .ok_or("a third act vanished from the roster read")?;
+    assert_eq!(
+        stranger_act.overlap_with_act("headliner"),
+        Some(0),
+        "two acts that were measured and share nobody did not report zero"
+    );
+
+    Ok(())
+}
+
+async fn org_workspace(
+    pool: &PgPool,
+    organization_id: Uuid,
+    name: &str,
+) -> Result<Uuid, Box<dyn std::error::Error>> {
+    let id = Uuid::now_v7();
+    sqlx::query("INSERT INTO workspaces (id, slug, name, organization_id) VALUES ($1, $2, $3, $4)")
+        .bind(id)
+        .bind(format!("ws-{}", id.simple()))
+        .bind(name)
+        .bind(organization_id)
+        .execute(pool)
+        .await?;
+    Ok(id)
 }
 
 /// §4G.2b: the roster's capacity is a stored organisation setting.
