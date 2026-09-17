@@ -19,6 +19,7 @@ use sqlx::postgres::PgConnectOptions;
 use thiserror::Error;
 use url::Url;
 
+use crate::attestation::AttestationSigningKey;
 use crate::sensitive_response::SensitiveResponseKey;
 
 mod click;
@@ -264,6 +265,9 @@ pub struct Config {
     pub team_operations: TeamOperationsConfig,
     /// Derived AEAD key for sensitive idempotency response replay.
     pub response_encryption_key: SensitiveResponseKey,
+    /// Derived HMAC key an audience attestation is signed under. Same
+    /// configured secret as the response key, different domain separator.
+    pub attestation_signing_key: AttestationSigningKey,
     /// Optional immediately preceding AEAD key used during bounded rotation.
     pub previous_response_encryption_key: Option<SensitiveResponseKey>,
     /// Requires inbox ownership confirmation before a fan becomes active.
@@ -452,6 +456,8 @@ impl Config {
             values.get(RESPONSE_ENCRYPTION_SECRET_KEY),
             environment.is_production(),
         )?;
+        let attestation_signing_key =
+            derive_attestation_signing_key(values.get(RESPONSE_ENCRYPTION_SECRET_KEY));
         let previous_response_encryption_key = parse_previous_response_encryption_key(
             values.get(PREVIOUS_RESPONSE_ENCRYPTION_SECRET_KEY),
             environment.is_production(),
@@ -498,6 +504,7 @@ impl Config {
             admission_security,
             team_operations,
             response_encryption_key,
+            attestation_signing_key,
             previous_response_encryption_key,
             require_double_opt_in,
             push_delivery: PushPublicConfig::parse(&values)?,

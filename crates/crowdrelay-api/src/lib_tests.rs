@@ -478,6 +478,9 @@ mod tests {
             crowdrelay_infra::sensitive_response::SensitiveResponseKey::derive_from_secret(
                 b"test-encryption-key",
             ),
+            crowdrelay_infra::attestation::AttestationSigningKey::derive_from_secret(
+                b"test-encryption-key",
+            ),
             crowdrelay_infra::provider_verification::ProviderVerifiers::new(
                 None,
                 None,

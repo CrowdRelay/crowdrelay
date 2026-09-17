@@ -291,6 +291,7 @@ async fn main() -> Result<()> {
             },
             tenant_profile,
             config.response_encryption_key.clone(),
+            config.attestation_signing_key.clone(),
             crowdrelay_infra::provider_verification::ProviderVerifiers::new(
                 config.youtube_api_key.clone(),
                 config.facebook_page_access_token.clone(),
