@@ -123,6 +123,7 @@ pub async fn set_growth_envelope(
     if request.expected_version <= 0
         || request.weekly_owned_audience_touches > 100_000
         || request.weekly_third_party_touches > 1_000
+        || request.daily_third_party_touches > 100
         || request.subject_cooldown_hours > 8_760
         || !(1..=100_000).contains(&request.max_recipients_per_step)
     {
@@ -144,6 +145,7 @@ pub async fn set_growth_envelope(
                 dry_run: request.dry_run,
                 weekly_owned_audience_touches: request.weekly_owned_audience_touches,
                 weekly_third_party_touches: request.weekly_third_party_touches,
+                daily_third_party_touches: request.daily_third_party_touches,
                 subject_cooldown_hours: request.subject_cooldown_hours,
                 max_recipients_per_step: request.max_recipients_per_step,
                 expected_version: request.expected_version,
@@ -441,6 +443,7 @@ pub async fn growth_envelope(State(state): State<AppState>, headers: HeaderMap) 
                     "dryRun": envelope.dry_run,
                     "weeklyOwnedAudienceTouches": envelope.weekly_owned_audience_touches,
                     "weeklyThirdPartyTouches": envelope.weekly_third_party_touches,
+                    "dailyThirdPartyTouches": envelope.daily_third_party_touches,
                     "subjectCooldownHours": envelope.subject_cooldown_hours,
                     "maxRecipientsPerStep": envelope.max_recipients_per_step,
                     "parked": envelope.parked,

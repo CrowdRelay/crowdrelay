@@ -166,12 +166,19 @@ pub trait AutopilotControlRepository: Send + Sync {
         request_id: Option<&crate::RequestId>,
     ) -> Result<AutopilotControlMutation, RepositoryError>;
 
+    /// Approves a parked action, optionally with an operator revision.
+    ///
+    /// `revision` maps draft fields to the operator's replacement text. The
+    /// domain rules in `draft_revision` decide what may change — words a
+    /// human reads, never recipients, costs, or routing — and a refused
+    /// revision refuses the approval rather than approving the original.
     async fn approve_action(
         &self,
         workspace_id: WorkspaceId,
         action_id: AutopilotActionId,
         idempotency_key: &crate::IdempotencyKey,
         request_id: Option<&crate::RequestId>,
+        revision: Option<&std::collections::BTreeMap<String, String>>,
     ) -> Result<AutopilotControlMutation, RepositoryError>;
 
     async fn cancel_action(

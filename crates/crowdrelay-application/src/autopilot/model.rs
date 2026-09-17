@@ -963,9 +963,6 @@ impl AutopilotActionPayload {
             // claim without asking the person who made it.
             | Self::VerifyPlaylistPlacement { .. }
             | Self::EscalateEditorialPitch { .. }
-            // An LLM draft materializes as a first-party campaign draft; the
-            // actual send is a separate, separately-approved action.
-            | Self::RequestAgentContent { .. }
             // A target promotion is an internal DB write (flipping a staging
             // row from proposed to promoted). It reaches nobody and is undone
             // by flipping the status back.
@@ -974,6 +971,23 @@ impl AutopilotActionPayload {
             // an agent_service_tasks row). It reaches nobody, costs nothing,
             // and is undone by deleting the task row.
             | Self::RequestAgentRun { .. } => ActionClass::FirstPartyReversible,
+
+            // A channel draft materializes inside the workspace; a draft with
+            // a recipient is the send itself — an email to a person outside
+            // it. A press pitch that classed itself first-party spent nothing
+            // from the outward budget and skipped the evidence gate, which is
+            // exactly the hole the gate exists to close.
+            Self::RequestAgentContent {
+                recipient_email,
+                recipient_target_id,
+                ..
+            } => {
+                if recipient_email.is_some() || recipient_target_id.is_some() {
+                    ActionClass::ThirdParty
+                } else {
+                    ActionClass::FirstPartyReversible
+                }
+            }
 
             // The step kind decides, not the play and not this table: the same
             // play may legitimately hold an owned-audience ask and a curator
@@ -985,21 +999,7 @@ impl AutopilotActionPayload {
             // for the whole variant would be wrong in both directions: it would
             // either gate a push to our own fans or let a press approach go out
             // unattended.
-            Self::RequestShowGrowth { lever, .. } => match lever {
-                ShowGrowthLever::PartnerCrossPromo
-                | ShowGrowthLever::GrassrootsSceneRelay
-                | ShowGrowthLever::SocialProofRelay => ActionClass::ThirdParty,
-                ShowGrowthLever::FanAmbassadors
-                | ShowGrowthLever::FreeFanChannelPush
-                | ShowGrowthLever::MerchBuyerOffer
-                | ShowGrowthLever::HighIntentLastMile
-                | ShowGrowthLever::PostShowMerchFollowUp
-                | ShowGrowthLever::PostShowRecap
-                | ShowGrowthLever::PostShowFollowAsk => ActionClass::OwnedAudience,
-                ShowGrowthLever::CanonicalLinkSetup
-                | ShowGrowthLever::FreeListingSweep
-                | ShowGrowthLever::AudienceCaptureSetup => ActionClass::FirstPartyReversible,
-            },
+            Self::RequestShowGrowth { lever, .. } => lever.action_class(),
             Self::ExecuteReleaseMilestone { milestone, .. } => match milestone {
                 ReleaseMilestone::StartPress => ActionClass::ThirdParty,
                 ReleaseMilestone::Announcement

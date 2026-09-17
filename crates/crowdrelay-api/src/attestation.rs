@@ -88,6 +88,12 @@ pub struct IssueRequest {
     pub cities: Vec<String>,
 }
 
+/// Each city costs the measurement one query, and each figure costs the
+/// reader one more line of a document that is supposed to stay readable. A
+/// request past this is not an attestation, it is a report — and reports are
+/// a different endpoint's job.
+const MAX_ISSUE_CITIES: usize = 32;
+
 /// The document plus the two things a tenant needs to act: where to send it,
 /// and what a reader will see if they check it.
 #[derive(Debug, Serialize)]
@@ -106,6 +112,11 @@ pub async fn issue_attestation(
     headers: HeaderMap,
     Json(request): Json<IssueRequest>,
 ) -> Response {
+    if request.cities.len() > MAX_ISSUE_CITIES {
+        return Problem::bad_request_because("cities holds at most 32 slugs", request_id(&headers))
+            .private()
+            .into_response();
+    }
     let workspace_id = state.ticketing.workspace_id().into_uuid();
     let act_name = state.tenant.display_name.clone();
     let repository = repo(&state);
@@ -151,6 +162,38 @@ pub async fn issue_attestation(
                 }),
             )
                 .into_response()
+        }
+        Err(error) => problem(&error, request_id(&headers)),
+    }
+}
+
+/// `GET /v1/control-plane/attestations` — the tenant's documents, newest
+/// first. Enough to manage them; the figures stay on the document itself.
+pub async fn list_attestations(
+    State(state): State<crate::AppState>,
+    headers: HeaderMap,
+) -> Response {
+    let workspace_id = state.ticketing.workspace_id().into_uuid();
+    match repo(&state).list_for_workspace(workspace_id).await {
+        Ok(rows) => {
+            let items: Vec<serde_json::Value> = rows
+                .iter()
+                .map(|row| {
+                    json!({
+                        "digest": row.digest,
+                        "share_token": row.share_token,
+                        "act_name": row.act_name,
+                        "issued_at": row.issued_at
+                            .format(&time::format_description::well_known::Rfc3339)
+                            .unwrap_or_default(),
+                        "valid_until": row.valid_until
+                            .format(&time::format_description::well_known::Rfc3339)
+                            .unwrap_or_default(),
+                        "revoked": row.revoked,
+                    })
+                })
+                .collect();
+            (StatusCode::OK, Json(items)).into_response()
         }
         Err(error) => problem(&error, request_id(&headers)),
     }

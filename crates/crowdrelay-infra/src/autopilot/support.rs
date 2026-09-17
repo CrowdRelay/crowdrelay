@@ -195,6 +195,10 @@ fn pending_action(
     // Discarding the serde error made that indistinguishable from a database
     // hiccup, so the shape mismatch stayed invisible while the action failed
     // on every retry.
+    // The editable surface rides on the raw payload — `revisable_fields`
+    // and `apply_revision` share the allowlist, so the modal and the gate
+    // can never disagree about which keys may be rewritten.
+    let revisable = crowdrelay_domain::draft_revision::revisable_fields(&row.payload);
     let payload: AutopilotActionPayload =
         serde_json::from_value(row.payload).map_err(|error| {
             tracing::warn!(
@@ -241,6 +245,7 @@ fn pending_action(
             _ => None,
         },
         assignment_due_at: row.assignment_due_at,
+        revisable,
     })
 }
 

@@ -128,7 +128,14 @@ class GrowthAutonomyContract(unittest.TestCase):
         block = self.model.split("pub const fn action_class(&self)", 1)[1].split(
             "pub const fn action_kind", 1
         )[0]
-        self.assertIn("ShowGrowthLever::PartnerCrossPromo", block)
+        # The per-lever classification lives on the lever itself so the emit
+        # site and the classifier cannot drift; the payload delegates.
+        self.assertIn("=> lever.action_class()", block)
+        lever = read(ROOT / "crates/crowdrelay-domain/src/show_growth.rs")
+        lever_block = lever.split("pub const fn action_class", 1)[1].split("\n    }", 1)[0]
+        # Inside the lever's own impl the arms are `Self::…`.
+        self.assertIn("Self::PartnerCrossPromo", lever_block)
+        self.assertIn("ActionClass::ThirdParty", lever_block)
         self.assertIn("ReleaseMilestone::StartPress", block)
         press = block.split("ReleaseMilestone::StartPress => ", 1)[1].split(",", 1)[0]
         self.assertEqual(press, "ActionClass::ThirdParty")

@@ -1340,13 +1340,16 @@ paths:
           $ref: '#/components/responses/Problem'
   /public/attestations/{token}:
     get:
-      operationId: getPublicAttestation
+      operationId: readAudienceAttestation
       summary: Read an audience attestation by share token
-      description: The share token is the whole credential — the same shape as a
-        published band listing. A correct token on a live attestation returns the
-        figures as issued plus a verification block, so the reader sees the document
-        and whether it still stands in one answer. A wrong, rotated or revoked token
-        is the same 404, so a reader cannot tell "never existed" from "withdrawn".
+      description: >
+        What a posted link opens: the document plus four independent checks —
+        `unedited` (the digest recomputed from the figures matches the stored
+        digest), `issued_by_us` (the signature is CrowdRelay's), `current`
+        (inside the validity window) and `revoked`. The four are never collapsed
+        into one flag: a document can be authentic and expired, or unedited and
+        forged, and a reader must be able to tell which. A revoked or expired
+        attestation still resolves and reports so.
       parameters:
       - in: path
         name: token
@@ -1356,55 +1359,49 @@ paths:
           format: uuid
       responses:
         '200':
-          description: The attestation and its current verification state.
+          description: The document and its verification.
           headers:
             Cache-Control:
-              schema:
-                type: string
-                example: public, max-age=60
-            X-Request-ID:
-              $ref: '#/components/headers/RequestId'
+              description: Short-lived — a revocation must show within about a minute.
+              schema: { type: string }
           content:
             application/json:
-              schema:
-                $ref: '#/components/schemas/AttestationReaderView'
+              schema: { $ref: '#/components/schemas/VerifiedAttestation' }
         '404':
-          $ref: '#/components/responses/PrivateProblem'
-        '503':
-          $ref: '#/components/responses/PrivateProblem'
+          description: No attestation carries this token — wrong, rotated, or never issued.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
   /public/attestations/verify/{digest}:
     get:
-      operationId: verifyPublicAttestation
-      summary: Verify an audience attestation by digest, no credential needed
-      description: Somebody holding a printed or forwarded document types the digest
-        and learns whether CrowdRelay issued it and whether it still stands. A wrong
-        or invented digest is a 404 — the honest answer is that there is no record of
-        that document. The digest is exactly 64 hexadecimal characters.
+      operationId: verifyAudienceAttestationDigest
+      summary: Verify an attestation by digest, no link required
+      description: >
+        The check a sceptical reader runs with nothing but a document in hand:
+        recompute its digest, look it up here, and read the same four flags the
+        link would have returned. A malformed digest is the same 404 as an
+        unknown one — the route is unauthenticated, so the cheapest rejection
+        is the one that never becomes a query.
       parameters:
       - in: path
         name: digest
         required: true
         schema:
           type: string
-          pattern: '^[0-9a-fA-F]{64}$'
+          pattern: '^[0-9a-f]{64}$'
       responses:
         '200':
-          description: The attestation and its verification verdict.
-          headers:
-            Cache-Control:
-              schema:
-                type: string
-                example: public, max-age=60
-            X-Request-ID:
-              $ref: '#/components/headers/RequestId'
+          description: The document and its verification.
           content:
             application/json:
-              schema:
-                $ref: '#/components/schemas/AttestationReaderView'
+              schema: { $ref: '#/components/schemas/VerifiedAttestation' }
         '404':
-          $ref: '#/components/responses/PrivateProblem'
-        '503':
-          $ref: '#/components/responses/PrivateProblem'
+          description: No attestation carries this digest, or the digest is malformed.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
   /public/synesthesia/runs:
     post:
       operationId: startSynesthesiaRun
@@ -4463,11 +4460,31 @@ paths:
     post:
       operationId: approveAutopilotAction
       summary: Approve one prepared Autopilot action
+      description: >
+        Approves the action as prepared, or with an operator revision. A
+        revision maps draft fields to replacement text; the editable field
+        names come from the pending action's `revisable` map, which the
+        approval gate and the client share. A refused revision refuses the
+        approval rather than approving the original words.
       security:
       - adminBearer: []
       parameters:
       - $ref: '#/components/parameters/AutopilotActionId'
       - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                revision:
+                  type: object
+                  additionalProperties: { type: string, maxLength: 4000 }
+                  description: >
+                    Field → corrected text. Only fields present in the
+                    action's `revisable` map may change.
       responses:
         '200':
           description: Action queued or idempotently replayed.
@@ -9830,93 +9847,6 @@ components:
           schema:
             $ref: '#/components/schemas/Problem'
   schemas:
-    AttestationReaderView:
-      type: object
-      additionalProperties: false
-      required: [act, issued_at, valid_until, digest, figures, verification]
-      properties:
-        act:
-          type: string
-          maxLength: 160
-        issued_at:
-          type: integer
-          description: Unix timestamp of issue.
-        valid_until:
-          type: integer
-          description: Unix timestamp after which the figures are out of date.
-        digest:
-          type: string
-          pattern: '^[0-9a-f]{64}$'
-        figures:
-          type: array
-          items:
-            type: object
-            additionalProperties: false
-            required: [metric, method, scope, value, reads_as, window_days, observed_at]
-            properties:
-              metric:
-                type: string
-                enum: [reachable_fans, active_fans, tickets_sold, observed_attendance, repeat_attenders, connected_followers]
-              method:
-                type: string
-                description: How the figure was counted, in reader terms.
-              scope:
-                type: object
-                additionalProperties: false
-                required: [kind]
-                properties:
-                  kind:
-                    type: string
-                    enum: [everywhere, city, event]
-                  value:
-                    type: string
-                    description: City name or event slug when kind is city or event.
-              value:
-                type: object
-                additionalProperties: false
-                required: [kind, value]
-                properties:
-                  kind:
-                    type: string
-                    enum: [exact, fewer_than]
-                  value:
-                    type: integer
-                    minimum: 0
-                    description: The figure itself when exact; an upper bound when fewer_than.
-              reads_as:
-                type: string
-                description: The value rendered for a person, e.g. "fewer than 12".
-              window_days:
-                type: integer
-                minimum: 0
-                description: Lookback the measurement used; 0 is a lifetime figure.
-              observed_at:
-                type: integer
-                description: Unix timestamp the measurement ran.
-        verification:
-          type: object
-          additionalProperties: false
-          required: [verdict, unedited, issued_by_us, current, revoked]
-          properties:
-            verdict:
-              type: string
-              enum:
-              - not issued by CrowdRelay
-              - issued by CrowdRelay, but edited since
-              - issued by CrowdRelay, then withdrawn by the act
-              - issued by CrowdRelay, unedited, but out of date
-              - issued by CrowdRelay, unedited, current
-            unedited:
-              type: boolean
-              description: The recomputed digest matches the stored digest.
-            issued_by_us:
-              type: boolean
-              description: The signature over the digest is CrowdRelay's.
-            current:
-              type: boolean
-              description: Inside the validity window at the moment of asking.
-            revoked:
-              type: boolean
     BeaconNetworkDiscoveryRun:
       type: object
       additionalProperties: false
@@ -10229,6 +10159,97 @@ components:
         dropId: { type: string }
         challenge: { type: string }
         samples: { type: array, minItems: 3, maxItems: 8, items: { $ref: '#/components/schemas/AreaPositionSample' } }
+    AttestedMetric:
+      type: string
+      enum: [reachable_fans, active_fans, tickets_sold, observed_attendance, repeat_attenders, connected_followers]
+      description: >
+        What the figure counts. Each metric carries its measurement method in
+        the document the reader receives — a number with a method is one the
+        reader can challenge, which is what makes it a proof.
+    AttestationFigureScope:
+      type: object
+      required: [kind]
+      properties:
+        kind:
+          type: string
+          enum: [everywhere, city, event]
+        value:
+          type: string
+          description: City name or event slug; absent when `kind` is `everywhere`.
+      description: What the figure covers — the whole audience, one city, or one show.
+    AttestationReaderFigure:
+      type: object
+      additionalProperties: false
+      required: [metric, method, scope, reads_as, window_days, observed_at]
+      properties:
+        metric: { $ref: '#/components/schemas/AttestedMetric' }
+        method:
+          type: string
+          description: >
+            How the number was produced, in the reader-facing sentence the
+            metric owns — the part a sceptical reader actually argues with.
+        scope: { $ref: '#/components/schemas/AttestationFigureScope' }
+        reads_as:
+          type: string
+          description: >
+            The figure as the reader receives it — "1,247", or "fewer than 10"
+            when the cohort is too small to name precisely. The sentence is
+            the value; a typed number is deliberately not sent.
+        window_days:
+          type: integer
+          format: int32
+          description: Lookback the measurement used; 0 means a lifetime figure.
+        observed_at:
+          type: integer
+          format: int64
+          description: Unix seconds — when the measurement ran, not when the document was issued.
+    VerifiedAttestation:
+      type: object
+      additionalProperties: false
+      required: [act, issued_at, valid_until, digest, figures, verification]
+      properties:
+        act: { type: string }
+        issued_at:
+          type: integer
+          format: int64
+          description: Unix seconds.
+        valid_until:
+          type: integer
+          format: int64
+          description: "Unix seconds. After this instant the document reports `current: false`."
+        digest:
+          type: string
+          pattern: '^[0-9a-f]{64}$'
+          description: >
+            Hex SHA-256 over the canonical document. Anyone holding the document
+            can recompute it — a figure edited after issue breaks the match.
+        figures:
+          type: array
+          items: { $ref: '#/components/schemas/AttestationReaderFigure' }
+          description: Sorted deterministically at issue time so the digest is recomputable.
+        verification:
+          type: object
+          additionalProperties: false
+          required: [verdict, unedited, issued_by_us, current, revoked]
+          properties:
+            verdict:
+              type: string
+              description: >
+                The four flags read aloud — e.g. "issued by CrowdRelay,
+                unedited, current". Never a bare boolean.
+            unedited:
+              type: boolean
+              description: The digest recomputed from the figures matches the stored digest.
+            issued_by_us:
+              type: boolean
+              description: The signature over the digest is CrowdRelay's.
+            current:
+              type: boolean
+              description: Inside the validity window at the moment of asking.
+            revoked:
+              type: boolean
+              description: Withdrawn by the act. The document still resolves and says so.
+
     MerchCatalog:
       type: object
       additionalProperties: false
@@ -11020,6 +11041,11 @@ components:
         # `awaiting_executor`. A client that presents such an item as ordinary
         # work is promising an outcome the system cannot deliver.
         executor_ready: { type: boolean }
+        # The payload fields an operator may edit on approve, with their
+        # current text. Empty when the draft carries no revisable text.
+        revisable:
+          type: object
+          additionalProperties: { type: string }
     RecentAutopilotDecision:
       type: object
       additionalProperties: false
@@ -11406,7 +11432,7 @@ components:
     GrowthEnvelopeRequest:
       type: object
       additionalProperties: false
-      required: [agent_enabled, dry_run, weekly_owned_audience_touches, weekly_third_party_touches, subject_cooldown_hours, max_recipients_per_step, expected_version]
+      required: [agent_enabled, dry_run, weekly_owned_audience_touches, weekly_third_party_touches, daily_third_party_touches, subject_cooldown_hours, max_recipients_per_step, expected_version]
       properties:
         # The kill switch.
         agent_enabled: { type: boolean }
@@ -11414,6 +11440,9 @@ components:
         dry_run: { type: boolean }
         weekly_owned_audience_touches: { type: integer, minimum: 0, maximum: 100000 }
         weekly_third_party_touches: { type: integer, minimum: 0, maximum: 1000 }
+        # Third-party approaches inside a rolling day — the ceiling atop the
+        # per-subject cooldown.
+        daily_third_party_touches: { type: integer, minimum: 0, maximum: 100 }
         subject_cooldown_hours: { type: integer, minimum: 0, maximum: 8760 }
         max_recipients_per_step: { type: integer, minimum: 1, maximum: 100000 }
         expected_version: { type: integer, format: int64, minimum: 1 }
@@ -12370,12 +12399,33 @@ components:
     AutopilotChiefOfStaff:
       type: object
       additionalProperties: false
-      required: [executed_24h, failed_24h, needs_you, estimated_minutes_saved_24h, measured_improved_7d, measured_neutral_7d, measured_worsened_7d, attention_items, top_opportunities, show_tasks, acted_alone_24h, about_to_act, parked_for_approval, stopped, moved, objectives_at_risk]
+      required: [executed_24h, failed_24h, needs_you, estimated_minutes_saved_24h, estimated_minutes_basis, median_assignment_turnaround_minutes_7d, assignments_completed_7d, measured_improved_7d, measured_neutral_7d, measured_worsened_7d, attention_items, top_opportunities, show_tasks, acted_alone_24h, about_to_act, parked_for_approval, stopped, moved, objectives_at_risk]
       properties:
         executed_24h: { type: integer, format: int64, minimum: 0 }
         failed_24h: { type: integer, format: int64, minimum: 0 }
         needs_you: { type: integer, format: int64, minimum: 0 }
-        estimated_minutes_saved_24h: { type: integer, format: int64, minimum: 0 }
+        estimated_minutes_saved_24h:
+          description: An estimate from flat per-action-kind assumptions, not a measurement — `estimated_minutes_basis` states the assumption and travels with the number.
+          type: integer
+          format: int64
+          minimum: 0
+        estimated_minutes_basis:
+          description: The assumption behind `estimated_minutes_saved_24h`, stated where the number travels.
+          type: string
+        median_assignment_turnaround_minutes_7d:
+          description: >
+            Measured turnaround — median minutes from assigned_at to completed_at for team
+            assignments completed in the last 7 days. Null when nothing completed; never
+            read 0 into it.
+          type: integer
+          format: int64
+          minimum: 0
+          nullable: true
+        assignments_completed_7d:
+          description: How many completions the median covers — the n before reading a trend into it.
+          type: integer
+          format: int64
+          minimum: 0
         measured_improved_7d: { type: integer, format: int64, minimum: 0 }
         measured_neutral_7d: { type: integer, format: int64, minimum: 0 }
         measured_worsened_7d: { type: integer, format: int64, minimum: 0 }

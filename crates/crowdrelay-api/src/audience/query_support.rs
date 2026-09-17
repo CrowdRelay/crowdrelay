@@ -350,6 +350,26 @@ async fn ensure_recipient_snapshot(
         return Ok(true);
     }
 
+    // The growth envelope's per-step recipient bound is the operator's
+    // blast-radius dial: it clamps the snapshotted fan set, not just the
+    // reported count. An absent envelope row reads as the domain default —
+    // never as "no bound".
+    let recipient_bound = sqlx::query_scalar::<_, i32>(
+        "SELECT max_recipients_per_step FROM viryaos_growth_envelope WHERE workspace_id = $1",
+    )
+    .bind(workspace_id)
+    .fetch_optional(&mut *transaction)
+    .await?
+    .map_or_else(
+        || {
+            i64::from(
+                crowdrelay_domain::growth_envelope::GrowthEnvelope::default()
+                    .max_recipients_per_step,
+            )
+        },
+        |bound| i64::from(bound.max(1)),
+    );
+
     let sql = format!(
         r#"
         INSERT INTO communication_campaign_recipients (workspace_id, campaign_id, fan_id)
@@ -373,6 +393,8 @@ async fn ensure_recipient_snapshot(
                     LIMIT 1
                 )
           ))
+        ORDER BY fan.id
+        LIMIT $16
         ON CONFLICT (workspace_id, campaign_id, fan_id) DO NOTHING
         "#,
         segment_predicate()
@@ -393,6 +415,7 @@ async fn ensure_recipient_snapshot(
         .bind(&filter.excluded_campaign_slugs)
         .bind(campaign_id)
         .bind(require_marketing)
+        .bind(recipient_bound)
         .execute(&mut *transaction)
         .await?;
 

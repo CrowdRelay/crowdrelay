@@ -722,46 +722,56 @@ fn outreach_candidate(
     }))
 }
 
-fn content_candidate(
+/// One supply snapshot can owe several actions: the artifact the chain is
+/// missing, and — for a synced band post — the relays that carry it. The
+/// artifact request is unchanged; the relay is the addition (2.11), and it is
+/// a *carry*, not a draft: title, caption and link arrive verbatim.
+fn content_candidates(
     snapshot: &ContentSupplySnapshot,
     policy: &AutopilotPolicy,
+    communities: &[CommunityRelayTarget],
     now: OffsetDateTime,
-) -> Result<Option<DecisionCandidate>, serde_json::Error> {
+) -> Result<Vec<DecisionCandidate>, serde_json::Error> {
     let AutopilotPolicyConfig::ContentSupply(domain_policy) = &policy.config else {
-        return Ok(None);
+        return Ok(Vec::new());
     };
-    let ContentSupplyDecision::Request {
-        artifact,
-        confidence,
-    } = evaluate_content_supply(snapshot, *domain_policy, now)
-    else {
-        return Ok(None);
-    };
-    let disposition = disposition(policy.autonomy_level, confidence, policy.minimum_confidence);
-    Ok(Some(DecisionCandidate {
-        context: policy.context,
-        subject: ActionSubject::ContentSource(snapshot.source_id),
-        decision_kind: "request_content_artifact",
-        confidence,
-        disposition,
-        reason: "trusted source is missing one required deterministic content artifact",
-        input_snapshot: serde_json::to_value(snapshot)?,
-        policy_snapshot: policy_evidence(policy, domain_policy)?,
-        action: AutopilotActionPayload::RequestContentArtifact {
-            source_id: snapshot.source_id,
-            source_version: snapshot.source_version,
+    match evaluate_content_supply(snapshot, *domain_policy, now) {
+        ContentSupplyDecision::Request {
             artifact,
-            template_key: artifact.template_key().to_owned(),
-        },
-        decision_key: format!(
-            "decision:content:v{}:{}:sv{}:{:?}",
-            policy.version, snapshot.source_id, snapshot.source_version, artifact
-        ),
-        action_idempotency_key: format!(
-            "action:content:{}:sv{}:{:?}",
-            snapshot.source_id, snapshot.source_version, artifact
-        ),
-    }))
+            confidence,
+        } => {
+            let disposition =
+                disposition(policy.autonomy_level, confidence, policy.minimum_confidence);
+            Ok(vec![DecisionCandidate {
+                context: policy.context,
+                subject: ActionSubject::ContentSource(snapshot.source_id),
+                decision_kind: "request_content_artifact",
+                confidence,
+                disposition,
+                reason: "trusted source is missing one required deterministic content artifact",
+                input_snapshot: serde_json::to_value(snapshot)?,
+                policy_snapshot: policy_evidence(policy, domain_policy)?,
+                action: AutopilotActionPayload::RequestContentArtifact {
+                    source_id: snapshot.source_id,
+                    source_version: snapshot.source_version,
+                    artifact,
+                    template_key: artifact.template_key().to_owned(),
+                },
+                decision_key: format!(
+                    "decision:content:v{}:{}:sv{}:{:?}",
+                    policy.version, snapshot.source_id, snapshot.source_version, artifact
+                ),
+                action_idempotency_key: format!(
+                    "action:content:{}:sv{}:{:?}",
+                    snapshot.source_id, snapshot.source_version, artifact
+                ),
+            }])
+        }
+        ContentSupplyDecision::Relay { confidence } => {
+            Ok(relay_candidates(snapshot, policy, domain_policy, communities, confidence)?)
+        }
+        ContentSupplyDecision::Hold(_) => Ok(Vec::new()),
+    }
 }
 
 fn experiment_candidate(

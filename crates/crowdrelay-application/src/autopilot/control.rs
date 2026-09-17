@@ -143,6 +143,12 @@ pub struct PendingAutopilotAction {
     /// being approved. Generated from the payload so the frontend modal
     /// and the team email share a single source of truth.
     pub briefing: ActionBriefing,
+    /// The payload fields an operator may edit on approve, with their
+    /// current text — `draft_revision::revisable_fields` is the single
+    /// definition, so the modal and the gate can never disagree about
+    /// what is editable. Empty when the draft carries no revisable text.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub revisable: std::collections::BTreeMap<String, String>,
 }
 
 /// Compact immutable decision trail shown in the operator cockpit.
@@ -276,6 +282,39 @@ pub struct ContentPipeline {
     /// `content_source_id` → title for every source a pending payload cites,
     /// so the page can say what a draft is built from without a second fetch.
     pub source_titles: std::collections::BTreeMap<String, String>,
+    /// The §4d-3.2 voice signal: how far operator edits on approve moved the
+    /// machine's words. `None` until the first revised approval — a queue
+    /// with no edits has no signal, and a 0 would lie that the machine
+    /// writes perfectly.
+    pub revision_trend: Option<RevisionTrend>,
+}
+
+/// How the band's edits to drafts are trending — the only honest measure of
+/// whether voice-matching is working. Distance should fall over time; when it
+/// does not, the machine's words keep needing the same human fix.
+#[derive(Clone, Debug, Serialize)]
+pub struct RevisionTrend {
+    /// Edited fields in the last 30 days — the n any reading of the trend
+    /// must respect before it is a trend at all.
+    pub revised_fields_30d: i64,
+    /// Actions approved with an edit in the same window.
+    pub revised_actions_30d: i64,
+    /// Mean changed characters per edited field over the window.
+    pub avg_distance_chars_30d: i64,
+    /// Per-week buckets, oldest first — direction matters more than any
+    /// single number, and the panel draws this without another query.
+    pub weekly: Vec<RevisionTrendWeek>,
+}
+
+/// One week of revision signal.
+#[derive(Clone, Debug, Serialize)]
+pub struct RevisionTrendWeek {
+    /// Monday of the week, `YYYY-MM-DD`.
+    pub week_start: String,
+    /// Fields edited that week.
+    pub revised_fields: i64,
+    /// Mean changed characters per field that week.
+    pub avg_distance_chars: i64,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -519,7 +558,21 @@ pub struct AutopilotChiefOfStaff {
     pub executed_24h: i64,
     pub failed_24h: i64,
     pub needs_you: i64,
+    /// An estimate, not a measurement: a flat per-action-kind guess at how
+    /// long the work would have taken a person. `estimated_minutes_basis`
+    /// carries the assumption so no surface can present it as measured.
     pub estimated_minutes_saved_24h: i64,
+    /// The assumption behind `estimated_minutes_saved_24h`, stated where the
+    /// number travels — per-kind minutes, not observed work.
+    pub estimated_minutes_basis: &'static str,
+    /// Measured turnaround: median minutes from `assigned_at` to
+    /// `completed_at` for assignments completed in the last 7 days. `None`
+    /// when nothing completed — a turnaround nobody finished has no median,
+    /// and 0 would read as instant work.
+    pub median_assignment_turnaround_minutes_7d: Option<i64>,
+    /// How many completions the median covers — the n to check before
+    /// reading a trend into it.
+    pub assignments_completed_7d: i64,
     pub measured_improved_7d: i64,
     pub measured_neutral_7d: i64,
     pub measured_worsened_7d: i64,
@@ -580,6 +633,9 @@ pub struct SetGrowthEnvelope {
     pub dry_run: bool,
     pub weekly_owned_audience_touches: u32,
     pub weekly_third_party_touches: u32,
+    /// Third-party approaches allowed inside a rolling day — the volume wall
+    /// behind the per-subject cooldown (2.4).
+    pub daily_third_party_touches: u32,
     pub subject_cooldown_hours: u32,
     pub max_recipients_per_step: u32,
     pub expected_version: i64,

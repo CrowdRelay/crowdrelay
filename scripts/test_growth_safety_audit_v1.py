@@ -129,6 +129,7 @@ class GrowthSafetyAudit(unittest.TestCase):
                 "dry_run",
                 "weekly_budget_exhausted",
                 "subject_in_cooldown",
+                "daily_budget_exhausted",
             },
         )
 

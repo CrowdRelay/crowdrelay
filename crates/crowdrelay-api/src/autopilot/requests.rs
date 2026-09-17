@@ -27,6 +27,19 @@ pub struct AssignActionRequest {
     member_key: String,
 }
 
+/// Approve a parked action, optionally with the operator's corrected words.
+///
+/// `revision` maps draft fields to replacement text. Which fields may be
+/// revised is `draft_revision::REVISABLE_FIELDS` — the pending action's
+/// `revisable` map is the same definition, so a client renders the editable
+/// surface rather than guessing. An absent or empty body approves as before.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ApproveActionRequest {
+    #[serde(default)]
+    pub revision: Option<std::collections::BTreeMap<String, String>>,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AuthorityRequest {
@@ -42,6 +55,10 @@ pub struct AuthorityRequest {
     config: Option<serde_json::Value>,
 }
 
+const fn default_daily_third_party_touches() -> u32 {
+    3
+}
+
 /// Whole-envelope write. Every field required: a partial update of a limit set
 /// is how one ceiling gets widened while another is believed tightened.
 #[derive(Debug, Deserialize)]
@@ -51,6 +68,10 @@ pub struct GrowthEnvelopeRequest {
     pub(super) dry_run: bool,
     pub(super) weekly_owned_audience_touches: u32,
     pub(super) weekly_third_party_touches: u32,
+    /// Defaults rather than required: a caller that predates the field gets
+    /// the safe default instead of a 400 on a limit it never saw.
+    #[serde(default = "default_daily_third_party_touches")]
+    pub(super) daily_third_party_touches: u32,
     pub(super) subject_cooldown_hours: u32,
     pub(super) max_recipients_per_step: u32,
     pub(super) expected_version: i64,

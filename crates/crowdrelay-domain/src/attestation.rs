@@ -173,8 +173,9 @@ impl AttestedMetric {
                  not counted."
             }
             Self::TicketsSold => {
-                "Ticket orders that were paid for, counted from the order ledger. Refunded \
-                 orders are excluded; partially refunded orders are counted once."
+                "Tickets sold across paid orders, counted from the order ledger — one \
+                 order can carry several tickets. Fully refunded orders are excluded; \
+                 partially refunded orders still count."
             }
             Self::ObservedAttendance => {
                 "Distinct people scanned at the door — somebody scanned twice is one \

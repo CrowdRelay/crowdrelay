@@ -118,6 +118,13 @@ impl AutopilotDecisionRepository for PostgresAutopilotRepository {
             .await
     }
 
+    async fn load_relay_community_targets(
+        &self,
+        workspace_id: WorkspaceId,
+    ) -> Result<Vec<CommunityRelayTarget>, RepositoryError> {
+        operations::load_relay_community_targets(self, workspace_id).await
+    }
+
     async fn load_experiment_snapshots(
         &self,
         workspace_id: WorkspaceId,

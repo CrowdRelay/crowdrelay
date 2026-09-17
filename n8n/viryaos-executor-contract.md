@@ -129,6 +129,8 @@ Until a handler exists, answering `2xx` and dropping the event is worse than the
 
 An n8n executor that handles pitches must therefore register `agent.content.press_pitch` in its heartbeat capabilities. Registering it unparks the queue with no change in CrowdRelay — and registering it before the handler works is the one thing not to do, because that resumes emission to a consumer that will refuse it. Channel templates are unaffected and keep flowing through `agent.content`.
 
+`examples/autopilot-press-pitch-executor.example.json` is the handler. It claims once with `capabilities:['agent.content.press_pitch']`, refuses any event that arrived without `send_evidence` (that would mean the dispatch gate was bypassed upstream), sends exactly one Gmail send to `recipient_email` with `replyTo` set to `VIRYA_PRESS_REPLY_TO` (falling back to `VIRYA_OUTREACH_FROM_EMAIL`) so replies land on the monitored inbox the reply monitor already watches, and reports a `press_pitch:{action_id}:email` receipt carrying the send's `send_evidence` in metadata so the trace keeps the provenance the gate demanded.
+
 ## Provider execution claims
 
 Before Gmail, Discord, Drive, or another provider call without a trustworthy request-idempotency primitive, POST `/v1/internal/autopilot/actions/{action_id}/execution-claim`. Only `claimed` may call the provider. `already_succeeded` is a no-op replay. `in_flight` and `ambiguous` must fail closed and require reconciliation instead of an automatic second provider call. Explicitly safe/idempotent provider operations may omit the claim when their provider key guarantees replay safety.

@@ -274,27 +274,42 @@ pub(in crate::autopilot) async fn execute_show_growth(
         _ => return Err(RepositoryError::Conflict),
     };
 
+    let mut payload = json!({
+    "action_id": action_id,
+    "event_id": event_id,
+        "event_slug": event.0,
+        "event_title": event.1,
+        "city_slug": event.2,
+        "venue": event.3,
+        "ticket_url": event.4,
+        // The announced bill in play order — the partner relay's
+        // `support_or_bill_cross_post` ask names these acts, so a generic
+        // "cross-post with the bill" instruction is not enough.
+        "acts": event.6.clone().unwrap_or_else(|| json!([])),
+        "lever": lever,
+        "template_key": template_key,
+        "constraints": constraints,
+    });
+    if lever.action_class().is_outward()
+        && let Some(map) = payload.as_object_mut()
+    {
+        map.insert(
+            "send_evidence".to_owned(),
+            crate::autopilot::send_evidence(
+                format!("show-growth:{event_id}:{}", lever.as_str()),
+                format!(
+                    "show growth lever {} for the band's own event",
+                    lever.as_str()
+                ),
+            )?,
+        );
+    }
     crate::autopilot::emit_external_action(
         tx,
         workspace_id,
         action_id,
         "crowdrelay.show_growth.requested",
-        json!({
-            "action_id": action_id,
-            "event_id": event_id,
-            "event_slug": event.0,
-            "event_title": event.1,
-            "city_slug": event.2,
-            "venue": event.3,
-            "ticket_url": event.4,
-            // The announced bill in play order — the partner relay's
-            // `support_or_bill_cross_post` ask names these acts, so a generic
-            // "cross-post with the bill" instruction is not enough.
-            "acts": event.6.clone().unwrap_or_else(|| json!([])),
-            "lever": lever,
-            "template_key": template_key,
-            "constraints": constraints,
-        }),
+        payload,
     )
     .await
 }
@@ -672,14 +687,20 @@ async fn execute_first_party_growth_campaign(
     if campaign.1 == "draft" {
         let outbox_id = sqlx::query_scalar::<_, Uuid>(
             r#"
-            INSERT INTO outbox_events(workspace_id,event_type,event_version,payload,available_at)
-            VALUES(
+            // The outbox row carries the action's trace spine — `ops/trace`
+            // shows the decision → action → campaign hop, not an orphan.
+            INSERT INTO outbox_events(workspace_id,event_type,event_version,payload,available_at,trace_id,causation_id,action_id)
+            SELECT
                 $1,'communication.campaign_due',1,
                 jsonb_build_object(
                     'campaign_id',$2::uuid,'campaign_slug',$3::text,'channel','email',
-                    'segment_id',$4::uuid,'template_key',$5::text
-                ),$6
-            ) RETURNING id
+                    'segment_id',$4::uuid,'template_key',$5::text,
+                    'send_evidence',jsonb_build_object(
+                        'source_id',$7::text,'recipient_reason',$8::text
+                    )
+                ),$6,at.trace_id,at.causation_id,at.id
+            FROM viryaos_autopilot_actions at WHERE at.id=$9
+            RETURNING id
             "#,
         )
         .bind(workspace_id.into_uuid())
@@ -688,6 +709,9 @@ async fn execute_first_party_growth_campaign(
         .bind(segment_id)
         .bind(template_key)
         .bind(send_at.unwrap_or(now))
+        .bind(format!("show-growth:{slug}"))
+        .bind("marketing-consent segment — every fan in it opted in")
+        .bind(action_id.into_uuid())
         .fetch_one(&mut **tx)
         .await
         .map_err(map_sqlx)?;
@@ -705,7 +729,6 @@ async fn execute_first_party_growth_campaign(
         return Err(RepositoryError::Conflict);
     }
 
-    let _ = action_id; // action id is already the durable one-shot record.
     Ok(())
 }
 

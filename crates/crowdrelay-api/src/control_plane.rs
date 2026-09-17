@@ -328,7 +328,7 @@ pub(crate) fn router(state: crate::AppState) -> Router {
         // mints a fresh link — revoke-by-rotation, same as the listing.
         .route(
             "/v1/control-plane/attestations",
-            post(crate::attestation::issue_attestation),
+            get(crate::attestation::list_attestations).post(crate::attestation::issue_attestation),
         )
         .route(
             "/v1/control-plane/attestations/{digest}/revoke",

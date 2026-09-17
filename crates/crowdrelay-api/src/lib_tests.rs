@@ -878,6 +878,8 @@ mod tests {
         Ok(())
     }
 
+    include!("lib_tests_attestation.rs");
+
     #[tokio::test]
     async fn referral_redirect_progress_and_redemption_routes_are_private()
     -> Result<(), Box<dyn std::error::Error>> {

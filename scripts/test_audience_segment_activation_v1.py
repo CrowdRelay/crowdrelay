@@ -16,12 +16,13 @@ bug today for one reason only: **nothing anywhere sets that column false**, so i
 has a single reachable value and there is no decision to revert.
 
 The readers make the stakes concrete. `audience/campaign_handlers.rs` requires
-`AND active` to attach a campaign to a segment, and `execute_signal_push` in
-`operations/execution.rs` treats an inactive segment as a reason to fall back to
-broadcasting to *every* consented fan. So an operator deactivating a segment is
-doing two things at once — stopping targeted sends through it, and widening an
-autopilot push that names it — and the autopilot would undo the first within five
-minutes while the second stayed undone.
+`AND active` to attach a campaign to a segment, and `resolve_segment_filter` in
+`operations/push_segments.rs` requires `AND active` before a push may target a
+segment — a named-but-inactive segment now refuses the send rather than widening
+it to every consented fan. So an operator deactivating a segment is doing two
+things at once — stopping targeted sends through it, and parking an autopilot
+push that names it — and the autopilot would undo the first within five minutes
+while the second stayed parked.
 
 No behavioural test can fail today: there is no deactivation path to exercise. So
 this gate encodes the implication instead. The day somebody adds one, it fails and
@@ -155,14 +156,23 @@ class AudienceSegmentActivation(unittest.TestCase):
             rf"FROM {TABLE}\s+WHERE workspace_id = \$1 AND slug = \$2 AND active",
             "attaching a campaign to a segment should still require an active one",
         )
-        execution = (
-            CRATES / "crowdrelay-infra/src/autopilot/operations/execution.rs"
+        # Resolution moved to `push_segments.rs`, and the stakes changed with
+        # it: a named-but-inactive segment used to widen the push to every
+        # consented fan, now it refuses the send. The reader still
+        # distinguishes active from inactive — that is all this gate pins.
+        segments = (
+            CRATES / "crowdrelay-infra/src/autopilot/operations/push_segments.rs"
         ).read_text()
+        self.assertRegex(
+            segments,
+            rf"FROM {TABLE}\s+WHERE workspace_id = \$1 AND slug = \$2 AND active",
+            "resolving a segment for a push should still require an active one",
+        )
         self.assertIn(
-            "inactive",
-            execution,
-            "execute_signal_push should still document that an inactive segment "
-            "widens the push to every consented fan rather than narrowing it",
+            "not found or inactive",
+            segments,
+            "a named-but-inactive segment should still refuse the push rather "
+            "than widen it to every consented fan",
         )
 
 

@@ -4,9 +4,9 @@
 //! the slug is resolved against the `audience_segments` table. If a matching
 //! active segment is found, its JSONB filter is parsed into a typed
 //! `SegmentFilter` and applied as additional fan predicates on the push
-//! delivery INSERT. If the slug is not found, inactive, or the filter is
-//! invalid, the push falls back to broadcasting to all consented fans with
-//! active endpoints (the original behavior).
+//! delivery INSERT. A named segment that cannot resolve refuses the send —
+//! a push aimed at a subset never widens to everyone consented; only a push
+//! with no segment at all broadcasts.
 //!
 //! This module mirrors the audience panel's `segment_predicate()` semantics
 //! (see `crowdrelay-api/src/audience/query_support.rs`) but is self-contained
@@ -173,23 +173,24 @@ pub(in crate::autopilot) enum SegmentBind {
 }
 
 /// Load a segment's JSONB filter from `audience_segments` and parse it into a
-/// validated `SegmentFilter`. Returns `None` (→ broadcast) if:
-/// - the slug is not provided or empty
-/// - the segment is not found or inactive
-/// - the filter is not a valid JSON object
-/// - any filter field has an invalid type (e.g. `statuses` is a string, not
-///   an array; `min_qualified_referrals` is not a number)
+/// validated `SegmentFilter`.
 ///
-/// Logs a warning on every fallback path so the operator can see when the
-/// brain referenced a non-existent or malformed segment.
+/// Two different answers for two different requests: *no segment named* is a
+/// broadcast — the operator asked for everyone, so `Ok(None)` applies no
+/// clause. *A segment named but unresolvable* is a refusal — the send was
+/// aimed at a subset, and delivering it to everyone consented is precisely
+/// the misfire the recipient ceiling exists to bound. `Err` parks the action
+/// instead of widening the audience.
 pub(in crate::autopilot) async fn resolve_segment_filter(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     workspace_id: WorkspaceId,
     segment: Option<&str>,
-) -> Option<SegmentFilter> {
-    let slug = segment?;
+) -> Result<Option<SegmentFilter>, RepositoryError> {
+    let Some(slug) = segment else {
+        return Ok(None);
+    };
     if slug.is_empty() {
-        return None;
+        return Ok(None);
     }
 
     let result = sqlx::query_scalar::<_, Option<serde_json::Value>>(
@@ -206,33 +207,47 @@ pub(in crate::autopilot) async fn resolve_segment_filter(
         Ok(Some(Some(_))) => {
             tracing::warn!(
                 segment = slug,
-                "segment filter is not a JSON object, broadcasting"
+                "segment filter is not a JSON object, refusing to widen to broadcast"
             );
-            return None;
+            return Err(RepositoryError::ConflictBecause(
+                "segment's filter is not a JSON object — refusing to widen the send to broadcast",
+            ));
         }
         Ok(Some(None)) => {
-            tracing::warn!(segment = slug, "segment has null filter, broadcasting");
-            return None;
+            tracing::warn!(
+                segment = slug,
+                "segment has null filter, refusing to widen to broadcast"
+            );
+            return Err(RepositoryError::ConflictBecause(
+                "segment's filter is empty — refusing to widen the send to broadcast",
+            ));
         }
         Ok(None) => {
-            tracing::warn!(segment = slug, "segment slug not found, broadcasting");
-            return None;
+            tracing::warn!(
+                segment = slug,
+                "segment slug not found or inactive, refusing to widen to broadcast"
+            );
+            return Err(RepositoryError::ConflictBecause(
+                "segment not found or inactive — refusing to widen the send to broadcast",
+            ));
         }
         Err(error) => {
-            tracing::warn!(%error, segment = slug, "failed to load segment filter, broadcasting");
-            return None;
+            tracing::warn!(%error, segment = slug, "failed to load segment filter");
+            return Err(map_sqlx(error));
         }
     };
 
     match parse_segment_filter(&filter_json) {
-        Some(filter) => Some(filter),
+        Some(filter) => Ok(Some(filter)),
         None => {
             tracing::warn!(
                 segment = slug,
                 filter = %filter_json,
-                "segment filter has invalid field types, broadcasting"
+                "segment filter has invalid field types, refusing to widen to broadcast"
             );
-            None
+            Err(RepositoryError::ConflictBecause(
+                "segment's filter has invalid fields — refusing to widen the send to broadcast",
+            ))
         }
     }
 }
@@ -279,4 +294,158 @@ fn parse_segment_filter(filter: &serde_json::Value) -> Option<SegmentFilter> {
         tags_all: parse_string_array("tags_all")?,
         excluded_campaign_slugs: parse_string_array("excluded_campaign_slugs")?,
     })
+}
+
+/// Materializes an approved Signal push as `fan_push_deliveries` rows for all
+/// consented fans with active push endpoints. The PushDeliveryWorker then
+/// sends them via FCM/Web Push.
+///
+/// Idempotency: `UNIQUE (workspace_id, source_kind, source_id, endpoint_id)`
+/// on `fan_push_deliveries` means a retry of the same action + endpoint is a
+/// no-op. `source_id` is the autopilot action id.
+///
+/// When `segment` is `Some(slug)`, [`resolve_segment_filter`] applies the
+/// segment's parsed predicates — and refuses the action rather than widening
+/// to broadcast when the slug cannot resolve.
+#[allow(clippy::too_many_arguments)]
+pub(in crate::autopilot) async fn execute_signal_push(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    workspace_id: WorkspaceId,
+    action_id: crowdrelay_domain::AutopilotActionId,
+    title: &str,
+    body: &str,
+    target_path: Option<&str>,
+    _event_id: Option<&uuid::Uuid>,
+    segment: Option<&str>,
+    _now: OffsetDateTime,
+) -> Result<(), RepositoryError> {
+    let action_uuid = action_id.into_uuid();
+    let collapse_key = format!("agent:{action_uuid}");
+    let target = target_path.unwrap_or("/my-signal/");
+
+    // No segment named means a broadcast the operator asked for. A segment
+    // named but unresolvable refuses the action rather than widening the
+    // send to everyone consented.
+    let mut segment_filter = resolve_segment_filter(tx, workspace_id, segment).await?;
+
+    // Build the segment clause + typed bind values. Only fields present
+    // in the filter generate SQL conditions, avoiding unnecessary
+    // correlated subqueries for absent fields.
+    let (segment_clause, segment_binds) = segment_filter
+        .as_mut()
+        .map(|f| f.sql_clause(7))
+        .unwrap_or_default();
+
+    // The envelope's per-step recipient bound is an operator safety dial: it
+    // clamps the fan set, not just the reported reach. An absent envelope row
+    // reads as the domain default — never as "no bound". The bound applies to
+    // fans (recipients), not deliveries: a fan with three endpoints is still
+    // one person reached.
+    let recipient_bound = sqlx::query_scalar::<_, i32>(
+        "SELECT max_recipients_per_step FROM viryaos_growth_envelope WHERE workspace_id = $1",
+    )
+    .bind(workspace_id.into_uuid())
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(map_sqlx)?
+    .map_or_else(
+        || {
+            i64::from(
+                crowdrelay_domain::growth_envelope::GrowthEnvelope::default()
+                    .max_recipients_per_step,
+            )
+        },
+        |bound| i64::from(bound.max(1)),
+    );
+    let limit_bind = 7 + segment_binds.len();
+
+    let sql = format!(
+        r#"
+        INSERT INTO fan_push_deliveries
+            (workspace_id, fan_id, endpoint_id, source_kind, source_id,
+             category, title, body, target_path, collapse_key)
+        SELECT endpoint.workspace_id, endpoint.fan_id, endpoint.id,
+               'agent_signal_push', $2,
+               'community', $3, $4, $5, $6
+        FROM fan_push_endpoints endpoint
+        JOIN (
+            -- The envelope's blast-radius bound applies to the fan set, not
+            -- to deliveries: a fan with three endpoints is still one person
+            -- reached. An absent envelope row reads as the domain default,
+            -- never as "no bound".
+            SELECT fan.id
+            FROM fans fan
+            WHERE fan.workspace_id = $1
+              AND fan.status = 'active'
+              AND EXISTS (
+                  SELECT 1 FROM fan_consents consent
+                  WHERE consent.workspace_id = fan.workspace_id
+                    AND consent.fan_id = fan.id
+                    AND consent.purpose = 'marketing'
+                    AND consent.granted
+                    AND consent.id = (
+                        SELECT newest.id FROM fan_consents newest
+                        WHERE newest.workspace_id = consent.workspace_id
+                          AND newest.fan_id = consent.fan_id
+                          AND newest.purpose = consent.purpose
+                        ORDER BY newest.recorded_at DESC, newest.id DESC LIMIT 1
+                    )
+              )
+              {segment_clause}
+            ORDER BY fan.id
+            LIMIT ${limit_bind}
+        ) fan ON fan.id = endpoint.fan_id
+        WHERE endpoint.workspace_id = $1
+          AND endpoint.active
+          AND endpoint.invalidated_at IS NULL
+        ON CONFLICT (workspace_id, source_kind, source_id, endpoint_id) DO NOTHING
+        "#
+    );
+
+    let mut query = sqlx::query(&sql)
+        .bind(workspace_id.into_uuid())
+        .bind(action_uuid)
+        .bind(title)
+        .bind(body)
+        .bind(target)
+        .bind(&collapse_key);
+
+    for bind in segment_binds {
+        query = match bind {
+            SegmentBind::Statuses(v) => query.bind(v),
+            SegmentBind::CitySlugs(v) => query.bind(v),
+            SegmentBind::MinReferrals(v) => query.bind(v),
+            SegmentBind::Synesthesia(v) => query.bind(v),
+            SegmentBind::TagsAll(v) => query.bind(v),
+            SegmentBind::ExcludedCampaignSlugs(v) => query.bind(v),
+        };
+    }
+    query = query.bind(recipient_bound);
+
+    let inserted = query.execute(&mut **tx).await.map_err(map_sqlx)?;
+
+    // Record a reach event for the unified reach ledger. Signal pushes are
+    // broadcast reaches — one action reaches many fans. The estimated_reach
+    // is the number of eligible endpoints that received the push (from the
+    // INSERT ... ON CONFLICT row count above).
+    let estimated_reach = inserted.rows_affected() as i32;
+    // Zero endpoints inserted means zero reach — the credit allocator divides
+    // fan outcomes by reach, so a fabricated denominator of 1 would invent
+    // credit from nothing. A reach of 0 is the honest report: no audience was
+    // reached, so no outcome can be attributed to this push.
+    let estimated_reach = if estimated_reach > 0 {
+        estimated_reach
+    } else {
+        0
+    };
+    sqlx::query(r#"INSERT INTO viryaos_reach_events (workspace_id, action_id, recipient_kind, recipient_id, channel, template_id, estimated_reach, status, metadata) VALUES ($1, $2, 'platform_audience', 'signal_fans', 'signal_push', 'signal-inviter', $4, 'sent', jsonb_build_object('title', $3)) ON CONFLICT (action_id, recipient_id, channel) WHERE action_id IS NOT NULL DO NOTHING"#)
+        .bind(workspace_id.into_uuid())
+        .bind(action_uuid)
+        .bind(title)
+        .bind(estimated_reach)
+        .execute(&mut **tx)
+        .await
+        .map_err(map_sqlx)?;
+
+    Ok(())
 }

@@ -7,7 +7,9 @@
 use serde::{Deserialize, Serialize};
 use time::{Duration, OffsetDateTime};
 
-use crate::{ContentSourceId, autonomy::Confidence, release_autopilot::ReleaseTier};
+use crate::{
+    ContentSourceId, OutreachTargetId, autonomy::Confidence, release_autopilot::ReleaseTier,
+};
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -71,6 +73,32 @@ impl ContentArtifactKind {
     }
 }
 
+/// Facts about a synced band post, projected for the relay path: the post's
+/// own first line, its permalink, the platform account it came from and the
+/// caption itself. The relay carries these verbatim — it shares what the band
+/// published, it does not draft a post about a post.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct SocialPostFact {
+    /// The post's own first line — the caption's head, never a rewrite.
+    pub title: String,
+    /// The platform permalink, when the API gave one.
+    pub url: Option<String>,
+    /// Which owned account it came from — `facebook`, `instagram`, `x`.
+    pub platform: String,
+    /// The caption itself, as truncated by the sync.
+    pub body: Option<String>,
+}
+
+/// A community the workspace may post in: an outreach target the screening
+/// pipeline admitted and an operator-visible promotion carried to `promoted`.
+/// The relay reads this list — a community not on it is not reachable.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct CommunityRelayTarget {
+    pub target_id: OutreachTargetId,
+    /// The clean subreddit name (no `r/`), as stored on the admitted target.
+    pub subreddit: String,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct ContentSupplySnapshot {
     pub source_id: ContentSourceId,
@@ -92,12 +120,20 @@ pub struct ContentSupplySnapshot {
     pub release_tier: Option<ReleaseTier>,
     pub completed_artifacts: Vec<ContentArtifactKind>,
     pub in_flight_artifacts: Vec<ContentArtifactKind>,
+    /// The synced post's own facts — `Some` only when `source_kind` is
+    /// `SocialPost`. The relay needs them to carry the post; every other
+    /// kind leaves it `None`.
+    pub social_post: Option<SocialPostFact>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(default)]
 pub struct ContentSupplyPolicy {
     pub maximum_source_age_days: u32,
+    /// How fresh a synced band post has to be for the relay to carry it —
+    /// a post past the window is news that already cooled, and relaying it
+    /// reads as a channel that cannot tell now from then.
+    pub social_post_relay_hours: u32,
     /// How long a finished show's material gets to arrive before the harvest
     /// starts drafting from it: the capture plan needs the night plus a
     /// collection window, so `show_completed` sources stay pending until
@@ -110,6 +146,7 @@ impl Default for ContentSupplyPolicy {
         Self {
             maximum_source_age_days: 45,
             post_show_harvest_hours: 72,
+            social_post_relay_hours: 72,
         }
     }
 }
@@ -119,6 +156,12 @@ pub enum ContentSupplyDecision {
     Hold(ContentSupplyHoldReason),
     Request {
         artifact: ContentArtifactKind,
+        confidence: Confidence,
+    },
+    /// The band already made the post — the machine's job is to carry it to
+    /// the owned audience and admitted communities, verbatim. It is not a
+    /// new broadcast and it is not drafted material.
+    Relay {
         confidence: Confidence,
     },
 }
@@ -168,6 +211,26 @@ pub fn evaluate_content_supply(
         && now - snapshot.occurred_at < Duration::hours(i64::from(policy.post_show_harvest_hours))
     {
         return ContentSupplyDecision::Hold(ContentSupplyHoldReason::HarvestPending);
+    }
+
+    // A synced band post owes no artifact — relaying it is the work (2.11).
+    // Inside the freshness window the post is carryable news; past it the
+    // moment already cooled and the honest answer is Complete, not a late
+    // relay that reads like a channel that cannot tell now from then.
+    if snapshot.source_kind == ContentSourceKind::SocialPost {
+        // `social_post.is_some()` is part of the gate: a source row without
+        // the post's own facts has nothing to carry, and a relay that would
+        // have to invent the share is exactly what this path exists to
+        // prevent.
+        let fresh = now - snapshot.occurred_at
+            <= Duration::hours(i64::from(policy.social_post_relay_hours.max(1)));
+        return if fresh && snapshot.social_post.is_some() {
+            ContentSupplyDecision::Relay {
+                confidence: Confidence::saturating_from_basis_points(9_000),
+            }
+        } else {
+            ContentSupplyDecision::Hold(ContentSupplyHoldReason::Complete)
+        };
     }
 
     for artifact in required_artifacts(snapshot.source_kind) {
@@ -286,6 +349,7 @@ mod tests {
             release_tier: None,
             completed_artifacts: Vec::new(),
             in_flight_artifacts: Vec::new(),
+            social_post: None,
         };
 
         assert_eq!(
@@ -308,6 +372,7 @@ mod tests {
             communication_enabled: None,
             press_enabled: None,
             release_tier: None,
+            social_post: None,
             completed_artifacts: vec![ContentArtifactKind::LiveListing],
             in_flight_artifacts: Vec::new(),
         };
@@ -331,6 +396,7 @@ mod tests {
             communication_enabled: Some(true),
             press_enabled: Some(true),
             release_tier: Some(ReleaseTier::Single),
+            social_post: None,
             completed_artifacts: vec![ContentArtifactKind::SignalPush],
             in_flight_artifacts: vec![ContentArtifactKind::SocialFeed],
         };
@@ -357,6 +423,7 @@ mod tests {
             release_tier: None,
             completed_artifacts: Vec::new(),
             in_flight_artifacts: Vec::new(),
+            social_post: None,
         };
         let old_video = ContentSupplySnapshot {
             source_kind: ContentSourceKind::Video,
@@ -395,6 +462,7 @@ mod tests {
             release_tier: None,
             completed_artifacts: Vec::new(),
             in_flight_artifacts: Vec::new(),
+            social_post: None,
         };
 
         // Twenty hours in, the night is over but the capture plan's material
@@ -438,6 +506,7 @@ mod tests {
             release_tier: Some(ReleaseTier::Single),
             completed_artifacts: Vec::new(),
             in_flight_artifacts: Vec::new(),
+            social_post: None,
         }
     }
 
@@ -511,7 +580,10 @@ mod tests {
     }
 
     #[test]
-    fn a_synced_social_post_is_live_material_but_owes_no_artifact() {
+    fn a_synced_social_post_without_facts_cannot_relay() {
+        // A source row with no social_post facts has nothing to carry — the
+        // relay cannot invent a title or link, so it holds rather than send
+        // an empty share.
         let snapshot = ContentSupplySnapshot {
             source_id: ContentSourceId::new(),
             source_kind: ContentSourceKind::SocialPost,
@@ -523,6 +595,7 @@ mod tests {
             release_tier: None,
             completed_artifacts: Vec::new(),
             in_flight_artifacts: Vec::new(),
+            social_post: None,
         };
 
         assert_eq!(

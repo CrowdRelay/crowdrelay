@@ -6,7 +6,7 @@
 //! The cockpit-wide overview stays in `control.rs`.
 
 use super::*;
-use crowdrelay_application::autopilot::ContentPipeline;
+use crowdrelay_application::autopilot::{ContentPipeline, RevisionTrend, RevisionTrendWeek};
 
 pub(super) async fn load_content_pipeline(
     repo: &PostgresAutopilotRepository,
@@ -93,6 +93,69 @@ pub(super) async fn load_content_pipeline(
         },
     )?;
 
+    // §4d-3.2 — the voice signal alongside the queue: how far the band's
+    // edits moved the machine's words, bucketed per week so the panel can
+    // draw the direction without a second fetch.
+    let revision_rows = sqlx::query_as::<_, (time::Date, i64, i64)>(
+        r#"
+        SELECT date_trunc('week', created_at)::date AS week_start,
+               count(*) AS revised_fields,
+               avg(distance_chars)::bigint AS avg_distance_chars
+        FROM viryaos_draft_revisions
+        WHERE workspace_id = $1
+          AND created_at > now() - interval '30 days'
+        GROUP BY 1
+        ORDER BY 1
+        "#,
+    )
+    .bind(workspace_uuid)
+    .fetch_all(&repo.pool)
+    .await
+    .map_err(map_sqlx)?;
+
+    let revision_trend = if revision_rows.is_empty() {
+        // No revised approvals yet — `None`, because 0 would report that the
+        // machine writes perfectly when the truth is nobody has edited yet.
+        None
+    } else {
+        let revised_fields_30d: i64 = revision_rows.iter().map(|row| row.1).sum();
+        let field_total: i64 = revision_rows
+            .iter()
+            .map(|row| row.1.saturating_mul(row.2))
+            .sum();
+        let revised_actions_30d = sqlx::query_scalar::<_, i64>(
+            r#"
+            SELECT count(DISTINCT action_id)
+            FROM viryaos_draft_revisions
+            WHERE workspace_id = $1
+              AND created_at > now() - interval '30 days'
+            "#,
+        )
+        .bind(workspace_uuid)
+        .fetch_one(&repo.pool)
+        .await
+        .map_err(map_sqlx)?;
+        Some(RevisionTrend {
+            revised_fields_30d,
+            revised_actions_30d,
+            avg_distance_chars_30d: if revised_fields_30d == 0 {
+                0
+            } else {
+                field_total / revised_fields_30d
+            },
+            weekly: revision_rows
+                .into_iter()
+                .map(
+                    |(week_start, revised_fields, avg_distance_chars)| RevisionTrendWeek {
+                        week_start: week_start.to_string(),
+                        revised_fields,
+                        avg_distance_chars,
+                    },
+                )
+                .collect(),
+        })
+    };
+
     // Same briefing language the overview resolves — one setting for
     // the whole queue rather than a read per row.
     let crew_locale = sqlx::query_scalar::<_, String>(
@@ -143,5 +206,6 @@ pub(super) async fn load_content_pipeline(
         live_sources,
         pending,
         source_titles,
+        revision_trend,
     })
 }

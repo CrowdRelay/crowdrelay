@@ -1026,29 +1026,48 @@ pub(super) async fn execute_play_step(
         | PlayKind::ReleaseRunway => None,
     };
 
+    // The step's own class decides whether this emit is an outward send — a
+    // follow ask to a fan carries evidence, a listing sweep of our own pages
+    // does not.
+    let mut step_payload = json!({
+        "action_id": action_id,
+        "play_id": play_id,
+        "play_kind": play_kind.as_str(),
+        "step_index": step_index,
+        "step_kind": step_kind.as_str(),
+        "template_key": template_key,
+        "fan_id": fan_id,
+        "fan": fan.map(|fan| {
+            json!({
+                "email": fan.0,
+                "display_name": fan.1,
+                "locale": fan.2,
+            })
+        }),
+        "event": event_facts,
+        "call_to_action_url": follow_link,
+    });
+    if step_kind.action_class().is_outward()
+        && let Some(map) = step_payload.as_object_mut()
+    {
+        map.insert(
+            "send_evidence".to_owned(),
+            send_evidence(
+                format!("play:{play_id}:step:{step_index}"),
+                format!(
+                    "{} step of a {} play",
+                    step_kind.as_str(),
+                    play_kind.as_str()
+                ),
+            )?,
+        );
+    }
     emit_external_action(
         transaction,
         workspace_id,
         action_id,
         "crowdrelay.play.step_requested",
-        json!({
-            "action_id": action_id,
-            "play_id": play_id,
-            "play_kind": play_kind.as_str(),
-            "step_index": step_index,
-            "step_kind": step_kind.as_str(),
-            "template_key": template_key,
-            "fan_id": fan_id,
-            "fan": fan.map(|fan| {
-                json!({
-                    "email": fan.0,
-                    "display_name": fan.1,
-                    "locale": fan.2,
-                })
-            }),
-            "event": event_facts,
-            "call_to_action_url": follow_link,
-        }),
+        step_payload,
     )
     .await
 }

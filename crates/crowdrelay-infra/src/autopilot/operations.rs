@@ -11,7 +11,10 @@ use crowdrelay_domain::{
     },
     booking::BookingReplyDisposition,
     campaign_lifecycle::{EventCampaignHistory, EventCampaignSnapshot},
-    content_supply::{ContentArtifactKind, ContentSourceKind, ContentSupplySnapshot},
+    content_supply::{
+        CommunityRelayTarget, ContentArtifactKind, ContentSourceKind, ContentSupplySnapshot,
+        SocialPostFact,
+    },
     experimentation::{ExperimentMetric, ExperimentSnapshot, ExperimentVariantSnapshot},
     merch_bundle::MerchBundleSnapshot,
     outreach::{OutreachReplyDisposition, OutreachSnapshot, OutreachTargetKind},

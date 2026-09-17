@@ -113,14 +113,19 @@ pub(in crate::autopilot) async fn execute_release_campaign(
     .await
     .map_err(map_sqlx)?;
     if campaign.1 == "draft" {
-        let outbox_id=sqlx::query_scalar::<_,Uuid>(r#"INSERT INTO outbox_events(workspace_id,event_type,event_version,payload,available_at) VALUES($1,'communication.campaign_due',1,jsonb_build_object('campaign_id',$2::uuid,'campaign_slug',$3::text,'channel','email','segment_id',$4::uuid,'template_key',$5::text),$6) RETURNING id"#)
-          .bind(workspace_id.into_uuid()).bind(campaign.0).bind(&campaign_slug).bind(segment_id).bind(&template).bind(now).fetch_one(&mut **tx).await.map_err(map_sqlx)?;
+        // The outbox row carries the action's trace spine — `ops/trace` shows
+        // the decision → action → campaign hop, not a context-free orphan.
+        let outbox_id=sqlx::query_scalar::<_,Uuid>(r#"INSERT INTO outbox_events(workspace_id,event_type,event_version,payload,available_at,trace_id,causation_id,action_id) SELECT $1,'communication.campaign_due',1,jsonb_build_object('campaign_id',$2::uuid,'campaign_slug',$3::text,'channel','email','segment_id',$4::uuid,'template_key',$5::text,'send_evidence',jsonb_build_object('source_id',$7::text,'recipient_reason',$8::text)),$6,at.trace_id,at.causation_id,at.id FROM viryaos_autopilot_actions at WHERE at.id=$9 RETURNING id"#)
+          .bind(workspace_id.into_uuid()).bind(campaign.0).bind(&campaign_slug).bind(segment_id).bind(&template).bind(now)
+          .bind(format!("release-campaign:{campaign_slug}"))
+          .bind("marketing-consent segment — every fan in it opted in")
+          .bind(action_id.into_uuid())
+          .fetch_one(&mut **tx).await.map_err(map_sqlx)?;
         sqlx::query("UPDATE communication_campaigns SET status='scheduled',scheduled_at=$3,dispatch_event_id=$4 WHERE workspace_id=$1 AND id=$2 AND status='draft'")
           .bind(workspace_id.into_uuid()).bind(campaign.0).bind(now).bind(outbox_id).execute(&mut **tx).await.map_err(map_sqlx)?;
     } else if !matches!(campaign.1.as_str(), "scheduled" | "completed") {
         return Err(RepositoryError::Conflict);
     }
-    let _ = action_id;
     Ok(())
 }
 /// Every phase send that can precede the late waves — the exclusion set the
@@ -242,6 +247,10 @@ pub(in crate::autopilot) async fn tag_likely_listeners(
         json!({
             "action_id": action_id,
             "release_id": release_id,
+            "send_evidence": crate::autopilot::send_evidence(
+                format!("release:{release_id}:countdown"),
+                "consented active fans tagged as likely listeners — ranking formula travels with the artifact",
+            )?,
             "release": { "title": title },
             "generated_at": now,
             "tag": tag,

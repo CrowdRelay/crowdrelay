@@ -106,7 +106,7 @@ async fn seed_outcome_action(
             subject_id, idempotency_key, payload, status, action_class,
             approved_at, approved_by, available_at)
            VALUES ($1,$2,$3,'growth_intelligence',$4,'agent_outcome',$5,$6,$7,
-                   'queued','third_party',$8,'policy:bounded_auto',$8)"#,
+                   'queued',$9,$8,'policy:bounded_auto',$8)"#,
     )
     .bind(action_id)
     .bind(f.workspace_id.into_uuid())
@@ -114,8 +114,17 @@ async fn seed_outcome_action(
     .bind(action_kind)
     .bind(Uuid::now_v7())
     .bind(format!("action-{action_id}"))
-    .bind(payload)
+    .bind(&payload)
     .bind(now)
+    .bind(
+        // The row's class is the payload's own classification — never a
+        // fixture literal, so the evidence gate reads the truth.
+        serde_json::from_value::<crowdrelay_application::autopilot::AutopilotActionPayload>(
+            payload.clone(),
+        )
+        .map(|parsed| parsed.action_class().as_str())
+        .unwrap_or("first_party_reversible"),
+    )
     .execute(&f.pool)
     .await?;
     Ok(action_id)
@@ -308,6 +317,104 @@ async fn an_executor_required_action_gets_no_premature_envelope()
         (prediction_rows, evidence_rows, measurement_rows),
         (0, 0, 0),
         "a dispatched intent is not evidence: the executor receipt writes those rows"
+    );
+    Ok(())
+}
+
+/// The growth envelope's `max_recipients_per_step` is the operator's
+/// blast-radius dial. Before it was wired into the send path it was a
+/// documented promise the SQL ignored — a broadcast push to a workspace of
+/// thousands would have delivered to every consented endpoint while the
+/// operator panel showed a bound of 250.
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn a_signal_push_respects_the_envelope_recipient_bound()
+-> Result<(), Box<dyn std::error::Error>> {
+    let f = setup().await?;
+    let now = OffsetDateTime::now_utc();
+    let suffix = f.workspace_id.into_uuid().simple().to_string();
+
+    // Five eligible fans; the operator's envelope permits two per step.
+    sqlx::query(
+        "UPDATE viryaos_growth_envelope SET max_recipients_per_step = 2
+         WHERE workspace_id = $1",
+    )
+    .bind(f.workspace_id.into_uuid())
+    .execute(&f.pool)
+    .await?;
+    for index in 0..5 {
+        let fan_id = Uuid::now_v7();
+        sqlx::query(
+            "INSERT INTO fans (id, workspace_id, normalized_email, display_name, status)
+             VALUES ($1, $2, $3, 'Fan', 'active')",
+        )
+        .bind(fan_id)
+        .bind(f.workspace_id.into_uuid())
+        .bind(format!("bounded-{suffix}-{index}@example.test"))
+        .execute(&f.pool)
+        .await?;
+        sqlx::query(
+            "INSERT INTO fan_consents (workspace_id, fan_id, purpose, granted, policy_version, source)
+             VALUES ($1,$2,'marketing',true,'v1','test')",
+        )
+        .bind(f.workspace_id.into_uuid())
+        .bind(fan_id)
+        .execute(&f.pool)
+        .await?;
+        sqlx::query(
+            "INSERT INTO fan_push_endpoints
+               (id, workspace_id, fan_id, installation_id, transport, endpoint_address, active)
+             VALUES ($1, $2, $3, $4, 'android_fcm', $5, true)",
+        )
+        .bind(Uuid::now_v7())
+        .bind(f.workspace_id.into_uuid())
+        .bind(fan_id)
+        .bind(format!("install-{suffix}-{index}"))
+        .bind(format!("token-{suffix}-{index}"))
+        .execute(&f.pool)
+        .await?;
+    }
+
+    let action_id = seed_outcome_action(
+        &f,
+        "signal.push.request",
+        json!({
+            "kind": "request_signal_push",
+            "task_id": Uuid::now_v7(),
+            "title": "bounded push",
+            "body": "bounded push body",
+            "target_path": null,
+            "event_id": null,
+            "segment": null,
+        }),
+        now,
+    )
+    .await?;
+
+    let claimed = f
+        .repository
+        .claim_due_autonomous_actions(f.workspace_id, 8, now)
+        .await?;
+    let action = claimed
+        .iter()
+        .find(|a| a.id.into_uuid() == action_id)
+        .expect("the queued push action must be claimable");
+    f.repository
+        .execute_action(f.workspace_id, action, now)
+        .await?;
+
+    let (deliveries, recipients) = sqlx::query_as::<_, (i64, i64)>(
+        "SELECT COUNT(*)::bigint, COUNT(DISTINCT fan_id)::bigint \
+         FROM fan_push_deliveries WHERE workspace_id = $1 AND source_id = $2",
+    )
+    .bind(f.workspace_id.into_uuid())
+    .bind(action_id)
+    .fetch_one(&f.pool)
+    .await?;
+    assert_eq!(
+        (deliveries, recipients),
+        (2, 2),
+        "the envelope bound clamps the fan set itself, not just the report"
     );
     Ok(())
 }

@@ -14,7 +14,7 @@ use crowdrelay_domain::{
     beacons::{BeaconCampaignSnapshot, BeaconDiscoverySnapshot, BeaconInviteSnapshot},
     booking::{BookingTargetSnapshot, CityOpportunitySnapshot},
     campaign_lifecycle::EventCampaignSnapshot,
-    content_supply::ContentSupplySnapshot,
+    content_supply::{CommunityRelayTarget, ContentSupplySnapshot},
     experimentation::ExperimentSnapshot,
     funding::FundingOpportunitySnapshot,
     growth_debt::GrowthDebtObservation,
@@ -167,6 +167,14 @@ pub trait AutopilotDecisionRepository: Send + Sync {
         workspace_id: WorkspaceId,
         now: OffsetDateTime,
     ) -> Result<Vec<ContentSupplySnapshot>, RepositoryError>;
+
+    /// The communities a synced band post may be relayed into — only targets
+    /// the screening pipeline admitted and promotion carried. An empty list
+    /// means the relay still reaches the owned audience, just nobody else's.
+    async fn load_relay_community_targets(
+        &self,
+        workspace_id: WorkspaceId,
+    ) -> Result<Vec<CommunityRelayTarget>, RepositoryError>;
 
     async fn load_experiment_snapshots(
         &self,

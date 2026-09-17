@@ -299,6 +299,7 @@ async fn approving_the_advisory_parks_the_community() -> Result<(), Box<dyn std:
         AutopilotActionId::from_uuid(*action_id),
         &IdempotencyKey::parse(format!("approve-{}", action_id.simple())).expect("key"),
         None,
+        None,
     )
     .await?;
 

@@ -202,6 +202,29 @@ impl ShowGrowthLever {
         )
     }
 
+    /// The reach class the autopilot persists on the action. Single source:
+    /// `AutopilotActionPayload::RequestShowGrowth::action_class` delegates here
+    /// so the dispatch site and the classifier can never disagree.
+    #[must_use]
+    pub const fn action_class(self) -> crate::action_class::ActionClass {
+        use crate::action_class::ActionClass;
+        match self {
+            Self::PartnerCrossPromo | Self::GrassrootsSceneRelay | Self::SocialProofRelay => {
+                ActionClass::ThirdParty
+            }
+            Self::FanAmbassadors
+            | Self::FreeFanChannelPush
+            | Self::MerchBuyerOffer
+            | Self::HighIntentLastMile
+            | Self::PostShowMerchFollowUp
+            | Self::PostShowRecap
+            | Self::PostShowFollowAsk => ActionClass::OwnedAudience,
+            Self::CanonicalLinkSetup | Self::FreeListingSweep | Self::AudienceCaptureSetup => {
+                ActionClass::FirstPartyReversible
+            }
+        }
+    }
+
     /// True for the levers that only exist because a show already happened.
     /// Any of them executing is first-party proof the night is over, which is
     /// what registers the show as harvestable material.
