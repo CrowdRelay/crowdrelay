@@ -466,8 +466,17 @@ pub async fn city_venues(State(state): State<crate::AppState>, headers: HeaderMa
     {
         Ok(genres) => genres,
         Err(error) => {
-            tracing::warn!(%error, "tenant genre read failed; comparable_acts reads as zero");
-            Vec::new()
+            // Degrading to an empty set made every comparability test fail,
+            // and the read then reported `comparable_acts: 0` — a measured
+            // claim that no act of this band's genre has ever played the room.
+            // That number reaches a proposal's caveat, so an outage would have
+            // put a false statement in front of a promoter. The evidence read
+            // failing fails the request, the way the other evidence reads on
+            // this surface do.
+            tracing::warn!(%error, "tenant genre read failed");
+            return Problem::service_unavailable(request_id(&headers))
+                .private()
+                .into_response();
         }
     };
     let mut result = sqlx::query_as::<_, CityVenueRow>(
@@ -556,7 +565,13 @@ pub async fn city_venues(State(state): State<crate::AppState>, headers: HeaderMa
             JOIN event_acts AS a
               ON a.event_id = m.event_id
              AND a.workspace_id = m.workspace_id
-            WHERE EXISTS (
+            -- Never the asking band itself. Its own genres intersect its own
+            -- by construction, so counting it made "acts from your genre have
+            -- played here" partly mean "you have played here" — which the row
+            -- already says, under `shows_played`, and which proves nothing
+            -- about whether the room books the genre from anyone else.
+            WHERE a.act_workspace_id IS DISTINCT FROM $1
+              AND EXISTS (
                 SELECT 1
                 FROM (
                     SELECT COALESCE(mine_alias.canonical, mine_tag.genre) AS genre
