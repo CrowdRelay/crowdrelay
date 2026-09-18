@@ -25,13 +25,18 @@ pub enum AmplificationPurpose {
     ReleaseFeature,
     /// Shared-billing push around a co-attended event or festival slot.
     EventCrossbill,
+    /// The label's crossbill (§4h-7.4): the beneficiary's back catalogue
+    /// carried to the owner's audience — a fan who joined in month twenty
+    /// has never heard month three. Its own grant, cap and cooldown.
+    CatalogueRotation,
 }
 
 impl AmplificationPurpose {
-    pub const ALL: [AmplificationPurpose; 3] = [
+    pub const ALL: [AmplificationPurpose; 4] = [
         AmplificationPurpose::CrossPromote,
         AmplificationPurpose::ReleaseFeature,
         AmplificationPurpose::EventCrossbill,
+        AmplificationPurpose::CatalogueRotation,
     ];
 
     pub const fn as_str(self) -> &'static str {
@@ -39,6 +44,7 @@ impl AmplificationPurpose {
             Self::CrossPromote => "cross_promote",
             Self::ReleaseFeature => "release_feature",
             Self::EventCrossbill => "event_crossbill",
+            Self::CatalogueRotation => "catalogue_rotation",
         }
     }
 

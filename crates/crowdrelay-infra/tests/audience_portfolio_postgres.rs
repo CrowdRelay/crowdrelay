@@ -235,14 +235,30 @@ async fn portfolio_edges_route_only_within_an_organization_and_cap_deliveries()
     assert_eq!(preview, 2, "suppressed fans never count as reach");
 
     let queued_first = repo
-        .run_amplification_campaign(owner, consent, "pf-camp-1", "Hello", "Body", 100)
+        .run_amplification_campaign(
+            owner,
+            consent,
+            "pf-camp-1",
+            "Hello",
+            "Body",
+            100,
+            serde_json::json!({}),
+        )
         .await?;
     assert_eq!(queued_first, 2);
 
     // Monthly cap of one campaign: a second distinct reference is refused even
     // though fans exist.
     let capped = repo
-        .run_amplification_campaign(owner, consent, "pf-camp-2", "Hello", "Body", 100)
+        .run_amplification_campaign(
+            owner,
+            consent,
+            "pf-camp-2",
+            "Hello",
+            "Body",
+            100,
+            serde_json::json!({}),
+        )
         .await;
     assert!(matches!(capped, Err(PortfolioError::CapReached)));
     cleanup(&pool, &[owner, beneficiary, outsider]).await;
@@ -294,7 +310,15 @@ async fn crossbill_edges_carry_only_once_reciprocated() -> Result<(), Box<dyn st
     // The beneficiary's crowd has never carried the owner's announcement:
     // the edge refuses before any campaign can queue — and writes nothing.
     let refused = repo
-        .run_amplification_campaign(owner, edge, "cb-camp-1", "Hello", "Body", 100)
+        .run_amplification_campaign(
+            owner,
+            edge,
+            "cb-camp-1",
+            "Hello",
+            "Body",
+            100,
+            serde_json::json!({}),
+        )
         .await;
     assert!(matches!(refused, Err(PortfolioError::Unreciprocated)));
     let queued: i64 =
@@ -326,7 +350,15 @@ async fn crossbill_edges_carry_only_once_reciprocated() -> Result<(), Box<dyn st
     )
     .await?;
     let undelivered = repo
-        .run_amplification_campaign(owner, edge, "cb-camp-1", "Hello", "Body", 100)
+        .run_amplification_campaign(
+            owner,
+            edge,
+            "cb-camp-1",
+            "Hello",
+            "Body",
+            100,
+            serde_json::json!({}),
+        )
         .await;
     assert!(matches!(undelivered, Err(PortfolioError::Unreciprocated)));
 
@@ -343,7 +375,15 @@ async fn crossbill_edges_carry_only_once_reciprocated() -> Result<(), Box<dyn st
     .await?;
 
     let carried = repo
-        .run_amplification_campaign(owner, edge, "cb-camp-1", "Hello", "Body", 100)
+        .run_amplification_campaign(
+            owner,
+            edge,
+            "cb-camp-1",
+            "Hello",
+            "Body",
+            100,
+            serde_json::json!({}),
+        )
         .await?;
     assert_eq!(carried, 2);
 
@@ -360,7 +400,15 @@ async fn crossbill_edges_carry_only_once_reciprocated() -> Result<(), Box<dyn st
     )
     .await?;
     let still_carried = repo
-        .run_amplification_campaign(owner, edge, "cb-camp-2", "Hello", "Body", 100)
+        .run_amplification_campaign(
+            owner,
+            edge,
+            "cb-camp-2",
+            "Hello",
+            "Body",
+            100,
+            serde_json::json!({}),
+        )
         .await;
     assert!(
         matches!(still_carried, Ok(0)),

@@ -34,6 +34,10 @@ pub enum PortfolioError {
     /// Both workspaces must belong to the same organization.
     #[error("workspaces are not in the same organization")]
     NotInSameOrganization,
+    /// Every released item on the edge has already rotated — reported, not
+    /// silently empty, because "nothing left to rotate" is information.
+    #[error("the edge's catalogue is fully rotated")]
+    CatalogueExhausted,
     #[error("label portfolio repository failed unexpectedly")]
     Database(sqlx::Error),
 }
@@ -308,6 +312,7 @@ impl PostgresPortfolioRepository {
         message_subject: &str,
         message_text: &str,
         batch_limit: i64,
+        payload_extra: serde_json::Value,
     ) -> Result<i64, PortfolioError> {
         let mut tx = self
             .pool
@@ -435,7 +440,7 @@ impl PostgresPortfolioRepository {
                                'display_name', audience.display_name,
                                'locale', audience.locale
                            )
-                       ),
+                       ) || $7::jsonb,
                        'amplify:' || edge.id::text || ':' || $3 || ':fan:' || audience.id::text
                 FROM edge, spent, audience
                 WHERE spent.campaigns < edge.max_campaigns_per_month
@@ -460,6 +465,7 @@ impl PostgresPortfolioRepository {
         .bind(message_subject)
         .bind(batch_limit)
         .bind(message_text)
+        .bind(payload_extra)
         .fetch_one(&mut *tx)
         .await
         .map_err(PortfolioError::unexpected)?;

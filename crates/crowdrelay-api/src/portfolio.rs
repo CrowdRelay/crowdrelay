@@ -37,6 +37,11 @@ fn error_response(error: PortfolioError, request_id_value: Option<String>) -> Re
             Problem::conflict(request_id_value).into_response()
         }
         PortfolioError::CapReached => Problem::conflict(request_id_value).into_response(),
+        PortfolioError::CatalogueExhausted => Problem::conflict_because(
+            "The edge's catalogue is fully rotated — every released item has already been carried.",
+            request_id_value,
+        )
+        .into_response(),
         PortfolioError::Unreciprocated => Problem::conflict_because(
             "The cross-bill edge is unreciprocated: the beneficiary's audience \
              has never carried the audience owner's announcement — a delivered \
@@ -342,6 +347,7 @@ pub async fn run_campaign(
             request.subject.trim(),
             request.text.trim(),
             request.limit.unwrap_or(2_000),
+            serde_json::json!({}),
         )
         .await
     {
