@@ -7379,6 +7379,53 @@ paths:
           $ref: '#/components/responses/Problem'
         '503':
           $ref: '#/components/responses/Problem'
+  /admin/roster-plan/act-report:
+    get:
+      operationId: rosterActReport
+      summary: The label's quarterly page to one of its own acts
+      description: >
+        5.25 — labels lose acts because the act cannot see what the label
+        did. This is the quarter's record for one member act, composed from
+        the same tables the act's own surfaces read so the page and the
+        dashboard can never disagree: `actions` (every dispatch by kind and
+        outcome), `shows` (the rooms the act played — published or completed
+        events it is on the bill of), `fans` (`gained_total` plus where the
+        new fans declared interest), and `rotations_landed` (the quarter's
+        catalogue-rotation campaigns, the crossbill a label owes under
+        §4h-7.4).
+
+
+        The period is calendar-quarter-to-date — `period_start` is stated so
+        "quarter" is checkable rather than assumed. Membership is the
+        boundary: a workspace outside the organisation gets a 404, not an
+        empty page, because an empty page would claim membership that does
+        not exist. Admin rather than control-plane, like the rest of
+        roster-plan: the report reads the organisation's membership, and a
+        workspace token here would be one act deciding which label it
+        reports for.
+      security:
+      - adminBearer: []
+      parameters:
+      - in: query
+        name: organization_id
+        required: true
+        schema: { type: string, format: uuid }
+      - in: query
+        name: workspace_id
+        required: true
+        schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: >
+            The act's quarter. Empty sections are honest zeros — an act with
+            no shows this quarter reports `shows: []`, which is itself the
+            report.
+        '404':
+          $ref: '#/components/responses/Problem'
+        '401':
+          $ref: '#/components/responses/Problem'
+        '503':
+          $ref: '#/components/responses/Problem'
   /admin/roster-plan/support-slot-ask:
     post:
       operationId: approveSupportSlotAsk

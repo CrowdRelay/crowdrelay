@@ -831,6 +831,12 @@ pub(super) fn application_routes(state: AppState) -> Router {
             "/v1/admin/roster-plan/portfolio",
             get(crate::roster_portfolio::roster_portfolio),
         )
+        // The quarterly page the label owes each act — the same org-scoped
+        // membership boundary as the rest of roster-plan.
+        .route(
+            "/v1/admin/roster-plan/act-report",
+            get(crate::roster_act_report::roster_act_report),
+        )
         // The roster's own numbers, on the same surface as its plan for the
         // same reason: these belong to the organisation, and a workspace token
         // must not be able to read or set what a labelmate's plan is sized by.
