@@ -100,6 +100,7 @@ mod push;
 mod rate_limit;
 mod referrals;
 mod releases;
+mod roster_source_roi;
 mod routing;
 mod security;
 mod signal_installations;
