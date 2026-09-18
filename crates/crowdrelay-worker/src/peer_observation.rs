@@ -1,5 +1,11 @@
 //! Peer observation sweep (sprint 3.5b.1).
 //!
+//! Each sweep opens with one proposal pass: `place_peer_acts` whose
+//! canonicalised genres intersect the workspace's band-listing genres land
+//! `proposed` in `viryaos_peers` for the operator to confirm or refuse —
+//! the peer-act graph keeps the watch list fed, and a refused name is never
+//! asked again. Only then does the observing half run.
+//!
 //! Deterministic, no LLM: confirmed peers in `viryaos_peers` carry `handles`
 //! like `{"youtube": "@handle" | "UC...", "rss": "https://..."}`. Each sweep
 //! resolves the handle to a feed, fetches it, and records one dated fact per
@@ -134,6 +140,18 @@ impl PeerObservationWorker {
     /// feed instead of waiting out the ticker.
     pub async fn sweep(&self) -> Result<usize, PeerObservationError> {
         let repository = PostgresContentEngineRepository::new(self.pool.clone());
+        // Proposals before observations: a candidate the operator confirms
+        // is a feed the next sweep reads, and a proposal-pass failure must
+        // not stop observing the peers already confirmed.
+        match repository.propose_peers(self.workspace_id).await {
+            Ok(proposed) if !proposed.is_empty() => {
+                tracing::info!(proposed = proposed.len(), "peer candidates proposed");
+            }
+            Ok(_) => {}
+            Err(error) => {
+                tracing::warn!(error = %error, "peer proposal pass failed");
+            }
+        }
         let peers = repository
             .list_peers(
                 self.workspace_id,

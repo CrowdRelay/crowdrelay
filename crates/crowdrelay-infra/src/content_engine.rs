@@ -1,6 +1,7 @@
-//! Content engine persistence (sprint 3.5a): peers, peer observations, the
-//! format catalogue, production events, capture plans, arcs, suggestions and
-//! outcomes.
+//! Content engine persistence (sprint 3.5a): peer observations, the
+//! format catalogue, production events, capture plans, arcs, suggestions
+//! and outcomes. The peer write path — operator create, resolve, scanner
+//! proposals — lives in `content_peers.rs`.
 //!
 //! Every query is workspace-scoped — `viryaos_content_format_entries` is the
 //! only global table, because the catalogue is a seeded prior shared by all
@@ -18,9 +19,9 @@ use crowdrelay_domain::{
     content_engine::{
         Arc, ArcStatus, CapabilityProfile, CapturePlan, CapturePlanStatus, ContentFormatEntry,
         ContentSuggestion, Effort, FanObservation, FormatCadence, FormatCategory, FormatPurpose,
-        FormatRequirement, Peer, PeerObservation, PeerStatus, PeerTier, ProductionEvent,
-        ProductionEventKind, ProductionEventStatus, SuggestionOutcome, SuggestionOutcomeKind,
-        SuggestionStatus, normalize_watch_for, parse_format_skill,
+        FormatRequirement, PeerObservation, ProductionEvent, ProductionEventKind,
+        ProductionEventStatus, SuggestionOutcome, SuggestionOutcomeKind, SuggestionStatus,
+        normalize_watch_for, parse_format_skill,
     },
     team_operations::TeamSkill,
 };
@@ -46,6 +47,16 @@ pub enum ContentEngineError {
     /// conflict from a database failure.
     #[error("an open capture plan already exists for the production event")]
     PlanAlreadyOpen,
+    /// The name index's partial guard found a live twin. For the operator
+    /// that is a conflict, not the scanner's silent dedup — they asked for
+    /// a new entry and "already there" is the answer.
+    #[error("a live peer already carries this name")]
+    PeerNameTaken,
+    /// The idempotency key is already spent on a different request — the
+    /// operator-action ledger is the record of what a key did, and a reused
+    /// key answering with somebody else's action would be a lie.
+    #[error("idempotency key already spent on a different request")]
+    KeyConflict,
     #[error("content engine database operation failed")]
     Database(sqlx::Error),
 }
@@ -67,47 +78,6 @@ pub struct PostgresContentEngineRepository {
 }
 
 // ── Rows ──────────────────────────────────────────────────────────────────
-
-#[derive(Debug, FromRow)]
-struct PeerRow {
-    id: Uuid,
-    workspace_id: Uuid,
-    name: String,
-    handles: serde_json::Value,
-    tier: String,
-    watch_for: Vec<String>,
-    why: String,
-    proposed_by: String,
-    status: String,
-    rejection_reason: Option<String>,
-    confirmed_at: Option<OffsetDateTime>,
-    created_at: OffsetDateTime,
-    updated_at: OffsetDateTime,
-}
-
-impl TryFrom<PeerRow> for Peer {
-    type Error = ContentEngineError;
-
-    fn try_from(row: PeerRow) -> Result<Self> {
-        Ok(Self {
-            id: PeerId::from_uuid(row.id),
-            workspace_id: WorkspaceId::from_uuid(row.workspace_id),
-            name: row.name,
-            handles: row.handles,
-            tier: PeerTier::parse(&row.tier)
-                .ok_or(ContentEngineError::UnknownValue("peer.tier"))?,
-            watch_for: normalize_watch_for(&row.watch_for),
-            why: row.why,
-            proposed_by: row.proposed_by,
-            status: PeerStatus::parse(&row.status)
-                .ok_or(ContentEngineError::UnknownValue("peer.status"))?,
-            rejection_reason: row.rejection_reason,
-            confirmed_at: row.confirmed_at,
-            created_at: row.created_at,
-            updated_at: row.updated_at,
-        })
-    }
-}
 
 #[derive(Debug, FromRow)]
 struct ObservationRow {
@@ -419,22 +389,6 @@ impl TryFrom<OutcomeRow> for SuggestionOutcome {
 
 // ── Inputs ────────────────────────────────────────────────────────────────
 
-/// What the API or a scanner knows when it proposes a peer. The peer lands
-/// `proposed` until the operator confirms — a candidate is not a peer.
-#[derive(Clone, Debug)]
-pub struct NewPeer {
-    pub name: String,
-    pub handles: serde_json::Value,
-    pub tier: PeerTier,
-    pub watch_for: Vec<String>,
-    pub why: String,
-    /// `'operator'` for typed-in entries; a scanner name for proposals.
-    pub proposed_by: String,
-    /// `true` only for rows the operator confirmed at entry — scanner
-    /// proposals always start `proposed`.
-    pub confirmed: bool,
-}
-
 #[derive(Clone, Debug)]
 pub struct NewPeerObservation {
     pub peer_id: PeerId,
@@ -515,114 +469,6 @@ impl PostgresContentEngineRepository {
     #[must_use]
     pub const fn new(pool: PgPool) -> Self {
         Self { pool }
-    }
-
-    // Peers ────────────────────────────────────────────────────────────────
-
-    /// Inserts a peer in `proposed` or `confirmed` status. The unique index
-    /// on `(workspace_id, lower(name))` keeps a name from landing twice;
-    /// `ON CONFLICT DO NOTHING` returns `None` on a clash rather than
-    /// failing, so a scanner re-proposing the same artist is a no-op.
-    pub async fn create_peer(
-        &self,
-        workspace_id: WorkspaceId,
-        peer: &NewPeer,
-    ) -> Result<Option<Peer>> {
-        let status = if peer.confirmed {
-            PeerStatus::Confirmed
-        } else {
-            PeerStatus::Proposed
-        };
-        let row = sqlx::query_as::<_, PeerRow>(
-            r#"
-            INSERT INTO viryaos_peers (
-                id, workspace_id, name, handles, tier, watch_for, why,
-                proposed_by, status, confirmed_at
-            )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9,
-                    CASE WHEN $9 = 'confirmed' THEN now() END)
-            ON CONFLICT DO NOTHING
-            RETURNING *
-            "#,
-        )
-        .bind(PeerId::new().into_uuid())
-        .bind(workspace_id.into_uuid())
-        .bind(peer.name.trim())
-        .bind(&peer.handles)
-        .bind(peer.tier.as_str())
-        .bind(normalize_watch_for(&peer.watch_for))
-        .bind(&peer.why)
-        .bind(&peer.proposed_by)
-        .bind(status.as_str())
-        .fetch_optional(&self.pool)
-        .await?;
-        row.map(Peer::try_from).transpose()
-    }
-
-    /// Lists peers for a workspace, optionally narrowed to one status.
-    /// Sweeps ask for `Confirmed` only — proposals are never observed.
-    pub async fn list_peers(
-        &self,
-        workspace_id: WorkspaceId,
-        status: Option<PeerStatus>,
-    ) -> Result<Vec<Peer>> {
-        let rows = sqlx::query_as::<_, PeerRow>(
-            r#"
-            SELECT * FROM viryaos_peers
-            WHERE workspace_id = $1
-              AND ($2::text IS NULL OR status = $2)
-            ORDER BY created_at ASC
-            "#,
-        )
-        .bind(workspace_id.into_uuid())
-        .bind(status.map(PeerStatus::as_str))
-        .fetch_all(&self.pool)
-        .await?;
-        rows.into_iter().map(Peer::try_from).collect()
-    }
-
-    /// Resolves a `proposed` peer to `confirmed` or `rejected`. The
-    /// transition guard runs in the `WHERE` clause so a stale approval can
-    /// never un-reject a peer. A rejection must carry its reason — that is
-    /// the record that stops the same wrong name being proposed twice — and
-    /// a confirmation must not carry one.
-    pub async fn resolve_peer(
-        &self,
-        workspace_id: WorkspaceId,
-        peer_id: PeerId,
-        next: PeerStatus,
-        rejection_reason: Option<&str>,
-    ) -> Result<Peer> {
-        if !PeerStatus::Proposed.can_transition_to(next) {
-            return Err(ContentEngineError::InvalidTransition);
-        }
-        let reason = rejection_reason
-            .map(str::trim)
-            .filter(|value| !value.is_empty());
-        match (next, reason) {
-            (PeerStatus::Rejected, None) => return Err(ContentEngineError::MissingReason),
-            (PeerStatus::Confirmed, Some(_)) => return Err(ContentEngineError::InvalidTransition),
-            _ => {}
-        }
-        let row = sqlx::query_as::<_, PeerRow>(
-            r#"
-            UPDATE viryaos_peers
-            SET status = $3,
-                rejection_reason = CASE WHEN $3 = 'rejected' THEN $4 END,
-                confirmed_at = CASE WHEN $3 = 'confirmed' THEN now() END,
-                updated_at = now()
-            WHERE id = $2 AND workspace_id = $1 AND status = 'proposed'
-            RETURNING *
-            "#,
-        )
-        .bind(workspace_id.into_uuid())
-        .bind(peer_id.into_uuid())
-        .bind(next.as_str())
-        .bind(reason)
-        .fetch_optional(&self.pool)
-        .await?
-        .ok_or(ContentEngineError::InvalidTransition)?;
-        Peer::try_from(row)
     }
 
     // Observations ─────────────────────────────────────────────────────────

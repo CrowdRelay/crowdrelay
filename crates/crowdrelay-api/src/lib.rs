@@ -75,6 +75,7 @@ mod connections_gdrive;
 mod connections_gmail;
 mod connections_simple;
 mod connections_tiktok;
+mod content_engine;
 mod control_plane;
 mod ecosystem;
 mod event_copy;

@@ -11,7 +11,8 @@ use crowdrelay_domain::{
     WorkspaceId,
     content_engine::{PeerStatus, PeerTier},
 };
-use crowdrelay_infra::content_engine::{NewPeer, PostgresContentEngineRepository};
+use crowdrelay_infra::content_engine::PostgresContentEngineRepository;
+use crowdrelay_infra::content_peers::NewPeer;
 use crowdrelay_worker::peer_observation::PeerObservationWorker;
 use serde_json::json;
 use sqlx::{PgPool, postgres::PgPoolOptions};
@@ -137,5 +138,82 @@ async fn sweep_records_dated_facts_once() -> Result<(), Box<dyn std::error::Erro
     // A resweep records nothing new — the dedup index, not luck.
     let again = worker.sweep().await?;
     assert_eq!(again, 0, "the same facts must not be recorded twice");
+    Ok(())
+}
+
+/// The sweep opens with the proposal pass: a peer act sharing the listing's
+/// genres lands `proposed` — and is *not* observed that same sweep, because
+/// only a confirmed peer is ever read. The operator's confirm is what turns
+/// a candidate into a feed.
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and disposable PostgreSQL"]
+async fn sweep_proposes_before_it_observes() -> Result<(), Box<dyn std::error::Error>> {
+    let database_url = std::env::var("CROWDRELAY_TEST_DATABASE_URL")
+        .map_err(|e| format!("CROWDRELAY_TEST_DATABASE_URL must be configured: {e}"))?;
+    let pool: PgPool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&database_url)
+        .await?;
+    crowdrelay_infra::database::MIGRATOR.run(&pool).await?;
+
+    let workspace_id = WorkspaceId::new();
+    let unique = workspace_id.into_uuid().simple().to_string();
+    sqlx::query("INSERT INTO workspaces (id, slug, name) VALUES ($1, $2, $3)")
+        .bind(workspace_id.into_uuid())
+        .bind(format!("peer-sweep-{unique}"))
+        .bind("Peer Sweep Test")
+        .execute(&pool)
+        .await?;
+    // The listing's genre is the intersection the pass reads; the act name
+    // and genre are run-unique because the peer-act graph is global.
+    let genre = format!("sweep-{unique}");
+    sqlx::query(
+        "INSERT INTO viryaos_band_listings (workspace_id, act_name, genre_tags) \
+         VALUES ($1, $2, $3)",
+    )
+    .bind(workspace_id.into_uuid())
+    .bind("The Sweep Band")
+    .bind(vec![genre.clone()])
+    .execute(&pool)
+    .await?;
+    let act_id = uuid::Uuid::now_v7();
+    let act_name = format!("Sweep Match {unique}");
+    sqlx::query("INSERT INTO place_peer_acts (id, name_key, display_name) VALUES ($1, $2, $3)")
+        .bind(act_id)
+        .bind(act_name.to_lowercase())
+        .bind(&act_name)
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "INSERT INTO place_peer_act_genres
+            (peer_act_id, genre_tag, provenance, source_ref)
+         VALUES ($1, $2, 'researched', 'test-suite')",
+    )
+    .bind(act_id)
+    .bind(&genre)
+    .execute(&pool)
+    .await?;
+
+    let worker = PeerObservationWorker::with_client(
+        pool.clone(),
+        workspace_id,
+        Duration::from_secs(3600),
+        reqwest::Client::new(),
+    );
+    let recorded = worker.sweep().await?;
+    assert_eq!(recorded, 0, "a proposal is never observed the same sweep");
+
+    let repository = PostgresContentEngineRepository::new(pool.clone());
+    let proposals = repository
+        .list_peers(workspace_id, Some(PeerStatus::Proposed))
+        .await?;
+    assert_eq!(proposals.len(), 1);
+    assert_eq!(proposals[0].name, act_name);
+    assert_eq!(proposals[0].proposed_by, "peer-act-graph");
+    assert_eq!(
+        proposals[0].handles,
+        json!({}),
+        "the scanner never invents handles"
+    );
     Ok(())
 }
