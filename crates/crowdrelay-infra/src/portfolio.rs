@@ -26,6 +26,11 @@ pub enum PortfolioError {
     /// The monthly campaign cap for this edge is already spent.
     #[error("monthly campaign cap reached for this edge")]
     CapReached,
+    /// A cross-bill edge carries only after the beneficiary's own audience
+    /// has carried the audience owner's announcement — measured by a
+    /// delivered reverse-direction edge, active or since revoked.
+    #[error("cross-bill edge is unreciprocated")]
+    Unreciprocated,
     /// Both workspaces must belong to the same organization.
     #[error("workspaces are not in the same organization")]
     NotInSameOrganization,
@@ -329,13 +334,50 @@ impl PostgresPortfolioRepository {
         .await
         .map_err(PortfolioError::unexpected)?
         .ok_or(PortfolioError::NotFound)?;
-        let max_campaigns: i16 = sqlx::query_scalar(
-            "SELECT max_campaigns_per_month FROM amplification_consents WHERE id = $1",
-        )
-        .bind(consent_id)
-        .fetch_one(&mut *tx)
-        .await
-        .map_err(PortfolioError::unexpected)?;
+        // A cross-bill edge that has never been reciprocated does not
+        // carry: the beneficiary's audience must have carried the audience
+        // owner's announcement before the owner's crowd carries theirs.
+        // Any reverse-purpose delivery counts — a delivered cross-promote
+        // or release-feature edge is how a fresh pair bootstraps. The
+        // reverse edge needs a delivery, not an active status —
+        // revocation does not erase history. Forward purposes other than
+        // crossbill (a label pushing its roster) are legitimately
+        // asymmetric and ungated. The structural refusal is reported
+        // before the transient cap: an unreciprocated edge is ineligible
+        // whatever the budget says.
+        let Some((purpose, max_campaigns, reciprocated)) =
+            sqlx::query_as::<_, (String, i16, bool)>(
+                r#"
+            SELECT edge.purpose, edge.max_campaigns_per_month,
+                   EXISTS (
+                       SELECT 1
+                       FROM amplification_consents AS reverse_edge
+                       JOIN amplification_deliveries AS reverse_ledger
+                         ON reverse_ledger.consent_id = reverse_edge.id
+                       WHERE reverse_edge.from_workspace_id = edge.to_workspace_id
+                         AND reverse_edge.to_workspace_id = edge.from_workspace_id
+                   ) AS reciprocated
+            FROM amplification_consents AS edge
+            WHERE edge.id = $2
+              AND edge.status = 'active'
+              AND (edge.from_workspace_id = $1 OR edge.to_workspace_id = $1)
+            "#,
+            )
+            .bind(workspace_id)
+            .bind(consent_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(PortfolioError::unexpected)?
+        else {
+            // The consent went inactive between the probe and this read —
+            // same NotFound the probe would have reported.
+            return Err(PortfolioError::NotFound);
+        };
+        if purpose == crowdrelay_domain::portfolio::AmplificationPurpose::EventCrossbill.as_str()
+            && !reciprocated
+        {
+            return Err(PortfolioError::Unreciprocated);
+        }
         if spent_campaigns >= i32::from(max_campaigns) {
             return Err(PortfolioError::CapReached);
         }

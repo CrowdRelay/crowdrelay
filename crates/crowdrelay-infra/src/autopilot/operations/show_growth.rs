@@ -32,6 +32,7 @@ struct ShowGrowthRow {
     post_show_follow_ask_requested: bool,
     post_show_recap_requested: bool,
     morning_after_send_at: Option<OffsetDateTime>,
+    unreciprocated_crossbill_edge: bool,
 }
 
 pub(in crate::autopilot) async fn load_show_growth_snapshots(
@@ -82,7 +83,37 @@ pub(in crate::autopilot) async fn load_show_growth_snapshots(
                 (date_trunc('day', (event.starts_at - interval '4 hours')
                         AT TIME ZONE event.timezone)
                     + interval '34 hours') AT TIME ZONE event.timezone
-            END AS morning_after_send_at
+            END AS morning_after_send_at,
+            -- §4e-2: an active event_crossbill edge points at this workspace
+            -- (`to` is the beneficiary — the direction rule the timeline and
+            -- fan_context use) and not one inbound edge is reciprocated by a
+            -- delivered reverse-direction consent. The delivery row is the
+            -- proof: a consent that has carried exists in the ledger whatever
+            -- its status is now, so revocation does not reopen the gate. The
+            -- flag is exactly the surface's `unreciprocated` state — an edge
+            -- exists and none can carry — so the tenant never sees
+            -- `automated_overlap` on a lever the brain is declining. False
+            -- when no inbound edge exists at all: the partner lever also
+            -- covers venue and scene asks that owe nobody reciprocity.
+            EXISTS (
+                SELECT 1
+                FROM amplification_consents AS edge
+                WHERE edge.to_workspace_id = event.workspace_id
+                  AND edge.purpose = 'event_crossbill'
+                  AND edge.status = 'active'
+            )
+            AND NOT EXISTS (
+                SELECT 1
+                FROM amplification_consents AS edge
+                JOIN amplification_consents AS reverse_edge
+                  ON reverse_edge.from_workspace_id = edge.to_workspace_id
+                 AND reverse_edge.to_workspace_id = edge.from_workspace_id
+                JOIN amplification_deliveries AS reverse_ledger
+                  ON reverse_ledger.consent_id = reverse_edge.id
+                WHERE edge.to_workspace_id = event.workspace_id
+                  AND edge.purpose = 'event_crossbill'
+                  AND edge.status = 'active'
+            ) AS unreciprocated_crossbill_edge
         FROM events AS event
         LEFT JOIN ecosystem_feature_flags AS comm
           ON comm.workspace_id = event.workspace_id
@@ -226,6 +257,7 @@ fn map_row(row: ShowGrowthRow) -> Result<ShowGrowthSnapshot, RepositoryError> {
         beacon_partners: u16::try_from(row.beacon_partners)
             .map_err(|_| RepositoryError::Unexpected)?,
         attendees: bounded_u32(row.attendees)?,
+        unreciprocated_crossbill_edge: row.unreciprocated_crossbill_edge,
         history: ShowGrowthHistory {
             free_listing_sweep_requested: row.free_listing_sweep_requested,
             canonical_link_setup_requested: row.canonical_link_setup_requested,

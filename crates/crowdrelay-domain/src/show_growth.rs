@@ -51,6 +51,15 @@ pub struct ShowGrowthSnapshot {
     /// scheduling. `None` only when the event's timezone is not a known IANA
     /// name, in which case the recap sends when the decision lands.
     pub morning_after_send_at: Option<OffsetDateTime>,
+    /// §4e-2: an active `event_crossbill` edge points at this workspace and
+    /// not one of them is reciprocated — no reverse-direction consent has
+    /// ever delivered, so this workspace's crowd has never carried a
+    /// partner's announcement and its show does not get carried to theirs.
+    /// `false` when no edge exists at all, and when at least one inbound
+    /// edge can carry: the partner lever also covers venue and scene asks
+    /// that owe nobody reciprocity, and the per-edge refusal in the
+    /// delivery path guards whichever edges still cannot.
+    pub unreciprocated_crossbill_edge: bool,
     pub history: ShowGrowthHistory,
 }
 
@@ -278,6 +287,13 @@ pub enum ShowGrowthHoldReason {
     Unpublished,
     CommunicationDisabled,
     TooEarly,
+    /// §4e-2: the crossbill lever is due but the inbound edge is
+    /// unreciprocated — this workspace's audience has never carried the
+    /// partner's announcement, so this workspace's does not get carried to
+    /// theirs until the reverse direction has delivered once. The hold is
+    /// named so the refusal lands on the decision ledger instead of reading
+    /// as a generic `NotDue`.
+    UnreciprocatedCrossbill,
     NotDue,
 }
 
@@ -382,6 +398,15 @@ pub fn evaluate_show_growth(
     if days <= i64::from(policy.partner_cross_promo_lead_days)
         && !snapshot.history.partner_cross_promo_requested
     {
+        // §4e-2: reciprocity is a hard gate, not a score. An unreciprocated
+        // edge does not produce a proposal — an act that has never carried a
+        // bill-mate's announcement does not get carried. Without this,
+        // crossbill is spam between tenants. The named hold stays terminal
+        // for this lever only; the caller re-evaluates with the lever masked
+        // so the rest of the ladder is not stalled by one gated edge.
+        if snapshot.unreciprocated_crossbill_edge {
+            return ShowGrowthDecision::Hold(ShowGrowthHoldReason::UnreciprocatedCrossbill);
+        }
         return request(ShowGrowthLever::PartnerCrossPromo, 9_400);
     }
 
@@ -548,6 +573,7 @@ mod tests {
             beacon_partners: 0,
             attendees: 0,
             morning_after_send_at: None,
+            unreciprocated_crossbill_edge: false,
             history: ShowGrowthHistory {
                 // Every test below describes a show already mid-campaign; the
                 // tracked link is set up once, before anything is shared.
@@ -577,6 +603,38 @@ mod tests {
         let decision = evaluate_show_growth(data, ShowGrowthPolicy::default(), now());
         assert!(matches!(
             decision,
+            ShowGrowthDecision::Request {
+                lever: ShowGrowthLever::PartnerCrossPromo,
+                ..
+            }
+        ));
+    }
+
+    /// §4e-2: a crossbill edge whose beneficiary has never carried the
+    /// partner's announcement does not get carried — the lever holds with a
+    /// named reason instead of proposing.
+    #[test]
+    fn an_unreciprocated_crossbill_edge_holds_the_partner_lever() {
+        let mut data = snapshot(40);
+        data.history.free_listing_sweep_requested = true;
+        data.history.audience_capture_setup_requested = true;
+        data.unreciprocated_crossbill_edge = true;
+        assert_eq!(
+            evaluate_show_growth(data, ShowGrowthPolicy::default(), now()),
+            ShowGrowthDecision::Hold(ShowGrowthHoldReason::UnreciprocatedCrossbill)
+        );
+    }
+
+    /// The same due lever fires the moment the edge is reciprocated — the
+    /// flag is the only difference from `cross_promo_follows_listing_sweep`.
+    #[test]
+    fn a_reciprocated_crossbill_edge_still_fires_the_partner_lever() {
+        let mut data = snapshot(40);
+        data.history.free_listing_sweep_requested = true;
+        data.history.audience_capture_setup_requested = true;
+        data.unreciprocated_crossbill_edge = false;
+        assert!(matches!(
+            evaluate_show_growth(data, ShowGrowthPolicy::default(), now()),
             ShowGrowthDecision::Request {
                 lever: ShowGrowthLever::PartnerCrossPromo,
                 ..

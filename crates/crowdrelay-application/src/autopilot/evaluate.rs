@@ -100,7 +100,7 @@ use growth_intelligence::{
 use growth_metrics::growth_metric_candidate;
 use outreach_supply::outreach_supply_candidate;
 use plays::{play_decision, play_start, play_step_candidate};
-use show_growth::show_growth_candidate;
+use show_growth::show_growth_candidates;
 
 use crate::RepositoryError;
 
@@ -509,7 +509,11 @@ where
                         .load_show_growth_snapshots(self.workspace_id, now)
                         .await?;
                     for snapshot in snapshots {
-                        if let Some(candidate) = show_growth_candidate(snapshot, &policy, now)? {
+                        // One snapshot can emit two candidates: the §4e-2
+                        // refusal of an unreciprocated crossbill lever, and —
+                        // the refusal belongs to that lever, not the ladder —
+                        // the next lever that is due on its own schedule.
+                        for candidate in show_growth_candidates(snapshot, &policy, now)? {
                             self.persist(&candidate, &mut limits, &mut report).await?;
                         }
                     }

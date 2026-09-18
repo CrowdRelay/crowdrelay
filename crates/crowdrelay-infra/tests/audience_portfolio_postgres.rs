@@ -251,6 +251,128 @@ async fn portfolio_edges_route_only_within_an_organization_and_cap_deliveries()
 
 #[tokio::test]
 #[ignore = "requires an explicit CROWDRELAY_TEST_DATABASE_URL PostgreSQL database"]
+async fn crossbill_edges_carry_only_once_reciprocated() -> Result<(), Box<dyn std::error::Error>> {
+    let pool = pool().await;
+    crowdrelay_infra::database::MIGRATOR.run(&pool).await?;
+    let repo = PostgresPortfolioRepository::new(pool.clone());
+    let owner = seed_workspace(&pool, "cb-owner").await;
+    let beneficiary = seed_workspace(&pool, "cb-benefit").await;
+
+    let org = repo
+        .create_organization_for_workspace(owner, &format!("cb-{}", owner.simple()), "CB Label")
+        .await?;
+    sqlx::query("UPDATE workspaces SET organization_id = $2 WHERE id = $1")
+        .bind(beneficiary)
+        .bind(org)
+        .execute(&pool)
+        .await?;
+
+    let edge = repo
+        .propose_amplification(
+            owner,
+            beneficiary,
+            crowdrelay_domain::portfolio::AmplificationPurpose::EventCrossbill,
+            "all_active",
+            3,
+            1,
+        )
+        .await?;
+    repo.decide_amplification(owner, edge, ConsentStatus::Active, Some("op"), None)
+        .await?;
+
+    for index in ["a", "b"] {
+        sqlx::query(
+            "INSERT INTO fans (id, workspace_id, normalized_email, status) VALUES ($1,$2,$3,'active')",
+        )
+        .bind(Uuid::now_v7())
+        .bind(owner)
+        .bind(format!("fan-{index}-{}@cb.test", owner.simple()))
+        .execute(&pool)
+        .await?;
+    }
+
+    // The beneficiary's crowd has never carried the owner's announcement:
+    // the edge refuses before any campaign can queue — and writes nothing.
+    let refused = repo
+        .run_amplification_campaign(owner, edge, "cb-camp-1", "Hello", "Body", 100)
+        .await;
+    assert!(matches!(refused, Err(PortfolioError::Unreciprocated)));
+    let queued: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM outbox_events WHERE workspace_id = $1")
+            .bind(owner)
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(queued, 0, "a refused edge must not queue deliveries");
+
+    // An active reverse edge alone is consent, not proof — zero deliveries
+    // still refuses. Any reverse purpose counts: a delivered cross-promote
+    // is how a fresh pair bootstraps its first carry.
+    let reverse = repo
+        .propose_amplification(
+            beneficiary,
+            owner,
+            crowdrelay_domain::portfolio::AmplificationPurpose::CrossPromote,
+            "all_active",
+            1,
+            1,
+        )
+        .await?;
+    repo.decide_amplification(
+        beneficiary,
+        reverse,
+        ConsentStatus::Active,
+        Some("op"),
+        None,
+    )
+    .await?;
+    let undelivered = repo
+        .run_amplification_campaign(owner, edge, "cb-camp-1", "Hello", "Body", 100)
+        .await;
+    assert!(matches!(undelivered, Err(PortfolioError::Unreciprocated)));
+
+    sqlx::query(
+        "INSERT INTO amplification_deliveries
+             (consent_id, from_workspace_id, to_workspace_id, fan_id, campaign_reference)
+         VALUES ($1, $2, $3, $4, 'cb-reverse-1')",
+    )
+    .bind(reverse)
+    .bind(beneficiary)
+    .bind(owner)
+    .bind(Uuid::now_v7())
+    .execute(&pool)
+    .await?;
+
+    let carried = repo
+        .run_amplification_campaign(owner, edge, "cb-camp-1", "Hello", "Body", 100)
+        .await?;
+    assert_eq!(carried, 2);
+
+    // Revoking the reverse edge does not erase its history — the
+    // beneficiary already carried, so the forward edge stays eligible.
+    // Every fan is inside the one-day cooldown now, so zero queue, but the
+    // run must not refuse.
+    repo.decide_amplification(
+        beneficiary,
+        reverse,
+        ConsentStatus::Revoked,
+        None,
+        Some("ended"),
+    )
+    .await?;
+    let still_carried = repo
+        .run_amplification_campaign(owner, edge, "cb-camp-2", "Hello", "Body", 100)
+        .await;
+    assert!(
+        matches!(still_carried, Ok(0)),
+        "a revoked reverse edge still counts as reciprocation"
+    );
+
+    cleanup(&pool, &[owner, beneficiary]).await;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires an explicit CROWDRELAY_TEST_DATABASE_URL PostgreSQL database"]
 async fn fan_import_lands_pending_and_respects_opt_outs() -> Result<(), Box<dyn std::error::Error>>
 {
     let pool = pool().await;
