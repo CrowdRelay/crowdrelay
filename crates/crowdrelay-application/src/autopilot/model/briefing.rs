@@ -277,6 +277,32 @@ impl AutopilotActionPayload {
                 ],
                 deadline_note: String::new(),
             },
+            Self::RequestBookingAgentApproach { agent_name, agency, note, evidence, .. } => {
+                let draw = [
+                    evidence.shows_played_12m.map(|v| format!("{v} shows played (12m)")),
+                    evidence.paid_tickets_12m.map(|v| format!("{v} paid tickets (12m)")),
+                    evidence.distinct_buyers_12m.map(|v| format!("{v} distinct buyers (12m)")),
+                ]
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>()
+                .join(", ");
+                ActionBriefing {
+                    summary: format!("Apply to booking agent: {}", agent_name),
+                    why_it_matters: "The platform sends this on the band's behalf — the agent's address never reaches the band. The draw numbers are the pitch, and one approach spends the season either way.".into(),
+                    steps: vec![
+                        BriefingStep { what_to_do: "Check the draw numbers are the ones you want sent".into(), why_it_matters: "The agent decides on them, and dispatch refuses without them".into() },
+                        BriefingStep { what_to_do: "Click APPROVE to send it".into(), why_it_matters: "The application goes out once a season, and a decline closes the door for one".into() },
+                    ],
+                    content: vec![
+                        BriefingField { label: "Agent".into(), value: agent_name.clone() },
+                        BriefingField { label: "Agency".into(), value: agency.clone().unwrap_or_else(|| "—".into()) },
+                        BriefingField { label: "Draw".into(), value: if draw.is_empty() { "—".into() } else { draw } },
+                        BriefingField { label: "Note".into(), value: note.clone().unwrap_or_else(|| "—".into()) },
+                    ],
+                    deadline_note: String::new(),
+                }
+            }
             Self::VerifyPlaylistPlacement { playlist_external_id, track_external_id, checkpoint, .. } => ActionBriefing {
                 summary: format!("Verify the playlist (check {})", checkpoint),
                 why_it_matters: "This checks whether the track is on the playlist. It reads public data and contacts nobody.".into(),

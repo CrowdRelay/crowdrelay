@@ -542,27 +542,13 @@ impl PostgresGDriveRepository {
         } else {
             display_name
         };
-        sqlx::query(
-            r#"
-            INSERT INTO viryaos_outreach_targets
-                (workspace_id, target_kind, display_name, contact_email,
-                 active, verified, accepts_outreach, do_not_contact)
-            VALUES ($1, $2, $3, $4, true, true, false, false)
-            ON CONFLICT (workspace_id, contact_email) DO UPDATE SET
-                target_kind = CASE
-                    WHEN viryaos_outreach_targets.target_kind IN ('agent','label')
-                        THEN EXCLUDED.target_kind
-                    ELSE viryaos_outreach_targets.target_kind
-                END,
-                display_name = EXCLUDED.display_name,
-                updated_at = now()
-            "#,
+        upsert_representation_target(
+            &mut tx,
+            workspace_id,
+            target_kind,
+            &display_name,
+            &contact.normalized_email,
         )
-        .bind(workspace_id)
-        .bind(target_kind)
-        .bind(&display_name)
-        .bind(&contact.normalized_email)
-        .execute(&mut *tx)
         .await?;
         sqlx::query(
             "UPDATE viryaos_drive_contacts SET beacon_outcome = 'promoted' WHERE workspace_id = $1 AND id = $2",
@@ -621,11 +607,14 @@ impl PostgresGDriveRepository {
         sqlx::query(
             r#"
             INSERT INTO viryaos_booking_agents
-                (workspace_id, name, agency, contact_email)
-            VALUES ($1, $2, $3, $4)
+                (workspace_id, name, agency, contact_email, contact_verified_at)
+            VALUES ($1, $2, $3, $4, now())
             ON CONFLICT (workspace_id, contact_email) DO UPDATE SET
                 name = EXCLUDED.name,
-                agency = COALESCE(EXCLUDED.agency, viryaos_booking_agents.agency)
+                agency = COALESCE(EXCLUDED.agency, viryaos_booking_agents.agency),
+                contact_verified_at = COALESCE(
+                    viryaos_booking_agents.contact_verified_at, now()
+                )
             "#,
         )
         .bind(workspace_id)
@@ -633,6 +622,18 @@ impl PostgresGDriveRepository {
         .bind(agency)
         .bind(&contact.normalized_email)
         .execute(&mut *tx)
+        .await?;
+        // The registry row is who the agent is; the outreach row is how the
+        // band reaches them — one promote files both, or the agent list
+        // would be a book the band can never act on. Consent still waits on
+        // a stated basis like every representation contact.
+        upsert_representation_target(
+            &mut tx,
+            workspace_id,
+            "agent",
+            &name,
+            &contact.normalized_email,
+        )
         .await?;
         sqlx::query(
             "UPDATE viryaos_drive_contacts SET beacon_outcome = 'promoted' WHERE workspace_id = $1 AND id = $2",
@@ -1012,4 +1013,48 @@ impl PostgresGDriveRepository {
         .await?;
         Ok(())
     }
+}
+
+/// Files a contact on the representation list — the `viryaos_outreach_targets`
+/// row an approach can be requested against. Shared by the two beacon promote
+/// paths: an `agent`/`label` sheet kind files it directly, and a
+/// `booking_agent`/`talent_buyer` files it beside the registry row so the
+/// agent is approachable rather than merely recorded.
+///
+/// Verified because the band's own records are the route's provenance;
+/// `accepts_outreach` stays false — the consent basis is the operator's to
+/// state before an approach may send. A re-import refreshes the name and
+/// retires a stale representation kind, but never rewrites a non-
+/// representation kind at the same address — a contact filed as press stays
+/// press.
+async fn upsert_representation_target(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    workspace_id: Uuid,
+    target_kind: &str,
+    display_name: &str,
+    contact_email: &str,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        r#"
+        INSERT INTO viryaos_outreach_targets
+            (workspace_id, target_kind, display_name, contact_email,
+             active, verified, accepts_outreach, do_not_contact)
+        VALUES ($1, $2, $3, $4, true, true, false, false)
+        ON CONFLICT (workspace_id, contact_email) DO UPDATE SET
+            target_kind = CASE
+                WHEN viryaos_outreach_targets.target_kind IN ('agent','label')
+                    THEN EXCLUDED.target_kind
+                ELSE viryaos_outreach_targets.target_kind
+            END,
+            display_name = EXCLUDED.display_name,
+            updated_at = now()
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(target_kind)
+    .bind(display_name)
+    .bind(contact_email)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
 }

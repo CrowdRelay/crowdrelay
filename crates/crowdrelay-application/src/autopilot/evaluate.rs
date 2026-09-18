@@ -655,11 +655,12 @@ where
                         }
                     }
                 }
-                AutopilotContext::Representation => {
+                AutopilotContext::Representation | AutopilotContext::BookingAgent => {
                     // Approaches are band-initiated: the evaluator never
-                    // proposes one. The policy row exists so posture can be
-                    // read and changed, not so a cycle can volunteer the
-                    // band's name to an agent.
+                    // proposes one. The policy rows hold posture for a human
+                    // to read and change — a cycle volunteering the band's
+                    // name to an agent is the blast the season rule exists
+                    // to prevent.
                 }
             }
         }

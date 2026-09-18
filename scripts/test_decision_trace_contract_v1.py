@@ -47,6 +47,11 @@ KNOWN_WRITERS = {
     # action's trace with `TraceContext::for_action` carrying the decision as
     # causation, so `ops/trace/{trace_id}` joins the approval to the letter.
     "crates/crowdrelay-infra/src/gig_outreach.rs",
+    # 4.6d: a band-requested booking-agent approach. Audited — it roots a trace
+    # with `TraceContext::root`, binds `trace_id` on the decision, and derives
+    # the action's trace with `TraceContext::for_action` carrying the decision
+    # as causation, so `ops/trace/{trace_id}` joins the approval to the letter.
+    "crates/crowdrelay-infra/src/booking_agents.rs",
     "crates/crowdrelay-worker/src/agent_outcomes.rs",
 }
 

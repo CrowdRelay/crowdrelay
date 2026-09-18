@@ -206,7 +206,7 @@ pub(in crate::autopilot) async fn load_chief_of_staff(
             (SELECT count(*)::bigint FROM viryaos_autopilot_actions
               WHERE workspace_id=$1 AND status='awaiting_approval') awaiting_approval,
             (SELECT COALESCE(sum(CASE
-                WHEN action_kind IN ('booking.outreach.request','outreach.request','beacon.outreach.request','beacon.discovery.request','opportunity.live.apply') THEN 10
+                WHEN action_kind IN ('booking.outreach.request','outreach.request','beacon.outreach.request','beacon.discovery.request','opportunity.live.apply','representation.approach.request','booking_agent.approach.request') THEN 10
                 WHEN action_kind='show.growth.request' THEN 9
                 WHEN action_kind='content.artifact.request' THEN 8
                 WHEN action_kind IN ('fan.lifecycle.message.request','audience.campaign.request','release.milestone.execute') THEN 5

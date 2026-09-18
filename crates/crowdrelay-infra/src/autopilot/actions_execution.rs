@@ -263,6 +263,7 @@ impl PostgresAutopilotRepository {
                     target_version,
                     target_name: _,
                     note,
+                    draw_evidence: _,
                 } => {
                     let target = crate::representation::lock_representation_for_execution(
                         &mut transaction,
@@ -277,7 +278,7 @@ impl PostgresAutopilotRepository {
                         workspace_id,
                         action.id,
                         "representation",
-                        &target.1,
+                        &target.contact_email,
                         now,
                     )
                     .await?;
@@ -305,12 +306,17 @@ impl PostgresAutopilotRepository {
                         json!({
                             "action_id": action.id,
                             "target_id": target_id,
-                            "target_name": target.0,
-                            "target_kind": target.2,
-                            "contact_email": target.1,
+                            "target_name": target.display_name,
+                            "target_kind": target.target_kind,
+                            "contact_email": target.contact_email,
                             "note": note,
                             "share_token": listing.share_token,
                             "listing": redacted,
+                            // The pitch is the numbers — the lock just
+                            // re-measured them inside the gate, so the letter
+                            // cites the figure that cleared it, never the
+                            // figure the request remembered.
+                            "draw_evidence": target.draw_evidence,
                         }),
                     )
                     .await?;
@@ -319,6 +325,63 @@ impl PostgresAutopilotRepository {
                         workspace_id,
                         action.id,
                         *target_id,
+                        now,
+                    )
+                    .await?;
+                }
+                AutopilotActionPayload::RequestBookingAgentApproach {
+                    agent_id,
+                    agent_version,
+                    agent_name: _,
+                    agency: _,
+                    note,
+                    evidence: _,
+                } => {
+                    // The lock re-runs every request-time gate — standing,
+                    // the season door, the season spend, and the draw floor
+                    // re-measured now — so an approval that went stale cannot
+                    // send. The evidence it hands back is the figure that
+                    // cleared the gate, which is what the letter cites.
+                    let agent = crate::booking_agents::lock_agent_for_execution(
+                        &mut transaction,
+                        workspace_id,
+                        *agent_id,
+                        *agent_version,
+                        now,
+                    )
+                    .await?;
+                    reserve_contact_window(
+                        &mut transaction,
+                        workspace_id,
+                        action.id,
+                        "booking_agent",
+                        &agent.contact_email,
+                        now,
+                    )
+                    .await?;
+                    emit_outward_action(
+                        &mut transaction,
+                        workspace_id,
+                        action.id,
+                        "crowdrelay.booking_agent.approach_requested",
+                        format!("booking-agent:{agent_id}"),
+                        "screened booking agent — locked under version, draw evidence re-measured at dispatch",
+                        json!({
+                            "action_id": action.id,
+                            "agent_id": agent_id,
+                            "agent_name": agent.name,
+                            "agency": agent.agency,
+                            "contact_email": agent.contact_email,
+                            "note": note,
+                            "evidence": agent.evidence,
+                        }),
+                    )
+                    .await?;
+                    crate::booking_agents::record_approach_sent(
+                        &mut transaction,
+                        workspace_id,
+                        action.id,
+                        *agent_id,
                         now,
                     )
                     .await?;

@@ -178,6 +178,36 @@ pub(super) async fn observe(
             .fetch_one(pool)
             .await
             .map_err(map_sqlx)?,
+            // An agent's reply belongs to the season's one application, and
+            // thirty days is where it is still that application's answer.
+            // Same "latest letter owns the reply" rule as the booking
+            // measurement — a reply that landed after a newer approach is the
+            // newer approach's answer, not this one's.
+            AutopilotMeasurementKind::BookingAgentReply30d => sqlx::query_scalar::<_, f64>(
+                r#"
+                SELECT CASE WHEN EXISTS (
+                    SELECT 1 FROM viryaos_booking_agent_interactions AS reply
+                    WHERE reply.workspace_id=$1 AND reply.agent_id=$2
+                      AND reply.direction='inbound'
+                      AND reply.occurred_at >= $3
+                      AND reply.occurred_at < $3 + INTERVAL '30 days'
+                      AND NOT EXISTS (
+                          SELECT 1 FROM viryaos_booking_agent_interactions AS newer
+                          WHERE newer.workspace_id=reply.workspace_id
+                            AND newer.agent_id=reply.agent_id
+                            AND newer.direction='outbound'
+                            AND newer.occurred_at > $3
+                            AND newer.occurred_at <= reply.occurred_at
+                      )
+                ) THEN 1.0::double precision ELSE 0.0::double precision END
+                "#,
+            )
+            .bind(workspace_id.into_uuid())
+            .bind(measurement.subject_id)
+            .bind(measurement.action_finished_at)
+            .fetch_one(pool)
+            .await
+            .map_err(map_sqlx)?,
             AutopilotMeasurementKind::AudienceTicketRevenue72h => sqlx::query_scalar::<_, f64>(
                 r#"
                 SELECT COALESCE(SUM(ticket_order.amount_gross_minor),0)::double precision

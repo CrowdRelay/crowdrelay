@@ -400,6 +400,22 @@ pub(crate) fn router(state: crate::AppState) -> Router {
             "/v1/control-plane/representation/approach",
             post(crate::band_listing::request_representation_approach),
         )
+        // The booking-agent registry's own surface (§4h-10): the band sees
+        // who the agents are and where the season door stands, asks for one
+        // approach a season, and files what came back. The address never
+        // leaves the platform — the send is brokered.
+        .route(
+            "/v1/control-plane/booking-agents",
+            get(crate::booking_agents::list_booking_agents),
+        )
+        .route(
+            "/v1/control-plane/booking-agents/approach",
+            post(crate::booking_agents::request_booking_agent_approach),
+        )
+        .route(
+            "/v1/control-plane/booking-agents/{agent_id}/reply",
+            post(crate::booking_agents::record_booking_agent_reply),
+        )
         // ── The shared night (§12-9) ────────────────────────────────
         // One read whose payload is the caller's resolved lens, and the
         // five writes around it: contribute, revoke, mint/revoke the

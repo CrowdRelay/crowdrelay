@@ -130,6 +130,7 @@ fn parse_context(value: &str) -> Option<AutopilotContext> {
         "growth_intelligence" => Some(AutopilotContext::GrowthIntelligence),
         "content_strategy" => Some(AutopilotContext::ContentStrategy),
         "representation" => Some(AutopilotContext::Representation),
+        "booking_agent" => Some(AutopilotContext::BookingAgent),
         _ => None,
     }
 }

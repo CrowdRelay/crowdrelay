@@ -87,6 +87,8 @@
         /v1/control-plane/attestations/* \
         /v1/control-plane/representation/targets \
         /v1/control-plane/representation/approach \
+        /v1/control-plane/booking-agents \
+        /v1/control-plane/booking-agents/* \
 
 	handle /healthz/ready {
 		rewrite * /v1/health/ready

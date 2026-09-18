@@ -67,6 +67,7 @@ mod audience_graph;
 mod autopilot;
 mod band_listing;
 mod beacon_signal;
+mod booking_agents;
 mod commerce;
 mod community_intelligence_routes;
 mod concert_qr;

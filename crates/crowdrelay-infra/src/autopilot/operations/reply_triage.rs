@@ -258,6 +258,35 @@ impl AutopilotReplyTriageRepository for PostgresAutopilotRepository {
                 .await
                 .map_err(map_sqlx)?;
 
+                // Same door the operator-recorded decline closes (§4h-10):
+                // a classified refusal on an agent target sets the registry's
+                // refused_until, matched by address. The season dates from the
+                // reply's own day — `last_reply_at` is the occurred_at the
+                // ingress stamped, not the moment the classifier ran.
+                if disp_str == "declined" {
+                    sqlx::query(
+                        r#"
+                        UPDATE viryaos_booking_agents AS agent
+                        SET refused_until = GREATEST(
+                            agent.refused_until,
+                            COALESCE(target.last_reply_at::date, CURRENT_DATE) + $3
+                        ),
+                            version = agent.version + 1
+                        FROM viryaos_outreach_targets AS target
+                        WHERE target.workspace_id = $1 AND target.id = $2
+                          AND target.target_kind = 'agent'
+                          AND agent.workspace_id = target.workspace_id
+                          AND lower(agent.contact_email) = lower(target.contact_email)
+                        "#,
+                    )
+                    .bind(workspace_id.into_uuid())
+                    .bind(target_id)
+                    .bind(crowdrelay_domain::representation::AGENT_APPROACH_SEASON_DAYS as i32)
+                    .execute(&mut *transaction)
+                    .await
+                    .map_err(map_sqlx)?;
+                }
+
                 // When the classifier confirms DNC, update the contact governor
                 // so the target's email is blocked across all future targets.
                 // The ingress skips this when reply_text is present (because the
@@ -286,6 +315,26 @@ impl AutopilotReplyTriageRepository for PostgresAutopilotRepository {
                     .bind(workspace_id.into_uuid())
                     .bind(target_id)
                     .bind(result.classified_at)
+                    .execute(&mut *transaction)
+                    .await
+                    .map_err(map_sqlx)?;
+
+                    // The registry's own wall beside the governor's — same
+                    // reason as the operator path: the booking-agent gate
+                    // reads `viryaos_booking_agents.do_not_contact`.
+                    sqlx::query(
+                        r#"
+                        UPDATE viryaos_booking_agents AS agent
+                        SET do_not_contact = true, version = agent.version + 1
+                        FROM viryaos_outreach_targets AS target
+                        WHERE target.workspace_id = $1 AND target.id = $2
+                          AND target.target_kind = 'agent'
+                          AND agent.workspace_id = target.workspace_id
+                          AND lower(agent.contact_email) = lower(target.contact_email)
+                        "#,
+                    )
+                    .bind(workspace_id.into_uuid())
+                    .bind(target_id)
                     .execute(&mut *transaction)
                     .await
                     .map_err(map_sqlx)?;

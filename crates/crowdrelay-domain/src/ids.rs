@@ -108,6 +108,7 @@ typed_uuid_id!(
     PromotionCampaignId,
     MarketSignalId,
     BookingTargetId,
+    BookingAgentId,
     OutreachTargetId,
     OutreachOpportunityId,
     ContentSourceId,
