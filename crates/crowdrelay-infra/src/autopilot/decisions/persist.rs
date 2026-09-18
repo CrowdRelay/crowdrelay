@@ -76,8 +76,16 @@ async fn persist_decision_and_action_tx(
     }
     // ── Decision INSERT ──
     let decision_id = Uuid::now_v7();
+    // The booking letter is composed here, inside the same transaction that
+    // writes the action, so the payload carries the words the approver will
+    // read. A refusal leaves the draft empty — dispatch fails closed on it,
+    // and the briefing says "not composed" instead of showing invented text.
+    let mut action = candidate.action.clone();
+    if let AutopilotActionPayload::RequestBookingOutreach { .. } = action {
+        enrich_booking_draft(transaction, workspace_id, &mut action).await?;
+    }
     let action_json =
-        serde_json::to_value(&candidate.action).map_err(|_| RepositoryError::Unexpected)?;
+        serde_json::to_value(&action).map_err(|_| RepositoryError::Unexpected)?;
     let inserted_decision = sqlx::query_scalar::<_, Uuid>(
         r#"
         INSERT INTO viryaos_autopilot_decisions (
@@ -456,6 +464,115 @@ async fn record_prediction_and_evidence_tx(
     )
     .await?;
     Ok(evidence)
+}
+
+/// Composes the booking letter onto a `RequestBookingOutreach` payload while
+/// the action is still being written.
+///
+/// The evaluator cannot write the letter: it is pure and the sender identity,
+/// the city's name and its country all live in Postgres. Here is where the
+/// transaction that writes the action exists, so the draft is composed here —
+/// the approval reads the same words the target will. A refusal leaves the
+/// draft empty: dispatch fails closed on it, and the briefing prints "not
+/// composed" rather than words nobody approved.
+async fn enrich_booking_draft(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    workspace_id: WorkspaceId,
+    action: &mut AutopilotActionPayload,
+) -> Result<(), RepositoryError> {
+    use crowdrelay_domain::booking_letter::{compose_booking_letter, BookingLetterInput};
+    use crowdrelay_domain::gig_letter::{LetterLanguage, SenderIdentity};
+    use crowdrelay_domain::venue_evidence::{EvidenceLocale, booking_evidence_line};
+
+    let AutopilotActionPayload::RequestBookingOutreach {
+        draft,
+        city_id,
+        target_name,
+        proposed_window,
+        venue_evidence,
+        phase,
+        ..
+    } = action
+    else {
+        return Ok(());
+    };
+
+    let ws = workspace_id.into_uuid();
+    let city = sqlx::query_as::<_, (String, String)>(
+        "SELECT name, country_code FROM cities WHERE id = $1",
+    )
+    .bind((*city_id).into_uuid())
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(map_sqlx)?;
+    let Some((city_name, country_code)) = city else {
+        // A city the action names must exist — the candidate carried its id.
+        return Err(RepositoryError::NotFound);
+    };
+    let language = LetterLanguage::for_country(&country_code);
+    let sender = SenderIdentity {
+        act_name: sqlx::query_scalar::<_, String>("SELECT name FROM workspaces WHERE id = $1")
+            .bind(ws)
+            .fetch_optional(&mut **transaction)
+            .await
+            .map_err(map_sqlx)?
+            .unwrap_or_default(),
+        style: sqlx::query_scalar::<_, String>(
+            "SELECT value FROM tenant_settings WHERE workspace_id = $1 AND key = 'act_style'",
+        )
+        .bind(ws)
+        .fetch_optional(&mut **transaction)
+        .await
+        .map_err(map_sqlx)?
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty()),
+        home_city: sqlx::query_scalar::<_, String>(
+            r#"
+            SELECT city.name
+            FROM events AS event
+            JOIN cities AS city ON city.id = event.city_id
+            WHERE event.workspace_id = $1
+            GROUP BY city.id, city.name
+            ORDER BY count(*) DESC, city.name
+            LIMIT 1
+            "#,
+        )
+        .bind(ws)
+        .fetch_optional(&mut **transaction)
+        .await
+        .map_err(map_sqlx)?,
+        site_url: sqlx::query_scalar::<_, String>(
+            "SELECT value FROM tenant_settings WHERE workspace_id = $1 AND key = 'member_site_base_url'",
+        )
+        .bind(ws)
+        .fetch_optional(&mut **transaction)
+        .await
+        .map_err(map_sqlx)?
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty()),
+    };
+    let locale = match language {
+        LetterLanguage::Polish => EvidenceLocale::Pl,
+        _ => EvidenceLocale::En,
+    };
+    let first_line_fact = venue_evidence
+        .as_ref()
+        .and_then(|evidence| booking_evidence_line(evidence, locale));
+    let window = proposed_window
+        .as_ref()
+        .map(|window| (window.start, window.end));
+    if let Ok(letter) = compose_booking_letter(&BookingLetterInput {
+        language,
+        sender: &sender,
+        target_name,
+        city: &city_name,
+        proposed_window: window,
+        first_line_fact: first_line_fact.as_deref(),
+        phase: *phase,
+    }) {
+        *draft = letter;
+    }
+    Ok(())
 }
 
 macro_rules! decision_persist {

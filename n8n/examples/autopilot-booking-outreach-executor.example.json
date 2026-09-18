@@ -1,0 +1,219 @@
+{
+  "name": "CrowdRelay \u2014 Autopilot booking outreach executor",
+  "nodes": [
+    {
+      "id": "gig-outreach-trigger",
+      "name": "Called by verified ingress",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        0,
+        0
+      ],
+      "parameters": {
+        "inputSource": "passthrough"
+      }
+    },
+    {
+      "id": "gig-outreach-validate",
+      "name": "Validate the approved letter",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        220,
+        0
+      ],
+      "parameters": {
+        "jsCode": "// One event, one letter, every booking target the proposal named \u2014 the\n// all-or-none reservation happened upstream, so this executor either\n// delivers the letter to all of them in one send or delivers nothing.\n//\n// This node does not write any of the letter. CrowdRelay composed it when\n// the action was written \u2014 the words the operator approved ride in `draft`,\n// and a payload without one is refused rather than filled in here.\nconst e = $json;\nif (!e || e.type !== 'crowdrelay.booking.outreach_requested' || e.version !== 1) {\n  throw new Error('booking outreach refused: unsupported event');\n}\nconst d = e.data ?? {};\nif (d.template_key !== 'booking.opportunity.v1' && d.template_key !== 'booking.followup.v1') {\n  throw new Error('booking outreach refused: unknown template_key ' + d.template_key);\n}\nconst actionId = String(d.action_id || '').trim();\nconst draft = d.draft || {};\nconst subject = String(draft.subject || '').trim();\nconst body = String(draft.body || '').trim();\nif (!actionId) {\n  throw new Error('booking outreach refused: missing action_id');\n}\n// The refusal that keeps the promise: no approved words, no send.\nif (!subject || !body) {\n  throw new Error(\n    'booking outreach refused: no approved letter in the payload \u2014 nothing may compose one here'\n  );\n}\n// The address is resolved inside the sending lock upstream; a recipient\n// without one means the boundary was bypassed, and that is a stop, not a\n// partial send.\nconst recipients = Array.isArray(d.recipients) ? d.recipients : [];\nconst emails = [];\nconst targetIds = [];\nfor (const r of recipients) {\n  const em = String((r && r.contact_email) || '').trim();\n  if (!em.includes('@')) {\n    throw new Error('booking outreach refused: recipient without contact_email');\n  }\n  emails.push(em);\n  targetIds.push(String((r && r.target_id) || ''));\n}\nif (!emails.length) throw new Error('booking outreach refused: empty recipient set');\nreturn [{ json: {\n  event_id: e.id,\n  action_id: actionId,\n  city_id: String(d.city_id || ''),\n  template_key: String(d.template_key),\n  phase: String(d.phase || ''),\n  proposed_window: d.proposed_window || null,\n  recipient_count: emails.length,\n  recipient_target_ids: targetIds,\n  SendTo: emails.join(', '),\n  SendSubject: subject.slice(0, 220),\n  SendBody: body,\n}}];"
+      }
+    },
+    {
+      "id": "gig-outreach-claim",
+      "name": "Claim action once",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        440,
+        0
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.CROWDRELAY_INTERNAL_BASE_URL + '/v1/internal/autopilot/actions/' + $json.action_id + '/execution-claim' }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ ({ executor_id: String($env.VIRYAOS_EXECUTOR_ID || 'virya-n8n-primary').trim(), occurred_at: new Date().toISOString() }) }}",
+        "options": {
+          "timeout": 30000
+        }
+      }
+    },
+    {
+      "id": "gig-outreach-claim-gate",
+      "name": "Fail-closed claim gate",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        660,
+        0
+      ],
+      "parameters": {
+        "jsCode": "const claim = $json;\nconst intent = $('Validate the approved letter').first().json;\n// A replay of an already-finished action is a no-op, not an error.\nif (claim.disposition === 'already_succeeded') return [];\n// claimed is the only disposition that may reach the provider; in_flight\n// and ambiguous stay claimed upstream and never send twice.\nif (claim.disposition !== 'claimed' || !claim.claim_token) {\n  throw new Error('Provider execution ' + (claim.disposition || 'unclaimed') + '; fail closed to prevent duplicate external side effects');\n}\nreturn [{ json: { ...intent, claim_token: String(claim.claim_token), attempt_number: Number(claim.attempt_number || 1) } }];"
+      }
+    },
+    {
+      "id": "gig-outreach-send",
+      "name": "Send the letter (Gmail)",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        880,
+        0
+      ],
+      "onError": "continueErrorOutput",
+      "parameters": {
+        "sendTo": "={{ $json.SendTo }}",
+        "subject": "={{ $json.SendSubject }}",
+        "message": "={{ $json.SendBody }}",
+        "emailType": "text",
+        "options": {
+          "senderName": "Wojciech Bator / Virya",
+          "appendAttribution": false
+        }
+      }
+    },
+    {
+      "id": "gig-outreach-receipt",
+      "name": "Build send receipt",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1100,
+        0
+      ],
+      "parameters": {
+        "jsCode": "const intent = $('Fail-closed claim gate').first().json;\nconst failed = Boolean($json.error);\nconst ref = $json.threadId || $json.thread_id || $json.id || null;\nreturn [{ json: {\n  action_id: intent.action_id,\n  receipt_key: 'booking_outreach:' + intent.action_id + ':email',\n  executor_id: $env.VIRYAOS_EXECUTOR_ID || 'virya-n8n-primary',\n  status: failed ? 'failed' : 'succeeded',\n  claim_token: intent.claim_token,\n  provider_reference: failed ? null : (ref ? String(ref).slice(0, 240) : null),\n  error_kind: failed ? 'gmail_send_failed' : null,\n  metadata: {\n    channel: 'email',\n    event_id: intent.event_id,\n    show_event_id: intent.show_event_id,\n    phase: intent.phase,\n    city_id: intent.city_id,\n    recipient_count: intent.recipient_count,\n    recipient_target_ids: intent.recipient_target_ids,\n    template_key: intent.template_key,\n  },\n  occurred_at: new Date().toISOString(),\n}}];"
+      }
+    },
+    {
+      "id": "gig-outreach-report",
+      "name": "Report provider receipt",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1320,
+        0
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.CROWDRELAY_INTERNAL_BASE_URL + '/v1/internal/autopilot/actions/' + $json.action_id + '/execution-report' }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "options": {
+          "timeout": 30000
+        },
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ JSON.stringify({receipt_key:$json.receipt_key,executor_id:$json.executor_id,status:$json.status,claim_token:$json.claim_token,provider_reference:$json.provider_reference,error_kind:$json.error_kind,metadata:$json.metadata,occurred_at:$json.occurred_at}) }}"
+      }
+    },
+    {
+      "id": "gig-outreach-ambiguous",
+      "name": "Fail closed on ambiguous provider error",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        880,
+        240
+      ],
+      "parameters": {
+        "jsCode": "const src = $('Fail-closed claim gate').first().json || {};\nthrow new Error('Provider outcome ambiguous for action ' + (src.action_id || 'unknown') + '; claim retained to prevent automatic duplicate');"
+      }
+    }
+  ],
+  "connections": {
+    "Called by verified ingress": {
+      "main": [
+        [
+          {
+            "node": "Validate the approved letter",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Claim action once": {
+      "main": [
+        [
+          {
+            "node": "Fail-closed claim gate",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fail-closed claim gate": {
+      "main": [
+        [
+          {
+            "node": "Send the letter (Gmail)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send the letter (Gmail)": {
+      "main": [
+        [
+          {
+            "node": "Build send receipt",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Fail closed on ambiguous provider error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build send receipt": {
+      "main": [
+        [
+          {
+            "node": "Report provider receipt",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate the approved letter": {
+      "main": [
+        [
+          {
+            "node": "Claim action once",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveDataErrorExecution": "none",
+    "saveDataSuccessExecution": "none",
+    "saveManualExecutions": false,
+    "executionTimeout": 120
+  },
+  "active": false
+}
