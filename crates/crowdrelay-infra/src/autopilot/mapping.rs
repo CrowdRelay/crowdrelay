@@ -1,31 +1,10 @@
 fn parse_policy(row: PolicyRow) -> Result<AutopilotPolicy, RepositoryError> {
-    let context = match row.context.as_str() {
-        "ticket_yield" => AutopilotContext::TicketYield,
-        "fan_lifecycle" => AutopilotContext::FanLifecycle,
-        "campaign_lifecycle" => AutopilotContext::CampaignLifecycle,
-        "merchandising" => AutopilotContext::Merchandising,
-        "merch_pricing" => AutopilotContext::MerchPricing,
-        "merch_bundle" => AutopilotContext::MerchBundle,
-        "booking_opportunity" => AutopilotContext::BookingOpportunity,
-        "outreach" => AutopilotContext::Outreach,
-        "content_supply" => AutopilotContext::ContentSupply,
-        "promotion_budget" => AutopilotContext::PromotionBudget,
-        "experimentation" => AutopilotContext::Experimentation,
-        "show_operations" => AutopilotContext::ShowOperations,
-        "release" => AutopilotContext::Release,
-        "live_opportunity" => AutopilotContext::LiveOpportunity,
-        "funding" => AutopilotContext::Funding,
-        "beacon" => AutopilotContext::Beacon,
-        "show_growth" => AutopilotContext::ShowGrowth,
-        "growth_metrics" => AutopilotContext::GrowthMetrics,
-        "growth_debt" => AutopilotContext::GrowthDebt,
-        "outreach_supply" => AutopilotContext::OutreachSupply,
-        "growth_intelligence" => AutopilotContext::GrowthIntelligence,
-        "plays" => AutopilotContext::Plays,
-        "content_strategy" => AutopilotContext::ContentStrategy,
-        "representation" => AutopilotContext::Representation,
-        _ => return Err(RepositoryError::Unexpected),
-    };
+    // Derived from `AutopilotContext::ALL` — a context the policy CHECK
+    // accepts must parse here, or every `load_policies` fails the whole
+    // eval. Restating the names once let `booking_agent` through the schema
+    // and past this match, and it took the eval down at first sight.
+    let context = AutopilotContext::from_storage(&row.context)
+        .ok_or(RepositoryError::Unexpected)?;
     let autonomy_level = parse_autonomy_level(&row.autonomy_level)?;
     let confidence = u16::try_from(row.minimum_confidence_basis_points)
         .ok()

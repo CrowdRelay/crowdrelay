@@ -11,9 +11,9 @@
 use std::time::Duration;
 
 use crowdrelay_application::autopilot::{
-    AutopilotActionRepository, AutopilotBookingAgentStateRepository, AutopilotControlRepository,
-    AutopilotRuntimeRepository, ClaimExecution, ExecutorReportStatus, RecordBookingAgentReply,
-    RecordExecutionReport,
+    AutopilotActionRepository, AutopilotBookingAgentStateRepository, AutopilotContext,
+    AutopilotControlRepository, AutopilotDecisionRepository, AutopilotRuntimeRepository,
+    ClaimExecution, ExecutorReportStatus, RecordBookingAgentReply, RecordExecutionReport,
 };
 use crowdrelay_application::{IdempotencyKey, RequestId};
 use crowdrelay_domain::booking_agent::BookingAgentReplyDisposition;
@@ -270,6 +270,17 @@ async fn the_registry_approach_queues_once_and_spends_the_season()
     .fetch_one(&pool)
     .await?;
     assert!(provisioned, "the booking_agent policy was not provisioned");
+
+    // The provisioned row must read back through the eval's policy load —
+    // production lost every cycle for three hours the day a context the
+    // CHECK accepts could not be parsed by the storage mapping.
+    let policies = autopilot.load_policies(workspace_id.into()).await?;
+    assert!(
+        policies
+            .iter()
+            .any(|policy| policy.context == AutopilotContext::BookingAgent),
+        "load_policies dropped the booking_agent row"
+    );
 
     let agent_id = insert_agent(&pool, workspace_id, true).await?;
 
