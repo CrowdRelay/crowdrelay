@@ -418,6 +418,10 @@ pub(super) fn campaign_lifecycle_candidate(
             event_id: snapshot.event_id,
             phase,
             template_key: phase.template_key().to_owned(),
+            // O.5: the size and the basis travel with the ask, so the approval
+            // says who this reaches rather than naming a template key.
+            audience_size: phase.audience_size(&snapshot),
+            audience_basis: phase.audience_basis().to_owned(),
         },
         decision_key: format!(
             "decision:event-campaign:v{}:{}:{:?}:{}:{}:{}",

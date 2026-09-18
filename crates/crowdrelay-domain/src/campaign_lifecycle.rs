@@ -74,6 +74,49 @@ impl EventCampaignPhase {
             Self::ThankYou => "event.thank_you.v1",
         }
     }
+
+    /// Who this phase writes to, in the operator's words (O.5).
+    ///
+    /// The approval used to name a phase and a template key and nothing else,
+    /// so an operator could not tell whether they were about to write to eight
+    /// people or eight hundred, nor on what basis those people were reachable.
+    /// Every phase has an answer and every answer is a sentence rather than a
+    /// segment slug.
+    #[must_use]
+    pub const fn audience_basis(self) -> &'static str {
+        match self {
+            Self::Announcement => {
+                "every consented fan in the event's city — counted when the campaign is built,                  because the city's audience moves between the approval and the send"
+            }
+            Self::InterestReminder | Self::LastCall => {
+                "fans who said they are coming and have not bought a ticket"
+            }
+            Self::DayOf => "fans who bought a ticket",
+            Self::ThankYou => {
+                "fans who were in the room, minus anyone whose scan already got the welcome"
+            }
+        }
+    }
+
+    /// How many people that is, when the decision snapshot already knows.
+    ///
+    /// `None` for the announcement and only for the announcement: its audience
+    /// is every consented fan in the city, which this snapshot does not carry.
+    /// Absent is reported as absent — a zero here would read as "nobody" and
+    /// stop an announcement that has an audience.
+    #[must_use]
+    pub fn audience_size(self, snapshot: &EventCampaignSnapshot) -> Option<u32> {
+        match self {
+            Self::Announcement => None,
+            Self::InterestReminder | Self::LastCall => Some(
+                snapshot
+                    .interested_fans
+                    .saturating_sub(snapshot.paid_buyers),
+            ),
+            Self::DayOf => Some(snapshot.paid_buyers),
+            Self::ThankYou => Some(snapshot.attendees),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -191,6 +234,75 @@ fn policy_is_valid(policy: EventCampaignPolicy) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// O.5: the approval has to say who it reaches. Every phase but one knows
+    /// the number from the decision snapshot.
+    #[test]
+    fn every_phase_names_its_audience() {
+        let snapshot = EventCampaignSnapshot {
+            event_id: EventId::from_uuid(uuid::Uuid::nil()),
+            published: true,
+            communication_enabled: true,
+            starts_at: OffsetDateTime::UNIX_EPOCH,
+            interested_fans: 90,
+            paid_buyers: 30,
+            attendees: 70,
+            history: EventCampaignHistory::default(),
+        };
+        assert_eq!(
+            EventCampaignPhase::InterestReminder.audience_size(&snapshot),
+            Some(60)
+        );
+        assert_eq!(
+            EventCampaignPhase::LastCall.audience_size(&snapshot),
+            Some(60)
+        );
+        assert_eq!(EventCampaignPhase::DayOf.audience_size(&snapshot), Some(30));
+        assert_eq!(
+            EventCampaignPhase::ThankYou.audience_size(&snapshot),
+            Some(70)
+        );
+        // The one honest absence: the announcement's audience is the city's
+        // consented fans, which this snapshot does not carry. A zero here would
+        // read as "nobody" and stop a campaign that has an audience.
+        assert_eq!(
+            EventCampaignPhase::Announcement.audience_size(&snapshot),
+            None
+        );
+
+        for phase in [
+            EventCampaignPhase::Announcement,
+            EventCampaignPhase::InterestReminder,
+            EventCampaignPhase::LastCall,
+            EventCampaignPhase::DayOf,
+            EventCampaignPhase::ThankYou,
+        ] {
+            assert!(
+                phase.audience_basis().len() > 20,
+                "{phase:?} describes its audience as a fragment"
+            );
+        }
+    }
+
+    /// More buyers than interested fans is possible — somebody bought without
+    /// ever marking interest — and must not underflow into a huge number.
+    #[test]
+    fn more_buyers_than_interested_is_an_empty_reminder_not_a_wrapped_one() {
+        let snapshot = EventCampaignSnapshot {
+            event_id: EventId::from_uuid(uuid::Uuid::nil()),
+            published: true,
+            communication_enabled: true,
+            starts_at: OffsetDateTime::UNIX_EPOCH,
+            interested_fans: 5,
+            paid_buyers: 40,
+            attendees: 0,
+            history: EventCampaignHistory::default(),
+        };
+        assert_eq!(
+            EventCampaignPhase::LastCall.audience_size(&snapshot),
+            Some(0)
+        );
+    }
 
     fn now() -> OffsetDateTime {
         OffsetDateTime::UNIX_EPOCH + Duration::days(20_000)

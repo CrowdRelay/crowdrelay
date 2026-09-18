@@ -156,6 +156,12 @@ impl PostgresAutopilotRepository {
                     event_id,
                     phase,
                     template_key,
+                    // The audience facts are for the approval screen, not for
+                    // the send: the segment is rebuilt from the filter here, so
+                    // a count taken at decision time must never be what the
+                    // campaign is actually addressed to.
+                    audience_size: _,
+                    audience_basis: _,
                 } => {
                     operations::execute_audience_campaign(
                         &mut transaction,
