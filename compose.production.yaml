@@ -189,6 +189,14 @@ services:
       # Optional Overpass mirror/self-hosted endpoint; unset means the public
       # overpass-api.de interpreter.
       CROWDRELAY_OSM_OVERPASS_URL: ${CROWDRELAY_OSM_OVERPASS_URL:-}
+      # The Ticketmaster Discovery sweep writes event_evidence facts,
+      # ticketmaster anchors and peer acts — only onto rooms the registry
+      # already holds. Off and keyless by default.
+      CROWDRELAY_TICKETMASTER_ENABLED: ${CROWDRELAY_TICKETMASTER_ENABLED:-false}
+      CROWDRELAY_TICKETMASTER_API_KEY: ${CROWDRELAY_TICKETMASTER_API_KEY:-}
+      # Optional endpoint override (mirrors CROWDRELAY_OSM_OVERPASS_URL);
+      # unset means the public Discovery v2 events endpoint.
+      CROWDRELAY_TICKETMASTER_EVENTS_URL: ${CROWDRELAY_TICKETMASTER_EVENTS_URL:-}
     volumes:
       - ${CROWDRELAY_FCM_SERVICE_ACCOUNT_HOST_FILE:-./secrets/virya-signal-firebase-service-account.json}:/run/secrets/firebase-service-account.json:ro
       - ${CROWDRELAY_WEBHOOK_SECRETS_HOST_FILE:-./deploy/webhook-secrets.production.json}:/run/secrets/crowdrelay-webhooks.json:ro

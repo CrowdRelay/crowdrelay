@@ -575,6 +575,76 @@ impl PostgresGDriveRepository {
         Ok(())
     }
 
+    /// Promotes a contact onto the booking-agent list — a
+    /// `viryaos_booking_agents` row (§12-5 entity 4). An agent is the one
+    /// booking-graph contact that is *not* city-scoped: the band pitches the
+    /// agent for representation once, not a room for one night, so the
+    /// candidate queue's city dance never applies. The sheet's organization
+    /// column carries the agency — the firm the agent works for is half of
+    /// who they are.
+    ///
+    /// One address is one agent (`UNIQUE (workspace_id, contact_email)`): a
+    /// re-import refreshes name and agency rather than filing a twin, and a
+    /// refusal already on file (`refused_until`) is never touched — the
+    /// closed door is the agent's answer, not the sheet's to reopen.
+    pub async fn promote_beacon_agent(
+        &self,
+        workspace_id: Uuid,
+        contact: &DriveContactRow,
+    ) -> Result<(), GDriveError> {
+        let mut tx = self.pool.begin().await?;
+        // Same name-fallback chain as the other promotes — the sheet's
+        // display name, else the organization, else the address itself.
+        let name: String = contact
+            .display_name
+            .clone()
+            .or_else(|| contact.organization.clone())
+            .unwrap_or_else(|| contact.normalized_email.clone())
+            .trim()
+            .chars()
+            .take(200)
+            .collect();
+        let name = if name.is_empty() {
+            contact.normalized_email.trim().chars().take(200).collect()
+        } else {
+            name
+        };
+        // The agency and the name share a column source — when the display
+        // name fell back to the organization, filing the same string twice
+        // reads as a data error, so agency yields.
+        let agency = contact
+            .organization
+            .clone()
+            .filter(|org| name != org.trim())
+            .map(|org| org.trim().chars().take(200).collect::<String>())
+            .filter(|org| !org.is_empty());
+        sqlx::query(
+            r#"
+            INSERT INTO viryaos_booking_agents
+                (workspace_id, name, agency, contact_email)
+            VALUES ($1, $2, $3, $4)
+            ON CONFLICT (workspace_id, contact_email) DO UPDATE SET
+                name = EXCLUDED.name,
+                agency = COALESCE(EXCLUDED.agency, viryaos_booking_agents.agency)
+            "#,
+        )
+        .bind(workspace_id)
+        .bind(&name)
+        .bind(agency)
+        .bind(&contact.normalized_email)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            "UPDATE viryaos_drive_contacts SET beacon_outcome = 'promoted' WHERE workspace_id = $1 AND id = $2",
+        )
+        .bind(workspace_id)
+        .bind(contact.id)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
     /// Promotes a contact into booking supply: a `viryaos_booking_candidates`
     /// row, admitted on first-party grounds — the band's own sent mail is the
     /// evidence (`source_reference` carries the thread), which is exactly what

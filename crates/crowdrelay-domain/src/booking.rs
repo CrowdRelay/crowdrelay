@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use time::{Duration, OffsetDateTime};
 
 use crate::{
-    BookingTargetId, CityId, autonomy::Confidence, market_intelligence::CityMarketEvidence,
+    BookingTargetId, CityId, VenueId, autonomy::Confidence, market_intelligence::CityMarketEvidence,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -248,6 +248,16 @@ pub struct BookingTargetSnapshot {
     pub last_reply: BookingReplyDisposition,
     /// Evidence for the linked room; `None` when the target has no venue link.
     pub venue_evidence: Option<BookingVenueEvidence>,
+    /// Days until the festival's next application window closes (§12-5 entity
+    /// 5). `None` for non-festival targets and festivals with no open window —
+    /// both read as "nothing shutting", never as "infinite runway".
+    pub days_until_application_close: Option<i64>,
+    /// Every room this target resolves to: the primary `venue_id` union the
+    /// promoter↔venue edges (§12-5 entity 6). Venue-level evidence should
+    /// aggregate over this set — the unioned evidence read is the follow-up
+    /// the 4V.7 snapshot extension owns; until then the ids are exposed so a
+    /// reader can never see a promoter as room-less.
+    pub linked_venue_ids: Vec<VenueId>,
 }
 
 #[must_use]
@@ -585,6 +595,8 @@ mod tests {
             followup_count: 0,
             last_reply: BookingReplyDisposition::None,
             venue_evidence: None,
+            days_until_application_close: None,
+            linked_venue_ids: Vec::new(),
         }
     }
 
@@ -692,6 +704,8 @@ mod tests {
             followup_count: 0,
             last_reply: BookingReplyDisposition::None,
             venue_evidence: None,
+            days_until_application_close: None,
+            linked_venue_ids: Vec::new(),
         };
         assert!(matches!(
             evaluate_booking_followup(&target, BookingFollowUpPolicy::default(), now()),

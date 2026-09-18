@@ -826,6 +826,11 @@ pub(super) fn application_routes(state: AppState) -> Router {
             post(autopilot::record_booking_reply),
         )
         .route(
+            "/v1/admin/autopilot/booking-targets/{target_id}/venues/{venue_id}",
+            post(autopilot::link_booking_target_venue)
+                .delete(autopilot::unlink_booking_target_venue),
+        )
+        .route(
             "/v1/admin/autopilot/beacons",
             post(autopilot::upsert_beacon),
         )

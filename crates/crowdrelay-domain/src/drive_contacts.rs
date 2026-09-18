@@ -123,9 +123,15 @@ fn kind_for(raw: &str) -> Option<&'static str> {
         // Booking supply, not outreach: the kind names which queue the
         // promote lands in (viryaos_booking_candidates), never the press
         // outreach vocabulary.
-        // "agent" and "club" stay unmapped on purpose: a press agent or a
-        // fan club typed in a role column must not cross into booking supply.
-        "promoter" | "booking" | "booker" | "booking_agent" | "talent_buyer" => Some("promoter"),
+        // "club" stays unmapped on purpose: a fan club typed in a role
+        // column must not cross into booking supply.
+        "promoter" | "booking" | "booker" => Some("promoter"),
+        // §12-5 entity 4: an agent represents the band — the opposite
+        // direction from a promoter, who books one room for one night.
+        // "agent" was left unmapped while the only landing zones were
+        // promoter (wrong direction) or press; viryaos_booking_agents is the
+        // home that makes the mapping safe.
+        "booking_agent" | "talent_buyer" | "agent" => Some("booking_agent"),
         "venue" | "room" | "hall" | "live_venue" | "concert_venue" | "music_venue" => Some("venue"),
         "festival" | "fest" | "festival_organizer" | "festival_organiser" => Some("festival"),
         _ => None,
@@ -426,6 +432,32 @@ mod tests {
         let contact = &report.contacts[0];
         assert_eq!(contact.organization.as_deref(), Some("Klub X"));
         assert_eq!(contact.city, None);
+    }
+
+    #[test]
+    fn agent_vocabulary_lands_as_booking_agent() {
+        // §12-5 entity 4: the agent is its own entity, not a promoter — the
+        // intake's three spellings must all file `booking_agent`, which the
+        // promote routes to viryaos_booking_agents. A promoter row stays a
+        // promoter, and a fan club still files nothing.
+        for (typed, expected) in [
+            ("booking_agent", Some("booking_agent")),
+            ("Booking Agent", Some("booking_agent")),
+            ("talent buyer", Some("booking_agent")),
+            ("agent", Some("booking_agent")),
+            ("promoter", Some("promoter")),
+            ("club", None),
+        ] {
+            let report = extract_contacts(&grid(&[
+                &["Email", "Type"],
+                &["route@agency.example", typed],
+            ]));
+            assert_eq!(
+                report.contacts[0].suggested_kind.as_deref(),
+                expected,
+                "typed {typed:?}"
+            );
+        }
     }
 
     #[test]

@@ -59,5 +59,6 @@ pub mod retention;
 pub mod social_post_executor;
 pub mod social_post_source_sync;
 pub mod telegram_executor;
+pub mod ticketmaster_sweep;
 pub mod venue_fact_expiry;
 pub mod video_source_sync;

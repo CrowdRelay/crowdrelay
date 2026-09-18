@@ -47,7 +47,38 @@ macro_rules! decision_booking_reads {
                        COALESCE(comparable.comparable_acts, 0)::bigint AS comparable_acts,
                        genres_fact.value AS venue_genres,
                        capacity_fact.value AS venue_capacity,
-                       contact_age.booking_contact_days
+                       contact_age.booking_contact_days,
+                       -- §12-5 entity 5: the soonest closing application
+                       -- window of the festival's editions. CEIL turns a
+                       -- partially elapsed day into a full one — a window
+                       -- shutting in two hours reads as "1 day", which is
+                       -- the honest answer for "is there still time". The
+                       -- HAVING keeps a target with no open window at NULL:
+                       -- GREATEST(0, NULL) would answer 0 — "closes today" —
+                       -- exactly backwards.
+                       (SELECT GREATEST(0, CEIL(EXTRACT(EPOCH FROM
+                               (MIN(edition.application_closes_at) - now())) / 86400.0))::bigint
+                        FROM viryaos_festival_editions AS edition
+                        WHERE edition.workspace_id = target.workspace_id
+                          AND edition.target_id = target.id
+                          AND edition.application_closes_at >= now()
+                        HAVING MIN(edition.application_closes_at) IS NOT NULL)
+                           AS days_until_application_close,
+                       -- §12-5 entity 6: a promoter's rooms are the union of
+                       -- the primary venue_id and every edge row. UNION
+                       -- dedupes a room that is both.
+                       ARRAY(
+                           SELECT edge_or_primary.venue_id
+                           FROM (
+                               SELECT edge.venue_id
+                               FROM viryaos_booking_target_venues AS edge
+                               WHERE edge.workspace_id = target.workspace_id
+                                 AND edge.target_id = target.id
+                               UNION
+                               SELECT target.venue_id
+                           ) AS edge_or_primary
+                           WHERE edge_or_primary.venue_id IS NOT NULL
+                       ) AS linked_venue_ids
                 FROM viryaos_booking_targets AS target
                 -- §12-6 evidence: the room's own recent history. Past shows
                 -- only — a booked future night is not played yet — and the

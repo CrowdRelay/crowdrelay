@@ -164,7 +164,7 @@ pub use ids::{
     MerchProductId, MerchVariantId, OutreachOpportunityId, OutreachTargetId, PassSessionId, PeerId,
     PlayId, ProductionEventId, PromotionCampaignId, ReferralAttributionId, ReleasePlanId,
     RewardDrawId, RewardGrantId, RewardRuleId, SmartLinkId, TeamAssignmentId, TeamOpportunityId,
-    TicketTypeId, VisitorId, WorkspaceId, WorkspaceMemberId, WorkspaceMemberSessionId,
+    TicketTypeId, VenueId, VisitorId, WorkspaceId, WorkspaceMemberId, WorkspaceMemberSessionId,
 };
 pub use referrals::{
     CouponCode, CouponCodeError, CouponRedemptionResult, CouponStatus, FanSessionToken,

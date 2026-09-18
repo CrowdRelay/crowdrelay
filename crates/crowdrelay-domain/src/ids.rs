@@ -125,6 +125,7 @@ typed_uuid_id!(
     ArcId,
     ContentSuggestionId,
     ContentTrendId,
+    VenueId,
 );
 
 #[cfg(test)]

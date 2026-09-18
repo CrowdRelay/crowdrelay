@@ -300,6 +300,28 @@ pub(in crate::autopilot) async fn load_chief_of_staff(
             WHERE opportunity.workspace_id=$1 AND opportunity.eligible AND opportunity.deadline IS NOT NULL
               AND opportunity.status IN ('new','prepared','awaiting_approval','submission_requested')
               AND opportunity.deadline BETWEEN $2 - INTERVAL '2 days' AND $2 + INTERVAL '14 days'
+            UNION ALL
+            -- §12-5 entity 5: the one deadline a festival always has and a
+            -- target row could never carry — the application window. DISTINCT
+            -- ON keeps one row per series: the *next* edition's close, not
+            -- every edition that happens to land inside the radar's month.
+            SELECT 'festival_application_close'::text kind,
+                   'booking_target'::text subject_kind, closing.target_id,
+                   closing.edition_label title, closing.display_name detail,
+                   closing.application_closes_at due_at
+            FROM (
+                SELECT DISTINCT ON (edition.target_id)
+                       edition.target_id, edition.edition_label,
+                       edition.application_closes_at, target.display_name
+                FROM viryaos_festival_editions AS edition
+                JOIN viryaos_booking_targets AS target
+                  ON target.workspace_id = edition.workspace_id
+                 AND target.id = edition.target_id
+                WHERE edition.workspace_id = $1
+                  AND edition.application_closes_at >= $2
+                  AND edition.application_closes_at <= $2 + INTERVAL '30 days'
+                ORDER BY edition.target_id, edition.application_closes_at
+            ) closing
         ) attention
         ORDER BY due_at ASC, kind ASC, subject_id ASC
         LIMIT 12
