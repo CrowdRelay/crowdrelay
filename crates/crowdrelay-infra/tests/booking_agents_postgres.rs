@@ -414,17 +414,34 @@ async fn the_registry_approach_queues_once_and_spends_the_season()
             None,
         )
         .await?;
-    let claimed = autopilot
+    // The approach is an outward class, so approval parks it in the two-minute
+    // hold window (O.2) — the window the operator cancels inside when they
+    // spot a mistake. Claiming at `now` must find nothing due; claiming once
+    // the window has lapsed must find it.
+    let in_window = autopilot
         .claim_due_autonomous_actions(
             WorkspaceId::from_uuid(workspace_id),
             8,
             OffsetDateTime::now_utc(),
         )
         .await?;
+    assert!(
+        in_window
+            .iter()
+            .all(|claimed| claimed.id.into_uuid() != action_id),
+        "the approved approach was claimable inside its hold window"
+    );
+    let claimed = autopilot
+        .claim_due_autonomous_actions(
+            WorkspaceId::from_uuid(workspace_id),
+            8,
+            OffsetDateTime::now_utc() + Duration::from_secs(121),
+        )
+        .await?;
     let action = claimed
         .iter()
         .find(|claimed| claimed.id.into_uuid() == action_id)
-        .expect("the approved approach is claimable");
+        .expect("the approved approach is claimable once the hold lapses");
     autopilot
         .execute_action(
             WorkspaceId::from_uuid(workspace_id),
@@ -556,17 +573,20 @@ async fn a_moved_gate_fails_the_dispatch() -> Result<(), Box<dyn std::error::Err
     .execute(&pool)
     .await?;
 
+    // The approval parked the approach in the two-minute outward hold window
+    // (O.2); claiming once the window has lapsed reaches the dispatch re-gate,
+    // which is the check this test exists for.
     let claimed = autopilot
         .claim_due_autonomous_actions(
             WorkspaceId::from_uuid(workspace_id),
             8,
-            OffsetDateTime::now_utc(),
+            OffsetDateTime::now_utc() + Duration::from_secs(121),
         )
         .await?;
     let action = claimed
         .iter()
         .find(|claimed| claimed.id.into_uuid() == action_id)
-        .expect("the approved approach is claimable");
+        .expect("the approved approach is claimable once the hold lapses");
     let outcome = autopilot
         .execute_action(
             WorkspaceId::from_uuid(workspace_id),
