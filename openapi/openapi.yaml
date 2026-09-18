@@ -4855,6 +4855,38 @@ paths:
         '409': { $ref: '#/components/responses/PrivateProblem' }
         '503': { $ref: '#/components/responses/PrivateProblem' }
 
+  /admin/autopilot/actions/{action_id}/sent:
+    get:
+      operationId: autopilotActionSentRecord
+      summary: What this action actually said, and to whom
+      description: >
+        The overview answers "did it work": status, executor status, provider
+        reference, error kind. This answers the two questions an operator asks
+        before pressing the button a second time — what did we say, and who
+        received it.
+
+
+        Both are read back from the emission the dispatch arm wrote: the payload
+        in `outbox_events`, tied to the action by
+        `viryaos_autopilot_action_emissions`. Nothing read them back until this
+        route existed, so the console could report a successful send and never
+        show the words that left.
+
+
+        An absent `event_type` means the action never emitted anything, which is
+        itself the answer: nothing left. `subject` and `body` are absent for
+        payloads that carry no draft.
+      security:
+      - adminBearer: []
+      parameters:
+      - $ref: '#/components/parameters/AutopilotActionId'
+      responses:
+        '200':
+          description: The words, the addresses, and the executor's own last word.
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '404': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
+
   /admin/ops/summary:
     get:
       operationId: getOperationsSummary

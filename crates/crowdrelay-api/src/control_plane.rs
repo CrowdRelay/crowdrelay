@@ -192,6 +192,12 @@ pub(crate) fn router(state: crate::AppState) -> Router {
             "/v1/control-plane/autopilot/actions/{action_id}/cancel",
             post(crate::autopilot::cancel_action),
         )
+        // What the action actually sent — the words and the addresses. The
+        // read that makes the *next* approval easier to give.
+        .route(
+            "/v1/control-plane/autopilot/actions/{action_id}/sent",
+            get(crate::autopilot::action_sent_record),
+        )
         .route(
             "/v1/control-plane/autopilot/decisions/{decision_id}/handled-externally",
             post(crate::autopilot::mark_decision_handled_externally),

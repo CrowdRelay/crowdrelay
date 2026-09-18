@@ -15,6 +15,7 @@ use axum::{
 };
 use crowdrelay_domain::WorkspaceId;
 use crowdrelay_infra::lapsed_approvals::LapsedApprovals;
+use crowdrelay_infra::sent_record::FailedSends;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sqlx::{FromRow, PgPool, Postgres, Transaction};

@@ -120,6 +120,12 @@ struct OperatorAttentionSnapshot {
     /// expensive one there is: nothing anywhere records that the thing was
     /// proposed at all.
     lapsed_approvals: LapsedApprovals,
+    /// Outward sends that failed in the last week, named (O.7).
+    ///
+    /// The overview counts them. A count says something broke; it does not say
+    /// which promoter never heard from the band, which is the only version of
+    /// that fact an operator can act on.
+    failed_sends: FailedSends,
 }
 
 /// The brain's own verdict, and whether it is asking for a person.
@@ -205,15 +211,16 @@ pub async fn attention(State(state): State<crate::AppState>, headers: HeaderMap)
     let blocked_communities =
         run_limited(budget, timeout_duration, load_blocked_communities(&state.ops));
     let lapsed = run_limited(budget, timeout_duration, load_lapsed_approvals(&state.ops));
+    let failed = run_limited(budget, timeout_duration, load_failed_sends(&state.ops));
 
     let (
         summary, alerts, dead_outbox, dead_deliveries, dead_push,
         ecosystem, findings, needs_you, brain, unpublished_drafts,
-        blocked_communities, lapsed,
+        blocked_communities, lapsed, failed,
     ) = tokio::join!(
         summary, alerts, dead_outbox, dead_deliveries, dead_push,
         ecosystem, findings, needs_you, brain, unpublished_drafts,
-        blocked_communities, lapsed,
+        blocked_communities, lapsed, failed,
     );
 
     let request_id_value = request_id(&headers);
@@ -265,6 +272,10 @@ pub async fn attention(State(state): State<crate::AppState>, headers: HeaderMap)
         Ok(value) => value,
         Err(error) => return error.into_response(request_id(&headers)),
     };
+    let failed_sends = match failed {
+        Ok(value) => value,
+        Err(error) => return error.into_response(request_id(&headers)),
+    };
 
     let (needs_you, awaiting_approval) = needs_you;
 
@@ -284,6 +295,7 @@ pub async fn attention(State(state): State<crate::AppState>, headers: HeaderMap)
             blocked_communities,
             brain,
             lapsed_approvals,
+            failed_sends,
         },
     )
 }
@@ -693,6 +705,22 @@ async fn load_needs_you(
 /// property of the action ledger and not of this page.
 async fn load_lapsed_approvals(state: &OpsState) -> Result<LapsedApprovals, OpsError> {
     crowdrelay_infra::lapsed_approvals::lapsed_approvals(
+        &state.pool,
+        state.workspace_id.into_uuid(),
+        OffsetDateTime::now_utc(),
+    )
+    .await
+    .map_err(OpsError::sqlx)
+}
+
+/// Outward sends that failed inside the window, with the recipients who never
+/// heard anything.
+///
+/// Delegates to `crowdrelay-infra` for the same reason `load_lapsed_approvals`
+/// does: which failures count as an outward send is a property of the action
+/// ledger's `action_class`, not of this page.
+async fn load_failed_sends(state: &OpsState) -> Result<FailedSends, OpsError> {
+    crowdrelay_infra::sent_record::failed_sends(
         &state.pool,
         state.workspace_id.into_uuid(),
         OffsetDateTime::now_utc(),
