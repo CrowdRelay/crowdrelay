@@ -168,6 +168,7 @@ async fn fan(
 }
 
 #[tokio::test]
+#[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn a_rotation_lands_labelled_catalogue_inside_the_cap()
 -> Result<(), Box<dyn std::error::Error>> {
     let db = DisposableDatabase::create().await?;
@@ -293,6 +294,7 @@ async fn a_rotation_lands_labelled_catalogue_inside_the_cap()
 }
 
 #[tokio::test]
+#[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn edges_outside_the_organisation_are_absent() -> Result<(), Box<dyn std::error::Error>> {
     let db = DisposableDatabase::create().await?;
     let result = async {

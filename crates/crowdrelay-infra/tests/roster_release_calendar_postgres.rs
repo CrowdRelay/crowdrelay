@@ -132,6 +132,7 @@ async fn fan(
 }
 
 #[tokio::test]
+#[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn a_same_week_pair_collides_and_the_quieter_release_moves()
 -> Result<(), Box<dyn std::error::Error>> {
     let db = DisposableDatabase::create().await?;
@@ -247,6 +248,7 @@ async fn a_same_week_pair_collides_and_the_quieter_release_moves()
 }
 
 #[tokio::test]
+#[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn an_empty_roster_gets_an_empty_calendar() -> Result<(), Box<dyn std::error::Error>> {
     let db = DisposableDatabase::create().await?;
     let result = async {
