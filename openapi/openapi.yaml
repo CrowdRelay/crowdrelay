@@ -10042,6 +10042,43 @@ paths:
         '404': { $ref: '#/components/responses/PrivateProblem' }
         '409': { $ref: '#/components/responses/PrivateProblem' }
         '503': { $ref: '#/components/responses/PrivateProblem' }
+  /control-plane/events/{event_slug}/who-can-help:
+    get:
+      operationId: getControlPlaneEventHelpers
+      summary: Who could help with this show — the candidate shortlist
+      description: >-
+        The staging queue read against a date rather than as an inventory
+        (§4h-11). One upcoming show, one shortlist: unpromoted press and radio
+        in the show's city, the tenant's active rooms and promoters there,
+        the communities it posts in across the show's country, and the cold
+        rooms the shared venue registry knows that this tenant has never
+        played. Every row is a candidate — promotion, the contact governor
+        and the admission wall all still bind, which is why no row carries an
+        email address. Each section degrades independently: a source with no
+        rows is an empty array, a section whose read failed is named in
+        `degraded`, and an event with no city answers `degraded: ["city"]`
+        with every section empty rather than an error.
+      security:
+      - controlPlaneBearer: []
+      parameters:
+      - in: path
+        name: event_slug
+        required: true
+        schema:
+          type: string
+          minLength: 1
+          maxLength: 128
+          pattern: ^[a-z0-9][a-z0-9_-]*$
+      responses:
+        '200':
+          description: The night's candidate shortlist, per section.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ControlPlaneShowHelpers'
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '404': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
 components:
   headers:
     RequestId:
@@ -10138,6 +10175,11 @@ components:
       type: http
       scheme: bearer
       bearerFormat: opaque-beacon-session
+    controlPlaneBearer:
+      type: http
+      scheme: bearer
+      bearerFormat: opaque
+      description: Control-plane operator token scoped to one tenant workspace.
   parameters:
     # Merged here from a second `components.parameters:` block that
     # silently replaced this one. YAML keeps the last mapping for a
@@ -10539,6 +10581,123 @@ components:
         sessions:
           type: array
           items: { $ref: '#/components/schemas/StaffDeviceSession' }
+    ControlPlaneShowHelpers:
+      type: object
+      additionalProperties: false
+      description: >-
+        §4h-11 — who could help with this show. Every row is a candidate for
+        a person to look at, not an instruction: no row carries an email
+        address, and promotion, the contact governor and the admission wall
+        all still bind between this list and any outreach.
+      required: [event, degraded, notes, press, rooms_and_promoters, communities, cold_rooms]
+      properties:
+        event:
+          type: object
+          additionalProperties: false
+          required: [slug, title, starts_at, city, country_code]
+          properties:
+            slug: { type: string }
+            title: { type: string }
+            starts_at: { type: string, format: date-time }
+            city:
+              type: [string, 'null']
+              description: The city's display name. Null when the event carries no city.
+            country_code:
+              type: [string, 'null']
+              pattern: '^[A-Z]{2}$'
+        degraded:
+          type: array
+          description: >-
+            What this read could not answer: "city" when the event carries no
+            city (every section then answers empty), and one key per section
+            whose query failed. An absent key means the empty array is a
+            measured answer, not a failure.
+          items:
+            type: string
+            enum: [city, press, rooms_and_promoters, communities, cold_rooms]
+        notes:
+          type: array
+          description: >-
+            Gaps in the read itself. `staged_contacts_have_no_city` is
+            constant: drive contacts carry a free-text city at best, which is
+            not a city this read can filter on.
+          items:
+            type: string
+            enum: [staged_contacts_have_no_city]
+        press:
+          type: array
+          description: Unpromoted press, radio, playlist and media-patronage contacts in the show's city.
+          items:
+            type: object
+            additionalProperties: false
+            required: [id, target_kind, display_name, contact_domain, why_fit, verified]
+            properties:
+              id: { type: string, format: uuid }
+              target_kind:
+                type: string
+                enum: [press, radio, playlist, media_patronage]
+              display_name: { type: string }
+              contact_domain: { type: [string, 'null'] }
+              why_fit: { type: string }
+              verified: { type: boolean }
+        rooms_and_promoters:
+          type: array
+          description: The tenant's active booking targets in the show's city.
+          items:
+            type: object
+            additionalProperties: false
+            required: [id, target_kind, display_name, accepts_booking, relationship_score, venue_linked]
+            properties:
+              id: { type: string, format: uuid }
+              target_kind:
+                type: string
+                enum: [venue, promoter, festival]
+              display_name: { type: string }
+              accepts_booking: { type: boolean }
+              relationship_score: { type: integer, minimum: 0, maximum: 100 }
+              venue_linked:
+                type: boolean
+                description: Whether the target is joined to the shared venue registry.
+        communities:
+          type: array
+          description: Communities the tenant posts in, matched on the show's country — the honest granularity, since a community carries no city.
+          items:
+            type: object
+            additionalProperties: false
+            required: [id, community_name, platform, url, self_promo_policy, country]
+            properties:
+              id: { type: string, format: uuid }
+              community_name: { type: string }
+              platform:
+                type: string
+                enum: [reddit, forum, discord, webzine, newsletter]
+              url: { type: string, format: uri }
+              self_promo_policy:
+                type: string
+                enum: [tolerant, strict, megathread_only, prohibited]
+              country:
+                type: string
+                pattern: '^[A-Z]{2}$'
+                description: The country the match was made on — never a city.
+        cold_rooms:
+          type: array
+          description: >-
+            Rooms the shared venue registry knows in this city that this
+            tenant has never played, capacity-bearing rooms first. The read
+            is deliberately global: `place_venues` holds no workspace_id and
+            returns only what any tenant could see, while the capacity join
+            keeps global facts (`workspace_id IS NULL`) only, so a
+            contributor-private fact never surfaces.
+          items:
+            type: object
+            additionalProperties: false
+            required: [id, display_name, capacity]
+            properties:
+              id: { type: string, format: uuid }
+              display_name: { type: string }
+              capacity:
+                type: [string, 'null']
+                description: The global capacity fact's raw text value, when one exists.
     EcosystemMeta:
       type: object
       additionalProperties: false

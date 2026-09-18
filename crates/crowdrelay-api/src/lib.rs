@@ -429,6 +429,10 @@ fn is_control_plane_management_path(path: &str) -> bool {
         || one_segment_with_suffix(path, "/v1/control-plane/events/", "/timeline")
         || one_segment_with_suffix(path, "/v1/control-plane/events/", "/scan")
         || one_segment_with_suffix(path, "/v1/control-plane/events/", "/report")
+        // §4h-11: the show's helper shortlist — same authority class as the
+        // timeline. Missing from this list it would answer unauthenticated,
+        // not refused: `privileged` derives from these same predicates.
+        || one_segment_with_suffix(path, "/v1/control-plane/events/", "/who-can-help")
         // The operator's show writes — bill entry and the T+7 report's
         // counterparty — reuse the staff/admin handlers under this prefix.
         || one_segment_with_suffix(path, "/v1/control-plane/events/", "/acts")
