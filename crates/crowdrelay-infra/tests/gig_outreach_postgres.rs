@@ -190,6 +190,23 @@ async fn run(pool: &PgPool, url: &str) -> Result<(), Box<dyn std::error::Error>>
     .await?;
     assert_eq!(decision_kind, "gig.proposal.approved");
 
+    // ── The two minutes between "approve" and "sent" (O.2) ──────────────────
+    // Until this existed, the two were one instant: the action was queued with
+    // `available_at = now`, a worker claimed it within a second, and the only
+    // cancel path refused anything past `awaiting_approval`. An operator who
+    // saw the mistake immediately had nothing to click.
+    let available_at = sqlx::query_scalar::<_, OffsetDateTime>(
+        "SELECT available_at FROM viryaos_autopilot_actions WHERE workspace_id = $1 AND id = $2",
+    )
+    .bind(act)
+    .bind(action_id)
+    .fetch_one(pool)
+    .await?;
+    assert!(
+        available_at > now,
+        "the letter was claimable the instant it was approved: {available_at} <= {now}"
+    );
+
     // ── The same click twice ────────────────────────────────────────────────
     let replay = approve_gig_proposal(pool, act, wroclaw, &key, now, None).await?;
     match replay {
@@ -317,6 +334,37 @@ async fn run(pool: &PgPool, url: &str) -> Result<(), Box<dyn std::error::Error>>
     two_promoters_with_one_name_both_receive_the_letter(pool).await?;
     a_second_approval_for_a_city_already_written_to_is_a_sentence(pool).await?;
     a_reply_belongs_to_the_letter_that_preceded_it(pool).await?;
+
+    // ── The window is usable (O.2) ──────────────────────────────────────────
+    // A fresh approval, immediately called back. `processing` deliberately
+    // cannot be: a letter that is going out is gone, and a cancel that
+    // pretended otherwise would be a lie with a promoter on the other end.
+    unblock_contact(pool, act, "bogdan@example.com").await?;
+    let callback_key = IdempotencyKey::parse("gig-approve-callback").expect("valid key");
+    let queued = approve_gig_proposal(pool, act, wroclaw, &callback_key, now, None).await;
+    if let Ok(GigOutreachOutcome::Queued { action_id, .. }) = queued {
+        let called_back = sqlx::query_scalar::<_, String>(
+            r#"
+            UPDATE viryaos_autopilot_actions
+            SET status = 'cancelled', finished_at = now()
+            WHERE workspace_id = $1 AND id = $2
+              AND (
+                    status = 'awaiting_approval'
+                 OR (status = 'queued' AND attempt_count = 0 AND available_at > now())
+              )
+            RETURNING status
+            "#,
+        )
+        .bind(act)
+        .bind(action_id)
+        .fetch_optional(pool)
+        .await?;
+        assert_eq!(
+            called_back.as_deref(),
+            Some("cancelled"),
+            "an approved letter still inside its hold window could not be called back"
+        );
+    }
 
     Ok(())
 }
@@ -1159,6 +1207,29 @@ async fn advertise(
 }
 
 /// A do-not-contact on one address, the way an operator sets one.
+/// Lifts the do-not-contact so a later approval in the same test can reach the
+/// whole room again.
+async fn unblock_contact(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    email: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    sqlx::query(
+        // `next_contact_after >= last_outbound_at` is a CHECK, so the window
+        // is cleared by moving both backwards rather than only one.
+        "UPDATE viryaos_contact_governor
+         SET do_not_contact = false,
+             last_outbound_at = now() - INTERVAL '30 days',
+             next_contact_after = now() - INTERVAL '29 days'
+         WHERE workspace_id = $1 AND normalized_contact = $2",
+    )
+    .bind(workspace_id)
+    .bind(email)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 async fn block_contact(
     pool: &PgPool,
     workspace_id: Uuid,

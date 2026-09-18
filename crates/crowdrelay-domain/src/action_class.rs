@@ -89,6 +89,27 @@ impl ActionClass {
         }
     }
 
+    /// How long an approved outward action waits before a worker may claim it
+    /// (O.2).
+    ///
+    /// The window exists for one reason: until it did, `approve` and `send`
+    /// were the same instant. The gig approval wrote its action with
+    /// `available_at = now`, the worker claimed it within a second, and the
+    /// only cancel path refused anything that had left `awaiting_approval`. An
+    /// operator who noticed a mistake half a second after clicking had nothing
+    /// to click.
+    ///
+    /// Two minutes is chosen to be long enough to read the sent letter again
+    /// and short enough that nobody plans around it. It costs a promoter
+    /// nothing: no booking was ever decided by two minutes.
+    ///
+    /// Only outward classes wait. A ticket price change is reversible inside
+    /// the workspace, and delaying it would be ceremony with no cost avoided.
+    #[must_use]
+    pub const fn hold_seconds(self) -> i64 {
+        if self.is_outward() { 120 } else { 0 }
+    }
+
     /// True when acting reaches someone outside the workspace, and therefore
     /// counts against the outward-touch budget.
     #[must_use]

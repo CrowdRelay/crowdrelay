@@ -6,6 +6,14 @@
 
 use super::*;
 
+/// Seconds an approved outward action waits before a worker may claim it.
+///
+/// One number for every outward class, taken from the domain so the SQL here
+/// and `gig_outreach`'s own insert cannot drift apart about how long "hold on"
+/// lasts. See `ActionClass::hold_seconds` for why the window exists at all.
+const OUTWARD_HOLD_SECONDS: f64 =
+    crowdrelay_domain::action_class::ActionClass::ThirdParty.hold_seconds() as f64;
+
 /// Why an approve or cancel matched no row, in words an operator can act on.
 ///
 /// Only `awaiting_approval` rows are transitionable, so anything else is either
@@ -140,7 +148,17 @@ impl PostgresAutopilotRepository {
                         r#"
                         UPDATE viryaos_autopilot_actions
                         SET status = 'queued', payload = $3,
-                            approved_at = now(), approved_by = 'operator:admin_api_key'
+                            approved_at = now(), approved_by = 'operator:admin_api_key',
+                            -- O.2: an outward send waits out its hold window
+                            -- before a worker may claim it. `action_class` is
+                            -- the same durable classification the outward gate
+                            -- binds on, so nothing here depends on the payload
+                            -- describing itself honestly.
+                            available_at = now() + CASE
+                                WHEN action_class IN ('owned_audience', 'third_party', 'paid')
+                                THEN make_interval(secs => $4::double precision)
+                                ELSE INTERVAL '0'
+                            END
                         WHERE workspace_id = $1 AND id = $2 AND status = 'awaiting_approval'
                           AND (approval_expires_at IS NULL OR approval_expires_at > now())
                         RETURNING status
@@ -149,11 +167,18 @@ impl PostgresAutopilotRepository {
                     .bind(workspace_id.into_uuid())
                     .bind(action_id.into_uuid())
                     .bind(revised.as_ref().map(|(payload, _, _)| payload.clone()))
+                    .bind(OUTWARD_HOLD_SECONDS)
                 } else {
                     sqlx::query_scalar::<_, String>(
                         r#"
                         UPDATE viryaos_autopilot_actions
-                        SET status = 'queued', approved_at = now(), approved_by = 'operator:admin_api_key'
+                        SET status = 'queued', approved_at = now(),
+                            approved_by = 'operator:admin_api_key',
+                            available_at = now() + CASE
+                                WHEN action_class IN ('owned_audience', 'third_party', 'paid')
+                                THEN make_interval(secs => $3::double precision)
+                                ELSE INTERVAL '0'
+                            END
                         WHERE workspace_id = $1 AND id = $2 AND status = 'awaiting_approval'
                           AND (approval_expires_at IS NULL OR approval_expires_at > now())
                         RETURNING status
@@ -161,6 +186,7 @@ impl PostgresAutopilotRepository {
                     )
                     .bind(workspace_id.into_uuid())
                     .bind(action_id.into_uuid())
+                    .bind(OUTWARD_HOLD_SECONDS)
                 };
                 query
                     .fetch_optional(&mut *transaction)
@@ -171,7 +197,21 @@ impl PostgresAutopilotRepository {
                     r#"
                     UPDATE viryaos_autopilot_actions
                     SET status = 'cancelled', finished_at = now()
-                    WHERE workspace_id = $1 AND id = $2 AND status = 'awaiting_approval'
+                    WHERE workspace_id = $1 AND id = $2
+                      AND (
+                            status = 'awaiting_approval'
+                            -- O.2: an approved outward send that is still
+                            -- inside its hold window and that no worker has
+                            -- claimed. `attempt_count = 0` and the future
+                            -- `available_at` are what "nothing has happened
+                            -- yet" looks like from here; `processing` is
+                            -- deliberately not in this set, because a letter
+                            -- that is going out cannot be called back and
+                            -- pretending otherwise is worse than refusing.
+                         OR (status = 'queued'
+                             AND attempt_count = 0
+                             AND available_at > now())
+                      )
                     RETURNING status
                     "#,
                 )

@@ -37,6 +37,7 @@
   "crates/crowdrelay-infra/src/referrals.rs": 1797,
   "crates/crowdrelay-infra/tests/autopilot_experiment_integrity_postgres.rs": 4485,
   "crates/crowdrelay-infra/tests/autopilot_measurement_spine_postgres.rs": 1550,
+  "crates/crowdrelay-infra/tests/gig_outreach_postgres.rs": 1251,
   "crates/crowdrelay-worker/src/ad_conversion.rs": 1364,
   "crates/crowdrelay-worker/src/agent_outcomes.rs": 1661,
   "crates/crowdrelay-worker/src/community_executor.rs": 1508,
