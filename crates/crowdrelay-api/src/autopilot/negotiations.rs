@@ -1,0 +1,212 @@
+// Negotiations read model (P.7) — the assist surface between a promoter's
+// answer and the counter. Every live terms row joined to the opportunity it
+// prices, the ladder the agent argued from, and the move parked in
+// `awaiting_approval` for it.
+//
+// Read model, not a pipeline: the ladder is written at terms-record time,
+// the pending move by the evaluator, and this only reports them. The loop
+// stays human at both ends — the operator records the promoter's position
+// through the terms endpoint, and approves the move through the ordinary
+// approval path.
+
+/// The negotiation table: live conversations first, then the settled record.
+#[derive(Debug, Serialize)]
+pub struct NegotiationsView {
+    /// Unsettled terms rows, soonest response deadline first.
+    pub live: Vec<NegotiationEntry>,
+    /// Recently settled rows — the record the next negotiation reads.
+    pub settled: Vec<NegotiationEntry>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct NegotiationEntry {
+    pub opportunity_id: Uuid,
+    pub title: String,
+    pub organization: String,
+    /// The counterparty's own address on the tenant's opportunity — the
+    /// workspace's row, so it rides like any contact the band already has.
+    pub contact_email: Option<String>,
+    pub opportunity_kind: String,
+    /// The opportunity's own status — a negotiation on a `submitted` row is
+    /// a different conversation than one on `replied`.
+    pub opportunity_status: String,
+    pub state: String,
+    pub currency: String,
+    /// What the promoter has on the table right now.
+    pub offered_fee_minor: i64,
+    /// The frozen ladder: below `walk_away_minor` the answer is no,
+    /// `target_minor` is the fee worth playing for, `opening_ask_minor` is
+    /// where the conversation opened.
+    pub walk_away_minor: i64,
+    pub target_minor: i64,
+    pub opening_ask_minor: i64,
+    /// Which input produced the walk-away — `cost`, `market`, or
+    /// `counterparty_history` — and the two external numbers behind it.
+    pub floor_basis: String,
+    pub prior_fee_minor: Option<i64>,
+    pub market_floor_minor: Option<i64>,
+    /// The agent's last ask, and how many it has made.
+    pub countered_fee_minor: Option<i64>,
+    pub counter_rounds: i32,
+    #[serde(with = "time::serde::rfc3339")]
+    pub responds_by: OffsetDateTime,
+    #[serde(with = "time::serde::rfc3339::option")]
+    pub settled_at: Option<OffsetDateTime>,
+    pub settled_reason: Option<String>,
+    /// The move the evaluator parked for a human — a drafted counter or an
+    /// accept — when one is waiting. `null` when nothing is proposed.
+    pub pending_move: Option<PendingMove>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PendingMove {
+    pub action_id: Uuid,
+    /// `counter_live_opportunity_terms` or `accept_live_opportunity_terms`.
+    pub kind: String,
+    /// The proposed amount — the counter's ask or the accepted fee.
+    pub amount_minor: Option<i64>,
+    /// Which counter round the proposal is. Zero on an accept.
+    pub round: i64,
+}
+
+#[derive(Debug, FromRow)]
+struct NegotiationRow {
+    opportunity_id: Uuid,
+    title: String,
+    organization: String,
+    contact_email: Option<String>,
+    opportunity_kind: String,
+    opportunity_status: String,
+    state: String,
+    currency: String,
+    offered_fee_minor: i64,
+    walk_away_minor: i64,
+    target_minor: i64,
+    opening_ask_minor: i64,
+    floor_basis: String,
+    prior_fee_minor: Option<i64>,
+    market_floor_minor: Option<i64>,
+    countered_fee_minor: Option<i64>,
+    counter_rounds: i32,
+    responds_by: OffsetDateTime,
+    settled_at: Option<OffsetDateTime>,
+    settled_reason: Option<String>,
+    pending_action_id: Option<Uuid>,
+    pending_action_kind: Option<String>,
+    pending_amount_minor: Option<i64>,
+    pending_round: Option<i64>,
+}
+
+const LIVE_LIMIT: usize = 40;
+const SETTLED_LIMIT: usize = 20;
+// One literal query — the SQL gates cannot parse a `format!`ed statement,
+// so live and settled come back in one round trip and split in Rust.
+const ROW_LIMIT: i64 = 60;
+
+pub async fn negotiations(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    let workspace_id = state.ops.workspace_id().into_uuid();
+    let pool = &state.database;
+
+    // The pending-move lateral reads the action queue the approval screen
+    // does: one awaiting-approval terms move per negotiation, newest first.
+    // Ordering partitions live-first: unsettled rows by the promoter's
+    // deadline ascending, then settled rows newest-close first.
+    let rows = sqlx::query_as::<_, NegotiationRow>(
+        r#"
+        SELECT terms.opportunity_id,
+               opportunity.title, opportunity.organization, opportunity.contact_email,
+               opportunity.opportunity_kind, opportunity.status AS opportunity_status,
+               terms.state, terms.currency, terms.offered_fee_minor,
+               terms.walk_away_minor, terms.target_minor, terms.opening_ask_minor,
+               terms.floor_basis, terms.prior_fee_minor, terms.market_floor_minor,
+               terms.countered_fee_minor, terms.counter_rounds,
+               terms.responds_by, terms.settled_at, terms.settled_reason,
+               move.id AS pending_action_id, move.action_kind AS pending_action_kind,
+               COALESCE(
+                   (move.payload ->> 'ask_minor')::bigint,
+                   (move.payload ->> 'fee_minor')::bigint
+               ) AS pending_amount_minor,
+               COALESCE((move.payload ->> 'round')::bigint, 0) AS pending_round
+        FROM viryaos_team_opportunity_terms AS terms
+        JOIN viryaos_team_opportunities AS opportunity
+          ON opportunity.workspace_id = terms.workspace_id
+         AND opportunity.id = terms.opportunity_id
+        LEFT JOIN LATERAL (
+            SELECT action.id, action.action_kind, action.payload
+            FROM viryaos_autopilot_actions AS action
+            WHERE action.workspace_id = terms.workspace_id
+              AND action.subject_kind = 'team_opportunity'
+              AND action.subject_id = terms.opportunity_id
+              AND action.status = 'awaiting_approval'
+              AND action.action_kind IN (
+                  'counter_live_opportunity_terms', 'accept_live_opportunity_terms'
+              )
+            ORDER BY action.created_at DESC, action.id DESC
+            LIMIT 1
+        ) AS move ON true
+        WHERE terms.workspace_id = $1
+          AND (terms.settled_at IS NULL
+               OR terms.settled_at > now() - interval '90 days')
+        ORDER BY (terms.settled_at IS NOT NULL) ASC,
+                 CASE WHEN terms.settled_at IS NULL THEN terms.responds_by END ASC,
+                 terms.settled_at DESC
+        LIMIT $2
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(ROW_LIMIT)
+    .fetch_all(pool)
+    .await;
+
+    match rows {
+        Ok(rows) => {
+            let mut live = Vec::new();
+            let mut settled = Vec::new();
+            for row in rows {
+                if row.settled_at.is_some() {
+                    if settled.len() < SETTLED_LIMIT {
+                        settled.push(negotiation_row_to_entry(row));
+                    }
+                } else if live.len() < LIVE_LIMIT {
+                    live.push(negotiation_row_to_entry(row));
+                }
+            }
+            private_json(StatusCode::OK, NegotiationsView { live, settled })
+        }
+        Err(_) => {
+            tracing::warn!("could not load negotiations view");
+            Problem::service_unavailable(request_id(&headers)).into_response()
+        }
+    }
+}
+
+fn negotiation_row_to_entry(row: NegotiationRow) -> NegotiationEntry {
+    NegotiationEntry {
+        opportunity_id: row.opportunity_id,
+        title: row.title,
+        organization: row.organization,
+        contact_email: row.contact_email,
+        opportunity_kind: row.opportunity_kind,
+        opportunity_status: row.opportunity_status,
+        state: row.state,
+        currency: row.currency,
+        offered_fee_minor: row.offered_fee_minor,
+        walk_away_minor: row.walk_away_minor,
+        target_minor: row.target_minor,
+        opening_ask_minor: row.opening_ask_minor,
+        floor_basis: row.floor_basis,
+        prior_fee_minor: row.prior_fee_minor,
+        market_floor_minor: row.market_floor_minor,
+        countered_fee_minor: row.countered_fee_minor,
+        counter_rounds: row.counter_rounds,
+        responds_by: row.responds_by,
+        settled_at: row.settled_at,
+        settled_reason: row.settled_reason,
+        pending_move: row.pending_action_id.map(|action_id| PendingMove {
+            action_id,
+            kind: row.pending_action_kind.unwrap_or_default(),
+            amount_minor: row.pending_amount_minor,
+            round: row.pending_round.unwrap_or(0),
+        }),
+    }
+}

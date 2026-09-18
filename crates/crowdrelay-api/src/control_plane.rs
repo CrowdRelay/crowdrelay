@@ -188,6 +188,18 @@ pub(crate) fn router(state: crate::AppState) -> Router {
             "/v1/control-plane/autopilot/reply-triage",
             get(crate::autopilot::reply_triage_handler),
         )
+        // The negotiation table: every live terms conversation with the
+        // ladder it was argued from and the move parked for approval. The
+        // position write reuses the canonical admin handler — this surface
+        // grows no authority path of its own.
+        .route(
+            "/v1/control-plane/autopilot/negotiations",
+            get(crate::autopilot::negotiations),
+        )
+        .route(
+            "/v1/control-plane/autopilot/team-opportunities/{opportunity_id}/terms",
+            post(crate::autopilot::record_team_opportunity_terms),
+        )
         .route(
             "/v1/control-plane/autopilot/actions/{action_id}/approve",
             post(crate::autopilot::approve_action),
