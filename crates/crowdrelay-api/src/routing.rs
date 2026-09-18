@@ -798,6 +798,14 @@ pub(super) fn application_routes(state: AppState) -> Router {
             "/v1/admin/roster-plan",
             get(crate::gig_planning::roster_gig_plan),
         )
+        // The write half of the plan's cheapest move — an open slot becomes
+        // one letter to the headliner's own promoter. Admin for the same
+        // reason the read is: the ask names two workspaces and both must be
+        // the organisation's.
+        .route(
+            "/v1/admin/roster-plan/support-slot-ask",
+            post(crate::gig_planning::approve_support_slot_ask),
+        )
         // The roster's own numbers, on the same surface as its plan for the
         // same reason: these belong to the organisation, and a workspace token
         // must not be able to read or set what a labelmate's plan is sized by.

@@ -24,8 +24,9 @@ use crowdrelay_domain::roster_plan::{RosterRefusal, RosterRun, plan_roster_run};
 use crowdrelay_domain::venue_seed::{self, ResearchSubject};
 use crowdrelay_infra::band_listing::PostgresBandListingRepository;
 use crowdrelay_infra::gig_outreach::{
-    GigOutreachError, GigOutreachOutcome, SEND_CHANNEL_MISSING,
-    approve_gig_proposal as approve_proposal, gig_outreach_is_sendable,
+    GigOutreachError, GigOutreachOutcome, SEND_CHANNEL_MISSING, SupportSlotAskOutcome,
+    approve_gig_proposal as approve_proposal, approve_support_slot_ask as approve_ask,
+    gig_outreach_is_sendable,
 };
 use crowdrelay_infra::gig_planning::{
     city_opportunities, proposal_track_record, roster_opportunity, stated_intent,
@@ -559,6 +560,140 @@ pub async fn approve_gig_proposal(
             .into_response(),
         Err(GigOutreachError::Database(error)) => {
             tracing::warn!(%error, "gig proposal approval failed");
+            Problem::service_unavailable(request_id_value)
+                .private()
+                .into_response()
+        }
+    }
+}
+
+/// `POST /v1/admin/roster-plan/support-slot-ask` — the roster operator's yes:
+/// the labelmate is named, and the headliner's own promoter gets the letter.
+///
+/// Admin rather than control-plane for the same reason the plan read is: the
+/// ask names two workspaces, and both must be the organisation's. What the
+/// approval actually recomputes is on the other side — the slot, the pairing
+/// arithmetic, the sender, the names — so a screen that went stale refuses
+/// rather than writing.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SupportSlotAskRequest {
+    /// The organisation both acts belong to. The route is admin-scoped
+    /// because a roster spans workspaces; this id is what the membership
+    /// check is made against, not a hint.
+    organization_id: Uuid,
+    /// The catalogue id of the city the show is in — the same `city_id` the
+    /// slot was read with. Ids, not slugs, everywhere an approval names
+    /// something: the catalogue is only unique per country.
+    city_id: Uuid,
+    /// The act whose published show holds the open slot — the workspace the
+    /// letter leaves from.
+    headliner_workspace_id: Uuid,
+    /// The labelmate being put forward for the slot.
+    support_workspace_id: Uuid,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(untagged)]
+enum SupportSlotAskResponse {
+    Queued {
+        action_id: Uuid,
+        /// Who holds the room and the night.
+        headliner: String,
+        /// Who is being put forward for the slot.
+        support: String,
+        city: String,
+        venue: String,
+        /// The night as the letter states it.
+        show_date: String,
+        /// Everybody who will receive it — the headliner's own promoter
+        /// contacts for that city, all of them or none.
+        recipients: Vec<String>,
+        /// The first line of the letter. Returned so the operator reads what
+        /// the promoter will read.
+        opening_line: String,
+    },
+    /// The same key already produced this ask. The stored status travels
+    /// because it may already have run.
+    Replayed { action_id: Uuid, status: String },
+    /// The ask no longer holds — the slot is gone, the support fills nothing,
+    /// the pairing splits one crowd, or a letter for this show is already in
+    /// flight. A real answer, not an error: the sentence says what changed.
+    Refused { refused: String },
+}
+
+/// The write half of the cheapest move the roster planner makes. One open
+/// slot produces one letter; approving once is approving, and every gate is
+/// re-run at dispatch.
+pub async fn approve_support_slot_ask(
+    State(state): State<crate::AppState>,
+    headers: HeaderMap,
+    payload: Result<Json<SupportSlotAskRequest>, JsonRejection>,
+) -> Response {
+    let request_id_value = request_id(&headers);
+    let Ok(Json(request)) = payload else {
+        return Problem::bad_request(request_id_value).into_response();
+    };
+    let Some(idempotency_key) = headers
+        .get(&crate::IDEMPOTENCY_KEY)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| IdempotencyKey::parse(value).ok())
+    else {
+        // Required rather than generated: a retried click must not become a
+        // second letter to the same promoters, and only the caller knows
+        // which click this is.
+        return Problem::bad_request(request_id_value).into_response();
+    };
+
+    match approve_ask(
+        &state.database,
+        request.organization_id,
+        request.headliner_workspace_id,
+        request.support_workspace_id,
+        request.city_id,
+        &idempotency_key,
+        OffsetDateTime::now_utc(),
+    )
+    .await
+    {
+        Ok(SupportSlotAskOutcome::Queued {
+            action_id,
+            headliner,
+            support,
+            city,
+            venue,
+            show_date,
+            recipients,
+            opening_line,
+        }) => (
+            StatusCode::OK,
+            Json(SupportSlotAskResponse::Queued {
+                action_id,
+                headliner,
+                support,
+                city,
+                venue,
+                show_date,
+                recipients,
+                opening_line,
+            }),
+        )
+            .into_response(),
+        Ok(SupportSlotAskOutcome::Replayed { action_id, status }) => (
+            StatusCode::OK,
+            Json(SupportSlotAskResponse::Replayed { action_id, status }),
+        )
+            .into_response(),
+        Err(GigOutreachError::Refused(sentence)) => (
+            StatusCode::OK,
+            Json(SupportSlotAskResponse::Refused { refused: sentence }),
+        )
+            .into_response(),
+        Err(GigOutreachError::NotFound) => Problem::not_found(request_id_value)
+            .private()
+            .into_response(),
+        Err(GigOutreachError::Database(error)) => {
+            tracing::warn!(%error, "support-slot ask approval failed");
             Problem::service_unavailable(request_id_value)
                 .private()
                 .into_response()

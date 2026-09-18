@@ -474,6 +474,58 @@ pub struct GigOutreachRecipient {
     pub target_name: String,
 }
 
+/// Which letter a `RequestGigOutreach` sends.
+///
+/// Same action, same capability, same all-or-none recipient reservation — the
+/// letter is what differs. `Proposal` is the band asking a room for a night;
+/// `SupportSlotAsk` is the headliner's own workspace asking its promoter to
+/// confirm a named labelmate for a slot that is already on the bill. The two
+/// render from different template keys, which is why the kind is on the
+/// payload rather than decided at dispatch.
+///
+/// `Default` is `Proposal` because every action queued before this field
+/// existed is one — the serde default decodes those rows unchanged.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GigLetterKind {
+    /// The proposal letter: "we want to book a night here".
+    #[default]
+    Proposal,
+    /// The support-slot ask: "{support_act} can take the open slot on the
+    /// night we already hold". Carries the facts the template needs that the
+    /// proposal letter never has — whose name is being put forward and which
+    /// show the slot belongs to.
+    SupportSlotAsk {
+        /// The roster act being proposed, by the name the promoter reads.
+        support_act: String,
+        /// The show the slot is on — the letter's subject, and the row a
+        /// receipt traces back to.
+        event_id: EventId,
+        /// The date as the letter states it, rendered at approval time — the
+        /// show may move later, and the letter says what was true when it was
+        /// asked.
+        show_date: String,
+    },
+}
+
+impl GigLetterKind {
+    /// The template an executor renders this letter from.
+    #[must_use]
+    pub const fn template_key(&self) -> &'static str {
+        match self {
+            Self::Proposal => "gig.proposal.v1",
+            Self::SupportSlotAsk { .. } => "support.slot.ask.v1",
+        }
+    }
+
+    /// Whether this is the proposal — used to keep old payloads byte-identical:
+    /// a proposal letter serializes without a `letter` key at all.
+    #[must_use]
+    pub const fn is_proposal(&self) -> bool {
+        matches!(self, Self::Proposal)
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum AutopilotActionPayload {
@@ -634,6 +686,12 @@ pub enum AutopilotActionPayload {
         /// the draft can use more than the first without re-deriving any of
         /// them.
         reasons: Vec<String>,
+        /// Which letter this is. Absent on every action queued before the
+        /// support-slot ask existed — those are all proposals, so the default
+        /// decodes them unchanged, and a proposal serializes without the key
+        /// rather than carrying a field that says nothing.
+        #[serde(default, skip_serializing_if = "GigLetterKind::is_proposal")]
+        letter: GigLetterKind,
     },
     /// Read a public playlist and report whether the track is in it.
     ///

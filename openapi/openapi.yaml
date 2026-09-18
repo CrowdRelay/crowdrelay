@@ -7176,6 +7176,78 @@ paths:
           $ref: '#/components/responses/Problem'
         '503':
           $ref: '#/components/responses/Problem'
+  /admin/roster-plan/support-slot-ask:
+    post:
+      operationId: approveSupportSlotAsk
+      summary: Turn one open support slot into one letter to the headliner's own promoter
+      description: >
+        The write half of the cheapest move the roster planner makes: a
+        confirmed show with room on the bill is already paid for, and filling
+        the slot costs an ask rather than a booking. The letter leaves from the
+        headliner's workspace — the room, the promoter relationship and the
+        night are theirs — and names the labelmate being put forward. Both
+        workspaces must belong to the organisation. The slot, the pairing
+        arithmetic, the sender and the recipients are all recomputed from the
+        rows rather than trusted from the screen, so a slot that stopped being
+        open refuses with the sentence that says what changed. Approving once
+        is approving: the action is queued, and every gate runs again at
+        dispatch. One show produces one in-flight ask; a second approval with a
+        different key is refused until the first finishes, and a replayed key
+        returns the stored action.
+      security:
+      - adminBearer: []
+      parameters:
+      - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required:
+              - organization_id
+              - city_id
+              - headliner_workspace_id
+              - support_workspace_id
+              properties:
+                organization_id:
+                  type: string
+                  format: uuid
+                  description: >
+                    The organisation both acts belong to — the membership
+                    check is made against it, not taken on trust.
+                city_id:
+                  type: string
+                  format: uuid
+                  description: >
+                    The catalogue id of the city the show is in — the same id
+                    the slot was read with. Ids, not slugs: the catalogue is
+                    only unique per country.
+                headliner_workspace_id:
+                  type: string
+                  format: uuid
+                  description: >
+                    The act whose published show holds the open slot — the
+                    workspace the letter leaves from.
+                support_workspace_id:
+                  type: string
+                  format: uuid
+                  description: The labelmate being put forward for the slot.
+      responses:
+        '200':
+          description: >
+            The queued letter with everything the operator approved — the two
+            acts, the night, the room and every recipient — or the replay of an
+            already-made ask, or the refusal sentence saying what changed.
+        '400':
+          $ref: '#/components/responses/Problem'
+        '401':
+          $ref: '#/components/responses/Problem'
+        '404':
+          $ref: '#/components/responses/Problem'
+        '503':
+          $ref: '#/components/responses/Problem'
   /admin/organizations/{organization_id}/settings:
     get:
       operationId: getOrganizationSettings
