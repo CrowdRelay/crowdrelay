@@ -858,6 +858,21 @@ pub trait AutopilotDecisionRepository: Send + Sync {
     ) -> Result<CandidatePersistence, RepositoryError>;
 }
 
+/// The `last_error_kind` an action is failed with when the roster's monthly
+/// attention budget refused the send (§4d-3).
+///
+/// Recorded on the action row, which bounds the column at 96 characters — so
+/// this is a short kind, not a sentence. It lives here rather than beside the
+/// query that raises it because the worker records it and the repository
+/// raises it, and neither should own the other's vocabulary.
+///
+/// Raised as `RepositoryError::ConflictBecause` by `reserve_contact_window`
+/// so it survives the trip through `execute_action` to `fail_action`. A plain
+/// `Conflict` would read back as `state_changed`, and "the organization
+/// already spent this person's monthly share" is not a stale-write retry —
+/// the lapsed/attention reads must be able to tell it apart.
+pub const ORG_ATTENTION_BUDGET_ERROR_KIND: &str = "org_attention_budget";
+
 /// Durable execution port. Kept separate from decision snapshot access so the
 /// evaluator cannot accidentally grow side-effect responsibilities.
 #[async_trait]

@@ -369,6 +369,18 @@ pub(in crate::autopilot) async fn executor_capability_available(
         .map_err(map_sqlx)
 }
 
+/// The roster's monthly share of one person's attention (§4d-3): how many
+/// touches the whole organization may spend on one contact in a trailing
+/// thirty days, counted in `viryaos_contact_touches`.
+///
+/// The governor says *not twice this week*; the budget says *of the four
+/// things this roster wants to tell this person this month, these three were
+/// worth it* — the pooled form of `fatigue_decay`. It is a rate the label
+/// sets, not a per-workspace knob: a workspace with no `organization_id` is a
+/// roster of one and the same cap binds it, because three touches a month is
+/// what one sender owes one person, whoever holds the pen.
+pub(in crate::autopilot) const ORG_MONTHLY_CONTACT_BUDGET: u32 = 3;
+
 /// Reserves the next contact window for one address, across the whole
 /// organization when there is one.
 ///
@@ -384,9 +396,27 @@ pub(in crate::autopilot) async fn executor_capability_available(
 /// expired. It stays one statement: a pre-check followed by an insert would
 /// leave a gap two acts could both pass through.
 ///
-/// A workspace with no `organization_id` is unaffected. The `NOT EXISTS` is
-/// vacuously true for it, so a single-act tenant reserves exactly as before —
-/// which is every tenant today.
+/// The monthly budget is the same rule one level up. `viryaos_contact_touches`
+/// counts what the organization already sent this person in the trailing
+/// thirty days — the workspace's own rows included, so the cap binds a lone
+/// tenant too — and the count rides inside the insert's `WHERE` for the same
+/// reason the sibling block does: a pre-check plus an insert leaves a gap two
+/// acts could both pass through. The `EXISTS` half is the replay exception —
+/// an action that already reserved this window is not a new spend, so its own
+/// earlier touch row must not count against it.
+///
+/// A workspace with no `organization_id` sees only its own touches. The
+/// sibling half of the count is vacuous for it, so a single-act tenant keeps
+/// the cooldown it always had and gains the monthly cap — which is the point:
+/// the budget is owed to the person, not to the roster shape.
+///
+/// # Errors
+///
+/// `ConflictBecause(ORG_ATTENTION_BUDGET_ERROR_KIND)` when the organization's
+/// thirty-day share for this contact is already spent, so the worker can
+/// record `org_attention_budget` rather than the generic `state_changed`.
+/// `Conflict` for the older refusals — sibling cooldown, `do_not_contact`,
+/// and the per-workspace window in the `ON CONFLICT` arm.
 pub(in crate::autopilot) async fn reserve_contact_window(
     transaction: &mut Transaction<'_, Postgres>,
     workspace_id: WorkspaceId,
@@ -398,6 +428,48 @@ pub(in crate::autopilot) async fn reserve_contact_window(
     let normalized = contact.trim().to_ascii_lowercase();
     if normalized.is_empty() || normalized.len() > 320 {
         return Err(RepositoryError::Conflict);
+    }
+    // Read the budget before reserving so the refusal can say what refused
+    // it — the insert returns no row for a spent budget exactly as it does
+    // for a sibling cooldown, and `last_error_kind` is the only channel that
+    // survives to the operator. The count is also folded into the insert
+    // itself, so this read is the reason and that one is the gate; a touch
+    // committed between the two still cannot pass. The join shape is the
+    // sibling gate's own: the roster is one sender, so the count is one
+    // sender's count — the workspace's own touches plus its siblings'.
+    let budget_spent = sqlx::query_scalar::<_, bool>(
+        r#"
+        SELECT COUNT(*) >= $4 AND NOT EXISTS (
+            SELECT 1
+            FROM viryaos_contact_touches replay
+            WHERE replay.workspace_id = $1
+              AND replay.normalized_contact = $2
+              AND replay.action_id = $5
+        )
+        FROM viryaos_contact_touches sibling
+        JOIN workspaces sibling_ws ON sibling_ws.id = sibling.workspace_id
+        JOIN workspaces self_ws ON self_ws.id = $1
+        WHERE sibling.normalized_contact = $2
+          AND sibling.touched_at > $3 - INTERVAL '30 days'
+          AND (
+              sibling.workspace_id = $1
+              OR (self_ws.organization_id IS NOT NULL
+                  AND sibling_ws.organization_id = self_ws.organization_id)
+          )
+        "#,
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(&normalized)
+    .bind(now)
+    .bind(i64::from(ORG_MONTHLY_CONTACT_BUDGET))
+    .bind(action_id.into_uuid())
+    .fetch_one(&mut **transaction)
+    .await
+    .map_err(map_sqlx)?;
+    if budget_spent {
+        return Err(RepositoryError::ConflictBecause(
+            ORG_ATTENTION_BUDGET_ERROR_KIND,
+        ));
     }
     let reserved = sqlx::query_scalar::<_, String>(
         r#"
@@ -417,6 +489,28 @@ pub(in crate::autopilot) async fn reserve_contact_window(
               AND sibling_ws.organization_id = self_ws.organization_id
               AND (sibling.do_not_contact OR sibling.next_contact_after > $5)
         )
+        AND (
+            EXISTS (
+                SELECT 1
+                FROM viryaos_contact_touches replay
+                WHERE replay.workspace_id = $1
+                  AND replay.normalized_contact = $2
+                  AND replay.action_id = $4
+            )
+            OR (
+                SELECT COUNT(*)
+                FROM viryaos_contact_touches sibling
+                JOIN workspaces sibling_ws ON sibling_ws.id = sibling.workspace_id
+                JOIN workspaces self_ws ON self_ws.id = $1
+                WHERE sibling.normalized_contact = $2
+                  AND sibling.touched_at > $5 - INTERVAL '30 days'
+                  AND (
+                      sibling.workspace_id = $1
+                      OR (self_ws.organization_id IS NOT NULL
+                          AND sibling_ws.organization_id = self_ws.organization_id)
+                  )
+            ) < $6
+        )
         ON CONFLICT (workspace_id, normalized_contact) DO UPDATE
         SET last_context=EXCLUDED.last_context,
             last_action_id=EXCLUDED.last_action_id,
@@ -435,14 +529,32 @@ pub(in crate::autopilot) async fn reserve_contact_window(
     .bind(context)
     .bind(action_id.into_uuid())
     .bind(now)
+    .bind(i64::from(ORG_MONTHLY_CONTACT_BUDGET))
     .fetch_optional(&mut **transaction)
     .await
     .map_err(map_sqlx)?;
-    if reserved.is_some() {
-        Ok(())
-    } else {
-        Err(RepositoryError::Conflict)
+    if reserved.is_none() {
+        return Err(RepositoryError::Conflict);
     }
+    // The ledger write shares the reservation's transaction and its action_id:
+    // a replayed action finds its own row already counted and the primary key
+    // turns the second insert into a no-op instead of a second spend.
+    sqlx::query(
+        r#"
+        INSERT INTO viryaos_contact_touches (
+            workspace_id, normalized_contact, action_id, touched_at
+        ) VALUES ($1,$2,$3,$4)
+        ON CONFLICT (workspace_id, normalized_contact, action_id) DO NOTHING
+        "#,
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(&normalized)
+    .bind(action_id.into_uuid())
+    .bind(now)
+    .execute(&mut **transaction)
+    .await
+    .map_err(map_sqlx)?;
+    Ok(())
 }
 
 /// One executor capability as the workspace stands right now.
