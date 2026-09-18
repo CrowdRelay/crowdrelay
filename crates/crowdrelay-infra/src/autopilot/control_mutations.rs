@@ -754,4 +754,214 @@ impl PostgresAutopilotRepository {
         })
         .await
     }
+
+    /// Releases a synced post's whole relay ladder at once (P.5).
+    ///
+    /// Every rung the post already asked for — the owned-audience push and one
+    /// community relay per admitted community — shares the idempotency prefix
+    /// `action:relay:{source}:`; releasing by that prefix moves the whole
+    /// spread in one statement, because the thing the operator approved was
+    /// the spread. The release marks `operator:relay_ladder` so a revoke
+    /// cancels only what the ladder freed, and applies the same outward hold
+    /// an individual approval does: the window is what makes "stop"
+    /// meaningful. A rung decided later — a community admitted after the
+    /// approval — asks on its own: the ladder is the spread the operator
+    /// could read, not a standing yes to whatever the post might still
+    /// become.
+    pub(super) async fn approve_relay_ladder_operator(
+        &self,
+        workspace_id: WorkspaceId,
+        source_id: uuid::Uuid,
+        idempotency_key: &IdempotencyKey,
+        request_id: Option<&RequestId>,
+    ) -> Result<AutopilotControlMutation, RepositoryError> {
+        self.bounded(async {
+            let mut transaction = self.pool.begin().await.map_err(map_sqlx)?;
+            let operation_id = Uuid::now_v7();
+            let replay = operator_actions::insert_operator_action(
+                &mut transaction,
+                workspace_id,
+                operation_id,
+                "approve_autopilot_relay_ladder",
+                "content_source",
+                source_id,
+                "admin_api_key",
+                idempotency_key,
+                request_id,
+                &json!({"requested_status": "approved"}),
+            )
+            .await?;
+            if let Some(existing) = replay {
+                // The approval is a point-in-time release — the operator
+                // actions row already records it. Reporting the rungs still
+                // parked would pretend the release never happened; reporting
+                // the queued count now would count rungs a revoke already
+                // cancelled. "approved" is the honest answer: it did happen.
+                transaction.commit().await.map_err(map_sqlx)?;
+                return Ok(AutopilotControlMutation {
+                    operation_id: existing,
+                    target_id: source_id,
+                    status: "approved".to_owned(),
+                    replayed: true,
+                });
+            }
+            // A foreign or misspelt source id is a not-found, not a released
+            // count of zero.
+            let exists = sqlx::query_scalar::<_, bool>(
+                "SELECT EXISTS (SELECT 1 FROM viryaos_content_sources \
+                 WHERE workspace_id=$1 AND id=$2 AND source_kind='social_post')",
+            )
+            .bind(workspace_id.into_uuid())
+            .bind(source_id)
+            .fetch_one(&mut *transaction)
+            .await
+            .map_err(map_sqlx)?;
+            if !exists {
+                return Err(RepositoryError::NotFound);
+            }
+            let now = OffsetDateTime::now_utc();
+            let released: Vec<Uuid> = sqlx::query_scalar(
+                r#"
+                UPDATE viryaos_autopilot_actions
+                SET status='queued', approved_at=$3, approved_by='operator:relay_ladder',
+                    -- O.2: an outward send waits out its hold window before a
+                    -- worker may claim it — the ladder is the approval, not a
+                    -- shortcut past the window that makes revoking meaningful.
+                    available_at = now() + CASE
+                        WHEN action_class IN ('owned_audience', 'third_party', 'paid')
+                        THEN make_interval(secs => $4::double precision)
+                        ELSE INTERVAL '0'
+                    END
+                WHERE workspace_id=$1
+                  AND context='content_supply'
+                  AND idempotency_key LIKE 'action:relay:' || $2::text || ':%'
+                  AND status='awaiting_approval'
+                  AND (approval_expires_at IS NULL OR approval_expires_at > $3)
+                RETURNING id
+                "#,
+            )
+            .bind(workspace_id.into_uuid())
+            .bind(source_id)
+            .bind(now)
+            .bind(OUTWARD_HOLD_SECONDS)
+            .fetch_all(&mut *transaction)
+            .await
+            .map_err(map_sqlx)?;
+            // A parked rung can carry an open crew assignment — close it, or
+            // a reminder keeps asking somebody to approve what already
+            // queued.
+            sqlx::query(
+                "UPDATE viryaos_team_assignments \
+                 SET status='done', completed_at=$3, next_reminder_at=NULL \
+                 WHERE workspace_id=$1 AND action_id = ANY($2) AND status='open'",
+            )
+            .bind(workspace_id.into_uuid())
+            .bind(&released)
+            .bind(now)
+            .execute(&mut *transaction)
+            .await
+            .map_err(map_sqlx)?;
+            transaction.commit().await.map_err(map_sqlx)?;
+            Ok(AutopilotControlMutation {
+                operation_id,
+                target_id: source_id,
+                status: format!("approved:{}", released.len()),
+                replayed: false,
+            })
+        })
+        .await
+    }
+
+    /// Cancels the still-queued rungs a relay-ladder approval released (P.5).
+    ///
+    /// "Stop the rest of this post's spread": rungs the ladder freed that
+    /// have not started yet are cancelled — `operator:relay_ladder` is the
+    /// whole provenance, so a rung a person approved on its own keeps its
+    /// approval and a rung already running or finished keeps its record.
+    /// Unlike the per-action cancel this takes a queued rung regardless of
+    /// attempt count: the rung never emitted, and "stop the spread" means
+    /// even the one retrying. Relay keys are versionless, so the stop is
+    /// final for this post — a re-approval afterwards finds nothing parked.
+    /// There is no ladder row to close: the release was point-in-time, and a
+    /// second revoke honestly finds nothing left to cancel.
+    pub(super) async fn revoke_relay_ladder_operator(
+        &self,
+        workspace_id: WorkspaceId,
+        source_id: uuid::Uuid,
+        idempotency_key: &IdempotencyKey,
+        request_id: Option<&RequestId>,
+    ) -> Result<AutopilotControlMutation, RepositoryError> {
+        self.bounded(async {
+            let mut transaction = self.pool.begin().await.map_err(map_sqlx)?;
+            let operation_id = Uuid::now_v7();
+            let replay = operator_actions::insert_operator_action(
+                &mut transaction,
+                workspace_id,
+                operation_id,
+                "revoke_autopilot_relay_ladder",
+                "content_source",
+                source_id,
+                "admin_api_key",
+                idempotency_key,
+                request_id,
+                &json!({"requested_status": "revoked"}),
+            )
+            .await?;
+            if let Some(existing) = replay {
+                transaction.commit().await.map_err(map_sqlx)?;
+                return Ok(AutopilotControlMutation {
+                    operation_id: existing,
+                    target_id: source_id,
+                    status: "revoked".to_owned(),
+                    replayed: true,
+                });
+            }
+            let exists = sqlx::query_scalar::<_, bool>(
+                "SELECT EXISTS (SELECT 1 FROM viryaos_content_sources \
+                 WHERE workspace_id=$1 AND id=$2 AND source_kind='social_post')",
+            )
+            .bind(workspace_id.into_uuid())
+            .bind(source_id)
+            .fetch_one(&mut *transaction)
+            .await
+            .map_err(map_sqlx)?;
+            if !exists {
+                return Err(RepositoryError::NotFound);
+            }
+            let now = OffsetDateTime::now_utc();
+            let cancelled: Vec<Uuid> = sqlx::query_scalar(
+                "UPDATE viryaos_autopilot_actions \
+                 SET status='cancelled', finished_at=$3 \
+                 WHERE workspace_id=$1 \
+                   AND context='content_supply' \
+                   AND idempotency_key LIKE 'action:relay:' || $2::text || ':%' \
+                   AND status='queued' AND approved_by='operator:relay_ladder' \
+                 RETURNING id",
+            )
+            .bind(workspace_id.into_uuid())
+            .bind(source_id)
+            .bind(now)
+            .fetch_all(&mut *transaction)
+            .await
+            .map_err(map_sqlx)?;
+            sqlx::query(
+                "UPDATE viryaos_team_assignments \
+                 SET status='cancelled', completed_at=NULL, next_reminder_at=NULL \
+                 WHERE workspace_id=$1 AND action_id = ANY($2) AND status='open'",
+            )
+            .bind(workspace_id.into_uuid())
+            .bind(&cancelled)
+            .execute(&mut *transaction)
+            .await
+            .map_err(map_sqlx)?;
+            transaction.commit().await.map_err(map_sqlx)?;
+            Ok(AutopilotControlMutation {
+                operation_id,
+                target_id: source_id,
+                status: format!("revoked:{}", cancelled.len()),
+                replayed: false,
+            })
+        })
+        .await
+    }
 }
