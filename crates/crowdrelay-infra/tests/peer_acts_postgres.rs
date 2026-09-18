@@ -307,3 +307,77 @@ async fn run_cases(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
 
     Ok(())
 }
+
+/// The 0316 seed resolves spelling families the way the map was curated
+/// (N.3): alias spellings land on the family canonical, deliberately
+/// distinct neighbours stay distinct, and canonicals are self-mapped so the
+/// set is inspectable without knowing which rows were omitted.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn genre_alias_seed_resolves_spellings() -> Result<(), Box<dyn std::error::Error>> {
+    let database = DisposableDatabase::create().await?;
+    let result = async {
+        let pool = &database.pool;
+        let resolved = |alias: &'static str| {
+            sqlx::query_scalar::<_, Option<String>>(
+                "SELECT canonical FROM place_genre_aliases WHERE alias = $1",
+            )
+            .bind(alias)
+            .fetch_one(pool)
+        };
+        // Spelling families fold to their family canonical — including the
+        // whitespace/punctuation variants place_venue_key leaves literal.
+        for (alias, canonical) in [
+            ("doom", "doom metal"),
+            ("doommetal", "doom metal"),
+            ("metal core", "metalcore"),
+            ("melodic metalcore", "metalcore"),
+            ("djent metal", "djent"),
+            ("post-metal", "post-metal"),
+            ("post metal", "post-metal"),
+            ("postmetal", "post-metal"),
+            ("nu-metal", "nu metal"),
+            ("thrash", "thrash metal"),
+            ("prog metal", "progressive metal"),
+        ] {
+            assert_eq!(
+                resolved(alias).await?,
+                Some(canonical.to_owned()),
+                "alias {alias} must resolve to {canonical}"
+            );
+        }
+        // Deliberately distinct neighbours stay distinct — broadening a real
+        // boundary to buy a match is how this map would lie.
+        for (alias, canonical) in [
+            ("jungle", "jungle"),
+            ("drum and bass", "drum and bass"),
+            ("melodic hardcore", "melodic hardcore"),
+            ("hardcore", "hardcore"),
+            ("screamo", "screamo"),
+        ] {
+            assert_eq!(
+                resolved(alias).await?,
+                Some(canonical.to_owned()),
+                "{alias} must not fold into a neighbour's canonical"
+            );
+        }
+        // Self-mapped canonicals document the resolve target spellings.
+        for canonical in [
+            "metalcore",
+            "deathcore",
+            "doom metal",
+            "black metal",
+            "progressive metal",
+        ] {
+            assert_eq!(
+                resolved(canonical).await?,
+                Some(canonical.to_owned()),
+                "canonical {canonical} must be self-mapped"
+            );
+        }
+        Ok(())
+    }
+    .await;
+    database.drop_database().await;
+    result
+}
