@@ -441,3 +441,160 @@ async fn a_concept_that_never_produced_retires_and_the_tail_is_named()
     );
     Ok(())
 }
+
+/// 5.6 — shared learning, respecting per-band taste. A same-style sibling's
+/// productions pool into the target act's prior and the raised row names the
+/// evidence; a different-style labelmate and an org-less lookalike teach
+/// nothing; an act that never declared a style pools nothing.
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and disposable PostgreSQL"]
+async fn a_same_style_siblings_productions_lift_the_format()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (repo, pool) = repository().await?;
+
+    let organization_id = Uuid::now_v7();
+    sqlx::query("INSERT INTO organizations (id, slug, name) VALUES ($1, $2, $2)")
+        .bind(organization_id)
+        .bind("roster-label")
+        .execute(&pool)
+        .await?;
+
+    // The act being advised: full band fixture, two-format spine so both
+    // beats are feasible, and a declared style written messily on purpose —
+    // the sibling's tidier spelling must still match it.
+    let target = WorkspaceId::new();
+    seed_workspace(&pool, target).await?;
+    sqlx::query("UPDATE workspaces SET organization_id = $2 WHERE id = $1")
+        .bind(target.into_uuid())
+        .bind(organization_id)
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "INSERT INTO tenant_settings (workspace_id, key, value) VALUES ($1, 'act_style', 'Stoner  DOOM')",
+    )
+    .bind(target.into_uuid())
+    .execute(&pool)
+    .await?;
+    let tsuffix = target.into_uuid().simple().to_string();
+    seed_band(
+        &pool,
+        target,
+        &tsuffix,
+        json!([
+            {"at": "2026-10-10", "beat": "playthrough", "format_key": "playthrough"},
+            {"at": "2026-10-17", "beat": "rehearsal_clip", "format_key": "rehearsal_clip"}
+        ]),
+    )
+    .await?;
+
+    // Two productions on the sibling's ledger — the floor the lift needs.
+    async fn produced_twice(
+        pool: &PgPool,
+        workspace_id: Uuid,
+        format_key: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        for _ in 0..2 {
+            let suggestion_id: Uuid = sqlx::query_scalar(
+                "INSERT INTO viryaos_content_suggestions
+                     (id, workspace_id, format_key, concept, status)
+                 VALUES ($1, $2, $3, 'sibling beat', 'done')
+                 RETURNING id",
+            )
+            .bind(Uuid::now_v7())
+            .bind(workspace_id)
+            .bind(format_key)
+            .fetch_one(pool)
+            .await?;
+            sqlx::query(
+                "INSERT INTO viryaos_suggestion_outcomes
+                     (workspace_id, suggestion_id, outcome, resolved_at)
+                 VALUES ($1, $2, 'done', now() - interval '10 days')",
+            )
+            .bind(workspace_id)
+            .bind(suggestion_id)
+            .execute(pool)
+            .await?;
+        }
+        Ok(())
+    }
+
+    async fn member(
+        pool: &PgPool,
+        organization_id: Option<Uuid>,
+        style: &str,
+    ) -> Result<Uuid, Box<dyn std::error::Error>> {
+        let id = WorkspaceId::new();
+        sqlx::query(
+            "INSERT INTO workspaces (id, slug, name, organization_id) VALUES ($1, $2, $2, $3)",
+        )
+        .bind(id.into_uuid())
+        .bind(format!("member-{}", id.into_uuid().simple()))
+        .bind(organization_id)
+        .execute(pool)
+        .await?;
+        sqlx::query(
+            "INSERT INTO tenant_settings (workspace_id, key, value) VALUES ($1, 'act_style', $2)",
+        )
+        .bind(id.into_uuid())
+        .bind(style)
+        .execute(pool)
+        .await?;
+        Ok(id.into_uuid())
+    }
+
+    // Same style, same org — teaches. Different style, same org — does not.
+    // Same style, no org — cannot even be seen.
+    let sibling = member(&pool, Some(organization_id), "stoner doom").await?;
+    produced_twice(&pool, sibling, "playthrough").await?;
+    let other_style = member(&pool, Some(organization_id), "black metal").await?;
+    produced_twice(&pool, other_style, "playthrough").await?;
+    let outsider = member(&pool, None, "stoner doom").await?;
+    produced_twice(&pool, outsider, "playthrough").await?;
+
+    let today = time::OffsetDateTime::now_utc().date();
+    let raised = repo.refresh_suggestions(target, today).await?;
+    let proven = raised
+        .iter()
+        .find(|s| s.format_key.as_deref() == Some("playthrough"))
+        .ok_or("the spine's proven beat is raised")?;
+    assert_eq!(
+        proven.evidence.get("sibling_productions"),
+        Some(&json!(2)),
+        "only the same-style sibling's two productions count — not the \
+         black-metal labelmate's, not the org-less lookalike's"
+    );
+    assert!(
+        proven.reason.contains("same-style acts"),
+        "the raised row says where the prior came from: {}",
+        proven.reason
+    );
+
+    // A workspace with no declared style pools nothing — the prior is
+    // honest absence, not a borrowed one.
+    let unstyled = WorkspaceId::new();
+    seed_workspace(&pool, unstyled).await?;
+    sqlx::query("UPDATE workspaces SET organization_id = $2 WHERE id = $1")
+        .bind(unstyled.into_uuid())
+        .bind(organization_id)
+        .execute(&pool)
+        .await?;
+    let usuffix = unstyled.into_uuid().simple().to_string();
+    seed_band(
+        &pool,
+        unstyled,
+        &usuffix,
+        json!([
+            {"at": "2026-10-10", "beat": "playthrough", "format_key": "playthrough"},
+            {"at": "2026-10-17", "beat": "rehearsal_clip", "format_key": "rehearsal_clip"}
+        ]),
+    )
+    .await?;
+    let theirs = repo.refresh_suggestions(unstyled, today).await?;
+    assert!(
+        theirs
+            .iter()
+            .all(|s| s.evidence.get("sibling_productions") == Some(&json!(0))),
+        "an act that never declared a style inherits nothing"
+    );
+    Ok(())
+}

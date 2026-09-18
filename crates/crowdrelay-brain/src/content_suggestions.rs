@@ -71,6 +71,14 @@ pub const ARC_LIFT: f64 = 1.4;
 pub const CONFIRMED_TREND_LIFT: f64 = 1.5;
 pub const EMERGING_TREND_LIFT: f64 = 1.125;
 
+/// 5.6 — shared learning. A format the roster's same-style sibling acts
+/// actually produced at least this many times is the label's experience
+/// arguing for it: a modest lift on expected fans, weaker than the band's
+/// own approved arc and much weaker than a confirmed trend. One production
+/// is an anecdote, not a pattern — the term stays inert below two.
+pub const SIBLING_PROOF_MIN: u32 = 2;
+pub const SIBLING_PROOF_LIFT: f64 = 1.15;
+
 /// Pareto says two or three, not everything over a threshold.
 pub const DEFAULT_LIMIT: usize = 3;
 
@@ -299,6 +307,12 @@ pub struct RankingInputs<'a> {
     /// Suggestion count per format key — novelty decays as the engine
     /// repeats itself.
     pub suggestion_counts: &'a BTreeMap<String, u32>,
+    /// 5.6 — productions of each format pooled across the roster's
+    /// same-style sibling acts. A shared prior, not a verdict: it can only
+    /// lift a format that already cleared every gate of this act's own —
+    /// a declined or capability-gated concept never reaches this code. The
+    /// act's own taste stays absolute; the label's experience only argues.
+    pub sibling_produced: &'a BTreeMap<String, u32>,
     pub reach: &'a ReachSnapshot,
     pub weights: EfeWeights,
     /// The cycle's date — coverage only counts events ahead of it.
@@ -379,6 +393,19 @@ pub fn rank_suggestions(inputs: &RankingInputs<'_>) -> Vec<ScoredSuggestion> {
         if arc_hit {
             lift *= ARC_LIFT;
         }
+        // Shared learning (5.6): the roster's same-style siblings already
+        // made this format work — a prior from the label's own ledger.
+        // It arrives after every gate, so it reorders the queue but can
+        // never put back what this act's own taste or capability removed.
+        let sibling_produced = inputs
+            .sibling_produced
+            .get(&entry.key)
+            .copied()
+            .unwrap_or(0);
+        let sibling_proof = sibling_produced >= SIBLING_PROOF_MIN;
+        if sibling_proof {
+            lift *= SIBLING_PROOF_LIFT;
+        }
 
         let promise = assemble_promise(&entry.distribution, inputs.reach);
         if distribution_promise_is_empty(&promise) {
@@ -414,6 +441,7 @@ pub fn rank_suggestions(inputs: &RankingInputs<'_>) -> Vec<ScoredSuggestion> {
                 covered,
                 trend_lift > 1.0,
                 arc_hit,
+                sibling_produced,
                 &promise,
                 inputs.reach.communities.len(),
             ),
@@ -425,6 +453,7 @@ pub fn rank_suggestions(inputs: &RankingInputs<'_>) -> Vec<ScoredSuggestion> {
                     .map(|event| event.id.clone())
                     .collect::<Vec<_>>(),
                 "arc_format_key_hit": arc_hit,
+                "sibling_productions": sibling_produced,
                 "efe_score": efe,
                 "lift": lift,
             }),
@@ -446,11 +475,13 @@ pub fn rank_suggestions(inputs: &RankingInputs<'_>) -> Vec<ScoredSuggestion> {
 }
 
 /// The auditable "why" — each clause names the input that earned it.
+#[allow(clippy::too_many_arguments)]
 fn reason_for(
     entry: &ContentFormatEntry,
     covered: bool,
     trend_lifted: bool,
     arc_hit: bool,
+    sibling_produced: u32,
     promise: &JsonValue,
     community_total: usize,
 ) -> String {
@@ -469,6 +500,11 @@ fn reason_for(
     }
     if arc_hit {
         clauses.push("it is a beat in the approved arc".to_owned());
+    }
+    if sibling_produced >= SIBLING_PROOF_MIN {
+        clauses.push(format!(
+            "same-style acts on the roster made it {sibling_produced} times"
+        ));
     }
     if let Some(map) = promise.as_object() {
         let mut reach = Vec::new();
@@ -564,6 +600,7 @@ mod tests {
             arc_format_keys: arc,
             outcome_counts: outcomes,
             suggestion_counts: suggestions,
+            sibling_produced: &EMPTY_COUNTS,
             reach,
             weights: EfeWeights::default(),
             today: today(),
@@ -749,6 +786,7 @@ mod tests {
     }
 
     static EMPTY_KEYS: BTreeSet<String> = BTreeSet::new();
+    static EMPTY_COUNTS: BTreeMap<String, u32> = BTreeMap::new();
 
     #[test]
     fn rank_then_cut_keeps_only_the_vital_few() {
@@ -931,6 +969,105 @@ mod tests {
         assert!(
             keys.contains(&"rehearsal_clip"),
             "the fresh concept still ranks: {keys:?}"
+        );
+    }
+
+    #[test]
+    fn sibling_proof_lifts_but_never_resurrects() {
+        let formats = vec![
+            entry("playthrough", TeamSkill::Video, FormatRequirement::Nothing),
+            entry(
+                "rehearsal_clip",
+                TeamSkill::Video,
+                FormatRequirement::Nothing,
+            ),
+        ];
+        let reach = reach();
+        let empty = BTreeSet::new();
+        let empty_arc = BTreeMap::new();
+        let empty_counts = BTreeMap::new();
+        let proven = BTreeMap::from([("playthrough".to_owned(), 3_u32)]);
+
+        let ranked = rank_suggestions(&RankingInputs {
+            sibling_produced: &proven,
+            ..inputs(
+                &formats,
+                &profile(),
+                &[],
+                &[],
+                &empty,
+                &empty,
+                &empty_arc,
+                &empty_counts,
+                &empty_counts,
+                &reach,
+            )
+        });
+        // The roster-proven format leads and names the evidence.
+        assert_eq!(ranked[0].format_key, "playthrough");
+        assert_eq!(
+            ranked[0].evidence.get("sibling_productions"),
+            Some(&serde_json::json!(3))
+        );
+        assert!(ranked[0].reason.contains("same-style acts"));
+
+        // A single sibling production is an anecdote — below the floor, the
+        // ranking is untouched.
+        let anecdote = BTreeMap::from([("rehearsal_clip".to_owned(), 1_u32)]);
+        let with = rank_suggestions(&RankingInputs {
+            sibling_produced: &anecdote,
+            ..inputs(
+                &formats,
+                &profile(),
+                &[],
+                &[],
+                &empty,
+                &empty,
+                &empty_arc,
+                &empty_counts,
+                &empty_counts,
+                &reach,
+            )
+        });
+        let without = rank_suggestions(&inputs(
+            &formats,
+            &profile(),
+            &[],
+            &[],
+            &empty,
+            &empty,
+            &empty_arc,
+            &empty_counts,
+            &empty_counts,
+            &reach,
+        ));
+        assert_eq!(
+            with.iter().map(|s| &s.format_key).collect::<Vec<_>>(),
+            without.iter().map(|s| &s.format_key).collect::<Vec<_>>(),
+            "one production must not reorder"
+        );
+
+        // And the lift cannot argue back what the band itself declined —
+        // the decline gate fires before the term ever applies.
+        let declined = BTreeSet::from(["playthrough".to_owned()]);
+        let ranked = rank_suggestions(&RankingInputs {
+            sibling_produced: &proven,
+            ..inputs(
+                &formats,
+                &profile(),
+                &[],
+                &[],
+                &empty,
+                &declined,
+                &empty_arc,
+                &empty_counts,
+                &empty_counts,
+                &reach,
+            )
+        });
+        assert!(
+            !ranked.iter().any(|s| s.format_key == "playthrough"),
+            "the band's own decline outranks the label's experience"
         );
     }
 }
