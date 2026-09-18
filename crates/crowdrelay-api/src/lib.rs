@@ -103,6 +103,7 @@ mod referrals;
 mod releases;
 mod roster_act_report;
 mod roster_catalogue_rotation;
+mod roster_counterparty_archive;
 mod roster_portfolio;
 mod roster_release_calendar;
 mod roster_source_roi;

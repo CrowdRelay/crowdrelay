@@ -7550,6 +7550,43 @@ paths:
           $ref: '#/components/responses/Problem'
         '503':
           $ref: '#/components/responses/Problem'
+  /admin/roster-plan/counterparty-archive:
+    get:
+      operationId: counterpartyArchive
+      summary: Every counterparty the roster's shows named, with the recurrence
+      description: >
+        5.14 — the roster archive (§4h-7.3). The shared counterparty
+        registry (`place_counterparties`, global by email) is populated by
+        workspace-scoped marks from the shows themselves, the same shape as
+        the venue registry: every published or completed event naming a
+        counterparty marks them, and the roster scan spans every member act
+        at once. The response is each counterparty the organisation's acts
+        have met — `shared_by_acts` is the recurrence the archive exists
+        for (one act's contact is private; three acts naming the same
+        promoter is a roster relationship), with the per-act breakdown,
+        shows count and the first/last-seen span. Marks from outside the
+        organisation never enter the response; `display_name` is the most
+        recent mark's contribution and `null` when no mark ever recorded
+        one. Admin rather than control-plane: marks are each act's private
+        contribution; only the organisation reads them together.
+      security:
+      - adminBearer: []
+      parameters:
+      - in: query
+        name: organization_id
+        required: true
+        schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: >
+            The archive: counterparties ordered by recurrence then
+            recency, and `member_count` — the roster's span. An
+            organisation whose acts have named nobody yet gets an empty
+            list.
+        '401':
+          $ref: '#/components/responses/Problem'
+        '503':
+          $ref: '#/components/responses/Problem'
   /admin/roster-plan/support-slot-ask:
     post:
       operationId: approveSupportSlotAsk
