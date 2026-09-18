@@ -92,6 +92,37 @@ pub struct RecordBookingReply {
     pub occurred_at: OffsetDateTime,
 }
 
+/// What a booking agent said back, filed against the registry entity itself
+/// (§4h-10). Kept apart from `RecordBookingReply`: a booking target answers
+/// for one night, an agent answers for the season — so a decline here stamps
+/// `viryaos_booking_agents.refused_until` and a do-not-contact is the wall,
+/// not a cooldown.
+#[derive(Clone, Copy, Debug)]
+pub struct RecordBookingAgentReply {
+    pub agent_id: BookingAgentId,
+    pub disposition: BookingAgentReplyDisposition,
+    pub occurred_at: OffsetDateTime,
+}
+
+/// The booking-agent registry: list, the gated approach request, and the
+/// reply ledger. The address never leaves this trait — list rows carry no
+/// email, and the approach command names the agent by id so a caller cannot
+/// invent a recipient.
+#[async_trait]
+pub trait AutopilotBookingAgentStateRepository: Send + Sync {
+    /// Records the agent's reply. `Declined` stamps the season's
+    /// `refused_until`; `DoNotContact` stamps the flag and the contact
+    /// governor so every other route honours it too. Idempotent on
+    /// `idempotency_key` like every other recorded reply.
+    async fn record_booking_agent_reply(
+        &self,
+        workspace_id: WorkspaceId,
+        command: RecordBookingAgentReply,
+        idempotency_key: &IdempotencyKey,
+        request_id: Option<&RequestId>,
+    ) -> Result<AutopilotControlMutation, RepositoryError>;
+}
+
 #[async_trait]
 pub trait AutopilotBookingStateRepository: Send + Sync {
     async fn upsert_booking_target(

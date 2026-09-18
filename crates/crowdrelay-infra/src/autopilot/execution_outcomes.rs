@@ -60,6 +60,9 @@ pub(super) async fn record_execution_outcome(
         AutopilotActionPayload::RequestRepresentationApproach { .. } => {
             ("representation_approach_requested", 1.0, None)
         }
+        AutopilotActionPayload::RequestBookingAgentApproach { .. } => {
+            ("booking_agent_approach_requested", 1.0, None)
+        }
         AutopilotActionPayload::RequestBeaconDiscovery { .. } => ("beacon_discovery_requested", 1.0, None),
         AutopilotActionPayload::RequestOutreachDiscovery { .. } => ("outreach_discovery_requested", 1.0, None),
         AutopilotActionPayload::RequestBookingTargetDiscovery { .. } => ("booking_target_discovery_requested", 1.0, None),

@@ -129,6 +129,15 @@ pub(super) async fn schedule_effect_measurement(
             0.0,
             now + time::Duration::days(7),
         )),
+        // An agent decides on a season's timescale — thirty days is where a
+        // reply is still this application's answer, and the reply lives on
+        // the agent's own interaction ledger, not the outreach targets'.
+        AutopilotActionPayload::RequestBookingAgentApproach { agent_id, .. } => plans.push((
+            AutopilotMeasurementKind::BookingAgentReply30d,
+            agent_id.into_uuid(),
+            0.0,
+            now + time::Duration::days(30),
+        )),
         AutopilotActionPayload::RequestAudienceCampaign { event_id, .. } => {
             let baseline = sqlx::query_scalar::<_, f64>(
                 r#"

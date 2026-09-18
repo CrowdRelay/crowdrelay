@@ -443,6 +443,60 @@ impl AutopilotOutreachStateRepository for PostgresAutopilotRepository {
             .await
             .map_err(map_sqlx)?;
 
+            // A reply from a registry agent re-proves the registry's route
+            // too — an agent who wrote back is an agent whose address was
+            // real. `viryaos_booking_agents` predating the verified column
+            // otherwise stay unverified forever on this path.
+            sqlx::query(
+                r#"
+                UPDATE viryaos_booking_agents AS agent
+                SET contact_verified_at = CASE
+                        WHEN agent.contact_verified_at IS NULL
+                          OR agent.contact_verified_at < $3
+                        THEN $3 ELSE agent.contact_verified_at
+                    END,
+                    version = agent.version + 1
+                FROM viryaos_outreach_targets AS target
+                WHERE target.workspace_id = $1 AND target.id = $2
+                  AND target.target_kind = 'agent'
+                  AND agent.workspace_id = target.workspace_id
+                  AND lower(agent.contact_email) = lower(target.contact_email)
+                "#,
+            )
+            .bind(workspace_id.into_uuid())
+            .bind(command.target_id.into_uuid())
+            .bind(command.occurred_at)
+            .execute(&mut *transaction)
+            .await
+            .map_err(map_sqlx)?;
+
+            // An agent's decline is the season's answer (§4h-10): the
+            // registry's door closes until next season, matched to the
+            // registry row by address — no row, no door to close. The season
+            // runs from the day they answered (`occurred_at`), not the day
+            // the reply was filed.
+            if applied_disposition_str == "declined" {
+                sqlx::query(
+                    r#"
+                    UPDATE viryaos_booking_agents AS agent
+                    SET refused_until = GREATEST(agent.refused_until, $3::date + $4),
+                        version = agent.version + 1
+                    FROM viryaos_outreach_targets AS target
+                    WHERE target.workspace_id = $1 AND target.id = $2
+                      AND target.target_kind = 'agent'
+                      AND agent.workspace_id = target.workspace_id
+                      AND lower(agent.contact_email) = lower(target.contact_email)
+                    "#,
+                )
+                .bind(workspace_id.into_uuid())
+                .bind(command.target_id.into_uuid())
+                .bind(command.occurred_at)
+                .bind(crowdrelay_domain::representation::AGENT_APPROACH_SEASON_DAYS as i32)
+                .execute(&mut *transaction)
+                .await
+                .map_err(map_sqlx)?;
+            }
+
             if applied_disposition_str == "do_not_contact" {
                 sqlx::query(
                     r#"
@@ -463,6 +517,27 @@ impl AutopilotOutreachStateRepository for PostgresAutopilotRepository {
                 .bind(workspace_id.into_uuid())
                 .bind(command.target_id.into_uuid())
                 .bind(command.occurred_at)
+                .execute(&mut *transaction)
+                .await
+                .map_err(map_sqlx)?;
+
+                // The registry's own wall: the governor blocks the address
+                // everywhere, but the booking-agent gate reads its own flag —
+                // without this the band-facing list would still show the
+                // agent as someone a season's letter could reach.
+                sqlx::query(
+                    r#"
+                    UPDATE viryaos_booking_agents AS agent
+                    SET do_not_contact = true, version = agent.version + 1
+                    FROM viryaos_outreach_targets AS target
+                    WHERE target.workspace_id = $1 AND target.id = $2
+                      AND target.target_kind = 'agent'
+                      AND agent.workspace_id = target.workspace_id
+                      AND lower(agent.contact_email) = lower(target.contact_email)
+                    "#,
+                )
+                .bind(workspace_id.into_uuid())
+                .bind(command.target_id.into_uuid())
                 .execute(&mut *transaction)
                 .await
                 .map_err(map_sqlx)?;

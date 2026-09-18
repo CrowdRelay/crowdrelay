@@ -14,6 +14,12 @@ fn executor_capability_for_event(event_type: &str) -> &'static str {
         "crowdrelay.merch.bundle_requested" => "merch.bundle",
         "crowdrelay.outreach.requested" => "outreach.send",
         "crowdrelay.representation.approach_requested" => "representation.approach",
+        // Its own capability rather than riding `representation.approach`:
+        // the payload names a registry agent and carries the draw snapshot,
+        // and an executor that only knows the listing-letter shape would
+        // claim it and have nothing to send. Until one advertises
+        // `booking_agent.approach` these park, which is the honest state.
+        "crowdrelay.booking_agent.approach_requested" => "booking_agent.approach",
         "crowdrelay.beacon.discovery_requested" => "beacon.discovery",
         "crowdrelay.outreach.discovery_requested" => "outreach.discovery",
         "crowdrelay.booking.target_discovery_requested" => "booking.discovery",
@@ -123,6 +129,7 @@ pub const fn payload_requires_executor(payload: &AutopilotActionPayload) -> bool
                 | AutopilotActionPayload::RequestMerchBundle { .. }
                 | AutopilotActionPayload::RequestOutreach { .. }
                 | AutopilotActionPayload::RequestRepresentationApproach { .. }
+                | AutopilotActionPayload::RequestBookingAgentApproach { .. }
                 | AutopilotActionPayload::RequestBeaconDiscovery { .. }
                 | AutopilotActionPayload::RequestOutreachDiscovery { .. }
                 | AutopilotActionPayload::RequestBeaconInviteBatch { .. }
@@ -174,6 +181,7 @@ pub(in crate::autopilot) fn executor_capability_for_payload(
         AutopilotActionPayload::RequestMerchBundle { .. } => "merch.bundle",
         AutopilotActionPayload::RequestOutreach { .. } => "outreach.send",
         AutopilotActionPayload::RequestRepresentationApproach { .. } => "representation.approach",
+        AutopilotActionPayload::RequestBookingAgentApproach { .. } => "booking_agent.approach",
         AutopilotActionPayload::RequestBeaconDiscovery { .. } => "beacon.discovery",
         AutopilotActionPayload::RequestOutreachDiscovery { .. } => "outreach.discovery",
         AutopilotActionPayload::RequestBookingTargetDiscovery { .. } => "booking.discovery",

@@ -62,6 +62,7 @@ pub mod autonomy;
 pub mod beacon_release;
 pub mod beacons;
 pub mod booking;
+pub mod booking_agent;
 pub mod booking_discovery;
 pub mod booking_window;
 pub mod calendar_routing;
@@ -159,8 +160,8 @@ pub use fan_lifecycle::{
 };
 pub use ids::{
     AdmissionPassId, AdmissionPoolId, ArcId, AutopilotActionId, AutopilotDecisionId,
-    AutopilotMeasurementId, BeaconId, BookingTargetId, CampaignId, CapturePlanId, CityId,
-    ContentSourceId, ContentSuggestionId, ContentTrendId, EventId, ExperimentId,
+    AutopilotMeasurementId, BeaconId, BookingAgentId, BookingTargetId, CampaignId, CapturePlanId,
+    CityId, ContentSourceId, ContentSuggestionId, ContentTrendId, EventId, ExperimentId,
     ExperimentVariantId, FanId, GrowthMetricSeriesId, MarketSignalId, MerchCouponId,
     MerchProductId, MerchVariantId, OutreachOpportunityId, OutreachTargetId, PassSessionId, PeerId,
     PlayId, ProductionEventId, PromotionCampaignId, ReferralAttributionId, ReleasePlanId,

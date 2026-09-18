@@ -434,6 +434,7 @@ fn parse_measurement_kind(value: &str) -> Result<AutopilotMeasurementKind, Repos
         "scanner_discovery_quality_1h" => Ok(AutopilotMeasurementKind::ScannerDiscoveryQuality1h),
         "strategist_insight_quality_1h" => Ok(AutopilotMeasurementKind::StrategistInsightQuality1h),
         "signal_installs_1d" => Ok(AutopilotMeasurementKind::SignalInstalls1d),
+        "booking_agent_reply_30d" => Ok(AutopilotMeasurementKind::BookingAgentReply30d),
         _ => Err(RepositoryError::Unexpected),
     }
 }

@@ -119,6 +119,12 @@ pub enum AutopilotMeasurementKind {
     /// the 7-day window — the brain gets next-cycle feedback on whether the
     /// worker moved fans toward Signal within 24 hours, not a week.
     SignalInstalls1d,
+    /// Whether a booking-agent approach got an answer in the 30 days after
+    /// dispatch. An agent decides on a season's timescale, not a pitch's
+    /// week — thirty days is the window where a reply is still the
+    /// approach's answer rather than the season's news. The observation
+    /// counts inbound `reply` interactions on the agent since the send.
+    BookingAgentReply30d,
 }
 
 impl AutopilotMeasurementKind {
@@ -149,6 +155,7 @@ impl AutopilotMeasurementKind {
             Self::ScannerDiscoveryQuality1h => "scanner_discovery_quality_1h",
             Self::StrategistInsightQuality1h => "strategist_insight_quality_1h",
             Self::SignalInstalls1d => "signal_installs_1d",
+            Self::BookingAgentReply30d => "booking_agent_reply_30d",
         }
     }
 

@@ -287,6 +287,28 @@ impl AutopilotBookingStateRepository for PostgresAutopilotRepository {
 }
 
 #[async_trait]
+impl crowdrelay_application::autopilot::AutopilotBookingAgentStateRepository
+    for PostgresAutopilotRepository
+{
+    async fn record_booking_agent_reply(
+        &self,
+        workspace_id: WorkspaceId,
+        command: crowdrelay_application::autopilot::RecordBookingAgentReply,
+        idempotency_key: &IdempotencyKey,
+        request_id: Option<&RequestId>,
+    ) -> Result<AutopilotControlMutation, RepositoryError> {
+        operations::booking_agents::record_booking_agent_reply(
+            self,
+            workspace_id,
+            command,
+            idempotency_key,
+            request_id,
+        )
+        .await
+    }
+}
+
+#[async_trait]
 impl AutopilotMerchStateRepository for PostgresAutopilotRepository {
     async fn upsert_merch_product_economics(
         &self,

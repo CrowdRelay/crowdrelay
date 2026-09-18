@@ -2,7 +2,7 @@
 
 use crowdrelay_brain::{AgentTier, GrowthIntelligencePolicy};
 use crowdrelay_domain::{
-    ArcId, AutopilotActionId, BeaconId, BookingTargetId, CityId, ContentSourceId,
+    ArcId, AutopilotActionId, BeaconId, BookingAgentId, BookingTargetId, CityId, ContentSourceId,
     ContentSuggestionId, EventId, ExperimentId, ExperimentVariantId, FanId, GrowthMetricSeriesId,
     MerchProductId, MerchVariantId, OutreachOpportunityId, OutreachTargetId, PlayId,
     PromotionCampaignId, ReleasePlanId, TeamOpportunityId, TicketTypeId, WorkspaceId,
@@ -11,6 +11,7 @@ use crowdrelay_domain::{
     autonomy::{AutonomyLevel, Confidence, PolicyDisposition},
     beacons::{BeaconCampaignPolicy, BeaconOutreachPhase},
     booking::{BookingOpportunityPolicy, BookingOutreachPhase, BookingVenueEvidence},
+    booking_agent::{AgentDrawEvidence, BookingAgentPolicy},
     booking_window::ProposedWindow,
     campaign_lifecycle::{EventCampaignPhase, EventCampaignPolicy},
     content_engine::ContentStrategyPolicy,
@@ -79,6 +80,10 @@ pub enum AutopilotContext {
     /// and the approach queues for approval. Deterministic gates own whether
     /// one may go out — consent, activity, verification, monthly allowance.
     Representation,
+    /// Booking-agent approaches (§4h-10): the band picks a screened agent and
+    /// asks for representation — a season-scarce application that refuses to
+    /// exist without real draw evidence behind it.
+    BookingAgent,
 }
 
 impl AutopilotContext {
@@ -87,7 +92,7 @@ impl AutopilotContext {
     /// Storage parsing is derived from this list rather than restating the
     /// names: a context the policy table can hold but a reader cannot parse
     /// fails the whole overview read, not just its own row.
-    pub const ALL: [Self; 24] = [
+    pub const ALL: [Self; 25] = [
         Self::TicketYield,
         Self::FanLifecycle,
         Self::CampaignLifecycle,
@@ -112,6 +117,7 @@ impl AutopilotContext {
         Self::Plays,
         Self::ContentStrategy,
         Self::Representation,
+        Self::BookingAgent,
     ];
 
     /// Parse the stored representation written by [`Self::as_str`].
@@ -149,6 +155,7 @@ impl AutopilotContext {
             Self::Plays => "plays",
             Self::ContentStrategy => "content_strategy",
             Self::Representation => "representation",
+            Self::BookingAgent => "booking_agent",
         }
     }
 }
@@ -180,6 +187,7 @@ pub enum AutopilotPolicyConfig {
     Plays(PlayPolicy),
     ContentStrategy(ContentStrategyPolicy),
     Representation(RepresentationPolicy),
+    BookingAgent(BookingAgentPolicy),
 }
 
 impl AutopilotPolicyConfig {
@@ -274,6 +282,9 @@ impl AutopilotPolicyConfig {
             AutopilotContext::Representation => {
                 Self::parse_into(raw, Self::Representation, RepresentationPolicy::default())
             }
+            AutopilotContext::BookingAgent => {
+                Self::parse_into(raw, Self::BookingAgent, BookingAgentPolicy::default())
+            }
         }
     }
 
@@ -327,6 +338,10 @@ pub enum ActionSubject {
     Beacon(BeaconId),
     GrowthMetricSeries(GrowthMetricSeriesId),
     BookingTarget(BookingTargetId),
+    /// A screened booking agent — `viryaos_booking_agents.id`. Distinct from
+    /// `BookingTarget`: the agent is the booking graph's third entity, the
+    /// one the band applies to rather than pitches a night at.
+    BookingAgent(BookingAgentId),
     OutreachTarget(OutreachTargetId),
     /// P0-3: A community target discovered by the agent (e.g. a subreddit
     /// from `agent_outreach_targets`). Distinct from `OutreachTarget`
@@ -377,6 +392,7 @@ impl ActionSubject {
             Self::Beacon(_) => "beacon",
             Self::GrowthMetricSeries(_) => "growth_metric_series",
             Self::BookingTarget(_) => "booking_target",
+            Self::BookingAgent(_) => "booking_agent",
             Self::OutreachTarget(_) => "outreach_target",
             Self::TargetCommunity(_) => "target_community",
             Self::Workspace(_) => "workspace",
@@ -401,7 +417,11 @@ impl ActionSubject {
     pub const fn is_contactable_person(self) -> bool {
         matches!(
             self,
-            Self::Fan(_) | Self::BookingTarget(_) | Self::OutreachTarget(_) | Self::Beacon(_)
+            Self::Fan(_)
+                | Self::BookingTarget(_)
+                | Self::BookingAgent(_)
+                | Self::OutreachTarget(_)
+                | Self::Beacon(_)
         )
     }
 
@@ -423,6 +443,7 @@ impl ActionSubject {
             Self::Beacon(id) => id.into_uuid(),
             Self::GrowthMetricSeries(id) => id.into_uuid(),
             Self::BookingTarget(id) => id.into_uuid(),
+            Self::BookingAgent(id) => id.into_uuid(),
             Self::OutreachTarget(id) => id.into_uuid(),
             Self::TargetCommunity(id) => id,
             Self::Workspace(id) => id.into_uuid(),
@@ -550,6 +571,38 @@ pub enum AutopilotActionPayload {
         /// the listing speaks alone.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         note: Option<String>,
+        /// The draw numbers the request measured — an agent pitch cites
+        /// them, so what the approval saw is what the letter claims.
+        /// `None` on a label: the listing is its pitch.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        draw_evidence: Option<crowdrelay_domain::representation::DrawEvidence>,
+    },
+    /// Ask the platform to broker the band's application to a booking agent
+    /// (§4h-10): representation for a season, not a slot on one date.
+    ///
+    /// The proof is the pitch — `evidence` is the draw snapshot the approval
+    /// screen showed, carried verbatim so the send argues from the same
+    /// numbers. Dispatch re-runs the whole gate — standing, the season door,
+    /// and a fresh evidence floor — so an approval that went stale cannot
+    /// send, and a decline since then closes the door under it.
+    ///
+    /// The agent's address never reaches the band, so the send is brokered
+    /// and our reputation rides on it — which is why a thin approach is
+    /// refused outright rather than sent weaker.
+    RequestBookingAgentApproach {
+        agent_id: BookingAgentId,
+        agent_version: i64,
+        agent_name: String,
+        /// The agency the agent works for — half of who they are. Absent is
+        /// honest: an independent is not an agency with no name.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agency: Option<String>,
+        /// One line of the band's own words over the numbers.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        note: Option<String>,
+        /// The draw readings the approval was made on — the pitch's content,
+        /// not an attachment to it.
+        evidence: AgentDrawEvidence,
     },
     /// Write to everybody who books one room about one night (§12-6, 4G.4).
     ///
@@ -972,6 +1025,10 @@ impl AutopilotActionPayload {
             | Self::RequestGigOutreach { .. }
             | Self::RequestOutreach { .. }
             | Self::RequestRepresentationApproach { .. }
+            // The agent application is somebody else's relationship in the
+            // most literal sense — they sell *us*, and a bad first approach
+            // spends a season, not a cooldown.
+            | Self::RequestBookingAgentApproach { .. }
             | Self::RequestBeaconOutreach { .. }
             // A partner being asked to carry invite codes is a real-world
             // approach to somebody else's community, not a message to ours.
@@ -1098,6 +1155,7 @@ impl AutopilotActionPayload {
             Self::RequestMerchBundle { .. } => "merch.bundle.request",
             Self::RequestOutreach { .. } => "outreach.request",
             Self::RequestRepresentationApproach { .. } => "representation.approach.request",
+            Self::RequestBookingAgentApproach { .. } => "booking_agent.approach.request",
             Self::RequestBeaconDiscovery { .. } => "beacon.discovery.request",
             Self::RequestBookingTargetDiscovery { .. } => "booking.target_discovery.request",
             Self::RequestBeaconInviteBatch { .. } => "beacon.invite_batch.request",

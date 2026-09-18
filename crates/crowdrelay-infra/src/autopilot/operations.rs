@@ -37,6 +37,7 @@ use crowdrelay_application::{IdempotencyKey, RepositoryError, RequestId};
 mod acquisition_channels;
 pub(in crate::autopilot) mod attribution;
 pub(in crate::autopilot) mod belief_revisions;
+pub(in crate::autopilot) mod booking_agents;
 mod booking_outreach_execution;
 mod chief;
 mod content_arc_execution;

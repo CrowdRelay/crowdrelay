@@ -23,7 +23,8 @@ use crowdrelay_application::IdempotencyKey;
 use crowdrelay_domain::OutreachTargetId;
 use crowdrelay_domain::outreach::OutreachTargetKind;
 use crowdrelay_domain::representation::{
-    ApproachRequest, MONTHLY_APPROACH_ALLOWANCE, review_approach,
+    AGENT_APPROACH_SEASON_DAYS, AgentGate, ApproachRefusal, ApproachRequest, DrawEvidence,
+    MONTHLY_APPROACH_ALLOWANCE, review_approach,
 };
 use crowdrelay_domain::trace::TraceContext;
 use serde::Serialize;
@@ -64,6 +65,14 @@ pub struct RepresentationTarget {
     pub version: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_outreach_at: Option<OffsetDateTime>,
+    /// When the registry's booking-agent row was last approached — agents
+    /// only; always `None` on a label or a contact the registry does not
+    /// know.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub approached_at: Option<OffsetDateTime>,
+    /// The date the agent's refusal stops binding — agents only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub refused_until: Option<time::Date>,
 }
 
 /// What `request_approach` did. `Replayed` means the same idempotency key
@@ -93,15 +102,24 @@ impl PostgresRepresentationRepository {
         &self,
         workspace_id: Uuid,
     ) -> Result<Vec<RepresentationTarget>, RepresentationError> {
+        // The registry's door state rides the read: a booking-agent row at
+        // the same address is the same agent, and the band deciding whether
+        // to knock needs to see whether it already did — or was refused.
         let rows = sqlx::query(
             r#"
-            SELECT id, target_kind, display_name, accepts_outreach,
-                   accepts_outreach_basis, do_not_contact, active, verified,
-                   version, last_outreach_at
-            FROM viryaos_outreach_targets
-            WHERE workspace_id = $1 AND target_kind IN ('agent','label')
-            ORDER BY do_not_contact, NOT active, last_outreach_at ASC NULLS FIRST,
-                     display_name ASC
+            SELECT target.id, target.target_kind, target.display_name,
+                   target.accepts_outreach, target.accepts_outreach_basis,
+                   target.do_not_contact, target.active, target.verified,
+                   target.version, target.last_outreach_at,
+                   agent.approached_at, agent.refused_until
+            FROM viryaos_outreach_targets AS target
+            LEFT JOIN viryaos_booking_agents AS agent
+              ON agent.workspace_id = target.workspace_id
+             AND lower(agent.contact_email) = lower(target.contact_email)
+            WHERE target.workspace_id = $1 AND target.target_kind IN ('agent','label')
+            ORDER BY target.do_not_contact, NOT target.active,
+                     target.last_outreach_at ASC NULLS FIRST,
+                     target.display_name ASC
             "#,
         )
         .bind(workspace_id)
@@ -120,6 +138,8 @@ impl PostgresRepresentationRepository {
                 verified: row.get("verified"),
                 version: row.get("version"),
                 last_outreach_at: row.get("last_outreach_at"),
+                approached_at: row.get("approached_at"),
+                refused_until: row.get("refused_until"),
             })
             .collect())
     }
@@ -262,6 +282,16 @@ impl PostgresRepresentationRepository {
             ));
         }
 
+        // An agent answers the extra gates: the registry's season door and
+        // the draw ledger the pitch cites. Gathered inside the same locked
+        // transaction so the answer at request time is the answer the
+        // approval lands on.
+        let agent_gate = if kind == OutreachTargetKind::Agent {
+            Some(agent_gate_state(&mut tx, workspace_id, target_id, now).await?)
+        } else {
+            None
+        };
+
         review_approach(&ApproachRequest {
             accepts_outreach: target.get("accepts_outreach"),
             has_acceptance_basis: target
@@ -271,6 +301,7 @@ impl PostgresRepresentationRepository {
             active: target.get("active"),
             verified: target.get("verified"),
             listing_published,
+            agent_gate: agent_gate.clone(),
             approaches_used_this_month: u32::try_from(used + pending_workspace).unwrap_or(u32::MAX),
             allowance: MONTHLY_APPROACH_ALLOWANCE,
         })
@@ -286,6 +317,7 @@ impl PostgresRepresentationRepository {
             target_version: target.get("version"),
             target_name: target.get("display_name"),
             note: trimmed_note.map(str::to_owned),
+            draw_evidence: agent_gate.as_ref().map(|gate| gate.draw.clone()),
         };
         let action_kind = payload.action_kind();
         let action_class = payload.action_class().as_str();
@@ -317,6 +349,11 @@ impl PostgresRepresentationRepository {
             "note": trimmed_note,
             "listing_published": listing_published,
             "approaches_used_this_month": used,
+            "agent_gate": agent_gate.as_ref().map(|gate| json!({
+                "door_closed": gate.door_closed,
+                "approached_this_season": gate.approached_this_season,
+                "draw": gate.draw,
+            })),
         }))
         .bind(json!({"require_approval": true, "monthly_allowance": MONTHLY_APPROACH_ALLOWANCE}))
         .bind(payload_json.clone())
@@ -391,9 +428,137 @@ fn map_sqlx(error: sqlx::Error) -> crowdrelay_application::RepositoryError {
     }
 }
 
+/// The draw ledger an agent pitch stands on: the workspace's own confirmed
+/// shows, counted the same way the campaign snapshot counts them — real paid
+/// buyers from the ticket ledger, real interested fans, and the city the
+/// band draws hardest in. Zeroed when there is nothing to measure, which is
+/// the honest answer to "what have you got" when the books are empty.
+pub(crate) async fn load_draw_evidence(
+    executor: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    workspace_id: Uuid,
+) -> Result<DrawEvidence, sqlx::Error> {
+    sqlx::query_as::<_, (i64, i64, i64, Option<String>)>(
+        r#"
+        WITH per_event AS (
+            SELECT event.id, event.city_id,
+                   (SELECT count(*) FROM event_interests AS interest
+                     WHERE interest.workspace_id = event.workspace_id
+                       AND interest.event_id = event.id) AS interested,
+                   (SELECT count(DISTINCT orders.buyer_email)
+                      FROM ticket_orders AS orders
+                      JOIN ticket_sales AS sale
+                        ON sale.workspace_id = orders.workspace_id
+                       AND sale.id = orders.ticket_sale_id
+                     WHERE sale.workspace_id = event.workspace_id
+                       AND sale.event_id = event.id
+                       AND orders.status IN ('paid','partially_refunded')) AS paid
+            FROM events AS event
+            WHERE event.workspace_id = $1
+              AND event.status IN ('published','completed')
+        ),
+        totals AS (
+            SELECT count(*)::bigint AS shows,
+                   COALESCE(sum(interested), 0)::bigint AS interested_fans,
+                   COALESCE(sum(paid), 0)::bigint AS paid_buyers
+            FROM per_event
+        ),
+        top_city AS (
+            SELECT city.name, sum(per_event.paid + per_event.interested) AS draw
+            FROM per_event
+            JOIN cities AS city ON city.id = per_event.city_id
+            GROUP BY city.name
+            ORDER BY draw DESC, city.name
+            LIMIT 1
+        )
+        SELECT totals.shows, totals.interested_fans, totals.paid_buyers,
+               top_city.name
+        FROM totals LEFT JOIN top_city ON true
+        "#,
+    )
+    .bind(workspace_id)
+    .fetch_one(&mut **executor)
+    .await
+    .map(
+        |(shows, interested_fans, paid_buyers, top_city)| DrawEvidence {
+            paid_buyers,
+            interested_fans,
+            confirmed_shows: shows,
+            top_city,
+        },
+    )
+}
+
+/// The season-door state an agent approach answers to (§4h-10).
+///
+/// `viryaos_booking_agents` is matched to the outreach target by address
+/// inside the query — the band never sees the email, and neither does this
+/// layer need it. The door is closed when `refused_until` covers today; the
+/// season is spent when the registry's `approached_at` or this target's own
+/// `approach` ledger entry fell inside the window — either record of the
+/// knock counts.
+async fn agent_gate_state(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    workspace_id: Uuid,
+    target_id: Uuid,
+    now: OffsetDateTime,
+) -> Result<AgentGate, sqlx::Error> {
+    let door = sqlx::query_as::<_, (Option<time::Date>, Option<OffsetDateTime>)>(
+        r#"
+        SELECT agent.refused_until, agent.approached_at
+        FROM viryaos_outreach_targets AS target
+        LEFT JOIN viryaos_booking_agents AS agent
+          ON agent.workspace_id = target.workspace_id
+         AND lower(agent.contact_email) = lower(target.contact_email)
+        WHERE target.workspace_id = $1 AND target.id = $2
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(target_id)
+    .fetch_one(&mut **tx)
+    .await?;
+    let season_start = now - time::Duration::days(AGENT_APPROACH_SEASON_DAYS);
+    let ledger_knock = sqlx::query_scalar::<_, bool>(
+        r#"
+        SELECT EXISTS(
+            SELECT 1 FROM viryaos_outreach_interactions
+            WHERE workspace_id = $1 AND target_id = $2 AND phase = 'approach'
+              AND occurred_at >= $3
+        )
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(target_id)
+    .bind(season_start)
+    .fetch_one(&mut **tx)
+    .await?;
+    let (refused_until, approached_at) = door;
+    let door_closed = refused_until.is_some_and(|until| until >= now.date());
+    let approached_this_season = ledger_knock || approached_at.is_some_and(|at| at >= season_start);
+    let draw = load_draw_evidence(tx, workspace_id).await?;
+    Ok(AgentGate {
+        door_closed,
+        approached_this_season,
+        draw,
+    })
+}
+
+/// A representation contact locked for dispatch — the fields the letter is
+/// addressed to, plus the draw evidence an agent pitch cites. The lock is
+/// the moment the gates were re-run, so the draw it carries is the number
+/// that just cleared the gate, not a stale payload figure.
+pub(crate) struct RepresentationLock {
+    pub display_name: String,
+    pub contact_email: String,
+    pub target_kind: String,
+    /// The measured draw — `Some` only for agent targets, which are the
+    /// approaches that cite it.
+    pub draw_evidence: Option<DrawEvidence>,
+}
+
 /// Locks a representation contact (agent or label) for an approach and
 /// re-runs every request-time gate: consent, verification, the published
-/// listing, and the monthly allowance.
+/// listing, the agent's season door and draw ledger, and the monthly
+/// allowance.
 ///
 /// Approaches have no opportunity row — the band names the target directly —
 /// so this locks the target itself. The workspace advisory lock serializes
@@ -408,7 +573,7 @@ pub(crate) async fn lock_representation_for_execution(
     target_id: OutreachTargetId,
     target_version: i64,
     now: OffsetDateTime,
-) -> Result<(String, String, String), crowdrelay_application::RepositoryError> {
+) -> Result<RepresentationLock, crowdrelay_application::RepositoryError> {
     sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1::text))")
         .bind(workspace_id.into_uuid())
         .execute(&mut **tx)
@@ -473,6 +638,16 @@ pub(crate) async fn lock_representation_for_execution(
     .await
     .map_err(map_sqlx)?;
 
+    let agent_gate = if kind == OutreachTargetKind::Agent {
+        Some(
+            agent_gate_state(tx, workspace_id.into_uuid(), target_id.into_uuid(), now)
+                .await
+                .map_err(map_sqlx)?,
+        )
+    } else {
+        None
+    };
+
     crowdrelay_domain::representation::review_approach(
         &crowdrelay_domain::representation::ApproachRequest {
             accepts_outreach: target.3,
@@ -481,13 +656,33 @@ pub(crate) async fn lock_representation_for_execution(
             active: target.6,
             verified: target.7,
             listing_published: listing_visibility.as_deref() == Some("admitted_readers"),
+            agent_gate: agent_gate.clone(),
             approaches_used_this_month: u32::try_from(approaches_used).unwrap_or(u32::MAX),
             allowance: MONTHLY_APPROACH_ALLOWANCE,
         },
     )
-    .map_err(|_| crowdrelay_application::RepositoryError::Conflict)?;
+    .map_err(|refusal| {
+        // The reason survives the dispatch ladder: a parked action that
+        // fails on a moved gate must say which gate moved, or the failure
+        // reads as a broken button.
+        crowdrelay_application::RepositoryError::ConflictBecause(match refusal {
+            ApproachRefusal::AgentDoorClosed => {
+                "the agent's refusal still binds — the season door is closed"
+            }
+            ApproachRefusal::AgentApproachedThisSeason => {
+                "the agent was already approached this season"
+            }
+            ApproachRefusal::InsufficientDrawEvidence => "insufficient_draw_evidence",
+            _ => "the representation gates changed between approval and dispatch",
+        })
+    })?;
 
-    Ok((target.0, target.1, target.2))
+    Ok(RepresentationLock {
+        display_name: target.0,
+        contact_email: target.1,
+        target_kind: target.2,
+        draw_evidence: agent_gate.map(|gate| gate.draw),
+    })
 }
 
 /// Records that an approach went out: the contact's `last_outreach_at`, an
@@ -502,6 +697,27 @@ pub(crate) async fn record_approach_sent(
 ) -> Result<(), crowdrelay_application::RepositoryError> {
     sqlx::query("UPDATE viryaos_outreach_targets SET last_outreach_at=$3,contact_verified_at=CASE WHEN contact_verified_at IS NULL OR contact_verified_at < $3 THEN $3 ELSE contact_verified_at END WHERE workspace_id=$1 AND id=$2")
       .bind(workspace_id.into_uuid()).bind(target_id.into_uuid()).bind(now).execute(&mut **tx).await.map_err(map_sqlx)?;
+    // The registry row for the same address is the season's book-keeping:
+    // an agent who just heard from us cannot be knocked on again until the
+    // window passes. Matched by address so a registry-less target is a
+    // no-op rather than a write that invents one.
+    sqlx::query(
+        r#"
+        UPDATE viryaos_booking_agents AS agent
+        SET approached_at = $3
+        FROM viryaos_outreach_targets AS target
+        WHERE target.workspace_id = $1 AND target.id = $2
+          AND target.target_kind = 'agent'
+          AND agent.workspace_id = target.workspace_id
+          AND lower(agent.contact_email) = lower(target.contact_email)
+        "#,
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(target_id.into_uuid())
+    .bind(now)
+    .execute(&mut **tx)
+    .await
+    .map_err(map_sqlx)?;
     sqlx::query(r#"INSERT INTO viryaos_outreach_interactions(workspace_id,target_id,opportunity_id,direction,phase,source_key,occurred_at) VALUES($1,$2,NULL,'outbound','approach',$3,$4) ON CONFLICT(workspace_id,target_id,source_key) DO NOTHING"#)
       .bind(workspace_id.into_uuid()).bind(target_id.into_uuid()).bind(format!("autopilot:{}",action_id)).bind(now).execute(&mut **tx).await.map_err(map_sqlx)?;
     sqlx::query(r#"INSERT INTO viryaos_reach_events (workspace_id, action_id, recipient_kind, recipient_id, channel, template_id, estimated_reach, status, metadata) VALUES ($1, $2, 'outreach_target', $3::text, 'email', 'representation', 1, 'sent', jsonb_build_object('kind', 'approach')) ON CONFLICT (action_id, recipient_id, channel) WHERE action_id IS NOT NULL DO NOTHING"#)
