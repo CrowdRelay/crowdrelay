@@ -41,6 +41,12 @@ pub const REVISABLE_FIELDS: &[&str] = &[
     "subject",
     "draft_text",
     "summary",
+    // The gig letter's first line — the band's voice, which is what an
+    // operator is there to fix. `reasons` stays off this list on purpose:
+    // those are the machine's measured evidence sentences, and a band that
+    // disagrees with a number's honest act is to refuse the letter, not to
+    // edit the evidence.
+    "opening_line",
 ];
 
 /// Why a revision was refused. Each variant is a sentence an operator should be

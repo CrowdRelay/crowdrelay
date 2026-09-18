@@ -12,6 +12,8 @@
 //!
 //! The only genuine error here is not being able to read the evidence.
 
+use std::collections::BTreeMap;
+
 use axum::{
     Json,
     extract::{Query, State, rejection::JsonRejection},
@@ -468,6 +470,15 @@ pub struct ApproveProposalRequest {
     /// screen: evidence that moved between the read and the click wins, and
     /// the band is told what moved.
     city_id: Uuid,
+    /// The band's fix to the letter's words — `{"opening_line": "..."}`,
+    /// reviewed by the same gate the admin approval surface uses
+    /// (draft_revision). Only the opening line may be revised: it is the
+    /// band's voice. The reasons are the machine's measured evidence, and a
+    /// disagreement with a number is a refusal, not an edit — a refused
+    /// revision refuses the approval rather than approving the original
+    /// words.
+    #[serde(default)]
+    revision: Option<BTreeMap<String, String>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -525,6 +536,7 @@ pub async fn approve_gig_proposal(
         request.city_id,
         &idempotency_key,
         OffsetDateTime::now_utc(),
+        request.revision.as_ref(),
     )
     .await
     {
@@ -591,6 +603,11 @@ pub struct SupportSlotAskRequest {
     headliner_workspace_id: Uuid,
     /// The labelmate being put forward for the slot.
     support_workspace_id: Uuid,
+    /// The operator's fix to the letter's words — same revision shape as the
+    /// band's proposal approval, and the same gate: `opening_line` is the
+    /// only field a gig letter lets a person rewrite.
+    #[serde(default)]
+    revision: Option<BTreeMap<String, String>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -653,6 +670,7 @@ pub async fn approve_support_slot_ask(
         request.city_id,
         &idempotency_key,
         OffsetDateTime::now_utc(),
+        request.revision.as_ref(),
     )
     .await
     {

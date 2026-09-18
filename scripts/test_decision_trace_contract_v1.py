@@ -47,6 +47,11 @@ KNOWN_WRITERS = {
     # action's trace with `TraceContext::for_action` carrying the decision as
     # causation, so `ops/trace/{trace_id}` joins the approval to the letter.
     "crates/crowdrelay-infra/src/gig_outreach.rs",
+    # N.5/N.10: a roster-approved support-slot ask. Same audited shape as the
+    # band path it shares the module with — TraceContext::root on the
+    # decision, trace_id bound, and the action's trace derived by
+    # TraceContext::for_action with the decision as causation.
+    "crates/crowdrelay-infra/src/gig_outreach/support_slot.rs",
     # 4.6d: a band-requested booking-agent approach. Audited — it roots a trace
     # with `TraceContext::root`, binds `trace_id` on the decision, and derives
     # the action's trace with `TraceContext::for_action` carrying the decision
