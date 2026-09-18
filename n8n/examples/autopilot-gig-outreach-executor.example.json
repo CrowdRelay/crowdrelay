@@ -59,7 +59,7 @@
         0
       ],
       "parameters": {
-        "jsCode": "const claim = $json;\nconst intent = $('Validate and compose letter').first().json;\n// A replay of an already-finished action is a no-op, not an error.\nif (claim.disposition === 'already_succeeded') return [];\n// claimed is the only disposition that may reach the provider; in_flight\n// and ambiguous stay claimed upstream and never send twice.\nif (claim.disposition !== 'claimed' || !claim.claim_token) {\n  throw new Error('Provider execution ' + (claim.disposition || 'unclaimed') + '; fail closed to prevent duplicate external side effects');\n}\nreturn [{ json: { ...intent, claim_token: String(claim.claim_token), attempt_number: Number(claim.attempt_number || 1) } }];"
+        "jsCode": "const claim = $json;\nconst intent = $('Validate the approved letter').first().json;\n// A replay of an already-finished action is a no-op, not an error.\nif (claim.disposition === 'already_succeeded') return [];\n// claimed is the only disposition that may reach the provider; in_flight\n// and ambiguous stay claimed upstream and never send twice.\nif (claim.disposition !== 'claimed' || !claim.claim_token) {\n  throw new Error('Provider execution ' + (claim.disposition || 'unclaimed') + '; fail closed to prevent duplicate external side effects');\n}\nreturn [{ json: { ...intent, claim_token: String(claim.claim_token), attempt_number: Number(claim.attempt_number || 1) } }];"
       }
     },
     {
@@ -111,11 +111,12 @@
         "authentication": "genericCredentialType",
         "genericAuthType": "httpHeaderAuth",
         "sendBody": true,
-        "specifyBody": "json",
-        "jsonBody": "={{ $json }}",
         "options": {
           "timeout": 30000
-        }
+        },
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ JSON.stringify({receipt_key:$json.receipt_key,executor_id:$json.executor_id,status:$json.status,claim_token:$json.claim_token,provider_reference:$json.provider_reference,error_kind:$json.error_kind,metadata:$json.metadata,occurred_at:$json.occurred_at}) }}"
       }
     },
     {

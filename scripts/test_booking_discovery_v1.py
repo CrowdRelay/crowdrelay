@@ -23,6 +23,7 @@ ROOT = Path(__file__).resolve().parents[1]
 MIGRATION = ROOT / "migrations/0104_viryaos_booking_target_discovery.sql"
 DOMAIN = ROOT / "crates/crowdrelay-domain/src/booking_discovery.rs"
 MODEL = ROOT / "crates/crowdrelay-application/src/autopilot/model.rs"
+ACTION_KIND = ROOT / "crates/crowdrelay-application/src/autopilot/model/action_kind.rs"
 CANDIDATE = ROOT / "crates/crowdrelay-application/src/autopilot/evaluate/outreach_supply.rs"
 EVALUATE = ROOT / "crates/crowdrelay-application/src/autopilot/evaluate.rs"
 SNAPSHOTS = ROOT / "crates/crowdrelay-infra/src/autopilot/operations/snapshots.rs"
@@ -85,7 +86,7 @@ class BookingDiscoveryContract(unittest.TestCase):
         self.assertIn("Promotion never resets anything.", read(INGRESS))
 
     def test_the_agent_can_ask_for_supply(self) -> None:
-        model = read(MODEL)
+        model = read(MODEL) + read(ACTION_KIND)
         self.assertIn("RequestBookingTargetDiscovery", model)
         arm = model.split("RequestBookingTargetDiscovery { .. } => ", 1)[1][:80]
         self.assertIn('"booking.target_discovery.request"', arm)

@@ -1,9 +1,9 @@
 // Sending one invitation (P.1).
 //
-// Included into `autopilot.rs` beside the beacon arm it shares a transport
-// with. The shape is the gig letter's, narrowed to one recipient: the letter
-// was composed and approved upstream, so this re-pins the row, reserves the
-// contact window and emits what was approved — it writes no words of its own.
+// Included into `autopilot.rs` beside the beacon arm. The shape is the gig
+// letter's, narrowed to one recipient: the letter was composed and approved
+// upstream, so this re-pins the row, reserves the contact window and emits
+// what was approved — it writes no words of its own.
 //
 // Every gate runs again here rather than being trusted from the approval. A
 // beacon can be marked do-not-contact, edited, or deactivated between the click

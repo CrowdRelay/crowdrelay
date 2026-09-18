@@ -15,6 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 MIGRATION = ROOT / "migrations/0075_viryaos_growth_autonomy.sql"
 DOMAIN = ROOT / "crates/crowdrelay-domain/src/action_class.rs"
 MODEL = ROOT / "crates/crowdrelay-application/src/autopilot/model.rs"
+ACTION_KIND = ROOT / "crates/crowdrelay-application/src/autopilot/model/action_kind.rs"
 EVALUATE = ROOT / "crates/crowdrelay-application/src/autopilot/evaluate.rs"
 EVALUATE_TYPES = ROOT / "crates/crowdrelay-application/src/autopilot/evaluate/types.rs"
 LOADER = ROOT / "crates/crowdrelay-infra/src/autopilot/decisions/cycle_reads.rs"
@@ -30,7 +31,7 @@ class GrowthAutonomyContract(unittest.TestCase):
     def setUp(self) -> None:
         self.migration = read(MIGRATION)
         self.domain = read(DOMAIN)
-        self.model = read(MODEL)
+        self.model = read(MODEL) + read(ACTION_KIND)
 
     def test_money_and_third_party_contact_are_seeded_gated(self) -> None:
         # The operator chose safest real autonomy. If this ever seeds
