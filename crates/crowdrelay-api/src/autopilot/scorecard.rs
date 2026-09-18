@@ -349,6 +349,7 @@ async fn load_agent_scorecard(
                 WHEN payload->>'action_kind' LIKE 'booking.%' THEN 'booking.outreach'
                 WHEN payload->>'action_kind' LIKE 'outreach.%' THEN 'outreach.send'
                 WHEN payload->>'action_kind' LIKE 'beacon.%' THEN 'beacon.outreach'
+                WHEN payload->>'action_kind' LIKE 'latarnik.%' THEN 'latarnik.invite'
                 WHEN payload->>'action_kind' LIKE 'content.%' THEN 'content.artifact'
                 WHEN payload->>'action_kind' LIKE 'show_growth.%' THEN 'show.growth'
                 WHEN payload->>'action_kind' LIKE 'fan.%' THEN 'fan.lifecycle.message'

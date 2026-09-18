@@ -24,7 +24,14 @@ fn executor_capability_for_event(event_type: &str) -> &'static str {
         "crowdrelay.outreach.discovery_requested" => "outreach.discovery",
         "crowdrelay.booking.target_discovery_requested" => "booking.discovery",
         "crowdrelay.beacon.outreach_requested" => "beacon.outreach",
-        "crowdrelay.latarnik.invite_requested" => "beacon.outreach",
+        // Its own capability rather than riding `beacon.outreach`: the
+        // contract bundled them on the premise that a beacon-pitch transport
+        // exists to share, and none does — no executor has ever advertised
+        // `beacon.outreach` and a pitch branch was never built. Advertising
+        // `beacon.outreach` to unblock this send would also unpark pitch
+        // emissions onto a route nobody serves, so the letter that is ready
+        // to send gets a capability that says exactly that.
+        "crowdrelay.latarnik.invite_requested" => "latarnik.invite",
         "crowdrelay.beacon.invite_batch_requested" => "beacon.invite_batch",
         "crowdrelay.beacon.release_delivery_confirmation_requested" => "beacon.release.mail",
         "crowdrelay.beacon.network_discovery_requested" => "beacon.network.discovery",
@@ -188,10 +195,12 @@ pub(in crate::autopilot) fn executor_capability_for_payload(
         AutopilotActionPayload::RequestOutreachDiscovery { .. } => "outreach.discovery",
         AutopilotActionPayload::RequestBookingTargetDiscovery { .. } => "booking.discovery",
         AutopilotActionPayload::RequestBeaconOutreach { .. } => "beacon.outreach",
-        // The same transport: one mail to one beacon. A separate capability
-        // would mean a second workflow doing the identical thing, and an
-        // operator wondering which of the two is the one that is down.
-        AutopilotActionPayload::RequestLatarnikInvite { .. } => "beacon.outreach",
+        // Its own capability rather than riding `beacon.outreach`: the shared
+        // pitch transport the bundling assumed was never built, so keeping the
+        // mapping would let one unbuilt branch hold the other's letters
+        // hostage. An executor that can send an approved invitation verbatim
+        // is live today; a pitch composer is a different, unbuilt thing.
+        AutopilotActionPayload::RequestLatarnikInvite { .. } => "latarnik.invite",
         AutopilotActionPayload::RequestBeaconInviteBatch { .. } => "beacon.invite_batch",
         AutopilotActionPayload::RequestShowGrowth { .. } => "show.growth",
         AutopilotActionPayload::RequestContentArtifact { .. } => "content.artifact",
