@@ -1,0 +1,68 @@
+name: CI failure alert
+
+# Q.5: a red run on main said nothing to anybody. The rustsec failure of
+# 2026-09-18 sat unread for hours because its summary job queued behind an
+# offline runner — the failure and the silence compounded. This workflow is
+# the one place a main-line failure announces itself: workflow_run fires on
+# the default branch even while every self-hosted lane is saturated, and the
+# message lands where a person actually looks.
+#
+# Deliberately failure-only: a cancelled run is almost always supersession
+# (a newer push replaced it), which is the pipeline working, not breaking.
+
+on:
+  workflow_run:
+    workflows:
+      - "CI"
+      - "Dependency security"
+      - "Ecosystem deploy"
+      - "Ecosystem contract"
+      - "Ecosystem release audit"
+      - "Publish container images"
+      - "External proofs"
+      - "Production operational readiness"
+      - "Artifact Cleanup"
+      - "Fallback gates (no self-hosted runner)"
+    types: [completed]
+
+permissions:
+  contents: read
+
+jobs:
+  alert:
+    name: Report the failure to Discord
+    # workflow_run jobs run in the context of the default branch, so the
+    # event payload — not github.ref — decides whether this was main.
+    if: >-
+      github.event.workflow_run.conclusion == 'failure'
+      && github.event.workflow_run.head_branch == 'main'
+    # Self-hosted like every other job in this repository: hosted runners
+    # are not entitled on this account, and a notification that never
+    # dispatches is the same silence this workflow exists to end. The job
+    # is a single curl; it drains in seconds whenever a lane frees.
+    runs-on: [self-hosted, arm64]
+    timeout-minutes: 5
+    env:
+      ALERT_WEBHOOK_URL: ${{ secrets.PRODUCTION_DISCORD_WEBHOOK_URL }}
+    steps:
+      - name: Post the failed run
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          # No webhook configured means nowhere to say it — the run's own
+          # red badge is then the only signal, same as today.
+          if [ -z "${ALERT_WEBHOOK_URL:-}" ]; then
+            echo "PRODUCTION_DISCORD_WEBHOOK_URL is not set — skipping alert"
+            exit 0
+          fi
+          payload="$(jq -n \
+            --arg content "🚨 ${GITHUB_REPOSITORY} — ${{ github.event.workflow_run.name }} failed on main (${{ github.event.workflow_run.head_sha }}): ${{ github.event.workflow_run.html_url }}" \
+            '{content: $content}')"
+          curl \
+            --fail-with-body \
+            --silent \
+            --show-error \
+            --max-time 15 \
+            --header 'content-type: application/json' \
+            --data "$payload" \
+            "$ALERT_WEBHOOK_URL"
