@@ -653,6 +653,13 @@ pub enum AutopilotActionPayload {
         /// `None` on a label: the listing is its pitch.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         draw_evidence: Option<crowdrelay_domain::representation::DrawEvidence>,
+        /// The finished introduction, composed at request time — the words
+        /// the approver read are the words the target gets. `draft_revision`
+        /// can offer `subject`/`body` for editing because the field rides
+        /// under `draft`, and dispatch refuses a missing or empty draft
+        /// rather than letting anything compose on the band's behalf.
+        #[serde(default)]
+        draft: crowdrelay_domain::approach_letter::ApproachLetter,
     },
     /// Ask the platform to broker the band's application to a booking agent
     /// (§4h-10): representation for a season, not a slot on one date.
@@ -680,6 +687,12 @@ pub enum AutopilotActionPayload {
         /// The draw readings the approval was made on — the pitch's content,
         /// not an attachment to it.
         evidence: AgentDrawEvidence,
+        /// The finished application, composed at request time — the words
+        /// the approver read are the words the agent gets. Dispatch refuses
+        /// a missing or empty draft rather than letting anything compose on
+        /// the band's behalf.
+        #[serde(default)]
+        draft: crowdrelay_domain::approach_letter::ApproachLetter,
     },
     /// Write to everybody who books one room about one night (§12-6, 4G.4).
     ///
@@ -1913,6 +1926,37 @@ mod tests {
         assert_eq!(proposed_window, None);
         assert!(additional_recipients.is_empty());
         assert_eq!(venue_evidence, None);
+        Ok(())
+    }
+
+    /// Approach payloads queued before the letter rode along must still
+    /// parse — the draft deserializes empty and dispatch refuses it rather
+    /// than composing after the approval.
+    #[test]
+    fn approach_payloads_without_draft_still_parse() -> Result<(), Box<dyn std::error::Error>> {
+        let AutopilotActionPayload::RequestRepresentationApproach { draft, .. } =
+            serde_json::from_value(serde_json::json!({
+                "kind": "request_representation_approach",
+                "target_id": uuid::Uuid::now_v7(),
+                "target_version": 1,
+                "target_name": "Agent X",
+            }))?
+        else {
+            panic!("the legacy payload must still parse as RequestRepresentationApproach")
+        };
+        assert!(draft.subject.is_empty() && draft.body.is_empty());
+        let AutopilotActionPayload::RequestBookingAgentApproach { draft, .. } =
+            serde_json::from_value(serde_json::json!({
+                "kind": "request_booking_agent_approach",
+                "agent_id": uuid::Uuid::now_v7(),
+                "agent_version": 1,
+                "agent_name": "Agent Y",
+                "evidence": {},
+            }))?
+        else {
+            panic!("the legacy payload must still parse as RequestBookingAgentApproach")
+        };
+        assert!(draft.subject.is_empty() && draft.body.is_empty());
         Ok(())
     }
 }

@@ -367,6 +367,19 @@ async fn the_registry_approach_queues_once_and_spends_the_season()
     .fetch_one(&pool)
     .await?;
     assert!(evidence_ok, "the approval payload carries no real draw");
+    let draft_ready: bool = sqlx::query_scalar(
+        "SELECT length(trim(payload->'draft'->>'subject')) > 0 \
+         AND length(trim(payload->'draft'->>'body')) > 0 \
+         FROM viryaos_autopilot_actions WHERE workspace_id = $1 AND id = $2",
+    )
+    .bind(workspace_id)
+    .bind(action_id)
+    .fetch_one(&pool)
+    .await?;
+    assert!(
+        draft_ready,
+        "the approval payload must carry the finished letter, not a promise of one"
+    );
 
     // A retried submit replays the same action; a different key is a
     // different ask, and the pending one already spent it.
