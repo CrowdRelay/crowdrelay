@@ -50,7 +50,9 @@
   "crates/crowdrelay-worker/src/growth_metric_sync.rs": 2280,
   "crates/crowdrelay-worker/src/main.rs": 1423,
   "crates/crowdrelay-worker/src/receipt_reconciliation.rs": 1343,
-  "crates/crowdrelay-worker/src/retention.rs": 1419
+  "crates/crowdrelay-worker/src/retention.rs": 1419,
+  "crates/crowdrelay-infra/src/autopilot/control_mutations.rs": 1208,
+  "crates/crowdrelay-infra/src/autopilot/control.rs": 1215
  },
  "policy": "ratchet-not-hard-cap",
  "reviewThresholdLines": 1200

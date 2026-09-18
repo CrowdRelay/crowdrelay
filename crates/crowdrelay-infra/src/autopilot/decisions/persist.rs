@@ -134,7 +134,35 @@ async fn persist_decision_and_action_tx(
         }
     };
     // ── Action INSERT ──
+    // P.4: a live show-ladder approval is the human gate, already answered.
+    // The decision row keeps the disposition the policy and class ceiling
+    // computed — `require_approval` there means "this would have asked" — but
+    // the action is written already approved, provenance `operator:show_ladder`
+    // so a revoke can cancel exactly the rungs the ladder released.
+    // Scoped to the show-growth context on purpose: the flag is a contract
+    // between `evaluate/show_growth` and this write, and the revoke path
+    // reaches only `context='show_growth'` rows — anywhere else the flag
+    // would queue a rung no revoke could cancel.
+    let mut ladder_authorized = candidate.context == AutopilotContext::ShowGrowth
+        && candidate.policy_snapshot.get("ladder_authorized") == Some(&json!(true));
+    if ladder_authorized {
+        // The flag was read when the snapshot loaded; a revoke may have
+        // landed since. Re-ask inside this transaction — a rung queued under
+        // a dead ladder would be uncancellable (revoke requires a live row),
+        // so the honest fallback is the parked state the disposition asked
+        // for.
+        ladder_authorized = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS (SELECT 1 FROM viryaos_show_ladder_approvals \
+             WHERE workspace_id=$1 AND event_id=$2 AND revoked_at IS NULL)",
+        )
+        .bind(workspace_id.into_uuid())
+        .bind(candidate.subject.uuid())
+        .fetch_one(&mut **transaction)
+        .await
+        .map_err(map_sqlx)?;
+    }
     let status = match candidate.disposition {
+        PolicyDisposition::RequireApproval if ladder_authorized => Some("queued"),
         PolicyDisposition::RequireApproval => Some("awaiting_approval"),
         PolicyDisposition::AutoExecute => Some("queued"),
         PolicyDisposition::ObserveOnly
@@ -160,14 +188,20 @@ async fn persist_decision_and_action_tx(
             subject_kind, subject_id, idempotency_key, payload, status,
             action_class,
             approved_at, approved_by, approval_expires_at,
-            trace_id, causation_id
+            trace_id, causation_id, available_at
         )
         VALUES (
             $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,
             CASE WHEN $10 = 'queued' THEN now() ELSE NULL END,
-            CASE WHEN $10 = 'queued' THEN 'policy:bounded_auto' ELSE NULL END,
+            CASE WHEN $10 = 'queued' THEN $14 ELSE NULL END,
             CASE WHEN $10 = 'awaiting_approval' THEN now() + INTERVAL '72 hours' ELSE NULL END,
-            $12, $13
+            $12, $13,
+            -- The ladder is the approval, not a shortcut past the hold that
+            -- makes revoking meaningful: a ladder-queued outward rung waits
+            -- its class's window exactly like an individually approved one.
+            CASE WHEN $10 = 'queued'
+                 THEN now() + make_interval(secs => $15::double precision)
+                 ELSE now() END
         )
         ON CONFLICT DO NOTHING
         RETURNING id
@@ -188,6 +222,23 @@ async fn persist_decision_and_action_tx(
     .bind(candidate.action.action_class().as_str())
     .bind(action_trace.trace_id().into_uuid())
     .bind(action_trace.causation_id().map(|c| c.into_uuid()))
+    // Provenance distinguishes who answered the human gate: the ladder row the
+    // operator signed, or the workspace's own bounded-auto policy.
+    .bind(if ladder_authorized && candidate.disposition == PolicyDisposition::RequireApproval {
+        "operator:show_ladder"
+    } else {
+        "policy:bounded_auto"
+    })
+    // The hold comes from the domain, per class — a first-party rung queues
+    // immediately either way, and a plain bounded-auto row keeps the same
+    // available_at it always had.
+    .bind(
+        if ladder_authorized && candidate.disposition == PolicyDisposition::RequireApproval {
+            candidate.action.action_class().hold_seconds() as f64
+        } else {
+            0.0
+        },
+    )
     .fetch_optional(&mut **transaction)
     .await
     .map_err(map_sqlx)?;

@@ -872,6 +872,135 @@ impl PostgresAutopilotRepository {
         .await
     }
 
+    /// P.4: one "yes" over a show's whole growth ladder.
+    ///
+    /// Approving writes the live approval row every later snapshot read honours
+    /// and releases the rungs already parked on the event in one statement —
+    /// the thing the operator approved was the ladder, so a half-released
+    /// ladder is the one state they could not reason about. The release marks
+    /// `operator:show_ladder` so a revoke cancels only what the ladder freed,
+    /// and applies the same outward hold an individual approval does: the
+    /// window is what makes "stop" meaningful.
+    pub(super) async fn approve_show_ladder_operator(
+        &self,
+        workspace_id: WorkspaceId,
+        event_id: EventId,
+        idempotency_key: &IdempotencyKey,
+        request_id: Option<&RequestId>,
+    ) -> Result<AutopilotControlMutation, RepositoryError> {
+        self.bounded(async {
+            let mut transaction = self.pool.begin().await.map_err(map_sqlx)?;
+            let operation_id = Uuid::now_v7();
+            let replay = operator_actions::insert_operator_action(
+                &mut transaction,
+                workspace_id,
+                operation_id,
+                "approve_show_ladder",
+                "event",
+                event_id.into_uuid(),
+                "admin_api_key",
+                idempotency_key,
+                request_id,
+                &json!({"requested_status": "approved"}),
+            )
+            .await?;
+            if let Some(existing) = replay {
+                // Report the live state, not the remembered one — an approve
+                // replayed after a revoke must not answer "approved".
+                let live = sqlx::query_scalar::<_, bool>(
+                    "SELECT EXISTS (SELECT 1 FROM viryaos_show_ladder_approvals \
+                     WHERE workspace_id=$1 AND event_id=$2 AND revoked_at IS NULL)",
+                )
+                .bind(workspace_id.into_uuid())
+                .bind(event_id.into_uuid())
+                .fetch_one(&mut *transaction)
+                .await
+                .map_err(map_sqlx)?;
+                transaction.commit().await.map_err(map_sqlx)?;
+                return Ok(AutopilotControlMutation {
+                    operation_id: existing,
+                    target_id: event_id.into_uuid(),
+                    status: if live { "approved" } else { "revoked" }.to_owned(),
+                    replayed: true,
+                });
+            }
+            // A foreign or misspelt event id is a not-found, not a constraint
+            // violation surfaced as a 500.
+            let exists = sqlx::query_scalar::<_, bool>(
+                "SELECT EXISTS (SELECT 1 FROM events WHERE workspace_id=$1 AND id=$2)",
+            )
+            .bind(workspace_id.into_uuid())
+            .bind(event_id.into_uuid())
+            .fetch_one(&mut *transaction)
+            .await
+            .map_err(map_sqlx)?;
+            if !exists {
+                return Err(RepositoryError::NotFound);
+            }
+            let now = OffsetDateTime::now_utc();
+            sqlx::query(
+                "INSERT INTO viryaos_show_ladder_approvals \
+                 (workspace_id, event_id, approved_by, approved_at) \
+                 VALUES ($1,$2,'admin_api_key',$3) \
+                 ON CONFLICT (workspace_id, event_id) WHERE revoked_at IS NULL \
+                 DO UPDATE SET approved_by='admin_api_key'",
+            )
+            .bind(workspace_id.into_uuid())
+            .bind(event_id.into_uuid())
+            .bind(now)
+            .execute(&mut *transaction)
+            .await
+            .map_err(map_sqlx)?;
+            let released: Vec<Uuid> = sqlx::query_scalar(
+                r#"
+                UPDATE viryaos_autopilot_actions
+                SET status='queued', approved_at=$3, approved_by='operator:show_ladder',
+                    -- O.2: an outward send waits out its hold window before a
+                    -- worker may claim it — the ladder is the approval, not a
+                    -- shortcut past the window that makes revoking meaningful.
+                    available_at = now() + CASE
+                        WHEN action_class IN ('owned_audience', 'third_party', 'paid')
+                        THEN make_interval(secs => $4::double precision)
+                        ELSE INTERVAL '0'
+                    END
+                WHERE workspace_id=$1 AND context='show_growth'
+                  AND subject_kind='event' AND subject_id=$2
+                  AND status='awaiting_approval'
+                  AND (approval_expires_at IS NULL OR approval_expires_at > $3)
+                RETURNING id
+                "#,
+            )
+            .bind(workspace_id.into_uuid())
+            .bind(event_id.into_uuid())
+            .bind(now)
+            .bind(OUTWARD_HOLD_SECONDS)
+            .fetch_all(&mut *transaction)
+            .await
+            .map_err(map_sqlx)?;
+            // A parked rung can carry an open crew assignment — close it, or a
+            // reminder keeps asking somebody to approve what already queued.
+            sqlx::query(
+                "UPDATE viryaos_team_assignments \
+                 SET status='done', completed_at=$3, next_reminder_at=NULL \
+                 WHERE workspace_id=$1 AND action_id = ANY($2) AND status='open'",
+            )
+            .bind(workspace_id.into_uuid())
+            .bind(&released)
+            .bind(now)
+            .execute(&mut *transaction)
+            .await
+            .map_err(map_sqlx)?;
+            transaction.commit().await.map_err(map_sqlx)?;
+            Ok(AutopilotControlMutation {
+                operation_id,
+                target_id: event_id.into_uuid(),
+                status: format!("approved:{}", released.len()),
+                replayed: false,
+            })
+        })
+        .await
+    }
+
     /// Cancels the still-queued rungs a relay-ladder approval released (P.5).
     ///
     /// "Stop the rest of this post's spread": rungs the ladder freed that
@@ -958,6 +1087,118 @@ impl PostgresAutopilotRepository {
             Ok(AutopilotControlMutation {
                 operation_id,
                 target_id: source_id,
+                status: format!("revoked:{}", cancelled.len()),
+                replayed: false,
+            })
+        })
+        .await
+    }
+
+    /// Withdraws the ladder approval (P.4).
+    ///
+    /// "Stop the remaining ladder" is what revoke means: rungs the ladder
+    /// released or pre-authorized that have not started yet are cancelled —
+    /// both carry the `operator:show_ladder` provenance. A rung already
+    /// running or finished keeps its record, and a rung a person approved on
+    /// its own is untouched. The approval row stays for the ledger;
+    /// `revoked_at IS NULL` is the whole live/revoked distinction.
+    pub(super) async fn revoke_show_ladder_operator(
+        &self,
+        workspace_id: WorkspaceId,
+        event_id: EventId,
+        idempotency_key: &IdempotencyKey,
+        request_id: Option<&RequestId>,
+    ) -> Result<AutopilotControlMutation, RepositoryError> {
+        self.bounded(async {
+            let mut transaction = self.pool.begin().await.map_err(map_sqlx)?;
+            let operation_id = Uuid::now_v7();
+            let replay = operator_actions::insert_operator_action(
+                &mut transaction,
+                workspace_id,
+                operation_id,
+                "revoke_show_ladder",
+                "event",
+                event_id.into_uuid(),
+                "admin_api_key",
+                idempotency_key,
+                request_id,
+                &json!({"requested_status": "revoked"}),
+            )
+            .await?;
+            if let Some(existing) = replay {
+                let live = sqlx::query_scalar::<_, bool>(
+                    "SELECT EXISTS (SELECT 1 FROM viryaos_show_ladder_approvals \
+                     WHERE workspace_id=$1 AND event_id=$2 AND revoked_at IS NULL)",
+                )
+                .bind(workspace_id.into_uuid())
+                .bind(event_id.into_uuid())
+                .fetch_one(&mut *transaction)
+                .await
+                .map_err(map_sqlx)?;
+                transaction.commit().await.map_err(map_sqlx)?;
+                return Ok(AutopilotControlMutation {
+                    operation_id: existing,
+                    target_id: event_id.into_uuid(),
+                    status: if live { "approved" } else { "revoked" }.to_owned(),
+                    replayed: true,
+                });
+            }
+            // Same 404 contract as approve: a foreign or misspelt event is a
+            // not-found, not a conflict that implies a ladder existed.
+            let exists = sqlx::query_scalar::<_, bool>(
+                "SELECT EXISTS (SELECT 1 FROM events WHERE workspace_id=$1 AND id=$2)",
+            )
+            .bind(workspace_id.into_uuid())
+            .bind(event_id.into_uuid())
+            .fetch_one(&mut *transaction)
+            .await
+            .map_err(map_sqlx)?;
+            if !exists {
+                return Err(RepositoryError::NotFound);
+            }
+            let now = OffsetDateTime::now_utc();
+            let revoked = sqlx::query(
+                "UPDATE viryaos_show_ladder_approvals \
+                 SET revoked_at=$3, revoked_by='admin_api_key' \
+                 WHERE workspace_id=$1 AND event_id=$2 AND revoked_at IS NULL",
+            )
+            .bind(workspace_id.into_uuid())
+            .bind(event_id.into_uuid())
+            .bind(now)
+            .execute(&mut *transaction)
+            .await
+            .map_err(map_sqlx)?;
+            if revoked.rows_affected() == 0 {
+                return Err(RepositoryError::Conflict);
+            }
+            let cancelled: Vec<Uuid> = sqlx::query_scalar(
+                "UPDATE viryaos_autopilot_actions \
+                 SET status='cancelled', finished_at=$3 \
+                 WHERE workspace_id=$1 AND context='show_growth' \
+                   AND subject_kind='event' AND subject_id=$2 \
+                   AND status='queued' AND approved_by='operator:show_ladder' \
+                 RETURNING id",
+            )
+            .bind(workspace_id.into_uuid())
+            .bind(event_id.into_uuid())
+            .bind(now)
+            .fetch_all(&mut *transaction)
+            .await
+            .map_err(map_sqlx)?;
+            sqlx::query(
+                "UPDATE viryaos_team_assignments \
+                 SET status='cancelled', completed_at=NULL, next_reminder_at=NULL \
+                 WHERE workspace_id=$1 AND action_id = ANY($2) AND status='open'",
+            )
+            .bind(workspace_id.into_uuid())
+            .bind(&cancelled)
+            .execute(&mut *transaction)
+            .await
+            .map_err(map_sqlx)?;
+            transaction.commit().await.map_err(map_sqlx)?;
+            Ok(AutopilotControlMutation {
+                operation_id,
+                target_id: event_id.into_uuid(),
                 status: format!("revoked:{}", cancelled.len()),
                 replayed: false,
             })

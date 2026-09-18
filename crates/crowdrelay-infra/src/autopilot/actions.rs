@@ -437,6 +437,34 @@ impl PostgresAutopilotRepository {
             .await
             .map_err(map_sqlx)?;
 
+            // P.4: a rung the ladder freed only stays freed while the ladder
+            // is live. Revoke cancels what is queued in front of it, but a
+            // rung that was mid-flight then can come back `queued` through a
+            // retryable failure — without this sweep it would claim again
+            // under a dead ladder, and neither revoke (needs a live row) nor
+            // individual cancel (needs attempt_count = 0) could still stop
+            // it.
+            sqlx::query(
+                r#"
+                UPDATE viryaos_autopilot_actions AS action
+                SET status = 'cancelled', finished_at = $2
+                WHERE action.workspace_id = $1
+                  AND action.status = 'queued'
+                  AND action.approved_by = 'operator:show_ladder'
+                  AND NOT EXISTS (
+                      SELECT 1 FROM viryaos_show_ladder_approvals AS ladder
+                      WHERE ladder.workspace_id = action.workspace_id
+                        AND ladder.event_id = action.subject_id
+                        AND ladder.revoked_at IS NULL
+                  )
+                "#,
+            )
+            .bind(workspace_id.into_uuid())
+            .bind(now)
+            .execute(&mut *transaction)
+            .await
+            .map_err(map_sqlx)?;
+
             let candidates = sqlx::query_as::<_, ClaimedActionRow>(
                 r#"
                 SELECT id, payload, attempt_count AS attempt_number

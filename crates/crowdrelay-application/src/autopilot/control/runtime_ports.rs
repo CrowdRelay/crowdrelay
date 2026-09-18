@@ -231,6 +231,21 @@ pub trait AutopilotControlRepository: Send + Sync {
         request_id: Option<&crate::RequestId>,
     ) -> Result<AutopilotControlMutation, RepositoryError>;
 
+    /// Approves a show's whole growth ladder at once (P.4).
+    ///
+    /// Releases the rungs already parked in `awaiting_approval` for the event
+    /// and pre-authorizes the ones not yet decided: while the approval row is
+    /// live, a lever whose only remaining gate is the human one auto-executes
+    /// on schedule. The domain's own evidence gates still apply — a denied
+    /// rung stays denied.
+    async fn approve_show_ladder(
+        &self,
+        workspace_id: WorkspaceId,
+        event_id: EventId,
+        idempotency_key: &crate::IdempotencyKey,
+        request_id: Option<&crate::RequestId>,
+    ) -> Result<AutopilotControlMutation, RepositoryError>;
+
     /// Cancels the queued rungs a relay-ladder approval released.
     ///
     /// "Stop the rest of this post's spread" — rungs already running or
@@ -241,6 +256,20 @@ pub trait AutopilotControlRepository: Send + Sync {
         &self,
         workspace_id: WorkspaceId,
         source_id: uuid::Uuid,
+        idempotency_key: &crate::IdempotencyKey,
+        request_id: Option<&crate::RequestId>,
+    ) -> Result<AutopilotControlMutation, RepositoryError>;
+
+    /// Withdraws a show's ladder approval.
+    ///
+    /// Future rungs go back to asking individually, and rungs the ladder
+    /// released but that have not executed yet are cancelled — the operator
+    /// who revokes means "stop the remaining ladder". A rung approved on its
+    /// own, outside the ladder, keeps its approval.
+    async fn revoke_show_ladder(
+        &self,
+        workspace_id: WorkspaceId,
+        event_id: EventId,
         idempotency_key: &crate::IdempotencyKey,
         request_id: Option<&crate::RequestId>,
     ) -> Result<AutopilotControlMutation, RepositoryError>;

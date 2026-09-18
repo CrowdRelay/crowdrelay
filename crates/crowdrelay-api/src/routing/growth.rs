@@ -42,6 +42,17 @@ pub(super) fn growth_routes() -> Router<AppState> {
             "/v1/admin/autopilot/content-sources/{source_id}/relay-ladder/revoke",
             post(autopilot::revoke_relay_ladder),
         )
+        // P.4: the show ladder is the same one-yes shape as a wave, keyed on
+        // the event rather than a batch — approve once and every rung whose
+        // own evidence gates pass fires on schedule; revoke stops the rest.
+        .route(
+            "/v1/admin/autopilot/events/{event_id}/growth-ladder/approve",
+            post(autopilot::approve_show_ladder),
+        )
+        .route(
+            "/v1/admin/autopilot/events/{event_id}/growth-ladder/revoke",
+            post(autopilot::revoke_show_ladder),
+        )
         .route(
             "/v1/admin/autopilot/playlist-placements",
             post(autopilot::record_playlist_placement),

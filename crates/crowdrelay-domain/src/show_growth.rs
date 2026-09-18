@@ -60,6 +60,13 @@ pub struct ShowGrowthSnapshot {
     /// that owe nobody reciprocity, and the per-edge refusal in the
     /// delivery path guards whichever edges still cannot.
     pub unreciprocated_crossbill_edge: bool,
+    /// P.4: a live `viryaos_show_ladder_approvals` row exists for this event —
+    /// the operator already said yes to the whole announce-to-recap ladder, so
+    /// a rung whose only remaining gate is the human one runs unattended. It
+    /// does not soften the evidence gates: a rung the facts do not support is
+    /// still denied, because approving the ladder was never approving a lever
+    /// the night could not justify.
+    pub ladder_approved: bool,
     pub history: ShowGrowthHistory,
 }
 
@@ -574,6 +581,7 @@ mod tests {
             attendees: 0,
             morning_after_send_at: None,
             unreciprocated_crossbill_edge: false,
+            ladder_approved: false,
             history: ShowGrowthHistory {
                 // Every test below describes a show already mid-campaign; the
                 // tracked link is set up once, before anything is shared.

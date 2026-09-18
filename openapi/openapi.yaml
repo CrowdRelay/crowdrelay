@@ -4719,6 +4719,31 @@ paths:
         '401': { $ref: '#/components/responses/PrivateProblem' }
         '404': { $ref: '#/components/responses/PrivateProblem' }
         '409': { $ref: '#/components/responses/PrivateProblem' }
+  /admin/autopilot/events/{event_id}/growth-ladder/approve:
+    post:
+      operationId: approveShowGrowthLadder
+      summary: Approve a show's whole growth ladder
+      description: >
+        One approval over the night's announce-to-recap sequence. Releases every rung already
+        parked on the event and pre-authorizes the ones not yet decided: while the approval is
+        live, a lever whose only remaining gate is the human one queues with
+        `operator:show_ladder` provenance. The domain's own evidence gates still apply — a
+        denied rung stays denied. The returned status carries how many parked rungs were
+        released.
+      security:
+      - adminBearer: []
+      parameters:
+      - $ref: '#/components/parameters/IdempotencyKey'
+      - in: path
+        name: event_id
+        required: true
+        schema: { type: string, format: uuid }
+      responses:
+        '200': { description: Ladder approved or replayed, content: { application/json: { schema: { $ref: '#/components/schemas/AutopilotMutation' } } } }
+        '400': { $ref: '#/components/responses/PrivateProblem' }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '404': { $ref: '#/components/responses/PrivateProblem' }
+        '409': { $ref: '#/components/responses/PrivateProblem' }
   /admin/autopilot/content-sources/{source_id}/relay-ladder/revoke:
     post:
       operationId: revokeRelayLadder
@@ -4738,6 +4763,29 @@ paths:
         schema: { type: string, format: uuid }
       responses:
         '200': { description: Ladder rungs cancelled or replayed, content: { application/json: { schema: { $ref: '#/components/schemas/AutopilotMutation' } } } }
+        '400': { $ref: '#/components/responses/PrivateProblem' }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '404': { $ref: '#/components/responses/PrivateProblem' }
+        '409': { $ref: '#/components/responses/PrivateProblem' }
+  /admin/autopilot/events/{event_id}/growth-ladder/revoke:
+    post:
+      operationId: revokeShowGrowthLadder
+      summary: Withdraw a show's ladder approval
+      description: >
+        Future rungs go back to asking individually, and rungs the ladder released or
+        pre-authorized that have not executed yet are cancelled — a rung already running or
+        finished keeps its record, and a rung approved on its own keeps its approval. Revoking
+        a ladder that is not live is a conflict.
+      security:
+      - adminBearer: []
+      parameters:
+      - $ref: '#/components/parameters/IdempotencyKey'
+      - in: path
+        name: event_id
+        required: true
+        schema: { type: string, format: uuid }
+      responses:
+        '200': { description: Ladder revoked or replayed, content: { application/json: { schema: { $ref: '#/components/schemas/AutopilotMutation' } } } }
         '400': { $ref: '#/components/responses/PrivateProblem' }
         '401': { $ref: '#/components/responses/PrivateProblem' }
         '404': { $ref: '#/components/responses/PrivateProblem' }

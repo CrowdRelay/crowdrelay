@@ -1180,6 +1180,28 @@ impl AutopilotControlRepository for PostgresAutopilotRepository {
             .await
     }
 
+    async fn approve_show_ladder(
+        &self,
+        workspace_id: WorkspaceId,
+        event_id: EventId,
+        idempotency_key: &IdempotencyKey,
+        request_id: Option<&RequestId>,
+    ) -> Result<AutopilotControlMutation, RepositoryError> {
+        self.approve_show_ladder_operator(workspace_id, event_id, idempotency_key, request_id)
+            .await
+    }
+
+    async fn revoke_show_ladder(
+        &self,
+        workspace_id: WorkspaceId,
+        event_id: EventId,
+        idempotency_key: &IdempotencyKey,
+        request_id: Option<&RequestId>,
+    ) -> Result<AutopilotControlMutation, RepositoryError> {
+        self.revoke_show_ladder_operator(workspace_id, event_id, idempotency_key, request_id)
+            .await
+    }
+
     async fn mark_decision_handled_externally(
         &self,
         workspace_id: WorkspaceId,

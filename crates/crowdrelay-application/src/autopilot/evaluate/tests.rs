@@ -809,6 +809,7 @@ mod tests {
             attendees: 0,
             morning_after_send_at: None,
             unreciprocated_crossbill_edge: unreciprocated,
+            ladder_approved: false,
             history: ShowGrowthHistory {
                 canonical_link_setup_requested: true,
                 free_listing_sweep_requested: true,
@@ -851,6 +852,81 @@ mod tests {
         assert_eq!(proposed.disposition, PolicyDisposition::RequireApproval);
         assert!(matches!(
             proposed.action,
+            AutopilotActionPayload::RequestShowGrowth {
+                lever: ShowGrowthLever::PartnerCrossPromo,
+                ..
+            }
+        ));
+        Ok(())
+    }
+
+    /// P.4: one approved ladder is the operator's yes to every rung whose own
+    /// evidence gates pass — carried as `ladder_authorized` provenance the
+    /// action insert honours, not as a disposition override. The class ceiling
+    /// and the envelope still get their say, and `Deny` is never lifted:
+    /// approving the ladder was never approving a lever the night's own facts
+    /// cannot carry.
+    #[test]
+    fn an_approved_ladder_marks_the_rungs_it_pre_authorized()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use crowdrelay_domain::show_growth::{
+            ShowGrowthHistory, ShowGrowthLever, ShowGrowthPolicy, ShowGrowthSnapshot,
+        };
+
+        let policy = AutopilotPolicy {
+            context: AutopilotContext::ShowGrowth,
+            enabled: true,
+            autonomy_level: AutonomyLevel::RequireApproval,
+            minimum_confidence: Confidence::from_basis_points(8_000)?,
+            max_actions_24h: 10,
+            config: AutopilotPolicyConfig::ShowGrowth(ShowGrowthPolicy::default()),
+            version: 1,
+            guarded_until: None,
+            guardrail_reason: None,
+        };
+        let now = OffsetDateTime::UNIX_EPOCH + time::Duration::days(20_000);
+        let snapshot = |approved: bool| ShowGrowthSnapshot {
+            event_id: EventId::new(),
+            published: true,
+            communication_enabled: true,
+            starts_at: now + time::Duration::days(40),
+            capacity: 100,
+            paid_tickets: 8,
+            paid_buyers: 6,
+            paid_tickets_last_7d: 2,
+            interested_fans: 30,
+            city_signal_fans: 20,
+            qualified_referrers_in_city: 4,
+            beacon_partners: 0,
+            attendees: 0,
+            morning_after_send_at: None,
+            unreciprocated_crossbill_edge: false,
+            ladder_approved: approved,
+            history: ShowGrowthHistory {
+                canonical_link_setup_requested: true,
+                free_listing_sweep_requested: true,
+                audience_capture_setup_requested: true,
+                ..ShowGrowthHistory::default()
+            },
+        };
+
+        let parked = show_growth::show_growth_candidates(snapshot(false), &policy, now)?;
+        assert_eq!(parked.len(), 1);
+        assert_eq!(parked[0].disposition, PolicyDisposition::RequireApproval);
+        assert_eq!(parked[0].policy_snapshot.get("ladder_authorized"), None);
+
+        // The flag rides the policy snapshot — the disposition stays honest
+        // about what the level and confidence computed; the class ceiling and
+        // the envelope run before the action insert honours the ladder.
+        let released = show_growth::show_growth_candidates(snapshot(true), &policy, now)?;
+        assert_eq!(released.len(), 1);
+        assert_eq!(released[0].disposition, PolicyDisposition::RequireApproval);
+        assert_eq!(
+            released[0].policy_snapshot.get("ladder_authorized"),
+            Some(&serde_json::Value::Bool(true))
+        );
+        assert!(matches!(
+            released[0].action,
             AutopilotActionPayload::RequestShowGrowth {
                 lever: ShowGrowthLever::PartnerCrossPromo,
                 ..
