@@ -65,6 +65,7 @@ docs/*
 # snapshots on production are timestamped (`Caddyfile.bak-20260826T103002`),
 # not just `*.bak`, and left the deploy preflight refusing a clean worktree.
 *.bak
+*.bak[0-9]*
 *.bak-*
 *.orig
 *.rej
