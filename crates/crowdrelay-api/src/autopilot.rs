@@ -245,6 +245,7 @@ include!("autopilot/booking_discovery.rs");
 include!("autopilot/scorecard.rs");
 include!("autopilot/measurement.rs");
 include!("autopilot/reply_triage.rs");
+include!("autopilot/negotiations.rs");
 include!("autopilot/decision_evidence.rs");
 include!("autopilot/learning_proof.rs");
 include!("autopilot/cycle.rs");
