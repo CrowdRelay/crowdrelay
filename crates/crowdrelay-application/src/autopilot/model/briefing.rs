@@ -195,9 +195,26 @@ impl AutopilotActionPayload {
                 },
                 deadline_note: String::new(),
             },
-            Self::RequestGigOutreach { venue, recipients, opening_line, reasons, .. } => ActionBriefing {
-                summary: format!("Gig outreach: {} ({} to write to)", venue, recipients.len()),
-                why_it_matters: "Everybody who books this room hears about the same night, or nobody does. Writing to one promoter of three about one night reads as a snub to the other two.".into(),
+            Self::RequestGigOutreach { venue, recipients, opening_line, reasons, letter, .. } => ActionBriefing {
+                summary: match letter {
+                    GigLetterKind::Proposal => {
+                        format!("Gig outreach: {} ({} to write to)", venue, recipients.len())
+                    }
+                    GigLetterKind::SupportSlotAsk { support_act, .. } => format!(
+                        "Support-slot ask: {} for {} ({} to write to)",
+                        venue,
+                        support_act,
+                        recipients.len()
+                    ),
+                },
+                why_it_matters: match letter {
+                    GigLetterKind::Proposal => {
+                        "Everybody who books this room hears about the same night, or nobody does. Writing to one promoter of three about one night reads as a snub to the other two.".into()
+                    }
+                    GigLetterKind::SupportSlotAsk { .. } => {
+                        "The room and the date are already held — this asks the promoter to confirm a named labelmate for a slot they offered. Everybody who books the room hears the same name, or nobody does.".into()
+                    }
+                },
                 steps: vec![
                     BriefingStep { what_to_do: "Check who is on the list and that the room is right".into(), why_it_matters: "They all receive it together".into() },
                     BriefingStep { what_to_do: "Read the opening line".into(), why_it_matters: "It is the fact the proposal was approved on, and the promoter will answer it".into() },

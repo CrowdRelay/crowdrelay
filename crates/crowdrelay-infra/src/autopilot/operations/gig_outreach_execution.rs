@@ -23,9 +23,11 @@ use serde_json::json;
 
 use super::*;
 use crate::autopilot::{
-    emit_external_action, lock_booking_target_for_execution, reserve_contact_window,
+    emit_outward_action, lock_booking_target_for_execution, reserve_contact_window,
 };
-use crowdrelay_application::autopilot::{AutopilotActionPayload, ClaimedAutopilotAction};
+use crowdrelay_application::autopilot::{
+    AutopilotActionPayload, ClaimedAutopilotAction, GigLetterKind,
+};
 
 /// Writes the letter, or writes none of it.
 ///
@@ -47,6 +49,7 @@ pub(in crate::autopilot) async fn execute_gig_outreach(
         recipients,
         opening_line,
         reasons,
+        letter,
     } = &action.payload
     else {
         return Err(RepositoryError::Conflict);
@@ -79,16 +82,50 @@ pub(in crate::autopilot) async fn execute_gig_outreach(
         }));
     }
 
-    emit_external_action(
+    // The template key is part of which letter this is — a support-slot ask
+    // must not leave wearing `gig.proposal.v1`, because the executor renders
+    // the named template verbatim and a proposal letter would announce a night
+    // that is already booked.
+    let (support_act, event_id, show_date, source_id, recipient_reason) = match letter {
+        GigLetterKind::Proposal => (
+            None,
+            None,
+            None,
+            format!("gig-proposal:{city_id}"),
+            "every promoter the band-approved proposal named — locked under \
+             version, contact window reserved"
+                .to_owned(),
+        ),
+        GigLetterKind::SupportSlotAsk {
+            support_act,
+            event_id,
+            show_date,
+        } => (
+            Some(support_act.clone()),
+            Some(event_id.into_uuid()),
+            Some(show_date.clone()),
+            format!("support-slot-ask:{event_id}"),
+            "the headliner's own promoter for the show holding the slot — \
+             locked under version, contact window reserved"
+                .to_owned(),
+        ),
+    };
+    emit_outward_action(
         transaction,
         workspace_id,
         action_id,
         "crowdrelay.gig.outreach_requested",
+        source_id,
+        recipient_reason,
         json!({
             "action_id": action_id,
             "city_id": city_id,
             "venue": venue,
-            "template_key": "gig.proposal.v1",
+            "template_key": letter.template_key(),
+            "letter": letter,
+            "support_act": support_act,
+            "event_id": event_id,
+            "show_date": show_date,
             "opening_line": opening_line,
             "reasons": reasons,
             "recipients": addressed,
