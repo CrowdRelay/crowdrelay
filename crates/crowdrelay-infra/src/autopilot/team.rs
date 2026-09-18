@@ -382,6 +382,28 @@ impl PostgresAutopilotRepository {
         self.bounded(async {
             let mut tx = self.pool.begin().await.map_err(map_sqlx)?;
             let crew_locale = crew_locale_in_tx(&mut tx, workspace_id).await;
+
+            // Quiet hours on the tenant's own clock. A reminder due at 03:00
+            // is not more urgent for arriving then — nobody reads it, and a
+            // mailbox trained to expect overnight mail learns to ignore the
+            // morning ones. The rows stay due rather than being rescheduled,
+            // so the first sweep after the window ends sends them unchanged.
+            let crew_timezone = crew_timezone_in_tx(&mut tx, workspace_id).await?;
+            let local_hour: i32 = sqlx::query_scalar(
+                "SELECT EXTRACT(HOUR FROM $1::timestamptz AT TIME ZONE $2)::int",
+            )
+            .bind(now)
+            .bind(&crew_timezone)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(map_sqlx)?;
+            // The window wraps midnight, so the check is "not within the
+            // waking span" — [08:00, 21:00) local is when crew mail may go.
+            if !(CREW_QUIET_END_LOCAL_HOUR..CREW_QUIET_START_LOCAL_HOUR).contains(&local_hour) {
+                tx.commit().await.map_err(map_sqlx)?;
+                return Ok(0);
+            }
+
             // Same reasoning as the handoff sweep: a gated capability is an
             // operator's decision, not a fault, and reporting it as a failed
             // cycle every sixty seconds trains everyone to ignore the log.
@@ -676,6 +698,35 @@ pub(super) async fn queue_team_email_action(
         .fetch_one(&mut **tx).await.map_err(map_sqlx)?
         };
 
+    // Crew mail keeps the tenant's night quiet — `available_at` holds the
+    // notice to the window's end instead of a 03:00 inbox. The row exists,
+    // audits and says exactly what was composed; it is simply not claimable
+    // until morning. The dispatch sweep's own gate covers the reminder half;
+    // this covers every first notice, whichever producer queued it.
+    let crew_timezone = crew_timezone_in_tx(tx, workspace_id).await?;
+    let available_at: OffsetDateTime = sqlx::query_scalar(
+        r#"
+        SELECT (
+            CASE
+                WHEN EXTRACT(HOUR FROM $1::timestamptz AT TIME ZONE $2)::int >= $3
+                    THEN date_trunc('day', $1::timestamptz AT TIME ZONE $2)
+                         + make_interval(days => 1, hours => $4)
+                WHEN EXTRACT(HOUR FROM $1::timestamptz AT TIME ZONE $2)::int < $4
+                    THEN date_trunc('day', $1::timestamptz AT TIME ZONE $2)
+                         + make_interval(hours => $4)
+                ELSE $1::timestamptz AT TIME ZONE $2
+            END
+        ) AT TIME ZONE $2
+        "#,
+    )
+    .bind(now)
+    .bind(&crew_timezone)
+    .bind(CREW_QUIET_START_LOCAL_HOUR)
+    .bind(CREW_QUIET_END_LOCAL_HOUR)
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(map_sqlx)?;
+
     let payload = serde_json::to_value(AutopilotActionPayload::SendTeamAssignmentEmail {
         assignment_id,
         recipient_email: recipient_email.to_owned(),
@@ -710,7 +761,7 @@ pub(super) async fn queue_team_email_action(
     .bind(assignment_id)
     .bind(idempotency_key)
     .bind(payload)
-    .bind(now)
+    .bind(available_at)
     .bind(action_trace.trace_id().into_uuid())
     .bind(action_trace.causation_id().map(|c| c.into_uuid()))
     .execute(&mut **tx)
@@ -919,6 +970,31 @@ pub(super) async fn crew_locale_in_tx(
     })
 }
 
+/// The tenant's own clock (`crew_timezone`), read inside the caller's
+/// transaction so the briefing's day boundary and a reminder's quiet window
+/// cannot disagree mid-sweep.
+///
+/// Same rules as `crew_locale`: trimmed, IANA-validated, and UTC when the row
+/// is absent or unreadable — the shipped default `tenant_settings` documents.
+/// The error propagates like the briefing's own read: a database that cannot
+/// answer this cannot answer the next query either.
+pub(super) async fn crew_timezone_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    workspace_id: WorkspaceId,
+) -> Result<String, RepositoryError> {
+    let stored: Option<String> = sqlx::query_scalar(
+        "SELECT value FROM tenant_settings WHERE workspace_id = $1 AND key = 'crew_timezone'",
+    )
+    .bind(workspace_id.into_uuid())
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(map_sqlx)?;
+    Ok(stored
+        .map(|value| value.trim().to_owned())
+        .filter(|value| crate::regional::is_known_iana_timezone(value))
+        .unwrap_or_else(|| "UTC".to_owned()))
+}
+
 /// The words the n8n workflow wraps around `task_title`/`task_detail` — the
 /// subject line, the greeting and the intro sentence.
 ///
@@ -1068,6 +1144,14 @@ pub(super) fn first_reminder_at(
 /// member's inbox. Silence after three is information too — the follow-through
 /// score already records how many reminders each completion needed.
 const MAX_REMINDERS_PER_ASSIGNMENT: i32 = 3;
+
+/// Crew mail's quiet window, in the tenant's local hour — 21:00 to the
+/// briefing's own 08:00, so the first mail of the day lands with the morning
+/// briefing rather than ahead of it. Overnight is not an emergency channel:
+/// a task whose 6-hour rung falls at 03:00 waits three hours and loses
+/// nothing, because nobody should have been reading mail at 03:00.
+const CREW_QUIET_START_LOCAL_HOUR: i32 = 21;
+const CREW_QUIET_END_LOCAL_HOUR: i32 = 8;
 
 /// Hours before the due time at which each reminder lands.
 ///

@@ -184,21 +184,10 @@ pub(in crate::autopilot) async fn issue_daily_briefings(
 
     // The day boundary is the tenant's, not the session clock's. Absent a
     // configured zone the shipped default is UTC — the same convention
-    // tenant_settings documents for every per-workspace override.
-    let stored_zone: Option<String> = sqlx::query_scalar(
-        "SELECT value FROM tenant_settings WHERE workspace_id = $1 AND key = 'crew_timezone'",
-    )
-    .bind(ws)
-    .fetch_optional(&mut **tx)
-    .await
-    .map_err(map_sqlx)?;
-    // Trim before validating AND binding — `is_known_iana_timezone` trims
-    // internally, so a stored ' Europe/Warsaw' would pass its check and
-    // then fail `AT TIME ZONE`, rolling back every sweep for the workspace.
-    let zone = stored_zone
-        .map(|value| value.trim().to_owned())
-        .filter(|value| crate::regional::is_known_iana_timezone(value))
-        .unwrap_or_else(|| "UTC".to_owned());
+    // tenant_settings documents for every per-workspace override. The read
+    // itself is shared with the reminder sweep's quiet window so both clocks
+    // resolve one row the same way.
+    let zone = super::team::crew_timezone_in_tx(tx, workspace_id).await?;
 
     // Local date + hour in one statement so the gate and the artifact can
     // never disagree about which day it is.
