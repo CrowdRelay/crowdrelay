@@ -586,6 +586,12 @@ pub(in crate::autopilot) async fn load_content_supply_snapshots(
                 WHERE action.workspace_id = source.workspace_id
                   AND action.context = 'content_supply'
                   AND action.subject_id = source.id
+                  -- A shared subject row can carry an action that is not an
+                  -- artifact build (the assignment emails the approval queue
+                  -- sends are content_supply actions on the same source).
+                  -- Without the guard their NULL element fails the Vec<String>
+                  -- decode and takes the whole snapshot load with it.
+                  AND action.payload ? 'artifact'
                   AND action.status = 'succeeded'
                   AND EXISTS (
                       SELECT 1
@@ -601,6 +607,7 @@ pub(in crate::autopilot) async fn load_content_supply_snapshots(
                 WHERE action.workspace_id = source.workspace_id
                   AND action.context = 'content_supply'
                   AND action.subject_id = source.id
+                  AND action.payload ? 'artifact'
                   AND (
                       action.status IN ('awaiting_approval','queued','processing')
                       OR (

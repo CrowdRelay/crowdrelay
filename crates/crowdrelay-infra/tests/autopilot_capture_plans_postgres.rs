@@ -968,3 +968,93 @@ async fn a_moved_show_moves_its_door_window_until_the_first_checkin()
     assert_eq!(still, valid_until, "a scanned campaign's window is history");
     Ok(())
 }
+
+/// A `team.assignment.email` action shares `context='content_supply'` and the
+/// source as `subject_id` with the artifact builds it rides alongside — and
+/// its payload carries no `artifact` key. Without the guard the array column
+/// picks up NULL and the whole snapshot load fails the eval, as it did in
+/// production the morning the first assignment email aged in.
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn a_keyless_action_on_a_source_does_not_break_the_supply_read()
+-> Result<(), Box<dyn std::error::Error>> {
+    use crowdrelay_application::autopilot::AutopilotDecisionRepository;
+
+    let (repo, pool) = repository().await?;
+    let workspace_id = WorkspaceId::new();
+    seed_workspace(&pool, workspace_id).await?;
+    seed_source(
+        &pool,
+        workspace_id,
+        "src-keyless",
+        OffsetDateTime::now_utc(),
+    )
+    .await?;
+    let source_id: Uuid = sqlx::query_scalar(
+        "SELECT id FROM viryaos_content_sources WHERE workspace_id=$1 AND source_key='src-keyless'",
+    )
+    .bind(workspace_id.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+
+    // The row that killed production: a succeeded, emitted, never-reported
+    // action on the source whose payload is the assignment email, not an
+    // artifact build.
+    let decision_id = Uuid::now_v7();
+    let action_id = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO viryaos_autopilot_decisions (
+             id, workspace_id, decision_key, context, subject_kind, subject_id,
+             decision_kind, confidence_basis_points, disposition, reason,
+             input_snapshot, policy_snapshot, recommendation, trace_id
+         ) VALUES ($1,$2,$3,'content_supply','content_source',$4,
+                   'request_content_artifact',8000,'auto_execute','ask for the artifact',
+                   '{}'::jsonb,'{}'::jsonb,'{}'::jsonb,$5)",
+    )
+    .bind(decision_id)
+    .bind(workspace_id.into_uuid())
+    .bind(format!("decision-{decision_id}"))
+    .bind(source_id)
+    .bind(Uuid::now_v7())
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO viryaos_autopilot_actions (
+             id, workspace_id, decision_id, context, action_kind, subject_kind,
+             subject_id, idempotency_key, payload, status, finished_at, trace_id
+         ) VALUES ($1,$2,$3,'content_supply','team.assignment.email','content_source',
+                   $4,$5,$6,'succeeded',now(),$7)",
+    )
+    .bind(action_id)
+    .bind(workspace_id.into_uuid())
+    .bind(decision_id)
+    .bind(source_id)
+    .bind(format!("action-{action_id}"))
+    .bind(json!({"kind":"send_team_assignment_email","task_title":"Approve the post"}))
+    .bind(Uuid::now_v7())
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO viryaos_autopilot_action_emissions
+             (workspace_id, action_id, emission_key, outbox_event_id)
+         VALUES ($1,$2,$3,NULL)",
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(action_id)
+    .bind(format!("emission-{action_id}"))
+    .execute(&pool)
+    .await?;
+
+    let snapshots = repo
+        .load_content_supply_snapshots(workspace_id, OffsetDateTime::now_utc())
+        .await?;
+    let snapshot = snapshots
+        .iter()
+        .find(|snapshot| snapshot.source_id.into_uuid() == source_id)
+        .expect("the seeded source is missing from the supply read");
+    assert!(
+        snapshot.in_flight_artifacts.is_empty() && snapshot.completed_artifacts.is_empty(),
+        "the assignment email leaked into the artifact inventory"
+    );
+    Ok(())
+}
