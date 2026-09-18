@@ -43,6 +43,8 @@
 //! plan nobody can staff is not ambition, it is a list that teaches the
 //! manager to stop reading the list.
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 use crate::gig_plan::{CityOpportunity, GigRefusal, Reason, TenantIntent, plan_gig};
@@ -69,6 +71,15 @@ pub const STARVED_ACT_MARGIN_BASIS_POINTS: u16 = 2_000;
 /// have and taking half the door. That is a favour between friends, which is a
 /// fine reason to do it and not a reason for the system to propose it.
 pub const PAIRING_OVERLAP_CEILING_BASIS_POINTS: u16 = 6_000;
+
+/// The farthest drive between two corridor legs, in kilometres.
+///
+/// Three hundred is a morning in the van — load out after midnight, sleep,
+/// soundcheck in the next city by afternoon. Wider than that and the run is
+/// two trips sharing a name, which is exactly the lie a corridor exists to
+/// refuse. Wrocław–Kraków is 270; Kraków–Berlin is 520 and correctly is not
+/// a leg.
+pub const CORRIDOR_RADIUS_KM: f64 = 300.0;
 
 /// One act on the roster, as the planner needs to see it.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -163,6 +174,12 @@ pub struct OpenSupportSlot {
     /// Identity, not the slug: two catalogue cities can share a slug.
     pub city_id: crate::CityId,
     pub venue: String,
+    /// When the night is a festival slot, its name — the plan reads "the
+    /// slot at FESTIWAL X", not a bare room, because the ask is different:
+    /// a slot on a festival bill is the organiser's stage, not the
+    /// headliner's own night.
+    #[serde(default)]
+    pub festival_name: Option<String>,
     /// The act whose show this is. They are not a candidate for their own
     /// support slot.
     pub headliner: String,
@@ -179,7 +196,7 @@ pub struct OpenSupportSlot {
 pub const MINIMUM_SLOT_LEAD_DAYS: u16 = 10;
 
 /// Everything the roster planner sees.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct RosterOpportunity {
     pub acts: Vec<RosterAct>,
     /// Cities with their evidence, reused verbatim from the band planner so
@@ -200,12 +217,35 @@ pub enum RosterMove {
     FillSupportSlot {
         city: String,
         venue: String,
+        /// The festival's own name when the slot is a festival bill —
+        /// carried so the plan and the letter name the organiser's stage
+        /// rather than a room nobody booked.
+        #[serde(default)]
+        festival_name: Option<String>,
         headliner: String,
         /// The labelmate to ask.
         support: String,
         adds_reachable: u32,
         days_until_show: u16,
         reasons: Vec<Reason>,
+    },
+    /// One act plays a run of nearby cities in one trip — the routing
+    /// question "which band plays this corridor" answered as one move,
+    /// not as three nights that happen to share a van. A corridor is only
+    /// ever two or more legs: a run of one is a `BookPackage` and is
+    /// reported as one.
+    RouteCorridor {
+        headliner: String,
+        /// Ordered the way the van drives: the strongest night anchors,
+        /// then the nearest remaining leg follows the nearest chosen one.
+        legs: Vec<CorridorLeg>,
+        /// Reachable people across every leg, the number the move is
+        /// judged on — a corridor is worth proposing when the run, not
+        /// any single night, is the draw.
+        total_reachable: u32,
+        /// Present when the headliner won on fairness rather than on reach
+        /// alone — the same rule a single night applies.
+        fairness_note: Option<String>,
     },
     /// Book a new night, with a headliner chosen by local draw.
     BookPackage {
@@ -234,6 +274,8 @@ impl RosterMove {
     pub fn city(&self) -> &str {
         match self {
             Self::FillSupportSlot { city, .. } | Self::BookPackage { city, .. } => city,
+            // A corridor's anchor leg — the city the run is organised around.
+            Self::RouteCorridor { legs, .. } => legs.first().map_or("", |leg| leg.city.as_str()),
         }
     }
 
@@ -253,8 +295,34 @@ impl RosterMove {
                 }
                 names
             }
+            Self::RouteCorridor {
+                headliner, legs, ..
+            } => {
+                let mut names = vec![headliner.as_str()];
+                names.extend(legs.iter().filter_map(|leg| leg.support.as_deref()));
+                names
+            }
         }
     }
+}
+
+/// One night inside a corridor — a `BookPackage` without the wrapper. Each
+/// leg is a real night: its own room, its own promoter set, its own reason
+/// list, and its own support choice — the same act opening every leg is a
+/// tour support, which is what a corridor support usually is.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct CorridorLeg {
+    pub city: String,
+    pub city_id: crate::CityId,
+    pub venue: String,
+    pub contact: Vec<crate::gig_plan::PromoterContact>,
+    /// The leg's own support when one adds audience without splitting it —
+    /// a leg where the chosen support splits the crowd keeps the slot open
+    /// rather than proposing a favour between friends.
+    pub support: Option<String>,
+    pub combined_reachable: u32,
+    pub reasons: Vec<Reason>,
+    pub caveats: Vec<String>,
 }
 
 /// Why a city produced no move.
@@ -450,6 +518,165 @@ fn choose_support<'a>(
         })
 }
 
+/// Great-circle distance between two catalogue coordinates, in kilometres.
+/// Only ever called on pairs where both cities are geocoded — an unlocated
+/// city cannot be a leg, so it never reaches this arithmetic.
+fn distance_km(a: (f64, f64), b: (f64, f64)) -> f64 {
+    let (lat1, lon1) = (a.0.to_radians(), a.1.to_radians());
+    let (lat2, lon2) = (b.0.to_radians(), b.1.to_radians());
+    let dlat = lat2 - lat1;
+    let dlon = lon2 - lon1;
+    let haversine =
+        (dlat / 2.0).sin().powi(2) + lat1.cos() * lat2.cos() * (dlon / 2.0).sin().powi(2);
+    6_371.0 * 2.0 * haversine.sqrt().asin()
+}
+
+/// Groups the period's candidate cities into corridors: connected components
+/// under `CORRIDOR_RADIUS_KM` chaining, so Kraków–Warsaw–Gdańsk is one run
+/// even though the ends sit 590 km apart. A city with no coordinates cannot
+/// be routed, and a cluster of one is not a corridor — it stays a night.
+fn corridor_clusters(cities: &[CityOpportunity]) -> Vec<Vec<usize>> {
+    let located: Vec<(usize, (f64, f64))> = cities
+        .iter()
+        .enumerate()
+        .filter_map(|(index, city)| Some((index, (city.latitude?, city.longitude?))))
+        .collect();
+    // Members carry their coordinates beside the city index so a hop test
+    // never needs a second lookup. A city within one hop of any member joins
+    // that cluster — and a city within reach of two clusters merges them,
+    // which is how Kraków–Warszawa–Gdańsk is one run although its ends sit
+    // 590 km apart.
+    let mut clusters: Vec<Vec<(usize, (f64, f64))>> = Vec::new();
+    for (index, point) in located {
+        let mut hits: Vec<usize> = clusters
+            .iter()
+            .enumerate()
+            .filter(|(_, members)| {
+                members.iter().any(|(_, member_point)| {
+                    distance_km(*member_point, point) <= CORRIDOR_RADIUS_KM
+                })
+            })
+            .map(|(position, _)| position)
+            .collect();
+        if hits.is_empty() {
+            clusters.push(vec![(index, point)]);
+            continue;
+        }
+        // `hits` is ascending; removing the rest in descending order keeps
+        // every earlier index valid while each cluster folds into the first.
+        let anchor = hits.remove(0);
+        let mut merged = vec![(index, point)];
+        for position in hits.iter().rev() {
+            merged.append(&mut clusters.swap_remove(*position));
+        }
+        if let Some(anchor_members) = clusters.get_mut(anchor) {
+            anchor_members.append(&mut merged);
+        }
+    }
+    clusters
+        .into_iter()
+        .filter(|members| members.len() >= 2)
+        .map(|members| members.into_iter().map(|(index, _)| index).collect())
+        .collect()
+}
+
+/// Which act plays the corridor: the strongest summed measured reach across
+/// the legs — the run is what the act is being judged on, and a city where
+/// the act is unmeasured contributes nothing rather than a guessed zero.
+/// The starved-act margin applies on the same sum, so a corridor cannot be
+/// where fairness gets a wider license than a night.
+fn choose_corridor_headliner<'a>(
+    acts: &[&'a RosterAct],
+    legs: &[&CityOpportunity],
+) -> Option<(&'a RosterAct, Option<String>)> {
+    let reach_of = |act: &RosterAct| -> u64 {
+        legs.iter()
+            .filter_map(|leg| act.reach_in(leg.city_id))
+            .map(u64::from)
+            .sum()
+    };
+    let best = acts.iter().max_by_key(|act| reach_of(act)).copied()?;
+    let best_total = reach_of(best);
+    if best_total == 0 {
+        return None;
+    }
+    let floor =
+        best_total * u64::from(10_000_u16.saturating_sub(STARVED_ACT_MARGIN_BASIS_POINTS)) / 10_000;
+    let starved = acts
+        .iter()
+        .copied()
+        .filter(|act| act.is_starved() && act.name != best.name)
+        .filter(|act| {
+            let total = reach_of(act);
+            total >= floor && total > 0
+        })
+        .max_by_key(|act| reach_of(act));
+    match starved {
+        Some(starved) if !best.is_starved() => {
+            let note = match starved.months_since_last_show {
+                Some(months) => format!(
+                    "{} headlines the corridor over {} on fairness: their draw across the run                      is within {}% and they have not played in {months} months.",
+                    starved.name,
+                    best.name,
+                    STARVED_ACT_MARGIN_BASIS_POINTS / 100
+                ),
+                None => format!(
+                    "{} headlines the corridor over {} on fairness: their draw across the run                      is within {}% and they have never played a show on record.",
+                    starved.name,
+                    best.name,
+                    STARVED_ACT_MARGIN_BASIS_POINTS / 100
+                ),
+            };
+            Some((starved, Some(note)))
+        }
+        _ => Some((best, None)),
+    }
+}
+
+/// Orders the surviving legs the way the van drives: anchor on the
+/// headliner's strongest night, then always the nearest remaining city to
+/// the leg just placed — a chain a tour manager recognises, and a stable one:
+/// distance ties break on city id so the same evidence prints the same run.
+fn order_corridor_legs<'a>(
+    headliner: &RosterAct,
+    mut survivors: Vec<(&'a CityOpportunity, crate::gig_plan::GigPlan)>,
+) -> Vec<(&'a CityOpportunity, crate::gig_plan::GigPlan)> {
+    survivors.sort_by(|left, right| {
+        let left_reach = headliner.reach_in(left.0.city_id).unwrap_or(0);
+        let right_reach = headliner.reach_in(right.0.city_id).unwrap_or(0);
+        right_reach
+            .cmp(&left_reach)
+            .then_with(|| left.0.city_id.into_uuid().cmp(&right.0.city_id.into_uuid()))
+    });
+    let mut remaining = survivors;
+    let mut ordered: Vec<(&'a CityOpportunity, crate::gig_plan::GigPlan)> =
+        Vec::with_capacity(remaining.len());
+    if !remaining.is_empty() {
+        ordered.push(remaining.remove(0));
+    }
+    while let Some((last_city, _)) = ordered.last() {
+        let last_point = match (last_city.latitude, last_city.longitude) {
+            (Some(lat), Some(lon)) => (lat, lon),
+            // A corridor leg always came from a located city — the cluster
+            // only ever contains geocoded members.
+            _ => break,
+        };
+        let next = remaining
+            .iter()
+            .enumerate()
+            .filter_map(|(index, (city, _))| {
+                Some((
+                    index,
+                    distance_km(last_point, (city.latitude?, city.longitude?)),
+                ))
+            })
+            .min_by(|left, right| left.1.total_cmp(&right.1));
+        let Some((index, _)) = next else { break };
+        ordered.push(remaining.swap_remove(index));
+    }
+    ordered
+}
+
 /// Plans the roster's next period.
 ///
 /// # Errors
@@ -481,8 +708,9 @@ pub fn plan_roster_run(opportunity: &RosterOpportunity) -> Result<RosterRun, Ros
     // else in this module is this cheap, so nothing else goes first — and a
     // planner that proposed a new night while a labelmate's slot sat open
     // would be spending the roster's week to buy what an email buys.
+    let mut packages_used = 0usize;
     for slot in &opportunity.open_slots {
-        if moves.len() >= usize::from(opportunity.packages_this_period) {
+        if packages_used >= usize::from(opportunity.packages_this_period) {
             break;
         }
         if slot.days_until_show < MINIMUM_SLOT_LEAD_DAYS {
@@ -517,6 +745,7 @@ pub fn plan_roster_run(opportunity: &RosterOpportunity) -> Result<RosterRun, Ros
         moves.push(RosterMove::FillSupportSlot {
             city: slot.city.clone(),
             venue: slot.venue.clone(),
+            festival_name: slot.festival_name.clone(),
             headliner: slot.headliner.clone(),
             support: support.name.clone(),
             adds_reachable: adds,
@@ -525,17 +754,65 @@ pub fn plan_roster_run(opportunity: &RosterOpportunity) -> Result<RosterRun, Ros
         });
         committed_acts.push(support.name.clone());
         committed_cities.push(slot.city_id);
+        packages_used += 1;
     }
 
     // ── Then new nights ─────────────────────────────────────────────────────
-    for city in &opportunity.cities {
-        if moves.len() >= usize::from(opportunity.packages_this_period) {
+    //
+    // Corridors first, in encounter order: a cluster of nearby cities is one
+    // question — "which band plays this run" — and answering it per city
+    // would propose three separate trips where a tour manager sees one.
+    // Cities the corridor leaves uncommitted still get their own evaluation
+    // below: a leg that failed the bar under the corridor's headliner may
+    // clear it under a different act, and the corridor's leftovers are
+    // honest cities, not spent ones.
+    let corridors = corridor_clusters(&opportunity.cities);
+    // city index → cluster index
+    let mut corridor_of: BTreeMap<usize, usize> = BTreeMap::new();
+    for (cluster_index, members) in corridors.iter().enumerate() {
+        for member in members {
+            corridor_of.insert(*member, cluster_index);
+        }
+    }
+    let mut processed_corridors: BTreeMap<usize, ()> = BTreeMap::new();
+
+    for (city_index, city) in opportunity.cities.iter().enumerate() {
+        if packages_used >= usize::from(opportunity.packages_this_period) {
             break;
         }
         if committed_cities.contains(&city.city_id) {
             // A roster running two of its own shows in one city in one period
             // is competing with itself for the same room.
             continue;
+        }
+        let fresh_corridor = corridor_of
+            .get(&city_index)
+            .filter(|cluster_index| !processed_corridors.contains_key(cluster_index));
+        if let Some(&cluster_index) = fresh_corridor {
+            processed_corridors.insert(cluster_index, ());
+            if let Some(cluster) = corridors.get(cluster_index) {
+                let packages_left =
+                    usize::from(opportunity.packages_this_period).saturating_sub(packages_used);
+                evaluate_corridor(
+                    opportunity,
+                    cluster,
+                    &available,
+                    &mut committed_acts,
+                    &mut committed_cities,
+                    &mut moves,
+                    packages_left,
+                );
+                packages_used = moves
+                    .iter()
+                    .map(|mv| match mv {
+                        RosterMove::RouteCorridor { legs, .. } => legs.len(),
+                        _ => 1,
+                    })
+                    .sum();
+            }
+            if committed_cities.contains(&city.city_id) {
+                continue;
+            }
         }
         let candidates: Vec<&RosterAct> = available
             .iter()
@@ -591,6 +868,7 @@ pub fn plan_roster_run(opportunity: &RosterOpportunity) -> Result<RosterRun, Ros
         if let Some((act, _)) = support {
             committed_acts.push(act.name.clone());
         }
+        packages_used += 1;
     }
 
     if moves.is_empty() {
@@ -610,6 +888,112 @@ pub fn plan_roster_run(opportunity: &RosterOpportunity) -> Result<RosterRun, Ros
         waiting,
         considered_and_refused: refused,
     })
+}
+
+/// Evaluates one corridor: picks the act the run favours, tries every
+/// uncommitted leg under that headliner's own evidence, and emits a
+/// `RouteCorridor` when two or more legs survive — a run of one is reported
+/// as an ordinary package instead, because calling one night a tour is the
+/// kind of inflation that teaches a manager to stop reading the plan.
+///
+/// Legs the corridor does not commit are left alone rather than refused:
+/// they stay in the caller's loop and are judged under whatever act suits
+/// them, the same treatment a non-corridor city gets.
+#[allow(clippy::too_many_arguments)]
+fn evaluate_corridor(
+    opportunity: &RosterOpportunity,
+    cluster: &[usize],
+    available: &[&RosterAct],
+    committed_acts: &mut Vec<String>,
+    committed_cities: &mut Vec<crate::CityId>,
+    moves: &mut Vec<RosterMove>,
+    packages_left: usize,
+) {
+    let legs: Vec<&CityOpportunity> = cluster
+        .iter()
+        .filter_map(|index| opportunity.cities.get(*index))
+        .filter(|city| !committed_cities.contains(&city.city_id))
+        .collect();
+    if legs.len() < 2 {
+        return;
+    }
+    let candidates: Vec<&RosterAct> = available
+        .iter()
+        .copied()
+        .filter(|act| !committed_acts.contains(&act.name))
+        .collect();
+    let Some((headliner, fairness_note)) = choose_corridor_headliner(&candidates, &legs) else {
+        return;
+    };
+
+    // Every leg is judged on the city's own evidence under this headliner's
+    // reach — the same `plan_gig` a solo night answers to, so a corridor
+    // cannot carry a night the band planner would refuse.
+    let mut survivors: Vec<(&CityOpportunity, crate::gig_plan::GigPlan)> = Vec::new();
+    for leg in &legs {
+        if survivors.len() >= packages_left {
+            break;
+        }
+        let mut as_seen = (*leg).clone();
+        as_seen.reachable_fans = headliner.reach_in(leg.city_id);
+        match plan_gig(&as_seen, headliner.intent) {
+            Ok(plan) => survivors.push((leg, plan)),
+            // Not a refusal of the city — only of this act in it. Left
+            // uncommitted so the normal loop prices it under its own best
+            // headliner.
+            Err(_) => continue,
+        }
+    }
+    if survivors.len() < 2 {
+        return;
+    }
+
+    let ordered = order_corridor_legs(headliner, survivors);
+    let mut corridor_legs: Vec<CorridorLeg> = Vec::with_capacity(ordered.len());
+    // A support is chosen per leg but not committed between them — the same
+    // act opening the whole run is what tour support means, and forcing a
+    // different opener per night invents a constraint nobody has.
+    let mut corridor_supports: Vec<String> = Vec::new();
+    for (leg, plan) in &ordered {
+        let candidates: Vec<&RosterAct> = available
+            .iter()
+            .copied()
+            .filter(|act| !committed_acts.contains(&act.name))
+            .filter(|act| act.name != headliner.name)
+            .collect();
+        let support = choose_support(&candidates, headliner, leg.city_id);
+        let combined = plan.reach.reachable + support.map_or(0, |(_, adds)| adds);
+        let mut reasons = plan.reasons.clone();
+        if let Some((act, adds)) = support {
+            reasons.push(Reason::CoBillAddsAudience {
+                act: act.name.clone(),
+                adds_reachable: adds,
+            });
+            if !corridor_supports.contains(&act.name) {
+                corridor_supports.push(act.name.clone());
+            }
+        }
+        corridor_legs.push(CorridorLeg {
+            city: leg.city.clone(),
+            city_id: leg.city_id,
+            venue: plan.venue.clone(),
+            contact: plan.contact.clone(),
+            support: support.map(|(act, _)| act.name.clone()),
+            combined_reachable: combined,
+            reasons,
+            caveats: plan.caveats.clone(),
+        });
+        committed_cities.push(leg.city_id);
+    }
+    let total_reachable = corridor_legs.iter().map(|leg| leg.combined_reachable).sum();
+    committed_acts.push(headliner.name.clone());
+    committed_acts.extend(corridor_supports);
+    moves.push(RosterMove::RouteCorridor {
+        headliner: headliner.name.clone(),
+        legs: corridor_legs,
+        total_reachable,
+        fairness_note,
+    });
 }
 
 #[cfg(test)]
@@ -646,6 +1030,8 @@ mod tests {
         CityOpportunity {
             city_id: city_id(name),
             city: name.to_owned(),
+            latitude: None,
+            longitude: None,
             reachable_fans: Some(240),
             active_fans_30d: 60,
             months_since_show: Some(14),
@@ -660,6 +1046,15 @@ mod tests {
             }],
             co_bill: Vec::new(),
         }
+    }
+
+    /// The same fixture with the catalogue pin set — a city that can be
+    /// routed into a corridor.
+    fn located_city(name: &str, latitude: f64, longitude: f64) -> CityOpportunity {
+        let mut city = city(name);
+        city.latitude = Some(latitude);
+        city.longitude = Some(longitude);
+        city
     }
 
     fn act(name: &str, reach: &[(&str, u32)], months: Option<u16>) -> RosterAct {
@@ -913,6 +1308,7 @@ mod tests {
             city: "Wrocław".to_owned(),
             city_id: city_id("Wrocław"),
             venue: "Klub X".to_owned(),
+            festival_name: None,
             headliner: "Head".to_owned(),
             days_until_show: 30,
         }];
@@ -943,6 +1339,7 @@ mod tests {
             city: "Wrocław".to_owned(),
             city_id: city_id("Wrocław"),
             venue: "Klub X".to_owned(),
+            festival_name: None,
             headliner: "Head".to_owned(),
             days_until_show: MINIMUM_SLOT_LEAD_DAYS - 1,
         }];
@@ -1128,5 +1525,183 @@ mod tests {
             vec![city("Wrocław")],
         );
         assert_eq!(plan_roster_run(&opportunity), plan_roster_run(&opportunity));
+    }
+
+    // ── Corridors (5.8) ────────────────────────────────────────────────────
+
+    /// Nearby cities are one trip, not two nights. Kraków–Warszawa is 250 km
+    /// of motorway; Berlin is a flight — it stays out of the corridor and is
+    /// judged as its own night.
+    #[test]
+    fn nearby_cities_run_as_one_corridor_and_distant_ones_do_not() {
+        let run = plan_roster_run(&RosterOpportunity {
+            acts: vec![
+                act(
+                    "Alpha",
+                    &[("Kraków", 300), ("Warszawa", 200), ("Berlin", 260)],
+                    Some(2),
+                ),
+                act("Beta", &[("Kraków", 50), ("Warszawa", 40)], Some(2)),
+            ],
+            cities: vec![
+                located_city("Kraków", 50.06, 19.94),
+                located_city("Warszawa", 52.23, 21.01),
+                located_city("Berlin", 52.52, 13.41),
+            ],
+            open_slots: Vec::new(),
+            packages_this_period: 4,
+        })
+        .expect("plans");
+
+        let corridor = run
+            .moves
+            .iter()
+            .find(|mv| matches!(mv, RosterMove::RouteCorridor { .. }))
+            .expect("two cities within a morning's drive route as one run");
+        let RosterMove::RouteCorridor {
+            headliner,
+            legs,
+            total_reachable,
+            ..
+        } = corridor
+        else {
+            unreachable!()
+        };
+        assert_eq!(headliner, "Alpha");
+        // The strongest night anchors, the nearest leg follows it — the
+        // order a van actually drives.
+        let leg_names: Vec<&str> = legs.iter().map(|leg| leg.city.as_str()).collect();
+        assert_eq!(leg_names, vec!["Kraków", "Warszawa"]);
+        assert_eq!(*total_reachable, 500);
+        assert!(
+            legs.iter().all(|leg| leg.city_id != city_id("Berlin")),
+            "a flight away is not a leg: {leg_names:?}"
+        );
+        // Berlin was still judged — under whatever act remains.
+        assert!(
+            run.moves
+                .iter()
+                .all(|mv| mv.city() != "Berlin" || matches!(mv, RosterMove::BookPackage { .. }))
+                || run
+                    .considered_and_refused
+                    .iter()
+                    .any(|(city, _)| city == "Berlin"),
+            "the distant city is accounted for one way or the other"
+        );
+    }
+
+    /// The corridor's headliner is the act the whole run favours — not the
+    /// winner of its single strongest city. A roster asking "which band
+    /// plays this corridor" is asking about the trip.
+    #[test]
+    fn the_corridor_headliner_is_the_run_wide_draw_not_the_city_best() {
+        let run = plan_roster_run(&RosterOpportunity {
+            acts: vec![
+                act("Alpha", &[("Kraków", 500), ("Warszawa", 100)], Some(2)),
+                act("Beta", &[("Kraków", 400), ("Warszawa", 300)], Some(2)),
+            ],
+            cities: vec![
+                located_city("Kraków", 50.06, 19.94),
+                located_city("Warszawa", 52.23, 21.01),
+            ],
+            open_slots: Vec::new(),
+            packages_this_period: 4,
+        })
+        .expect("plans");
+        let Some(RosterMove::RouteCorridor { headliner, .. }) = run
+            .moves
+            .iter()
+            .find(|mv| matches!(mv, RosterMove::RouteCorridor { .. }))
+        else {
+            panic!("a corridor was proposed: {:?}", run.moves)
+        };
+        assert_eq!(
+            headliner, "Beta",
+            "600 across the run beats 600 vs 700 — Beta wins the corridor              even though Alpha is bigger in Kraków alone"
+        );
+    }
+
+    /// A corridor spends one package per night — a three-city run under a
+    /// two-package cap keeps its two best-connected legs and the third city
+    /// goes back to being an ordinary candidate, not a freebie.
+    #[test]
+    fn a_corridor_spends_a_package_per_night() {
+        let run = plan_roster_run(&RosterOpportunity {
+            acts: vec![act(
+                "Alpha",
+                &[("Kraków", 300), ("Warszawa", 200), ("Gdańsk", 150)],
+                Some(2),
+            )],
+            cities: vec![
+                located_city("Kraków", 50.06, 19.94),
+                located_city("Warszawa", 52.23, 21.01),
+                // Chained through Warszawa (~280 km) — the corridor is the
+                // component, not the endpoints.
+                located_city("Gdańsk", 54.35, 18.64),
+            ],
+            open_slots: Vec::new(),
+            packages_this_period: 2,
+        })
+        .expect("plans");
+        let Some(RosterMove::RouteCorridor { legs, .. }) = run
+            .moves
+            .iter()
+            .find(|mv| matches!(mv, RosterMove::RouteCorridor { .. }))
+        else {
+            panic!("a corridor was proposed: {:?}", run.moves)
+        };
+        assert_eq!(legs.len(), 2, "the cap counts nights, not moves");
+    }
+
+    /// A city nobody geocoded cannot be routed into a run — it is proposed
+    /// as a night, exactly as before.
+    #[test]
+    fn an_unlocated_city_is_a_night_not_a_leg() {
+        let run = plan_roster_run(&RosterOpportunity {
+            acts: vec![act("Alpha", &[("Kraków", 300), ("Nowhere", 240)], Some(2))],
+            cities: vec![located_city("Kraków", 50.06, 19.94), city("Nowhere")],
+            open_slots: Vec::new(),
+            packages_this_period: 4,
+        })
+        .expect("plans");
+        assert!(
+            run.moves
+                .iter()
+                .all(|mv| !matches!(mv, RosterMove::RouteCorridor { .. })),
+            "an unlocatable city cannot pretend a drive exists: {:?}",
+            run.moves
+        );
+    }
+
+    /// A festival slot names the festival — the plan reads "the slot at OFF
+    /// Festival", not a bare room, because a festival bill is the
+    /// organiser's stage and the ask is different.
+    #[test]
+    fn a_festival_slot_names_the_festival() {
+        let mut opportunity = roster(
+            vec![
+                act("Head", &[("Katowice", 240)], Some(1)),
+                with_overlap(
+                    act("Mate", &[("Katowice", 200)], Some(8)),
+                    "Head",
+                    "Katowice",
+                    1_000,
+                ),
+            ],
+            Vec::new(),
+        );
+        opportunity.open_slots = vec![OpenSupportSlot {
+            city: "Katowice".to_owned(),
+            city_id: city_id("Katowice"),
+            venue: "the festival grounds".to_owned(),
+            festival_name: Some("OFF Festival".to_owned()),
+            headliner: "Head".to_owned(),
+            days_until_show: 30,
+        }];
+        let run = plan_roster_run(&opportunity).expect("plans");
+        let Some(RosterMove::FillSupportSlot { festival_name, .. }) = run.moves.first() else {
+            panic!("the slot was proposed: {:?}", run.moves)
+        };
+        assert_eq!(festival_name.as_deref(), Some("OFF Festival"));
     }
 }

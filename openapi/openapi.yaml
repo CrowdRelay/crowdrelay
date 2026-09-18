@@ -7268,7 +7268,11 @@ paths:
         construction, so a roster read accepting a workspace token would be one
         tenant reading its labelmates' audiences. A refusal is returned as 200
         with its sentence — a roster that cannot be planned is an answer, not a
-        failure to render.
+        failure to render. Moves are tagged `kind`: `fill_support_slot` (an
+        open slot on a member's show, festival slots carrying
+        `festival_name`), `route_corridor` (one act, a run of cities inside a
+        driveable chain, ordered the way the van drives), and `book_package`
+        (a single new night).
       security:
       - adminBearer: []
       parameters:

@@ -372,6 +372,7 @@ async fn run(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
     shared_fans_measure_overlap_without_naming_anybody(pool).await?;
     an_overlap_is_measured_in_each_city_separately(pool).await?;
     a_declared_open_slot_reaches_the_roster_planner(pool).await?;
+    a_citys_coordinates_reach_the_roster_planner(pool).await?;
     an_act_style_is_declared_or_absent(pool).await?;
 
     Ok(())
@@ -613,6 +614,12 @@ async fn a_declared_open_slot_reaches_the_roster_planner(
         .bind(slot_show)
         .execute(pool)
         .await?;
+    // A slot on a festival bill is the organiser's stage, not the
+    // headliner's room — the planner must be able to say so (5.8).
+    sqlx::query("UPDATE events SET festival_name = 'OFF Festival' WHERE id = $1")
+        .bind(slot_show)
+        .execute(pool)
+        .await?;
     // Declared full. A zero is an answer somebody gave, and the planner acts
     // on it exactly as it acts on silence: no slot. The difference matters to
     // the operator reading it, not to the plan.
@@ -635,6 +642,11 @@ async fn a_declared_open_slot_reaches_the_roster_planner(
     let slot = &opportunity.open_slots[0];
     assert_eq!(slot.city, "lodz");
     assert_eq!(slot.headliner, "slot-act");
+    assert_eq!(
+        slot.festival_name.as_deref(),
+        Some("OFF Festival"),
+        "a festival slot that lost its name reads as a room it is not"
+    );
     assert!(
         (39..=41).contains(&slot.days_until_show),
         "the lead time is the show's own, got {}",
@@ -667,6 +679,60 @@ async fn a_declared_open_slot_reaches_the_roster_planner(
         opportunity.open_slots.len(),
         1,
         "a draft or a past show was read as an open slot"
+    );
+
+    Ok(())
+}
+
+/// 5.8 — a corridor can only be routed if the catalogue's coordinates reach
+/// the planner. The pin is the wiring, not the math (the domain pins that):
+/// a city the catalogue has pinned must arrive carrying its pin.
+async fn a_citys_coordinates_reach_the_roster_planner(
+    pool: &PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use crowdrelay_infra::gig_planning::roster_opportunity;
+
+    let label = organization(pool, "label-corridor").await?;
+    let act = org_workspace(pool, label, "corridor-act").await?;
+    let krakow = city_in(pool, "krakow", "PL", 50.06, 19.94).await?;
+    reachable_fan(pool, act, krakow, "corridor@example.com").await?;
+
+    let opportunity = roster_opportunity(pool, label, 2, OffsetDateTime::now_utc()).await?;
+    let krakow_opp = opportunity
+        .cities
+        .iter()
+        .find(|opp| opp.city_id == crowdrelay_domain::CityId::from_uuid(krakow))
+        .ok_or("the city the act reaches was absent from its roster read")?;
+    assert_eq!(
+        (krakow_opp.latitude, krakow_opp.longitude),
+        (Some(50.06), Some(19.94)),
+        "a corridor cannot be routed over coordinates that never arrived"
+    );
+
+    // A city the catalogue never pinned still surfaces as an opportunity —
+    // it just cannot be a leg, and `None` must say so rather than a
+    // defaulted zero at the equator.
+    sqlx::query(
+        "INSERT INTO cities (slug, name, country_code) VALUES ('unmapped', 'unmapped', 'PL')
+         ON CONFLICT (country_code, slug) DO UPDATE SET latitude = NULL, longitude = NULL",
+    )
+    .execute(pool)
+    .await?;
+    let unmapped: Uuid =
+        sqlx::query_scalar("SELECT id FROM cities WHERE country_code = 'PL' AND slug = 'unmapped'")
+            .fetch_one(pool)
+            .await?;
+    reachable_fan(pool, act, unmapped, "unmapped@example.com").await?;
+    let opportunity = roster_opportunity(pool, label, 2, OffsetDateTime::now_utc()).await?;
+    let unmapped_opp = opportunity
+        .cities
+        .iter()
+        .find(|opp| opp.city_id == crowdrelay_domain::CityId::from_uuid(unmapped))
+        .ok_or("an unlocated city vanished instead of arriving unlocated")?;
+    assert_eq!(
+        (unmapped_opp.latitude, unmapped_opp.longitude),
+        (None, None),
+        "an unlocatable city must read unlocatable, not zeroed"
     );
 
     Ok(())

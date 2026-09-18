@@ -238,13 +238,21 @@ pub struct CoBillAct {
 }
 
 /// What the planner knows about one city.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct CityOpportunity {
     /// The catalogue row this evidence belongs to. `city` is the slug, and a
     /// slug is only unique per country — two catalogues rows can share one —
     /// so identity is the id, and the string is for reading.
     pub city_id: crate::CityId,
     pub city: String,
+    /// Where the catalogue pins the city. `None` on either axis means the
+    /// city cannot be routed — it still proposes as a night, it just cannot
+    /// join a corridor, the same way an unmeasured reach is not a zero.
+    #[serde(default)]
+    pub latitude: Option<f64>,
+    /// Paired with `latitude` — the schema binds the two to NULL-or-both.
+    #[serde(default)]
+    pub longitude: Option<f64>,
     /// Consented fans inside the radius they chose. `None` means the city
     /// cannot be measured — no coordinates on record — which is not the same
     /// claim as a measured zero.
