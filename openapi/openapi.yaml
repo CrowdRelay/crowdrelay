@@ -12299,7 +12299,7 @@ components:
     EventCrossbill:
       type: object
       additionalProperties: false
-      required: [state, acts, explanation, reciprocated]
+      required: [state, acts, tenant_act_count, explanation, reciprocated]
       description: >-
         Whether band-to-band crossbill for this show runs automatically or is a
         manual ask. Automated overlap needs an `event_crossbill` amplification
@@ -12318,6 +12318,16 @@ components:
           type: array
           description: Bill acts in bill order (position, then slug).
           items: { $ref: '#/components/schemas/EventCrossbillAct' }
+        tenant_act_count:
+          type: integer
+          minimum: 0
+          description: >-
+            How many acts on this bill resolved to a platform workspace at
+            bill-write time — `own`, `sibling` and `tenant` all count; `peer`
+            and `unclaimed` do not. Stored on the event and maintained by
+            trigger, so the number is the platform's fact rather than this
+            reader's derivation. Two or more is the bill density a festival
+            organiser is buying.
         explanation: { type: string }
         reciprocated:
           type: [boolean, 'null']
