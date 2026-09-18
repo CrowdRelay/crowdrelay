@@ -141,6 +141,12 @@ The payload names the agent (`agent_id`, `agent_name`, `agency`), the `contact_e
 
 ## Gig outreach
 
+`beacon.outreach` also carries `crowdrelay.latarnik.invite_requested`: one letter to one person the band already works with, asking whether they also want the dates before they are public. Same transport as a beacon pitch, deliberately not its own capability — a second workflow doing the identical thing is a second thing to be down.
+
+The payload names `action_id`, `beacon_id`, `recipient_name`, a one-entry `recipients` array with the address resolved inside the sending lock, the `reason` the letter opens with, and `draft` — the finished `subject` and `body`. **Send `draft.body` verbatim and refuse a payload whose draft is missing or empty.** The executor composes nothing: the whole value of this letter is that a person read it before it went, and a template rendered after the approval would be a different letter to somebody who knows the band personally.
+
+Upstream refuses far more often than it sends. Nobody cold is ever asked, nobody is asked twice, nobody who unsubscribed is approached again through their other role, and nobody is asked inside three weeks of any other contact. An executor receiving one of these can assume every one of those checks passed inside the sending transaction.
+
 `gig.outreach` carries `crowdrelay.gig.outreach_requested`: the band approved a gig proposal for one room, and the proposal names everybody who books it. CrowdRelay has already decided everything that matters — the proposal was approved on its stated reasons, every recipient's version was re-pinned inside the sending transaction, and the contact governor reserved every window or the whole letter stayed unwritten. The executor's job is narrower than a send: it is *one letter to all of them*, because the alternative — two promoters comparing notes on a night the third never heard about — is the failure the all-or-none reservation exists to prevent.
 
 The payload names `action_id`, `city_id`, the `venue`, the `template_key`, the `recipients` in ranked order — each with `target_id`, `target_name`, `target_kind` and the `contact_email` resolved inside the lock — and **`draft`, the finished letter: `subject` and `body`, exactly as the operator approved them**. `opening_line` and `reasons` still travel for the receipt and the ledger, but the executor composes nothing from them.

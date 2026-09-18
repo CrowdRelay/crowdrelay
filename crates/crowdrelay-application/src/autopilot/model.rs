@@ -775,6 +775,32 @@ pub enum AutopilotActionPayload {
     RequestBookingTargetDiscovery {
         requested_count: u16,
     },
+    /// Ask somebody the band already works with whether they also want the
+    /// dates first (P.1).
+    ///
+    /// Not a campaign and not a newsletter signup. One letter, to one person
+    /// the band has a relationship with, carrying a reason that is about them —
+    /// a date in their city, a night you shared, a record just out. The rules
+    /// that decide whether it may go at all live in
+    /// `crowdrelay_domain::latarnik_invite`, and they are almost entirely
+    /// refusals.
+    ///
+    /// `draft` carries the finished letter for the same reason the gig letter
+    /// does (O.1): the operator approves the sentences a promoter will read,
+    /// not a template key that becomes sentences later.
+    RequestLatarnikInvite {
+        beacon_id: BeaconId,
+        /// Pinned at approval time. A beacon edited between the read and the
+        /// send is a different person's record, and the send refuses.
+        beacon_version: i64,
+        recipient_email: String,
+        recipient_name: String,
+        /// Why this person, in the words the letter opens with. Carried so the
+        /// receipt and the ledger record what was claimed, not only that
+        /// something was sent.
+        reason: String,
+        draft: crowdrelay_domain::latarnik_invite::Invite,
+    },
     RequestBeaconOutreach {
         beacon_id: BeaconId,
         event_id: EventId,
@@ -1141,6 +1167,11 @@ impl AutopilotActionPayload {
             // spends a season, not a cooldown.
             | Self::RequestBookingAgentApproach { .. }
             | Self::RequestBeaconOutreach { .. }
+            // An invitation is a letter to somebody outside the band's own
+            // audience — that is the whole point of it — so it carries the
+            // third-party class, its hold window and its identical-draft
+            // refusal.
+            | Self::RequestLatarnikInvite { .. }
             // A partner being asked to carry invite codes is a real-world
             // approach to somebody else's community, not a message to ours.
             | Self::RequestBeaconInviteBatch { .. }
@@ -1251,64 +1282,12 @@ impl AutopilotActionPayload {
             },
         }
     }
-
-    #[must_use]
-    pub const fn action_kind(&self) -> &'static str {
-        match self {
-            Self::ChangeTicketPrice { .. } => "ticket.price.change",
-            Self::ChangeTicketCapacity { .. } => "ticket.capacity.change",
-            Self::RequestFanLifecycleMessage { .. } => "fan.lifecycle.message.request",
-            Self::RequestMerchReorder { .. } => "merch.reorder.request",
-            Self::ChangeMerchPrice { .. } => "merch.price.change",
-            Self::RequestBookingOutreach { .. } => "booking.outreach.request",
-            Self::RequestGigOutreach { .. } => "gig.outreach.request",
-            Self::RequestAudienceCampaign { .. } => "audience.campaign.request",
-            Self::RequestMerchBundle { .. } => "merch.bundle.request",
-            Self::RequestOutreach { .. } => "outreach.request",
-            Self::RequestRepresentationApproach { .. } => "representation.approach.request",
-            Self::RequestBookingAgentApproach { .. } => "booking_agent.approach.request",
-            Self::RequestBeaconDiscovery { .. } => "beacon.discovery.request",
-            Self::RequestBookingTargetDiscovery { .. } => "booking.target_discovery.request",
-            Self::RequestBeaconInviteBatch { .. } => "beacon.invite_batch.request",
-            Self::RequestOutreachDiscovery { .. } => "outreach.discovery.request",
-            Self::RequestBeaconOutreach { .. } => "beacon.outreach.request",
-            Self::RequestShowGrowth { .. } => "show.growth.request",
-            Self::RequestContentArtifact { .. } => "content.artifact.request",
-            Self::AdjustExperiment {
-                complete: false, ..
-            } => "experiment.allocation.change",
-            Self::AdjustExperiment { complete: true, .. } => "experiment.complete",
-            Self::CompleteShowTask { .. } => "show.task.complete",
-            Self::EscalateShowTask { .. } => "show.task.escalate",
-            Self::RequestPromotionBudgetChange { .. } => "promotion.budget_change.request",
-            Self::ExecuteReleaseMilestone { .. } => "release.milestone.execute",
-            Self::ApplyLiveOpportunity { .. } => "opportunity.live.apply",
-            Self::VerifyPlaylistPlacement { .. } => "playlist.placement.verify",
-            Self::EscalateEditorialPitch { .. } => "release.editorial_pitch.escalate",
-            Self::CounterLiveOpportunityTerms { .. } => "opportunity.terms.counter",
-            Self::AcceptLiveOpportunityTerms { .. } => "opportunity.terms.accept",
-            Self::PrepareFundingPackage { .. } => "funding.package.prepare",
-            Self::SubmitFundingApplication { .. } => "funding.application.submit",
-            Self::RaiseGrowthOpportunity { .. } => "growth.opportunity.raise",
-            Self::RaiseDeclineAdvisory { .. } => "community.decline.advisory",
-            Self::RaiseGrowthDebt { .. } => "growth.debt.raise",
-            Self::IssueReferralCode { .. } => "referral.code.issue",
-            Self::RaiseContentSuggestion { .. } => "content.suggestion.raise",
-            Self::RaiseContentArc { .. } => "content.arc.raise",
-            Self::RunPlayStep { .. } => "play.step.run",
-            Self::SendTeamAssignmentEmail { .. } => "team.assignment.email",
-            Self::RequestAgentContent { .. } => "agent.content.request",
-            Self::RequestOutreachTarget { .. } => "outreach.target.request",
-            Self::RequestAgentRun { .. } => "agent.run.request",
-            Self::RequestCommunityEngagement { .. } => "community.engage.request",
-            Self::RequestSignalPush { .. } => "signal.push.request",
-        }
-    }
 }
 
 mod briefing_locale;
 pub use briefing_locale::BriefingLocale;
 
+include!("model/action_kind.rs");
 include!("model/briefing.rs");
 
 /// Formats a minor-currency amount as a human-readable string.

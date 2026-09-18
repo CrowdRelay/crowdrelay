@@ -606,6 +606,27 @@ impl PostgresAutopilotRepository {
                     )
                     .await?;
                 }
+                AutopilotActionPayload::RequestLatarnikInvite {
+                    beacon_id,
+                    beacon_version,
+                    recipient_email,
+                    recipient_name,
+                    reason,
+                    draft,
+                } => {
+                    execute_latarnik_invite(
+                        &mut transaction,
+                        workspace_id,
+                        action.id,
+                        *beacon_id,
+                        *beacon_version,
+                        recipient_email,
+                        recipient_name,
+                        reason,
+                        draft,
+                    )
+                    .await?;
+                }
                 AutopilotActionPayload::RequestBeaconOutreach {
                     beacon_id,
                     event_id,

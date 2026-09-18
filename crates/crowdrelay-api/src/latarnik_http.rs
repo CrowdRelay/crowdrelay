@@ -1,0 +1,135 @@
+//! Operator surface for the invitation (P.1).
+//!
+//! Two routes and one rule between them: the read says who could be asked and
+//! why the rest cannot, and the write asks exactly one person. There is no
+//! batch endpoint on purpose — "invite everybody who qualifies" is the shape
+//! that turns a professional courtesy into a mailshot, and the people on the
+//! other end of this list would notice within the hour.
+
+use axum::{
+    Json,
+    extract::{Path, State},
+    http::{HeaderMap, StatusCode, header::CACHE_CONTROL},
+    response::{IntoResponse, Response},
+};
+use crowdrelay_infra::latarnik::{InviteError, approve_latarnik_invite, dual_role_review};
+use time::OffsetDateTime;
+use uuid::Uuid;
+
+use crate::{Problem, request_id};
+
+/// The caller's idempotency key.
+///
+/// Read here rather than borrowed from `autopilot::validation`, which keeps it
+/// private to that include chain. One rule either way: a write that can be
+/// retried must carry a key, and a missing one is a bad request rather than a
+/// silently fresh invitation.
+fn idempotency_key(
+    headers: &HeaderMap,
+) -> Result<crowdrelay_application::IdempotencyKey, Box<Response>> {
+    let raw = headers
+        .get("idempotency-key")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default();
+    crowdrelay_application::IdempotencyKey::parse(raw).map_err(|_| {
+        Box::new(
+            Problem::bad_request_because(
+                "this write needs an Idempotency-Key header so a retry cannot send twice",
+                request_id(headers),
+            )
+            .private()
+            .into_response(),
+        )
+    })
+}
+
+const PRIVATE_NO_STORE: &str = "private, no-store";
+
+/// `GET /v1/control-plane/contacts/dual-role`
+///
+/// Everybody the band works with, with both roles resolved: who already hears
+/// the dates, who could be asked, and — for everybody else — the sentence
+/// saying why not.
+pub async fn dual_role_contacts(
+    State(state): State<crate::AppState>,
+    headers: HeaderMap,
+) -> Response {
+    let now = OffsetDateTime::now_utc();
+    // Whether there is anything to tell people is a question about the
+    // calendar, and the per-contact answer is computed at approval time. The
+    // read reports eligibility on the assumption that a reason exists, so the
+    // operator sees the relationship rules rather than an empty screen on a
+    // quiet week; the approval refuses if the reason turns out not to be there.
+    match dual_role_review(
+        &state.database,
+        state.ops.workspace_id().into_uuid(),
+        now,
+        true,
+    )
+    .await
+    {
+        Ok(review) => (
+            StatusCode::OK,
+            [(CACHE_CONTROL, PRIVATE_NO_STORE)],
+            Json(review),
+        )
+            .into_response(),
+        Err(error) => {
+            tracing::warn!(%error, "dual-role contact read failed");
+            Problem::service_unavailable(request_id(&headers))
+                .private()
+                .into_response()
+        }
+    }
+}
+
+/// `POST /v1/control-plane/contacts/{beacon_id}/latarnik-invite`
+///
+/// Asks one person, once. Every refusal comes back as 200 with its sentence:
+/// "this person unsubscribed" is an answer, not a server fault.
+pub async fn invite_to_latarnik(
+    State(state): State<crate::AppState>,
+    Path(beacon_id): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    let Ok(beacon_id) = Uuid::parse_str(&beacon_id) else {
+        return Problem::not_found(request_id(&headers))
+            .private()
+            .into_response();
+    };
+    let idempotency_key = match idempotency_key(&headers) {
+        Ok(value) => value,
+        Err(response) => return *response,
+    };
+    match approve_latarnik_invite(
+        &state.database,
+        state.ops.workspace_id().into_uuid(),
+        beacon_id,
+        &idempotency_key,
+        OffsetDateTime::now_utc(),
+    )
+    .await
+    {
+        Ok(outcome) => (
+            StatusCode::OK,
+            [(CACHE_CONTROL, PRIVATE_NO_STORE)],
+            Json(serde_json::json!({ "outcome": format!("{outcome:?}") })),
+        )
+            .into_response(),
+        Err(InviteError::NotFound) => Problem::not_found(request_id(&headers))
+            .private()
+            .into_response(),
+        Err(InviteError::Refused(sentence)) => (
+            StatusCode::OK,
+            [(CACHE_CONTROL, PRIVATE_NO_STORE)],
+            Json(serde_json::json!({ "refused": sentence })),
+        )
+            .into_response(),
+        Err(InviteError::Database(error)) => {
+            tracing::warn!(%error, "latarnik invite failed");
+            Problem::service_unavailable(request_id(&headers))
+                .private()
+                .into_response()
+        }
+    }
+}

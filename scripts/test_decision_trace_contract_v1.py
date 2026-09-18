@@ -39,6 +39,11 @@ DECISION_TABLE = "viryaos_autopilot_decisions"
 # enough to name, and that is worth keeping true.
 KNOWN_WRITERS = {
     "crates/crowdrelay-infra/src/autopilot/decisions/persist.rs",
+    # P.1's invitation. Audited: the decision carries `TraceContext::root`'s
+    # trace id, and the action it queues carries `for_action`'s causation id, so
+    # `ops/trace/{trace_id}` joins decision, action, outbox and delivery the way
+    # every other approval does.
+    "crates/crowdrelay-infra/src/latarnik/approve.rs",
     "crates/crowdrelay-infra/src/autopilot/decline_advisories.rs",
     "crates/crowdrelay-infra/src/autopilot/team.rs",
     "crates/crowdrelay-infra/src/representation.rs",
