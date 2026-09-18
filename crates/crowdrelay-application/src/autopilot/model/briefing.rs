@@ -238,17 +238,34 @@ impl AutopilotActionPayload {
                 },
                 deadline_note: String::new(),
             },
-            Self::RequestAudienceCampaign { event_id, phase, template_key } => ActionBriefing {
-                summary: format!("Audience campaign: {}", friendly_template(template_key)),
+            Self::RequestAudienceCampaign { event_id, phase, template_key, audience_size, audience_basis } => ActionBriefing {
+                summary: match audience_size {
+                    Some(size) => format!(
+                        "Audience campaign to {size} fans: {}",
+                        friendly_template(template_key)
+                    ),
+                    None => format!("Audience campaign: {}", friendly_template(template_key)),
+                },
                 why_it_matters: "The campaign reaches fans tied to this event. A sent campaign cannot be recalled.".into(),
                 steps: vec![
-                    BriefingStep { what_to_do: "Check the template and the campaign phase".into(), why_it_matters: "Make sure the content suits this phase".into() },
+                    BriefingStep { what_to_do: "Check who this reaches and the campaign phase".into(), why_it_matters: "The size and the basis are the part a template key hides".into() },
                     BriefingStep { what_to_do: "Click APPROVE to start it".into(), why_it_matters: "Once approved the campaign is sent".into() },
                 ],
                 content: vec![
                     BriefingField { label: "Event".into(), value: short_ref(event_id) },
                     BriefingField { label: "Phase".into(), value: friendly_enum(phase) },
                     BriefingField { label: "Template".into(), value: friendly_template(template_key) },
+                    // Absent is said out loud rather than printed as a zero:
+                    // the announcement's audience is counted when the campaign
+                    // is built, and "0 fans" would read as "nobody".
+                    BriefingField {
+                        label: "Reaches".into(),
+                        value: match audience_size {
+                            Some(size) => format!("{size} fans"),
+                            None => "counted when the campaign is built".to_owned(),
+                        },
+                    },
+                    BriefingField { label: "Who they are".into(), value: audience_basis.clone() },
                 ],
                 deadline_note: String::new(),
             },

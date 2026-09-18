@@ -581,6 +581,20 @@ pub enum AutopilotActionPayload {
         event_id: EventId,
         phase: EventCampaignPhase,
         template_key: String,
+        /// How many fans this reaches, when the decision snapshot knows (O.5).
+        ///
+        /// `None` is honest rather than convenient: the announcement's audience
+        /// is every consented fan in the event's city and is counted when the
+        /// campaign is built, so the approval says so instead of printing a
+        /// zero that would read as "nobody".
+        #[serde(default)]
+        audience_size: Option<u32>,
+        /// Who those people are, in a sentence — "fans who said they are coming
+        /// and have not bought a ticket". An operator approving a send to
+        /// strangers' inboxes should not have to decode a segment slug to learn
+        /// who is in it.
+        #[serde(default)]
+        audience_basis: String,
     },
     RequestMerchBundle {
         product_a: MerchProductId,
