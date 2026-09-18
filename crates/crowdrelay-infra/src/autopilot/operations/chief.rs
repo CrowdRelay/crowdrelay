@@ -13,7 +13,7 @@ pub(in crate::autopilot) async fn record_booking_reply(
         if matches!(command.disposition, BookingReplyDisposition::None) { return Err(RepositoryError::Unexpected); }
         let mut tx=repo.pool.begin().await.map_err(map_sqlx)?;
         let operation_id=Uuid::now_v7(); let disposition=booking_reply_str(command.disposition);
-        let details=json!({"target_id":command.target_id,"disposition":disposition,"occurred_at":command.occurred_at});
+        let details=json!({"target_id":command.target_id,"disposition":disposition,"occurred_at":command.occurred_at,"reply_text":command.reply_text.as_deref().map(str::trim).filter(|t| !t.is_empty())});
         if let Some(existing)=super::insert_operator_action(&mut tx,workspace_id,operation_id,"record_autopilot_booking_reply","booking_target",command.target_id.into_uuid(),"admin_api_key",idempotency_key,request_id,&details).await?{
             tx.commit().await.map_err(map_sqlx)?; return Ok(AutopilotControlMutation{operation_id:existing,target_id:command.target_id.into_uuid(),status:"reply_recorded".into(),replayed:true});
         }
@@ -25,7 +25,7 @@ pub(in crate::autopilot) async fn record_booking_reply(
             BookingReplyDisposition::DoNotContact => -15,
             BookingReplyDisposition::None => 0,
         };
-        let new_version = sqlx::query_scalar::<_, i64>(
+        let (new_version, target_kind) = sqlx::query_as::<_, (i64, String)>(
             r#"
             UPDATE viryaos_booking_targets
             SET accepts_booking = CASE
@@ -36,7 +36,7 @@ pub(in crate::autopilot) async fn record_booking_reply(
                 contact_verified_at = CASE WHEN contact_verified_at IS NULL OR contact_verified_at < $5 THEN $5 ELSE contact_verified_at END,
                 version = version + 1
             WHERE workspace_id = $1 AND id = $2
-            RETURNING version
+            RETURNING version, target_kind
             "#,
         )
         .bind(workspace_id.into_uuid())
@@ -106,6 +106,35 @@ pub(in crate::autopilot) async fn record_booking_reply(
         .execute(&mut *tx)
         .await
         .map_err(map_sqlx)?;
+
+        // The reply's own words join the triage queue when the operator
+        // pasted them: a negotiation reply always needs a human — the
+        // disposition above is already filed — and the deterministic
+        // reader proposes the terms it finds for the human to confirm.
+        // Blank or over-long text is no text, same as the outreach ingress.
+        let trimmed = command.reply_text.as_deref().map(str::trim).unwrap_or("");
+        if !trimmed.is_empty() && trimmed.len() <= 4000 {
+            sqlx::query(
+                r#"
+                INSERT INTO viryaos_reply_classifications (
+                    workspace_id, target_id, target_kind,
+                    reply_text, previous_disposition,
+                    classification_result, classified_disposition,
+                    confidence_basis_points, matched_rules, classified_at
+                )
+                VALUES ($1, $2, $3, $4, 'received', 'auto', NULL, 0, '[]'::jsonb, $5)
+                "#,
+            )
+            .bind(workspace_id.into_uuid())
+            .bind(command.target_id.into_uuid())
+            .bind(&target_kind)
+            .bind(trimmed)
+            .bind(command.occurred_at)
+            .execute(&mut *tx)
+            .await
+            .map_err(map_sqlx)?;
+        }
+
         tx.commit().await.map_err(map_sqlx)?; Ok(AutopilotControlMutation{operation_id,target_id:command.target_id.into_uuid(),status:"reply_recorded".into(),replayed:false})
     }).await
 }

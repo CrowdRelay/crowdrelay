@@ -176,6 +176,11 @@ pub struct CityMarketSignalRequest {
 #[serde(deny_unknown_fields)]
 pub struct BookingReplyRequest {
     disposition: BookingReplyDisposition,
+    /// The reply's own words, when the operator pasted them in. Present means
+    /// the reply joins the triage queue — the deterministic reader proposes
+    /// the terms it finds for the human to confirm.
+    #[serde(default)]
+    reply_text: Option<String>,
     #[serde(with = "time::serde::rfc3339")]
     occurred_at: OffsetDateTime,
 }

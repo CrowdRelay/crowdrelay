@@ -1099,12 +1099,25 @@ pub fn assess_wave_claim(
 // surfaced via the operator brief.
 // ---------------------------------------------------------------------------
 
+/// What the reply's target is, at the granularity the triage loop needs.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ReplyTargetKind {
+    /// One of the outreach kinds — the classifier's vocabulary applies.
+    Outreach(OutreachTargetKind),
+    /// A promoter, venue, or festival on the booking channel. A negotiation
+    /// reply is
+    /// always a human's call: the operator filed the disposition with the
+    /// reply, and the number inside the text is a proposal to confirm, not
+    /// a disposition to infer.
+    BookingCounterparty,
+}
+
 /// A reply awaiting first-party classification.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ReplyNeedingTriage {
     pub reply_id: uuid::Uuid,
     pub target_id: uuid::Uuid,
-    pub target_kind: OutreachTargetKind,
+    pub target_kind: ReplyTargetKind,
     pub reply_text: String,
     pub previous_disposition: Option<crowdrelay_domain::outreach::OutreachReplyDisposition>,
 }

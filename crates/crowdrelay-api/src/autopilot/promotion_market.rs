@@ -89,6 +89,7 @@ pub async fn record_booking_reply(
         target_id: BookingTargetId::from_uuid(target_id),
         disposition: request.disposition,
         occurred_at: request.occurred_at,
+        reply_text: request.reply_text,
     };
     match state
         .autopilot

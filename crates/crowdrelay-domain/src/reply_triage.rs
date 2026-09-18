@@ -65,6 +65,11 @@ pub enum HumanReviewReason {
     /// No keywords matched any category. The reply is in a supported language
     /// and long enough, but says something the rules do not recognise.
     UnmatchedText,
+    /// The reply came from a booking-channel counterparty — a promoter, a
+    /// venue, or a festival. A negotiation reply is always a human's call: the operator
+    /// already filed its disposition with the reply, and the number inside
+    /// the text is a proposal to confirm, not a disposition to infer.
+    NegotiationReply,
 }
 
 impl HumanReviewReason {
@@ -76,6 +81,7 @@ impl HumanReviewReason {
             Self::TooShort => "too_short",
             Self::PreviousDoNotContact => "previous_do_not_contact",
             Self::UnmatchedText => "unmatched_text",
+            Self::NegotiationReply => "negotiation_reply",
         }
     }
 }
@@ -315,6 +321,272 @@ fn dnc_matches(lower: &str) -> Vec<&'static str> {
         .filter(|(keyword, _)| lower.contains(keyword))
         .map(|(_, rule)| *rule)
         .collect()
+}
+
+/// What the reader found in a negotiation reply, when the text carried
+/// exactly one confident money figure.
+///
+/// This is a proposal, never a write: the columns it fills tell the human
+/// what the machine read, and the human still certifies the number through
+/// the terms route. The extractor is deliberately blind to anything short
+/// of a figure glued to a currency — two different amounts, a range, or a
+/// bare number all yield `None`, because a guessed fee is worse than none.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ProposedTerms {
+    /// The figure in the currency's minor unit.
+    pub fee_minor: i64,
+    /// ISO-4217 code the figure was quoted in.
+    pub currency: &'static str,
+}
+
+/// Currency markers the reader recognises, longest spellings first so
+/// `złoty` never collides with `zł`. `comma_decimal` is the convention the
+/// currency is quoted in: continental currencies read `400,50` as four
+/// hundred and a half, Anglo ones read it as forty thousand and fifty.
+const CURRENCY_MARKERS: &[(&[&str], &str, bool)] = &[
+    (&["euros", "euro", "eur", "€"], "EUR", true),
+    (&["złotych", "złote", "złoty", "pln", "zł"], "PLN", true),
+    (&["dollars", "dollar", "usd", "$"], "USD", false),
+    (&["pounds", "pound", "gbp", "£"], "GBP", false),
+];
+
+/// Reads the one money figure a reply text carries, if exactly one exists.
+///
+/// A figure only counts when a currency marker touches it — "capacity 400"
+/// is not an offer, "€400" is. Two different figures, or a figure the
+/// currency's own convention cannot parse, yield `None` and the reply stays
+/// entirely the human's.
+#[must_use]
+pub fn extract_offer_terms(text: &str) -> Option<ProposedTerms> {
+    // Case-fold once and scan the folded text: everything the reader needs —
+    // digits, separators, markers — is identical in both, and folding can
+    // change byte lengths, so positions must never index the original.
+    let lowered = text.to_lowercase();
+    let mut found: Option<ProposedTerms> = None;
+    for (markers, currency, comma_decimal) in CURRENCY_MARKERS {
+        for marker in *markers {
+            let mut search_from = 0;
+            while let Some(at) = lowered
+                .get(search_from..)
+                .and_then(|tail| tail.find(marker))
+            {
+                let marker_at = search_from + at;
+                search_from = marker_at + marker.len();
+                // An alphabetic marker must sit on a word boundary — "eur"
+                // inside "amateur" is not a currency.
+                if marker.starts_with(|c: char| c.is_alphanumeric()) {
+                    let before = lowered
+                        .get(..marker_at)
+                        .and_then(|head| head.chars().next_back());
+                    let after = lowered
+                        .get(marker_at + marker.len()..)
+                        .and_then(|tail| tail.chars().next());
+                    if before.is_some_and(|c| c.is_alphanumeric())
+                        || after.is_some_and(|c| c.is_alphanumeric())
+                    {
+                        continue;
+                    }
+                }
+                for span in [
+                    number_before(&lowered, marker_at),
+                    number_after(&lowered, marker_at + marker.len()),
+                ]
+                .into_iter()
+                .flatten()
+                {
+                    let Some(minor) = lowered
+                        .get(span.0..span.1)
+                        .and_then(|raw| parse_amount(raw, *comma_decimal))
+                    else {
+                        continue;
+                    };
+                    // A figure glued to another figure through a range sign
+                    // is one end of an offer, not the offer.
+                    if touches_range(&lowered, span.0, span.1) {
+                        continue;
+                    }
+                    let candidate = ProposedTerms {
+                        fee_minor: minor,
+                        currency,
+                    };
+                    match found {
+                        None => found = Some(candidate),
+                        Some(existing) if existing == candidate => {}
+                        Some(_) => return None,
+                    }
+                }
+            }
+        }
+    }
+    found
+}
+
+/// The number token ending just before `pos`, skipping whitespace. A space
+/// inside the token continues it only when another digit follows — "1 200"
+/// is one figure, "sold 400 tickets" is not.
+fn number_before(text: &str, pos: usize) -> Option<(usize, usize)> {
+    let head = text.get(..pos)?.trim_end();
+    let mut start = head.len();
+    let mut saw_digit = false;
+    while start > 0 {
+        let c = head.get(..start)?.chars().next_back()?;
+        if c.is_ascii_digit() {
+            saw_digit = true;
+            start -= 1;
+        } else if saw_digit && matches!(c, '.' | ',' | '\'' | '\u{00A0}' | '\u{202F}') {
+            start -= c.len_utf8();
+        } else if saw_digit && c == ' ' {
+            let before_space = head.get(..start).and_then(|h| h.chars().next_back());
+            if before_space.is_some_and(|b| b.is_ascii_digit()) {
+                // Peek further back: the space continues the figure only if
+                // the digit before it begins a 3-digit group.
+                start -= 1;
+            } else {
+                break;
+            }
+        } else {
+            break;
+        }
+    }
+    saw_digit.then_some((start, head.len()))
+}
+
+/// The number token beginning just after `pos`, same rule mirrored.
+fn number_after(text: &str, pos: usize) -> Option<(usize, usize)> {
+    let tail = text.get(pos..)?;
+    let leading_ws = tail.len() - tail.trim_start().len();
+    let body = tail.get(leading_ws..)?;
+    let mut end = 0;
+    let mut chars = body.char_indices().peekable();
+    let mut saw_digit = false;
+    while let Some((i, c)) = chars.next() {
+        if c.is_ascii_digit() {
+            saw_digit = true;
+            end = i + 1;
+        } else if saw_digit && matches!(c, '.' | ',' | '\'' | '\u{00A0}' | '\u{202F}') {
+            end = i + c.len_utf8();
+        } else if saw_digit && c == ' ' {
+            if chars.peek().is_some_and(|(_, n)| n.is_ascii_digit()) {
+                end = i + 1;
+            } else {
+                break;
+            }
+        } else {
+            break;
+        }
+    }
+    if !saw_digit {
+        return None;
+    }
+    // Trailing separators are not part of the figure.
+    let raw = body.get(..end)?;
+    let trimmed = raw.trim_end_matches(['.', ',', '\'', ' ', '\u{00A0}', '\u{202F}']);
+    (!trimmed.is_empty()).then_some((pos + leading_ws, pos + leading_ws + trimmed.len()))
+}
+
+/// True when the figure at `span` is welded to a neighbour by a range sign —
+/// "400-500" and "from 400 to 500" are a range, not a proposal.
+fn touches_range(text: &str, start: usize, end: usize) -> bool {
+    const RANGE_SIGNS: &[char] = &[
+        '-', '\u{2013}', '\u{2014}', '\u{2212}', '\u{2011}', '/', '~',
+    ];
+    let before = text.get(..start).map(str::trim_end).unwrap_or_default();
+    if before
+        .chars()
+        .next_back()
+        .is_some_and(|prev| RANGE_SIGNS.contains(&prev))
+    {
+        return true;
+    }
+    // A range word immediately before the figure makes it the far end of
+    // one — "from 400 to 500", "either 400 or 500", "400 and 500". "up to
+    // €400" is refused too: a ceiling is not a committed offer.
+    let word_before = before
+        .rsplit(|c: char| !c.is_alphabetic())
+        .find(|word| !word.is_empty())
+        .unwrap_or_default();
+    if matches!(word_before, "to" | "or" | "and" | "from" | "between") {
+        return true;
+    }
+    let after = text.get(end..).map(str::trim_start).unwrap_or_default();
+    if let Some(next) = after.chars().next() {
+        if RANGE_SIGNS.contains(&next)
+            && after
+                .get(next.len_utf8()..)
+                .map(str::trim_start)
+                .and_then(|rest| rest.chars().next())
+                .is_some_and(|c| c.is_ascii_digit())
+        {
+            return true;
+        }
+        let first_word: String = after.chars().take_while(|c| c.is_alphabetic()).collect();
+        // A currency marker may sit between the range word and the figure
+        // ("or €450"), so the question is whether the next alphanumeric
+        // character is a digit, not whether a digit is literally next.
+        if matches!(first_word.as_str(), "to" | "or" | "and")
+            && after
+                .get(first_word.len()..)
+                .and_then(|rest| rest.chars().find(|c| c.is_alphanumeric()))
+                .is_some_and(|c| c.is_ascii_digit())
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// Parses a figure under the currency's own decimal convention. Returns
+/// `None` for anything the convention cannot read unambiguously — a second
+/// decimal separator, a broken group, an empty figure.
+fn parse_amount(raw: &str, comma_decimal: bool) -> Option<i64> {
+    let decimal_sep = if comma_decimal { ',' } else { '.' };
+    let thousands_sep = if comma_decimal { '.' } else { ',' };
+    let (int_raw, frac_minor) = match raw.rfind(decimal_sep) {
+        Some(at) => {
+            let tail = raw.get(at + 1..).unwrap_or_default();
+            // One or two digits after the separator read as the fraction;
+            // three read as grouping ("1,200" under a comma convention is
+            // ambiguous, so it is refused rather than guessed).
+            if !tail.is_empty() && tail.len() <= 2 && tail.bytes().all(|b| b.is_ascii_digit()) {
+                let mut frac = tail.parse::<i64>().ok()?;
+                if tail.len() == 1 {
+                    frac *= 10;
+                }
+                (raw.get(..at).unwrap_or_default(), frac)
+            } else {
+                (raw, 0)
+            }
+        }
+        None => (raw, 0),
+    };
+    // A decimal separator left in the integer part means two of them —
+    // not a figure either convention will read.
+    if int_raw.contains(decimal_sep) {
+        return None;
+    }
+    let mut digits = String::with_capacity(int_raw.len());
+    let mut groups = int_raw
+        .split([thousands_sep, '\'', ' ', '\u{00A0}', '\u{202F}'])
+        .peekable();
+    let head = groups.next()?;
+    // The ≤3-digit head rule only binds a grouped figure: "1.200" groups
+    // as twelve hundred, but ungrouped "1200" is twelve hundred too.
+    if head.is_empty()
+        || (head.len() > 3 && groups.peek().is_some())
+        || !head.bytes().all(|b| b.is_ascii_digit())
+    {
+        return None;
+    }
+    digits.push_str(head);
+    for group in groups {
+        if group.len() != 3 || !group.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        digits.push_str(group);
+    }
+    let int: i64 = digits.parse().ok()?;
+    let minor = int.checked_mul(100)?.checked_add(frac_minor)?;
+    (minor > 0).then_some(minor)
 }
 
 #[cfg(test)]
@@ -557,5 +829,108 @@ mod tests {
             } => {}
             other => panic!("expected Auto Declined, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn a_figure_with_a_currency_is_the_offer() {
+        assert_eq!(
+            extract_offer_terms("We can offer €400 for the night."),
+            Some(ProposedTerms {
+                fee_minor: 40_000,
+                currency: "EUR",
+            })
+        );
+        assert_eq!(
+            extract_offer_terms("Możemy zaproponować 400 zł za występ."),
+            Some(ProposedTerms {
+                fee_minor: 40_000,
+                currency: "PLN",
+            })
+        );
+        assert_eq!(
+            extract_offer_terms("Our best is 1,200 USD all-in."),
+            Some(ProposedTerms {
+                fee_minor: 120_000,
+                currency: "USD",
+            })
+        );
+        assert_eq!(
+            extract_offer_terms("Budget is 1.200,50 EUR this time."),
+            Some(ProposedTerms {
+                fee_minor: 120_050,
+                currency: "EUR",
+            })
+        );
+        assert_eq!(
+            extract_offer_terms("How about £350 plus the door?"),
+            Some(ProposedTerms {
+                fee_minor: 35_000,
+                currency: "GBP",
+            })
+        );
+    }
+
+    #[test]
+    fn a_repeated_figure_is_still_one_offer() {
+        // The same number quoted twice is one proposal, not two.
+        assert_eq!(
+            extract_offer_terms("We could do €400 — yes, 400 euros total."),
+            Some(ProposedTerms {
+                fee_minor: 40_000,
+                currency: "EUR",
+            })
+        );
+    }
+
+    #[test]
+    fn two_figures_or_a_range_propose_nothing() {
+        assert_eq!(
+            extract_offer_terms("Either €400 or €450 depending on the date."),
+            None
+        );
+        assert_eq!(extract_offer_terms("Somewhere between €400-500."), None);
+        assert_eq!(extract_offer_terms("Somewhere between 400-500 EUR."), None);
+        // No currency marker: a bare number is never a proposal.
+        assert_eq!(extract_offer_terms("The room holds 400 people."), None);
+        assert_eq!(extract_offer_terms("Sure, see you then."), None);
+        // A marker without a figure proposes nothing either.
+        assert_eq!(extract_offer_terms("Payment in EUR is fine."), None);
+        // A figure the convention cannot read is refused, not guessed.
+        assert_eq!(extract_offer_terms("Could do 1,2,3 EUR maybe."), None);
+    }
+
+    #[test]
+    fn ungrouped_figures_read_but_word_ranges_and_zero_do_not() {
+        // The common magnitudes, written without separators.
+        assert_eq!(
+            extract_offer_terms("We can offer 1200 EUR for the night."),
+            Some(ProposedTerms {
+                fee_minor: 120_000,
+                currency: "EUR"
+            })
+        );
+        assert_eq!(
+            extract_offer_terms("1500 zł i dobrze."),
+            Some(ProposedTerms {
+                fee_minor: 150_000,
+                currency: "PLN"
+            })
+        );
+        assert_eq!(
+            extract_offer_terms("$5000 is our ceiling."),
+            Some(ProposedTerms {
+                fee_minor: 500_000,
+                currency: "USD"
+            })
+        );
+        // Zero is not an offer — and would violate the proposed-fee CHECK.
+        assert_eq!(extract_offer_terms("We can do €0 this time."), None);
+        assert_eq!(extract_offer_terms("0 zł, niestety."), None);
+        // Word ranges propose nothing: the marked figure is one end.
+        assert_eq!(extract_offer_terms("From 400 to 500 EUR."), None);
+        assert_eq!(extract_offer_terms("Either 400 or 500 EUR."), None);
+        assert_eq!(extract_offer_terms("€400—500 depending."), None);
+        // A ceiling is not a committed figure either.
+        assert_eq!(extract_offer_terms("Up to €400, no more."), None);
     }
 }
