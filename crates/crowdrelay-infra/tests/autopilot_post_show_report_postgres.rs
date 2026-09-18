@@ -640,3 +640,260 @@ async fn a_failed_report_escalation_advances_the_retry_epoch()
     f.pool.close().await;
     Ok(())
 }
+
+async fn advertise_show_growth(
+    pool: &sqlx::PgPool,
+    workspace_id: WorkspaceId,
+    now: OffsetDateTime,
+) -> Result<(), Box<dyn std::error::Error>> {
+    sqlx::query(
+        r#"
+        INSERT INTO viryaos_executor_instances (
+            workspace_id, executor_id, version, manifest_sha, observed_at, expires_at
+        ) VALUES ($1,'n8n-growth-test','test','test-manifest',$2,$3)
+        "#,
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(now)
+    .bind(now + time::Duration::minutes(30))
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO viryaos_executor_capabilities (
+            workspace_id, executor_id, capability, capability_version, observed_at, expires_at
+        ) VALUES ($1,'n8n-growth-test','show.growth','1',$2,$3)
+        "#,
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(now)
+    .bind(now + time::Duration::minutes(30))
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// §6.4 — post-festival follow-up, performer side. The T+1 recap for the
+/// room names the festival and lists every act on the slot's bill — "acts
+/// you saw" is the whole bill, not just the tenant — and the T+7 report
+/// labels the room's numbers the same way it does for any show: a festival
+/// date is evidence of record, not a special pipeline.
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn festival_post_show_follow_up_labels_acts_and_room()
+-> Result<(), Box<dyn std::error::Error>> {
+    let f = setup().await?;
+    let now = OffsetDateTime::now_utc();
+    advertise_show_growth(&f.pool, f.workspace_id, now).await?;
+    advertise_show_escalation(&f.pool, f.workspace_id, now).await?;
+    // First-party levers only send when the tenant has campaigns on.
+    sqlx::query(
+        "INSERT INTO ecosystem_feature_flags (workspace_id, key, enabled)
+         VALUES ($1, 'communication_campaigns_enabled', true)",
+    )
+    .bind(f.workspace_id.into_uuid())
+    .execute(&f.pool)
+    .await?;
+
+    let starts_at = now - time::Duration::days(8);
+    let event_id = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO cities (id, slug, name, country_code) VALUES ($1, 'wroclaw', 'Wrocław', 'PL')
+         ON CONFLICT (country_code, slug) DO UPDATE SET name = EXCLUDED.name",
+    )
+    .bind(Uuid::now_v7())
+    .execute(&f.pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO events (id, workspace_id, city_id, slug, title, venue, timezone,
+                             starts_at, status, published_at,
+                             counterparty_name, counterparty_email, festival_name)
+         VALUES ($1, $2, $3, 'off-fest-2026', 'Virya at OFF Festival', 'Main Stage',
+                 'Europe/Warsaw', $4, 'published', $5,
+                 'OFF Organiser', 'organiser@example.test', 'OFF Festival')",
+    )
+    .bind(event_id)
+    .bind(f.workspace_id.into_uuid())
+    .bind(city_id_for(&f.pool, "wroclaw").await?)
+    .bind(starts_at)
+    .bind(starts_at - time::Duration::days(20))
+    .execute(&f.pool)
+    .await?;
+    // The festival bill: the tenant plus two bill-mates, in play order.
+    sqlx::query(
+        "INSERT INTO event_acts (workspace_id, event_id, act_slug, act_name, position)
+         VALUES ($1, $2, 'virya', 'Virya', 0),
+                ($1, $2, 'scene-local', 'Scene Local', 1),
+                ($1, $2, 'quiet-riot', 'Quiet Riot Tribute', 2)",
+    )
+    .bind(f.workspace_id.into_uuid())
+    .bind(event_id)
+    .execute(&f.pool)
+    .await?;
+
+    // Room evidence: a long-known fan on a session scan and a stranger who
+    // claimed an email identity at the door — the festival's new-follows
+    // number is the second of these.
+    let qr_campaign_id = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO concert_qr_campaigns (workspace_id, event_id, id, label, valid_from, valid_until)
+         VALUES ($1, $2, $3, 'poster', $4, $5)",
+    )
+    .bind(f.workspace_id.into_uuid())
+    .bind(event_id)
+    .bind(qr_campaign_id)
+    .bind(starts_at - time::Duration::days(7))
+    .bind(starts_at + time::Duration::days(7))
+    .execute(&f.pool)
+    .await?;
+    let known_fan = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO fans (id, workspace_id, normalized_email, status, created_at)
+         VALUES ($1, $2, 'festival-known@example.test', 'active', $3)",
+    )
+    .bind(known_fan)
+    .bind(f.workspace_id.into_uuid())
+    .bind(starts_at - time::Duration::days(60))
+    .execute(&f.pool)
+    .await?;
+    let new_fan = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO fans (id, workspace_id, normalized_email, status, created_at)
+         VALUES ($1, $2, 'festival-stranger@example.test', 'active', $3)",
+    )
+    .bind(new_fan)
+    .bind(f.workspace_id.into_uuid())
+    .bind(starts_at + time::Duration::hours(1))
+    .execute(&f.pool)
+    .await?;
+    for (fan_id, source) in [(known_fan, "session"), (new_fan, "email_claim")] {
+        sqlx::query(
+            "INSERT INTO concert_checkins (workspace_id, event_id, campaign_id, fan_id, checked_in_at, identity_source)
+             VALUES ($1, $2, $3, $4, $5, $6)",
+        )
+        .bind(f.workspace_id.into_uuid())
+        .bind(event_id)
+        .bind(qr_campaign_id)
+        .bind(fan_id)
+        .bind(starts_at + time::Duration::hours(1))
+        .bind(source)
+        .execute(&f.pool)
+        .await?;
+    }
+
+    // The T+1 recap lever, seeded the way the evaluator's persist path writes
+    // it — a queued owned-audience action on the show.growth capability.
+    let decision_id = Uuid::now_v7();
+    sqlx::query(
+        r#"INSERT INTO viryaos_autopilot_decisions
+           (id, workspace_id, decision_key, context, subject_kind, subject_id,
+            decision_kind, confidence_basis_points, disposition, reason,
+            input_snapshot, policy_snapshot, recommendation, evaluated_at, trace_id)
+           VALUES ($1,$2,$3,'show_operations','event',$4,'request_show_growth',10000,
+                   'auto_execute','T+1 recap due','{}','{}','{}',$5,$1)"#,
+    )
+    .bind(decision_id)
+    .bind(f.workspace_id.into_uuid())
+    .bind(format!("decision-{decision_id}"))
+    .bind(event_id)
+    .bind(now)
+    .execute(&f.pool)
+    .await?;
+    let recap_action = Uuid::now_v7();
+    sqlx::query(
+        r#"INSERT INTO viryaos_autopilot_actions
+           (id, workspace_id, decision_id, context, action_kind, subject_kind,
+            subject_id, idempotency_key, payload, status, action_class,
+            approved_at, approved_by, available_at)
+           VALUES ($1,$2,$3,'show_operations','show.growth.request','event',$4,$5,$6,
+                   'queued','owned_audience',$7,'system:test',$7)"#,
+    )
+    .bind(recap_action)
+    .bind(f.workspace_id.into_uuid())
+    .bind(decision_id)
+    .bind(event_id)
+    .bind(format!("action:show:{event_id}:PostShowRecap"))
+    .bind(json!({
+        "kind": "request_show_growth",
+        "event_id": event_id,
+        "lever": "post_show_recap",
+        "template_key": "post_show_recap"
+    }))
+    .bind(now)
+    .execute(&f.pool)
+    .await?;
+
+    let claimed = f
+        .repository
+        .claim_due_autonomous_actions(f.workspace_id, 8, now)
+        .await?;
+    let action = claimed
+        .iter()
+        .find(|a| a.id.into_uuid() == recap_action)
+        .expect("festival recap action claimable under show.growth");
+    f.repository
+        .execute_action(f.workspace_id, action, now)
+        .await?;
+
+    // The recap the room gets: the festival is the memory hook, and "acts you
+    // saw" is every act on the slot's bill, in play order.
+    let content: Value = sqlx::query_scalar(
+        "SELECT content FROM communication_campaigns
+         WHERE workspace_id = $1 AND slug = 'viryaos-off-fest-2026-post-show-recap'",
+    )
+    .bind(f.workspace_id.into_uuid())
+    .fetch_one(&f.pool)
+    .await?;
+    assert_eq!(content["festival_name"], "OFF Festival");
+    assert_eq!(content["venue"], "Main Stage");
+    let acts: Vec<&str> = content["acts"]
+        .as_array()
+        .expect("acts array")
+        .iter()
+        .filter_map(|act| act["slug"].as_str())
+        .collect();
+    assert_eq!(acts, ["virya", "scene-local", "quiet-riot"]);
+    let rules: Vec<&str> = content["email_contract"]["rules"]
+        .as_array()
+        .expect("rules array")
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    assert!(rules.contains(&"name_only_acts_on_the_announced_bill"));
+
+    // The T+7 report on the same festival date labels the room's numbers —
+    // the band-side "new follows from this room" is `new_fan_records_at_show`.
+    let report_action = seed_report_action(&f, event_id, now).await?;
+    let claimed = f
+        .repository
+        .claim_due_autonomous_actions(f.workspace_id, 8, now)
+        .await?;
+    let action = claimed
+        .iter()
+        .find(|a| a.id.into_uuid() == report_action)
+        .expect("festival report action claimable");
+    f.repository
+        .execute_action(f.workspace_id, action, now)
+        .await?;
+    let payload: Value = sqlx::query_scalar(
+        "SELECT payload FROM outbox_events
+         WHERE workspace_id = $1 AND event_type = 'crowdrelay.show.post_show_report_due'
+           AND payload->'event'->>'slug' = 'off-fest-2026'",
+    )
+    .bind(f.workspace_id.into_uuid())
+    .fetch_one(&f.pool)
+    .await?;
+    assert_eq!(payload["event"]["festival_name"], "OFF Festival");
+    assert_eq!(payload["report"]["observed"]["room_checkins_total"], 2);
+    assert_eq!(payload["report"]["observed"]["new_fan_records_at_show"], 1);
+    let report_acts: Vec<&str> = payload["event"]["acts"]
+        .as_array()
+        .expect("event acts array")
+        .iter()
+        .filter_map(|act| act["slug"].as_str())
+        .collect();
+    assert_eq!(report_acts, ["virya", "scene-local", "quiet-riot"]);
+
+    f.pool.close().await;
+    Ok(())
+}
