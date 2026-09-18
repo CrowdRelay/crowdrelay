@@ -326,6 +326,10 @@ pub struct TeamOpportunityRequest {
     /// prestige by omission.
     #[serde(default)]
     strategic_value_basis_points: u16,
+    /// When the source was actually observed. `None` stays `None` — the row
+    /// keeps whatever observation it had rather than borrowing the write time.
+    #[serde(default, with = "time::serde::rfc3339::option")]
+    source_observed_at: Option<OffsetDateTime>,
     expected_version: i64,
 }
 
@@ -335,6 +339,10 @@ pub struct TeamOpportunityProgressRequest {
     progress: TeamOpportunityProgress,
     #[serde(with = "time::serde::rfc3339")]
     occurred_at: OffsetDateTime,
+    /// Required for `lost` and `dismissed`: a row that closes says why, so a
+    /// refusal teaches the pipeline instead of disappearing.
+    #[serde(default)]
+    reason: Option<String>,
 }
 
 /// Where the promoter stands. The agent never invents this: somebody read an

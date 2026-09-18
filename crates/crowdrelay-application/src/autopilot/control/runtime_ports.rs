@@ -82,6 +82,16 @@ pub trait AutopilotControlRepository: Send + Sync {
         now: OffsetDateTime,
     ) -> Result<Vec<NextBestAction>, RepositoryError>;
 
+    /// The scout shortlist: every tracked opportunity with its link, costed
+    /// figures, staleness and latest decision — including the rows that are
+    /// closed, ineligible or stale, because a review surface that hides its
+    /// rejections makes the operator re-check them by hand.
+    async fn load_opportunity_shortlist(
+        &self,
+        workspace_id: WorkspaceId,
+        now: OffsetDateTime,
+    ) -> Result<OpportunityShortlist, RepositoryError>;
+
     /// Which channels produced people who stayed.
     ///
     /// The question a zero-budget campaign lives on, and the one the system

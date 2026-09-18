@@ -400,6 +400,14 @@ impl AutopilotControlRepository for PostgresAutopilotRepository {
             .await
     }
 
+    async fn load_opportunity_shortlist(
+        &self,
+        workspace_id: WorkspaceId,
+        now: OffsetDateTime,
+    ) -> Result<crowdrelay_application::autopilot::OpportunityShortlist, RepositoryError> {
+        operations::load_opportunity_shortlist(self, workspace_id, now).await
+    }
+
     async fn load_manager_booking_policy(
         &self,
         workspace_id: WorkspaceId,

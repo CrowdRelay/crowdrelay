@@ -63,6 +63,10 @@ fn executor_capability_for_event(event_type: &str) -> &'static str {
         "crowdrelay.ops.status_changed" => "ops.alert",
         "crowdrelay.promotion.budget_change_requested" => "promotion.budget",
         "crowdrelay.opportunity.application_requested" => "opportunity.application",
+        // The counterparty report is the same delivery class as the post-show
+        // report it precedes in the negotiation — a note to the humans around
+        // the deal — so it rides the same show.escalation executor.
+        "crowdrelay.opportunity.counterparty_report_issued" => "show.escalation",
         // One capability for both moves. An executor that can write to a
         // promoter can write either message, and splitting them would let a
         // workspace advertise the ability to accept without the ability to
@@ -150,6 +154,9 @@ pub const fn payload_requires_executor(payload: &AutopilotActionPayload) -> bool
                 | AutopilotActionPayload::VerifyPlaylistPlacement { .. }
                 | AutopilotActionPayload::CounterLiveOpportunityTerms { .. }
                 | AutopilotActionPayload::AcceptLiveOpportunityTerms { .. }
+                // Sends through the same machinery as the checklist's report
+                // escalation — same capability, same event.
+                | AutopilotActionPayload::IssueCounterpartyReport { .. }
                 | AutopilotActionPayload::PrepareFundingPackage { .. }
                 | AutopilotActionPayload::SubmitFundingApplication { .. }
                 | AutopilotActionPayload::RunPlayStep { .. }
@@ -205,6 +212,7 @@ pub(in crate::autopilot) fn executor_capability_for_payload(
         AutopilotActionPayload::RequestShowGrowth { .. } => "show.growth",
         AutopilotActionPayload::RequestContentArtifact { .. } => "content.artifact",
         AutopilotActionPayload::EscalateShowTask { .. } => "show.escalation",
+        AutopilotActionPayload::IssueCounterpartyReport { .. } => "show.escalation",
         AutopilotActionPayload::RequestPromotionBudgetChange { .. } => "promotion.budget",
         AutopilotActionPayload::ApplyLiveOpportunity { .. } => "opportunity.application",
         AutopilotActionPayload::VerifyPlaylistPlacement { .. } => "playlist.verify",

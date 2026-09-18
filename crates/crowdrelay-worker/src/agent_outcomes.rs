@@ -36,6 +36,7 @@ use crowdrelay_domain::target_discovery::{
 use serde_json::{Value, json};
 use sqlx::{PgPool, Postgres, Transaction};
 use thiserror::Error;
+use time::OffsetDateTime;
 use tokio::{
     sync::watch,
     time::{MissedTickBehavior, interval, timeout},
@@ -79,86 +80,18 @@ pub enum AgentOutcomeError {
     NoPressRecipient,
     #[error("agent outcome payload does not match the action schema")]
     UnpersistablePayload,
+    /// The quality guard runs before the transaction opens, so a rejection
+    /// surfacing here means the finding-shaped write re-checked its own
+    /// contract rather than trusting the caller. The process loop records it
+    /// as a rejection either way.
+    #[error("{0}")]
+    Rejected(#[from] OutcomeRejection),
 }
 
-/// Why an outcome was rejected by the data-quality guard. Stored in
-/// `rejection_reason` for auditability — the row is never deleted.
-///
-/// The brain must never turn a connector failure into an opportunity.
-/// A Reddit credential error produces 0 evidence and 0% confidence, and
-/// without these guards that still became a decision with an
-/// `awaiting_approval` action targeting "Unnamed target". NO EVIDENCE =
-/// NO OPPORTUNITY.
-#[derive(Debug)]
-enum OutcomeRejection {
-    /// confidence_basis_points is 0 for a require_approval kind.
-    /// The connector produced no evidence to support a decision.
-    InsufficientEvidence { reason: String },
-    /// The outreach target has no usable identity — display_name is
-    /// missing, empty, or the literal "Unnamed target" fallback.
-    MissingTargetIdentity,
-    /// The row's provenance bars it from becoming a pending action: nothing
-    /// recorded how it was produced, it was never grounding-checked, or a
-    /// data source behind it did not complete.
-    ///
-    /// Unlike every other variant here, this one reads what the agents
-    /// service recorded about the RUN rather than what the model wrote in the
-    /// item. That is the difference that matters: a model answering
-    /// confidently from a dead connector clears every item-level test,
-    /// because every item-level test reads fields the model authored.
-    UnsupportedProvenance(ProvenanceRejection),
-    /// A signal push whose deep link leaves the app.
-    ///
-    /// `target_path` is an in-app route (`/events/{id}`). A model that writes
-    /// an absolute URL or a scheme there is proposing to send the fanbase to
-    /// a destination nobody approved, and the approval click shows the copy,
-    /// not the link.
-    OffPlatformPushTarget { target: String },
-    /// A community post whose target is not a screened-and-admitted
-    /// community. The `target_id` a model supplies is only a claim — the row
-    /// it names must exist, carry `screening_verdict = 'admitted'`, and sit
-    /// at `status = 'promoted'`. Anything else is a post to a community
-    /// nobody vetted: a fabricated UUID posts anywhere the model names, and
-    /// a refused community (off-topic, too small, previously refused) posts
-    /// past the screen that rejected it.
-    UnvettedCommunity { target_id: Uuid },
-    /// A community post that names no trusted video source — or names one
-    /// that does not exist, is inactive, expired, or is not a video. A thread
-    /// post exists to share a release video; anything else is a post about
-    /// nothing — which is how fabricated anecdotes reached Reddit.
-    UnsourcedPost { source_id: Option<String> },
-}
-
-impl std::fmt::Display for OutcomeRejection {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::InsufficientEvidence { reason } => {
-                write!(f, "INSUFFICIENT_EVIDENCE: {reason}")
-            }
-            Self::MissingTargetIdentity => {
-                write!(
-                    f,
-                    "MISSING_TARGET_IDENTITY: display_name is missing or unnamed"
-                )
-            }
-            Self::UnsupportedProvenance(rejection) => write!(f, "{rejection}"),
-            Self::OffPlatformPushTarget { target } => write!(
-                f,
-                "OFF_PLATFORM_PUSH_TARGET: target_path {target:?} is not an in-app route"
-            ),
-            Self::UnvettedCommunity { target_id } => write!(
-                f,
-                "UNVETTED_COMMUNITY: target_id {target_id} is not an admitted, promoted community target"
-            ),
-            Self::UnsourcedPost { source_id } => write!(
-                f,
-                "UNSOURCED_POST: source_id {source_id:?} does not name an active, unexpired video content source for this workspace"
-            ),
-        }
-    }
-}
+include!("agent_outcomes/rejections.rs");
 
 include!("agent_outcomes/quality_guard.rs");
+include!("agent_outcomes/opportunity_findings.rs");
 
 /// True for a relative in-app route the Signal app can resolve.
 ///
@@ -452,6 +385,25 @@ impl AgentOutcomeWorker {
         let trace_id = self.resolve_trace(outcome).await;
         let mut tx = self.pool.begin().await?;
         let decision_id = Uuid::now_v7();
+
+        // A scout finding names its own subject: the decision records what
+        // the brain made of the finding, and the shortlist joins that say to
+        // the row it is about. The opportunity lands first so the decision
+        // can point at it.
+        let (subject_kind, subject_id) = match outcome.kind {
+            OutcomeKind::OpportunityFindings => match &outcome.payload.item {
+                Some(item) => (
+                    "team_opportunity",
+                    insert_opportunity_finding(&mut tx, outcome, item).await?,
+                ),
+                // The quality guard refuses a finding without an item before
+                // the transaction opens; this arm exists only so the subject
+                // pair is total.
+                None => ("agent_outcome", outcome.id),
+            },
+            _ => ("agent_outcome", outcome.id),
+        };
+
         let input_snapshot = json!({
             "task_id": outcome.task_id,
             "result_id": outcome.result_id,
@@ -520,8 +472,8 @@ impl AgentOutcomeWorker {
         .bind(outcome.workspace_id)
         .bind(&outcome.idempotency_key)
         .bind(outcome.kind.autopilot_context())
-        .bind("agent_outcome")
-        .bind(outcome.id)
+        .bind(subject_kind)
+        .bind(subject_id)
         .bind(outcome.kind.decision_kind())
         // NOT the self-report. See `evidence_confidence_basis_points`: an LLM
         // proposal carries no measured evidence confidence, so this column gets
@@ -576,8 +528,15 @@ impl AgentOutcomeWorker {
             _ => {}
         }
 
-        // Action row only for require_approval kinds.
-        let action_id = if outcome.kind.disposition() == "require_approval" {
+        // Action row only for require_approval kinds — except scout findings.
+        // A finding's review act is on the opportunity row itself (the
+        // shortlist's own controls progress or dismiss it), and an approved
+        // action that no executor claims would sit in `queued` forever,
+        // polluting every in-flight index. The decision's require_approval
+        // disposition still routes it through the provenance gate.
+        let action_id = if outcome.kind.disposition() == "require_approval"
+            && outcome.kind != OutcomeKind::OpportunityFindings
+        {
             let action_id = Uuid::now_v7();
 
             // A social_post from the community-engager worker targets a
@@ -1427,11 +1386,12 @@ impl AgentOutcomeWorker {
         sqlx::query(
             r#"
             UPDATE agent_outcomes
-            SET status = 'rejected', rejection_reason = $2
-            WHERE id = $1
+            SET status = 'rejected', rejection_reason = $3
+            WHERE id = $1 AND workspace_id = $2
             "#,
         )
         .bind(outcome_id)
+        .bind(self.workspace_id.into_uuid())
         .bind(reason)
         .execute(&self.pool)
         .await?;
@@ -1503,7 +1463,11 @@ mod tests {
         })
     }
 
-    fn make_outcome(kind: OutcomeKind, confidence: i32, item: Option<Value>) -> ValidatedOutcome {
+    pub(super) fn make_outcome(
+        kind: OutcomeKind,
+        confidence: i32,
+        item: Option<Value>,
+    ) -> ValidatedOutcome {
         let needs_provenance = kind.disposition() == "require_approval";
         ValidatedOutcome {
             id: Uuid::now_v7(),

@@ -51,6 +51,7 @@ KNOWN_UNMEASURED = {
     "EscalateEditorialPitch",
     "EscalateShowTask",
     "ExecuteReleaseMilestone",
+    "IssueCounterpartyReport",
     "IssueReferralCode",
     "PrepareFundingPackage",
     "RaiseContentArc",

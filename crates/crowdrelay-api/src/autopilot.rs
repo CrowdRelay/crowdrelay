@@ -217,6 +217,25 @@ pub async fn next_best_actions(State(state): State<AppState>, headers: HeaderMap
     }
 }
 
+/// The scout shortlist: every tracked opportunity with its link, costed
+/// figures, staleness and newest decision — including the closed, ineligible
+/// and stale rows, because a review surface that hides its rejections makes
+/// the operator re-check them by hand.
+pub async fn opportunity_shortlist(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    match read(
+        &state,
+        1,
+        state
+            .autopilot
+            .load_opportunity_shortlist(state.ops.workspace_id(), OffsetDateTime::now_utc()),
+    )
+    .await
+    {
+        Ok(shortlist) => private_json(StatusCode::OK, shortlist),
+        Err(error) => repository_problem(error, request_id(&headers)),
+    }
+}
+
 pub async fn manager_booking_policy(State(state): State<AppState>, headers: HeaderMap) -> Response {
     match read(
         &state,

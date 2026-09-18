@@ -161,7 +161,8 @@ pub async fn negotiations(State(state): State<AppState>, headers: HeaderMap) -> 
                   AND (action.approval_expires_at IS NULL
                        OR action.approval_expires_at > now())
                   AND action.action_kind IN (
-                      'opportunity.terms.counter', 'opportunity.terms.accept'
+                      'opportunity.terms.counter', 'opportunity.terms.accept',
+                      'opportunity.counterparty_report.issue'
                   )
                 ORDER BY action.created_at DESC, action.id DESC
                 LIMIT 1

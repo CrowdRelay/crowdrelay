@@ -92,7 +92,7 @@ async fn insert_outcome(
     // admission gate. Observation kinds (recommend_only) do not.
     if matches!(
         kind,
-        "outreach_targets" | "press_pitch" | "social_post" | "signal_push"
+        "outreach_targets" | "press_pitch" | "social_post" | "signal_push" | "opportunity_findings"
     ) && let Some(obj) = payload.as_object_mut()
     {
         obj.entry("provenance").or_insert(json!({
@@ -672,6 +672,232 @@ async fn rationaleless_inner(pool: &PgPool) -> Result<()> {
     ensure!(
         status == "processed",
         "the outcome must be processed, not rejected — got {status}"
+    );
+    Ok(())
+}
+
+// ── Scout findings: link-or-drop, vocabulary, and the review surface ───────
+//
+// An `opportunity_findings` outcome is a scout carrying a link home. The
+// worker turns it into a `viryaos_team_opportunities` row plus a decision
+// that names the row — never an action, because the review act lives on the
+// shortlist's own controls. A finding without a usable link, a readable
+// description, or a kind inside the scout vocabulary is not a finding.
+
+/// A minimal valid finding item. `press` exercises a scout-only kind so the
+/// row proves scout vocabulary reaches the table.
+fn finding_item() -> serde_json::Value {
+    json!({
+        "type": "opportunity_finding",
+        "opportunity_kind": "press",
+        "title": "Unsigned column at Obscure Zine",
+        "organization": "Obscure Zine",
+        "destination_url": "https://obscure.example/columns/unsigned",
+        "summary": "A quarterly print zine with an unsigned column and an email pitch box.",
+        "country_code": "PL",
+    })
+}
+
+async fn opportunity_count(pool: &PgPool, workspace_id: WorkspaceId) -> Result<i64> {
+    Ok(sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM viryaos_team_opportunities WHERE workspace_id = $1",
+    )
+    .bind(workspace_id.into_uuid())
+    .fetch_one(pool)
+    .await?)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn a_finding_without_a_link_is_rejected() -> Result<()> {
+    let database = DisposableDatabase::create().await?;
+    let result = finding_no_link_inner(&database.pool).await;
+    database.drop_database().await;
+    result
+}
+
+async fn finding_no_link_inner(pool: &PgPool) -> Result<()> {
+    let ws = workspace(pool).await?;
+    let mut item = finding_item();
+    item.as_object_mut().unwrap().remove("destination_url");
+    let outcome_id = insert_outcome(
+        pool,
+        ws,
+        "opportunity_findings",
+        5000,
+        json!({ "item": item, "rationale": "test" }),
+    )
+    .await?;
+
+    worker(pool, ws).run_once().await?;
+
+    ensure!(
+        opportunity_count(pool, ws).await? == 0,
+        "a finding without a link must not land a row"
+    );
+    let reason = rejection_reason(pool, outcome_id).await?;
+    ensure!(
+        reason
+            .as_ref()
+            .is_some_and(|r| r.contains("MISSING_FINDING_LINK")),
+        "rejection reason must mention MISSING_FINDING_LINK, got {reason:?}"
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn a_finding_outside_the_vocabulary_is_rejected() -> Result<()> {
+    let database = DisposableDatabase::create().await?;
+    let result = finding_bad_kind_inner(&database.pool).await;
+    database.drop_database().await;
+    result
+}
+
+async fn finding_bad_kind_inner(pool: &PgPool) -> Result<()> {
+    let ws = workspace(pool).await?;
+    let mut item = finding_item();
+    item["opportunity_kind"] = json!("funding");
+    let outcome_id = insert_outcome(
+        pool,
+        ws,
+        "opportunity_findings",
+        5000,
+        json!({ "item": item, "rationale": "test" }),
+    )
+    .await?;
+
+    worker(pool, ws).run_once().await?;
+
+    ensure!(
+        opportunity_count(pool, ws).await? == 0,
+        "a kind outside the scout vocabulary must not land a row"
+    );
+    let reason = rejection_reason(pool, outcome_id).await?;
+    ensure!(
+        reason
+            .as_ref()
+            .is_some_and(|r| r.contains("INVALID_FINDING_KIND")),
+        "rejection reason must mention INVALID_FINDING_KIND, got {reason:?}"
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn a_valid_finding_lands_a_row_and_a_decision_but_no_action() -> Result<()> {
+    let database = DisposableDatabase::create().await?;
+    let result = finding_valid_inner(&database.pool).await;
+    database.drop_database().await;
+    result
+}
+
+async fn finding_valid_inner(pool: &PgPool) -> Result<()> {
+    let ws = workspace(pool).await?;
+    let outcome_id = insert_outcome(
+        pool,
+        ws,
+        "opportunity_findings",
+        5000,
+        json!({ "item": finding_item(), "rationale": "test" }),
+    )
+    .await?;
+
+    worker(pool, ws).run_once().await?;
+
+    ensure!(
+        opportunity_count(pool, ws).await? == 1,
+        "a valid finding must land exactly one opportunity row"
+    );
+    let (kind, verified, requires_contract, observed, status): (String, bool, bool, bool, String) =
+        sqlx::query_as(
+            "SELECT opportunity_kind, verified_destination, requires_contract, \
+                source_observed_at IS NOT NULL, status \
+         FROM viryaos_team_opportunities WHERE workspace_id = $1",
+        )
+        .bind(ws.into_uuid())
+        .fetch_one(pool)
+        .await?;
+    ensure!(kind == "press", "the scout kind must land, got {kind}");
+    ensure!(
+        !verified && requires_contract && status == "new",
+        "a finding must land unverified, contract-gated and new"
+    );
+    ensure!(
+        observed,
+        "a finding without observed_at borrows the outcome's write time"
+    );
+
+    // The decision names the opportunity row — the shortlist joins on it.
+    let (subject_kind, subject_matches): (String, bool) = sqlx::query_as(
+        "SELECT d.subject_kind, d.subject_id = o.id \
+         FROM viryaos_autopilot_decisions d \
+         JOIN viryaos_team_opportunities o ON o.workspace_id = d.workspace_id \
+         WHERE d.workspace_id = $1",
+    )
+    .bind(ws.into_uuid())
+    .fetch_one(pool)
+    .await?;
+    ensure!(
+        subject_kind == "team_opportunity" && subject_matches,
+        "the decision must name the opportunity row it is about"
+    );
+
+    // No action: the review act lives on the shortlist's own controls, and an
+    // approved action no executor claims would sit queued forever.
+    let actions: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM viryaos_autopilot_actions WHERE workspace_id = $1",
+    )
+    .bind(ws.into_uuid())
+    .fetch_one(pool)
+    .await?;
+    ensure!(actions == 0, "a finding must create no action row");
+
+    let status: String = sqlx::query_scalar("SELECT status FROM agent_outcomes WHERE id = $1")
+        .bind(outcome_id)
+        .fetch_one(pool)
+        .await?;
+    ensure!(status == "processed", "the outcome must be processed");
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn a_reemitted_finding_updates_the_same_row() -> Result<()> {
+    let database = DisposableDatabase::create().await?;
+    let result = finding_reemit_inner(&database.pool).await;
+    database.drop_database().await;
+    result
+}
+
+async fn finding_reemit_inner(pool: &PgPool) -> Result<()> {
+    let ws = workspace(pool).await?;
+    for _ in 0..2 {
+        insert_outcome(
+            pool,
+            ws,
+            "opportunity_findings",
+            5000,
+            json!({ "item": finding_item(), "rationale": "test" }),
+        )
+        .await?;
+    }
+
+    worker(pool, ws).run_once().await?;
+
+    ensure!(
+        opportunity_count(pool, ws).await? == 1,
+        "kind + link is the finding's natural key — a re-emit must land on the same row"
+    );
+    let version: i64 = sqlx::query_scalar(
+        "SELECT version FROM viryaos_team_opportunities WHERE workspace_id = $1",
+    )
+    .bind(ws.into_uuid())
+    .fetch_one(pool)
+    .await?;
+    ensure!(
+        version == 2,
+        "the re-emit must bump the row version, got {version}"
     );
     Ok(())
 }

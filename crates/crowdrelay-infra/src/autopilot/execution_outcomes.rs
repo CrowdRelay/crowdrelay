@@ -135,6 +135,9 @@ pub(super) async fn record_execution_outcome(
         AutopilotActionPayload::AcceptLiveOpportunityTerms { fee_minor, .. } => {
             ("live_opportunity_accepted_minor", *fee_minor as f64, None)
         }
+        AutopilotActionPayload::IssueCounterpartyReport { .. } => {
+            ("counterparty_report_issued", 1.0, None)
+        }
         AutopilotActionPayload::PrepareFundingPackage { .. } => ("funding_package_requested",1.0,None),
         AutopilotActionPayload::SubmitFundingApplication { .. } => ("funding_submission_requested",1.0,None),
         AutopilotActionPayload::SendTeamAssignmentEmail { .. } => {

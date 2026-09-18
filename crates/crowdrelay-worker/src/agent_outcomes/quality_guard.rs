@@ -99,5 +99,48 @@ fn evaluate_outcome_quality(outcome: &ValidatedOutcome) -> Result<(), OutcomeRej
         }
     }
 
+    // Scout findings: the link is the finding and the kind is the contract.
+    // A model that cannot supply both was not looking at a source.
+    if outcome.kind == OutcomeKind::OpportunityFindings {
+        let Some(item) = &outcome.payload.item else {
+            return Err(OutcomeRejection::MissingFindingContent);
+        };
+        let kind = item
+            .get("opportunity_kind")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if crowdrelay_domain::live_opportunities::ScoutOpportunityKind::parse(kind).is_none() {
+            return Err(OutcomeRejection::InvalidFindingKind {
+                kind: kind.to_owned(),
+            });
+        }
+        let title = item
+            .get("title")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .trim();
+        let summary = item
+            .get("summary")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .trim();
+        if title.is_empty() || summary.is_empty() {
+            return Err(OutcomeRejection::MissingFindingContent);
+        }
+        let link = item
+            .get("destination_url")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .trim();
+        if link.is_empty() || link.len() > 1_000 {
+            return Err(OutcomeRejection::MissingFindingLink);
+        }
+        // `observed_at` is the source's own date when the source states one;
+        // when absent the outcome's write time stands in. Either way the row
+        // lands with an honest observation date, and a stale one simply shows
+        // stale on the shortlist. Only a broken or impossible date is refused.
+        parse_finding_timestamp(item.get("observed_at"))?;
+    }
+
     Ok(())
 }

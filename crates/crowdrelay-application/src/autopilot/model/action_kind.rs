@@ -40,6 +40,7 @@ impl AutopilotActionPayload {
             Self::EscalateEditorialPitch { .. } => "release.editorial_pitch.escalate",
             Self::CounterLiveOpportunityTerms { .. } => "opportunity.terms.counter",
             Self::AcceptLiveOpportunityTerms { .. } => "opportunity.terms.accept",
+            Self::IssueCounterpartyReport { .. } => "opportunity.counterparty_report.issue",
             Self::PrepareFundingPackage { .. } => "funding.package.prepare",
             Self::SubmitFundingApplication { .. } => "funding.application.submit",
             Self::RaiseGrowthOpportunity { .. } => "growth.opportunity.raise",

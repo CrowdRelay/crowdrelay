@@ -25,7 +25,9 @@ FLOOR_MIGRATION = ROOT / "migrations/0314_terms_floor_basis.sql"
 DOMAIN = ROOT / "crates/crowdrelay-domain/src/negotiation.rs"
 POLICY = ROOT / "crates/crowdrelay-domain/src/live_opportunities.rs"
 MODEL = ROOT / "crates/crowdrelay-application/src/autopilot/model.rs"
-CANDIDATE = ROOT / "crates/crowdrelay-application/src/autopilot/evaluate/candidates.rs"
+CANDIDATE = (
+    ROOT / "crates/crowdrelay-application/src/autopilot/evaluate/candidates_terms.rs"
+)
 EVALUATE = ROOT / "crates/crowdrelay-application/src/autopilot/evaluate/live_terms.rs"
 INFRA = ROOT / "crates/crowdrelay-infra/src/autopilot/terms.rs"
 INGRESS = ROOT / "crates/crowdrelay-infra/src/autopilot/operations/ingress/team.rs"

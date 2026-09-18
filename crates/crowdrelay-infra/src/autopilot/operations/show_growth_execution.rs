@@ -1029,11 +1029,13 @@ pub(in crate::autopilot) async fn issue_post_show_report(
         "promoter"
     };
 
-    crate::autopilot::emit_external_action(
+    crate::autopilot::emit_outward_action(
         tx,
         workspace_id,
         action_id,
         "crowdrelay.show.post_show_report_due",
+        format!("show-report:{event_id}"),
+        "post-show report owed to the band and the counterparty of record",
         json!({
             "action_id": action_id,
             "event_id": event_id,
@@ -1147,4 +1149,40 @@ pub(in crate::autopilot) async fn issue_post_show_report(
     // A report going out proves the night ended; if reconciliation never ran
     // (an odd path, but possible) the harvest source still registers here.
     ensure_show_completed_source(tx, workspace_id, event_id).await
+}
+
+/// The report a live-terms negotiation waits on before its first counter. It
+/// goes through `issue_post_show_report` — the one piece of machinery that
+/// owns the checklist item — so the sequencing rule and the checklist can
+/// never disagree about whether the report went. The emitted event then names
+/// the negotiation it unblocked, so the receipt trail reads "report sent for
+/// this opportunity" instead of an unattributed show task.
+pub(in crate::autopilot) async fn issue_counterparty_report(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    workspace_id: WorkspaceId,
+    action_id: crowdrelay_domain::AutopilotActionId,
+    opportunity_id: crowdrelay_domain::TeamOpportunityId,
+    event_id: EventId,
+    now: OffsetDateTime,
+) -> Result<(), RepositoryError> {
+    issue_post_show_report(tx, workspace_id, action_id, event_id, now).await?;
+    // The marker is this action's second emission — it needs its own key or
+    // the report's emission row swallows it on the conflict.
+    crate::autopilot::emit_external_action_keyed(
+        tx,
+        workspace_id,
+        action_id,
+        "crowdrelay.opportunity.counterparty_report_issued",
+        json!({
+            "action_id": action_id,
+            "opportunity_id": opportunity_id,
+            "event_id": event_id,
+            "send_evidence": crate::autopilot::send_evidence(
+                format!("opportunity:{opportunity_id}"),
+                "post-show report owed to this counterparty before the next ask",
+            )?,
+        }),
+        Some("counterparty-report"),
+    )
+    .await
 }

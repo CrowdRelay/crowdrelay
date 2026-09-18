@@ -1012,6 +1012,12 @@ impl PostgresAutopilotRepository {
                         now,
                     ).await?;
                 }
+                AutopilotActionPayload::IssueCounterpartyReport { opportunity_id, event_id } => {
+                    operations::issue_counterparty_report(
+                        &mut transaction, workspace_id, action.id, *opportunity_id, *event_id, now,
+                    )
+                    .await?;
+                }
                 AutopilotActionPayload::PrepareFundingPackage { opportunity_id } => {
                     operations::prepare_funding_package(&mut transaction, workspace_id, action.id, *opportunity_id, now).await?;
                 }
