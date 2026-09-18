@@ -665,6 +665,27 @@ async fn staged_rows_resolve_against_the_shared_registries()
     .execute(&fixture.pool)
     .await?;
 
+    // P.6 — a second tenant's outreach ledger holds a positive thread on
+    // Aga's address, so the prior counts across workspaces, not just this
+    // band's own marks. The disposable database persists between runs and
+    // each run's workspace is new, so the assertions floor rather than pin.
+    let other_tenant = Uuid::now_v7();
+    sqlx::query("INSERT INTO workspaces (id, slug, name) VALUES ($1, $2, 'Other tenant')")
+        .bind(other_tenant)
+        .bind(format!("registry-other-{}", other_tenant.simple()))
+        .execute(&fixture.pool)
+        .await?;
+    sqlx::query(
+        "INSERT INTO viryaos_outreach_targets
+            (workspace_id, target_kind, display_name, contact_email,
+             last_outreach_at, last_reply_at, last_reply_disposition)
+         VALUES ($1, 'support_slot', 'Aga Nowak', 'aga@agency.pl',
+                 now() - interval '40 days', now() - interval '39 days', 'positive')",
+    )
+    .bind(other_tenant)
+    .execute(&fixture.pool)
+    .await?;
+
     // The sheet.
     seed_contact(&fixture, "bookings@stodola.pl", Some("Klub Stodola"), None).await?;
     let own_room = seed_contact_city(
@@ -699,32 +720,70 @@ async fn staged_rows_resolve_against_the_shared_registries()
         .repository
         .list_contacts(fixture.workspace_id, 50)
         .await?;
-    let by_email = |email: &str| rows.iter().find(|r| r.normalized_email == email).unwrap();
+    let by_email = |email: &str| {
+        rows.iter()
+            .find(|v| v.row.normalized_email == email)
+            .unwrap()
+    };
 
     // City-placed match: org keys to the wroclaw room, own marks say played.
     let own = by_email("produk@stodola.pl");
-    assert_eq!(own.matched_venue.as_deref(), Some("Klub Stodola"));
-    assert!(own.venue_played_here);
+    assert_eq!(own.row.matched_venue.as_deref(), Some("Klub Stodola"));
+    assert!(own.row.venue_played_here);
+    // P.6 — this tenant's own mark is part of the room's record: the prior
+    // floors at one tenant, one show.
+    let own_prior = own.venue_prior.expect("a matched venue carries its prior");
+    assert!(
+        own_prior.tenants_played >= 1 && own_prior.shows >= 1,
+        "Klub Stodola's marks are the shared record: {own_prior:?}"
+    );
 
     // The ambiguous name with no city resolves to nothing — guessing would
     // file the row against the wrong room.
     let ambiguous = by_email("info@stodola.pl");
-    assert_eq!(ambiguous.matched_venue, None);
+    assert_eq!(ambiguous.row.matched_venue, None);
 
     // The played counterparty and the merely-known one stay distinct.
     let played = by_email("aga@agency.pl");
-    assert_eq!(played.matched_counterparty.as_deref(), Some("Aga Nowak"));
-    assert!(played.counterparty_worked_with);
+    assert_eq!(
+        played.row.matched_counterparty.as_deref(),
+        Some("Aga Nowak")
+    );
+    assert!(played.row.counterparty_worked_with);
+    // P.6 — the shared reply record rides the row: at least this run's
+    // other-tenant thread answered and won. Only counts, never names.
+    let played_prior = played
+        .counterparty_prior
+        .expect("the prior read ran for the list");
+    assert!(
+        played_prior.tenants_contacted >= 1
+            && played_prior.tenants_replied >= 1
+            && played_prior.tenants_won >= 1,
+        "aga@agency.pl carries the other tenant's won thread: {played_prior:?}"
+    );
     let known = by_email("known@agency.pl");
-    assert_eq!(known.matched_counterparty.as_deref(), Some("Known Booker"));
-    assert!(!known.counterparty_worked_with);
+    assert_eq!(
+        known.row.matched_counterparty.as_deref(),
+        Some("Known Booker")
+    );
+    assert!(!known.row.counterparty_worked_with);
 
-    // The stranger stays a stranger.
+    // The stranger stays a stranger — registry-blind, and the prior read
+    // still ran: a measured zero is an answer, not an absence.
     let stranger = by_email("stranger@elsewhere.pl");
-    assert_eq!(stranger.matched_venue, None);
-    assert_eq!(stranger.matched_counterparty, None);
-    assert!(!stranger.venue_played_here);
-    assert!(!stranger.counterparty_worked_with);
+    assert_eq!(stranger.row.matched_venue, None);
+    assert_eq!(stranger.row.matched_counterparty, None);
+    assert!(!stranger.row.venue_played_here);
+    assert!(!stranger.row.counterparty_worked_with);
+    assert_eq!(
+        stranger.counterparty_prior.map(|prior| (
+            prior.tenants_contacted,
+            prior.tenants_replied,
+            prior.tenants_won
+        )),
+        Some((0, 0, 0)),
+        "no ledger anywhere names the stranger's address"
+    );
 
     let summary = fixture
         .repository

@@ -106,6 +106,12 @@ pub struct RoomCandidate {
     /// Whether the target is joined to the shared venue registry — the
     /// difference between "a name on a list" and "a room with a record".
     pub venue_linked: bool,
+    /// P.6: the target address's reply record across every tenant —
+    /// anonymous counts. `null` means the prior read did not run.
+    pub counterparty_prior: Option<crate::cross_tenant_priors::CounterpartyPrior>,
+    /// P.6: the linked room's play record — `null` when the target is not
+    /// venue-linked or the read did not run.
+    pub venue_prior: Option<crate::cross_tenant_priors::VenuePrior>,
 }
 
 /// A community the tenant posts in, in the show's country.
@@ -128,6 +134,9 @@ pub struct CommunityCandidate {
 pub struct ColdRoom {
     pub id: Uuid,
     pub display_name: String,
+    /// P.6: the room's play record across every tenant — cold for this
+    /// band is not cold for the registry. `null` when the read did not run.
+    pub venue_prior: Option<crate::cross_tenant_priors::VenuePrior>,
     /// The global capacity fact's raw value, when one exists. Text rather
     /// than a number because the fact itself is text — "350" and "350
     /// standing" are both honest answers, and parsing either into an integer
@@ -497,10 +506,14 @@ pub async fn who_can_help(
     // The tenant's own booking targets in this city — active only. A venue
     // target joined to the registry (`venue_id`) carries the room's record
     // with it; the flag is what the page shows, not the join.
-    match sqlx::query_as::<_, (Uuid, String, String, bool, i32, bool)>(
+    // contact_email and venue_id are fetch-only: they key the P.6 prior
+    // lookups and must not serialize — who-can-help never hands out an
+    // address, and the room's record is the prior, not the join key.
+    match sqlx::query_as::<_, (Uuid, String, String, bool, i32, bool, String, Option<Uuid>)>(
         r#"
         SELECT id, target_kind, display_name, accepts_booking,
-               relationship_score, (venue_id IS NOT NULL) AS venue_linked
+               relationship_score, (venue_id IS NOT NULL) AS venue_linked,
+               contact_email, venue_id
         FROM viryaos_booking_targets
         WHERE workspace_id = $1 AND city_id = $2 AND active
         ORDER BY relationship_score DESC, display_name
@@ -518,10 +531,39 @@ pub async fn who_can_help(
                 rows.truncate(MAX_HELPERS_PER_SECTION as usize);
                 truncated.push("rooms_and_promoters");
             }
+            let emails: Vec<String> = rows
+                .iter()
+                .map(|row| row.6.to_lowercase().trim().to_owned())
+                .collect();
+            let venue_ids: Vec<Uuid> = rows.iter().filter_map(|row| row.7).collect();
+            let counterparty_priors =
+                crate::cross_tenant_priors::counterparty_priors(pool, &emails)
+                    .await
+                    .map_err(|error| {
+                        tracing::warn!(%error, "who-can-help promoter priors failed");
+                        error
+                    })
+                    .ok();
+            let venue_priors = crate::cross_tenant_priors::venue_priors(pool, &venue_ids)
+                .await
+                .map_err(|error| {
+                    tracing::warn!(%error, "who-can-help venue priors failed");
+                    error
+                })
+                .ok();
             rooms_and_promoters = rows
                 .into_iter()
                 .map(
-                    |(id, target_kind, display_name, accepts_booking, score, venue_linked)| {
+                    |(
+                        id,
+                        target_kind,
+                        display_name,
+                        accepts_booking,
+                        score,
+                        venue_linked,
+                        email,
+                        venue_id,
+                    )| {
                         RoomCandidate {
                             id,
                             target_kind,
@@ -529,6 +571,19 @@ pub async fn who_can_help(
                             accepts_booking,
                             relationship_score: score,
                             venue_linked,
+                            counterparty_prior: counterparty_priors.as_ref().map(|priors| {
+                                priors
+                                    .get(&email.to_lowercase().trim().to_owned())
+                                    .copied()
+                                    .unwrap_or_default()
+                            }),
+                            // A failed prior read is `None` — never a
+                            // measured-looking zero nobody measured.
+                            venue_prior: venue_id.and_then(|id| {
+                                venue_priors
+                                    .as_ref()
+                                    .map(|priors| priors.get(&id).copied().unwrap_or_default())
+                            }),
                         }
                     },
                 )
@@ -634,12 +689,25 @@ pub async fn who_can_help(
                 rows.truncate(MAX_HELPERS_PER_SECTION as usize);
                 truncated.push("cold_rooms");
             }
+            // "Cold" names this band's history, not the room's — the
+            // marks aggregate is the comparables record.
+            let venue_ids: Vec<Uuid> = rows.iter().map(|(id, _, _)| *id).collect();
+            let venue_priors = crate::cross_tenant_priors::venue_priors(pool, &venue_ids)
+                .await
+                .map_err(|error| {
+                    tracing::warn!(%error, "who-can-help cold-room priors failed");
+                    error
+                })
+                .ok();
             cold_rooms = rows
                 .into_iter()
                 .map(|(id, display_name, capacity)| ColdRoom {
                     id,
                     display_name,
                     capacity,
+                    venue_prior: venue_priors
+                        .as_ref()
+                        .map(|priors| priors.get(&id).copied().unwrap_or_default()),
                 })
                 .collect();
         }

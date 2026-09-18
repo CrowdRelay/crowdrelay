@@ -64,6 +64,9 @@ pub struct DriveContactRow {
     /// this room is already on record somewhere — maybe played by this
     /// band, maybe known only through another tenant's marks.
     pub matched_venue: Option<String>,
+    /// The matched room's registry id — the key the cross-tenant prior
+    /// lookup joins on. Internal: the API nests the prior, not the id.
+    pub matched_venue_id: Option<Uuid>,
     /// This workspace's own marks say the band already played that room.
     pub venue_played_here: bool,
     /// `place_counterparties` knows this address — a promoter or booker an
@@ -71,6 +74,20 @@ pub struct DriveContactRow {
     pub matched_counterparty: Option<String>,
     /// This workspace's own marks say the band already dealt with them.
     pub counterparty_worked_with: bool,
+}
+
+/// A staged contact plus the cross-tenant priors its addresses and rooms
+/// carry (P.6). The row is the tenant's own; the priors are the shared
+/// record — anonymous counts, the only shape cross-tenant history is
+/// allowed to leave this crate in.
+pub struct DriveContactView {
+    pub row: DriveContactRow,
+    /// The address's reply record across every tenant. `Some` when the
+    /// prior read ran — `None` means "not measured", never "no history".
+    pub counterparty_prior: Option<crate::cross_tenant_priors::CounterpartyPrior>,
+    /// The matched room's play record across every tenant. `None` when the
+    /// row matched no `place_venues` row or the read did not run.
+    pub venue_prior: Option<crate::cross_tenant_priors::VenuePrior>,
 }
 
 /// What the registry join found across the whole review population, not
@@ -103,12 +120,13 @@ const CONTACT_SELECT: &str = r#"
            c.suggested_kind, c.city, c.notes, c.source_file_id, c.source_file_name,
            c.sources, c.last_seen_at, c.disappeared_at, c.fan_outcome, c.beacon_outcome,
            venue.display_name AS matched_venue,
+           venue.venue_id AS matched_venue_id,
            COALESCE(venue.played_here, false) AS venue_played_here,
            cp.display_name AS matched_counterparty,
            COALESCE(cp.dealt_with, false) AS counterparty_worked_with
     FROM viryaos_drive_contacts c
     LEFT JOIN LATERAL (
-        SELECT v.display_name,
+        SELECT v.id AS venue_id, v.display_name,
                EXISTS (
                    SELECT 1 FROM place_venue_marks vm
                    WHERE vm.venue_id = v.id
@@ -404,7 +422,7 @@ impl PostgresGDriveRepository {
         &self,
         workspace_id: Uuid,
         limit: i64,
-    ) -> Result<Vec<DriveContactRow>, GDriveError> {
+    ) -> Result<Vec<DriveContactView>, GDriveError> {
         let sql = format!(
             r#"{CONTACT_SELECT}
             WHERE c.workspace_id = $1
@@ -412,12 +430,68 @@ impl PostgresGDriveRepository {
                      c.last_seen_at DESC
             LIMIT $2"#
         );
-        sqlx::query_as::<_, DriveContactRow>(&sql)
+        let rows = sqlx::query_as::<_, DriveContactRow>(&sql)
             .bind(workspace_id)
             .bind(limit)
             .fetch_all(&self.pool)
             .await
-            .map_err(GDriveError::Database)
+            .map_err(GDriveError::Database)?;
+        Ok(self.attach_priors(rows).await)
+    }
+
+    /// The P.6 layer: every row's address asks the shared ledger for its
+    /// reply record, and every matched room asks the marks. A prior read
+    /// that fails leaves the row whole — the contacts are the payload, the
+    /// priors are the annotation, so an absent one serializes as `null`,
+    /// not as a measured zero.
+    async fn attach_priors(&self, rows: Vec<DriveContactRow>) -> Vec<DriveContactView> {
+        let emails: Vec<String> = rows
+            .iter()
+            .map(|row| row.normalized_email.clone())
+            .collect();
+        let venue_ids: Vec<Uuid> = rows.iter().filter_map(|row| row.matched_venue_id).collect();
+        let counterparty_priors =
+            crate::cross_tenant_priors::counterparty_priors(&self.pool, &emails)
+                .await
+                .map_err(|error| {
+                    tracing::warn!(%error, "drive contacts: counterparty prior read failed");
+                    error
+                })
+                .ok();
+        let venue_priors = crate::cross_tenant_priors::venue_priors(&self.pool, &venue_ids)
+            .await
+            .map_err(|error| {
+                tracing::warn!(%error, "drive contacts: venue prior read failed");
+                error
+            })
+            .ok();
+        rows.into_iter()
+            .map(|row| DriveContactView {
+                counterparty_prior: counterparty_priors.as_ref().map(|priors| {
+                    priors
+                        .get(&row.normalized_email)
+                        .copied()
+                        .unwrap_or_default()
+                }),
+                venue_prior: row
+                    .matched_venue_id
+                    .and_then(|venue_id| {
+                        venue_priors
+                            .as_ref()
+                            .and_then(|priors| priors.get(&venue_id).copied())
+                    })
+                    .or_else(|| {
+                        // A matched room with no marks anywhere still has a
+                        // measured record: nobody on record played it.
+                        if row.matched_venue_id.is_some() && venue_priors.is_some() {
+                            Some(crate::cross_tenant_priors::VenuePrior::default())
+                        } else {
+                            None
+                        }
+                    }),
+                row,
+            })
+            .collect()
     }
 
     /// The same joins, counted across every row — including ones the
