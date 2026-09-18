@@ -215,7 +215,7 @@ impl PostgresAutopilotRepository {
                     // would write on the band's behalf.
                     if draft.subject.trim().is_empty() || draft.body.trim().is_empty() {
                         return Err(RepositoryError::ConflictBecause(
-                            "outreach refused: this action carries no letter —                              the pitch composes when the action is written",
+                            "outreach refused: this action carries no letter — the pitch composes when the action is written",
                         ));
                     }
                     let target = operations::lock_outreach_for_execution(
