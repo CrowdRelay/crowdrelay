@@ -6,7 +6,7 @@ pub async fn upsert_beacon(
     let invalid = request.expected_version < 0
         || (request.expected_version > 0 && request.beacon_id.is_none())
         || request.display_name.trim().is_empty()
-        || request.display_name.len() > 240
+        || request.display_name.chars().count() > 240
         || request.relationship_score > 100
         || request.relevance_basis_points > 10_000
         || request.confidence_basis_points > 10_000

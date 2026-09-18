@@ -74,9 +74,11 @@ pub struct HelperEvent {
     /// The city's country — communities are country-scoped, so the field is
     /// `country_code`, never anything that reads as city-local.
     pub country_code: Option<String>,
-    /// The city's slug — what an operator action (admit a candidate to the
+    /// The city's id — what an operator action (admit a candidate to the
     /// roster) needs to place a beacon in this city. `null` with `city`.
-    pub city_slug: Option<String>,
+    /// The id, not the slug: slug resolution reads a top-100 fan-signal
+    /// snapshot that low-signal and foreign cities never reach.
+    pub city_id: Option<Uuid>,
 }
 
 /// An unpromoted press, radio or playlist contact in the show's city.
@@ -141,7 +143,7 @@ pub struct ColdRoom {
 pub struct BillMate {
     pub act_slug: String,
     pub act_name: String,
-    /// Slot order on the bill — 0 headlines by convention the sheet uses.
+    /// Slot order on the bill — running order, headliner last. 0 opens.
     pub position: i32,
     /// `peer` when the name resolved to a `place_peer_acts` row, `unclaimed`
     /// when the resolver has not minted one yet. Tenant acts are omitted
@@ -206,6 +208,9 @@ pub struct ShowHelpers {
     pub venue_channel: Option<VenueChannel>,
     /// Photographer beacons in the show's city.
     pub photographers: Vec<PhotographerCandidate>,
+    /// Sections that hit the shortlist cap — a festival bill can carry 500
+    /// acts, so "40 shown" must not read as "40 exist".
+    pub truncated: Vec<&'static str>,
 }
 
 /// Who could help with the show identified by this slug.
@@ -236,13 +241,11 @@ pub async fn who_can_help(
             Option<String>,
             Option<String>,
             Option<String>,
-            Option<String>,
         ),
     >(
         r#"
         SELECT event.id, event.slug, event.title, event.starts_at,
-               event.city_id, event.venue, city.name, city.country_code,
-               city.slug
+               event.city_id, event.venue, city.name, city.country_code
         FROM events AS event
         LEFT JOIN cities AS city ON city.id = event.city_id
         WHERE event.workspace_id = $1 AND event.slug = $2
@@ -256,8 +259,7 @@ pub async fn who_can_help(
     else {
         return Ok(None);
     };
-    let (event_id, slug, title, starts_at, city_id, venue_text, city_name, country_code, city_slug) =
-        event;
+    let (event_id, slug, title, starts_at, city_id, venue_text, city_name, country_code) = event;
 
     let mut degraded: Vec<&'static str> = Vec::new();
     let mut press = Vec::new();
@@ -267,10 +269,159 @@ pub async fn who_can_help(
     let mut bill_mates = Vec::new();
     let mut venue_channel = None;
     let mut photographers = Vec::new();
+    let mut truncated: Vec<&'static str> = Vec::new();
+
+    // The other bands on this bill (P.3) — event-scoped, not city-scoped,
+    // so this answers even when the show has no city yet. A peer or
+    // unclaimed act is a name, not an address: `on_roster` marks the ones
+    // already carried by a beacon, and the rest are candidates for it.
+    // Tenants are omitted — the crossbill edge is already their channel.
+    // An act matching this workspace's own listing name is excluded too:
+    // an unresolved collision must not offer "add yourself to your roster".
+    match sqlx::query_as::<_, (String, String, i32, String, bool, i64)>(
+        r#"
+        SELECT act.act_slug, act.act_name, act.position,
+               CASE WHEN act.peer_act_id IS NOT NULL THEN 'peer'
+                    ELSE 'unclaimed' END AS resolution,
+               EXISTS (
+                   SELECT 1 FROM viryaos_beacons AS beacon
+                   WHERE beacon.workspace_id = $1
+                     AND beacon.city_id IS NOT DISTINCT FROM $3
+                     AND beacon.beacon_kind = 'scene_partner'
+                     AND beacon.active
+                     AND place_venue_key(beacon.display_name)
+                         = place_venue_key(act.act_name)
+               ) AS on_roster,
+               (SELECT count(*) FROM event_acts AS other
+                 JOIN events AS past ON past.id = other.event_id
+                  AND past.status IN ('published','completed')
+                 WHERE other.workspace_id = $1
+                   AND other.event_id <> act.event_id
+                   AND other.peer_act_id = act.peer_act_id
+                   AND act.peer_act_id IS NOT NULL)::bigint AS shared_bills
+        FROM event_acts AS act
+        WHERE act.workspace_id = $1 AND act.event_id = $2
+          AND act.act_workspace_id IS NULL
+          AND NOT EXISTS (
+              SELECT 1 FROM viryaos_band_listings AS own
+              WHERE own.workspace_id = $1
+                AND place_venue_key(own.act_name)
+                    = place_venue_key(act.act_name)
+          )
+        ORDER BY act.position, act.act_name
+        LIMIT $4
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(event_id)
+    .bind(city_id)
+    .bind(MAX_HELPERS_PER_SECTION + 1)
+    .fetch_all(pool)
+    .await
+    {
+        Ok(mut rows) => {
+            if rows.len() as i64 > MAX_HELPERS_PER_SECTION {
+                rows.truncate(MAX_HELPERS_PER_SECTION as usize);
+                truncated.push("bill_mates");
+            }
+            bill_mates = rows
+                .into_iter()
+                .map(
+                    |(act_slug, act_name, position, resolution, on_roster, shared_bills)| {
+                        BillMate {
+                            act_slug,
+                            act_name,
+                            position,
+                            resolution,
+                            on_roster,
+                            shared_bills,
+                        }
+                    },
+                )
+                .collect();
+        }
+        Err(error) => {
+            tracing::warn!(%error, "who-can-help bill_mates section failed");
+            degraded.push("bill_mates");
+        }
+    }
+
+    // The room itself (P.3) — event-scoped like the bill. The registry join
+    // needs the city; the beacon check runs either way (a venue beacon may
+    // carry no city), so an unresolved room still answers on_roster truly.
+    if let Some(venue_text) = venue_text
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+    {
+        match sqlx::query_as::<_, (Option<Uuid>, String, bool)>(
+            r#"
+            SELECT venue.id, venue.display_name,
+                   EXISTS (
+                       SELECT 1 FROM viryaos_beacons AS beacon
+                       WHERE beacon.workspace_id = $1
+                         AND beacon.city_id IS NOT DISTINCT FROM $2
+                         AND beacon.beacon_kind = 'venue'
+                         AND beacon.active
+                         AND place_venue_key(beacon.display_name)
+                             = place_venue_key($3)
+                   ) AS on_roster
+            FROM place_venues AS venue
+            WHERE venue.city_id = $2
+              AND venue.name_key = place_venue_key($3)
+            UNION ALL
+            SELECT NULL, $3,
+                   EXISTS (
+                       SELECT 1 FROM viryaos_beacons AS beacon
+                       WHERE beacon.workspace_id = $1
+                         AND beacon.city_id IS NOT DISTINCT FROM $2
+                         AND beacon.beacon_kind = 'venue'
+                         AND beacon.active
+                         AND place_venue_key(beacon.display_name)
+                             = place_venue_key($3)
+                   )
+            WHERE NOT EXISTS (
+                SELECT 1 FROM place_venues AS venue
+                WHERE venue.city_id = $2
+                  AND venue.name_key = place_venue_key($3)
+            )
+            LIMIT 1
+            "#,
+        )
+        .bind(workspace_id)
+        .bind(city_id)
+        .bind(venue_text)
+        .fetch_optional(pool)
+        .await
+        {
+            Ok(Some((venue_id, display_name, on_roster))) => {
+                venue_channel = Some(VenueChannel {
+                    venue_id,
+                    display_name,
+                    on_roster,
+                });
+            }
+            // The UNION guarantees a row whenever venue text exists; a None
+            // is unreachable but still answered honestly rather than hidden.
+            Ok(None) => {
+                venue_channel = Some(VenueChannel {
+                    venue_id: None,
+                    display_name: venue_text.to_owned(),
+                    on_roster: false,
+                });
+            }
+            Err(error) => {
+                tracing::warn!(%error, "who-can-help venue_channel section failed");
+                degraded.push("venue_channel");
+            }
+        }
+    }
 
     let Some(city_id) = city_id else {
-        // No city means no local anybody — and no country either, since the
-        // country is the city's own. Every section is honestly empty.
+        // No city means no local anybody for the city-scoped sections — but
+        // the bill and the room already answered above. `degraded` still
+        // names "city": the remaining sections are honestly empty because
+        // of it.
         degraded.push("city");
         return Ok(Some(ShowHelpers {
             event: HelperEvent {
@@ -279,7 +430,7 @@ pub async fn who_can_help(
                 starts_at,
                 city: city_name,
                 country_code,
-                city_slug,
+                city_id: None,
             },
             degraded,
             notes: vec!["staged_contacts_have_no_city"],
@@ -287,12 +438,10 @@ pub async fn who_can_help(
             rooms_and_promoters,
             communities,
             cold_rooms,
-            // Bill-mates are the bill's own answer, not the city's — but
-            // with no city the whole card is honestly empty by the same
-            // "no local anybody" rule the read already makes.
             bill_mates,
             venue_channel,
             photographers,
+            truncated,
         }));
     };
 
@@ -314,11 +463,15 @@ pub async fn who_can_help(
     )
     .bind(workspace_id)
     .bind(city_id)
-    .bind(MAX_HELPERS_PER_SECTION)
+    .bind(MAX_HELPERS_PER_SECTION + 1)
     .fetch_all(pool)
     .await
     {
-        Ok(rows) => {
+        Ok(mut rows) => {
+            if rows.len() as i64 > MAX_HELPERS_PER_SECTION {
+                rows.truncate(MAX_HELPERS_PER_SECTION as usize);
+                truncated.push("press");
+            }
             press = rows
                 .into_iter()
                 .map(
@@ -356,11 +509,15 @@ pub async fn who_can_help(
     )
     .bind(workspace_id)
     .bind(city_id)
-    .bind(MAX_HELPERS_PER_SECTION)
+    .bind(MAX_HELPERS_PER_SECTION + 1)
     .fetch_all(pool)
     .await
     {
-        Ok(rows) => {
+        Ok(mut rows) => {
+            if rows.len() as i64 > MAX_HELPERS_PER_SECTION {
+                rows.truncate(MAX_HELPERS_PER_SECTION as usize);
+                truncated.push("rooms_and_promoters");
+            }
             rooms_and_promoters = rows
                 .into_iter()
                 .map(
@@ -398,11 +555,15 @@ pub async fn who_can_help(
     )
     .bind(workspace_id)
     .bind(country_code.as_deref().unwrap_or(""))
-    .bind(MAX_HELPERS_PER_SECTION)
+    .bind(MAX_HELPERS_PER_SECTION + 1)
     .fetch_all(pool)
     .await
     {
-        Ok(rows) => {
+        Ok(mut rows) => {
+            if rows.len() as i64 > MAX_HELPERS_PER_SECTION {
+                rows.truncate(MAX_HELPERS_PER_SECTION as usize);
+                truncated.push("communities");
+            }
             communities = rows
                 .into_iter()
                 .map(
@@ -464,11 +625,15 @@ pub async fn who_can_help(
     )
     .bind(city_id)
     .bind(workspace_id)
-    .bind(MAX_HELPERS_PER_SECTION)
+    .bind(MAX_HELPERS_PER_SECTION + 1)
     .fetch_all(pool)
     .await
     {
-        Ok(rows) => {
+        Ok(mut rows) => {
+            if rows.len() as i64 > MAX_HELPERS_PER_SECTION {
+                rows.truncate(MAX_HELPERS_PER_SECTION as usize);
+                truncated.push("cold_rooms");
+            }
             cold_rooms = rows
                 .into_iter()
                 .map(|(id, display_name, capacity)| ColdRoom {
@@ -481,116 +646,6 @@ pub async fn who_can_help(
         Err(error) => {
             tracing::warn!(%error, "who-can-help cold_rooms section failed");
             degraded.push("cold_rooms");
-        }
-    }
-
-    // The other bands on this bill (P.3) — the side nobody contacts. A peer
-    // or unclaimed act is a name, not an address: `on_roster` marks the ones
-    // already carried by a beacon, and the rest are candidates for it.
-    // Tenants are omitted — the crossbill edge is already their channel.
-    match sqlx::query_as::<_, (String, String, i32, String, bool, i64)>(
-        r#"
-        SELECT act.act_slug, act.act_name, act.position,
-               CASE WHEN act.peer_act_id IS NOT NULL THEN 'peer'
-                    ELSE 'unclaimed' END AS resolution,
-               EXISTS (
-                   SELECT 1 FROM viryaos_beacons AS beacon
-                   WHERE beacon.workspace_id = $1
-                     AND beacon.active
-                     AND place_venue_key(beacon.display_name)
-                         = place_venue_key(act.act_name)
-               ) AS on_roster,
-               (SELECT count(*) FROM event_acts AS other
-                 WHERE other.workspace_id = $1
-                   AND other.peer_act_id = act.peer_act_id
-                   AND act.peer_act_id IS NOT NULL)::bigint AS shared_bills
-        FROM event_acts AS act
-        WHERE act.workspace_id = $1 AND act.event_id = $2
-          AND act.act_workspace_id IS NULL
-        ORDER BY act.position, act.act_name
-        LIMIT $3
-        "#,
-    )
-    .bind(workspace_id)
-    .bind(event_id)
-    .bind(MAX_HELPERS_PER_SECTION)
-    .fetch_all(pool)
-    .await
-    {
-        Ok(rows) => {
-            bill_mates = rows
-                .into_iter()
-                .map(
-                    |(act_slug, act_name, position, resolution, on_roster, shared_bills)| {
-                        BillMate {
-                            act_slug,
-                            act_name,
-                            position,
-                            resolution,
-                            on_roster,
-                            shared_bills,
-                        }
-                    },
-                )
-                .collect();
-        }
-        Err(error) => {
-            tracing::warn!(%error, "who-can-help bill_mates section failed");
-            degraded.push("bill_mates");
-        }
-    }
-
-    // The room itself (P.3) — the venue's own channel. The event's venue
-    // text resolves against the shared registry the same way the upload
-    // match does; unresolved still names the room the operator typed.
-    if let Some(venue_text) = venue_text
-        .as_deref()
-        .map(str::trim)
-        .filter(|v| !v.is_empty())
-    {
-        match sqlx::query_as::<_, (Uuid, String, bool)>(
-            r#"
-            SELECT venue.id, venue.display_name,
-                   EXISTS (
-                       SELECT 1 FROM viryaos_beacons AS beacon
-                       WHERE beacon.workspace_id = $1
-                         AND beacon.city_id = $2
-                         AND beacon.beacon_kind = 'venue'
-                         AND beacon.active
-                         AND place_venue_key(beacon.display_name)
-                             = venue.name_key
-                   ) AS on_roster
-            FROM place_venues AS venue
-            WHERE venue.city_id = $2
-              AND venue.name_key = place_venue_key($3)
-            LIMIT 1
-            "#,
-        )
-        .bind(workspace_id)
-        .bind(city_id)
-        .bind(venue_text)
-        .fetch_optional(pool)
-        .await
-        {
-            Ok(Some((venue_id, display_name, on_roster))) => {
-                venue_channel = Some(VenueChannel {
-                    venue_id: Some(venue_id),
-                    display_name,
-                    on_roster,
-                });
-            }
-            // Not on the registry yet — the room is still the room.
-            Ok(None) => {
-                venue_channel = Some(VenueChannel {
-                    venue_id: None,
-                    display_name: venue_text.to_owned(),
-                    on_roster: false,
-                });
-            }
-            Err(error) => {
-                tracing::warn!(%error, "who-can-help venue_channel section failed");
-                degraded.push("venue_channel");
-            }
         }
     }
 
@@ -610,18 +665,22 @@ pub async fn who_can_help(
         FROM viryaos_beacons AS beacon
         WHERE beacon.workspace_id = $1 AND beacon.city_id = $2
           AND beacon.beacon_kind = 'photographer'
-          AND beacon.active
+          AND beacon.active AND NOT beacon.do_not_contact
         ORDER BY beacon.relationship_score DESC, beacon.display_name
         LIMIT $3
         "#,
     )
     .bind(workspace_id)
     .bind(city_id)
-    .bind(MAX_HELPERS_PER_SECTION)
+    .bind(MAX_HELPERS_PER_SECTION + 1)
     .fetch_all(pool)
     .await
     {
-        Ok(rows) => {
+        Ok(mut rows) => {
+            if rows.len() as i64 > MAX_HELPERS_PER_SECTION {
+                rows.truncate(MAX_HELPERS_PER_SECTION as usize);
+                truncated.push("photographers");
+            }
             photographers = rows
                 .into_iter()
                 .map(
@@ -650,7 +709,7 @@ pub async fn who_can_help(
             starts_at,
             city: city_name,
             country_code,
-            city_slug,
+            city_id: Some(city_id),
         },
         degraded,
         notes: vec!["staged_contacts_have_no_city"],
@@ -661,5 +720,6 @@ pub async fn who_can_help(
         bill_mates,
         venue_channel,
         photographers,
+        truncated,
     }))
 }
