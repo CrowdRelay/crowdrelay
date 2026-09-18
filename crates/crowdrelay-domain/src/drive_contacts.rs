@@ -389,6 +389,30 @@ pub fn extract_header_contacts(header_values: &[String], self_email: &str) -> Ve
     seen.into_values().collect()
 }
 
+/// Delimited text → the grid `extract_contacts` reads. A header row is
+/// required by the extractor downstream; blank trailing rows are dropped
+/// here. Lives beside the extractor because both sides of the upload — the
+/// Drive connector and the operator's file — parse through the same path.
+pub fn parse_delimited(bytes: &[u8], delimiter: u8) -> Result<Vec<Vec<String>>, String> {
+    let mut reader = csv::ReaderBuilder::new()
+        .delimiter(delimiter)
+        .has_headers(false)
+        .flexible(true)
+        .from_reader(bytes);
+    let mut grid: Vec<Vec<String>> = Vec::new();
+    for record in reader.records() {
+        let record = record.map_err(|e| format!("delimited parse failed: {e}"))?;
+        grid.push(record.iter().map(str::to_owned).collect());
+    }
+    while grid
+        .last()
+        .is_some_and(|row| row.iter().all(|c| c.trim().is_empty()))
+    {
+        grid.pop();
+    }
+    Ok(grid)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

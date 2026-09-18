@@ -869,6 +869,10 @@ async fn a_beacon_agent_lands_on_the_registry_and_the_approach_list()
         disappeared_at: None,
         fan_outcome: "none".to_owned(),
         beacon_outcome: "staged".to_owned(),
+        matched_venue: None,
+        venue_played_here: false,
+        matched_counterparty: None,
+        counterparty_worked_with: false,
     };
     // The promote marks the drive contact promoted — the staging row must
     // exist for that update to land.

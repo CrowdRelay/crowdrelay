@@ -17,6 +17,7 @@ Pinned here:
 """
 
 from pathlib import Path
+import re
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -38,7 +39,13 @@ OPENAPI = ROOT / "openapi/openapi.yaml"
 
 
 def read(path: Path) -> str:
-    return path.read_text(encoding="utf-8")
+    text = path.read_text(encoding="utf-8")
+    # Rust `include!` splits a file the contract reads as one — resolve it.
+    return re.sub(
+        r'include!\("([^"]+)"\);',
+        lambda m: (path.parent / m.group(1)).read_text(encoding="utf-8"),
+        text,
+    )
 
 
 class BookingDiscoveryContract(unittest.TestCase):

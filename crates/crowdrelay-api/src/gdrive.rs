@@ -77,11 +77,35 @@ pub struct DriveContact {
     gone_from_source: bool,
     fan_outcome: String,
     beacon_outcome: String,
+    /// P.2: the room's `place_venues` display name when this contact's
+    /// organisation is already on record — `null` means a stranger.
+    matched_venue: Option<String>,
+    /// The band's own marks say they already played that room.
+    venue_played_here: bool,
+    /// The counterparty registry knows this address — somebody's event
+    /// already recorded dealing with this person.
+    matched_counterparty: Option<String>,
+    /// The band's own marks say they already dealt with them.
+    counterparty_worked_with: bool,
+}
+
+/// The registry joins counted over the whole staging population — the page
+/// is capped, so the "already on record" numbers cannot come from it.
+#[derive(Serialize)]
+pub struct RegistrySummary {
+    total: i64,
+    known_venues: i64,
+    own_rooms: i64,
+    known_counterparties: i64,
+    dealt_with: i64,
 }
 
 #[derive(Serialize)]
 pub struct DriveContactsResponse {
     contacts: Vec<DriveContact>,
+    /// Null when the registry pass could not run — the contacts still
+    /// render, and a summary that was never measured never reads as zero.
+    registry_summary: Option<RegistrySummary>,
 }
 
 #[derive(Deserialize)]
@@ -120,6 +144,10 @@ fn contact_json(row: crowdrelay_infra::gdrive::DriveContactRow) -> DriveContact 
         gone_from_source: row.disappeared_at.is_some(),
         fan_outcome: row.fan_outcome,
         beacon_outcome: row.beacon_outcome,
+        matched_venue: row.matched_venue,
+        venue_played_here: row.venue_played_here,
+        matched_counterparty: row.matched_counterparty,
+        counterparty_worked_with: row.counterparty_worked_with,
     }
 }
 
@@ -131,17 +159,146 @@ fn repo(state: &crate::AppState) -> crowdrelay_infra::gdrive::PostgresGDriveRepo
 pub async fn list_contacts(State(state): State<crate::AppState>, headers: HeaderMap) -> Response {
     let request_id_value = request_id(&headers);
     let workspace_id = state.ops.workspace_id().into_uuid();
-    match repo(&state).list_contacts(workspace_id, LIST_LIMIT).await {
-        Ok(rows) => (
+    let repo = repo(&state);
+    let rows = match repo.list_contacts(workspace_id, LIST_LIMIT).await {
+        Ok(rows) => rows,
+        Err(error) => {
+            tracing::warn!(%error, "gdrive contacts list failed");
+            return Problem::service_unavailable(request_id_value)
+                .private()
+                .into_response();
+        }
+    };
+    // A summary failure cannot take the list down — the contacts are the
+    // payload, the registry counts are the annotation. A summary that could
+    // not run reports as null rather than as zeroes nobody measured.
+    let registry_summary = repo
+        .registry_summary(workspace_id)
+        .await
+        .map(|summary| RegistrySummary {
+            total: summary.total,
+            known_venues: summary.known_venues,
+            own_rooms: summary.own_rooms,
+            known_counterparties: summary.known_counterparties,
+            dealt_with: summary.dealt_with,
+        })
+        .map_err(|error| {
+            tracing::warn!(%error, "gdrive registry summary failed");
+            error
+        })
+        .ok();
+    (
+        StatusCode::OK,
+        [(CACHE_CONTROL, HeaderValue::from_static(PRIVATE_NO_STORE))],
+        Json(DriveContactsResponse {
+            contacts: rows.into_iter().map(contact_json).collect(),
+            registry_summary,
+        }),
+    )
+        .into_response()
+}
+
+/// `POST /v1/control-plane/gdrive/contacts/upload` — `{file_name, csv}`.
+///
+/// The operator's own spreadsheet is an intake source with the same
+/// semantics as the connectors: parse, extract, stage, and let the review
+/// queue's one-by-one promote decide each row. The extractor is the same
+/// one Drive feeds, so a sheet that yields no email column answers
+/// "not a contact list" rather than filing noise.
+///
+/// `mark_disappeared` stays false: an upload is an addition the operator
+/// made, and a partial paste must not retract rows a file still carries.
+const UPLOAD_MAX_BYTES: usize = 2 * 1024 * 1024;
+/// The staging table is a review queue — past a few thousand rows the
+/// honest answer is to split the sheet, not to file it all.
+const UPLOAD_MAX_ROWS: usize = 5_000;
+
+#[derive(Deserialize)]
+pub struct UploadContactsRequest {
+    file_name: String,
+    csv: String,
+}
+
+pub async fn upload_contacts(
+    State(state): State<crate::AppState>,
+    headers: HeaderMap,
+    payload: Result<Json<UploadContactsRequest>, axum::extract::rejection::JsonRejection>,
+) -> Response {
+    let request_id_value = request_id(&headers);
+    let Ok(Json(request)) = payload else {
+        return Problem::bad_request(request_id_value).into_response();
+    };
+    let file_name = request.file_name.trim();
+    if file_name.is_empty() || file_name.chars().count() > 500 {
+        return Problem::bad_request(request_id_value)
+            .private()
+            .into_response();
+    }
+    if request.csv.is_empty() || request.csv.len() > UPLOAD_MAX_BYTES {
+        return Problem::bad_request(request_id_value)
+            .private()
+            .into_response();
+    }
+
+    // Comma first, tab when the comma pass finds no email column — a sheet
+    // exported as TSV is the same file wearing a different separator.
+    let grid =
+        match crowdrelay_domain::drive_contacts::parse_delimited(request.csv.as_bytes(), b',') {
+            Ok(grid) => grid,
+            Err(_) => {
+                return Problem::bad_request(request_id_value)
+                    .private()
+                    .into_response();
+            }
+        };
+    let mut report = crowdrelay_domain::drive_contacts::extract_contacts(&grid);
+    if report.no_email_column
+        && let Ok(grid) =
+            crowdrelay_domain::drive_contacts::parse_delimited(request.csv.as_bytes(), b'\t')
+    {
+        report = crowdrelay_domain::drive_contacts::extract_contacts(&grid);
+    }
+    if report.no_email_column {
+        return Problem::conflict_because(
+            "No column looked like email — this is not a contact list.",
+            request_id_value,
+        )
+        .private()
+        .into_response();
+    }
+    if report.contacts.len() > UPLOAD_MAX_ROWS {
+        return Problem::conflict_because(
+            "That sheet is bigger than the review queue can hold — split it and upload in parts.",
+            request_id_value,
+        )
+        .private()
+        .into_response();
+    }
+
+    let repo = repo(&state);
+    match repo
+        .upsert_contacts_for_source(
+            state.ops.workspace_id().into_uuid(),
+            "upload",
+            &format!("upload:{file_name}"),
+            file_name,
+            &report.contacts,
+            false,
+        )
+        .await
+    {
+        Ok(summary) => (
             StatusCode::OK,
             [(CACHE_CONTROL, HeaderValue::from_static(PRIVATE_NO_STORE))],
-            Json(DriveContactsResponse {
-                contacts: rows.into_iter().map(contact_json).collect(),
-            }),
+            Json(serde_json::json!({
+                "staged": summary.upserted,
+                "rows_read": report.rows_read,
+                "rows_without_email": report.rows_without_email,
+            })),
         )
             .into_response(),
         Err(error) => {
-            tracing::warn!(%error, "gdrive contacts list failed");
+            tracing::warn!(%error, "gdrive contacts upload failed");
             Problem::service_unavailable(request_id_value)
                 .private()
                 .into_response()

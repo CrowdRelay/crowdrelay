@@ -17,7 +17,7 @@
 
 use std::time::Duration;
 
-use crowdrelay_domain::drive_contacts::extract_contacts;
+use crowdrelay_domain::drive_contacts::{extract_contacts, parse_delimited};
 use crowdrelay_domain::scan_scope::ScanScope;
 use crowdrelay_domain::venue_seed::extract_seed_sheet;
 use crowdrelay_infra::{
@@ -719,28 +719,6 @@ impl GDriveContactsSyncWorker {
         )
         .await
     }
-}
-
-/// CSV/TSV → grid. A header row is required by the extractor downstream;
-/// blank trailing rows are dropped here.
-fn parse_delimited(bytes: &[u8], delimiter: u8) -> Result<Vec<Vec<String>>, String> {
-    let mut reader = csv::ReaderBuilder::new()
-        .delimiter(delimiter)
-        .has_headers(false)
-        .flexible(true)
-        .from_reader(bytes);
-    let mut grid: Vec<Vec<String>> = Vec::new();
-    for record in reader.records() {
-        let record = record.map_err(|e| format!("delimited parse failed: {e}"))?;
-        grid.push(record.iter().map(str::to_owned).collect());
-    }
-    while grid
-        .last()
-        .is_some_and(|row| row.iter().all(|c| c.trim().is_empty()))
-    {
-        grid.pop();
-    }
-    Ok(grid)
 }
 
 /// xlsx → grid via calamine. First non-empty sheet wins — the Drive CSV

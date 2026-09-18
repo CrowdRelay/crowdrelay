@@ -599,3 +599,227 @@ async fn booking_promote_does_not_overturn_refused_route() -> Result<(), Box<dyn
     assert_eq!(staged, "staged");
     Ok(())
 }
+
+/// P.2: a sheet row stops being a stranger when the shared registries know
+/// the room or the person. The join is the read's own — a venue matches by
+/// its key inside the city the sheet named, or by being the only room
+/// anywhere carrying that name; a counterparty matches on the address.
+#[tokio::test]
+#[ignore = "requires a disposable postgres database"]
+async fn staged_rows_resolve_against_the_shared_registries()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = fixture("registry").await?;
+    let wroclaw: Uuid = sqlx::query_scalar("SELECT id FROM cities WHERE slug = 'wroclaw'")
+        .fetch_one(&fixture.pool)
+        .await?;
+    sqlx::query(
+        "INSERT INTO cities (id, slug, name, country_code) \
+         VALUES (gen_random_uuid(), 'krakow', 'Krakow', 'PL') \
+         ON CONFLICT (country_code, slug) DO NOTHING",
+    )
+    .execute(&fixture.pool)
+    .await?;
+    let krakow: Uuid = sqlx::query_scalar("SELECT id FROM cities WHERE slug = 'krakow'")
+        .fetch_one(&fixture.pool)
+        .await?;
+
+    // A published show marks the room and the counterparty through the
+    // registry triggers — the band's own evidence, not a hand-seeded row.
+    sqlx::query(
+        r#"
+        INSERT INTO events (
+            id, workspace_id, city_id, slug, title, venue,
+            counterparty_name, counterparty_email,
+            starts_at, status, published_at
+        ) VALUES (
+            gen_random_uuid(), $1, $2, 'registry-mark-show', 'Played night',
+            'Klub Stodola', 'Aga Nowak', 'aga@agency.pl',
+            now() - interval '30 days', 'published', now() - interval '30 days'
+        )
+        "#,
+    )
+    .bind(fixture.workspace_id)
+    .bind(wroclaw)
+    .execute(&fixture.pool)
+    .await?;
+
+    // A same-named room in another city makes 'Klub Stodola' ambiguous —
+    // a cityless row must not guess between the two. The disposable
+    // database persists between runs, so the seed tolerates its own echo.
+    sqlx::query(
+        "INSERT INTO place_venues (city_id, name_key, display_name) \
+         VALUES ($1, place_venue_key('Klub Stodola'), 'Klub Stodola') \
+         ON CONFLICT (city_id, name_key) DO NOTHING",
+    )
+    .bind(krakow)
+    .execute(&fixture.pool)
+    .await?;
+
+    // A counterparty the band never dealt with — on record through another
+    // tenant's marks, so the row exists but dealt_with stays false.
+    sqlx::query(
+        "INSERT INTO place_counterparties (email_key, display_name) \
+         VALUES ('known@agency.pl', 'Known Booker') \
+         ON CONFLICT (email_key) DO NOTHING",
+    )
+    .execute(&fixture.pool)
+    .await?;
+
+    // The sheet.
+    seed_contact(&fixture, "bookings@stodola.pl", Some("Klub Stodola"), None).await?;
+    let own_room = seed_contact_city(
+        &fixture,
+        "produk@stodola.pl",
+        Some("Stodola production"),
+        Some("wroclaw"),
+    )
+    .await?;
+    sqlx::query("UPDATE viryaos_drive_contacts SET organization = 'Klub Stodola' WHERE id = $1")
+        .bind(own_room.id)
+        .execute(&fixture.pool)
+        .await?;
+    seed_contact(&fixture, "aga@agency.pl", Some("Aga Nowak"), None).await?;
+    seed_contact(&fixture, "known@agency.pl", Some("Known Booker"), None).await?;
+    seed_contact(
+        &fixture,
+        "stranger@elsewhere.pl",
+        Some("Stranger"),
+        Some("Nowhere Inn"),
+    )
+    .await?;
+    // The ambiguous name, no city — must not guess.
+    let ambiguous =
+        seed_contact_city(&fixture, "info@stodola.pl", Some("Klub Stodola"), None).await?;
+    sqlx::query("UPDATE viryaos_drive_contacts SET organization = 'Klub Stodola' WHERE id = $1")
+        .bind(ambiguous.id)
+        .execute(&fixture.pool)
+        .await?;
+
+    let rows = fixture
+        .repository
+        .list_contacts(fixture.workspace_id, 50)
+        .await?;
+    let by_email = |email: &str| rows.iter().find(|r| r.normalized_email == email).unwrap();
+
+    // City-placed match: org keys to the wroclaw room, own marks say played.
+    let own = by_email("produk@stodola.pl");
+    assert_eq!(own.matched_venue.as_deref(), Some("Klub Stodola"));
+    assert!(own.venue_played_here);
+
+    // The ambiguous name with no city resolves to nothing — guessing would
+    // file the row against the wrong room.
+    let ambiguous = by_email("info@stodola.pl");
+    assert_eq!(ambiguous.matched_venue, None);
+
+    // The played counterparty and the merely-known one stay distinct.
+    let played = by_email("aga@agency.pl");
+    assert_eq!(played.matched_counterparty.as_deref(), Some("Aga Nowak"));
+    assert!(played.counterparty_worked_with);
+    let known = by_email("known@agency.pl");
+    assert_eq!(known.matched_counterparty.as_deref(), Some("Known Booker"));
+    assert!(!known.counterparty_worked_with);
+
+    // The stranger stays a stranger.
+    let stranger = by_email("stranger@elsewhere.pl");
+    assert_eq!(stranger.matched_venue, None);
+    assert_eq!(stranger.matched_counterparty, None);
+    assert!(!stranger.venue_played_here);
+    assert!(!stranger.counterparty_worked_with);
+
+    let summary = fixture
+        .repository
+        .registry_summary(fixture.workspace_id)
+        .await?;
+    assert_eq!(summary.total, 6);
+    assert_eq!(summary.known_venues, 1);
+    assert_eq!(summary.own_rooms, 1);
+    assert_eq!(summary.known_counterparties, 2);
+    assert_eq!(summary.dealt_with, 1);
+    Ok(())
+}
+
+/// P.2: an operator's pasted sheet stages like a connector's sighting —
+/// 'upload' is a third lawful source, and a second upload of the same file
+/// name refreshes rather than doubling.
+#[tokio::test]
+#[ignore = "requires a disposable postgres database"]
+async fn uploaded_sheet_stages_through_the_upload_source() -> Result<(), Box<dyn std::error::Error>>
+{
+    let fixture = fixture("upload").await?;
+    // The address the sheet will carry was already sighted over Gmail —
+    // the upload must converge to one row carrying both sources.
+    sqlx::query(
+        "INSERT INTO viryaos_drive_contacts \
+            (workspace_id, normalized_email, source_file_id, source_file_name, sources) \
+         VALUES ($1, 'first@sheet.test', 'msg-9', 'Re: hello', '{gmail}')",
+    )
+    .bind(fixture.workspace_id)
+    .execute(&fixture.pool)
+    .await?;
+    let contacts = vec![
+        crowdrelay_domain::drive_contacts::ExtractedContact {
+            email: "first@sheet.test".to_owned(),
+            display_name: Some("First".to_owned()),
+            organization: None,
+            phone: None,
+            suggested_kind: None,
+            city: Some("wroclaw".to_owned()),
+            notes: None,
+        },
+        crowdrelay_domain::drive_contacts::ExtractedContact {
+            email: "second@sheet.test".to_owned(),
+            display_name: None,
+            organization: Some("Agency Y".to_owned()),
+            phone: None,
+            suggested_kind: Some("promoter".to_owned()),
+            city: None,
+            notes: None,
+        },
+    ];
+    let summary = fixture
+        .repository
+        .upsert_contacts_for_source(
+            fixture.workspace_id,
+            "upload",
+            "upload:sheet.csv",
+            "sheet.csv",
+            &contacts,
+            false,
+        )
+        .await?;
+    assert_eq!(summary.upserted, 2);
+
+    // The widened CHECK accepts 'upload', and the rows land staged.
+    let staged: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM viryaos_drive_contacts \
+         WHERE workspace_id = $1 AND 'upload' = ANY(sources)",
+    )
+    .bind(fixture.workspace_id)
+    .fetch_one(&fixture.pool)
+    .await?;
+    assert_eq!(staged, 2);
+
+    // A re-upload of the same file refreshes rather than doubling, and
+    // the gmail+upload union survives it.
+    fixture
+        .repository
+        .upsert_contacts_for_source(
+            fixture.workspace_id,
+            "upload",
+            "upload:sheet.csv",
+            "sheet.csv",
+            &contacts,
+            false,
+        )
+        .await?;
+    let sources: Vec<String> = sqlx::query_scalar(
+        "SELECT sources FROM viryaos_drive_contacts \
+         WHERE workspace_id = $1 AND normalized_email = 'first@sheet.test'",
+    )
+    .bind(fixture.workspace_id)
+    .fetch_one(&fixture.pool)
+    .await?;
+    assert!(sources.contains(&"upload".to_owned()));
+    assert!(sources.contains(&"gmail".to_owned()));
+    Ok(())
+}
