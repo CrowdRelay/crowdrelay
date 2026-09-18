@@ -20,6 +20,7 @@ type GrowthEventFacts = (
     Option<String>,
     Option<String>,
     Option<serde_json::Value>,
+    Option<String>,
 );
 
 #[allow(clippy::too_many_arguments)]
@@ -41,7 +42,8 @@ pub(in crate::autopilot) async fn execute_show_growth(
                      ORDER BY act.position, act.act_slug)
              FROM event_acts AS act
              WHERE act.workspace_id = event.workspace_id
-               AND act.event_id = event.id) AS acts
+               AND act.event_id = event.id) AS acts,
+            event.festival_name
         FROM events AS event
         -- `cities` is a shared catalogue, not a tenant table: it has no
         -- `workspace_id`, and `events_city_id_fkey` references `cities(id)`
@@ -590,6 +592,9 @@ async fn execute_first_party_growth_campaign(
             "event_id": event_id,
             "lever": lever.as_str(),
             "venue": event.3,
+            // A festival slot's memory hook is the festival's own name — the
+            // room remembers "OFF Festival", not the stage the slot ran on.
+            "festival_name": event.7,
             // The bill as announced, in play order: "here's who you saw" is a
             // statement of record, not a pitch, so it carries the acts table
             // rather than a ticket link.
@@ -613,6 +618,7 @@ async fn execute_first_party_growth_campaign(
             "lever": lever.as_str(),
             "ticket_url": event.4,
             "venue": event.3,
+            "festival_name": event.7,
             "managed_by": "viryaos_show_growth",
             // Same canonical links as the pre-show push. The difference is who
             // receives it: people who were in the room, which is the warmest
@@ -658,6 +664,7 @@ async fn execute_first_party_growth_campaign(
             "lever": lever.as_str(),
             "ticket_url": event.4,
             "venue": event.3,
+            "festival_name": event.7,
             "managed_by": "viryaos_show_growth"
         }),
     };
@@ -697,10 +704,10 @@ async fn execute_first_party_growth_campaign(
     .map_err(map_sqlx)?;
 
     if campaign.1 == "draft" {
+        // The outbox row carries the action's trace spine — `ops/trace`
+        // shows the decision → action → campaign hop, not an orphan.
         let outbox_id = sqlx::query_scalar::<_, Uuid>(
             r#"
-            // The outbox row carries the action's trace spine — `ops/trace`
-            // shows the decision → action → campaign hop, not an orphan.
             INSERT INTO outbox_events(workspace_id,event_type,event_version,payload,available_at,trace_id,causation_id,action_id)
             SELECT
                 $1,'communication.campaign_due',1,
