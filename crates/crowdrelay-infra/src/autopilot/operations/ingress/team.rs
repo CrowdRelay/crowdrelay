@@ -511,61 +511,76 @@ impl AutopilotTeamStateRepository for PostgresAutopilotRepository {
         if offered_fee_minor < 0 || !valid_opportunity_currency(&command.currency) {
             return Err(RepositoryError::Conflict);
         }
-        // The ladder needs the show as the agent sees it — costed trip, travel
-        // band, how full the year is — so it is read through the same statement
-        // the evaluator uses rather than rebuilt from the row. Two ways of
-        // costing the same trip is how a floor and a verdict come to disagree.
-        let policy = self.live_opportunity_policy(workspace_id).await?;
-        let snapshot = self
-            .load_live_opportunity_snapshots_for(
-                workspace_id,
-                OffsetDateTime::now_utc(),
-                &["submitted", "replied"],
+        // An offer is priced against the ladder; a withdrawal only settles
+        // whatever is live. The reads below exist to build that ladder, so
+        // they run for an offer and only for an offer — a withdrawal on an
+        // opportunity that has already moved on still reaches the settle.
+        let ladder_inputs = if matches!(command.position, PromoterPosition::Offer { .. }) {
+            // The ladder needs the show as the agent sees it — costed trip,
+            // travel band, how full the year is — so it is read through the
+            // same statement the evaluator uses rather than rebuilt from the
+            // row. Two ways of costing the same trip is how a floor and a
+            // verdict come to disagree.
+            let policy = self.live_opportunity_policy(workspace_id).await?;
+            let snapshot = self
+                .load_live_opportunity_snapshots_for(
+                    workspace_id,
+                    OffsetDateTime::now_utc(),
+                    &["submitted", "replied"],
+                )
+                .await?
+                .into_iter()
+                .find(|snapshot| snapshot.opportunity_id == command.opportunity_id)
+                .ok_or(RepositoryError::NotFound)?;
+            // What this counterparty last agreed to pay, in the currency this
+            // negotiation is being conducted in: an accepted terms row's
+            // agreed fee is the offer that was accepted — our own unanswered
+            // counter on that row was never a deal. The counterparty is the
+            // organization, matched by either of its calling cards — the
+            // contact email, or the organization name.
+            let prior_fee_minor = sqlx::query_scalar::<_, i64>(
+                r#"
+                SELECT t.offered_fee_minor
+                FROM viryaos_team_opportunity_terms t
+                JOIN viryaos_team_opportunities o
+                  ON o.workspace_id = t.workspace_id AND o.id = t.opportunity_id
+                JOIN viryaos_team_opportunities self_o
+                  ON self_o.workspace_id = t.workspace_id AND self_o.id = $2
+                WHERE t.workspace_id = $1
+                  AND t.state = 'accepted'
+                  AND t.opportunity_id <> $2
+                  AND t.currency = self_o.currency
+                  AND (
+                       (self_o.contact_email IS NOT NULL AND o.contact_email IS NOT NULL
+                        AND lower(o.contact_email) = lower(self_o.contact_email))
+                       OR lower(btrim(o.organization)) = lower(btrim(self_o.organization))
+                  )
+                ORDER BY t.settled_at DESC NULLS LAST, t.updated_at DESC
+                LIMIT 1
+                "#,
             )
-            .await?
-            .into_iter()
-            .find(|snapshot| snapshot.opportunity_id == command.opportunity_id)
-            .ok_or(RepositoryError::NotFound)?;
-        // What this counterparty last agreed to pay. An accepted terms row
-        // carries the fee that closed the deal — the counter we sent if we
-        // sent one, else the offer as made — and the newest one is the
-        // precedent their next offer is judged against. The counterparty is
-        // matched by contact email first, organization name otherwise.
-        let prior_fee_minor = sqlx::query_scalar::<_, i64>(
-            r#"
-            SELECT COALESCE(t.countered_fee_minor, t.offered_fee_minor)
-            FROM viryaos_team_opportunity_terms t
-            JOIN viryaos_team_opportunities o
-              ON o.workspace_id = t.workspace_id AND o.id = t.opportunity_id
-            JOIN viryaos_team_opportunities self_o
-              ON self_o.workspace_id = t.workspace_id AND self_o.id = $2
-            WHERE t.workspace_id = $1
-              AND t.state = 'accepted'
-              AND t.opportunity_id <> $2
-              AND (
-                   (self_o.contact_email IS NOT NULL AND o.contact_email IS NOT NULL
-                    AND lower(o.contact_email) = lower(self_o.contact_email))
-                   OR lower(btrim(o.organization)) = lower(btrim(self_o.organization))
-              )
-            ORDER BY t.settled_at DESC NULLS LAST, t.updated_at DESC
-            LIMIT 1
-            "#,
-        )
-        .bind(workspace_id.into_uuid())
-        .bind(command.opportunity_id.into_uuid())
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(map_sqlx)?;
-        let market_floor_minor = self
-            .market_floor_minor(workspace_id, command.opportunity_id)
-            .await?;
-        let ladder = terms_ladder(
-            snapshot,
-            policy,
-            snapshot.estimated_cost_minor,
-            prior_fee_minor.unwrap_or(0),
-            market_floor_minor,
-        );
+            .bind(workspace_id.into_uuid())
+            .bind(command.opportunity_id.into_uuid())
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(map_sqlx)?;
+            let market_floor_minor = self
+                .market_floor_minor(workspace_id, command.opportunity_id)
+                .await?;
+            Some((
+                terms_ladder(
+                    snapshot,
+                    policy,
+                    snapshot.estimated_cost_minor,
+                    prior_fee_minor.unwrap_or(0),
+                    market_floor_minor,
+                ),
+                prior_fee_minor,
+                market_floor_minor,
+            ))
+        } else {
+            None
+        };
 
         self.bounded(async {
             let mut tx = self.pool.begin().await.map_err(map_sqlx)?;
@@ -626,35 +641,39 @@ impl AutopilotTeamStateRepository for PostgresAutopilotRepository {
                 // counter was argued from, and it does not reset the round
                 // count, which is what stops a promoter nudging their offer up
                 // by a złoty to buy another ask.
-                PromoterPosition::Offer { .. } => sqlx::query(
-                    r#"
-                    INSERT INTO viryaos_team_opportunity_terms (
-                        workspace_id, opportunity_id, state, currency, offered_fee_minor,
-                        walk_away_minor, target_minor, opening_ask_minor, floor_basis,
-                        prior_fee_minor, market_floor_minor, responds_by
-                    ) VALUES ($1,$2,'proposed',$3,$4,$5,$6,$7,$8,$9,$10,$11)
-                    ON CONFLICT (workspace_id, opportunity_id) DO UPDATE SET
-                        state='proposed',
-                        offered_fee_minor=EXCLUDED.offered_fee_minor,
-                        responds_by=EXCLUDED.responds_by,
-                        version=viryaos_team_opportunity_terms.version+1
-                    WHERE viryaos_team_opportunity_terms.settled_at IS NULL
-                    "#,
-                )
-                .bind(workspace_id.into_uuid())
-                .bind(command.opportunity_id.into_uuid())
-                .bind(&command.currency)
-                .bind(offered_fee_minor)
-                .bind(ladder.walk_away_minor)
-                .bind(ladder.target_minor)
-                .bind(ladder.opening_ask_minor)
-                .bind(ladder.floor_basis.as_str())
-                .bind(prior_fee_minor)
-                .bind(market_floor_minor)
-                .bind(command.responds_by)
-                .execute(&mut *tx)
-                .await
-                .map_err(map_sqlx)?,
+                PromoterPosition::Offer { .. } => {
+                    let (ladder, prior_fee_minor, market_floor_minor) =
+                        ladder_inputs.ok_or(RepositoryError::Unexpected)?;
+                    sqlx::query(
+                        r#"
+                        INSERT INTO viryaos_team_opportunity_terms (
+                            workspace_id, opportunity_id, state, currency, offered_fee_minor,
+                            walk_away_minor, target_minor, opening_ask_minor, floor_basis,
+                            prior_fee_minor, market_floor_minor, responds_by
+                        ) VALUES ($1,$2,'proposed',$3,$4,$5,$6,$7,$8,$9,$10,$11)
+                        ON CONFLICT (workspace_id, opportunity_id) DO UPDATE SET
+                            state='proposed',
+                            offered_fee_minor=EXCLUDED.offered_fee_minor,
+                            responds_by=EXCLUDED.responds_by,
+                            version=viryaos_team_opportunity_terms.version+1
+                        WHERE viryaos_team_opportunity_terms.settled_at IS NULL
+                        "#,
+                    )
+                    .bind(workspace_id.into_uuid())
+                    .bind(command.opportunity_id.into_uuid())
+                    .bind(&command.currency)
+                    .bind(offered_fee_minor)
+                    .bind(ladder.walk_away_minor)
+                    .bind(ladder.target_minor)
+                    .bind(ladder.opening_ask_minor)
+                    .bind(ladder.floor_basis.as_str())
+                    .bind(prior_fee_minor)
+                    .bind(market_floor_minor)
+                    .bind(command.responds_by)
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(map_sqlx)?
+                }
             };
             if changed.rows_affected() != 1 {
                 // A settled negotiation is not reopened by another offer. That

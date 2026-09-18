@@ -690,7 +690,6 @@ pub(in crate::autopilot) async fn execute_live_opportunity_terms(
             i64,
             i64,
             String,
-            i32,
             String,
             Option<i64>,
             Option<i64>,
@@ -699,7 +698,7 @@ pub(in crate::autopilot) async fn execute_live_opportunity_terms(
         r#"
         SELECT opportunity.title, opportunity.organization, opportunity.contact_email,
                terms.offered_fee_minor, terms.walk_away_minor, terms.currency,
-               terms.counter_rounds, terms.floor_basis, terms.prior_fee_minor,
+               terms.floor_basis, terms.prior_fee_minor,
                terms.market_floor_minor
         FROM viryaos_team_opportunity_terms AS terms
         JOIN viryaos_team_opportunities AS opportunity
@@ -760,9 +759,9 @@ pub(in crate::autopilot) async fn execute_live_opportunity_terms(
             // beside it at open — the drafted counter quotes these verbatim,
             // which is why they come off the row rather than a recompute:
             // evidence moves under a running negotiation.
-            "floor_basis": row.7,
-            "prior_fee_minor": row.8,
-            "market_floor_minor": row.9,
+            "floor_basis": row.6,
+            "prior_fee_minor": row.7,
+            "market_floor_minor": row.8,
             "amount_minor": amount_minor,
             "round": round,
             "payment_execution_allowed": false,

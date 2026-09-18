@@ -508,7 +508,9 @@ async fn the_floor_cites_the_counterpartys_precedent_and_the_market()
     .await?;
 
     // The costed floor on this show is 150_000 (bare cost — no policy row is
-    // configured). The counterparty's own precedent at 300_000 binds above it.
+    // configured). The deal closed at the 280_000 offer that was accepted;
+    // the 300_000 on the row was our own unanswered counter, which was never
+    // a deal and must not become the precedent.
     record(
         &fixture,
         PromoterPosition::Offer { fee_minor: 100_000 },
@@ -526,12 +528,12 @@ async fn the_floor_cites_the_counterpartys_precedent_and_the_market()
     assert_eq!(
         row,
         (
-            300_000,
+            280_000,
             "counterparty_history".to_owned(),
-            Some(300_000),
+            Some(280_000),
             None
         ),
-        "a promoter who paid 300 last time does not re-open below it"
+        "a promoter who agreed to 280 last time does not re-open below it"
     );
 
     // Stage two: the workspace's own booking graph ties the counterparty to a
@@ -662,7 +664,7 @@ async fn the_floor_cites_the_counterpartys_precedent_and_the_market()
     .await?;
     assert_eq!(
         row,
-        (380_000, "market".to_owned(), Some(300_000), Some(380_000)),
+        (380_000, "market".to_owned(), Some(280_000), Some(380_000)),
         "the lowest band that holds at every room they work binds the floor"
     );
 
