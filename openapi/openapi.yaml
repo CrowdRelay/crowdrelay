@@ -7462,6 +7462,94 @@ paths:
           $ref: '#/components/responses/Problem'
         '503':
           $ref: '#/components/responses/Problem'
+  /admin/roster-plan/catalogue-rotation:
+    get:
+      operationId: catalogueRotationPlan
+      summary: Which catalogue-rotation edges have headroom, and what they would carry next
+      description: >
+        5.15 — the label's crossbill (§4h-7.4): §4i-4 across acts. A fan of
+        act A has never heard act B's back catalogue, and the label holds
+        both rights through `catalogue_rotation` consent edges — their own
+        grant, monthly cap and cooldown. The response is one proposal per
+        edge with cap headroom: the pair, the release it would feature
+        (oldest released item the edge has not yet rotated — month three
+        before month twenty), the reachable-fan ceiling, and the spent
+        fraction of the edge's monthly cap. Edges with nothing left to
+        rotate are reported under `exhausted` — a finished catalogue is
+        information, not silence. Admin rather than control-plane: the
+        rotation spends one act's audience on a labelmate's catalogue,
+        which is the organisation's call.
+      security:
+      - adminBearer: []
+      parameters:
+      - in: query
+        name: organization_id
+        required: true
+        schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: >
+            The proposals with headroom and the exhausted edges. An
+            organisation with no active catalogue-rotation consents gets
+            empty lists.
+        '401':
+          $ref: '#/components/responses/Problem'
+        '503':
+          $ref: '#/components/responses/Problem'
+    post:
+      operationId: runCatalogueRotation
+      summary: Run one catalogue rotation on an edge
+      description: >
+        Approves and dispatches one rotation: the pick is recomputed
+        against the live rows — a stale screen cannot rotate a release that
+        has since been carried or cancelled — then the campaign dispatches
+        through the same capped path every amplification uses, so the
+        edge's monthly cap and per-fan cooldown apply unchanged. The
+        ledger records `catalogue:<release_id>` as the campaign reference
+        and the outbox payload carries `kind: catalogue_rotation` plus the
+        release it featured — the labelling the plan names. Replay is
+        honest rather than keyed: deliveries are unique on
+        (consent, fan, reference), so a repeated approval of the same edge
+        queues zero. A spent edge refuses 409; a fully rotated catalogue
+        refuses 409 with the reason.
+      security:
+      - adminBearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [organization_id, consent_id]
+              properties:
+                organization_id:
+                  type: string
+                  format: uuid
+                  description: >
+                    The organisation the consent edge belongs to — the
+                    membership is checked, not taken on trust.
+                consent_id:
+                  type: string
+                  format: uuid
+                  description: >
+                    The active `catalogue_rotation` consent edge to run —
+                    the grant that authorises mailing one act's fans the
+                    labelmate's catalogue.
+      responses:
+        '200':
+          description: >
+            The landed rotation: the consent edge, the release it carried,
+            the campaign reference it recorded, and how many fan deliveries
+            were queued.
+        '401':
+          $ref: '#/components/responses/Problem'
+        '404':
+          $ref: '#/components/responses/Problem'
+        '409':
+          $ref: '#/components/responses/Problem'
+        '503':
+          $ref: '#/components/responses/Problem'
   /admin/roster-plan/support-slot-ask:
     post:
       operationId: approveSupportSlotAsk
@@ -8607,7 +8695,7 @@ paths:
                   format: uuid
                 purpose:
                   type: string
-                  enum: [cross_promote, release_feature, event_crossbill]
+                  enum: [cross_promote, release_feature, event_crossbill, catalogue_rotation]
                 scope:
                   type: string
                   enum: [all_active, double_opt_in]

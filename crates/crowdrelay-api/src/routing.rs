@@ -844,6 +844,14 @@ pub(super) fn application_routes(state: AppState) -> Router {
             "/v1/admin/roster-plan/release-calendar",
             get(crate::roster_release_calendar::roster_release_calendar),
         )
+        // The label's crossbill: which catalogue-rotation edges have
+        // headroom and what they'd carry, and the approval that runs one.
+        // Replay is ledger-deduped, so a repeated ask queues zero.
+        .route(
+            "/v1/admin/roster-plan/catalogue-rotation",
+            get(crate::roster_catalogue_rotation::catalogue_rotation_plan)
+                .post(crate::roster_catalogue_rotation::run_catalogue_rotation),
+        )
         // The roster's own numbers, on the same surface as its plan for the
         // same reason: these belong to the organisation, and a workspace token
         // must not be able to read or set what a labelmate's plan is sized by.
