@@ -1061,14 +1061,9 @@ async fn comparable_acts_reach_the_planner() -> Result<(), Box<dyn std::error::E
         .execute(pool)
         .await?;
 
-        // The alias map is what makes "doom" the same genre as "doom metal":
-        // the peer claims the short spelling and still counts.
-        sqlx::query(
-            "INSERT INTO place_genre_aliases (alias, canonical) VALUES ('doom', 'doom metal')
-             ON CONFLICT DO NOTHING",
-        )
-        .execute(pool)
-        .await?;
+        // No fixture insert: the 0316 seed map itself is what makes "doom"
+        // the same genre as "doom metal" — if the seed row ever goes missing
+        // this test fails, which is the point.
 
         // Another tenant's bill at the same room carries two peers: one doom,
         // one not. Only the doom one intersects the tenant's genres — and the
