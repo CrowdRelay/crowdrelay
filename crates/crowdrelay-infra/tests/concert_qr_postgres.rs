@@ -423,3 +423,104 @@ async fn email_claim_never_mints_a_session() -> Result<()> {
     assert_eq!(sessions, 0, "an unverified email must never authenticate");
     Ok(())
 }
+
+/// A rescheduled show must not kill the codes already on the door. The old
+/// rule bound a token's signed expiry to the campaign row's `valid_until` by
+/// equality, so the door-campaign retime — the fix that exists to rescue a
+/// moved gig — retired every printed QR the moment it ran. The bound is now
+/// one-sided: a token may not promise a life longer than the live window
+/// (tightening still retires codes), but an extended window keeps a token
+/// alive until its own signed expiry.
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn extended_window_keeps_in_flight_tokens_tightened_window_retires_them() -> Result<()> {
+    let pool = pool().await?;
+    let ws = workspace(&pool, "scan-window").await?;
+    let fixture = show(&pool, ws, "scan-window").await?;
+    let repo = PostgresConcertQrRepository::new(pool.clone());
+    let slug: String =
+        sqlx::query_scalar("SELECT slug FROM events WHERE workspace_id = $1 AND id = $2")
+            .bind(ws.into_uuid())
+            .bind(fixture.event_id)
+            .fetch_one(&pool)
+            .await?;
+
+    // The show moved later: the campaign window was extended past the expiry
+    // this token was printed with. Under the equality rule this scan died.
+    sqlx::query(
+        "UPDATE concert_qr_campaigns SET valid_until = valid_until + interval '6 hours' \
+         WHERE workspace_id = $1 AND id = $2",
+    )
+    .bind(ws.into_uuid())
+    .bind(fixture.campaign_id)
+    .execute(&pool)
+    .await?;
+    let mut extended = command(
+        &fixture,
+        ws,
+        None,
+        Some("moved-show@example.com".to_owned()),
+        Some(CheckinConsent {
+            granted: true,
+            policy_version: "v1".to_owned(),
+        }),
+    );
+    extended.event_slug = slug.clone();
+    assert!(
+        repo.check_in(&extended).await?.created,
+        "a token inside its signed expiry survives an extended window"
+    );
+
+    // The same show moved earlier instead: the window tightened below the
+    // printed expiry — those codes must die with the rescinded window.
+    let fixture2 = show(&pool, ws, "scan-window-tight").await?;
+    let slug2: String =
+        sqlx::query_scalar("SELECT slug FROM events WHERE workspace_id = $1 AND id = $2")
+            .bind(ws.into_uuid())
+            .bind(fixture2.event_id)
+            .fetch_one(&pool)
+            .await?;
+    sqlx::query(
+        "UPDATE concert_qr_campaigns SET valid_until = now() + interval '2 hours' \
+         WHERE workspace_id = $1 AND id = $2",
+    )
+    .bind(ws.into_uuid())
+    .bind(fixture2.campaign_id)
+    .execute(&pool)
+    .await?;
+    let mut tightened = command(
+        &fixture2,
+        ws,
+        None,
+        Some("early-show@example.com".to_owned()),
+        None,
+    );
+    tightened.event_slug = slug2;
+    let err = repo.check_in(&tightened).await.unwrap_err();
+    assert_eq!(
+        err,
+        crowdrelay_application::ConcertQrError::NotFound,
+        "a token promising beyond the live window must be refused"
+    );
+
+    // And a token past its own signed expiry stays dead regardless.
+    let fixture3 = show(&pool, ws, "scan-window-expired").await?;
+    let slug3: String =
+        sqlx::query_scalar("SELECT slug FROM events WHERE workspace_id = $1 AND id = $2")
+            .bind(ws.into_uuid())
+            .bind(fixture3.event_id)
+            .fetch_one(&pool)
+            .await?;
+    let mut expired = command(
+        &fixture3,
+        ws,
+        None,
+        Some("late-scan@example.com".to_owned()),
+        None,
+    );
+    expired.event_slug = slug3;
+    expired.expires_at = OffsetDateTime::now_utc().unix_timestamp() - 60;
+    let err = repo.check_in(&expired).await.unwrap_err();
+    assert_eq!(err, crowdrelay_application::ConcertQrError::NotFound);
+    Ok(())
+}

@@ -90,7 +90,10 @@ class GrowthDebtContract(unittest.TestCase):
             self.assertIn("growth_debt", allowed)
 
     def test_the_context_is_reachable_from_every_parse_surface(self) -> None:
-        self.assertIn('"growth_debt" => AutopilotContext::GrowthDebt', read(MAPPING))
+        # mapping.rs derives from AutopilotContext::ALL via from_storage; the
+        # storage name itself is pinned on the as_str arm in model.rs.
+        self.assertIn("AutopilotContext::from_storage(&row.context)", read(MAPPING))
+        self.assertIn('Self::GrowthDebt => "growth_debt"', read(MODEL))
         self.assertIn(
             '"growth_debt" => Some(AutopilotContext::GrowthDebt)', read(VALIDATION)
         )

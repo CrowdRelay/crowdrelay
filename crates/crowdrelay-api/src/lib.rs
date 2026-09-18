@@ -368,162 +368,18 @@ fn is_area_management_path(path: &str) -> bool {
     path == "/v1/control-plane/area" || path.starts_with("/v1/control-plane/area/")
 }
 
-fn one_segment_after(path: &str, prefix: &str) -> bool {
-    path.strip_prefix(prefix)
-        .is_some_and(|tail| !tail.is_empty() && !tail.contains('/'))
-}
-
-/// One identifier segment between a fixed prefix and a fixed suffix, e.g.
-/// `/v1/control-plane/autopilot/actions/{id}/approve`.
-fn one_segment_with_suffix(path: &str, prefix: &str, suffix: &str) -> bool {
-    path.strip_prefix(prefix)
-        .and_then(|tail| tail.strip_suffix(suffix))
-        .is_some_and(|segment| !segment.is_empty() && !segment.contains('/'))
-}
-
+/// The Control Plane's own namespace. Every path under it requires the
+/// derived ControlPlane bearer — the area sub-namespace alone takes the
+/// narrower AreaManagement token instead.
+///
+/// This is a prefix, not a list, on purpose: the list that used to live here
+/// had to be edited by hand for every new route, and a route missing from it
+/// did not become unreachable — outside `control_plane::router`'s own auth
+/// layer it answered *unauthenticated*. A prefix boundary cannot be
+/// forgotten.
 fn is_control_plane_management_path(path: &str) -> bool {
-    path.starts_with("/v1/control-plane/ops/")
-        || matches!(
-            path,
-            "/v1/control-plane/ecosystem/overview"
-                | "/v1/control-plane/ecosystem/findings"
-                | "/v1/control-plane/ecosystem/reconcile"
-                | "/v1/control-plane/ecosystem/flags"
-                | "/v1/control-plane/autopilot/overview"
-                | "/v1/control-plane/autopilot/growth"
-                | "/v1/control-plane/autopilot/growth-metrics/coverage"
-                | "/v1/control-plane/autopilot/growth-metrics/trends"
-                | "/v1/control-plane/autopilot/objectives"
-                | "/v1/control-plane/autopilot/posture"
-                | "/v1/control-plane/autopilot/acquisition-channels"
-                | "/v1/control-plane/autopilot/tour-economics"
-                | "/v1/control-plane/autopilot/show-economics"
-                | "/v1/control-plane/autopilot/chief-of-staff"
-                | "/v1/control-plane/autopilot/outreach/candidates"
-                | "/v1/control-plane/autopilot/booking-discovery/candidates"
-                | "/v1/control-plane/autopilot/beacon-signal"
-                | "/v1/control-plane/autopilot/beacon-signal/candidates"
-                | "/v1/control-plane/autopilot/beacon-press-requests"
-                | "/v1/control-plane/autopilot/beacon-press-assets"
-                | "/v1/control-plane/autopilot/beacon-signal-engagements"
-                | "/v1/control-plane/autopilot/beacon-coverage"
-                | "/v1/control-plane/autopilot/beacon-network"
-                | "/v1/control-plane/autopilot/beacon-release-campaigns"
-                | "/v1/control-plane/autopilot/plays"
-                | "/v1/control-plane/autopilot/scorecard"
-                | "/v1/control-plane/autopilot/measurement"
-                | "/v1/control-plane/autopilot/reply-triage"
-                | "/v1/control-plane/autopilot/next-best-actions"
-                | "/v1/control-plane/autopilot/learning-loop"
-                | "/v1/control-plane/autopilot/learning-proof"
-                | "/v1/control-plane/portfolio/overview"
-                | "/v1/control-plane/portfolio/amplification"
-                | "/v1/control-plane/tenant-settings"
-                | "/v1/control-plane/fanbases"
-                | "/v1/control-plane/fanbases/connections"
-                | "/v1/control-plane/webhook-endpoints"
-                | "/v1/control-plane/audience/overview"
-                | "/v1/control-plane/audience/acquisition-sources"
-                | "/v1/control-plane/audience/city-funnel"
-                | "/v1/control-plane/audience/city-venues"
-                | "/v1/control-plane/audience/fans"
-                | "/v1/control-plane/audience/segments"
-                | "/v1/control-plane/community-intelligence/communities"
-                | "/v1/control-plane/events"
-        )
-        || one_segment_with_suffix(path, "/v1/control-plane/events/", "/timeline")
-        || one_segment_with_suffix(path, "/v1/control-plane/events/", "/scan")
-        || one_segment_with_suffix(path, "/v1/control-plane/events/", "/report")
-        // §4h-11: the show's helper shortlist — same authority class as the
-        // timeline. Missing from this list it would answer unauthenticated,
-        // not refused: `privileged` derives from these same predicates.
-        || one_segment_with_suffix(path, "/v1/control-plane/events/", "/who-can-help")
-        // The operator's show writes — bill entry and the T+7 report's
-        // counterparty — reuse the staff/admin handlers under this prefix.
-        || one_segment_with_suffix(path, "/v1/control-plane/events/", "/acts")
-        || one_segment_with_suffix(path, "/v1/control-plane/events/", "/counterparty")
-        || one_segment_with_suffix(
-            path,
-            "/v1/control-plane/community-intelligence/communities/",
-            "/observations",
-        )
-        || one_segment_with_suffix(
-            path,
-            "/v1/control-plane/community-intelligence/communities/",
-            "/entities",
-        )
-        // Registering a route is not enough — a control-plane path missing
-        // from this list is unreachable, and answers 404 rather than saying
-        // it was refused. Both of these shipped that way for one deploy.
-        || one_segment_with_suffix(
-            path,
-            "/v1/control-plane/community-intelligence/communities/",
-            "/membership",
-        )
-        || one_segment_with_suffix(
-            path,
-            "/v1/control-plane/community-intelligence/communities/",
-            "/intro-draft",
-        )
-        // Beacon management. The read surfaces were allowlisted long ago; the
-        // writes never were, so the roster was observable and unchangeable.
-        || path == "/v1/control-plane/autopilot/beacons"
-        || path == "/v1/control-plane/autopilot/beacons/signal-invites/batch"
-        || one_segment_with_suffix(path, "/v1/control-plane/autopilot/beacons/", "/signal-invites")
-        || one_segment_with_suffix(path, "/v1/control-plane/autopilot/beacons/", "/signal-state")
-        || one_segment_with_suffix(path, "/v1/control-plane/autopilot/beacons/", "/reply")
-        // Audience graph: registering communities was psql-only before this.
-        || path == "/v1/control-plane/audience-graph/places"
-        || path == "/v1/control-plane/audience-graph/places/import"
-        || one_segment_after(path, "/v1/control-plane/ecosystem/flags/")
-        || one_segment_after(path, "/v1/control-plane/autopilot/policies/")
-        || one_segment_after(path, "/v1/control-plane/tenant-settings/")
-        || one_segment_with_suffix(path, "/v1/control-plane/autopilot/actions/", "/approve")
-        || one_segment_with_suffix(
-            path,
-            "/v1/control-plane/autopilot/decisions/",
-            "/handled-externally",
-        )
-        || one_segment_with_suffix(path, "/v1/control-plane/autopilot/decisions/", "/evidence")
-        || one_segment_with_suffix(
-            path,
-            "/v1/control-plane/portfolio/amplification/",
-            "/decide",
-        )
-        || one_segment_with_suffix(path, "/v1/control-plane/fanbases/", "/ingest")
-        // The shared night (§12-9). A control-plane path missing from this
-        // list answers 404 rather than saying it was refused — both halves
-        // of every pattern below are covered so a forgotten entry ships as
-        // a missing route, not a silent one.
-        || one_segment_after(path, "/v1/control-plane/nights/")
-        || one_segment_with_suffix(path, "/v1/control-plane/nights/", "/contributions")
-        || one_segment_with_suffix(path, "/v1/control-plane/nights/", "/organiser-link")
-        || night_contribution_path(path)
-        || night_act_confirm_path(path)
-}
-
-/// `/v1/control-plane/nights/{id}/contributions/{kind}` — one variable
-/// segment, a fixed middle, one variable segment.
-fn night_contribution_path(path: &str) -> bool {
-    path.strip_prefix("/v1/control-plane/nights/")
-        .and_then(|tail| tail.split_once("/contributions/"))
-        .is_some_and(|(id, kind)| {
-            !id.is_empty() && !id.contains('/') && !kind.is_empty() && !kind.contains('/')
-        })
-}
-
-/// `/v1/control-plane/nights/{id}/acts/{act_slug}/confirm` — two variable
-/// segments around a fixed middle with a fixed tail.
-fn night_act_confirm_path(path: &str) -> bool {
-    path.strip_prefix("/v1/control-plane/nights/")
-        .and_then(|tail| tail.split_once("/acts/"))
-        .is_some_and(|(id, rest)| {
-            !id.is_empty()
-                && !id.contains('/')
-                && rest
-                    .strip_suffix("/confirm")
-                    .is_some_and(|slug| !slug.is_empty() && !slug.contains('/'))
-        })
+    (path == "/v1/control-plane" || path.starts_with("/v1/control-plane/"))
+        && !is_area_management_path(path)
 }
 
 async fn enforce_privileged_namespace(

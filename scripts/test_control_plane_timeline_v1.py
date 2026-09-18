@@ -81,14 +81,12 @@ class ControlPlaneTimelineContract(unittest.TestCase):
         self.assertIn("concert_qr::control_plane_event_timeline", self.router)
 
     def test_the_management_path_predicate_covers_it(self) -> None:
-        # Route registration alone does not bind the credential: paths under
-        # /v1/control-plane/ that the management predicate does not list fall
-        # through the privileged-namespace check. This pair is what keeps the
-        # timeline behind the ControlPlane bearer at the app layer.
-        self.assertIn(
-            'one_segment_with_suffix(path, "/v1/control-plane/events/", "/timeline")',
-            self.lib,
-        )
+        # Route registration alone does not bind the credential. The predicate
+        # is a prefix rule — every /v1/control-plane/ path outside /area/ —
+        # so the timeline cannot fall off a list the way the old hand-kept
+        # allowlist could.
+        self.assertIn('path.starts_with("/v1/control-plane/")', self.lib)
+        self.assertIn("!is_area_management_path(path)", self.lib)
 
     def test_the_chunk_is_included(self) -> None:
         self.assertIn('include!("concert_qr/timeline.rs");', self.parent)
@@ -202,10 +200,10 @@ class ControlPlaneScanContract(unittest.TestCase):
         self.assertIn("concert_qr::control_plane_event_scan", self.router)
 
     def test_scan_path_is_under_the_management_credential(self) -> None:
-        self.assertIn(
-            'one_segment_with_suffix(path, "/v1/control-plane/events/", "/scan")',
-            self.lib,
-        )
+        # Prefix predicate: /v1/control-plane/events/{slug}/scan is covered
+        # by the /v1/control-plane/ boundary, not a named entry.
+        self.assertIn('path.starts_with("/v1/control-plane/")', self.lib)
+        self.assertIn("!is_area_management_path(path)", self.lib)
 
     def test_scan_chunk_is_included(self) -> None:
         self.assertIn('include!("concert_qr/scan_view.rs");', self.parent)
@@ -273,10 +271,10 @@ class ControlPlaneReportContract(unittest.TestCase):
         self.assertIn("concert_qr::control_plane_event_report", self.router)
 
     def test_report_path_is_under_the_management_credential(self) -> None:
-        self.assertIn(
-            'one_segment_with_suffix(path, "/v1/control-plane/events/", "/report")',
-            self.lib,
-        )
+        # Prefix predicate: /v1/control-plane/events/{slug}/report is covered
+        # by the /v1/control-plane/ boundary, not a named entry.
+        self.assertIn('path.starts_with("/v1/control-plane/")', self.lib)
+        self.assertIn("!is_area_management_path(path)", self.lib)
 
     def test_report_chunk_is_included(self) -> None:
         self.assertIn('include!("concert_qr/report_view.rs");', self.parent)

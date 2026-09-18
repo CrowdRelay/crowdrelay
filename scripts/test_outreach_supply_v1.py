@@ -108,9 +108,10 @@ class OutreachSupplyContract(unittest.TestCase):
         )
 
     def test_the_context_is_reachable_from_every_parse_surface(self) -> None:
-        self.assertIn(
-            '"outreach_supply" => AutopilotContext::OutreachSupply', read(MAPPING)
-        )
+        # mapping.rs derives from AutopilotContext::ALL via from_storage; the
+        # storage name itself is pinned on the as_str arm in model.rs.
+        self.assertIn("AutopilotContext::from_storage(&row.context)", read(MAPPING))
+        self.assertIn('Self::OutreachSupply => "outreach_supply"', read(MODEL))
         self.assertIn(
             '"outreach_supply" => Some(AutopilotContext::OutreachSupply)',
             read(VALIDATION),

@@ -1,27 +1,28 @@
 #!/usr/bin/env python3
-"""Every registered control-plane route must be reachable.
+"""Every registered control-plane route must sit under the management prefix.
 
 `/v1/control-plane/` requests are gated by `is_control_plane_management_path`
-in `crowdrelay-api/src/lib.rs`. Registering a route in a router is not enough:
-a path missing from that function is unreachable, and — because the gate runs
-before routing — it answers **404**, not 401 or 403. So the failure reads as
-"this endpoint does not exist" when the endpoint exists and was refused.
+in `crowdrelay-api/src/lib.rs`. That predicate is a prefix rule — the whole
+namespace minus the `/v1/control-plane/area/` sub-scope, which takes the
+narrower AreaManagement bearer — because the alternative already shipped its
+failure mode once: a hand-maintained list of paths that had to grow by hand
+for every new route.
 
-The consequence is worse than unreachability. `privileged` is computed from
-these same predicates, so a control-plane path the gate does not recognise is
-not refused — it is served **with no authentication at all**:
+The list's failure was worse than unreachability. `privileged` is computed
+from the same predicates, so a control-plane path the list did not recognise
+was not refused — it was served **with no authentication at all**:
 
     let privileged = ... || is_control_plane_management_path(path);
 
 `.../communities/{id}/intro-draft` and `.../communities/{id}/membership`
 shipped that way and answered `200` with data to an unauthenticated request,
-the second of them a write. Nothing compared the two lists, and `cargo check`
-cannot: one side is a router, the other a `matches!` arm, and both compile
-happily while disagreeing.
+the second of them a write.
 
-This compares them. Every registered `/v1/control-plane/...` literal in the
-governed family must be matched by the allowlist — as an exact string, a
-`one_segment_with_suffix` prefix/suffix pair, or a `starts_with` prefix.
+This gate now pins the rule that cannot forget: the predicate must be shaped
+as the `/v1/control-plane/` prefix minus the area sub-scope, and every
+registered `/v1/control-plane/...` literal in the governed family must fall
+under that prefix. If the predicate ever grows an exclusion beyond the area
+carve-out, this check starts flagging real routes again.
 """
 from __future__ import annotations
 
@@ -39,7 +40,7 @@ def gate_source() -> str:
     """The body of the gate, bounded by brace depth.
 
     Scanning to the next `\nfn ` overshoots by 26k characters and swallows
-    unrelated predicates, which makes the allowlist look far broader than it
+    unrelated predicates, which makes the coverage look far broader than it
     is — the first version of this check passed for that reason.
     """
     source = LIB.read_text()
@@ -55,18 +56,25 @@ def gate_source() -> str:
     raise AssertionError("gate function is unbalanced")
 
 
-def allowlist() -> tuple[set[str], list[tuple[str, str]], list[str]]:
-    """Exact paths, (prefix, suffix) pairs, and bare prefixes."""
-    gate = gate_source()
-    exact = set(re.findall(r'"(/v1/control-plane/[^"]*)"(?!\s*,)', gate))
-    exact |= set(re.findall(r'\|\s*"(/v1/control-plane/[^"]*)"', gate))
-    exact |= set(re.findall(r'path == "(/v1/control-plane/[^"]*)"', gate))
-    pairs = re.findall(
-        r'one_segment_with_suffix\(\s*path,\s*"([^"]+)",\s*"([^"]+)",?\s*\)',
-        gate,
+def is_area_management_path(path: str) -> bool:
+    """Python port of the area sub-scope the prefix rule carves out."""
+    return path == "/v1/control-plane/area" or path.startswith(
+        "/v1/control-plane/area/"
     )
-    prefixes = re.findall(r'path\.starts_with\("([^"]+)"\)', gate)
-    return exact, pairs, prefixes
+
+
+def is_allowed(path: str) -> bool:
+    """Python port of `is_control_plane_management_path` as a prefix rule.
+
+    The Rust predicate is `(path == "/v1/control-plane" ||
+    path.starts_with("/v1/control-plane/")) && !is_area_management_path(path)`.
+    A route under the prefix is covered by construction; a route under the
+    area sub-scope belongs to the narrower credential and must not be claimed
+    by this one.
+    """
+    return (
+        path == "/v1/control-plane" or path.startswith("/v1/control-plane/")
+    ) and not is_area_management_path(path)
 
 
 # Scoped to the family this was proven against. Statically modelling the whole
@@ -88,38 +96,23 @@ def registered_routes() -> set[str]:
     return found
 
 
-def is_allowed(path: str) -> bool:
-    exact, pairs, prefixes = allowlist()
-    if path in exact:
-        return True
-    if any(path.startswith(p) for p in prefixes):
-        return True
-    for prefix, suffix in pairs:
-        if not path.startswith(prefix) or not path.endswith(suffix):
-            continue
-        middle = path[len(prefix) : len(path) - len(suffix)]
-        # `one_segment_with_suffix` allows exactly one path segment between
-        # the two, which is what `{id}` renders as.
-        if middle and "/" not in middle:
-            return True
-    return False
-
-
 class ControlPlanePathAllowlist(unittest.TestCase):
     def test_routes_are_discoverable(self) -> None:
         self.assertTrue(registered_routes(), "no control-plane routes found to check")
 
     def test_the_gate_is_still_where_we_look_for_it(self) -> None:
-        self.assertIn("one_segment_with_suffix", gate_source())
+        gate = gate_source()
+        self.assertIn('path.starts_with("/v1/control-plane/")', gate)
+        self.assertIn("!is_area_management_path(path)", gate)
 
     def test_every_registered_route_is_reachable(self) -> None:
         unreachable = sorted(p for p in registered_routes() if not is_allowed(p))
         self.assertEqual(
             unreachable,
             [],
-            "these control-plane routes are registered but missing from "
-            "is_control_plane_management_path, so they answer 404 as though "
-            "they did not exist: " + ", ".join(unreachable),
+            "these control-plane routes are registered but outside the "
+            "/v1/control-plane/ prefix boundary, so the management credential "
+            "does not reach them: " + ", ".join(unreachable),
         )
 
 

@@ -62,14 +62,10 @@ class ControlPlaneShowWritesContract(unittest.TestCase):
     def test_the_management_path_predicate_covers_both(self) -> None:
         # The predicate is also the privileged-computation input: a control-
         # plane path missing here is served unauthenticated, not refused.
-        self.assertIn(
-            'one_segment_with_suffix(path, "/v1/control-plane/events/", "/acts")',
-            self.lib,
-        )
-        self.assertIn(
-            'one_segment_with_suffix(path, "/v1/control-plane/events/", "/counterparty")',
-            self.lib,
-        )
+        # It is a prefix rule — every /v1/control-plane/ path outside /area/
+        # is covered by construction, so these writes cannot fall off a list.
+        self.assertIn('path.starts_with("/v1/control-plane/")', self.lib)
+        self.assertIn("!is_area_management_path(path)", self.lib)
 
     def test_the_bill_route_sized_its_body_limit(self) -> None:
         declared = re.search(

@@ -372,9 +372,9 @@ async fn checkin_against_another_fans_ticket_order_records_a_candidate() -> Resu
     let buyer = fan(&pool, ws, "buyer@example.com", "active").await?;
     let event_id = event(&pool, ws, "gig-three").await?;
     let campaign_id = qr_campaign(&pool, ws, event_id).await?;
-    // expires_at must equal the campaign's own valid_until — recomputing
+    // expires_at must not outlive the campaign's own valid_until — recomputing
     // now()+1d on the Rust side straddles a second boundary against the SQL
-    // now() the helper used, and check_in rejects a mismatched expiry.
+    // now() the helper used, and check_in rejects an expiry beyond the window.
     let campaign_valid_until: OffsetDateTime =
         sqlx::query_scalar("SELECT valid_until FROM concert_qr_campaigns WHERE id = $1")
             .bind(campaign_id)

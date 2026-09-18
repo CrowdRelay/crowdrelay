@@ -553,6 +553,59 @@ mod tests {
         Ok(())
     }
 
+    /// The control-plane boundary is a prefix, not a list: any path under
+    /// `/v1/control-plane/` — including ones no allowlist entry names — must
+    /// refuse every credential but the derived ControlPlane bearer. A path
+    /// that fell off a hand-maintained list used to answer *unauthenticated*
+    /// instead of refused; this pins the fail-closed shape.
+    #[tokio::test]
+    async fn unlisted_control_plane_paths_still_require_the_control_plane_bearer()
+    -> Result<(), Box<dyn std::error::Error>> {
+        const ADMIN_KEY: &str = "test-admin-api-key-123456789012";
+        const STAFF_KEY: &str = "test-staff-api-key-123456789012";
+        const AREA_KEY: &str = "test-area-management-key-1234567890";
+        const CONTROL_PLANE_KEY: &str = "test-control-plane-key-123456789012";
+
+        // `/v1/control-plane/gdrive/contacts` and the connections writes were
+        // the routes a stale allowlist left uncovered.
+        let app = test_router()?;
+        for (uri, token) in [
+            ("/v1/control-plane/gdrive/contacts", None),
+            ("/v1/control-plane/gdrive/contacts", Some(ADMIN_KEY)),
+            ("/v1/control-plane/gdrive/contacts", Some(STAFF_KEY)),
+            ("/v1/control-plane/gdrive/contacts", Some(AREA_KEY)),
+            ("/v1/control-plane/connections/discord", Some(ADMIN_KEY)),
+            ("/v1/control-plane/autopilot/cycle/run", Some(ADMIN_KEY)),
+            ("/v1/control-plane/never-registered-path", None),
+            ("/v1/control-plane/never-registered-path", Some(ADMIN_KEY)),
+        ] {
+            let mut builder = Request::builder().uri(uri);
+            if let Some(token) = token {
+                builder = builder.header(AUTHORIZATION, format!("Bearer {token}"));
+            }
+            let response = app.clone().oneshot(builder.body(Body::empty())?).await?;
+            assert_eq!(
+                response.status(),
+                StatusCode::UNAUTHORIZED,
+                "{uri} with {token:?} must be refused"
+            );
+        }
+
+        let control_plane_key_accepted = app
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/control-plane/gdrive/contacts")
+                    .header(AUTHORIZATION, format!("Bearer {CONTROL_PLANE_KEY}"))
+                    .body(Body::empty())?,
+            )
+            .await?;
+        assert_ne!(
+            control_plane_key_accepted.status(),
+            StatusCode::UNAUTHORIZED
+        );
+        Ok(())
+    }
+
     include!("lib_tests_attestation.rs");
 
     #[tokio::test]
