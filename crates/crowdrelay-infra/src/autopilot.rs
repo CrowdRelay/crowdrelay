@@ -11,6 +11,9 @@ pub use cycle_trigger::{
     AUTOPILOT_CYCLE_CHANNEL, CyclePreview, CycleTrigger, NORTH_STAR_WINDOW_DAYS, close_cycle_run,
     daily_north_star, open_cycle_run, preview_autopilot_cycle, request_autopilot_cycle,
 };
+// The signal-inviter's outcome mapper lives in the worker crate but needs the
+// same audience count the approval screen shows — one count, one definition.
+pub use operations::push_segments::signal_push_audience;
 mod control_mutations;
 mod control_pipeline;
 mod decisions;
@@ -104,7 +107,7 @@ use crowdrelay_domain::{
     booking_discovery::BookingSupplySnapshot,
     booking_window::{BookingWindowInputSet, BookingWindowOwnShow, BookingWindowTargetInputs},
     campaign_lifecycle::EventCampaignSnapshot,
-    content_supply::{CommunityRelayTarget, ContentSupplySnapshot},
+    content_supply::{CommunityRelayTarget, ContentSupplySnapshot, SignalPushAudience},
     deliverability::DeliverabilitySnapshot,
     experimentation::ExperimentSnapshot,
     free_reach::{WaveAnchor, WaveSnapshot, WaveState},

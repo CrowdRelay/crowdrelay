@@ -99,6 +99,18 @@ pub struct CommunityRelayTarget {
     pub subreddit: String,
 }
 
+/// How many fans a Signal push would reach right now, measured with the
+/// send path's own eligibility (active fan, newest marketing consent
+/// granted, the segment's predicates, at least one live push endpoint).
+/// `reached` is `eligible` clamped by the workspace's per-step recipient
+/// bound — the bound clamps the fan set, not just the report, so an
+/// approval screen should print `reached`, never `eligible`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+pub struct SignalPushAudience {
+    pub eligible: u32,
+    pub reached: u32,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct ContentSupplySnapshot {
     pub source_id: ContentSourceId,

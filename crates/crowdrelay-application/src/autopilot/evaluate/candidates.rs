@@ -730,6 +730,7 @@ fn content_candidates(
     snapshot: &ContentSupplySnapshot,
     policy: &AutopilotPolicy,
     communities: &[CommunityRelayTarget],
+    push_audience: Option<crowdrelay_domain::content_supply::SignalPushAudience>,
     now: OffsetDateTime,
 ) -> Result<Vec<DecisionCandidate>, serde_json::Error> {
     let AutopilotPolicyConfig::ContentSupply(domain_policy) = &policy.config else {
@@ -767,9 +768,14 @@ fn content_candidates(
                 ),
             }])
         }
-        ContentSupplyDecision::Relay { confidence } => {
-            Ok(relay_candidates(snapshot, policy, domain_policy, communities, confidence)?)
-        }
+        ContentSupplyDecision::Relay { confidence } => Ok(relay_candidates(
+            snapshot,
+            policy,
+            domain_policy,
+            communities,
+            push_audience,
+            confidence,
+        )?),
         ContentSupplyDecision::Hold(_) => Ok(Vec::new()),
     }
 }

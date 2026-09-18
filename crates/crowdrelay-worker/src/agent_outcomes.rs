@@ -861,6 +861,48 @@ impl AgentOutcomeWorker {
                             .and_then(|i| i.get("segment"))
                             .and_then(Value::as_str)
                             .map(|s| s.to_owned());
+                        // The approval quotes the audience the send would
+                        // reach today — the same eligibility and envelope
+                        // bound the execution path enforces. A segment the
+                        // count cannot resolve stays uncounted rather than
+                        // failing the outcome: the send path still refuses
+                        // the bad slug at dispatch.
+                        let audience = crowdrelay_infra::autopilot::signal_push_audience(
+                            &self.pool,
+                            self.workspace_id,
+                            segment.as_deref(),
+                        )
+                        .await;
+                        let (audience_size, audience_basis) = match audience {
+                            Ok(audience) => {
+                                let basis = match &segment {
+                                    Some(slug) if audience.reached < audience.eligible => {
+                                        format!(
+                                            "fans in the '{slug}' segment with notifications on who consented to marketing — the workspace's per-step send envelope caps this push at {}",
+                                            audience.reached
+                                        )
+                                    }
+                                    Some(slug) => format!(
+                                        "fans in the '{slug}' segment with notifications on who consented to marketing"
+                                    ),
+                                    None if audience.reached < audience.eligible => format!(
+                                        "fans with notifications on who consented to marketing — the workspace's per-step send envelope caps this push at {}",
+                                        audience.reached
+                                    ),
+                                    None => "fans with notifications on who consented to marketing"
+                                        .to_owned(),
+                                };
+                                (Some(audience.reached), basis)
+                            }
+                            Err(error) => {
+                                tracing::warn!(
+                                    %error,
+                                    segment = segment.as_deref(),
+                                    "signal push audience could not be counted at raise"
+                                );
+                                (None, String::new())
+                            }
+                        };
                         Some((
                             json!({
                                 "kind": "request_signal_push",
@@ -870,6 +912,8 @@ impl AgentOutcomeWorker {
                                 "target_path": target_path,
                                 "event_id": event_id,
                                 "segment": segment,
+                                "audience_size": audience_size,
+                                "audience_basis": audience_basis,
                             }),
                             "signal.push.request",
                         ))

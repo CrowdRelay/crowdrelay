@@ -1126,6 +1126,8 @@ impl PostgresAutopilotRepository {
                     target_path,
                     event_id,
                     segment,
+                    audience_size: _,
+                    audience_basis: _,
                 } => {
                     operations::execute_signal_push(
                         &mut transaction,

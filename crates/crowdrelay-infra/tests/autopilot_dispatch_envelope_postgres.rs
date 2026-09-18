@@ -418,3 +418,160 @@ async fn a_signal_push_respects_the_envelope_recipient_bound()
     );
     Ok(())
 }
+
+/// The approval screen quotes `signal_push_audience`: the count must match
+/// what `execute_signal_push` would deliver — same eligibility, same segment
+/// predicates, same envelope bound. Pinned here so a briefing can never drift
+/// from the send it describes.
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn signal_push_audience_counts_what_the_send_would_reach()
+-> Result<(), Box<dyn std::error::Error>> {
+    let f = setup().await?;
+    let suffix = f.workspace_id.into_uuid().simple().to_string();
+
+    // The operator's envelope permits two recipients per step.
+    sqlx::query(
+        "UPDATE viryaos_growth_envelope SET max_recipients_per_step = 2
+         WHERE workspace_id = $1",
+    )
+    .bind(f.workspace_id.into_uuid())
+    .execute(&f.pool)
+    .await?;
+
+    // Three fans the send would reach: active, marketing consent granted,
+    // one live endpoint each.
+    for index in 0..3 {
+        let fan_id = Uuid::now_v7();
+        sqlx::query(
+            "INSERT INTO fans (id, workspace_id, normalized_email, display_name, status)
+             VALUES ($1, $2, $3, 'Fan', 'active')",
+        )
+        .bind(fan_id)
+        .bind(f.workspace_id.into_uuid())
+        .bind(format!("aud-{suffix}-{index}@example.test"))
+        .execute(&f.pool)
+        .await?;
+        sqlx::query(
+            "INSERT INTO fan_consents (workspace_id, fan_id, purpose, granted, policy_version, source)
+             VALUES ($1,$2,'marketing',true,'v1','test')",
+        )
+        .bind(f.workspace_id.into_uuid())
+        .bind(fan_id)
+        .execute(&f.pool)
+        .await?;
+        sqlx::query(
+            "INSERT INTO fan_push_endpoints
+               (id, workspace_id, fan_id, installation_id, transport, endpoint_address, active)
+             VALUES ($1, $2, $3, $4, 'android_fcm', $5, true)",
+        )
+        .bind(Uuid::now_v7())
+        .bind(f.workspace_id.into_uuid())
+        .bind(fan_id)
+        .bind(format!("install-aud-{suffix}-{index}"))
+        .bind(format!("token-aud-{suffix}-{index}"))
+        .execute(&f.pool)
+        .await?;
+    }
+
+    // One fan who consented but whose only endpoint is gone — unreachable.
+    let unreachable = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO fans (id, workspace_id, normalized_email, display_name, status)
+         VALUES ($1, $2, $3, 'Fan', 'active')",
+    )
+    .bind(unreachable)
+    .bind(f.workspace_id.into_uuid())
+    .bind(format!("aud-{suffix}-gone@example.test"))
+    .execute(&f.pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO fan_consents (workspace_id, fan_id, purpose, granted, policy_version, source)
+         VALUES ($1,$2,'marketing',true,'v1','test')",
+    )
+    .bind(f.workspace_id.into_uuid())
+    .bind(unreachable)
+    .execute(&f.pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO fan_push_endpoints
+           (id, workspace_id, fan_id, installation_id, transport, endpoint_address, active)
+         VALUES ($1, $2, $3, $4, 'android_fcm', $5, false)",
+    )
+    .bind(Uuid::now_v7())
+    .bind(f.workspace_id.into_uuid())
+    .bind(unreachable)
+    .bind(format!("install-aud-{suffix}-gone"))
+    .bind(format!("token-aud-{suffix}-gone"))
+    .execute(&f.pool)
+    .await?;
+
+    // One fan who never consented — the base guard excludes them regardless
+    // of endpoints.
+    let unconsented = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO fans (id, workspace_id, normalized_email, display_name, status)
+         VALUES ($1, $2, $3, 'Fan', 'active')",
+    )
+    .bind(unconsented)
+    .bind(f.workspace_id.into_uuid())
+    .bind(format!("aud-{suffix}-no@example.test"))
+    .execute(&f.pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO fan_push_endpoints
+           (id, workspace_id, fan_id, installation_id, transport, endpoint_address, active)
+         VALUES ($1, $2, $3, $4, 'android_fcm', $5, true)",
+    )
+    .bind(Uuid::now_v7())
+    .bind(f.workspace_id.into_uuid())
+    .bind(unconsented)
+    .bind(format!("install-aud-{suffix}-no"))
+    .bind(format!("token-aud-{suffix}-no"))
+    .execute(&f.pool)
+    .await?;
+
+    let audience =
+        crowdrelay_infra::autopilot::signal_push_audience(&f.pool, f.workspace_id, None).await?;
+    assert_eq!(
+        (audience.eligible, audience.reached),
+        (3, 2),
+        "eligible counts who could receive; reached is what the send actually delivers"
+    );
+
+    // A segment narrows the count with the same predicates the send applies.
+    let segment_slug = format!("aud-seg-{suffix}");
+    sqlx::query(
+        "INSERT INTO audience_segments (workspace_id, slug, name, filter, active)
+         VALUES ($1, $2, 'five referrals', '{\"min_qualified_referrals\": 5}', true)",
+    )
+    .bind(f.workspace_id.into_uuid())
+    .bind(&segment_slug)
+    .execute(&f.pool)
+    .await?;
+    let segmented = crowdrelay_infra::autopilot::signal_push_audience(
+        &f.pool,
+        f.workspace_id,
+        Some(&segment_slug),
+    )
+    .await?;
+    assert_eq!(
+        (segmented.eligible, segmented.reached),
+        (0, 0),
+        "the segment's predicates count the same set the send would filter to"
+    );
+
+    // A segment that does not resolve is a refusal, not a broadcast — the
+    // count must fail the same way the send does.
+    let missing = crowdrelay_infra::autopilot::signal_push_audience(
+        &f.pool,
+        f.workspace_id,
+        Some("no-such-segment"),
+    )
+    .await;
+    assert!(
+        missing.is_err(),
+        "an unresolvable segment refuses rather than reporting the broadcast count"
+    );
+    Ok(())
+}

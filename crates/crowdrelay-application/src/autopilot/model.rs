@@ -1082,6 +1082,19 @@ pub enum AutopilotActionPayload {
         target_path: Option<String>,
         event_id: Option<uuid::Uuid>,
         segment: Option<String>,
+        /// How many fans the push reaches, when the raise knew (O.5's
+        /// audience answer applied to pushes). `None` is honest rather than
+        /// convenient: payloads raised before the count existed, or where a
+        /// segment could not be measured, say so instead of printing a zero
+        /// that would read as "reaches nobody".
+        #[serde(default)]
+        audience_size: Option<u32>,
+        /// Who those people are, in a sentence — "fans with notifications
+        /// on who consented to marketing". An operator approving a push to
+        /// people's pockets should not have to decode a segment slug to
+        /// learn who is in it.
+        #[serde(default)]
+        audience_basis: String,
     },
 }
 
