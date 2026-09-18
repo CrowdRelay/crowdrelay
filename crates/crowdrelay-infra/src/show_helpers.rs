@@ -177,6 +177,10 @@ pub struct VenueChannel {
     /// A `venue`-kind beacon in this city already names this room — the
     /// channel exists on the roster rather than needing to be found.
     pub on_roster: bool,
+    /// The room's platform-wide play record — the acts on record that
+    /// played it. `None` when the room never matched the registry or the
+    /// read failed; `Some` zero is a measured zero.
+    pub venue_prior: Option<crate::cross_tenant_priors::VenuePrior>,
 }
 
 /// A photographer beacon in the show's city (P.3). The recap needs the lens
@@ -408,6 +412,7 @@ pub async fn who_can_help(
                     venue_id,
                     display_name,
                     on_roster,
+                    venue_prior: None,
                 });
             }
             // The UNION guarantees a row whenever venue text exists; a None
@@ -417,11 +422,29 @@ pub async fn who_can_help(
                     venue_id: None,
                     display_name: venue_text.to_owned(),
                     on_roster: false,
+                    venue_prior: None,
                 });
             }
             Err(error) => {
                 tracing::warn!(%error, "who-can-help venue_channel section failed");
                 degraded.push("venue_channel");
+            }
+        }
+
+        // The room's play record rides the channel — the same counts the
+        // cold-rooms list carries, on the room the band actually booked.
+        // A failed read degrades to `None` like every prior does.
+        if let Some(venue_id) = venue_channel.as_ref().and_then(|channel| channel.venue_id) {
+            let prior = crate::cross_tenant_priors::venue_priors(pool, &[venue_id])
+                .await
+                .map_err(|error| {
+                    tracing::warn!(%error, "who-can-help venue-channel prior failed");
+                    error
+                })
+                .ok();
+            if let Some(channel) = venue_channel.as_mut() {
+                channel.venue_prior =
+                    prior.map(|priors| priors.get(&venue_id).copied().unwrap_or_default());
             }
         }
     }

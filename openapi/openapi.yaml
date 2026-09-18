@@ -11663,7 +11663,7 @@ components:
         venue_channel:
           type: [object, 'null']
           additionalProperties: false
-          required: [venue_id, display_name, on_roster]
+          required: [venue_id, display_name, on_roster, venue_prior]
           description: >-
             The room the show is in, resolved to the shared registry when
             the city lets it. Null only when the event names no venue; an
@@ -11679,6 +11679,18 @@ components:
               description: >-
                 A venue-kind beacon already names this room — the channel
                 exists on the roster rather than needing to be found.
+            venue_prior:
+              type: [object, 'null']
+              additionalProperties: false
+              required: [tenants_played, shows]
+              description: >-
+                The room's cross-tenant play record — distinct tenants whose
+                acts played it and the total marks. Null when the room never
+                matched the registry or the read did not run; present with
+                zero counts is a measured zero.
+              properties:
+                tenants_played: { type: integer }
+                shows: { type: integer }
         photographers:
           type: array
           description: >-

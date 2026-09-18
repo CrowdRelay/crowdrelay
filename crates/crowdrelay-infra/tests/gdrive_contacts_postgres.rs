@@ -685,6 +685,17 @@ async fn staged_rows_resolve_against_the_shared_registries()
     .bind(other_tenant)
     .execute(&fixture.pool)
     .await?;
+    sqlx::query(
+        "INSERT INTO viryaos_outreach_interactions
+            (workspace_id, target_id, direction, phase, disposition, source_key, occurred_at)
+         SELECT workspace_id, id, 'inbound', 'reply', 'positive',
+                'seed-aga-reply', now() - interval '39 days'
+         FROM viryaos_outreach_targets
+         WHERE workspace_id = $1 AND contact_email = 'aga@agency.pl'",
+    )
+    .bind(other_tenant)
+    .execute(&fixture.pool)
+    .await?;
 
     // The sheet.
     seed_contact(&fixture, "bookings@stodola.pl", Some("Klub Stodola"), None).await?;

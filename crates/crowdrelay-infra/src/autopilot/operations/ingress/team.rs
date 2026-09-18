@@ -750,21 +750,33 @@ impl AutopilotTeamStateRepository for PostgresAutopilotRepository {
                     "UPDATE viryaos_team_opportunities SET status='submitted', version=version+1 \
                      WHERE workspace_id=$1 AND id=$2 AND status='submission_requested'"
                 }
+                // Replied/won/lost are thread outcomes — they only exist
+                // once a submission was requested or confirmed. Marking a
+                // never-sent opportunity 'won' would fabricate a send, a
+                // reply and a win in the cross-tenant prior.
                 TeamOpportunityProgress::Replied => {
                     "UPDATE viryaos_team_opportunities SET status='replied', version=version+1 \
-                     WHERE workspace_id=$1 AND id=$2 AND status NOT IN ('won','lost','dismissed')"
+                     WHERE workspace_id=$1 AND id=$2 \
+                       AND status IN ('submission_requested','submitted','replied')"
                 }
                 TeamOpportunityProgress::Won => {
                     "UPDATE viryaos_team_opportunities SET status='won', version=version+1 \
-                     WHERE workspace_id=$1 AND id=$2 AND status NOT IN ('won','lost','dismissed')"
+                     WHERE workspace_id=$1 AND id=$2 \
+                       AND status IN ('submission_requested','submitted','replied')"
                 }
                 TeamOpportunityProgress::Lost => {
                     "UPDATE viryaos_team_opportunities SET status='lost', version=version+1 \
-                     WHERE workspace_id=$1 AND id=$2 AND status NOT IN ('won','lost','dismissed')"
+                     WHERE workspace_id=$1 AND id=$2 \
+                       AND status IN ('submission_requested','submitted','replied')"
                 }
+                // Dismissal is for pre-send cleanup only — once a send is
+                // confirmed ('submitted') or answered ('replied'), the
+                // thread is evidence and the honest end states are
+                // won/lost. Dismissing it would erase the send record.
                 TeamOpportunityProgress::Dismissed => {
                     "UPDATE viryaos_team_opportunities SET status='dismissed', version=version+1 \
-                     WHERE workspace_id=$1 AND id=$2 AND status NOT IN ('won','lost','dismissed')"
+                     WHERE workspace_id=$1 AND id=$2 \
+                       AND status IN ('new','prepared','awaiting_approval','submission_requested')"
                 }
             };
             let changed = sqlx::query(sql)
