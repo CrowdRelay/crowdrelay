@@ -806,6 +806,14 @@ pub(super) fn application_routes(state: AppState) -> Router {
             "/v1/admin/roster-plan/support-slot-ask",
             post(crate::gig_planning::approve_support_slot_ask),
         )
+        // Which channel produced people who stayed, pooled across the acts.
+        // Admin for the third time and the same reason: the numbers are the
+        // organisation's, and pooling them is exactly the thing one act's
+        // token must not be able to do.
+        .route(
+            "/v1/admin/roster-plan/source-roi",
+            get(crate::roster_source_roi::roster_source_roi),
+        )
         // The roster's own numbers, on the same surface as its plan for the
         // same reason: these belong to the organisation, and a workspace token
         // must not be able to read or set what a labelmate's plan is sized by.

@@ -7176,6 +7176,54 @@ paths:
           $ref: '#/components/responses/Problem'
         '503':
           $ref: '#/components/responses/Problem'
+  /admin/roster-plan/source-roi:
+    get:
+      operationId: rosterSourceRoi
+      summary: Which acquisition channel keeps people, pooled across the roster's acts
+      description: >
+        The same channel measurement §4e-4 makes per act, pooled across every
+        act in the organisation. Per act it is eight small samples and each one
+        answers "insufficient evidence"; pooled it is one sample that can
+        separate a channel people stay through from one they do not.
+
+
+        Three rules bound what the pooled number may claim, and each is visible
+        in the response. A channel under the evidence floor carries its counts
+        and no verdict, with the shortfall named. A channel whose every arrival
+        came from one act is marked `single_act` and can never be the reason to
+        move effort, because the roster's question is whether a channel travels
+        between acts. And two rates are only called apart when the gap exceeds
+        both of their 95% half-widths — a difference nobody can measure is not
+        a difference.
+
+
+        Churn is netted out by construction rather than subtracted: the
+        population is active fans, so somebody who left is absent from the
+        numerator and the denominator alike.
+
+
+        Admin rather than control-plane for the same reason the roster plan is:
+        pooling several acts' funnels is exactly what one act's token must not
+        be able to do.
+      security:
+      - adminBearer: []
+      parameters:
+      - in: query
+        name: organization_id
+        required: true
+        schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: >
+            The ranked channels with the finding that follows from them, or
+            `nothing_to_pool` when no act on the roster has an active fan yet.
+            Three of the four findings are refusals to reallocate; this read
+            exists to change a decision when the evidence supports it, not to
+            produce a leaderboard.
+        '401':
+          $ref: '#/components/responses/Problem'
+        '503':
+          $ref: '#/components/responses/Problem'
   /admin/roster-plan/support-slot-ask:
     post:
       operationId: approveSupportSlotAsk

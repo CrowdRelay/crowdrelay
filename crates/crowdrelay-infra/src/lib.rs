@@ -63,6 +63,7 @@ pub mod reddit_proxy;
 pub mod referrals;
 pub mod regional;
 pub mod representation;
+pub mod roster_source_roi;
 pub mod sensitive_response;
 pub mod show_helpers;
 pub mod signal_installations;
