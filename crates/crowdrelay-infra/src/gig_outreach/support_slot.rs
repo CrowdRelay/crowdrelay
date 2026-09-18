@@ -304,6 +304,22 @@ pub async fn approve_support_slot_ask(
         pair.map(|overlap| overlap.shared),
         adds,
     );
+    // O.1: the ask's letter is composed here too, so the roster operator reads
+    // the same words the headliner's promoter will.
+    let sender = super::sender_identity(pool, headliner_workspace_id).await?;
+    let draft = crowdrelay_domain::gig_letter::compose_letter(
+        &crowdrelay_domain::gig_letter::LetterInput {
+            kind: crowdrelay_domain::gig_letter::LetterKind::SupportSlotAsk,
+            sender: &sender,
+            venue: &slot.venue,
+            opening_line: &opening_line,
+            reasons: &reasons,
+            support_act: Some(&support),
+            show_date: Some(&show_date),
+        },
+    )
+    .map_err(|refusal| GigOutreachError::Refused(refusal.message().to_owned()))?;
+
     let payload = AutopilotActionPayload::RequestGigOutreach {
         city_id: CityId::from_uuid(city_id),
         venue: slot.venue.clone(),
@@ -316,7 +332,8 @@ pub async fn approve_support_slot_ask(
             })
             .collect(),
         opening_line: opening_line.clone(),
-        reasons,
+        reasons: reasons.clone(),
+        draft,
         letter: GigLetterKind::SupportSlotAsk {
             support_act: support.clone(),
             event_id: EventId::from_uuid(slot.event_id),

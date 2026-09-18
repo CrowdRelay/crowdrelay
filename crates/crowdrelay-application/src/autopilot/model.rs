@@ -692,6 +692,21 @@ pub enum AutopilotActionPayload {
         /// rather than carrying a field that says nothing.
         #[serde(default, skip_serializing_if = "GigLetterKind::is_proposal")]
         letter: GigLetterKind,
+        /// The finished letter: the subject and every sentence the promoter
+        /// will read (O.1).
+        ///
+        /// It used to be composed in the executor's JavaScript after the
+        /// approval, so the band approved an opening line and a promoter
+        /// received five paragraphs nobody at the band had seen. Carrying it
+        /// here is what lets the console show the real thing, lets
+        /// `draft_revision` offer `subject` and `body` for editing, and lets
+        /// the identical-draft refusal compare drafts at all.
+        ///
+        /// `default` for the rows queued before it existed: those carry an
+        /// empty draft and the executor refuses them rather than inventing the
+        /// missing words.
+        #[serde(default)]
+        draft: crowdrelay_domain::gig_letter::GigLetter,
     },
     /// Read a public playlist and report whether the track is in it.
     ///

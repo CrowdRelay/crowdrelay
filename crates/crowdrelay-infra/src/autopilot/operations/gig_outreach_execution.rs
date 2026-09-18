@@ -50,11 +50,22 @@ pub(in crate::autopilot) async fn execute_gig_outreach(
         opening_line,
         reasons,
         letter,
+        draft,
     } = &action.payload
     else {
         return Err(RepositoryError::Conflict);
     };
     let city_id = *city_id;
+    // O.1: the letter is composed at approval time and travels in the payload.
+    // A row queued before that — or one whose draft was lost — is refused here
+    // rather than passed to an executor that would compose its own words. The
+    // band approved sentences; sending different ones is the failure this whole
+    // path exists to prevent.
+    if draft.subject.trim().is_empty() || draft.body.trim().is_empty() {
+        return Err(RepositoryError::ConflictBecause(
+            "gig outreach refused: this action carries no letter — it was queued before the              letter was composed at approval time, and nothing may write one on the band's              behalf now. Approve the proposal again to compose it.",
+        ));
+    }
     let mut addressed = Vec::with_capacity(recipients.len());
     for recipient in recipients {
         let target = lock_booking_target_for_execution(
@@ -128,6 +139,10 @@ pub(in crate::autopilot) async fn execute_gig_outreach(
             "show_date": show_date,
             "opening_line": opening_line,
             "reasons": reasons,
+            // The letter itself, approved word for word. `draft` is the name
+            // the outward gate's identical-draft check and
+            // `draft_revision::revisable_fields` both already look for.
+            "draft": draft,
             "recipients": addressed,
         }),
     )

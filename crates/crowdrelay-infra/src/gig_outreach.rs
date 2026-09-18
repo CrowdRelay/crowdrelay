@@ -287,6 +287,62 @@ pub async fn gig_outreach_is_sendable(
     })
 }
 
+/// Who the letter is from, read from the tenant's own records (O.1).
+///
+/// The executor used to hardcode one band's name, genre, home city and two
+/// URLs. Reading them here means a second tenant's letter is their letter, and
+/// an unset field shortens the sentence instead of borrowing somebody else's.
+///
+/// # Errors
+///
+/// Propagates the database error.
+pub(crate) async fn sender_identity(
+    pool: &PgPool,
+    workspace_id: Uuid,
+) -> Result<crowdrelay_domain::gig_letter::SenderIdentity, sqlx::Error> {
+    let act_name = sqlx::query_scalar::<_, String>("SELECT name FROM workspaces WHERE id = $1")
+        .bind(workspace_id)
+        .fetch_optional(pool)
+        .await?
+        .unwrap_or_default();
+    let settings = TenantSettingsRepository::new(pool.clone());
+    let style = settings.act_style(workspace_id).await?;
+    // The stored override only. `brand_settings` would fall back to a shipped
+    // default, and a default URL in a letter to a stranger is a link to
+    // somebody else's website.
+    let site_url = sqlx::query_scalar::<_, String>(
+        "SELECT value FROM tenant_settings WHERE workspace_id = $1 AND key = 'member_site_base_url'",
+    )
+    .bind(workspace_id)
+    .fetch_optional(pool)
+    .await?
+    .map(|value| value.trim().to_owned())
+    .filter(|value| !value.is_empty());
+    // The home city is the one the act has played most from its own shows. It
+    // is a measured fact rather than a setting nobody would keep current, and
+    // an act with no shows on record simply has no city in the sentence.
+    let home_city = sqlx::query_scalar::<_, String>(
+        r#"
+        SELECT city.name
+        FROM events AS event
+        JOIN cities AS city ON city.id = event.city_id
+        WHERE event.workspace_id = $1
+        GROUP BY city.id, city.name
+        ORDER BY count(*) DESC, city.name
+        LIMIT 1
+        "#,
+    )
+    .bind(workspace_id)
+    .fetch_optional(pool)
+    .await?;
+    Ok(crowdrelay_domain::gig_letter::SenderIdentity {
+        act_name,
+        style,
+        home_city,
+        site_url,
+    })
+}
+
 /// Approves the proposal for one city and queues the outreach it names.
 ///
 /// `revision` is the approve-with-edit path (N.10): the band's fix to the
@@ -366,6 +422,23 @@ pub async fn approve_gig_proposal(
         )));
     }
 
+    // O.1: compose the whole letter now, so the band approves the sentences the
+    // promoter will read rather than an opening line and a promise.
+    let reasons: Vec<String> = plan.reasons.iter().map(reason_sentence).collect();
+    let sender = sender_identity(pool, workspace_id).await?;
+    let letter = crowdrelay_domain::gig_letter::compose_letter(
+        &crowdrelay_domain::gig_letter::LetterInput {
+            kind: crowdrelay_domain::gig_letter::LetterKind::Proposal,
+            sender: &sender,
+            venue: &plan.venue,
+            opening_line: &plan.opening_line(),
+            reasons: &reasons,
+            support_act: None,
+            show_date: None,
+        },
+    )
+    .map_err(|refusal| GigOutreachError::Refused(refusal.message().to_owned()))?;
+
     let payload = AutopilotActionPayload::RequestGigOutreach {
         city_id: CityId::from_uuid(city_id),
         venue: plan.venue.clone(),
@@ -381,8 +454,9 @@ pub async fn approve_gig_proposal(
         // Rendered here rather than in the draft, from the same reasons the
         // console displayed. A draft that re-derives them is a second code path
         // describing one decision.
-        reasons: plan.reasons.iter().map(reason_sentence).collect(),
+        reasons,
         letter: GigLetterKind::Proposal,
+        draft: letter,
     };
     // The band's fix to the letter, reviewed before anything is queued: a
     // refused revision refuses the approval itself, and nothing — no
