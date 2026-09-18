@@ -164,9 +164,13 @@ pub struct VenueEvidence {
     pub name: String,
     /// Shows any tenant has marked at this room in the last twelve months.
     pub shows_last_12_months: u16,
-    /// Of those, how many were by acts whose genre overlaps this tenant's.
-    /// The strongest single fact in the proposal, and the one a promoter
-    /// recognises fastest.
+    /// How many distinct acts billed at this room — on record, all-time,
+    /// the same count `city_venues` and the booking snapshot report — have a
+    /// genre overlapping this tenant's. Deliberately not a subset of
+    /// `shows_last_12_months`: the registry's bills reach further back than
+    /// the activity window, and one room must answer with one number
+    /// wherever it is asked. The strongest single fact in the proposal, and
+    /// the one a promoter recognises fastest.
     pub comparable_acts: u16,
     pub capacity: Option<u32>,
     /// Mean paid orders per ticketed show at this room. `None` when no marked
@@ -430,8 +434,16 @@ impl GigPlan {
         let city = &self.city;
         let venue = &self.venue;
         match self.reasons.first() {
-            Some(Reason::ComparableActsPlayedHere { count, of_shows }) => {
-                format!("{count} of the last {of_shows} shows at {venue} were acts from our genre.")
+            Some(Reason::ComparableActsPlayedHere { count, .. }) => {
+                // The count is all-time billed acts while `of_shows` is the
+                // last twelve months — "X of the last N shows" could claim a
+                // subset the number does not guarantee, so the sentence states
+                // the record.
+                if *count == 1 {
+                    format!("One act from our genre has played {venue} on record.")
+                } else {
+                    format!("{count} acts from our genre have played {venue} on record.")
+                }
             }
             Some(Reason::ReachableAudience { reachable }) => format!(
                 "{reachable} people around {city} asked us to tell them when we play nearby."
