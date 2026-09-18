@@ -393,6 +393,25 @@ async fn run_support_slot_ask(pool: &PgPool, url: &str) -> Result<(), Box<dyn st
         Some(opening_line.as_str())
     );
 
+    // O.6: the room is in Poland, so the whole ask is Polish — the frame, the
+    // opening line the operator edited, and the evidence bullets together. The
+    // ask kept its English while the proposal moved, because half a translation
+    // reads worse to a promoter than none; this is the other half.
+    let body = payload["draft"]["body"].as_str().unwrap_or_default();
+    assert!(
+        body.starts_with("Cześć,") && body.contains("Pozdrawiamy,"),
+        "the ask to a Polish room is not in Polish: {body:?}"
+    );
+    assert!(
+        body.contains("klub i data są już zaklepane")
+            || body.contains("Klub i data są już zaklepane"),
+        "the bullet that says the night is already held is missing or English: {body:?}"
+    );
+    assert!(
+        !body.contains("Hi,") && !body.contains("Best,"),
+        "an English frame leaked into a Polish ask: {body:?}"
+    );
+
     // The fix is on the ledger too — the machine's words and the operator's,
     // one row per field, hung off the approval's own audit row by the
     // operation_id foreign key.

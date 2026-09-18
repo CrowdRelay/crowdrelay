@@ -26,6 +26,7 @@ use crowdrelay_application::IdempotencyKey;
 use crowdrelay_application::autopilot::{
     AutopilotActionPayload, GigLetterKind, GigOutreachRecipient,
 };
+use crowdrelay_domain::gig_letter::LetterLanguage;
 use crowdrelay_domain::roster_plan::{
     MINIMUM_SLOT_LEAD_DAYS, PAIRING_OVERLAP_CEILING_BASIS_POINTS,
 };
@@ -294,6 +295,10 @@ pub async fn approve_support_slot_ask(
             "[day] [month repr:short] [year]"
         ))
         .unwrap_or_else(|_| slot.starts_at.date().to_string());
+    // The room's country picks the language, exactly as the proposal's does:
+    // the letter is for the promoter receiving it, not for the roster operator
+    // approving it.
+    let language = super::letter_language(pool, city_id).await?;
     let (opening_line, reasons) = support_slot_ask_letter(
         &headliner,
         &support,
@@ -303,6 +308,7 @@ pub async fn approve_support_slot_ask(
         reachable,
         pair.map(|overlap| overlap.shared),
         adds,
+        language,
     );
     // O.1: the ask's letter is composed here too, so the roster operator reads
     // the same words the headliner's promoter will.
@@ -310,13 +316,7 @@ pub async fn approve_support_slot_ask(
     let draft = crowdrelay_domain::gig_letter::compose_letter(
         &crowdrelay_domain::gig_letter::LetterInput {
             kind: crowdrelay_domain::gig_letter::LetterKind::SupportSlotAsk,
-            // English on purpose, even for a Polish room. The ask's own opening
-            // line and bullets come from `support_slot_ask_letter`, which is
-            // written in English only; a Polish frame around English evidence
-            // is the seam the localisation exists to remove, and half a
-            // translation reads worse to a promoter than none. The frame
-            // follows the sentences, and the sentences move first.
-            language: crowdrelay_domain::gig_letter::LetterLanguage::English,
+            language,
             sender: &sender,
             venue: &slot.venue,
             opening_line: &opening_line,
@@ -425,7 +425,17 @@ fn support_slot_ask_letter(
     reachable: u32,
     shared: Option<u32>,
     adds: u32,
+    language: LetterLanguage,
 ) -> (String, Vec<String>) {
+    // O.6, second half. The ask kept its English while the proposal moved,
+    // because a Polish frame around English evidence is the seam localisation
+    // exists to remove and half a translation reads worse to a promoter than
+    // none. These are the sentences, so now the frame can follow them.
+    if language == LetterLanguage::Polish {
+        return polish_support_slot_ask(
+            headliner, support, city, venue, show_date, reachable, shared, adds,
+        );
+    }
     let opening_line = format!(
         "{support} can take the open slot at {venue} on {show_date} — they bring \
          {adds} people there that we do not already reach."
@@ -450,6 +460,53 @@ fn support_slot_ask_letter(
     reasons.push(
         "the room and the date are already held — this confirms a name for a slot \
          you offered, it does not ask for a new night"
+            .to_owned(),
+    );
+    (opening_line, reasons)
+}
+
+/// The same facts in Polish, arm for arm.
+///
+/// Written beside the English rather than interleaved with it so a reader can
+/// see one letter at a time, and so the `None` branch — which says "we never
+/// measured this pair" rather than "they share nobody" — keeps its own sentence
+/// in both languages instead of being flattened into a zero.
+#[allow(clippy::too_many_arguments)]
+fn polish_support_slot_ask(
+    headliner: &str,
+    support: &str,
+    city: &str,
+    venue: &str,
+    show_date: &str,
+    reachable: u32,
+    shared: Option<u32>,
+    adds: u32,
+) -> (String, Vec<String>) {
+    let opening_line = format!(
+        "{support} może wejść na wolny slot w {venue} w dniu {show_date} — przyprowadzą \
+         tam {adds} osób, do których sami nie docieramy."
+    );
+    let mut reasons = vec![format!(
+        "{support} ma {reachable} osób w okolicy {city}, które prosiły, żeby dać im znać, \
+         kiedy grają"
+    )];
+    match shared {
+        Some(shared) if shared > 0 => reasons.push(format!(
+            "{shared} z nich już słucha {headliner}, więc ta nazwa i tak dokłada {adds} \
+             osób, do których ten koncert nie dociera"
+        )),
+        Some(_) => reasons.push(format!(
+            "nikt z osób, do których {support} dociera w okolicy {city}, nie słucha jeszcze \
+             {headliner} — to druga publiczność, a nie ta sama dwa razy"
+        )),
+        None => reasons.push(format!(
+            "{headliner} nie ma zmierzonej publiczności w okolicy {city} — każda osoba, \
+             którą przyprowadzi {support}, jest dla tego koncertu nowa"
+        )),
+    }
+    reasons.push(
+        "klub i data są już zaklepane — to potwierdzenie nazwy na slot, który \
+         zaproponowaliście, a nie prośba o nowy termin"
             .to_owned(),
     );
     (opening_line, reasons)

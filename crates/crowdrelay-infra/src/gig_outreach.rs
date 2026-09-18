@@ -297,7 +297,7 @@ pub async fn gig_outreach_is_sendable(
 /// # Errors
 ///
 /// Propagates the database error.
-async fn letter_language(
+pub(super) async fn letter_language(
     pool: &PgPool,
     city_id: Uuid,
 ) -> Result<crowdrelay_domain::gig_letter::LetterLanguage, sqlx::Error> {
