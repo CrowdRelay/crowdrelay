@@ -206,6 +206,11 @@ async fn run(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(helpers.event.slug, "friday");
     assert_eq!(helpers.event.city.as_deref(), Some("Wrocław"));
     assert_eq!(helpers.event.country_code.as_deref(), Some("PL"));
+    assert_eq!(
+        helpers.event.city_slug.as_deref(),
+        Some("wroclaw"),
+        "the slug is what an admit action needs to place the beacon"
+    );
     assert!(
         helpers.degraded.is_empty(),
         "degraded: {:?}",
