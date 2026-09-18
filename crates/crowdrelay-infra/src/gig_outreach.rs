@@ -240,8 +240,15 @@ pub async fn approve_gig_proposal(
 fn reason_sentence(reason: &crowdrelay_domain::gig_plan::Reason) -> String {
     use crowdrelay_domain::gig_plan::Reason;
     match reason {
-        Reason::ComparableActsPlayedHere { count, of_shows } => {
-            format!("{count} of the last {of_shows} shows there were acts from our genre")
+        Reason::ComparableActsPlayedHere { count, .. } => {
+            // All-time count over a twelve-month window — the subset phrasing
+            // is not guaranteed by the number, so the sentence states the
+            // record.
+            if *count == 1 {
+                "one act from our genre has played there on record".to_owned()
+            } else {
+                format!("{count} acts from our genre have played there on record")
+            }
         }
         Reason::ReachableAudience { reachable } => {
             format!("{reachable} people nearby asked us to tell them when we play")

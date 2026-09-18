@@ -262,7 +262,8 @@ async fn run(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
     );
     assert_eq!(
         venue.comparable_acts, 0,
-        "comparable acts must stay zero until the peer-act graph exists"
+        "no peer act has billed this room, and the tenant declares no genre — \
+         zero is the honest count, not a missing join"
     );
 
     // The planner refuses this city — no route to anybody — and that refusal is
@@ -947,6 +948,195 @@ async fn an_unlocatable_city_is_unmeasurable_not_zero() -> Result<(), Box<dyn st
                 .await?,
             None,
             "an unknown city cannot be measured"
+        );
+        Ok(())
+    }
+    .await;
+    database.drop_database().await;
+    result
+}
+
+/// A peer act with one genre claim — returns the registry id so the same
+/// peer can be billed twice (the count is DISTINCT acts, not appearances).
+async fn peer_act(pool: &PgPool, genre: &str) -> Result<Uuid, Box<dyn std::error::Error>> {
+    let peer = sqlx::query_scalar::<_, Uuid>(
+        "INSERT INTO place_peer_acts (name_key, display_name)
+         VALUES (place_venue_key($1), $1) RETURNING id",
+    )
+    .bind(format!("Peer {genre} {}", Uuid::now_v7().simple()))
+    .fetch_one(pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO place_peer_act_genres (peer_act_id, genre_tag, provenance, source_ref)
+         VALUES ($1, $2, 'researched', 'test')",
+    )
+    .bind(peer)
+    .bind(genre)
+    .execute(pool)
+    .await?;
+    Ok(peer)
+}
+
+/// Bills `peer` on `event_id` — written directly, the way
+/// `booking_window_postgres` seeds the same shape: the resolution path that
+/// would set `peer_act_id` has its own suite.
+async fn bill_peer(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    event_id: Uuid,
+    peer: Uuid,
+) -> Result<(), Box<dyn std::error::Error>> {
+    sqlx::query(
+        "INSERT INTO event_acts (workspace_id, event_id, act_slug, act_name, peer_act_id)
+         VALUES ($1, $2, $3, $3, $4)",
+    )
+    .bind(workspace_id)
+    .bind(event_id)
+    .bind(format!("peer-{}", Uuid::now_v7().simple()))
+    .bind(peer)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn peer_on_bill(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    event_id: Uuid,
+    genre: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let peer = peer_act(pool, genre).await?;
+    bill_peer(pool, workspace_id, event_id, peer).await
+}
+
+/// The comparable-acts count reaches the planner (N.2): a billed act whose
+/// genre intersects the tenant's declared set counts once per act; an
+/// unrelated genre does not, and neither does the tenant's own act — a band
+/// is not its own comparable.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn comparable_acts_reach_the_planner() -> Result<(), Box<dyn std::error::Error>> {
+    let database = DisposableDatabase::create().await?;
+    let result = async {
+        let pool = &database.pool;
+        let act = workspace(pool).await?;
+        let wroclaw = city(pool, "wroclaw-comparables").await?;
+        let now = OffsetDateTime::now_utc();
+
+        // The tenant declares a genre; without it "comparable" has no "mine"
+        // side to intersect and every act counts as incomparable.
+        sqlx::query(
+            "INSERT INTO viryaos_band_listings (workspace_id, act_name, genre_tags)
+             VALUES ($1, 'Test Act', '{doom metal}')",
+        )
+        .bind(act)
+        .execute(pool)
+        .await?;
+
+        for index in 0..60 {
+            reachable_fan(pool, act, wroclaw, &format!("cmp{index}@example.com")).await?;
+        }
+
+        // The tenant's own show marks the room — and its own act on the bill
+        // must not count as its own comparable.
+        let own_show = played_show(pool, act, wroclaw, "Klub X", "own-show", 30).await?;
+        sqlx::query(
+            "INSERT INTO event_acts (workspace_id, event_id, act_slug, act_name, act_workspace_id)
+             VALUES ($1, $2, 'us', 'Test Act', $1)",
+        )
+        .bind(act)
+        .bind(own_show)
+        .execute(pool)
+        .await?;
+
+        // The other tenant declares a genre too — 'dream pop'. If the
+        // genre read forgot the workspace filter, the tenant would borrow
+        // 'dream pop' as its own set and the count below would change.
+        let other = workspace(pool).await?;
+        sqlx::query(
+            "INSERT INTO viryaos_band_listings (workspace_id, act_name, genre_tags)
+             VALUES ($1, 'Other Act', '{dream pop}')",
+        )
+        .bind(other)
+        .execute(pool)
+        .await?;
+
+        // The alias map is what makes "doom" the same genre as "doom metal":
+        // the peer claims the short spelling and still counts.
+        sqlx::query(
+            "INSERT INTO place_genre_aliases (alias, canonical) VALUES ('doom', 'doom metal')
+             ON CONFLICT DO NOTHING",
+        )
+        .execute(pool)
+        .await?;
+
+        // Another tenant's bill at the same room carries two peers: one doom,
+        // one not. Only the doom one intersects the tenant's genres — and the
+        // same peer billed twice still counts once (acts, not appearances).
+        let doom_peer = peer_act(pool, "doom").await?;
+        let their_show = played_show(pool, other, wroclaw, "Klub X", "their-show", 20).await?;
+        bill_peer(pool, other, their_show, doom_peer).await?;
+        let encore = played_show(pool, other, wroclaw, "Klub X", "their-encore", 15).await?;
+        bill_peer(pool, other, encore, doom_peer).await?;
+        peer_on_bill(pool, other, their_show, "dream pop").await?;
+
+        // A second room gets its own matching peer — the count is per venue,
+        // and Klub Y's bill must not leak into Klub X's. One mark keeps Klub
+        // X the winner either way.
+        let klub_y_night = played_show(pool, other, wroclaw, "Klub Y", "other-room", 10).await?;
+        peer_on_bill(pool, other, klub_y_night, "doom metal").await?;
+
+        let wro = city_opportunities(pool, act, now)
+            .await?
+            .into_iter()
+            .find(|city| city.city == "wroclaw-comparables")
+            .ok_or("a city with sixty fans and marked room was not considered")?;
+        let venue = wro
+            .venue
+            .as_ref()
+            .ok_or("a marked room produced no venue evidence")?;
+        assert_eq!(
+            venue.comparable_acts, 1,
+            "the doom peer counts once across two bills; the dream-pop peer, \
+             the other tenant's genre set and Klub Y's bill do not count"
+        );
+
+        // The count reaches the letter: with a route on file the plan
+        // proposes, and the comparable-acts reason — strongest first — is
+        // what the opening line renders.
+        sqlx::query(
+            "INSERT INTO viryaos_booking_targets
+                (workspace_id, city_id, target_kind, display_name, contact_email,
+                 relationship_score)
+             VALUES ($1, $2, 'promoter', 'Anna', 'anna@example.com', 70)",
+        )
+        .bind(act)
+        .bind(wroclaw)
+        .execute(pool)
+        .await?;
+        let wro = city_opportunities(pool, act, now)
+            .await?
+            .into_iter()
+            .find(|city| city.city == "wroclaw-comparables")
+            .ok_or("city vanished after adding a promoter")?;
+        let plan = plan_gig(&wro, TenantIntent::BookingShows).expect("proposes with a route");
+        assert!(
+            matches!(
+                plan.reasons.first(),
+                Some(
+                    crowdrelay_domain::gig_plan::Reason::ComparableActsPlayedHere {
+                        count: 1,
+                        of_shows: 3
+                    }
+                )
+            ),
+            "the comparable-acts reason did not lead the proposal: {:?}",
+            plan.reasons
+        );
+        assert_eq!(
+            plan.opening_line(),
+            "One act from our genre has played Klub X on record.",
+            "the opening line must render the count the graph measured"
         );
         Ok(())
     }

@@ -20,12 +20,9 @@
 //!
 //! # What is not gathered yet, and why that is fine
 //!
-//! `comparable_acts` needs the peer-act graph (4V.6) and arrives as `0`.
-//! `co_bill` needs the support-slot entity (4V.5) and arrives empty. Both
-//! degrade correctly: zero comparable acts produces the "no act from your
-//! genre has played here on record" caveat, which is true, and an empty
-//! co-bill produces a solo proposal. The planner is built to say less rather
-//! than to guess, so it runs today and improves when those land.
+//! `co_bill` needs the support-slot entity (4V.5) and arrives empty, which
+//! degrades correctly to a solo proposal. The planner is built to say less
+//! rather than to guess, so it runs today and improves when that lands.
 
 use crowdrelay_domain::gig_plan::{CityOpportunity, PromoterRef, TenantIntent, VenueEvidence};
 use crowdrelay_domain::roster_plan::{CityReach, OpenSupportSlot, RosterAct, RosterOpportunity};
@@ -72,6 +69,7 @@ struct VenueRow {
     shows_last_12_months: i64,
     days_since_last_event: Option<i64>,
     typical_draw: Option<f64>,
+    comparable_acts: i64,
     capacity: Option<i32>,
     has_booking_route: bool,
     contact_verified_days_ago: Option<i64>,
@@ -162,12 +160,17 @@ async fn candidate_cities(
 /// "Best" is the one with the most marked shows — the registry's own measure of
 /// a room that programmes. Capacity and the booking route come from the
 /// tenant's own booking target joined through migration 0296's `venue_id`,
-/// which is why that join had to exist before this could.
+/// which is why that join had to exist before this could. `comparable_acts`
+/// counts distinct billed acts at the room whose genres intersect the
+/// tenant's — the peer-act graph (4V.6) read through `my_genres`, the same
+/// shape `city_venues` and the booking snapshot use, so one answer follows
+/// the room wherever it is asked about.
 async fn best_venue(
     pool: &PgPool,
     workspace_id: Uuid,
     city_id: Uuid,
     now: OffsetDateTime,
+    my_genres: &[String],
 ) -> Result<Option<VenueEvidence>, sqlx::Error> {
     let row = sqlx::query_as::<_, VenueRow>(
         r#"
@@ -208,6 +211,13 @@ async fn best_venue(
                -- unmeasurable, not a night nobody came to, so it stays out of
                -- the mean instead of dragging it down.
                avg(per_show.paid_orders) AS typical_draw,
+               -- Distinct bill acts at the room whose genres intersect the
+               -- tenant's, both sides canonicalised through
+               -- place_genre_aliases — the same shape `city_venues` and the
+               -- booking snapshot use, so one answer follows the room
+               -- wherever it is asked about. The requesting workspace's own
+               -- acts never count: a tenant is not its own comparable.
+               COALESCE(max(comparable.comparable_acts), 0) AS comparable_acts,
                max(target.capacity) AS capacity,
                COALESCE(bool_or(target.active AND target.accepts_booking), false)
                    AS has_booking_route,
@@ -219,6 +229,41 @@ async fn best_venue(
         LEFT JOIN per_show
           ON per_show.venue_id = marks.venue_id
          AND per_show.event_id = marks.event_id
+        LEFT JOIN LATERAL (
+            SELECT count(DISTINCT COALESCE(
+                       act.act_workspace_id::text, act.peer_act_id::text))::bigint
+                   AS comparable_acts
+            FROM place_venue_marks AS mark
+            JOIN event_acts AS act
+              ON act.event_id = mark.event_id
+             AND act.workspace_id = mark.workspace_id
+            WHERE mark.venue_id = venue.id
+              AND (act.act_workspace_id IS NULL OR act.act_workspace_id <> $1)
+              AND EXISTS (
+                  SELECT 1
+                  FROM (
+                      SELECT COALESCE(mine_alias.canonical, mine_tag.genre) AS genre
+                      FROM unnest($4::text[]) AS mine_tag(genre)
+                      LEFT JOIN place_genre_aliases AS mine_alias
+                        ON mine_alias.alias = mine_tag.genre
+                  ) AS mine
+                  JOIN (
+                      SELECT COALESCE(their_alias.canonical,
+                                      lower(btrim(their_genre.genre))) AS genre
+                      FROM (
+                          SELECT unnest(listing.genre_tags) AS genre
+                          FROM viryaos_band_listings AS listing
+                          WHERE listing.workspace_id = act.act_workspace_id
+                          UNION ALL
+                          SELECT peer_genre.genre_tag
+                          FROM place_peer_act_genres AS peer_genre
+                          WHERE peer_genre.peer_act_id = act.peer_act_id
+                      ) AS their_genre
+                      LEFT JOIN place_genre_aliases AS their_alias
+                        ON their_alias.alias = lower(btrim(their_genre.genre))
+                  ) AS theirs ON theirs.genre = mine.genre
+              )
+        ) AS comparable ON true
         -- The tenant's own booking targets for this room, if they have one —
         -- the primary venue_id union the promoter↔venue edges, so a room a
         -- promoter works reads as reachable even when the target's primary
@@ -238,23 +283,25 @@ async fn best_venue(
              )
          )
         GROUP BY venue.id, venue.display_name
-        ORDER BY count(marks.event_id) DESC, venue.display_name
+        -- DISTINCT here is load-bearing, not cosmetic: the target join can
+        -- fan a venue's marks out, and a raw count would let a room win on
+        -- booking-target cardinality rather than shows. `venue.id` is the
+        -- deterministic tiebreak `city_venues` uses.
+        ORDER BY count(DISTINCT marks.event_id) DESC, venue.id
         LIMIT 1
         "#,
     )
     .bind(workspace_id)
     .bind(city_id)
     .bind(now)
+    .bind(my_genres)
     .fetch_optional(pool)
     .await?;
 
     Ok(row.map(|row| VenueEvidence {
         name: row.display_name,
         shows_last_12_months: bounded_u16(row.shows_last_12_months),
-        // Needs the peer-act graph (4V.6). Zero is honest here: it produces the
-        // "no act from your genre has played here on record" caveat, which is
-        // exactly what we know.
-        comparable_acts: 0,
+        comparable_acts: bounded_u16(row.comparable_acts),
         capacity: row.capacity.and_then(|value| u32::try_from(value).ok()),
         typical_draw: row
             .typical_draw
@@ -399,6 +446,21 @@ pub async fn city_opportunities(
     now: OffsetDateTime,
 ) -> Result<Vec<CityOpportunity>, sqlx::Error> {
     let cities = candidate_cities(pool, workspace_id, now).await?;
+    // The tenant's own genre set, fetched once per pass — the "mine" half
+    // of every venue's comparable-acts test, canonicalised through the
+    // shared alias map the same way `city_venues` does it. One read per
+    // pass rather than one per city also keeps the snapshot consistent: a
+    // listing edited mid-loop cannot give two cities two different "mine".
+    let my_genres = sqlx::query_scalar::<_, Vec<String>>(
+        r#"
+        SELECT COALESCE(array_agg(DISTINCT lower(btrim(tag))), '{}')
+        FROM viryaos_band_listings AS listing, unnest(listing.genre_tags) AS tag
+        WHERE listing.workspace_id = $1
+        "#,
+    )
+    .bind(workspace_id)
+    .fetch_one(pool)
+    .await?;
     let mut opportunities = Vec::with_capacity(cities.len());
     for city in cities {
         // `None` means the city cannot be measured — no coordinates on
@@ -412,7 +474,7 @@ pub async fn city_opportunities(
             active_fans_30d: bounded_u16(city.active_30d).into(),
             months_since_show: months_between(city.last_show_at, now),
             has_upcoming_show: city.next_show_at.is_some(),
-            venue: best_venue(pool, workspace_id, city.city_id, now).await?,
+            venue: best_venue(pool, workspace_id, city.city_id, now, &my_genres).await?,
             promoters: promoters_in_city(pool, workspace_id, city.city_id).await?,
             // Needs the support-slot entity (4V.5). Empty produces a solo
             // proposal, which is correct rather than incomplete.
