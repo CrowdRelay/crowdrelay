@@ -334,6 +334,71 @@ pub async fn approve_outreach_wave(
     }
 }
 
+/// P.5: one "yes" over a synced post's whole relay ladder — the owned-audience
+/// push plus one community relay per admitted community, released together.
+pub async fn approve_relay_ladder(
+    State(state): State<AppState>,
+    Path(source_id): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    let Ok(source_id) = Uuid::parse_str(&source_id) else {
+        return Problem::not_found(request_id(&headers))
+            .private()
+            .into_response();
+    };
+    let idempotency_key = match parse_idempotency_key(&headers) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let request_id_value = parsed_request_id(&headers);
+    match state
+        .autopilot
+        .approve_relay_ladder(
+            state.ops.workspace_id(),
+            source_id,
+            &idempotency_key,
+            request_id_value.as_ref(),
+        )
+        .await
+    {
+        Ok(result) => private_json(StatusCode::OK, result),
+        Err(error) => repository_problem(error, request_id(&headers)),
+    }
+}
+
+/// Cancels the still-queued rungs a post's relay ladder released. A rung a
+/// person approved on its own keeps its approval; a rung already running or
+/// finished keeps its record.
+pub async fn revoke_relay_ladder(
+    State(state): State<AppState>,
+    Path(source_id): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    let Ok(source_id) = Uuid::parse_str(&source_id) else {
+        return Problem::not_found(request_id(&headers))
+            .private()
+            .into_response();
+    };
+    let idempotency_key = match parse_idempotency_key(&headers) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let request_id_value = parsed_request_id(&headers);
+    match state
+        .autopilot
+        .revoke_relay_ladder(
+            state.ops.workspace_id(),
+            source_id,
+            &idempotency_key,
+            request_id_value.as_ref(),
+        )
+        .await
+    {
+        Ok(result) => private_json(StatusCode::OK, result),
+        Err(error) => repository_problem(error, request_id(&headers)),
+    }
+}
+
 async fn mutate_action(
     state: AppState,
     headers: HeaderMap,

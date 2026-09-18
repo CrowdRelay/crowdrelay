@@ -4694,6 +4694,54 @@ paths:
         '401': { $ref: '#/components/responses/PrivateProblem' }
         '404': { $ref: '#/components/responses/PrivateProblem' }
         '409': { $ref: '#/components/responses/PrivateProblem' }
+  /admin/autopilot/content-sources/{source_id}/relay-ladder/approve:
+    post:
+      operationId: approveRelayLadder
+      summary: Approve a synced post's whole relay ladder
+      description: >
+        One approval over the spread a synced post already asked for — the owned-audience
+        push plus one community relay per admitted community — released together, each still
+        carrying its own outward hold. A rung decided later (a community admitted after the
+        approval) asks on its own: the ladder is the spread the operator could read, not a
+        standing yes to whatever the post might still become. The returned status carries how
+        many rungs were released.
+      security:
+      - adminBearer: []
+      parameters:
+      - $ref: '#/components/parameters/IdempotencyKey'
+      - in: path
+        name: source_id
+        required: true
+        schema: { type: string, format: uuid }
+      responses:
+        '200': { description: Ladder approved or replayed, content: { application/json: { schema: { $ref: '#/components/schemas/AutopilotMutation' } } } }
+        '400': { $ref: '#/components/responses/PrivateProblem' }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '404': { $ref: '#/components/responses/PrivateProblem' }
+        '409': { $ref: '#/components/responses/PrivateProblem' }
+  /admin/autopilot/content-sources/{source_id}/relay-ladder/revoke:
+    post:
+      operationId: revokeRelayLadder
+      summary: Stop the rest of a post's spread
+      description: >
+        Cancels the rungs the ladder approval released that have not started yet — a rung a
+        person approved on its own keeps its approval, and a rung already running or finished
+        keeps its record. Relay keys are versionless, so the stop is final for this post: a
+        re-approval afterwards finds nothing parked to release.
+      security:
+      - adminBearer: []
+      parameters:
+      - $ref: '#/components/parameters/IdempotencyKey'
+      - in: path
+        name: source_id
+        required: true
+        schema: { type: string, format: uuid }
+      responses:
+        '200': { description: Ladder rungs cancelled or replayed, content: { application/json: { schema: { $ref: '#/components/schemas/AutopilotMutation' } } } }
+        '400': { $ref: '#/components/responses/PrivateProblem' }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '404': { $ref: '#/components/responses/PrivateProblem' }
+        '409': { $ref: '#/components/responses/PrivateProblem' }
   /admin/autopilot/team-opportunities/{opportunity_id}/terms:
     post:
       operationId: recordAutopilotTeamOpportunityTerms

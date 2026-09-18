@@ -215,6 +215,35 @@ pub trait AutopilotControlRepository: Send + Sync {
         idempotency_key: &crate::IdempotencyKey,
         request_id: Option<&crate::RequestId>,
     ) -> Result<AutopilotControlMutation, RepositoryError>;
+
+    /// Approves a synced post's whole relay ladder at once (P.5).
+    ///
+    /// One "yes" over every rung the post already asked for — the owned-audience
+    /// push and one community relay per admitted community. A rung decided
+    /// later (a community admitted after the approval) asks on its own: the
+    /// ladder is the spread the operator could read, not a standing yes to
+    /// whatever the post might still become.
+    async fn approve_relay_ladder(
+        &self,
+        workspace_id: WorkspaceId,
+        source_id: uuid::Uuid,
+        idempotency_key: &crate::IdempotencyKey,
+        request_id: Option<&crate::RequestId>,
+    ) -> Result<AutopilotControlMutation, RepositoryError>;
+
+    /// Cancels the queued rungs a relay-ladder approval released.
+    ///
+    /// "Stop the rest of this post's spread" — rungs already running or
+    /// finished keep their record, and a rung a person approved on its own
+    /// keeps its approval. With no ladder row to close, a second revoke simply
+    /// finds nothing left to cancel.
+    async fn revoke_relay_ladder(
+        &self,
+        workspace_id: WorkspaceId,
+        source_id: uuid::Uuid,
+        idempotency_key: &crate::IdempotencyKey,
+        request_id: Option<&crate::RequestId>,
+    ) -> Result<AutopilotControlMutation, RepositoryError>;
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]

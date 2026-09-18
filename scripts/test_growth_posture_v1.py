@@ -51,16 +51,26 @@ class GrowthPostureContract(unittest.TestCase):
     def test_applying_is_recorded_in_the_ledger(self) -> None:
         # A posture flip moves every authority surface at once; if that is
         # not in the ledger, nobody can later explain why the agent changed.
-        block = self.mutations.split("async fn set_growth_posture_impl", 1)[1].split(
-            "\nimpl PostgresAutopilotRepository", 1
-        )[0]
+        block = (
+            self.mutations.split("async fn set_growth_posture_impl", 1)[1]
+            .split("\nimpl PostgresAutopilotRepository", 1)[0]
+            # The posture function alone — bound at the next sibling so a
+            # later function in the same impl is never measured as part of
+            # the single-transaction contract.
+            .split("\n    pub(super) async fn", 1)[0]
+        )
         self.assertIn('"set_growth_autonomy_posture"', block)
         self.assertIn("insert_operator_action", block)
 
     def test_all_three_surfaces_move_in_one_transaction(self) -> None:
-        block = self.mutations.split("async fn set_growth_posture_impl", 1)[1].split(
-            "\nimpl PostgresAutopilotRepository", 1
-        )[0]
+        block = (
+            self.mutations.split("async fn set_growth_posture_impl", 1)[1]
+            .split("\nimpl PostgresAutopilotRepository", 1)[0]
+            # The posture function alone — bound at the next sibling so a
+            # later function in the same impl is never measured as part of
+            # the single-transaction contract.
+            .split("\n    pub(super) async fn", 1)[0]
+        )
         self.assertIn("UPDATE viryaos_autopilot_policies", block)
         self.assertIn("INSERT INTO viryaos_growth_autonomy", block)
         self.assertIn("INSERT INTO viryaos_growth_envelope", block)
@@ -77,9 +87,14 @@ class GrowthPostureContract(unittest.TestCase):
         # The envelope write touches only the switches. Tuned budgets and
         # cooldowns belong to the operator; a posture that reset them would
         # be a regression wearing a feature's clothes.
-        block = self.mutations.split("async fn set_growth_posture_impl", 1)[1].split(
-            "\nimpl PostgresAutopilotRepository", 1
-        )[0]
+        block = (
+            self.mutations.split("async fn set_growth_posture_impl", 1)[1]
+            .split("\nimpl PostgresAutopilotRepository", 1)[0]
+            # The posture function alone — bound at the next sibling so a
+            # later function in the same impl is never measured as part of
+            # the single-transaction contract.
+            .split("\n    pub(super) async fn", 1)[0]
+        )
         envelope_sql = block.split("INSERT INTO viryaos_growth_envelope", 1)[1].split("#", 1)[0]
         self.assertNotIn("weekly_owned_audience_touches =", envelope_sql)
         self.assertNotIn("subject_cooldown_hours =", envelope_sql)
@@ -87,9 +102,14 @@ class GrowthPostureContract(unittest.TestCase):
         self.assertIn("dry_run = EXCLUDED.dry_run", envelope_sql)
 
     def test_every_context_is_set_so_no_switch_is_forgotten(self) -> None:
-        block = self.mutations.split("async fn set_growth_posture_impl", 1)[1].split(
-            "\nimpl PostgresAutopilotRepository", 1
-        )[0]
+        block = (
+            self.mutations.split("async fn set_growth_posture_impl", 1)[1]
+            .split("\nimpl PostgresAutopilotRepository", 1)[0]
+            # The posture function alone — bound at the next sibling so a
+            # later function in the same impl is never measured as part of
+            # the single-transaction contract.
+            .split("\n    pub(super) async fn", 1)[0]
+        )
         self.assertIn("for context in AutopilotContext::ALL", block)
         self.assertIn("enabled = true", block, "a posture enables the contexts it applies")
 
@@ -116,9 +136,14 @@ class GrowthPostureContract(unittest.TestCase):
         self.assertIn("deny_unknown_fields", read(REQUESTS))
 
     def test_optimistic_concurrency_on_the_posture_row(self) -> None:
-        block = self.mutations.split("async fn set_growth_posture_impl", 1)[1].split(
-            "\nimpl PostgresAutopilotRepository", 1
-        )[0]
+        block = (
+            self.mutations.split("async fn set_growth_posture_impl", 1)[1]
+            .split("\nimpl PostgresAutopilotRepository", 1)[0]
+            # The posture function alone — bound at the next sibling so a
+            # later function in the same impl is never measured as part of
+            # the single-transaction contract.
+            .split("\n    pub(super) async fn", 1)[0]
+        )
         self.assertIn("expected_version != command.expected_version", block.replace("current_version !=", "expected_version !="))
         self.assertIn("FOR UPDATE", block)
 

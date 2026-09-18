@@ -1158,6 +1158,28 @@ impl AutopilotControlRepository for PostgresAutopilotRepository {
             .await
     }
 
+    async fn approve_relay_ladder(
+        &self,
+        workspace_id: WorkspaceId,
+        source_id: uuid::Uuid,
+        idempotency_key: &IdempotencyKey,
+        request_id: Option<&RequestId>,
+    ) -> Result<AutopilotControlMutation, RepositoryError> {
+        self.approve_relay_ladder_operator(workspace_id, source_id, idempotency_key, request_id)
+            .await
+    }
+
+    async fn revoke_relay_ladder(
+        &self,
+        workspace_id: WorkspaceId,
+        source_id: uuid::Uuid,
+        idempotency_key: &IdempotencyKey,
+        request_id: Option<&RequestId>,
+    ) -> Result<AutopilotControlMutation, RepositoryError> {
+        self.revoke_relay_ladder_operator(workspace_id, source_id, idempotency_key, request_id)
+            .await
+    }
+
     async fn mark_decision_handled_externally(
         &self,
         workspace_id: WorkspaceId,

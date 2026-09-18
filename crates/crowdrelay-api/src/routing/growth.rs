@@ -31,6 +31,17 @@ pub(super) fn growth_routes() -> Router<AppState> {
             "/v1/admin/autopilot/outreach-waves/{wave_id}/approve",
             post(autopilot::approve_outreach_wave),
         )
+        // P.5: the same one-yes shape as a wave, keyed on the synced post —
+        // approve once and the post's whole spread (push + every admitted
+        // community) queues together; revoke stops the part not yet running.
+        .route(
+            "/v1/admin/autopilot/content-sources/{source_id}/relay-ladder/approve",
+            post(autopilot::approve_relay_ladder),
+        )
+        .route(
+            "/v1/admin/autopilot/content-sources/{source_id}/relay-ladder/revoke",
+            post(autopilot::revoke_relay_ladder),
+        )
         .route(
             "/v1/admin/autopilot/playlist-placements",
             post(autopilot::record_playlist_placement),
