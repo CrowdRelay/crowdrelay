@@ -51,6 +51,7 @@ pub mod gdrive;
 pub mod gig_outreach;
 pub mod gig_planning;
 pub mod lapsed_approvals;
+pub mod latarnik;
 pub mod measurement_queries;
 pub mod mobile_fan;
 pub mod night;
