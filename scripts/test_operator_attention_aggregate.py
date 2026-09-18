@@ -98,6 +98,7 @@ class OperatorAttentionAggregateContract(unittest.TestCase):
                 "dead_push",
                 "ecosystem",
                 "findings",
+                "lapsed",
                 "needs_you",
                 "summary",
                 "unpublished_drafts",

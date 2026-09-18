@@ -110,6 +110,16 @@ struct OperatorAttentionSnapshot {
     /// they went looking at a cycle list, which is the opposite of
     /// exception-first.
     brain: BrainSelfAssessment,
+    /// What the approval queue lost, and what it is about to lose.
+    ///
+    /// The queue's other half. `needs_you` above is what is pending; this is
+    /// the asks that reached their deadline — reaped by the sweep, or past it
+    /// and waiting for the sweep to notice. Without it an approval nobody
+    /// answered simply disappears, and with every outbound channel in this
+    /// system drafting and waiting for a person, that silence is the most
+    /// expensive one there is: nothing anywhere records that the thing was
+    /// proposed at all.
+    lapsed_approvals: LapsedApprovals,
 }
 
 /// The brain's own verdict, and whether it is asking for a person.
@@ -194,15 +204,16 @@ pub async fn attention(State(state): State<crate::AppState>, headers: HeaderMap)
         run_limited(budget, timeout_duration, load_unpublished_drafts(&state));
     let blocked_communities =
         run_limited(budget, timeout_duration, load_blocked_communities(&state.ops));
+    let lapsed = run_limited(budget, timeout_duration, load_lapsed_approvals(&state.ops));
 
     let (
         summary, alerts, dead_outbox, dead_deliveries, dead_push,
         ecosystem, findings, needs_you, brain, unpublished_drafts,
-        blocked_communities,
+        blocked_communities, lapsed,
     ) = tokio::join!(
         summary, alerts, dead_outbox, dead_deliveries, dead_push,
         ecosystem, findings, needs_you, brain, unpublished_drafts,
-        blocked_communities,
+        blocked_communities, lapsed,
     );
 
     let request_id_value = request_id(&headers);
@@ -250,6 +261,10 @@ pub async fn attention(State(state): State<crate::AppState>, headers: HeaderMap)
         Ok(value) => value,
         Err(error) => return error.into_response(request_id(&headers)),
     };
+    let lapsed_approvals = match lapsed {
+        Ok(value) => value,
+        Err(error) => return error.into_response(request_id(&headers)),
+    };
 
     let (needs_you, awaiting_approval) = needs_you;
 
@@ -268,6 +283,7 @@ pub async fn attention(State(state): State<crate::AppState>, headers: HeaderMap)
             unpublished_drafts,
             blocked_communities,
             brain,
+            lapsed_approvals,
         },
     )
 }
@@ -668,6 +684,21 @@ async fn load_needs_you(
         })
         .collect();
     Ok((summaries, total))
+}
+
+/// What the approval queue already lost, and what it loses next.
+///
+/// Delegates to `crowdrelay-infra` rather than carrying the SQL here: the
+/// three ways an ask can die, and the rule that they stay apart, are a
+/// property of the action ledger and not of this page.
+async fn load_lapsed_approvals(state: &OpsState) -> Result<LapsedApprovals, OpsError> {
+    crowdrelay_infra::lapsed_approvals::lapsed_approvals(
+        &state.pool,
+        state.workspace_id.into_uuid(),
+        OffsetDateTime::now_utc(),
+    )
+    .await
+    .map_err(OpsError::sqlx)
 }
 
 #[cfg(test)]
