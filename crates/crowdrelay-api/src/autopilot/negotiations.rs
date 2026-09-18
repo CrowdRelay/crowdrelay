@@ -97,11 +97,8 @@ struct NegotiationRow {
     pending_round: Option<i64>,
 }
 
-const LIVE_LIMIT: usize = 40;
-const SETTLED_LIMIT: usize = 20;
-// One literal query — the SQL gates cannot parse a `format!`ed statement,
-// so live and settled come back in one round trip and split in Rust.
-const ROW_LIMIT: i64 = 60;
+const LIVE_LIMIT: i64 = 40;
+const SETTLED_LIMIT: i64 = 20;
 
 pub async fn negotiations(State(state): State<AppState>, headers: HeaderMap) -> Response {
     let workspace_id = state.ops.workspace_id().into_uuid();
@@ -109,52 +106,83 @@ pub async fn negotiations(State(state): State<AppState>, headers: HeaderMap) -> 
 
     // The pending-move lateral reads the action queue the approval screen
     // does: one awaiting-approval terms move per negotiation, newest first.
-    // Ordering partitions live-first: unsettled rows by the promoter's
-    // deadline ascending, then settled rows newest-close first.
+    // action_kind carries the persisted vocabulary ('opportunity.terms.*'),
+    // while the serde `kind` tag inside the payload is what the console's
+    // move badge reads. Ordering partitions live-first: unsettled rows by
+    // the promoter's deadline ascending, then settled rows newest-close
+    // first; each partition is capped in SQL so a busy live book cannot
+    // starve the record.
     let rows = sqlx::query_as::<_, NegotiationRow>(
         r#"
-        SELECT terms.opportunity_id,
-               opportunity.title, opportunity.organization, opportunity.contact_email,
-               opportunity.opportunity_kind, opportunity.status AS opportunity_status,
-               terms.state, terms.currency, terms.offered_fee_minor,
-               terms.walk_away_minor, terms.target_minor, terms.opening_ask_minor,
-               terms.floor_basis, terms.prior_fee_minor, terms.market_floor_minor,
-               terms.countered_fee_minor, terms.counter_rounds,
-               terms.responds_by, terms.settled_at, terms.settled_reason,
-               move.id AS pending_action_id, move.action_kind AS pending_action_kind,
-               COALESCE(
-                   (move.payload ->> 'ask_minor')::bigint,
-                   (move.payload ->> 'fee_minor')::bigint
-               ) AS pending_amount_minor,
-               COALESCE((move.payload ->> 'round')::bigint, 0) AS pending_round
-        FROM viryaos_team_opportunity_terms AS terms
-        JOIN viryaos_team_opportunities AS opportunity
-          ON opportunity.workspace_id = terms.workspace_id
-         AND opportunity.id = terms.opportunity_id
-        LEFT JOIN LATERAL (
-            SELECT action.id, action.action_kind, action.payload
-            FROM viryaos_autopilot_actions AS action
-            WHERE action.workspace_id = terms.workspace_id
-              AND action.subject_kind = 'team_opportunity'
-              AND action.subject_id = terms.opportunity_id
-              AND action.status = 'awaiting_approval'
-              AND action.action_kind IN (
-                  'counter_live_opportunity_terms', 'accept_live_opportunity_terms'
-              )
-            ORDER BY action.created_at DESC, action.id DESC
-            LIMIT 1
-        ) AS move ON true
-        WHERE terms.workspace_id = $1
-          AND (terms.settled_at IS NULL
-               OR terms.settled_at > now() - interval '90 days')
-        ORDER BY (terms.settled_at IS NOT NULL) ASC,
-                 CASE WHEN terms.settled_at IS NULL THEN terms.responds_by END ASC,
-                 terms.settled_at DESC
-        LIMIT $2
+        SELECT ranked.opportunity_id,
+               ranked.title, ranked.organization, ranked.contact_email,
+               ranked.opportunity_kind, ranked.opportunity_status,
+               ranked.state, ranked.currency, ranked.offered_fee_minor,
+               ranked.walk_away_minor, ranked.target_minor, ranked.opening_ask_minor,
+               ranked.floor_basis, ranked.prior_fee_minor, ranked.market_floor_minor,
+               ranked.countered_fee_minor, ranked.counter_rounds,
+               ranked.responds_by, ranked.settled_at, ranked.settled_reason,
+               ranked.pending_action_id, ranked.pending_action_kind,
+               ranked.pending_amount_minor, ranked.pending_round
+        FROM (
+            SELECT terms.opportunity_id,
+                   opportunity.title, opportunity.organization, opportunity.contact_email,
+                   opportunity.opportunity_kind, opportunity.status AS opportunity_status,
+                   terms.state, terms.currency, terms.offered_fee_minor,
+                   terms.walk_away_minor, terms.target_minor, terms.opening_ask_minor,
+                   terms.floor_basis, terms.prior_fee_minor, terms.market_floor_minor,
+                   terms.countered_fee_minor, terms.counter_rounds,
+                   terms.responds_by, terms.settled_at, terms.settled_reason,
+                   move.id AS pending_action_id,
+                   move.payload ->> 'kind' AS pending_action_kind,
+                   COALESCE(
+                       (move.payload ->> 'ask_minor')::bigint,
+                       (move.payload ->> 'fee_minor')::bigint
+                   ) AS pending_amount_minor,
+                   COALESCE((move.payload ->> 'round')::bigint, 0) AS pending_round,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY (terms.settled_at IS NOT NULL)
+                       ORDER BY
+                           CASE WHEN terms.settled_at IS NULL THEN terms.responds_by END ASC,
+                           terms.settled_at DESC,
+                           terms.opportunity_id
+                   ) AS bucket_rank
+            FROM viryaos_team_opportunity_terms AS terms
+            JOIN viryaos_team_opportunities AS opportunity
+              ON opportunity.workspace_id = terms.workspace_id
+             AND opportunity.id = terms.opportunity_id
+            LEFT JOIN LATERAL (
+                SELECT action.id, action.payload
+                FROM viryaos_autopilot_actions AS action
+                WHERE action.workspace_id = terms.workspace_id
+                  AND action.subject_kind = 'team_opportunity'
+                  AND action.subject_id = terms.opportunity_id
+                  AND action.status = 'awaiting_approval'
+                  AND (action.approval_expires_at IS NULL
+                       OR action.approval_expires_at > now())
+                  AND action.action_kind IN (
+                      'opportunity.terms.counter', 'opportunity.terms.accept'
+                  )
+                ORDER BY action.created_at DESC, action.id DESC
+                LIMIT 1
+            ) AS move ON true
+            WHERE terms.workspace_id = $1
+              AND (terms.settled_at IS NULL
+                   OR terms.settled_at > now() - interval '90 days')
+        ) AS ranked
+        WHERE ranked.bucket_rank <= (CASE
+            WHEN ranked.settled_at IS NULL THEN $2
+            ELSE $3
+        END)::bigint
+        ORDER BY (ranked.settled_at IS NOT NULL) ASC,
+                 CASE WHEN ranked.settled_at IS NULL THEN ranked.responds_by END ASC,
+                 ranked.settled_at DESC,
+                 ranked.opportunity_id
         "#,
     )
     .bind(workspace_id)
-    .bind(ROW_LIMIT)
+    .bind(LIVE_LIMIT)
+    .bind(SETTLED_LIMIT)
     .fetch_all(pool)
     .await;
 
@@ -164,10 +192,8 @@ pub async fn negotiations(State(state): State<AppState>, headers: HeaderMap) -> 
             let mut settled = Vec::new();
             for row in rows {
                 if row.settled_at.is_some() {
-                    if settled.len() < SETTLED_LIMIT {
-                        settled.push(negotiation_row_to_entry(row));
-                    }
-                } else if live.len() < LIVE_LIMIT {
+                    settled.push(negotiation_row_to_entry(row));
+                } else {
                     live.push(negotiation_row_to_entry(row));
                 }
             }
@@ -208,5 +234,32 @@ fn negotiation_row_to_entry(row: NegotiationRow) -> NegotiationEntry {
             amount_minor: row.pending_amount_minor,
             round: row.pending_round.unwrap_or(0),
         }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crowdrelay_application::autopilot::AutopilotActionPayload;
+    use crowdrelay_domain::TeamOpportunityId;
+
+    // The lateral's `action_kind` filter must name the persisted vocabulary
+    // from `AutopilotActionPayload::action_kind()` — the serde `kind` tags
+    // (counter_live_opportunity_terms) never reach the column. Pin it so a
+    // vocabulary drift cannot silently blank the pending move again.
+    #[test]
+    fn pending_move_filter_matches_persisted_action_kinds() {
+        let counter = AutopilotActionPayload::CounterLiveOpportunityTerms {
+            opportunity_id: TeamOpportunityId::new(),
+            ask_minor: 1,
+            currency: "PLN".to_string(),
+            round: 1,
+        };
+        let accept = AutopilotActionPayload::AcceptLiveOpportunityTerms {
+            opportunity_id: TeamOpportunityId::new(),
+            fee_minor: 1,
+            currency: "PLN".to_string(),
+        };
+        assert_eq!(counter.action_kind(), "opportunity.terms.counter");
+        assert_eq!(accept.action_kind(), "opportunity.terms.accept");
     }
 }
