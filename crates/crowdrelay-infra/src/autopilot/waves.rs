@@ -336,7 +336,7 @@ impl PostgresAutopilotRepository {
     /// loop, an error halfway leaves a half-approved batch — the one state an
     /// operator cannot reason about, because the thing they approved was the
     /// batch.
-    pub(super) async fn approve_outreach_wave_operator(
+    pub(super) async fn approve_outreach_wave_impl(
         &self,
         workspace_id: WorkspaceId,
         wave_id: Uuid,
