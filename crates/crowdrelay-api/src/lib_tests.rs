@@ -925,6 +925,7 @@ mod tests {
                 image_url: None,
                 trailer_url: None,
                 external_event_url: None,
+                festival_name: None,
                 acts: vec![
                     crowdrelay_domain::PublicEventAct {
                         act_slug: "opener".to_owned(),
@@ -948,7 +949,8 @@ mod tests {
             ListFanEventInterests::new(Arc::clone(&repository)),
             ReplaceEventActs::new(Arc::clone(&repository)),
             SetEventCounterparty::new(Arc::clone(&repository)),
-            crowdrelay_application::SetEventSupportSlots::new(repository),
+            crowdrelay_application::SetEventSupportSlots::new(Arc::clone(&repository)),
+            crowdrelay_application::SetEventFestival::new(repository),
             {
                 let captured = Arc::clone(&captured);
                 Arc::new(move |action: EventAction| {

@@ -202,6 +202,13 @@
         ) -> Result<(), RepositoryError> {
             Ok(())
         }
+
+        async fn set_event_festival(
+            &self,
+            _command: &crowdrelay_application::SetEventFestivalCommand,
+        ) -> Result<(), RepositoryError> {
+            Ok(())
+        }
     }
 
     struct TestAdmissionRepository;
@@ -302,7 +309,8 @@
             ListFanEventInterests::new(Arc::clone(&repository)),
             ReplaceEventActs::new(Arc::clone(&repository)),
             SetEventCounterparty::new(Arc::clone(&repository)),
-            crowdrelay_application::SetEventSupportSlots::new(repository),
+            crowdrelay_application::SetEventSupportSlots::new(Arc::clone(&repository)),
+            crowdrelay_application::SetEventFestival::new(repository),
             Arc::new(|_action| {}),
             Arc::new(EventActionMetricsSnapshot::default),
         )

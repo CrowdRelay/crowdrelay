@@ -18,7 +18,8 @@ use crowdrelay_application::{
     EventActEntry, EventCache, IdempotencyKey, ListFanEventInterests, MAX_PUBLIC_EVENT_LIMIT,
     RegisterEventInterest, RegisterEventInterestCommand, RegisterEventInterestCommandArgs,
     ReplaceEventActs, ReplaceEventActsCommand, RepositoryError, RequestId, SetEventCounterparty,
-    SetEventCounterpartyCommand, SetEventSupportSlots, SetEventSupportSlotsCommand,
+    SetEventCounterpartyCommand, SetEventFestival, SetEventFestivalCommand, SetEventSupportSlots,
+    SetEventSupportSlotsCommand,
 };
 use crowdrelay_domain::{
     CampaignId, EventAction, EventActionKind, EventSlug, PublicEvent, WorkspaceId,
@@ -64,6 +65,7 @@ pub struct EventState {
     replace_acts: ReplaceEventActs,
     set_counterparty: SetEventCounterparty,
     set_support_slots: SetEventSupportSlots,
+    set_festival: SetEventFestival,
     action_submitter: EventActionSubmitter,
     action_metrics_reader: EventActionMetricsReader,
 }
@@ -80,6 +82,7 @@ impl EventState {
         replace_acts: ReplaceEventActs,
         set_counterparty: SetEventCounterparty,
         set_support_slots: SetEventSupportSlots,
+        set_festival: SetEventFestival,
         action_submitter: EventActionSubmitter,
         action_metrics_reader: EventActionMetricsReader,
     ) -> Self {
@@ -91,6 +94,7 @@ impl EventState {
             replace_acts,
             set_counterparty,
             set_support_slots,
+            set_festival,
             action_submitter,
             action_metrics_reader,
         }
@@ -839,6 +843,14 @@ pub struct SetEventCounterpartyRequest {
     counterparty_email: Option<String>,
 }
 
+/// Body of the staff/admin festival endpoint (6.1). `null` clears the marker
+/// back to an ordinary night.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SetEventFestivalRequest {
+    festival_name: Option<String>,
+}
+
 /// The counterparty email must satisfy the same shape the
 /// `events.counterparty_email` CHECK enforces — `[^@\s]+@[^@\s]+\.[^@\s]+$`.
 /// `NormalizedEmail` accepts single-label domains (`x@localhost`), which the
@@ -974,6 +986,62 @@ pub async fn set_event_counterparty(
     }
 }
 
+/// Sets or clears the show's festival marker (staff/admin) (6.1). The name's
+/// presence is what makes the event a festival slot — `null` is an ordinary
+/// night again. The organiser rides the counterparty fields.
+/// `PUT /v1/{admin,staff}/events/{slug}/festival`
+pub async fn set_event_festival(
+    State(state): State<crate::AppState>,
+    Path(raw_slug): Path<String>,
+    headers: HeaderMap,
+    body: Result<Json<SetEventFestivalRequest>, JsonRejection>,
+) -> Response {
+    let request_id_value = request_id(&headers);
+    let Json(payload) = match body {
+        Ok(value) => value,
+        Err(rejection) => {
+            let problem = if rejection.status() == StatusCode::PAYLOAD_TOO_LARGE {
+                Problem::payload_too_large(request_id_value)
+            } else {
+                Problem::bad_request(request_id_value)
+            };
+            return problem.private().into_response();
+        }
+    };
+    let festival_name = payload
+        .festival_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(str::to_owned);
+    // The column's own CHECK is char_length <= 200; rejected here so the
+    // operator gets a 400 naming their input instead of a 500 naming ours.
+    if festival_name
+        .as_deref()
+        .is_some_and(|name| name.len() > 200)
+    {
+        return Problem::bad_request(request_id_value)
+            .private()
+            .into_response();
+    }
+    let command = SetEventFestivalCommand {
+        workspace_id: state.events.workspace_id,
+        event_slug: raw_slug.trim().to_ascii_lowercase(),
+        festival_name,
+    };
+    match state.events.set_festival.execute(&command).await {
+        Ok(()) => (
+            StatusCode::OK,
+            [(CACHE_CONTROL, HeaderValue::from_static(PRIVATE_NO_STORE))],
+            Json(serde_json::json!({
+                "festival_name": command.festival_name,
+            })),
+        )
+            .into_response(),
+        Err(error) => repository_problem(error, request_id_value).into_response(),
+    }
+}
+
 fn repository_problem(error: RepositoryError, request_id: Option<String>) -> Problem {
     match error {
         RepositoryError::Unavailable => Problem::service_unavailable(request_id),
@@ -1012,6 +1080,7 @@ mod tests {
             image_url: None,
             trailer_url: None,
             external_event_url: None,
+            festival_name: None,
             acts: Vec::new(),
             updated_at: OffsetDateTime::UNIX_EPOCH,
         };
@@ -1052,6 +1121,7 @@ mod tests {
             image_url: None,
             trailer_url: None,
             external_event_url: None,
+            festival_name: None,
             acts: Vec::new(),
             updated_at: OffsetDateTime::UNIX_EPOCH,
         };

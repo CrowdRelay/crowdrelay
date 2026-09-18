@@ -98,6 +98,10 @@ pub struct PublicEvent {
     pub image_url: Option<String>,
     pub trailer_url: Option<String>,
     pub external_event_url: Option<String>,
+    /// The festival this show is a slot inside of, if it is one — public
+    /// poster information, carried through the same validation discipline
+    /// as the venue name. `None` is an ordinary night, not a hidden one.
+    pub festival_name: Option<String>,
     #[serde(default)]
     pub acts: Vec<PublicEventAct>,
     #[serde(with = "time::serde::rfc3339")]
@@ -113,6 +117,7 @@ impl PublicEvent {
         validate_optional_multiline_text(self.description.as_deref(), 10_000)?;
         validate_optional_text(self.venue.as_deref(), 500)?;
         validate_optional_text(self.venue_address.as_deref(), 500)?;
+        validate_optional_text(self.festival_name.as_deref(), 200)?;
 
         for value in [
             self.ticket_url.as_deref(),
@@ -419,6 +424,7 @@ mod description_tests {
             image_url: None,
             trailer_url: None,
             external_event_url: None,
+            festival_name: None,
             acts: Vec::new(),
             updated_at: OffsetDateTime::UNIX_EPOCH,
         }

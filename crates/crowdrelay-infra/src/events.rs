@@ -15,7 +15,7 @@ use std::{
 use async_trait::async_trait;
 use crowdrelay_application::{
     EventRepository, RegisterEventInterestCommand, ReplaceEventActsCommand, RepositoryError,
-    SetEventCounterpartyCommand, SetEventSupportSlotsCommand,
+    SetEventCounterpartyCommand, SetEventFestivalCommand, SetEventSupportSlotsCommand,
 };
 use crowdrelay_domain::{
     CampaignId, CityId, EventAction, EventCity, EventId, EventInterestResult, EventSlug,
@@ -116,6 +116,7 @@ impl PostgresEventRepository {
                 events.image_url,
                 events.trailer_url,
                 events.external_event_url,
+                events.festival_name,
                 acts.value AS acts,
                 events.updated_at
             FROM events
@@ -757,6 +758,50 @@ impl PostgresEventRepository {
             .map_err(EventStoreError::from_sqlx)
     }
 
+    async fn set_event_festival_inner(
+        &self,
+        command: &SetEventFestivalCommand,
+    ) -> Result<(), EventStoreError> {
+        let mut transaction = self
+            .pool
+            .begin()
+            .await
+            .map_err(EventStoreError::from_sqlx)?;
+        let workspace_id =
+            trusted_workspace_id_in_transaction(&mut transaction, &self.workspace_slug).await?;
+        if workspace_id != command.workspace_id {
+            return Err(EventStoreError::NotFound);
+        }
+
+        let updated = sqlx::query(
+            r#"
+            UPDATE events
+            SET festival_name = $3,
+                updated_at = now()
+            WHERE workspace_id = $1
+                AND slug = $2
+                -- Same status rule as the counterparty: a slot's festival
+                -- identity is often only confirmed around show day, so
+                -- 'completed' stays editable; 'cancelled' is history.
+                AND status IN ('draft', 'published', 'completed')
+            "#,
+        )
+        .bind(workspace_id.into_uuid())
+        .bind(command.event_slug.as_str())
+        .bind(command.festival_name.as_deref())
+        .execute(&mut *transaction)
+        .await
+        .map_err(EventStoreError::from_sqlx)?;
+        if updated.rows_affected() == 0 {
+            return Err(EventStoreError::NotFound);
+        }
+
+        transaction
+            .commit()
+            .await
+            .map_err(EventStoreError::from_sqlx)
+    }
+
     async fn list_fan_interests_inner(
         &self,
         workspace_id: WorkspaceId,
@@ -808,6 +853,7 @@ impl PostgresEventRepository {
                 events.image_url,
                 events.trailer_url,
                 events.external_event_url,
+                events.festival_name,
                 acts.value AS acts,
                 events.updated_at,
                 event_interests.created_at AS interested_at
@@ -895,6 +941,15 @@ impl EventRepository for PostgresEventRepository {
         command: &SetEventSupportSlotsCommand,
     ) -> Result<(), RepositoryError> {
         self.bounded(self.set_event_support_slots_inner(command))
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn set_event_festival(
+        &self,
+        command: &SetEventFestivalCommand,
+    ) -> Result<(), RepositoryError> {
+        self.bounded(self.set_event_festival_inner(command))
             .await
             .map_err(Into::into)
     }

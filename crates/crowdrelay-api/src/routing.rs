@@ -509,6 +509,16 @@ pub(super) fn application_routes(state: AppState) -> Router {
             "/v1/admin/events/{slug}/support-slots",
             put(events::set_event_support_slots),
         )
+        // 6.1: the festival this show is a slot inside of. Declared on both
+        // surfaces the bill itself is edited from.
+        .route(
+            "/v1/staff/events/{slug}/festival",
+            put(events::set_event_festival),
+        )
+        .route(
+            "/v1/admin/events/{slug}/festival",
+            put(events::set_event_festival),
+        )
         .route(
             "/v1/internal/ticket-orders/{order_id}/stripe-checkout",
             post(ticketing::bind_stripe_checkout),

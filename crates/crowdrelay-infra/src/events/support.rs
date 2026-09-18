@@ -20,6 +20,7 @@ struct PublicEventRow {
     image_url: Option<String>,
     trailer_url: Option<String>,
     external_event_url: Option<String>,
+    festival_name: Option<String>,
     acts: Option<serde_json::Value>,
     updated_at: OffsetDateTime,
 }
@@ -56,6 +57,7 @@ impl TryFrom<PublicEventRow> for PublicEvent {
             image_url: row.image_url,
             trailer_url: row.trailer_url,
             external_event_url: row.external_event_url,
+            festival_name: row.festival_name,
             acts: row
                 .acts
                 .map(serde_json::from_value::<Vec<PublicEventAct>>)
@@ -91,6 +93,7 @@ struct FanInterestRow {
     image_url: Option<String>,
     trailer_url: Option<String>,
     external_event_url: Option<String>,
+    festival_name: Option<String>,
     acts: Option<serde_json::Value>,
     updated_at: OffsetDateTime,
     interested_at: OffsetDateTime,
@@ -120,6 +123,7 @@ impl TryFrom<FanInterestRow> for FanEventInterest {
             image_url: row.image_url,
             trailer_url: row.trailer_url,
             external_event_url: row.external_event_url,
+            festival_name: row.festival_name,
             acts: row.acts,
             updated_at: row.updated_at,
         })?;
