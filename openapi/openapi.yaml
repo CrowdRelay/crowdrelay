@@ -10795,14 +10795,18 @@ paths:
         The staging queue read against a date rather than as an inventory
         (§4h-11). One upcoming show, one shortlist: unpromoted press and radio
         in the show's city, the tenant's active rooms and promoters there,
-        the communities it posts in across the show's country, and the cold
+        the communities it posts in across the show's country, the cold
         rooms the shared venue registry knows that this tenant has never
-        played. Every row is a candidate — promotion, the contact governor
-        and the admission wall all still bind, which is why no row carries an
-        email address. Each section degrades independently: a source with no
-        rows is an empty array, a section whose read failed is named in
+        played, the other bands on this bill who are not tenants, the venue's
+        own channel, and the photographer beacons in the show's city. Every
+        row is a candidate — promotion, the contact governor and the
+        admission wall all still bind, which is why no row carries an email
+        address. Each section degrades independently: a source with no rows
+        is an empty array, a section whose read failed is named in
         `degraded`, and an event with no city answers `degraded: ["city"]`
-        with every section empty rather than an error.
+        with the city-scoped sections empty — the bill-mates and venue
+        sections still answer, since a bill and a room belong to the event,
+        not the city.
       security:
       - controlPlaneBearer: []
       parameters:
@@ -11470,12 +11474,12 @@ components:
         a person to look at, not an instruction: no row carries an email
         address, and promotion, the contact governor and the admission wall
         all still bind between this list and any outreach.
-      required: [event, degraded, notes, press, rooms_and_promoters, communities, cold_rooms]
+      required: [event, degraded, notes, press, rooms_and_promoters, communities, cold_rooms, bill_mates, venue_channel, photographers, truncated]
       properties:
         event:
           type: object
           additionalProperties: false
-          required: [slug, title, starts_at, city, country_code]
+          required: [slug, title, starts_at, city, country_code, city_id]
           properties:
             slug: { type: string }
             title: { type: string }
@@ -11486,6 +11490,14 @@ components:
             country_code:
               type: [string, 'null']
               pattern: '^[A-Z]{2}$'
+            city_id:
+              type: [string, 'null']
+              format: uuid
+              description: >-
+                The city's id — what an admit action needs to place a beacon
+                there. Null with `city`. The id, not the slug: slug
+                resolution reads a top-100 fan-signal snapshot that
+                low-signal and foreign cities never reach.
         degraded:
           type: array
           description: >-
@@ -11495,7 +11507,7 @@ components:
             measured answer, not a failure.
           items:
             type: string
-            enum: [city, press, rooms_and_promoters, communities, cold_rooms]
+            enum: [city, press, rooms_and_promoters, communities, cold_rooms, bill_mates, venue_channel, photographers]
         notes:
           type: array
           description: >-
@@ -11579,6 +11591,85 @@ components:
               capacity:
                 type: [string, 'null']
                 description: The global capacity fact's raw text value, when one exists.
+        bill_mates:
+          type: array
+          description: >-
+            The other bands on this bill who are not tenants — the peer or
+            unclaimed act names the poster already proves exist. Tenant acts
+            are omitted (the crossbill edge is already their channel), and an
+            act matching the workspace's own listing name is excluded.
+            Event-scoped: answers even when the show has no city.
+          items:
+            type: object
+            additionalProperties: false
+            required: [act_slug, act_name, position, resolution, on_roster, shared_bills]
+            properties:
+              act_slug: { type: string }
+              act_name: { type: string }
+              position:
+                type: integer
+                description: Running order — 0 opens; the headliner is last.
+              resolution:
+                type: string
+                enum: [peer, unclaimed]
+                description: >-
+                  `peer` resolved to a `place_peer_acts` row; `unclaimed` has
+                  none yet.
+              on_roster:
+                type: boolean
+                description: >-
+                  A scene-partner beacon in the show's city already carries
+                  this act's name.
+              shared_bills:
+                type: integer
+                description: >-
+                  Published or completed bills this act has shared with the
+                  tenant before this show — the show itself never counts.
+        venue_channel:
+          type: [object, 'null']
+          additionalProperties: false
+          required: [venue_id, display_name, on_roster]
+          description: >-
+            The room the show is in, resolved to the shared registry when
+            the city lets it. Null only when the event names no venue; an
+            unresolved room still names itself with `venue_id` null.
+          properties:
+            venue_id:
+              type: [string, 'null']
+              format: uuid
+              description: The `place_venues` row when resolved.
+            display_name: { type: string }
+            on_roster:
+              type: boolean
+              description: >-
+                A venue-kind beacon already names this room — the channel
+                exists on the roster rather than needing to be found.
+        photographers:
+          type: array
+          description: >-
+            Photographer beacons in the show's city, warmest first —
+            suppressed rows never list.
+          items:
+            type: object
+            additionalProperties: false
+            required: [id, display_name, verified, relationship_score, contacted_before]
+            properties:
+              id: { type: string, format: uuid }
+              display_name: { type: string }
+              verified: { type: boolean }
+              relationship_score: { type: integer }
+              contacted_before:
+                type: boolean
+                description: >-
+                  The contact governor remembers a touch — the band has
+                  written to them before, in any context.
+        truncated:
+          type: array
+          description: >-
+            Sections that hit the 40-row shortlist cap — "40 shown" must not
+            read as "40 exist".
+          items:
+            type: string
     EcosystemMeta:
       type: object
       additionalProperties: false

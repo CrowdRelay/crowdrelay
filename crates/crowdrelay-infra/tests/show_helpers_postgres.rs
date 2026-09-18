@@ -164,6 +164,47 @@ async fn run(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
     .bind(peer)
     .execute(pool)
     .await?;
+    // A cancelled bill they shared does not count toward shared_bills.
+    sqlx::query(
+        "INSERT INTO events (workspace_id, city_id, slug, title, venue, starts_at, status, published_at)
+         VALUES ($1, $2, 'cancelled-night', 'cancelled-night', 'Klub A', now() + interval '20 days', 'cancelled', now())",
+    )
+    .bind(act).bind(wroclaw).execute(pool).await?;
+    let cancelled = event_id(pool, act, "cancelled-night").await?;
+    sqlx::query(
+        "INSERT INTO event_acts (workspace_id, event_id, act_slug, act_name, position, peer_act_id)
+         VALUES ($1, $2, 'the-openers', 'The Openers', 1, $3)",
+    )
+    .bind(act)
+    .bind(cancelled)
+    .bind(peer)
+    .execute(pool)
+    .await?;
+    // An unclaimed act — resolver never minted it — still lists.
+    sqlx::query(
+        "INSERT INTO event_acts (workspace_id, event_id, act_slug, act_name, position)
+         VALUES ($1, $2, 'mystery-band', 'Mystery Band', 3)",
+    )
+    .bind(act)
+    .bind(friday_id)
+    .execute(pool)
+    .await?;
+    // The band's own listing name on the bill stays out — an unresolved
+    // collision must not offer "add yourself to your roster".
+    sqlx::query("INSERT INTO viryaos_band_listings (workspace_id, act_name) VALUES ($1, 'Virya')")
+        .bind(act)
+        .execute(pool)
+        .await?;
+    sqlx::query(
+        "INSERT INTO event_acts (workspace_id, event_id, act_slug, act_name, position)
+         VALUES ($1, $2, 'virya', 'Virya', 4)",
+    )
+    .bind(act)
+    .bind(friday_id)
+    .execute(pool)
+    .await?;
+    // A same-named beacon in the wrong city must not flip on_roster.
+    beacon(pool, act, krakow, "The Openers", "scene_partner", None).await?;
     // A tenant act — the crossbill edge is its channel, not this section.
     sqlx::query(
         "INSERT INTO event_acts (workspace_id, event_id, act_slug, act_name, position, act_workspace_id)
@@ -192,6 +233,19 @@ async fn run(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
     )
     .await?;
     beacon(pool, act, krakow, "Krakow Lens", "photographer", None).await?;
+    let suppressed = beacon(
+        pool,
+        act,
+        wroclaw,
+        "Suppressed Lens",
+        "photographer",
+        Some("gone@example.com"),
+    )
+    .await?;
+    sqlx::query("UPDATE viryaos_beacons SET do_not_contact = true WHERE id = $1")
+        .bind(suppressed)
+        .execute(pool)
+        .await?;
     beacon(pool, other, wroclaw, "Their Lens", "photographer", None).await?;
     sqlx::query(
         "INSERT INTO viryaos_contact_governor
@@ -207,9 +261,14 @@ async fn run(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(helpers.event.city.as_deref(), Some("Wrocław"));
     assert_eq!(helpers.event.country_code.as_deref(), Some("PL"));
     assert_eq!(
-        helpers.event.city_slug.as_deref(),
-        Some("wroclaw"),
-        "the slug is what an admit action needs to place the beacon"
+        helpers.event.city_id,
+        Some(wroclaw),
+        "the id is what an admit action needs to place the beacon"
+    );
+    assert!(
+        helpers.truncated.is_empty(),
+        "no section hit the cap: {:?}",
+        helpers.truncated
     );
     assert!(
         helpers.degraded.is_empty(),
@@ -304,8 +363,9 @@ async fn run(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
         .collect();
     assert_eq!(
         mates,
-        [("The Openers", "peer", 2)],
-        "bill_mates must hold the peer acts only: {mates:?}"
+        // Only the real prior bill counts — this show must not count itself.
+        [("The Openers", "peer", 1), ("Mystery Band", "unclaimed", 0)],
+        "bill_mates must hold the peer and unclaimed acts only: {mates:?}"
     );
     assert!(
         !helpers.bill_mates[0].on_roster,
@@ -363,10 +423,21 @@ async fn run(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
         .ok_or("a city-less show produced no read")?;
     assert_eq!(no_city.degraded, ["city"]);
     assert_eq!(no_city.event.city, None);
+    assert_eq!(no_city.event.city_id, None);
     assert!(no_city.press.is_empty());
     assert!(no_city.rooms_and_promoters.is_empty());
     assert!(no_city.communities.is_empty());
     assert!(no_city.cold_rooms.is_empty());
+    assert!(no_city.photographers.is_empty());
+    // The bill and the room are the event's own answers — a missing city
+    // does not suppress them. "TBA" resolves to nothing, but still names
+    // itself.
+    let channel = no_city
+        .venue_channel
+        .as_ref()
+        .ok_or("a city-less show with a venue name must still answer")?;
+    assert_eq!(channel.display_name, "TBA");
+    assert_eq!(channel.venue_id, None);
     assert_eq!(no_city.notes, ["staged_contacts_have_no_city"]);
 
     // An event nobody has is not an empty list — and neither is a draft,

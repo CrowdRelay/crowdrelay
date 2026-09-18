@@ -631,11 +631,14 @@ impl PostgresEventRepository {
             // ON CONFLICT DO UPDATE — not DO NOTHING — so RETURNING hands
             // back the existing row's id on a name_key collision, which is
             // the re-link path for a band already on somebody else's bill.
+            // The update assigns the row's own display_name: earliest-seen
+            // casing wins, matching place_venues' DO NOTHING policy — the
+            // last tenant to write a bill does not get to re-spell the band.
             let peer_act_id = sqlx::query_scalar::<_, Uuid>(
                 r#"
                 INSERT INTO place_peer_acts (name_key, display_name)
                 VALUES (place_venue_key($1), left(btrim($1), 500))
-                ON CONFLICT (name_key) DO UPDATE SET display_name = EXCLUDED.display_name
+                ON CONFLICT (name_key) DO UPDATE SET display_name = place_peer_acts.display_name
                 RETURNING id
                 "#,
             )

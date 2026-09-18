@@ -15,7 +15,7 @@ impl AutopilotBeaconStateRepository for PostgresAutopilotRepository {
             if command.expected_version < 0
                 || (command.expected_version > 0 && command.beacon_id.is_none())
                 || command.display_name.trim().is_empty()
-                || command.display_name.len() > 240
+                || command.display_name.chars().count() > 240
                 || command.relationship_score > 100
                 || command.relevance_basis_points > 10_000
                 || command.confidence.basis_points() > 10_000
@@ -44,9 +44,18 @@ impl AutopilotBeaconStateRepository for PostgresAutopilotRepository {
             let normalized_email = command.contact_email.as_deref().map(str::trim);
             let normalized_destination = command.destination_url.as_deref().map(str::trim);
             let normalized_source = command.source_url.as_deref().map(str::trim);
-            let natural = sqlx::query_as::<_, (Uuid, i64)>(
+            // A name-only row — an admitted candidate stub — has no contact
+            // identity of its own, so its normalized name is the claim. The
+            // match ranks email first, destination second, name-stub last:
+            // a create that carries an email adopts the same-named stub
+            // instead of duplicating it, while a name-only write can never
+            // touch a row that has a real contact identity.
+            let natural = sqlx::query_as::<_, (Uuid, i64, i32)>(
                 r#"
-                SELECT id, version
+                SELECT id, version, CASE
+                    WHEN $4::text IS NOT NULL AND contact_email = $4 THEN 0
+                    WHEN $5::text IS NOT NULL AND destination_url = $5 THEN 1
+                    ELSE 2 END AS match_kind
                 FROM viryaos_beacons
                 WHERE workspace_id=$1 AND beacon_kind=$2
                   AND city_id IS NOT DISTINCT FROM $3
@@ -56,7 +65,14 @@ impl AutopilotBeaconStateRepository for PostgresAutopilotRepository {
                       $4::text IS NULL AND $5::text IS NOT NULL
                       AND destination_url = $5
                     )
+                    OR (
+                      contact_email IS NULL AND destination_url IS NULL
+                      AND place_venue_key(display_name)
+                          = place_venue_key($6)
+                    )
                   )
+                ORDER BY match_kind, id
+                LIMIT 1
                 FOR UPDATE
                 "#,
             )
@@ -65,12 +81,17 @@ impl AutopilotBeaconStateRepository for PostgresAutopilotRepository {
             .bind(command.city_id.map(CityId::into_uuid))
             .bind(normalized_email)
             .bind(normalized_destination)
+            .bind(command.display_name.trim())
             .fetch_optional(&mut *tx)
             .await
             .map_err(map_sqlx)?;
 
             let operation_id = Uuid::now_v7();
-            let beacon_id = match (command.beacon_id, natural) {
+            let natural_match = natural.map(|(id, version, _)| (id, version));
+            let stub_adoption = command.beacon_id.is_none()
+                && command.expected_version == 0
+                && natural.is_some_and(|(_, _, match_kind)| match_kind == 2);
+            let beacon_id = match (command.beacon_id, natural_match) {
                 (Some(requested), Some((persisted, _))) if requested.into_uuid() != persisted => {
                     return Err(RepositoryError::Conflict);
                 }
@@ -123,7 +144,7 @@ impl AutopilotBeaconStateRepository for PostgresAutopilotRepository {
                 });
             }
 
-            let version = if command.expected_version == 0 && natural.is_none() {
+            let version = if command.expected_version == 0 && natural_match.is_none() {
                 sqlx::query_scalar::<_, i64>(
                     r#"
                     INSERT INTO viryaos_beacons(
@@ -156,16 +177,29 @@ impl AutopilotBeaconStateRepository for PostgresAutopilotRepository {
                 .map_err(map_sqlx)?
             } else {
                 let expected = if command.expected_version == 0 {
-                    natural.map_or(0, |(_, version)| version)
+                    natural_match.map_or(0, |(_, version)| version)
                 } else {
                     command.expected_version
                 };
+                // A create-intent that lands on a real contact row is a
+                // duplicate submit, not an edit: it may update the identity
+                // fields but never the consent standing. `do_not_contact` is
+                // preserved on every create-intent match, stubs included —
+                // suppression is a record, not a default a resubmit resets.
+                // `verified`/`accepts_outreach` preserve only on a real-row
+                // collision; a name-stub adoption is exactly the enrich step
+                // that sets them.
+                let create_intent = command.expected_version == 0 && command.beacon_id.is_none();
+                let preserve_flags = create_intent && !stub_adoption;
                 sqlx::query_scalar::<_, i64>(
                     r#"
                     UPDATE viryaos_beacons
                     SET city_id=$3, beacon_kind=$4, display_name=$5, contact_email=$6,
-                        destination_url=$7, source_url=$8, active=$9, verified=$10,
-                        accepts_outreach=$11, do_not_contact=$12, relationship_score=$13,
+                        destination_url=$7, source_url=$8, active=$9,
+                        verified = CASE WHEN $19 THEN verified ELSE $10 END,
+                        accepts_outreach = CASE WHEN $19 THEN accepts_outreach ELSE $11 END,
+                        do_not_contact = CASE WHEN $18 THEN do_not_contact ELSE $12 END,
+                        relationship_score=$13,
                         relevance_basis_points=$14, confidence_basis_points=$15,
                         metadata=$16, version=version+1
                     WHERE workspace_id=$1 AND id=$2 AND version=$17
@@ -189,6 +223,8 @@ impl AutopilotBeaconStateRepository for PostgresAutopilotRepository {
                 .bind(i32::from(command.confidence.basis_points()))
                 .bind(&command.metadata)
                 .bind(expected)
+                .bind(create_intent)
+                .bind(preserve_flags)
                 .fetch_optional(&mut *tx)
                 .await
                 .map_err(map_sqlx)?
