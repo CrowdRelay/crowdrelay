@@ -130,6 +130,55 @@ pub struct ColdRoom {
     pub capacity: Option<String>,
 }
 
+/// A band on the same bill who is not a tenant — the peer whose crowd is
+/// already in the room on our date (P.3). The crossbill edge carries a
+/// tenant bill-mate; a peer or unclaimed act is a name only, and the honest
+/// candidate row says so — the roster is the only door to contact.
+#[derive(Debug, Serialize)]
+pub struct BillMate {
+    pub act_slug: String,
+    pub act_name: String,
+    /// Slot order on the bill — 0 headlines by convention the sheet uses.
+    pub position: i32,
+    /// `peer` when the name resolved to a `place_peer_acts` row, `unclaimed`
+    /// when the resolver has not minted one yet. Tenant acts are omitted
+    /// entirely: the crossbill edge is already their channel.
+    pub resolution: String,
+    /// A beacon already carries this act's name — the difference between a
+    /// name on a poster and a contact the pipeline can carry.
+    pub on_roster: bool,
+    /// Bills this act has shared with this band, tonight included. "We have
+    /// shared a stage before" is the warmest fact a candidate row can hold.
+    pub shared_bills: i64,
+}
+
+/// The room the show is in — the venue's own channel (P.3). `venue_id` is
+/// `None` when the registry has not resolved the name; the row still carries
+/// the event's own venue text, because a room we cannot name in the registry
+/// is still a room we are playing.
+#[derive(Debug, Serialize)]
+pub struct VenueChannel {
+    pub venue_id: Option<Uuid>,
+    pub display_name: String,
+    /// A `venue`-kind beacon in this city already names this room — the
+    /// channel exists on the roster rather than needing to be found.
+    pub on_roster: bool,
+}
+
+/// A photographer beacon in the show's city (P.3). The recap needs the lens
+/// before the show happens — a photographer nobody contacted is a recap that
+/// never exists.
+#[derive(Debug, Serialize)]
+pub struct PhotographerCandidate {
+    pub id: Uuid,
+    pub display_name: String,
+    pub verified: bool,
+    pub relationship_score: i32,
+    /// The contact governor remembers a touch — the band has written to them
+    /// before, in any context. Warm, not cold.
+    pub contacted_before: bool,
+}
+
 /// Everybody worth looking at for one night, per the spec's four sections.
 #[derive(Debug, Serialize)]
 pub struct ShowHelpers {
@@ -146,6 +195,14 @@ pub struct ShowHelpers {
     pub rooms_and_promoters: Vec<RoomCandidate>,
     pub communities: Vec<CommunityCandidate>,
     pub cold_rooms: Vec<ColdRoom>,
+    /// The other bands on this bill who are not tenants — P.3's bill-mate
+    /// side. Empty when the bill was never entered (`event_acts` is operator
+    /// data) — that is a real empty, not a missing read.
+    pub bill_mates: Vec<BillMate>,
+    /// The room itself, when the event names one — the venue's own channel.
+    pub venue_channel: Option<VenueChannel>,
+    /// Photographer beacons in the show's city.
+    pub photographers: Vec<PhotographerCandidate>,
 }
 
 /// Who could help with the show identified by this slug.
@@ -168,17 +225,19 @@ pub async fn who_can_help(
     let Some(event) = sqlx::query_as::<
         _,
         (
+            Uuid,
             String,
             String,
             OffsetDateTime,
             Option<Uuid>,
             Option<String>,
             Option<String>,
+            Option<String>,
         ),
     >(
         r#"
-        SELECT event.slug, event.title, event.starts_at, event.city_id,
-               city.name, city.country_code
+        SELECT event.id, event.slug, event.title, event.starts_at,
+               event.city_id, event.venue, city.name, city.country_code
         FROM events AS event
         LEFT JOIN cities AS city ON city.id = event.city_id
         WHERE event.workspace_id = $1 AND event.slug = $2
@@ -192,13 +251,16 @@ pub async fn who_can_help(
     else {
         return Ok(None);
     };
-    let (slug, title, starts_at, city_id, city_name, country_code) = event;
+    let (event_id, slug, title, starts_at, city_id, venue_text, city_name, country_code) = event;
 
     let mut degraded: Vec<&'static str> = Vec::new();
     let mut press = Vec::new();
     let mut rooms_and_promoters = Vec::new();
     let mut communities = Vec::new();
     let mut cold_rooms = Vec::new();
+    let mut bill_mates = Vec::new();
+    let mut venue_channel = None;
+    let mut photographers = Vec::new();
 
     let Some(city_id) = city_id else {
         // No city means no local anybody — and no country either, since the
@@ -218,6 +280,12 @@ pub async fn who_can_help(
             rooms_and_promoters,
             communities,
             cold_rooms,
+            // Bill-mates are the bill's own answer, not the city's — but
+            // with no city the whole card is honestly empty by the same
+            // "no local anybody" rule the read already makes.
+            bill_mates,
+            venue_channel,
+            photographers,
         }));
     };
 
@@ -409,6 +477,165 @@ pub async fn who_can_help(
         }
     }
 
+    // The other bands on this bill (P.3) — the side nobody contacts. A peer
+    // or unclaimed act is a name, not an address: `on_roster` marks the ones
+    // already carried by a beacon, and the rest are candidates for it.
+    // Tenants are omitted — the crossbill edge is already their channel.
+    match sqlx::query_as::<_, (String, String, i32, String, bool, i64)>(
+        r#"
+        SELECT act.act_slug, act.act_name, act.position,
+               CASE WHEN act.peer_act_id IS NOT NULL THEN 'peer'
+                    ELSE 'unclaimed' END AS resolution,
+               EXISTS (
+                   SELECT 1 FROM viryaos_beacons AS beacon
+                   WHERE beacon.workspace_id = $1
+                     AND beacon.active
+                     AND place_venue_key(beacon.display_name)
+                         = place_venue_key(act.act_name)
+               ) AS on_roster,
+               (SELECT count(*) FROM event_acts AS other
+                 WHERE other.workspace_id = $1
+                   AND other.peer_act_id = act.peer_act_id
+                   AND act.peer_act_id IS NOT NULL)::bigint AS shared_bills
+        FROM event_acts AS act
+        WHERE act.workspace_id = $1 AND act.event_id = $2
+          AND act.act_workspace_id IS NULL
+        ORDER BY act.position, act.act_name
+        LIMIT $3
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(event_id)
+    .bind(MAX_HELPERS_PER_SECTION)
+    .fetch_all(pool)
+    .await
+    {
+        Ok(rows) => {
+            bill_mates = rows
+                .into_iter()
+                .map(
+                    |(act_slug, act_name, position, resolution, on_roster, shared_bills)| {
+                        BillMate {
+                            act_slug,
+                            act_name,
+                            position,
+                            resolution,
+                            on_roster,
+                            shared_bills,
+                        }
+                    },
+                )
+                .collect();
+        }
+        Err(error) => {
+            tracing::warn!(%error, "who-can-help bill_mates section failed");
+            degraded.push("bill_mates");
+        }
+    }
+
+    // The room itself (P.3) — the venue's own channel. The event's venue
+    // text resolves against the shared registry the same way the upload
+    // match does; unresolved still names the room the operator typed.
+    if let Some(venue_text) = venue_text
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+    {
+        match sqlx::query_as::<_, (Uuid, String, bool)>(
+            r#"
+            SELECT venue.id, venue.display_name,
+                   EXISTS (
+                       SELECT 1 FROM viryaos_beacons AS beacon
+                       WHERE beacon.workspace_id = $1
+                         AND beacon.city_id = $2
+                         AND beacon.beacon_kind = 'venue'
+                         AND beacon.active
+                         AND place_venue_key(beacon.display_name)
+                             = venue.name_key
+                   ) AS on_roster
+            FROM place_venues AS venue
+            WHERE venue.city_id = $2
+              AND venue.name_key = place_venue_key($3)
+            LIMIT 1
+            "#,
+        )
+        .bind(workspace_id)
+        .bind(city_id)
+        .bind(venue_text)
+        .fetch_optional(pool)
+        .await
+        {
+            Ok(Some((venue_id, display_name, on_roster))) => {
+                venue_channel = Some(VenueChannel {
+                    venue_id: Some(venue_id),
+                    display_name,
+                    on_roster,
+                });
+            }
+            // Not on the registry yet — the room is still the room.
+            Ok(None) => {
+                venue_channel = Some(VenueChannel {
+                    venue_id: None,
+                    display_name: venue_text.to_owned(),
+                    on_roster: false,
+                });
+            }
+            Err(error) => {
+                tracing::warn!(%error, "who-can-help venue_channel section failed");
+                degraded.push("venue_channel");
+            }
+        }
+    }
+
+    // The local photographer (P.3): beacons of that kind in this city,
+    // warmest first. The governor read names who has heard from us before.
+    match sqlx::query_as::<_, (Uuid, String, bool, i32, bool)>(
+        r#"
+        SELECT beacon.id, beacon.display_name, beacon.verified,
+               beacon.relationship_score,
+               EXISTS (
+                   SELECT 1 FROM viryaos_contact_governor AS governor
+                   WHERE governor.workspace_id = beacon.workspace_id
+                     AND beacon.contact_email IS NOT NULL
+                     AND governor.normalized_contact
+                         = lower(btrim(beacon.contact_email))
+               ) AS contacted_before
+        FROM viryaos_beacons AS beacon
+        WHERE beacon.workspace_id = $1 AND beacon.city_id = $2
+          AND beacon.beacon_kind = 'photographer'
+          AND beacon.active
+        ORDER BY beacon.relationship_score DESC, beacon.display_name
+        LIMIT $3
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(city_id)
+    .bind(MAX_HELPERS_PER_SECTION)
+    .fetch_all(pool)
+    .await
+    {
+        Ok(rows) => {
+            photographers = rows
+                .into_iter()
+                .map(
+                    |(id, display_name, verified, relationship_score, contacted_before)| {
+                        PhotographerCandidate {
+                            id,
+                            display_name,
+                            verified,
+                            relationship_score,
+                            contacted_before,
+                        }
+                    },
+                )
+                .collect();
+        }
+        Err(error) => {
+            tracing::warn!(%error, "who-can-help photographers section failed");
+            degraded.push("photographers");
+        }
+    }
+
     Ok(Some(ShowHelpers {
         event: HelperEvent {
             slug,
@@ -423,5 +650,8 @@ pub async fn who_can_help(
         rooms_and_promoters,
         communities,
         cold_rooms,
+        bill_mates,
+        venue_channel,
+        photographers,
     }))
 }
