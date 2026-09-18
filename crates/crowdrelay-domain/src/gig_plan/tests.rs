@@ -193,8 +193,10 @@ mod tests {
     fn a_co_bill_that_brings_the_same_people_is_not_invited() {
         let mut same_crowd = opportunity();
         same_crowd.co_bill = vec![CoBillAct {
+            workspace: crate::WorkspaceId::new(),
             name: "Twin".to_owned(),
             reachable_here: 200,
+            shared_with_tenant: 200,
             audience_overlap_basis_points: 10_000,
             consented_to_share_bills: true,
         }];
@@ -207,9 +209,12 @@ mod tests {
     fn a_co_bill_that_adds_people_is_invited_with_the_number_it_adds() {
         let mut complementary = opportunity();
         complementary.co_bill = vec![CoBillAct {
+            workspace: crate::WorkspaceId::new(),
             name: "Other".to_owned(),
             reachable_here: 200,
-            // A quarter of their audience is already ours.
+            // A quarter of their audience is already ours — 50 real people,
+            // carried exactly rather than rebuilt from the basis-point share.
+            shared_with_tenant: 50,
             audience_overlap_basis_points: 2_500,
             consented_to_share_bills: true,
         }];
@@ -222,14 +227,38 @@ mod tests {
         }));
     }
 
+    /// Past the pairing ceiling the audiences are one audience — the same
+    /// rule the roster's support picker applies. "Adds a hundred new people"
+    /// is still a door split over a crowd that was already coming.
+    #[test]
+    fn a_co_bill_past_the_overlap_ceiling_is_not_invited() {
+        let mut mirror = opportunity();
+        mirror.co_bill = vec![CoBillAct {
+            workspace: crate::WorkspaceId::new(),
+            name: "Mirror".to_owned(),
+            reachable_here: 1_000,
+            shared_with_tenant: 700,
+            audience_overlap_basis_points: 7_000,
+            consented_to_share_bills: true,
+        }];
+        let plan = plan_gig(&mirror, TenantIntent::BookingShows).expect("proposes");
+        assert!(
+            plan.invite_to_bill.is_empty(),
+            "a 70%-shared sibling was invited for its 300 additions"
+        );
+        assert_eq!(plan.reach.added_by_co_bill, 0);
+    }
+
     /// An act that has not agreed is a suggestion to ask, never a name on a
     /// proposal that somebody might announce.
     #[test]
     fn an_act_that_never_agreed_is_not_put_on_a_bill() {
         let mut unconsented = opportunity();
         unconsented.co_bill = vec![CoBillAct {
+            workspace: crate::WorkspaceId::new(),
             name: "Unasked".to_owned(),
             reachable_here: 300,
+            shared_with_tenant: 0,
             audience_overlap_basis_points: 0,
             consented_to_share_bills: false,
         }];
