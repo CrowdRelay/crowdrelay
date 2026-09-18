@@ -814,6 +814,15 @@ pub(super) fn application_routes(state: AppState) -> Router {
             "/v1/admin/roster-plan/source-roi",
             get(crate::roster_source_roi::roster_source_roi),
         )
+        // The manager's week at a glance across the whole roster: who is
+        // waiting on a decision, whose asks died unanswered, whose brain
+        // says it is drifting. Admin for the same reason as the rest of
+        // this surface — the queues being read belong to the organisation,
+        // not to any one of its acts.
+        .route(
+            "/v1/admin/roster-plan/weekly-brief",
+            get(crate::roster_weekly_brief::roster_weekly_brief),
+        )
         // The roster's own numbers, on the same surface as its plan for the
         // same reason: these belong to the organisation, and a workspace token
         // must not be able to read or set what a labelmate's plan is sized by.

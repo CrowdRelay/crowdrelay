@@ -7224,6 +7224,57 @@ paths:
           $ref: '#/components/responses/Problem'
         '503':
           $ref: '#/components/responses/Problem'
+  /admin/roster-plan/weekly-brief:
+    get:
+      operationId: rosterWeeklyBrief
+      summary: The manager's week across the whole roster — who needs a decision, who is drifting
+      description: >
+        One page per organisation, composed from machinery each act already
+        runs: the approval queue (`awaiting_approval` actions with a window
+        still open), the asks that died unanswered in the last seven days
+        (`approval_expired` and `insufficient_evidence` kept distinct), the
+        brain's own self-assessment over its sixty-day North Star series
+        (`improving`/`learning`/`stagnant`/`regressing`/`initializing`, the
+        same verdict the attention read computes per workspace), and the
+        tenant-local date of each act's newest daily briefing.
+
+
+        Acts are ordered for a top-down read: anything waiting on a human
+        first, then acts whose posture needs attention, then the quiet ones.
+        Inside a bucket the deeper queue leads, then the act that slipped
+        most, then name. Empty states render honestly rather than being
+        fabricated: an organisation with no members returns `acts: []`, an
+        act with no briefing carries `latest_briefing_date: null`, and an act
+        with nothing pending reports `pending_decisions: 0` beside an empty
+        list. Item lists show at most the first few per act; the counts
+        beside them are the queues' real depth.
+
+
+        Admin rather than control-plane for the same reason the rest of this
+        surface is: the queues being read belong to the organisation, and a
+        workspace token here would be one act reading its labelmates' queues.
+      security:
+      - adminBearer: []
+      parameters:
+      - in: query
+        name: organization_id
+        required: true
+        schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: >
+            The org-level page: `organization_id`, `generated_at`,
+            `window_days` (7), and `acts` — each entry carrying the act's
+            `workspace_id` and `name`, `pending_decisions` with the first few
+            `pending` items (action id, kind, subject, expiry), `slipped`
+            with the first few `slipped_items` (kind, subject, `resolution`,
+            `finished_at`), `posture`/`posture_needs_attention`/
+            `days_observed`, and `latest_briefing_date` (null when no
+            briefing has ever issued).
+        '401':
+          $ref: '#/components/responses/Problem'
+        '503':
+          $ref: '#/components/responses/Problem'
   /admin/roster-plan/support-slot-ask:
     post:
       operationId: approveSupportSlotAsk
