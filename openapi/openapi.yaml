@@ -10180,6 +10180,51 @@ paths:
         '401': { $ref: '#/components/responses/PrivateProblem' }
         '404': { $ref: '#/components/responses/PrivateProblem' }
         '503': { $ref: '#/components/responses/PrivateProblem' }
+  /control-plane/gig-plan:
+    get:
+      operationId: getGigPlan
+      summary: The booking plan — which cities to write to, and why
+      description: >-
+        The deterministic planner's answer for the tenant: proposals ranked
+        per city (room, reachable fans, reasons, caveats, the promoters to
+        write to, the computed `opening_line` an approval would send), the
+        cities passed over with the sentence that says why and — where it
+        would change the answer — the research brief, plus the track record
+        of past proposals. `can_send` reports whether any executor currently
+        advertises `gig.outreach`; when false the console must show
+        `send_blocked_reason` rather than offering a button that will refuse.
+        `?intent=` overrides the stored tenant intent for one read.
+      security:
+      - controlPlaneBearer: []
+      parameters:
+      - in: query
+        name: intent
+        required: false
+        schema:
+          type: string
+          pattern: ^[a-z_]{1,32}$
+      responses:
+        '200': { description: The plan — proposals, passed-over cities, track record. }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
+  /control-plane/autopilot/capabilities:
+    get:
+      operationId: getAutopilotCapabilities
+      summary: Which capabilities an executor can actually run right now
+      description: >-
+        The executor registry's posture, read from the same gate dispatch
+        uses: every capability lane the workspace's actions need, marked
+        `live`, `blocked` or `missing`, with the executors advertising each
+        and the count of actions parked waiting on it. `missing` means no
+        executor advertises the capability — those actions stay parked rather
+        than spending attempts. An empty executor list is reported as itself,
+        never as an empty capability list.
+      security:
+      - controlPlaneBearer: []
+      responses:
+        '200': { description: Capability lanes in severity order — missing, blocked, live. }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
   /control-plane/gig-plan/approve:
     post:
       operationId: approveGigProposal
