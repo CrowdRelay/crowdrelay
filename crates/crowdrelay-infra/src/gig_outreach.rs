@@ -647,7 +647,8 @@ async fn queue_outreach(
     let payload_json = serde_json::to_value(payload)
         .map_err(|_| GigOutreachError::Refused("the outreach could not be encoded".to_owned()))?;
     let action_kind = payload.action_kind();
-    let action_class = payload.action_class().as_str();
+    let action_class_value = payload.action_class();
+    let action_class = action_class_value.as_str();
     let trace = TraceContext::root(WorkspaceId::from_uuid(workspace_id));
     let decision_key = format!("gig.outreach:{}", idempotency_key.as_str());
 
@@ -746,7 +747,8 @@ async fn queue_outreach(
             action_class, approved_at, approved_by, available_at,
             trace_id, causation_id
         ) VALUES ($1,$2,$3,'booking_opportunity',$4,'city',$5,$6,$7,
-                  'queued',$8,$9,'operator:gig_proposal_approval',$9,$10,$11)
+                  'queued',$8,$9,'operator:gig_proposal_approval',
+                  $9 + make_interval(secs => $12::double precision),$10,$11)
         "#,
     )
     .bind(action_id)
@@ -760,6 +762,12 @@ async fn queue_outreach(
     .bind(now)
     .bind(action_trace.trace_id().into_uuid())
     .bind(action_trace.causation_id().map(|id| id.into_uuid()))
+    // O.2: the letter waits out the hold window before a worker may claim it,
+    // so "approve" and "sent" stop being the same instant and the operator has
+    // something to click when they notice a mistake.
+    .bind(f64::from(
+        i32::try_from(action_class_value.hold_seconds()).unwrap_or(120),
+    ))
     .execute(&mut *tx)
     .await?;
 
