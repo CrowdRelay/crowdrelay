@@ -68,6 +68,7 @@ pub mod representation;
 pub mod roster_act_report;
 pub mod roster_catalogue_rotation;
 pub mod roster_counterparty_archive;
+pub mod roster_overview;
 pub mod roster_portfolio;
 pub mod roster_release_calendar;
 pub mod roster_source_roi;

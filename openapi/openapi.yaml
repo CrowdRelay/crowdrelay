@@ -7466,6 +7466,55 @@ paths:
           $ref: '#/components/responses/Problem'
         '503':
           $ref: '#/components/responses/Problem'
+  /admin/roster-plan/overview:
+    get:
+      operationId: rosterOverview
+      summary: The roster view — every act's attention, pipeline and gaps on one screen
+      description: >
+        5.5 — the standing page the weekly brief is the digest of. Per member
+        act: `attention` (the act's trailing-30-day share of the shared
+        contact budget, governor rows still cooling down, doors closed via
+        `do_not_contact`), `pipeline` (approvals waiting on a human under the
+        same open-window predicate the brief and the attention queue share,
+        published shows ahead with the nearest date), and `gaps` — the named
+        empty spots a count cannot say: `no_upcoming_show`, `no_briefing`,
+        `no_reachable_fans`. `reachable_fans` is the send-path count: active
+        fans whose latest `marketing` consent is a grant. `org_touches_30d`
+        carries the shared budget's total draw so a per-act number reads as
+        a share.
+
+
+        Rows are ordered for a top-down scan — the act missing the most
+        leads, then name and id for a total order. Empty is rendered, never
+        fabricated: an organisation with no members returns `acts: []`, an
+        act with no briefing carries `latest_briefing_date: null`, and a
+        complete act reports `gaps: []`.
+
+
+        Admin rather than control-plane for the same reason the rest of this
+        surface is: the state being read belongs to the organisation, and a
+        workspace token here would be one act reading its labelmates' state.
+      security:
+      - adminBearer: []
+      parameters:
+      - in: query
+        name: organization_id
+        required: true
+        schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: >
+            `organization_id`, `generated_at`, `org_touches_30d`, and `acts` —
+            each entry carrying `workspace_id`, `name`, `attention`
+            (`touches_30d`, `contacts_on_hold`, `do_not_contact`), `pipeline`
+            (`pending_decisions`, `upcoming_shows`, `next_show_at` — null
+            when the calendar is empty), `latest_briefing_date` (null when
+            no briefing has ever issued), `reachable_fans`, and `gaps` (the
+            closed `GAP_*` vocabulary, empty when nothing is missing).
+        '401':
+          $ref: '#/components/responses/Problem'
+        '503':
+          $ref: '#/components/responses/Problem'
   /admin/roster-plan/act-report:
     get:
       operationId: rosterActReport
