@@ -668,6 +668,93 @@ async fn a_moved_or_cancelled_gig_carries_its_production_day_with_it()
     Ok(())
 }
 
+/// 6.3: a festival slot is a production day of its own kind. The mark on
+/// the gig is what decides — a show marked before it projects lands as
+/// `festival`, a mark added after flips the day's kind through the same
+/// sync that carries moves, and unmarking carries it back.
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn a_festival_slot_projects_a_festival_production_day()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (repo, pool) = repository().await?;
+    let workspace_id = WorkspaceId::new();
+    seed_workspace(&pool, workspace_id).await?;
+
+    // The slot as booked — still an ordinary show.
+    let event_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO events (id, workspace_id, slug, title, starts_at, status, published_at)
+         VALUES ($1,$2,$3,$4, date_trunc('day', now()) + interval '20 hours', 'published', now())
+         RETURNING id",
+    )
+    .bind(Uuid::now_v7())
+    .bind(workspace_id.into_uuid())
+    .bind(format!("fest-{}", workspace_id.into_uuid().simple()))
+    .bind("The festival slot")
+    .fetch_one(&pool)
+    .await?;
+    repo.reconcile_team_handoffs(workspace_id, OffsetDateTime::now_utc())
+        .await?;
+    let kind: Option<String> = sqlx::query_scalar(
+        "SELECT kind FROM viryaos_production_events
+         WHERE workspace_id=$1 AND event_id=$2",
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(event_id)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(kind.as_deref(), Some("show"));
+
+    // The festival confirmation lands — the day's kind follows it.
+    sqlx::query("UPDATE events SET festival_name='OFF Festival' WHERE id=$1")
+        .bind(event_id)
+        .execute(&pool)
+        .await?;
+    repo.reconcile_team_handoffs(workspace_id, OffsetDateTime::now_utc())
+        .await?;
+    let kind: Option<String> =
+        sqlx::query_scalar("SELECT kind FROM viryaos_production_events WHERE event_id=$1")
+            .bind(event_id)
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(kind.as_deref(), Some("festival"));
+
+    // A second slot booked marked projects as festival from the start.
+    let marked_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO events (id, workspace_id, slug, title, starts_at, status, published_at, festival_name)
+         VALUES ($1,$2,$3,$4, date_trunc('day', now()) + interval '30 hours', 'published', now(), 'OFF Festival')
+         RETURNING id",
+    )
+    .bind(Uuid::now_v7())
+    .bind(workspace_id.into_uuid())
+    .bind(format!("fest2-{}", workspace_id.into_uuid().simple()))
+    .bind("The marked slot")
+    .fetch_one(&pool)
+    .await?;
+    repo.reconcile_team_handoffs(workspace_id, OffsetDateTime::now_utc())
+        .await?;
+    let kind: Option<String> =
+        sqlx::query_scalar("SELECT kind FROM viryaos_production_events WHERE event_id=$1")
+            .bind(marked_id)
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(kind.as_deref(), Some("festival"));
+
+    // Losing the mark carries the day back to a show.
+    sqlx::query("UPDATE events SET festival_name=NULL WHERE id=$1")
+        .bind(event_id)
+        .execute(&pool)
+        .await?;
+    repo.reconcile_team_handoffs(workspace_id, OffsetDateTime::now_utc())
+        .await?;
+    let kind: Option<String> =
+        sqlx::query_scalar("SELECT kind FROM viryaos_production_events WHERE event_id=$1")
+            .bind(event_id)
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(kind.as_deref(), Some("show"));
+    Ok(())
+}
+
 #[tokio::test]
 #[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn a_published_show_mints_its_door_campaign_once_and_only_once()
