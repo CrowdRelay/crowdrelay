@@ -554,6 +554,168 @@ async fn a_festival_bill_runs_festival_scale() -> Result<(), Box<dyn std::error:
     Ok(())
 }
 
+/// 6.5 — the platform knows how many tenant acts shared each bill. The
+/// trigger-maintained `tenant_act_count` on events counts bill rows whose
+/// act resolved to a platform workspace at bill-write time — the event's own
+/// act, a roster sibling, or another tenant — and ignores peer identities
+/// and bare names. It climbs when a second tenant lands and falls when the
+/// bill shrinks, so the organiser product's density predicate is a WHERE
+/// clause, not a nightly scan.
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_EVENT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn tenant_act_count_tracks_resolved_acts_on_the_bill()
+-> Result<(), Box<dyn std::error::Error>> {
+    let database_url = std::env::var("CROWDRELAY_EVENT_TEST_DATABASE_URL").map_err(|e| {
+        format!("CROWDRELAY_EVENT_TEST_DATABASE_URL must target a disposable database: {e}")
+    })?;
+    let pool = PgPoolOptions::new()
+        .max_connections(8)
+        .connect(&database_url)
+        .await?;
+    crowdrelay_infra::database::MIGRATOR.run(&pool).await?;
+
+    let workspace_id = WorkspaceId::new();
+    let workspace_slug =
+        WorkspaceSlug::parse(format!("event-acts-{}", workspace_id.into_uuid().simple()))?;
+    let starts_at = OffsetDateTime::now_utc() + time::Duration::days(2);
+    let event_id = seed_fixture(&pool, workspace_id, &workspace_slug, starts_at).await?;
+
+    // A second tenant act — its workspace slug is what a bill-mate resolves
+    // on. The slug is unique per run because the shared test database keeps
+    // the rows a previous run wrote.
+    let mate_id = WorkspaceId::new();
+    let mate_slug = format!("mate-band-{}", mate_id.into_uuid().simple());
+    sqlx::query("INSERT INTO workspaces (id, slug, name) VALUES ($1, $2, 'Mate Band')")
+        .bind(mate_id.into_uuid())
+        .bind(&mate_slug)
+        .execute(&pool)
+        .await?;
+
+    let database = DatabaseConfig {
+        url: database_url,
+        max_connections: 8,
+        connect_timeout: Duration::from_secs(3),
+        ping_timeout: Duration::from_secs(2),
+        operation_timeout: Duration::from_secs(5),
+        lock_timeout: Duration::from_secs(1),
+    };
+    let events = PostgresEventRepository::new(
+        pool.clone(),
+        workspace_slug.clone(),
+        &database,
+        vec![1_440, 120],
+    );
+
+    let count = |workspace: WorkspaceId, event: Uuid, pool: &PgPool| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query_scalar::<_, i32>(
+                "SELECT tenant_act_count FROM events WHERE workspace_id = $1 AND id = $2",
+            )
+            .bind(workspace.into_uuid())
+            .bind(event)
+            .fetch_one(&pool)
+            .await
+        }
+    };
+
+    // A three-act bill: the tenant's own (slug hit), the mate (slug hit on
+    // the second workspace), and an outside act that resolves to a peer —
+    // which is not a tenant and must not count.
+    events
+        .replace_event_acts(&ReplaceEventActsCommand {
+            workspace_id,
+            event_slug: "wroclaw-live-2026".to_owned(),
+            acts: vec![
+                EventActEntry {
+                    act_slug: workspace_slug.as_str().to_owned(),
+                    // Unique per run: the shared test database may hold a
+                    // band listing naming a common act, and a slug hit plus
+                    // a foreign listing hit is ambiguous by design.
+                    act_name: format!("Own Act {}", workspace_id.into_uuid().simple()),
+                    position: 0,
+                    ticket_url: None,
+                },
+                EventActEntry {
+                    act_slug: mate_slug.clone(),
+                    act_name: format!("Mate Band {}", mate_id.into_uuid().simple()),
+                    position: 1,
+                    ticket_url: None,
+                },
+                EventActEntry {
+                    act_slug: "outlander".to_owned(),
+                    act_name: format!("Outlander {}", event_id.simple()),
+                    position: 2,
+                    ticket_url: None,
+                },
+            ],
+        })
+        .await?;
+    assert_eq!(
+        count(workspace_id, event_id, &pool).await?,
+        2,
+        "two platform acts share this bill; the peer is not one"
+    );
+    let (ws, peer): (Option<Uuid>, Option<Uuid>) = sqlx::query_as(
+        "SELECT act_workspace_id, peer_act_id FROM event_acts
+         WHERE workspace_id = $1 AND event_id = $2 AND act_slug = 'outlander'",
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(event_id)
+    .fetch_one(&pool)
+    .await?;
+    assert!(
+        ws.is_none() && peer.is_some(),
+        "the outside act is a peer, not a tenant"
+    );
+
+    // The bill shrinks and the counter follows — density is a fact about the
+    // current bill, not a cumulative tally.
+    events
+        .replace_event_acts(&ReplaceEventActsCommand {
+            workspace_id,
+            event_slug: "wroclaw-live-2026".to_owned(),
+            acts: vec![
+                EventActEntry {
+                    act_slug: workspace_slug.as_str().to_owned(),
+                    act_name: format!("Own Act {}", workspace_id.into_uuid().simple()),
+                    position: 0,
+                    ticket_url: None,
+                },
+                EventActEntry {
+                    act_slug: "outlander".to_owned(),
+                    act_name: format!("Outlander {}", event_id.simple()),
+                    position: 1,
+                    ticket_url: None,
+                },
+            ],
+        })
+        .await?;
+    assert_eq!(
+        count(workspace_id, event_id, &pool).await?,
+        1,
+        "the mate leaving drops the count"
+    );
+
+    // No platform act on the bill at all is an honest zero.
+    events
+        .replace_event_acts(&ReplaceEventActsCommand {
+            workspace_id,
+            event_slug: "wroclaw-live-2026".to_owned(),
+            acts: vec![EventActEntry {
+                act_slug: "outlander".to_owned(),
+                act_name: format!("Outlander {}", event_id.simple()),
+                position: 0,
+                ticket_url: None,
+            }],
+        })
+        .await?;
+    assert_eq!(count(workspace_id, event_id, &pool).await?, 0);
+
+    pool.close().await;
+    Ok(())
+}
+
 fn signup_command(
     workspace_id: WorkspaceId,
 ) -> Result<SignupFanCommand, Box<dyn std::error::Error>> {

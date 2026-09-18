@@ -313,6 +313,11 @@ impl EventCrossbillActRow {
 struct EventCrossbill {
     state: &'static str,
     acts: Vec<EventCrossbillAct>,
+    /// How many acts on this bill resolved to a platform workspace — own,
+    /// sibling and tenant all count; the organiser product's density starts
+    /// at two. Stored on the event and maintained by trigger, so the number
+    /// is the platform's fact, not this reader's derivation.
+    tenant_act_count: i32,
     explanation: &'static str,
     /// Whether this workspace's audience has ever carried the edge owner's
     /// announcement — a reverse-direction consent with at least one delivery,
@@ -323,6 +328,7 @@ struct EventCrossbill {
 
 fn crossbill_state(
     acts: Vec<EventCrossbillAct>,
+    tenant_act_count: i32,
     edge_reciprocated: Option<bool>,
 ) -> EventCrossbill {
     let (state, explanation) = if acts.len() <= 1 {
@@ -354,6 +360,7 @@ fn crossbill_state(
     EventCrossbill {
         state,
         acts,
+        tenant_act_count,
         explanation,
         reciprocated,
     }
@@ -952,9 +959,20 @@ async fn event_crossbill(
     .into_iter()
     .map(|row| row.into_view(workspace_id))
     .collect::<Vec<_>>();
+    // The stored counter is the fact the organiser product will read —
+    // `fetch_optional` so a bill-less or missing event still reports zero
+    // rather than failing the whole dashboard on the counter.
+    let tenant_act_count = sqlx::query_scalar::<_, i32>(
+        "SELECT tenant_act_count FROM events WHERE workspace_id = $1 AND slug = $2",
+    )
+    .bind(workspace_id)
+    .bind(event_slug)
+    .fetch_optional(pool)
+    .await?
+    .unwrap_or(0);
     // No bill-mate means no crossbill either way — skip the edge check.
     if acts.len() <= 1 {
-        return Ok(crossbill_state(acts, None));
+        return Ok(crossbill_state(acts, tenant_act_count, None));
     }
     // Only an edge whose beneficiary is this workspace amplifies its shows —
     // `from` is the audience owner, `to` the beneficiary (portfolio.rs). An
@@ -991,6 +1009,7 @@ async fn event_crossbill(
     .await?;
     Ok(crossbill_state(
         acts,
+        tenant_act_count,
         automated_edge_active.then_some(edge_reciprocated),
     ))
 }
@@ -1015,23 +1034,23 @@ mod tests {
             confirmed: false,
             resolution: "unclaimed",
         };
-        let solo = crossbill_state(vec![], Some(false));
+        let solo = crossbill_state(vec![], 0, Some(false));
         assert_eq!(solo.state, "no_support_bill");
         assert_eq!(solo.reciprocated, None);
         assert_eq!(
-            crossbill_state(vec![act("headliner")], Some(true)).state,
+            crossbill_state(vec![act("headliner")], 1, Some(true)).state,
             "no_support_bill"
         );
-        let manual = crossbill_state(vec![act("headliner"), act("support")], None);
+        let manual = crossbill_state(vec![act("headliner"), act("support")], 2, None);
         assert_eq!(manual.state, "manual_ask");
         assert_eq!(manual.reciprocated, None);
         assert!(manual.explanation.contains("manual ask"));
-        let automated = crossbill_state(vec![act("headliner"), act("support")], Some(true));
+        let automated = crossbill_state(vec![act("headliner"), act("support")], 2, Some(true));
         assert_eq!(automated.state, "automated_overlap");
         assert_eq!(automated.reciprocated, Some(true));
         // An active edge that was never reciprocated is honest about it —
         // it is neither automated nor a bare manual ask.
-        let blocked = crossbill_state(vec![act("headliner"), act("support")], Some(false));
+        let blocked = crossbill_state(vec![act("headliner"), act("support")], 2, Some(false));
         assert_eq!(blocked.state, "unreciprocated");
         assert_eq!(blocked.reciprocated, Some(false));
         assert!(blocked.explanation.contains("never been reciprocated"));
