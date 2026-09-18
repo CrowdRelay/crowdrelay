@@ -2,13 +2,14 @@
 //! contact keeps when it is promoted (3.9, 3.10).
 //!
 //! Both halves are database shape rather than policy: a column that must carry
-//! through a promote, and a read that must place contacts in a city and say
-//! honestly how many it could not place. SQLx checks none of that at compile
-//! time, so it is driven here.
+//! through a promote, and a read that must place candidates in a city while
+//! scoping each tenant to its own — plus the one deliberate global read, the
+//! cold rooms any tenant may see. SQLx checks none of that at compile time,
+//! so it is driven here.
 
 use std::time::Duration;
 
-use crowdrelay_infra::show_helpers::{HelperState, who_can_help};
+use crowdrelay_infra::show_helpers::who_can_help;
 use sqlx::{Connection, PgConnection, PgPool, postgres::PgPoolOptions};
 use uuid::Uuid;
 
@@ -57,10 +58,13 @@ impl DisposableDatabase {
     }
 }
 
+/// 3.10 — two workspaces seed different candidates for the same city; each
+/// sees only its own plus the shared cold rooms; and an event with no city
+/// degrades rather than erroring.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
-async fn a_show_names_the_people_who_could_fill_the_room() -> Result<(), Box<dyn std::error::Error>>
-{
+async fn each_workspace_sees_its_own_candidates_and_the_shared_cold_rooms()
+-> Result<(), Box<dyn std::error::Error>> {
     let database = DisposableDatabase::create().await?;
     let result = run(&database.pool).await;
     database.drop_database().await;
@@ -69,193 +73,198 @@ async fn a_show_names_the_people_who_could_fill_the_room() -> Result<(), Box<dyn
 
 async fn run(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
     let act = workspace(pool).await?;
-    let wroclaw = city(pool, "wroclaw", "Wrocław", 51.1, 17.03).await?;
-    let krakow = city(pool, "krakow", "Kraków", 50.06, 19.94).await?;
-    show(pool, act, wroclaw, "friday").await?;
-    show(pool, act, krakow, "next-month").await?;
+    let other = workspace(pool).await?;
+    let wroclaw = city(pool, "wroclaw", "Wrocław", "PL", 51.1, 17.03).await?;
+    let krakow = city(pool, "krakow", "Kraków", "PL", 50.06, 19.94).await?;
+    let berlin = city(pool, "berlin", "Berlin", "DE", 52.52, 13.4).await?;
+    // The show's own venue mark lands via the event trigger — "Klub A" is a
+    // room this tenant has played, so it must never list as cold.
+    show(pool, act, Some(wroclaw), "friday", "Klub A").await?;
+    show(pool, other, Some(wroclaw), "friday-too", "Klub B").await?;
+    show(pool, act, None, "no-city-yet", "TBA").await?;
+    show(pool, act, Some(wroclaw), "draft-show", "Klub A").await?;
+    sqlx::query("UPDATE events SET status = 'draft' WHERE slug = 'draft-show'")
+        .execute(pool)
+        .await?;
 
-    // The local paper, promoted and contactable.
+    // ── press: proposed only, this workspace, this city, media kinds ──
+    press(pool, act, Some(wroclaw), "Gazeta", "press", "proposed").await?;
+    // Promoted contacts are already past the candidate stage — the promote
+    // flow owns them, so the shortlist does not repeat them.
+    press(pool, act, Some(wroclaw), "Old Paper", "press", "promoted").await?;
+    // Another city's paper must not appear on this night.
+    press(pool, act, Some(krakow), "Kraków Daily", "press", "proposed").await?;
+    // An endorsement target is not press — the kind list is the media set.
     press(
         pool,
         act,
         Some(wroclaw),
-        "Gazeta",
-        "press",
-        "promoted",
-        true,
-        false,
+        "Sponsor Lady",
+        "endorsement",
+        "proposed",
     )
     .await?;
-    // A staged one the archive scan produced — the larger half in practice,
-    // and the one no other screen shows.
+    // The other workspace's candidate for the same city stays its own.
     press(
         pool,
-        act,
+        other,
         Some(wroclaw),
-        "Radio Nowe",
+        "Rival Radio",
         "radio",
         "proposed",
-        false,
-        false,
-    )
-    .await?;
-    // Promoted, and they asked not to be contacted. Reported as blocked with
-    // the reason rather than filtered away: a band that cannot see why
-    // somebody is missing asks for them again next month.
-    press(
-        pool,
-        act,
-        Some(wroclaw),
-        "Zine",
-        "press",
-        "promoted",
-        true,
-        true,
-    )
-    .await?;
-    // A national title with no city. Counted, never invented into a city.
-    press(pool, act, None, "Krajowy", "press", "promoted", true, false).await?;
-    // Another city's paper must not appear on this night.
-    press(
-        pool,
-        act,
-        Some(krakow),
-        "Kraków Daily",
-        "press",
-        "promoted",
-        true,
-        false,
     )
     .await?;
 
-    booking_target(pool, act, wroclaw, "Anna", "promoter", true, true).await?;
-    booking_target(pool, act, wroclaw, "Stary Klub", "venue", false, true).await?;
-    booking_candidate(pool, act, "wroclaw", "Nowy Klub", "venue").await?;
+    // ── rooms_and_promoters: active only, this workspace, this city ──
+    booking_target(pool, act, wroclaw, "Anna", "promoter", true).await?;
+    booking_target(pool, act, wroclaw, "Dead Club", "venue", false).await?;
+    booking_target(pool, other, wroclaw, "Their Booker", "promoter", true).await?;
+
+    // ── communities: this workspace, the city's country, active ──
+    community(pool, act, "PL", "r/wroclaw", true).await?;
+    community(pool, act, "PL", "r/inactive", false).await?;
+    community(pool, act, "DE", "r/berlin", true).await?;
+    community(pool, other, "PL", "r/theirs", true).await?;
+
+    // ── cold_rooms: the registry's rooms minus this tenant's marks ──
+    // "Klub A" (marked by the show above) and "Klub B" (marked by the other
+    // workspace) already exist in place_venues through the trigger. Two more
+    // are rooms nobody has marked — one with a public capacity fact, one
+    // with none, and a private fact on the first that must never leak.
+    let cold = venue(pool, wroclaw, "Cold Klub").await?;
+    let no_capacity = venue(pool, wroclaw, "No Cap Klub").await?;
+    venue(pool, berlin, "Berlin Cold").await?;
+    venue_fact(pool, cold, "capacity", "350", None).await?;
+    venue_fact(pool, no_capacity, "capacity", "999", Some(other)).await?;
 
     let helpers = who_can_help(pool, act, "friday")
         .await?
         .ok_or("the show produced no helper read")?;
-    assert_eq!(helpers.city, "Wrocław");
-
-    let voice = |name: &str| {
-        helpers
-            .voices
-            .iter()
-            .find(|helper| helper.display_name == name)
-            .cloned()
-    };
-    assert_eq!(
-        helpers.voices.len(),
-        3,
-        "the city's voices are the three placed here, got {:?}",
-        helpers
-            .voices
-            .iter()
-            .map(|helper| helper.display_name.as_str())
-            .collect::<Vec<_>>()
-    );
-    assert_eq!(
-        voice("Gazeta").ok_or("the local paper is missing")?.state,
-        HelperState::Ready
-    );
-    // Contactable first. The status column sorts 'promoted' before 'proposed',
-    // so ordering by it descending put every staged row above every ready one
-    // — and the limit is applied after the sort, so a workspace with forty
-    // staged contacts would have seen none it could write to.
-    assert_eq!(
-        helpers.voices[0].state,
-        HelperState::Ready,
-        "a staged contact outranked one that can be written to: {:?}",
-        helpers
-            .voices
-            .iter()
-            .map(|helper| (helper.display_name.as_str(), helper.state))
-            .collect::<Vec<_>>()
-    );
-    assert_eq!(
-        voice("Radio Nowe")
-            .ok_or("the staged station is missing")?
-            .state,
-        HelperState::NeedsReview
-    );
-    let blocked = voice("Zine").ok_or("the do-not-contact title is missing")?;
-    assert_eq!(blocked.state, HelperState::Blocked);
+    assert_eq!(helpers.event.slug, "friday");
+    assert_eq!(helpers.event.city.as_deref(), Some("Wrocław"));
+    assert_eq!(helpers.event.country_code.as_deref(), Some("PL"));
     assert!(
-        blocked
-            .blocked_reason
-            .as_deref()
-            .is_some_and(|reason| reason.contains("not to be contacted")),
-        "the block did not say which rule: {:?}",
-        blocked.blocked_reason
+        helpers.degraded.is_empty(),
+        "degraded: {:?}",
+        helpers.degraded
+    );
+    assert_eq!(helpers.notes, ["staged_contacts_have_no_city"]);
+
+    // press — only the city's proposed media contact, nothing promoted,
+    // nothing another city's, nothing that is not a media kind, nothing the
+    // other workspace holds.
+    let names: Vec<&str> = helpers
+        .press
+        .iter()
+        .map(|row| row.display_name.as_str())
+        .collect();
+    assert_eq!(names, ["Gazeta"], "press section: {names:?}");
+    assert_eq!(helpers.press[0].target_kind, "press");
+    // No contact_email field exists on the row at all — the type carries no
+    // address, which is the assertion that cannot drift.
+
+    let rooms: Vec<&str> = helpers
+        .rooms_and_promoters
+        .iter()
+        .map(|row| row.display_name.as_str())
+        .collect();
+    assert_eq!(
+        rooms,
+        ["Anna"],
+        "rooms_and_promoters must hold only this tenant's active targets: {rooms:?}"
+    );
+
+    let communities: Vec<(&str, &str)> = helpers
+        .communities
+        .iter()
+        .map(|row| (row.community_name.as_str(), row.country.as_str()))
+        .collect();
+    assert_eq!(
+        communities,
+        [("r/wroclaw", "PL")],
+        "communities must be this tenant's, active, in the show's country: {communities:?}"
+    );
+
+    // cold_rooms — the shared registry minus this tenant's marks. "Klub A"
+    // is out because the tenant played it; "Klub B" is IN because the other
+    // workspace's mark is not this tenant's knowledge. The capacity fact
+    // surfaces globally; the private fact on "No Cap Klub" must not.
+    let cold_names: Vec<&str> = helpers
+        .cold_rooms
+        .iter()
+        .map(|row| row.display_name.as_str())
+        .collect();
+    assert_eq!(
+        cold_names.first(),
+        Some(&"Cold Klub"),
+        "a room with a known capacity sorts first: {cold_names:?}"
+    );
+    assert_eq!(helpers.cold_rooms[0].capacity.as_deref(), Some("350"));
+    assert!(
+        cold_names.contains(&"Klub B"),
+        "a room only the other workspace played is cold to this one: {cold_names:?}"
     );
     assert!(
-        voice("Kraków Daily").is_none(),
-        "another city's paper appeared on this night"
+        cold_names.contains(&"No Cap Klub"),
+        "an unmarked room with no capacity fact still lists: {cold_names:?}"
     );
-    assert_eq!(
-        helpers.contacts_unplaced, 1,
-        "the national title was not counted as unplaced"
+    assert!(
+        !cold_names.contains(&"Klub A"),
+        "a room this tenant played is not cold: {cold_names:?}"
     );
-    // A community is an outreach target carrying a place, and it can never be
-    // placed in a city — the place graph records a country and nothing finer.
-    // The first version of this count asked `discovery_places` for a status
-    // its CHECK does not allow, so it could only ever answer zero: a measured
-    // absence that was really an unasked question.
-    community(pool, act, "r/wroclaw").await?;
-    community(pool, act, "r/polishmetal").await?;
-    let with_communities = who_can_help(pool, act, "friday")
-        .await?
-        .ok_or("the show produced no helper read")?;
-    assert_eq!(
-        with_communities.communities_unplaced, 2,
-        "communities the workspace holds were not counted"
+    assert!(
+        !cold_names.contains(&"Berlin Cold"),
+        "another city's room is not on this night: {cold_names:?}"
     );
+    let no_cap = helpers
+        .cold_rooms
+        .iter()
+        .find(|row| row.display_name == "No Cap Klub")
+        .ok_or("No Cap Klub is missing")?;
     assert_eq!(
-        with_communities.contacts_unplaced, 1,
-        "a community was counted as an unplaced press contact as well"
+        no_cap.capacity, None,
+        "the other workspace's private fact leaked into a global read"
     );
 
-    let booker = |name: &str| {
-        helpers
-            .bookers
-            .iter()
-            .find(|helper| helper.display_name == name)
-            .cloned()
-    };
-    assert_eq!(
-        booker("Anna").ok_or("the promoter is missing")?.state,
-        HelperState::Ready
-    );
-    assert_eq!(
-        booker("Stary Klub")
-            .ok_or("the inactive room is missing")?
-            .state,
-        HelperState::Blocked
-    );
-    assert_eq!(
-        booker("Nowy Klub")
-            .ok_or("the staged room is missing")?
-            .state,
-        HelperState::NeedsReview
-    );
-
-    // A show in the other city answers with that city's people, which is the
-    // whole point of reading the queue against a date.
-    let other = who_can_help(pool, act, "next-month")
+    // The other workspace's read of the same city: its own press, its own
+    // booker, its own community — and the cold rooms flip: "Klub A" is cold
+    // to it, "Klub B" is not.
+    let theirs = who_can_help(pool, other, "friday-too")
         .await?
         .ok_or("the second show produced no helper read")?;
-    assert_eq!(other.city, "Kraków");
-    assert_eq!(
-        other
-            .voices
-            .iter()
-            .map(|helper| helper.display_name.as_str())
-            .collect::<Vec<_>>(),
-        vec!["Kraków Daily"]
+    let their_press: Vec<&str> = theirs
+        .press
+        .iter()
+        .map(|row| row.display_name.as_str())
+        .collect();
+    assert_eq!(their_press, ["Rival Radio"], "their press: {their_press:?}");
+    let their_cold: Vec<&str> = theirs
+        .cold_rooms
+        .iter()
+        .map(|row| row.display_name.as_str())
+        .collect();
+    assert!(
+        their_cold.contains(&"Klub A") && !their_cold.contains(&"Klub B"),
+        "cold rooms did not flip per workspace: {their_cold:?}"
     );
 
-    // An event nobody has is not an empty list.
+    // A show with no city degrades: every section empty, "city" named, never
+    // an error — a band needs to see the missing city, not a 404.
+    let no_city = who_can_help(pool, act, "no-city-yet")
+        .await?
+        .ok_or("a city-less show produced no read")?;
+    assert_eq!(no_city.degraded, ["city"]);
+    assert_eq!(no_city.event.city, None);
+    assert!(no_city.press.is_empty());
+    assert!(no_city.rooms_and_promoters.is_empty());
+    assert!(no_city.communities.is_empty());
+    assert!(no_city.cold_rooms.is_empty());
+    assert_eq!(no_city.notes, ["staged_contacts_have_no_city"]);
+
+    // An event nobody has is not an empty list — and neither is a draft,
+    // matching the timeline's resolution exactly.
     assert!(who_can_help(pool, act, "no-such-show").await?.is_none());
+    assert!(who_can_help(pool, act, "draft-show").await?.is_none());
 
     a_promoted_press_contact_keeps_its_city(pool).await?;
 
@@ -271,7 +280,7 @@ async fn a_promoted_press_contact_keeps_its_city(
     pool: &PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let act = workspace(pool).await?;
-    let gdansk = city(pool, "gdansk", "Gdańsk", 54.35, 18.65).await?;
+    let gdansk = city(pool, "gdansk", "Gdańsk", "PL", 54.35, 18.65).await?;
     let repository = crowdrelay_infra::gdrive::PostgresGDriveRepository::new(pool.clone());
 
     // The sheet wrote the city in its own words, with its own diacritics.
@@ -309,7 +318,7 @@ async fn a_promoted_press_contact_keeps_its_city(
     // A city name two catalogue rows share resolves to nothing rather than to
     // whichever came first — the booking half's rule, for the same reason:
     // a contact filed in the wrong city is suggested for the wrong shows.
-    city(pool, "springfield", "Springfield", 39.79, -89.64).await?;
+    city(pool, "springfield", "Springfield", "US", 39.79, -89.64).await?;
     sqlx::query(
         "INSERT INTO cities (slug, name, country_code, latitude, longitude)
          VALUES ('springfield-ma', 'Springfield', 'US', 42.1, -72.59)",
@@ -348,43 +357,50 @@ async fn city(
     pool: &PgPool,
     slug: &str,
     name: &str,
+    country_code: &str,
     latitude: f64,
     longitude: f64,
 ) -> Result<Uuid, Box<dyn std::error::Error>> {
     Ok(sqlx::query_scalar::<_, Uuid>(
         "INSERT INTO cities (slug, name, country_code, latitude, longitude)
-         VALUES ($1, $2, 'PL', $3, $4)
+         VALUES ($1, $2, $3, $4, $5)
          ON CONFLICT (country_code, slug) DO UPDATE SET name = EXCLUDED.name
          RETURNING id",
     )
     .bind(slug)
     .bind(name)
+    .bind(country_code)
     .bind(latitude)
     .bind(longitude)
     .fetch_one(pool)
     .await?)
 }
 
+/// A show row. `venue` names the room so the registry trigger marks it —
+/// a published or completed event with a venue and a city is what feeds
+/// `place_venues`/`place_venue_marks`, and that is exactly what makes the
+/// room warm rather than cold for this tenant.
 async fn show(
     pool: &PgPool,
     workspace_id: Uuid,
-    city_id: Uuid,
+    city_id: Option<Uuid>,
     slug: &str,
+    venue: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     sqlx::query(
         "INSERT INTO events
             (workspace_id, city_id, slug, title, venue, starts_at, status, published_at)
-         VALUES ($1, $2, $3, $3, 'Klub X', now() + interval '20 days', 'published', now())",
+         VALUES ($1, $2, $3, $3, $4, now() + interval '20 days', 'published', now())",
     )
     .bind(workspace_id)
     .bind(city_id)
     .bind(slug)
+    .bind(venue)
     .execute(pool)
     .await?;
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn press(
     pool: &PgPool,
     workspace_id: Uuid,
@@ -392,14 +408,11 @@ async fn press(
     display_name: &str,
     kind: &str,
     status: &str,
-    accepts_outreach: bool,
-    do_not_contact: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     sqlx::query(
         "INSERT INTO agent_outreach_targets
-            (workspace_id, target_kind, display_name, contact_email, status,
-             accepts_outreach, do_not_contact, city_id)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+            (workspace_id, target_kind, display_name, contact_email, status, city_id)
+         VALUES ($1, $2, $3, $4, $5, $6)",
     )
     .bind(workspace_id)
     .bind(kind)
@@ -409,41 +422,33 @@ async fn press(
         display_name.to_lowercase().replace(' ', "-")
     ))
     .bind(status)
-    .bind(accepts_outreach)
-    .bind(do_not_contact)
     .bind(city_id)
     .execute(pool)
     .await?;
     Ok(())
 }
 
-/// A community the workspace has on file: an outreach target attached to a
-/// place. Placeless by construction — `discovery_places` records a country.
+/// A community outreach target — the communities section's source table.
+/// `country_code` is all the placement it carries; there is no city.
 async fn community(
     pool: &PgPool,
     workspace_id: Uuid,
+    country_code: &str,
     name: &str,
+    active: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let place = sqlx::query_scalar::<_, Uuid>(
-        "INSERT INTO discovery_places
-            (workspace_id, place_kind, platform, name, url, country_code, status)
-         VALUES ($1, 'subreddit', 'reddit', $2, $3, 'PL', 'active')
-         RETURNING id",
+    sqlx::query(
+        "INSERT INTO viryaos_community_outreach_targets
+            (workspace_id, symbol_slug, community_name, platform, url,
+             country_code, active)
+         VALUES ($1, $2, $3, 'reddit', $4, $5, $6)",
     )
     .bind(workspace_id)
+    .bind(name.replace('/', "-"))
     .bind(name)
     .bind(format!("https://www.reddit.com/{name}"))
-    .fetch_one(pool)
-    .await?;
-    sqlx::query(
-        "INSERT INTO agent_outreach_targets
-            (workspace_id, target_kind, display_name, status, place_id,
-             screening_verdict)
-         VALUES ($1, 'media_patronage', $2, 'promoted', $3, 'admitted')",
-    )
-    .bind(workspace_id)
-    .bind(name)
-    .bind(place)
+    .bind(country_code)
+    .bind(active)
     .execute(pool)
     .await?;
     Ok(())
@@ -456,13 +461,12 @@ async fn booking_target(
     display_name: &str,
     kind: &str,
     active: bool,
-    accepts_booking: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     sqlx::query(
         "INSERT INTO viryaos_booking_targets
             (workspace_id, city_id, target_kind, display_name, contact_email,
-             relationship_score, active, accepts_booking)
-         VALUES ($1, $2, $3, $4, $5, 60, $6, $7)",
+             relationship_score, active)
+         VALUES ($1, $2, $3, $4, $5, 60, $6)",
     )
     .bind(workspace_id)
     .bind(city_id)
@@ -473,33 +477,47 @@ async fn booking_target(
         display_name.to_lowercase().replace(' ', "-")
     ))
     .bind(active)
-    .bind(accepts_booking)
     .execute(pool)
     .await?;
     Ok(())
 }
 
-async fn booking_candidate(
+/// A registry row directly — the rooms nobody has marked, which is what
+/// makes them cold to every workspace rather than just this one.
+async fn venue(
     pool: &PgPool,
-    workspace_id: Uuid,
-    city_slug: &str,
+    city_id: Uuid,
     display_name: &str,
-    kind: &str,
+) -> Result<Uuid, Box<dyn std::error::Error>> {
+    Ok(sqlx::query_scalar::<_, Uuid>(
+        "INSERT INTO place_venues (city_id, name_key, display_name)
+         VALUES ($1, place_venue_key($2), $2)
+         RETURNING id",
+    )
+    .bind(city_id)
+    .bind(display_name)
+    .fetch_one(pool)
+    .await?)
+}
+
+/// A fact about a room — `None` workspace writes the global record any
+/// tenant may read, `Some` writes a private one the global read must skip.
+async fn venue_fact(
+    pool: &PgPool,
+    venue_id: Uuid,
+    attribute: &str,
+    value: &str,
+    workspace_id: Option<Uuid>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     sqlx::query(
-        "INSERT INTO viryaos_booking_candidates
-            (workspace_id, target_kind, display_name, city_slug, route_kind,
-             route_value, source, source_reference, fit_basis_points, status)
-         VALUES ($1, $2, $3, $4, 'email', $5, 'contact_scan', 'sheet', 6000, 'admitted')",
+        "INSERT INTO place_venue_facts
+            (venue_id, attribute, value, provenance, source_ref, observed_at, workspace_id)
+         VALUES ($1, $2, $3, 'researched', 'test', now(), $4)",
     )
+    .bind(venue_id)
+    .bind(attribute)
+    .bind(value)
     .bind(workspace_id)
-    .bind(kind)
-    .bind(display_name)
-    .bind(city_slug)
-    .bind(format!(
-        "{}@example.com",
-        display_name.to_lowercase().replace(' ', "-")
-    ))
     .execute(pool)
     .await?;
     Ok(())

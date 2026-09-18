@@ -5,7 +5,8 @@
 // band owes the show, but who in that city could make more people come to it.
 // Everything here is a candidate. Promotion, the contact governor and the
 // admission wall all still stand between this list and anybody being written
-// to, which is why the read carries a state per row instead of an action.
+// to — and the response carries no addresses, because a shortlist names who,
+// it does not hand out a way to reach them.
 
 /// `GET /v1/control-plane/events/{event_slug}/who-can-help`
 pub async fn control_plane_event_helpers(
@@ -21,9 +22,9 @@ pub async fn control_plane_event_helpers(
     )
     .await
     {
-        // A show with no city resolves to `None` alongside a show that does
-        // not exist: without a city there is nobody local, and answering with
-        // the whole contact list is the inventory this read replaces.
+        // `None` is only "no such event". A show with no city still answers:
+        // `degraded: ["city"]` and every section empty — a band needs to know
+        // the city is missing, not be handed a 404 that reads as "no show".
         Ok(Some(helpers)) => (
             StatusCode::OK,
             [(CACHE_CONTROL, PRIVATE_NO_STORE)],
