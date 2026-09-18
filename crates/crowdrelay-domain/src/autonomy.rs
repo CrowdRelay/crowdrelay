@@ -106,6 +106,78 @@ pub const fn disposition(
     }
 }
 
+/// How many observations stand behind the confidence a context reported.
+///
+/// Separate from [`Confidence`] because they answer different questions and
+/// only one of them is currently asked. Confidence is what an estimator says
+/// about itself; this is how much evidence it saw. A Beta posterior updated
+/// four times reports a confidence, and that confidence is not small — it is
+/// simply unearned, and nothing downstream can tell the difference by looking
+/// at the number.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(transparent)]
+pub struct EvidenceCount(pub i64);
+
+impl EvidenceCount {
+    /// No observations at all — the state every estimator starts in.
+    pub const NONE: Self = Self(0);
+
+    /// Whether this many observations clears `floor`.
+    #[must_use]
+    pub const fn clears(self, floor: i64) -> bool {
+        self.0 >= floor
+    }
+}
+
+/// [`disposition`] with the evidence floor applied.
+///
+/// # Why a second gate
+///
+/// `disposition` asks how confident a context is and never asks what that
+/// confidence was computed from. Those come apart exactly where it costs the
+/// most: an estimator with four observations can report high confidence, clear
+/// `minimum_confidence`, and be handed `AutoExecute` over an action the tenant
+/// cannot take back. `action_class` already records that a venue, curator or
+/// press contact gets one first approach — spending it on an unevaluated
+/// posterior is not a small error, and it is not recoverable by learning later.
+///
+/// # Why this caps rather than denies
+///
+/// Below the floor the result is [`PolicyDisposition::RequireApproval`], never
+/// `ObserveOnly` and never `Deny`. Denying would be self-defeating: acting is
+/// how the observations that clear the floor get made, so a gate that blocks
+/// action below the floor guarantees the floor is never reached. What must not
+/// happen is *unattended* action on an untested estimator, so the action still
+/// goes out — with a person on it.
+///
+/// `Deny` from the confidence gate is preserved. A context that failed its own
+/// confidence bar is refused, and having little evidence does not soften that.
+///
+/// The floor is the caller's, because the caller knows what it is counting.
+/// `measurement::RATE_FLOOR` is the floor for rates and the right default for
+/// anything counted per-observation.
+#[must_use]
+pub const fn disposition_with_evidence(
+    level: AutonomyLevel,
+    confidence: Confidence,
+    minimum_confidence: Confidence,
+    observations: EvidenceCount,
+    floor: i64,
+) -> PolicyDisposition {
+    let granted = disposition(level, confidence, minimum_confidence);
+    if observations.clears(floor) {
+        return granted;
+    }
+    match granted {
+        // The one downgrade: unattended execution becomes attended.
+        PolicyDisposition::AutoExecute => PolicyDisposition::RequireApproval,
+        // Already at or below approval, or refused outright. A thin posterior
+        // is no reason to widen authority, and no reason to narrow one that is
+        // already narrow.
+        other => other,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -151,5 +223,100 @@ mod tests {
         );
         assert!(!AutonomyLevel::RequireApproval.may_auto_execute());
         assert!(AutonomyLevel::RequireApproval.may_enqueue());
+    }
+
+    /// The case the confidence gate alone cannot see: a maximally confident
+    /// estimator that has been tested four times.
+    #[test]
+    fn a_confident_estimator_with_thin_evidence_cannot_execute_unattended() {
+        let minimum = Confidence::saturating_from_basis_points(8_000);
+        let floor = crate::measurement::RATE_FLOOR;
+
+        assert_eq!(
+            disposition(AutonomyLevel::BoundedAuto, Confidence::MAX, minimum),
+            PolicyDisposition::AutoExecute,
+            "the confidence gate alone grants unattended execution"
+        );
+        assert_eq!(
+            disposition_with_evidence(
+                AutonomyLevel::BoundedAuto,
+                Confidence::MAX,
+                minimum,
+                EvidenceCount(4),
+                floor,
+            ),
+            PolicyDisposition::RequireApproval,
+            "four observations must not license an unattended irreversible action"
+        );
+    }
+
+    #[test]
+    fn clearing_the_floor_changes_nothing() {
+        let minimum = Confidence::saturating_from_basis_points(8_000);
+        let floor = crate::measurement::RATE_FLOOR;
+
+        for level in [
+            AutonomyLevel::Observe,
+            AutonomyLevel::Recommend,
+            AutonomyLevel::RequireApproval,
+            AutonomyLevel::BoundedAuto,
+        ] {
+            assert_eq!(
+                disposition_with_evidence(
+                    level,
+                    Confidence::MAX,
+                    minimum,
+                    EvidenceCount(floor),
+                    floor,
+                ),
+                disposition(level, Confidence::MAX, minimum),
+                "at the floor the evidence gate is transparent"
+            );
+        }
+    }
+
+    /// Below the floor is unproven, not refused. Blocking action below the
+    /// floor would stop the observations that clear it from ever being made.
+    #[test]
+    fn thin_evidence_never_narrows_authority_past_approval() {
+        let minimum = Confidence::saturating_from_basis_points(8_000);
+
+        for level in [
+            AutonomyLevel::Observe,
+            AutonomyLevel::Recommend,
+            AutonomyLevel::RequireApproval,
+        ] {
+            let granted = disposition(level, Confidence::MAX, minimum);
+            assert_eq!(
+                disposition_with_evidence(
+                    level,
+                    Confidence::MAX,
+                    minimum,
+                    EvidenceCount::NONE,
+                    crate::measurement::RATE_FLOOR,
+                ),
+                granted,
+                "the evidence floor only ever downgrades AutoExecute"
+            );
+        }
+    }
+
+    /// A context that failed its own confidence bar stays refused. Thin
+    /// evidence must not turn a denial into an approval queue item.
+    #[test]
+    fn thin_evidence_does_not_soften_a_denial() {
+        let confidence = Confidence::saturating_from_basis_points(7_999);
+        let minimum = Confidence::saturating_from_basis_points(8_000);
+
+        assert_eq!(
+            disposition_with_evidence(
+                AutonomyLevel::BoundedAuto,
+                confidence,
+                minimum,
+                EvidenceCount::NONE,
+                crate::measurement::RATE_FLOOR,
+            ),
+            PolicyDisposition::Deny
+        );
     }
 }
