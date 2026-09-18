@@ -137,6 +137,39 @@ async fn run(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
     )
     .await?;
 
+    // A report that went out — the post-show and release reports name their
+    // recipients as an object keyed by audience, not an array. Before the read
+    // understood that shape this row answered "sent to nobody" for a send that
+    // named the whole band and the promoter across the table.
+    let reported = action(
+        pool,
+        act,
+        "reported",
+        "succeeded",
+        "owned_audience",
+        None,
+        now,
+    )
+    .await?;
+    emit(
+        pool,
+        act,
+        reported,
+        "crowdrelay.show.post_show_report_due",
+        serde_json::json!({
+            "recipients": {
+                "band": [
+                    {"email": "wiktor@example.test", "name": "Wiktor"},
+                    {"email": "ola@example.test", "name": "Ola"}
+                ],
+                "counterparty": {"name": "Klub X", "email": "booking@klubx.test"}
+            },
+            "report": {"kind": "post_show_t7"}
+        }),
+        now,
+    )
+    .await?;
+
     let record = sent_record(pool, act, sent).await?.ok_or("no record")?;
     assert_eq!(
         record.subject.as_deref(),
@@ -163,6 +196,19 @@ async fn run(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(
         record.provider_reference.as_deref(),
         Some("gmail-message-1")
+    );
+
+    let report_record = sent_record(pool, act, reported)
+        .await?
+        .ok_or("no record for the report")?;
+    assert_eq!(
+        report_record.recipients,
+        vec![
+            "wiktor@example.test".to_owned(),
+            "ola@example.test".to_owned(),
+            "booking@klubx.test".to_owned(),
+        ],
+        "the report's audience-keyed recipients read back as sent to nobody"
     );
 
     let failures = failed_sends(pool, act, now).await?;

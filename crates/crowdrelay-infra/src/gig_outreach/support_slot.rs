@@ -552,7 +552,8 @@ async fn queue_support_slot_ask(
             action_class, approved_at, approved_by, available_at,
             trace_id, causation_id
         ) VALUES ($1,$2,$3,'booking_opportunity',$4,'event',$5,$6,$7,
-                  'queued',$8,$9,'operator:support_slot_ask_approval',$9,$10,$11)
+                  'queued',$8,$9,'operator:support_slot_ask_approval',
+                  $9 + make_interval(secs => $12::double precision),$10,$11)
         "#,
     )
     .bind(action_id)
@@ -566,6 +567,12 @@ async fn queue_support_slot_ask(
     .bind(now)
     .bind(action_trace.trace_id().into_uuid())
     .bind(action_trace.causation_id().map(|id| id.into_uuid()))
+    // O.2: the ask is a letter to the headliner's promoter — the same outward
+    // hold `queue_outreach` writes, so "approve" and "sent" stop being the
+    // same instant on this path too.
+    .bind(f64::from(
+        i32::try_from(payload.action_class().hold_seconds()).unwrap_or(120),
+    ))
     .execute(&mut *tx)
     .await?;
 

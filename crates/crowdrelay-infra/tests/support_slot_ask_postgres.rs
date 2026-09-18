@@ -478,13 +478,28 @@ async fn run_support_slot_ask(pool: &PgPool, url: &str) -> Result<(), Box<dyn st
             lock_timeout: Duration::from_secs(1),
         },
     );
-    let claimed = repository
+    // The ask is an outward letter, so approval parks it in the two-minute
+    // hold window (O.2) — claimable only once the window has lapsed.
+    let in_window = repository
         .claim_due_autonomous_actions(WorkspaceId::from_uuid(head), 8, now)
+        .await?;
+    assert!(
+        in_window
+            .iter()
+            .all(|candidate| candidate.id.into_uuid() != action_id),
+        "the queued ask was claimable inside its hold window"
+    );
+    let claimed = repository
+        .claim_due_autonomous_actions(
+            WorkspaceId::from_uuid(head),
+            8,
+            now + Duration::from_secs(121),
+        )
         .await?;
     let claimed_action = claimed
         .iter()
         .find(|candidate| candidate.id.into_uuid() == action_id)
-        .ok_or("the queued ask was not claimable")?;
+        .ok_or("the queued ask was not claimable once the hold lapsed")?;
     repository
         .execute_action(WorkspaceId::from_uuid(head), claimed_action, now)
         .await

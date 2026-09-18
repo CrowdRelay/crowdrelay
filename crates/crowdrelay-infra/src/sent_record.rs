@@ -88,22 +88,46 @@ pub struct FailedSends {
 
 /// Pulls every address out of an emitted payload, whatever shape it used.
 ///
-/// Three shapes exist across the outward events and none of them is going to be
+/// Four shapes exist across the outward events and none of them is going to be
 /// unified for this read: a `recipients` array of objects with `contact_email`,
-/// a flat array of strings, and a single `recipient_email`. Reading all three
-/// here keeps the console honest about sends the newest code did not write.
+/// a flat array of strings, a `recipients` object keyed by audience
+/// (`{"band": [{"email": …}], "counterparty": {"email": …}}` — what the
+/// post-show and release reports emit), and a single `recipient_email`.
+/// Reading all four here keeps the console honest about sends the newest code
+/// did not write — a report whose `recipients` is an object used to read back
+/// as "sent to nobody", which is the lie this whole read exists to prevent.
 fn addresses(payload: &serde_json::Value) -> Vec<String> {
-    let mut found = Vec::new();
-    if let Some(list) = payload.get("recipients").and_then(|value| value.as_array()) {
-        for entry in list {
-            if let Some(email) = entry.as_str() {
-                found.push(email.to_owned());
-            } else if let Some(email) = entry.get("contact_email").and_then(|v| v.as_str()) {
-                found.push(email.to_owned());
-            } else if let Some(email) = entry.get("email").and_then(|v| v.as_str()) {
-                found.push(email.to_owned());
+    fn collect(value: &serde_json::Value, found: &mut Vec<String>) {
+        match value {
+            serde_json::Value::String(email) => found.push(email.to_owned()),
+            serde_json::Value::Array(list) => {
+                for entry in list {
+                    collect(entry, found);
+                }
             }
+            serde_json::Value::Object(map) => {
+                // An entry that carries an address field is a recipient; an
+                // object without one is a grouping (`band`, `counterparty`)
+                // whose values hold the recipients.
+                let mut named = false;
+                for key in ["contact_email", "email", "recipient_email"] {
+                    if let Some(email) = map.get(key).and_then(|v| v.as_str()) {
+                        found.push(email.to_owned());
+                        named = true;
+                    }
+                }
+                if !named {
+                    for nested in map.values() {
+                        collect(nested, found);
+                    }
+                }
+            }
+            _ => {}
         }
+    }
+    let mut found = Vec::new();
+    if let Some(recipients) = payload.get("recipients") {
+        collect(recipients, &mut found);
     }
     if found.is_empty()
         && let Some(single) = payload.get("recipient_email").and_then(|v| v.as_str())
