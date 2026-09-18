@@ -220,6 +220,42 @@ pub async fn approve_action(
     mutate_action(state, headers, action_id, true, revision).await
 }
 
+/// `GET /v1/control-plane/autopilot/actions/{action_id}/sent`
+///
+/// What this action actually said, and to whom (O.4). The overview answers
+/// "did it work"; this answers the two questions an operator asks before
+/// pressing the button a second time. Both facts have been on disk since the
+/// emission was written and nothing read them back.
+pub async fn action_sent_record(
+    State(state): State<AppState>,
+    Path(action_id): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    let Ok(action_id) = Uuid::parse_str(&action_id) else {
+        return Problem::not_found(request_id(&headers))
+            .private()
+            .into_response();
+    };
+    match crowdrelay_infra::sent_record::sent_record(
+        &state.database,
+        state.ops.workspace_id().into_uuid(),
+        action_id,
+    )
+    .await
+    {
+        Ok(Some(record)) => private_json(StatusCode::OK, record),
+        Ok(None) => Problem::not_found(request_id(&headers))
+            .private()
+            .into_response(),
+        Err(error) => {
+            tracing::warn!(%error, "sent record read failed");
+            Problem::service_unavailable(request_id(&headers))
+                .private()
+                .into_response()
+        }
+    }
+}
+
 pub async fn cancel_action(
     State(state): State<AppState>,
     Path(action_id): Path<String>,

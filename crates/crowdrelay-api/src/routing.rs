@@ -1095,6 +1095,13 @@ pub(super) fn application_routes(state: AppState) -> Router {
             "/v1/admin/autopilot/actions/{action_id}/cancel",
             post(autopilot::cancel_action),
         )
+        // What the action actually said, and to whom. Same surface as the
+        // approve and cancel it belongs beside — an operator who can approve a
+        // send can read what the last one contained.
+        .route(
+            "/v1/admin/autopilot/actions/{action_id}/sent",
+            get(crate::autopilot::action_sent_record),
+        )
         .route(
             "/v1/admin/autopilot/decisions/{decision_id}/handled-externally",
             post(autopilot::mark_decision_handled_externally),

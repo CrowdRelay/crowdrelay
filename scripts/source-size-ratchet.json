@@ -14,6 +14,7 @@
   "crates/crowdrelay-api/src/routing.rs": 1159,
   "crates/crowdrelay-application/src/autopilot/evaluate.rs": 1358,
   "crates/crowdrelay-application/src/autopilot/model.rs": 1884,
+  "crates/crowdrelay-application/src/autopilot/ports.rs": 1211,
   "crates/crowdrelay-application/src/autopilot/model/briefing_locale.rs": 1235,
   "crates/crowdrelay-brain/src/bayesian.rs": 1339,
   "crates/crowdrelay-brain/src/causal_model.rs": 1388,
