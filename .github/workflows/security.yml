@@ -53,4 +53,19 @@ jobs:
             echo "$rsa_graph" >&2
             exit 1
           fi
-          cargo audit --ignore RUSTSEC-2023-0071
+          # `cargo audit` exits 0 on a yanked crate — it is a warning, not an
+          # advisory. That is defensible for the tree at large and wrong for
+          # this one: `chacha20 0.10.1` was yanked by its author and sat in the
+          # workspace's encryption path for weeks, surfacing only when somebody
+          # ran the audit by hand. A crate the author withdrew is a crate
+          # nobody should be shipping, and in crypto the gap between "withdrawn"
+          # and "advisory" is the window this catches.
+          cargo audit --ignore RUSTSEC-2023-0071 --json > audit.json
+          yanked="$(jq -r '.warnings.yanked // [] | .[] | .package.name + " " + .package.version' audit.json)"
+          if [[ -n "$yanked" ]]; then
+            echo "yanked crates are in the dependency graph:" >&2
+            echo "$yanked" >&2
+            echo "A yanked crate was withdrawn by its own author. Move off it, or state the" >&2
+            echo "reason it is tolerable in this workflow next to an explicit allow." >&2
+            exit 1
+          fi
