@@ -292,19 +292,26 @@ async fn crossbill_edges_carry_only_once_reciprocated() -> Result<(), Box<dyn st
     }
 
     // The beneficiary's crowd has never carried the owner's announcement:
-    // the edge refuses before any campaign can queue.
+    // the edge refuses before any campaign can queue — and writes nothing.
     let refused = repo
         .run_amplification_campaign(owner, edge, "cb-camp-1", "Hello", "Body", 100)
         .await;
     assert!(matches!(refused, Err(PortfolioError::Unreciprocated)));
+    let queued: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM outbox_events WHERE workspace_id = $1")
+            .bind(owner)
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(queued, 0, "a refused edge must not queue deliveries");
 
-    // The beneficiary carries the owner once — a reverse-direction edge
-    // with one delivered campaign is the proof.
+    // An active reverse edge alone is consent, not proof — zero deliveries
+    // still refuses. Any reverse purpose counts: a delivered cross-promote
+    // is how a fresh pair bootstraps its first carry.
     let reverse = repo
         .propose_amplification(
             beneficiary,
             owner,
-            crowdrelay_domain::portfolio::AmplificationPurpose::EventCrossbill,
+            crowdrelay_domain::portfolio::AmplificationPurpose::CrossPromote,
             "all_active",
             1,
             1,
@@ -318,6 +325,11 @@ async fn crossbill_edges_carry_only_once_reciprocated() -> Result<(), Box<dyn st
         None,
     )
     .await?;
+    let undelivered = repo
+        .run_amplification_campaign(owner, edge, "cb-camp-1", "Hello", "Body", 100)
+        .await;
+    assert!(matches!(undelivered, Err(PortfolioError::Unreciprocated)));
+
     sqlx::query(
         "INSERT INTO amplification_deliveries
              (consent_id, from_workspace_id, to_workspace_id, fan_id, campaign_reference)

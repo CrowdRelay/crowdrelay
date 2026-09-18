@@ -8252,7 +8252,7 @@ paths:
         '200':
           description: Number of fans queued.
         '409':
-          description: Monthly cap reached for this edge.
+          description: Monthly cap reached for this edge. Also returned when a cross-bill edge is unreciprocated — the detail names which.
   /admin/audience-graph/places:
     get:
       operationId: listAudienceGraphPlaces
@@ -11418,12 +11418,14 @@ components:
     EventCrossbill:
       type: object
       additionalProperties: false
-      required: [state, acts, explanation]
+      required: [state, acts, explanation, reciprocated]
       description: >-
         Whether band-to-band crossbill for this show runs automatically or is a
         manual ask. Automated overlap needs an `event_crossbill` amplification
         edge that is reciprocated — a reverse-direction consent must have
-        delivered this workspace's announcement to the partner's crowd first.
+        delivered the partner's announcement to this workspace's crowd first;
+        any reverse purpose counts, so a delivered cross-promote or
+        release-feature edge is the bootstrap.
         An active but unreciprocated edge reports `unreciprocated`; without an
         edge the bill step surfaces as the manual bill-mate ask carried by the
         partner relay brief.
@@ -11436,6 +11438,13 @@ components:
           description: Bill acts in bill order (position, then slug).
           items: { $ref: '#/components/schemas/EventCrossbillAct' }
         explanation: { type: string }
+        reciprocated:
+          type: [boolean, 'null']
+          description: >-
+            Whether this workspace's audience has ever carried the edge
+            owner's announcement — a reverse-direction consent with at least
+            one delivery, whatever its status is now. `null` when there is
+            no active crossbill edge to measure, not a fabricated `false`.
     EventCrossbillAct:
       type: object
       additionalProperties: false

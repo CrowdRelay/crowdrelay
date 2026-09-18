@@ -264,38 +264,48 @@ struct EventCrossbill {
     state: &'static str,
     acts: Vec<EventCrossbillAct>,
     explanation: &'static str,
+    /// Whether this workspace's audience has ever carried the edge owner's
+    /// announcement — a reverse-direction consent with at least one delivery,
+    /// whatever its status is now. `null` when there is no active edge to
+    /// measure — an absent edge is not a `false`.
+    reciprocated: Option<bool>,
 }
 
 fn crossbill_state(
     acts: Vec<EventCrossbillAct>,
-    automated_edge_active: bool,
-    edge_reciprocated: bool,
+    edge_reciprocated: Option<bool>,
 ) -> EventCrossbill {
     let (state, explanation) = if acts.len() <= 1 {
         (
             "no_support_bill",
             "The bill has no second act to crossbill with.",
         )
-    } else if automated_edge_active && edge_reciprocated {
-        (
-            "automated_overlap",
-            "An active event-crossbill edge routes this workspace's shows into a partner audience. It is workspace-level: whether the partner's act is on this bill is not recorded.",
-        )
-    } else if automated_edge_active {
-        (
-            "unreciprocated",
-            "The event-crossbill edge exists but has never been reciprocated: this workspace's audience has never carried the partner's announcement. Carry theirs first — that is what unlocks the automated overlap.",
-        )
     } else {
-        (
-            "manual_ask",
-            "Band-to-band overlap needs a second workspace in a shared organization. Until then the crossbill is a manual ask — the partner relay brief carries the bill-mate cross-post step.",
-        )
+        match edge_reciprocated {
+            Some(true) => (
+                "automated_overlap",
+                "An active event-crossbill edge routes this workspace's shows into a partner audience. It is workspace-level: whether the partner's act is on this bill is not recorded.",
+            ),
+            Some(false) => (
+                "unreciprocated",
+                "The event-crossbill edge exists but has never been reciprocated: this workspace's audience has never carried the partner's announcement. Carry theirs first — a delivered cross-promote or release-feature edge unlocks the overlap.",
+            ),
+            None => (
+                "manual_ask",
+                "Band-to-band overlap needs a second workspace in a shared organization. Until then the crossbill is a manual ask — the partner relay brief carries the bill-mate cross-post step.",
+            ),
+        }
+    };
+    let reciprocated = if acts.len() <= 1 {
+        None
+    } else {
+        edge_reciprocated
     };
     EventCrossbill {
         state,
         acts,
         explanation,
+        reciprocated,
     }
 }
 
@@ -879,15 +889,16 @@ async fn event_crossbill(
     .await?;
     // No bill-mate means no crossbill either way — skip the edge check.
     if acts.len() <= 1 {
-        return Ok(crossbill_state(acts, false, false));
+        return Ok(crossbill_state(acts, None));
     }
     // Only an edge whose beneficiary is this workspace amplifies its shows —
     // `from` is the audience owner, `to` the beneficiary (portfolio.rs). An
     // edge mailing our fans about a partner is not amplification of our show.
     // Reciprocity is measured on deliveries, not intent: the edge is
-    // reciprocated once a reverse-direction consent has carried this
-    // workspace's announcement to the beneficiary's crowd. Revocation does
-    // not erase that history — the ledger row is the proof.
+    // reciprocated once a reverse-direction consent has carried the
+    // partner's announcement to this workspace's crowd — any reverse
+    // purpose counts, so a delivered cross-promote or release-feature is
+    // how a fresh pair bootstraps. Revocation does not erase that history.
     let (automated_edge_active, edge_reciprocated) = sqlx::query_as::<_, (bool, bool)>(
         r#"
         SELECT EXISTS(
@@ -915,8 +926,7 @@ async fn event_crossbill(
     .await?;
     Ok(crossbill_state(
         acts,
-        automated_edge_active,
-        edge_reciprocated,
+        automated_edge_active.then_some(edge_reciprocated),
     ))
 }
 
@@ -937,25 +947,25 @@ mod tests {
             slug: name.to_owned(),
             name: name.to_owned(),
         };
+        let solo = crossbill_state(vec![], Some(false));
+        assert_eq!(solo.state, "no_support_bill");
+        assert_eq!(solo.reciprocated, None);
         assert_eq!(
-            crossbill_state(vec![], false, false).state,
+            crossbill_state(vec![act("headliner")], Some(true)).state,
             "no_support_bill"
         );
-        assert_eq!(
-            crossbill_state(vec![act("headliner")], true, true).state,
-            "no_support_bill"
-        );
-        let manual = crossbill_state(vec![act("headliner"), act("support")], false, false);
+        let manual = crossbill_state(vec![act("headliner"), act("support")], None);
         assert_eq!(manual.state, "manual_ask");
+        assert_eq!(manual.reciprocated, None);
         assert!(manual.explanation.contains("manual ask"));
-        assert_eq!(
-            crossbill_state(vec![act("headliner"), act("support")], true, true).state,
-            "automated_overlap"
-        );
+        let automated = crossbill_state(vec![act("headliner"), act("support")], Some(true));
+        assert_eq!(automated.state, "automated_overlap");
+        assert_eq!(automated.reciprocated, Some(true));
         // An active edge that was never reciprocated is honest about it —
         // it is neither automated nor a bare manual ask.
-        let blocked = crossbill_state(vec![act("headliner"), act("support")], true, false);
+        let blocked = crossbill_state(vec![act("headliner"), act("support")], Some(false));
         assert_eq!(blocked.state, "unreciprocated");
+        assert_eq!(blocked.reciprocated, Some(false));
         assert!(blocked.explanation.contains("never been reciprocated"));
     }
 }

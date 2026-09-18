@@ -44,8 +44,8 @@ struct TimelineCrossbillEdgeRow {
     max_campaigns_per_month: i16,
     cooldown_days: i16,
     deliveries_this_month: i64,
-    /// Whether a reverse-direction consent has ever carried this
-    /// workspace's announcement to the edge owner's crowd — the delivery
+    /// Whether a reverse-direction consent has ever carried the edge
+    /// owner's announcement to this workspace's crowd — the delivery
     /// ledger is the proof, and revocation does not erase it.
     reciprocated: bool,
 }
@@ -526,7 +526,10 @@ async fn load_timeline_facts(
             WHERE edge.to_workspace_id = $1
               AND edge.purpose = 'event_crossbill'
               AND edge.status = 'active'
-            ORDER BY edge.created_at
+            -- With several inbound edges, describe the one that can carry:
+            -- a reciprocated edge sorts first so this state agrees with the
+            -- staff dashboard's any-reciprocated EXISTS.
+            ORDER BY reciprocated DESC, edge.created_at
             LIMIT 1
             "#,
         )

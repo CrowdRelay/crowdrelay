@@ -754,4 +754,93 @@ mod tests {
         assert_ne!(alone.decision_key, with_window.decision_key);
         Ok(())
     }
+    /// §4e-2: an unreciprocated crossbill edge turns the partner lever into a
+    /// named refusal on the decision ledger — and the refusal is that lever's,
+    /// not the ladder's, so the next due lever still proposes in the same
+    /// evaluation.
+    #[test]
+    fn an_unreciprocated_crossbill_edge_declines_the_lever_and_lets_the_ladder_move()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use crowdrelay_domain::show_growth::{
+            ShowGrowthHistory, ShowGrowthLever, ShowGrowthPolicy, ShowGrowthSnapshot,
+        };
+
+        let policy = AutopilotPolicy {
+            context: AutopilotContext::ShowGrowth,
+            enabled: true,
+            autonomy_level: AutonomyLevel::RequireApproval,
+            minimum_confidence: Confidence::from_basis_points(8_000)?,
+            max_actions_24h: 10,
+            config: AutopilotPolicyConfig::ShowGrowth(ShowGrowthPolicy::default()),
+            version: 1,
+            guarded_until: None,
+            guardrail_reason: None,
+        };
+        let now = OffsetDateTime::UNIX_EPOCH + time::Duration::days(20_000);
+        let snapshot = |unreciprocated: bool| ShowGrowthSnapshot {
+            event_id: EventId::new(),
+            published: true,
+            communication_enabled: true,
+            starts_at: now + time::Duration::days(40),
+            capacity: 100,
+            paid_tickets: 8,
+            paid_buyers: 6,
+            paid_tickets_last_7d: 2,
+            interested_fans: 30,
+            city_signal_fans: 20,
+            qualified_referrers_in_city: 4,
+            beacon_partners: 0,
+            attendees: 0,
+            morning_after_send_at: None,
+            unreciprocated_crossbill_edge: unreciprocated,
+            history: ShowGrowthHistory {
+                canonical_link_setup_requested: true,
+                free_listing_sweep_requested: true,
+                audience_capture_setup_requested: true,
+                ..ShowGrowthHistory::default()
+            },
+        };
+
+        let candidates = show_growth::show_growth_candidates(snapshot(true), &policy, now)?;
+        assert_eq!(candidates.len(), 2, "the refusal and the next due lever");
+        let declined = &candidates[0];
+        assert_eq!(declined.decision_kind, "unreciprocated_crossbill");
+        assert_eq!(declined.disposition, PolicyDisposition::Deny);
+        assert!(declined.reason.contains("unreciprocated_crossbill"));
+        assert!(matches!(
+            declined.action,
+            AutopilotActionPayload::RequestShowGrowth {
+                lever: ShowGrowthLever::PartnerCrossPromo,
+                ..
+            }
+        ));
+        // Forty days out with partner masked, grassroots scene relay is the
+        // next lever the night is owed — the gate must not starve it.
+        let next = &candidates[1];
+        assert_eq!(next.decision_kind, "activate_show_growth_lever");
+        assert!(matches!(
+            next.action,
+            AutopilotActionPayload::RequestShowGrowth {
+                lever: ShowGrowthLever::GrassrootsSceneRelay,
+                ..
+            }
+        ));
+
+        // The same due lever fires the moment the edge is reciprocated —
+        // one candidate, the ordinary request, no refusal row.
+        let candidates = show_growth::show_growth_candidates(snapshot(false), &policy, now)?;
+        assert_eq!(candidates.len(), 1);
+        let proposed = &candidates[0];
+        assert_eq!(proposed.decision_kind, "activate_show_growth_lever");
+        assert_eq!(proposed.disposition, PolicyDisposition::RequireApproval);
+        assert!(matches!(
+            proposed.action,
+            AutopilotActionPayload::RequestShowGrowth {
+                lever: ShowGrowthLever::PartnerCrossPromo,
+                ..
+            }
+        ));
+        Ok(())
+    }
+
 }

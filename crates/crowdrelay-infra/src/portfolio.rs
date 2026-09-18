@@ -337,13 +337,17 @@ impl PostgresPortfolioRepository {
         // A cross-bill edge that has never been reciprocated does not
         // carry: the beneficiary's audience must have carried the audience
         // owner's announcement before the owner's crowd carries theirs.
-        // The reverse edge needs a delivery, not an active status —
-        // revocation does not erase history. Other purposes (a label
-        // pushing its roster) are legitimately asymmetric and ungated.
-        // The structural refusal is reported before the transient cap:
-        // an unreciprocated edge is ineligible whatever the budget says.
-        let (purpose, max_campaigns, reciprocated): (String, i16, bool) = sqlx::query_as(
-            r#"
+        // Any reverse-purpose delivery counts — a delivered cross-promote
+        // or release-feature edge is how a fresh pair bootstraps. The
+        // reverse edge needs a delivery, not an active status —
+        // revocation does not erase history. Forward purposes other than
+        // crossbill (a label pushing its roster) are legitimately
+        // asymmetric and ungated. The structural refusal is reported
+        // before the transient cap: an unreciprocated edge is ineligible
+        // whatever the budget says.
+        let Some((purpose, max_campaigns, reciprocated)) =
+            sqlx::query_as::<_, (String, i16, bool)>(
+                r#"
             SELECT edge.purpose, edge.max_campaigns_per_month,
                    EXISTS (
                        SELECT 1
@@ -358,13 +362,20 @@ impl PostgresPortfolioRepository {
               AND edge.status = 'active'
               AND (edge.from_workspace_id = $1 OR edge.to_workspace_id = $1)
             "#,
-        )
-        .bind(workspace_id)
-        .bind(consent_id)
-        .fetch_one(&mut *tx)
-        .await
-        .map_err(PortfolioError::unexpected)?;
-        if purpose == "event_crossbill" && !reciprocated {
+            )
+            .bind(workspace_id)
+            .bind(consent_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(PortfolioError::unexpected)?
+        else {
+            // The consent went inactive between the probe and this read —
+            // same NotFound the probe would have reported.
+            return Err(PortfolioError::NotFound);
+        };
+        if purpose == crowdrelay_domain::portfolio::AmplificationPurpose::EventCrossbill.as_str()
+            && !reciprocated
+        {
             return Err(PortfolioError::Unreciprocated);
         }
         if spent_campaigns >= i32::from(max_campaigns) {
