@@ -332,6 +332,12 @@ pub(crate) fn router(state: crate::AppState) -> Router {
             "/v1/control-plane/gdrive/scan",
             post(crate::gdrive::scan_now),
         )
+        // P.2: the operator's own sheet is an intake source too — staged
+        // through the same extractor the connectors feed.
+        .route(
+            "/v1/control-plane/gdrive/contacts/upload",
+            post(crate::gdrive::upload_contacts),
+        )
         .route(
             "/v1/control-plane/gdrive/contacts/{contact_id}/promote",
             post(crate::gdrive::promote_contact),

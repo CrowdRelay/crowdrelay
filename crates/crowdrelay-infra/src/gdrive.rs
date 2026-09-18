@@ -59,7 +59,86 @@ pub struct DriveContactRow {
     pub disappeared_at: Option<time::OffsetDateTime>,
     pub fan_outcome: String,
     pub beacon_outcome: String,
+    /// P.2 registry join: the organisation (or the name itself, for a venue
+    /// typed row) resolved against `place_venues`. Some(display_name) means
+    /// this room is already on record somewhere — maybe played by this
+    /// band, maybe known only through another tenant's marks.
+    pub matched_venue: Option<String>,
+    /// This workspace's own marks say the band already played that room.
+    pub venue_played_here: bool,
+    /// `place_counterparties` knows this address — a promoter or booker an
+    /// event already recorded, in this or another tenant's ledger.
+    pub matched_counterparty: Option<String>,
+    /// This workspace's own marks say the band already dealt with them.
+    pub counterparty_worked_with: bool,
 }
+
+/// What the registry join found across the whole review population, not
+/// just the returned page — the "412 already in the venue registry" half of
+/// the sheet arriving.
+#[derive(Debug, Default, Clone, Copy, sqlx::FromRow)]
+pub struct RegistrySummary {
+    pub total: i64,
+    pub known_venues: i64,
+    pub own_rooms: i64,
+    pub known_counterparties: i64,
+    pub dealt_with: i64,
+}
+
+/// The registry-resolved contact row shape. Every reader of
+/// `viryaos_drive_contacts` selects through this so `DriveContactRow`
+/// decodes identically whether it came from the review queue or a single
+/// fetch — a second column list is a decode fault waiting on the first
+/// divergent field.
+///
+/// A venue matches when the organisation (or the row's own name, for a
+/// venue-shaped contact) keys to a `place_venues` row that either sits in
+/// the city the sheet named or is the only room anywhere carrying that
+/// name — the same unambiguous-or-placed discipline the booking promote
+/// applies. A counterparty matches on the address alone: the registry's
+/// identity key is the email. `ORDER BY played_here DESC` inside the
+/// lateral makes a same-named room the band already played win the tie.
+const CONTACT_SELECT: &str = r#"
+    SELECT c.id, c.normalized_email, c.display_name, c.organization, c.phone,
+           c.suggested_kind, c.city, c.notes, c.source_file_id, c.source_file_name,
+           c.sources, c.last_seen_at, c.disappeared_at, c.fan_outcome, c.beacon_outcome,
+           venue.display_name AS matched_venue,
+           COALESCE(venue.played_here, false) AS venue_played_here,
+           cp.display_name AS matched_counterparty,
+           COALESCE(cp.dealt_with, false) AS counterparty_worked_with
+    FROM viryaos_drive_contacts c
+    LEFT JOIN LATERAL (
+        SELECT v.display_name,
+               EXISTS (
+                   SELECT 1 FROM place_venue_marks vm
+                   WHERE vm.venue_id = v.id
+                     AND vm.workspace_id = c.workspace_id
+               ) AS played_here
+        FROM place_venues v
+        JOIN cities vc ON vc.id = v.city_id
+        WHERE v.name_key = place_venue_key(
+                  COALESCE(c.organization, c.display_name, ''))
+          AND (
+              vc.slug = lower(btrim(COALESCE(c.city, '')))
+              OR lower(vc.name) = lower(btrim(COALESCE(c.city, '')))
+              OR (SELECT count(*) FROM place_venues sib
+                  WHERE sib.name_key = v.name_key) = 1
+          )
+        ORDER BY played_here DESC
+        LIMIT 1
+    ) venue ON true
+    LEFT JOIN LATERAL (
+        SELECT p.display_name,
+               EXISTS (
+                   SELECT 1 FROM place_counterparty_marks cm
+                   WHERE cm.counterparty_id = p.id
+                     AND cm.workspace_id = c.workspace_id
+               ) AS dealt_with
+        FROM place_counterparties p
+        WHERE p.email_key = c.normalized_email
+        LIMIT 1
+    ) cp ON true
+"#;
 
 /// What one file's upsert did.
 #[derive(Debug, Default, Clone, Copy)]
@@ -301,28 +380,80 @@ impl PostgresGDriveRepository {
         Ok(())
     }
 
-    /// The review queue: staged rows first, newest seen first. `outcome`
-    /// filters on either flag — `staged` means "still undecided somewhere".
+    /// The review queue: staged rows first, newest seen first, every row
+    /// resolved against the shared registries so a sheet arrives as "412
+    /// already on record" rather than 2000 strangers (P.2).
     pub async fn list_contacts(
         &self,
         workspace_id: Uuid,
         limit: i64,
     ) -> Result<Vec<DriveContactRow>, GDriveError> {
-        sqlx::query_as::<_, DriveContactRow>(
+        let sql = format!(
+            r#"{CONTACT_SELECT}
+            WHERE c.workspace_id = $1
+            ORDER BY (c.fan_outcome = 'staged' OR c.beacon_outcome = 'staged') DESC,
+                     c.last_seen_at DESC
+            LIMIT $2"#
+        );
+        sqlx::query_as::<_, DriveContactRow>(&sql)
+            .bind(workspace_id)
+            .bind(limit)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(GDriveError::Database)
+    }
+
+    /// The same joins, counted across every row — including ones the
+    /// paginated list never returned — so the summary cannot claim a match
+    /// rate measured on a page.
+    pub async fn registry_summary(
+        &self,
+        workspace_id: Uuid,
+    ) -> Result<RegistrySummary, GDriveError> {
+        sqlx::query_as::<_, RegistrySummary>(
             r#"
-            SELECT id, normalized_email, display_name, organization, phone,
-                   suggested_kind, city, notes, source_file_id, source_file_name, sources,
-                   last_seen_at, disappeared_at, fan_outcome, beacon_outcome
-            FROM viryaos_drive_contacts
-            WHERE workspace_id = $1
-            ORDER BY (fan_outcome = 'staged' OR beacon_outcome = 'staged') DESC,
-                     last_seen_at DESC
-            LIMIT $2
+            SELECT count(*) AS total,
+                   count(*) FILTER (WHERE venue.display_name IS NOT NULL) AS known_venues,
+                   count(*) FILTER (WHERE venue.played_here) AS own_rooms,
+                   count(*) FILTER (WHERE cp.counterparty_id IS NOT NULL) AS known_counterparties,
+                   count(*) FILTER (WHERE cp.dealt_with) AS dealt_with
+            FROM viryaos_drive_contacts c
+            LEFT JOIN LATERAL (
+                SELECT v.display_name,
+                       EXISTS (
+                           SELECT 1 FROM place_venue_marks vm
+                           WHERE vm.venue_id = v.id
+                             AND vm.workspace_id = c.workspace_id
+                       ) AS played_here
+                FROM place_venues v
+                JOIN cities vc ON vc.id = v.city_id
+                WHERE v.name_key = place_venue_key(
+                          COALESCE(c.organization, c.display_name, ''))
+                  AND (
+                      vc.slug = lower(btrim(COALESCE(c.city, '')))
+                      OR lower(vc.name) = lower(btrim(COALESCE(c.city, '')))
+                      OR (SELECT count(*) FROM place_venues sib
+                          WHERE sib.name_key = v.name_key) = 1
+                  )
+                ORDER BY played_here DESC
+                LIMIT 1
+            ) venue ON true
+            LEFT JOIN LATERAL (
+                SELECT p.id AS counterparty_id,
+                       EXISTS (
+                           SELECT 1 FROM place_counterparty_marks cm
+                           WHERE cm.counterparty_id = p.id
+                             AND cm.workspace_id = c.workspace_id
+                       ) AS dealt_with
+                FROM place_counterparties p
+                WHERE p.email_key = c.normalized_email
+                LIMIT 1
+            ) cp ON true
+            WHERE c.workspace_id = $1
             "#,
         )
         .bind(workspace_id)
-        .bind(limit)
-        .fetch_all(&self.pool)
+        .fetch_one(&self.pool)
         .await
         .map_err(GDriveError::Database)
     }
@@ -342,39 +473,31 @@ impl PostgresGDriveRepository {
             ("beacon", "promoted" | "dismissed") => "beacon_outcome",
             _ => return Err(GDriveError::NotFound),
         };
-        let sql = format!(
-            r#"
-            UPDATE viryaos_drive_contacts SET {column} = $3
-            WHERE workspace_id = $1 AND id = $2
-            RETURNING id, normalized_email, display_name, organization, phone,
-                      suggested_kind, city, notes, source_file_id, source_file_name, sources,
-                      last_seen_at, disappeared_at, fan_outcome, beacon_outcome
-            "#
-        );
-        sqlx::query_as::<_, DriveContactRow>(&sql)
-            .bind(workspace_id)
-            .bind(contact_id)
-            .bind(outcome)
-            .fetch_optional(&self.pool)
-            .await?
-            .ok_or(GDriveError::NotFound)
+        let updated = sqlx::query_scalar::<_, Uuid>(&format!(
+            "UPDATE viryaos_drive_contacts SET {column} = $3 \
+                 WHERE workspace_id = $1 AND id = $2 RETURNING id"
+        ))
+        .bind(workspace_id)
+        .bind(contact_id)
+        .bind(outcome)
+        .fetch_optional(&self.pool)
+        .await?;
+        match updated {
+            Some(_) => self.get_contact(workspace_id, contact_id).await,
+            None => Err(GDriveError::NotFound),
+        }
     }
 
-    /// One staged contact by id, for the promote handlers.
+    /// One staged contact by id, for the promote handlers — the same
+    /// registry-resolved shape the review queue returns.
     pub async fn get_contact(
         &self,
         workspace_id: Uuid,
         contact_id: Uuid,
     ) -> Result<DriveContactRow, GDriveError> {
-        sqlx::query_as::<_, DriveContactRow>(
-            r#"
-            SELECT id, normalized_email, display_name, organization, phone,
-                   suggested_kind, city, notes, source_file_id, source_file_name, sources,
-                   last_seen_at, disappeared_at, fan_outcome, beacon_outcome
-            FROM viryaos_drive_contacts
-            WHERE workspace_id = $1 AND id = $2
-            "#,
-        )
+        sqlx::query_as::<_, DriveContactRow>(&format!(
+            "{CONTACT_SELECT} WHERE c.workspace_id = $1 AND c.id = $2"
+        ))
         .bind(workspace_id)
         .bind(contact_id)
         .fetch_optional(&self.pool)
