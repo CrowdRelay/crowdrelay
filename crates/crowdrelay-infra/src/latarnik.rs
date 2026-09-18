@@ -26,11 +26,18 @@
 //! "never cold, once ever, never on top of business, never empty-handed" is
 //! testable without a database.
 
+use crowdrelay_application::IdempotencyKey;
+use crowdrelay_application::autopilot::AutopilotActionPayload;
+use crowdrelay_domain::WorkspaceId;
 use crowdrelay_domain::latarnik_invite::{ContactStanding, InviteDecision, decide};
+use crowdrelay_domain::trace::TraceContext;
 use serde::Serialize;
+use serde_json::json;
 use sqlx::PgPool;
 use time::OffsetDateTime;
 use uuid::Uuid;
+
+include!("latarnik/approve.rs");
 
 /// Rows returned in one read. An operator reviewing who to invite is reading,
 /// not exporting; the count comes back separately so a truncated list still

@@ -9,7 +9,10 @@
 
 use std::time::Duration;
 
-use crowdrelay_infra::latarnik::dual_role_review;
+use crowdrelay_application::IdempotencyKey;
+use crowdrelay_infra::latarnik::{
+    InviteError, InviteOutcome, approve_latarnik_invite, dual_role_review,
+};
 use sqlx::{Connection, PgConnection, PgPool, postgres::PgPoolOptions};
 use time::OffsetDateTime;
 use uuid::Uuid;
@@ -267,9 +270,200 @@ async fn run(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn the_invitation_carries_its_letter_and_refuses_the_rest()
+-> Result<(), Box<dyn std::error::Error>> {
+    let database = DisposableDatabase::create().await?;
+    let result = run_send(&database.pool).await;
+    database.drop_database().await;
+    result
+}
+
+async fn run_send(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
+    let now = OffsetDateTime::now_utc();
+    let act = workspace(pool).await?;
+    let city = city(pool).await?;
+    settings(pool, act, "member_site_base_url", "https://virya.music").await?;
+    settings(pool, act, "act_style", "modern metal").await?;
+
+    let anna = beacon(
+        pool,
+        act,
+        city,
+        "promoter",
+        "Anna",
+        "anna@example.test",
+        72,
+        true,
+    )
+    .await?;
+    replied(pool, act, anna, city, now).await?;
+    contacted(
+        pool,
+        act,
+        "anna@example.test",
+        "gig_outreach",
+        now - time::Duration::days(40),
+    )
+    .await?;
+
+    // A published night in Anna's city is the reason the letter opens with.
+    published_show(pool, act, city, now + time::Duration::days(45)).await?;
+
+    let key = IdempotencyKey::parse("latarnik-anna-1").expect("valid key");
+    let outcome = approve_latarnik_invite(pool, act, anna, &key, now).await?;
+    let action_id = match outcome {
+        InviteOutcome::Queued {
+            action_id,
+            recipient,
+            subject,
+        } => {
+            assert_eq!(recipient, "anna@example.test");
+            assert!(subject.contains("Virya"), "{subject}");
+            action_id
+        }
+        other => return Err(format!("expected a queued invitation, got {other:?}").into()),
+    };
+
+    let (kind, status, payload) = sqlx::query_as::<_, (String, String, serde_json::Value)>(
+        "SELECT action_kind, status, payload FROM viryaos_autopilot_actions
+         WHERE workspace_id = $1 AND id = $2",
+    )
+    .bind(act)
+    .bind(action_id)
+    .fetch_one(pool)
+    .await?;
+    assert_eq!(kind, "latarnik.invite.request");
+    assert_eq!(status, "queued");
+
+    // The letter is in the payload, whole, and it opens with her fact rather
+    // than with the band's. That is the difference between this and a blast.
+    let body = payload["draft"]["body"].as_str().unwrap_or_default();
+    assert!(body.starts_with("Cześć Anna,"), "{body}");
+    assert!(
+        body.contains("Gramy w Wrocław"),
+        "the letter does not open with her city: {body}"
+    );
+    assert!(body.contains("https://virya.music/pl/latarnik"), "{body}");
+    assert!(
+        !body.contains('!'),
+        "an exclamation mark reached a working promoter: {body}"
+    );
+    assert!(
+        payload["reason"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("koncert w Wrocław"),
+        "the ledger did not record why she was written to: {payload}"
+    );
+
+    // O.2 applies here too: an outward send waits before a worker may claim it.
+    let available_at = sqlx::query_scalar::<_, OffsetDateTime>(
+        "SELECT available_at FROM viryaos_autopilot_actions WHERE workspace_id = $1 AND id = $2",
+    )
+    .bind(act)
+    .bind(action_id)
+    .fetch_one(pool)
+    .await?;
+    assert!(
+        available_at > now,
+        "the invitation was claimable the instant it was approved"
+    );
+
+    // The same click twice is the same invitation.
+    match approve_latarnik_invite(pool, act, anna, &key, now).await? {
+        InviteOutcome::Replayed {
+            action_id: replayed,
+            ..
+        } => assert_eq!(replayed, action_id),
+        other => return Err(format!("expected a replay, got {other:?}").into()),
+    }
+
+    // A second key does not buy a second ask: the governor row now records
+    // `latarnik_invite` as her last contact, and once-ever refuses.
+    let second = IdempotencyKey::parse("latarnik-anna-2").expect("valid key");
+    match approve_latarnik_invite(pool, act, anna, &second, now).await {
+        Err(InviteError::Refused(sentence)) => assert!(
+            sentence.contains("already queued") || sentence.contains("asked once"),
+            "the second ask was refused for the wrong reason: {sentence}"
+        ),
+        other => return Err(format!("a second invitation was taken: {other:?}").into()),
+    }
+
+    // Somebody who left the list is refused by name, whatever else is true.
+    let celina = beacon(
+        pool,
+        act,
+        city,
+        "photographer",
+        "Celina",
+        "celina@example.test",
+        90,
+        true,
+    )
+    .await?;
+    replied(pool, act, celina, city, now).await?;
+    contacted(
+        pool,
+        act,
+        "celina@example.test",
+        "beacon_outreach",
+        now - time::Duration::days(200),
+    )
+    .await?;
+    consented_fan(pool, act, "celina@example.test", false).await?;
+    let key = IdempotencyKey::parse("latarnik-celina").expect("valid key");
+    match approve_latarnik_invite(pool, act, celina, &key, now).await {
+        Err(InviteError::Refused(sentence)) => assert!(
+            sentence.contains("unsubscribed"),
+            "an opt-out was refused for the wrong reason: {sentence}"
+        ),
+        other => return Err(format!("an unsubscribed contact was written to: {other:?}").into()),
+    }
+    Ok(())
+}
+
+async fn settings(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    key: &str,
+    value: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    sqlx::query("INSERT INTO tenant_settings (workspace_id, key, value) VALUES ($1, $2, $3)")
+        .bind(workspace_id)
+        .bind(key)
+        .bind(value)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+async fn published_show(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    city_id: Uuid,
+    starts_at: OffsetDateTime,
+) -> Result<(), Box<dyn std::error::Error>> {
+    sqlx::query(
+        r#"
+        INSERT INTO events
+            (workspace_id, slug, title, status, starts_at, timezone, city_id, published_at)
+        VALUES ($1, $2, 'Koncert', 'published', $3, 'Europe/Warsaw', $4, now())
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(format!("gig-{}", Uuid::now_v7().simple()))
+    .bind(starts_at)
+    .bind(city_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 async fn workspace(pool: &PgPool) -> Result<Uuid, Box<dyn std::error::Error>> {
     let id = Uuid::now_v7();
-    sqlx::query("INSERT INTO workspaces (id, slug, name) VALUES ($1, $2, 'Latarnik test')")
+    sqlx::query("INSERT INTO workspaces (id, slug, name) VALUES ($1, $2, 'Virya')")
         .bind(id)
         .bind(format!("latarnik-{}", id.simple()))
         .execute(pool)

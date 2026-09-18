@@ -518,6 +518,16 @@ pub(crate) fn router(state: crate::AppState) -> Router {
             "/v1/control-plane/audience/segments",
             get(crate::audience::list_segments),
         )
+        // P.1: the people the band already works with, with both roles
+        // resolved — and the one-person, once-ever invitation.
+        .route(
+            "/v1/control-plane/contacts/dual-role",
+            get(crate::latarnik_http::dual_role_contacts),
+        )
+        .route(
+            "/v1/control-plane/contacts/{beacon_id}/latarnik-invite",
+            post(crate::latarnik_http::invite_to_latarnik),
+        )
         .route(
             "/v1/control-plane/audience/segments/{slug}/preview",
             get(crate::audience::preview_segment),

@@ -16,6 +16,10 @@ ROOT = Path(__file__).resolve().parents[1]
 MIGRATION = ROOT / "migrations/0074_viryaos_growth_debt.sql"
 DOMAIN = ROOT / "crates/crowdrelay-domain/src/growth_debt.rs"
 MODEL = ROOT / "crates/crowdrelay-application/src/autopilot/model.rs"
+# The action-kind match moved into a chunk `model.rs` includes when that file
+# crossed the source-size ratchet. Same vocabulary, one file further down — and
+# read separately so the context assertions keep reading the parent.
+ACTION_KIND = ROOT / "crates/crowdrelay-application/src/autopilot/model/action_kind.rs"
 VALIDATION = ROOT / "crates/crowdrelay-api/src/autopilot/validation.rs"
 MAPPING = ROOT / "crates/crowdrelay-infra/src/autopilot/mapping.rs"
 LOADER = ROOT / "crates/crowdrelay-infra/src/autopilot/operations/growth_debt.rs"
@@ -224,7 +228,9 @@ class GrowthDebtContract(unittest.TestCase):
     def test_the_action_kind_fits_the_published_contract(self) -> None:
         # `action_kind` is a free-form bounded string in the contract, not an
         # enum, so the only thing to hold is the length bound.
-        self.assertIn('Self::RaiseGrowthDebt { .. } => "growth.debt.raise"', read(MODEL))
+        self.assertIn(
+            'Self::RaiseGrowthDebt { .. } => "growth.debt.raise"', read(ACTION_KIND)
+        )
         openapi = read(OPENAPI)
         self.assertIn("action_kind: { type: string, maxLength: 96 }", openapi)
         self.assertLessEqual(len("growth.debt.raise"), 96)

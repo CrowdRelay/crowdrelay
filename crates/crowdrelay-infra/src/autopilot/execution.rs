@@ -311,6 +311,12 @@ pub(super) async fn schedule_effect_measurement(
         | AutopilotActionPayload::AcceptLiveOpportunityTerms { .. }
         | AutopilotActionPayload::PrepareFundingPackage { .. }
         | AutopilotActionPayload::SubmitFundingApplication { .. }
+        // An invitation is measured by whether the person joined, not by
+        // whether they replied — most will simply click or not. That evidence
+        // arrives as a fan row against an address the band already knew, which
+        // no existing measurement kind describes, so nothing is planned here
+        // rather than a reply window this letter never asks for.
+        | AutopilotActionPayload::RequestLatarnikInvite { .. }
         // A play's effect is the play's, not one send's: a tracker count moves
         // because a campaign ran, and attributing it to whichever message
         // happened to be last would be a number that reads as attribution and

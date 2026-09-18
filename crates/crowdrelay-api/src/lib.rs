@@ -88,6 +88,7 @@ mod fanbase;
 mod gdrive;
 mod gig_planning;
 mod http_metrics;
+mod latarnik_http;
 mod meta;
 mod mobile_fan;
 mod night;

@@ -876,6 +876,22 @@ impl AutopilotActionPayload {
                 ],
                 deadline_note: String::new(),
             },
+            Self::RequestLatarnikInvite { recipient_name, reason, draft, .. } => ActionBriefing {
+                summary: format!("Invitation to {recipient_name}: the dates, first"),
+                why_it_matters: "Somebody the band already works with is asked whether they also want the dates before they are public. One ask, ever — if it is ignored, that was the answer.".into(),
+                steps: vec![
+                    BriefingStep { what_to_do: "Read the letter as they will read it".into(), why_it_matters: "This person knows the band; a letter that reads like software costs the relationship".into() },
+                    BriefingStep { what_to_do: "Check the reason still holds".into(), why_it_matters: "The letter opens with their fact — a date in their city, a night you shared, a record just out".into() },
+                    BriefingStep { what_to_do: "Click APPROVE to send it".into(), why_it_matters: "One letter to one person; nobody is asked a second time".into() },
+                ],
+                content: vec![
+                    BriefingField { label: "To".into(), value: recipient_name.clone() },
+                    BriefingField { label: "Why them".into(), value: reason.clone() },
+                    BriefingField { label: "Subject".into(), value: draft.subject.clone() },
+                    BriefingField { label: "Letter".into(), value: truncate(draft.body.clone(), 2000) },
+                ],
+                deadline_note: String::new(),
+            },
             Self::RequestSignalPush { title, body, target_path, event_id, segment, audience_size, audience_basis, .. } => ActionBriefing {
                 summary: match audience_size {
                     Some(size) => format!("Push notification to {size} fans: {}", title),

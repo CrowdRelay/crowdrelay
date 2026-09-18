@@ -24,6 +24,7 @@ fn executor_capability_for_event(event_type: &str) -> &'static str {
         "crowdrelay.outreach.discovery_requested" => "outreach.discovery",
         "crowdrelay.booking.target_discovery_requested" => "booking.discovery",
         "crowdrelay.beacon.outreach_requested" => "beacon.outreach",
+        "crowdrelay.latarnik.invite_requested" => "beacon.outreach",
         "crowdrelay.beacon.invite_batch_requested" => "beacon.invite_batch",
         "crowdrelay.beacon.release_delivery_confirmation_requested" => "beacon.release.mail",
         "crowdrelay.beacon.network_discovery_requested" => "beacon.network.discovery",
@@ -126,6 +127,7 @@ pub const fn payload_requires_executor(payload: &AutopilotActionPayload) -> bool
                 | AutopilotActionPayload::RequestMerchReorder { .. }
                 | AutopilotActionPayload::RequestBookingOutreach { .. }
                 | AutopilotActionPayload::RequestGigOutreach { .. }
+                | AutopilotActionPayload::RequestLatarnikInvite { .. }
                 | AutopilotActionPayload::RequestMerchBundle { .. }
                 | AutopilotActionPayload::RequestOutreach { .. }
                 | AutopilotActionPayload::RequestRepresentationApproach { .. }
@@ -186,6 +188,10 @@ pub(in crate::autopilot) fn executor_capability_for_payload(
         AutopilotActionPayload::RequestOutreachDiscovery { .. } => "outreach.discovery",
         AutopilotActionPayload::RequestBookingTargetDiscovery { .. } => "booking.discovery",
         AutopilotActionPayload::RequestBeaconOutreach { .. } => "beacon.outreach",
+        // The same transport: one mail to one beacon. A separate capability
+        // would mean a second workflow doing the identical thing, and an
+        // operator wondering which of the two is the one that is down.
+        AutopilotActionPayload::RequestLatarnikInvite { .. } => "beacon.outreach",
         AutopilotActionPayload::RequestBeaconInviteBatch { .. } => "beacon.invite_batch",
         AutopilotActionPayload::RequestShowGrowth { .. } => "show.growth",
         AutopilotActionPayload::RequestContentArtifact { .. } => "content.artifact",

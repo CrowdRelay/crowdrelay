@@ -38,6 +38,11 @@ EXECUTION = ROOT / "crates/crowdrelay-infra/src/autopilot/execution.rs"
 # list means asserting the brain cannot observe the outcome of that action.
 KNOWN_UNMEASURED = {
     "AcceptLiveOpportunityTerms",
+    # An invitation is answered by joining, not by replying. The evidence is a
+    # fan row appearing against an address the band already knew, which no
+    # action-level measurement kind describes; scheduling a reply window would
+    # measure a question this letter never asks.
+    "RequestLatarnikInvite",
     "AdjustExperiment",
     "ApplyLiveOpportunity",
     "ChangeTicketCapacity",

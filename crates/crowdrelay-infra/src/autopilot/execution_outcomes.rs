@@ -57,6 +57,10 @@ pub(super) async fn record_execution_outcome(
             bundle_price_minor, ..
         } => ("merch_bundle_price_minor", *bundle_price_minor as f64, None),
         AutopilotActionPayload::RequestOutreach { .. } => ("outreach_requested", 1.0, None),
+        // One letter, one person. The measure worth having later is how many
+        // of these turned into somebody who hears the dates, which is a fan
+        // row appearing against an address the band already knew.
+        AutopilotActionPayload::RequestLatarnikInvite { .. } => ("latarnik_invite_sent", 1.0, None),
         AutopilotActionPayload::RequestRepresentationApproach { .. } => {
             ("representation_approach_requested", 1.0, None)
         }
