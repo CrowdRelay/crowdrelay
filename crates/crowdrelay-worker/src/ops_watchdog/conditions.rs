@@ -389,6 +389,44 @@ fn conditions(snapshot: &OpsSnapshot, posture: PublishingPosture) -> Vec<Conditi
             }),
         },
         Condition {
+            // Warning, and deliberately paired with `executor.offline`: that
+            // one is the registry dead entirely, this is one capability dark
+            // while the rest heartbeat. Production carried it for eleven days
+            // — `team.email` fell out of the advertised set when its
+            // attestation aged past the freshness window, and every emission
+            // queued, waited out the 24-hour grace and cancelled with
+            // `no_executor`, a `last_error_kind` nobody reads.
+            //
+            // The demand side is the honest signal. The n8n heartbeat deletes
+            // and re-inserts its capability rows on every beat, so a dropped
+            // capability leaves no expired row to notice — what remains is the
+            // work it stopped doing. `executor_active > 0` is the other half:
+            // an empty registry is a deployment without executors, not a
+            // dropped capability, and `executor.offline` already says so.
+            //
+            // The same predicate fires for a capability that was never wired
+            // — an executor nobody built yet parks actions identically. That
+            // is still the finding: work classes that cannot run, named.
+            key: "executor.capability_unadvertised",
+            severity: "warning",
+            summary: "Actions are parked or cancelled for a capability no live executor advertises",
+            active: snapshot.executor_active > 0
+                && (snapshot.awaiting_executor_actions > 0
+                    || snapshot.no_executor_cancelled_7d > 0),
+            details: json!({
+                "awaiting_executor": snapshot.awaiting_executor_actions,
+                "cancelled_no_executor_7d": snapshot.no_executor_cancelled_7d,
+                "action_kinds": snapshot.unclaimed_action_kinds,
+                "remedy": "the named action kinds need a capability no live \
+                           executor advertises. Compare against the executor \
+                           contract's capability list and the n8n heartbeat's \
+                           advertised set — a capability that fell out on a \
+                           stale attestation needs a fresh attestation pass; \
+                           one that was never wired needs its executor \
+                           imported and activated",
+            }),
+        },
+        Condition {
             key: "execution.unknown_outcome",
             severity: "warning",
             summary: "Autopilot actions stuck in unknown execution outcome",
