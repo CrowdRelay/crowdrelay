@@ -445,6 +445,11 @@ async fn delete_old_terminal_outbox_events(
     // artifact itself — the only copy of what the counterparty was mailed —
     // and the control-plane report view reads it back indefinitely. One row
     // per show, so the exemption costs nothing measurable.
+    // Events still referenced by a durable record are exempt the same way:
+    // four ledgers hold RESTRICT keys into this table precisely so the row
+    // cannot vanish while the campaign, calendar request, or emission ledger
+    // still names it. Those referrers have their own retention; the event
+    // becomes eligible when they let it go.
     let result = sqlx::query(
         r#"
         WITH candidates AS (
@@ -460,6 +465,30 @@ async fn delete_old_terminal_outbox_events(
                     WHERE delivery.workspace_id = event.workspace_id
                         AND delivery.outbox_event_id = event.id
                         AND delivery.status IN ('pending', 'processing')
+                )
+                AND NOT EXISTS (
+                    SELECT 1
+                    FROM viryaos_autopilot_action_emissions AS emission
+                    WHERE emission.workspace_id = event.workspace_id
+                        AND emission.outbox_event_id = event.id
+                )
+                AND NOT EXISTS (
+                    SELECT 1
+                    FROM show_notification_emissions AS emission
+                    WHERE emission.workspace_id = event.workspace_id
+                        AND emission.outbox_event_id = event.id
+                )
+                AND NOT EXISTS (
+                    SELECT 1
+                    FROM viryaos_calendar_requests AS request
+                    WHERE request.workspace_id = event.workspace_id
+                        AND request.outbox_event_id = event.id
+                )
+                AND NOT EXISTS (
+                    SELECT 1
+                    FROM communication_campaigns AS campaign
+                    WHERE campaign.workspace_id = event.workspace_id
+                        AND campaign.dispatch_event_id = event.id
                 )
             ORDER BY COALESCE(event.delivered_at, event.dead_at), event.id
             FOR UPDATE OF event SKIP LOCKED
