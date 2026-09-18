@@ -154,9 +154,16 @@ async fn run(pool: &PgPool, url: &str) -> Result<(), Box<dyn std::error::Error>>
         body.contains(&opening_line),
         "the letter does not open with the line the band approved"
     );
+    // O.6: the fixture's room is in Poland, so the whole letter is Polish —
+    // frame, evidence and sign-off together. An English greeting here would
+    // mean the frame and the sentences had come apart.
     assert!(
-        body.starts_with("Hi,") && body.contains("Best,"),
+        body.starts_with("Cześć,") && body.contains("Pozdrawiamy,"),
         "the payload carries a fragment rather than a whole letter: {body:?}"
+    );
+    assert!(
+        !body.contains("Hi,") && !body.contains("Best,"),
+        "an English frame leaked into a letter to a Polish room: {body:?}"
     );
     assert!(
         !body.contains("Virya, a modern metal band from Wroclaw"),
@@ -993,8 +1000,13 @@ async fn run_revision(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
     )
     .await?;
     let sopot_line = crowdrelay_domain::gig_plan::plan_gig(sopot_opportunity, intent)
-        .expect("sopot still proposes")
-        .opening_line();
+        .expect("sopot still proposes");
+    // The stored line is the Polish one, because the room is Polish. Editing
+    // it to the same words is the no-op this refuses.
+    let sopot_line = crowdrelay_domain::gig_letter::opening_line(
+        &sopot_line,
+        crowdrelay_domain::gig_letter::LetterLanguage::Polish,
+    );
     let noop_edit = BTreeMap::from([("opening_line".to_owned(), sopot_line)]);
     match approve_gig_proposal(pool, act, sopot, &noop_key, now, Some(&noop_edit)).await {
         Err(GigOutreachError::Refused(sentence)) => assert!(

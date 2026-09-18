@@ -29,6 +29,196 @@
 
 use serde::{Deserialize, Serialize};
 
+/// The language the promoter reads (O.6).
+///
+/// The letter was English for everybody. Virya books rooms in Poland, so every
+/// proposal so far has reached a Polish promoter in a foreign language — the
+/// first impression a stranger forms of a band, and one nobody chose.
+///
+/// Two languages, because two is what can be written honestly here. A room in a
+/// country neither covers gets English, which is the lingua franca of booking
+/// and an explicit fallback rather than an accident.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LetterLanguage {
+    #[default]
+    English,
+    Polish,
+}
+
+impl LetterLanguage {
+    /// The language for a room in this country, by ISO 3166-1 alpha-2 code.
+    ///
+    /// Deliberately a whitelist. Guessing from a country code we have no copy
+    /// for would produce an English letter wearing a Polish label, and the
+    /// promoter would be the one to discover it.
+    #[must_use]
+    pub fn for_country(code: &str) -> Self {
+        match code.trim().to_ascii_uppercase().as_str() {
+            "PL" => Self::Polish,
+            _ => Self::English,
+        }
+    }
+}
+
+/// The letter's first sentence, in the promoter's language (O.6).
+///
+/// English delegates to `GigPlan::opening_line` — one definition, and the
+/// console's English read cannot drift from the English letter. Polish is
+/// written here rather than in `gig_plan` so the plan stays about the decision
+/// and this file stays about the words a stranger reads.
+///
+/// Same rule as the bullets: the numbers are stated plainly and nothing is
+/// softened in translation.
+#[must_use]
+pub fn opening_line(plan: &crate::gig_plan::GigPlan, language: LetterLanguage) -> String {
+    use crate::gig_plan::Reason;
+    if language == LetterLanguage::English {
+        return plan.opening_line();
+    }
+    let city = &plan.city;
+    let venue = &plan.venue;
+    match plan.reasons.first() {
+        Some(Reason::ComparableActsPlayedHere { count, .. }) => {
+            if *count == 1 {
+                format!("Jeden zespół z naszego gatunku zagrał w {venue} według naszych danych.")
+            } else {
+                format!(
+                    "Zespoły z naszego gatunku zagrały w {venue} {count} razy według naszych \
+                     danych."
+                )
+            }
+        }
+        Some(Reason::ReachableAudience { reachable }) => format!(
+            "{reachable} osób w okolicy {city} poprosiło, żebyśmy dali znać, kiedy gramy w \
+             pobliżu."
+        ),
+        Some(Reason::RoomDraws { typical_draw }) => format!(
+            "Biletowane koncerty w {venue} sprzedają średnio {typical_draw} biletów, i to jest \
+             skala, w której gramy."
+        ),
+        Some(Reason::NeverPlayedButHasFans { reachable }) => format!(
+            "{reachable} osób w okolicy {city} prosiło, żeby dać im znać, kiedy zagramy w \
+             pobliżu, a nigdy nie graliśmy w tym mieście."
+        ),
+        Some(Reason::OverdueReturn { months, active_30d }) => format!(
+            "Ostatni raz graliśmy w {city} {months} miesięcy temu, a {active_30d} osób stamtąd \
+             było z nami aktywnych w ostatnim miesiącu."
+        ),
+        Some(Reason::CoBillAddsAudience {
+            act,
+            adds_reachable,
+        }) => format!(
+            "Wspólny line-up z {act} dociera do {adds_reachable} osób w okolicy {city}, do \
+             których sami nie docieramy."
+        ),
+        Some(Reason::WarmPromoter { name }) => {
+            format!("{name} — pisaliśmy już ze sobą, a my znów patrzymy na {city}.")
+        }
+        Some(Reason::RoomIsActive {
+            days_since_last_event,
+        }) => format!(
+            "W {venue} coś się działo {days_since_last_event} dni temu, a my patrzymy na {city}."
+        ),
+        // Unreachable by construction, for the same reason it is on the
+        // English side: `plan_gig` never returns a proposal with no reasons.
+        None => format!("Patrzymy na {city}, a {venue} jest tym klubem."),
+    }
+}
+
+/// One reason as a letter bullet, in the promoter's language (O.6).
+///
+/// The bullets used to be rendered in `crowdrelay-infra` in English only, so a
+/// Polish frame would have wrapped English evidence — the same seam the crew
+/// email exists to avoid, moved to a stranger's inbox. Rendering them here is
+/// also where they belong: the letter owns the words the promoter reads, and
+/// the infra layer owns the rows they are measured from.
+///
+/// The bullets are evidence, not voice. The numbers are stated plainly in both
+/// languages and nothing is softened in translation.
+#[must_use]
+pub fn reason_line(reason: &crate::gig_plan::Reason, language: LetterLanguage) -> String {
+    use crate::gig_plan::Reason;
+    match (language, reason) {
+        // All-time count over a twelve-month window — the subset phrasing is
+        // not guaranteed by the number, so the sentence states the record.
+        (LetterLanguage::English, Reason::ComparableActsPlayedHere { count, .. }) => {
+            if *count == 1 {
+                "one act from our genre has played there on record".to_owned()
+            } else {
+                format!("{count} acts from our genre have played there on record")
+            }
+        }
+        (LetterLanguage::Polish, Reason::ComparableActsPlayedHere { count, .. }) => {
+            if *count == 1 {
+                "jeden zespół z naszego gatunku zagrał tam według naszych danych".to_owned()
+            } else {
+                format!("zespoły z naszego gatunku zagrały tam {count} razy według naszych danych")
+            }
+        }
+        (LetterLanguage::English, Reason::ReachableAudience { reachable }) => {
+            format!("{reachable} people nearby asked us to tell them when we play")
+        }
+        (LetterLanguage::Polish, Reason::ReachableAudience { reachable }) => {
+            format!("{reachable} osób w okolicy poprosiło, żebyśmy dali znać, kiedy gramy")
+        }
+        (LetterLanguage::English, Reason::RoomDraws { typical_draw }) => {
+            format!("the room averages {typical_draw} paid tickets per ticketed show")
+        }
+        (LetterLanguage::Polish, Reason::RoomDraws { typical_draw }) => {
+            format!("klub sprzedaje średnio {typical_draw} biletów na biletowany koncert")
+        }
+        (LetterLanguage::English, Reason::NeverPlayedButHasFans { reachable }) => {
+            format!("{reachable} people nearby follow us and we have never played the city")
+        }
+        (LetterLanguage::Polish, Reason::NeverPlayedButHasFans { reachable }) => {
+            format!("{reachable} osób w okolicy nas słucha, a nigdy nie graliśmy w tym mieście")
+        }
+        (LetterLanguage::English, Reason::OverdueReturn { months, active_30d }) => format!(
+            "our last show there was {months} months ago and {active_30d} people there were \
+             active with us this month"
+        ),
+        (LetterLanguage::Polish, Reason::OverdueReturn { months, active_30d }) => format!(
+            "ostatni koncert graliśmy tam {months} miesięcy temu, a {active_30d} osób stamtąd \
+             było z nami aktywnych w tym miesiącu"
+        ),
+        (
+            LetterLanguage::English,
+            Reason::CoBillAddsAudience {
+                act,
+                adds_reachable,
+            },
+        ) => format!("a bill with {act} reaches {adds_reachable} people we do not reach alone"),
+        (
+            LetterLanguage::Polish,
+            Reason::CoBillAddsAudience {
+                act,
+                adds_reachable,
+            },
+        ) => format!(
+            "wspólny line-up z {act} dociera do {adds_reachable} osób, do których sami nie docieramy"
+        ),
+        (LetterLanguage::English, Reason::WarmPromoter { name }) => {
+            format!("{name} has answered us before")
+        }
+        (LetterLanguage::Polish, Reason::WarmPromoter { name }) => {
+            format!("{name} już nam kiedyś odpisał(a)")
+        }
+        (
+            LetterLanguage::English,
+            Reason::RoomIsActive {
+                days_since_last_event,
+            },
+        ) => format!("the room had something on {days_since_last_event} days ago"),
+        (
+            LetterLanguage::Polish,
+            Reason::RoomIsActive {
+                days_since_last_event,
+            },
+        ) => format!("w klubie coś się działo {days_since_last_event} dni temu"),
+    }
+}
+
 /// Which of the two letters this is.
 ///
 /// They are not interchangeable. The proposal asks a room for a night that does
@@ -63,6 +253,9 @@ pub struct SenderIdentity {
 #[derive(Clone, Debug)]
 pub struct LetterInput<'a> {
     pub kind: LetterKind,
+    /// What the promoter reads it in. Chosen from the room's country, not from
+    /// the band's own locale: the letter is for them.
+    pub language: LetterLanguage,
     pub sender: &'a SenderIdentity,
     /// The room, named so a promoter who books two knows which is meant.
     pub venue: &'a str,
@@ -179,38 +372,60 @@ fn proposal(
     rest: &[String],
 ) -> GigLetter {
     let mut body = vec![
-        "Hi,".to_owned(),
+        greeting(input.language).to_owned(),
         String::new(),
         opening.to_owned(),
         String::new(),
     ];
-    body.push(format!(
-        "{} and we are putting together a night at {venue}. This letter goes to \
-         everyone who books the room at once, so nobody hears about it secondhand.",
-        introduction(input.sender, act)
-    ));
+    body.push(match input.language {
+        LetterLanguage::English => format!(
+            "{} and we are putting together a night at {venue}. This letter goes to \
+             everyone who books the room at once, so nobody hears about it secondhand.",
+            introduction(input.sender, act, input.language)
+        ),
+        LetterLanguage::Polish => format!(
+            "{} i planujemy koncert w {venue}. Ten list trafia do wszystkich osób, \
+             które bukują ten klub, więc nikt nie dowiaduje się o nim z drugiej ręki.",
+            introduction(input.sender, act, input.language)
+        ),
+    });
     body.push(String::new());
     if !rest.is_empty() {
-        body.push("Why we think the night works:".to_owned());
+        body.push(
+            match input.language {
+                LetterLanguage::English => "Why we think the night works:",
+                LetterLanguage::Polish => "Dlaczego uważamy, że ten wieczór ma sens:",
+            }
+            .to_owned(),
+        );
         for reason in rest {
             body.push(format!("- {reason}"));
         }
         body.push(String::new());
     }
-    body.push(format!(
-        "If {venue} has a window in the coming months, tell us what the night \
-         needs and we will come back with a concrete offer."
-    ));
+    body.push(match input.language {
+        LetterLanguage::English => format!(
+            "If {venue} has a window in the coming months, tell us what the night \
+             needs and we will come back with a concrete offer."
+        ),
+        LetterLanguage::Polish => format!(
+            "Jeśli {venue} ma wolny termin w najbliższych miesiącach, napiszcie \
+             czego potrzebuje ten wieczór, a wrócimy z konkretną propozycją."
+        ),
+    });
     body.push(String::new());
-    if let Some(site) = site_line(input.sender) {
+    if let Some(site) = site_line(input.sender, input.language) {
         body.push(site);
         body.push(String::new());
     }
-    body.push("Best,".to_owned());
+    body.push(sign_off(input.language).to_owned());
     body.push(act.to_owned());
 
     GigLetter {
-        subject: truncate(&format!("{act} x {venue} — show proposal")),
+        subject: truncate(&match input.language {
+            LetterLanguage::English => format!("{act} x {venue} — show proposal"),
+            LetterLanguage::Polish => format!("{act} x {venue} — propozycja koncertu"),
+        }),
         body: body.join("\n"),
     }
 }
@@ -225,36 +440,70 @@ fn support_slot_ask(
 ) -> GigLetter {
     let act = input.sender.act_name.trim();
     let mut body = vec![
-        "Hi,".to_owned(),
+        greeting(input.language).to_owned(),
         String::new(),
         opening.to_owned(),
         String::new(),
     ];
-    body.push(format!(
-        "The night at {venue} on {date} is already ours, and the slot you offered \
-         is still open. {support} is the labelmate we want to put in it. This \
-         letter goes to everyone who books the room at once, so nobody hears \
-         about it secondhand."
-    ));
+    body.push(match input.language {
+        LetterLanguage::English => format!(
+            "The night at {venue} on {date} is already ours, and the slot you offered \
+             is still open. {support} is the labelmate we want to put in it. This \
+             letter goes to everyone who books the room at once, so nobody hears \
+             about it secondhand."
+        ),
+        LetterLanguage::Polish => format!(
+            "Koncert w {venue} w dniu {date} jest już nasz, a slot, który \
+             zaproponowaliście, nadal jest wolny. Chcemy wstawić w niego {support} — \
+             zespół z tej samej stajni. Ten list trafia do wszystkich osób, które \
+             bukują ten klub, więc nikt nie dowiaduje się o nim z drugiej ręki."
+        ),
+    });
     body.push(String::new());
     if !rest.is_empty() {
-        body.push(format!("Why {support} fits the slot:"));
+        body.push(match input.language {
+            LetterLanguage::English => format!("Why {support} fits the slot:"),
+            LetterLanguage::Polish => format!("Dlaczego {support} pasuje do tego slotu:"),
+        });
         for reason in rest {
             body.push(format!("- {reason}"));
         }
         body.push(String::new());
     }
-    body.push(format!(
-        "If {support} works for the slot, say so and they are confirmed — and if \
-         you would rather hold it, that answer is just as useful."
-    ));
+    body.push(match input.language {
+        LetterLanguage::English => format!(
+            "If {support} works for the slot, say so and they are confirmed — and if \
+             you would rather hold it, that answer is just as useful."
+        ),
+        LetterLanguage::Polish => format!(
+            "Jeśli {support} pasuje na ten slot, dajcie znać i mamy to potwierdzone — \
+             a jeśli wolicie go zatrzymać, ta odpowiedź jest tak samo przydatna."
+        ),
+    });
     body.push(String::new());
-    body.push("Best,".to_owned());
+    body.push(sign_off(input.language).to_owned());
     body.push(act.to_owned());
 
     GigLetter {
-        subject: truncate(&format!("{support} for the {venue} slot — {date}")),
+        subject: truncate(&match input.language {
+            LetterLanguage::English => format!("{support} for the {venue} slot — {date}"),
+            LetterLanguage::Polish => format!("{support} na slot w {venue} — {date}"),
+        }),
         body: body.join("\n"),
+    }
+}
+
+const fn greeting(language: LetterLanguage) -> &'static str {
+    match language {
+        LetterLanguage::English => "Hi,",
+        LetterLanguage::Polish => "Cześć,",
+    }
+}
+
+const fn sign_off(language: LetterLanguage) -> &'static str {
+    match language {
+        LetterLanguage::English => "Best,",
+        LetterLanguage::Polish => "Pozdrawiamy,",
     }
 }
 
@@ -263,7 +512,7 @@ fn support_slot_ask(
 /// Every clause is conditional on a stored fact. A band that has not declared a
 /// style gets a shorter sentence, not a guessed one — the promoter reading it
 /// would rather have four true words than a genre somebody's software picked.
-fn introduction(sender: &SenderIdentity, act: &str) -> String {
+fn introduction(sender: &SenderIdentity, act: &str, language: LetterLanguage) -> String {
     let style = sender
         .style
         .as_deref()
@@ -274,21 +523,34 @@ fn introduction(sender: &SenderIdentity, act: &str) -> String {
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty());
-    match (style, city) {
-        (Some(style), Some(city)) => format!("We are {act}, a {style} band from {city},"),
-        (Some(style), None) => format!("We are {act}, a {style} band,"),
-        (None, Some(city)) => format!("We are {act}, a band from {city},"),
-        (None, None) => format!("We are {act},"),
+    match (language, style, city) {
+        (LetterLanguage::English, Some(style), Some(city)) => {
+            format!("We are {act}, a {style} band from {city},")
+        }
+        (LetterLanguage::English, Some(style), None) => format!("We are {act}, a {style} band,"),
+        (LetterLanguage::English, None, Some(city)) => format!("We are {act}, a band from {city},"),
+        (LetterLanguage::English, None, None) => format!("We are {act},"),
+        (LetterLanguage::Polish, Some(style), Some(city)) => {
+            format!("Jesteśmy {act}, zespół grający {style} z {city},")
+        }
+        (LetterLanguage::Polish, Some(style), None) => {
+            format!("Jesteśmy {act}, zespół grający {style},")
+        }
+        (LetterLanguage::Polish, None, Some(city)) => format!("Jesteśmy {act}, zespół z {city},"),
+        (LetterLanguage::Polish, None, None) => format!("Jesteśmy {act},"),
     }
 }
 
-fn site_line(sender: &SenderIdentity) -> Option<String> {
+fn site_line(sender: &SenderIdentity, language: LetterLanguage) -> Option<String> {
     sender
         .site_url
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .map(|site| format!("Music: {site}"))
+        .map(|site| match language {
+            LetterLanguage::English => format!("Music: {site}"),
+            LetterLanguage::Polish => format!("Muzyka: {site}"),
+        })
 }
 
 /// Capitalises the first character and leaves the rest alone.
@@ -341,6 +603,7 @@ mod tests {
         let reasons = reasons();
         let letter = compose_letter(&LetterInput {
             kind: LetterKind::Proposal,
+            language: LetterLanguage::English,
             sender: &sender,
             venue: "Klub X",
             opening_line: "Four comparable acts played Klub X in the last year.",
@@ -377,6 +640,7 @@ mod tests {
         let reasons = reasons();
         let letter = compose_letter(&LetterInput {
             kind: LetterKind::Proposal,
+            language: LetterLanguage::English,
             sender: &sender,
             venue: "Klub X",
             opening_line: "The room books this kind of night.",
@@ -405,6 +669,7 @@ mod tests {
         let reasons = reasons();
         let letter = compose_letter(&LetterInput {
             kind: LetterKind::SupportSlotAsk,
+            language: LetterLanguage::English,
             sender: &sender,
             venue: "Klub X",
             opening_line: "The slot you offered on 12 October is still open.",
@@ -437,6 +702,7 @@ mod tests {
         let reasons = reasons();
         let base = LetterInput {
             kind: LetterKind::SupportSlotAsk,
+            language: LetterLanguage::English,
             sender: &sender,
             venue: "Klub X",
             opening_line: "A sentence.",
@@ -471,6 +737,84 @@ mod tests {
         );
     }
 
+    /// O.6: the letter is for the promoter, so it is in their language. Virya
+    /// books rooms in Poland and every proposal so far arrived in English —
+    /// the first impression a stranger forms of a band, and one nobody chose.
+    #[test]
+    fn a_polish_room_gets_a_polish_letter() {
+        let sender = sender();
+        let reasons = reasons();
+        let letter = compose_letter(&LetterInput {
+            kind: LetterKind::Proposal,
+            language: LetterLanguage::Polish,
+            sender: &sender,
+            venue: "Klub X",
+            opening_line: "Cztery podobne zespoły zagrały w Klub X w ostatnim roku.",
+            reasons: &reasons,
+            support_act: None,
+            show_date: None,
+        })
+        .expect("composes");
+        assert!(letter.body.starts_with("Cześć,\n"), "{}", letter.body);
+        assert!(
+            letter
+                .body
+                .contains("Jesteśmy Virya, zespół grający modern metal z Wrocław,")
+        );
+        assert!(
+            letter
+                .body
+                .contains("Dlaczego uważamy, że ten wieczór ma sens:")
+        );
+        assert!(letter.body.contains("Muzyka: https://virya.music/"));
+        assert!(letter.body.ends_with("Pozdrawiamy,\nVirya"));
+        assert_eq!(letter.subject, "Virya x Klub X — propozycja koncertu");
+        // Nothing English leaks through the frame.
+        assert!(!letter.body.contains("Hi,"));
+        assert!(!letter.body.contains("Best,"));
+    }
+
+    /// The language follows the room's country, and a country nothing is
+    /// written for falls back to English rather than to a guess.
+    #[test]
+    fn the_country_picks_the_language_and_the_unknown_one_is_english() {
+        assert_eq!(LetterLanguage::for_country("PL"), LetterLanguage::Polish);
+        assert_eq!(LetterLanguage::for_country("pl"), LetterLanguage::Polish);
+        assert_eq!(LetterLanguage::for_country(" pl "), LetterLanguage::Polish);
+        assert_eq!(LetterLanguage::for_country("DE"), LetterLanguage::English);
+        assert_eq!(LetterLanguage::for_country(""), LetterLanguage::English);
+    }
+
+    /// The ask travels too, and still refuses to announce a night that is
+    /// already held.
+    #[test]
+    fn the_polish_ask_is_about_the_slot_not_a_new_night() {
+        let sender = sender();
+        let reasons = reasons();
+        let letter = compose_letter(&LetterInput {
+            kind: LetterKind::SupportSlotAsk,
+            language: LetterLanguage::Polish,
+            sender: &sender,
+            venue: "Klub X",
+            opening_line: "Slot, który zaproponowaliście, jest nadal wolny.",
+            reasons: &reasons,
+            support_act: Some("Second Act"),
+            show_date: Some("12 października"),
+        })
+        .expect("composes");
+        assert!(letter.body.contains("jest już nasz"));
+        assert!(
+            letter
+                .body
+                .contains("Dlaczego Second Act pasuje do tego slotu:")
+        );
+        assert_eq!(
+            letter.subject,
+            "Second Act na slot w Klub X — 12 października"
+        );
+        assert!(!letter.body.contains("planujemy koncert"));
+    }
+
     /// One reason is a whole proposal: the opening line says it, and the letter
     /// carries no empty bullet list underneath.
     #[test]
@@ -479,6 +823,7 @@ mod tests {
         let one = vec!["the room books this kind of night".to_owned()];
         let letter = compose_letter(&LetterInput {
             kind: LetterKind::Proposal,
+            language: LetterLanguage::English,
             sender: &sender,
             venue: "Klub X",
             opening_line: "The room books this kind of night.",
@@ -498,6 +843,7 @@ mod tests {
         let venue = "A".repeat(400);
         let letter = compose_letter(&LetterInput {
             kind: LetterKind::Proposal,
+            language: LetterLanguage::English,
             sender: &sender,
             venue: &venue,
             opening_line: "A sentence.",
