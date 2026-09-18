@@ -140,6 +140,19 @@ async fn run(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
     .bind(other)
     .execute(pool)
     .await?;
+    // The prior reads replies from the interaction ledger, not the
+    // denormalized disposition — seed the inbound row too.
+    sqlx::query(
+        "INSERT INTO viryaos_outreach_interactions
+            (workspace_id, target_id, direction, phase, disposition, source_key, occurred_at)
+         SELECT workspace_id, id, 'inbound', 'reply', 'positive',
+                'seed-anna-reply', now() - interval '39 days'
+         FROM viryaos_outreach_targets
+         WHERE workspace_id = $1 AND contact_email = 'anna@example.com'",
+    )
+    .bind(other)
+    .execute(pool)
+    .await?;
 
     // ── communities: this workspace, the city's country, active ──
     community(pool, act, "PL", "r/wroclaw", true).await?;
