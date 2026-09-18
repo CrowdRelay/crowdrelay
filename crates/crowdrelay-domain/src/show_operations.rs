@@ -20,6 +20,11 @@ pub enum ShowTaskKind {
     NetworkTested,
     GuestlistChecked,
     CapturePlan,
+    /// The door QR exists for every published show and converts the room —
+    /// but only if somebody on stage says the words. The beat is human and
+    /// the proof is first-party: the campaign's `announced_from_stage` flag,
+    /// or the first scan landing.
+    QrFromStage,
     PostShowReconciliation,
     PostShowReport,
 }
@@ -37,6 +42,7 @@ impl ShowTaskKind {
             Self::NetworkTested => "network_tested",
             Self::GuestlistChecked => "guestlist_checked",
             Self::CapturePlan => "capture_plan",
+            Self::QrFromStage => "qr_from_stage",
             Self::PostShowReconciliation => "post_show_reconciliation",
             Self::PostShowReport => "post_show_report",
         }
@@ -365,6 +371,27 @@ mod tests {
         assert_eq!(parsed.post_show_escalate_hours, 8);
         assert_eq!(parsed.escalation_cooldown_hours, 6);
         assert_eq!(parsed.post_show_report_hours, 168);
+    }
+
+    /// The announce beat is human work but first-party provable: the
+    /// campaign flag or a landed scan completes it without a human tick.
+    /// Non-physical is what lets `verifiable_fact` resolve it.
+    #[test]
+    fn the_qr_announce_beat_is_verifiable_not_physical() {
+        assert_eq!(ShowTaskKind::QrFromStage.key(), "qr_from_stage");
+        assert!(!ShowTaskKind::QrFromStage.is_physical());
+        let snapshot = ShowTaskSnapshot {
+            event_id: EventId::new(),
+            task: ShowTaskKind::QrFromStage,
+            starts_at: now() + Duration::days(1),
+            already_done: false,
+            verifiable_fact: true,
+            last_escalated_at: None,
+        };
+        assert!(matches!(
+            evaluate_show_task(snapshot, ShowOperationsPolicy::default(), now()),
+            ShowOperationsDecision::AutoComplete { .. }
+        ));
     }
 
     #[test]

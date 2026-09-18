@@ -897,3 +897,105 @@ async fn festival_post_show_follow_up_labels_acts_and_room()
     f.pool.close().await;
     Ok(())
 }
+
+/// The announce beat exists only where a live campaign does — no mint, no
+/// task — and its proof is first-party: the flag, or the first scan landing.
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn the_qr_announce_beat_follows_the_campaign_not_the_calendar()
+-> Result<(), Box<dyn std::error::Error>> {
+    use crowdrelay_application::autopilot::AutopilotDecisionRepository;
+    use crowdrelay_domain::show_operations::ShowTaskKind;
+
+    let f = setup().await?;
+    let now = OffsetDateTime::now_utc();
+    let event_id = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO events (id, workspace_id, slug, title, starts_at, status, published_at)
+         VALUES ($1,$2,$3,'QR beat show',$4,'published',$4 - interval '7 days') RETURNING id",
+    )
+    .bind(event_id)
+    .bind(f.workspace_id.into_uuid())
+    .bind(format!("qr-beat-{}", f.workspace_id.into_uuid().simple()))
+    .bind(now + time::Duration::days(1))
+    .execute(&f.pool)
+    .await?;
+
+    let snapshots = f
+        .repository
+        .load_show_task_snapshots(f.workspace_id, now)
+        .await?;
+    assert!(
+        !snapshots
+            .iter()
+            .any(|s| s.event_id.into_uuid() == event_id && s.task == ShowTaskKind::QrFromStage),
+        "no campaign minted yet — there is nothing to announce"
+    );
+
+    let campaign_id = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO concert_qr_campaigns (id, workspace_id, event_id, label, valid_from, valid_until)
+         VALUES ($1,$2,$3,'Door',$4,$5)",
+    )
+    .bind(campaign_id)
+    .bind(f.workspace_id.into_uuid())
+    .bind(event_id)
+    .bind(now - time::Duration::hours(4))
+    .bind(now + time::Duration::days(2))
+    .execute(&f.pool)
+    .await?;
+
+    let snapshots = f
+        .repository
+        .load_show_task_snapshots(f.workspace_id, now)
+        .await?;
+    let beat = snapshots
+        .iter()
+        .find(|s| s.event_id.into_uuid() == event_id && s.task == ShowTaskKind::QrFromStage)
+        .expect("a live campaign makes the beat appear");
+    assert!(!beat.verifiable_fact, "minted is not announced");
+    assert!(!beat.already_done);
+
+    sqlx::query("UPDATE concert_qr_campaigns SET announced_from_stage = true WHERE id = $1")
+        .bind(campaign_id)
+        .execute(&f.pool)
+        .await?;
+    let snapshots = f
+        .repository
+        .load_show_task_snapshots(f.workspace_id, now)
+        .await?;
+    let beat = snapshots
+        .iter()
+        .find(|s| s.event_id.into_uuid() == event_id && s.task == ShowTaskKind::QrFromStage)
+        .expect("the task stays in the snapshot");
+    assert!(
+        beat.verifiable_fact,
+        "the stage flag is first-party proof the beat happened"
+    );
+
+    // A revoked campaign with no flag and no scans is a dead QR — the beat
+    // must not complete against it. `now()` is the database clock: the
+    // CHECK requires revoked_at >= created_at and the test process clock
+    // can lag the server's by a tick.
+    sqlx::query(
+        "UPDATE concert_qr_campaigns
+         SET announced_from_stage = false, active = false, revoked_at = now()
+         WHERE id = $1",
+    )
+    .bind(campaign_id)
+    .execute(&f.pool)
+    .await?;
+    let snapshots = f
+        .repository
+        .load_show_task_snapshots(f.workspace_id, now)
+        .await?;
+    assert!(
+        !snapshots
+            .iter()
+            .any(|s| s.event_id.into_uuid() == event_id && s.task == ShowTaskKind::QrFromStage),
+        "a revoked campaign retires the beat with it"
+    );
+
+    f.pool.close().await;
+    Ok(())
+}
