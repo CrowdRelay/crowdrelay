@@ -310,6 +310,13 @@ pub async fn approve_support_slot_ask(
     let draft = crowdrelay_domain::gig_letter::compose_letter(
         &crowdrelay_domain::gig_letter::LetterInput {
             kind: crowdrelay_domain::gig_letter::LetterKind::SupportSlotAsk,
+            // English on purpose, even for a Polish room. The ask's own opening
+            // line and bullets come from `support_slot_ask_letter`, which is
+            // written in English only; a Polish frame around English evidence
+            // is the seam the localisation exists to remove, and half a
+            // translation reads worse to a promoter than none. The frame
+            // follows the sentences, and the sentences move first.
+            language: crowdrelay_domain::gig_letter::LetterLanguage::English,
             sender: &sender,
             venue: &slot.venue,
             opening_line: &opening_line,

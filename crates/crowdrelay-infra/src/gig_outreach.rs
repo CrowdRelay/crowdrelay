@@ -287,6 +287,30 @@ pub async fn gig_outreach_is_sendable(
     })
 }
 
+/// The language the promoter reads, from the room's own country (O.6).
+///
+/// Read from the city catalogue rather than from the tenant's locale: the
+/// letter is for the person receiving it. A city whose country we have no copy
+/// for falls back to English, which `LetterLanguage::for_country` states
+/// explicitly rather than guessing at.
+///
+/// # Errors
+///
+/// Propagates the database error.
+async fn letter_language(
+    pool: &PgPool,
+    city_id: Uuid,
+) -> Result<crowdrelay_domain::gig_letter::LetterLanguage, sqlx::Error> {
+    let country = sqlx::query_scalar::<_, String>("SELECT country_code FROM cities WHERE id = $1")
+        .bind(city_id)
+        .fetch_optional(pool)
+        .await?
+        .unwrap_or_default();
+    Ok(crowdrelay_domain::gig_letter::LetterLanguage::for_country(
+        &country,
+    ))
+}
+
 /// Who the letter is from, read from the tenant's own records (O.1).
 ///
 /// The executor used to hardcode one band's name, genre, home city and two
@@ -424,14 +448,26 @@ pub async fn approve_gig_proposal(
 
     // O.1: compose the whole letter now, so the band approves the sentences the
     // promoter will read rather than an opening line and a promise.
-    let reasons: Vec<String> = plan.reasons.iter().map(reason_sentence).collect();
+    //
+    // O.6: in the promoter's language, chosen from the room's country. The
+    // opening line and the bullets are rendered in the same language as the
+    // frame — a Polish letter around English evidence is the seam this exists
+    // to remove, moved to a stranger's inbox.
+    let language = letter_language(pool, city_id).await?;
+    let opening_line = crowdrelay_domain::gig_letter::opening_line(&plan, language);
+    let reasons: Vec<String> = plan
+        .reasons
+        .iter()
+        .map(|reason| crowdrelay_domain::gig_letter::reason_line(reason, language))
+        .collect();
     let sender = sender_identity(pool, workspace_id).await?;
     let letter = crowdrelay_domain::gig_letter::compose_letter(
         &crowdrelay_domain::gig_letter::LetterInput {
             kind: crowdrelay_domain::gig_letter::LetterKind::Proposal,
+            language,
             sender: &sender,
             venue: &plan.venue,
-            opening_line: &plan.opening_line(),
+            opening_line: &opening_line,
             reasons: &reasons,
             support_act: None,
             show_date: None,
@@ -450,7 +486,7 @@ pub async fn approve_gig_proposal(
                 target_name: recipient.2.clone(),
             })
             .collect(),
-        opening_line: plan.opening_line(),
+        opening_line,
         // Rendered here rather than in the draft, from the same reasons the
         // console displayed. A draft that re-derives them is a second code path
         // describing one decision.
@@ -504,47 +540,10 @@ pub async fn approve_gig_proposal(
     })
 }
 
-/// One reason as a sentence the draft can use.
-///
-/// The console phrases these for a band; this phrases them for the promoter who
-/// receives the letter, from the same structured fact. Neither one invents a
-/// number the other did not have.
-fn reason_sentence(reason: &crowdrelay_domain::gig_plan::Reason) -> String {
-    use crowdrelay_domain::gig_plan::Reason;
-    match reason {
-        Reason::ComparableActsPlayedHere { count, .. } => {
-            // All-time count over a twelve-month window — the subset phrasing
-            // is not guaranteed by the number, so the sentence states the
-            // record.
-            if *count == 1 {
-                "one act from our genre has played there on record".to_owned()
-            } else {
-                format!("{count} acts from our genre have played there on record")
-            }
-        }
-        Reason::ReachableAudience { reachable } => {
-            format!("{reachable} people nearby asked us to tell them when we play")
-        }
-        Reason::RoomDraws { typical_draw } => {
-            format!("the room averages {typical_draw} paid tickets per ticketed show")
-        }
-        Reason::NeverPlayedButHasFans { reachable } => {
-            format!("{reachable} people nearby follow us and we have never played the city")
-        }
-        Reason::OverdueReturn { months, active_30d } => format!(
-            "our last show there was {months} months ago and {active_30d} people there were \
-             active with us this month"
-        ),
-        Reason::CoBillAddsAudience {
-            act,
-            adds_reachable,
-        } => format!("a bill with {act} reaches {adds_reachable} people we do not reach alone"),
-        Reason::WarmPromoter { name } => format!("{name} has answered us before"),
-        Reason::RoomIsActive {
-            days_since_last_event,
-        } => format!("the room had something on {days_since_last_event} days ago"),
-    }
-}
+// The per-reason sentence used to live here in English only. It moved to
+// `crowdrelay_domain::gig_letter::reason_line`, which renders the same
+// structured fact in the promoter's language — the letter owns the words a
+// stranger reads, and this file owns the rows they are measured from.
 
 /// The promoters the proposal named, in the order it ranked them.
 ///
