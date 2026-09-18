@@ -1154,7 +1154,7 @@ impl AutopilotControlRepository for PostgresAutopilotRepository {
         idempotency_key: &IdempotencyKey,
         request_id: Option<&RequestId>,
     ) -> Result<AutopilotControlMutation, RepositoryError> {
-        self.approve_outreach_wave_operator(workspace_id, wave_id, idempotency_key, request_id)
+        self.approve_outreach_wave_impl(workspace_id, wave_id, idempotency_key, request_id)
             .await
     }
 
