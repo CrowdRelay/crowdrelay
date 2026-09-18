@@ -366,6 +366,40 @@ pub async fn approve_relay_ladder(
     }
 }
 
+/// P.4: one "yes" over a show's whole growth ladder — releases the rungs
+/// already parked for the event and pre-authorizes the ones not yet decided.
+/// The domain's per-lever evidence gates still apply; this only removes the
+/// repeated human gate.
+pub async fn approve_show_ladder(
+    State(state): State<AppState>,
+    Path(event_id): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    let Ok(event_id) = Uuid::parse_str(&event_id) else {
+        return Problem::not_found(request_id(&headers))
+            .private()
+            .into_response();
+    };
+    let idempotency_key = match parse_idempotency_key(&headers) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let request_id_value = parsed_request_id(&headers);
+    match state
+        .autopilot
+        .approve_show_ladder(
+            state.ops.workspace_id(),
+            crowdrelay_domain::EventId::from_uuid(event_id),
+            &idempotency_key,
+            request_id_value.as_ref(),
+        )
+        .await
+    {
+        Ok(result) => private_json(StatusCode::OK, result),
+        Err(error) => repository_problem(error, request_id(&headers)),
+    }
+}
+
 /// Cancels the still-queued rungs a post's relay ladder released. A rung a
 /// person approved on its own keeps its approval; a rung already running or
 /// finished keeps its record.
@@ -389,6 +423,39 @@ pub async fn revoke_relay_ladder(
         .revoke_relay_ladder(
             state.ops.workspace_id(),
             source_id,
+            &idempotency_key,
+            request_id_value.as_ref(),
+        )
+        .await
+    {
+        Ok(result) => private_json(StatusCode::OK, result),
+        Err(error) => repository_problem(error, request_id(&headers)),
+    }
+}
+
+/// Withdraws the ladder approval: rungs not yet decided ask individually
+/// again, and rungs the ladder released but that have not executed yet are
+/// cancelled. A rung approved on its own keeps its approval.
+pub async fn revoke_show_ladder(
+    State(state): State<AppState>,
+    Path(event_id): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    let Ok(event_id) = Uuid::parse_str(&event_id) else {
+        return Problem::not_found(request_id(&headers))
+            .private()
+            .into_response();
+    };
+    let idempotency_key = match parse_idempotency_key(&headers) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let request_id_value = parsed_request_id(&headers);
+    match state
+        .autopilot
+        .revoke_show_ladder(
+            state.ops.workspace_id(),
+            crowdrelay_domain::EventId::from_uuid(event_id),
             &idempotency_key,
             request_id_value.as_ref(),
         )

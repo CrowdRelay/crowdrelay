@@ -33,6 +33,7 @@ struct ShowGrowthRow {
     post_show_recap_requested: bool,
     morning_after_send_at: Option<OffsetDateTime>,
     unreciprocated_crossbill_edge: bool,
+    ladder_approved: bool,
 }
 
 pub(in crate::autopilot) async fn load_show_growth_snapshots(
@@ -113,7 +114,18 @@ pub(in crate::autopilot) async fn load_show_growth_snapshots(
                 WHERE edge.to_workspace_id = event.workspace_id
                   AND edge.purpose = 'event_crossbill'
                   AND edge.status = 'active'
-            ) AS unreciprocated_crossbill_edge
+            ) AS unreciprocated_crossbill_edge,
+            -- P.4: one live ladder approval pre-authorizes every rung whose own
+            -- evidence gates still pass. `revoked_at IS NULL` is the whole
+            -- state machine — a revoked ladder leaves a row for the ledger and
+            -- stops applying in the same read.
+            EXISTS (
+                SELECT 1
+                FROM viryaos_show_ladder_approvals AS ladder
+                WHERE ladder.workspace_id = event.workspace_id
+                  AND ladder.event_id = event.id
+                  AND ladder.revoked_at IS NULL
+            ) AS ladder_approved
         FROM events AS event
         LEFT JOIN ecosystem_feature_flags AS comm
           ON comm.workspace_id = event.workspace_id
@@ -258,6 +270,7 @@ fn map_row(row: ShowGrowthRow) -> Result<ShowGrowthSnapshot, RepositoryError> {
             .map_err(|_| RepositoryError::Unexpected)?,
         attendees: bounded_u32(row.attendees)?,
         unreciprocated_crossbill_edge: row.unreciprocated_crossbill_edge,
+        ladder_approved: row.ladder_approved,
         history: ShowGrowthHistory {
             free_listing_sweep_requested: row.free_listing_sweep_requested,
             canonical_link_setup_requested: row.canonical_link_setup_requested,
