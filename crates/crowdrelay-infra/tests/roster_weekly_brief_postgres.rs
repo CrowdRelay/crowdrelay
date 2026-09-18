@@ -299,6 +299,12 @@ async fn run_roster(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
     )
     .await?;
 
+    // busy's queue is loud but its week is also growing — rising North Star
+    // so the headline's weakest is a measured minimum, not the only signal.
+    for (day, value) in [(6, 10), (5, 20), (4, 30), (3, 40), (2, 50), (1, 60)] {
+        north_star_day(pool, busy, now - time::Duration::days(day), value).await?;
+    }
+
     // drifting: nothing pending, but six days of a falling North Star — the
     // brain's own verdict is regressing, which is bucket two.
     for (day, value) in [(6, 100), (5, 90), (4, 80), (3, 30), (2, 20), (1, 10)] {
@@ -392,8 +398,8 @@ async fn run_roster(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
     );
     assert!(resolutions.contains(&"insufficient_evidence"));
     assert_eq!(
-        busy_brief.posture, "initializing",
-        "no cycle history is not a verdict"
+        busy_brief.posture, "improving",
+        "six rising days is the brain calling itself improving"
     );
     assert_eq!(busy_brief.latest_briefing_date, None);
 
@@ -413,6 +419,26 @@ async fn run_roster(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(quiet_brief.pending_decisions, 0);
     assert_eq!(quiet_brief.slipped, 0);
     assert_eq!(quiet_brief.latest_briefing_date, None);
+
+    // 5.12 — the roster's north star is a distribution: the headline is the
+    // weakest act's growth, not the roster's sum. drifting fell 90 fans over
+    // the window (10 ← 100), quiet held at zero, busy gained 50 — the
+    // headline names drifting, the total is the second line, and nobody is
+    // unreadable.
+    assert_eq!(drifting_brief.north_star_delta, Some(-90));
+    assert_eq!(quiet_brief.north_star_delta, Some(0));
+    assert_eq!(busy_brief.north_star_delta, Some(50));
+    assert_eq!(
+        brief.headline.weakest_act_id,
+        Some(drifting_brief.workspace_id)
+    );
+    assert_eq!(
+        brief.headline.weakest_act_name.as_deref(),
+        Some("drifting-act")
+    );
+    assert_eq!(brief.headline.weakest_act_growth, Some(-90));
+    assert_eq!(brief.headline.total_growth, Some(-40));
+    assert_eq!(brief.headline.acts_without_signal, 0);
     Ok(())
 }
 
@@ -451,5 +477,10 @@ async fn run_empty(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(act.posture, "initializing");
     assert_eq!(act.days_observed, 0);
     assert_eq!(act.latest_briefing_date, None);
+    assert_eq!(act.north_star_delta, None);
+    assert_eq!(brief.headline.weakest_act_id, None);
+    assert_eq!(brief.headline.weakest_act_growth, None);
+    assert_eq!(brief.headline.total_growth, None);
+    assert_eq!(brief.headline.acts_without_signal, 1);
     Ok(())
 }
