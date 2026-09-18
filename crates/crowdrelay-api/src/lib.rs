@@ -101,6 +101,7 @@ mod push;
 mod rate_limit;
 mod referrals;
 mod releases;
+mod roster_portfolio;
 mod roster_source_roi;
 mod roster_weekly_brief;
 mod routing;

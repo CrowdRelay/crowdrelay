@@ -823,4 +823,14 @@ impl AutopilotDecisionRepository for PostgresAutopilotRepository {
         )
         .await
     }
+
+    async fn replace_portfolio_pool(
+        &self,
+        workspace_id: WorkspaceId,
+        entries: &[PortfolioPoolEntry],
+        now: OffsetDateTime,
+    ) -> Result<(), RepositoryError> {
+        operations::portfolio_pool::replace_portfolio_pool(&self.pool, workspace_id, entries, now)
+            .await
+    }
 }

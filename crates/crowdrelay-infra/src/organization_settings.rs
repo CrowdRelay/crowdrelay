@@ -37,12 +37,45 @@ pub const KEY_ROSTER_PACKAGES_PER_PERIOD: &str = "roster_packages_per_period";
 /// The inclusive bounds a stored capacity must fall inside.
 pub const PACKAGES_PER_PERIOD_RANGE: std::ops::RangeInclusive<u16> = 1..=12;
 
+/// How many dispatches the roster's pooled portfolio may make in one ranking
+/// (5.1). Sixty is the ceiling for the same reason twelve bounds packages: a
+/// roster dispatching more than that a week is not planning, it is dispatching.
+///
+/// Unset means the pooled read runs on the optimizer's own default, exactly as
+/// one workspace's cycle does — the pooled question has a defensible answer
+/// before anybody tunes it.
+pub const KEY_ROSTER_PORTFOLIO_MAX_DISPATCHES: &str = "roster_portfolio_max_dispatches";
+
+/// The inclusive bounds a stored dispatch cap must fall inside.
+pub const PORTFOLIO_MAX_DISPATCHES_RANGE: std::ops::RangeInclusive<u16> = 1..=60;
+
+/// The roster's pooled cost budget per ranking, in the optimizer's resource
+/// units. Zero is a stated choice — "no cost budget, count dispatches only" —
+/// which is why it validates where the packages cap refuses its own zero.
+pub const KEY_ROSTER_PORTFOLIO_COST_BUDGET: &str = "roster_portfolio_cost_budget";
+
+/// The inclusive bounds a stored cost budget must fall inside.
+pub const PORTFOLIO_COST_BUDGET_RANGE: std::ops::RangeInclusive<f64> = 0.0..=1_000_000.0;
+
 /// The keys an operator may edit on an organisation.
 ///
 /// Same allowlist discipline as `tenant_settings::EDITABLE_KEYS`: anything else
 /// stays internal even if a row somehow appears, so the HTTP surface cannot be
 /// used to smuggle state into the organisation.
-pub const EDITABLE_KEYS: [&str; 1] = [KEY_ROSTER_PACKAGES_PER_PERIOD];
+pub const EDITABLE_KEYS: [&str; 3] = [
+    KEY_ROSTER_PACKAGES_PER_PERIOD,
+    KEY_ROSTER_PORTFOLIO_MAX_DISPATCHES,
+    KEY_ROSTER_PORTFOLIO_COST_BUDGET,
+];
+
+/// The roster's stated pooled-portfolio limits (5.1) — `None` per field where
+/// nobody has said, following the same "a hand edit out of range is nobody's
+/// choice" rule as `packages_this_period`.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct RosterPortfolioLimits {
+    pub max_dispatches: Option<u16>,
+    pub cost_budget: Option<f64>,
+}
 
 #[derive(Clone)]
 pub struct OrganizationSettingsRepository {
@@ -117,6 +150,36 @@ impl OrganizationSettingsRepository {
             .filter(|packages| PACKAGES_PER_PERIOD_RANGE.contains(packages)))
     }
 
+    /// The roster's stated pooled-portfolio limits, one `list` rather than two
+    /// `get`s — both keys are read together everywhere they are read at all.
+    ///
+    /// # Errors
+    ///
+    /// Propagates the database error.
+    pub async fn roster_portfolio_limits(
+        &self,
+        organization_id: Uuid,
+    ) -> Result<RosterPortfolioLimits, sqlx::Error> {
+        let stored = self.list(organization_id).await?;
+        let value = |key: &str| {
+            stored
+                .iter()
+                .find(|(k, _)| k == key)
+                .map(|(_, v)| v.trim().to_owned())
+                .filter(|v| !v.is_empty())
+        };
+        let max_dispatches = value(KEY_ROSTER_PORTFOLIO_MAX_DISPATCHES)
+            .and_then(|v| v.parse::<u16>().ok())
+            .filter(|v| PORTFOLIO_MAX_DISPATCHES_RANGE.contains(v));
+        let cost_budget = value(KEY_ROSTER_PORTFOLIO_COST_BUDGET)
+            .and_then(|v| v.parse::<f64>().ok())
+            .filter(|v| v.is_finite() && PORTFOLIO_COST_BUDGET_RANGE.contains(v));
+        Ok(RosterPortfolioLimits {
+            max_dispatches,
+            cost_budget,
+        })
+    }
+
     /// Upserts one override.
     ///
     /// # Errors
@@ -157,6 +220,13 @@ pub fn is_valid_value(key: &str, value: &str) -> bool {
             .trim()
             .parse::<u16>()
             .is_ok_and(|packages| PACKAGES_PER_PERIOD_RANGE.contains(&packages)),
+        KEY_ROSTER_PORTFOLIO_MAX_DISPATCHES => value
+            .trim()
+            .parse::<u16>()
+            .is_ok_and(|dispatches| PORTFOLIO_MAX_DISPATCHES_RANGE.contains(&dispatches)),
+        KEY_ROSTER_PORTFOLIO_COST_BUDGET => value.trim().parse::<f64>().is_ok_and(|budget| {
+            budget.is_finite() && PORTFOLIO_COST_BUDGET_RANGE.contains(&budget)
+        }),
         _ => false,
     }
 }
@@ -186,7 +256,28 @@ mod tests {
     #[test]
     fn an_unknown_key_is_never_valid() {
         assert!(!is_valid_value("anything_else", "1"));
-        assert_eq!(EDITABLE_KEYS.len(), 1);
-        assert!(EDITABLE_KEYS.contains(&KEY_ROSTER_PACKAGES_PER_PERIOD));
+        assert_eq!(EDITABLE_KEYS.len(), 3);
+        for key in EDITABLE_KEYS {
+            assert!(
+                is_valid_value(key, "1"),
+                "editable key {key} must accept a valid value"
+            );
+        }
+    }
+
+    #[test]
+    fn the_portfolio_bounds_are_asserted_on_both_sides() {
+        assert!(is_valid_value(KEY_ROSTER_PORTFOLIO_MAX_DISPATCHES, "1"));
+        assert!(is_valid_value(KEY_ROSTER_PORTFOLIO_MAX_DISPATCHES, "60"));
+        assert!(!is_valid_value(KEY_ROSTER_PORTFOLIO_MAX_DISPATCHES, "0"));
+        assert!(!is_valid_value(KEY_ROSTER_PORTFOLIO_MAX_DISPATCHES, "61"));
+        // Zero is a stated choice for the cost budget — "no cost budget" —
+        // unlike the packages cap where a zero would refuse every act for a
+        // reason none of them stated.
+        assert!(is_valid_value(KEY_ROSTER_PORTFOLIO_COST_BUDGET, "0"));
+        assert!(is_valid_value(KEY_ROSTER_PORTFOLIO_COST_BUDGET, "2500.5"));
+        assert!(!is_valid_value(KEY_ROSTER_PORTFOLIO_COST_BUDGET, "-1"));
+        assert!(!is_valid_value(KEY_ROSTER_PORTFOLIO_COST_BUDGET, "NaN"));
+        assert!(!is_valid_value(KEY_ROSTER_PORTFOLIO_COST_BUDGET, "1e9"));
     }
 }

@@ -546,7 +546,7 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
                 first.agent_execution_health.sizing_multiplier(),
             ));
         }
-        let selection = portfolio::select_portfolio(
+        let run = portfolio::select_portfolio(
             &portfolio_candidates,
             &gi_policy,
             pending_measurement_count,
@@ -554,6 +554,21 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
             &experimental_keys,
             sizing_multiplier,
         );
+        let selection = run.selection;
+        // 5.1: publish the pool this selection was drawn from. The roster's
+        // pooled read re-ranks every member act's rows under the
+        // organisation's own config — including what this workspace rejected
+        // for want of slots. Warn-and-continue: a visibility write must not
+        // degrade the cycle it reports on.
+        if let Err(error) = self
+            .repository
+            .replace_portfolio_pool(self.workspace_id, &run.pool, now)
+            .await
+        {
+            report
+                .gi_dispatch_log
+                .push(format!("portfolio pool write failed; roster read goes stale: {error}"));
+        }
         let selected_keys = portfolio::selected_keys(&selection);
         report.gi_candidates = u32::try_from(scored_candidates.len()).unwrap_or(u32::MAX);
         report.gi_wait_reason = selection.wait_reason.clone();

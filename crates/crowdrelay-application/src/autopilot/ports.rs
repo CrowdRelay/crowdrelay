@@ -856,6 +856,49 @@ pub trait AutopilotDecisionRepository: Send + Sync {
         holdout_probability: f64,
         trace: &TraceContext,
     ) -> Result<CandidatePersistence, RepositoryError>;
+
+    /// Replaces the workspace's current candidate pool with the pool the eval
+    /// just ranked (5.1). The roster's pooled read re-ranks the union of every
+    /// member act's rows — losers are rows too, because a candidate a lone act
+    /// rejected for `max_dispatches` may win a slot in the roster's larger
+    /// pool, which is the whole point of pooling.
+    ///
+    /// The pool is current state, not a log: each cycle's write replaces the
+    /// workspace's rows atomically, so the table always holds the pool the
+    /// latest cycle actually ranked.
+    async fn replace_portfolio_pool(
+        &self,
+        workspace_id: WorkspaceId,
+        entries: &[PortfolioPoolEntry],
+        now: OffsetDateTime,
+    ) -> Result<(), RepositoryError>;
+}
+
+/// One row of a workspace's current candidate pool — the persisted form the
+/// roster read (5.1) re-ranks under the organisation's own portfolio config.
+///
+/// `decision_value` travels whole rather than as `intrinsic_y30`: a re-rank
+/// needs the same `total()`, `resource_cost`, `uncertainty` and bridge terms
+/// the act's own selection used, not a number re-derived against a world
+/// model that has since moved.
+#[derive(Clone, Debug)]
+pub struct PortfolioPoolEntry {
+    /// `OpportunityId`'s canonical string — the key rejections already use,
+    /// so a row's local outcome joins to the same identity.
+    pub opportunity_key: String,
+    /// The identity itself, whole: its display form is not parseable (parts
+    /// contain `:`), so the roster read rebuilds candidates from this.
+    pub opportunity_id: crowdrelay_brain::OpportunityId,
+    pub audience_key: String,
+    pub source_context: String,
+    pub action_key: String,
+    pub decision_value: crowdrelay_brain::DecisionValue,
+    pub is_experimental: bool,
+    /// What the act's own selection did with this candidate — kept so the
+    /// roster read can say "locally rejected for `max_dispatches`, selected
+    /// here" rather than presenting a number without its history.
+    pub selected: bool,
+    pub rejection_reason: Option<String>,
 }
 
 /// The `last_error_kind` an action is failed with when the roster's monthly
