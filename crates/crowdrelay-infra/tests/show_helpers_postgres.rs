@@ -137,6 +137,69 @@ async fn run(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
     venue_fact(pool, cold, "capacity", "350", None).await?;
     venue_fact(pool, no_capacity, "capacity", "999", Some(other)).await?;
 
+    // ── P.3 sections ──
+    // bill_mates: a peer act on friday's bill (the kind nobody contacts), a
+    // second bill they shared before, a tenant act the crossbill edge already
+    // covers, and an act of our own — the last two must not list.
+    let friday_id = event_id(pool, act, "friday").await?;
+    let peer = peer_act(pool, "The Openers").await?;
+    sqlx::query(
+        "INSERT INTO event_acts (workspace_id, event_id, act_slug, act_name, position, peer_act_id)
+         VALUES ($1, $2, 'the-openers', 'The Openers', 1, $3)",
+    )
+    .bind(act)
+    .bind(friday_id)
+    .bind(peer)
+    .execute(pool)
+    .await?;
+    // A past shared bill is the warm fact the row carries.
+    show(pool, act, Some(wroclaw), "last-month", "Klub A").await?;
+    let last_month = event_id(pool, act, "last-month").await?;
+    sqlx::query(
+        "INSERT INTO event_acts (workspace_id, event_id, act_slug, act_name, position, peer_act_id)
+         VALUES ($1, $2, 'the-openers', 'The Openers', 1, $3)",
+    )
+    .bind(act)
+    .bind(last_month)
+    .bind(peer)
+    .execute(pool)
+    .await?;
+    // A tenant act — the crossbill edge is its channel, not this section.
+    sqlx::query(
+        "INSERT INTO event_acts (workspace_id, event_id, act_slug, act_name, position, act_workspace_id)
+         VALUES ($1, $2, 'tenant-band', 'Tenant Band', 2, $3)",
+    )
+    .bind(act).bind(friday_id).bind(other).execute(pool).await?;
+    // Our own act — never a candidate.
+    sqlx::query(
+        "INSERT INTO event_acts (workspace_id, event_id, act_slug, act_name, position, act_workspace_id)
+         VALUES ($1, $2, 'us', 'Us', 0, $3)",
+    )
+    .bind(act).bind(friday_id).bind(act).execute(pool).await?;
+
+    // venue_channel: "Klub A" was marked by the event trigger; a venue-kind
+    // beacon of the same name means the channel is already on the roster.
+    beacon(pool, act, wroclaw, "Klub A", "venue", None).await?;
+    // photographers: one in the city the band has written to, one in the
+    // wrong city, one that is the other workspace's.
+    beacon(
+        pool,
+        act,
+        wroclaw,
+        "Basia Lens",
+        "photographer",
+        Some("basia@example.com"),
+    )
+    .await?;
+    beacon(pool, act, krakow, "Krakow Lens", "photographer", None).await?;
+    beacon(pool, other, wroclaw, "Their Lens", "photographer", None).await?;
+    sqlx::query(
+        "INSERT INTO viryaos_contact_governor
+            (workspace_id, normalized_contact, last_outbound_at, next_contact_after, last_context)
+         VALUES ($1, 'basia@example.com', now() - interval '10 days', now() - interval '3 days', 'beacon.outreach')",
+    )
+    .bind(act).execute(pool).await?;
+
     let helpers = who_can_help(pool, act, "friday")
         .await?
         .ok_or("the show produced no helper read")?;
@@ -224,6 +287,46 @@ async fn run(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(
         no_cap.capacity, None,
         "the other workspace's private fact leaked into a global read"
+    );
+
+    // bill_mates — the peer act lists with its shared-bill count; the tenant
+    // act and our own do not (their channels are the crossbill edge and
+    // nothing, respectively).
+    let mates: Vec<(&str, &str, i64)> = helpers
+        .bill_mates
+        .iter()
+        .map(|m| (m.act_name.as_str(), m.resolution.as_str(), m.shared_bills))
+        .collect();
+    assert_eq!(
+        mates,
+        [("The Openers", "peer", 2)],
+        "bill_mates must hold the peer acts only: {mates:?}"
+    );
+    assert!(
+        !helpers.bill_mates[0].on_roster,
+        "no beacon carries the name yet"
+    );
+
+    // venue_channel — the show's own room, resolved to the registry and
+    // matched by the venue-kind beacon of the same name.
+    let channel = helpers
+        .venue_channel
+        .as_ref()
+        .ok_or("the room the show is in produced no channel row")?;
+    assert_eq!(channel.display_name, "Klub A");
+    assert!(channel.venue_id.is_some(), "the registry must resolve it");
+    assert!(channel.on_roster, "the venue beacon is the channel");
+
+    // photographers — this city's only, warmest facts surfaced.
+    let lenses: Vec<(&str, bool)> = helpers
+        .photographers
+        .iter()
+        .map(|p| (p.display_name.as_str(), p.contacted_before))
+        .collect();
+    assert_eq!(
+        lenses,
+        [("Basia Lens", true)],
+        "photographers must be this city's, this tenant's: {lenses:?}"
     );
 
     // The other workspace's read of the same city: its own press, its own
@@ -521,6 +624,60 @@ async fn venue_fact(
     .execute(pool)
     .await?;
     Ok(())
+}
+
+async fn event_id(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    slug: &str,
+) -> Result<Uuid, Box<dyn std::error::Error>> {
+    Ok(
+        sqlx::query_scalar::<_, Uuid>(
+            "SELECT id FROM events WHERE workspace_id = $1 AND slug = $2",
+        )
+        .bind(workspace_id)
+        .bind(slug)
+        .fetch_one(pool)
+        .await?,
+    )
+}
+
+async fn peer_act(pool: &PgPool, name: &str) -> Result<Uuid, Box<dyn std::error::Error>> {
+    Ok(sqlx::query_scalar::<_, Uuid>(
+        "INSERT INTO place_peer_acts (name_key, display_name)
+         VALUES (place_venue_key($1), $1)
+         ON CONFLICT (name_key) DO UPDATE SET display_name = EXCLUDED.display_name
+         RETURNING id",
+    )
+    .bind(name)
+    .fetch_one(pool)
+    .await?)
+}
+
+/// A beacon row — kind, city and optional email are the axes the P.3
+/// sections filter on.
+async fn beacon(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    city_id: Uuid,
+    display_name: &str,
+    kind: &str,
+    email: Option<&str>,
+) -> Result<Uuid, Box<dyn std::error::Error>> {
+    Ok(sqlx::query_scalar::<_, Uuid>(
+        "INSERT INTO viryaos_beacons
+            (workspace_id, city_id, beacon_kind, display_name, contact_email,
+             accepts_outreach)
+         VALUES ($1, $2, $3, $4, $5, true)
+         RETURNING id",
+    )
+    .bind(workspace_id)
+    .bind(city_id)
+    .bind(kind)
+    .bind(display_name)
+    .bind(email)
+    .fetch_one(pool)
+    .await?)
 }
 
 async fn staged_contact(
