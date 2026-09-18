@@ -10,7 +10,9 @@ serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
-time.workspace = true
+# `macros` for `format_description!` — the booking letter renders window
+# dates in the recipient's language.
+time = { workspace = true, features = ["macros"] }
 url.workspace = true
 uuid.workspace = true
 

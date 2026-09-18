@@ -162,7 +162,7 @@ impl AutopilotActionPayload {
                 ],
                 deadline_note: String::new(),
             },
-            Self::RequestBookingOutreach { target_name, score, phase, proposed_window, additional_recipients, .. } => ActionBriefing {
+            Self::RequestBookingOutreach { target_name, score, phase, proposed_window, additional_recipients, draft, .. } => ActionBriefing {
                 summary: if additional_recipients.is_empty() {
                     format!("Booking contact: {}", target_name)
                 } else {
@@ -191,6 +191,22 @@ impl AutopilotActionPayload {
                             value: format!("{} more target(s) in the same city", additional_recipients.len()),
                         });
                     }
+                    // The approval shows the words the send carries, not a
+                    // template key that resolves outside the repo.
+                    fields.push(BriefingField {
+                        label: "Subject".into(),
+                        value: match draft.subject.trim().is_empty() {
+                            true => "not composed".to_owned(),
+                            false => draft.subject.clone(),
+                        },
+                    });
+                    fields.push(BriefingField {
+                        label: "Body".into(),
+                        value: match draft.body.trim().is_empty() {
+                            true => "not composed".to_owned(),
+                            false => truncate(draft.body.clone(), 2000),
+                        },
+                    });
                     fields
                 },
                 deadline_note: String::new(),

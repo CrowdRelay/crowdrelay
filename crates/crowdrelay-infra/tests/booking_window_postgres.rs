@@ -560,6 +560,10 @@ async fn run_execution_case(pool: &PgPool) -> Result<(), Box<dyn std::error::Err
                 }],
             }),
             additional_recipients: vec![(BookingTargetId::from_uuid(extra), 1)],
+            draft: crowdrelay_domain::booking_letter::BookingLetter {
+                subject: "Act One — booking in Wrocław".to_owned(),
+                body: "Cześć,\n\nJesteśmy Act One.".to_owned(),
+            },
             venue_evidence: Some(crowdrelay_domain::booking::BookingVenueEvidence {
                 shows_last_12m: 9,
                 comparable_acts: 3,
@@ -621,6 +625,11 @@ async fn run_execution_case(pool: &PgPool) -> Result<(), Box<dyn std::error::Err
     assert_eq!(
         emitted["first_line_fact"].as_str(),
         Some("9 shows in the last year, 3 comparable acts on its bills, programmes metal."),
+    );
+    // The letter travels approved — the executor sends these words verbatim.
+    assert_eq!(
+        emitted["draft"]["subject"].as_str(),
+        Some("Act One — booking in Wrocław")
     );
 
     // And every recipient's clock moved — one touch per person.
@@ -684,6 +693,10 @@ async fn run_stale_recipient_case(pool: &PgPool) -> Result<(), Box<dyn std::erro
             phase: BookingOutreachPhase::Initial,
             proposed_window: None,
             additional_recipients: vec![(BookingTargetId::from_uuid(extra), 9_999)],
+            draft: crowdrelay_domain::booking_letter::BookingLetter {
+                subject: "Act One — booking in Wrocław".to_owned(),
+                body: "Cześć,\n\nJesteśmy Act One.".to_owned(),
+            },
             venue_evidence: None,
         },
     )?;

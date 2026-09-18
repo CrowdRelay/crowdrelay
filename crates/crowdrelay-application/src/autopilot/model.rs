@@ -576,6 +576,14 @@ pub enum AutopilotActionPayload {
         /// approval showed. `None` for an unlinked or evidenceless room.
         #[serde(default)]
         venue_evidence: Option<BookingVenueEvidence>,
+        /// The finished letter, composed when the action is written — the
+        /// words the approver reads are the words the target gets, and
+        /// `draft_revision` can offer `subject`/`body` for editing because
+        /// the field rides under `draft`. Dispatch refuses a missing or
+        /// empty draft rather than letting anything compose on the band's
+        /// behalf.
+        #[serde(default)]
+        draft: crowdrelay_domain::booking_letter::BookingLetter,
     },
     RequestAudienceCampaign {
         event_id: EventId,
@@ -1897,6 +1905,10 @@ mod tests {
                 ],
             }),
             additional_recipients: vec![(BookingTargetId::new(), 2)],
+            draft: crowdrelay_domain::booking_letter::BookingLetter {
+                subject: "Act — booking in Kraków".to_owned(),
+                body: "Hi,\n\nWe are Act.".to_owned(),
+            },
             venue_evidence: Some(BookingVenueEvidence {
                 shows_last_12m: 9,
                 comparable_acts: 3,
@@ -1936,6 +1948,7 @@ mod tests {
             proposed_window,
             additional_recipients,
             venue_evidence,
+            draft,
             ..
         } = serde_json::from_value(legacy)?
         else {
@@ -1944,6 +1957,10 @@ mod tests {
         assert_eq!(proposed_window, None);
         assert!(additional_recipients.is_empty());
         assert_eq!(venue_evidence, None);
+        // A payload written before the letter travelled in it decodes to the
+        // empty draft — dispatch refuses it rather than composing on the
+        // band's behalf.
+        assert!(draft.subject.is_empty() && draft.body.is_empty());
         Ok(())
     }
 
