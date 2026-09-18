@@ -74,6 +74,9 @@ pub struct HelperEvent {
     /// The city's country — communities are country-scoped, so the field is
     /// `country_code`, never anything that reads as city-local.
     pub country_code: Option<String>,
+    /// The city's slug — what an operator action (admit a candidate to the
+    /// roster) needs to place a beacon in this city. `null` with `city`.
+    pub city_slug: Option<String>,
 }
 
 /// An unpromoted press, radio or playlist contact in the show's city.
@@ -233,11 +236,13 @@ pub async fn who_can_help(
             Option<String>,
             Option<String>,
             Option<String>,
+            Option<String>,
         ),
     >(
         r#"
         SELECT event.id, event.slug, event.title, event.starts_at,
-               event.city_id, event.venue, city.name, city.country_code
+               event.city_id, event.venue, city.name, city.country_code,
+               city.slug
         FROM events AS event
         LEFT JOIN cities AS city ON city.id = event.city_id
         WHERE event.workspace_id = $1 AND event.slug = $2
@@ -251,7 +256,8 @@ pub async fn who_can_help(
     else {
         return Ok(None);
     };
-    let (event_id, slug, title, starts_at, city_id, venue_text, city_name, country_code) = event;
+    let (event_id, slug, title, starts_at, city_id, venue_text, city_name, country_code, city_slug) =
+        event;
 
     let mut degraded: Vec<&'static str> = Vec::new();
     let mut press = Vec::new();
@@ -273,6 +279,7 @@ pub async fn who_can_help(
                 starts_at,
                 city: city_name,
                 country_code,
+                city_slug,
             },
             degraded,
             notes: vec!["staged_contacts_have_no_city"],
@@ -643,6 +650,7 @@ pub async fn who_can_help(
             starts_at,
             city: city_name,
             country_code,
+            city_slug,
         },
         degraded,
         notes: vec!["staged_contacts_have_no_city"],
