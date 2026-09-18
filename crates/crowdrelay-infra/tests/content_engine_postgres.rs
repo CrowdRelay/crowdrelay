@@ -14,9 +14,10 @@ use crowdrelay_domain::{
     team_operations::TeamSkill,
 };
 use crowdrelay_infra::content_engine::{
-    ContentEngineError, NewArc, NewCapturePlan, NewFanObservation, NewOutcome, NewPeer,
-    NewPeerObservation, NewProductionEvent, NewSuggestion, PostgresContentEngineRepository,
+    ContentEngineError, NewArc, NewCapturePlan, NewFanObservation, NewOutcome, NewPeerObservation,
+    NewProductionEvent, NewSuggestion, PostgresContentEngineRepository,
 };
+use crowdrelay_infra::content_peers::NewPeer;
 use serde_json::json;
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use time::{Date, Month};
@@ -137,7 +138,7 @@ async fn peers_resolve_once_and_dedup_by_name() -> Result<(), Box<dyn std::error
     assert!(confirmed_before.is_empty());
 
     let confirmed = repo
-        .resolve_peer(workspace_id, proposed.id, PeerStatus::Confirmed, None)
+        .resolve_peer(workspace_id, proposed.id, PeerStatus::Confirmed, None, None)
         .await?;
     assert_eq!(confirmed.status, PeerStatus::Confirmed);
     assert!(confirmed.confirmed_at.is_some());
@@ -149,6 +150,7 @@ async fn peers_resolve_once_and_dedup_by_name() -> Result<(), Box<dyn std::error
             proposed.id,
             PeerStatus::Rejected,
             Some("late"),
+            None,
         )
         .await
         .expect_err("a decided peer is final");
@@ -172,7 +174,7 @@ async fn peers_resolve_once_and_dedup_by_name() -> Result<(), Box<dyn std::error
         .await?
         .expect("second peer lands");
     let silent = repo
-        .resolve_peer(workspace_id, second.id, PeerStatus::Rejected, None)
+        .resolve_peer(workspace_id, second.id, PeerStatus::Rejected, None, None)
         .await
         .expect_err("a reasonless rejection is refused");
     assert!(matches!(silent, ContentEngineError::MissingReason));
@@ -182,6 +184,7 @@ async fn peers_resolve_once_and_dedup_by_name() -> Result<(), Box<dyn std::error
             second.id,
             PeerStatus::Rejected,
             Some("wrong genre"),
+            None,
         )
         .await?;
     assert_eq!(rejected.rejection_reason.as_deref(), Some("wrong genre"));
@@ -458,7 +461,7 @@ async fn a_second_workspace_sees_nothing() -> Result<(), Box<dyn std::error::Err
 
     // And the other workspace cannot reach our rows by id either.
     let cross = repo
-        .resolve_peer(theirs, peer.id, PeerStatus::Rejected, Some("x"))
+        .resolve_peer(theirs, peer.id, PeerStatus::Rejected, Some("x"), None)
         .await;
     assert!(
         matches!(cross, Err(ContentEngineError::InvalidTransition)),

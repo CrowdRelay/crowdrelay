@@ -7259,6 +7259,99 @@ paths:
           $ref: '#/components/responses/Problem'
         '503':
           $ref: '#/components/responses/Problem'
+  /admin/content-engine/peers:
+    get:
+      operationId: listContentEnginePeers
+      summary: The peer watch list as it stands, proposals included
+      description: >
+        Peers are the artists the band watches: the peer-act-graph scanner
+        proposes candidates from shared genres in tracked bills, the operator
+        confirms or refuses them, and only a `confirmed` row is ever observed.
+        Absent `status` lists all three; the parameter narrows to one.
+      security:
+      - adminBearer: []
+      parameters:
+      - in: query
+        name: status
+        required: false
+        schema:
+          type: string
+          enum: [proposed, confirmed, rejected]
+      responses:
+        '200':
+          description: The workspace's peers, oldest first.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [peers]
+                properties:
+                  peers:
+                    type: array
+                    items: { $ref: '#/components/schemas/Peer' }
+        '400': { $ref: '#/components/responses/PrivateProblem' }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
+    post:
+      operationId: createContentEnginePeer
+      summary: Add a peer the operator chose themselves
+      description: >
+        An operator-entered peer lands `confirmed` — typed in by a person, it
+        is already the decision — with `proposed_by` stamped `operator`. The
+        name is the peer's natural identity: a live row already carrying it
+        answers `409`, where the scanner's same clash is a silent no-op.
+        Retried with the same Idempotency-Key and body, the stored peer
+        answers `200` instead of writing twice.
+      security:
+      - adminBearer: []
+      parameters:
+      - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreatePeerRequest' }
+      responses:
+        '200': { description: The peer a replayed key already created, content: { application/json: { schema: { $ref: '#/components/schemas/Peer' } } } }
+        '201': { description: Peer created and confirmed, content: { application/json: { schema: { $ref: '#/components/schemas/Peer' } } } }
+        '400': { $ref: '#/components/responses/PrivateProblem' }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '409': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
+  /admin/content-engine/peers/{peer_id}/resolve:
+    post:
+      operationId: resolveContentEnginePeer
+      summary: Confirm or refuse a proposed peer
+      description: >
+        The transition guard lives in the `UPDATE`'s `WHERE status =
+        'proposed'` clause, so a stale second decision answers `409` rather
+        than rewriting the first. A proposal arrives without handles and is
+        never observable until the operator adds them, so `confirmed` may
+        carry `handles`, `watch_for` and `tier` — patched in the same write
+        that confirms it. `rejected` must carry `rejection_reason` and none
+        of the edit fields: the row is terminal, and the reason is the
+        suppression record that stops the scanner asking again.
+      security:
+      - adminBearer: []
+      parameters:
+      - in: path
+        name: peer_id
+        required: true
+        schema: { type: string, format: uuid }
+      - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ResolvePeerRequest' }
+      responses:
+        '200': { description: The peer as it now stands — resolved, or the replay of an already-made decision, content: { application/json: { schema: { $ref: '#/components/schemas/Peer' } } } }
+        '400': { $ref: '#/components/responses/PrivateProblem' }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '409': { $ref: '#/components/responses/PrivateProblem' }
+        '422': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
   /admin/organizations/{organization_id}/settings:
     get:
       operationId: getOrganizationSettings
@@ -12910,6 +13003,89 @@ components:
             `claimed` opens the placement and counts toward nothing. `present` and `absent` are
             what a read found. `unreadable` records that the read did not happen and advances no
             checkpoint.
+    Peer:
+      type: object
+      additionalProperties: false
+      required: [id, name, tier, handles, watch_for, why, proposed_by, status, confirmed_at, created_at, updated_at]
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        tier: { $ref: '#/components/schemas/PeerTier' }
+        handles:
+          type: object
+          additionalProperties: true
+          description: >
+            `{"spotify": "...", "youtube": "...", "rss": "https://..."}` — platform name to
+            handle. The observation sweep reads whichever a peer uses; a scanner proposal
+            carries `{}` and is never observable until the confirm adds them.
+        watch_for:
+          type: array
+          items: { type: string }
+          description: Which dimensions are worth observing for this peer.
+        why: { type: string, description: Why they are on the list — the operator's words or the scanner's evidence. }
+        proposed_by: { type: string, description: "`operator` for typed-in entries; `peer-act-graph` for scanner proposals." }
+        status: { $ref: '#/components/schemas/PeerStatus' }
+        rejection_reason: { type: string, description: Present on `rejected` — the suppression record that stops the same wrong name being proposed twice. }
+        confirmed_at: { type: [string, 'null'], format: date-time }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    PeerTier:
+      type: string
+      enum: [aspirational, near_peer, lateral]
+      description: >
+        Who the peer is relative to the band: aspirational shows where to aim, near-peer shows
+        what is working at the same level right now, lateral imports moves a genre has not tried.
+    PeerStatus:
+      type: string
+      enum: [proposed, confirmed, rejected]
+      description: >
+        The system may propose; the operator confirms. A candidate is not a peer until then —
+        sweeps only observe `confirmed`, and `rejected` is terminal.
+    CreatePeerRequest:
+      type: object
+      additionalProperties: false
+      required: [name, tier, why]
+      properties:
+        name: { type: string, minLength: 1, description: The artist's name — the dedup identity. }
+        tier: { $ref: '#/components/schemas/PeerTier' }
+        handles:
+          type: object
+          additionalProperties: true
+          default: {}
+          description: Platform name to handle — the observation sweep reads whichever a peer uses.
+        watch_for:
+          type: array
+          items: { type: string }
+          default: []
+        why: { type: string, minLength: 1, description: Why they are on the list, in the operator's words — the audit. }
+    ResolvePeerRequest:
+      type: object
+      additionalProperties: false
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [confirmed, rejected]
+          description: The only statuses a proposal may resolve to.
+        rejection_reason:
+          type: string
+          description: >
+            Required on `rejected` — the record that stops the same wrong name being proposed
+            twice. Must be absent on `confirmed`.
+        handles:
+          type: object
+          additionalProperties: true
+          description: >
+            Confirm-time edit: a scanner proposal arrives without handles and is never
+            observable until the operator adds them. Patched in the same guarded UPDATE.
+            Must be absent on `rejected`.
+        watch_for:
+          type: array
+          items: { type: string }
+          description: Confirm-time edit; absent on `rejected`.
+        tier:
+          $ref: '#/components/schemas/PeerTier'
+          description: Confirm-time edit; absent on `rejected`.
     TeamOpportunityTermsRequest:
       type: object
       additionalProperties: false
