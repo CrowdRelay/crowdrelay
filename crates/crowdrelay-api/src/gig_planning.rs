@@ -121,6 +121,11 @@ fn capacity_band(reachable: u32) -> Option<(u32, u32)> {
 #[derive(Debug, Serialize)]
 struct ProposalView {
     city_name: String,
+    /// The first line of the letter an approval would queue — computed by the
+    /// plan's own `opening_line()`, so the screen reads the same words the
+    /// promoter would. The approve-with-edit affordance (N.10) pre-fills it;
+    /// without it the operator would be editing a sentence they cannot see.
+    opening_line: String,
     #[serde(flatten)]
     plan: GigPlan,
 }
@@ -433,6 +438,7 @@ pub async fn band_gig_plan(
                 .map(|plan| ProposalView {
                     city_name: display_name(&names, plan.city_id.into_uuid(), &plan.city)
                         .to_owned(),
+                    opening_line: plan.opening_line(),
                     plan,
                 })
                 .collect(),
