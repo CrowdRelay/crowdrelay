@@ -78,8 +78,8 @@ include!("autopilot/requests.rs");
 mod runtime;
 pub use discovery::discover_team_opportunity;
 pub use runtime::{
-    execution_claim, execution_report, executor_heartbeat, provider_action, release_component,
-    release_ledger, rum,
+    execution_claim, execution_report, executor_capabilities, executor_heartbeat, provider_action,
+    release_component, release_ledger, rum,
 };
 
 #[derive(Debug, Serialize)]

@@ -262,3 +262,154 @@ async fn seed_action(
     .await?;
     Ok(())
 }
+
+/// §N.9 — the posture read is the missing-capability surface: it names the
+/// lanes a workspace's actions are parked behind, before an approval meets
+/// the refusal. Driven against real rows because every claim — live, blocked,
+/// missing, awaiting — is a join that could silently measure the wrong thing.
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn the_posture_names_missing_lanes_and_what_they_park()
+-> Result<(), Box<dyn std::error::Error>> {
+    let database_url =
+        std::env::var("CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL").map_err(|error| {
+            format!(
+                "CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL must target a disposable database: {error}"
+            )
+        })?;
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&database_url)
+        .await?;
+    crowdrelay_infra::database::MIGRATOR.run(&pool).await?;
+
+    let workspace_id = WorkspaceId::new();
+    let now = OffsetDateTime::now_utc();
+    sqlx::query("INSERT INTO workspaces (id, slug, name) VALUES ($1, $2, $3)")
+        .bind(workspace_id.into_uuid())
+        .bind(format!("posture-{}", workspace_id.into_uuid().simple()))
+        .bind("Posture test")
+        .execute(&pool)
+        .await?;
+
+    // An empty registry first: no executor has ever heartbeated, and the
+    // dispatcher fails open there — the report must say so rather than list
+    // every capability as missing.
+    let empty =
+        crowdrelay_infra::autopilot::executor_capability_posture(&pool, workspace_id, now).await?;
+    assert!(
+        !empty.executors_registered,
+        "a workspace with no executor rows reported a live registry"
+    );
+    assert!(
+        empty.capabilities.is_empty(),
+        "nothing advertised and nothing parked is an empty posture, not a wall of missing"
+    );
+
+    // One executor, one advertised lane.
+    sqlx::query(
+        r#"
+        INSERT INTO viryaos_executor_instances (
+            workspace_id, executor_id, version, manifest_sha, observed_at, expires_at
+        ) VALUES ($1,'n8n-gated-test','test','test-manifest',$2,$3)
+        "#,
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(now)
+    .bind(now + time::Duration::minutes(30))
+    .execute(&pool)
+    .await?;
+    advertise(&pool, workspace_id, "fan.lifecycle.message", now).await?;
+
+    // A queued action parked behind a capability nobody advertises — the same
+    // state the gate leaves, because that is the definition of waiting on an
+    // executor.
+    seed_action(
+        &pool,
+        workspace_id,
+        Uuid::now_v7(),
+        "content.artifact.request",
+        json!({
+            "kind": "request_content_artifact",
+            "source_id": Uuid::now_v7(),
+            "source_version": 1,
+            "artifact": "live_listing",
+            "template_key": "content.live_listing.v1"
+        }),
+        now,
+    )
+    .await?;
+    sqlx::query(
+        "UPDATE viryaos_autopilot_actions SET last_error_kind = 'awaiting_executor'
+         WHERE workspace_id = $1",
+    )
+    .bind(workspace_id.into_uuid())
+    .execute(&pool)
+    .await?;
+
+    let report =
+        crowdrelay_infra::autopilot::executor_capability_posture(&pool, workspace_id, now).await?;
+    assert!(report.executors_registered);
+
+    let parked = report
+        .capabilities
+        .iter()
+        .find(|lane| lane.capability == "content.artifact")
+        .ok_or("a parked action's capability was absent from the posture")?;
+    assert_eq!(parked.state, "missing");
+    assert_eq!(
+        parked.awaiting, 1,
+        "one parked action is one waiting letter"
+    );
+    assert!(parked.executors.is_empty());
+
+    let live_lane = report
+        .capabilities
+        .iter()
+        .find(|lane| lane.capability == "fan.lifecycle.message")
+        .ok_or("an advertised capability was absent from the posture")?;
+    assert_eq!(live_lane.state, "live");
+    assert_eq!(live_lane.awaiting, 0);
+    assert_eq!(live_lane.executors, vec!["n8n-gated-test".to_owned()]);
+
+    // The order the screen should show them in: the lane with something
+    // parked leads, and a missing lane outranks a live one — an alphabetical
+    // sort on the state string would put missing last, which is the one
+    // place the operator never looks.
+    assert_eq!(
+        report
+            .capabilities
+            .iter()
+            .map(|lane| lane.capability.as_str())
+            .collect::<Vec<_>>(),
+        ["content.artifact", "fan.lifecycle.message"],
+        "waiting-first ordering broke"
+    );
+
+    // A breaker holding the only executor open turns the lane blocked — not
+    // missing, because the lane exists and something measurable holds it.
+    sqlx::query(
+        "INSERT INTO viryaos_executor_circuit_breakers
+            (workspace_id, executor_id, failure_count, last_failure_at, guarded_until, reason)
+         VALUES ($1, 'n8n-gated-test', 3, $2, $3, 'consecutive_failures')",
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(now)
+    .bind(now + time::Duration::minutes(15))
+    .execute(&pool)
+    .await?;
+
+    let report =
+        crowdrelay_infra::autopilot::executor_capability_posture(&pool, workspace_id, now).await?;
+    let blocked = report
+        .capabilities
+        .iter()
+        .find(|lane| lane.capability == "fan.lifecycle.message")
+        .ok_or("the advertised lane vanished behind its breaker")?;
+    assert_eq!(
+        blocked.state, "blocked",
+        "an open breaker is blocked, not missing — the lane exists"
+    );
+
+    Ok(())
+}

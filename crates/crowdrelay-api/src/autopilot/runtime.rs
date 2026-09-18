@@ -469,6 +469,31 @@ pub async fn release_component(
     }
 }
 
+/// `GET /v1/control-plane/autopilot/capabilities` — every executor lane the
+/// workspace has, every one its parked actions need, and what each costs.
+///
+/// The approval-time refusal is where a missing capability surfaces today —
+/// a sentence at the moment somebody tries to act. This read is the same
+/// registry the gate consults, laid out so the operator sees the gap before
+/// they meet it.
+pub async fn executor_capabilities(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    match crowdrelay_infra::autopilot::executor_capability_posture(
+        &state.database,
+        state.ops.workspace_id(),
+        OffsetDateTime::now_utc(),
+    )
+    .await
+    {
+        Ok(report) => private_json(StatusCode::OK, report),
+        Err(error) => {
+            tracing::warn!(%error, "executor capability posture read failed");
+            Problem::service_unavailable(request_id(&headers))
+                .private()
+                .into_response()
+        }
+    }
+}
+
 pub async fn release_ledger(State(state): State<AppState>, headers: HeaderMap) -> Response {
     if !state.ticketing.admin_authorized(&headers) {
         return Problem::unauthorized(request_id(&headers))
