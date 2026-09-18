@@ -123,6 +123,11 @@ pub(in crate::autopilot) async fn execute_audience_campaign(
             GREATEST(7000,LEAST(10000,target.relationship_score*100)),8800,true,$3,$3 + INTERVAL '30 days'
           FROM viryaos_outreach_targets target
           WHERE target.workspace_id=$1 AND target.active AND target.verified AND target.accepts_outreach AND NOT target.do_not_contact
+            -- A target that already replied is served: a reply awaiting triage
+            -- ('received'), a yes ('positive'), and a no ('declined') all mean
+            -- a human answered — the autopilot does not re-pitch a served lead.
+            -- Re-engagement is an operator decision that clears the disposition.
+            AND COALESCE(target.last_reply_disposition::text,'none') NOT IN ('received','positive','declined')
             AND target.target_kind IN ('press','radio','creator','media_patronage','endorsement')
           ON CONFLICT(workspace_id,source,target_id,subject_kind,subject_key) DO UPDATE SET
             active=true,observed_at=EXCLUDED.observed_at,expires_at=EXCLUDED.expires_at,
@@ -147,6 +152,9 @@ pub(in crate::autopilot) async fn lock_outreach_for_execution(
       WHERE opportunity.workspace_id=$1 AND opportunity.id=$2 AND opportunity.target_id=$3
         AND opportunity.active AND opportunity.expires_at>now()
         AND target.version=$4 AND target.active AND target.verified AND target.accepts_outreach AND NOT target.do_not_contact
+        -- The reply may have landed after the opportunity was seeded — the
+        -- dispatch gate is where a served lead is stopped for good.
+        AND COALESCE(target.last_reply_disposition::text,'none') NOT IN ('received','positive','declined')
       FOR UPDATE OF opportunity,target
     "#).bind(workspace_id.into_uuid()).bind(opportunity_id.into_uuid()).bind(target_id.into_uuid()).bind(target_version)
       .fetch_optional(&mut **tx).await.map_err(map_sqlx)?.ok_or(RepositoryError::Conflict)
@@ -491,6 +499,7 @@ async fn seed_release_outreach(
         GREATEST(7000,LEAST(10000,target.relationship_score*100)),9000,true,$3,GREATEST($4 + INTERVAL '14 days',$3 + INTERVAL '14 days')
       FROM viryaos_outreach_targets target
       WHERE target.workspace_id=$1 AND target.active AND target.verified AND target.accepts_outreach AND NOT target.do_not_contact
+        AND COALESCE(target.last_reply_disposition::text,'none') NOT IN ('received','positive','declined')
         AND target.target_kind IN ('press','radio','creator','media_patronage','endorsement')
       ON CONFLICT(workspace_id,source,target_id,subject_kind,subject_key) DO UPDATE SET
         active=true,observed_at=EXCLUDED.observed_at,expires_at=EXCLUDED.expires_at,
