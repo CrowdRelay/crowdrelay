@@ -203,6 +203,93 @@ impl PostgresContentEngineRepository {
         Ok((suggestions, outcomes, produced))
     }
 
+    /// 5.6 — shared learning, respecting per-band taste. Productions of each
+    /// format pooled across the act's same-style siblings in the same
+    /// organisation: the label's own ledger arguing for a format its other
+    /// bands of the same shape already made work.
+    ///
+    /// Two absences are honest zeros:
+    ///
+    /// * **No organisation or no declared `act_style`** — nothing to match
+    ///   on, so nothing pools. A band that never said what it sounds like
+    ///   cannot claim taste-kinship, and guessing it would be exactly the
+    ///   inference 5.21 refused.
+    /// * **No same-style sibling produced it** — the map simply lacks the
+    ///   key; the ranker's floor (`SIBLING_PROOF_MIN`) turns one anecdote
+    ///   into no lift.
+    ///
+    /// The taste gate is normalised equality on the declared descriptor —
+    /// lowercase, whitespace-folded. Only `done`/`done_differently` count:
+    /// the same production rule the stale check credits, so a sibling's
+    /// declined or lapsed attempt teaches nothing.
+    async fn sibling_produced_counts(
+        &self,
+        workspace_id: WorkspaceId,
+    ) -> Result<BTreeMap<String, u32>> {
+        let ws = workspace_id.into_uuid();
+        let (organization_id,): (Option<Uuid>,) =
+            sqlx::query_as("SELECT organization_id FROM workspaces WHERE id = $1")
+                .bind(ws)
+                .fetch_one(&self.pool)
+                .await?;
+        let Some(organization_id) = organization_id else {
+            return Ok(BTreeMap::new());
+        };
+        let own_style = sqlx::query_scalar::<_, String>(
+            "SELECT value FROM tenant_settings WHERE workspace_id = $1 AND key = 'act_style'",
+        )
+        .bind(ws)
+        .fetch_optional(&self.pool)
+        .await?
+        .map(|style| normalize_style(&style))
+        .filter(|style| !style.is_empty());
+        let Some(own_style) = own_style else {
+            return Ok(BTreeMap::new());
+        };
+
+        let sibling_rows = sqlx::query_as::<_, (Uuid, String)>(
+            r#"
+            SELECT member.id, setting.value
+            FROM workspaces AS member
+            JOIN tenant_settings AS setting
+              ON setting.workspace_id = member.id AND setting.key = 'act_style'
+            WHERE member.organization_id = $1 AND member.id <> $2
+            "#,
+        )
+        .bind(organization_id)
+        .bind(ws)
+        .fetch_all(&self.pool)
+        .await?;
+        let sibling_ids: Vec<Uuid> = sibling_rows
+            .into_iter()
+            .filter(|(_, style)| normalize_style(style) == own_style)
+            .map(|(id, _)| id)
+            .collect();
+        if sibling_ids.is_empty() {
+            return Ok(BTreeMap::new());
+        }
+
+        let rows = sqlx::query_as::<_, (String, i64)>(
+            r#"
+            SELECT s.format_key, count(o.id) AS produced
+            FROM viryaos_content_suggestions AS s
+            JOIN viryaos_suggestion_outcomes AS o
+              ON o.workspace_id = s.workspace_id AND o.suggestion_id = s.id
+            WHERE s.workspace_id = ANY($1)
+              AND s.format_key IS NOT NULL
+              AND o.outcome IN ('done', 'done_differently')
+            GROUP BY s.format_key
+            "#,
+        )
+        .bind(&sibling_ids)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|(key, produced)| (key, u32::try_from(produced).unwrap_or(u32::MAX)))
+            .collect())
+    }
+
     /// One ranking pass: gather inputs, rank, persist the survivors as
     /// `raised` suggestions. Returns the rows written — an empty vec is a
     /// truthful "nothing worth the band's time today".
@@ -261,6 +348,7 @@ impl PostgresContentEngineRepository {
         let arc_keys = self.arc_format_keys(workspace_id).await?;
         let (suggestion_counts, outcome_counts, produced_counts) =
             self.format_history(&self.pool, workspace_id).await?;
+        let sibling_produced = self.sibling_produced_counts(workspace_id).await?;
 
         // §4b-4 — a concept that has been offered STALE_ATTEMPT_LIMIT
         // times and never produced has had its chances: it retires on its
@@ -392,6 +480,7 @@ impl PostgresContentEngineRepository {
             arc_format_keys: &arc_keys,
             outcome_counts: &outcome_counts,
             suggestion_counts: &suggestion_counts,
+            sibling_produced: &sibling_produced,
             reach: &reach,
             weights: Default::default(),
             today,
@@ -473,4 +562,15 @@ impl PostgresContentEngineRepository {
         );
         Ok(raised)
     }
+}
+
+/// The declared-taste comparison, one spelling for every caller: lowercase,
+/// whitespace-folded. Two acts that wrote the same words differently still
+/// said the same thing; an act that never said anything matches nothing.
+fn normalize_style(style: &str) -> String {
+    style
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
 }
