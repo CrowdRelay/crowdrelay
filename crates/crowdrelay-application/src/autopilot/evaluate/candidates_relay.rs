@@ -14,11 +14,18 @@ fn relay_candidates(
     communities: &[CommunityRelayTarget],
     push_audience: Option<crowdrelay_domain::content_supply::SignalPushAudience>,
     confidence: crowdrelay_domain::autonomy::Confidence,
+    evidence: EvidenceCount,
 ) -> Result<Vec<DecisionCandidate>, serde_json::Error> {
     let Some(post) = &snapshot.social_post else {
         return Ok(Vec::new());
     };
-    let disposition = disposition(policy.autonomy_level, confidence, policy.minimum_confidence);
+    let disposition = disposition_with_evidence(
+        policy.autonomy_level,
+        confidence,
+        policy.minimum_confidence,
+        evidence,
+        RATE_FLOOR,
+    );
     let input_snapshot = serde_json::to_value(snapshot)?;
     let policy_snapshot = policy_evidence(policy, domain_policy)?;
     let source = snapshot.source_id.into_uuid();

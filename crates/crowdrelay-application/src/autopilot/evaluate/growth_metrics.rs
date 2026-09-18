@@ -26,6 +26,7 @@ fn cooldown_window(now: OffsetDateTime, cooldown_hours: u32) -> i64 {
 pub(super) fn growth_metric_candidate(
     snapshot: &GrowthMetricSnapshot,
     policy: &AutopilotPolicy,
+    evidence: EvidenceCount,
     now: OffsetDateTime,
 ) -> Result<Option<DecisionCandidate>, serde_json::Error> {
     let AutopilotPolicyConfig::GrowthMetrics(domain_policy) = policy.config else {
@@ -36,10 +37,12 @@ pub(super) fn growth_metric_candidate(
     else {
         return Ok(None);
     };
-    let disposition = disposition(
+    let disposition = disposition_with_evidence(
         policy.autonomy_level,
         opportunity.confidence,
         policy.minimum_confidence,
+        evidence,
+        RATE_FLOOR,
     );
     let action = AutopilotActionPayload::RaiseGrowthOpportunity {
         series_id: snapshot.series_id,

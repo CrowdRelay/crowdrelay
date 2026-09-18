@@ -11,7 +11,10 @@ use crowdrelay_domain::{
     audience_lifecycle::{
         FanLifecycleDecision, FanLifecycleSnapshot, LifecycleTemplate, evaluate_fan_lifecycle,
     },
-    autonomy::{AutonomyLevel, Confidence, PolicyDisposition, disposition},
+    autonomy::{
+        AutonomyLevel, Confidence, EvidenceCount, PolicyDisposition, disposition,
+        disposition_with_evidence,
+    },
     beacons::{
         BeaconCampaignSnapshot, BeaconDecision, BeaconDiscoveryDecision, BeaconDiscoverySnapshot,
         BeaconInviteDecision, BeaconInviteSnapshot, BeaconOutreachPhase, evaluate_beacon_campaign,
@@ -42,6 +45,7 @@ use crowdrelay_domain::{
         LiveOpportunityDecision, LiveOpportunitySnapshot, evaluate_live_opportunity,
         live_opportunity_score,
     },
+    measurement::RATE_FLOOR,
     merch_bundle::{MerchBundleDecision, MerchBundleSnapshot, evaluate_merch_bundle},
     merchandising::{
         MerchInventorySnapshot, MerchPriceDecision, MerchPriceDirection, MerchPriceSnapshot,
@@ -71,7 +75,7 @@ use serde::Serialize;
 use thiserror::Error;
 use time::OffsetDateTime;
 
-use super::{model::*, ports::AutopilotDecisionRepository};
+use super::{evidence_ledger::EvidenceLedger, model::*, ports::AutopilotDecisionRepository};
 mod beacons;
 mod booking_supply;
 mod commercial;
@@ -127,6 +131,16 @@ where
         let ceilings = self
             .repository
             .load_autonomy_ceilings(self.workspace_id)
+            .await?;
+        // What each context has actually learned, on the same once-per-cycle
+        // terms as the ceilings above. Until this existed the authority gate
+        // could ask a context how confident it was but not what that
+        // confidence was computed from, so a context with four measured
+        // outcomes could report a high number, clear its minimum, and be
+        // handed unattended execution over an action nobody can recall.
+        let evidence = self
+            .repository
+            .load_resolved_evidence_counts(self.workspace_id)
             .await?;
         // Mutable for the whole cycle: the spend is topped up as actions are
         // created, so the cap holds within one cycle and not only across them.
@@ -264,9 +278,13 @@ where
                         .repository
                         .load_booking_supply_snapshot(self.workspace_id, now)
                         .await?;
-                    if let Some(candidate) =
-                        booking_supply_candidate(&supply, &policy, self.workspace_id, now)?
-                    {
+                    if let Some(candidate) = booking_supply_candidate(
+                        &supply,
+                        &policy,
+                        evidence.for_context(policy.context),
+                        self.workspace_id,
+                        now,
+                    )? {
                         self.persist(&candidate, &mut limits, &mut report).await?;
                     }
                 }
@@ -392,9 +410,14 @@ where
                     };
                     let mut produced = 0usize;
                     for snapshot in &snapshots {
-                        for candidate in
-                            content_candidates(snapshot, &policy, &communities, push_audience, now)?
-                        {
+                        for candidate in content_candidates(
+                            snapshot,
+                            &policy,
+                            &communities,
+                            push_audience,
+                            evidence.for_context(policy.context),
+                            now,
+                        )? {
                             produced += 1;
                             self.persist(&candidate, &mut limits, &mut report).await?;
                         }
@@ -525,7 +548,12 @@ where
                         // refusal of an unreciprocated crossbill lever, and —
                         // the refusal belongs to that lever, not the ladder —
                         // the next lever that is due on its own schedule.
-                        for candidate in show_growth_candidates(snapshot, &policy, now)? {
+                        for candidate in show_growth_candidates(
+                            snapshot,
+                            &policy,
+                            evidence.for_context(policy.context),
+                            now,
+                        )? {
                             self.persist(&candidate, &mut limits, &mut report).await?;
                         }
                     }
@@ -536,7 +564,12 @@ where
                         .load_growth_metric_snapshots(self.workspace_id, now)
                         .await?;
                     for snapshot in &snapshots {
-                        if let Some(candidate) = growth_metric_candidate(snapshot, &policy, now)? {
+                        if let Some(candidate) = growth_metric_candidate(
+                            snapshot,
+                            &policy,
+                            evidence.for_context(policy.context),
+                            now,
+                        )? {
                             self.persist(&candidate, &mut limits, &mut report).await?;
                         }
                     }
@@ -630,7 +663,12 @@ where
                         .load_growth_debt_observations(self.workspace_id, now)
                         .await?;
                     for observation in &observations {
-                        if let Some(candidate) = growth_debt_candidate(observation, &policy, now)? {
+                        if let Some(candidate) = growth_debt_candidate(
+                            observation,
+                            &policy,
+                            evidence.for_context(policy.context),
+                            now,
+                        )? {
                             self.persist(&candidate, &mut limits, &mut report).await?;
                         }
                     }
@@ -638,6 +676,7 @@ where
                 AutopilotContext::GrowthIntelligence => {
                     self.evaluate_growth_intelligence_context(
                         &policy,
+                        &evidence,
                         now,
                         &mut limits,
                         &mut report,

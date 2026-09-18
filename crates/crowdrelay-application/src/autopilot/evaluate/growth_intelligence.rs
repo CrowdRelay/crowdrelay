@@ -890,6 +890,7 @@ pub(super) fn growth_intelligence_candidate(
     blocked_on_membership: &mut Vec<(String, u32)>,
     snapshot: &GrowthIntelligenceSnapshot,
     policy: &AutopilotPolicy,
+    evidence: EvidenceCount,
     workspace_id: WorkspaceId,
     now: OffsetDateTime,
     causal_model: &CausalModel,
@@ -909,6 +910,7 @@ pub(super) fn growth_intelligence_candidate(
             snapshot,
             policy,
             domain_policy,
+            evidence,
             workspace_id,
             now,
             causal_model,
@@ -933,6 +935,7 @@ pub(super) fn growth_intelligence_candidate(
         snapshot,
         policy,
         domain_policy,
+        evidence,
         workspace_id,
         now,
     )?])
@@ -946,6 +949,7 @@ fn candidate_from_request(
     snapshot: &GrowthIntelligenceSnapshot,
     policy: &AutopilotPolicy,
     domain_policy: &GrowthIntelligencePolicy,
+    evidence: EvidenceCount,
     workspace_id: WorkspaceId,
     now: OffsetDateTime,
 ) -> Result<ScoredCandidate, serde_json::Error> {
@@ -953,10 +957,15 @@ fn candidate_from_request(
     let efe_score = request.efe_score;
     let strategy_rank = request.strategy_rank;
     let treatment_stats = request.treatment_stats;
-    let disposition = disposition(
+    // `Confidence::MAX` is asserted, not measured: this context always
+    // believes its own request is worth making. The evidence gate is the only
+    // thing standing between that constant and unattended execution.
+    let disposition = disposition_with_evidence(
         policy.autonomy_level,
         Confidence::MAX,
         policy.minimum_confidence,
+        evidence,
+        RATE_FLOOR,
     );
     let action = AutopilotActionPayload::RequestAgentRun {
         template_id: request.template_id.to_owned(),

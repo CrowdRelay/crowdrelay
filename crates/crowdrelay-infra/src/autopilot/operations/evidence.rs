@@ -19,6 +19,7 @@ use time::OffsetDateTime;
 
 use super::{PostgresAutopilotRepository, map_sqlx};
 use crowdrelay_application::RepositoryError;
+use crowdrelay_application::autopilot::{AutopilotContext, EvidenceLedger};
 
 /// Records the best-effort audit trail for a growth evidence row:
 /// the immutable `action_dispatched` event in `viryaos_evidence_events`
@@ -175,6 +176,51 @@ pub(in crate::autopilot) async fn load_growth_evidence(
     since: Option<OffsetDateTime>,
 ) -> Result<Vec<GrowthEvidence>, RepositoryError> {
     load_evidence(repo, workspace_id, &EvidenceSelector::ResolvedAfter(since)).await
+}
+
+/// Counts, per context, the dispatches whose outcome was actually measured.
+///
+/// The count is of resolved evidence rows, not of actions: an action that
+/// dispatched and is still inside its measurement window has taught the
+/// context nothing yet, and counting it would let a context earn unattended
+/// execution by acting rather than by learning. `resolved_at IS NOT NULL` is
+/// the whole difference.
+///
+/// The context lives on the action rather than the evidence row, so this joins
+/// rather than reading one table. A context with no measured outcome produces
+/// no row and is absent from the ledger, which reads as none.
+pub(in crate::autopilot) async fn load_resolved_evidence_counts(
+    repo: &PostgresAutopilotRepository,
+    workspace_id: WorkspaceId,
+) -> Result<EvidenceLedger, RepositoryError> {
+    let rows: Vec<(String, i64)> = sqlx::query_as(
+        r#"
+        SELECT a.context, COUNT(*)
+        FROM viryaos_growth_evidence e
+        JOIN viryaos_autopilot_actions a
+          ON a.id = e.action_id
+         AND a.workspace_id = e.workspace_id
+        WHERE e.workspace_id = $1
+          AND e.resolved_at IS NOT NULL
+        GROUP BY a.context
+        "#,
+    )
+    .bind(workspace_id.into_uuid())
+    .fetch_all(repo.pool())
+    .await
+    .map_err(map_sqlx)?;
+
+    // A context this build cannot parse is skipped rather than failing the
+    // cycle. Skipping treats it as unmeasured, so it needs approval; failing
+    // would stop every context from evaluating. The first is the safe
+    // direction and the one the policy overview already chose not to take.
+    let counts = rows
+        .into_iter()
+        .filter_map(|(context, count)| {
+            AutopilotContext::from_storage(&context).map(|context| (context, count))
+        })
+        .collect();
+    Ok(EvidenceLedger::from_counts(counts))
 }
 
 /// Loads the resolved control arm of the given experiments, ignoring the

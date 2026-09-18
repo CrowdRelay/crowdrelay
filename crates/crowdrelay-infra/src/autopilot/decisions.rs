@@ -527,6 +527,13 @@ impl AutopilotDecisionRepository for PostgresAutopilotRepository {
         .await
     }
 
+    async fn load_resolved_evidence_counts(
+        &self,
+        workspace_id: WorkspaceId,
+    ) -> Result<EvidenceLedger, RepositoryError> {
+        super::operations::evidence::load_resolved_evidence_counts(self, workspace_id).await
+    }
+
     async fn load_evidence_quality(
         &self,
         workspace_id: WorkspaceId,

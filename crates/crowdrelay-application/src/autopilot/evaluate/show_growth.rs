@@ -16,6 +16,7 @@ const UNRECIPROCATED_CROSSBILL: &str = "unreciprocated_crossbill";
 pub(super) fn show_growth_candidates(
     snapshot: ShowGrowthSnapshot,
     policy: &AutopilotPolicy,
+    evidence: EvidenceCount,
     now: OffsetDateTime,
 ) -> Result<Vec<DecisionCandidate>, serde_json::Error> {
     let AutopilotPolicyConfig::ShowGrowth(domain_policy) = policy.config else {
@@ -32,6 +33,7 @@ pub(super) fn show_growth_candidates(
             domain_policy,
             lever,
             confidence,
+            evidence,
             send_at,
         )?]),
         ShowGrowthDecision::Hold(ShowGrowthHoldReason::UnreciprocatedCrossbill) => {
@@ -58,6 +60,7 @@ pub(super) fn show_growth_candidates(
                     domain_policy,
                     lever,
                     confidence,
+                    evidence,
                     send_at,
                 )?);
             }
@@ -73,9 +76,16 @@ fn request_candidate(
     domain_policy: ShowGrowthPolicy,
     lever: ShowGrowthLever,
     confidence: Confidence,
+    evidence: EvidenceCount,
     send_at: Option<OffsetDateTime>,
 ) -> Result<DecisionCandidate, serde_json::Error> {
-    let disposition = disposition(policy.autonomy_level, confidence, policy.minimum_confidence);
+    let disposition = disposition_with_evidence(
+        policy.autonomy_level,
+        confidence,
+        policy.minimum_confidence,
+        evidence,
+        RATE_FLOOR,
+    );
     let mut policy_snapshot = policy_evidence(policy, domain_policy)?;
     // P.4: a live ladder approval is the operator's one "yes" over the whole
     // announce-to-recap sequence, carried as provenance rather than a
