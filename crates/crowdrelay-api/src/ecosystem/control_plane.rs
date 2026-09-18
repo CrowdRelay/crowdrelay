@@ -163,9 +163,21 @@ async fn ensure_checklist_defaults(
             ('gate_device_charged', 'gate', 220),
             ('backup_device_ready', 'gate', 230),
             ('network_tested', 'gate', 240),
+            ('qr_from_stage', 'gate', 250),
             ('post_show_reconciliation', 'post_show', 310),
             ('post_show_report', 'post_show', 320)
         ) AS defaults(item_key, section, sort_order)
+        -- The announce beat exists only where a live campaign does — seeding
+        -- it for a show with no QR minted would put a dead row on the list.
+        WHERE defaults.item_key <> 'qr_from_stage'
+           OR EXISTS (
+               SELECT 1
+               FROM concert_qr_campaigns AS campaign
+               WHERE campaign.workspace_id = $1
+                 AND campaign.event_id = $2
+                 AND campaign.active
+                 AND campaign.revoked_at IS NULL
+           )
         ON CONFLICT (workspace_id, event_id, item_key) DO UPDATE
         SET section = EXCLUDED.section,
             sort_order = EXCLUDED.sort_order

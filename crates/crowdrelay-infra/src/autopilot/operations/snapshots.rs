@@ -845,6 +845,7 @@ pub(in crate::autopilot) async fn load_show_task_snapshots(
                 ('network_tested'),
                 ('guestlist_checked'),
                 ('capture_plan'),
+                ('qr_from_stage'),
                 ('post_show_reconciliation'),
                 ('post_show_report')
         )
@@ -869,6 +870,19 @@ pub(in crate::autopilot) async fn load_show_task_snapshots(
                             AND type.ticket_sale_id = sale.id
                             AND type.active
                       )
+                )
+                -- The announce beat is proven by first-party state: the
+                -- campaign flag flipped, or a scan already landing — the
+                -- strongest proof a QR got shown is somebody using it.
+                WHEN 'qr_from_stage' THEN EXISTS (
+                    SELECT 1 FROM concert_qr_campaigns AS campaign
+                    WHERE campaign.workspace_id = event.workspace_id
+                      AND campaign.event_id = event.id
+                      AND campaign.active AND campaign.revoked_at IS NULL
+                      AND (campaign.announced_from_stage
+                           OR EXISTS (SELECT 1 FROM concert_checkins AS checkin
+                                      WHERE checkin.workspace_id = campaign.workspace_id
+                                        AND checkin.campaign_id = campaign.id))
                 )
                 ELSE false
             END AS verifiable_fact,
@@ -898,6 +912,14 @@ pub(in crate::autopilot) async fn load_show_task_snapshots(
           -- evaluation-cycle slack, or a show ages out of the snapshot the
           -- morning its report comes due and the artifact never ships.
           AND event.starts_at BETWEEN $2 - INTERVAL '9 days' AND $2 + INTERVAL '14 days'
+          -- The announce beat exists only where a live campaign does — a
+          -- task telling the band to announce a QR that was never minted
+          -- would be noise wearing a checklist's clothes.
+          AND (task.item_key <> 'qr_from_stage'
+               OR EXISTS (SELECT 1 FROM concert_qr_campaigns AS campaign
+                          WHERE campaign.workspace_id = event.workspace_id
+                            AND campaign.event_id = event.id
+                            AND campaign.active AND campaign.revoked_at IS NULL))
         ORDER BY event.starts_at, task.item_key
         LIMIT $3
         "#,
@@ -1022,6 +1044,7 @@ pub(super) fn parse_show_task(value: &str) -> Result<ShowTaskKind, RepositoryErr
         "network_tested" => Ok(ShowTaskKind::NetworkTested),
         "guestlist_checked" => Ok(ShowTaskKind::GuestlistChecked),
         "capture_plan" => Ok(ShowTaskKind::CapturePlan),
+        "qr_from_stage" => Ok(ShowTaskKind::QrFromStage),
         "post_show_reconciliation" => Ok(ShowTaskKind::PostShowReconciliation),
         "post_show_report" => Ok(ShowTaskKind::PostShowReport),
         _ => Err(RepositoryError::Unexpected),

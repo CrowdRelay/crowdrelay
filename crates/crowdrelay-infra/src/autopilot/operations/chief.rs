@@ -386,7 +386,7 @@ pub(in crate::autopilot) async fn load_chief_of_staff(
         WITH task(item_key) AS (VALUES
             ('announcement_published'),('ticketing_verified'),('staff_assigned'),('offline_snapshot_ready'),
             ('gate_device_charged'),('backup_device_ready'),('network_tested'),('guestlist_checked'),
-            ('capture_plan'),('post_show_reconciliation'),('post_show_report'))
+            ('capture_plan'),('qr_from_stage'),('post_show_reconciliation'),('post_show_report'))
         SELECT event.id event_id, event.title event_title, task.item_key task_key,
                COALESCE(checklist.status,'pending') status, event.starts_at
         FROM events event CROSS JOIN task
@@ -417,6 +417,15 @@ pub(in crate::autopilot) async fn load_chief_of_staff(
               ELSE $2 >= event.starts_at - INTERVAL '36 hours'
                    AND event.starts_at >= $2 - INTERVAL '2 days'
           END
+          -- The announce beat exists only where a live campaign does.
+          AND (task.item_key <> 'qr_from_stage'
+               OR EXISTS (
+                   SELECT 1 FROM concert_qr_campaigns campaign
+                   WHERE campaign.workspace_id = event.workspace_id
+                     AND campaign.event_id = event.id
+                     AND campaign.active
+                     AND campaign.revoked_at IS NULL
+               ))
         ORDER BY event.starts_at, task.item_key
         LIMIT 20
     "#).bind(workspace_id.into_uuid()).bind(now).fetch_all(&repo.pool).await.map_err(map_sqlx)?;

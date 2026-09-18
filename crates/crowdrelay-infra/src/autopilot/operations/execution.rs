@@ -231,6 +231,9 @@ pub(in crate::autopilot) async fn complete_show_task(
       SELECT CASE $3
         WHEN 'announcement_published' THEN event.status IN ('published','completed')
         WHEN 'ticketing_verified' THEN EXISTS(SELECT 1 FROM ticket_sales sale WHERE sale.workspace_id=event.workspace_id AND sale.event_id=event.id AND sale.active AND sale.sales_open_at<sale.sales_close_at AND EXISTS(SELECT 1 FROM ticket_types type WHERE type.workspace_id=sale.workspace_id AND type.ticket_sale_id=sale.id AND type.active))
+        -- Same proof the snapshot loads, re-checked under the row lock:
+        -- the stage flag flipped, or a scan already landed on a live campaign.
+        WHEN 'qr_from_stage' THEN EXISTS(SELECT 1 FROM concert_qr_campaigns campaign WHERE campaign.workspace_id=event.workspace_id AND campaign.event_id=event.id AND campaign.active AND campaign.revoked_at IS NULL AND (campaign.announced_from_stage OR EXISTS(SELECT 1 FROM concert_checkins checkin WHERE checkin.workspace_id=campaign.workspace_id AND checkin.campaign_id=campaign.id)))
         ELSE false END
       FROM events event WHERE event.workspace_id=$1 AND event.id=$2 FOR UPDATE
     "#).bind(workspace_id.into_uuid()).bind(event_id.into_uuid()).bind(task.key()).fetch_optional(&mut **tx).await.map_err(map_sqlx)?.ok_or(RepositoryError::Conflict)?;
