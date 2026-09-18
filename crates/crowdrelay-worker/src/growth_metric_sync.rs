@@ -34,7 +34,10 @@ use crowdrelay_infra::sensitive_response::{SensitiveResponseKey, decrypt_value, 
 
 mod connection_health;
 mod simple_platforms;
+mod spotify_cities;
+
 use serde::Deserialize;
+pub use spotify_cities::resolve_spotify_city;
 use sqlx::{FromRow, PgPool, postgres::PgListener};
 use thiserror::Error;
 use time::OffsetDateTime;
@@ -633,10 +636,15 @@ impl GrowthMetricSyncWorker {
         })?;
 
         // Step 2: Call the pathfinder GraphQL API for artist stats.
+        // The pinned document is the richer queryArtistOverview variant —
+        // same operation, but its stats block carries `topCities`, the
+        // listener geography the gig-planning reads consume. Pathfinder
+        // only serves persisted queries, so the document body is fixed by
+        // the hash; anything it does not return cannot be asked for.
         let variables = format!(
             r#"{{"uri":"spotify:artist:{artist_id}","locale":"","includePrerelease":false}}"#
         );
-        let extensions = r#"{"persistedQuery":{"version":1,"sha256Hash":"d66221ea13998b2f81883c5187d174c8646e4041d67f5b1e103bc262d447e3a0"}}"#;
+        let extensions = r#"{"persistedQuery":{"version":1,"sha256Hash":"79a4a9d7c3a3781d801e62b62ef11c7ee56fce2626772eb26cd20c69f84b3f49"}}"#;
         let graphql_url = format!(
             "https://api-partner.spotify.com/pathfinder/v1/query?operationName=queryArtistOverview&variables={}&extensions={}",
             urlencode(&variables),
@@ -661,28 +669,87 @@ impl GrowthMetricSyncWorker {
                 "Spotify pathfinder response missing stats field".to_string(),
             )
         })?;
-        let follower_count = stats.followers;
         let display_name = body.data.artist.profile.name;
+        let now = OffsetDateTime::now_utc();
 
-        record_metric_point(
-            &self.pool,
-            conn.workspace_id,
-            conn.id,
-            "spotify",
-            "followers",
-            &format!("Spotify followers — {display_name}"),
-            follower_count,
-            OffsetDateTime::now_utc(),
-        )
-        .await?;
+        if let Some(follower_count) = stats.followers {
+            record_metric_point(
+                &self.pool,
+                conn.workspace_id,
+                conn.id,
+                "spotify",
+                "followers",
+                &format!("Spotify followers — {display_name}"),
+                follower_count,
+                now,
+            )
+            .await?;
+        }
+
+        if let Some(monthly_listeners) = stats.monthly_listeners {
+            record_metric_point(
+                &self.pool,
+                conn.workspace_id,
+                conn.id,
+                "spotify",
+                "monthly_listeners",
+                &format!("Spotify monthly listeners — {display_name}"),
+                monthly_listeners,
+                now,
+            )
+            .await?;
+        }
+
+        // The city series is keyed (workspace, city) — the schema cannot
+        // express (connection × city), so two Spotify connections sharing a
+        // top city interleave their numbers on one timeline. Virya runs a
+        // single artist connection so the key is exact today; a multi-artist
+        // workspace needs a subject redesign, not a workaround here.
+        let mut resolved_cities = 0u32;
+        if let Some(top_cities) = stats.top_cities {
+            for item in top_cities.items {
+                let (Some(country), Some(listeners), Some(city)) =
+                    (item.country, item.number_of_listeners, item.city)
+                else {
+                    continue;
+                };
+                match resolve_spotify_city(&self.pool, &country, &city).await? {
+                    Some((city_id, city_name)) => {
+                        resolved_cities += 1;
+                        record_subject_metric_point(
+                            &self.pool,
+                            conn.workspace_id,
+                            "spotify",
+                            "monthly_listeners",
+                            "city",
+                            city_id,
+                            &format!("Spotify monthly listeners · {city_name} — {display_name}"),
+                            listeners,
+                            now,
+                        )
+                        .await?;
+                    }
+                    None => {
+                        tracing::warn!(
+                            connection_id = %conn.id,
+                            artist_id = %artist_id,
+                            city = %city,
+                            country = %country,
+                            "spotify top city did not resolve to the cities catalog — skipped"
+                        );
+                    }
+                }
+            }
+        }
 
         tracing::info!(
             connection_id = %conn.id,
             artist_id = %artist_id,
             artist = %display_name,
-            followers = follower_count,
-            monthly_listeners = stats.monthly_listeners,
-            "spotify follower count recorded via partner API"
+            followers = ?stats.followers,
+            monthly_listeners = ?stats.monthly_listeners,
+            resolved_cities,
+            "spotify metrics recorded via partner API"
         );
         Ok(())
     }
@@ -1330,6 +1397,9 @@ struct SpotifyPartnerArtistResponse {
 
 #[derive(Debug, Deserialize)]
 struct SpotifyPartnerData {
+    /// The persisted queryArtistOverview document this worker pins names the
+    /// artist root `artistUnion`, not `artist`.
+    #[serde(rename = "artistUnion")]
     artist: SpotifyPartnerArtist,
 }
 
@@ -1342,12 +1412,39 @@ struct SpotifyPartnerArtist {
 
 #[derive(Debug, Deserialize)]
 struct SpotifyPartnerStats {
-    followers: i64,
+    /// Option, not a 0 default: when Spotify omits a field the number is
+    /// absent, and an absent number must never be recorded as zero. The
+    /// `followers` deprecation named above makes that omission a live
+    /// possibility, not a theoretical one.
+    #[serde(default)]
+    followers: Option<i64>,
     #[serde(default, rename = "monthlyListeners")]
-    monthly_listeners: i64,
+    monthly_listeners: Option<i64>,
+    /// Listener geography — where the monthly listeners live. The top-level
+    /// companion to `monthly_listeners`, and the evidence the gig-planning
+    /// reads consume when they ask where a show is worth routing.
+    #[serde(default, rename = "topCities")]
+    top_cities: Option<SpotifyTopCities>,
     #[allow(dead_code)]
     #[serde(default, rename = "worldRank")]
     world_rank: i64,
+}
+
+#[derive(Debug, Deserialize)]
+struct SpotifyTopCities {
+    #[serde(default)]
+    items: Vec<SpotifyTopCity>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SpotifyTopCity {
+    #[serde(default, rename = "numberOfListeners")]
+    number_of_listeners: Option<i64>,
+    #[serde(default)]
+    city: Option<String>,
+    /// ISO 3166-1 alpha-2, matching `cities.country_code`.
+    #[serde(default)]
+    country: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1629,6 +1726,32 @@ async fn record_metric_point(
     // The series is scoped to the fanbase connection, not the workspace:
     // a workspace may have multiple Meta pages or YouTube channels, and a
     // workspace-level series would interleave their numbers.
+    record_subject_metric_point(
+        pool,
+        workspace_id,
+        platform,
+        metric_key,
+        "fanbase_connection",
+        connection_id,
+        display_name,
+        value,
+        observed_at,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn record_subject_metric_point(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    platform: &str,
+    metric_key: &str,
+    subject_kind: &str,
+    subject_id: Uuid,
+    display_name: &str,
+    value: i64,
+    observed_at: OffsetDateTime,
+) -> Result<(), GrowthMetricSyncError> {
     sqlx::query(
         r#"
         WITH series AS (
@@ -1637,8 +1760,8 @@ async fn record_metric_point(
                 display_name, direction, value_tier, expected_interval_hours, active
             )
             VALUES (
-                $1, $2, $3, 'fanbase_connection', $4,
-                left($5, 120),
+                $1, $2, $3, $4, $5,
+                left($6, 120),
                 'higher_is_better', 'intermediate', 24, true
             )
             ON CONFLICT (workspace_id, platform, metric_key, subject_kind, subject_id)
@@ -1650,7 +1773,7 @@ async fn record_metric_point(
         INSERT INTO viryaos_growth_metric_points (
             workspace_id, series_id, captured_at, value, source
         )
-        SELECT $1, series.id, date_trunc('hour', $6::timestamptz), $7, 'growth_metric_sync'
+        SELECT $1, series.id, date_trunc('hour', $7::timestamptz), $8, 'growth_metric_sync'
         FROM series
         ON CONFLICT (workspace_id, series_id, captured_at) DO NOTHING
         "#,
@@ -1658,7 +1781,8 @@ async fn record_metric_point(
     .bind(workspace_id)
     .bind(platform)
     .bind(metric_key)
-    .bind(connection_id)
+    .bind(subject_kind)
+    .bind(subject_id)
     .bind(display_name)
     .bind(observed_at)
     .bind(value)
@@ -1749,18 +1873,44 @@ mod tests {
 
     #[test]
     fn spotify_partner_response_parses_stats() {
-        let json = br#"{"data":{"artist":{"id":"6bbW0jOKAWJWm3h6CTWaAS","uri":"spotify:artist:6bbW0jOKAWJWm3h6CTWaAS","profile":{"name":"Virya","verified":true},"stats":{"followers":183,"monthlyListeners":45,"worldRank":0}}}}"#;
+        let json = br#"{"data":{"artistUnion":{"id":"6bbW0jOKAWJWm3h6CTWaAS","uri":"spotify:artist:6bbW0jOKAWJWm3h6CTWaAS","profile":{"name":"Virya","verified":true},"stats":{"followers":183,"monthlyListeners":45,"worldRank":0}}}}"#;
         let response: SpotifyPartnerArtistResponse = serde_json::from_slice(json).unwrap();
         let stats = response.data.artist.stats.unwrap();
         assert_eq!(response.data.artist.profile.name, "Virya");
-        assert_eq!(stats.followers, 183);
-        assert_eq!(stats.monthly_listeners, 45);
+        assert_eq!(stats.followers, Some(183));
+        assert_eq!(stats.monthly_listeners, Some(45));
+    }
+
+    #[test]
+    fn spotify_partner_response_parses_top_cities() {
+        // Shape pinned against the live pathfinder document: items carry a
+        // city name, an ISO country code, a region code, and a listener
+        // count. Every field beyond the name is optional in the struct so a
+        // partial item degrades to a skip instead of a failed sync.
+        let json = br#"{"data":{"artistUnion":{"profile":{"name":"Virya"},"stats":{"followers":183,"monthlyListeners":72,"topCities":{"items":[{"numberOfListeners":22,"city":"Wroclaw","country":"PL","region":"02"},{"numberOfListeners":5,"city":"Warsaw","country":"PL","region":"14"}]}}}}}"#;
+        let response: SpotifyPartnerArtistResponse = serde_json::from_slice(json).unwrap();
+        let stats = response.data.artist.stats.unwrap();
+        let items = stats.top_cities.unwrap().items;
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].city.as_deref(), Some("Wroclaw"));
+        assert_eq!(items[0].country.as_deref(), Some("PL"));
+        assert_eq!(items[0].number_of_listeners, Some(22));
+    }
+
+    #[test]
+    fn spotify_partner_response_without_top_cities_still_parses() {
+        let json =
+            br#"{"data":{"artistUnion":{"profile":{"name":"Virya"},"stats":{"followers":183}}}}"#;
+        let response: SpotifyPartnerArtistResponse = serde_json::from_slice(json).unwrap();
+        let stats = response.data.artist.stats.unwrap();
+        assert!(stats.monthly_listeners.is_none());
+        assert!(stats.top_cities.is_none());
     }
 
     #[test]
     fn spotify_partner_response_parses_without_stats() {
         let json =
-            br#"{"data":{"artist":{"id":"6bbW0jOKAWJWm3h6CTWaAS","profile":{"name":"Virya"}}}}"#;
+            br#"{"data":{"artistUnion":{"id":"6bbW0jOKAWJWm3h6CTWaAS","profile":{"name":"Virya"}}}}"#;
         let response: SpotifyPartnerArtistResponse = serde_json::from_slice(json).unwrap();
         assert_eq!(response.data.artist.profile.name, "Virya");
         assert!(response.data.artist.stats.is_none());
