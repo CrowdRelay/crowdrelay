@@ -833,8 +833,8 @@ pub(super) fn application_routes(state: AppState) -> Router {
             "/v1/admin/roster-plan/weekly-brief",
             get(crate::roster_weekly_brief::roster_weekly_brief),
         )
+        // 5.5: the roster view — every act's attention, pipeline, gaps.
         .route(
-            // 5.5: the roster view — every act's attention, pipeline, gaps.
             "/v1/admin/roster-plan/overview",
             get(crate::roster_overview::roster_overview),
         )

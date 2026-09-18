@@ -253,10 +253,60 @@ struct StaffEventDashboardResponse {
 /// edge, and edges require a second workspace inside a shared organization —
 /// at one tenant that cannot exist, so the bill step must surface as the
 /// manual bill-mate ask the partner relay brief already carries.
-#[derive(Debug, Serialize, FromRow)]
+/// One bill-mate as the crossbill candidate list sees it — position and
+/// confirmation from the bill row, plus what the act resolved to at
+/// bill-write time: `own` (the caller's), `sibling` (same organization —
+/// the only kind a consent edge can ever cover, edges being org-scoped),
+/// `tenant` (on-platform, outside the org), `peer` (a known outside act
+/// with a `place_peer_acts` identity), `unclaimed` (a name, nothing more).
+#[derive(Debug, Serialize)]
 struct EventCrossbillAct {
     slug: String,
     name: String,
+    position: i32,
+    /// The shared-night rule: a bill row counts as confirmed only when the
+    /// act's own workspace said so — the writer's claim alone stays `false`.
+    confirmed: bool,
+    resolution: &'static str,
+}
+
+#[derive(Debug, FromRow)]
+struct EventCrossbillActRow {
+    slug: String,
+    name: String,
+    position: i32,
+    confirmed: bool,
+    act_workspace_id: Option<Uuid>,
+    peer_act_id: Option<Uuid>,
+    act_organization_id: Option<Uuid>,
+    own_organization_id: Option<Uuid>,
+}
+
+impl EventCrossbillActRow {
+    fn into_view(self, workspace_id: Uuid) -> EventCrossbillAct {
+        let resolution = if self.act_workspace_id == Some(workspace_id) {
+            "own"
+        } else if self.act_workspace_id.is_some() {
+            if self.act_organization_id.is_some()
+                && self.act_organization_id == self.own_organization_id
+            {
+                "sibling"
+            } else {
+                "tenant"
+            }
+        } else if self.peer_act_id.is_some() {
+            "peer"
+        } else {
+            "unclaimed"
+        };
+        EventCrossbillAct {
+            slug: self.slug,
+            name: self.name,
+            position: self.position,
+            confirmed: self.confirmed,
+            resolution,
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -873,12 +923,24 @@ async fn event_crossbill(
     workspace_id: Uuid,
     event_slug: &str,
 ) -> Result<EventCrossbill, sqlx::Error> {
-    let acts = sqlx::query_as::<_, EventCrossbillAct>(
+    // The candidate list carries the whole bill — a festival slot's can run
+    // far past a club night's. `resolution` marks which mates the
+    // consent-edge machinery could ever reach: only `sibling` is org-scoped.
+    let acts = sqlx::query_as::<_, EventCrossbillActRow>(
         r#"
-        SELECT act.act_slug AS slug, act.act_name AS name
+        SELECT act.act_slug AS slug, act.act_name AS name, act.position,
+               (act.confirmed_by IS NOT NULL
+                AND act.confirmed_by = act.act_workspace_id) AS confirmed,
+               act.act_workspace_id, act.peer_act_id,
+               resolved_ws.organization_id AS act_organization_id,
+               own_ws.organization_id AS own_organization_id
         FROM event_acts AS act
         INNER JOIN events AS event
           ON event.workspace_id = act.workspace_id AND event.id = act.event_id
+        INNER JOIN workspaces AS own_ws
+          ON own_ws.id = act.workspace_id
+        LEFT JOIN workspaces AS resolved_ws
+          ON resolved_ws.id = act.act_workspace_id
         WHERE act.workspace_id = $1 AND event.slug = $2
         ORDER BY act.position, act.act_slug
         "#,
@@ -886,7 +948,10 @@ async fn event_crossbill(
     .bind(workspace_id)
     .bind(event_slug)
     .fetch_all(pool)
-    .await?;
+    .await?
+    .into_iter()
+    .map(|row| row.into_view(workspace_id))
+    .collect::<Vec<_>>();
     // No bill-mate means no crossbill either way — skip the edge check.
     if acts.len() <= 1 {
         return Ok(crossbill_state(acts, None));
@@ -946,6 +1011,9 @@ mod tests {
         let act = |name: &str| EventCrossbillAct {
             slug: name.to_owned(),
             name: name.to_owned(),
+            position: 0,
+            confirmed: false,
+            resolution: "unclaimed",
         };
         let solo = crossbill_state(vec![], Some(false));
         assert_eq!(solo.state, "no_support_bill");
@@ -967,5 +1035,57 @@ mod tests {
         assert_eq!(blocked.state, "unreciprocated");
         assert_eq!(blocked.reciprocated, Some(false));
         assert!(blocked.explanation.contains("never been reciprocated"));
+    }
+
+    #[test]
+    fn bill_mate_resolution_marks_the_candidate_kind() {
+        let me = Uuid::now_v7();
+        let org = Uuid::now_v7();
+        let row = |act_ws: Option<Uuid>, peer: Option<Uuid>, act_org: Option<Uuid>| {
+            EventCrossbillActRow {
+                slug: "a".to_owned(),
+                name: "A".to_owned(),
+                position: 0,
+                confirmed: false,
+                act_workspace_id: act_ws,
+                peer_act_id: peer,
+                act_organization_id: act_org,
+                own_organization_id: Some(org),
+            }
+        };
+        // Own act on the caller's own bill.
+        assert_eq!(
+            row(Some(me), None, Some(org)).into_view(me).resolution,
+            "own"
+        );
+        // A roster sibling — the only edge-capable kind.
+        assert_eq!(
+            row(Some(Uuid::now_v7()), None, Some(org))
+                .into_view(me)
+                .resolution,
+            "sibling"
+        );
+        // Another tenant outside the org — on-platform, unreachable by edge.
+        assert_eq!(
+            row(Some(Uuid::now_v7()), None, Some(Uuid::now_v7()))
+                .into_view(me)
+                .resolution,
+            "tenant"
+        );
+        // A workspace with no org at all is still a tenant, not a sibling.
+        assert_eq!(
+            row(Some(Uuid::now_v7()), None, None)
+                .into_view(me)
+                .resolution,
+            "tenant"
+        );
+        // A known peer and a bare name.
+        assert_eq!(
+            row(None, Some(Uuid::now_v7()), None)
+                .into_view(me)
+                .resolution,
+            "peer"
+        );
+        assert_eq!(row(None, None, None).into_view(me).resolution, "unclaimed");
     }
 }

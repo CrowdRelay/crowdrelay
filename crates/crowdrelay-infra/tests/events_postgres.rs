@@ -449,6 +449,111 @@ async fn a_festival_slot_runs_as_an_ordinary_show() -> Result<(), Box<dyn std::e
     Ok(())
 }
 
+/// 6.2: a festival slot's bill runs longer than a club night's — the same
+/// write path, a bound that follows the stored festival mark. An unmarked
+/// event refuses a festival-scale bill, a marked one stores it and the
+/// published read carries every act; the mark cannot come off while the
+/// bill still exceeds the club bound, and no bill passes the absolute cap.
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_EVENT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn a_festival_bill_runs_festival_scale() -> Result<(), Box<dyn std::error::Error>> {
+    let database_url = std::env::var("CROWDRELAY_EVENT_TEST_DATABASE_URL").map_err(|e| {
+        format!("CROWDRELAY_EVENT_TEST_DATABASE_URL must target a disposable database: {e}")
+    })?;
+    let pool = PgPoolOptions::new()
+        .max_connections(8)
+        .connect(&database_url)
+        .await?;
+    crowdrelay_infra::database::MIGRATOR.run(&pool).await?;
+
+    let workspace_id = WorkspaceId::new();
+    let workspace_slug =
+        WorkspaceSlug::parse(format!("event-fest-{}", workspace_id.into_uuid().simple()))?;
+    let starts_at = OffsetDateTime::now_utc() + time::Duration::days(2);
+    seed_fixture(&pool, workspace_id, &workspace_slug, starts_at).await?;
+
+    let database = DatabaseConfig {
+        url: database_url,
+        max_connections: 8,
+        connect_timeout: Duration::from_secs(3),
+        ping_timeout: Duration::from_secs(2),
+        operation_timeout: Duration::from_secs(5),
+        lock_timeout: Duration::from_secs(1),
+    };
+    let events =
+        PostgresEventRepository::new(pool.clone(), workspace_slug, &database, vec![1_440, 120]);
+
+    let bill = |count: usize| ReplaceEventActsCommand {
+        workspace_id,
+        event_slug: "wroclaw-live-2026".to_owned(),
+        acts: (0..count)
+            .map(|index| EventActEntry {
+                act_slug: format!("act-{index}"),
+                act_name: format!("Act {index}"),
+                position: i32::try_from(index).unwrap_or_default(),
+                ticket_url: None,
+            })
+            .collect(),
+    };
+
+    // An ordinary night's bill stays club-sized: forty acts refuse.
+    assert_eq!(
+        events.replace_event_acts(&bill(40)).await,
+        Err(crowdrelay_application::RepositoryError::Conflict)
+    );
+
+    // The festival mark lifts the same event's bound — forty land whole.
+    events
+        .set_event_festival(&SetEventFestivalCommand {
+            workspace_id,
+            event_slug: "wroclaw-live-2026".to_owned(),
+            festival_name: Some("OFF Festival Katowice".to_owned()),
+        })
+        .await?;
+    events.replace_event_acts(&bill(40)).await?;
+    let published = events.load_published_events().await?;
+    assert_eq!(published[0].acts.len(), 40);
+    assert_eq!(published[0].acts[0].act_slug, "act-0");
+    assert_eq!(published[0].acts[39].act_slug, "act-39");
+
+    // The mark cannot come off while the bill still exceeds the club bound —
+    // clearing it would strand acts the public validator then refuses.
+    assert_eq!(
+        events
+            .set_event_festival(&SetEventFestivalCommand {
+                workspace_id,
+                event_slug: "wroclaw-live-2026".to_owned(),
+                festival_name: None,
+            })
+            .await,
+        Err(crowdrelay_application::RepositoryError::Conflict)
+    );
+
+    // Past the absolute bound even a festival refuses.
+    assert_eq!(
+        events
+            .replace_event_acts(&bill(crowdrelay_domain::MAX_EVENT_ACTS_FESTIVAL + 1))
+            .await,
+        Err(crowdrelay_application::RepositoryError::Conflict)
+    );
+
+    // Shrinking the bill back to club size lets the mark clear.
+    events.replace_event_acts(&bill(32)).await?;
+    events
+        .set_event_festival(&SetEventFestivalCommand {
+            workspace_id,
+            event_slug: "wroclaw-live-2026".to_owned(),
+            festival_name: None,
+        })
+        .await?;
+    let published = events.load_published_events().await?;
+    assert_eq!(published[0].festival_name, None);
+    assert_eq!(published[0].acts.len(), 32);
+
+    pool.close().await;
+    Ok(())
+}
+
 fn signup_command(
     workspace_id: WorkspaceId,
 ) -> Result<SignupFanCommand, Box<dyn std::error::Error>> {

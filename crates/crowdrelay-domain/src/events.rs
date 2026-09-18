@@ -76,6 +76,14 @@ pub struct PublicEventAct {
     pub ticket_url: Option<String>,
 }
 
+/// The club-night bill bound — a shared stage that long is already
+/// exceptional.
+pub const MAX_EVENT_ACTS: usize = 32;
+/// The festival-slot bill bound: the whole announced lineup can ride one
+/// event, and a large festival's running order still fits. Beyond it the
+/// position space itself runs out of ordering room.
+pub const MAX_EVENT_ACTS_FESTIVAL: usize = 500;
+
 /// Fan-visible event detail view served from the in-memory cache.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct PublicEvent {
@@ -137,7 +145,9 @@ impl PublicEvent {
 
         // Acts are the bill: each carries its own tagged ticket link, so a
         // malformed one gets the same scrutiny as the event's own fields.
-        if self.acts.len() > 32 {
+        // A festival slot's bill runs longer than a club night's — the
+        // bound follows the festival mark, never the caller's claim.
+        if self.acts.len() > self.act_bill_limit() {
             return Err(PublicEventError::InvalidActs);
         }
         for act in &self.acts {
@@ -145,6 +155,17 @@ impl PublicEvent {
                 .map_err(|_| PublicEventError::InvalidActs)?;
         }
         Ok(())
+    }
+
+    /// How many billed acts this event may carry: a club night's bill or a
+    /// festival slot's, decided by the stored festival mark.
+    #[must_use]
+    pub fn act_bill_limit(&self) -> usize {
+        if self.festival_name.is_some() {
+            MAX_EVENT_ACTS_FESTIVAL
+        } else {
+            MAX_EVENT_ACTS
+        }
     }
 }
 
@@ -551,6 +572,25 @@ mod act_tests {
         assert!(validate_act_fields("virya", "", None).is_err());
         assert!(validate_act_fields("virya", &"n".repeat(161), None).is_err());
         assert!(validate_act_fields("Bad Slug", "Virya", None).is_err());
+    }
+
+    #[test]
+    fn the_bill_bound_follows_the_festival_mark() {
+        let act = |index: usize| PublicEventAct {
+            act_slug: format!("act-{index}"),
+            act_name: format!("Act {index}"),
+            ticket_url: None,
+        };
+        let mut event = description_tests::event(None, None);
+        event.acts = (0..MAX_EVENT_ACTS + 1).map(act).collect();
+        // An ordinary night is club-sized.
+        assert_eq!(event.validate(), Err(PublicEventError::InvalidActs));
+        // The festival mark lifts the same bill.
+        event.festival_name = Some("OFF Festival".to_owned());
+        assert!(event.validate().is_ok());
+        // But never past the absolute bound.
+        event.acts = (0..MAX_EVENT_ACTS_FESTIVAL + 1).map(act).collect();
+        assert_eq!(event.validate(), Err(PublicEventError::InvalidActs));
     }
 
     #[test]
