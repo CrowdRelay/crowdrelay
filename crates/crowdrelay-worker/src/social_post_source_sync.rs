@@ -66,18 +66,20 @@ pub enum SocialPostSourceSyncError {
     ClientBuild(reqwest::Error),
 }
 
-/// One owned post as the platform reports it — the facts only.
+/// One owned post as the platform reports it — the facts only. Public for
+/// the same reason `ReleaseEntry` is — the postgres suite drives the shipped
+/// upsert, and placeholder drift fails only against a real schema.
 #[derive(Debug)]
-struct PostEntry {
+pub struct PostEntry {
     /// Stable platform identifier — becomes `{platform}:{id}` source_key.
-    external_id: String,
+    pub external_id: String,
     /// First line of the caption, shortened — what the panel reads.
-    title: String,
+    pub title: String,
     /// Canonical permalink — what the artifact cites.
-    url: Option<String>,
-    posted_at: Option<OffsetDateTime>,
+    pub url: Option<String>,
+    pub posted_at: Option<OffsetDateTime>,
     /// The band's own words, full but bounded — voice material.
-    caption: Option<String>,
+    pub caption: Option<String>,
 }
 
 #[derive(Clone)]
@@ -323,7 +325,7 @@ impl SocialPostSourceSyncWorker {
     /// bumps the version and records history; an unchanged row is a no-op
     /// under the IS DISTINCT FROM guard. A post the API never stamped keeps
     /// the anchor it was first filed with instead of restamping "now".
-    async fn upsert_post(&self, platform: &str, entry: &PostEntry) -> Result<(), String> {
+    pub async fn upsert_post(&self, platform: &str, entry: &PostEntry) -> Result<(), String> {
         let source_key = format!("{platform}:{}", entry.external_id);
         let title = truncate_chars(&entry.title, MAX_TITLE_CHARS);
         let metadata = json!({
@@ -343,15 +345,15 @@ impl SocialPostSourceSyncWorker {
             ) VALUES (
                 $3, $1, 'social_post', $2, $4,
                 COALESCE($5, now()),
-                COALESCE($5, now()) + make_interval(days => $8),
-                $7
+                COALESCE($5, now()) + make_interval(days => $7),
+                $6
             )
             ON CONFLICT (workspace_id, source_kind, source_key) DO UPDATE SET
                 title = EXCLUDED.title,
                 occurred_at = COALESCE($5, viryaos_content_sources.occurred_at),
                 expires_at = GREATEST(
                     viryaos_content_sources.expires_at,
-                    COALESCE($5, viryaos_content_sources.occurred_at) + make_interval(days => $8)
+                    COALESCE($5, viryaos_content_sources.occurred_at) + make_interval(days => $7)
                 ),
                 metadata = viryaos_content_sources.metadata || EXCLUDED.metadata,
                 version = viryaos_content_sources.version + 1

@@ -73,20 +73,22 @@ pub enum ReleaseSourceSyncError {
     ClientBuild(reqwest::Error),
 }
 
-/// One release as any platform reports it — the facts only.
+/// One release as any platform reports it — the facts only. Public so the
+/// shipped upsert is exercisable from the postgres suite — a placeholder
+/// drift in that query fails only against a real schema.
 #[derive(Debug)]
-struct ReleaseEntry {
+pub struct ReleaseEntry {
     /// Stable platform identifier — becomes `{platform}:{id}` source_key.
-    external_id: String,
-    title: String,
+    pub external_id: String,
+    pub title: String,
     /// Canonical listen/buy link — what the artifact cites.
-    url: String,
-    released_at: Option<OffsetDateTime>,
+    pub url: String,
+    pub released_at: Option<OffsetDateTime>,
     /// Prose the band published with it (Bandcamp liner notes, SoundCloud
     /// description). Absent stays absent, never an empty string.
-    description: Option<String>,
+    pub description: Option<String>,
     /// What the platform calls it — "album", "single", "track", "ep".
-    release_type: Option<String>,
+    pub release_type: Option<String>,
 }
 
 #[derive(Clone)]
@@ -474,7 +476,7 @@ impl ReleaseSourceSyncWorker {
 
     /// Idempotent upsert keyed on `{platform}:{external_id}`. A fact change
     /// bumps the version and records history; an unchanged row is a no-op.
-    async fn upsert_release(&self, platform: &str, entry: &ReleaseEntry) -> Result<(), String> {
+    pub async fn upsert_release(&self, platform: &str, entry: &ReleaseEntry) -> Result<(), String> {
         let source_key = format!("{platform}:{}", entry.external_id);
         let title: String = truncate_chars(entry.title.trim(), MAX_TITLE_CHARS);
         if title.is_empty() {
@@ -498,8 +500,8 @@ impl ReleaseSourceSyncWorker {
             ) VALUES (
                 $3, $1, 'release', $2, $4,
                 COALESCE($5, now()),
-                COALESCE($5, now()) + make_interval(days => $8),
-                $7
+                COALESCE($5, now()) + make_interval(days => $7),
+                $6
             )
             ON CONFLICT (workspace_id, source_kind, source_key) DO UPDATE SET
                 title = EXCLUDED.title,
@@ -508,7 +510,7 @@ impl ReleaseSourceSyncWorker {
                 occurred_at = COALESCE($5, viryaos_content_sources.occurred_at),
                 expires_at = GREATEST(
                     viryaos_content_sources.expires_at,
-                    COALESCE($5, viryaos_content_sources.occurred_at) + make_interval(days => $8)
+                    COALESCE($5, viryaos_content_sources.occurred_at) + make_interval(days => $7)
                 ),
                 -- The announce endpoint writes the same `spotify:{id}` key with
                 -- richer fields (listen_url, image, track count). Merge so a
