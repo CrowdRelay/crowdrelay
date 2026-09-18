@@ -757,6 +757,8 @@ type ReportEventFacts = (
     Option<String>,
     Option<String>,
     Option<serde_json::Value>,
+    Option<uuid::Uuid>,
+    Option<String>,
 );
 
 /// Issues the T+7 post-show report: the night's numbers honestly labelled by
@@ -786,7 +788,8 @@ pub(in crate::autopilot) async fn issue_post_show_report(
                      ORDER BY act.position, act.act_slug)
              FROM event_acts AS act
              WHERE act.workspace_id = event.workspace_id
-               AND act.event_id = event.id) AS acts
+               AND act.event_id = event.id) AS acts,
+            event.city_id, event.festival_name
         FROM events AS event
         LEFT JOIN cities AS city ON city.id = event.city_id
         WHERE event.workspace_id = $1
@@ -945,6 +948,80 @@ pub(in crate::autopilot) async fn issue_post_show_report(
         evidence_gaps.push("no_event_campaigns_on_record");
     }
 
+    // §4f-1 — the room is a counterparty too. When the event's venue name
+    // resolves to a registry row, the artifact carries the venue's own
+    // numbers — shows on record, typical paid draw, repeat attenders,
+    // contributor count — the same aggregates `city_venues` publishes:
+    // counts and means only, never which tenant or which fan produced them.
+    // A room nobody has marked reads NULL, not a zeroed row.
+    let venue_numbers = match (event.9, event.3.as_deref()) {
+        (Some(city_id), Some(venue_name)) => {
+            sqlx::query_as::<_, (String, i64, i64, Option<f64>, i64)>(
+                r#"
+            SELECT venue.display_name,
+                   stats.shows_on_record,
+                   stats.contributors,
+                   stats.typical_draw,
+                   stats.repeat_attenders
+            FROM place_venues AS venue
+            JOIN LATERAL (
+                SELECT count(DISTINCT mark.event_id)::bigint AS shows_on_record,
+                       count(DISTINCT mark.workspace_id)::bigint AS contributors,
+                       (SELECT avg(draw.paid_orders)
+                        FROM (
+                            SELECT count(ticket_order.id)::double precision AS paid_orders
+                            FROM place_venue_marks AS m
+                            JOIN ticket_sales AS sale
+                              ON sale.workspace_id = m.workspace_id
+                             AND sale.event_id = m.event_id
+                            JOIN ticket_orders AS ticket_order
+                              ON ticket_order.workspace_id = m.workspace_id
+                             AND ticket_order.ticket_sale_id = sale.id
+                             AND ticket_order.status IN ('paid', 'partially_refunded')
+                            WHERE m.venue_id = venue.id
+                            GROUP BY m.event_id
+                        ) AS draw) AS typical_draw,
+                       (SELECT count(*)::bigint
+                        FROM (
+                            SELECT lower(btrim(ticket_order.buyer_email)) AS buyer
+                            FROM place_venue_marks AS m
+                            JOIN ticket_sales AS sale
+                              ON sale.workspace_id = m.workspace_id
+                             AND sale.event_id = m.event_id
+                            JOIN ticket_orders AS ticket_order
+                              ON ticket_order.workspace_id = m.workspace_id
+                             AND ticket_order.ticket_sale_id = sale.id
+                             AND ticket_order.status IN ('paid', 'partially_refunded')
+                            WHERE m.venue_id = venue.id
+                            GROUP BY buyer
+                            HAVING count(DISTINCT m.event_id) >= 2
+                        ) AS repeats) AS repeat_attenders
+                FROM place_venue_marks AS mark
+                WHERE mark.venue_id = venue.id
+            ) AS stats ON true
+            WHERE venue.city_id = $1
+              AND venue.name_key = place_venue_key($2)
+            "#,
+            )
+            .bind(city_id)
+            .bind(venue_name)
+            .fetch_optional(&mut **tx)
+            .await
+            .map_err(map_sqlx)?
+        }
+        _ => None,
+    };
+
+    // A festival's counterparty is its organiser — the artifact is the
+    // discovery-rate report §4f-1 hands a festival before any tenancy talk.
+    // The kind travels with the recipient so the letter knows which side of
+    // the table it is writing to.
+    let counterparty_kind = if event.10.is_some() {
+        "festival"
+    } else {
+        "promoter"
+    };
+
     crate::autopilot::emit_external_action(
         tx,
         workspace_id,
@@ -958,12 +1035,14 @@ pub(in crate::autopilot) async fn issue_post_show_report(
                 "title": event.1,
                 "city": event.2,
                 "venue": event.3,
+                "festival_name": event.10,
                 "starts_at": event.4,
                 "timezone": event.5,
                 "acts": event.8.unwrap_or_else(|| json!([])),
             },
             "report": {
                 "kind": "post_show_t7",
+                "counterparty_kind": counterparty_kind,
                 "generated_at": now,
                 "observed": {
                     "room_checkins_total": checkins_total,
@@ -997,6 +1076,22 @@ pub(in crate::autopilot) async fn issue_post_show_report(
                     }))
                     .collect::<Vec<_>>(),
                 "evidence_gaps": evidence_gaps,
+                // The venue's own numbers, which no venue currently has —
+                // §4f-1's second deliverable riding the same artifact.
+                "venue": venue_numbers.as_ref().map_or_else(
+                    || json!({"on_record": false}),
+                    |(name, shows, contributors, typical_draw, repeats)| json!({
+                        "on_record": true,
+                        "name": name,
+                        "shows_on_record": shows,
+                        "contributors": contributors,
+                        // Unticketed nights are unmeasurable — NULL stays NULL
+                        // rather than quoting a draw nobody measured.
+                        "typical_draw_paid_orders": typical_draw
+                            .map(|draw| draw.round() as i64),
+                        "repeat_attenders": repeats,
+                    }),
+                ),
             },
             "recipients": {
                 "band": band
@@ -1004,7 +1099,11 @@ pub(in crate::autopilot) async fn issue_post_show_report(
                     .map(|(email, name)| json!({"email": email, "name": name}))
                     .collect::<Vec<_>>(),
                 "counterparty": match (&event.6, &event.7) {
-                    (_, Some(email)) => json!({"name": event.6, "email": email}),
+                    (_, Some(email)) => json!({
+                        "name": event.6,
+                        "email": email,
+                        "kind": counterparty_kind,
+                    }),
                     _ => serde_json::Value::Null,
                 },
             },
