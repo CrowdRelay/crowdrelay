@@ -85,11 +85,15 @@ pub struct BookingTargetMutation {
     pub replayed: bool,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct RecordBookingReply {
     pub target_id: BookingTargetId,
     pub disposition: BookingReplyDisposition,
     pub occurred_at: OffsetDateTime,
+    /// The reply's own words, when the operator pasted them in. Present means
+    /// the reply joins the triage queue — a negotiation reply always needs a
+    /// human, and the deterministic reader proposes the terms it finds.
+    pub reply_text: Option<String>,
 }
 
 /// What a booking agent said back, filed against the registry entity itself

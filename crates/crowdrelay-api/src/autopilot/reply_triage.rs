@@ -30,6 +30,11 @@ pub struct ReplyTriageEntry {
     pub classification_result: String,
     pub classified_disposition: Option<String>,
     pub human_review_reason: Option<String>,
+    /// What the reader proposed from a negotiation reply's text — a fee the
+    /// human confirms through the terms route, never a write the machine made.
+    pub proposed_fee_minor: Option<i64>,
+    pub proposed_currency: Option<String>,
+    pub proposed_opportunity_id: Option<uuid::Uuid>,
     pub confidence_basis_points: i32,
     pub matched_rules: serde_json::Value,
     #[serde(with = "time::serde::rfc3339")]
@@ -55,6 +60,9 @@ struct ReplyTriageRow {
     classification_result: String,
     classified_disposition: Option<String>,
     human_review_reason: Option<String>,
+    proposed_fee_minor: Option<i64>,
+    proposed_currency: Option<String>,
+    proposed_opportunity_id: Option<uuid::Uuid>,
     confidence_basis_points: i32,
     matched_rules: serde_json::Value,
     classified_at: OffsetDateTime,
@@ -74,6 +82,7 @@ pub async fn reply_triage_handler(
         r#"
         SELECT id, target_id, target_kind, reply_text, previous_disposition,
                classification_result, classified_disposition, human_review_reason,
+               proposed_fee_minor, proposed_currency, proposed_opportunity_id,
                confidence_basis_points, matched_rules, classified_at
         FROM viryaos_reply_classifications
         WHERE workspace_id = $1
@@ -91,6 +100,7 @@ pub async fn reply_triage_handler(
         r#"
         SELECT id, target_id, target_kind, reply_text, previous_disposition,
                classification_result, classified_disposition, human_review_reason,
+               proposed_fee_minor, proposed_currency, proposed_opportunity_id,
                confidence_basis_points, matched_rules, classified_at
         FROM viryaos_reply_classifications
         WHERE workspace_id = $1
@@ -147,6 +157,9 @@ fn row_to_entry(row: ReplyTriageRow) -> ReplyTriageEntry {
         classification_result: row.classification_result,
         classified_disposition: row.classified_disposition,
         human_review_reason: row.human_review_reason,
+        proposed_fee_minor: row.proposed_fee_minor,
+        proposed_currency: row.proposed_currency,
+        proposed_opportunity_id: row.proposed_opportunity_id,
         confidence_basis_points: row.confidence_basis_points,
         matched_rules: row.matched_rules,
         classified_at: row.classified_at,

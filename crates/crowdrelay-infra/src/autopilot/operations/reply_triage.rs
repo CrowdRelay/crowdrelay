@@ -9,7 +9,7 @@
 
 use async_trait::async_trait;
 use crowdrelay_application::autopilot::{
-    AutopilotReplyTriageRepository, ReplyNeedingTriage, ReplyTriageResult,
+    AutopilotReplyTriageRepository, ReplyNeedingTriage, ReplyTargetKind, ReplyTriageResult,
 };
 use crowdrelay_domain::WorkspaceId;
 use crowdrelay_domain::outreach::{OutreachReplyDisposition, OutreachTargetKind};
@@ -60,8 +60,14 @@ impl AutopilotReplyTriageRepository for PostgresAutopilotRepository {
 
             rows.into_iter()
                 .map(|row| {
-                    let target_kind = OutreachTargetKind::parse(&row.target_kind)
-                        .ok_or(RepositoryError::Unexpected)?;
+                    let target_kind = match row.target_kind.as_str() {
+                        // A booking-channel counterparty's reply never meets
+                        // the outreach classifier — it always needs a human.
+                        "promoter" | "venue" | "festival" => ReplyTargetKind::BookingCounterparty,
+                        other => ReplyTargetKind::Outreach(
+                            OutreachTargetKind::parse(other).ok_or(RepositoryError::Unexpected)?,
+                        ),
+                    };
                     let previous_disposition = row
                         .previous_disposition
                         .as_deref()
@@ -95,9 +101,9 @@ impl AutopilotReplyTriageRepository for PostgresAutopilotRepository {
             // If the row is gone (already classified by another worker between
             // load and record), silently skip — a race-lost classification is
             // not an error and must not fail the autopilot cycle.
-            let (target_id, reply_text): (uuid::Uuid, String) =
-                match sqlx::query_as::<_, (uuid::Uuid, String)>(
-                    "SELECT target_id, reply_text FROM viryaos_reply_classifications
+            let (target_id, reply_text, target_kind): (uuid::Uuid, String, String) =
+                match sqlx::query_as::<_, (uuid::Uuid, String, String)>(
+                    "SELECT target_id, reply_text, target_kind FROM viryaos_reply_classifications
                      WHERE workspace_id = $1 AND id = $2
                        AND classified_disposition IS NULL
                        AND classification_result = 'auto'",
@@ -189,11 +195,67 @@ impl AutopilotReplyTriageRepository for PostgresAutopilotRepository {
                 return Ok(());
             }
 
+            // A negotiation reply's number is a proposal, never a write —
+            // the human confirms it through the terms route like any other.
+            if matches!(target_kind.as_str(), "promoter" | "venue" | "festival")
+                && let Some(proposal) =
+                    crowdrelay_domain::reply_triage::extract_offer_terms(&reply_text)
+            {
+                    // The live negotiation for this counterparty is the open
+                    // team opportunity whose contact the reply's target is —
+                    // the same email/organization signal the market floor
+                    // reads. Only fee-negotiable kinds link, and a currency
+                    // match wins the tie.
+                    let opportunity_id = sqlx::query_scalar::<_, uuid::Uuid>(
+                        "SELECT opportunity.id \
+                         FROM viryaos_team_opportunities AS opportunity \
+                         JOIN viryaos_booking_targets AS target \
+                           ON target.workspace_id = opportunity.workspace_id \
+                          AND target.id = $2 \
+                         WHERE opportunity.workspace_id = $1 \
+                           AND opportunity.status IN ('submitted','replied') \
+                           AND opportunity.opportunity_kind IN \
+                               ('festival','showcase','support_slot') \
+                           AND ( \
+                                (target.contact_email IS NOT NULL \
+                                 AND lower(target.contact_email) = lower(opportunity.contact_email)) \
+                                OR lower(btrim(target.display_name)) = lower(btrim(opportunity.organization)) \
+                               ) \
+                         ORDER BY (opportunity.currency = $3) DESC, \
+                                  opportunity.updated_at DESC, opportunity.id \
+                         LIMIT 1",
+                    )
+                    .bind(workspace_id.into_uuid())
+                    .bind(target_id)
+                    .bind(proposal.currency)
+                    .fetch_optional(&mut *transaction)
+                    .await
+                    .map_err(map_sqlx)?;
+                    sqlx::query(
+                        "UPDATE viryaos_reply_classifications \
+                         SET proposed_fee_minor = $3, proposed_currency = $4, \
+                             proposed_opportunity_id = $5 \
+                         WHERE workspace_id = $1 AND id = $2",
+                    )
+                    .bind(workspace_id.into_uuid())
+                    .bind(reply_id)
+                    .bind(proposal.fee_minor)
+                    .bind(proposal.currency)
+                    .bind(opportunity_id)
+                    .execute(&mut *transaction)
+                    .await
+                    .map_err(map_sqlx)?;
+            }
+
             // For auto-classifications, also update the target's disposition.
             // `last_reply_at` is NOT updated here — the ingress already set it
             // to the reply's occurred_at, and the classification time is not
-            // when the reply was received.
-            if let ReplyClassification::Auto { disposition, .. } = &result.classification {
+            // when the reply was received. Booking-channel kinds never reach
+            // this arm: their replies are always needs_human, and their
+            // disposition lives on the booking target's own record.
+            if !matches!(target_kind.as_str(), "promoter" | "venue" | "festival")
+                && let ReplyClassification::Auto { disposition, .. } = &result.classification
+            {
                 let disp_str = match disposition {
                     OutreachReplyDisposition::Positive => "positive",
                     OutreachReplyDisposition::Declined => "declined",

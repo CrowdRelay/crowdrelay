@@ -13300,6 +13300,14 @@ components:
       required: [disposition, occurred_at]
       properties:
         disposition: { $ref: '#/components/schemas/BookingReplyDisposition' }
+        reply_text:
+          type: string
+          maxLength: 4000
+          description: >-
+            The reply's own words, when the operator pastes them in. Present
+            means the reply joins the triage queue — a negotiation reply
+            always needs a human, and the deterministic reader proposes the
+            terms it finds for the human to confirm through the terms route.
         occurred_at: { type: string, format: date-time }
 
     OutreachTargetKind:

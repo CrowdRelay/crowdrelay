@@ -730,12 +730,29 @@ impl AutopilotWorker {
             Ok(replies) => {
                 for reply in replies {
                     let classified_at = OffsetDateTime::now_utc();
-                    let input = crowdrelay_domain::reply_triage::ReplyClassificationInput {
-                        reply_text: &reply.reply_text,
-                        target_kind: reply.target_kind,
-                        previous_disposition: reply.previous_disposition,
+                    let classification = match reply.target_kind {
+                        crowdrelay_application::autopilot::ReplyTargetKind::Outreach(kind) => {
+                            let input =
+                                crowdrelay_domain::reply_triage::ReplyClassificationInput {
+                                    reply_text: &reply.reply_text,
+                                    target_kind: kind,
+                                    previous_disposition: reply.previous_disposition,
+                                };
+                            crowdrelay_domain::reply_triage::classify_reply(&input)
+                        }
+                        // A negotiation reply is always a human's call — the
+                        // operator filed the disposition with the reply, and
+                        // the triage row's job is to carry the proposed terms
+                        // the reader extracted, not a second disposition.
+                        crowdrelay_application::autopilot::ReplyTargetKind::BookingCounterparty => {
+                            crowdrelay_domain::reply_triage::ReplyClassification::NeedsHuman {
+                                reason: crowdrelay_domain::reply_triage::HumanReviewReason::NegotiationReply,
+                                confidence: crowdrelay_domain::autonomy::Confidence::saturating_from_basis_points(
+                                    10_000,
+                                ),
+                            }
+                        }
                     };
-                    let classification = crowdrelay_domain::reply_triage::classify_reply(&input);
                     let result = crowdrelay_application::autopilot::ReplyTriageResult {
                         classification,
                         classified_at,
