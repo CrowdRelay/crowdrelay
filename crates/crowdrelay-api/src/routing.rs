@@ -852,6 +852,13 @@ pub(super) fn application_routes(state: AppState) -> Router {
             get(crate::roster_catalogue_rotation::catalogue_rotation_plan)
                 .post(crate::roster_catalogue_rotation::run_catalogue_rotation),
         )
+        // The roster archive: every counterparty the member acts' shows
+        // named, with the recurrence — the same promoter across acts is
+        // the registry density the label holds already.
+        .route(
+            "/v1/admin/roster-plan/counterparty-archive",
+            get(crate::roster_counterparty_archive::counterparty_archive),
+        )
         // The roster's own numbers, on the same surface as its plan for the
         // same reason: these belong to the organisation, and a workspace token
         // must not be able to read or set what a labelmate's plan is sized by.
