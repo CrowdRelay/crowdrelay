@@ -285,6 +285,16 @@ async fn seed_show(f: &Fixture, now: OffsetDateTime) -> Result<Uuid, Box<dyn std
     Ok(event_id)
 }
 
+/// The catalogue id for a city slug the fixture already created.
+async fn city_id_for(pool: &sqlx::PgPool, slug: &str) -> Result<Uuid, Box<dyn std::error::Error>> {
+    Ok(
+        sqlx::query_scalar::<_, Uuid>("SELECT id FROM cities WHERE slug = $1 ORDER BY id LIMIT 1")
+            .bind(slug)
+            .fetch_one(pool)
+            .await?,
+    )
+}
+
 async fn seed_report_action(
     f: &Fixture,
     event_id: Uuid,
@@ -402,6 +412,26 @@ async fn post_show_report_escalation_emits_labelled_artifact_and_closes_task()
             .is_empty()
     );
 
+    // §4f-1: the room is a counterparty — the artifact carries the venue's
+    // own registry numbers. 'Klub Testowy' was marked by the trigger on the
+    // published event, so it resolves: this show among the room's record,
+    // this workspace among its contributors, and a draw only over shows
+    // that were actually ticketed. The database is shared across runs, so
+    // the pin is the shape — our show counted — not a count that other
+    // runs legitimately moved.
+    let venue = &payload["report"]["venue"];
+    assert_eq!(venue["on_record"], true);
+    assert_eq!(venue["name"], "Klub Testowy");
+    assert!(venue["shows_on_record"].as_i64().expect("count") >= 1);
+    assert!(venue["contributors"].as_i64().expect("count") >= 1);
+    assert!(venue["repeat_attenders"].as_i64().expect("count") >= 0);
+
+    // An ordinary show's counterparty is a promoter — the kind travels with
+    // the recipient and the report, and no festival name is claimed.
+    assert_eq!(payload["report"]["counterparty_kind"], "promoter");
+    assert_eq!(payload["recipients"]["counterparty"]["kind"], "promoter");
+    assert!(payload["event"]["festival_name"].is_null());
+
     // The task is done — re-evaluation holds instead of re-sending.
     let status: String = sqlx::query_scalar(
         "SELECT status FROM show_checklist_items
@@ -463,8 +493,66 @@ async fn post_show_report_escalation_emits_labelled_artifact_and_closes_task()
         .collect();
     assert!(gaps.contains(&"room_attendance_unverified"));
     assert!(gaps.contains(&"no_counterparty_on_record"));
+
     assert!(gaps.contains(&"no_event_campaigns_on_record"));
     assert!(payload["recipients"]["counterparty"].is_null());
+
+    // A festival slot reports to its organiser: the counterparty kind is
+    // the festival's, the event carries the festival's own name, and the
+    // stage's own numbers ride along — the trigger already marked it, so
+    // the festival's stage reads on_record with one show, while an
+    // unticketed night keeps its draw NULL rather than quoting a zero the
+    // room never earned.
+    let festival_event = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO events (id, workspace_id, city_id, slug, title, venue, timezone,
+                             starts_at, status, published_at,
+                             counterparty_name, counterparty_email, festival_name)
+         VALUES ($1, $2, $3, 'off-festival-slot', 'OFF Festival slot', 'Festival Grounds',
+                 'Europe/Warsaw', $4, 'published', $5,
+                 'OFF Organiser', 'organiser@example.test', 'OFF Festival')",
+    )
+    .bind(festival_event)
+    .bind(f.workspace_id.into_uuid())
+    .bind(city_id_for(&f.pool, "krakow").await?)
+    .bind(now - time::Duration::days(8))
+    .bind(now - time::Duration::days(20))
+    .execute(&f.pool)
+    .await?;
+    let festival_action = seed_report_action(&f, festival_event, now).await?;
+    let claimed = f
+        .repository
+        .claim_due_autonomous_actions(f.workspace_id, 8, now)
+        .await?;
+    let action = claimed
+        .iter()
+        .find(|a| a.id.into_uuid() == festival_action)
+        .expect("festival report action claimable");
+    f.repository
+        .execute_action(f.workspace_id, action, now)
+        .await?;
+    let payload: Value = sqlx::query_scalar(
+        "SELECT payload FROM outbox_events
+         WHERE workspace_id = $1 AND event_type = 'crowdrelay.show.post_show_report_due'
+           AND payload->'event'->>'slug' = 'off-festival-slot'",
+    )
+    .bind(f.workspace_id.into_uuid())
+    .fetch_one(&f.pool)
+    .await?;
+    assert_eq!(payload["report"]["counterparty_kind"], "festival");
+    assert_eq!(payload["event"]["festival_name"], "OFF Festival");
+    assert_eq!(
+        payload["recipients"]["counterparty"]["kind"], "festival",
+        "the organiser reads the festival's own kind of artifact"
+    );
+    let venue = &payload["report"]["venue"];
+    assert_eq!(venue["on_record"], true);
+    assert_eq!(venue["name"], "Festival Grounds");
+    assert!(venue["shows_on_record"].as_i64().expect("count") >= 1);
+    assert!(
+        venue["typical_draw_paid_orders"].is_null(),
+        "an unticketed festival slot must not read as a zero-draw room"
+    );
 
     f.pool.close().await;
     Ok(())
