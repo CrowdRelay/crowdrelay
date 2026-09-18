@@ -8,8 +8,8 @@ use crowdrelay_application::{
         AutopilotActionRepository, AutopilotContext, AutopilotDecisionRepository,
         AutopilotFirstPartyGrowthMetrics, AutopilotMeasurementKind, AutopilotMeasurementRepository,
         AutopilotPlayOutcomeRepository, AutopilotPolicyConfig, AutopilotReplyTriageRepository,
-        AutopilotWaveOutcomeRepository, EvaluateAutopilot, assess_measurement_effect,
-        assess_play_claim, assess_wave_claim,
+        AutopilotWaveOutcomeRepository, EvaluateAutopilot, ORG_ATTENTION_BUDGET_ERROR_KIND,
+        assess_measurement_effect, assess_play_claim, assess_wave_claim,
     },
 };
 use crowdrelay_domain::{WorkspaceId, play_measurement::PlayMeasurementPolicy};
@@ -951,6 +951,49 @@ fn repository_error_kind(error: RepositoryError) -> &'static str {
         {
             AutopilotMeasurementKind::NEVER_PUBLISHED
         }
+        // Same shape as the measurement kind above: the contact governor
+        // raises the roster's spent monthly attention share as a named
+        // conflict, and "of the four things this roster wanted to tell this
+        // person this month, three already went out" is not a stale write —
+        // the lapsed/attention reads stay honest only if the kind says so.
+        RepositoryError::ConflictBecause(reason) if reason == ORG_ATTENTION_BUDGET_ERROR_KIND => {
+            ORG_ATTENTION_BUDGET_ERROR_KIND
+        }
         RepositoryError::Conflict | RepositoryError::ConflictBecause(_) => "state_changed",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The named conflicts that must reach `last_error_kind` verbatim rather
+    /// than collapsing into `state_changed` — the funnel is the only thing
+    /// keeping "the roster spent this person's monthly share" readable as
+    /// itself on the action row.
+    #[test]
+    fn repository_error_kind_keeps_named_conflicts() {
+        assert_eq!(
+            repository_error_kind(RepositoryError::ConflictBecause(
+                ORG_ATTENTION_BUDGET_ERROR_KIND
+            )),
+            "org_attention_budget"
+        );
+        assert_eq!(
+            repository_error_kind(RepositoryError::ConflictBecause(
+                AutopilotMeasurementKind::NEVER_PUBLISHED
+            )),
+            "dispatch_never_published"
+        );
+        assert_eq!(
+            repository_error_kind(RepositoryError::Conflict),
+            "state_changed"
+        );
+        assert_eq!(
+            repository_error_kind(RepositoryError::ConflictBecause(
+                "some other operator-facing reason"
+            )),
+            "state_changed"
+        );
     }
 }
