@@ -63,6 +63,7 @@ use crowdrelay_worker::{
     social_post_executor::SocialPostExecutorWorker,
     social_post_source_sync::SocialPostSourceSyncWorker,
     telegram_executor::TelegramExecutorWorker,
+    ticketmaster_sweep::TicketmasterSweepWorker,
     venue_fact_expiry::VenueFactExpiryWorker,
     video_source_sync::VideoSourceSyncWorker,
 };
@@ -832,6 +833,16 @@ async fn run(database: PgPool, config: &Config, standby: bool) -> Result<()> {
         None
     };
 
+    // The Ticketmaster sweep writes event_evidence onto rooms the registry
+    // already holds — it mints no venue, and without an API key it is inert:
+    // a flag alone must not start a worker that can only fail.
+    let ticketmaster_sweep = TicketmasterSweepWorker::maybe_standard(
+        database.clone(),
+        config.ticketmaster_enabled,
+        config.ticketmaster_api_key.clone(),
+        config.database.operation_timeout,
+    );
+
     let (shutdown_sender, shutdown_receiver) = watch::channel(false);
     let reminder_shutdown = shutdown_receiver.clone();
     let nearby_gig_shutdown = shutdown_receiver.clone();
@@ -866,6 +877,7 @@ async fn run(database: PgPool, config: &Config, standby: bool) -> Result<()> {
     let community_intel_shutdown = shutdown_receiver.clone();
     let venue_fact_expiry_shutdown = shutdown_receiver.clone();
     let osm_venue_sweep_shutdown = shutdown_receiver.clone();
+    let ticketmaster_sweep_shutdown = shutdown_receiver.clone();
 
     // Growth readiness summary: tells the operator exactly which growth
     // systems are active and what's missing. This is the single most
@@ -1127,6 +1139,12 @@ async fn run(database: PgPool, config: &Config, standby: bool) -> Result<()> {
         runtime_tasks.spawn(async move {
             worker.run(osm_venue_sweep_shutdown).await;
             "OSM venue sweep"
+        });
+    }
+    if let Some(worker) = ticketmaster_sweep {
+        runtime_tasks.spawn(async move {
+            worker.run(ticketmaster_sweep_shutdown).await;
+            "Ticketmaster sweep"
         });
     }
 

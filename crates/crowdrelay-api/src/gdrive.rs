@@ -46,6 +46,12 @@ const OUTREACH_KINDS: &[&str] = &[
     "creator",
 ];
 const BOOKING_KINDS: &[&str] = &["venue", "promoter", "festival"];
+// The §12-5 booking agent: a band pitches an agent to be represented, once —
+// a different direction and cadence from a promoter's one-show pitch, so the
+// kind has its own table (viryaos_booking_agents) rather than a chair in the
+// city-scoped candidate queue. The extractor files `talent_buyer` as
+// `booking_agent`, but the promote accepts the sheet's own word too.
+const AGENT_KINDS: &[&str] = &["booking_agent", "talent_buyer"];
 // Agents and labels the band already dealt with file onto the
 // representation list — a different home from the press kinds because the
 // consent they carry is different: not "published a route", but "the band
@@ -244,7 +250,8 @@ pub async fn promote_contact(
                 Some(k)
                     if OUTREACH_KINDS.contains(&k)
                         || BOOKING_KINDS.contains(&k)
-                        || REPRESENTATION_KINDS.contains(&k) =>
+                        || REPRESENTATION_KINDS.contains(&k)
+                        || AGENT_KINDS.contains(&k) =>
                 {
                     k.to_owned()
                 }
@@ -255,6 +262,21 @@ pub async fn promote_contact(
                     .unwrap_or_else(|| "press".to_owned()),
             };
             let kind = kind.as_str();
+            if AGENT_KINDS.contains(&kind) {
+                return match repo.promote_beacon_agent(workspace_id, &contact).await {
+                    Ok(()) => (
+                        StatusCode::OK,
+                        Json(serde_json::json!({ "beacon_outcome": "promoted" })),
+                    )
+                        .into_response(),
+                    Err(error) => {
+                        tracing::warn!(%error, "gdrive agent promote failed");
+                        Problem::service_unavailable(request_id_value)
+                            .private()
+                            .into_response()
+                    }
+                };
+            }
             if REPRESENTATION_KINDS.contains(&kind) {
                 return match repo
                     .promote_beacon_representation(workspace_id, &contact, kind)

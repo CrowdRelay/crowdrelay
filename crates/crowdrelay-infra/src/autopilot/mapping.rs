@@ -177,6 +177,12 @@ fn booking_target_snapshot(
             .map_err(|_| RepositoryError::Unexpected)?,
         last_reply: parse_booking_reply_disposition(&row.last_reply_disposition)?,
         venue_evidence,
+        days_until_application_close: row.days_until_application_close,
+        linked_venue_ids: row
+            .linked_venue_ids
+            .into_iter()
+            .map(crowdrelay_domain::VenueId::from_uuid)
+            .collect(),
     })
 }
 

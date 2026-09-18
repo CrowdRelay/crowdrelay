@@ -3760,6 +3760,70 @@ paths:
         '404': { $ref: '#/components/responses/PrivateProblem' }
         '409': { $ref: '#/components/responses/PrivateProblem' }
         '503': { $ref: '#/components/responses/PrivateProblem' }
+  /admin/autopilot/booking-targets/{target_id}/venues/{venue_id}:
+    post:
+      operationId: linkAutopilotBookingTargetVenue
+      summary: Link a booking target to one of its rooms
+      description: >-
+        The promoter↔venue edge (plan §12-5): one promoter works several
+        rooms, one room hosts several promoters. The target's primary
+        `venue_id` stays; the edge is the many. Idempotent by primary key —
+        replaying answers `linked: false`, so no Idempotency-Key is required.
+      security:
+      - adminBearer: []
+      parameters:
+      - in: path
+        name: target_id
+        required: true
+        schema: { type: string, format: uuid }
+      - in: path
+        name: venue_id
+        required: true
+        schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Edge present — `linked` says whether this call created it.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [linked]
+                properties:
+                  linked: { type: boolean }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '404': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
+    delete:
+      operationId: unlinkAutopilotBookingTargetVenue
+      summary: Remove a promoter↔venue edge
+      description: >-
+        Idempotent — deleting an edge that is already absent answers
+        `linked: false`, not an error. An unknown target is a 404: a mistyped
+        id must not read as a successful unlink.
+      security:
+      - adminBearer: []
+      parameters:
+      - in: path
+        name: target_id
+        required: true
+        schema: { type: string, format: uuid }
+      - in: path
+        name: venue_id
+        required: true
+        schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Edge absent.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [linked]
+                properties:
+                  linked: { type: boolean }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '404': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
   /admin/autopilot/outreach/candidates:
     post:
       operationId: ingestAutopilotOutreachCandidates

@@ -71,6 +71,11 @@ const AGENT_OUTCOMES_ENABLED_KEY: &str = "CROWDRELAY_AGENT_OUTCOMES_ENABLED";
 /// shared `place_venues`/`place_venue_facts` rows from a public upstream, so
 /// production enables it only after the sweep's output has been verified.
 const OSM_VENUE_SWEEP_ENABLED_KEY: &str = "CROWDRELAY_OSM_VENUE_SWEEP_ENABLED";
+/// The Ticketmaster Discovery sweep (§12-3): `event_evidence` facts, venue
+/// anchors and peer acts for rooms that already exist — it mints nothing.
+/// Default OFF, and dead without the API key.
+const TICKETMASTER_ENABLED_KEY: &str = "CROWDRELAY_TICKETMASTER_ENABLED";
+const TICKETMASTER_API_KEY: &str = "CROWDRELAY_TICKETMASTER_API_KEY";
 const REDDIT_PROXY_URL_KEY: &str = "CROWDRELAY_REDDIT_PROXY_URL";
 const AGENT_SERVICE_URL_KEY: &str = "CROWDRELAY_AGENT_SERVICE_URL";
 /// YouTube Data API v3 key. Shared by the growth metric sync worker and
@@ -176,6 +181,8 @@ const KNOWN_KEYS: &[&str] = &[
     AUTOPILOT_POLL_INTERVAL_MS_KEY,
     AGENT_OUTCOMES_ENABLED_KEY,
     OSM_VENUE_SWEEP_ENABLED_KEY,
+    TICKETMASTER_ENABLED_KEY,
+    TICKETMASTER_API_KEY,
     REDDIT_PROXY_URL_KEY,
     AGENT_SERVICE_URL_KEY,
     YOUTUBE_API_KEY,
@@ -254,6 +261,16 @@ pub struct Config {
     /// cities tenants care about and writes `open_directory`/ODbL facts.
     /// Default OFF — a shared-registry writer stays dark until verified.
     pub osm_venue_sweep_enabled: bool,
+    /// When true, the worker sweeps Ticketmaster Discovery for events in the
+    /// same city set and writes `event_evidence` facts, `ticketmaster` venue
+    /// anchors and peer acts — only onto rooms that already exist. Default
+    /// OFF: a keyless worker must not even start, and a provider nobody
+    /// verified must not write.
+    pub ticketmaster_enabled: bool,
+    /// The Ticketmaster Discovery API key. Required when the sweep is on —
+    /// a flag without a key logs once and stays inert rather than failing
+    /// the whole worker boot.
+    pub ticketmaster_api_key: Option<String>,
     /// Optional HTTP/HTTPS/SOCKS proxy URL for Reddit requests. Reddit blocks
     /// direct JSON API access from some IPs (403). When set, the discovery
     /// worker and community executor route Reddit requests through this proxy.
@@ -431,6 +448,16 @@ impl Config {
             OSM_VENUE_SWEEP_ENABLED_KEY,
             false,
         )?;
+        let ticketmaster_enabled = parse_bool(
+            values.get(TICKETMASTER_ENABLED_KEY),
+            TICKETMASTER_ENABLED_KEY,
+            false,
+        )?;
+        let ticketmaster_api_key = values
+            .get(TICKETMASTER_API_KEY)
+            .map(|v| v.trim())
+            .filter(|v| !v.is_empty())
+            .map(|v| v.to_owned());
         let reddit_proxy_url = values
             .get(REDDIT_PROXY_URL_KEY)
             .map(|v| v.trim())
@@ -512,6 +539,8 @@ impl Config {
             autopilot_poll_interval,
             agent_outcomes_enabled,
             osm_venue_sweep_enabled,
+            ticketmaster_enabled,
+            ticketmaster_api_key,
             reddit_proxy_url,
             agent_service_url,
             youtube_api_key,

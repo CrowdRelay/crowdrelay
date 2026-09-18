@@ -190,7 +190,11 @@ async fn best_venue(
             GROUP BY marks.venue_id, marks.event_id
         )
         SELECT venue.display_name,
-               count(marks.event_id) FILTER (
+               -- DISTINCT because the target join can fan a venue's marks
+               -- out — two targets pointing at one room, or one promoter
+               -- edge-joined beside its own primary link, must not double
+               -- the room's show count.
+               count(DISTINCT marks.event_id) FILTER (
                    WHERE marks.starts_at > $3 - INTERVAL '12 months'
                      AND marks.starts_at <= $3
                )::bigint AS shows_last_12_months,
@@ -215,12 +219,24 @@ async fn best_venue(
         LEFT JOIN per_show
           ON per_show.venue_id = marks.venue_id
          AND per_show.event_id = marks.event_id
-        -- The tenant's own booking target for this room, if they have one.
+        -- The tenant's own booking targets for this room, if they have one —
+        -- the primary venue_id union the promoter↔venue edges, so a room a
+        -- promoter works reads as reachable even when the target's primary
+        -- link names another room (§12-5 entity 6).
         -- Scoped to the workspace: capacity is shared knowledge, but whether
         -- *we* can write to the room is ours.
         LEFT JOIN viryaos_booking_targets AS target
-          ON target.venue_id = venue.id
-         AND target.workspace_id = $1
+          ON target.workspace_id = $1
+         AND (
+             target.venue_id = venue.id
+             OR EXISTS (
+                 SELECT 1
+                 FROM viryaos_booking_target_venues AS edge
+                 WHERE edge.workspace_id = target.workspace_id
+                   AND edge.target_id = target.id
+                   AND edge.venue_id = venue.id
+             )
+         )
         GROUP BY venue.id, venue.display_name
         ORDER BY count(marks.event_id) DESC, venue.display_name
         LIMIT 1

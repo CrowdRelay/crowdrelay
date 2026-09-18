@@ -42,7 +42,7 @@ use crowdrelay_domain::{
     AutopilotActionId, AutopilotDecisionId, BeaconId, BookingTargetId, CityId, CitySlug,
     ContentSourceId, ContentSuggestionId, EventId, ExperimentId, ExperimentVariantId,
     GrowthMetricSeriesId, MerchProductId, OutreachOpportunityId, OutreachTargetId, ReleasePlanId,
-    TeamOpportunityId, TicketTypeId,
+    TeamOpportunityId, TicketTypeId, VenueId,
     autonomy::{AutonomyLevel, Confidence},
     beacons::{BeaconKind, BeaconReplyDisposition},
     booking::{BookingReplyDisposition, BookingTargetKind},

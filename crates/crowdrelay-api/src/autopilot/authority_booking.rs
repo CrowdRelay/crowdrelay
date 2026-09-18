@@ -213,6 +213,69 @@ pub async fn upsert_booking_target(
     }
 }
 
+/// Links a booking target to one of its rooms (§12-5 entity 6) — the
+/// operator's "this promoter also books Klub X". The edge's primary key is
+/// the idempotency: replaying the POST is a no-op, so this is the one
+/// mutation on the surface that does not ask for an Idempotency-Key — the
+/// row cannot be written twice by construction.
+pub async fn link_booking_target_venue(
+    State(state): State<AppState>,
+    Path((target_id, venue_id)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Response {
+    let (Ok(target_id), Ok(venue_id)) = (
+        Uuid::parse_str(&target_id),
+        Uuid::parse_str(&venue_id),
+    ) else {
+        return Problem::not_found(request_id(&headers))
+            .private()
+            .into_response();
+    };
+    match state
+        .autopilot
+        .link_target_venue(
+            state.ops.workspace_id(),
+            BookingTargetId::from_uuid(target_id),
+            VenueId::from_uuid(venue_id),
+        )
+        .await
+    {
+        // `linked` says whether this call created the edge — a replay reads
+        // `false`, which is still a 200: the desired end state holds.
+        Ok(linked) => private_json(StatusCode::OK, serde_json::json!({ "linked": linked })),
+        Err(error) => repository_problem(error, request_id(&headers)),
+    }
+}
+
+/// Removes a promoter↔venue edge. Idempotent: deleting an edge that is
+/// already absent answers `linked: false`, not an error.
+pub async fn unlink_booking_target_venue(
+    State(state): State<AppState>,
+    Path((target_id, venue_id)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Response {
+    let (Ok(target_id), Ok(venue_id)) = (
+        Uuid::parse_str(&target_id),
+        Uuid::parse_str(&venue_id),
+    ) else {
+        return Problem::not_found(request_id(&headers))
+            .private()
+            .into_response();
+    };
+    match state
+        .autopilot
+        .unlink_target_venue(
+            state.ops.workspace_id(),
+            BookingTargetId::from_uuid(target_id),
+            VenueId::from_uuid(venue_id),
+        )
+        .await
+    {
+        Ok(_) => private_json(StatusCode::OK, serde_json::json!({ "linked": false })),
+        Err(error) => repository_problem(error, request_id(&headers)),
+    }
+}
+
 pub async fn upsert_ticket_allocation_guardrail(
     State(state): State<AppState>,
     headers: HeaderMap,

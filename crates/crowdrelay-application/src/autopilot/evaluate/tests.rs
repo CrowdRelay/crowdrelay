@@ -616,6 +616,8 @@ mod tests {
             followup_count: 0,
             last_reply: crowdrelay_domain::booking::BookingReplyDisposition::None,
             venue_evidence,
+            days_until_application_close: None,
+            linked_venue_ids: Vec::new(),
         }
     }
 

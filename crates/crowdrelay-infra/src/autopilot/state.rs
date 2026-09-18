@@ -194,6 +194,96 @@ impl AutopilotBookingStateRepository for PostgresAutopilotRepository {
         operations::record_booking_reply(self, workspace_id, command, idempotency_key, request_id)
             .await
     }
+
+    async fn link_target_venue(
+        &self,
+        workspace_id: WorkspaceId,
+        target_id: BookingTargetId,
+        venue_id: crowdrelay_domain::VenueId,
+    ) -> Result<bool, RepositoryError> {
+        self.bounded(async {
+            // The composite FK carries workspace_id, so a cross-tenant attach
+            // can never write — but it would surface as a bare constraint
+            // error. The pre-reads keep the honest answer a 404.
+            // A bare `SELECT 1` is int4 on the wire — decoding it as i64
+            // fails before the row is even looked at. EXISTS answers a bool.
+            let target_exists = sqlx::query_scalar::<_, bool>(
+                "SELECT EXISTS (SELECT 1 FROM viryaos_booking_targets \
+                 WHERE workspace_id = $1 AND id = $2)",
+            )
+            .bind(workspace_id.into_uuid())
+            .bind(target_id.into_uuid())
+            .fetch_one(&self.pool)
+            .await
+            .map_err(map_sqlx)?;
+            if !target_exists {
+                return Err(RepositoryError::NotFound);
+            }
+            let venue_exists = sqlx::query_scalar::<_, bool>(
+                "SELECT EXISTS (SELECT 1 FROM place_venues WHERE id = $1)",
+            )
+            .bind(venue_id.into_uuid())
+            .fetch_one(&self.pool)
+            .await
+            .map_err(map_sqlx)?;
+            if !venue_exists {
+                return Err(RepositoryError::NotFound);
+            }
+            let rows = sqlx::query(
+                r#"
+                INSERT INTO viryaos_booking_target_venues (workspace_id, target_id, venue_id)
+                VALUES ($1, $2, $3)
+                ON CONFLICT DO NOTHING
+                "#,
+            )
+            .bind(workspace_id.into_uuid())
+            .bind(target_id.into_uuid())
+            .bind(venue_id.into_uuid())
+            .execute(&self.pool)
+            .await
+            .map_err(map_sqlx)?;
+            Ok(rows.rows_affected() > 0)
+        })
+        .await
+    }
+
+    async fn unlink_target_venue(
+        &self,
+        workspace_id: WorkspaceId,
+        target_id: BookingTargetId,
+        venue_id: crowdrelay_domain::VenueId,
+    ) -> Result<bool, RepositoryError> {
+        self.bounded(async {
+            // A bare `SELECT 1` is int4 on the wire — decoding it as i64
+            // fails before the row is even looked at. EXISTS answers a bool.
+            let target_exists = sqlx::query_scalar::<_, bool>(
+                "SELECT EXISTS (SELECT 1 FROM viryaos_booking_targets \
+                 WHERE workspace_id = $1 AND id = $2)",
+            )
+            .bind(workspace_id.into_uuid())
+            .bind(target_id.into_uuid())
+            .fetch_one(&self.pool)
+            .await
+            .map_err(map_sqlx)?;
+            if !target_exists {
+                return Err(RepositoryError::NotFound);
+            }
+            let rows = sqlx::query(
+                r#"
+                DELETE FROM viryaos_booking_target_venues
+                WHERE workspace_id = $1 AND target_id = $2 AND venue_id = $3
+                "#,
+            )
+            .bind(workspace_id.into_uuid())
+            .bind(target_id.into_uuid())
+            .bind(venue_id.into_uuid())
+            .execute(&self.pool)
+            .await
+            .map_err(map_sqlx)?;
+            Ok(rows.rows_affected() > 0)
+        })
+        .await
+    }
 }
 
 #[async_trait]

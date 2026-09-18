@@ -5,7 +5,7 @@ use crowdrelay_domain::{
     AutopilotActionId, AutopilotDecisionId, AutopilotMeasurementId, BeaconId, BookingTargetId,
     CityId, ContentSourceId, ContentSuggestionId, EventId, ExperimentId, ExperimentVariantId,
     GrowthMetricSeriesId, MarketSignalId, MerchProductId, OutreachOpportunityId, OutreachTargetId,
-    PlayId, PromotionCampaignId, ReleasePlanId, TeamOpportunityId, WorkspaceId,
+    PlayId, PromotionCampaignId, ReleasePlanId, TeamOpportunityId, VenueId, WorkspaceId,
     acquisition_channel::{ChannelAttribution, UnattributedReason},
     autonomy::{AutonomyLevel, Confidence, PolicyDisposition},
     beacons::{BeaconKind, BeaconReplyDisposition},

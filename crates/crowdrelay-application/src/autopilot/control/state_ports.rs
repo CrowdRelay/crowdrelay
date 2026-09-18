@@ -109,6 +109,29 @@ pub trait AutopilotBookingStateRepository: Send + Sync {
         idempotency_key: &IdempotencyKey,
         request_id: Option<&RequestId>,
     ) -> Result<AutopilotControlMutation, RepositoryError>;
+
+    /// Links a booking target to one of its rooms (§12-5 entity 6). A
+    /// promoter works several rooms — the edge is the many beside the
+    /// target's single primary `venue_id`. Idempotent by primary key:
+    /// linking an already-linked room answers `Ok(false)`, and an unknown
+    /// target or venue is `NotFound`, never a silent no-op.
+    async fn link_target_venue(
+        &self,
+        workspace_id: WorkspaceId,
+        target_id: BookingTargetId,
+        venue_id: VenueId,
+    ) -> Result<bool, RepositoryError>;
+
+    /// Removes a promoter↔venue edge. `Ok(true)` when the edge existed;
+    /// `Ok(false)` is the idempotent answer for an edge that was already
+    /// absent. An unknown target is `NotFound` — a mistyped id must not read
+    /// as a successful unlink.
+    async fn unlink_target_venue(
+        &self,
+        workspace_id: WorkspaceId,
+        target_id: BookingTargetId,
+        venue_id: VenueId,
+    ) -> Result<bool, RepositoryError>;
 }
 
 #[derive(Clone, Debug)]
