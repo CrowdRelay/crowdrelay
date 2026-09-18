@@ -104,6 +104,7 @@ pub mod next_best_action;
 pub mod night;
 pub mod objectives;
 pub mod outreach;
+pub mod outreach_letter;
 pub mod outward_evidence;
 pub mod performance;
 pub mod place;
