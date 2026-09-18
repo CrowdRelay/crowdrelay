@@ -1,0 +1,150 @@
+# The gates that do not need the self-hosted runner.
+#
+# CrowdRelay's CI runs on one self-hosted arm64 machine. On 2026-09-18 that
+# machine went offline around 06:27 UTC and every job queued behind it — four
+# runs on main among them — so the repository had no gates at all for as long as
+# the machine stayed down, and a pull request could only be merged on gates run
+# by hand on somebody's laptop. One offline box should not mean no CI.
+#
+# This workflow is the answer to that and nothing more. It runs on a
+# GitHub-hosted runner (the repository is public, so those minutes are free)
+# and carries the whole check chain except the PostgreSQL integration tests:
+# those are #[ignore]d, provision a disposable database per test file, and stay
+# on the self-hosted job that has one. So a green run here is not a full CI
+# pass, and the workflow's name says so rather than implying otherwise.
+#
+# It duplicates work when the self-hosted runner is healthy. That is the price,
+# knowingly paid: detecting whether the runner is up needs the runners API,
+# which the workflow token cannot read, and a fallback that only runs when
+# somebody remembers to press a button is not a fallback.
+name: Fallback gates (no self-hosted runner)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ["main"]
+  pull_request:
+    paths-ignore: ["**/*.md", "docs/**"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fallback-gates-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  cpu-gates:
+    name: Checks without the self-hosted runner
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    # The same service the self-hosted unit-test job runs: a handful of
+    # pg-gated lib tests connect to 127.0.0.1:5432 and fail with PoolTimedOut
+    # when nothing is listening.
+    services:
+      postgres:
+        image: postgres:19beta3-alpine
+        env:
+          POSTGRES_DB: crowdrelay
+          POSTGRES_USER: crowdrelay
+          POSTGRES_PASSWORD: crowdrelay-ci-only
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U crowdrelay -d crowdrelay"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+
+
+    env:
+      CROWDRELAY_ENV: test
+      CROWDRELAY_BIND_ADDR: 127.0.0.1:8080
+      CROWDRELAY_DATABASE_URL: postgres://crowdrelay:crowdrelay-ci-only@127.0.0.1:5432/crowdrelay
+      CROWDRELAY_TEST_DATABASE_URL: postgres://crowdrelay:crowdrelay-ci-only@127.0.0.1:5432/crowdrelay
+      CROWDRELAY_OUTBOX_TEST_DATABASE_URL: postgres://crowdrelay:crowdrelay-ci-only@127.0.0.1:5432/crowdrelay
+      CROWDRELAY_ADMISSION_TEST_DATABASE_URL: postgres://crowdrelay:crowdrelay-ci-only@127.0.0.1:5432/crowdrelay
+      CROWDRELAY_EVENT_TEST_DATABASE_URL: postgres://crowdrelay:crowdrelay-ci-only@127.0.0.1:5432/crowdrelay
+      CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL: postgres://crowdrelay:crowdrelay-ci-only@127.0.0.1:5432/crowdrelay
+      CROWDRELAY_ECOSYSTEM_TEST_DATABASE_URL: postgres://crowdrelay:crowdrelay-ci-only@127.0.0.1:5432/crowdrelay
+      CROWDRELAY_FAN_LIFECYCLE_TEST_DATABASE_URL: postgres://crowdrelay:crowdrelay-ci-only@127.0.0.1:5432/crowdrelay
+      CROWDRELAY_REFERRAL_TEST_DATABASE_URL: postgres://crowdrelay:crowdrelay-ci-only@127.0.0.1:5432/crowdrelay
+      CROWDRELAY_MOBILE_FAN_TEST_DATABASE_URL: postgres://crowdrelay:crowdrelay-ci-only@127.0.0.1:5432/crowdrelay
+      CROWDRELAY_REMINDER_TEST_DATABASE_URL: postgres://crowdrelay:crowdrelay-ci-only@127.0.0.1:5432/crowdrelay
+      CROWDRELAY_RETENTION_TEST_DATABASE_URL: postgres://crowdrelay:crowdrelay-ci-only@127.0.0.1:5432/crowdrelay
+      CROWDRELAY_COMMUNITY_TEST_DATABASE_URL: postgres://crowdrelay:crowdrelay-ci-only@127.0.0.1:5432/crowdrelay
+      CROWDRELAY_DATABASE_MAX_CONNECTIONS: 5
+      CROWDRELAY_ALLOWED_ORIGINS: http://localhost:4321
+      CROWDRELAY_WORKSPACE_SLUG: example
+      CROWDRELAY_PUBLIC_SITE_BASE_URL: http://localhost:4321
+      CROWDRELAY_DEFAULT_COUNTRY_CODE: PL
+      CROWDRELAY_TENANT_REGION: eu
+      CROWDRELAY_TENANT_LOCALE: pl-PL
+      CROWDRELAY_TENANT_TIMEZONE: Europe/Warsaw
+      CROWDRELAY_TENANT_CURRENCY: PLN
+      CROWDRELAY_TENANT_DATE_FORMAT: dmy
+      CROWDRELAY_TENANT_NUMBER_FORMAT: comma_decimal
+      CROWDRELAY_TENANT_DATA_REGION: eu
+      CROWDRELAY_RANDOM_DRAWS_ENABLED: "false"
+      CROWDRELAY_BOOTSTRAP_JSON: >-
+        {"workspace_name":"CrowdRelay CI","cities":[{"slug":"wroclaw","name":"Wroclaw","country":"PL","region":"Dolnoslaskie","lat":51.1079,"lng":17.0385}],"campaigns":[{"name":"CI launch","active":true,"smart_links":[{"slug":"ci-launch","destination_url":"http://localhost:4321/join","active":true}]}],"webhook_endpoints":[]}
+      RUST_LOG: info
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+        with:
+          toolchain: 1.98.0
+          components: rustfmt, clippy
+
+      # `validate-contract-assets.ts` is TypeScript run through Node's type
+      # stripping, which needs a Node new enough to carry the flag.
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          # Restore only. The self-hosted job owns the cache entry for the
+          # default branch; two writers would thrash the 10 GB pool between
+          # two different architectures' artifacts.
+          save-if: 'false'
+
+      - name: Run repository checks
+        # The same chain `just ci` runs and the same chain the self-hosted
+        # "Unit tests and contracts" job inlines, minus the PostgreSQL
+        # integration tests: those are #[ignore]d, need a migrated database per
+        # test file, and stay on the self-hosted job that provisions one.
+        # `scripts/test_task_runner_v1.py` asserts this block carries the same
+        # commands as the justfile, so the fallback cannot silently gate less
+        # than the primary.
+        run: |
+          set -euo pipefail
+          cargo fmt --all --check
+          cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+          cargo test --locked --workspace --all-targets --all-features
+          node --disable-warning=ExperimentalWarning --experimental-strip-types scripts/validate-contract-assets.ts
+          python3 -m unittest discover -s scripts -p 'test_*.py'
+          bash scripts/audit-public-tree.sh
+          python3 scripts/check-ci-policy.py
+          python3 scripts/source-size-ratchet.py
+          python3 scripts/api-sql-ratchet.py
+          python3 scripts/workspace-scope-ratchet.py
+          python3 scripts/test-modularity-contract.py
+          python3 scripts/test_platform_vocabulary_v1.py
+          python3 scripts/test_sql_identifiers_v1.py
+          python3 scripts/test_sql_columns_v1.py
+          python3 scripts/check-postgres-major.py
+          python3 scripts/postgres18_runtime_contract.py
+          python3 scripts/area_wallet_authority_v2_contract.py
+          python3 scripts/staff_device_sessions_v2_contract.py
+          python3 scripts/test-ecosystem-contract-v2.py
+          python3 scripts/test-ops-control-plane-v2.py
+          python3 scripts/test-ecosystem-design-contract.py
+          python3 scripts/test-image-provenance-policy.py
+          python3 scripts/test_release_receipt.py
+          python3 scripts/test_ecosystem_deploy_contract.py
