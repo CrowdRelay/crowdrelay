@@ -11422,13 +11422,15 @@ components:
       description: >-
         Whether band-to-band crossbill for this show runs automatically or is a
         manual ask. Automated overlap needs an `event_crossbill` amplification
-        edge, which requires a second workspace inside a shared organization;
-        at one tenant that cannot exist, so the bill step surfaces as the
-        manual bill-mate ask carried by the partner relay brief.
+        edge that is reciprocated — a reverse-direction consent must have
+        delivered this workspace's announcement to the partner's crowd first.
+        An active but unreciprocated edge reports `unreciprocated`; without an
+        edge the bill step surfaces as the manual bill-mate ask carried by the
+        partner relay brief.
       properties:
         state:
           type: string
-          enum: [no_support_bill, manual_ask, automated_overlap]
+          enum: [no_support_bill, manual_ask, unreciprocated, automated_overlap]
         acts:
           type: array
           description: Bill acts in bill order (position, then slug).

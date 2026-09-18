@@ -44,6 +44,10 @@ struct TimelineCrossbillEdgeRow {
     max_campaigns_per_month: i16,
     cooldown_days: i16,
     deliveries_this_month: i64,
+    /// Whether a reverse-direction consent has ever carried this
+    /// workspace's announcement to the edge owner's crowd — the delivery
+    /// ledger is the proof, and revocation does not erase it.
+    reciprocated: bool,
 }
 
 #[derive(Debug, FromRow)]
@@ -509,7 +513,15 @@ async fn load_timeline_facts(
                 (SELECT count(DISTINCT d.campaign_reference)
                  FROM amplification_deliveries AS d
                  WHERE d.consent_id = edge.id AND d.to_workspace_id = $1
-                   AND d.delivered_at >= date_trunc('month', now())) AS deliveries_this_month
+                   AND d.delivered_at >= date_trunc('month', now())) AS deliveries_this_month,
+                EXISTS (
+                    SELECT 1
+                    FROM amplification_consents AS reverse_edge
+                    JOIN amplification_deliveries AS reverse_ledger
+                      ON reverse_ledger.consent_id = reverse_edge.id
+                    WHERE reverse_edge.from_workspace_id = $1
+                      AND reverse_edge.to_workspace_id = edge.from_workspace_id
+                ) AS reciprocated
             FROM amplification_consents AS edge
             WHERE edge.to_workspace_id = $1
               AND edge.purpose = 'event_crossbill'

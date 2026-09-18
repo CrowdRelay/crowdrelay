@@ -244,8 +244,16 @@ fn build_steps(facts: &TimelineFacts, now: OffsetDateTime) -> Vec<TimelineStepVi
     let announced = facts.emissions.iter().find(|e| e.phase == "announcement");
     let crossbill_state = if facts.crossbill_acts.len() <= 1 {
         "no_support_bill"
-    } else if facts.crossbill_edge.is_some() {
+    } else if facts
+        .crossbill_edge
+        .as_ref()
+        .is_some_and(|edge| edge.reciprocated)
+    {
         "automated_overlap"
+    } else if facts.crossbill_edge.is_some() {
+        // The edge exists but the beneficiary's crowd has never carried
+        // the owner's announcement — it cannot carry until it has.
+        "unreciprocated"
     } else {
         "manual_ask"
     };
@@ -271,6 +279,7 @@ fn build_steps(facts: &TimelineFacts, now: OffsetDateTime) -> Vec<TimelineStepVi
             "cap_per_month": facts.crossbill_edge.as_ref().map(|e| e.max_campaigns_per_month),
             "cooldown_days": facts.crossbill_edge.as_ref().map(|e| e.cooldown_days),
             "deliveries_this_month": facts.crossbill_edge.as_ref().map(|e| e.deliveries_this_month),
+            "reciprocated": facts.crossbill_edge.as_ref().map(|e| e.reciprocated),
         },
     });
     let (announced_state, announced_action) = if announced.is_some() {

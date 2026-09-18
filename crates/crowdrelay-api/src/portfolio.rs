@@ -37,6 +37,12 @@ fn error_response(error: PortfolioError, request_id_value: Option<String>) -> Re
             Problem::conflict(request_id_value).into_response()
         }
         PortfolioError::CapReached => Problem::conflict(request_id_value).into_response(),
+        PortfolioError::Unreciprocated => Problem::conflict_because(
+            "The cross-bill edge is unreciprocated: the beneficiary's audience \
+             has never carried the audience owner's announcement.",
+            request_id_value,
+        )
+        .into_response(),
         PortfolioError::Database(_) => {
             Problem::service_unavailable(request_id_value).into_response()
         }
