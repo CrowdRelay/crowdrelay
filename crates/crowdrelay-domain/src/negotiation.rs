@@ -88,6 +88,8 @@ pub struct TermsLadder {
     /// Below this the band is working for nothing: cost, plus the minimum
     /// margin, plus whatever the application itself costs. At the Landmark tier
     /// this drops by the operator's bounded loss tolerance and by nothing else.
+    /// A counterparty's own precedent and the market evidence at their rooms
+    /// can only raise it — never lower it.
     pub walk_away_minor: i64,
     /// The fee that makes the show clearly worth playing rather than merely not
     /// a loss.
@@ -96,6 +98,50 @@ pub struct TermsLadder {
     /// already the target leaves the band negotiating down from the number they
     /// actually wanted.
     pub opening_ask_minor: i64,
+    /// Which input produced `walk_away_minor` — the citation the drafted
+    /// counter opens with, frozen with the rest of the ladder.
+    pub floor_basis: FloorBasis,
+}
+
+/// Which input produced the walk-away floor.
+///
+/// The floor is a `max` over the costed trip, the market evidence and the
+/// counterparty's own precedent — this names the one that bound. Ties resolve
+/// toward the more external evidence, because the more external the citation
+/// the more persuasive it is in the drafted counter: market over counterparty
+/// history over cost.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FloorBasis {
+    /// The costed trip plus margin bound — nothing external spoke higher.
+    Cost,
+    /// The venue evidence floor bound: the lowest fee band that holds at every
+    /// room the counterparty works, so it can never overstate the one this
+    /// show is at.
+    Market,
+    /// The counterparty's own last accepted fee bound — their precedent.
+    CounterpartyHistory,
+}
+
+impl FloorBasis {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Cost => "cost",
+            Self::Market => "market",
+            Self::CounterpartyHistory => "counterparty_history",
+        }
+    }
+
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "cost" => Some(Self::Cost),
+            "market" => Some(Self::Market),
+            "counterparty_history" => Some(Self::CounterpartyHistory),
+            _ => None,
+        }
+    }
 }
 
 /// Why the agent will not accept, whatever the fee says.
@@ -177,15 +223,25 @@ pub enum TermsDecision {
 
 /// Builds the ladder for one opportunity.
 ///
-/// `cost_minor` is the costed trip. `None` means the trip could not be costed,
-/// and the ladder is then built from the walk-away figure the opportunity row
-/// carries — which is enough to draft a counter and never enough to accept,
-/// because [`evaluate_terms`] refuses an uncosted acceptance separately.
+/// `cost_minor` is the costed trip. `prior_fee_minor` is the fee this
+/// counterparty last agreed to — zero when there is no history. The
+/// walk-away floor is the higher of the two: a promoter who paid more last
+/// time does not get to re-open below their own precedent, and a cheaper
+/// trip never re-opens below the costed floor.
+///
+/// `market_floor_minor` is the lowest fee band that is true at every room the
+/// counterparty books — `None` when no cleared band exists, which is silence
+/// rather than zero pressure. No floor may lower another: market evidence
+/// never excuses a loss, and a prior paid fee never lowers the cost floor.
+/// `floor_basis` records which of the three bound, ties resolving toward the
+/// more external evidence.
 #[must_use]
 pub fn terms_ladder(
     snapshot: LiveOpportunitySnapshot,
     policy: LiveOpportunityPolicy,
     cost_minor: i64,
+    prior_fee_minor: i64,
+    market_floor_minor: Option<i64>,
 ) -> TermsLadder {
     let tier = StrategicTier::from_basis_points(snapshot.strategic_value_basis_points, policy);
     // The bounded loss tolerance drops the floor and nothing else: a festival
@@ -196,11 +252,21 @@ pub fn terms_ladder(
     } else {
         0
     };
-    let walk_away_minor = cost_minor
+    let cost_floor = cost_minor
         .saturating_add(policy.minimum_margin_minor)
         .saturating_add(snapshot.application_fee_minor)
         .saturating_sub(tolerance)
         .max(0);
+    let walk_away_minor = cost_floor
+        .max(prior_fee_minor)
+        .max(market_floor_minor.unwrap_or(0));
+    let floor_basis = if market_floor_minor.is_some_and(|floor| floor >= walk_away_minor) {
+        FloorBasis::Market
+    } else if prior_fee_minor > 0 && prior_fee_minor >= walk_away_minor {
+        FloorBasis::CounterpartyHistory
+    } else {
+        FloorBasis::Cost
+    };
     // Uplifts are applied to the floor rather than to the offer. Anchoring on
     // what the promoter said would let a deliberately low first offer drag the
     // band's own target down with it, which is the oldest trick in booking.
@@ -210,6 +276,7 @@ pub fn terms_ladder(
         walk_away_minor,
         target_minor,
         opening_ask_minor,
+        floor_basis,
     }
 }
 
@@ -421,7 +488,7 @@ mod tests {
         };
         let mut snapshot = opportunity();
         snapshot.application_fee_minor = 10_000;
-        let ladder = terms_ladder(snapshot, policy, 150_000);
+        let ladder = terms_ladder(snapshot, policy, 150_000, 0, None);
         assert_eq!(ladder.walk_away_minor, 210_000);
         assert!(ladder.target_minor > ladder.walk_away_minor);
         assert!(ladder.opening_ask_minor > ladder.target_minor);
@@ -434,12 +501,78 @@ mod tests {
             max_strategic_negative_margin_minor: 40_000,
             ..LiveOpportunityPolicy::default()
         };
-        let standard = terms_ladder(opportunity(), policy, 150_000);
+        let standard = terms_ladder(opportunity(), policy, 150_000, 0, None);
         let mut landmark_snapshot = opportunity();
         landmark_snapshot.strategic_value_basis_points = 9_000;
-        let landmark = terms_ladder(landmark_snapshot, policy, 150_000);
+        let landmark = terms_ladder(landmark_snapshot, policy, 150_000, 0, None);
         assert_eq!(standard.walk_away_minor, 200_000);
         assert_eq!(landmark.walk_away_minor, 160_000);
+    }
+
+    #[test]
+    fn the_floor_is_the_higher_of_cost_and_what_they_paid_before() {
+        let policy = LiveOpportunityPolicy {
+            minimum_margin_minor: 50_000,
+            ..LiveOpportunityPolicy::default()
+        };
+        // A counterparty that agreed 300 last time does not re-open below
+        // their own precedent, even though the trip got cheaper.
+        let with_history = terms_ladder(opportunity(), policy, 150_000, 300_000, None);
+        assert_eq!(with_history.walk_away_minor, 300_000);
+        assert_eq!(with_history.floor_basis, FloorBasis::CounterpartyHistory);
+        // And history never drags the floor below cost plus margin — a cheap
+        // earlier fee is not permission to play at a loss now.
+        let without_history = terms_ladder(opportunity(), policy, 150_000, 100_000, None);
+        assert_eq!(without_history.walk_away_minor, 200_000);
+        assert_eq!(without_history.floor_basis, FloorBasis::Cost);
+    }
+
+    #[test]
+    fn the_market_floor_raises_but_never_lowers() {
+        let policy = LiveOpportunityPolicy {
+            minimum_margin_minor: 50_000,
+            ..LiveOpportunityPolicy::default()
+        };
+        // Every room this counterparty works clearing 300 is evidence the
+        // show does not open below it — even when the trip costs less.
+        let evidenced = terms_ladder(opportunity(), policy, 150_000, 0, Some(300_000));
+        assert_eq!(evidenced.walk_away_minor, 300_000);
+        assert_eq!(evidenced.floor_basis, FloorBasis::Market);
+        // A market reading under the cost floor is a fact about the rooms,
+        // not permission to play at a loss.
+        let thin = terms_ladder(opportunity(), policy, 150_000, 0, Some(100_000));
+        assert_eq!(thin.walk_away_minor, 200_000);
+        assert_eq!(thin.floor_basis, FloorBasis::Cost);
+        // And no cleared band is silence, not zero pressure.
+        let silent = terms_ladder(opportunity(), policy, 150_000, 0, None);
+        assert_eq!(silent.walk_away_minor, 200_000);
+        assert_eq!(silent.floor_basis, FloorBasis::Cost);
+    }
+
+    #[test]
+    fn the_floor_cites_what_bound_and_breaks_ties_outward() {
+        let policy = LiveOpportunityPolicy {
+            minimum_margin_minor: 50_000,
+            ..LiveOpportunityPolicy::default()
+        };
+        // Market and history tied at the top: the more external evidence is
+        // the more persuasive citation, so market speaks.
+        let tied = terms_ladder(opportunity(), policy, 150_000, 300_000, Some(300_000));
+        assert_eq!(tied.walk_away_minor, 300_000);
+        assert_eq!(tied.floor_basis, FloorBasis::Market);
+        // History tied with the costed floor: the counterparty's own
+        // precedent out-cites the arithmetic.
+        let precedent_tied = terms_ladder(opportunity(), policy, 150_000, 200_000, None);
+        assert_eq!(precedent_tied.walk_away_minor, 200_000);
+        assert_eq!(precedent_tied.floor_basis, FloorBasis::CounterpartyHistory);
+        // Market tied with the costed floor: market speaks.
+        let market_tied = terms_ladder(opportunity(), policy, 150_000, 0, Some(200_000));
+        assert_eq!(market_tied.walk_away_minor, 200_000);
+        assert_eq!(market_tied.floor_basis, FloorBasis::Market);
+        // Both external floors under cost: the floor is the band's own cost.
+        let cost = terms_ladder(opportunity(), policy, 150_000, 100_000, Some(150_000));
+        assert_eq!(cost.walk_away_minor, 200_000);
+        assert_eq!(cost.floor_basis, FloorBasis::Cost);
     }
 
     #[test]
@@ -447,7 +580,7 @@ mod tests {
         // Anchoring on the promoter's number lets a deliberately low first
         // offer drag the band's own target down with it.
         let policy = LiveOpportunityPolicy::default();
-        let ladder = terms_ladder(opportunity(), policy, 150_000);
+        let ladder = terms_ladder(opportunity(), policy, 150_000, 0, None);
         let low = evaluate_terms(terms(ladder, 1), opportunity(), policy, 80, now());
         let high = evaluate_terms(
             terms(ladder, ladder.walk_away_minor),
@@ -472,7 +605,7 @@ mod tests {
     #[test]
     fn an_offer_at_or_above_target_is_accepted() {
         let policy = LiveOpportunityPolicy::default();
-        let ladder = terms_ladder(opportunity(), policy, 150_000);
+        let ladder = terms_ladder(opportunity(), policy, 150_000, 0, None);
         let decision = evaluate_terms(
             terms(ladder, ladder.target_minor),
             opportunity(),
@@ -491,7 +624,7 @@ mod tests {
     #[test]
     fn money_never_buys_a_contract_or_an_exclusivity_clause() {
         let policy = LiveOpportunityPolicy::default();
-        let ladder = terms_ladder(opportunity(), policy, 150_000);
+        let ladder = terms_ladder(opportunity(), policy, 150_000, 0, None);
         for (mutate, expected) in [
             (
                 (|snapshot: &mut LiveOpportunitySnapshot| snapshot.requires_contract = true)
@@ -529,7 +662,7 @@ mod tests {
     #[test]
     fn a_stretch_slot_holds_the_operators_own_bar() {
         let policy = LiveOpportunityPolicy::default();
-        let ladder = terms_ladder(opportunity(), policy, 150_000);
+        let ladder = terms_ladder(opportunity(), policy, 150_000, 0, None);
         let mut snapshot = opportunity();
         snapshot.committed_shows_year = 16;
         snapshot.pipeline_shows_year = 0;
@@ -561,7 +694,7 @@ mod tests {
     #[test]
     fn a_counter_already_sent_waits_for_an_answer() {
         let policy = LiveOpportunityPolicy::default();
-        let ladder = terms_ladder(opportunity(), policy, 150_000);
+        let ladder = terms_ladder(opportunity(), policy, 150_000, 0, None);
         let mut waiting = terms(ladder, ladder.walk_away_minor);
         waiting.state = TermsState::Countered;
         waiting.countered_fee_minor = Some(ladder.opening_ask_minor);
@@ -576,7 +709,7 @@ mod tests {
     #[test]
     fn each_round_concedes_toward_the_target_and_never_past_it() {
         let policy = LiveOpportunityPolicy::default();
-        let ladder = terms_ladder(opportunity(), policy, 150_000);
+        let ladder = terms_ladder(opportunity(), policy, 150_000, 0, None);
         let mut round = terms(ladder, ladder.walk_away_minor);
         let mut previous = ladder.opening_ask_minor;
         for expected_round in 2..=policy.max_counter_rounds {
@@ -603,7 +736,7 @@ mod tests {
     #[test]
     fn out_of_asks_the_agent_takes_what_clears_and_refuses_what_does_not() {
         let policy = LiveOpportunityPolicy::default();
-        let ladder = terms_ladder(opportunity(), policy, 150_000);
+        let ladder = terms_ladder(opportunity(), policy, 150_000, 0, None);
         let mut exhausted = terms(ladder, ladder.walk_away_minor);
         exhausted.counter_rounds = policy.max_counter_rounds;
         exhausted.countered_fee_minor = Some(ladder.target_minor);
@@ -625,7 +758,7 @@ mod tests {
     #[test]
     fn a_closed_window_beats_every_offer() {
         let policy = LiveOpportunityPolicy::default();
-        let ladder = terms_ladder(opportunity(), policy, 150_000);
+        let ladder = terms_ladder(opportunity(), policy, 150_000, 0, None);
         let mut late = terms(ladder, ladder.opening_ask_minor);
         late.responds_by = now() - time::Duration::hours(1);
         assert_eq!(
@@ -638,7 +771,7 @@ mod tests {
     #[test]
     fn a_settled_negotiation_is_never_revisited() {
         let policy = LiveOpportunityPolicy::default();
-        let ladder = terms_ladder(opportunity(), policy, 150_000);
+        let ladder = terms_ladder(opportunity(), policy, 150_000, 0, None);
         for state in [
             TermsState::Accepted,
             TermsState::Declined,
