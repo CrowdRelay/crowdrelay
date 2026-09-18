@@ -28,6 +28,7 @@
 //! sentence nobody can support is worse than a shorter letter.
 
 use serde::{Deserialize, Serialize};
+use time::OffsetDateTime;
 
 /// The language the promoter reads (O.6).
 ///
@@ -491,6 +492,43 @@ fn support_slot_ask(
         }),
         body: body.join("\n"),
     }
+}
+
+/// Polish month names in the genitive — "18 października", the form a date
+/// takes inside a sentence. Index-safe: a month outside 1–12 is impossible
+/// for `time::Month`, and `get` makes a broken table a compile-time-sized
+/// absence rather than a panic.
+const POLISH_MONTHS: [&str; 12] = [
+    "stycznia",
+    "lutego",
+    "marca",
+    "kwietnia",
+    "maja",
+    "czerwca",
+    "lipca",
+    "sierpnia",
+    "września",
+    "października",
+    "listopada",
+    "grudnia",
+];
+
+/// A date the way Polish copy writes it — "18 października 2026". Shared by
+/// every composed text that quotes a day: a letter's "on 18 October" line and
+/// a campaign mail's date are the same sentence part in the same language.
+#[must_use]
+pub fn polish_date(at: OffsetDateTime) -> String {
+    let month = POLISH_MONTHS
+        .get(usize::from(u8::from(at.month())) - 1)
+        .copied()
+        .unwrap_or("");
+    format!("{} {} {}", at.day(), month, at.year())
+}
+
+/// A clock time the way Polish copy writes it — "19:30".
+#[must_use]
+pub fn polish_time(at: OffsetDateTime) -> String {
+    format!("{:02}:{:02}", at.hour(), at.minute())
 }
 
 const fn greeting(language: LetterLanguage) -> &'static str {

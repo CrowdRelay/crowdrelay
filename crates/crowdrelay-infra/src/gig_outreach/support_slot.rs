@@ -288,12 +288,22 @@ pub async fn approve_support_slot_ask(
         )));
     }
 
-    let show_date = slot
-        .starts_at
-        .format(time::macros::format_description!(
-            "[day] [month repr:short] [year]"
-        ))
-        .unwrap_or_else(|_| slot.starts_at.date().to_string());
+    // O.6: in the promoter's language, chosen from the room's country — the
+    // same rule the proposal letter follows, now that the ask's own sentences
+    // exist in both. The date is rendered in the letter's language too: "18
+    // Oct 2026" inside a Polish sentence is still a foreign word.
+    let language = super::letter_language(pool, city_id).await?;
+    let show_date = match language {
+        crowdrelay_domain::gig_letter::LetterLanguage::Polish => {
+            crowdrelay_domain::gig_letter::polish_date(slot.starts_at)
+        }
+        crowdrelay_domain::gig_letter::LetterLanguage::English => slot
+            .starts_at
+            .format(time::macros::format_description!(
+                "[day] [month repr:short] [year]"
+            ))
+            .unwrap_or_else(|_| slot.starts_at.date().to_string()),
+    };
     let (opening_line, reasons) = support_slot_ask_letter(
         &headliner,
         &support,
@@ -303,6 +313,7 @@ pub async fn approve_support_slot_ask(
         reachable,
         pair.map(|overlap| overlap.shared),
         adds,
+        language,
     );
     // O.1: the ask's letter is composed here too, so the roster operator reads
     // the same words the headliner's promoter will.
@@ -310,13 +321,7 @@ pub async fn approve_support_slot_ask(
     let draft = crowdrelay_domain::gig_letter::compose_letter(
         &crowdrelay_domain::gig_letter::LetterInput {
             kind: crowdrelay_domain::gig_letter::LetterKind::SupportSlotAsk,
-            // English on purpose, even for a Polish room. The ask's own opening
-            // line and bullets come from `support_slot_ask_letter`, which is
-            // written in English only; a Polish frame around English evidence
-            // is the seam the localisation exists to remove, and half a
-            // translation reads worse to a promoter than none. The frame
-            // follows the sentences, and the sentences move first.
-            language: crowdrelay_domain::gig_letter::LetterLanguage::English,
+            language,
             sender: &sender,
             venue: &slot.venue,
             opening_line: &opening_line,
@@ -415,6 +420,10 @@ pub async fn approve_support_slot_ask(
 /// facts, and neither invents a number the other did not have. `shared` is
 /// `None` when the pair was never measured here — the honest version of that
 /// is "every one of them is new", not a zero we never counted.
+///
+/// In the room's language (O.6's rule, extended to the ask): a Polish promoter
+/// reads Polish, and the numbers keep the established `{n} osób` genitive the
+/// proposal's own lines use.
 #[allow(clippy::too_many_arguments)]
 fn support_slot_ask_letter(
     headliner: &str,
@@ -425,33 +434,62 @@ fn support_slot_ask_letter(
     reachable: u32,
     shared: Option<u32>,
     adds: u32,
+    language: crowdrelay_domain::gig_letter::LetterLanguage,
 ) -> (String, Vec<String>) {
-    let opening_line = format!(
-        "{support} can take the open slot at {venue} on {show_date} — they bring \
-         {adds} people there that we do not already reach."
-    );
-    let mut reasons = vec![format!(
-        "{support} has {reachable} people around {city} who asked to hear when they play"
-    )];
-    match shared {
-        Some(shared) if shared > 0 => reasons.push(format!(
+    use crowdrelay_domain::gig_letter::LetterLanguage;
+    let opening_line = match language {
+        LetterLanguage::English => format!(
+            "{support} can take the open slot at {venue} on {show_date} — they bring \
+             {adds} people there that we do not already reach."
+        ),
+        LetterLanguage::Polish => format!(
+            "{support} może zająć wolny slot w {venue} {show_date} — przyprowadzą \
+             {adds} osób, do których sami nie docieramy."
+        ),
+    };
+    let mut reasons = vec![match language {
+        LetterLanguage::English => format!(
+            "{support} has {reachable} people around {city} who asked to hear when they play"
+        ),
+        LetterLanguage::Polish => format!(
+            "{reachable} osób w okolicy miasta {city} poprosiło, żeby dać znać, kiedy \
+             {support} gra"
+        ),
+    }];
+    match (language, shared) {
+        (LetterLanguage::English, Some(shared)) if shared > 0 => reasons.push(format!(
             "{shared} of them already follow {headliner}, so the name still adds {adds} \
              people the night does not reach"
         )),
-        Some(_) => reasons.push(format!(
+        (LetterLanguage::Polish, Some(shared)) if shared > 0 => reasons.push(format!(
+            "{shared} z nich już słucha {headliner}, więc nazwisko nadal dokłada {adds} \
+             osób, do których ten wieczór nie dociera"
+        )),
+        (LetterLanguage::English, Some(_)) => reasons.push(format!(
             "none of the people {support} reaches around {city} already follow \
              {headliner} — a second crowd, not the same one twice"
         )),
-        None => reasons.push(format!(
+        (LetterLanguage::Polish, Some(_)) => reasons.push(format!(
+            "nikt z osób, do których {support} dociera w okolicy miasta {city}, nie \
+             słucha jeszcze {headliner} — druga publiczność, nie ta sama dwa razy"
+        )),
+        (LetterLanguage::English, None) => reasons.push(format!(
             "{headliner} has no measured audience around {city} — every person \
              {support} brings is somebody new to the night"
         )),
+        (LetterLanguage::Polish, None) => reasons.push(format!(
+            "{headliner} nie ma zmierzonej publiczności w okolicy miasta {city} — \
+             każda osoba, którą {support} przyprowadzi, jest dla tego wieczoru nowa"
+        )),
     }
-    reasons.push(
-        "the room and the date are already held — this confirms a name for a slot \
-         you offered, it does not ask for a new night"
+    reasons.push(match language {
+        LetterLanguage::English => "the room and the date are already held — this \
+             confirms a name for a slot you offered, it does not ask for a new night"
             .to_owned(),
-    );
+        LetterLanguage::Polish => "klub i termin są już potwierdzone — to wpisuje \
+             nazwę na slot, który zaproponowaliście, a nie prosi o nowy wieczór"
+            .to_owned(),
+    });
     (opening_line, reasons)
 }
 

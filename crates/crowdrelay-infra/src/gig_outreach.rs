@@ -153,8 +153,18 @@ fn apply_operator_revision(
     let changed = crowdrelay_domain::draft_revision::review_revision(&draft, revision)
         .map_err(|refusal| GigOutreachError::Refused(refusal.message()))?;
     crowdrelay_domain::draft_revision::apply_revision(&mut serialized, &changed);
-    let revised = serde_json::from_value(serialized)
+    let mut revised: AutopilotActionPayload = serde_json::from_value(serialized)
         .map_err(|_| GigOutreachError::Refused("the outreach could not be encoded".to_owned()))?;
+    // `apply_revision` writes fields by name, but the letter's opening
+    // paragraph is the opening line *embedded* in `draft.body` — patching the
+    // field alone would send the machine's words under the operator's edit.
+    // The opening is the first paragraph after the greeting, so the first
+    // occurrence is the sentence to replace.
+    if let (Some(before), Some(after)) = (draft.get("opening_line"), changed.get("opening_line"))
+        && let AutopilotActionPayload::RequestGigOutreach { draft: letter, .. } = &mut revised
+    {
+        letter.body = letter.body.replacen(before.as_str(), after.as_str(), 1);
+    }
     Ok((
         revised,
         AppliedRevision {
