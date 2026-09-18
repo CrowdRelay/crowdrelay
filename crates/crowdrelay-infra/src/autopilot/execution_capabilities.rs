@@ -444,3 +444,163 @@ pub(in crate::autopilot) async fn reserve_contact_window(
         Err(RepositoryError::Conflict)
     }
 }
+
+/// One executor capability as the workspace stands right now.
+///
+/// `state` is one of:
+/// - `live` — an unexpired executor advertises it and no breaker holds it open.
+/// - `blocked` — advertised, but not usable this minute: the advertisement or
+///   the executor expired, or the circuit breaker is holding it. Temporary by
+///   construction, which is why it is not lumped into `missing`.
+/// - `missing` — the workspace needed it (an action is parked behind it) and
+///   nobody advertises it.
+#[derive(Debug, serde::Serialize)]
+pub struct ExecutorCapabilityPosture {
+    pub capability: String,
+    pub state: &'static str,
+    /// The executors that advertise it — names matter when two run and only
+    /// one is healthy.
+    pub executors: Vec<String>,
+    /// Queued actions parked behind this capability right now. The number a
+    /// missing row costs, so the screen orders by what is actually waiting.
+    pub awaiting: u32,
+}
+
+/// The capability posture for one workspace: everything its executors offer
+/// and everything its queued actions are parked behind.
+///
+/// The needed set is measured, not catalogued: a capability enters it when a
+/// parked action's payload resolves to it through the same
+/// `executor_capability_for_payload` mapping the dispatcher enforces, so the
+/// list cannot drift from the gate it describes. A capability the workspace
+/// has never needed and nobody advertises does not appear — there is nothing
+/// to say about it.
+///
+/// `executors_registered` separates "no executor has ever heartbeated" from
+/// "executors run but this lane is dark" — the dispatcher fails open on the
+/// first and fails closed on the second, and the screen must not conflate them.
+#[derive(Debug, serde::Serialize)]
+pub struct ExecutorCapabilityReport {
+    pub executors_registered: bool,
+    pub capabilities: Vec<ExecutorCapabilityPosture>,
+}
+
+/// # Errors
+///
+/// Propagates the database error.
+pub async fn executor_capability_posture(
+    pool: &PgPool,
+    workspace_id: WorkspaceId,
+    now: OffsetDateTime,
+) -> Result<ExecutorCapabilityReport, sqlx::Error> {
+    let ws = workspace_id.into_uuid();
+
+    // Advertised half: every capability row on a live or dead executor, with
+    // what makes it usable or not — expiry on either row and the breaker.
+    let advertised = sqlx::query_as::<_, (String, String, OffsetDateTime, OffsetDateTime, Option<OffsetDateTime>)>(
+        r#"
+        SELECT capability.capability, capability.executor_id,
+               capability.expires_at, executor.expires_at, breaker.guarded_until
+        FROM viryaos_executor_capabilities capability
+        JOIN viryaos_executor_instances executor
+          ON executor.workspace_id = capability.workspace_id
+         AND executor.executor_id = capability.executor_id
+        LEFT JOIN viryaos_executor_circuit_breakers breaker
+          ON breaker.workspace_id = executor.workspace_id
+         AND breaker.executor_id = executor.executor_id
+        WHERE capability.workspace_id = $1
+        "#,
+    )
+    .bind(ws)
+    .fetch_all(pool)
+    .await?;
+
+    let executors_registered = sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS (SELECT 1 FROM viryaos_executor_instances WHERE workspace_id = $1)",
+    )
+    .bind(ws)
+    .fetch_one(pool)
+    .await?;
+
+    // Needed half: queued actions the capability gate parked. The payload
+    // carries the answer because the gate reads the payload — counting any
+    // other way would be a second definition of "waiting on an executor".
+    let parked_payloads = sqlx::query_scalar::<_, Value>(
+        r#"
+        SELECT payload
+        FROM viryaos_autopilot_actions
+        WHERE workspace_id = $1
+          AND status = 'queued'
+          AND last_error_kind = 'awaiting_executor'
+        "#,
+    )
+    .bind(ws)
+    .fetch_all(pool)
+    .await?;
+
+    let mut awaiting: HashMap<String, u32> = HashMap::new();
+    for payload in &parked_payloads {
+        if let Ok(parsed) = serde_json::from_value::<AutopilotActionPayload>(payload.clone())
+            && let Some(capability) = executor_capability_for_payload(&parsed)
+        {
+            *awaiting.entry(capability.to_owned()).or_insert(0) += 1;
+        }
+    }
+
+    let mut by_capability: HashMap<String, ExecutorCapabilityPosture> = HashMap::new();
+    for (capability, executor_id, cap_expires, exec_expires, guarded_until) in advertised {
+        let live = cap_expires > now
+            && exec_expires > now
+            && guarded_until.is_none_or(|until| until <= now);
+        let entry = by_capability
+            .entry(capability.clone())
+            .or_insert_with(|| ExecutorCapabilityPosture {
+                capability: capability.clone(),
+                state: "blocked",
+                executors: Vec::new(),
+                awaiting: 0,
+            });
+        entry.executors.push(executor_id);
+        // One live advertisement makes the lane live; the rest staying blocked
+        // is detail the executor list already carries.
+        if live {
+            entry.state = "live";
+        }
+    }
+    for (capability, count) in awaiting {
+        by_capability
+            .entry(capability.clone())
+            .or_insert_with(|| ExecutorCapabilityPosture {
+                capability: capability.clone(),
+                state: "missing",
+                executors: Vec::new(),
+                awaiting: 0,
+            })
+            .awaiting = count;
+    }
+    // Advertised-and-parked is `blocked`, never `missing` — the lane exists,
+    // something is holding it, and the breaker or expiry says what.
+    let mut capabilities: Vec<ExecutorCapabilityPosture> = by_capability.into_values().collect();
+    // What is waiting, then what is missing, then what is held, then the
+    // lanes that work — the order a screen should show them in. The state
+    // rank is a number because the string order would put missing last.
+    fn state_rank(state: &str) -> u8 {
+        match state {
+            "missing" => 0,
+            "blocked" => 1,
+            _ => 2,
+        }
+    }
+    capabilities.sort_by(|left, right| {
+        right
+            .awaiting
+            .cmp(&left.awaiting)
+            .then_with(|| state_rank(left.state).cmp(&state_rank(right.state)))
+            .then_with(|| left.capability.cmp(&right.capability))
+    });
+
+    Ok(ExecutorCapabilityReport {
+        executors_registered,
+        capabilities,
+    })
+}

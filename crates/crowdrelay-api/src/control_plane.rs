@@ -544,6 +544,13 @@ pub(crate) fn router(state: crate::AppState) -> Router {
             "/v1/control-plane/autopilot/posture",
             get(crate::autopilot::growth_posture).post(crate::autopilot::set_growth_posture),
         )
+        // Which executor lanes are live, blocked, or missing — the read-side
+        // of the registry the dispatch gate enforces, so a missing capability
+        // is a line on a screen instead of a refusal sentence at approve time.
+        .route(
+            "/v1/control-plane/autopilot/capabilities",
+            get(crate::autopilot::executor_capabilities),
+        )
         .route(
             "/v1/control-plane/autopilot/acquisition-channels",
             get(crate::autopilot::acquisition_channels),
