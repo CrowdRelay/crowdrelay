@@ -452,146 +452,86 @@ impl PostgresAutopilotRepository {
             }
 
             let mut queued = 0_u32;
+            // One email per person per sweep, not one per assignment.
+            //
+            // The sweep reads up to 24 due assignments at a time and used to
+            // queue an email for every one of them, all stamped the same
+            // minute. With four content approvals open, the crew member got
+            // four emails with identical subjects — the subject is composed
+            // from the action kind, so tasks of one kind are indistinguishable
+            // — and no way to tell four tasks from one task sent four times.
+            //
+            // Grouping by recipient keeps every fact and removes three
+            // interruptions: the most urgent assignment supplies the subject
+            // and body, and the rest are named underneath it. Each of them
+            // still advances its own reminder bookkeeping, because each of them
+            // was in fact reminded about.
+            let mut by_recipient: Vec<(String, Vec<ReminderRow>)> = Vec::new();
             for row in rows {
-                let reminder_number = row.reminder_count.saturating_add(1);
-                let next = next_reminder_at(now, row.due_at, row.reminder_count);
-                let title = if row.source_kind == "show_task" {
-                    friendly_show_task_title(
-                        row.source_ref.as_deref().unwrap_or("show_task"),
-                        crew_locale,
-                    )
-                } else if row.source_kind == "release_making_of" {
-                    match (row.release_title.as_deref(), crew_locale) {
-                        (Some(plan_title), BriefingLocale::Pl) => {
-                            format!("Making-of do wydania: {plan_title}")
-                        }
-                        (Some(plan_title), BriefingLocale::En) => {
-                            format!("Making-of for the release: {plan_title}")
-                        }
-                        (None, BriefingLocale::Pl) => "Making-of do wydania".to_owned(),
-                        (None, BriefingLocale::En) => "Making-of for the release".to_owned(),
-                    }
-                } else if row.source_kind == "capture_plan" {
-                    match (row.plan_title.as_deref(), crew_locale) {
-                        (Some(plan_title), BriefingLocale::Pl) => {
-                            format!("Zabezpiecz materiał: {plan_title}")
-                        }
-                        (Some(plan_title), BriefingLocale::En) => {
-                            format!("Secure the footage: {plan_title}")
-                        }
-                        (None, BriefingLocale::Pl) => "Zabezpiecz materiał".to_owned(),
-                        (None, BriefingLocale::En) => "Secure the footage".to_owned(),
-                    }
-                } else {
-                    friendly_action_title(
-                        row.action_kind.as_deref().unwrap_or("approval"),
-                        crew_locale,
-                    )
+                match by_recipient
+                    .iter_mut()
+                    .find(|(email, _)| *email == row.normalized_email)
+                {
+                    Some((_, group)) => group.push(row),
+                    None => by_recipient.push((row.normalized_email.clone(), vec![row])),
+                }
+            }
+
+            for (_, group) in by_recipient {
+                let Some(primary) = group.first() else {
+                    continue;
                 };
-                let detail = if row.source_kind == "show_task" {
-                    match (row.event_title.as_deref(), crew_locale) {
-                        (Some(event_title), BriefingLocale::Pl) => format!(
-                            "To zadanie dotyczące koncertu {event_title} nadal czeka na domknięcie."
-                        ),
-                        (Some(event_title), BriefingLocale::En) => format!(
-                            "The task for the {event_title} show is still waiting to be closed."
-                        ),
-                        (None, BriefingLocale::Pl) => {
-                            "To zadanie nadal czeka na Twoje domknięcie.".to_owned()
-                        }
-                        (None, BriefingLocale::En) => {
-                            "This task is still waiting for you to close it.".to_owned()
-                        }
-                    }
-                } else if row.source_kind == "release_making_of" {
-                    match (row.release_title.as_deref(), crew_locale) {
-                        (Some(plan_title), BriefingLocale::Pl) => format!(
-                            "Premiera „{plan_title}” zbliża się — materiał making-of nadal czeka na zarchiwizowanie i oznaczenie."
-                        ),
-                        (Some(plan_title), BriefingLocale::En) => format!(
-                            "\"{plan_title}\" is still inside its making-of window — the material is waiting to be filed and marked."
-                        ),
-                        (None, BriefingLocale::Pl) => {
-                            "Materiał making-of nadal czeka na zarchiwizowanie.".to_owned()
-                        }
-                        (None, BriefingLocale::En) => {
-                            "The making-of material is still waiting to be filed.".to_owned()
-                        }
-                    }
-                } else if row.source_kind == "capture_plan" {
-                    // The reminder re-lists the shots — the member should not
-                    // have to dig the first email out of their inbox.
-                    let items = row
-                        .plan_items
-                        .as_ref()
-                        .and_then(|items| items.as_array())
-                        .map(|list| {
-                            list.iter()
-                                .filter_map(|entry| entry["item"].as_str().map(str::to_owned))
-                                .collect::<Vec<_>>()
-                        })
-                        .unwrap_or_default();
-                    match (
-                        row.plan_title.as_deref(),
-                        row.plan_scheduled_for,
-                        crew_locale,
-                    ) {
-                        (Some(plan_title), Some(scheduled_for), _) => {
-                            super::capture_plans::capture_plan_detail(
-                                plan_title,
-                                scheduled_for,
-                                &items,
-                                crew_locale,
-                            )
-                        }
-                        (_, _, BriefingLocale::Pl) => {
-                            "Lista ujęć nadal czeka na wykonanie.".to_owned()
-                        }
-                        (_, _, BriefingLocale::En) => {
-                            "The shot list is still waiting to be done.".to_owned()
-                        }
-                    }
-                } else if let Some(payload_json) = row.payload.as_ref() {
-                    enriched_task_detail(payload_json, row.due_at, row.due_at, crew_locale)
-                } else {
-                    match crew_locale {
-                        BriefingLocale::Pl => {
-                            "To zadanie nadal czeka na Twoją decyzję lub wykonanie.".to_owned()
-                        }
-                        BriefingLocale::En => {
-                            "This task is still waiting for your decision or action.".to_owned()
-                        }
-                    }
-                };
+                let reminder_number = primary.reminder_count.saturating_add(1);
+                let title = reminder_title(primary, crew_locale);
+                let others: Vec<String> = group
+                    .iter()
+                    .skip(1)
+                    .map(|row| reminder_title(row, crew_locale))
+                    .collect();
+                let detail = format!(
+                    "{}{}",
+                    reminder_detail(primary, crew_locale),
+                    digest_tail(&others, crew_locale)
+                );
                 queue_team_email_action(
                     &mut tx,
                     workspace_id,
-                    row.assignment_id,
-                    row.context.as_deref().unwrap_or("show_operations"),
-                    &row.normalized_email,
-                    &row.display_name,
+                    primary.assignment_id,
+                    primary.context.as_deref().unwrap_or("show_operations"),
+                    &primary.normalized_email,
+                    &primary.display_name,
                     title,
                     detail,
-                    row.due_at,
-                    u8::try_from(reminder_number.clamp(1, 12)).unwrap_or(12),
-                    row.action_id,
+                    primary.due_at,
+                    // Clamped to the ladder's length so the frame can tell the
+                    // recipient which reminder is the last one. It was clamped
+                    // at 12 when the cadence had no ceiling.
+                    u8::try_from(reminder_number.clamp(1, MAX_REMINDERS_PER_ASSIGNMENT))
+                        .unwrap_or(MAX_REMINDERS_PER_ASSIGNMENT as u8),
+                    primary.action_id,
                     now,
                 )
                 .await?;
-                sqlx::query(
-                    r#"UPDATE viryaos_team_assignments
-                       SET last_reminded_at=$3, next_reminder_at=$4,
-                           reminder_count=reminder_count+1,
-                           first_overdue_reminder_at = COALESCE(first_overdue_reminder_at, CASE WHEN due_at IS NOT NULL AND $3 > due_at THEN $3 END)
-                       WHERE workspace_id=$1 AND id=$2 AND status='open'"#,
-                )
-                .bind(workspace_id.into_uuid())
-                .bind(row.assignment_id)
-                .bind(now)
-                .bind(next)
-                .execute(&mut *tx)
-                .await
-                .map_err(map_sqlx)?;
+                // Every assignment in the digest, not only the one that gave
+                // the email its subject: each was named in the body, so each
+                // has been reminded about and each owes its own next rung.
+                for row in &group {
+                    let row_next = next_reminder_at(now, row.due_at, row.reminder_count);
+                    sqlx::query(
+                        r#"UPDATE viryaos_team_assignments
+                           SET last_reminded_at=$3, next_reminder_at=$4,
+                               reminder_count=reminder_count+1,
+                               first_overdue_reminder_at = COALESCE(first_overdue_reminder_at, CASE WHEN due_at IS NOT NULL AND $3 > due_at THEN $3 END)
+                           WHERE workspace_id=$1 AND id=$2 AND status='open'"#,
+                    )
+                    .bind(workspace_id.into_uuid())
+                    .bind(row.assignment_id)
+                    .bind(now)
+                    .bind(row_next)
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(map_sqlx)?;
+                }
                 queued = queued.saturating_add(1);
             }
             tx.commit().await.map_err(map_sqlx)?;
@@ -994,21 +934,41 @@ pub(super) fn team_email_frame(
     reminder_number: u8,
 ) -> (String, String, String) {
     let reminder = reminder_number > 0;
-    let subject = match (locale, reminder) {
-        (BriefingLocale::Pl, false) => format!("VIRYA — nowe zadanie: {task_title}"),
-        (BriefingLocale::Pl, true) => format!("VIRYA — przypomnienie: {task_title}"),
-        (BriefingLocale::En, false) => format!("VIRYA — new task: {task_title}"),
-        (BriefingLocale::En, true) => format!("VIRYA — reminder: {task_title}"),
+    // The last rung of the ladder. Saying so is the difference between a
+    // reminder and a nag: the recipient learns that nothing further will
+    // arrive, so ignoring it is a decision rather than a delay.
+    let final_reminder = reminder && i32::from(reminder_number) >= MAX_REMINDERS_PER_ASSIGNMENT;
+    let subject = match (locale, reminder, final_reminder) {
+        (BriefingLocale::Pl, false, _) => format!("VIRYA — nowe zadanie: {task_title}"),
+        (BriefingLocale::Pl, true, false) => format!("VIRYA — przypomnienie: {task_title}"),
+        (BriefingLocale::Pl, true, true) => {
+            format!("VIRYA — ostatnie przypomnienie: {task_title}")
+        }
+        (BriefingLocale::En, false, _) => format!("VIRYA — new task: {task_title}"),
+        (BriefingLocale::En, true, false) => format!("VIRYA — reminder: {task_title}"),
+        (BriefingLocale::En, true, true) => format!("VIRYA — last reminder: {task_title}"),
     };
     let greeting = match locale {
         BriefingLocale::Pl => format!("Cześć {recipient_name}!"),
         BriefingLocale::En => format!("Hi {recipient_name}!"),
     };
-    let intro = match (locale, reminder) {
-        (BriefingLocale::Pl, false) => "Wpadło do Ciebie nowe zadanie od VIRYA OS.".to_owned(),
-        (BriefingLocale::Pl, true) => "To zadanie nadal czeka na Ciebie — przypominamy.".to_owned(),
-        (BriefingLocale::En, false) => "A new task from VIRYA OS landed for you.".to_owned(),
-        (BriefingLocale::En, true) => "This task is still waiting for you.".to_owned(),
+    let intro = match (locale, reminder, final_reminder) {
+        (BriefingLocale::Pl, false, _) => "Wpadło do Ciebie nowe zadanie od VIRYA OS.".to_owned(),
+        (BriefingLocale::Pl, true, false) => {
+            "To zadanie nadal czeka na Ciebie — przypominamy.".to_owned()
+        }
+        (BriefingLocale::Pl, true, true) => {
+            "To ostatnie przypomnienie o tym zadaniu — kolejnych nie wyślemy. \
+             Jeśli nie jest już potrzebne, zamknij je w panelu."
+                .to_owned()
+        }
+        (BriefingLocale::En, false, _) => "A new task from VIRYA OS landed for you.".to_owned(),
+        (BriefingLocale::En, true, false) => "This task is still waiting for you.".to_owned(),
+        (BriefingLocale::En, true, true) => {
+            "This is the last reminder for this task — no more will follow. \
+             If it is no longer needed, close it in the panel."
+                .to_owned()
+        }
     };
     (subject, greeting, intro)
 }
@@ -1099,47 +1059,53 @@ pub(super) fn first_reminder_at(
     })
 }
 
+/// Reminders one assignment may ever produce, after the first email.
+///
+/// Three, and then the machine stops asking. A fourth reminder has never once
+/// been the thing that made somebody do a task: if three did not move it, the
+/// task is mis-assigned, mis-scoped or not actually wanted, and that is a
+/// staffing question for the operator rather than another line in a crew
+/// member's inbox. Silence after three is information too — the follow-through
+/// score already records how many reminders each completion needed.
+const MAX_REMINDERS_PER_ASSIGNMENT: i32 = 3;
+
+/// Hours before the due time at which each reminder lands.
+///
+/// Anchored to the deadline rather than to the previous send, which is the
+/// whole fix. The old rule spaced reminders 24h, then 12h, then every 6 hours
+/// from *now* until the due time, so a task due in a week produced somewhere
+/// near thirty emails and every one of them said the same thing. Anchoring to
+/// the deadline means each reminder arrives when it changes what the recipient
+/// would do: two days out is still plannable, a day out is today's problem,
+/// six hours out is now or never.
+const REMINDER_LADDER_HOURS: [i64; MAX_REMINDERS_PER_ASSIGNMENT as usize] = [48, 24, 6];
+
+/// When the next reminder for this assignment is due, if there should be one.
+///
+/// `None` means never again: the ladder is spent, the deadline is too close for
+/// another rung to fall before it, or the assignment has no due time at all —
+/// in which case the single nudge `first_reminder_at` scheduled is the whole of
+/// the chasing, because there is no deadline to count down to.
 fn next_reminder_at(
     now: OffsetDateTime,
     due: Option<OffsetDateTime>,
     reminder_count: i32,
 ) -> Option<OffsetDateTime> {
-    let hours = match reminder_count {
-        i if i <= 0 => 24,
-        1 => 12,
-        _ => 6,
-    };
-    let candidate = now + TimeDuration::hours(hours);
-    due.and_then(|due_at| (candidate < due_at).then_some(candidate))
+    let due_at = due?;
+    if reminder_count >= MAX_REMINDERS_PER_ASSIGNMENT {
+        return None;
+    }
+    // Start at the rung matching how many reminders this assignment has had,
+    // then walk down: a task assigned 30 hours before it is due skips the
+    // 48-hour rung, because that moment is already behind us.
+    let start = usize::try_from(reminder_count.max(0)).unwrap_or(0);
+    REMINDER_LADDER_HOURS
+        .get(start..)?
+        .iter()
+        .map(|hours| due_at - TimeDuration::hours(*hours))
+        .find(|candidate| *candidate > now)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+include!("team/reminder_copy.rs");
 
-    #[test]
-    fn the_email_frame_follows_the_crew_locale() {
-        let (subject, greeting, intro) =
-            team_email_frame(BriefingLocale::Pl, "Wojtek", "Zatwierdź artefakt treści", 0);
-        assert_eq!(subject, "VIRYA — nowe zadanie: Zatwierdź artefakt treści");
-        assert_eq!(greeting, "Cześć Wojtek!");
-        assert!(intro.contains("nowe zadanie"));
-
-        let (subject, greeting, _) = team_email_frame(
-            BriefingLocale::En,
-            "Wojtek",
-            "Approve the content artifact",
-            0,
-        );
-        assert_eq!(subject, "VIRYA — new task: Approve the content artifact");
-        assert_eq!(greeting, "Hi Wojtek!");
-    }
-
-    #[test]
-    fn a_reminder_frame_is_not_the_first_send() {
-        let (subject, _, intro) =
-            team_email_frame(BriefingLocale::Pl, "Wojtek", "Domknij zadanie", 2);
-        assert!(subject.starts_with("VIRYA — przypomnienie:"));
-        assert!(intro.contains("przypominamy"));
-    }
-}
+include!("team/tests.rs");
