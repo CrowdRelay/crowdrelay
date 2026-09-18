@@ -7,7 +7,7 @@
 //! not actionable from there. FakAP remains the external health probe for
 //! API reachability; this watchdog catches silent failures FakAP cannot see.
 //!
-//! The watchdog monitors eighteen conditions. The count and this list are
+//! The watchdog monitors nineteen conditions. The count and this list are
 //! gated against `conditions()` by `test_watchdog_conditions_documented_v1.py`:
 //! it said "ten" while seven alarms went undocumented, including two criticals,
 //! and this repository has a record of concluding a live capability is missing
@@ -453,7 +453,7 @@ struct OpsSnapshot {
     /// It is the one loss that scales with the operator being the bottleneck,
     /// which is the state this deployment is in — the queue is the throughput
     /// limit, and the queue empties itself every three days whether or not
-    /// anybody looked. None of the other sixteen conditions watches it: they
+    /// anybody looked. None of the other eighteen conditions watches it: they
     /// watch executors, feeds, drafts and the brain, all of which are working
     /// when this happens.
     approvals_expired_7d: i64,
