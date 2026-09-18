@@ -162,14 +162,18 @@ impl PostgresAutopilotRepository {
                     // campaign is actually addressed to.
                     audience_size: _,
                     audience_basis: _,
+                    draft,
                 } => {
                     operations::execute_audience_campaign(
                         &mut transaction,
                         workspace_id,
                         action.id,
-                        *event_id,
-                        *phase,
-                        template_key,
+                        operations::AudienceCampaignOrder {
+                            event_id: *event_id,
+                            phase: *phase,
+                            template_key,
+                            draft,
+                        },
                         now,
                     )
                     .await?;

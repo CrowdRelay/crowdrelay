@@ -10,6 +10,11 @@ struct EventCampaignRow {
     published: bool,
     communication_enabled: bool,
     starts_at: OffsetDateTime,
+    title: String,
+    sender_name: String,
+    city_name: Option<String>,
+    venue: Option<String>,
+    ticket_url: Option<String>,
     interested_fans: i64,
     paid_buyers: i64,
     attendees: i64,
@@ -32,6 +37,11 @@ pub(in crate::autopilot) async fn load_event_campaign_snapshots(
             event.status IN ('published','completed') AS published,
             COALESCE(flag.enabled, false) AS communication_enabled,
             event.starts_at,
+            event.title,
+            workspace.name AS sender_name,
+            city.name AS city_name,
+            event.venue,
+            event.ticket_url,
             (SELECT count(*)::bigint
              FROM event_interests AS interest
              WHERE interest.workspace_id = event.workspace_id
@@ -55,6 +65,12 @@ pub(in crate::autopilot) async fn load_event_campaign_snapshots(
             COALESCE(bool_or(emission.phase = 'day_of'), false) AS day_of_sent,
             COALESCE(bool_or(emission.phase = 'thank_you'), false) AS thank_you_sent
         FROM events AS event
+        JOIN workspaces AS workspace
+          ON workspace.id = event.workspace_id
+        -- `cities` is a shared catalogue with no workspace_id; the tenant
+        -- boundary is `event.workspace_id = $1`.
+        LEFT JOIN cities AS city
+          ON city.id = event.city_id
         LEFT JOIN ecosystem_feature_flags AS flag
           ON flag.workspace_id = event.workspace_id
          AND flag.key = 'communication_campaigns_enabled'
@@ -64,7 +80,7 @@ pub(in crate::autopilot) async fn load_event_campaign_snapshots(
         WHERE event.workspace_id = $1
           AND event.status IN ('published','completed')
           AND event.starts_at BETWEEN $2 - INTERVAL '14 days' AND $2 + INTERVAL '121 days'
-        GROUP BY event.id, flag.enabled
+        GROUP BY event.id, flag.enabled, workspace.name, city.name
         ORDER BY event.starts_at, event.id
         LIMIT $3
         "#,
@@ -95,6 +111,11 @@ pub(in crate::autopilot) async fn load_event_campaign_snapshots(
                     day_of_sent: row.day_of_sent,
                     thank_you_sent: row.thank_you_sent,
                 },
+                title: row.title,
+                sender_name: row.sender_name,
+                city_name: row.city_name,
+                venue: row.venue,
+                ticket_url: row.ticket_url,
             })
         })
         .collect()

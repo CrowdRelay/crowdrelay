@@ -238,7 +238,7 @@ impl AutopilotActionPayload {
                 },
                 deadline_note: String::new(),
             },
-            Self::RequestAudienceCampaign { event_id, phase, template_key, audience_size, audience_basis } => ActionBriefing {
+            Self::RequestAudienceCampaign { event_id, phase, template_key, audience_size, audience_basis, draft } => ActionBriefing {
                 summary: match audience_size {
                     Some(size) => format!(
                         "Audience campaign to {size} fans: {}",
@@ -266,6 +266,22 @@ impl AutopilotActionPayload {
                         },
                     },
                     BriefingField { label: "Who they are".into(), value: audience_basis.clone() },
+                    // O.3: the approval shows the words the mailer sends,
+                    // not a template key that resolves outside the repo.
+                    BriefingField {
+                        label: "Subject".into(),
+                        value: match draft.subject.trim().is_empty() {
+                            true => "not composed".to_owned(),
+                            false => draft.subject.clone(),
+                        },
+                    },
+                    BriefingField {
+                        label: "Body".into(),
+                        value: match draft.body.trim().is_empty() {
+                            true => "not composed".to_owned(),
+                            false => truncate(draft.body.clone(), 2000),
+                        },
+                    },
                 ],
                 deadline_note: String::new(),
             },

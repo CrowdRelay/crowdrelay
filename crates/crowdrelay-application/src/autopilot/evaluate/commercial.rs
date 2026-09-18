@@ -392,7 +392,7 @@ pub(super) fn booking_followup_candidate(
 }
 
 pub(super) fn campaign_lifecycle_candidate(
-    snapshot: EventCampaignSnapshot,
+    snapshot: &EventCampaignSnapshot,
     policy: &AutopilotPolicy,
     now: OffsetDateTime,
 ) -> Result<Option<DecisionCandidate>, serde_json::Error> {
@@ -420,8 +420,11 @@ pub(super) fn campaign_lifecycle_candidate(
             template_key: phase.template_key().to_owned(),
             // O.5: the size and the basis travel with the ask, so the approval
             // says who this reaches rather than naming a template key.
-            audience_size: phase.audience_size(&snapshot),
+            audience_size: phase.audience_size(snapshot),
             audience_basis: phase.audience_basis().to_owned(),
+            // O.3: the words travel too — the operator approves the sentences
+            // the fans receive, and the mailer sends them verbatim.
+            draft: phase.compose(snapshot),
         },
         decision_key: format!(
             "decision:event-campaign:v{}:{}:{:?}:{}:{}:{}",

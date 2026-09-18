@@ -36,6 +36,30 @@ It must not purchase placement, change ticket pricing, fabricate reviews/crowd/s
 
 CrowdRelay has already decided everything that matters: who is eligible, whether consent is current at the moment of dispatch, whether the step is still inside its window and whether the show is still on. The executor renders the named template from the supplied facts and sends it. It must not broaden the recipient list, substitute a different template, re-send a step it has already reported, or send at all once the event is past — a step delivered outside its moment is a different, worse message than one not delivered, and CrowdRelay records that omission as a skip rather than letting it arrive late.
 
+### Event campaigns (communication.campaign_due)
+
+`communication.campaign_due` carries a campaign reference, not the copy:
+`campaign_id`, `campaign_slug`, `channel`, `segment_id`, `template_key`. The
+words live on the campaign row — `communication_campaigns.content` carries
+`subject` and `body`, composed in CrowdRelay and approved by the operator
+verbatim.
+
+The executor expands `segment_id` into the consented fans it may write to,
+reads `content.subject`/`content.body`, and sends them unchanged. It does not
+render a template, substitute wording, or add paragraphs — the band approved
+the sentences; a send is not a second draft. `template_key` still travels for
+the ledger and for rows written before the copy moved in-repo; a campaign
+whose `content` carries `subject`/`body` is sent verbatim, and one without
+them may fall back to the key only while its copy predates this contract.
+
+| `template_key` | When it is sent |
+| --- | --- |
+| `event.announcement.v1` | The show is published and the city has not heard yet. |
+| `event.interest_reminder.v1` | Fans said they are coming and have not bought a ticket. |
+| `event.last_call.v1` | Same audience, inside the last-call window before doors. |
+| `event.day_of.v1` | Ticket buyers, on the day. |
+| `event.thank_you.v1` | Fans who were in the room, minus anyone whose scan already got the welcome. |
+
 ### Fan lifecycle messages
 
 `crowdrelay.fan_lifecycle.message_requested` carries one message for one

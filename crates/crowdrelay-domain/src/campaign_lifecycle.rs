@@ -18,7 +18,7 @@ pub struct EventCampaignHistory {
     pub thank_you_sent: bool,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct EventCampaignSnapshot {
     pub event_id: EventId,
     pub published: bool,
@@ -28,6 +28,16 @@ pub struct EventCampaignSnapshot {
     pub paid_buyers: u32,
     pub attendees: u32,
     pub history: EventCampaignHistory,
+    /// The facts the campaign copy is composed from (O.3): the event's own
+    /// title, where and when it is, and where a ticket lives. A copy that
+    /// names the show it is selling is composed from these, not re-fetched
+    /// downstream where the approval cannot see it.
+    pub title: String,
+    /// The workspace's display name — the signature on the mail.
+    pub sender_name: String,
+    pub city_name: Option<String>,
+    pub venue: Option<String>,
+    pub ticket_url: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -117,6 +127,122 @@ impl EventCampaignPhase {
             Self::ThankYou => Some(snapshot.attendees),
         }
     }
+
+    /// The copy the phase sends (O.3): the event's own facts in the tenant's
+    /// own voice — short sentences, no hype, no numbers nobody measured.
+    /// `Cześć,` greets without a name because the mailer expands the segment
+    /// per fan and a placeholder would make the approved text differ from the
+    /// sent one; the signature is the workspace's own name.
+    ///
+    /// The body is verbatim: every line a fan reads is a line the operator
+    /// approved. A missing ticket link or venue drops its line rather than
+    /// leaving a dead placeholder.
+    #[must_use]
+    pub fn compose(self, snapshot: &EventCampaignSnapshot) -> EventCampaignCopy {
+        let date = polish_date(snapshot.starts_at);
+        let place = place_line(snapshot.venue.as_deref(), snapshot.city_name.as_deref());
+        let when_where = match place.is_empty() {
+            true => date.clone(),
+            false => format!("{date}, {place}"),
+        };
+        let tickets = snapshot
+            .ticket_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|url| !url.is_empty())
+            .map(|url| format!("Bilety: {url}\n\n"))
+            .unwrap_or_default();
+        let signoff = signoff(&snapshot.sender_name);
+        let title = snapshot.title.trim();
+
+        let (subject, message) = match self {
+            Self::Announcement => (
+                format!("{title} — {when_where}"),
+                format!("{title} — {when_where}.\n\n{tickets}Do zobaczenia."),
+            ),
+            Self::InterestReminder => (
+                format!("{title} — {date}"),
+                format!(
+                    "Zapisaliście się, że idziecie — {title} jest {when_where}.\n\n{tickets}Do zobaczenia."
+                ),
+            ),
+            Self::LastCall => (
+                format!("Ostatnie bilety: {title} — {date}"),
+                format!(
+                    "{title} jest już {when_where} — to ostatni moment na bilet.\n\n{tickets}Do zobaczenia."
+                ),
+            ),
+            Self::DayOf => (
+                format!("Dziś: {title}"),
+                format!(
+                    "{title} jest dziś — {when_where}, start o {}.\n\nDo zobaczenia w sali.",
+                    polish_time(snapshot.starts_at)
+                ),
+            ),
+            Self::ThankYou => (
+                "Dziękujemy, że byliście".to_owned(),
+                format!(
+                    "{title} już za nami — dziękujemy, że byliście w sali.\n\nTakie wieczory są powodem, dla którego to robimy."
+                ),
+            ),
+        };
+        EventCampaignCopy {
+            subject,
+            body: format!("Cześć,\n\n{message}{signoff}"),
+        }
+    }
+}
+
+fn place_line(venue: Option<&str>, city: Option<&str>) -> String {
+    match (
+        venue.map(str::trim).filter(|v| !v.is_empty()),
+        city.map(str::trim).filter(|c| !c.is_empty()),
+    ) {
+        (Some(venue), Some(city)) => format!("{venue}, {city}"),
+        (Some(venue), None) => venue.to_owned(),
+        (None, Some(city)) => city.to_owned(),
+        (None, None) => String::new(),
+    }
+}
+
+fn signoff(sender_name: &str) -> String {
+    let sender = sender_name.trim();
+    if sender.is_empty() {
+        String::new()
+    } else {
+        format!("\n\n- {sender}")
+    }
+}
+
+/// Polish month names in the genitive — "18 października", the form a date
+/// takes inside a sentence. Index-safe: a month outside 1–12 is impossible
+/// for `time::Month`, and `get` makes a broken table a compile-time-sized
+/// absence rather than a panic.
+const POLISH_MONTHS: [&str; 12] = [
+    "stycznia",
+    "lutego",
+    "marca",
+    "kwietnia",
+    "maja",
+    "czerwca",
+    "lipca",
+    "sierpnia",
+    "września",
+    "października",
+    "listopada",
+    "grudnia",
+];
+
+fn polish_date(at: OffsetDateTime) -> String {
+    let month = POLISH_MONTHS
+        .get(usize::from(u8::from(at.month())) - 1)
+        .copied()
+        .unwrap_or("");
+    format!("{} {} {}", at.day(), month, at.year())
+}
+
+fn polish_time(at: OffsetDateTime) -> String {
+    format!("{:02}:{:02}", at.hour(), at.minute())
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -138,9 +264,20 @@ pub enum EventCampaignHoldReason {
     AlreadySent,
 }
 
+/// The words a first-party campaign sends, composed in-repo so the approval
+/// shows them (O.3). Until this existed the payload named a `template_key` and
+/// the sentences a fan received lived in a mailer nobody approved — the same
+/// hole O.1 closed for the gig letter. The mailer sends this verbatim: it is
+/// a sender, not an author.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct EventCampaignCopy {
+    pub subject: String,
+    pub body: String,
+}
+
 #[must_use]
 pub fn evaluate_event_campaign(
-    snapshot: EventCampaignSnapshot,
+    snapshot: &EventCampaignSnapshot,
     policy: EventCampaignPolicy,
     now: OffsetDateTime,
 ) -> EventCampaignDecision {
@@ -248,6 +385,11 @@ mod tests {
             paid_buyers: 30,
             attendees: 70,
             history: EventCampaignHistory::default(),
+            title: "Virya at Progresja".to_owned(),
+            sender_name: "VIRYA".to_owned(),
+            city_name: Some("Warszawa".to_owned()),
+            venue: Some("Progresja".to_owned()),
+            ticket_url: Some("https://tickets.test/virya".to_owned()),
         };
         assert_eq!(
             EventCampaignPhase::InterestReminder.audience_size(&snapshot),
@@ -297,6 +439,11 @@ mod tests {
             paid_buyers: 40,
             attendees: 0,
             history: EventCampaignHistory::default(),
+            title: "Virya at Progresja".to_owned(),
+            sender_name: "VIRYA".to_owned(),
+            city_name: Some("Warszawa".to_owned()),
+            venue: Some("Progresja".to_owned()),
+            ticket_url: None,
         };
         assert_eq!(
             EventCampaignPhase::LastCall.audience_size(&snapshot),
@@ -318,6 +465,11 @@ mod tests {
             paid_buyers: 10,
             attendees: 12,
             history: EventCampaignHistory::default(),
+            title: "Virya at Progresja".to_owned(),
+            sender_name: "VIRYA".to_owned(),
+            city_name: Some("Warszawa".to_owned()),
+            venue: Some("Progresja".to_owned()),
+            ticket_url: Some("https://tickets.test/virya".to_owned()),
         }
     }
 
@@ -328,7 +480,7 @@ mod tests {
         let mut data = snapshot(Duration::days(10));
         data.history.announcement_sent = true;
         assert!(matches!(
-            evaluate_event_campaign(data, EventCampaignPolicy::default(), now()),
+            evaluate_event_campaign(&data, EventCampaignPolicy::default(), now()),
             EventCampaignDecision::Request {
                 phase: EventCampaignPhase::InterestReminder,
                 ..
@@ -342,7 +494,7 @@ mod tests {
         data.history.announcement_sent = true;
         data.paid_buyers = data.interested_fans;
         assert_eq!(
-            evaluate_event_campaign(data, EventCampaignPolicy::default(), now()),
+            evaluate_event_campaign(&data, EventCampaignPolicy::default(), now()),
             EventCampaignDecision::Hold(EventCampaignHoldReason::InsufficientAudience)
         );
     }
@@ -352,9 +504,45 @@ mod tests {
         let mut data = snapshot(-Duration::hours(12));
         data.attendees = 0;
         assert_eq!(
-            evaluate_event_campaign(data, EventCampaignPolicy::default(), now()),
+            evaluate_event_campaign(&data, EventCampaignPolicy::default(), now()),
             EventCampaignDecision::Hold(EventCampaignHoldReason::InsufficientAudience)
         );
+    }
+
+    /// O.3: every phase composes the words the approval shows and the mail
+    /// sends — the event's own facts, no placeholders, signed by the tenant.
+    #[test]
+    fn every_phase_composes_approved_words_from_event_facts() {
+        let mut data = snapshot(Duration::days(30));
+        data.starts_at = now(); // any moment; the copy quotes its own date
+        for phase in [
+            EventCampaignPhase::Announcement,
+            EventCampaignPhase::InterestReminder,
+            EventCampaignPhase::LastCall,
+            EventCampaignPhase::DayOf,
+            EventCampaignPhase::ThankYou,
+        ] {
+            let copy = phase.compose(&data);
+            assert!(copy.subject.trim().len() > 4, "{phase:?} subject is empty");
+            assert!(copy.body.starts_with("Cześć,"), "{phase:?} body greets");
+            assert!(copy.body.ends_with("- VIRYA"), "{phase:?} body signs off");
+            assert!(
+                !copy.body.contains('{') && !copy.subject.contains('{'),
+                "{phase:?} leaves a placeholder unfilled"
+            );
+        }
+        // The sale phases quote the ticket link; the after-show one does not
+        // ask for anything.
+        let last_call = EventCampaignPhase::LastCall.compose(&data);
+        assert!(last_call.body.contains("https://tickets.test/virya"));
+        let thank_you = EventCampaignPhase::ThankYou.compose(&data);
+        assert!(!thank_you.body.contains("Bilety:"));
+
+        // A missing ticket link drops the line rather than leaving a hole.
+        data.ticket_url = None;
+        let announcement = EventCampaignPhase::Announcement.compose(&data);
+        assert!(!announcement.body.contains("Bilety:"));
+        assert!(!announcement.body.contains("None"));
     }
 
     #[test]
@@ -367,7 +555,7 @@ mod tests {
         data.interested_fans = 1; // below minimum_audience for reminder
         data.paid_buyers = 0;
         assert!(matches!(
-            evaluate_event_campaign(data, EventCampaignPolicy::default(), now()),
+            evaluate_event_campaign(&data, EventCampaignPolicy::default(), now()),
             EventCampaignDecision::Request {
                 phase: EventCampaignPhase::Announcement,
                 ..

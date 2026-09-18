@@ -595,6 +595,17 @@ pub enum AutopilotActionPayload {
         /// who is in it.
         #[serde(default)]
         audience_basis: String,
+        /// The words the campaign sends, composed in-repo at raise time (O.3):
+        /// the event's own facts in the tenant's voice. The mailer sends this
+        /// verbatim — the approval shows exactly what a fan reads, and
+        /// `draft_revision` can offer `subject`/`body` for editing because the
+        /// text lives in the payload.
+        ///
+        /// `default` for the rows queued before it existed: those carry an
+        /// empty draft and execution refuses them rather than inventing the
+        /// missing words.
+        #[serde(default)]
+        draft: crowdrelay_domain::campaign_lifecycle::EventCampaignCopy,
     },
     RequestMerchBundle {
         product_a: MerchProductId,
