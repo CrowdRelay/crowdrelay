@@ -7426,6 +7426,42 @@ paths:
           $ref: '#/components/responses/Problem'
         '503':
           $ref: '#/components/responses/Problem'
+  /admin/roster-plan/release-calendar:
+    get:
+      operationId: rosterReleaseCalendar
+      summary: Which member acts' releases land on each other, and which one should move
+      description: >
+        5.16 — the §4i-2 collision rule in the calendar dimension. The
+        response is the organisation's active releases over the next twelve
+        weeks (`releases`, soonest first) plus every week that holds two or
+        more (`collisions`). Each collision names who keeps the week
+        (`stays_act`), who is asked to move (`moves_act`), and a `reason`
+        citing the rule that decided — bigger tier keeps the week, equal
+        tiers break on asset readiness, then on who announced first —
+        because a calendar that reorders silently is an argument, not a
+        decision. `shared_fans` is the count-only overlap between the two
+        workspaces' active fanbases; `null` is unmeasured, not zero, and a
+        zero is reported as a press clash only. Admin rather than
+        control-plane, like the rest of roster-plan: unannounced labelmate
+        dates are the organisation's, not one act's.
+      security:
+      - adminBearer: []
+      parameters:
+      - in: query
+        name: organization_id
+        required: true
+        schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: >
+            The lookahead window's releases and every collision with its
+            proposed move. An organisation with no upcoming releases gets
+            empty lists, which is itself the answer to "is next quarter
+            clear".
+        '401':
+          $ref: '#/components/responses/Problem'
+        '503':
+          $ref: '#/components/responses/Problem'
   /admin/roster-plan/support-slot-ask:
     post:
       operationId: approveSupportSlotAsk

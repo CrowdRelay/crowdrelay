@@ -837,6 +837,13 @@ pub(super) fn application_routes(state: AppState) -> Router {
             "/v1/admin/roster-plan/act-report",
             get(crate::roster_act_report::roster_act_report),
         )
+        // The collision calendar: which releases land on each other across
+        // the roster, and which one is asked to move. Same boundary —
+        // unannounced labelmate dates are the organisation's, not one act's.
+        .route(
+            "/v1/admin/roster-plan/release-calendar",
+            get(crate::roster_release_calendar::roster_release_calendar),
+        )
         // The roster's own numbers, on the same surface as its plan for the
         // same reason: these belong to the organisation, and a workspace token
         // must not be able to read or set what a labelmate's plan is sized by.
