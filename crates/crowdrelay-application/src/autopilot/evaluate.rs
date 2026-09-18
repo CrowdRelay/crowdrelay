@@ -933,6 +933,7 @@ where
 include!("evaluate/live_terms.rs");
 include!("evaluate/types.rs");
 include!("evaluate/candidates.rs");
+include!("evaluate/candidates_terms.rs");
 include!("evaluate/candidates_relay.rs");
 include!("evaluate/supply_quiet.rs");
 include!("evaluate/growth_intelligence_context.rs");

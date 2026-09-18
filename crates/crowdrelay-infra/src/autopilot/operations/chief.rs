@@ -242,6 +242,8 @@ pub(in crate::autopilot) async fn load_chief_of_staff(
                 WHEN action_kind IN ('merch.reorder.request','merch.bundle.request') THEN 5
                 WHEN action_kind IN ('ticket.price.change','merch.price.change','promotion.budget_change.request') THEN 3
                 WHEN action_kind IN ('show.task.complete','show.task.escalate','funding.package.prepare') THEN 8
+                WHEN action_kind='opportunity.counterparty_report.issue' THEN 8
+                WHEN action_kind IN ('opportunity.terms.counter','opportunity.terms.accept') THEN 5
                 WHEN action_kind='funding.application.submit' THEN 10
                 WHEN action_kind LIKE 'experiment.%' THEN 3 ELSE 2 END),0)::bigint
              FROM viryaos_autopilot_actions action

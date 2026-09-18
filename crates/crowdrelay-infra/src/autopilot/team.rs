@@ -904,6 +904,16 @@ pub(super) fn friendly_action_title(action_kind: &str, locale: BriefingLocale) -
         ("signal.push.request", BriefingLocale::En) => "Approve the Signal push",
         ("latarnik.invite.request", BriefingLocale::Pl) => "Zatwierdź zaproszenie do Latarnika",
         ("latarnik.invite.request", BriefingLocale::En) => "Approve the Latarnik invitation",
+        ("opportunity.counterparty_report.issue", BriefingLocale::Pl) => {
+            "Zatwierdź wysłanie raportu po koncercie do kontrahenta"
+        }
+        ("opportunity.counterparty_report.issue", BriefingLocale::En) => {
+            "Approve the post-show report to the counterparty"
+        }
+        ("opportunity.terms.counter", BriefingLocale::Pl) => "Zatwierdź kontrpropozycję warunków",
+        ("opportunity.terms.counter", BriefingLocale::En) => "Approve the terms counter",
+        ("opportunity.terms.accept", BriefingLocale::Pl) => "Zatwierdź przyjęcie warunków",
+        ("opportunity.terms.accept", BriefingLocale::En) => "Approve accepting the terms",
         (other, _) => return format!("VIRYA OS — {}", other.replace(['.', '_'], " ")),
     };
     title.to_owned()

@@ -1029,11 +1029,13 @@ pub(in crate::autopilot) async fn issue_post_show_report(
         "promoter"
     };
 
-    crate::autopilot::emit_external_action(
+    crate::autopilot::emit_outward_action(
         tx,
         workspace_id,
         action_id,
         "crowdrelay.show.post_show_report_due",
+        format!("show-report:{event_id}"),
+        "post-show report owed to the band and the counterparty of record",
         json!({
             "action_id": action_id,
             "event_id": event_id,
@@ -1164,7 +1166,9 @@ pub(in crate::autopilot) async fn issue_counterparty_report(
     now: OffsetDateTime,
 ) -> Result<(), RepositoryError> {
     issue_post_show_report(tx, workspace_id, action_id, event_id, now).await?;
-    crate::autopilot::emit_external_action(
+    // The marker is this action's second emission — it needs its own key or
+    // the report's emission row swallows it on the conflict.
+    crate::autopilot::emit_external_action_keyed(
         tx,
         workspace_id,
         action_id,
@@ -1173,7 +1177,12 @@ pub(in crate::autopilot) async fn issue_counterparty_report(
             "action_id": action_id,
             "opportunity_id": opportunity_id,
             "event_id": event_id,
+            "send_evidence": crate::autopilot::send_evidence(
+                format!("opportunity:{opportunity_id}"),
+                "post-show report owed to this counterparty before the next ask",
+            )?,
         }),
+        Some("counterparty-report"),
     )
     .await
 }

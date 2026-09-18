@@ -724,7 +724,9 @@ impl AutopilotTeamStateRepository for PostgresAutopilotRepository {
                 TeamOpportunityProgress::Lost | TeamOpportunityProgress::Dismissed
             ) && reason.is_none_or(|value| value.is_empty() || value.len() > 240)
             {
-                return Err(RepositoryError::Unexpected);
+                return Err(RepositoryError::ConflictBecause(
+                    "lost and dismissed require a 1–240 character reason — a row that closes says why",
+                ));
             }
             let details = json!({
                 "opportunity_id": command.opportunity_id,
@@ -779,12 +781,12 @@ impl AutopilotTeamStateRepository for PostgresAutopilotRepository {
                        AND status IN ('submission_requested','submitted','replied')"
                 }
                 TeamOpportunityProgress::Won => {
-                    "UPDATE viryaos_team_opportunities SET status='won', version=version+1 \
+                    "UPDATE viryaos_team_opportunities SET status='won', status_reason=$3, version=version+1 \
                      WHERE workspace_id=$1 AND id=$2 \
                        AND status IN ('submission_requested','submitted','replied')"
                 }
                 TeamOpportunityProgress::Lost => {
-                    "UPDATE viryaos_team_opportunities SET status='lost', version=version+1 \
+                    "UPDATE viryaos_team_opportunities SET status='lost', status_reason=$3, version=version+1 \
                      WHERE workspace_id=$1 AND id=$2 \
                        AND status IN ('submission_requested','submitted','replied')"
                 }
@@ -793,7 +795,7 @@ impl AutopilotTeamStateRepository for PostgresAutopilotRepository {
                 // thread is evidence and the honest end states are
                 // won/lost. Dismissing it would erase the send record.
                 TeamOpportunityProgress::Dismissed => {
-                    "UPDATE viryaos_team_opportunities SET status='dismissed', version=version+1 \
+                    "UPDATE viryaos_team_opportunities SET status='dismissed', status_reason=$3, version=version+1 \
                      WHERE workspace_id=$1 AND id=$2 \
                        AND status IN ('new','prepared','awaiting_approval','submission_requested')"
                 }

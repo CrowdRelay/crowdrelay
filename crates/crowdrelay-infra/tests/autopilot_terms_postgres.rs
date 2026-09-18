@@ -681,3 +681,127 @@ async fn the_floor_cites_the_counterpartys_precedent_and_the_market()
     assert_eq!(snapshot.terms.ladder.walk_away_minor, 380_000);
     Ok(())
 }
+
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn terminal_progress_writes_the_reason_and_refuses_to_close_silently()
+-> Result<(), Box<dyn std::error::Error>> {
+    use crowdrelay_application::autopilot::{
+        RecordTeamOpportunityProgress, TeamOpportunityProgress,
+    };
+
+    // The scout's status_reason write rides a bind the stricter transition
+    // guards took over — this test exists because a bind nobody referenced
+    // compiled clean and would have failed on the first real close.
+    let fixture = fixture("terms-progress").await?;
+
+    // Lost without a reason refuses: a refusal teaches the pipeline only if it
+    // says why.
+    let silent = fixture
+        .repository
+        .record_team_opportunity_progress(
+            fixture.workspace_id,
+            RecordTeamOpportunityProgress {
+                opportunity_id: fixture.opportunity_id,
+                progress: TeamOpportunityProgress::Lost,
+                occurred_at: fixture.now,
+                reason: None,
+            },
+            &IdempotencyKey::parse("progress-lost-silent").expect("valid key"),
+            None,
+        )
+        .await;
+    assert!(silent.is_err(), "a lost with no reason must not write");
+
+    // Won from 'replied' carries the reason into status_reason.
+    fixture
+        .repository
+        .record_team_opportunity_progress(
+            fixture.workspace_id,
+            RecordTeamOpportunityProgress {
+                opportunity_id: fixture.opportunity_id,
+                progress: TeamOpportunityProgress::Won,
+                occurred_at: fixture.now,
+                reason: Some("signed for the October date".to_owned()),
+            },
+            &IdempotencyKey::parse("progress-won").expect("valid key"),
+            None,
+        )
+        .await?;
+    let (status, reason): (String, Option<String>) = sqlx::query_as(
+        "SELECT status, status_reason FROM viryaos_team_opportunities \
+         WHERE workspace_id=$1 AND id=$2",
+    )
+    .bind(fixture.workspace_id.into_uuid())
+    .bind(fixture.opportunity_id.into_uuid())
+    .fetch_one(&fixture.pool)
+    .await?;
+    assert_eq!(status, "won");
+    assert_eq!(reason.as_deref(), Some("signed for the October date"));
+
+    // A won row cannot be re-closed or dismissed: the terminal guard holds.
+    let reclose = fixture
+        .repository
+        .record_team_opportunity_progress(
+            fixture.workspace_id,
+            RecordTeamOpportunityProgress {
+                opportunity_id: fixture.opportunity_id,
+                progress: TeamOpportunityProgress::Lost,
+                occurred_at: fixture.now,
+                reason: Some("changed their mind".to_owned()),
+            },
+            &IdempotencyKey::parse("progress-reclose").expect("valid key"),
+            None,
+        )
+        .await;
+    assert!(matches!(reclose, Err(RepositoryError::Conflict)));
+
+    // A never-sent row dismisses with a reason — pre-send cleanup is allowed.
+    let fresh_id = TeamOpportunityId::new();
+    sqlx::query(
+        r#"
+        INSERT INTO viryaos_team_opportunities (
+            id, workspace_id, opportunity_kind, source, external_key, title, organization,
+            verified_destination, fit_basis_points, confidence_basis_points, currency,
+            expected_fee_minor, estimated_cost_minor, event_starts_at, status
+        ) VALUES (
+            $1,$2,'festival','manual',$3,'Dismissable','A festival',
+            true,5000,5000,'PLN',100000,80000,$4,'new'
+        )
+        "#,
+    )
+    .bind(fresh_id.into_uuid())
+    .bind(fixture.workspace_id.into_uuid())
+    .bind(format!(
+        "dismiss-{}",
+        fixture.workspace_id.into_uuid().simple()
+    ))
+    .bind(fixture.now + time::Duration::days(90))
+    .execute(&fixture.pool)
+    .await?;
+    fixture
+        .repository
+        .record_team_opportunity_progress(
+            fixture.workspace_id,
+            RecordTeamOpportunityProgress {
+                opportunity_id: fresh_id,
+                progress: TeamOpportunityProgress::Dismissed,
+                occurred_at: fixture.now,
+                reason: Some("scout duplicate".to_owned()),
+            },
+            &IdempotencyKey::parse("progress-dismiss").expect("valid key"),
+            None,
+        )
+        .await?;
+    let (status, reason): (String, Option<String>) = sqlx::query_as(
+        "SELECT status, status_reason FROM viryaos_team_opportunities \
+         WHERE workspace_id=$1 AND id=$2",
+    )
+    .bind(fixture.workspace_id.into_uuid())
+    .bind(fresh_id.into_uuid())
+    .fetch_one(&fixture.pool)
+    .await?;
+    assert_eq!(status, "dismissed");
+    assert_eq!(reason.as_deref(), Some("scout duplicate"));
+    Ok(())
+}

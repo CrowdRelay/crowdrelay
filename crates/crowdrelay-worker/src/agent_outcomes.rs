@@ -1386,11 +1386,12 @@ impl AgentOutcomeWorker {
         sqlx::query(
             r#"
             UPDATE agent_outcomes
-            SET status = 'rejected', rejection_reason = $2
-            WHERE id = $1
+            SET status = 'rejected', rejection_reason = $3
+            WHERE id = $1 AND workspace_id = $2
             "#,
         )
         .bind(outcome_id)
+        .bind(self.workspace_id.into_uuid())
         .bind(reason)
         .execute(&self.pool)
         .await?;

@@ -288,7 +288,34 @@ pub(super) async fn emit_external_action(
     workspace_id: WorkspaceId,
     action_id: AutopilotActionId,
     event_type: &'static str,
+    payload: Value,
+) -> Result<(), RepositoryError> {
+    // The default key keeps the one-emission-per-action invariant — a replay
+    // lands on the same row. Actions that legitimately emit a second event
+    // (a marker beside the payload send) must name it explicitly through
+    // [`emit_external_action_keyed`] or the second event is swallowed by the
+    // conflict with no trace.
+    emit_external_action_keyed(
+        transaction,
+        workspace_id,
+        action_id,
+        event_type,
+        payload,
+        None,
+    )
+    .await
+}
+
+/// Same emission with an explicit key suffix. Use only when one action sends
+/// more than one event — the suffix is what keeps the two emissions distinct
+/// under `ON CONFLICT (workspace_id, emission_key)`.
+pub(super) async fn emit_external_action_keyed(
+    transaction: &mut Transaction<'_, Postgres>,
+    workspace_id: WorkspaceId,
+    action_id: AutopilotActionId,
+    event_type: &'static str,
     mut payload: Value,
+    emission_suffix: Option<&str>,
 ) -> Result<(), RepositoryError> {
     gate_outward_emission(transaction, workspace_id, action_id, event_type, &mut payload).await?;
     ensure_executor_capability(
@@ -297,7 +324,10 @@ pub(super) async fn emit_external_action(
         executor_capability_for_emission(event_type, &payload),
     )
     .await?;
-    let emission_key = format!("autopilot-action:{}", action_id);
+    let emission_key = match emission_suffix {
+        Some(suffix) => format!("autopilot-action:{}:{}", action_id, suffix),
+        None => format!("autopilot-action:{}", action_id),
+    };
     let outbox_id = Uuid::now_v7();
     // Propagate trace context (trace_id, causation_id) from the autopilot
     // action onto the outbox event so the trace spine stays continuous from

@@ -334,32 +334,46 @@ async fn load_agent_scorecard(
 
     // Parked capabilities: capabilities the agent tried to use but no
     // executor advertises. Derived from actions stuck in 'queued' for
-    // over an hour — we infer the capability from the action_kind.
+    // over an hour — we infer the capability from the action's durable
+    // `action_kind` column (the payload serializes its tag as `kind`, never
+    // `action_kind`, so reading it from the payload always read NULL).
     let parked_caps = sqlx::query_as::<_, ParkedCapabilityRow>(
         r#"
-        WITH parked_payloads AS (
-            SELECT payload
-            FROM viryaos_autopilot_actions
-            WHERE workspace_id = $1
-              AND status = 'queued'
-              AND available_at < $2 - INTERVAL '1 hour'
-        )
         SELECT DISTINCT
             CASE
-                WHEN payload->>'action_kind' LIKE 'booking.%' THEN 'booking.outreach'
-                WHEN payload->>'action_kind' LIKE 'outreach.%' THEN 'outreach.send'
-                WHEN payload->>'action_kind' LIKE 'beacon.%' THEN 'beacon.outreach'
-                WHEN payload->>'action_kind' LIKE 'latarnik.%' THEN 'latarnik.invite'
-                WHEN payload->>'action_kind' LIKE 'content.%' THEN 'content.artifact'
-                WHEN payload->>'action_kind' LIKE 'show_growth.%' THEN 'show.growth'
-                WHEN payload->>'action_kind' LIKE 'fan.%' THEN 'fan.lifecycle.message'
-                WHEN payload->>'action_kind' LIKE 'play.%' THEN 'play.execute'
-                WHEN payload->>'action_kind' LIKE 'funding.%' THEN 'funding.submit'
-                WHEN payload->>'action_kind' LIKE 'opportunity.%' THEN 'opportunity.application'
-                ELSE payload->>'action_kind'
+                WHEN action_kind = 'booking.target_discovery.request' THEN 'booking.discovery'
+                WHEN action_kind LIKE 'booking.%' THEN 'booking.outreach'
+                WHEN action_kind = 'outreach.discovery.request' THEN 'outreach.discovery'
+                WHEN action_kind LIKE 'outreach.%' THEN 'outreach.send'
+                WHEN action_kind = 'beacon.discovery.request' THEN 'beacon.discovery'
+                WHEN action_kind = 'beacon.invite_batch.request' THEN 'beacon.invite_batch'
+                WHEN action_kind LIKE 'beacon.%' THEN 'beacon.outreach'
+                WHEN action_kind LIKE 'latarnik.%' THEN 'latarnik.invite'
+                WHEN action_kind LIKE 'gig.%' THEN 'gig.outreach'
+                WHEN action_kind = 'content.artifact.request' THEN 'content.artifact'
+                WHEN action_kind LIKE 'show_growth.%' THEN 'show.growth'
+                WHEN action_kind = 'show.task.escalate' THEN 'show.escalation'
+                WHEN action_kind = 'opportunity.counterparty_report.issue' THEN 'show.escalation'
+                WHEN action_kind = 'release.editorial_pitch.escalate' THEN 'show.escalation'
+                WHEN action_kind = 'fan.lifecycle.message.request' THEN 'fan.lifecycle.message'
+                WHEN action_kind = 'play.step.run' THEN 'play.step'
+                WHEN action_kind = 'funding.package.prepare' THEN 'funding.package'
+                WHEN action_kind LIKE 'funding.%' THEN 'funding.submit'
+                WHEN action_kind = 'opportunity.live.apply' THEN 'opportunity.application'
+                WHEN action_kind LIKE 'opportunity.terms.%' THEN 'opportunity.terms'
+                WHEN action_kind = 'playlist.placement.verify' THEN 'playlist.verify'
+                WHEN action_kind = 'promotion.budget_change.request' THEN 'promotion.budget'
+                WHEN action_kind = 'representation.approach.request' THEN 'representation.approach'
+                WHEN action_kind = 'booking_agent.approach.request' THEN 'booking_agent.approach'
+                WHEN action_kind = 'team.assignment.email' THEN 'team.email'
+                WHEN action_kind = 'community.engage.request' THEN 'community.engage'
+                WHEN action_kind = 'agent.content.request' THEN 'agent.content'
+                ELSE action_kind
             END AS capability
-        FROM parked_payloads
-        WHERE payload->>'action_kind' IS NOT NULL
+        FROM viryaos_autopilot_actions
+        WHERE workspace_id = $1
+          AND status = 'queued'
+          AND available_at < $2 - INTERVAL '1 hour'
         "#,
     )
     .bind(workspace_id)

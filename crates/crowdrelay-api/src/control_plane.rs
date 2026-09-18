@@ -207,6 +207,12 @@ pub(crate) fn router(state: crate::AppState) -> Router {
             "/v1/control-plane/autopilot/team-opportunities/{opportunity_id}/terms",
             post(crate::autopilot::record_team_opportunity_terms),
         )
+        // The shortlist's close-out control — same reuse: the admin handler
+        // owns the write, this surface only routes to it.
+        .route(
+            "/v1/control-plane/autopilot/team-opportunities/{opportunity_id}/progress",
+            post(crate::autopilot::record_team_opportunity_progress),
+        )
         .route(
             "/v1/control-plane/autopilot/actions/{action_id}/approve",
             post(crate::autopilot::approve_action),
