@@ -16,6 +16,10 @@ use axum::{
 use crowdrelay_domain::venue_evidence::{
     EvidenceFact, EvidenceLocale, VenueAssessment, VenueEvidence, assess, unchecked_sentence,
 };
+use crowdrelay_domain::venue_terms::{
+    TermsContribution, VenueTermsEvidence, aggregate_venue_terms,
+};
+use crowdrelay_infra::night::PostgresNightRepository;
 use crowdrelay_infra::tenant_settings::TenantSettingsRepository;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;

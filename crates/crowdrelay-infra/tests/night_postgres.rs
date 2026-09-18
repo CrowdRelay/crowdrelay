@@ -9,7 +9,10 @@
 //! itself cannot be forged by the tenant that billed it.
 
 use crowdrelay_domain::night::ContributionKind;
-use crowdrelay_infra::night::{NightError, PostgresNightRepository};
+use crowdrelay_domain::venue_terms::{
+    TermsContribution, VenueTermsEvidence, aggregate_venue_terms,
+};
+use crowdrelay_infra::night::{NightError, PostgresNightRepository, VenueTermsRow};
 use sqlx::{Connection, PgConnection, PgPool, postgres::PgPoolOptions};
 use time::OffsetDateTime;
 use uuid::Uuid;
@@ -504,6 +507,148 @@ async fn a_roster_reads_its_own_split() -> Result<(), Box<dyn std::error::Error>
                 "roster must not carry {forbidden}"
             );
         }
+        Ok::<(), Box<dyn std::error::Error>>(())
+    }
+    .await;
+    database.drop_database().await;
+    result
+}
+
+/// The repo's rows as the domain consumes them — the workspace key travels
+/// only to be counted.
+fn terms_tuples(rows: &[VenueTermsRow]) -> Vec<TermsContribution> {
+    rows.iter()
+        .map(|row| {
+            (
+                row.workspace_id,
+                row.amount_minor,
+                row.currency.clone(),
+                row.contributed_at,
+            )
+        })
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn a_venues_terms_band_clears_only_across_workspaces()
+-> Result<(), Box<dyn std::error::Error>> {
+    let database = DisposableDatabase::create().await?;
+    let result = async {
+        let pool = &database.pool;
+        let repo = PostgresNightRepository::new(pool.clone());
+        let city_id = seed_city(pool).await?;
+        let alpha = seed_workspace(pool, "terms-alpha").await?;
+        let bravo = seed_workspace(pool, "terms-bravo").await?;
+        let charlie = seed_workspace(pool, "terms-charlie").await?;
+        // delta owns a show on the same night — a relationship, therefore
+        // a legitimate reader — but never contributes terms.
+        let delta = seed_workspace(pool, "terms-delta").await?;
+        let starts = OffsetDateTime::now_utc() + time::Duration::days(14);
+        let mut night = None;
+        for (workspace, slug) in [
+            (alpha, "alpha-night"),
+            (bravo, "bravo-night"),
+            (charlie, "charlie-night"),
+            (delta, "delta-night"),
+        ] {
+            let event = seed_event(pool, workspace, city_id, slug, "Klub Ucho", starts).await?;
+            let resolved = place_event_of(pool, event).await?.ok_or("no night")?;
+            if let Some(first) = night {
+                assert_eq!(
+                    resolved, first,
+                    "four tenants, one room, one date — one night"
+                );
+            } else {
+                night = Some(resolved);
+            }
+        }
+        let night = night.ok_or("no night")?;
+        let venue_id =
+            sqlx::query_scalar::<_, Uuid>("SELECT venue_id FROM place_events WHERE id = $1")
+                .bind(night)
+                .fetch_one(pool)
+                .await?;
+
+        // Two distinct workspaces behind the pool — below the floor.
+        for (workspace, amount) in [(alpha, 40_000), (bravo, 60_000)] {
+            repo.upsert_contribution(
+                workspace,
+                night,
+                ContributionKind::Terms,
+                &serde_json::json!({"amount_minor": amount, "currency": "PLN"}),
+            )
+            .await?;
+        }
+        let rows = repo.venue_terms_contributions(&[venue_id]).await?;
+        assert_eq!(rows.len(), 2);
+        assert_eq!(
+            aggregate_venue_terms(&terms_tuples(&rows), OffsetDateTime::now_utc()),
+            vec![VenueTermsEvidence::InsufficientEvidence],
+            "two workspaces is a refusal, not a thin band"
+        );
+
+        // The third workspace clears the floor — quartiles over the pool.
+        repo.upsert_contribution(
+            charlie,
+            night,
+            ContributionKind::Terms,
+            &serde_json::json!({"amount_minor": 100_000, "currency": "PLN"}),
+        )
+        .await?;
+        let rows = repo.venue_terms_contributions(&[venue_id]).await?;
+        assert_eq!(rows.len(), 3);
+        let bands = aggregate_venue_terms(&terms_tuples(&rows), OffsetDateTime::now_utc());
+        let [
+            VenueTermsEvidence::Band {
+                currency,
+                fee_p25_minor,
+                fee_median_minor,
+                fee_p75_minor,
+                contributor_count,
+                ..
+            },
+        ] = bands.as_slice()
+        else {
+            panic!("expected one cleared band, got {bands:?}");
+        };
+        assert_eq!(currency, "PLN");
+        assert_eq!(*fee_p25_minor, 40_000);
+        assert_eq!(*fee_median_minor, 60_000);
+        assert_eq!(*fee_p75_minor, 100_000);
+        assert_eq!(*contributor_count, 3);
+        // Never identifiable: the band's rendered form names no workspace —
+        // not a contributor's, not a non-contributor's.
+        let rendered = format!("{bands:?}");
+        for workspace in [alpha, bravo, charlie, delta] {
+            assert!(
+                !rendered.contains(&workspace.to_string()),
+                "the band must not carry {workspace}"
+            );
+        }
+
+        // delta never contributed and still reads the cleared band — the
+        // read names no workspace at all, so declining costs no access.
+        // (One shared `now`: `as_of` is the read's instant, so two reads a
+        // microsecond apart would compare unequal on the timestamp alone.)
+        let read_at = OffsetDateTime::now_utc();
+        let delta_rows = repo.venue_terms_contributions(&[venue_id]).await?;
+        assert_eq!(
+            aggregate_venue_terms(&terms_tuples(&delta_rows), read_at),
+            aggregate_venue_terms(&terms_tuples(&rows), read_at),
+            "a non-contributor reads the same cleared band"
+        );
+
+        // Revoking a contribution withdraws it from the pool: back below
+        // the floor, the venue's answer is a refusal again.
+        repo.revoke_contribution(charlie, night, ContributionKind::Terms)
+            .await?;
+        let rows = repo.venue_terms_contributions(&[venue_id]).await?;
+        assert_eq!(rows.len(), 2);
+        assert_eq!(
+            aggregate_venue_terms(&terms_tuples(&rows), OffsetDateTime::now_utc()),
+            vec![VenueTermsEvidence::InsufficientEvidence]
+        );
         Ok::<(), Box<dyn std::error::Error>>(())
     }
     .await;

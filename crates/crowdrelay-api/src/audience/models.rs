@@ -425,6 +425,21 @@ pub struct CityFunnelRow {
     organise_score_bp: i64,
 }
 
+/// One currency's cleared fee band on a venue row (§4h-9): quartiles over
+/// the pooled `terms` observations of at least three distinct workspaces.
+/// `contributor_count` is the count the floor cleared — never a name, and
+/// the band carries nothing else that could single one out.
+#[derive(Clone, Debug, Serialize)]
+pub struct VenueTermsBand {
+    pub currency: String,
+    pub fee_p25_minor: i64,
+    pub fee_median_minor: i64,
+    pub fee_p75_minor: i64,
+    pub contributor_count: i64,
+    #[serde(with = "time::serde::rfc3339")]
+    pub as_of: OffsetDateTime,
+}
+
 /// One row of the shared venue registry read (§4f-2). A venue is a global
 /// object — one room no matter how many tenants marked it — and every
 /// number on this row is an aggregate over contributed marks, never a
@@ -506,6 +521,15 @@ pub struct CityVenueRow {
     /// refusal. Filled after the query, same as `assessment`.
     #[sqlx(default)]
     assessment_sentence: String,
+    /// §4h-9: the room's fee band, one block per currency that cleared the
+    /// three-workspace floor — quartiles over pooled terms contributions,
+    /// never an attributable row. `null` when no currency clears, either
+    /// because nothing was ever contributed or because too few workspaces
+    /// stand behind what was. Filled after the query, same as `assessment`.
+    /// `skip`, not `default`: no query column will ever feed it, and the
+    /// field type is a response shape, not a decoded one.
+    #[sqlx(skip)]
+    typical_terms: Option<Vec<VenueTermsBand>>,
 }
 
 /// One tenant-private resolved venue fact. `private_venue_facts` reads the

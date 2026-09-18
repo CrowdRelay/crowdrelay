@@ -9297,8 +9297,11 @@ paths:
         One row per room any tenant's published or completed event has marked.
         Shows played, contributing workspace count, typical paid-ticket draw
         (averaged only over shows that had a ticket sale), repeat attenders
-        (fans interested in 2+ shows at the room), and last/next show dates.
-        Aggregates only — no tenant's raw rows are exposed.
+        (fans interested in 2+ shows at the room), last/next show dates, and
+        typical terms — per-currency fee quartile bands over pooled
+        cross-tenant contributions, present only where at least 3 distinct
+        workspaces contributed. Aggregates only — no tenant's raw rows are
+        exposed.
       security:
       - adminBearer: []
       responses:
@@ -9322,6 +9325,19 @@ paths:
                     typical_draw: { type: number, format: double, nullable: true }
                     repeat_attenders: { type: integer, format: int64, description: 'Buyers with paid orders at 2+ shows at the room.' }
                     comparable_acts: { type: integer, format: int64, description: 'Distinct acts on the room''s bills whose genres intersect the requesting workspace''s listing genres.' }
+                    typical_terms:
+                      type: array
+                      nullable: true
+                      description: 'Fee bands at the room, one block per currency whose pooled terms contributions span at least 3 distinct workspaces — quartiles only, never an attributable row. Null when no currency clears the floor.'
+                      items:
+                        type: object
+                        properties:
+                          currency: { type: string }
+                          fee_p25_minor: { type: integer, format: int64 }
+                          fee_median_minor: { type: integer, format: int64 }
+                          fee_p75_minor: { type: integer, format: int64 }
+                          contributor_count: { type: integer, format: int64 }
+                          as_of: { type: string, format: date-time }
                     last_played_at: { type: string, format: date-time, nullable: true }
                     next_show_at: { type: string, format: date-time, nullable: true }
         '401':

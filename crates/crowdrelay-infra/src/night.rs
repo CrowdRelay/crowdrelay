@@ -239,6 +239,19 @@ struct ContributionRow {
     value: serde_json::Value,
 }
 
+/// One terms contribution as the venue aggregate consumes it (§4h-9): the
+/// contributing workspace is carried only so the domain can count distinct
+/// contributors against `MIN_CONTRIBUTORS` — it is never part of what a
+/// reader sees.
+#[derive(Debug)]
+pub struct VenueTermsRow {
+    pub venue_id: Uuid,
+    pub workspace_id: Uuid,
+    pub amount_minor: i64,
+    pub currency: String,
+    pub contributed_at: OffsetDateTime,
+}
+
 /// Everything the payload builder reads — the night row, its events, its
 /// billed acts, its live contributions. Loaded once per request; the four
 /// lenses are projections over this one fact set.
@@ -660,6 +673,62 @@ impl PostgresNightRepository {
         .fetch_one(&self.pool)
         .await?;
         Ok(sold)
+    }
+
+    /// The venue-level terms read (§4h-9): every active `terms`
+    /// contribution on every night at the given rooms, across all
+    /// workspaces — the raw material `aggregate_venue_terms` bands over.
+    ///
+    /// Deliberately global: the fee band exists only as a cross-tenant
+    /// pool, because scoped to one workspace it would be exactly the
+    /// identifiable single-tenant answer the aggregate exists to prevent.
+    /// The statement still selects `workspace_id` — the contributor key
+    /// the domain's `MIN_CONTRIBUTORS` floor counts — which is also what
+    /// keeps the workspace-scope ratchet satisfied; the deliberate
+    /// non-scoping is the absent `WHERE`, not a dropped column. Declining
+    /// to contribute costs no read access: the caller's workspace is not
+    /// even a parameter of this read.
+    ///
+    /// # Errors
+    ///
+    /// `Database` on the read itself.
+    pub async fn venue_terms_contributions(
+        &self,
+        venue_ids: &[Uuid],
+    ) -> Result<Vec<VenueTermsRow>, NightError> {
+        let rows = sqlx::query_as::<_, (Uuid, Uuid, serde_json::Value, OffsetDateTime)>(
+            r#"
+            SELECT night.venue_id, contribution.workspace_id,
+                   contribution.value, contribution.created_at
+            FROM place_event_contributions AS contribution
+            JOIN place_events AS night
+              ON night.id = contribution.place_event_id
+            WHERE night.venue_id = ANY($1)
+              AND contribution.status = 'active'
+              AND contribution.kind = 'terms'
+            ORDER BY night.venue_id, contribution.created_at, contribution.id
+            "#,
+        )
+        .bind(venue_ids)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|(venue_id, workspace_id, value, contributed_at)| {
+                // The write gate shapes the value, but a row that cannot
+                // name a fee and its currency is not evidence — skipped,
+                // not decoded as a zero.
+                let amount_minor = value.get("amount_minor")?.as_i64()?;
+                let currency = value.get("currency")?.as_str()?.to_owned();
+                Some(VenueTermsRow {
+                    venue_id,
+                    workspace_id,
+                    amount_minor,
+                    currency,
+                    contributed_at,
+                })
+            })
+            .collect())
     }
 
     /// The currently-live organiser link, for the band-side lenses that
