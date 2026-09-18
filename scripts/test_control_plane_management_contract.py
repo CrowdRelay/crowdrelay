@@ -46,7 +46,9 @@ assert "Problem::unauthorized" in require_block
 # The global middleware still owns credential separation and request metadata,
 # but route-local auth is the final fail-closed boundary for this router.
 assert "is_control_plane_management_path" in lib
-assert 'path.starts_with("/v1/control-plane/ops/")' in lib
+# The management predicate is a prefix rule — the whole namespace minus the
+# area sub-scope — not a hand-maintained list that can forget a route.
+assert 'path.starts_with("/v1/control-plane/")' in lib
 assert "state.control_plane_api_key_sha256" in lib
 assert "state.area_management_api_key_sha256" in lib
 
