@@ -60,6 +60,8 @@ const SHOW_ATTRIBUTION_WINDOW_DAYS: i64 = 120;
 struct CityRow {
     city_id: Uuid,
     city_slug: String,
+    latitude: Option<f64>,
+    longitude: Option<f64>,
     active_30d: i64,
     last_show_at: Option<OffsetDateTime>,
     next_show_at: Option<OffsetDateTime>,
@@ -102,6 +104,8 @@ async fn candidate_cities(
         WITH interested AS (
             SELECT city.slug AS city_slug,
                    city.id AS city_id,
+                   city.latitude,
+                   city.longitude,
                    fan.id AS fan_id,
                    fan_last_meaningful_action(
                        fan.workspace_id, fan.id, fan.normalized_email
@@ -119,6 +123,8 @@ async fn candidate_cities(
             -- served last month, and those want opposite proposals.
             SELECT city.id AS city_id,
                    city.slug AS city_slug,
+                   city.latitude,
+                   city.longitude,
                    max(event.starts_at) FILTER (WHERE event.starts_at <= $2) AS last_show_at,
                    min(event.starts_at) FILTER (
                        WHERE event.starts_at > $2 AND event.status = 'published'
@@ -127,13 +133,15 @@ async fn candidate_cities(
             JOIN cities AS city ON city.id = event.city_id
             WHERE event.workspace_id = $1
               AND event.status IN ('published', 'completed')
-            GROUP BY city.id, city.slug
+            GROUP BY city.id, city.slug, city.latitude, city.longitude
         )
         -- Identity is the id, not the slug: the catalogue is unique on
         -- (country_code, slug), so a bare slug can merge two cities' evidence
         -- into one phantom opportunity.
         SELECT COALESCE(interested.city_id, shows.city_id) AS city_id,
                COALESCE(interested.city_slug, shows.city_slug) AS city_slug,
+               COALESCE(interested.latitude, shows.latitude) AS latitude,
+               COALESCE(interested.longitude, shows.longitude) AS longitude,
                COALESCE(count(interested.fan_id) FILTER (
                    WHERE interested.last_action_at > $2 - INTERVAL '30 days'
                ), 0)::bigint AS active_30d,
@@ -145,7 +153,9 @@ async fn candidate_cities(
         -- knows them.
         FULL JOIN shows ON shows.city_id = interested.city_id
         GROUP BY COALESCE(interested.city_id, shows.city_id),
-                 COALESCE(interested.city_slug, shows.city_slug)
+                 COALESCE(interested.city_slug, shows.city_slug),
+                 COALESCE(interested.latitude, shows.latitude),
+                 COALESCE(interested.longitude, shows.longitude)
         ORDER BY active_30d DESC, city_slug
         LIMIT $3
         "#,
@@ -591,6 +601,10 @@ async fn city_opportunities_inner(
         opportunities.push(CityOpportunity {
             city_id: crowdrelay_domain::CityId::from_uuid(city.city_id),
             city: city.city_slug.clone(),
+            // The catalogue's own pin — `None` means the city was never
+            // geocoded, and an unlocatable city cannot join a corridor.
+            latitude: city.latitude,
+            longitude: city.longitude,
             reachable_fans: reachable,
             active_fans_30d: bounded_u16(city.active_30d).into(),
             months_since_show: months_between(city.last_show_at, now),
@@ -799,6 +813,7 @@ async fn open_support_slots(
         SELECT city.slug AS city_slug,
                city.id AS city_id,
                COALESCE(NULLIF(btrim(event.venue), ''), 'the room') AS venue,
+               event.festival_name,
                workspace.name AS headliner,
                FLOOR(EXTRACT(EPOCH FROM (event.starts_at - $2)) / 86400)::bigint
                    AS days_until_show
@@ -824,6 +839,7 @@ async fn open_support_slots(
             city: row.city_slug,
             city_id: crowdrelay_domain::CityId::from_uuid(row.city_id),
             venue: row.venue,
+            festival_name: row.festival_name,
             headliner: row.headliner,
             days_until_show: bounded_u16(row.days_until_show),
         })
@@ -835,6 +851,7 @@ struct SupportSlotRow {
     city_slug: String,
     city_id: Uuid,
     venue: String,
+    festival_name: Option<String>,
     headliner: String,
     days_until_show: i64,
 }

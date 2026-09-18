@@ -19,6 +19,8 @@ mod tests {
         CityOpportunity {
             city_id: crate::CityId::from_uuid(uuid::Uuid::from_u128(0x47)),
             city: "Wrocław".to_owned(),
+            latitude: None,
+            longitude: None,
             reachable_fans: Some(240),
             active_fans_30d: 60,
             months_since_show: Some(14),
