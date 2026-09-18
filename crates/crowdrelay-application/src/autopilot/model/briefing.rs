@@ -314,20 +314,37 @@ impl AutopilotActionPayload {
                 ],
                 deadline_note: String::new(),
             },
-            Self::RequestRepresentationApproach { target_name, note, .. } => ActionBriefing {
+            Self::RequestRepresentationApproach { target_name, note, draft, .. } => ActionBriefing {
                 summary: format!("Approach for representation: {}", target_name),
                 why_it_matters: "The platform sends this on the band's behalf — the agent never sees the address until they reply. The published listing is the pitch, and it costs one of the month's few approaches.".into(),
                 steps: vec![
                     BriefingStep { what_to_do: "Check the listing is published and the opt-in basis is true".into(), why_it_matters: "Dispatch refuses without both".into() },
+                    BriefingStep { what_to_do: "Read the letter below".into(), why_it_matters: "It is the exact text the target receives — approve the words, not the idea".into() },
                     BriefingStep { what_to_do: "Click APPROVE to send it".into(), why_it_matters: "The approach goes out once, and cannot be recalled".into() },
                 ],
                 content: vec![
                     BriefingField { label: "Contact".into(), value: target_name.clone() },
                     BriefingField { label: "Note".into(), value: note.clone().unwrap_or_else(|| "—".into()) },
+                    // The approval shows the words the executor sends —
+                    // not a description of them.
+                    BriefingField {
+                        label: "Subject".into(),
+                        value: match draft.subject.trim().is_empty() {
+                            true => "not composed".to_owned(),
+                            false => draft.subject.clone(),
+                        },
+                    },
+                    BriefingField {
+                        label: "Body".into(),
+                        value: match draft.body.trim().is_empty() {
+                            true => "not composed".to_owned(),
+                            false => truncate(draft.body.clone(), 2000),
+                        },
+                    },
                 ],
                 deadline_note: String::new(),
             },
-            Self::RequestBookingAgentApproach { agent_name, agency, note, evidence, .. } => {
+            Self::RequestBookingAgentApproach { agent_name, agency, note, evidence, draft, .. } => {
                 let draw = [
                     evidence.shows_played_12m.map(|v| format!("{v} shows played (12m)")),
                     evidence.paid_tickets_12m.map(|v| format!("{v} paid tickets (12m)")),
@@ -349,6 +366,22 @@ impl AutopilotActionPayload {
                         BriefingField { label: "Agency".into(), value: agency.clone().unwrap_or_else(|| "—".into()) },
                         BriefingField { label: "Draw".into(), value: if draw.is_empty() { "—".into() } else { draw } },
                         BriefingField { label: "Note".into(), value: note.clone().unwrap_or_else(|| "—".into()) },
+                        // The approval shows the words the executor sends —
+                        // not a description of them.
+                        BriefingField {
+                            label: "Subject".into(),
+                            value: match draft.subject.trim().is_empty() {
+                                true => "not composed".to_owned(),
+                                false => draft.subject.clone(),
+                            },
+                        },
+                        BriefingField {
+                            label: "Body".into(),
+                            value: match draft.body.trim().is_empty() {
+                                true => "not composed".to_owned(),
+                                false => truncate(draft.body.clone(), 2000),
+                            },
+                        },
                     ],
                     deadline_note: String::new(),
                 }

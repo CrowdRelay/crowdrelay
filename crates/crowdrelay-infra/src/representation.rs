@@ -312,12 +312,44 @@ impl PostgresRepresentationRepository {
             ));
         }
 
+        // The letter is composed now — the operator approves the sentences
+        // the contact will read, not a description of them. An action queued
+        // before this carried no draft and dispatch refuses it rather than
+        // letting anything write on the band's behalf after the approval.
+        let listing_state =
+            crate::band_listing::PostgresBandListingRepository::new(self.pool.clone())
+                .load_state(workspace_id)
+                .await
+                .map_err(|_| {
+                    RepresentationError::Refused("the listing could not be read".to_owned())
+                })?
+                .ok_or_else(|| {
+                    RepresentationError::Refused("the listing could not be read".to_owned())
+                })?;
+        let redacted =
+            crowdrelay_domain::listing::redact(&listing_state.listing).ok_or_else(|| {
+                RepresentationError::Refused("the listing is not published".to_owned())
+            })?;
+        let sender = crate::gig_outreach::sender_identity(&self.pool, workspace_id)
+            .await
+            .map_err(|_| RepresentationError::Refused("the sender could not be read".to_owned()))?;
+        let draft = crowdrelay_domain::approach_letter::compose_representation_letter(
+            &crowdrelay_domain::approach_letter::RepresentationLetterInput {
+                sender: &sender,
+                target_name: target.get("display_name"),
+                listing: &redacted,
+                note: trimmed_note,
+            },
+        )
+        .map_err(|refusal| RepresentationError::Refused(refusal.message().to_owned()))?;
+
         let payload = crowdrelay_application::autopilot::AutopilotActionPayload::RequestRepresentationApproach {
             target_id: OutreachTargetId::from_uuid(target_id),
             target_version: target.get("version"),
             target_name: target.get("display_name"),
             note: trimmed_note.map(str::to_owned),
             draw_evidence: agent_gate.as_ref().map(|gate| gate.draw.clone()),
+            draft,
         };
         let action_kind = payload.action_kind();
         let action_class = payload.action_class().as_str();

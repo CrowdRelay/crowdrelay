@@ -282,6 +282,24 @@ impl PostgresBookingAgentRepository {
         })
         .map_err(|refusal| BookingAgentError::Refused(refusal.message()))?;
 
+        // The letter is composed now — the operator approves the sentences
+        // the agent will read, not a description of them. An action queued
+        // before this carried no draft and dispatch refuses it rather than
+        // letting anything write on the band's behalf after the approval.
+        let sender = crate::gig_outreach::sender_identity(&self.pool, workspace_id)
+            .await
+            .map_err(|_| BookingAgentError::Refused("the sender could not be read".to_owned()))?;
+        let draft = crowdrelay_domain::approach_letter::compose_booking_agent_letter(
+            &crowdrelay_domain::approach_letter::BookingAgentLetterInput {
+                sender: &sender,
+                agent_name: agent.get("name"),
+                agency: agent.get::<Option<String>, _>("agency").as_deref(),
+                evidence: &evidence,
+                note: trimmed_note,
+            },
+        )
+        .map_err(|refusal| BookingAgentError::Refused(refusal.message().to_owned()))?;
+
         let payload = crowdrelay_application::autopilot::AutopilotActionPayload::RequestBookingAgentApproach {
             agent_id: BookingAgentId::from_uuid(agent_id),
             agent_version: agent.get("version"),
@@ -289,6 +307,7 @@ impl PostgresBookingAgentRepository {
             agency: agent.get("agency"),
             note: trimmed_note.map(str::to_owned),
             evidence,
+            draft,
         };
         let action_kind = payload.action_kind();
         let action_class = payload.action_class().as_str();

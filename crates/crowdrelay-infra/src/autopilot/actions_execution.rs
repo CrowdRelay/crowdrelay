@@ -274,7 +274,18 @@ impl PostgresAutopilotRepository {
                     target_name: _,
                     note,
                     draw_evidence: _,
+                    draft,
                 } => {
+                    // The letter was composed at request time. A row queued
+                    // before then — or one whose draft was lost — is refused
+                    // here rather than passed to an executor that would write
+                    // on the band's behalf. Approve again to compose it.
+                    if draft.subject.trim().is_empty() || draft.body.trim().is_empty() {
+                        return Err(RepositoryError::ConflictBecause(
+                            "representation approach refused: this action carries no letter — \
+                             approve the approach again to compose it",
+                        ));
+                    }
                     let target = crate::representation::lock_representation_for_execution(
                         &mut transaction,
                         workspace_id,
@@ -322,6 +333,10 @@ impl PostgresAutopilotRepository {
                             "note": note,
                             "share_token": listing.share_token,
                             "listing": redacted,
+                            // The letter itself, approved word for word —
+                            // the executor sends `draft.body` verbatim and
+                            // refuses the payload without it.
+                            "draft": draft,
                             // The pitch is the numbers — the lock just
                             // re-measured them inside the gate, so the letter
                             // cites the figure that cleared it, never the
@@ -346,7 +361,18 @@ impl PostgresAutopilotRepository {
                     agency: _,
                     note,
                     evidence: _,
+                    draft,
                 } => {
+                    // The letter was composed at request time. A row queued
+                    // before then — or one whose draft was lost — is refused
+                    // here rather than passed to an executor that would write
+                    // on the band's behalf. Approve again to compose it.
+                    if draft.subject.trim().is_empty() || draft.body.trim().is_empty() {
+                        return Err(RepositoryError::ConflictBecause(
+                            "booking-agent approach refused: this action carries no letter — \
+                             approve the approach again to compose it",
+                        ));
+                    }
                     // The lock re-runs every request-time gate — standing,
                     // the season door, the season spend, and the draw floor
                     // re-measured now — so an approval that went stale cannot
@@ -384,6 +410,10 @@ impl PostgresAutopilotRepository {
                             "contact_email": agent.contact_email,
                             "note": note,
                             "evidence": agent.evidence,
+                            // The letter itself, approved word for word —
+                            // the executor sends `draft.body` verbatim and
+                            // refuses the payload without it.
+                            "draft": draft,
                         }),
                     )
                     .await?;
