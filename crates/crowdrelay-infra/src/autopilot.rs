@@ -68,7 +68,7 @@ use crowdrelay_application::{
         PendingAutopilotAction, PlacementSettlement, PlayAnchor, PlayAnchorRef, PlayAudience,
         PlayClaimView, PlayKindStanding, PlayLedger, PlayLedgerEntry, PlayOutcomeObservation,
         PlayRunSnapshot, PlayStart, PlayStepSettlement, PlaylistPlacementSnapshot,
-        PromotionBudgetGuardrailMutation, PromotionBudgetGuardrailSummary,
+        PortfolioPoolEntry, PromotionBudgetGuardrailMutation, PromotionBudgetGuardrailSummary,
         PromotionCampaignStateMutation, ProviderActionCorrelation, RecentAutopilotAction,
         RecentAutopilotDecision, RecentAutopilotEffect, RecordDeliveryFault, RecordExecutionReport,
         RecordExecutorHeartbeat, RecordGrowthMetricPoint, RecordPlaylistPlacement, RecordRumSample,

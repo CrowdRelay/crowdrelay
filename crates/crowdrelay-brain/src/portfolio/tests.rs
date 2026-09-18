@@ -7,6 +7,8 @@
 
 use super::*;
 
+use crowdrelay_domain::WorkspaceId;
+
 use super::{
     DecisionMode, PortfolioCandidate, PortfolioConfig, PortfolioOptimizer, RejectionReason,
 };
@@ -14,6 +16,10 @@ use crate::causal_model::DispatchContext;
 use crate::opportunity::OpportunityAction;
 use crate::resource_cost::ResourceCost;
 use std::collections::HashSet;
+
+fn test_act() -> WorkspaceId {
+    WorkspaceId::from_uuid(uuid::Uuid::from_u128(1))
+}
 
 fn make_candidate(
     template: &str,
@@ -41,6 +47,7 @@ fn make_candidate(
     };
     PortfolioCandidate {
         opportunity_id: OpportunityId::new(template, target, OpportunityAction::Post, &ctx),
+        act: test_act(),
         generation_signal: None,
         audience_key: audience.to_owned(),
         source_context: "GrowthIntelligence".to_owned(),

@@ -823,6 +823,14 @@ pub(super) fn application_routes(state: AppState) -> Router {
             "/v1/admin/roster-plan/weekly-brief",
             get(crate::roster_weekly_brief::roster_weekly_brief),
         )
+        // The pooled question itself: of everything every act could do this
+        // week, which dispatches are worth the slots — ranked once across
+        // the roster under the organisation's stated limits. Same admin
+        // boundary for the same reason.
+        .route(
+            "/v1/admin/roster-plan/portfolio",
+            get(crate::roster_portfolio::roster_portfolio),
+        )
         // The roster's own numbers, on the same surface as its plan for the
         // same reason: these belong to the organisation, and a workspace token
         // must not be able to read or set what a labelmate's plan is sized by.

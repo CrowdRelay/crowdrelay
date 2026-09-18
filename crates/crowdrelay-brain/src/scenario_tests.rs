@@ -31,6 +31,8 @@
 //! outcome units, contamination downgrade, genuine attribution residual,
 //! and calibration regime isolation.
 
+use crowdrelay_domain::WorkspaceId;
+
 use crate::causal_model::TreatmentAwareStats;
 use crate::decision_value::{DecisionValue, EstimationRegime};
 use crate::evidence::EvidenceQuality;
@@ -70,6 +72,10 @@ fn make_stats(expected: f64, std: f64, confidence: u32) -> TreatmentAwareStats {
     }
 }
 
+fn test_act() -> WorkspaceId {
+    WorkspaceId::from_uuid(uuid::Uuid::from_u128(1))
+}
+
 fn make_candidate(
     template: &str,
     target: &str,
@@ -84,6 +90,7 @@ fn make_candidate(
     );
     PortfolioCandidate {
         opportunity_id: make_opportunity(template, target),
+        act: test_act(),
         generation_signal: None,
         audience_key: audience.to_owned(),
         source_context: "test".to_owned(),
@@ -101,6 +108,7 @@ fn make_candidate_with_dv(
 ) -> PortfolioCandidate {
     PortfolioCandidate {
         opportunity_id: make_opportunity(template, target),
+        act: test_act(),
         generation_signal: None,
         audience_key: audience.to_owned(),
         source_context: "test".to_owned(),

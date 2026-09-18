@@ -63,6 +63,8 @@ pub use adjustments::{AdjustmentInputs, MarginalAdjustments};
 pub use selection::{PortfolioRejection, PortfolioSelection, RejectionReason};
 pub use wait_value::WaitCandidateValue;
 
+use crowdrelay_domain::WorkspaceId;
+
 use crate::decision_value::DecisionValue;
 use crate::opportunity::OpportunityId;
 
@@ -125,6 +127,12 @@ pub struct PortfolioCandidate {
     // ── Identity / routing (not value semantics) ──
     /// The opportunity identity (stable across cycles).
     pub opportunity_id: OpportunityId,
+    /// The act whose workspace produced this candidate (5.1). One workspace's
+    /// optimizer run sets every candidate's `act` to that workspace; the
+    /// roster read pools candidates across acts and this is the attribution —
+    /// a pooled answer that cannot say which act a slot belongs to is a
+    /// leaderboard, not a plan.
+    pub act: WorkspaceId,
     /// The audience key — candidates with the same audience key overlap.
     /// E.g. "subreddit:r_MetalMusic" or "venue:Warsaw_Palladium".
     pub audience_key: String,

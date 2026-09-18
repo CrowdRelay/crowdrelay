@@ -7275,6 +7275,52 @@ paths:
           $ref: '#/components/responses/Problem'
         '503':
           $ref: '#/components/responses/Problem'
+  /admin/roster-plan/portfolio:
+    get:
+      operationId: rosterPortfolio
+      summary: Of everything every act could do this week, which dispatches are worth the slots
+      description: >
+        The roster's pooled portfolio (5.1). Each act's eval publishes the
+        candidate pool its own selection was drawn from — winners and losers
+        alike — and this read re-ranks the union under the organisation's
+        stated limits (`roster_portfolio_max_dispatches`,
+        `roster_portfolio_cost_budget` in organisation settings), or the
+        optimizer's defaults, labeled, where none are stated.
+
+
+        The answer is act-attributed: every selected slot names the act that
+        proposed it, and a candidate that wins a roster slot after its own
+        act rejected it for `max_dispatches_reached` says so — that is the
+        pooling payoff, an act that ran out of slots rather than a candidate
+        that was not worth running.
+
+
+        Admin rather than control-plane for the same reason the rest of this
+        surface is: pooling several acts' candidate pools is exactly what one
+        act's token must not be able to do.
+      security:
+      - adminBearer: []
+      parameters:
+      - in: query
+        name: organization_id
+        required: true
+        schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: >
+            `acts` lists every member workspace with its pool size, freshest
+            `refreshed_at`, and how many of its candidates the pooled rank
+            selected — an act with `pool_size` 0 has not published a pool,
+            which is reported rather than silently skipped. `selected` is the
+            ranked answer; `rejected_count` is how many competed and lost;
+            `undecodable_rows` counts pool rows that could not be re-ranked,
+            because a silently dropped candidate is a leaderboard that lies
+            by omission. `nothing_to_pool` instead of a ranking when the
+            organisation has no member workspaces at all.
+        '401':
+          $ref: '#/components/responses/Problem'
+        '503':
+          $ref: '#/components/responses/Problem'
   /admin/roster-plan/support-slot-ask:
     post:
       operationId: approveSupportSlotAsk

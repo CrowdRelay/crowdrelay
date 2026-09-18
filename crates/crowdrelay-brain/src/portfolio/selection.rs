@@ -94,3 +94,18 @@ pub enum RejectionReason {
     /// The candidate was superseded by a better candidate for the same audience.
     Superseded,
 }
+
+impl RejectionReason {
+    /// The stored form — the pool ledger (5.1) records why the act's own
+    /// selection left a candidate out, and the vocabulary is the serde one
+    /// rather than a second spelling.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::NegativeMarginalValue => "negative_marginal_value",
+            Self::BelowThreshold => "below_threshold",
+            Self::MaxDispatchesReached => "max_dispatches_reached",
+            Self::BudgetExhausted => "budget_exhausted",
+            Self::Superseded => "superseded",
+        }
+    }
+}

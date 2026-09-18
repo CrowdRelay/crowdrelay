@@ -96,6 +96,15 @@ fn template_cost(policy: &GrowthIntelligencePolicy, template_id: &str) -> Resour
 /// candidates whose `decision_key` appears in the selection's `selected`
 /// list, and skip all candidates if `do_nothing` is true.
 #[must_use]
+/// What one optimizer run produced: the selection the dispatch loop acts on,
+/// and the whole pool it was drawn from — winners and losers alike — in the
+/// persisted form the roster's pooled read (5.1) re-ranks under the
+/// organisation's own config.
+pub(super) struct PortfolioRun {
+    pub selection: PortfolioSelection,
+    pub pool: Vec<crate::autopilot::ports::PortfolioPoolEntry>,
+}
+
 pub(super) fn select_portfolio(
     scored: &[ScoredCandidate],
     policy: &GrowthIntelligencePolicy,
@@ -103,7 +112,7 @@ pub(super) fn select_portfolio(
     workspace_id: WorkspaceId,
     experimental_keys: &std::collections::HashSet<String>,
     sizing_multiplier: f64,
-) -> PortfolioSelection {
+) -> PortfolioRun {
     let candidates: Vec<PortfolioCandidate> = scored
         .iter()
         .map(|scored| {
@@ -139,6 +148,10 @@ pub(super) fn select_portfolio(
                     action: OpportunityAction::from_template(&p.template_id),
                     context_hash: context_hash(&p.context),
                 },
+                // One workspace's optimizer run produces one act's
+                // candidates — the field is what lets the roster read pool
+                // them across acts without re-deriving who proposed what.
+                act: workspace_id,
                 // EFE is a candidate-generation signal, NOT an economic
                 // value. The optimizer ignores generation_signal for
                 // ranking — DecisionValue.total() is the sole authority.
@@ -211,7 +224,41 @@ pub(super) fn select_portfolio(
         ..Default::default()
     };
     let optimizer = PortfolioOptimizer { config };
-    optimizer.select_with_wait(candidates, wait)
+    // The input vec is kept beside the selection: the roster read (5.1) needs
+    // every candidate's full decision_value, which the rejected side of
+    // `PortfolioSelection` deliberately does not carry.
+    let pool_candidates = candidates.clone();
+    let selection = optimizer.select_with_wait(candidates, wait);
+    let selected: HashSet<String> = selection
+        .selected
+        .iter()
+        .map(|candidate| candidate.opportunity_id.to_string())
+        .collect();
+    let rejected: HashMap<String, _> = selection
+        .rejected
+        .iter()
+        .map(|rejection| (rejection.opportunity_key.clone(), rejection.reason))
+        .collect();
+    let pool = pool_candidates
+        .into_iter()
+        .map(|candidate| {
+            let opportunity_key = candidate.opportunity_id.to_string();
+            crate::autopilot::ports::PortfolioPoolEntry {
+                opportunity_key: opportunity_key.clone(),
+                opportunity_id: candidate.opportunity_id.clone(),
+                audience_key: candidate.audience_key,
+                source_context: candidate.source_context,
+                action_key: candidate.action_key,
+                decision_value: candidate.decision_value,
+                is_experimental: candidate.is_experimental,
+                selected: selected.contains(&opportunity_key),
+                rejection_reason: rejected
+                    .get(&opportunity_key)
+                    .map(|reason| reason.as_str().to_owned()),
+            }
+        })
+        .collect();
+    PortfolioRun { selection, pool }
 }
 
 /// Extracts the selected decision keys from a portfolio selection for
@@ -454,6 +501,7 @@ mod tests {
                 action: OpportunityAction::Post,
                 context_hash: "ctx".to_owned(),
             },
+            act: WorkspaceId::from_uuid(uuid::Uuid::from_u128(1)),
             audience_key: audience.to_owned(),
             source_context: "GrowthIntelligence".to_owned(),
             action_key: format!("decision:{name}"),
@@ -596,6 +644,7 @@ mod tests {
                 action: OpportunityAction::Post,
                 context_hash: "ctx".to_owned(),
             },
+            act: WorkspaceId::from_uuid(uuid::Uuid::from_u128(1)),
             audience_key: "audience".to_owned(),
             source_context: "GrowthIntelligence".to_owned(),
             action_key: decision_key.to_owned(),
