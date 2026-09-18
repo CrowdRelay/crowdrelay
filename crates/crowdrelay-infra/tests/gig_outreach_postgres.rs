@@ -141,6 +141,28 @@ async fn run(pool: &PgPool, url: &str) -> Result<(), Box<dyn std::error::Error>>
             .unwrap_or_default(),
         2
     );
+    // O.1: the letter the promoter will read is in the payload, whole. Before
+    // this the executor composed it after the approval, so the band approved an
+    // opening line and a stranger received five paragraphs nobody had seen.
+    let subject = payload["draft"]["subject"].as_str().unwrap_or_default();
+    let body = payload["draft"]["body"].as_str().unwrap_or_default();
+    assert!(
+        subject.contains("Klub X"),
+        "the approved subject does not name the room: {subject:?}"
+    );
+    assert!(
+        body.contains(&opening_line),
+        "the letter does not open with the line the band approved"
+    );
+    assert!(
+        body.starts_with("Hi,") && body.contains("Best,"),
+        "the payload carries a fragment rather than a whole letter: {body:?}"
+    );
+    assert!(
+        !body.contains("Virya, a modern metal band from Wroclaw"),
+        "the letter still carries the executor's hardcoded description of one tenant"
+    );
+
     assert!(
         !payload["reasons"]
             .as_array()

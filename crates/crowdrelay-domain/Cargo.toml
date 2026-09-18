@@ -14,3 +14,9 @@ url.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+# `time::macros::datetime!` is test-only and the workspace's `time` does not
+# carry the `macros` feature. A workspace build gets it through another crate's
+# feature union, so `cargo test --workspace` passed while
+# `cargo test -p crowdrelay-domain` did not compile at all — the per-crate
+# build is the one a person runs while writing a test.
+time = { workspace = true, features = ["macros"] }
