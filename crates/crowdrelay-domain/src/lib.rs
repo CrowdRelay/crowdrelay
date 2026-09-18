@@ -126,6 +126,7 @@ pub mod value_tier;
 pub mod values;
 pub mod venue_evidence;
 pub mod venue_seed;
+pub mod venue_terms;
 pub mod worker_template;
 
 pub use acquisition::{

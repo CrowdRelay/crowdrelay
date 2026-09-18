@@ -26,8 +26,14 @@ async fn assess_venue_rows(state: &crate::AppState, rows: &mut [CityVenueRow]) {
     let locale = EvidenceLocale::from_tag(&locale_tag);
     let (mut private_facts, private_facts_degraded) =
         private_venue_facts(state, workspace_id, rows).await;
+    let mut terms_bands = venue_terms_bands(state, rows).await;
     let now = OffsetDateTime::now_utc();
     for row in rows.iter_mut() {
+        // The band is the same answer for every reader — a tenant that
+        // never contributed terms reads it identically to one that did.
+        row.typical_terms = terms_bands
+            .remove(&row.venue_id)
+            .filter(|bands| !bands.is_empty());
         let evidence = VenueEvidence {
             display_name: row.display_name.clone(),
             city_name: row.city_name.clone(),
@@ -177,3 +183,71 @@ async fn private_venue_facts(
     (by_venue, false)
 }
 
+/// The venue-level fee bands for the listed rooms (§4h-9): every active
+/// `terms` contribution on every night at each room, banded by the
+/// domain's k-anonymity rule into per-currency quartiles.
+///
+/// Deliberately reader-independent — the read takes no workspace, so a
+/// tenant that never contributed terms reads the same cleared band as one
+/// that did; declining cannot cost read access. A failed read degrades to
+/// "no bands" rather than failing the venue list over it — `typical_terms`
+/// stays null, which is also the honest shape of insufficient evidence.
+async fn venue_terms_bands(
+    state: &crate::AppState,
+    rows: &[CityVenueRow],
+) -> HashMap<Uuid, Vec<VenueTermsBand>> {
+    let venue_ids: Vec<Uuid> = rows.iter().map(|row| row.venue_id).collect();
+    let contributions = match PostgresNightRepository::new(state.database.clone())
+        .venue_terms_contributions(&venue_ids)
+        .await
+    {
+        Ok(rows) => rows,
+        Err(error) => {
+            tracing::warn!(%error, "venue terms read failed; typical_terms reads as absent");
+            return HashMap::new();
+        }
+    };
+    let mut by_venue: HashMap<Uuid, Vec<TermsContribution>> = HashMap::new();
+    for contribution in contributions {
+        by_venue
+            .entry(contribution.venue_id)
+            .or_default()
+            .push((
+                contribution.workspace_id,
+                contribution.amount_minor,
+                contribution.currency,
+                contribution.contributed_at,
+            ));
+    }
+    let now = OffsetDateTime::now_utc();
+    by_venue
+        .into_iter()
+        .map(|(venue_id, rows)| {
+            let bands = aggregate_venue_terms(&rows, now)
+                .into_iter()
+                .filter_map(|evidence| match evidence {
+                    VenueTermsEvidence::Band {
+                        currency,
+                        fee_p25_minor,
+                        fee_median_minor,
+                        fee_p75_minor,
+                        contributor_count,
+                        as_of,
+                    } => Some(VenueTermsBand {
+                        currency,
+                        fee_p25_minor,
+                        fee_median_minor,
+                        fee_p75_minor,
+                        contributor_count: contributor_count as i64,
+                        as_of,
+                    }),
+                    // Below the floor the row carries nothing — not a thin
+                    // band, not a count of who almost got there.
+                    VenueTermsEvidence::InsufficientEvidence
+                    | VenueTermsEvidence::NotContributed => None,
+                })
+                .collect::<Vec<_>>();
+            (venue_id, bands)
+        })
+        .collect()
+}
