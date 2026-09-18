@@ -14,6 +14,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use crowdrelay_domain::WorkspaceId;
+use crowdrelay_infra::lapsed_approvals::LapsedApprovals;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sqlx::{FromRow, PgPool, Postgres, Transaction};
