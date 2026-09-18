@@ -453,15 +453,31 @@ mod tests {
             },
         ];
 
-        let candidates = content_candidates(&snapshot, &policy, &communities, now)?;
+        // The approval quotes the audience the send would deliver — here the
+        // workspace's per-step envelope caps a bigger eligible set.
+        let push_audience = Some(crowdrelay_domain::content_supply::SignalPushAudience {
+            eligible: 120,
+            reached: 40,
+        });
+
+        let candidates =
+            content_candidates(&snapshot, &policy, &communities, push_audience, now)?;
         assert_eq!(candidates.len(), 3);
 
         // The owned-channel carry is a push, not a new broadcast.
         match &candidates[0].action {
-            AutopilotActionPayload::RequestSignalPush { title, body, .. } => {
+            AutopilotActionPayload::RequestSignalPush {
+                title,
+                body,
+                audience_size,
+                audience_basis,
+                ..
+            } => {
                 assert_eq!(title, "soundcheck done");
                 assert!(body.contains("soundcheck done — see you tonight"));
                 assert!(body.contains("https://instagram.com/p/abc"));
+                assert_eq!(*audience_size, Some(40));
+                assert!(audience_basis.contains("caps this push at 40"));
             }
             other => return Err(format!("expected signal push, got {other:?}").into()),
         }
@@ -507,7 +523,7 @@ mod tests {
         // the same post can never be carried twice.
         let mut edited = snapshot.clone();
         edited.source_version = 4;
-        let again = content_candidates(&edited, &policy, &communities, now)?;
+        let again = content_candidates(&edited, &policy, &communities, push_audience, now)?;
         for (first, second) in candidates.iter().zip(&again) {
             assert_eq!(first.action_idempotency_key, second.action_idempotency_key);
             assert_eq!(first.decision_key, second.decision_key);
@@ -553,7 +569,7 @@ mod tests {
             guardrail_reason: None,
         };
 
-        let candidates = content_candidates(&snapshot, &policy, &[], now)?;
+        let candidates = content_candidates(&snapshot, &policy, &[], None, now)?;
         assert_eq!(candidates.len(), 1);
         assert!(matches!(
             candidates[0].action,

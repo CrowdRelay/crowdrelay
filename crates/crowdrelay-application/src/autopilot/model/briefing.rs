@@ -860,11 +860,15 @@ impl AutopilotActionPayload {
                 ],
                 deadline_note: String::new(),
             },
-            Self::RequestSignalPush { title, body, target_path, event_id, segment, .. } => ActionBriefing {
-                summary: format!("Push notification: {}", title),
+            Self::RequestSignalPush { title, body, target_path, event_id, segment, audience_size, audience_basis, .. } => ActionBriefing {
+                summary: match audience_size {
+                    Some(size) => format!("Push notification to {size} fans: {}", title),
+                    None => format!("Push notification: {}", title),
+                },
                 why_it_matters: "The push reaches fans who consented to notifications. A sent push cannot be recalled.".into(),
                 steps: vec![
                     BriefingStep { what_to_do: "Read the notification title and body".into(), why_it_matters: "A sent push cannot be recalled — read it closely".into() },
+                    BriefingStep { what_to_do: "Check who this reaches".into(), why_it_matters: "The size and the basis are the part a segment slug hides".into() },
                     BriefingStep { what_to_do: "Click APPROVE to send it to the segment".into(), why_it_matters: "Once approved the push goes to the chosen fan segment".into() },
                 ],
                 content: vec![
@@ -872,6 +876,16 @@ impl AutopilotActionPayload {
                     BriefingField { label: "Body".into(), value: truncate(body.clone(), 2000) },
                     BriefingField { label: "Link".into(), value: target_path.clone().unwrap_or("—".into()) },
                     BriefingField { label: "Segment".into(), value: segment.clone().unwrap_or("everyone".into()) },
+                    // Absent is said out loud rather than printed as a zero:
+                    // a count nobody measured is not "reaches nobody".
+                    BriefingField {
+                        label: "Reaches".into(),
+                        value: match audience_size {
+                            Some(size) => format!("{size} fans"),
+                            None => "not counted".to_owned(),
+                        },
+                    },
+                    BriefingField { label: "Who they are".into(), value: audience_basis.clone() },
                     BriefingField { label: "Event".into(), value: event_id.map(|id| id.to_string()).unwrap_or("—".into()) },
                 ],
                 deadline_note: String::new(),

@@ -367,22 +367,34 @@ where
                     if !matches!(policy.config, AutopilotPolicyConfig::ContentSupply(_)) {
                         continue;
                     }
-                    // Admitted communities are loaded once, and only when a
-                    // fresh synced post could be relayed into them — a cycle
-                    // with no relay material owes the read nothing.
-                    let communities = if snapshots
+                    // Admitted communities — and the push audience the
+                    // approval will quote — are loaded once, and only when a
+                    // fresh synced post could be relayed — a cycle with no
+                    // relay material owes either read nothing.
+                    let has_relay_material = snapshots
                         .iter()
-                        .any(|snapshot| snapshot.source_kind == ContentSourceKind::SocialPost)
-                    {
+                        .any(|snapshot| snapshot.source_kind == ContentSourceKind::SocialPost);
+                    let communities = if has_relay_material {
                         self.repository
                             .load_relay_community_targets(self.workspace_id)
                             .await?
                     } else {
                         Vec::new()
                     };
+                    let push_audience = if has_relay_material {
+                        Some(
+                            self.repository
+                                .load_signal_push_audience(self.workspace_id, None)
+                                .await?,
+                        )
+                    } else {
+                        None
+                    };
                     let mut produced = 0usize;
                     for snapshot in &snapshots {
-                        for candidate in content_candidates(snapshot, &policy, &communities, now)? {
+                        for candidate in
+                            content_candidates(snapshot, &policy, &communities, push_audience, now)?
+                        {
                             produced += 1;
                             self.persist(&candidate, &mut limits, &mut report).await?;
                         }

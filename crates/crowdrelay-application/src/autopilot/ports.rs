@@ -15,7 +15,7 @@ use crowdrelay_domain::{
     booking::{BookingTargetSnapshot, CityOpportunitySnapshot},
     booking_window::BookingWindowInputSet,
     campaign_lifecycle::EventCampaignSnapshot,
-    content_supply::{CommunityRelayTarget, ContentSupplySnapshot},
+    content_supply::{CommunityRelayTarget, ContentSupplySnapshot, SignalPushAudience},
     experimentation::ExperimentSnapshot,
     funding::FundingOpportunitySnapshot,
     growth_debt::GrowthDebtObservation,
@@ -186,6 +186,18 @@ pub trait AutopilotDecisionRepository: Send + Sync {
         &self,
         workspace_id: WorkspaceId,
     ) -> Result<Vec<CommunityRelayTarget>, RepositoryError>;
+
+    /// How many fans a Signal push to `segment` would reach right now — the
+    /// same eligibility the send path applies (active fan, newest marketing
+    /// consent granted, the segment's predicates, at least one live push
+    /// endpoint), clamped by the workspace's per-step envelope bound. A
+    /// `None` segment is the broadcast-to-consented case; a segment that
+    /// cannot resolve surfaces the same refusal the send would.
+    async fn load_signal_push_audience(
+        &self,
+        workspace_id: WorkspaceId,
+        segment: Option<&str>,
+    ) -> Result<SignalPushAudience, RepositoryError>;
 
     async fn load_experiment_snapshots(
         &self,

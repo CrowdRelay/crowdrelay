@@ -181,11 +181,14 @@ pub(in crate::autopilot) enum SegmentBind {
 /// aimed at a subset, and delivering it to everyone consented is precisely
 /// the misfire the recipient ceiling exists to bound. `Err` parks the action
 /// instead of widening the audience.
-pub(in crate::autopilot) async fn resolve_segment_filter(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+pub(in crate::autopilot) async fn resolve_segment_filter<'e, E>(
+    executor: E,
     workspace_id: WorkspaceId,
     segment: Option<&str>,
-) -> Result<Option<SegmentFilter>, RepositoryError> {
+) -> Result<Option<SegmentFilter>, RepositoryError>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
     let Some(slug) = segment else {
         return Ok(None);
     };
@@ -199,7 +202,7 @@ pub(in crate::autopilot) async fn resolve_segment_filter(
     )
     .bind(workspace_id.into_uuid())
     .bind(slug)
-    .fetch_optional(&mut **tx)
+    .fetch_optional(executor)
     .await;
 
     let filter_json = match result {
@@ -326,7 +329,7 @@ pub(in crate::autopilot) async fn execute_signal_push(
     // No segment named means a broadcast the operator asked for. A segment
     // named but unresolvable refuses the action rather than widening the
     // send to everyone consented.
-    let mut segment_filter = resolve_segment_filter(tx, workspace_id, segment).await?;
+    let mut segment_filter = resolve_segment_filter(&mut **tx, workspace_id, segment).await?;
 
     // Build the segment clause + typed bind values. Only fields present
     // in the filter generate SQL conditions, avoiding unnecessary
@@ -410,16 +413,7 @@ pub(in crate::autopilot) async fn execute_signal_push(
         .bind(target)
         .bind(&collapse_key);
 
-    for bind in segment_binds {
-        query = match bind {
-            SegmentBind::Statuses(v) => query.bind(v),
-            SegmentBind::CitySlugs(v) => query.bind(v),
-            SegmentBind::MinReferrals(v) => query.bind(v),
-            SegmentBind::Synesthesia(v) => query.bind(v),
-            SegmentBind::TagsAll(v) => query.bind(v),
-            SegmentBind::ExcludedCampaignSlugs(v) => query.bind(v),
-        };
-    }
+    query = apply_segment_binds(query, segment_binds);
     query = query.bind(recipient_bound);
 
     let inserted = query.execute(&mut **tx).await.map_err(map_sqlx)?;
@@ -448,4 +442,119 @@ pub(in crate::autopilot) async fn execute_signal_push(
         .map_err(map_sqlx)?;
 
     Ok(())
+}
+
+fn apply_segment_binds<'q>(
+    mut query: sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArguments>,
+    binds: Vec<SegmentBind>,
+) -> sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArguments> {
+    for bind in binds {
+        query = match bind {
+            SegmentBind::Statuses(v) => query.bind(v),
+            SegmentBind::CitySlugs(v) => query.bind(v),
+            SegmentBind::MinReferrals(v) => query.bind(v),
+            SegmentBind::Synesthesia(v) => query.bind(v),
+            SegmentBind::TagsAll(v) => query.bind(v),
+            SegmentBind::ExcludedCampaignSlugs(v) => query.bind(v),
+        };
+    }
+    query
+}
+
+/// How many fans a signal push to `segment` reaches right now — the same
+/// eligibility `execute_signal_push` enforces at send time (active fan,
+/// newest marketing consent granted, the segment's predicates, at least one
+/// live push endpoint), then clamped by the workspace's per-step recipient
+/// bound. `reached` is what the send would deliver; `eligible` is the set
+/// before the bound. Both are counts, not estimates — an approval screen
+/// that prints `reached` is describing the send it is approving.
+///
+/// Runs on the pool rather than inside a transaction: an audience count is
+/// a read, and the raise paths that need it (the relay candidate builder,
+/// the signal-inviter's outcome mapper) hold no open transaction.
+///
+/// A segment that cannot resolve propagates the same refusal the send path
+/// returns — counting a bad segment as "everyone" would lie about the push
+/// the operator is approving.
+pub async fn signal_push_audience(
+    pool: &sqlx::PgPool,
+    workspace_id: WorkspaceId,
+    segment: Option<&str>,
+) -> Result<crowdrelay_domain::content_supply::SignalPushAudience, RepositoryError> {
+    let mut segment_filter = resolve_segment_filter(pool, workspace_id, segment).await?;
+    let (segment_clause, segment_binds) = segment_filter
+        .as_mut()
+        .map(|filter| filter.sql_clause(2))
+        .unwrap_or_default();
+
+    let sql = format!(
+        r#"
+        SELECT COUNT(*)::bigint
+        FROM fans fan
+        WHERE fan.workspace_id = $1
+          AND fan.status = 'active'
+          AND EXISTS (
+              SELECT 1 FROM fan_consents consent
+              WHERE consent.workspace_id = fan.workspace_id
+                AND consent.fan_id = fan.id
+                AND consent.purpose = 'marketing'
+                AND consent.granted
+                AND consent.id = (
+                    SELECT newest.id FROM fan_consents newest
+                    WHERE newest.workspace_id = consent.workspace_id
+                      AND newest.fan_id = consent.fan_id
+                      AND newest.purpose = consent.purpose
+                    ORDER BY newest.recorded_at DESC, newest.id DESC LIMIT 1
+                )
+          )
+          AND EXISTS (
+              SELECT 1 FROM fan_push_endpoints endpoint
+              WHERE endpoint.workspace_id = fan.workspace_id
+                AND endpoint.fan_id = fan.id
+                AND endpoint.active
+                AND endpoint.invalidated_at IS NULL
+          )
+          {segment_clause}
+        "#
+    );
+    let mut query = sqlx::query_scalar::<_, i64>(&sql).bind(workspace_id.into_uuid());
+    // `QueryAs` (query_scalar) is a different builder type than `Query`, so
+    // the segment binds are applied by hand here rather than through
+    // `apply_segment_binds`.
+    for bind in segment_binds {
+        query = match bind {
+            SegmentBind::Statuses(v) => query.bind(v),
+            SegmentBind::CitySlugs(v) => query.bind(v),
+            SegmentBind::MinReferrals(v) => query.bind(v),
+            SegmentBind::Synesthesia(v) => query.bind(v),
+            SegmentBind::TagsAll(v) => query.bind(v),
+            SegmentBind::ExcludedCampaignSlugs(v) => query.bind(v),
+        };
+    }
+    let eligible = query.fetch_one(pool).await.map_err(map_sqlx)?.max(0) as u32;
+
+    // The envelope's per-step bound clamps the fan set, not just the report:
+    // an eligible audience of five thousand with a bound of fifty is a push
+    // to fifty people, and the approval must say fifty.
+    let send_cap = sqlx::query_scalar::<_, i32>(
+        "SELECT max_recipients_per_step FROM viryaos_growth_envelope WHERE workspace_id = $1",
+    )
+    .bind(workspace_id.into_uuid())
+    .fetch_optional(pool)
+    .await
+    .map_err(map_sqlx)?
+    .map_or_else(
+        || {
+            i64::from(
+                crowdrelay_domain::growth_envelope::GrowthEnvelope::default()
+                    .max_recipients_per_step,
+            )
+        },
+        |bound| i64::from(bound.max(1)),
+    );
+
+    Ok(crowdrelay_domain::content_supply::SignalPushAudience {
+        eligible,
+        reached: i64::from(eligible).min(send_cap) as u32,
+    })
 }

@@ -12,6 +12,7 @@ fn relay_candidates(
     policy: &AutopilotPolicy,
     domain_policy: &crowdrelay_domain::content_supply::ContentSupplyPolicy,
     communities: &[CommunityRelayTarget],
+    push_audience: Option<crowdrelay_domain::content_supply::SignalPushAudience>,
     confidence: crowdrelay_domain::autonomy::Confidence,
 ) -> Result<Vec<DecisionCandidate>, serde_json::Error> {
     let Some(post) = &snapshot.social_post else {
@@ -49,6 +50,22 @@ fn relay_candidates(
             target_path: None,
             event_id: None,
             segment: None,
+            // The approval quotes what the send would deliver today: every
+            // consented fan with a live push endpoint, after the workspace's
+            // per-step envelope bound. When the count ran short of the
+            // eligible set the basis says so rather than letting the smaller
+            // number read as the whole audience.
+            audience_size: push_audience.map(|audience| audience.reached),
+            audience_basis: push_audience.map_or_else(String::new, |audience| {
+                if audience.reached < audience.eligible {
+                    format!(
+                        "fans with notifications on who consented to marketing — the workspace's per-step send envelope caps this push at {}",
+                        audience.reached
+                    )
+                } else {
+                    "fans with notifications on who consented to marketing".to_owned()
+                }
+            }),
         },
         decision_key: format!("decision:relay:v{}:{source}:signal_push", policy.version),
         action_idempotency_key: format!("action:relay:{source}:signal_push"),

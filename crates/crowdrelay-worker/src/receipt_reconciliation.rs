@@ -1065,6 +1065,8 @@ mod tests {
             target_path: None,
             event_id: None,
             segment: None,
+            audience_size: None,
+            audience_basis: String::new(),
         };
         assert!(!requires_terminal_receipt(&payload));
     }

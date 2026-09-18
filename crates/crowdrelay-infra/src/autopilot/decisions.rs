@@ -136,6 +136,14 @@ impl AutopilotDecisionRepository for PostgresAutopilotRepository {
         operations::load_relay_community_targets(self, workspace_id).await
     }
 
+    async fn load_signal_push_audience(
+        &self,
+        workspace_id: WorkspaceId,
+        segment: Option<&str>,
+    ) -> Result<SignalPushAudience, RepositoryError> {
+        operations::push_segments::signal_push_audience(&self.pool, workspace_id, segment).await
+    }
+
     async fn load_experiment_snapshots(
         &self,
         workspace_id: WorkspaceId,
