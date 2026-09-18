@@ -73,6 +73,12 @@ fn conditions(snapshot: &OpsSnapshot, posture: PublishingPosture) -> Vec<Conditi
             // and `crowdrelay.agent.content_requested` appears in no n8n
             // example workflow or executor contract in this repository, so the
             // consumer has most likely never known the event.
+            //
+            // The count counts letters by what they carry, not by a type list:
+            // `contact_email`, `recipient_email` or `recipients` in the payload
+            // means a specific human was the addressee. 2026-09-15 showed why —
+            // an approved festival application and the T+7 show report both
+            // died 422 cancelled while a two-type list watched neither.
             key: "delivery.growth_event_refused",
             severity: "critical",
             summary: "A growth event was permanently refused by its consumer",
@@ -84,6 +90,26 @@ fn conditions(snapshot: &OpsSnapshot, posture: PublishingPosture) -> Vec<Conditi
                            outbox_event_id for status='cancelled' and read \
                            last_response_status: 4xx is the consumer refusing \
                            the payload, not the outbox failing to send it",
+            }),
+        },
+        Condition {
+            // Warning, not critical: these refused deliveries carry no named
+            // recipient — status pings, internal markers, unrouted events that
+            // never drafted anything. The same cancelled-instead-of-dead blind
+            // spot hides them, so the count exists for visibility; the letters
+            // above keep the critical alarm.
+            key: "delivery.event_refused",
+            severity: "warning",
+            summary: "Deliveries were permanently refused by their consumers",
+            active: snapshot.refused_other_deliveries > 0,
+            details: json!({
+                "refused_deliveries": snapshot.refused_other_deliveries,
+                "window": "7 days",
+                "remedy": "join webhook_deliveries to outbox_events on \
+                           outbox_event_id for status='cancelled' — a refused \
+                           non-letter event is usually a stale consumer \
+                           contract or a route pin pointing at a workflow that \
+                           never learned the event type",
             }),
         },
         Condition {

@@ -45,6 +45,7 @@ fn publishing() -> PublishingPosture {
             orphaned_publishing_actions: 0,
             orphaned_publishing_actions_all_time: 0,
             refused_growth_deliveries: 0,
+            refused_other_deliveries: 0,
             unscoreable_live_opportunities: 0,
             duplicate_community_drafts: 0,
             relentless_degraded_phases: None,
@@ -631,6 +632,37 @@ fn publishing() -> PublishingPosture {
             !raised.contains(&"delivery.growth_event_refused"),
             "raised on a healthy snapshot: {raised:?}"
         );
+    }
+
+    /// A refused non-letter delivery warns rather than alarming.
+    ///
+    /// Stale consumer contracts and unrouted internal events share the same
+    /// cancelled-instead-of-dead blind spot, but they cost nothing like a
+    /// drafted letter does — so the severity stays below critical.
+    #[test]
+    fn a_refused_non_letter_delivery_warns() {
+        let mut snapshot = healthy();
+        snapshot.refused_other_deliveries = 3;
+        let condition = conditions(&snapshot, publishing())
+            .into_iter()
+            .find(|c| c.key == "delivery.event_refused")
+            .expect("condition should exist");
+        assert!(condition.active);
+        assert_eq!(condition.severity, "warning");
+    }
+
+    /// And it stays quiet when only letters are refused — that count is the
+    /// critical condition's job, not this one's.
+    #[test]
+    fn refused_letters_do_not_double_count_as_other() {
+        let mut snapshot = healthy();
+        snapshot.refused_growth_deliveries = 2;
+        let raised = conditions(&snapshot, publishing())
+            .into_iter()
+            .filter(|c| c.active)
+            .map(|c| c.key)
+            .collect::<Vec<_>>();
+        assert_eq!(raised, vec!["delivery.growth_event_refused"]);
     }
 
     /// The condition must fire when actionable outcomes are all refused, even

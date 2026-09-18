@@ -493,3 +493,99 @@ async fn parked_action(pool: &PgPool, workspace_id: WorkspaceId) -> Result<()> {
     .context("insert parked action")?;
     Ok(())
 }
+
+/// A refused letter must reach the operator regardless of its event type.
+///
+/// The predicate is the payload, not the event name: `contact_email` means a
+/// specific human was the addressee. Production proved why the type list could
+/// not be trusted — on 2026-09-15 an approved `opportunity.application_requested`
+/// and a `post_show_report_due` both died 422 cancelled while a two-type list
+/// watched neither. This test refuses a letter under an event type that does not
+/// exist in any list, and the alarm still has to fire.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn a_refused_letter_under_an_unknown_event_type_still_raises_attention() -> Result<()> {
+    let db = DisposableDatabase::create().await?;
+    let result = async {
+        let ws = workspace(&db.pool).await?;
+        refused_delivery(
+            &db.pool,
+            ws,
+            "crowdrelay.festival.application_requested",
+            serde_json::json!({"action_id": Uuid::now_v7(), "contact_email": "fest@example.org"}),
+        )
+        .await?;
+        watchdog(db.pool.clone(), ws).run_once().await?;
+        let alerts = active_alerts(&db.pool, ws).await?;
+        assert!(
+            alerts.contains(&"delivery.growth_event_refused".to_owned()),
+            "a letter refused under an unlisted event type must still alarm: {alerts:?}"
+        );
+
+        // And a refused event with no named recipient is the warning, not the
+        // critical alarm — the two must not bleed into each other.
+        refused_delivery(
+            &db.pool,
+            ws,
+            "crowdrelay.ops.status_changed",
+            serde_json::json!({"status": "degraded"}),
+        )
+        .await?;
+        watchdog(db.pool.clone(), ws).run_once().await?;
+        let alerts = active_alerts(&db.pool, ws).await?;
+        assert!(
+            alerts.contains(&"delivery.event_refused".to_owned()),
+            "a refused non-letter delivery warns: {alerts:?}"
+        );
+        Ok(())
+    }
+    .await;
+    db.drop_database().await;
+    result
+}
+
+/// One outbox event + one endpoint + one `cancelled` delivery joining them.
+async fn refused_delivery(
+    pool: &PgPool,
+    workspace_id: WorkspaceId,
+    event_type: &str,
+    payload: serde_json::Value,
+) -> Result<()> {
+    let ws = workspace_id.into_uuid();
+    let endpoint_id = sqlx::query_scalar::<_, Uuid>(
+        "INSERT INTO webhook_endpoints (workspace_id, name, url, signing_secret_ref, max_attempts) \
+         VALUES ($1,$2,'https://consumer.invalid/hook','ref',12) \
+         ON CONFLICT (workspace_id, name) DO UPDATE SET url = EXCLUDED.url \
+         RETURNING id",
+    )
+    .bind(ws)
+    .bind(format!("ep-{}", Uuid::now_v7()))
+    .fetch_one(pool)
+    .await
+    .context("insert endpoint")?;
+    let event_id = sqlx::query_scalar::<_, Uuid>(
+        "INSERT INTO outbox_events (workspace_id, event_type, payload, status, delivered_at) \
+         VALUES ($1,$2,$3,'delivered',now()) RETURNING id",
+    )
+    .bind(ws)
+    .bind(event_type)
+    .bind(payload)
+    .fetch_one(pool)
+    .await
+    .context("insert outbox event")?;
+    // The outbox event's own status is not what the watchdog reads — the
+    // delivery is the cancelled one. `delivered` satisfies its CHECK without
+    // pretending the letter arrived.
+    sqlx::query(
+        "INSERT INTO webhook_deliveries (workspace_id, outbox_event_id, endpoint_id, \
+         status, max_attempts, cancelled_at, last_response_status, last_error_kind) \
+         VALUES ($1,$2,$3,'cancelled',12,now(),422,'http_permanent_status')",
+    )
+    .bind(ws)
+    .bind(event_id)
+    .bind(endpoint_id)
+    .execute(pool)
+    .await
+    .context("insert refused delivery")?;
+    Ok(())
+}

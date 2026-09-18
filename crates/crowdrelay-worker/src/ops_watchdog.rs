@@ -7,7 +7,7 @@
 //! not actionable from there. FakAP remains the external health probe for
 //! API reachability; this watchdog catches silent failures FakAP cannot see.
 //!
-//! The watchdog monitors nineteen conditions. The count and this list are
+//! The watchdog monitors twenty conditions. The count and this list are
 //! gated against `conditions()` by `test_watchdog_conditions_documented_v1.py`:
 //! it said "ten" while seven alarms went undocumented, including two criticals,
 //! and this repository has a record of concluding a live capability is missing
@@ -36,7 +36,13 @@
 //!   the outbox correctly stops retrying and the delivery is `cancelled` rather
 //!   than `dead` — which means `ops/attention`, reporting dead deliveries and a
 //!   bare cancelled count, showed four refused press pitches as four increments
-//!   in a number that also held 39 stale refusals from August.
+//!   in a number that also held 39 stale refusals from August. Letters are
+//!   counted by the recipient keys their payloads carry, not by a type list —
+//!   the list form watched two types while an approved festival application
+//!   and the T+7 show report died 422 on 2026-09-15.
+//! - `delivery.event_refused` — refused deliveries carrying no named
+//!   recipient: stale consumer contracts and unrouted internal events in the
+//!   same cancelled-instead-of-dead blind spot. Warning, not critical.
 //! - `growth.unscoreable_live_opportunities` — the brain scored live
 //!   opportunities and denied every one. Read off its own denied decisions, not
 //!   off a guess at why: the first version counted rows missing strategic value
@@ -379,8 +385,16 @@ struct OpsSnapshot {
     /// The event list is deliberately narrow. A refused `ops.status_changed` is
     /// a stale consumer contract and costs nothing; a refused
     /// `agent.content_requested` is a press pitch the brain drafted, addressed
-    /// to a named journalist, that no longer has any route to them.
+    /// to a named journalist, that no longer has any route to them. The payload
+    /// keys — `contact_email`, `recipient_email`, `recipients` — are the
+    /// predicate, so a new letter type cannot add itself silently the way the
+    /// refused festival application did on 2026-09-15.
     refused_growth_deliveries: i64,
+    /// Refused deliveries in the same window that carry no named recipient —
+    /// stale consumer contracts and unrouted internal events. Warning-class:
+    /// the count exists so a non-letter event type dying at the bridge is
+    /// visible without alarming at letter severity.
+    refused_other_deliveries: i64,
     /// Live opportunities whose score ceiling is below the score floor.
     ///
     /// Not "none scored well" — *cannot* score well. With no strategic value and
@@ -697,11 +711,20 @@ async fn load_snapshot(
             )::bigint AS orphaned_publishing_actions_all_time,
             -- Growth-carrying events whose delivery was permanently refused.
             --
-            -- Only the event types that carry work outward: a pitch, a community
-            -- engagement, a push proposal. A refused `ops.status_changed` is a
-            -- stale consumer contract and costs nothing; a refused
-            -- `agent.content_requested` is the press pitch the brain drafted,
-            -- addressed to a journalist, never sent.
+            -- The discriminator is the payload, not an event-type list: a
+            -- delivery carrying a named recipient is a letter the brain
+            -- drafted for a specific human — a pitch, an approach, an
+            -- application, an invite. Two older event types stay named
+            -- explicitly because their payloads carry drafted work without an
+            -- email-shaped key. A refused `ops.status_changed` is a stale
+            -- consumer contract and lands in `refused_other_deliveries` as a
+            -- warning instead.
+            --
+            -- Measured 2026-09-15: an `opportunity.application_requested`
+            -- carrying `contact_email` and a `post_show_report_due` carrying
+            -- `recipients` both died 422 cancelled while this predicate's
+            -- two-type list watched neither — the list had silently encoded
+            -- "the only outward letters are these two".
             --
             -- Cancelled, not dead, which is why nothing reported this. A 4xx is
             -- `http_permanent_status` and the outbox correctly stops retrying —
@@ -714,9 +737,26 @@ async fn load_snapshot(
              WHERE d.workspace_id=$1
                AND d.status='cancelled'
                AND d.cancelled_at > now() - interval '7 days'
-               AND e.event_type IN ('crowdrelay.agent.content_requested',
-                                    'crowdrelay.community.engagement_requested')
+               AND (e.event_type IN ('crowdrelay.agent.content_requested',
+                                     'crowdrelay.community.engagement_requested')
+                    OR e.payload ? 'contact_email'
+                    OR e.payload ? 'recipient_email'
+                    OR e.payload ? 'recipients')
             )::bigint AS refused_growth_deliveries,
+            -- Refused deliveries that are not letters — stale consumer
+            -- contracts, unrouted internal events. Warning-class context for
+            -- the same cancelled-instead-of-dead blind spot.
+            (SELECT count(*) FROM webhook_deliveries d
+             JOIN outbox_events e ON e.id = d.outbox_event_id
+             WHERE d.workspace_id=$1
+               AND d.status='cancelled'
+               AND d.cancelled_at > now() - interval '7 days'
+               AND e.event_type NOT IN ('crowdrelay.agent.content_requested',
+                                        'crowdrelay.community.engagement_requested')
+               AND NOT (e.payload ? 'contact_email')
+               AND NOT (e.payload ? 'recipient_email')
+               AND NOT (e.payload ? 'recipients')
+            )::bigint AS refused_other_deliveries,
             -- Live opportunities the brain scored and then denied.
             --
             -- Read off the decisions the brain actually recorded rather than by
