@@ -88,6 +88,9 @@ pub struct ContactStanding {
     /// This address held marketing consent at some point and does not now.
     /// They opted out, and the other role is not a way back in.
     pub previously_opted_out: bool,
+    /// The double opt-in is already in their inbox — the ask is open, not
+    /// declined. Inviting again now would read as a reminder to confirm.
+    pub opt_in_pending: bool,
 }
 
 /// Why this person is worth writing to *now*, in their own terms.
@@ -130,6 +133,9 @@ pub enum InviteHold {
     /// Had the dates and left. The strongest hold there is, and the only one
     /// that never expires.
     OptedOut,
+    /// Their confirmation email is still open — the ask already landed and
+    /// they have not answered it yet.
+    OptInPending,
     /// Nothing concrete to say to them right now.
     NothingToOffer,
 }
@@ -157,6 +163,9 @@ impl InviteHold {
             Self::OptedOut => "they were on the list and unsubscribed — the working \
                  relationship stands, the invitation does not go out again"
                 .to_owned(),
+            Self::OptInPending => "their confirmation is still open — the ask is already \
+                 in their inbox, and a second one now reads as pressure"
+                .to_owned(),
             Self::NothingToOffer => "nothing concrete to tell them right now — no date in their \
                  city, no shared night, no new record"
                 .to_owned(),
@@ -178,6 +187,11 @@ pub fn decide(standing: &ContactStanding, reason: Option<&InviteReason>) -> Invi
     // arguments for writing, and this is the one fact that answers all of them.
     if standing.previously_opted_out {
         return InviteDecision::Hold(InviteHold::OptedOut);
+    }
+    // A pending double opt-in is the ask already in their inbox — it is not
+    // a no, but a second letter now is a reminder to confirm.
+    if standing.opt_in_pending {
+        return InviteDecision::Hold(InviteHold::OptInPending);
     }
     if standing.already_invited {
         return InviteDecision::Hold(InviteHold::AlreadyAsked);
@@ -327,6 +341,7 @@ mod tests {
             already_invited: false,
             already_a_fan: false,
             previously_opted_out: false,
+            opt_in_pending: false,
         }
     }
 
@@ -455,6 +470,7 @@ mod tests {
             InviteHold::AlreadyAsked,
             InviteHold::AlreadyIn,
             InviteHold::OptedOut,
+            InviteHold::OptInPending,
             InviteHold::NothingToOffer,
         ] {
             assert!(

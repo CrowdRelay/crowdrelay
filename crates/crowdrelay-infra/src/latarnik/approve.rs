@@ -69,13 +69,19 @@ pub async fn approve_latarnik_invite(
         )));
     }
 
-    let reason = invite_reason(pool, workspace_id, beacon_id, now).await?;
-    let review = crate::latarnik::dual_role_review(pool, workspace_id, now, reason.is_some()).await?;
-    let contact = review
-        .contacts
-        .into_iter()
-        .find(|contact| contact.beacon_id == beacon_id)
-        .ok_or(InviteError::NotFound)?;
+    let language = contact_language(pool, workspace_id, beacon_id).await?;
+    let reason = invite_reason(pool, workspace_id, beacon_id, language, now).await?;
+    // The standing is re-read by id, not searched in the capped review page —
+    // an id-addressed click must not 404 because the person ranked below it.
+    let contact = crate::latarnik::dual_role_contact(
+        pool,
+        workspace_id,
+        beacon_id,
+        now,
+        reason.is_some(),
+    )
+    .await?
+    .ok_or(InviteError::NotFound)?;
 
     // The review's own verdict, recomputed here rather than trusted from the
     // screen. `dual_role_review` already ran the domain rule; re-reading its
@@ -100,13 +106,14 @@ pub async fn approve_latarnik_invite(
         role: contact.role.clone(),
         city: contact.city.clone(),
         relationship_score: contact.relationship_score,
-        has_replied: true,
-        do_not_contact: false,
-        accepts_outreach: true,
+        has_replied: contact.has_replied,
+        do_not_contact: contact.do_not_contact,
+        accepts_outreach: contact.accepts_outreach,
         days_since_last_contact: contact.days_since_last_contact,
         already_invited: contact.already_invited,
         already_a_fan: contact.hears_the_dates,
-        previously_opted_out: contact.known_but_not_consented,
+        previously_opted_out: contact.previously_opted_out,
+        opt_in_pending: contact.opt_in_pending,
     };
     // Belt and braces: the review said yes, and the rule is asked again against
     // the standing the letter is actually composed from. Two answers that
@@ -118,8 +125,14 @@ pub async fn approve_latarnik_invite(
     let (beacon_version, contact_email) =
         beacon_pin(pool, workspace_id, beacon_id).await?.ok_or(InviteError::NotFound)?;
     let sender = crate::gig_outreach::sender_identity(pool, workspace_id).await?;
-    let language = contact_language(pool, workspace_id, beacon_id).await?;
-    let member_area = member_area_url(pool, workspace_id).await?;
+    // A letter with nowhere to point is worse than no letter — refuse rather
+    // than embed a dead link.
+    let member_area = member_area_url(pool, workspace_id).await?.ok_or_else(|| {
+        InviteError::Refused(
+            "the member-site address is not configured for this workspace — the letter has              nowhere to point"
+                .to_owned(),
+        )
+    })?;
     let letter = compose(&sender, &standing, &reason, &member_area, language);
 
     let action_id = queue_invite(
@@ -129,7 +142,7 @@ pub async fn approve_latarnik_invite(
         beacon_version,
         &contact_email,
         &contact.display_name,
-        &reason_sentence(&reason),
+        &reason_sentence(&reason, language),
         &letter,
         idempotency_key,
         now,
@@ -152,6 +165,7 @@ async fn invite_reason(
     pool: &PgPool,
     workspace_id: Uuid,
     beacon_id: Uuid,
+    language: crowdrelay_domain::gig_letter::LetterLanguage,
     now: OffsetDateTime,
 ) -> Result<Option<InviteReason>, sqlx::Error> {
     // A published show in their city, inside the window where telling somebody
@@ -180,7 +194,7 @@ async fn invite_reason(
     if let Some((city, starts_at)) = upcoming {
         return Ok(Some(InviteReason::UpcomingShowInTheirCity {
             city,
-            when: crowdrelay_domain::gig_letter::polish_date(starts_at),
+            when: crowdrelay_domain::gig_letter::letter_date(starts_at, language),
         }));
     }
 
@@ -206,9 +220,13 @@ async fn invite_reason(
     .fetch_optional(pool)
     .await?;
     if let Some((venue, starts_at)) = shared {
+        let fallback = match language {
+            crowdrelay_domain::gig_letter::LetterLanguage::Polish => "tamtym klubie",
+            crowdrelay_domain::gig_letter::LetterLanguage::English => "that night",
+        };
         return Ok(Some(InviteReason::SharedPastShow {
-            venue: venue.unwrap_or_else(|| "tamtym klubie".to_owned()),
-            when: crowdrelay_domain::gig_letter::polish_date(starts_at),
+            venue: venue.unwrap_or_else(|| fallback.to_owned()),
+            when: crowdrelay_domain::gig_letter::letter_date(starts_at, language),
         }));
     }
 
@@ -219,7 +237,7 @@ async fn invite_reason(
         SELECT title
         FROM viryaos_release_plans
         WHERE workspace_id = $1
-          AND release_at IS NOT NULL
+          AND active
           AND release_at < $2
           AND release_at > $2 - INTERVAL '90 days'
         ORDER BY release_at DESC
@@ -233,14 +251,32 @@ async fn invite_reason(
     Ok(release.map(|title| InviteReason::RecentRelease { title }))
 }
 
-/// The reason as one sentence for the ledger and the briefing.
-fn reason_sentence(reason: &InviteReason) -> String {
-    match reason {
-        InviteReason::UpcomingShowInTheirCity { city, when } => {
+/// The reason as one sentence for the ledger and the briefing, in the same
+/// language the letter it describes was written in.
+fn reason_sentence(
+    reason: &InviteReason,
+    language: crowdrelay_domain::gig_letter::LetterLanguage,
+) -> String {
+    use crowdrelay_domain::gig_letter::LetterLanguage;
+    match (language, reason) {
+        (LetterLanguage::Polish, InviteReason::UpcomingShowInTheirCity { city, when }) => {
             format!("koncert w {city} — {when}")
         }
-        InviteReason::SharedPastShow { venue, when } => format!("wspólny koncert w {venue} ({when})"),
-        InviteReason::RecentRelease { title } => format!("nowe wydawnictwo: {title}"),
+        (LetterLanguage::English, InviteReason::UpcomingShowInTheirCity { city, when }) => {
+            format!("show in {city} — {when}")
+        }
+        (LetterLanguage::Polish, InviteReason::SharedPastShow { venue, when }) => {
+            format!("wspólny koncert w {venue} ({when})")
+        }
+        (LetterLanguage::English, InviteReason::SharedPastShow { venue, when }) => {
+            format!("shared night at {venue} ({when})")
+        }
+        (LetterLanguage::Polish, InviteReason::RecentRelease { title }) => {
+            format!("nowe wydawnictwo: {title}")
+        }
+        (LetterLanguage::English, InviteReason::RecentRelease { title }) => {
+            format!("new release: {title}")
+        }
     }
 }
 
@@ -289,16 +325,23 @@ async fn contact_language(
 }
 
 /// Where the invitation points. The stored override only: a shipped default
-/// would send an industry contact to somebody else's website.
-async fn member_area_url(pool: &PgPool, workspace_id: Uuid) -> Result<String, sqlx::Error> {
-    let base = sqlx::query_scalar::<_, String>(
+/// would send an industry contact to somebody else's website, and a missing
+/// row must produce no letter rather than a dead link.
+async fn member_area_url(
+    pool: &PgPool,
+    workspace_id: Uuid,
+) -> Result<Option<String>, sqlx::Error> {
+    let Some(base) = sqlx::query_scalar::<_, String>(
         "SELECT value FROM tenant_settings
          WHERE workspace_id = $1 AND key = 'member_site_base_url'",
     )
     .bind(workspace_id)
     .fetch_optional(pool)
     .await?
-    .unwrap_or_default();
+    .filter(|value| !value.trim().is_empty())
+    else {
+        return Ok(None);
+    };
     let path = sqlx::query_scalar::<_, String>(
         "SELECT value FROM tenant_settings WHERE workspace_id = $1 AND key = 'member_area_path'",
     )
@@ -306,11 +349,11 @@ async fn member_area_url(pool: &PgPool, workspace_id: Uuid) -> Result<String, sq
     .fetch_optional(pool)
     .await?
     .unwrap_or_else(|| crate::tenant_settings::DEFAULT_MEMBER_AREA_PATH.to_owned());
-    Ok(format!(
+    Ok(Some(format!(
         "{}/{}",
         base.trim_end_matches('/'),
         path.trim_matches('/')
-    ))
+    )))
 }
 
 /// Has this key already produced an invitation?
@@ -441,7 +484,20 @@ async fn queue_invite(
         i32::try_from(action_class_value.hold_seconds()).unwrap_or(120),
     ))
     .execute(&mut *tx)
-    .await?;
+    .await
+    .map_err(|error| {
+        // Two clicks racing past the in-flight pre-read meet the constraint
+        // instead — the idempotency key's or the in-flight subject index's.
+        // Both mean the same thing to the operator: the ask already exists.
+        if error.as_database_error().is_some_and(|e| e.is_unique_violation()) {
+            InviteError::Refused(
+                "an invitation to this contact is already queued — one ask is the whole budget"
+                    .to_owned(),
+            )
+        } else {
+            InviteError::Database(error)
+        }
+    })?;
     tx.commit().await?;
     Ok(action_id)
 }
