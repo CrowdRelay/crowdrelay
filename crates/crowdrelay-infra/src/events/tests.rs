@@ -61,6 +61,13 @@ mod tests {
         ) -> Result<(), RepositoryError> {
             Err(RepositoryError::Unavailable)
         }
+
+        async fn set_event_festival(
+            &self,
+            _command: &crowdrelay_application::SetEventFestivalCommand,
+        ) -> Result<(), RepositoryError> {
+            Err(RepositoryError::Unavailable)
+        }
     }
 
     #[tokio::test]

@@ -2326,6 +2326,51 @@ paths:
           $ref: '#/components/responses/PrivateProblem'
         '503':
           $ref: '#/components/responses/PrivateProblem'
+  /admin/events/{slug}/festival:
+    put:
+      operationId: setEventFestivalAdmin
+      summary: Set or clear the show's festival marker
+      description: >-
+        6.1 — a festival slot is a show. The name's presence is what marks
+        this event as a slot inside a festival; null or empty clears it back
+        to an ordinary night. The organiser rides the counterparty fields, so
+        the T+7 post-show report reaches them unmodified, and the full
+        T-21→T+7 chain runs on the event unmodified. Draft, published and
+        completed shows accept the write; a cancelled night is history.
+      security:
+      - adminBearer: []
+      parameters:
+      - in: path
+        name: slug
+        required: true
+        schema:
+          type: string
+          minLength: 1
+          maxLength: 128
+          pattern: ^[a-z0-9][a-z0-9_-]*$
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SetEventFestivalRequest'
+      responses:
+        '200':
+          description: Festival marker as stored.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SetEventFestivalRequest'
+        '400':
+          $ref: '#/components/responses/PrivateProblem'
+        '401':
+          $ref: '#/components/responses/PrivateProblem'
+        '404':
+          $ref: '#/components/responses/PrivateProblem'
+        '413':
+          $ref: '#/components/responses/PrivateProblem'
+        '503':
+          $ref: '#/components/responses/PrivateProblem'
   /staff/events/{slug}/support-slots:
     put:
       operationId: setEventSupportSlotsStaff
@@ -2448,6 +2493,48 @@ paths:
         '404':
           $ref: '#/components/responses/PrivateProblem'
         '409':
+          $ref: '#/components/responses/PrivateProblem'
+        '413':
+          $ref: '#/components/responses/PrivateProblem'
+        '503':
+          $ref: '#/components/responses/PrivateProblem'
+  /staff/events/{slug}/festival:
+    put:
+      operationId: setEventFestivalStaff
+      summary: Set or clear the show's festival marker
+      description: >-
+        The staff surface for the same declaration, on the same screen the
+        bill itself is edited from: the festival this show is a slot inside
+        of, or null for an ordinary night.
+      security:
+      - staffBearer: []
+      parameters:
+      - in: path
+        name: slug
+        required: true
+        schema:
+          type: string
+          minLength: 1
+          maxLength: 128
+          pattern: ^[a-z0-9][a-z0-9_-]*$
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SetEventFestivalRequest'
+      responses:
+        '200':
+          description: Festival marker as stored.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SetEventFestivalRequest'
+        '400':
+          $ref: '#/components/responses/PrivateProblem'
+        '401':
+          $ref: '#/components/responses/PrivateProblem'
+        '404':
           $ref: '#/components/responses/PrivateProblem'
         '413':
           $ref: '#/components/responses/PrivateProblem'
@@ -15725,6 +15812,15 @@ components:
           - string
           - 'null'
           format: uri
+        festival_name:
+          type:
+          - string
+          - 'null'
+          maxLength: 200
+          description: >-
+            The festival this show is a slot inside of (6.1). Its presence is
+            what marks the event as a festival slot — null is an ordinary
+            night. Public poster information, shown like the venue name.
         acts:
           type: array
           description: >-
@@ -15843,6 +15939,18 @@ components:
           description: >-
             Address the T+7 post-show report is delivered to. Null or empty
             clears the stored address.
+    SetEventFestivalRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        festival_name:
+          type:
+          - string
+          - 'null'
+          maxLength: 200
+          description: >-
+            The festival this show is a slot inside of. Null or empty clears
+            the marker back to an ordinary night.
     ConfigureTicketSaleRequest:
       type: object
       additionalProperties: false

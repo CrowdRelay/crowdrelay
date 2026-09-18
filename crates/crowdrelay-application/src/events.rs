@@ -341,6 +341,16 @@ pub struct SetEventCounterpartyCommand {
     pub counterparty_email: Option<String>,
 }
 
+/// Command: sets or clears the show's festival marker (6.1). The name's
+/// presence is what marks the event as a slot inside a festival — `None`
+/// is an ordinary night again, and the organiser rides the counterparty
+/// fields so the T+7 report reaches them unmodified.
+pub struct SetEventFestivalCommand {
+    pub workspace_id: WorkspaceId,
+    pub event_slug: String,
+    pub festival_name: Option<String>,
+}
+
 /// Repository port for event discovery, interest registration, and action tracking.
 #[async_trait]
 pub trait EventRepository: Send + Sync {
@@ -384,6 +394,14 @@ pub trait EventRepository: Send + Sync {
     async fn set_event_support_slots(
         &self,
         command: &SetEventSupportSlotsCommand,
+    ) -> Result<(), RepositoryError>;
+    /// Sets or clears the show's festival marker. Same status rule as the
+    /// counterparty — a slot's festival identity is often only confirmed
+    /// around show day, and a cancelled night is history either way.
+    /// `NotFound` when the slug does not resolve inside the workspace.
+    async fn set_event_festival(
+        &self,
+        command: &SetEventFestivalCommand,
     ) -> Result<(), RepositoryError>;
 }
 
@@ -535,6 +553,31 @@ impl SetEventSupportSlots {
     }
 }
 
+/// Use case: sets or clears an event's festival marker (6.1) — the name of
+/// the festival this show is a slot inside. The marker is public poster
+/// information: it rides the public event payload like the venue name.
+#[derive(Clone)]
+pub struct SetEventFestival {
+    repository: Arc<dyn EventRepository>,
+}
+
+impl SetEventFestival {
+    /// Creates the festival use case.
+    #[must_use]
+    pub fn new(repository: Arc<dyn EventRepository>) -> Self {
+        Self { repository }
+    }
+
+    /// Writes the festival name; `None` clears the marker.
+    ///
+    /// # Errors
+    ///
+    /// Propagates the repository error.
+    pub async fn execute(&self, command: &SetEventFestivalCommand) -> Result<(), RepositoryError> {
+        self.repository.set_event_festival(command).await
+    }
+}
+
 /// Use case: sets or clears an event's counterparty — the person on the
 /// other side of the show who receives the T+7 report. Private contact
 /// data: it never enters the public event payload.
@@ -589,6 +632,7 @@ mod tests {
             image_url: None,
             trailer_url: None,
             external_event_url: None,
+            festival_name: None,
             acts: Vec::new(),
             updated_at: OffsetDateTime::UNIX_EPOCH,
         })

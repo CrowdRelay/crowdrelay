@@ -226,6 +226,12 @@ impl EventRepository for StubEvents {
     ) -> Result<(), RepositoryError> {
         Ok(())
     }
+    async fn set_event_festival(
+        &self,
+        _command: &crowdrelay_application::SetEventFestivalCommand,
+    ) -> Result<(), RepositoryError> {
+        Ok(())
+    }
 }
 
 struct StubAdmission;
@@ -322,7 +328,8 @@ fn app_state(
         ListFanEventInterests::new(Arc::clone(&event_repository)),
         ReplaceEventActs::new(Arc::clone(&event_repository)),
         SetEventCounterparty::new(Arc::clone(&event_repository)),
-        crowdrelay_application::SetEventSupportSlots::new(event_repository),
+        crowdrelay_application::SetEventSupportSlots::new(Arc::clone(&event_repository)),
+        crowdrelay_application::SetEventFestival::new(event_repository),
         Arc::new(|_action| {}),
         Arc::new(EventActionMetricsSnapshot::default),
     );

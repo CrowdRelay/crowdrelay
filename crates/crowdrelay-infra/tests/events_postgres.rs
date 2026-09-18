@@ -2,7 +2,8 @@ use std::time::Duration;
 
 use crowdrelay_application::{
     AcquisitionRepository, EventActEntry, EventRepository, IdempotencyKey,
-    RegisterEventInterestCommand, ReplaceEventActsCommand, RequestId, SignupFanCommand,
+    RegisterEventInterestCommand, ReplaceEventActsCommand, RequestId, SetEventFestivalCommand,
+    SignupFanCommand,
 };
 use crowdrelay_domain::{
     CitySlug, CountryCode, EventAction, EventActionKind, EventId, EventSlug, FanSignup,
@@ -361,6 +362,87 @@ async fn replaces_event_bill_and_attributes_ticket_clicks_per_act()
             })
             .await,
         Err(crowdrelay_application::RepositoryError::Conflict)
+    );
+
+    pool.close().await;
+    Ok(())
+}
+
+/// 6.1: a festival slot is an ordinary event carrying `festival_name`. The
+/// marker writes through the staff/admin setter, surfaces on the published
+/// event read the T-21→T+7 chain consumes, and clears back to an ordinary
+/// night. A stranger's workspace cannot touch it.
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_EVENT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn a_festival_slot_runs_as_an_ordinary_show() -> Result<(), Box<dyn std::error::Error>> {
+    let database_url = std::env::var("CROWDRELAY_EVENT_TEST_DATABASE_URL").map_err(|e| {
+        format!("CROWDRELAY_EVENT_TEST_DATABASE_URL must target a disposable database: {e}")
+    })?;
+    let pool = PgPoolOptions::new()
+        .max_connections(8)
+        .connect(&database_url)
+        .await?;
+    crowdrelay_infra::database::MIGRATOR.run(&pool).await?;
+
+    let workspace_id = WorkspaceId::new();
+    let workspace_slug =
+        WorkspaceSlug::parse(format!("event-fest-{}", workspace_id.into_uuid().simple()))?;
+    let starts_at = OffsetDateTime::now_utc() + time::Duration::days(2);
+    seed_fixture(&pool, workspace_id, &workspace_slug, starts_at).await?;
+
+    let database = DatabaseConfig {
+        url: database_url,
+        max_connections: 8,
+        connect_timeout: Duration::from_secs(3),
+        ping_timeout: Duration::from_secs(2),
+        operation_timeout: Duration::from_secs(5),
+        lock_timeout: Duration::from_secs(1),
+    };
+    let events =
+        PostgresEventRepository::new(pool.clone(), workspace_slug, &database, vec![1_440, 120]);
+
+    // Unmarked: an ordinary night.
+    let published = events.load_published_events().await?;
+    assert_eq!(published.len(), 1);
+    assert_eq!(published[0].festival_name, None);
+
+    // The slot's festival identity lands on the same published read the
+    // production chain consumes — no branch, no separate workflow.
+    events
+        .set_event_festival(&SetEventFestivalCommand {
+            workspace_id,
+            event_slug: "wroclaw-live-2026".to_owned(),
+            festival_name: Some("OFF Festival Katowice".to_owned()),
+        })
+        .await?;
+    let published = events.load_published_events().await?;
+    assert_eq!(published.len(), 1);
+    assert_eq!(
+        published[0].festival_name.as_deref(),
+        Some("OFF Festival Katowice")
+    );
+
+    // Clearing returns the night to ordinary.
+    events
+        .set_event_festival(&SetEventFestivalCommand {
+            workspace_id,
+            event_slug: "wroclaw-live-2026".to_owned(),
+            festival_name: None,
+        })
+        .await?;
+    let published = events.load_published_events().await?;
+    assert_eq!(published[0].festival_name, None);
+
+    // Another workspace's id cannot reach the row at all.
+    assert_eq!(
+        events
+            .set_event_festival(&SetEventFestivalCommand {
+                workspace_id: WorkspaceId::new(),
+                event_slug: "wroclaw-live-2026".to_owned(),
+                festival_name: Some("Stolen Festival".to_owned()),
+            })
+            .await,
+        Err(crowdrelay_application::RepositoryError::NotFound)
     );
 
     pool.close().await;
