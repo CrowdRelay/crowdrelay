@@ -11539,7 +11539,7 @@ components:
           items:
             type: object
             additionalProperties: false
-            required: [id, target_kind, display_name, accepts_booking, relationship_score, venue_linked]
+            required: [id, target_kind, display_name, accepts_booking, relationship_score, venue_linked, counterparty_prior, venue_prior]
             properties:
               id: { type: string, format: uuid }
               target_kind:
@@ -11551,6 +11551,30 @@ components:
               venue_linked:
                 type: boolean
                 description: Whether the target is joined to the shared venue registry.
+              counterparty_prior:
+                type: [object, 'null']
+                additionalProperties: false
+                required: [tenants_contacted, tenants_replied, tenants_won]
+                description: >-
+                  P.6: the target address's reply record across every tenant —
+                  anonymous counts over `workspace_id`, never the ids.
+                  `null` means the prior read did not run, not "no history".
+                properties:
+                  tenants_contacted: { type: integer }
+                  tenants_replied:
+                    type: integer
+                    description: Any disposition — a decline is still a reply.
+                  tenants_won: { type: integer }
+              venue_prior:
+                type: [object, 'null']
+                additionalProperties: false
+                required: [tenants_played, shows]
+                description: >-
+                  P.6: the linked room's play record across every tenant.
+                  `null` when the target is not venue-linked.
+                properties:
+                  tenants_played: { type: integer }
+                  shows: { type: integer }
         communities:
           type: array
           description: Communities the tenant posts in, matched on the show's country — the honest granularity, since a community carries no city.
@@ -11584,13 +11608,24 @@ components:
           items:
             type: object
             additionalProperties: false
-            required: [id, display_name, capacity]
+            required: [id, display_name, capacity, venue_prior]
             properties:
               id: { type: string, format: uuid }
               display_name: { type: string }
               capacity:
                 type: [string, 'null']
                 description: The global capacity fact's raw text value, when one exists.
+              venue_prior:
+                type: [object, 'null']
+                additionalProperties: false
+                required: [tenants_played, shows]
+                description: >-
+                  P.6: the room's play record across every tenant — cold for
+                  this band is not cold for the registry. `null` when the
+                  prior read did not run.
+                properties:
+                  tenants_played: { type: integer }
+                  shows: { type: integer }
         bill_mates:
           type: array
           description: >-

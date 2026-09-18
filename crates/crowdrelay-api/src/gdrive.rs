@@ -87,6 +87,12 @@ pub struct DriveContact {
     matched_counterparty: Option<String>,
     /// The band's own marks say they already dealt with them.
     counterparty_worked_with: bool,
+    /// P.6: the address's reply record across every tenant — anonymous
+    /// counts. `null` means the prior read did not run, not "no history".
+    counterparty_prior: Option<crowdrelay_infra::cross_tenant_priors::CounterpartyPrior>,
+    /// P.6: the matched room's play record across every tenant. `null`
+    /// when no venue matched or the read did not run.
+    venue_prior: Option<crowdrelay_infra::cross_tenant_priors::VenuePrior>,
 }
 
 /// The registry joins counted over the whole staging population — the page
@@ -126,7 +132,8 @@ pub struct DismissRequest {
     destination: String,
 }
 
-fn contact_json(row: crowdrelay_infra::gdrive::DriveContactRow) -> DriveContact {
+fn contact_json(view: crowdrelay_infra::gdrive::DriveContactView) -> DriveContact {
+    let row = view.row;
     DriveContact {
         id: row.id.to_string(),
         email: row.normalized_email,
@@ -148,6 +155,8 @@ fn contact_json(row: crowdrelay_infra::gdrive::DriveContactRow) -> DriveContact 
         venue_played_here: row.venue_played_here,
         matched_counterparty: row.matched_counterparty,
         counterparty_worked_with: row.counterparty_worked_with,
+        counterparty_prior: view.counterparty_prior,
+        venue_prior: view.venue_prior,
     }
 }
 

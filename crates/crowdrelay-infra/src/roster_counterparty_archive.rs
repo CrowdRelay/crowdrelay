@@ -56,6 +56,9 @@ pub struct CounterpartyRecord {
     pub first_seen: OffsetDateTime,
     #[serde(with = "time::serde::rfc3339")]
     pub last_seen: OffsetDateTime,
+    /// P.6: the address's reply record across every tenant on the platform —
+    /// anonymous counts. `null` when the prior read did not run.
+    pub prior: Option<crate::cross_tenant_priors::CounterpartyPrior>,
     pub acts: Vec<ActCounterpartyShare>,
 }
 
@@ -181,16 +184,31 @@ pub async fn counterparty_archive(
             });
     }
 
+    // P.6: the platform's record on each address — the moat a one-band
+    // competitor cannot reproduce. Counts only; the read never names a
+    // tenant, and a failed batch leaves `prior` null rather than zero.
+    let emails: Vec<String> = heads.iter().map(|head| head.email.clone()).collect();
+    let priors = crate::cross_tenant_priors::counterparty_priors(pool, &emails)
+        .await
+        .map_err(|error| {
+            tracing::warn!(%error, "counterparty archive: prior read failed");
+            error
+        })
+        .ok();
+
     let counterparties = heads
         .into_iter()
         .map(|head| CounterpartyRecord {
             counterparty_id: head.counterparty_id,
-            email: head.email,
             display_name: head.display_name,
             shared_by_acts: head.shared_by_acts,
             shows: head.shows,
             first_seen: head.first_seen,
             last_seen: head.last_seen,
+            prior: priors
+                .as_ref()
+                .map(|all| all.get(&head.email).copied().unwrap_or_default()),
+            email: head.email,
             acts: shares_by_counterparty
                 .remove(&head.counterparty_id)
                 .unwrap_or_default(),

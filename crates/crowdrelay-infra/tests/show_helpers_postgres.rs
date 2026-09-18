@@ -119,6 +119,27 @@ async fn run(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
     booking_target(pool, act, wroclaw, "Anna", "promoter", true).await?;
     booking_target(pool, act, wroclaw, "Dead Club", "venue", false).await?;
     booking_target(pool, other, wroclaw, "Their Booker", "promoter", true).await?;
+    // P.6 prior seed: this tenant mailed Anna once with no reply, and the
+    // other workspace's outreach ledger holds a positive thread on the same
+    // address — the record reads "2 wrote, 1 answered, 1 won" without ever
+    // naming the other tenant.
+    sqlx::query(
+        "UPDATE viryaos_booking_targets SET last_outreach_at = now() - interval '30 days'
+         WHERE workspace_id = $1 AND contact_email = 'anna@example.com'",
+    )
+    .bind(act)
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO viryaos_outreach_targets
+            (workspace_id, target_kind, display_name, contact_email, last_outreach_at,
+             last_reply_at, last_reply_disposition)
+         VALUES ($1, 'support_slot', 'Anna (theirs)', 'anna@example.com',
+                 now() - interval '40 days', now() - interval '39 days', 'positive')",
+    )
+    .bind(other)
+    .execute(pool)
+    .await?;
 
     // ── communities: this workspace, the city's country, active ──
     community(pool, act, "PL", "r/wroclaw", true).await?;
@@ -300,6 +321,24 @@ async fn run(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
         ["Anna"],
         "rooms_and_promoters must hold only this tenant's active targets: {rooms:?}"
     );
+    // P.6 — the cross-tenant record rides the row: two tenants' sends, one
+    // reply, one win. Only counts ever leave the read.
+    let anna_prior = helpers.rooms_and_promoters[0]
+        .counterparty_prior
+        .expect("the prior read ran");
+    assert_eq!(
+        (
+            anna_prior.tenants_contacted,
+            anna_prior.tenants_replied,
+            anna_prior.tenants_won
+        ),
+        (2, 1, 1),
+        "anna@example.com: this tenant's send + the other workspace's won thread"
+    );
+    assert!(
+        helpers.rooms_and_promoters[0].venue_prior.is_none(),
+        "a promoter-kind target has no linked room record"
+    );
 
     let communities: Vec<(&str, &str)> = helpers
         .communities
@@ -338,6 +377,28 @@ async fn run(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
     assert!(
         !cold_names.contains(&"Klub A"),
         "a room this tenant played is not cold: {cold_names:?}"
+    );
+    // P.6 — "Klub B" is cold to this tenant but the registry knows the other
+    // workspace's night there; "Cold Klub" carries a measured zero.
+    let klub_b = helpers
+        .cold_rooms
+        .iter()
+        .find(|room| room.display_name == "Klub B")
+        .expect("Klub B lists as cold to this tenant");
+    assert_eq!(
+        klub_b.venue_prior.map(|p| (p.tenants_played, p.shows)),
+        Some((1, 1)),
+        "the other workspace's mark is the prior this tenant sees"
+    );
+    let cold_klub = helpers
+        .cold_rooms
+        .iter()
+        .find(|room| room.display_name == "Cold Klub")
+        .expect("Cold Klub lists");
+    assert_eq!(
+        cold_klub.venue_prior.map(|p| (p.tenants_played, p.shows)),
+        Some((0, 0)),
+        "a room nobody marked reports a measured zero, not a missing prior"
     );
     assert!(
         !cold_names.contains(&"Berlin Cold"),

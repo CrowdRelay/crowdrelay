@@ -39,6 +39,7 @@ pub mod content_engine;
 pub mod content_peers;
 pub mod content_suggestions;
 pub mod content_trends;
+pub mod cross_tenant_priors;
 pub mod database;
 pub mod ecosystem;
 pub mod events;
