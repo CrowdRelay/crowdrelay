@@ -486,6 +486,57 @@ impl PostgresAutopilotRepository {
                     .await
                     .map_err(map_sqlx)?
                     .ok_or(RepositoryError::Conflict)?;
+                    // The bill is already known data: every non-sibling act on
+                    // it is a named entity the executor should resolve a public
+                    // contact for before it goes scouting blind. Siblings keep
+                    // the roster path; the venue's own channels seed as a
+                    // `venue` beacon. `counterparty_email` is private and never
+                    // enters this payload — the venue is resolved by name.
+                    let seed_acts = sqlx::query_scalar::<_, String>(
+                        r#"
+                        SELECT act.act_name
+                        FROM event_acts act
+                        JOIN workspaces own_ws ON own_ws.id = act.workspace_id
+                        LEFT JOIN workspaces act_ws ON act_ws.id = act.act_workspace_id
+                        WHERE act.workspace_id = $1 AND act.event_id = $2
+                          AND act.act_workspace_id IS DISTINCT FROM $1
+                          AND act.act_slug IS DISTINCT FROM own_ws.slug
+                          AND (act_ws.organization_id IS NULL
+                               OR act_ws.organization_id IS DISTINCT FROM own_ws.organization_id)
+                        GROUP BY act.act_name
+                        ORDER BY MIN(act.position)
+                        LIMIT 24
+                        "#,
+                    )
+                    .bind(workspace_id.into_uuid())
+                    .bind(event_id.into_uuid())
+                    .fetch_all(&mut *transaction)
+                    .await
+                    .map_err(map_sqlx)?;
+                    let mut seed_entities = seed_acts
+                        .iter()
+                        .map(|name| {
+                            json!({
+                                "name": name,
+                                "kind": "scene_partner",
+                                "role": "bill_mate",
+                                "evidence": "listed on the show's bill",
+                            })
+                        })
+                        .collect::<Vec<_>>();
+                    if let Some(venue) = event
+                        .1
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|v| !v.is_empty() && !seed_acts.iter().any(|name| name == v))
+                    {
+                        seed_entities.push(json!({
+                            "name": venue,
+                            "kind": "venue",
+                            "role": "host_venue",
+                            "evidence": "hosts the show",
+                        }));
+                    }
                     emit_external_action(
                         &mut transaction,
                         workspace_id,
@@ -503,6 +554,7 @@ impl PostgresAutopilotRepository {
                                 "region": event.5,
                             },
                             "target_count": target_count,
+                            "seed_entities": seed_entities,
                             "discovery_contract": {
                                 "public_sources_only": true,
                                 "require_source_url": true,
