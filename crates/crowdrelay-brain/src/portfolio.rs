@@ -202,10 +202,24 @@ pub struct PortfolioConfig {
     /// individual value is below the WAIT threshold.
     #[serde(default = "default_min_dispatches")]
     pub min_dispatches: u32,
+    /// The roster fairness term (5.2): each prior dispatch an act already
+    /// holds — this rank's earlier selections plus the recent ledger the
+    /// caller seeds — discounts its next candidate's marginal by this factor.
+    /// 1.0 is inert (pure value maximisation); 0.9 costs a five-dispatch act
+    /// about 41% on its sixth. A new act pays nothing, because a count of
+    /// zero leaves the factor at one — a new member has not failed to do
+    /// anything. Operator-visible through the organisation's
+    /// `roster_portfolio_fairness_decay` setting, never a hidden constant.
+    #[serde(default = "default_fairness_decay")]
+    pub fairness_decay: f64,
 }
 
 fn default_min_dispatches() -> u32 {
     1
+}
+
+fn default_fairness_decay() -> f64 {
+    1.0
 }
 
 impl Default for PortfolioConfig {
@@ -218,6 +232,7 @@ impl Default for PortfolioConfig {
             min_marginal_value: 0.1,
             experimental_dispatch_budget: 0,
             min_dispatches: 1,
+            fairness_decay: 1.0,
         }
     }
 }
@@ -227,13 +242,37 @@ impl Default for PortfolioConfig {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct PortfolioOptimizer {
     pub config: PortfolioConfig,
+    /// Recent dispatches per act, seeded by the caller from the ledger (5.2).
+    /// The roster read counts each member's trailing-week actions so a
+    /// permanently outbid act stops being outbid; a single-workspace run
+    /// leaves this empty because every candidate sharing one act makes the
+    /// term uniform, and a uniform multiplier cannot reorder anything.
+    #[serde(default)]
+    pub act_history: std::collections::HashMap<WorkspaceId, u32>,
+}
+
+impl PortfolioOptimizer {
+    /// Seeds the per-act dispatch counts the fairness term reads. Builder
+    /// form keeps the call sites that have no roster — the workspace eval —
+    /// untouched.
+    #[must_use]
+    pub fn with_act_history(
+        mut self,
+        history: std::collections::HashMap<WorkspaceId, u32>,
+    ) -> Self {
+        self.act_history = history;
+        self
+    }
 }
 
 impl PortfolioOptimizer {
     /// Creates a new optimizer with the given configuration.
     #[must_use]
     pub fn new(config: PortfolioConfig) -> Self {
-        Self { config }
+        Self {
+            config,
+            ..Default::default()
+        }
     }
 
     /// Selects the optimal portfolio from the global candidate pool.
@@ -261,6 +300,12 @@ impl PortfolioOptimizer {
         }
         // Track audience usage for overlap + fatigue computation.
         let mut audience_counts: std::collections::HashMap<String, u32> =
+            std::collections::HashMap::new();
+        // In-round act selections — the fairness term reads history plus
+        // what this same rank has already spent on the act, or a roster that
+        // drained its slots this week would still not see the damp until the
+        // ledger caught up.
+        let mut act_counts: std::collections::HashMap<WorkspaceId, u32> =
             std::collections::HashMap::new();
         let mut selected: Vec<PortfolioCandidate> = Vec::new();
         let mut rejected: Vec<PortfolioRejection> = Vec::new();
@@ -351,6 +396,12 @@ impl PortfolioOptimizer {
                 // portfolio state that vanishes with the cycle and the two
                 // coefficients are configuration a reader would otherwise have
                 // to take from a config that has since been edited.
+                let act_dispatches = self
+                    .act_history
+                    .get(&candidate.act)
+                    .copied()
+                    .unwrap_or(0)
+                    .saturating_add(act_counts.get(&candidate.act).copied().unwrap_or(0));
                 let adjustments = MarginalAdjustments::apply(
                     intrinsic,
                     AdjustmentInputs {
@@ -358,6 +409,8 @@ impl PortfolioOptimizer {
                         overlap_penalty: self.config.audience_overlap_penalty,
                         fatigue_decay: self.config.fatigue_decay,
                         bridge_factor: bridge_penalty,
+                        act_dispatches,
+                        fairness_decay: self.config.fairness_decay,
                     },
                 );
                 if adjustments.marginal_y30 > best_marginal {
@@ -419,6 +472,7 @@ impl PortfolioOptimizer {
                 *audience_counts
                     .entry(candidate.audience_key.clone())
                     .or_insert(0) += 1;
+                *act_counts.entry(candidate.act).or_insert(0) += 1;
                 total_expected_fans += best_marginal;
                 // Compute the decision mode from DecisionValue provenance:
                 // - Learn: low sample size → information gain

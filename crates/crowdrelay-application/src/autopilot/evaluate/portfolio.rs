@@ -223,7 +223,14 @@ pub(super) fn select_portfolio(
         experimental_dispatch_budget: policy.experimental_dispatch_budget,
         ..Default::default()
     };
-    let optimizer = PortfolioOptimizer { config };
+    // One workspace's run seeds no act history: every candidate shares the
+    // same `act`, the fairness term is uniform across the pool, and a uniform
+    // multiplier cannot reorder anything. The term does its work in the
+    // roster's pooled read, where the acts differ.
+    let optimizer = PortfolioOptimizer {
+        config,
+        ..Default::default()
+    };
     // The input vec is kept beside the selection: the roster read (5.1) needs
     // every candidate's full decision_value, which the rejected side of
     // `PortfolioSelection` deliberately does not carry.

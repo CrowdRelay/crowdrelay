@@ -54,6 +54,12 @@ pub struct AdjustmentInputs {
     pub fatigue_decay: f64,
     /// The uncalibrated-bridge factor — `1.0` when it does not apply.
     pub bridge_factor: f64,
+    /// How many dispatches this candidate's act already holds — recent ledger
+    /// history plus selections made earlier in this same rank. Drives the
+    /// fairness factor the way `audience_count` drives overlap.
+    pub act_dispatches: u32,
+    /// `PortfolioConfig::fairness_decay` — `1.0` keeps the term inert.
+    pub fairness_decay: f64,
 }
 
 /// The portfolio's adjustments to one candidate's intrinsic value, in expected
@@ -74,6 +80,12 @@ pub struct MarginalAdjustments {
     /// calibrated — a Y14 number wearing a Y30 label. Zero or negative, and
     /// zero for every other regime.
     pub bridge_adjustment: f64,
+    /// The roster fairness term (5.2) — the act's share of dispatches priced
+    /// in as a damp, so the two acts with the best posteriors cannot spend
+    /// every slot while six starve. Zero or negative; zero when the act had
+    /// no prior dispatches or the decay is 1.0.
+    #[serde(default)]
+    pub fairness_adjustment: f64,
     /// What the optimizer actually ranks on.
     pub marginal_y30: f64,
 
@@ -98,6 +110,19 @@ pub struct MarginalAdjustments {
     /// The uncalibrated-bridge factor applied — `1.0` when the regime is not
     /// `Y14Bridged` or the bridge is calibrated.
     pub bridge_factor: f64,
+    /// The act's dispatch count in force at decision time — ledger history
+    /// plus in-round selections.
+    #[serde(default)]
+    pub act_dispatches: u32,
+    /// `PortfolioConfig::fairness_decay` in force at decision time.
+    #[serde(default = "default_fairness_decay")]
+    pub fairness_decay: f64,
+}
+
+/// Records written before the fairness term existed had none — decoding them
+/// back means the inert value, not a fabricated one.
+const fn default_fairness_decay() -> f64 {
+    1.0
 }
 
 impl MarginalAdjustments {
@@ -114,19 +139,26 @@ impl MarginalAdjustments {
         let fatigue = inputs
             .fatigue_decay
             .powi(i32::try_from(inputs.audience_count).unwrap_or(i32::MAX));
+        let fairness = inputs
+            .fairness_decay
+            .powi(i32::try_from(inputs.act_dispatches).unwrap_or(i32::MAX));
         let after_overlap = intrinsic_y30 * overlap;
         let after_fatigue = after_overlap * fatigue;
         let after_bridge = after_fatigue * inputs.bridge_factor;
+        let after_fairness = after_bridge * fairness;
         Self {
             intrinsic_y30,
             overlap_adjustment: after_overlap - intrinsic_y30,
             fatigue_adjustment: after_fatigue - after_overlap,
             bridge_adjustment: after_bridge - after_fatigue,
-            marginal_y30: after_bridge,
+            fairness_adjustment: after_fairness - after_bridge,
+            marginal_y30: after_fairness,
             audience_count: inputs.audience_count,
             overlap_penalty: inputs.overlap_penalty,
             fatigue_decay: inputs.fatigue_decay,
             bridge_factor: inputs.bridge_factor,
+            act_dispatches: inputs.act_dispatches,
+            fairness_decay: inputs.fairness_decay,
         }
     }
 
@@ -138,6 +170,7 @@ impl MarginalAdjustments {
         self.overlap_adjustment == 0.0
             && self.fatigue_adjustment == 0.0
             && self.bridge_adjustment == 0.0
+            && self.fairness_adjustment == 0.0
     }
 }
 
@@ -151,6 +184,8 @@ mod tests {
             overlap_penalty: penalty,
             fatigue_decay: decay,
             bridge_factor: bridge,
+            act_dispatches: 0,
+            fairness_decay: 1.0,
         }
     }
 
@@ -205,6 +240,8 @@ mod tests {
                 overlap_penalty: original.overlap_penalty,
                 fatigue_decay: original.fatigue_decay,
                 bridge_factor: original.bridge_factor,
+                act_dispatches: original.act_dispatches,
+                fairness_decay: original.fairness_decay,
             },
         );
 
@@ -249,5 +286,30 @@ mod tests {
         assert_eq!(fatigue_only.overlap_adjustment, 0.0);
         assert!((fatigue_only.fatigue_adjustment - (-5.0)).abs() < 1e-9);
         assert_eq!(fatigue_only.bridge_adjustment, 0.0);
+
+        // Fairness only: three prior dispatches for the act at 0.9 decay —
+        // 10.0 * 0.9^3 = 7.29, so the term costs 2.71 and nothing else moves.
+        let mut fair = inputs(0, 0.0, 1.0, 1.0);
+        fair.act_dispatches = 3;
+        fair.fairness_decay = 0.9;
+        let fairness_only = MarginalAdjustments::apply(10.0, fair);
+        assert_eq!(fairness_only.overlap_adjustment, 0.0);
+        assert_eq!(fairness_only.fatigue_adjustment, 0.0);
+        assert_eq!(fairness_only.bridge_adjustment, 0.0);
+        assert!((fairness_only.marginal_y30 - 7.29).abs() < 1e-9);
+        assert!((fairness_only.fairness_adjustment - (-2.71)).abs() < 1e-9);
+        assert_eq!(fairness_only.act_dispatches, 3);
+    }
+
+    /// The neutral prior, stated: an act with no dispatch history pays no
+    /// fairness cost at all — a new member has not failed to do anything.
+    #[test]
+    fn a_new_act_is_not_punished_for_never_having_dispatched() {
+        let mut fresh = inputs(0, 0.0, 1.0, 1.0);
+        fresh.act_dispatches = 0;
+        fresh.fairness_decay = 0.5;
+        let untouched = MarginalAdjustments::apply(10.0, fresh);
+        assert_eq!(untouched.fairness_adjustment, 0.0);
+        assert!((untouched.marginal_y30 - 10.0).abs() < f64::EPSILON);
     }
 }

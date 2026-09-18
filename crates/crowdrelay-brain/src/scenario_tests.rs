@@ -274,6 +274,7 @@ fn scenario_d_cost_constraint() {
             cost_budget: 5.0,
             ..Default::default()
         },
+        ..Default::default()
     };
     let selection = optimizer.select(vec![a, b.clone()]);
     assert!(!selection.do_nothing);

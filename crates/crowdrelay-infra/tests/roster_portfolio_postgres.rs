@@ -431,3 +431,114 @@ async fn a_new_cycle_replaces_the_pool_whole() -> Result<(), Box<dyn std::error:
     db.drop_database().await;
     Ok(())
 }
+
+/// One spent dispatch — the action row the fairness term counts. The decision
+/// parent exists because the actions table anchors to it.
+async fn spent_dispatch(
+    pool: &PgPool,
+    workspace_id: Uuid,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let decision_id = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO viryaos_autopilot_decisions (
+             id, workspace_id, decision_key, context, subject_kind, subject_id,
+             decision_kind, confidence_basis_points, disposition, reason,
+             input_snapshot, policy_snapshot, recommendation, trace_id
+         ) VALUES ($1,$2,$3,'growth_intelligence','workspace',$4,
+                   'request_agent_run',8000,'auto_execute','test dispatch',
+                   '{}'::jsonb,'{}'::jsonb,'{}'::jsonb,$5)",
+    )
+    .bind(decision_id)
+    .bind(workspace_id)
+    .bind(format!("decision-{decision_id}"))
+    .bind(Uuid::now_v7())
+    .bind(Uuid::now_v7())
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO viryaos_autopilot_actions (
+             id, workspace_id, decision_id, context, action_kind, subject_kind,
+             subject_id, idempotency_key, payload, status, finished_at, trace_id
+         ) VALUES ($1,$2,$3,'growth_intelligence','agent.run','workspace',
+                   $4,$5,'{}'::jsonb,'succeeded',now(),$6)",
+    )
+    .bind(Uuid::now_v7())
+    .bind(workspace_id)
+    .bind(decision_id)
+    .bind(workspace_id)
+    .bind(format!("action-{}", Uuid::now_v7()))
+    .bind(Uuid::now_v7())
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// 5.2's promise: the act whose posteriors win every week cannot hold every
+/// slot forever. A busy act's sixth dispatch pays the fairness damp — five
+/// prior actions at 0.9 decay — and the quiet act's merely-good candidate
+/// outranks its best one. A new member has not failed to do anything.
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn a_permanently_outbid_act_stops_being_outbid() -> Result<(), Box<dyn std::error::Error>> {
+    let db = DisposableDatabase::create().await?;
+    let org = organization(&db.pool, "Roster").await?;
+    let busy = workspace(&db.pool, "Busy Act", Some(org)).await?;
+    let quiet = workspace(&db.pool, "Quiet Act", Some(org)).await?;
+
+    // The busy act already spent five dispatches this week.
+    for _ in 0..5 {
+        spent_dispatch(&db.pool, busy).await?;
+    }
+
+    // Its best candidate beats the quiet act's on intrinsic value — 9.0 vs
+    // 7.0 — but pays 0.9^5 for the share it already holds: 5.31 < 7.0.
+    repository(&db.pool)
+        .replace_portfolio_pool(
+            WorkspaceId::from_uuid(busy),
+            &[entry(
+                "community-engager",
+                "r/big",
+                9.0,
+                "subreddit:big",
+                true,
+                None,
+            )],
+            OffsetDateTime::now_utc(),
+        )
+        .await?;
+    repository(&db.pool)
+        .replace_portfolio_pool(
+            WorkspaceId::from_uuid(quiet),
+            &[entry(
+                "community-engager",
+                "r/small",
+                7.0,
+                "subreddit:small",
+                true,
+                None,
+            )],
+            OffsetDateTime::now_utc(),
+        )
+        .await?;
+
+    let plan = roster_portfolio_plan(&db.pool, org)
+        .await?
+        .expect("an org with members returns a plan");
+
+    assert_eq!(plan.fairness_decay, 0.9, "unstated uses the roster default");
+    assert_eq!(plan.fairness_decay_source, "roster_default");
+    assert_eq!(
+        plan.selected[0].act, "Quiet Act",
+        "the starved act must outrank the act that already spent its week"
+    );
+    assert_eq!(plan.selected[0].act_recent_dispatches, 0);
+    assert_eq!(plan.selected[1].act, "Busy Act");
+    assert_eq!(plan.selected[1].act_recent_dispatches, 5);
+    assert!(
+        plan.selected[1].fairness_adjustment < 0.0,
+        "the busy act's slot must show what its share cost"
+    );
+
+    db.drop_database().await;
+    Ok(())
+}

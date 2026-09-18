@@ -7295,6 +7295,19 @@ paths:
         that was not worth running.
 
 
+        The rank carries the roster fairness term (5.2). Each act's
+        trailing-week dispatch count is read from its action ledger and the
+        `fairness_decay` setting (`roster_portfolio_fairness_decay`, or the
+        roster default — labeled `fairness_decay_source`) damps each further
+        candidate by that factor per dispatch already spent. The term
+        reorders; it cannot rescue: a candidate with no intrinsic value stays
+        unselected no matter how quiet its act is, and an act that has never
+        dispatched pays factor 1.0 rather than a punitive zero. What the
+        term cost each selected candidate is shown as `fairness_adjustment`
+        beside the intrinsic value, with `act_recent_dispatches` naming the
+        count that drove it.
+
+
         Admin rather than control-plane for the same reason the rest of this
         surface is: pooling several acts' candidate pools is exactly what one
         act's token must not be able to do.
