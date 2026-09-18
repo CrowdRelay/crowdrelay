@@ -460,8 +460,9 @@ impl PostgresEventRepository {
     ) -> Result<(), EventStoreError> {
         // The same validator `PublicEvent::validate` applies on the way back
         // out — a bill that stores must not poison the public event cache on
-        // the next refresh.
-        if command.acts.len() > MAX_EVENT_ACTS_PER_EVENT {
+        // the next refresh. The count bound is festival-aware, so it waits
+        // for the event row below; the per-act checks need no state.
+        if command.acts.len() > crowdrelay_domain::MAX_EVENT_ACTS_FESTIVAL {
             return Err(EventStoreError::Conflict);
         }
         let mut seen_slugs = std::collections::HashSet::with_capacity(command.acts.len());
@@ -493,9 +494,9 @@ impl PostgresEventRepository {
 
         // The bill belongs to a real show — drafts and published events take
         // acts, cancelled/completed ones are history and refuse edits.
-        let event_id = sqlx::query_scalar::<_, Uuid>(
+        let event = sqlx::query_as::<_, (Uuid, bool)>(
             r#"
-            SELECT id FROM events
+            SELECT id, festival_name IS NOT NULL FROM events
             WHERE workspace_id = $1
                 AND slug = $2
                 AND status IN ('draft', 'published')
@@ -508,6 +509,17 @@ impl PostgresEventRepository {
         .await
         .map_err(EventStoreError::from_sqlx)?
         .ok_or(EventStoreError::NotFound)?;
+        let (event_id, is_festival) = event;
+        // 6.2: a festival slot's bill runs longer than a club night's — the
+        // same bound `PublicEvent::validate` re-applies on the way out.
+        let bill_limit = if is_festival {
+            crowdrelay_domain::MAX_EVENT_ACTS_FESTIVAL
+        } else {
+            MAX_EVENT_ACTS_PER_EVENT
+        };
+        if command.acts.len() > bill_limit {
+            return Err(EventStoreError::Conflict);
+        }
 
         sqlx::query("DELETE FROM event_acts WHERE workspace_id = $1 AND event_id = $2")
             .bind(workspace_id.into_uuid())
@@ -771,6 +783,29 @@ impl PostgresEventRepository {
             trusted_workspace_id_in_transaction(&mut transaction, &self.workspace_slug).await?;
         if workspace_id != command.workspace_id {
             return Err(EventStoreError::NotFound);
+        }
+
+        // Clearing the mark while a festival-scale bill sits on the event
+        // would leave stored acts that `PublicEvent::validate` refuses on
+        // the way back out — the bill must shrink to club size first.
+        if command.festival_name.is_none() {
+            let billed = sqlx::query_scalar::<_, i64>(
+                r#"
+                SELECT count(*) FROM event_acts AS act
+                JOIN events AS event
+                  ON event.workspace_id = act.workspace_id
+                 AND event.id = act.event_id
+                WHERE event.workspace_id = $1 AND event.slug = $2
+                "#,
+            )
+            .bind(workspace_id.into_uuid())
+            .bind(command.event_slug.as_str())
+            .fetch_one(&mut *transaction)
+            .await
+            .map_err(EventStoreError::from_sqlx)?;
+            if billed > MAX_EVENT_ACTS_PER_EVENT as i64 {
+                return Err(EventStoreError::Conflict);
+            }
         }
 
         let updated = sqlx::query(

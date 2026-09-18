@@ -12329,10 +12329,27 @@ components:
     EventCrossbillAct:
       type: object
       additionalProperties: false
-      required: [slug, name]
+      required: [slug, name, position, confirmed, resolution]
       properties:
         slug: { type: string, pattern: '^[a-z0-9][a-z0-9-]{0,63}$' }
         name: { type: string, minLength: 1, maxLength: 160 }
+        position: { type: integer, minimum: 0, maximum: 999 }
+        confirmed:
+          type: boolean
+          description: >-
+            True only when the act's own workspace confirmed its billed slot —
+            the bill writer's claim alone stays `false`.
+        resolution:
+          type: string
+          enum: [own, sibling, tenant, peer, unclaimed]
+          description: >-
+            What the act resolved to at bill-write time. `own` is the caller's
+            act; `sibling` is another workspace in the caller's organization —
+            the only kind an `event_crossbill` consent edge can ever cover,
+            edges being organization-scoped. `tenant` is on-platform but
+            outside the org, `peer` is a known outside act with a
+            `place_peer_acts` identity, `unclaimed` is a name on the bill and
+            nothing more.
     SynesthesiaLeaderboardEntry:
       type: object
       additionalProperties: false
@@ -15922,10 +15939,13 @@ components:
       properties:
         acts:
           type: array
-          maxItems: 32
+          maxItems: 500
           description: >-
             The whole bill, in one list. Replace semantics: the submitted
             array becomes the event's act bill in a single transaction.
+            The write path enforces the per-event bound: an ordinary night
+            carries at most 32 acts, an event marked with `festival_name`
+            up to 500 — the request bound is the festival one.
           items:
             $ref: '#/components/schemas/EventActInput'
     EventActInput:

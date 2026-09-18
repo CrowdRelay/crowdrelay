@@ -795,7 +795,11 @@ pub async fn replace_event_acts(
             return problem.private().into_response();
         }
     };
-    if payload.acts.len() > 32 || payload.acts.iter().any(|act| !act_input_valid(act)) {
+    // The request pre-checks against the festival bound — the event's own
+    // mark decides the real cap in the write path (a club bill stays at 32).
+    if payload.acts.len() > crowdrelay_domain::MAX_EVENT_ACTS_FESTIVAL
+        || payload.acts.iter().any(|act| !act_input_valid(act))
+    {
         return Problem::bad_request(request_id_value)
             .private()
             .into_response();
