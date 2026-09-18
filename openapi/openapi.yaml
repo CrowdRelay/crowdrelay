@@ -4613,9 +4613,11 @@ paths:
       summary: Record where the promoter stands on one opportunity
       description: >
         Opens or updates a negotiation. The walk-away floor, the target and the opening ask are
-        computed here from the show's costed trip and the operator's own policy, and are frozen
-        for the life of the conversation. A withdrawal settles whatever was live. A settled
-        negotiation is never reopened by another offer.
+        computed here from the show's costed trip, the operator's own policy, the counterparty's
+        last accepted fee and the fee bands that hold at every room the booking graph ties them
+        to — none of which may lower another — and are frozen for the life of the conversation,
+        with floor_basis naming the input that bound. A withdrawal settles whatever was live. A
+        settled negotiation is never reopened by another offer.
       security:
       - adminBearer: []
       parameters:

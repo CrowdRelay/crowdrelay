@@ -18,7 +18,8 @@ use crowdrelay_application::autopilot::{
 };
 use crowdrelay_application::{IdempotencyKey, RepositoryError};
 use crowdrelay_domain::{
-    AutopilotActionId, EventId, TeamOpportunityId, WorkspaceId, negotiation::TermsState,
+    AutopilotActionId, EventId, TeamOpportunityId, WorkspaceId,
+    negotiation::{FloorBasis, TermsState},
 };
 use crowdrelay_infra::{autopilot::PostgresAutopilotRepository, config::DatabaseConfig};
 use sqlx::postgres::PgPoolOptions;
@@ -449,5 +450,234 @@ async fn a_negotiation_reads_the_show_through_the_same_statement_the_evaluator_u
             .all(|entry| entry.opportunity_id != fixture.opportunity_id)
     );
     let _ = EventId::new();
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn the_floor_cites_the_counterpartys_precedent_and_the_market()
+-> Result<(), Box<dyn std::error::Error>> {
+    // §4h-9: the floor is a `max` over the costed trip, the counterparty's own
+    // precedent and the market evidence at the rooms they book — and the row
+    // says which of them bound, so the drafted counter can cite it.
+    let fixture = fixture("terms-floor-basis").await?;
+    sqlx::query(
+        "UPDATE viryaos_team_opportunities SET contact_email='booker@promoter.example', \
+         organization='Promoter Co' WHERE workspace_id=$1 AND id=$2",
+    )
+    .bind(fixture.workspace_id.into_uuid())
+    .bind(fixture.opportunity_id.into_uuid())
+    .execute(&fixture.pool)
+    .await?;
+
+    // The precedent: an earlier conversation with the same contact email
+    // closed on the counter we sent — COALESCE prefers it over the offer as
+    // made, because the counter is what the deal actually closed at.
+    let prior_opportunity = TeamOpportunityId::new();
+    sqlx::query(
+        r#"
+        INSERT INTO viryaos_team_opportunities (
+            id, workspace_id, opportunity_kind, source, external_key, title, organization,
+            contact_email, verified_destination, fit_basis_points, confidence_basis_points,
+            currency, expected_fee_minor, estimated_cost_minor, event_starts_at, status
+        ) VALUES (
+            $1,$2,'support_slot','manual',$3,'Last years slot','Promoter Co',
+            'booker@promoter.example',true,9000,9000,'PLN',300000,120000,$4,'won'
+        )
+        "#,
+    )
+    .bind(prior_opportunity.into_uuid())
+    .bind(fixture.workspace_id.into_uuid())
+    .bind(format!("prior-{}", Uuid::now_v7().simple()))
+    .bind(fixture.now - time::Duration::days(200))
+    .execute(&fixture.pool)
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO viryaos_team_opportunity_terms (
+            workspace_id, opportunity_id, state, currency, offered_fee_minor,
+            walk_away_minor, target_minor, opening_ask_minor, countered_fee_minor,
+            responds_by, settled_at
+        ) VALUES ($1,$2,'accepted','PLN',280000,250000,290000,320000,300000,$3,$3)
+        "#,
+    )
+    .bind(fixture.workspace_id.into_uuid())
+    .bind(prior_opportunity.into_uuid())
+    .bind(fixture.now - time::Duration::days(100))
+    .execute(&fixture.pool)
+    .await?;
+
+    // The costed floor on this show is 150_000 (bare cost — no policy row is
+    // configured). The deal closed at the 280_000 offer that was accepted;
+    // the 300_000 on the row was our own unanswered counter, which was never
+    // a deal and must not become the precedent.
+    record(
+        &fixture,
+        PromoterPosition::Offer { fee_minor: 100_000 },
+        "floor-prior",
+    )
+    .await?;
+    let row = sqlx::query_as::<_, (i64, String, Option<i64>, Option<i64>)>(
+        "SELECT walk_away_minor, floor_basis, prior_fee_minor, market_floor_minor \
+         FROM viryaos_team_opportunity_terms WHERE workspace_id=$1 AND opportunity_id=$2",
+    )
+    .bind(fixture.workspace_id.into_uuid())
+    .bind(fixture.opportunity_id.into_uuid())
+    .fetch_one(&fixture.pool)
+    .await?;
+    assert_eq!(
+        row,
+        (
+            280_000,
+            "counterparty_history".to_owned(),
+            Some(280_000),
+            None
+        ),
+        "a promoter who agreed to 280 last time does not re-open below it"
+    );
+
+    // Stage two: the workspace's own booking graph ties the counterparty to a
+    // room — a promoter target on the same contact email, linked through the
+    // edge table — and three workspaces' pooled terms at that room clear a
+    // band whose p25 sits above the precedent.
+    let city_id = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO cities (id, slug, name, country_code) \
+         VALUES ($1, 'wroclaw', 'Wrocław', 'PL') \
+         ON CONFLICT (country_code, slug) DO UPDATE SET name = EXCLUDED.name",
+    )
+    .bind(city_id)
+    .execute(&fixture.pool)
+    .await?;
+    let city_id = sqlx::query_scalar::<_, Uuid>(
+        "SELECT id FROM cities WHERE country_code = 'PL' AND slug = 'wroclaw'",
+    )
+    .fetch_one(&fixture.pool)
+    .await?;
+    let venue_id = Uuid::now_v7();
+    // The test database is shared and venues are unique per (city, name), so
+    // the room gets its own name per run rather than colliding on 'Klub Ucho'.
+    let venue_name = format!("Klub Ucho {}", Uuid::now_v7().simple());
+    sqlx::query(
+        "INSERT INTO place_venues (id, city_id, name_key, display_name) \
+         VALUES ($1, $2, place_venue_key($3), $3)",
+    )
+    .bind(venue_id)
+    .bind(city_id)
+    .bind(&venue_name)
+    .execute(&fixture.pool)
+    .await?;
+    let target_id = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO viryaos_booking_targets \
+         (id, workspace_id, city_id, target_kind, display_name, contact_email) \
+         VALUES ($3,$1,$2,'promoter','Promoter Co','booker@promoter.example')",
+    )
+    .bind(fixture.workspace_id.into_uuid())
+    .bind(city_id)
+    .bind(target_id)
+    .execute(&fixture.pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO viryaos_booking_target_venues (workspace_id, target_id, venue_id) \
+         VALUES ($1,$2,$3)",
+    )
+    .bind(fixture.workspace_id.into_uuid())
+    .bind(target_id)
+    .bind(venue_id)
+    .execute(&fixture.pool)
+    .await?;
+    let night_id = Uuid::now_v7();
+    sqlx::query("INSERT INTO place_events (id, venue_id, event_date) VALUES ($1,$2,$3)")
+        .bind(night_id)
+        .bind(venue_id)
+        .bind(fixture.now.date() - time::Duration::days(30))
+        .execute(&fixture.pool)
+        .await?;
+    // Three distinct workspaces — the k-anonymity floor. p25 over
+    // [380_000, 400_000, 420_000] is 380_000.
+    for (index, amount) in [380_000_i64, 400_000, 420_000].into_iter().enumerate() {
+        let contributor = Uuid::now_v7();
+        sqlx::query("INSERT INTO workspaces (id, slug, name) VALUES ($1, $2, $3)")
+            .bind(contributor)
+            .bind(format!(
+                "terms-contributor-{index}-{}",
+                contributor.simple()
+            ))
+            .bind("Contributor")
+            .execute(&fixture.pool)
+            .await?;
+        sqlx::query(
+            "INSERT INTO place_event_contributions \
+             (place_event_id, workspace_id, kind, value) VALUES ($1,$2,'terms',$3)",
+        )
+        .bind(night_id)
+        .bind(contributor)
+        .bind(serde_json::json!({"amount_minor": amount, "currency": "PLN"}))
+        .execute(&fixture.pool)
+        .await?;
+    }
+
+    // A fresh opportunity from the same counterparty: the market floor is
+    // true for the room they work, so it — not the precedent, not the cost —
+    // is what the ladder opens on, and the row says so.
+    let next_opportunity = TeamOpportunityId::new();
+    sqlx::query(
+        r#"
+        INSERT INTO viryaos_team_opportunities (
+            id, workspace_id, opportunity_kind, source, external_key, title, organization,
+            contact_email, verified_destination, fit_basis_points, confidence_basis_points,
+            currency, expected_fee_minor, estimated_cost_minor, event_starts_at, status
+        ) VALUES (
+            $1,$2,'support_slot','manual',$3,'This years slot','Promoter Co',
+            'booker@promoter.example',true,9000,9000,'PLN',300000,150000,$4,'replied'
+        )
+        "#,
+    )
+    .bind(next_opportunity.into_uuid())
+    .bind(fixture.workspace_id.into_uuid())
+    .bind(format!("next-{}", Uuid::now_v7().simple()))
+    .bind(fixture.now + time::Duration::days(60))
+    .execute(&fixture.pool)
+    .await?;
+    fixture
+        .repository
+        .record_team_opportunity_terms(
+            fixture.workspace_id,
+            RecordTeamOpportunityTerms {
+                opportunity_id: next_opportunity,
+                position: PromoterPosition::Offer { fee_minor: 100_000 },
+                currency: "PLN".to_owned(),
+                responds_by: fixture.now + time::Duration::days(7),
+            },
+            &IdempotencyKey::parse("floor-market").expect("valid key"),
+            None,
+        )
+        .await?;
+    let row = sqlx::query_as::<_, (i64, String, Option<i64>, Option<i64>)>(
+        "SELECT walk_away_minor, floor_basis, prior_fee_minor, market_floor_minor \
+         FROM viryaos_team_opportunity_terms WHERE workspace_id=$1 AND opportunity_id=$2",
+    )
+    .bind(fixture.workspace_id.into_uuid())
+    .bind(next_opportunity.into_uuid())
+    .fetch_one(&fixture.pool)
+    .await?;
+    assert_eq!(
+        row,
+        (380_000, "market".to_owned(), Some(280_000), Some(380_000)),
+        "the lowest band that holds at every room they work binds the floor"
+    );
+
+    // And the read path hands the cycle the same citation the row froze.
+    let live = fixture
+        .repository
+        .load_live_opportunity_terms(fixture.workspace_id, fixture.now)
+        .await?;
+    let snapshot = live
+        .iter()
+        .find(|entry| entry.terms.opportunity_id == next_opportunity)
+        .ok_or("the negotiation is live")?;
+    assert_eq!(snapshot.terms.ladder.floor_basis, FloorBasis::Market);
+    assert_eq!(snapshot.terms.ladder.walk_away_minor, 380_000);
     Ok(())
 }

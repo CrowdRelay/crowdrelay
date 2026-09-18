@@ -21,6 +21,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 MIGRATION = ROOT / "migrations/0097_viryaos_team_opportunity_terms.sql"
+FLOOR_MIGRATION = ROOT / "migrations/0314_terms_floor_basis.sql"
 DOMAIN = ROOT / "crates/crowdrelay-domain/src/negotiation.rs"
 POLICY = ROOT / "crates/crowdrelay-domain/src/live_opportunities.rs"
 MODEL = ROOT / "crates/crowdrelay-application/src/autopilot/model.rs"
@@ -45,6 +46,7 @@ def strip_sql_comments(sql: str) -> str:
 class LiveOpportunityTermsContract(unittest.TestCase):
     def setUp(self) -> None:
         self.sql = strip_sql_comments(read(MIGRATION))
+        self.floor_sql = strip_sql_comments(read(FLOOR_MIGRATION))
         self.domain = read(DOMAIN)
         self.infra = read(INFRA)
 
@@ -116,6 +118,17 @@ class LiveOpportunityTermsContract(unittest.TestCase):
         # are not refusals.
         self.assertEqual(stored_reasons - declared_reasons, {"promoter_withdrew", "window_closed"})
         self.assertEqual(declared_reasons - stored_reasons, set())
+
+    def test_the_stored_floor_bases_match_the_rust_enum(self) -> None:
+        stored = re.search(r"floor_basis IN \((.*?)\)", self.floor_sql, re.DOTALL)
+        self.assertIsNotNone(stored)
+        declared = set(
+            re.findall(
+                r'Self::\w+ => "([a-z_]+)"',
+                self.domain.split("impl FloorBasis", 1)[1].split("pub fn parse", 1)[0],
+            )
+        )
+        self.assertEqual(set(re.findall(r"'([a-z_]+)'", stored.group(1))), declared)
 
     # --- the ladder ------------------------------------------------------
 

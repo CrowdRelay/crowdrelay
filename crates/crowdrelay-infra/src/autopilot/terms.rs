@@ -25,6 +25,7 @@ struct TermsRow {
     countered_fee_minor: Option<i64>,
     counter_rounds: i32,
     responds_by: OffsetDateTime,
+    floor_basis: String,
 }
 
 impl PostgresAutopilotRepository {
@@ -67,7 +68,8 @@ impl PostgresAutopilotRepository {
                     r#"
                     SELECT opportunity_id, state, currency, offered_fee_minor,
                            walk_away_minor, target_minor, opening_ask_minor,
-                           countered_fee_minor, counter_rounds, responds_by
+                           countered_fee_minor, counter_rounds, responds_by,
+                           floor_basis
                     FROM viryaos_team_opportunity_terms
                     WHERE workspace_id = $1
                       AND settled_at IS NULL
@@ -114,6 +116,8 @@ impl PostgresAutopilotRepository {
                         walk_away_minor: row.walk_away_minor,
                         target_minor: row.target_minor,
                         opening_ask_minor: row.opening_ask_minor,
+                        floor_basis: FloorBasis::parse(&row.floor_basis)
+                            .ok_or(RepositoryError::Unexpected)?,
                     },
                     countered_fee_minor: row.countered_fee_minor,
                     counter_rounds: u8::try_from(row.counter_rounds)

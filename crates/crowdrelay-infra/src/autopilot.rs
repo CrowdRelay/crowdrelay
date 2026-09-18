@@ -126,7 +126,7 @@ use crowdrelay_domain::{
     market_intelligence::{CityMarketSignal, CityMarketSignalKind, aggregate_city_market_evidence},
     merch_bundle::MerchBundleSnapshot,
     merchandising::{MerchInventorySnapshot, MerchPriceSnapshot},
-    negotiation::{TermsLadder, TermsRefusal, TermsSnapshot, TermsState},
+    negotiation::{FloorBasis, TermsLadder, TermsRefusal, TermsSnapshot, TermsState},
     objectives::{GrowthObjective, ObjectivePolicy, ObjectiveScope, assess_objective},
     outreach::{OutreachSnapshot, OutreachTargetKind},
     performance::{EffectAssessment, EffectResult},
