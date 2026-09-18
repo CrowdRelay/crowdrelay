@@ -7,7 +7,7 @@
 //! not actionable from there. FakAP remains the external health probe for
 //! API reachability; this watchdog catches silent failures FakAP cannot see.
 //!
-//! The watchdog monitors eighteen conditions. The count and this list are
+//! The watchdog monitors nineteen conditions. The count and this list are
 //! gated against `conditions()` by `test_watchdog_conditions_documented_v1.py`:
 //! it said "ten" while seven alarms went undocumented, including two criticals,
 //! and this repository has a record of concluding a live capability is missing
@@ -55,6 +55,12 @@
 //! - `executor.offline` — the API is up but no executor has heartbeated
 //!   recently, so nothing can actually execute. This is a silent failure
 //!   that FakAP (external health probe) cannot detect.
+//! - `executor.capability_unadvertised` — the registry is live but work is
+//!   parking `awaiting_executor` or cancelling `no_executor`: a capability
+//!   fell out of the advertised set while demand for it continues.
+//!   Production carried exactly this for eleven days when `team.email`'s
+//!   attestation aged past its freshness window — the heartbeat's own
+//!   fail-closed design dropped the capability, and nothing said so.
 //! - `execution.unknown_outcome` — autopilot actions are stuck in the
 //!   `unknown` execution state: their provider receipts were lost or
 //!   their outcomes cannot be established, and the receipt reconciliation
@@ -447,7 +453,7 @@ struct OpsSnapshot {
     /// It is the one loss that scales with the operator being the bottleneck,
     /// which is the state this deployment is in — the queue is the throughput
     /// limit, and the queue empties itself every three days whether or not
-    /// anybody looked. None of the other sixteen conditions watches it: they
+    /// anybody looked. None of the other eighteen conditions watches it: they
     /// watch executors, feeds, drafts and the brain, all of which are working
     /// when this happens.
     approvals_expired_7d: i64,
@@ -460,6 +466,25 @@ struct OpsSnapshot {
     hours_to_next_approval_expiry: Option<i64>,
     /// Approvals currently outstanding, whatever their deadline.
     approvals_outstanding: i64,
+    /// Queued actions parked waiting on an executor capability nobody
+    /// advertises right now.
+    ///
+    /// The park sweep writes `last_error_kind='awaiting_executor'`; an action
+    /// carrying it has already tried dispatch once and found no live
+    /// advertisement. It unparks itself when the capability returns, so a
+    /// parked row is a current need, not history.
+    awaiting_executor_actions: i64,
+    /// Actions the grace sweep cancelled in the last week with
+    /// `last_error_kind='no_executor'`. Each is work the brain decided,
+    /// nobody executed, and the system threw away — the parked state above
+    /// made permanent.
+    no_executor_cancelled_7d: i64,
+    /// Distinct action kinds across both populations — the work classes that
+    /// cannot run. The capability an action needs is derived from its payload
+    /// in Rust (`executor_capability_for_payload`); reproducing that mapping
+    /// in SQL would be a second copy to drift, so the finding names the kind
+    /// and lets the operator map it to the executor that went dark.
+    unclaimed_action_kinds: Option<String>,
     /// Drafts waiting on a Reddit session (pending or deferred).
     reddit_posting_demand: i64,
     /// Count of credential rows eligible to establish a session — the same
@@ -833,6 +858,36 @@ async fn load_snapshot(
             (SELECT count(*) FROM viryaos_autopilot_actions a
              WHERE a.workspace_id=$1 AND a.status='awaiting_approval'
             )::bigint AS approvals_outstanding,
+            -- Work waiting on a capability no live executor advertises. The
+            -- park sweep writes `last_error_kind='awaiting_executor'` and
+            -- re-parks every cycle, so the row is current demand, not a
+            -- snapshot of a moment ago.
+            (SELECT count(*) FROM viryaos_autopilot_actions a
+             WHERE a.workspace_id=$1
+               AND a.status='queued'
+               AND a.last_error_kind='awaiting_executor'
+            )::bigint AS awaiting_executor_actions,
+            -- The same need made permanent: parked past the 24-hour grace,
+            -- cancelled with `no_executor`. Bounded at a week for the same
+            -- reason the orphaned-draft count is — an alarm that can never
+            -- clear is one an operator learns to ignore.
+            (SELECT count(*) FROM viryaos_autopilot_actions a
+             WHERE a.workspace_id=$1
+               AND a.status='cancelled'
+               AND a.last_error_kind='no_executor'
+               AND a.finished_at > now() - interval '7 days'
+            )::bigint AS no_executor_cancelled_7d,
+            -- Which work classes cannot run. `action_kind` is the table's own
+            -- vocabulary; the capability each kind needs lives in Rust
+            -- (`executor_capability_for_payload`) and must not be re-mapped
+            -- here as a second copy.
+            (SELECT string_agg(DISTINCT a.action_kind, ',' ORDER BY a.action_kind)
+             FROM viryaos_autopilot_actions a
+             WHERE a.workspace_id=$1
+               AND ((a.status='queued' AND a.last_error_kind='awaiting_executor')
+                 OR (a.status='cancelled' AND a.last_error_kind='no_executor'
+                     AND a.finished_at > now() - interval '7 days'))
+            ) AS unclaimed_action_kinds,
             -- Filled in by the guarded follow-up below. The real values live
             -- in `agent_service_credentials`, which the agents service owns —
             -- on a CrowdRelay-only deployment the relation does not exist,
