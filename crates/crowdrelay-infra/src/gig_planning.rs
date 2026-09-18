@@ -18,11 +18,13 @@
 //! Folding any of those to zero would make the planner confident about things
 //! nobody measured, and a confident wrong proposal costs a band a week.
 //!
-//! # What is not gathered yet, and why that is fine
+//! # What is gathered, and what it is not
 //!
-//! `co_bill` needs the support-slot entity (4V.5) and arrives empty, which
-//! degrades correctly to a solo proposal. The planner is built to say less
-//! rather than to guess, so it runs today and improves when that lands.
+//! `co_bill` names the roster siblings a city proposal could ask onto the
+//! bill, priced by the part of their audience that is genuinely new there.
+//! The roster read skips it on purpose: a package move prices its own pair
+//! through `choose_support`, and a surfacer-relative bill would name the
+//! wrong act's crowd.
 
 use crowdrelay_domain::gig_plan::{CityOpportunity, PromoterRef, TenantIntent, VenueEvidence};
 use crowdrelay_domain::roster_plan::{CityReach, OpenSupportSlot, RosterAct, RosterOpportunity};
@@ -445,6 +447,27 @@ pub async fn city_opportunities(
     workspace_id: Uuid,
     now: OffsetDateTime,
 ) -> Result<Vec<CityOpportunity>, sqlx::Error> {
+    city_opportunities_inner(pool, workspace_id, now, true).await
+}
+
+/// The roster's per-member read. Every city's `co_bill` is relative to the
+/// workspace that surfaced it — the wrong lens for a package move, which the
+/// roster prices headliner-relative through `choose_support`. Skipping the
+/// gather keeps it honest and saves an all-pairs overlap pass per member.
+pub async fn city_opportunities_for_roster_member(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    now: OffsetDateTime,
+) -> Result<Vec<CityOpportunity>, sqlx::Error> {
+    city_opportunities_inner(pool, workspace_id, now, false).await
+}
+
+async fn city_opportunities_inner(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    now: OffsetDateTime,
+    gather_co_bill: bool,
+) -> Result<Vec<CityOpportunity>, sqlx::Error> {
     let cities = candidate_cities(pool, workspace_id, now).await?;
     // The tenant's own genre set, fetched once per pass — the "mine" half
     // of every venue's comparable-acts test, canonicalised through the
@@ -461,12 +484,110 @@ pub async fn city_opportunities(
     .bind(workspace_id)
     .fetch_one(pool)
     .await?;
+
+    // The bill half of the package matcher: who else on the roster could be
+    // asked onto it, and what their audience adds here. Only organisation
+    // siblings qualify — an act outside the roster is a peer, and a peer
+    // cannot be named because nobody consented for them. A workspace with no
+    // organisation has no siblings and every city degrades to a solo
+    // proposal, which is correct rather than incomplete.
+    let siblings = if gather_co_bill {
+        sqlx::query_as::<_, (Uuid, String)>(
+            r#"
+            SELECT sibling.id, sibling.name
+            FROM workspaces AS me
+            JOIN workspaces AS sibling
+              ON sibling.organization_id = me.organization_id
+             AND sibling.id <> me.id
+            WHERE me.id = $1
+              AND me.organization_id IS NOT NULL
+            -- Ties break on id so the same evidence produces the same bill:
+            -- a proposal that reshuffles between runs reads as a new one.
+            ORDER BY sibling.name, sibling.id
+            -- The roster's own member cap: a larger org is a label the
+            -- roster read itself never shows, and the bill cannot name
+            -- acts the rest of the system cannot see.
+            LIMIT 60
+            "#,
+        )
+        .bind(workspace_id)
+        .fetch_all(pool)
+        .await?
+    } else {
+        Vec::new()
+    };
+    // "Already agreed to be proposed" is an active event_crossbill consent
+    // *offered by the sibling*: `from` is the audience owner who acted, `to`
+    // is the beneficiary. A tenant-to-sibling edge proves only that the
+    // tenant consented — either side may approve one, so naming the sibling
+    // on its strength could announce an act that never touched the row.
+    let consented: Vec<Uuid> = if siblings.is_empty() {
+        Vec::new()
+    } else {
+        sqlx::query_scalar::<_, Uuid>(
+            r#"
+            SELECT consent.from_workspace_id
+            FROM amplification_consents AS consent
+            JOIN workspaces AS me ON me.id = $1
+            WHERE consent.organization_id = me.organization_id
+              AND consent.purpose = 'event_crossbill'
+              AND consent.status = 'active'
+              AND consent.to_workspace_id = $1
+            "#,
+        )
+        .bind(workspace_id)
+        .fetch_all(pool)
+        .await?
+    };
+    // One overlap pass measures every (tenant, sibling) pair in every
+    // candidate city — the same gate the roster read uses, so a city's
+    // proposal and the roster's answer can never disagree about a share.
+    let city_ids: Vec<Uuid> = cities.iter().map(|city| city.city_id).collect();
+    let overlaps = if siblings.is_empty() || city_ids.is_empty() {
+        Vec::new()
+    } else {
+        let mut ids: Vec<Uuid> = siblings.iter().map(|(id, _)| *id).collect();
+        ids.push(workspace_id);
+        audience_overlaps_by_city(pool, &ids, &city_ids).await?
+    };
+
     let mut opportunities = Vec::with_capacity(cities.len());
     for city in cities {
         // `None` means the city cannot be measured — no coordinates on
         // record. Handed through as `None` so the planner refuses it as
         // unmeasurable rather than inventing a zero it never counted.
         let reachable = reachable_in_city(pool, workspace_id, city.city_id).await?;
+        let co_bill = siblings
+            .iter()
+            .filter_map(|(sibling_id, sibling_name)| {
+                let overlap = overlaps.iter().find(|overlap| {
+                    overlap.city_id == city.city_id
+                        && (overlap.workspace_a == *sibling_id
+                            || overlap.workspace_b == *sibling_id)
+                        && (overlap.workspace_a == workspace_id
+                            || overlap.workspace_b == workspace_id)
+                })?;
+                // A pair row exists only when both sides reach somebody
+                // here, so the sibling's side is measured — `shared` may
+                // still be zero, which is the package worth proposing.
+                let reachable_here = if overlap.workspace_a == *sibling_id {
+                    overlap.reachable_a
+                } else {
+                    overlap.reachable_b
+                };
+                Some(crowdrelay_domain::gig_plan::CoBillAct {
+                    workspace: crowdrelay_domain::WorkspaceId::from_uuid(*sibling_id),
+                    name: sibling_name.clone(),
+                    reachable_here,
+                    // The measured intersection, carried exactly — rebuilding
+                    // it from the basis-point share would lose people to
+                    // rounding in a number a promoter reads.
+                    shared_with_tenant: overlap.shared,
+                    audience_overlap_basis_points: overlap.share_of(*sibling_id)?,
+                    consented_to_share_bills: consented.contains(sibling_id),
+                })
+            })
+            .collect();
         opportunities.push(CityOpportunity {
             city_id: crowdrelay_domain::CityId::from_uuid(city.city_id),
             city: city.city_slug.clone(),
@@ -476,9 +597,7 @@ pub async fn city_opportunities(
             has_upcoming_show: city.next_show_at.is_some(),
             venue: best_venue(pool, workspace_id, city.city_id, now, &my_genres).await?,
             promoters: promoters_in_city(pool, workspace_id, city.city_id).await?,
-            // Needs the support-slot entity (4V.5). Empty produces a solo
-            // proposal, which is correct rather than incomplete.
-            co_bill: Vec::new(),
+            co_bill,
         });
     }
     Ok(opportunities)
@@ -554,7 +673,7 @@ pub async fn roster_opportunity(
     for member in &members {
         let act_workspace: Uuid = member.get("id");
         let act_name: String = member.get("name");
-        let per_city = city_opportunities(pool, act_workspace, now).await?;
+        let per_city = city_opportunities_for_roster_member(pool, act_workspace, now).await?;
         let intent = stated_intent(&settings, act_workspace).await?;
         per_act.push((act_workspace, act_name, per_city, intent));
     }

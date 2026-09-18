@@ -217,10 +217,18 @@ pub struct PromoterContact {
 /// An act that could share the bill, and what it brings.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct CoBillAct {
+    /// The act's workspace, because a display name is not an identity — two
+    /// roster siblings can share one name, and "ask them onto the bill" has to
+    /// name a single act.
+    pub workspace: crate::WorkspaceId,
     pub name: String,
     /// Consented, reachable people this act has in this city. The number that
     /// decides whether a co-bill adds a room or splits one.
     pub reachable_here: u32,
+    /// How many of `reachable_here` are already the tenant's people here —
+    /// measured, not reconstructed from the basis-point share, so the
+    /// arithmetic a promoter reads loses nobody to rounding.
+    pub shared_with_tenant: u32,
     /// Share of the two audiences that is the same people, in basis points.
     /// High overlap is not a package — it is one show with two names on it.
     pub audience_overlap_basis_points: u16,
@@ -372,7 +380,11 @@ pub struct ReachEstimate {
     /// People who asked to hear from the band, within reach of this city.
     pub reachable: u32,
     /// Added by co-billed acts, counting only the part that is not the same
-    /// people. Union minus intersection.
+    /// people — measured per act against the tenant. Two billed acts who
+    /// share fans with *each other* still count that part twice: the sum of
+    /// pairwise additions is an upper bound on the union, which is the honest
+    /// direction to err — a package promising less than it could reach would
+    /// undersell the night.
     pub added_by_co_bill: u32,
     /// What the room itself has historically drawn. `None` when unmeasured —
     /// and the whole estimate is weaker when this is absent, which the basis
@@ -594,11 +606,15 @@ pub fn plan_gig(
         if !act.consented_to_share_bills {
             continue;
         }
-        let overlapping = u32::try_from(
-            u64::from(act.reachable_here) * u64::from(act.audience_overlap_basis_points) / 10_000,
-        )
-        .unwrap_or(act.reachable_here);
-        let adds = act.reachable_here.saturating_sub(overlapping);
+        // Past the pairing ceiling the two audiences are one audience — the
+        // same rule the roster's support picker applies, because a bill that
+        // adds nobody new just splits a door.
+        if act.audience_overlap_basis_points
+            > crate::roster_plan::PAIRING_OVERLAP_CEILING_BASIS_POINTS
+        {
+            continue;
+        }
+        let adds = act.reachable_here.saturating_sub(act.shared_with_tenant);
         if adds == 0 {
             continue;
         }

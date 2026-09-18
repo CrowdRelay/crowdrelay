@@ -381,3 +381,223 @@ async fn genre_alias_seed_resolves_spellings() -> Result<(), Box<dyn std::error:
     database.drop_database().await;
     result
 }
+
+/// §N.4 — the package matcher: a consented roster sibling is named on the
+/// bill, priced by the part of its audience that is genuinely new in that
+/// city. Union minus intersection, per city, against real rows — every number
+/// the proposal quotes is a join that could silently measure the wrong thing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn a_consented_sibling_is_named_on_the_bill_with_its_arithmetic()
+-> Result<(), Box<dyn std::error::Error>> {
+    let database = DisposableDatabase::create().await?;
+    let result = run_package(&database.pool).await;
+    database.drop_database().await;
+    result
+}
+
+async fn run_package(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
+    use crowdrelay_domain::gig_plan::{Reason, TenantIntent, plan_gig};
+    use crowdrelay_infra::gig_planning::city_opportunities;
+
+    let org = sqlx::query_scalar::<_, Uuid>(
+        "INSERT INTO organizations (slug, name) VALUES ('label-n4', 'Label N4') RETURNING id",
+    )
+    .fetch_one(pool)
+    .await?;
+    let member = |name: &str| {
+        let pool = pool.clone();
+        let name = name.to_owned();
+        async move {
+            let id = Uuid::now_v7();
+            sqlx::query(
+                "INSERT INTO workspaces (id, slug, name, organization_id)
+                 VALUES ($1, $2, $3, $4)",
+            )
+            .bind(id)
+            .bind(format!("ws-{name}"))
+            .bind(&name)
+            .bind(org)
+            .execute(&pool)
+            .await?;
+            Ok::<Uuid, Box<dyn std::error::Error>>(id)
+        }
+    };
+    let head = member("headliner").await?;
+    let support = member("support").await?;
+    let third = member("third-act").await?;
+    let _quiet = member("quiet-act").await?;
+
+    let city = sqlx::query_scalar::<_, Uuid>(
+        "INSERT INTO cities (slug, name, country_code, latitude, longitude)
+         VALUES ('wroclaw-n4', 'wroclaw-n4', 'PL', 51.1, 17.0) RETURNING id",
+    )
+    .fetch_one(pool)
+    .await?;
+    let reachable = |ws: Uuid, email: &str| {
+        let pool = pool.clone();
+        let email = email.to_owned();
+        async move {
+            let fan = sqlx::query_scalar::<_, Uuid>(
+                "INSERT INTO fans (workspace_id, normalized_email, status)
+                 VALUES ($1, $2, 'active') RETURNING id",
+            )
+            .bind(ws)
+            .bind(&email)
+            .fetch_one(&pool)
+            .await?;
+            sqlx::query(
+                "INSERT INTO fan_consents
+                    (workspace_id, fan_id, purpose, granted, policy_version, source, recorded_at)
+                 VALUES ($1, $2, 'marketing', true, 'v1', 'signup', now())",
+            )
+            .bind(ws)
+            .bind(fan)
+            .execute(&pool)
+            .await?;
+            sqlx::query(
+                "INSERT INTO fan_location_preferences
+                    (workspace_id, fan_id, city_id, radius_km, nearby_gigs_enabled)
+                 VALUES ($1, $2, $3, 50, true)",
+            )
+            .bind(ws)
+            .bind(fan)
+            .bind(city)
+            .execute(&pool)
+            .await?;
+            sqlx::query(
+                "INSERT INTO fan_city_interests (workspace_id, fan_id, city_id)
+                 VALUES ($1, $2, $3) ON CONFLICT DO NOTHING",
+            )
+            .bind(ws)
+            .bind(fan)
+            .bind(city)
+            .execute(&pool)
+            .await?;
+            Ok::<(), Box<dyn std::error::Error>>(())
+        }
+    };
+    // The headliner reaches sixty — over the planner's floor. The support
+    // reaches four, two of them the same people; a third sibling reaches its
+    // own three but never consented; a fourth reaches nobody here at all.
+    for index in 0..60 {
+        reachable(head, &format!("head{index}@example.com")).await?;
+    }
+    for index in 0..2 {
+        reachable(support, &format!("head{index}@example.com")).await?;
+        reachable(support, &format!("own{index}@example.com")).await?;
+    }
+    for index in 0..3 {
+        reachable(third, &format!("third{index}@example.com")).await?;
+    }
+    // A room the headliner has played, and somebody to write to.
+    sqlx::query(
+        "INSERT INTO events (workspace_id, city_id, slug, title, venue, starts_at, status)
+         VALUES ($1, $2, 'n4-show', 'n4-show', 'Klub N4', now() - interval '40 days', 'completed')",
+    )
+    .bind(head)
+    .bind(city)
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO viryaos_booking_targets
+            (workspace_id, city_id, target_kind, display_name, contact_email,
+             relationship_score, capacity)
+         VALUES ($1, $2, 'promoter', 'Anna', 'anna@example.com', 70, 300)",
+    )
+    .bind(head)
+    .bind(city)
+    .execute(pool)
+    .await?;
+    // The consent that makes the support askable: an active event_crossbill
+    // *offered by the support* — `from` is the audience owner who acted. A
+    // consent in the other direction proves only that the headliner
+    // consented, which is exactly what `third-act` carries: an active edge
+    // from head to it, plus a revoked one in the agreeing direction. Neither
+    // makes it askable — the bill may measure it but never name it.
+    sqlx::query(
+        "INSERT INTO amplification_consents
+            (organization_id, from_workspace_id, to_workspace_id, purpose,
+             status, approved_by, approved_at)
+         VALUES ($1, $2, $3, 'event_crossbill', 'active', 'support', now())",
+    )
+    .bind(org)
+    .bind(support)
+    .bind(head)
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO amplification_consents
+            (organization_id, from_workspace_id, to_workspace_id, purpose,
+             status, approved_by, approved_at)
+         VALUES ($1, $2, $3, 'event_crossbill', 'active', 'label', now())",
+    )
+    .bind(org)
+    .bind(head)
+    .bind(third)
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO amplification_consents
+            (organization_id, from_workspace_id, to_workspace_id, purpose,
+             status, approved_by, approved_at, revoked_at, revoke_reason)
+         VALUES ($1, $2, $3, 'event_crossbill', 'revoked', 'label', now(),
+                 now(), 'asked to be left off bills')",
+    )
+    .bind(org)
+    .bind(third)
+    .bind(head)
+    .execute(pool)
+    .await?;
+
+    let opportunities = city_opportunities(pool, head, OffsetDateTime::now_utc()).await?;
+    let wro = opportunities
+        .iter()
+        .find(|city| city.city == "wroclaw-n4")
+        .ok_or("the city the headliner can play was not considered")?;
+
+    let support_entry = wro
+        .co_bill
+        .iter()
+        .find(|act| act.name == "support")
+        .ok_or("a consented sibling with reach was not a co-bill candidate")?;
+    assert_eq!(support_entry.reachable_here, 4);
+    assert_eq!(
+        support_entry.audience_overlap_basis_points, 5_000,
+        "two of the support's four are the headliner's people too"
+    );
+    assert!(support_entry.consented_to_share_bills);
+
+    let third_entry = wro
+        .co_bill
+        .iter()
+        .find(|act| act.name == "third-act")
+        .ok_or("a sibling with reach and no consent was dropped instead of flagged")?;
+    assert!(
+        !third_entry.consented_to_share_bills,
+        "an active edge the sibling never offered, and a revoked one it did,          still must not make it askable"
+    );
+    assert!(
+        wro.co_bill.iter().all(|act| act.name != "quiet-act"),
+        "a sibling reaching nobody here is absent — unmeasured, not a zero"
+    );
+
+    // The proposal: acts named, city named, the room's size on the evidence,
+    // and the arithmetic — four reached, two already ours, two added.
+    let plan = plan_gig(wro, TenantIntent::BookingShows).expect("a route, a room and a bill");
+    assert_eq!(plan.city, "wroclaw-n4");
+    assert_eq!(plan.invite_to_bill, ["support".to_owned()]);
+    assert_eq!(
+        plan.reach.added_by_co_bill, 2,
+        "union minus intersection: four reached, two already ours"
+    );
+    assert!(
+        plan.reasons.iter().any(|reason| matches!(
+            reason,
+            Reason::CoBillAddsAudience { act, adds_reachable }
+                if act == "support" && *adds_reachable == 2
+        )),
+        "the arithmetic behind the bill never reached the proposal"
+    );
+    Ok(())
+}
