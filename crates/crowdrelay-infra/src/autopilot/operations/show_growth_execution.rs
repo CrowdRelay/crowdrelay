@@ -474,16 +474,15 @@ async fn execute_first_party_growth_campaign(
                 })
             }
         }
+        // The offer contract used to live here, inside the filter. It is not a
+        // filter: `AudienceFilter` denies unknown fields, so every preview of a
+        // merch segment answered 503 and no send could count its audience. The
+        // words moved to the campaign's `content`, which is where the rest of
+        // this file already puts what a writer must obey.
         ShowGrowthLever::MerchBuyerOffer => json!({
             "statuses": ["active"],
             "purchased_event_slugs": [event.0.clone()],
-            "marketing_consent": true,
-            "offer_contract": {
-                "audience": "ticket_buyers",
-                "objective": "convert existing show intent into merch revenue before the event",
-                "fulfilment": "use_current_commerce_options_only",
-                "never_promise_event_pickup_without_checkout_support": true
-            }
+            "marketing_consent": true
         }),
         ShowGrowthLever::HighIntentLastMile => json!({
             "statuses": ["active"],
@@ -639,6 +638,19 @@ async fn execute_first_party_growth_campaign(
                     "prefer_one_primary_cta_and_one_secondary_cta",
                     "never fabricate follower_or_stream_numbers"
                 ]
+            }
+        }),
+        ShowGrowthLever::MerchBuyerOffer => json!({
+            "event_id": event_id,
+            "lever": lever.as_str(),
+            "ticket_url": event.4,
+            "venue": event.3,
+            "managed_by": "viryaos_show_growth",
+            "offer_contract": {
+                "audience": "ticket_buyers",
+                "objective": "convert existing show intent into merch revenue before the event",
+                "fulfilment": "use_current_commerce_options_only",
+                "never_promise_event_pickup_without_checkout_support": true
             }
         }),
         _ => json!({

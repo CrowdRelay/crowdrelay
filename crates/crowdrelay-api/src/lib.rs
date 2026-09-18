@@ -1186,6 +1186,31 @@ impl Problem {
         }
     }
 
+    /// A stored audience segment whose filter this build cannot read.
+    ///
+    /// Deliberately not a 503. Nothing is temporarily unavailable and a retry
+    /// changes nothing: the row holds a field the filter type does not have, or
+    /// a value it rejects, and it will hold the same one in a minute. The
+    /// generic dependency-unavailable problem sent the console a sentence about
+    /// the backend possibly "not supporting this segment", which is the one
+    /// thing that was never true — the backend stores the segment and cannot
+    /// parse it.
+    fn segment_filter_unreadable(request_id: Option<String>) -> Self {
+        Self {
+            r#type: "https://crowdrelay.dev/problems/segment-filter-unreadable",
+            title: "Segment filter cannot be read",
+            status: StatusCode::UNPROCESSABLE_ENTITY.as_u16(),
+            detail: std::borrow::Cow::Borrowed(
+                "This segment's stored filter carries a field this build does not know, or a \
+                 value it rejects, so its audience cannot be counted. The server log names the \
+                 field; the segment has to be rewritten before it can be previewed or sent to.",
+            ),
+            cache_control: "no-store",
+            retry_after_seconds: None,
+            request_id,
+        }
+    }
+
     fn payload_too_large(request_id: Option<String>) -> Self {
         Self {
             r#type: "https://crowdrelay.dev/problems/payload-too-large",

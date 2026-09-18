@@ -572,9 +572,34 @@ pub async fn preview_segment(
             return unavailable(&headers);
         }
     };
+    // Two different failures, both of which used to return an unexplained 503
+    // and log nothing at all — so a segment that could never be previewed
+    // looked exactly like a database that was briefly down.
     let filter = match serde_json::from_value::<AudienceFilter>(segment.filter.clone()) {
         Ok(value) if value.validate() => value,
-        _ => return unavailable(&headers),
+        Ok(_) => {
+            tracing::warn!(
+                slug,
+                "audience segment filter parsed but failed validation; refusing to preview"
+            );
+            return Problem::segment_filter_unreadable(request_id(&headers))
+                .private()
+                .into_response();
+        }
+        Err(error) => {
+            // The serde error names the offending field, which is the whole
+            // diagnosis: `AudienceFilter` denies unknown fields, so a writer
+            // that puts anything else in the filter breaks every preview of
+            // the segments it wrote.
+            tracing::warn!(
+                %error,
+                slug,
+                "audience segment filter could not be read; refusing to preview"
+            );
+            return Problem::segment_filter_unreadable(request_id(&headers))
+                .private()
+                .into_response();
+        }
     };
     let result = match segment_members(&state, workspace_id, &filter, limit).await {
         Ok((total, sample)) => SegmentPreview {
