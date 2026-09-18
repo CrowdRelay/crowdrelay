@@ -67,6 +67,7 @@ check: fmt lint test
     python3 scripts/test_sql_scalar_types_v1.py
     python3 scripts/test_sql_columns_v1.py
     python3 scripts/test_alert_policy_v1.py
+    python3 scripts/test_audience_segment_filters_v1.py
     python3 scripts/test_operator_reachability_v1.py
     python3 scripts/test_bluegreen_recovery_v1.py
     python3 scripts/check-postgres-major.py
