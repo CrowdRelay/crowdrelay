@@ -186,7 +186,7 @@ where
                         .repository
                         .load_event_campaign_snapshots(self.workspace_id, now)
                         .await?;
-                    for snapshot in snapshots {
+                    for snapshot in &snapshots {
                         if let Some(candidate) =
                             campaign_lifecycle_candidate(snapshot, &policy, now)?
                         {

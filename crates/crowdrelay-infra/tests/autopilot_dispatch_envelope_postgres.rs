@@ -575,3 +575,117 @@ async fn signal_push_audience_counts_what_the_send_would_reach()
     );
     Ok(())
 }
+
+/// O.3: the campaign row carries the approved words, and a draftless action
+/// is refused rather than sending copy nobody read.
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn an_audience_campaign_stores_the_approved_copy_and_a_draftless_one_refuses()
+-> Result<(), Box<dyn std::error::Error>> {
+    let f = setup().await?;
+    let now = OffsetDateTime::now_utc();
+    let suffix = f.workspace_id.into_uuid().simple().to_string();
+
+    sqlx::query(
+        "INSERT INTO ecosystem_feature_flags (workspace_id, key, enabled)
+         VALUES ($1, 'communication_campaigns_enabled', true)",
+    )
+    .bind(f.workspace_id.into_uuid())
+    .execute(&f.pool)
+    .await?;
+
+    let event_id = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO events (id, workspace_id, slug, title, venue, timezone, starts_at, status, published_at, ticket_url)
+         VALUES ($1, $2, $3, 'Virya live', 'Klub Testowy', 'Europe/Warsaw', $4, 'published', $5, 'https://tickets.test/virya')",
+    )
+    .bind(event_id)
+    .bind(f.workspace_id.into_uuid())
+    .bind(format!("aud-copy-{suffix}"))
+    .bind(now + time::Duration::days(30))
+    .bind(now - time::Duration::days(2))
+    .execute(&f.pool)
+    .await?;
+
+    let action_id = seed_outcome_action(
+        &f,
+        "audience.campaign.request",
+        json!({
+            "kind": "request_audience_campaign",
+            "event_id": event_id,
+            "phase": "announcement",
+            "template_key": "event.announcement.v1",
+            "audience_size": null,
+            "audience_basis": "every consented fan in the event's city",
+            "draft": {
+                "subject": "Virya live — 18 października, Klub Testowy",
+                "body": "Cześć,\n\nVirya live — 18 października, Klub Testowy.\n\nBilety: https://tickets.test/virya\n\nDo zobaczenia.\n\n- VIRYA",
+            },
+        }),
+        now,
+    )
+    .await?;
+
+    let claimed = f
+        .repository
+        .claim_due_autonomous_actions(f.workspace_id, 8, now)
+        .await?;
+    let action = claimed
+        .iter()
+        .find(|a| a.id.into_uuid() == action_id)
+        .expect("the queued campaign action must be claimable");
+    f.repository
+        .execute_action(f.workspace_id, action, now)
+        .await?;
+
+    let (subject, body) = sqlx::query_as::<_, (String, String)>(
+        "SELECT content->>'subject', content->>'body'
+         FROM communication_campaigns WHERE workspace_id = $1",
+    )
+    .bind(f.workspace_id.into_uuid())
+    .fetch_one(&f.pool)
+    .await?;
+    assert_eq!(subject, "Virya live — 18 października, Klub Testowy");
+    assert!(body.contains("Bilety: https://tickets.test/virya"));
+
+    let due = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*)::bigint FROM outbox_events
+         WHERE workspace_id = $1 AND event_type = 'communication.campaign_due'",
+    )
+    .bind(f.workspace_id.into_uuid())
+    .fetch_one(&f.pool)
+    .await?;
+    assert_eq!(due, 1, "the campaign dispatch is due exactly once");
+
+    // A payload with no copy — a row queued before drafts existed — refuses
+    // rather than letting the mailer invent the words.
+    let bare_action = seed_outcome_action(
+        &f,
+        "audience.campaign.request",
+        json!({
+            "kind": "request_audience_campaign",
+            "event_id": event_id,
+            "phase": "last_call",
+            "template_key": "event.last_call.v1",
+        }),
+        now,
+    )
+    .await?;
+    let claimed = f
+        .repository
+        .claim_due_autonomous_actions(f.workspace_id, 8, now)
+        .await?;
+    let action = claimed
+        .iter()
+        .find(|a| a.id.into_uuid() == bare_action)
+        .expect("the draftless campaign action must be claimable");
+    let refused = f
+        .repository
+        .execute_action(f.workspace_id, action, now)
+        .await;
+    assert!(
+        refused.is_err(),
+        "a campaign without the approved copy refuses instead of shipping template-only words"
+    );
+    Ok(())
+}

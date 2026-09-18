@@ -1,15 +1,36 @@
 //! Revalidated execution helpers for deterministic action intents.
 use super::*;
 
+/// The payload fields an audience campaign needs at send time — the
+/// approval-side audience facts stay on the action for the briefing only.
+pub(in crate::autopilot) struct AudienceCampaignOrder<'a> {
+    pub event_id: EventId,
+    pub phase: crowdrelay_domain::campaign_lifecycle::EventCampaignPhase,
+    pub template_key: &'a str,
+    pub draft: &'a crowdrelay_domain::campaign_lifecycle::EventCampaignCopy,
+}
+
 pub(in crate::autopilot) async fn execute_audience_campaign(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     workspace_id: WorkspaceId,
     action_id: crowdrelay_domain::AutopilotActionId,
-    event_id: EventId,
-    phase: crowdrelay_domain::campaign_lifecycle::EventCampaignPhase,
-    template_key: &str,
+    order: AudienceCampaignOrder<'_>,
     now: OffsetDateTime,
 ) -> Result<(), RepositoryError> {
+    let AudienceCampaignOrder {
+        event_id,
+        phase,
+        template_key,
+        draft,
+    } = order;
+    // O.3: the copy is approved text, not a template key the mailer renders.
+    // A row queued before the payload carried one — or one whose draft was
+    // lost — is refused rather than sending words nobody approved.
+    if draft.subject.trim().is_empty() || draft.body.trim().is_empty() {
+        return Err(RepositoryError::ConflictBecause(
+            "audience campaign refused: this action carries no copy — it was queued              before the draft was composed at approval time, and nothing may write one              on the tenant's behalf now",
+        ));
+    }
     let feature=sqlx::query_scalar::<_,bool>("SELECT COALESCE((SELECT enabled FROM ecosystem_feature_flags WHERE workspace_id=$1 AND key='communication_campaigns_enabled'),false)")
         .bind(workspace_id.into_uuid()).fetch_one(&mut **tx).await.map_err(map_sqlx)?;
     if !feature {
@@ -57,13 +78,17 @@ pub(in crate::autopilot) async fn execute_audience_campaign(
     .map_err(map_sqlx)?;
     let campaign=sqlx::query_as::<_,(Uuid,String,Option<OffsetDateTime>)>(r#"
       INSERT INTO communication_campaigns(workspace_id,segment_id,slug,name,channel,template_key,content)
-      VALUES($1,$2,$3,$4,'email',$5,jsonb_build_object('event_id',$6::uuid,'managed_by','viryaos'))
+      VALUES($1,$2,$3,$4,'email',$5,jsonb_build_object('event_id',$6::uuid,'managed_by','viryaos','subject',$7::text,'body',$8::text))
       ON CONFLICT(workspace_id,slug) DO UPDATE SET template_key=communication_campaigns.template_key
       RETURNING id,status,scheduled_at
-    "#).bind(workspace_id.into_uuid()).bind(segment_id).bind(&campaign_slug).bind(format!("{} · {}",row.1,phase_key)).bind(template_key).bind(event_id.into_uuid()).fetch_one(&mut **tx).await.map_err(map_sqlx)?;
+    "#).bind(workspace_id.into_uuid()).bind(segment_id).bind(&campaign_slug).bind(format!("{} · {}",row.1,phase_key)).bind(template_key).bind(event_id.into_uuid()).bind(&draft.subject).bind(&draft.body).fetch_one(&mut **tx).await.map_err(map_sqlx)?;
     if campaign.1 == "draft" {
         // The outbox row carries the action's trace spine — `ops/trace` shows
         // the decision → action → campaign hop, not a context-free orphan.
+        // The outbox payload stays reference-only — the mailer reads the
+        // approved copy off `communication_campaigns.content` by campaign_id.
+        // Embedding the text here would carry message content through every
+        // outbox mirror the reference contract deliberately keeps clean.
         let outbox_id=sqlx::query_scalar::<_,Uuid>(r#"
           INSERT INTO outbox_events(workspace_id,event_type,event_version,payload,available_at,trace_id,causation_id,action_id)
           SELECT $1,'communication.campaign_due',1,jsonb_build_object('campaign_id',$2::uuid,'campaign_slug',$3::text,'channel','email','segment_id',$4::uuid,'template_key',$5::text,'send_evidence',jsonb_build_object('source_id',$7::text,'recipient_reason',$8::text)),$6,at.trace_id,at.causation_id,at.id
