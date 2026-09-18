@@ -7250,6 +7250,19 @@ paths:
         beside them are the queues' real depth.
 
 
+        `headline` is the roster's own North Star (5.12): "every act grows,
+        nobody is neglected" is a distribution, so the page leads with the
+        weakest act's growth across the window — `weakest_act_*` — and the
+        summed `total_growth` is the second line. Each act's
+        `north_star_delta` is the same number the headline reads, so the
+        list and the headline cannot disagree. An act with fewer than two
+        readings is unmeasurable, not zero: excluded from the minimum and
+        counted in `acts_without_signal`, because a new member has not
+        failed to grow. This is the metric the portfolio's fairness knob is
+        legible against — raising `roster_portfolio_fairness_decay` should
+        move it.
+
+
         Admin rather than control-plane for the same reason the rest of this
         surface is: the queues being read belong to the organisation, and a
         workspace token here would be one act reading its labelmates' queues.

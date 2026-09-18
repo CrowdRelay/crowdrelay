@@ -115,6 +115,35 @@ pub struct ActBrief {
     /// The tenant-local day the act's newest briefing speaks for. `None`
     /// means none has ever issued — stated as null, never as a zero date.
     pub latest_briefing_date: Option<Date>,
+    /// The act's North Star growth across the observed window — newest
+    /// reading minus oldest. `None` under two readings: a delta that cannot
+    /// be measured is absent, not zero. The roster headline reads this —
+    /// the weakest act is a fact the page states, not a ranking it implies.
+    pub north_star_delta: Option<i64>,
+}
+
+/// The roster's own North Star (5.12): "every act grows, nobody is
+/// neglected" is a distribution, so the headline is the weakest act's
+/// growth and the total is the second line. A metric the front page leads
+/// with cannot be satisfied by concentrating effort the way a term inside
+/// the optimizer can — and it is what makes the fairness knob legible:
+/// raising `roster_portfolio_fairness_decay` should move this number.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct RosterHeadline {
+    /// The act with the smallest window delta. `None` when no member has
+    /// two readings to subtract — a young roster has no weakest act yet,
+    /// and claiming one would be a ranking invented from noise.
+    pub weakest_act_id: Option<WorkspaceId>,
+    pub weakest_act_name: Option<String>,
+    pub weakest_act_growth: Option<i64>,
+    /// Every measured act's delta summed — the second line, not the
+    /// headline. `None` when nothing is measurable; summing only the
+    /// measured acts is honest because `acts_without_signal` counts the
+    /// rest rather than folding them into a quiet zero.
+    pub total_growth: Option<i64>,
+    /// Members without two North Star readings — excluded from the minimum
+    /// and counted, so an unreadable act is named rather than skipped.
+    pub acts_without_signal: u32,
 }
 
 /// The page: one organisation's acts, each with its week.
@@ -124,6 +153,10 @@ pub struct RosterWeeklyBrief {
     #[serde(with = "time::serde::rfc3339")]
     pub generated_at: OffsetDateTime,
     pub window_days: u32,
+    /// The roster's North Star — see [`RosterHeadline`]. Computed from the
+    /// same per-act deltas the rows carry, so the headline and the list can
+    /// never disagree.
+    pub headline: RosterHeadline,
     /// Ordered for a top-down read — see [`compose`]. An organisation with
     /// no member workspaces is an empty list, which is the honest page:
     /// there is nobody's week to show.
@@ -144,11 +177,47 @@ pub fn compose(
     mut acts: Vec<ActBrief>,
 ) -> RosterWeeklyBrief {
     acts.sort_by(|left, right| order_key(left).cmp(&order_key(right)));
+    let headline = headline(&acts);
     RosterWeeklyBrief {
         organization_id,
         generated_at,
         window_days: WINDOW_DAYS,
+        headline,
         acts,
+    }
+}
+
+/// The minimum is taken over acts that have a delta at all — an act with
+/// one reading is unmeasurable, not zero, and folding it in would make a
+/// brand-new member the "weakest" on every page it ever appears on.
+fn headline(acts: &[ActBrief]) -> RosterHeadline {
+    let weakest = acts
+        .iter()
+        .filter(|act| act.north_star_delta.is_some())
+        .min_by(|left, right| {
+            left.north_star_delta
+                .cmp(&right.north_star_delta)
+                .then_with(|| left.name.cmp(&right.name))
+                .then_with(|| {
+                    left.workspace_id
+                        .into_uuid()
+                        .cmp(&right.workspace_id.into_uuid())
+                })
+        });
+    RosterHeadline {
+        weakest_act_id: weakest.map(|act| act.workspace_id),
+        weakest_act_name: weakest.map(|act| act.name.clone()),
+        weakest_act_growth: weakest.and_then(|act| act.north_star_delta),
+        total_growth: acts
+            .iter()
+            .filter_map(|act| act.north_star_delta)
+            .reduce(i64::saturating_add),
+        acts_without_signal: u32::try_from(
+            acts.iter()
+                .filter(|act| act.north_star_delta.is_none())
+                .count(),
+        )
+        .unwrap_or(u32::MAX),
     }
 }
 
@@ -194,6 +263,7 @@ mod tests {
             slipped,
             slipped_items: Vec::new(),
             latest_briefing_date: None,
+            north_star_delta: None,
         }
     }
 
@@ -207,6 +277,40 @@ mod tests {
         let brief = compose(Uuid::now_v7(), datetime!(2026-10-05 09:00 UTC), acts);
         let names: Vec<&str> = brief.acts.iter().map(|a| a.name.as_str()).collect();
         assert_eq!(names, ["busy-act", "drifting-act", "quiet-act"]);
+    }
+
+    /// 5.12: the headline is the distribution, not the level. The weakest
+    /// measured act leads; ties break by name so two reads cannot disagree;
+    /// an act under two readings is counted unmeasurable rather than
+    /// treated as zero growth — a new member has not failed to grow.
+    #[test]
+    fn the_headline_is_the_weakest_act_not_the_total() {
+        let mut flat = act("flat-act", 0, 0, false);
+        flat.north_star_delta = Some(0);
+        let mut rising = act("rising-act", 0, 0, false);
+        rising.north_star_delta = Some(50);
+        let unreadable = act("new-act", 0, 0, false);
+
+        let brief = compose(
+            Uuid::now_v7(),
+            datetime!(2026-10-05 09:00 UTC),
+            vec![rising, flat, unreadable],
+        );
+        assert_eq!(brief.headline.weakest_act_name.as_deref(), Some("flat-act"));
+        assert_eq!(brief.headline.weakest_act_growth, Some(0));
+        assert_eq!(brief.headline.total_growth, Some(50));
+        assert_eq!(brief.headline.acts_without_signal, 1);
+
+        // Nobody measurable is nobody at all — the headline is absent,
+        // not a ranking invented from silence.
+        let quiet = compose(
+            Uuid::now_v7(),
+            datetime!(2026-10-05 09:00 UTC),
+            vec![act("a", 0, 0, false), act("bb", 0, 0, false)],
+        );
+        assert_eq!(quiet.headline.weakest_act_id, None);
+        assert_eq!(quiet.headline.total_growth, None);
+        assert_eq!(quiet.headline.acts_without_signal, 2);
     }
 
     #[test]

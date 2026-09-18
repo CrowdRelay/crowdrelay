@@ -228,6 +228,15 @@ pub async fn act_briefs(
         )
         .await?;
         let days_observed = u32::try_from(samples.len()).unwrap_or(u32::MAX);
+        // The series arrives newest-first; growth is the newest reading
+        // minus the oldest, and under two readings it is unmeasurable —
+        // absent, not zero, so a young act is not the roster's "weakest"
+        // for want of data.
+        let north_star_delta = samples
+            .first()
+            .zip(samples.last())
+            .filter(|_| samples.len() >= 2)
+            .map(|(newest, oldest)| (newest.value - oldest.value) as i64);
         let posture = crowdrelay_brain::self_assessment::assess(samples);
 
         let (pending_total, pending) = pending_by_act
@@ -248,6 +257,7 @@ pub async fn act_briefs(
             slipped: clamp(slipped_total),
             slipped_items,
             latest_briefing_date: briefing_dates.get(&member.id).copied(),
+            north_star_delta,
         });
     }
     Ok(acts)
