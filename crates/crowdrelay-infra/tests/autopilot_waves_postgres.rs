@@ -383,6 +383,173 @@ async fn only_active_non_filler_releases_anchor_waves() -> Result<(), Box<dyn st
     Ok(())
 }
 
+/// A lead that already answered is served, not fresh: the eligible count stops
+/// promising it, and the send lock refuses the pitch outright — the reply may
+/// have landed after the opportunity was seeded, so the check lives at
+/// dispatch, not only at seed time.
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn a_served_lead_cannot_be_re_pitched() -> Result<(), Box<dyn std::error::Error>> {
+    let fixture = fixture("wave-served").await?;
+    // Three of the four press targets answered: one yes, one no, one reply the
+    // classifier has not read yet. All three are served — only the silent one
+    // is still a lead.
+    for (name, disposition) in [
+        ("Press 0", "positive"),
+        ("Press 1", "declined"),
+        ("Press 2", "received"),
+    ] {
+        sqlx::query(
+            "UPDATE viryaos_outreach_targets
+             SET last_reply_at=now(), last_reply_disposition=$3
+             WHERE workspace_id=$1 AND display_name=$2",
+        )
+        .bind(fixture.workspace_id.into_uuid())
+        .bind(name)
+        .bind(disposition)
+        .execute(&fixture.pool)
+        .await?;
+    }
+
+    let anchors = fixture
+        .repository
+        .load_outreach_wave_anchors(fixture.workspace_id, fixture.now)
+        .await?;
+    let press = anchors
+        .iter()
+        .find(|anchor| {
+            anchor.anchor.id() == fixture.event_id
+                && anchor.target_kind == OutreachTargetKind::Press
+        })
+        .ok_or("the published show is still a press-wave anchor")?;
+    assert_eq!(
+        press.eligible_targets, 1,
+        "only the lead that never answered still counts"
+    );
+
+    // And the dispatch lock refuses the served lead even though a stale
+    // opportunity row points at it — the gate is the last word.
+    let served_target = sqlx::query_scalar::<_, Uuid>(
+        "SELECT id FROM viryaos_outreach_targets WHERE workspace_id=$1 AND display_name='Press 0'",
+    )
+    .bind(fixture.workspace_id.into_uuid())
+    .fetch_one(&fixture.pool)
+    .await?;
+    let opportunity_id = sqlx::query_scalar::<_, Uuid>(
+        "INSERT INTO viryaos_outreach_opportunities (
+             workspace_id, target_id, source, subject_kind, subject_key, template_key,
+             relevance_basis_points, confidence_basis_points, observed_at, expires_at
+         ) VALUES ($1,$2,'manual','event',$3,'event.press.v1',9000,9000,$4,$5)
+         RETURNING id",
+    )
+    .bind(fixture.workspace_id.into_uuid())
+    .bind(served_target)
+    .bind(format!("event:{}", fixture.event_id))
+    .bind(fixture.now)
+    .bind(fixture.now + time::Duration::days(30))
+    .fetch_one(&fixture.pool)
+    .await?;
+    let payload = AutopilotActionPayload::RequestOutreach {
+        opportunity_id: OutreachOpportunityId::from_uuid(opportunity_id),
+        target_id: OutreachTargetId::from_uuid(served_target),
+        target_version: 1,
+        target_name: "Press 0".to_owned(),
+        phase: OutreachPhase::Initial,
+        template_key: "event.press.v1".to_owned(),
+        wave_id: None,
+    };
+    let decision_id = Uuid::now_v7();
+    sqlx::query(
+        r#"
+        INSERT INTO viryaos_autopilot_decisions (
+            id, workspace_id, decision_key, context, subject_kind, subject_id,
+            decision_kind, confidence_basis_points, disposition, reason,
+            input_snapshot, policy_snapshot, recommendation, trace_id)
+        VALUES ($1,$2,$3,'outreach','outreach_opportunity',$4,
+                'request_relationship_outreach',9000,'require_approval','test',
+                '{}'::jsonb,'{}'::jsonb,$5,gen_random_uuid())
+        "#,
+    )
+    .bind(decision_id)
+    .bind(fixture.workspace_id.into_uuid())
+    .bind(format!("decision:outreach:served:{decision_id}"))
+    .bind(Uuid::now_v7())
+    .bind(serde_json::to_value(&payload)?)
+    .execute(&fixture.pool)
+    .await?;
+    let action_id = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO viryaos_autopilot_actions (
+             id, workspace_id, decision_id, context, action_kind, subject_kind, subject_id,
+             idempotency_key, payload, status, action_class
+         ) VALUES ($1,$2,$3,'outreach','outreach.request','outreach_opportunity',$4,$5,$6,
+                   'queued','third_party')",
+    )
+    .bind(action_id)
+    .bind(fixture.workspace_id.into_uuid())
+    .bind(decision_id)
+    .bind(Uuid::now_v7())
+    .bind(format!("action:outreach:served:{action_id}"))
+    .bind(serde_json::to_value(&payload)?)
+    .execute(&fixture.pool)
+    .await?;
+
+    // An executor that can actually send: without the advertised capability the
+    // claim parks the pitch as `awaiting_executor` and the dispatch gate under
+    // test is never reached.
+    sqlx::query(
+        "INSERT INTO viryaos_executor_instances (
+             workspace_id, executor_id, version, manifest_sha, observed_at, expires_at
+         ) VALUES ($1,'n8n-served-test','test','test-manifest',$2,$3)",
+    )
+    .bind(fixture.workspace_id.into_uuid())
+    .bind(fixture.now)
+    .bind(fixture.now + time::Duration::minutes(30))
+    .execute(&fixture.pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO viryaos_executor_capabilities (
+             workspace_id, executor_id, capability, capability_version, observed_at, expires_at
+         ) VALUES ($1,'n8n-served-test','outreach.send','1',$2,$3)",
+    )
+    .bind(fixture.workspace_id.into_uuid())
+    .bind(fixture.now)
+    .bind(fixture.now + time::Duration::minutes(30))
+    .execute(&fixture.pool)
+    .await?;
+
+    use crowdrelay_application::autopilot::AutopilotActionRepository;
+    // `available_at` defaulted to the insert's now(), which is later than the
+    // fixture's — claiming at the fixture's clock would see it as not yet due.
+    let claim_now = OffsetDateTime::now_utc();
+    let claimed = fixture
+        .repository
+        .claim_due_actions(fixture.workspace_id, 8, claim_now)
+        .await?;
+    let action = claimed
+        .iter()
+        .find(|claimed| claimed.id.into_uuid() == action_id)
+        .ok_or("the queued pitch is claimable")?;
+    let outcome = fixture
+        .repository
+        .execute_action(fixture.workspace_id, action, fixture.now)
+        .await;
+    assert!(
+        matches!(outcome, Err(RepositoryError::Conflict)),
+        "a served lead must refuse the send, got {outcome:?}"
+    );
+    let outbox_rows: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM outbox_events
+         WHERE workspace_id=$1 AND payload->>'action_id'=$2",
+    )
+    .bind(fixture.workspace_id.into_uuid())
+    .bind(action_id.to_string())
+    .fetch_one(&fixture.pool)
+    .await?;
+    assert_eq!(outbox_rows, 0, "the refused send left no outbox intent");
+    Ok(())
+}
+
 #[tokio::test]
 #[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn an_expiring_wave_takes_its_unapproved_pitches_with_it()

@@ -92,6 +92,7 @@ SELECT
           -- deliver, and the gap only shows up as a wave that under-performs
           -- its own forecast.
           AND NOT target.do_not_contact
+          AND COALESCE(target.last_reply_disposition::text,'none') NOT IN ('received','positive','declined')
     ) AS eligible_targets
 FROM viryaos_outreach_waves AS wave
 WHERE wave.workspace_id = $1
@@ -147,6 +148,7 @@ SELECT
           -- deliver, and the gap only shows up as a wave that under-performs
           -- its own forecast.
           AND NOT target.do_not_contact
+          AND COALESCE(target.last_reply_disposition::text,'none') NOT IN ('received','positive','declined')
     ) AS eligible_targets
 FROM anchors
 CROSS JOIN kinds
