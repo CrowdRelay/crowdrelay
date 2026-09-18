@@ -91,6 +91,7 @@ async fn workspace(pool: &PgPool) -> Result<Uuid> {
 }
 
 #[tokio::test]
+#[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn release_upsert_writes_and_repeats_idempotently() -> Result<()> {
     let db = DisposableDatabase::create().await?;
     let workspace_id = workspace(&db.pool).await?;
@@ -141,6 +142,7 @@ async fn release_upsert_writes_and_repeats_idempotently() -> Result<()> {
 }
 
 #[tokio::test]
+#[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn post_upsert_writes_and_repeats_idempotently() -> Result<()> {
     let db = DisposableDatabase::create().await?;
     let workspace_id = workspace(&db.pool).await?;

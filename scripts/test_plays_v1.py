@@ -126,7 +126,10 @@ class PlaysContract(unittest.TestCase):
     def test_the_context_is_parseable_everywhere_a_context_is_read(self) -> None:
         # A context the policy table can hold but a reader cannot parse fails
         # the whole overview read, not just its own row.
-        self.assertIn('"plays" => AutopilotContext::Plays', read(MAPPING))
+        # mapping.rs derives from AutopilotContext::ALL via from_storage; the
+        # storage name itself is pinned on the as_str arm in model.rs.
+        self.assertIn("AutopilotContext::from_storage(&row.context)", read(MAPPING))
+        self.assertIn('Self::Plays => "plays"', read(MODEL))
         self.assertIn('"plays" => Some(AutopilotContext::Plays)', read(VALIDATION))
         self.assertIn("plays]", read(OPENAPI))
 
