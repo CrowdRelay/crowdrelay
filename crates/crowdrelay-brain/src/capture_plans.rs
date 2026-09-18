@@ -94,8 +94,15 @@ fn baseline_shot(kind: ProductionEventKind) -> Option<CaptureShot> {
             "One full run of the weakest song, one take",
             TeamSkill::Video,
         ),
-        ProductionEventKind::Show | ProductionEventKind::Festival => (
+        ProductionEventKind::Show => (
             "Soundcheck, doors, crowd, three songs front-of-house",
+            TeamSkill::Video,
+        ),
+        // A festival slot is a stranger-dense room — the biggest warm
+        // audience of the year belongs to the bill-mates. The baseline
+        // covers them too: their crowd is who the harvest courts.
+        ProductionEventKind::Festival => (
+            "Our set front-of-house, the crowd between sets, one bill-mate's stage",
             TeamSkill::Video,
         ),
         ProductionEventKind::Drive => (
@@ -230,6 +237,17 @@ mod tests {
         let shots = shot_list(ProductionEventKind::Rehearsal, &[]);
         assert_eq!(shots.len(), 1);
         assert!(shots[0].item.contains("weakest song"));
+    }
+
+    #[test]
+    fn a_festival_days_baseline_covers_the_stranger_dense_room() {
+        let shots = shot_list(ProductionEventKind::Festival, &[]);
+        assert_eq!(shots.len(), 1);
+        assert!(shots[0].item.contains("bill-mate"));
+        assert_ne!(
+            shots[0].item,
+            shot_list(ProductionEventKind::Show, &[])[0].item
+        );
     }
 
     #[test]

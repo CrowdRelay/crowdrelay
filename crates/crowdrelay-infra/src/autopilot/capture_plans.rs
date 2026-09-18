@@ -60,7 +60,12 @@ pub(in crate::autopilot) async fn project_shows_to_production_events(
     sqlx::query(&format!(
         r#"
         INSERT INTO viryaos_production_events (id, workspace_id, kind, title, scheduled_for, event_id)
-        SELECT uuidv7(), event.workspace_id, 'show', event.title,
+        SELECT uuidv7(), event.workspace_id,
+               -- 6.3: a festival slot is a production day of its own kind —
+               -- the shot list and harvest already know the difference.
+               CASE WHEN event.festival_name IS NOT NULL
+                    THEN 'festival' ELSE 'show' END,
+               event.title,
                {LOCAL_EVENT_DAY}, event.id
         FROM events event
         WHERE event.workspace_id = $1
@@ -86,6 +91,7 @@ pub(in crate::autopilot) async fn project_shows_to_production_events(
         SET title = sync.title,
             scheduled_for = sync.day,
             status = COALESCE(sync.terminal_status, day.status),
+            kind = sync.kind,
             updated_at = now()
         FROM (
             SELECT event.id, event.title,
@@ -93,17 +99,22 @@ pub(in crate::autopilot) async fn project_shows_to_production_events(
                    CASE event.status
                        WHEN 'cancelled' THEN 'cancelled'
                        WHEN 'completed' THEN 'done'
-                   END AS terminal_status
+                   END AS terminal_status,
+                   -- The festival mark can land after the day projected —
+                   -- the kind follows it the same way the date does.
+                   CASE WHEN event.festival_name IS NOT NULL
+                        THEN 'festival' ELSE 'show' END AS kind
             FROM events event
             WHERE event.workspace_id = $1
               AND event.status IN ('published','cancelled','completed')
         ) sync
         WHERE day.workspace_id = $1
           AND day.event_id = sync.id
-          AND day.kind = 'show'
+          AND day.kind IN ('show','festival')
           AND day.status IN ('scheduled','in_progress')
           AND (day.title IS DISTINCT FROM sync.title
                OR day.scheduled_for IS DISTINCT FROM sync.day
+               OR day.kind IS DISTINCT FROM sync.kind
                OR (sync.terminal_status IS NOT NULL
                    AND day.status <> sync.terminal_status))
         "#,
