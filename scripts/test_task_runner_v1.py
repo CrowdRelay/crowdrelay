@@ -9,6 +9,11 @@ two honest:
 - the justfile exposes the canonical recipes (`check`, `ci`, `test-postgres`);
 - the CI workflow's inline check block runs the same command set as
   `just ci`, so one cannot gain a gate the other lacks;
+- the fallback workflow, which exists because CI runs on one self-hosted
+  machine and that machine can be offline, runs the same chain too. A
+  fallback that gates less than the thing it stands in for is worse than
+  none: it reports green for a smaller set of checks and nobody reads the
+  job name closely enough to notice;
 - no workflow calls `make` any more.
 """
 
@@ -20,6 +25,7 @@ ROOT = Path(__file__).resolve().parents[1]
 JUSTFILE = ROOT / "justfile"
 MAKEFILE = ROOT / "Makefile"
 CI = ROOT / ".github/workflows/ci.yml"
+FALLBACK = ROOT / ".github/workflows/fallback-gates.yml"
 
 # Commands that constitute the canonical check chain, extracted from the
 # justfile's own recipes. Ordered: fmt, clippy, test, then contract layers.
@@ -52,6 +58,29 @@ class TaskRunnerContract(unittest.TestCase):
         for command in CHAIN:
             self.assertIn(command, block, command)
         self.assertNotIn("make ", block)
+
+    def test_the_fallback_workflow_runs_the_same_chain(self) -> None:
+        fallback = read(FALLBACK)
+        block = fallback.split("Run repository checks", 1)[1]
+        for command in CHAIN:
+            self.assertIn(command, block, command)
+
+    def test_the_fallback_workflow_needs_no_self_hosted_runner(self) -> None:
+        # The whole point. A fallback that also waits for the offline machine
+        # is not a fallback, and the failure mode is silent: the job simply
+        # queues for ever beside the one it was meant to cover.
+        targets = [
+            line.strip()
+            for line in read(FALLBACK).splitlines()
+            if line.strip().startswith("runs-on:")
+        ]
+        # The prose at the top of that file says "self-hosted" several times,
+        # which is why this reads the runs-on lines rather than the whole text:
+        # a gate that matches a comment is a gate that fails on an explanation.
+        self.assertTrue(targets, "the fallback workflow declares no runner at all")
+        for target in targets:
+            self.assertNotIn("self-hosted", target, target)
+            self.assertIn("ubuntu-latest", target, target)
 
     def test_no_workflow_shells_out_to_make(self) -> None:
         workflows = ROOT / ".github/workflows"
