@@ -116,6 +116,7 @@ pub mod release_autopilot;
 pub mod reply_triage;
 pub mod representation;
 pub mod roster_plan;
+pub mod roster_release_calendar;
 pub mod roster_source_roi;
 pub mod roster_weekly_brief;
 pub mod scan_scope;
