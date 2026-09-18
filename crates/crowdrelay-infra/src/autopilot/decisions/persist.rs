@@ -608,7 +608,7 @@ async fn enrich_outreach_draft(
     workspace_id: WorkspaceId,
     action: &mut AutopilotActionPayload,
 ) -> Result<(), RepositoryError> {
-    use crowdrelay_domain::outreach::{OutreachPhase, OutreachTargetKind};
+    use crowdrelay_domain::outreach::OutreachTargetKind;
     use crowdrelay_domain::outreach_letter::{compose_outreach_letter, OutreachLetterInput};
 
     let AutopilotActionPayload::RequestOutreach {
@@ -623,7 +623,7 @@ async fn enrich_outreach_draft(
 
     let ws = workspace_id.into_uuid();
     let target = sqlx::query_as::<_, (String, String)>(
-        "SELECT display_name, target_kind FROM viryaos_outreach_targets          WHERE workspace_id = $1 AND id = $2",
+        "SELECT display_name, target_kind FROM viryaos_outreach_targets WHERE workspace_id = $1 AND id = $2",
     )
     .bind(ws)
     .bind(target_id.into_uuid())
@@ -639,7 +639,7 @@ async fn enrich_outreach_draft(
         return Ok(());
     };
     let pitch = sqlx::query_as::<_, (String, String)>(
-        "SELECT title, listen_url FROM viryaos_release_plans          WHERE workspace_id = $1 AND active AND listen_url IS NOT NULL            AND btrim(listen_url) <> '' AND btrim(title) <> ''          ORDER BY release_at DESC LIMIT 1",
+        "SELECT title, listen_url FROM viryaos_release_plans WHERE workspace_id = $1 AND active AND listen_url IS NOT NULL AND btrim(listen_url) <> '' AND btrim(title) <> '' ORDER BY release_at DESC LIMIT 1",
     )
     .bind(ws)
     .fetch_optional(&mut **transaction)
@@ -657,7 +657,6 @@ async fn enrich_outreach_draft(
     }) {
         *draft = letter;
     }
-    let _ = OutreachPhase::Initial; // phase vocabulary pinned by the payload
     Ok(())
 }
 
