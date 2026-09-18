@@ -34,7 +34,7 @@ jobs:
     # workflow_run jobs run in the context of the default branch, so the
     # event payload — not github.ref — decides whether this was main.
     if: >-
-      github.event.workflow_run.conclusion == 'failure'
+      contains(fromJSON('["failure","timed_out","startup_failure","action_required"]'), github.event.workflow_run.conclusion)
       && github.event.workflow_run.head_branch == 'main'
     # Self-hosted like every other job in this repository: hosted runners
     # are not entitled on this account, and a notification that never

@@ -273,7 +273,9 @@ impl PostgresGDriveRepository {
         let mut ordered: Vec<&ExtractedContact> = contacts.iter().collect();
         ordered.sort_by(|a, b| a.email.cmp(&b.email));
 
-        // source_file_name is capped at 500 by CHECK.
+        // source_file_id is capped at 200 and source_file_name at 500 by
+        // CHECK — the upload id embeds a filename the operator controls.
+        let ref_id: String = ref_id.chars().take(200).collect();
         let ref_name: String = ref_name.chars().take(500).collect();
 
         let mut upserted = 0u64;
@@ -293,8 +295,23 @@ impl PostgresGDriveRepository {
                     suggested_kind = COALESCE(EXCLUDED.suggested_kind, viryaos_drive_contacts.suggested_kind),
                     city = COALESCE(EXCLUDED.city, viryaos_drive_contacts.city),
                     notes = COALESCE(EXCLUDED.notes, viryaos_drive_contacts.notes),
-                    source_file_id = EXCLUDED.source_file_id,
-                    source_file_name = EXCLUDED.source_file_name,
+                    -- source_file_id doubles as the disappearance anchor:
+                    -- the mark_disappeared sweep matches rows by the file
+                    -- that last saw them. A sighting from a source that
+                    -- never marks (gmail, upload) must not steal the anchor
+                    -- from a gdrive file that still tracks it.
+                    source_file_id = CASE
+                        WHEN $11 = 'gdrive'
+                             OR NOT 'gdrive' = ANY(viryaos_drive_contacts.sources)
+                        THEN EXCLUDED.source_file_id
+                        ELSE viryaos_drive_contacts.source_file_id
+                    END,
+                    source_file_name = CASE
+                        WHEN $11 = 'gdrive'
+                             OR NOT 'gdrive' = ANY(viryaos_drive_contacts.sources)
+                        THEN EXCLUDED.source_file_name
+                        ELSE viryaos_drive_contacts.source_file_name
+                    END,
                     sources = (SELECT array_agg(DISTINCT s) FROM unnest(
                         viryaos_drive_contacts.sources || EXCLUDED.sources) AS s),
                     last_seen_at = now(),
@@ -309,7 +326,7 @@ impl PostgresGDriveRepository {
             .bind(&contact.suggested_kind)
             .bind(&contact.city)
             .bind(&contact.notes)
-            .bind(ref_id)
+            .bind(&ref_id)
             .bind(&ref_name)
             .bind(source)
             .execute(&mut *tx)
@@ -335,7 +352,7 @@ impl PostgresGDriveRepository {
             "#,
             )
             .bind(workspace_id)
-            .bind(ref_id)
+            .bind(&ref_id)
             .bind(
                 contacts
                     .iter()

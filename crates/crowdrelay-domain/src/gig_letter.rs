@@ -531,6 +531,40 @@ pub fn polish_time(at: OffsetDateTime) -> String {
     format!("{:02}:{:02}", at.hour(), at.minute())
 }
 
+/// A date the way English copy writes it — "18 October 2026".
+#[must_use]
+pub fn english_date(at: OffsetDateTime) -> String {
+    const MONTHS: [&str; 12] = [
+        "January",
+        "February",
+        "March",
+        "April",
+        "May",
+        "June",
+        "July",
+        "August",
+        "September",
+        "October",
+        "November",
+        "December",
+    ];
+    let month = MONTHS
+        .get(usize::from(u8::from(at.month())) - 1)
+        .copied()
+        .unwrap_or("");
+    format!("{} {} {}", month, at.day(), at.year())
+}
+
+/// The date in the language the letter is written in — a Polish day-name in
+/// an English sentence is a machine slipping, not a flourish.
+#[must_use]
+pub fn letter_date(at: OffsetDateTime, language: LetterLanguage) -> String {
+    match language {
+        LetterLanguage::Polish => polish_date(at),
+        LetterLanguage::English => english_date(at),
+    }
+}
+
 const fn greeting(language: LetterLanguage) -> &'static str {
     match language {
         LetterLanguage::English => "Hi,",

@@ -30,13 +30,22 @@ assert "DefaultBodyLimit::max(MAX_CONTROL_BODY_BYTES)" in router
 overrides = set(re.findall(r"DefaultBodyLimit::max\((\w+)\)", router)) - {
     "MAX_CONTROL_BODY_BYTES"
 }
-assert overrides <= {"MAX_IMPORT_BODY_BYTES", "MAX_EVENT_BILL_BODY_BYTES"}, (
+# Each override is reviewed with its own ceiling: imports and event bills are
+# bounded records, the sheet upload carries a whole CSV the operator chose.
+ceilings = {
+    "MAX_IMPORT_BODY_BYTES": 512,
+    "MAX_EVENT_BILL_BODY_BYTES": 512,
+    "MAX_UPLOAD_BODY_BYTES": 2112,
+}
+assert overrides <= set(ceilings), (
     f"unreviewed control-plane body-limit override: {sorted(overrides)}"
 )
 for name in overrides:
     declared = re.search(rf"const {name}: usize = (\d+) \* 1024;", router)
     assert declared, f"{name} must be declared in KiB units for review"
-    assert int(declared.group(1)) <= 512, f"{name} exceeds the reviewed 512 KiB ceiling"
+    assert int(declared.group(1)) <= ceilings[name], (
+        f"{name} exceeds its reviewed {ceilings[name]} KiB ceiling"
+    )
 assert ".route_layer(from_fn_with_state(state.clone(), require_control_plane))" in router
 require_block = router.split("async fn require_control_plane", 1)[1]
 assert "security::bearer_sha256_matches" in require_block

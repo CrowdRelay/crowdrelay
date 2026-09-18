@@ -360,7 +360,7 @@ pub async fn promote_contact(
             // Attribution follows the contact, not the connector: an
             // address sighted in both Drive and Gmail reads "gdrive+gmail".
             let arrival_source = contact.sources.join("+");
-            match import
+            let counts = match import
                 .import_batch(
                     workspace_id,
                     &arrival_source,
@@ -370,13 +370,24 @@ pub async fn promote_contact(
                 )
                 .await
             {
-                Ok(_) => {}
+                Ok(counts) => counts,
                 Err(error) => {
                     tracing::warn!(%error, "gdrive fan promote failed");
                     return Problem::service_unavailable(request_id_value)
                         .private()
                         .into_response();
                 }
+            };
+            // A suppressed address is not promoted, whatever the click said:
+            // no opt-in mail leaves for them, and marking the row would lie
+            // about what happened.
+            if counts.skipped_suppressed > 0 {
+                return Problem::conflict_because(
+                    "This address is suppressed on the fan list — an earlier complaint or                      bounce. Nothing was sent, and the row stays staged.",
+                    request_id_value,
+                )
+                .private()
+                .into_response();
             }
             if let Err(error) = repo.mark_fan_promoted(workspace_id, contact_id).await {
                 tracing::warn!(%error, "gdrive fan outcome mark failed");
@@ -386,7 +397,13 @@ pub async fn promote_contact(
             }
             (
                 StatusCode::OK,
-                Json(serde_json::json!({ "fan_outcome": "promoted" })),
+                Json(serde_json::json!({
+                    "fan_outcome": "promoted",
+                    // The panel's notice says the opt-in mail is on its way —
+                    // only true when one actually left or was re-sent. An
+                    // already-active fan or a cooldown gets the honest flag.
+                    "opt_in_emailed": counts.imported_pending + counts.confirmation_resent > 0,
+                })),
             )
                 .into_response()
         }

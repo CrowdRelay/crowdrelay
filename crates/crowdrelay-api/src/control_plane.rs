@@ -29,6 +29,10 @@ const MAX_EVENT_BILL_BODY_BYTES: usize = 16 * 1024;
 /// notes, so the router-wide 8 KiB would reject a payload a quarter of the
 /// handler's own cap. Sized to let the handler's limit be the real one.
 const MAX_IMPORT_BODY_BYTES: usize = 512 * 1024;
+/// The sheet upload carries up to 2 MiB of CSV plus the JSON envelope —
+/// the router-wide 8 KiB would refuse every real sheet at the door before
+/// the handler's own bounds ran. The contract test reviews this ceiling.
+const MAX_UPLOAD_BODY_BYTES: usize = 2112 * 1024;
 
 pub(crate) fn router(state: crate::AppState) -> Router {
     Router::new()
@@ -336,7 +340,8 @@ pub(crate) fn router(state: crate::AppState) -> Router {
         // through the same extractor the connectors feed.
         .route(
             "/v1/control-plane/gdrive/contacts/upload",
-            post(crate::gdrive::upload_contacts),
+            post(crate::gdrive::upload_contacts)
+                .layer(DefaultBodyLimit::max(MAX_UPLOAD_BODY_BYTES)),
         )
         .route(
             "/v1/control-plane/gdrive/contacts/{contact_id}/promote",

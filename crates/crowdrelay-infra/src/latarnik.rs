@@ -68,6 +68,18 @@ pub struct DualRoleContact {
     pub invitable: bool,
     /// Why not, when not. A sentence, not a flag.
     pub hold_reason: Option<String>,
+    /// The band ever had an answer from them — a reply outranks a score.
+    pub has_replied: bool,
+    /// Marked do-not-contact, on the beacon or on the contact governor —
+    /// an org-wide opt-out counts the same.
+    pub do_not_contact: bool,
+    /// The contact takes outreach at all.
+    pub accepts_outreach: bool,
+    /// They were on the list and unsubscribed — or the newest consent
+    /// record is a withdrawal. The one hold that never expires.
+    pub previously_opted_out: bool,
+    /// Their double opt-in is already in their inbox, unanswered.
+    pub opt_in_pending: bool,
 }
 
 /// What the read found, with the honest denominator.
@@ -92,14 +104,101 @@ struct Row {
     relationship_score: i32,
     accepts_outreach: bool,
     do_not_contact: bool,
+    governor_do_not_contact: bool,
     has_replied: bool,
     fan_status: Option<String>,
-    consented: bool,
+    /// The newest marketing consent record's verdict — `None` when the fan
+    /// has never been asked, which is not the same as having said no.
+    latest_consent: Option<bool>,
     days_since_last_contact: Option<i64>,
     already_invited: bool,
-    total_count: i64,
 }
 
+/// The dual-role read, shared by the review page and the approve path's
+/// by-id re-check. One column list and one join shape so the two can never
+/// decode differently.
+///
+/// The fan join is LATERAL because `fans.normalized_email` is not unique: a
+/// merged identity leaves a stale row next to the live one, and a plain join
+/// would read both and double the contact. The pick prefers the live row —
+/// active, then pending, then anything left — so a dead merge remnant can
+/// never outrank the identity that actually holds the consent.
+///
+/// `latest_consent` is deliberately nullable: "never asked" and "said no"
+/// are different standings, and COALESCE would file the first under the
+/// second.
+const DUAL_ROLE_CORE: &str = r#"
+    SELECT
+        beacon.id AS beacon_id,
+        beacon.display_name,
+        beacon.beacon_kind AS role,
+        city.name AS city,
+        beacon.relationship_score,
+        beacon.accepts_outreach,
+        beacon.do_not_contact,
+        -- The governor's opt-out binds org-wide: a reply that said stop
+        -- anywhere is a stop here too, not a fresh start under another role.
+        COALESCE(governor.do_not_contact, false) AS governor_do_not_contact,
+        -- A reply outranks a score, so it is read rather than inferred: any
+        -- beacon campaign on this person that got an answer counts.
+        EXISTS (
+            SELECT 1 FROM viryaos_beacon_campaigns AS campaign
+            WHERE campaign.workspace_id = beacon.workspace_id
+              AND campaign.beacon_id = beacon.id
+              AND campaign.last_reply_disposition <> 'none'
+        ) AS has_replied,
+        fan.status AS fan_status,
+        -- Consent is the newest marketing record and nothing older. A fan
+        -- who opted out is `known_but_not_consented`, never "reachable
+        -- again because we have their address".
+        (
+            SELECT consent.granted
+            FROM fan_consents AS consent
+            WHERE consent.workspace_id = beacon.workspace_id
+              AND consent.fan_id = fan.id
+              AND consent.purpose = 'marketing'
+            ORDER BY consent.recorded_at DESC, consent.id DESC
+            LIMIT 1
+        ) AS latest_consent,
+        -- The governor spans both roles: this is the last time the band
+        -- reached this address for any reason at all.
+        -- Whole days, floored in SQL: `EXTRACT` returns NUMERIC and the
+        -- decode wants an integer answer, not a fraction of a day nobody
+        -- reads.
+        FLOOR(EXTRACT(EPOCH FROM ($2 - governor.last_outbound_at)) / 86400)::bigint
+            AS days_since_last_contact,
+        COALESCE(governor.last_context = 'latarnik_invite', false) AS already_invited
+    FROM viryaos_beacons AS beacon
+    LEFT JOIN cities AS city ON city.id = beacon.city_id
+    -- The join that did not exist: the same address wearing the other role.
+    LEFT JOIN LATERAL (
+        SELECT f.id, f.status
+        FROM fans AS f
+        WHERE f.workspace_id = beacon.workspace_id
+          AND f.normalized_email = lower(btrim(beacon.contact_email))
+        ORDER BY (f.status = 'active') DESC, (f.status = 'pending') DESC, f.id
+        LIMIT 1
+    ) AS fan ON true
+    LEFT JOIN viryaos_contact_governor AS governor
+      ON governor.workspace_id = beacon.workspace_id
+     AND governor.normalized_contact = lower(btrim(beacon.contact_email))
+    WHERE beacon.workspace_id = $1
+      AND beacon.active
+      AND beacon.contact_email IS NOT NULL
+"#;
+
+/// Everybody the band works with, with both roles resolved.
+///
+/// `reason_available` is passed in rather than computed here: whether there is
+/// something concrete to tell this person — a date in their city, a shared
+/// night, a new record — is a question about the band's calendar, and the
+/// caller that has the calendar answers it. Passing `false` makes every row
+/// hold with "nothing to offer", which is the correct answer for a band with
+/// nothing on.
+///
+/// # Errors
+///
+/// Propagates the database error.
 /// Everybody the band works with, with both roles resolved.
 ///
 /// `reason_available` is passed in rather than computed here: whether there is
@@ -118,118 +217,34 @@ pub async fn dual_role_review(
     now: OffsetDateTime,
     reason_available: bool,
 ) -> Result<DualRoleReview, sqlx::Error> {
-    let rows = sqlx::query_as::<_, Row>(
-        r#"
-        SELECT
-            beacon.id AS beacon_id,
-            beacon.display_name,
-            beacon.beacon_kind AS role,
-            city.name AS city,
-            beacon.relationship_score,
-            beacon.accepts_outreach,
-            beacon.do_not_contact,
-            -- A reply outranks a score, so it is read rather than inferred: any
-            -- beacon campaign on this person that got an answer counts.
-            EXISTS (
-                SELECT 1 FROM viryaos_beacon_campaigns AS campaign
-                WHERE campaign.workspace_id = beacon.workspace_id
-                  AND campaign.beacon_id = beacon.id
-                  AND campaign.last_reply_disposition <> 'none'
-            ) AS has_replied,
-            fan.status AS fan_status,
-            -- Consent is the newest marketing record and nothing older. A fan
-            -- who opted out is `known_but_not_consented`, never "reachable
-            -- again because we have their address".
-            COALESCE((
-                SELECT consent.granted
-                FROM fan_consents AS consent
-                WHERE consent.workspace_id = fan.workspace_id
-                  AND consent.fan_id = fan.id
-                  AND consent.purpose = 'marketing'
-                ORDER BY consent.recorded_at DESC, consent.id DESC
-                LIMIT 1
-            ), false) AS consented,
-            -- The governor spans both roles: this is the last time the band
-            -- reached this address for any reason at all.
-            -- Whole days, floored in SQL: `EXTRACT` returns NUMERIC and the
-            -- decode wants an integer answer, not a fraction of a day nobody
-            -- reads.
-            FLOOR(EXTRACT(EPOCH FROM ($2 - governor.last_outbound_at)) / 86400)::bigint
-                AS days_since_last_contact,
-            COALESCE(governor.last_context = 'latarnik_invite', false) AS already_invited,
-            count(*) OVER ()::bigint AS total_count
-        FROM viryaos_beacons AS beacon
-        LEFT JOIN cities AS city ON city.id = beacon.city_id
-        -- The join that did not exist: the same address wearing the other role.
-        LEFT JOIN fans AS fan
-          ON fan.workspace_id = beacon.workspace_id
-         AND fan.normalized_email = lower(btrim(beacon.contact_email))
-        LEFT JOIN viryaos_contact_governor AS governor
-          ON governor.workspace_id = beacon.workspace_id
-         AND governor.normalized_contact = lower(btrim(beacon.contact_email))
-        WHERE beacon.workspace_id = $1
-          AND beacon.active
-          AND beacon.contact_email IS NOT NULL
-        ORDER BY beacon.relationship_score DESC, beacon.display_name, beacon.id
-        LIMIT $3
-        "#,
-    )
-    .bind(workspace_id)
-    .bind(now)
-    .bind(MAX_ROWS)
-    .fetch_all(pool)
-    .await?;
+    // Every row is read, not just the page: the KPI counts must be the true
+    // denominator, so `invitable_now` cannot understate what a capped list
+    // hides. The returned contacts are still bounded to MAX_ROWS.
+    let sql = format!(
+        "{DUAL_ROLE_CORE} ORDER BY beacon.relationship_score DESC, beacon.display_name, beacon.id"
+    );
+    let rows = sqlx::query_as::<_, Row>(&sql)
+        .bind(workspace_id)
+        .bind(now)
+        .fetch_all(pool)
+        .await?;
 
-    let total = rows.first().map_or(0, |row| row.total_count);
+    let total = rows.len() as i64;
     let mut already_hear_the_dates = 0;
     let mut invitable_now = 0;
-    let mut contacts = Vec::with_capacity(rows.len());
+    let mut contacts = Vec::with_capacity(rows.len().min(MAX_ROWS as usize));
 
     for row in rows {
-        let hears_the_dates = row.fan_status.as_deref() == Some("active") && row.consented;
-        let known_but_not_consented = row.fan_status.is_some() && !hears_the_dates;
-        if hears_the_dates {
+        let (contact, hears, invitable) = row_to_contact(&row, reason_available);
+        if hears {
             already_hear_the_dates += 1;
         }
-        let days_since_last_contact = row.days_since_last_contact.map(|days| days.max(0));
-        let standing = ContactStanding {
-            display_name: row.display_name.clone(),
-            role: row.role.clone(),
-            city: row.city.clone(),
-            relationship_score: row.relationship_score,
-            has_replied: row.has_replied,
-            do_not_contact: row.do_not_contact,
-            accepts_outreach: row.accepts_outreach,
-            days_since_last_contact,
-            already_invited: row.already_invited,
-            already_a_fan: hears_the_dates,
-            // The fan row exists and consent is not live: they were on the list
-            // and left. The other role is not a way back in.
-            previously_opted_out: known_but_not_consented,
-        };
-        // The reason is the caller's to supply; without one every row holds,
-        // which is the honest state for a band with nothing on the calendar.
-        let decision = decide(&standing, reason_available.then_some(&PLACEHOLDER_REASON));
-        let (invitable, hold_reason) = match decision {
-            InviteDecision::Send => {
-                invitable_now += 1;
-                (true, None)
-            }
-            InviteDecision::Hold(hold) => (false, Some(hold.message())),
-        };
-        contacts.push(DualRoleContact {
-            beacon_id: row.beacon_id,
-            display_name: row.display_name,
-            role: row.role,
-            city: row.city,
-            relationship_score: row.relationship_score,
-            hears_the_dates,
-            known_but_not_consented,
-            days_since_last_contact,
-            already_invited: row.already_invited,
-            invitable,
-            hold_reason,
-        });
+        if invitable {
+            invitable_now += 1;
+        }
+        if contacts.len() < MAX_ROWS as usize {
+            contacts.push(contact);
+        }
     }
 
     Ok(DualRoleReview {
@@ -238,6 +253,89 @@ pub async fn dual_role_review(
         already_hear_the_dates,
         invitable_now,
     })
+}
+
+/// One row of the same read, by beacon id — the approve path's lookup. The
+/// review page is capped; an id-addressed click must not 404 because the
+/// person ranked below the cap.
+pub async fn dual_role_contact(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    beacon_id: Uuid,
+    now: OffsetDateTime,
+    reason_available: bool,
+) -> Result<Option<DualRoleContact>, sqlx::Error> {
+    let sql = format!("{DUAL_ROLE_CORE} AND beacon.id = $3");
+    let row = sqlx::query_as::<_, Row>(&sql)
+        .bind(workspace_id)
+        .bind(now)
+        .bind(beacon_id)
+        .fetch_optional(pool)
+        .await?;
+    Ok(row.map(|row| row_to_contact(&row, reason_available).0))
+}
+
+/// One decoded row → the standing, the decision and the contact the console
+/// renders. `hears`/`invitable` come back separately so the review can count
+/// them without re-reading the contact.
+fn row_to_contact(row: &Row, reason_available: bool) -> (DualRoleContact, bool, bool) {
+    let hears_the_dates =
+        row.fan_status.as_deref() == Some("active") && row.latest_consent == Some(true);
+    let known_but_not_consented = row.fan_status.is_some() && !hears_the_dates;
+    let days_since_last_contact = row.days_since_last_contact.map(|days| days.max(0));
+    // An opt-out is a withdrawal somebody made or a bounce the system took —
+    // `unsubscribed`/`suppressed`, or a consent record whose newest word was
+    // no. `pending` is not leaving: their confirmation is still open, and it
+    // gets its own hold rather than borrowing the strongest one.
+    let previously_opted_out = matches!(
+        row.fan_status.as_deref(),
+        Some("unsubscribed") | Some("suppressed")
+    ) || row.latest_consent == Some(false);
+    let opt_in_pending = row.fan_status.as_deref() == Some("pending");
+    let do_not_contact = row.do_not_contact || row.governor_do_not_contact;
+    let standing = ContactStanding {
+        display_name: row.display_name.clone(),
+        role: row.role.clone(),
+        city: row.city.clone(),
+        relationship_score: row.relationship_score,
+        has_replied: row.has_replied,
+        do_not_contact,
+        accepts_outreach: row.accepts_outreach,
+        days_since_last_contact,
+        already_invited: row.already_invited,
+        already_a_fan: hears_the_dates,
+        previously_opted_out,
+        opt_in_pending,
+    };
+    // The reason is the caller's to supply; without one every row holds,
+    // which is the honest state for a band with nothing on the calendar.
+    let decision = decide(&standing, reason_available.then_some(&PLACEHOLDER_REASON));
+    let (invitable, hold_reason) = match decision {
+        InviteDecision::Send => (true, None),
+        InviteDecision::Hold(hold) => (false, Some(hold.message())),
+    };
+    (
+        DualRoleContact {
+            beacon_id: row.beacon_id,
+            display_name: row.display_name.clone(),
+            role: row.role.clone(),
+            city: row.city.clone(),
+            relationship_score: row.relationship_score,
+            hears_the_dates,
+            known_but_not_consented,
+            days_since_last_contact,
+            already_invited: row.already_invited,
+            invitable,
+            hold_reason,
+            has_replied: row.has_replied,
+            do_not_contact,
+            accepts_outreach: row.accepts_outreach,
+            previously_opted_out,
+            opt_in_pending,
+        },
+        hears_the_dates,
+        invitable,
+    )
 }
 
 /// A stand-in for "the caller says there is something to tell them".
