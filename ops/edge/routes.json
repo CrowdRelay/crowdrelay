@@ -48,5 +48,7 @@
   "crowdrelay.show.post_show_report_due": "VOSTEAMOPS00001",
   "crowdrelay.autopilot.approval_requested": "VOSAPR000000001",
   "crowdrelay.fan_lifecycle.message_requested": "VOSMAIL000000001",
-  "crowdrelay.latarnik.invite_requested": "VOSLATINVITE001"
+  "crowdrelay.latarnik.invite_requested": "VOSLATINVITE001",
+  "crowdrelay.representation.approach_requested": "VOSREPAPPR00001",
+  "crowdrelay.booking_agent.approach_requested": "VOSBOOKAGENT001"
 }
