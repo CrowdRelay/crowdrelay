@@ -337,7 +337,13 @@ impl ConcertQrRepository for PostgresConcertQrRepository {
             || campaign.revoked_at.is_some()
             || command.now < campaign.valid_from
             || command.now > campaign.valid_until
-            || command.expires_at != campaign.valid_until.unix_timestamp()
+            // The token's signed expiry must not outlive the campaign's live
+            // window: tightening the window still retires already-printed
+            // codes. Equality would go further — a show rescheduled *later*
+            // would kill every code inside its promised lifetime, which is
+            // the dead scan leg the door-campaign retime exists to prevent.
+            || command.expires_at > campaign.valid_until.unix_timestamp()
+            || command.expires_at < command.now.unix_timestamp()
             || campaign.event_id != event.id
         {
             return Err(ConcertQrError::NotFound);
