@@ -393,6 +393,34 @@ async fn run_support_slot_ask(pool: &PgPool, url: &str) -> Result<(), Box<dyn st
         Some(opening_line.as_str())
     );
 
+    // The room is in Poland, so the ask arrives in the promoter's language —
+    // the same O.6 rule the proposal letter follows, down to the date inside
+    // the sentences ("października", not "Oct").
+    let draft_subject = payload["draft"]["subject"].as_str().unwrap_or_default();
+    let draft_body = payload["draft"]["body"].as_str().unwrap_or_default();
+    assert!(
+        draft_subject.starts_with("support na slot w Klub N5"),
+        "the subject stayed English in a Polish room: {draft_subject}"
+    );
+    assert!(
+        draft_body.starts_with("Cześć,"),
+        "the greeting stayed English in a Polish room: {draft_body}"
+    );
+    assert!(
+        draft_body.contains("nadal jest wolny"),
+        "the offer paragraph stayed English in a Polish room: {draft_body}"
+    );
+    // The operator's revised opening is what the letter actually says — the
+    // edit lands in the body's opening paragraph, not just the field beside it.
+    assert!(
+        draft_body.contains("Say the word and the N5 slot is theirs."),
+        "the sent letter kept the machine's opening under the operator's edit: {draft_body}"
+    );
+    assert!(
+        show_date.split(' ').nth(1).is_some_and(|m| m.len() > 3),
+        "the date inside the letter stayed English: {show_date}"
+    );
+
     // The fix is on the ledger too — the machine's words and the operator's,
     // one row per field, hung off the approval's own audit row by the
     // operation_id foreign key.

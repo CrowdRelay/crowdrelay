@@ -7,7 +7,11 @@
 use serde::{Deserialize, Serialize};
 use time::{Duration, OffsetDateTime};
 
-use crate::{EventId, autonomy::Confidence};
+use crate::{
+    EventId,
+    autonomy::Confidence,
+    gig_letter::{polish_date, polish_time},
+};
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize)]
 pub struct EventCampaignHistory {
@@ -212,37 +216,6 @@ fn signoff(sender_name: &str) -> String {
     } else {
         format!("\n\n- {sender}")
     }
-}
-
-/// Polish month names in the genitive — "18 października", the form a date
-/// takes inside a sentence. Index-safe: a month outside 1–12 is impossible
-/// for `time::Month`, and `get` makes a broken table a compile-time-sized
-/// absence rather than a panic.
-const POLISH_MONTHS: [&str; 12] = [
-    "stycznia",
-    "lutego",
-    "marca",
-    "kwietnia",
-    "maja",
-    "czerwca",
-    "lipca",
-    "sierpnia",
-    "września",
-    "października",
-    "listopada",
-    "grudnia",
-];
-
-fn polish_date(at: OffsetDateTime) -> String {
-    let month = POLISH_MONTHS
-        .get(usize::from(u8::from(at.month())) - 1)
-        .copied()
-        .unwrap_or("");
-    format!("{} {} {}", at.day(), month, at.year())
-}
-
-fn polish_time(at: OffsetDateTime) -> String {
-    format!("{:02}:{:02}", at.hour(), at.minute())
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
