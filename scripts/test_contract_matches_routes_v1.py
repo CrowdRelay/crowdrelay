@@ -48,8 +48,10 @@ SPEC = ROOT / "openapi/openapi.yaml"
 ROUTE_PATH = re.compile(r'\.route\(\s*"([^"]+)"')
 PARAM = re.compile(r"\{[^}]+\}")
 
-# The nine files CLAUDE.md says hold every route. Checked by
-# `test_claude_md_counts_v1.py`, so a tenth cannot appear unnoticed.
+# The files that register routes — the nine CLAUDE.md names, plus
+# content_engine.rs, whose admin surface is `.merge()`d into the router.
+# `test_claude_md_counts_v1.py` keeps the count honest so an eleventh
+# cannot appear unnoticed.
 ROUTE_FILES = [
     "routing.rs",
     "control_plane.rs",
@@ -60,6 +62,7 @@ ROUTE_FILES = [
     "audience_graph.rs",
     "community_intelligence_routes.rs",
     "routing/growth.rs",
+    "content_engine.rs",
 ]
 
 # Contract paths are relative to a server base ending in `/v1`.

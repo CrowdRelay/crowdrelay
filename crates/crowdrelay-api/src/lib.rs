@@ -102,6 +102,7 @@ mod rate_limit;
 mod referrals;
 mod releases;
 mod roster_source_roi;
+mod roster_weekly_brief;
 mod routing;
 mod security;
 mod signal_installations;

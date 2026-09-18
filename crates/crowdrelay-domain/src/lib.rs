@@ -116,6 +116,7 @@ pub mod reply_triage;
 pub mod representation;
 pub mod roster_plan;
 pub mod roster_source_roi;
+pub mod roster_weekly_brief;
 pub mod scan_scope;
 pub mod show_growth;
 pub mod show_operations;

@@ -11,7 +11,7 @@
   "crates/crowdrelay-api/src/lib_tests.rs": 1278,
   "crates/crowdrelay-api/src/ops.rs": 1400,
   "crates/crowdrelay-api/src/proofs.rs": 1954,
-  "crates/crowdrelay-api/src/routing.rs": 1070,
+  "crates/crowdrelay-api/src/routing.rs": 1159,
   "crates/crowdrelay-application/src/autopilot/evaluate.rs": 1358,
   "crates/crowdrelay-application/src/autopilot/model.rs": 1884,
   "crates/crowdrelay-application/src/autopilot/model/briefing_locale.rs": 1235,
