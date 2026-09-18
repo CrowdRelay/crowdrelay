@@ -21,6 +21,15 @@ use crowdrelay_domain::WorkspaceId;
 
 use crate::organization_settings::OrganizationSettingsRepository;
 
+/// The roster's fairness damp when the organisation has not stated one (5.2).
+///
+/// 0.9 — each prior dispatch this week costs an act a tenth of its next
+/// candidate's marginal value. Deliberately a *roster* default rather than
+/// `PortfolioConfig`'s inert 1.0: the pooled rank is the place the term does
+/// work, and "unstated" cannot mean "the fairness the row was built for is
+/// off". An operator who wants the pure maximiser says so — `1` validates.
+pub const ROSTER_FAIRNESS_DECAY: f64 = 0.9;
+
 /// One act's pool row as stored — the read deserializes `decision_value` and
 /// `opportunity_id` back into the brain's types and re-ranks.
 #[derive(Debug)]
@@ -145,6 +154,11 @@ pub struct RosterRankedCandidate {
     /// fatigue and the uncalibrated-bridge discount.
     pub marginal_y30: Option<f64>,
     pub resource_cost_units: f64,
+    /// What the act's dispatch share cost this candidate — the visible form
+    /// of the knob.
+    pub fairness_adjustment: f64,
+    /// The act's trailing-week dispatch count the damp read.
+    pub act_recent_dispatches: u32,
     pub is_experimental: bool,
     /// What the act's own cycle did with this candidate. `false` with a
     /// `local_rejection_reason` of `max_dispatches_reached` is the pooling
@@ -170,6 +184,10 @@ pub struct RosterPortfolioPlan {
     pub undecodable_rows: u32,
     /// How many pool rows competed and lost.
     pub rejected_count: u32,
+    /// The fairness damp in force — stated or the roster default, labeled —
+    /// so a reader can check "the knob" rather than trust it exists (§4h-6).
+    pub fairness_decay: f64,
+    pub fairness_decay_source: &'static str,
     pub selected: Vec<RosterRankedCandidate>,
 }
 
@@ -215,8 +233,41 @@ pub async fn roster_portfolio_plan(
             .map(u32::from)
             .unwrap_or(defaults.max_dispatches),
         cost_budget: limits.cost_budget.unwrap_or(defaults.cost_budget),
+        // Unstated resolves to the roster default, not the single-workspace
+        // no-op: the pooled rank is exactly where the fairness term exists to
+        // work, and "nobody tuned it" must not read as "every act grows,
+        // nobody is neglected" being switched off.
+        fairness_decay: limits.fairness_decay.unwrap_or(ROSTER_FAIRNESS_DECAY),
         ..defaults
     };
+
+    // 5.2: the fairness term's ledger half. `viryaos_autopilot_actions` is the
+    // record of what each act's brain actually spent this week — the trailing
+    // seven days of it is the share the damp reads. A failed send still spent
+    // the slot, so the count is every created action, not the successful
+    // subset.
+    let act_history: std::collections::HashMap<WorkspaceId, u32> =
+        sqlx::query_as::<_, (Uuid, i64)>(
+            r#"
+            SELECT action.workspace_id, COUNT(*)
+            FROM viryaos_autopilot_actions AS action
+            JOIN workspaces AS workspace ON workspace.id = action.workspace_id
+            WHERE workspace.organization_id = $1
+              AND action.created_at > now() - INTERVAL '7 days'
+            GROUP BY action.workspace_id
+            "#,
+        )
+        .bind(organization_id)
+        .fetch_all(pool)
+        .await?
+        .into_iter()
+        .map(|(workspace_id, count)| {
+            (
+                WorkspaceId::from_uuid(workspace_id),
+                u32::try_from(count).unwrap_or(u32::MAX),
+            )
+        })
+        .collect();
 
     let mut undecodable_rows = 0u32;
     let mut candidates: Vec<PortfolioCandidate> = Vec::with_capacity(rows.len());
@@ -240,7 +291,9 @@ pub async fn roster_portfolio_plan(
         });
     }
 
-    let selection = PortfolioOptimizer::new(config).select(candidates);
+    let selection = PortfolioOptimizer::new(config)
+        .with_act_history(act_history.clone())
+        .select(candidates);
     let name_of = |id: Uuid| -> String {
         members
             .iter()
@@ -275,6 +328,11 @@ pub async fn roster_portfolio_plan(
                     .get(&key)
                     .map(|adjustments| adjustments.marginal_y30),
                 resource_cost_units: candidate.decision_value.resource_cost.units,
+                fairness_adjustment: selection
+                    .marginal_adjustments
+                    .get(&key)
+                    .map_or(0.0, |adjustments| adjustments.fairness_adjustment),
+                act_recent_dispatches: act_history.get(&candidate.act).copied().unwrap_or(0),
                 is_experimental: candidate.is_experimental,
                 locally_selected,
                 local_rejection_reason,
@@ -330,6 +388,12 @@ pub async fn roster_portfolio_plan(
         },
         undecodable_rows,
         rejected_count: u32::try_from(selection.rejected.len()).unwrap_or(u32::MAX),
+        fairness_decay: config.fairness_decay,
+        fairness_decay_source: if limits.fairness_decay.is_some() {
+            "stated"
+        } else {
+            "roster_default"
+        },
         selected,
     }))
 }

@@ -773,3 +773,84 @@ fn portfolio_ties_in_decision_value_are_order_independent() {
         "tied candidates should produce same total regardless of order"
     );
 }
+
+/// 5.2's selection-level pin. The fairness term reorders on dispatch share —
+/// a busy act's next slot pays for the week it already spent — and it
+/// reorders nothing else: an act with no history pays factor 1.0 (a new
+/// member has not failed to do anything), and a candidate the gate rejects
+/// stays rejected no matter how quiet its act is, because a positive
+/// multiplier cannot turn a non-positive marginal into a positive one.
+#[test]
+fn the_fairness_term_reorders_on_share_and_respects_the_gate() {
+    let busy = test_act();
+    let quiet = WorkspaceId::from_uuid(uuid::Uuid::from_u128(2));
+    let optimizer = PortfolioOptimizer::new(PortfolioConfig {
+        fairness_decay: 0.9,
+        ..PortfolioConfig::default()
+    })
+    .with_act_history(std::collections::HashMap::from([(busy, 5)]));
+
+    let mut busy_best = make_candidate("busy-best", "t1", 9.0, "aud-busy");
+    busy_best.act = busy;
+    let mut quiet_offer = make_candidate("quiet-offer", "t2", 7.0, "aud-quiet");
+    quiet_offer.act = quiet;
+
+    // 9.0 * 0.9^5 = 5.31 < 7.0: the quiet act leads once share is priced.
+    let selection = optimizer.select(vec![busy_best, quiet_offer]);
+    assert_eq!(
+        selection.selected[0].opportunity_id.template_id,
+        "quiet-offer"
+    );
+    let quiet_ledger = &selection
+        .marginal_adjustments
+        .get(&selection.selected[0].opportunity_id.to_string())
+        .expect("selected candidates carry a ledger entry");
+    assert_eq!(quiet_ledger.act_dispatches, 0);
+    assert_eq!(
+        quiet_ledger.fairness_adjustment, 0.0,
+        "a new act pays nothing — zero history is neutral, not punitive"
+    );
+    let busy_ledger = &selection
+        .marginal_adjustments
+        .get(&selection.selected[1].opportunity_id.to_string())
+        .expect("the runner-up carries a ledger entry too");
+    assert_eq!(busy_ledger.act_dispatches, 5);
+    assert!(busy_ledger.fairness_adjustment < 0.0);
+
+    // Capability first: give the quiet act a candidate with no intrinsic
+    // value. Factor 1.0 keeps it at zero — the damp cannot buy a worthless
+    // candidate a slot, and the busy act's paid-down positive still wins.
+    let mut worthless = make_candidate("worthless", "t3", -4.0, "aud-quiet2");
+    worthless.act = quiet;
+    let mut busy_next = make_candidate("busy-next", "t4", 2.0, "aud-busy2");
+    busy_next.act = busy;
+    let gated = optimizer.select(vec![worthless, busy_next]);
+    assert_eq!(gated.selected.len(), 1);
+    assert_eq!(gated.selected[0].opportunity_id.template_id, "busy-next");
+
+    // In-round share accrues: each slot an act takes raises the price of
+    // its next one, so a two-slot slate balances rather than doubling.
+    let mut busy_a = make_candidate("busy-a", "t5", 6.0, "aud-b3");
+    busy_a.act = busy;
+    let mut busy_b = make_candidate("busy-b", "t6", 5.9, "aud-b4");
+    busy_b.act = busy;
+    let mut quiet_a = make_candidate("quiet-a", "t7", 5.5, "aud-q3");
+    quiet_a.act = quiet;
+    let balanced = optimizer.select(vec![busy_a, busy_b, quiet_a]);
+    let order: Vec<&str> = balanced
+        .selected
+        .iter()
+        .map(|c| c.opportunity_id.template_id.as_str())
+        .collect();
+    assert_eq!(
+        order,
+        vec!["quiet-a", "busy-a", "busy-b"],
+        "6.0*0.9^5=3.54 < 5.5, so quiet leads; both busy candidates stay positive and follow in intrinsic order"
+    );
+    let busy_b_ledger = balanced
+        .marginal_adjustments
+        .values()
+        .find(|a| a.act_dispatches == 6)
+        .expect("busy-b must pay 0.9^6 — the slot busy-a took counts too");
+    assert!(busy_b_ledger.fairness_adjustment < 0.0);
+}

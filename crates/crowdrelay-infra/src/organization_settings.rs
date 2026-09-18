@@ -57,15 +57,26 @@ pub const KEY_ROSTER_PORTFOLIO_COST_BUDGET: &str = "roster_portfolio_cost_budget
 /// The inclusive bounds a stored cost budget must fall inside.
 pub const PORTFOLIO_COST_BUDGET_RANGE: std::ops::RangeInclusive<f64> = 0.0..=1_000_000.0;
 
+/// How hard each prior dispatch an act already holds discounts its next
+/// candidate in the pooled rank (5.2). 1.0 is the pure value maximiser —
+/// inert — and 0.0 is "the quietest act always goes first". The useful band
+/// sits between them; the whole 0..=1 range is a stated choice, so the bounds
+/// do not editorialize inside it.
+pub const KEY_ROSTER_PORTFOLIO_FAIRNESS_DECAY: &str = "roster_portfolio_fairness_decay";
+
+/// The inclusive bounds a stored fairness decay must fall inside.
+pub const PORTFOLIO_FAIRNESS_DECAY_RANGE: std::ops::RangeInclusive<f64> = 0.0..=1.0;
+
 /// The keys an operator may edit on an organisation.
 ///
 /// Same allowlist discipline as `tenant_settings::EDITABLE_KEYS`: anything else
 /// stays internal even if a row somehow appears, so the HTTP surface cannot be
 /// used to smuggle state into the organisation.
-pub const EDITABLE_KEYS: [&str; 3] = [
+pub const EDITABLE_KEYS: [&str; 4] = [
     KEY_ROSTER_PACKAGES_PER_PERIOD,
     KEY_ROSTER_PORTFOLIO_MAX_DISPATCHES,
     KEY_ROSTER_PORTFOLIO_COST_BUDGET,
+    KEY_ROSTER_PORTFOLIO_FAIRNESS_DECAY,
 ];
 
 /// The roster's stated pooled-portfolio limits (5.1) — `None` per field where
@@ -75,6 +86,7 @@ pub const EDITABLE_KEYS: [&str; 3] = [
 pub struct RosterPortfolioLimits {
     pub max_dispatches: Option<u16>,
     pub cost_budget: Option<f64>,
+    pub fairness_decay: Option<f64>,
 }
 
 #[derive(Clone)]
@@ -174,9 +186,13 @@ impl OrganizationSettingsRepository {
         let cost_budget = value(KEY_ROSTER_PORTFOLIO_COST_BUDGET)
             .and_then(|v| v.parse::<f64>().ok())
             .filter(|v| v.is_finite() && PORTFOLIO_COST_BUDGET_RANGE.contains(v));
+        let fairness_decay = value(KEY_ROSTER_PORTFOLIO_FAIRNESS_DECAY)
+            .and_then(|v| v.parse::<f64>().ok())
+            .filter(|v| v.is_finite() && PORTFOLIO_FAIRNESS_DECAY_RANGE.contains(v));
         Ok(RosterPortfolioLimits {
             max_dispatches,
             cost_budget,
+            fairness_decay,
         })
     }
 
@@ -227,6 +243,9 @@ pub fn is_valid_value(key: &str, value: &str) -> bool {
         KEY_ROSTER_PORTFOLIO_COST_BUDGET => value.trim().parse::<f64>().is_ok_and(|budget| {
             budget.is_finite() && PORTFOLIO_COST_BUDGET_RANGE.contains(&budget)
         }),
+        KEY_ROSTER_PORTFOLIO_FAIRNESS_DECAY => value.trim().parse::<f64>().is_ok_and(|decay| {
+            decay.is_finite() && PORTFOLIO_FAIRNESS_DECAY_RANGE.contains(&decay)
+        }),
         _ => false,
     }
 }
@@ -256,7 +275,7 @@ mod tests {
     #[test]
     fn an_unknown_key_is_never_valid() {
         assert!(!is_valid_value("anything_else", "1"));
-        assert_eq!(EDITABLE_KEYS.len(), 3);
+        assert_eq!(EDITABLE_KEYS.len(), 4);
         for key in EDITABLE_KEYS {
             assert!(
                 is_valid_value(key, "1"),
@@ -279,5 +298,13 @@ mod tests {
         assert!(!is_valid_value(KEY_ROSTER_PORTFOLIO_COST_BUDGET, "-1"));
         assert!(!is_valid_value(KEY_ROSTER_PORTFOLIO_COST_BUDGET, "NaN"));
         assert!(!is_valid_value(KEY_ROSTER_PORTFOLIO_COST_BUDGET, "1e9"));
+
+        // The fairness knob is a unit-interval decay: both ends are stated
+        // choices, everything outside is refused rather than coerced.
+        assert!(is_valid_value(KEY_ROSTER_PORTFOLIO_FAIRNESS_DECAY, "1"));
+        assert!(is_valid_value(KEY_ROSTER_PORTFOLIO_FAIRNESS_DECAY, "0"));
+        assert!(is_valid_value(KEY_ROSTER_PORTFOLIO_FAIRNESS_DECAY, "0.85"));
+        assert!(!is_valid_value(KEY_ROSTER_PORTFOLIO_FAIRNESS_DECAY, "1.01"));
+        assert!(!is_valid_value(KEY_ROSTER_PORTFOLIO_FAIRNESS_DECAY, "-0.1"));
     }
 }
