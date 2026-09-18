@@ -118,6 +118,7 @@ async fn event(
 }
 
 #[tokio::test]
+#[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn the_same_promoter_across_acts_reports_the_recurrence()
 -> Result<(), Box<dyn std::error::Error>> {
     let db = DisposableDatabase::create().await?;
@@ -258,6 +259,7 @@ async fn the_same_promoter_across_acts_reports_the_recurrence()
 }
 
 #[tokio::test]
+#[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn a_retracted_counterparty_unmarks_the_event() -> Result<(), Box<dyn std::error::Error>> {
     let db = DisposableDatabase::create().await?;
     let result = async {
