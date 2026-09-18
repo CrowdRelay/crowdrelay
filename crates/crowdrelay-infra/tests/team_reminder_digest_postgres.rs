@@ -82,6 +82,15 @@ async fn run(pool: &PgPool, url: &str) -> Result<(), Box<dyn std::error::Error>>
     let workspace = workspace(pool).await?;
     advertise_team_email(pool, workspace, now).await?;
 
+    // Crew mail keeps the tenant's night quiet (UTC when `crew_timezone` is
+    // unset) — a dispatch instant inside the quiet window is the next test's
+    // business. Twelve hours forward from any quiet hour lands mid-morning.
+    let dispatch_now = if (8..21).contains(&now.hour()) {
+        now
+    } else {
+        now + time::Duration::hours(12)
+    };
+
     let alice = member(pool, workspace, "alice").await?;
     let bogdan = member(pool, workspace, "bogdan").await?;
 
@@ -103,7 +112,7 @@ async fn run(pool: &PgPool, url: &str) -> Result<(), Box<dyn std::error::Error>>
     };
     let repository = PostgresAutopilotRepository::new(pool.clone(), &database);
     let queued = repository
-        .dispatch_team_handoff_reminders(WorkspaceId::from_uuid(workspace), now)
+        .dispatch_team_handoff_reminders(WorkspaceId::from_uuid(workspace), dispatch_now)
         .await?;
     assert_eq!(queued, 2, "one email each for two people, not five");
 
@@ -148,9 +157,81 @@ async fn run(pool: &PgPool, url: &str) -> Result<(), Box<dyn std::error::Error>>
     // And the ladder is finite: a second sweep at the same instant sends
     // nothing, because every rung of every assignment is still in the future.
     let again = repository
-        .dispatch_team_handoff_reminders(WorkspaceId::from_uuid(workspace), now)
+        .dispatch_team_handoff_reminders(WorkspaceId::from_uuid(workspace), dispatch_now)
         .await?;
     assert_eq!(again, 0, "the same sweep sent a second round of mail");
+    Ok(())
+}
+
+/// Crew mail keeps the tenant's night quiet: a reminder due at 03:00 on the
+/// tenant's clock does not send at 03:00 — the row stays due, uncounted, and
+/// the first waking sweep sends it unchanged.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn a_reminder_due_overnight_waits_for_morning() -> Result<(), Box<dyn std::error::Error>> {
+    let database = DisposableDatabase::create().await?;
+    let result = run_quiet(&database.pool, &database.url).await;
+    database.drop_database().await;
+    result
+}
+
+async fn run_quiet(pool: &PgPool, url: &str) -> Result<(), Box<dyn std::error::Error>> {
+    // The workspace carries no `crew_timezone` row — the shipped default is
+    // UTC, so the quiet window is 21:00–08:00 UTC and the test can name its
+    // own hours without depending on the wall clock.
+    let quiet_now = OffsetDateTime::now_utc()
+        .replace_hour(3)
+        .expect("03:00 is a valid hour");
+    let morning = quiet_now + time::Duration::hours(6);
+
+    let workspace = workspace(pool).await?;
+    // The capability heartbeat compares `expires_at` to the database's own
+    // clock, not the sweep's `now` — advertise it against the real wall clock
+    // so it is still live when the deferred send runs a moment later.
+    advertise_team_email(pool, workspace, OffsetDateTime::now_utc()).await?;
+    let alice = member(pool, workspace, "night-owl").await?;
+    assignment(pool, workspace, alice, quiet_now, 0).await?;
+
+    let database = DatabaseConfig {
+        url: url.to_owned(),
+        max_connections: 4,
+        connect_timeout: Duration::from_secs(3),
+        ping_timeout: Duration::from_secs(2),
+        operation_timeout: Duration::from_secs(10),
+        lock_timeout: Duration::from_secs(2),
+    };
+    let repository = PostgresAutopilotRepository::new(pool.clone(), &database);
+
+    let sent_at_night = repository
+        .dispatch_team_handoff_reminders(WorkspaceId::from_uuid(workspace), quiet_now)
+        .await?;
+    assert_eq!(sent_at_night, 0, "a 03:00 reminder mailed anyway");
+
+    // Nothing was consumed: the row is still due and still unreminded, so the
+    // morning sweep sees the same assignment the night sweep declined to mail.
+    let (still_due, unreminded) = sqlx::query_as::<_, (bool, i32)>(
+        "SELECT next_reminder_at IS NOT NULL, reminder_count
+         FROM viryaos_team_assignments WHERE workspace_id = $1",
+    )
+    .bind(workspace)
+    .fetch_one(pool)
+    .await?;
+    assert!(
+        still_due,
+        "the quiet sweep cleared a reminder it never sent"
+    );
+    assert_eq!(
+        unreminded, 0,
+        "the quiet sweep counted a mail it never sent"
+    );
+
+    let sent_in_the_morning = repository
+        .dispatch_team_handoff_reminders(WorkspaceId::from_uuid(workspace), morning)
+        .await?;
+    assert_eq!(
+        sent_in_the_morning, 1,
+        "the deferred reminder never arrived"
+    );
     Ok(())
 }
 
