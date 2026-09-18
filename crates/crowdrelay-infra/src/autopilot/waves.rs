@@ -327,6 +327,15 @@ impl PostgresAutopilotRepository {
         .await
     }
 
+    /// Approves a whole wave in one statement, inside the ledger's
+    /// transaction.
+    ///
+    /// The ledger row and the release commit together — a crash between them
+    /// used to leave the ledger insisting "approved" while every pitch stayed
+    /// parked, and the replay then swore it happened. Pitch by pitch inside a
+    /// loop, an error halfway leaves a half-approved batch — the one state an
+    /// operator cannot reason about, because the thing they approved was the
+    /// batch.
     pub(super) async fn approve_outreach_wave_operator(
         &self,
         workspace_id: WorkspaceId,
@@ -334,59 +343,32 @@ impl PostgresAutopilotRepository {
         idempotency_key: &IdempotencyKey,
         request_id: Option<&RequestId>,
     ) -> Result<AutopilotControlMutation, RepositoryError> {
-        let mut transaction = self.pool.begin().await.map_err(map_sqlx)?;
-        let operation_id = Uuid::now_v7();
-        let replay = operator_actions::insert_operator_action(
-            &mut transaction,
-            workspace_id,
-            operation_id,
-            "approve_autopilot_outreach_wave",
-            "outreach_wave",
-            wave_id,
-            "admin_api_key",
-            idempotency_key,
-            request_id,
-            &json!({"requested_status": "approved"}),
-        )
-        .await?;
-        if let Some(existing) = replay {
-            transaction.commit().await.map_err(map_sqlx)?;
-            return Ok(AutopilotControlMutation {
-                operation_id: existing,
-                target_id: wave_id,
-                status: "approved".to_owned(),
-                replayed: true,
-            });
-        }
-        transaction.commit().await.map_err(map_sqlx)?;
-        // The wave and its pitches move in one statement each, inside their own
-        // transaction. Half an approved batch is the one state an operator
-        // cannot reason about, because the thing they approved was the batch.
-        let released = self
-            .approve_outreach_wave_impl(workspace_id, wave_id, OffsetDateTime::now_utc())
-            .await?;
-        Ok(AutopilotControlMutation {
-            operation_id,
-            target_id: wave_id,
-            status: format!("approved:{released}"),
-            replayed: false,
-        })
-    }
-
-    /// Approves a whole wave in one statement.
-    ///
-    /// Returns how many pitches were released. Pitch by pitch inside a loop, an
-    /// error halfway leaves a half-approved batch — which is the one state an
-    /// operator cannot reason about, because the thing they approved was the
-    /// batch.
-    pub(super) async fn approve_outreach_wave_impl(
-        &self,
-        workspace_id: WorkspaceId,
-        wave_id: Uuid,
-        now: OffsetDateTime,
-    ) -> Result<u32, RepositoryError> {
         self.bounded(async {
             let mut transaction = self.pool.begin().await.map_err(map_sqlx)?;
+            let operation_id = Uuid::now_v7();
+            let replay = operator_actions::insert_operator_action(
+                &mut transaction,
+                workspace_id,
+                operation_id,
+                "approve_autopilot_outreach_wave",
+                "outreach_wave",
+                wave_id,
+                "admin_api_key",
+                idempotency_key,
+                request_id,
+                &json!({"requested_status": "approved"}),
+            )
+            .await?;
+            if let Some(existing) = replay {
+                transaction.commit().await.map_err(map_sqlx)?;
+                return Ok(AutopilotControlMutation {
+                    operation_id: existing,
+                    target_id: wave_id,
+                    status: "approved".to_owned(),
+                    replayed: true,
+                });
+            }
+            let now = OffsetDateTime::now_utc();
             // Only a sealed wave. A drafting one is still growing, and
             // approving something that grows afterwards is approving something
             // nobody read.
@@ -434,7 +416,12 @@ impl PostgresAutopilotRepository {
             )
             .await?;
             transaction.commit().await.map_err(map_sqlx)?;
-            Ok(pitches_sent)
+            Ok(AutopilotControlMutation {
+                operation_id,
+                target_id: wave_id,
+                status: format!("approved:{pitches_sent}"),
+                replayed: false,
+            })
         })
         .await
     }
