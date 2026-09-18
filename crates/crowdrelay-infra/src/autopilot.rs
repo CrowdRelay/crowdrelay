@@ -21,7 +21,7 @@ mod growth_metrics;
 mod measurement;
 mod objectives;
 mod operations;
-mod operator_actions;
+pub(crate) mod operator_actions;
 mod placements;
 mod play_outcomes;
 mod plays;

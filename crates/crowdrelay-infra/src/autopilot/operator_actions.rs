@@ -8,7 +8,7 @@
 use super::*;
 
 #[allow(clippy::too_many_arguments)]
-pub(super) async fn insert_operator_action(
+pub(crate) async fn insert_operator_action(
     transaction: &mut Transaction<'_, Postgres>,
     workspace_id: WorkspaceId,
     operation_id: Uuid,

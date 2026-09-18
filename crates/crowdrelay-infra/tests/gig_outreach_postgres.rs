@@ -18,8 +18,8 @@ use crowdrelay_application::autopilot::{
     AutopilotActionRepository, AutopilotMeasurementKind, AutopilotMeasurementRepository,
     ClaimedAutopilotMeasurement, assess_measurement_effect,
 };
-use crowdrelay_domain::WorkspaceId;
 use crowdrelay_domain::ids::{AutopilotActionId, AutopilotMeasurementId};
+use crowdrelay_domain::{CityId, WorkspaceId};
 use crowdrelay_infra::gig_outreach::{GigOutreachError, GigOutreachOutcome, approve_gig_proposal};
 use crowdrelay_infra::{autopilot::PostgresAutopilotRepository, config::DatabaseConfig};
 use sqlx::{Connection, PgConnection, PgPool, postgres::PgPoolOptions};
@@ -100,7 +100,7 @@ async fn run(pool: &PgPool, url: &str) -> Result<(), Box<dyn std::error::Error>>
 
     // ── The approval ────────────────────────────────────────────────────────
     let key = IdempotencyKey::parse("gig-approve-1").expect("valid key");
-    let outcome = approve_gig_proposal(pool, act, wroclaw, &key, now).await?;
+    let outcome = approve_gig_proposal(pool, act, wroclaw, &key, now, None).await?;
     let (action_id, recipients, opening_line) = match outcome {
         GigOutreachOutcome::Queued {
             action_id,
@@ -169,7 +169,7 @@ async fn run(pool: &PgPool, url: &str) -> Result<(), Box<dyn std::error::Error>>
     assert_eq!(decision_kind, "gig.proposal.approved");
 
     // ── The same click twice ────────────────────────────────────────────────
-    let replay = approve_gig_proposal(pool, act, wroclaw, &key, now).await?;
+    let replay = approve_gig_proposal(pool, act, wroclaw, &key, now, None).await?;
     match replay {
         GigOutreachOutcome::Replayed {
             action_id: replayed,
@@ -192,7 +192,7 @@ async fn run(pool: &PgPool, url: &str) -> Result<(), Box<dyn std::error::Error>>
     // have done: accept the band's yes, park the action, and cancel it a day
     // later by a sweep nothing shows them.
     let refused_key = IdempotencyKey::parse("gig-approve-blocked").expect("valid key");
-    match approve_gig_proposal(pool, act, wroclaw, &refused_key, now).await {
+    match approve_gig_proposal(pool, act, wroclaw, &refused_key, now, None).await {
         Err(GigOutreachError::Refused(sentence)) => assert!(
             sentence.contains("nothing can send this letter yet"),
             "the refusal did not name the missing sender: {sentence}"
@@ -276,7 +276,7 @@ async fn run(pool: &PgPool, url: &str) -> Result<(), Box<dyn std::error::Error>>
     .execute(pool)
     .await?;
     let second_key = IdempotencyKey::parse("gig-approve-2").expect("valid key");
-    match approve_gig_proposal(pool, act, wroclaw, &second_key, now).await {
+    match approve_gig_proposal(pool, act, wroclaw, &second_key, now, None).await {
         Err(GigOutreachError::Refused(sentence)) => assert!(
             sentence.contains("already a show"),
             "the refusal did not say what changed: {sentence}"
@@ -287,7 +287,7 @@ async fn run(pool: &PgPool, url: &str) -> Result<(), Box<dyn std::error::Error>>
     }
 
     // A city nobody has an audience in is not on the board at all.
-    match approve_gig_proposal(pool, act, Uuid::now_v7(), &second_key, now).await {
+    match approve_gig_proposal(pool, act, Uuid::now_v7(), &second_key, now, None).await {
         Err(GigOutreachError::NotFound) => {}
         other => return Err(format!("an unknown city was not refused: {other:?}").into()),
     }
@@ -319,14 +319,14 @@ async fn a_second_approval_for_a_city_already_written_to_is_a_sentence(
 
     let first = IdempotencyKey::parse("gig-lublin-1").expect("valid key");
     let GigOutreachOutcome::Queued { .. } =
-        approve_gig_proposal(pool, act, lublin, &first, now).await?
+        approve_gig_proposal(pool, act, lublin, &first, now, None).await?
     else {
         return Err("the first Lublin approval did not queue".into());
     };
 
     // A different key, so this is a genuinely new approval rather than a replay.
     let second = IdempotencyKey::parse("gig-lublin-2").expect("valid key");
-    match approve_gig_proposal(pool, act, lublin, &second, now).await {
+    match approve_gig_proposal(pool, act, lublin, &second, now, None).await {
         Err(GigOutreachError::Refused(sentence)) => assert!(
             sentence.contains("already approved this city"),
             "the second approval did not explain itself: {sentence}"
@@ -455,7 +455,7 @@ async fn two_promoters_with_one_name_both_receive_the_letter(
         action_id,
         recipients,
         ..
-    } = approve_gig_proposal(pool, act, poznan, &key, now).await?
+    } = approve_gig_proposal(pool, act, poznan, &key, now, None).await?
     else {
         return Err("the namesake proposal did not queue".into());
     };
@@ -527,7 +527,7 @@ async fn a_settled_proposal_has_its_reasons_scored() -> Result<(), Box<dyn std::
 
         let key = IdempotencyKey::parse("gig-score-1").expect("valid key");
         let GigOutreachOutcome::Queued { action_id, .. } =
-            approve_gig_proposal(pool, act, wroclaw, &key, now).await?
+            approve_gig_proposal(pool, act, wroclaw, &key, now, None).await?
         else {
             return Err("the proposal did not queue".into());
         };
@@ -698,7 +698,7 @@ async fn a_settled_proposal_has_its_reasons_scored() -> Result<(), Box<dyn std::
         let GigOutreachOutcome::Queued {
             action_id: late_action,
             ..
-        } = approve_gig_proposal(pool, act, late_city, &late_key, now).await?
+        } = approve_gig_proposal(pool, act, late_city, &late_key, now, None).await?
         else {
             return Err("the late-city proposal did not queue".into());
         };
@@ -740,6 +740,216 @@ async fn a_settled_proposal_has_its_reasons_scored() -> Result<(), Box<dyn std::
     .await;
     database.drop_database().await;
     result
+}
+
+/// N.10 — the band fixes the first line, the fix is the letter, and the fix
+/// is on the ledger.
+///
+/// The gig approvals gain the generic approve-with-edit machinery (2.9): the
+/// opening line is the band's voice, so a correction is what the promoter
+/// reads — recorded field-by-field so the voice signal (§4d-3.2) can measure
+/// how wrong the machine was. What the gate refuses writes nothing at all,
+/// because a typo must not be able to burn the click's idempotency key.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn a_fixed_opening_line_is_the_letter_and_the_ledger()
+-> Result<(), Box<dyn std::error::Error>> {
+    let database = DisposableDatabase::create().await?;
+    let result = run_revision(&database.pool).await;
+    database.drop_database().await;
+    result
+}
+
+async fn run_revision(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
+    use std::collections::BTreeMap;
+
+    let now = OffsetDateTime::now_utc();
+    let act = workspace(pool).await?;
+    let gdansk = city(pool, "gdansk-rev").await?;
+    for index in 0..60 {
+        reachable_fan(pool, act, gdansk, &format!("rev{index}@example.com")).await?;
+    }
+    played_show(pool, act, gdansk, "Klub G", "rev-show", 30).await?;
+    promoter(pool, act, gdansk, "Feliks", "feliks@example.com", 70).await?;
+
+    // ── A locked field refuses the approval, and spends nothing ──────────
+    // `venue` is what the letter points at, not a word a human reads — the
+    // edit box is not a back door into the proposal's facts.
+    let key = IdempotencyKey::parse("gig-rev-1").expect("valid key");
+    let venue_edit = BTreeMap::from([("venue".to_owned(), "Anywhere Else".to_owned())]);
+    match approve_gig_proposal(pool, act, gdansk, &key, now, Some(&venue_edit)).await {
+        Err(GigOutreachError::Refused(sentence)) => assert!(
+            sentence.contains("`venue` cannot be revised"),
+            "the refusal did not name the locked field: {sentence}"
+        ),
+        other => return Err(format!("a venue edit was taken: {other:?}").into()),
+    }
+    // An emptied line is a reject wearing an edit's clothes, and an empty map
+    // changes nothing — both refuse in their own words, and neither spends
+    // the key.
+    let emptied_edit = BTreeMap::from([("opening_line".to_owned(), "   ".to_owned())]);
+    match approve_gig_proposal(pool, act, gdansk, &key, now, Some(&emptied_edit)).await {
+        Err(GigOutreachError::Refused(sentence)) => assert!(
+            sentence.contains("cannot be emptied"),
+            "an emptied line was not refused in its own words: {sentence}"
+        ),
+        other => return Err(format!("an emptied edit was taken: {other:?}").into()),
+    }
+    let empty_edit = BTreeMap::new();
+    match approve_gig_proposal(pool, act, gdansk, &key, now, Some(&empty_edit)).await {
+        Err(GigOutreachError::Refused(sentence)) => assert!(
+            sentence.contains("identical to the draft"),
+            "an empty revision was not refused: {sentence}"
+        ),
+        other => return Err(format!("an empty revision was taken: {other:?}").into()),
+    }
+    let (actions, decisions, audits) = sqlx::query_as::<_, (i64, i64, i64)>(
+        "SELECT (SELECT COUNT(*) FROM viryaos_autopilot_actions WHERE workspace_id = $1),
+                (SELECT COUNT(*) FROM viryaos_autopilot_decisions WHERE workspace_id = $1),
+                (SELECT COUNT(*) FROM operator_actions WHERE workspace_id = $1)",
+    )
+    .bind(act)
+    .fetch_one(pool)
+    .await?;
+    assert_eq!(
+        (actions, decisions, audits),
+        (0, 0, 0),
+        "a refused revision wrote something"
+    );
+
+    // ── The same key, now carrying a real edit ────────────────────────────
+    // The refusal spent nothing, so this is still the click the band made.
+    let edit = BTreeMap::from([(
+        "opening_line".to_owned(),
+        "Gdansk, we keep missing you — Klub G on a Friday fixes that.".to_owned(),
+    )]);
+    let GigOutreachOutcome::Queued {
+        action_id,
+        opening_line,
+        ..
+    } = approve_gig_proposal(pool, act, gdansk, &key, now, Some(&edit)).await?
+    else {
+        return Err("the unburnt key did not queue the fixed letter".into());
+    };
+    assert_eq!(
+        opening_line, "Gdansk, we keep missing you — Klub G on a Friday fixes that.",
+        "the outcome did not return the operator's words"
+    );
+
+    // The payload the action carries is what the executor renders — verbatim.
+    let stored_line = sqlx::query_scalar::<_, String>(
+        "SELECT payload ->> 'opening_line' FROM viryaos_autopilot_actions
+         WHERE workspace_id = $1 AND id = $2",
+    )
+    .bind(act)
+    .bind(action_id)
+    .fetch_one(pool)
+    .await?;
+    assert_eq!(
+        stored_line, opening_line,
+        "the queued letter is not the fix"
+    );
+
+    // One ledger row per edited field, hung off the approval's own audit
+    // row: the machine's words, the band's words, and how far they moved.
+    let rows = sqlx::query_as::<_, (String, String, String, String, i32, serde_json::Value)>(
+        "SELECT audit.action, revision.field, revision.before_text,
+                revision.after_text, revision.distance_chars, audit.details
+         FROM viryaos_draft_revisions AS revision
+         JOIN operator_actions AS audit ON audit.id = revision.operation_id
+         WHERE revision.workspace_id = $1 AND revision.action_id = $2",
+    )
+    .bind(act)
+    .bind(action_id)
+    .fetch_all(pool)
+    .await?;
+    let [(action, field, before, after, distance, details)] = rows.as_slice() else {
+        return Err(format!("one field edited, one ledger row expected: {rows:?}").into());
+    };
+    assert_eq!(action, "approve_gig_proposal");
+    assert_eq!(field, "opening_line");
+    assert!(
+        before.ends_with('.'),
+        "the machine's line was not kept: {before}"
+    );
+    assert_eq!(after, &opening_line);
+    assert!(*distance > 0, "the edit recorded no distance");
+    assert_eq!(
+        details["revision_fields"],
+        serde_json::json!(["opening_line"])
+    );
+
+    // ── A replayed key does not re-apply anything ─────────────────────────
+    let other_edit = BTreeMap::from([(
+        "opening_line".to_owned(),
+        "a different fix entirely".to_owned(),
+    )]);
+    match approve_gig_proposal(pool, act, gdansk, &key, now, Some(&other_edit)).await? {
+        GigOutreachOutcome::Replayed {
+            action_id: replayed,
+            ..
+        } => assert_eq!(replayed, action_id),
+        other => return Err(format!("a replayed key queued again: {other:?}").into()),
+    }
+    let still = sqlx::query_scalar::<_, String>(
+        "SELECT payload ->> 'opening_line' FROM viryaos_autopilot_actions
+         WHERE workspace_id = $1 AND id = $2",
+    )
+    .bind(act)
+    .bind(action_id)
+    .fetch_one(pool)
+    .await?;
+    assert_eq!(still, opening_line, "the replay rewrote the stored letter");
+
+    // ── A no-op is not an edit, and the evidence is not editable ──────────
+    // The no-op must be the machine's own line for the fresh city, recomputed
+    // the way the approval recomputes it — reach is geographic, so a second
+    // seeded city changes the count a guessed sentence would miss.
+    let sopot = city(pool, "sopot-rev").await?;
+    for index in 0..60 {
+        reachable_fan(pool, act, sopot, &format!("sopot{index}@example.com")).await?;
+    }
+    played_show(pool, act, sopot, "Klub G", "sopot-show", 30).await?;
+    promoter(pool, act, sopot, "Feliks", "feliks-sopot@example.com", 70).await?;
+    let noop_key = IdempotencyKey::parse("gig-rev-noop").expect("valid key");
+    let opportunities = crowdrelay_infra::gig_planning::city_opportunities(pool, act, now).await?;
+    let sopot_opportunity = opportunities
+        .iter()
+        .find(|candidate| candidate.city_id == CityId::from_uuid(sopot))
+        .expect("sopot is on the board");
+    let intent = crowdrelay_infra::gig_planning::stated_intent(
+        &crowdrelay_infra::tenant_settings::TenantSettingsRepository::new(pool.clone()),
+        act,
+    )
+    .await?;
+    let sopot_line = crowdrelay_domain::gig_plan::plan_gig(sopot_opportunity, intent)
+        .expect("sopot still proposes")
+        .opening_line();
+    let noop_edit = BTreeMap::from([("opening_line".to_owned(), sopot_line)]);
+    match approve_gig_proposal(pool, act, sopot, &noop_key, now, Some(&noop_edit)).await {
+        Err(GigOutreachError::Refused(sentence)) => assert!(
+            sentence.contains("identical to the draft"),
+            "the no-op was not refused in the draft's words: {sentence}"
+        ),
+        other => return Err(format!("a no-op edit was taken: {other:?}").into()),
+    }
+    // `reasons` is what the machine counted — disagreeing with a number is a
+    // refusal, not a rewrite. The same key is still unspent after both.
+    let reasons_edit = BTreeMap::from([("reasons".to_owned(), "the room loves us".to_owned())]);
+    match approve_gig_proposal(pool, act, sopot, &noop_key, now, Some(&reasons_edit)).await {
+        Err(GigOutreachError::Refused(sentence)) => assert!(
+            sentence.contains("`reasons` cannot be revised"),
+            "the evidence was editable: {sentence}"
+        ),
+        other => return Err(format!("a reasons edit was taken: {other:?}").into()),
+    }
+    let GigOutreachOutcome::Queued { .. } =
+        approve_gig_proposal(pool, act, sopot, &noop_key, now, Some(&edit)).await?
+    else {
+        return Err("twice-refused edits still burnt the key".into());
+    };
+
+    Ok(())
 }
 
 fn repository(pool: &PgPool, url: &str) -> PostgresAutopilotRepository {

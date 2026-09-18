@@ -7234,6 +7234,17 @@ paths:
                   type: string
                   format: uuid
                   description: The labelmate being put forward for the slot.
+                revision:
+                  type: object
+                  additionalProperties: { type: string, maxLength: 4000 }
+                  description: >
+                    Field → corrected text, reviewed by the same gate the
+                    admin approval surface uses. `opening_line` is the only
+                    field a gig letter lets a person rewrite — the reasons are
+                    the machine's measured evidence, and a disagreement with a
+                    number is a refusal, not an edit. A refused revision
+                    refuses the approval rather than approving the original
+                    words.
       responses:
         '200':
           description: >
@@ -10166,6 +10177,97 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ControlPlaneShowHelpers'
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '404': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
+  /control-plane/gig-plan/approve:
+    post:
+      operationId: approveGigProposal
+      summary: Approve the proposal for one city — yes, write to these people
+      description: >
+        The band approves a city, not a document: the proposal is recomputed
+        over the evidence as it stands, and a proposal that stopped being
+        true between the read and the click refuses with the sentence that
+        says what changed. Approving once is approving — the action is
+        written `queued`, not `awaiting_approval`, and every gate still runs
+        again at dispatch. One approval produces one action carrying the
+        whole recipient set: the promoters who book one room talk to each
+        other, so everybody hears or nobody does. The band may fix the
+        letter's words as they approve — `revision` maps fields to
+        replacement text, and `opening_line` is the only field a gig letter
+        lets a person rewrite. A refused revision refuses the approval and
+        spends nothing, so the idempotency key is still theirs to click with.
+        A replayed key returns the stored answer and never re-applies an
+        edit.
+      security:
+      - controlPlaneBearer: []
+      parameters:
+      - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required:
+              - city_id
+              properties:
+                city_id:
+                  type: string
+                  format: uuid
+                  description: >
+                    The catalogue id of the city whose proposal the band is
+                    approving — the same `city_id` the proposal was served
+                    with. The catalogue is only unique per country, and an
+                    approval is exactly where a wrong-city resolution cannot
+                    be afforded.
+                revision:
+                  type: object
+                  additionalProperties: { type: string, maxLength: 4000 }
+                  description: >
+                    Field → corrected text, reviewed by the same gate the
+                    admin approval surface uses. The opening line is the
+                    band's voice; the reasons are the machine's measured
+                    evidence and are not revisable.
+      responses:
+        '200':
+          description: >
+            The queued outreach with the room, the recipients and the first
+            line as the promoter will read them — or the replay of an
+            already-made approval, or the refusal sentence saying what
+            changed.
+          content:
+            application/json:
+              schema:
+                anyOf:
+                - type: object
+                  additionalProperties: false
+                  required: [action_id, city, venue, recipients, opening_line]
+                  properties:
+                    action_id: { type: string, format: uuid }
+                    city: { type: string }
+                    venue: { type: string }
+                    recipients:
+                      type: array
+                      items: { type: string }
+                    opening_line:
+                      type: string
+                      description: The first line of the letter — the operator's words when a revision replaced the machine's.
+                - type: object
+                  additionalProperties: false
+                  required: [action_id, status]
+                  properties:
+                    action_id: { type: string, format: uuid }
+                    status: { type: string }
+                - type: object
+                  additionalProperties: false
+                  required: [refused]
+                  properties:
+                    refused:
+                      type: string
+                      description: What changed, as a sentence the band can act on.
+        '400': { $ref: '#/components/responses/PrivateProblem' }
         '401': { $ref: '#/components/responses/PrivateProblem' }
         '404': { $ref: '#/components/responses/PrivateProblem' }
         '503': { $ref: '#/components/responses/PrivateProblem' }
