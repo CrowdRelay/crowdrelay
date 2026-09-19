@@ -63,7 +63,7 @@ mod growth_metric_candidate_tests {
     fn recommend_policy_never_creates_auto_execute_disposition()
     -> Result<(), Box<dyn std::error::Error>> {
         let policy = policy(AutonomyLevel::Recommend)?;
-        let candidate = growth_metric_candidate(&snapshot(now()), &policy, now())?
+        let candidate = growth_metric_candidate(&snapshot(now()), &policy, EvidenceCount(RATE_FLOOR), now())?
             .ok_or_else(|| std::io::Error::other("candidate expected"))?;
 
         assert_eq!(candidate.disposition, PolicyDisposition::RecommendOnly);
@@ -75,12 +75,12 @@ mod growth_metric_candidate_tests {
     fn decision_key_changes_when_the_evidence_changes()
     -> Result<(), Box<dyn std::error::Error>> {
         let policy = policy(AutonomyLevel::Recommend)?;
-        let baseline = growth_metric_candidate(&snapshot(now()), &policy, now())?
+        let baseline = growth_metric_candidate(&snapshot(now()), &policy, EvidenceCount(RATE_FLOOR), now())?
             .ok_or_else(|| std::io::Error::other("candidate expected"))?;
 
         let mut moved = snapshot(now());
         moved.trend.latest_value += 500;
-        let moved = growth_metric_candidate(&moved, &policy, now())?
+        let moved = growth_metric_candidate(&moved, &policy, EvidenceCount(RATE_FLOOR), now())?
             .ok_or_else(|| std::io::Error::other("candidate expected"))?;
 
         assert_ne!(baseline.decision_key, moved.decision_key);
@@ -94,9 +94,9 @@ mod growth_metric_candidate_tests {
         let mut second = policy(AutonomyLevel::Recommend)?;
         second.version = 2;
 
-        let a = growth_metric_candidate(&snapshot(now()), &first, now())?
+        let a = growth_metric_candidate(&snapshot(now()), &first, EvidenceCount(RATE_FLOOR), now())?
             .ok_or_else(|| std::io::Error::other("candidate expected"))?;
-        let b = growth_metric_candidate(&snapshot(now()), &second, now())?
+        let b = growth_metric_candidate(&snapshot(now()), &second, EvidenceCount(RATE_FLOOR), now())?
             .ok_or_else(|| std::io::Error::other("candidate expected"))?;
 
         assert_ne!(a.decision_key, b.decision_key);
@@ -109,9 +109,9 @@ mod growth_metric_candidate_tests {
         let policy = policy(AutonomyLevel::Recommend)?;
         let later = now() + time::Duration::hours(1);
 
-        let first = growth_metric_candidate(&snapshot(now()), &policy, now())?
+        let first = growth_metric_candidate(&snapshot(now()), &policy, EvidenceCount(RATE_FLOOR), now())?
             .ok_or_else(|| std::io::Error::other("candidate expected"))?;
-        let second = growth_metric_candidate(&snapshot(later), &policy, later)?
+        let second = growth_metric_candidate(&snapshot(later), &policy, EvidenceCount(RATE_FLOOR), later)?
             .ok_or_else(|| std::io::Error::other("candidate expected"))?;
 
         assert_eq!(
@@ -128,9 +128,9 @@ mod growth_metric_candidate_tests {
         // it is separate work, not a replay of the first one.
         let much_later = now() + time::Duration::days(30);
 
-        let first = growth_metric_candidate(&snapshot(now()), &policy, now())?
+        let first = growth_metric_candidate(&snapshot(now()), &policy, EvidenceCount(RATE_FLOOR), now())?
             .ok_or_else(|| std::io::Error::other("candidate expected"))?;
-        let second = growth_metric_candidate(&snapshot(much_later), &policy, much_later)?
+        let second = growth_metric_candidate(&snapshot(much_later), &policy, EvidenceCount(RATE_FLOOR), much_later)?
             .ok_or_else(|| std::io::Error::other("candidate expected"))?;
 
         assert_ne!(
@@ -147,7 +147,7 @@ mod growth_metric_candidate_tests {
         policy.config =
             AutopilotPolicyConfig::TicketYield(crowdrelay_domain::pricing::TicketYieldPolicy::default());
 
-        assert!(growth_metric_candidate(&snapshot(now()), &policy, now())?.is_none());
+        assert!(growth_metric_candidate(&snapshot(now()), &policy, EvidenceCount(RATE_FLOOR), now())?.is_none());
         Ok(())
     }
 
@@ -156,7 +156,7 @@ mod growth_metric_candidate_tests {
         let mut policy = policy(AutonomyLevel::BoundedAuto)?;
         policy.minimum_confidence = Confidence::MAX;
 
-        let candidate = growth_metric_candidate(&snapshot(now()), &policy, now())?
+        let candidate = growth_metric_candidate(&snapshot(now()), &policy, EvidenceCount(RATE_FLOOR), now())?
             .ok_or_else(|| std::io::Error::other("candidate expected"))?;
 
         assert_eq!(candidate.disposition, PolicyDisposition::Deny);

@@ -32,6 +32,7 @@ pub(super) fn community_engager_candidates(
     snapshot: &GrowthIntelligenceSnapshot,
     policy: &AutopilotPolicy,
     domain_policy: &GrowthIntelligencePolicy,
+    evidence: EvidenceCount,
     _workspace_id: WorkspaceId,
     now: OffsetDateTime,
     causal_model: &CausalModel,
@@ -65,10 +66,14 @@ pub(super) fn community_engager_candidates(
     if snapshot.unengaged_targets.is_empty() {
         return Ok(Vec::new());
     }
-    let disposition = disposition(
+    // `Confidence::MAX` is asserted, not measured. Without the evidence gate
+    // this context licenses unattended execution on its own say-so.
+    let disposition = disposition_with_evidence(
         policy.autonomy_level,
         Confidence::MAX,
         policy.minimum_confidence,
+        evidence,
+        RATE_FLOOR,
     );
     let is_retry = snapshot.hours_since_last_effective_run.is_none();
     let retry_window = domain_policy.failed_run_retry_hours.max(1);

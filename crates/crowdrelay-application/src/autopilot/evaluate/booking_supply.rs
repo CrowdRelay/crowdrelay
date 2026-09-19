@@ -9,6 +9,7 @@ use super::*;
 pub(super) fn booking_supply_candidate(
     snapshot: &crowdrelay_domain::booking_discovery::BookingSupplySnapshot,
     policy: &AutopilotPolicy,
+    evidence: EvidenceCount,
     workspace_id: WorkspaceId,
     now: OffsetDateTime,
 ) -> Result<Option<DecisionCandidate>, serde_json::Error> {
@@ -24,7 +25,13 @@ pub(super) fn booking_supply_candidate(
         return Ok(None);
     };
     let confidence = Confidence::saturating_from_basis_points(8_800);
-    let disposition = disposition(policy.autonomy_level, confidence, policy.minimum_confidence);
+    let disposition = disposition_with_evidence(
+        policy.autonomy_level,
+        confidence,
+        policy.minimum_confidence,
+        evidence,
+        RATE_FLOOR,
+    );
     let last_request = snapshot
         .hours_since_last_request
         .map_or(0, |hours| now.unix_timestamp() - i64::from(hours) * 3600);

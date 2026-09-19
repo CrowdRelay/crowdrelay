@@ -4,6 +4,7 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
     async fn evaluate_growth_intelligence_context(
         &self,
         policy: &AutopilotPolicy,
+        evidence: &EvidenceLedger,
         now: OffsetDateTime,
         _limits: &mut CycleLimits<'_>,
         report: &mut AutopilotCycleReport,
@@ -178,6 +179,7 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
                 &mut report.blocked_on_membership,
                 snapshot,
                 policy,
+                evidence.for_context(policy.context),
                 self.workspace_id,
                 now,
                 &causal_model,

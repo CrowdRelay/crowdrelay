@@ -46,11 +46,40 @@ mod growth_debt_candidate_tests {
     fn recommend_policy_never_creates_auto_execute_disposition()
     -> Result<(), Box<dyn std::error::Error>> {
         let policy = policy(AutonomyLevel::Recommend)?;
-        let candidate = growth_debt_candidate(&observation(), &policy, now())?
+        let candidate = growth_debt_candidate(&observation(), &policy, EvidenceCount(RATE_FLOOR), now())?
             .ok_or_else(|| std::io::Error::other("candidate expected"))?;
 
         assert_eq!(candidate.disposition, PolicyDisposition::RecommendOnly);
         assert_eq!(candidate.action.action_kind(), "growth.debt.raise");
+        Ok(())
+    }
+
+    /// The gate at a real call site, not only in the domain unit test: a
+    /// context the operator trusted with unattended execution still waits for
+    /// a person until its own dispatches have been measured often enough.
+    ///
+    /// The calls differ only in the evidence count, so a change that stops
+    /// threading it through this builder fails here rather than passing
+    /// quietly.
+    #[test]
+    fn unattended_execution_waits_for_measured_outcomes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let policy = policy(AutonomyLevel::BoundedAuto)?;
+
+        let proven =
+            growth_debt_candidate(&observation(), &policy, EvidenceCount(RATE_FLOOR), now())?
+                .ok_or_else(|| std::io::Error::other("candidate expected"))?;
+        assert_eq!(proven.disposition, PolicyDisposition::AutoExecute);
+
+        let unproven =
+            growth_debt_candidate(&observation(), &policy, EvidenceCount(RATE_FLOOR - 1), now())?
+                .ok_or_else(|| std::io::Error::other("candidate expected"))?;
+        assert_eq!(unproven.disposition, PolicyDisposition::RequireApproval);
+
+        // Never measured is not a softer case than measured-once.
+        let never = growth_debt_candidate(&observation(), &policy, EvidenceCount::NONE, now())?
+            .ok_or_else(|| std::io::Error::other("candidate expected"))?;
+        assert_eq!(never.disposition, PolicyDisposition::RequireApproval);
         Ok(())
     }
 
@@ -72,6 +101,7 @@ mod growth_debt_candidate_tests {
                 hours_since_last_signal: None,
             },
             &policy,
+            EvidenceCount(RATE_FLOOR),
             now(),
         )?
         .ok_or_else(|| std::io::Error::other("candidate expected"))?;
@@ -94,7 +124,7 @@ mod growth_debt_candidate_tests {
     #[test]
     fn the_decision_key_changes_with_the_evidence() -> Result<(), Box<dyn std::error::Error>> {
         let policy = policy(AutonomyLevel::Recommend)?;
-        let baseline = growth_debt_candidate(&observation(), &policy, now())?
+        let baseline = growth_debt_candidate(&observation(), &policy, EvidenceCount(RATE_FLOOR), now())?
             .ok_or_else(|| std::io::Error::other("candidate expected"))?;
         let worse = growth_debt_candidate(
             &GrowthDebtObservation {
@@ -102,6 +132,7 @@ mod growth_debt_candidate_tests {
                 ..observation()
             },
             &policy,
+            EvidenceCount(RATE_FLOOR),
             now(),
         )?
         .ok_or_else(|| std::io::Error::other("candidate expected"))?;
@@ -113,7 +144,7 @@ mod growth_debt_candidate_tests {
     #[test]
     fn the_decision_key_changes_with_the_policy_version()
     -> Result<(), Box<dyn std::error::Error>> {
-        let baseline = growth_debt_candidate(&observation(), &policy(AutonomyLevel::Recommend)?, now())?
+        let baseline = growth_debt_candidate(&observation(), &policy(AutonomyLevel::Recommend)?, EvidenceCount(RATE_FLOOR), now())?
             .ok_or_else(|| std::io::Error::other("candidate expected"))?;
         let revised = growth_debt_candidate(
             &observation(),
@@ -121,6 +152,7 @@ mod growth_debt_candidate_tests {
                 version: 2,
                 ..policy(AutonomyLevel::Recommend)?
             },
+            EvidenceCount(RATE_FLOOR),
             now(),
         )?
         .ok_or_else(|| std::io::Error::other("candidate expected"))?;
@@ -135,7 +167,7 @@ mod growth_debt_candidate_tests {
         let policy = policy(AutonomyLevel::Recommend)?;
         let cooldown = i64::from(GrowthDebtPolicy::default().cooldown_hours);
 
-        let first = growth_debt_candidate(&observation(), &policy, now())?
+        let first = growth_debt_candidate(&observation(), &policy, EvidenceCount(RATE_FLOOR), now())?
             .ok_or_else(|| std::io::Error::other("candidate expected"))?;
         // Same window, worse evidence: the operator queue must not gain a
         // second copy just because the debt aged an hour.
@@ -145,12 +177,14 @@ mod growth_debt_candidate_tests {
                 ..observation()
             },
             &policy,
+            EvidenceCount(RATE_FLOOR),
             now() + time::Duration::hours(1),
         )?
         .ok_or_else(|| std::io::Error::other("candidate expected"))?;
         let later_window = growth_debt_candidate(
             &observation(),
             &policy,
+            EvidenceCount(RATE_FLOOR),
             now() + time::Duration::hours(cooldown * 2),
         )?
         .ok_or_else(|| std::io::Error::other("candidate expected"))?;
@@ -179,6 +213,7 @@ mod growth_debt_candidate_tests {
                 hours_since_last_signal: None,
             },
             &policy,
+            EvidenceCount(RATE_FLOOR),
             now(),
         )?
         .ok_or_else(|| std::io::Error::other("candidate expected"))?;
@@ -194,6 +229,7 @@ mod growth_debt_candidate_tests {
                 hours_since_last_signal: None,
             },
             &policy,
+            EvidenceCount(RATE_FLOOR),
             now(),
         )?
         .ok_or_else(|| std::io::Error::other("candidate expected"))?;
@@ -215,7 +251,7 @@ mod growth_debt_candidate_tests {
             ),
             ..policy(AutonomyLevel::Recommend)?
         };
-        assert!(growth_debt_candidate(&observation(), &policy, now())?.is_none());
+        assert!(growth_debt_candidate(&observation(), &policy, EvidenceCount(RATE_FLOOR), now())?.is_none());
         Ok(())
     }
 
@@ -225,7 +261,7 @@ mod growth_debt_candidate_tests {
             minimum_confidence: Confidence::MAX,
             ..policy(AutonomyLevel::BoundedAuto)?
         };
-        let candidate = growth_debt_candidate(&observation(), &policy, now())?
+        let candidate = growth_debt_candidate(&observation(), &policy, EvidenceCount(RATE_FLOOR), now())?
             .ok_or_else(|| std::io::Error::other("candidate expected"))?;
 
         assert_eq!(candidate.disposition, PolicyDisposition::Deny);
@@ -241,7 +277,7 @@ mod growth_debt_candidate_tests {
             relationship_score: Some(5),
             ..observation()
         };
-        assert!(growth_debt_candidate(&cold, &policy, now())?.is_none());
+        assert!(growth_debt_candidate(&cold, &policy, EvidenceCount(RATE_FLOOR), now())?.is_none());
         Ok(())
     }
 }

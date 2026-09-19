@@ -42,6 +42,7 @@ use time::OffsetDateTime;
 
 use crowdrelay_domain::deliverability::DeliverabilitySnapshot;
 
+use super::evidence_ledger::EvidenceLedger;
 use super::model::{
     AutopilotPolicy, CandidatePersistence, ClaimedAutopilotAction, ClaimedPlayOutcome,
     DecisionCandidate, LiveTermsSnapshot, OutreachKindStanding, OutreachWaveAnchor,
@@ -554,6 +555,23 @@ pub trait AutopilotDecisionRepository: Send + Sync {
         workspace_id: WorkspaceId,
         event: &FanProvenanceEvent,
     ) -> Result<(), RepositoryError>;
+
+    /// Counts, per context, the dispatches whose outcome was actually
+    /// measured.
+    ///
+    /// Read once per cycle and handed to the authority gate, which until now
+    /// could ask a context how confident it was but not what that confidence
+    /// was computed from. Only rows carrying a resolved outcome count: a
+    /// dispatch still inside its measurement window is not yet evidence about
+    /// anything, and counting it would let a context earn unattended execution
+    /// by acting rather than by learning.
+    ///
+    /// A context with no measured outcome is absent from the ledger rather
+    /// than present with a zero.
+    async fn load_resolved_evidence_counts(
+        &self,
+        workspace_id: WorkspaceId,
+    ) -> Result<EvidenceLedger, RepositoryError>;
 
     /// Loads the strongest evidence quality for a template+unit from
     /// the experiment assignment state. Returns `Observational` when

@@ -461,7 +461,14 @@ mod tests {
         });
 
         let candidates =
-            content_candidates(&snapshot, &policy, &communities, push_audience, now)?;
+            content_candidates(
+            &snapshot,
+            &policy,
+            &communities,
+            push_audience,
+            EvidenceCount::NONE,
+            now,
+        )?;
         assert_eq!(candidates.len(), 3);
 
         // The owned-channel carry is a push, not a new broadcast.
@@ -523,7 +530,14 @@ mod tests {
         // the same post can never be carried twice.
         let mut edited = snapshot.clone();
         edited.source_version = 4;
-        let again = content_candidates(&edited, &policy, &communities, push_audience, now)?;
+        let again = content_candidates(
+            &edited,
+            &policy,
+            &communities,
+            push_audience,
+            EvidenceCount::NONE,
+            now,
+        )?;
         for (first, second) in candidates.iter().zip(&again) {
             assert_eq!(first.action_idempotency_key, second.action_idempotency_key);
             assert_eq!(first.decision_key, second.decision_key);
@@ -569,7 +583,7 @@ mod tests {
             guardrail_reason: None,
         };
 
-        let candidates = content_candidates(&snapshot, &policy, &[], None, now)?;
+        let candidates = content_candidates(&snapshot, &policy, &[], None, EvidenceCount::NONE, now)?;
         assert_eq!(candidates.len(), 1);
         assert!(matches!(
             candidates[0].action,
@@ -818,7 +832,7 @@ mod tests {
             },
         };
 
-        let candidates = show_growth::show_growth_candidates(snapshot(true), &policy, now)?;
+        let candidates = show_growth::show_growth_candidates(snapshot(true), &policy, EvidenceCount(RATE_FLOOR), now)?;
         assert_eq!(candidates.len(), 2, "the refusal and the next due lever");
         let declined = &candidates[0];
         assert_eq!(declined.decision_kind, "unreciprocated_crossbill");
@@ -845,7 +859,7 @@ mod tests {
 
         // The same due lever fires the moment the edge is reciprocated —
         // one candidate, the ordinary request, no refusal row.
-        let candidates = show_growth::show_growth_candidates(snapshot(false), &policy, now)?;
+        let candidates = show_growth::show_growth_candidates(snapshot(false), &policy, EvidenceCount(RATE_FLOOR), now)?;
         assert_eq!(candidates.len(), 1);
         let proposed = &candidates[0];
         assert_eq!(proposed.decision_kind, "activate_show_growth_lever");
@@ -910,7 +924,7 @@ mod tests {
             },
         };
 
-        let parked = show_growth::show_growth_candidates(snapshot(false), &policy, now)?;
+        let parked = show_growth::show_growth_candidates(snapshot(false), &policy, EvidenceCount(RATE_FLOOR), now)?;
         assert_eq!(parked.len(), 1);
         assert_eq!(parked[0].disposition, PolicyDisposition::RequireApproval);
         assert_eq!(parked[0].policy_snapshot.get("ladder_authorized"), None);
@@ -918,7 +932,7 @@ mod tests {
         // The flag rides the policy snapshot — the disposition stays honest
         // about what the level and confidence computed; the class ceiling and
         // the envelope run before the action insert honours the ladder.
-        let released = show_growth::show_growth_candidates(snapshot(true), &policy, now)?;
+        let released = show_growth::show_growth_candidates(snapshot(true), &policy, EvidenceCount(RATE_FLOOR), now)?;
         assert_eq!(released.len(), 1);
         assert_eq!(released[0].disposition, PolicyDisposition::RequireApproval);
         assert_eq!(

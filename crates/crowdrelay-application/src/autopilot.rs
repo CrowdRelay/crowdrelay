@@ -8,6 +8,7 @@
 mod belief_revision;
 mod control;
 mod evaluate;
+mod evidence_ledger;
 mod growth_posture;
 mod measurement_ports;
 mod model;
@@ -16,6 +17,7 @@ mod ports;
 pub use belief_revision::*;
 pub use control::*;
 pub use evaluate::*;
+pub use evidence_ledger::*;
 pub use growth_posture::*;
 pub use measurement_ports::*;
 pub use model::*;
