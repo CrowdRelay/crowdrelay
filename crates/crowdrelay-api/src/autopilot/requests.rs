@@ -117,6 +117,22 @@ pub struct BookingTargetRequest {
     expected_version: i64,
 }
 
+/// One edition of a festival series — the application window the deadline
+/// ask and the attention radar both read. Upserted on
+/// `(target_id, edition_label)`: correcting a window writes the same row.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FestivalEditionRequest {
+    edition_label: String,
+    #[serde(default, with = "time::serde::rfc3339::option")]
+    starts_at: Option<OffsetDateTime>,
+    #[serde(default, with = "time::serde::rfc3339::option")]
+    application_opens_at: Option<OffsetDateTime>,
+    #[serde(default, with = "time::serde::rfc3339::option")]
+    application_closes_at: Option<OffsetDateTime>,
+    lineup_url: Option<String>,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TicketAllocationGuardrailRequest {

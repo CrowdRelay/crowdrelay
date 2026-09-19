@@ -395,6 +395,79 @@ pub(super) fn booking_followup_candidate(
     }))
 }
 
+/// The deadline-driven ask on a festival target: the next edition's
+/// application window closes inside `ask_within_days` and nobody has asked
+/// for it. This is deliberately *not* the city-demand path — a festival slot
+/// is the demand, and the close date, not a score, is what makes today the
+/// day to write.
+///
+/// Both keys carry the close timestamp rather than the day countdown: the
+/// countdown changes every morning and would re-decide the same edition
+/// daily, while the timestamp changes only when a different edition becomes
+/// next — which is exactly when a new decision is honest.
+pub(super) fn festival_window_candidate(
+    target: &BookingTargetSnapshot,
+    policy: &AutopilotPolicy,
+    now: OffsetDateTime,
+) -> Result<Option<DecisionCandidate>, serde_json::Error> {
+    let AutopilotPolicyConfig::BookingOpportunity(domain_policy) = &policy.config else {
+        return Ok(None);
+    };
+    let window_policy = FestivalWindowPolicy::default();
+    let FestivalWindowDecision::Request { confidence } =
+        evaluate_festival_window(target, window_policy, now)
+    else {
+        return Ok(None);
+    };
+    let Some(closes_at) = target.next_application_closes_at else {
+        // The evaluator passed on the countdown, so a missing timestamp is a
+        // read inconsistency, not a proposal — say nothing rather than guess
+        // which edition this is.
+        return Ok(None);
+    };
+    let disposition = disposition(policy.autonomy_level, confidence, policy.minimum_confidence);
+    Ok(Some(DecisionCandidate {
+        context: policy.context,
+        subject: ActionSubject::City(target.city_id),
+        decision_kind: "request_festival_window",
+        confidence,
+        disposition,
+        reason: "the next edition's application window is closing and no ask is in flight",
+        input_snapshot: serde_json::to_value(target)?,
+        policy_snapshot: policy_evidence(
+            policy,
+            serde_json::json!({"opportunity":domain_policy,"festival_window":window_policy}),
+        )?,
+        action: AutopilotActionPayload::RequestBookingOutreach {
+            city_id: target.city_id,
+            target_id: target.target_id,
+            target_version: target.version,
+            target_name: target.display_name.clone(),
+            score: 0,
+            phase: BookingOutreachPhase::Initial,
+            // The edition's own dates are the ask's context; the letter
+            // composes without a derived window line, and extra recipients
+            // would mail-merge a deadline that belongs to one festival.
+            proposed_window: None,
+            additional_recipients: Vec::new(),
+            venue_evidence: target.venue_evidence.clone(),
+            draft: crowdrelay_domain::booking_letter::BookingLetter::default(),
+        },
+        decision_key: format!(
+            "decision:festival-window:v{}:{}:tv{}:{}",
+            policy.version,
+            target.target_id,
+            target.version,
+            closes_at.unix_timestamp()
+        ),
+        action_idempotency_key: format!(
+            "action:festival-window:{}:{}",
+            target.target_id,
+            closes_at.unix_timestamp()
+        ),
+    }))
+}
+
 pub(super) fn campaign_lifecycle_candidate(
     snapshot: &EventCampaignSnapshot,
     policy: &AutopilotPolicy,

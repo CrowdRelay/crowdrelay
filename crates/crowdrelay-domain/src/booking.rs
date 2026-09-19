@@ -252,6 +252,11 @@ pub struct BookingTargetSnapshot {
     /// 5). `None` for non-festival targets and festivals with no open window —
     /// both read as "nothing shutting", never as "infinite runway".
     pub days_until_application_close: Option<i64>,
+    /// The close timestamp itself. The day count is the countdown a reader
+    /// watches; the timestamp is the edition's identity — it changes only
+    /// when a *different* edition becomes the next to close, which makes it
+    /// the stable key a decision dedupes on.
+    pub next_application_closes_at: Option<OffsetDateTime>,
     /// Every room this target resolves to: the primary `venue_id` union the
     /// promoter↔venue edges (§12-5 entity 6). Venue-level evidence should
     /// aggregate over this set — the unioned evidence read is the follow-up
@@ -287,6 +292,109 @@ pub fn evaluate_booking_followup(
     }
     let relationship_bonus = target.relationship_score.saturating_mul(20).min(2_000);
     BookingFollowUpDecision::Request {
+        confidence: Confidence::saturating_from_basis_points(
+            7_500_u16.saturating_add(relationship_bonus),
+        ),
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(default)]
+pub struct FestivalWindowPolicy {
+    /// Propose when the next edition's application window closes within this
+    /// many days — enough runway to draft, approve and send before it shuts.
+    /// Longer than a follow-up cadence because a festival letter is a fresh
+    /// ask, not a nudge on a live thread.
+    pub ask_within_days: u32,
+    /// The same contact cooldown the anchor selection enforces — a festival
+    /// contacted inside the window is mid-conversation already.
+    pub target_cooldown_days: u32,
+}
+
+impl Default for FestivalWindowPolicy {
+    fn default() -> Self {
+        Self {
+            ask_within_days: 21,
+            target_cooldown_days: 180,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FestivalWindowDecision {
+    Hold(FestivalWindowHoldReason),
+    Request { confidence: Confidence },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FestivalWindowHoldReason {
+    NotAFestival,
+    NoOpenWindow,
+    WindowNotImminent,
+    Inactive,
+    NoBooking,
+    OutreachInFlight,
+    CooldownActive,
+    /// A warm thread belongs to the operator working it, not to a fresh
+    /// proposal — positive, booked and unclassified replies all live here.
+    LiveThread,
+    DoNotContact,
+}
+
+/// The deadline-driven ask: a festival's next edition closes applications
+/// soon, and nobody has asked for this window yet.
+///
+/// Unlike the city-driven path this does not wait for fan demand to clear a
+/// threshold — the festival slot is the demand. The guards it keeps are the
+/// ones about contact, not merit: reachable, not mid-conversation, outside
+/// cooldown, and not a thread a human is already working.
+///
+/// `declined` deliberately does not hold: festivals decline per edition, and
+/// a new edition's window is a new ask the operator approves or not.
+/// `do_not_contact` holds forever, and a warm reply (`received`, `positive`,
+/// `booked`) holds because that thread is already alive.
+#[must_use]
+pub fn evaluate_festival_window(
+    target: &BookingTargetSnapshot,
+    policy: FestivalWindowPolicy,
+    now: OffsetDateTime,
+) -> FestivalWindowDecision {
+    if target.kind != BookingTargetKind::Festival {
+        return FestivalWindowDecision::Hold(FestivalWindowHoldReason::NotAFestival);
+    }
+    if !target.active {
+        return FestivalWindowDecision::Hold(FestivalWindowHoldReason::Inactive);
+    }
+    if !target.accepts_booking {
+        return FestivalWindowDecision::Hold(FestivalWindowHoldReason::NoBooking);
+    }
+    let Some(days_left) = target.days_until_application_close else {
+        return FestivalWindowDecision::Hold(FestivalWindowHoldReason::NoOpenWindow);
+    };
+    if days_left > i64::from(policy.ask_within_days) {
+        return FestivalWindowDecision::Hold(FestivalWindowHoldReason::WindowNotImminent);
+    }
+    if matches!(target.last_reply, BookingReplyDisposition::DoNotContact) {
+        return FestivalWindowDecision::Hold(FestivalWindowHoldReason::DoNotContact);
+    }
+    if matches!(
+        target.last_reply,
+        BookingReplyDisposition::Received
+            | BookingReplyDisposition::Positive
+            | BookingReplyDisposition::Booked
+    ) {
+        return FestivalWindowDecision::Hold(FestivalWindowHoldReason::LiveThread);
+    }
+    if target.outreach_in_flight {
+        return FestivalWindowDecision::Hold(FestivalWindowHoldReason::OutreachInFlight);
+    }
+    if target.last_outreach_at.is_some_and(|at| {
+        at > now || now - at < Duration::days(i64::from(policy.target_cooldown_days))
+    }) {
+        return FestivalWindowDecision::Hold(FestivalWindowHoldReason::CooldownActive);
+    }
+    let relationship_bonus = target.relationship_score.saturating_mul(20).min(2_000);
+    FestivalWindowDecision::Request {
         confidence: Confidence::saturating_from_basis_points(
             7_500_u16.saturating_add(relationship_bonus),
         ),
@@ -596,6 +704,7 @@ mod tests {
             last_reply: BookingReplyDisposition::None,
             venue_evidence: None,
             days_until_application_close: None,
+            next_application_closes_at: None,
             linked_venue_ids: Vec::new(),
         }
     }
@@ -705,6 +814,7 @@ mod tests {
             last_reply: BookingReplyDisposition::None,
             venue_evidence: None,
             days_until_application_close: None,
+            next_application_closes_at: None,
             linked_venue_ids: Vec::new(),
         };
         assert!(matches!(
@@ -807,5 +917,110 @@ mod tests {
             ),
             BookingTargetDecision::Selected { target_id, .. } if target_id == fitted.target_id
         ));
+    }
+
+    fn festival_target(city: CityId, days_left: i64) -> BookingTargetSnapshot {
+        let mut festival = target(city, 80, 50);
+        festival.kind = BookingTargetKind::Festival;
+        festival.display_name = "Brutal Assault".to_owned();
+        festival.days_until_application_close = Some(days_left);
+        festival.next_application_closes_at = Some(now() + Duration::days(days_left));
+        festival
+    }
+
+    #[test]
+    fn a_closing_festival_window_proposes_the_ask() {
+        let festival = festival_target(CityId::new(), 14);
+        assert!(matches!(
+            evaluate_festival_window(&festival, FestivalWindowPolicy::default(), now()),
+            FestivalWindowDecision::Request { .. }
+        ));
+    }
+
+    #[test]
+    fn a_distant_festival_window_waits() {
+        let festival = festival_target(CityId::new(), 60);
+        assert_eq!(
+            evaluate_festival_window(&festival, FestivalWindowPolicy::default(), now()),
+            FestivalWindowDecision::Hold(FestivalWindowHoldReason::WindowNotImminent)
+        );
+    }
+
+    #[test]
+    fn a_venue_with_a_window_is_not_a_festival_ask() {
+        let mut venue = festival_target(CityId::new(), 5);
+        venue.kind = BookingTargetKind::Venue;
+        assert_eq!(
+            evaluate_festival_window(&venue, FestivalWindowPolicy::default(), now()),
+            FestivalWindowDecision::Hold(FestivalWindowHoldReason::NotAFestival)
+        );
+    }
+
+    #[test]
+    fn a_festival_with_no_window_never_proposes() {
+        let mut festival = festival_target(CityId::new(), 0);
+        festival.days_until_application_close = None;
+        festival.next_application_closes_at = None;
+        assert_eq!(
+            evaluate_festival_window(&festival, FestivalWindowPolicy::default(), now()),
+            FestivalWindowDecision::Hold(FestivalWindowHoldReason::NoOpenWindow)
+        );
+    }
+
+    #[test]
+    fn a_closing_window_never_reopens_a_do_not_contact() {
+        let mut festival = festival_target(CityId::new(), 3);
+        festival.last_reply = BookingReplyDisposition::DoNotContact;
+        assert_eq!(
+            evaluate_festival_window(&festival, FestivalWindowPolicy::default(), now()),
+            FestivalWindowDecision::Hold(FestivalWindowHoldReason::DoNotContact)
+        );
+    }
+
+    #[test]
+    fn a_warm_thread_is_left_to_the_operator() {
+        for disposition in [
+            BookingReplyDisposition::Received,
+            BookingReplyDisposition::Positive,
+            BookingReplyDisposition::Booked,
+        ] {
+            let mut festival = festival_target(CityId::new(), 3);
+            festival.last_reply = disposition;
+            assert_eq!(
+                evaluate_festival_window(&festival, FestivalWindowPolicy::default(), now()),
+                FestivalWindowDecision::Hold(FestivalWindowHoldReason::LiveThread),
+                "{disposition:?} must hold"
+            );
+        }
+    }
+
+    #[test]
+    fn a_decline_on_the_last_edition_does_not_block_the_next() {
+        let mut festival = festival_target(CityId::new(), 10);
+        festival.last_reply = BookingReplyDisposition::Declined;
+        assert!(matches!(
+            evaluate_festival_window(&festival, FestivalWindowPolicy::default(), now()),
+            FestivalWindowDecision::Request { .. }
+        ));
+    }
+
+    #[test]
+    fn a_recent_letter_is_inside_the_cooldown() {
+        let mut festival = festival_target(CityId::new(), 10);
+        festival.last_outreach_at = Some(now() - Duration::days(30));
+        assert_eq!(
+            evaluate_festival_window(&festival, FestivalWindowPolicy::default(), now()),
+            FestivalWindowDecision::Hold(FestivalWindowHoldReason::CooldownActive)
+        );
+    }
+
+    #[test]
+    fn an_in_flight_letter_holds_the_deadline_ask() {
+        let mut festival = festival_target(CityId::new(), 10);
+        festival.outreach_in_flight = true;
+        assert_eq!(
+            evaluate_festival_window(&festival, FestivalWindowPolicy::default(), now()),
+            FestivalWindowDecision::Hold(FestivalWindowHoldReason::OutreachInFlight)
+        );
     }
 }

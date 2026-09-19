@@ -213,6 +213,71 @@ pub async fn upsert_booking_target(
     }
 }
 
+/// Registers one edition's application window on a festival target
+/// (§12-5 entity 5). The close date is what the deadline ask and the
+/// attention radar read — without this write neither has anything to look
+/// at. Upserts on `(target_id, edition_label)`: re-posting a corrected
+/// window rewrites the same edition rather than filing a sibling.
+pub async fn upsert_festival_edition(
+    State(state): State<AppState>,
+    Path(target_id): Path<String>,
+    headers: HeaderMap,
+    Json(request): Json<FestivalEditionRequest>,
+) -> Response {
+    let Ok(target_id) = Uuid::parse_str(&target_id) else {
+        return Problem::not_found(request_id(&headers))
+            .private()
+            .into_response();
+    };
+    let label_len = request.edition_label.trim().chars().count();
+    let lineup_url = request
+        .lineup_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let window_inverted = request
+        .application_opens_at
+        .zip(request.application_closes_at)
+        .is_some_and(|(opens, closes)| opens >= closes);
+    if label_len == 0
+        || label_len > 120
+        || lineup_url.is_some_and(|url| {
+            !(url.starts_with("http://") || url.starts_with("https://")) || url.len() > 2_048
+        })
+        || window_inverted
+    {
+        return Problem::bad_request(request_id(&headers))
+            .private()
+            .into_response();
+    }
+    let idempotency_key = match parse_idempotency_key(&headers) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let request_id_value = parsed_request_id(&headers);
+    let command = UpsertFestivalEdition {
+        target_id: BookingTargetId::from_uuid(target_id),
+        edition_label: request.edition_label,
+        starts_at: request.starts_at,
+        application_opens_at: request.application_opens_at,
+        application_closes_at: request.application_closes_at,
+        lineup_url: lineup_url.map(str::to_owned),
+    };
+    match state
+        .autopilot
+        .upsert_festival_edition(
+            state.ops.workspace_id(),
+            command,
+            &idempotency_key,
+            request_id_value.as_ref(),
+        )
+        .await
+    {
+        Ok(result) => private_json(StatusCode::OK, result),
+        Err(error) => repository_problem(error, request_id(&headers)),
+    }
+}
+
 /// Links a booking target to one of its rooms (§12-5 entity 6) — the
 /// operator's "this promoter also books Klub X". The edge's primary key is
 /// the idempotency: replaying the POST is a no-op, so this is the one

@@ -902,6 +902,10 @@ pub(super) fn application_routes(state: AppState) -> Router {
             post(autopilot::upsert_merch_product_economics),
         )
         .route(
+            "/v1/admin/autopilot/booking-targets/{target_id}/editions",
+            post(autopilot::upsert_festival_edition),
+        )
+        .route(
             "/v1/admin/autopilot/booking-targets/{target_id}/reply",
             post(autopilot::record_booking_reply),
         )
