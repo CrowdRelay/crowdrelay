@@ -294,13 +294,14 @@ async fn run_cases(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
         .await?;
     assert_eq!(peer_count, 2, "the rewrite minted duplicates");
 
-    // ON CONFLICT DO UPDATE — the newest spelling wins the display name.
+    // First casing wins, matching place_venues' policy — a later bill
+    // rewrite does not get to re-spell the band.
     let display_name =
         sqlx::query_scalar::<_, String>("SELECT display_name FROM place_peer_acts WHERE id = $1")
             .bind(mystery_peer)
             .fetch_one(pool)
             .await?;
-    assert_eq!(display_name, "THE MYSTERY ACT");
+    assert_eq!(display_name, "The Mystery Act");
 
     // The ambiguous act still resolves to no tenant, and never to charlie.
     let (ws_link, _) = act_links(pool, writer_id.into_uuid(), event_id, "tenant-charlie").await?;
