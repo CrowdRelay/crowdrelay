@@ -769,6 +769,7 @@ async fn a_dispatched_pitch_carries_the_approved_letter() -> Result<(), Box<dyn 
 /// the payload carries `draft` verbatim, and dispatch refuses a row that
 /// predates the field.
 #[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn a_dispatched_application_carries_the_approved_letter()
 -> Result<(), Box<dyn std::error::Error>> {
     let fixture = fixture("apply-draft").await?;
