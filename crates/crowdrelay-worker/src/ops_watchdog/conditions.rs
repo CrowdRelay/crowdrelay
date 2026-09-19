@@ -73,6 +73,12 @@ fn conditions(snapshot: &OpsSnapshot, posture: PublishingPosture) -> Vec<Conditi
             // and `crowdrelay.agent.content_requested` appears in no n8n
             // example workflow or executor contract in this repository, so the
             // consumer has most likely never known the event.
+            //
+            // The count counts letters by what they carry, not by a type list:
+            // `contact_email`, `recipient_email` or `recipients` in the payload
+            // means a specific human was the addressee. 2026-09-15 showed why —
+            // an approved festival application and the T+7 show report both
+            // died 422 cancelled while a two-type list watched neither.
             key: "delivery.growth_event_refused",
             severity: "critical",
             summary: "A growth event was permanently refused by its consumer",
@@ -84,6 +90,26 @@ fn conditions(snapshot: &OpsSnapshot, posture: PublishingPosture) -> Vec<Conditi
                            outbox_event_id for status='cancelled' and read \
                            last_response_status: 4xx is the consumer refusing \
                            the payload, not the outbox failing to send it",
+            }),
+        },
+        Condition {
+            // Warning, not critical: these refused deliveries carry no named
+            // recipient — status pings, internal markers, unrouted events that
+            // never drafted anything. The same cancelled-instead-of-dead blind
+            // spot hides them, so the count exists for visibility; the letters
+            // above keep the critical alarm.
+            key: "delivery.event_refused",
+            severity: "warning",
+            summary: "Deliveries were permanently refused by their consumers",
+            active: snapshot.refused_other_deliveries > 0,
+            details: json!({
+                "refused_deliveries": snapshot.refused_other_deliveries,
+                "window": "7 days",
+                "remedy": "join webhook_deliveries to outbox_events on \
+                           outbox_event_id for status='cancelled' — a refused \
+                           non-letter event is usually a stale consumer \
+                           contract or a route pin pointing at a workflow that \
+                           never learned the event type",
             }),
         },
         Condition {
@@ -386,6 +412,44 @@ fn conditions(snapshot: &OpsSnapshot, posture: PublishingPosture) -> Vec<Conditi
             details: json!({
                 "registered": snapshot.executor_registered,
                 "active": snapshot.executor_active,
+            }),
+        },
+        Condition {
+            // Warning, and deliberately paired with `executor.offline`: that
+            // one is the registry dead entirely, this is one capability dark
+            // while the rest heartbeat. Production carried it for eleven days
+            // — `team.email` fell out of the advertised set when its
+            // attestation aged past the freshness window, and every emission
+            // queued, waited out the 24-hour grace and cancelled with
+            // `no_executor`, a `last_error_kind` nobody reads.
+            //
+            // The demand side is the honest signal. The n8n heartbeat deletes
+            // and re-inserts its capability rows on every beat, so a dropped
+            // capability leaves no expired row to notice — what remains is the
+            // work it stopped doing. `executor_active > 0` is the other half:
+            // an empty registry is a deployment without executors, not a
+            // dropped capability, and `executor.offline` already says so.
+            //
+            // The same predicate fires for a capability that was never wired
+            // — an executor nobody built yet parks actions identically. That
+            // is still the finding: work classes that cannot run, named.
+            key: "executor.capability_unadvertised",
+            severity: "warning",
+            summary: "Actions are parked or cancelled for a capability no live executor advertises",
+            active: snapshot.executor_active > 0
+                && (snapshot.awaiting_executor_actions > 0
+                    || snapshot.no_executor_cancelled_7d > 0),
+            details: json!({
+                "awaiting_executor": snapshot.awaiting_executor_actions,
+                "cancelled_no_executor_7d": snapshot.no_executor_cancelled_7d,
+                "action_kinds": snapshot.unclaimed_action_kinds,
+                "remedy": "the named action kinds need a capability no live \
+                           executor advertises. Compare against the executor \
+                           contract's capability list and the n8n heartbeat's \
+                           advertised set — a capability that fell out on a \
+                           stale attestation needs a fresh attestation pass; \
+                           one that was never wired needs its executor \
+                           imported and activated",
             }),
         },
         Condition {

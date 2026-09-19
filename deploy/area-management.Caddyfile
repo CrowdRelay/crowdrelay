@@ -38,6 +38,7 @@
         /v1/control-plane/autopilot/beacon-release-campaigns \
         /v1/control-plane/autopilot/beacon-release-campaigns/* \
         /v1/control-plane/autopilot/plays \
+        /v1/control-plane/autopilot/events/* \
         /v1/control-plane/autopilot/learning-loop \
         /v1/control-plane/autopilot/learning-proof \
         /v1/control-plane/portfolio/overview \

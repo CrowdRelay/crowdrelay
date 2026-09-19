@@ -226,6 +226,13 @@ async fn outreach_action(
         proposed_window: None,
         additional_recipients: vec![],
         venue_evidence: None,
+        draft: crowdrelay_domain::booking_letter::BookingLetter {
+            subject: "booking".to_owned(),
+            // The identical-draft refusal compares letters across actions —
+            // a fixture that always writes the same body would collide with
+            // itself the second time the budget test seeds one.
+            body: format!("letter {}", Uuid::now_v7()),
+        },
     })?;
     sqlx::query_scalar(
         "INSERT INTO viryaos_autopilot_actions

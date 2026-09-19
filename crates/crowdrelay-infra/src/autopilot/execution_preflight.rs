@@ -18,15 +18,28 @@ async fn lock_booking_target_for_execution(
 ) -> Result<(String, String, String), RepositoryError> {
     sqlx::query_as::<_, (String, String, String)>(
         r#"
-        SELECT target_kind, display_name, contact_email
-        FROM viryaos_booking_targets
-        WHERE workspace_id = $1
-          AND id = $2
-          AND city_id = $3
-          AND version = $4
-          AND active
-          AND accepts_booking
-        FOR UPDATE
+        SELECT target.target_kind, target.display_name, target.contact_email
+        FROM viryaos_booking_targets AS target
+        WHERE target.workspace_id = $1
+          AND target.id = $2
+          AND target.city_id = $3
+          AND target.version = $4
+          AND target.active
+          AND target.accepts_booking
+          -- A reply recorded after approval retires the pitch before it can
+          -- send: the snapshot's `last_reply_disposition` is this same
+          -- subquery, and `record_booking_reply` never files an inbound
+          -- reply with disposition 'none', so one row existing is the whole
+          -- condition.
+          AND NOT EXISTS (
+              SELECT 1
+              FROM viryaos_booking_interactions AS interaction
+              WHERE interaction.workspace_id = target.workspace_id
+                AND interaction.target_id = target.id
+                AND interaction.direction = 'inbound'
+                AND interaction.phase = 'reply'
+          )
+        FOR UPDATE OF target
         "#,
     )
     .bind(workspace_id.into_uuid())

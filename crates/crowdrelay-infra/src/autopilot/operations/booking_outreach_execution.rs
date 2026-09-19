@@ -52,10 +52,20 @@ pub(in crate::autopilot) async fn execute_booking_outreach(
         proposed_window,
         additional_recipients,
         venue_evidence,
+        draft,
     } = &action.payload
     else {
         return Err(RepositoryError::Conflict);
     };
+    // The refusal that keeps the promise: an action persisted before the
+    // letter travelled in the payload decodes to an empty draft, and nothing
+    // may compose one here — the words the operator approved are the only
+    // words a target can receive.
+    if draft.subject.trim().is_empty() || draft.body.trim().is_empty() {
+        return Err(RepositoryError::ConflictBecause(
+            "booking outreach refused: no approved letter in the payload",
+        ));
+    }
     let city_id = *city_id;
     let phase_str = match phase {
         BookingOutreachPhase::Initial => "initial",
@@ -137,6 +147,7 @@ pub(in crate::autopilot) async fn execute_booking_outreach(
             "proposed_window": proposed_window,
             "venue_evidence": venue_evidence,
             "first_line_fact": first_line_fact,
+            "draft": draft,
             "template_key": match phase {
                 BookingOutreachPhase::Initial => "booking.opportunity.v1",
                 BookingOutreachPhase::FollowUp => "booking.followup.v1",

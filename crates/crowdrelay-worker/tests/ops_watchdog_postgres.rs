@@ -377,3 +377,215 @@ async fn approval_action(
     .context("insert approval action")?;
     Ok(())
 }
+
+/// A capability that went dark while work still needed it must reach the
+/// operator — the `team.email` shape from production: the registry stays
+/// live, one advertisement just stops.
+///
+/// The unit tests prove the predicate. This proves the reading against a
+/// real schema: the parked marker is `last_error_kind='awaiting_executor'`
+/// on a `queued` row, the cancellation is `no_executor` on a `cancelled`
+/// one, and the action-kind rollup must decode.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn work_parked_on_a_dark_capability_reaches_the_operator() -> Result<()> {
+    let db = DisposableDatabase::create().await?;
+    let result = async {
+        let ws = workspace(&db.pool).await?;
+        live_executor(&db.pool, ws).await?;
+
+        // Nothing waiting: a live registry alone is not the finding.
+        watchdog(db.pool.clone(), ws).run_once().await?;
+        let alerts = active_alerts(&db.pool, ws).await?;
+        assert!(
+            !alerts.contains(&"executor.capability_unadvertised".to_owned()),
+            "a live registry with nothing parked is healthy: {alerts:?}"
+        );
+
+        parked_action(&db.pool, ws).await?;
+        watchdog(db.pool.clone(), ws).run_once().await?;
+        let alerts = active_alerts(&db.pool, ws).await?;
+        assert!(
+            alerts.contains(&"executor.capability_unadvertised".to_owned()),
+            "parked work beside a live registry must be reported: {alerts:?}"
+        );
+
+        // The capability returns: the row unparks and the finding clears.
+        sqlx::query(
+            "UPDATE viryaos_autopilot_actions SET last_error_kind=NULL \
+             WHERE workspace_id=$1 AND status='queued' \
+               AND last_error_kind='awaiting_executor'",
+        )
+        .bind(ws.into_uuid())
+        .execute(&db.pool)
+        .await
+        .context("unpark action")?;
+        watchdog(db.pool.clone(), ws).run_once().await?;
+        let alerts = active_alerts(&db.pool, ws).await?;
+        assert!(
+            !alerts.contains(&"executor.capability_unadvertised".to_owned()),
+            "work unparked when its capability returns: {alerts:?}"
+        );
+        Ok(())
+    }
+    .await;
+    db.drop_database().await;
+    result
+}
+
+/// A live heartbeat row so `executor_active > 0` — the condition's other half.
+async fn live_executor(pool: &PgPool, workspace_id: WorkspaceId) -> Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO viryaos_executor_instances (
+            workspace_id, executor_id, version, manifest_sha, observed_at, expires_at
+        ) VALUES ($1,'n8n-heartbeat','1.0.0','manifest',now(),now() + interval '10 minutes')
+        "#,
+    )
+    .bind(workspace_id.into_uuid())
+    .execute(pool)
+    .await
+    .context("insert live executor")?;
+    Ok(())
+}
+
+/// One queued action parked waiting on a capability nobody advertises.
+async fn parked_action(pool: &PgPool, workspace_id: WorkspaceId) -> Result<()> {
+    let decision_id = Uuid::now_v7();
+    sqlx::query(
+        r#"
+        INSERT INTO viryaos_autopilot_decisions (
+            id, workspace_id, decision_key, context, subject_kind, subject_id,
+            decision_kind, confidence_basis_points, disposition, reason,
+            input_snapshot, policy_snapshot, recommendation, trace_id
+        ) VALUES ($1,$2,$3,'live_opportunity','workspace',$4,
+                  'apply_live_opportunity',7700,'require_approval','a festival',
+                  '{}'::jsonb,'{}'::jsonb,'{}'::jsonb,$5)
+        "#,
+    )
+    .bind(decision_id)
+    .bind(workspace_id.into_uuid())
+    .bind(format!("live-{decision_id}"))
+    .bind(workspace_id.into_uuid())
+    .bind(Uuid::now_v7())
+    .execute(pool)
+    .await
+    .context("insert decision")?;
+    sqlx::query(
+        r#"
+        INSERT INTO viryaos_autopilot_actions (
+            id, workspace_id, decision_id, context, action_kind, subject_kind,
+            subject_id, idempotency_key, payload, status, approved_at,
+            last_error_kind, trace_id
+        ) VALUES ($1,$2,$3,'live_opportunity','team.email.send',
+                  'workspace',$4,$5,'{}'::jsonb,'queued',now(),
+                  'awaiting_executor',$6)
+        "#,
+    )
+    .bind(Uuid::now_v7())
+    .bind(workspace_id.into_uuid())
+    .bind(decision_id)
+    .bind(workspace_id.into_uuid())
+    .bind(format!("action-{}", Uuid::now_v7()))
+    .bind(Uuid::now_v7())
+    .execute(pool)
+    .await
+    .context("insert parked action")?;
+    Ok(())
+}
+
+/// A refused letter must reach the operator regardless of its event type.
+///
+/// The predicate is the payload, not the event name: `contact_email` means a
+/// specific human was the addressee. Production proved why the type list could
+/// not be trusted — on 2026-09-15 an approved `opportunity.application_requested`
+/// and a `post_show_report_due` both died 422 cancelled while a two-type list
+/// watched neither. This test refuses a letter under an event type that does not
+/// exist in any list, and the alarm still has to fire.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn a_refused_letter_under_an_unknown_event_type_still_raises_attention() -> Result<()> {
+    let db = DisposableDatabase::create().await?;
+    let result = async {
+        let ws = workspace(&db.pool).await?;
+        refused_delivery(
+            &db.pool,
+            ws,
+            "crowdrelay.festival.application_requested",
+            serde_json::json!({"action_id": Uuid::now_v7(), "contact_email": "fest@example.org"}),
+        )
+        .await?;
+        watchdog(db.pool.clone(), ws).run_once().await?;
+        let alerts = active_alerts(&db.pool, ws).await?;
+        assert!(
+            alerts.contains(&"delivery.growth_event_refused".to_owned()),
+            "a letter refused under an unlisted event type must still alarm: {alerts:?}"
+        );
+
+        // And a refused event with no named recipient is the warning, not the
+        // critical alarm — the two must not bleed into each other.
+        refused_delivery(
+            &db.pool,
+            ws,
+            "crowdrelay.ops.status_changed",
+            serde_json::json!({"status": "degraded"}),
+        )
+        .await?;
+        watchdog(db.pool.clone(), ws).run_once().await?;
+        let alerts = active_alerts(&db.pool, ws).await?;
+        assert!(
+            alerts.contains(&"delivery.event_refused".to_owned()),
+            "a refused non-letter delivery warns: {alerts:?}"
+        );
+        Ok(())
+    }
+    .await;
+    db.drop_database().await;
+    result
+}
+
+/// One outbox event + one endpoint + one `cancelled` delivery joining them.
+async fn refused_delivery(
+    pool: &PgPool,
+    workspace_id: WorkspaceId,
+    event_type: &str,
+    payload: serde_json::Value,
+) -> Result<()> {
+    let ws = workspace_id.into_uuid();
+    let endpoint_id = sqlx::query_scalar::<_, Uuid>(
+        "INSERT INTO webhook_endpoints (workspace_id, name, url, signing_secret_ref, max_attempts) \
+         VALUES ($1,$2,'https://consumer.invalid/hook','ref',12) \
+         ON CONFLICT (workspace_id, name) DO UPDATE SET url = EXCLUDED.url \
+         RETURNING id",
+    )
+    .bind(ws)
+    .bind(format!("ep-{}", Uuid::now_v7()))
+    .fetch_one(pool)
+    .await
+    .context("insert endpoint")?;
+    let event_id = sqlx::query_scalar::<_, Uuid>(
+        "INSERT INTO outbox_events (workspace_id, event_type, payload, status, delivered_at) \
+         VALUES ($1,$2,$3,'delivered',now()) RETURNING id",
+    )
+    .bind(ws)
+    .bind(event_type)
+    .bind(payload)
+    .fetch_one(pool)
+    .await
+    .context("insert outbox event")?;
+    // The outbox event's own status is not what the watchdog reads — the
+    // delivery is the cancelled one. `delivered` satisfies its CHECK without
+    // pretending the letter arrived.
+    sqlx::query(
+        "INSERT INTO webhook_deliveries (workspace_id, outbox_event_id, endpoint_id, \
+         status, max_attempts, cancelled_at, last_response_status, last_error_kind) \
+         VALUES ($1,$2,$3,'cancelled',12,now(),422,'http_permanent_status')",
+    )
+    .bind(ws)
+    .bind(event_id)
+    .bind(endpoint_id)
+    .execute(pool)
+    .await
+    .context("insert refused delivery")?;
+    Ok(())
+}

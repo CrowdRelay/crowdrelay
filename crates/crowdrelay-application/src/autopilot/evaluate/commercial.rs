@@ -285,6 +285,9 @@ pub(super) fn booking_candidate(
             proposed_window: proposed_window.clone(),
             additional_recipients,
             venue_evidence: target_snapshot.venue_evidence.clone(),
+            // Composed when the action persists — the evaluator is pure and
+            // the sender identity lives in Postgres.
+            draft: crowdrelay_domain::booking_letter::BookingLetter::default(),
         },
         decision_key: format!(
             "decision:booking:v{}:{}:{}:tv{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}",
@@ -371,6 +374,7 @@ pub(super) fn booking_followup_candidate(
             proposed_window: None,
             additional_recipients: Vec::new(),
             venue_evidence: target.venue_evidence.clone(),
+            draft: crowdrelay_domain::booking_letter::BookingLetter::default(),
         },
         decision_key: format!(
             "decision:booking-followup:v{}:{}:tv{}:{}:{}",

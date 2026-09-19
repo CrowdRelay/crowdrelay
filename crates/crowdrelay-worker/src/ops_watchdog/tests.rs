@@ -45,6 +45,7 @@ fn publishing() -> PublishingPosture {
             orphaned_publishing_actions: 0,
             orphaned_publishing_actions_all_time: 0,
             refused_growth_deliveries: 0,
+            refused_other_deliveries: 0,
             unscoreable_live_opportunities: 0,
             duplicate_community_drafts: 0,
             relentless_degraded_phases: None,
@@ -66,7 +67,71 @@ fn publishing() -> PublishingPosture {
             approvals_expired_7d: 0,
             hours_to_next_approval_expiry: None,
             approvals_outstanding: 0,
+            // No work parked or cancelled on a missing executor.
+            awaiting_executor_actions: 0,
+            no_executor_cancelled_7d: 0,
+            unclaimed_action_kinds: None,
         }
+    }
+
+    /// A capability that went dark while work still needed it — the
+    /// `team.email` failure shape. The registry is live and heartbeating;
+    /// one capability just stopped being advertised.
+    #[test]
+    fn a_dropped_capability_with_waiting_work_raises_attention() {
+        let mut snapshot = healthy();
+        snapshot.awaiting_executor_actions = 3;
+        snapshot.no_executor_cancelled_7d = 2;
+        snapshot.unclaimed_action_kinds = Some("team.email.send".to_owned());
+        let fired = conditions(&snapshot, publishing());
+        let condition = fired
+            .iter()
+            .find(|c| c.key == "executor.capability_unadvertised")
+            .expect("parked work against a live registry must be reported");
+        assert!(condition.active);
+        assert_eq!(condition.severity, "warning");
+        assert_eq!(
+            condition.details["action_kinds"],
+            serde_json::json!("team.email.send")
+        );
+    }
+
+    /// The losses alone reach the operator even after every parked action
+    /// has been cancelled — the parked count can read zero while the sweep
+    /// has already thrown the work away.
+    #[test]
+    fn no_executor_cancellations_raise_attention_without_parked_work() {
+        let mut snapshot = healthy();
+        snapshot.no_executor_cancelled_7d = 1;
+        let fired = conditions(&snapshot, publishing());
+        assert!(fired
+            .iter()
+            .any(|c| c.key == "executor.capability_unadvertised" && c.active));
+    }
+
+    /// A dead registry is `executor.offline`'s territory — parked work there
+    /// must not double-report as a dropped capability.
+    #[test]
+    fn parked_work_with_no_live_executor_reports_offline_not_unadvertised() {
+        let mut snapshot = healthy();
+        snapshot.executor_active = 0;
+        snapshot.awaiting_executor_actions = 2;
+        let fired = conditions(&snapshot, publishing());
+        assert!(fired
+            .iter()
+            .any(|c| c.key == "executor.offline" && c.active));
+        assert!(!fired
+            .iter()
+            .any(|c| c.key == "executor.capability_unadvertised" && c.active));
+    }
+
+    /// The healthy state carries neither parked work nor cancellations.
+    #[test]
+    fn advertised_capabilities_report_nothing() {
+        let fired = conditions(&healthy(), publishing());
+        assert!(!fired
+            .iter()
+            .any(|c| c.key == "executor.capability_unadvertised" && c.active));
     }
 
     /// History alone must not hold the alarm open.
@@ -567,6 +632,37 @@ fn publishing() -> PublishingPosture {
             !raised.contains(&"delivery.growth_event_refused"),
             "raised on a healthy snapshot: {raised:?}"
         );
+    }
+
+    /// A refused non-letter delivery warns rather than alarming.
+    ///
+    /// Stale consumer contracts and unrouted internal events share the same
+    /// cancelled-instead-of-dead blind spot, but they cost nothing like a
+    /// drafted letter does — so the severity stays below critical.
+    #[test]
+    fn a_refused_non_letter_delivery_warns() {
+        let mut snapshot = healthy();
+        snapshot.refused_other_deliveries = 3;
+        let condition = conditions(&snapshot, publishing())
+            .into_iter()
+            .find(|c| c.key == "delivery.event_refused")
+            .expect("condition should exist");
+        assert!(condition.active);
+        assert_eq!(condition.severity, "warning");
+    }
+
+    /// And it stays quiet when only letters are refused — that count is the
+    /// critical condition's job, not this one's.
+    #[test]
+    fn refused_letters_do_not_double_count_as_other() {
+        let mut snapshot = healthy();
+        snapshot.refused_growth_deliveries = 2;
+        let raised = conditions(&snapshot, publishing())
+            .into_iter()
+            .filter(|c| c.active)
+            .map(|c| c.key)
+            .collect::<Vec<_>>();
+        assert_eq!(raised, vec!["delivery.growth_event_refused"]);
     }
 
     /// The condition must fire when actionable outcomes are all refused, even

@@ -171,6 +171,10 @@ async fn queue_pitch(
         phase: OutreachPhase::Initial,
         template_key: "outreach.press.v1".to_owned(),
         wave_id,
+        draft: crowdrelay_domain::outreach_letter::OutreachLetter {
+            subject: format!("Act — {label}"),
+            body: format!("letter {label}"),
+        },
     };
     let decision_id = Uuid::now_v7();
     sqlx::query(
@@ -457,6 +461,10 @@ async fn a_served_lead_cannot_be_re_pitched() -> Result<(), Box<dyn std::error::
         phase: OutreachPhase::Initial,
         template_key: "event.press.v1".to_owned(),
         wave_id: None,
+        draft: crowdrelay_domain::outreach_letter::OutreachLetter {
+            subject: "Act — pitch".to_owned(),
+            body: format!("letter {}", Uuid::now_v7()),
+        },
     };
     let decision_id = Uuid::now_v7();
     sqlx::query(
@@ -616,6 +624,375 @@ async fn an_expiring_wave_takes_its_unapproved_pitches_with_it()
             .iter()
             .any(|anchor| anchor.anchor.id() == fixture.event_id
                 && anchor.target_kind == OutreachTargetKind::Press)
+    );
+    Ok(())
+}
+
+/// A pitch that does dispatch emits the approved letter verbatim — the
+/// executor receives the words the operator read, not a template key it
+/// would have to resolve.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn a_dispatched_pitch_carries_the_approved_letter() -> Result<(), Box<dyn std::error::Error>>
+{
+    let fixture = fixture("wave-draft").await?;
+    let target = sqlx::query_scalar::<_, Uuid>(
+        "SELECT id FROM viryaos_outreach_targets WHERE workspace_id=$1 AND display_name='Press 0'",
+    )
+    .bind(fixture.workspace_id.into_uuid())
+    .fetch_one(&fixture.pool)
+    .await?;
+    let opportunity_id = sqlx::query_scalar::<_, Uuid>(
+        "INSERT INTO viryaos_outreach_opportunities (
+             workspace_id, target_id, source, subject_kind, subject_key, template_key,
+             relevance_basis_points, confidence_basis_points, observed_at, expires_at
+         ) VALUES ($1,$2,'manual','event',$3,'event.press.v1',9000,9000,$4,$5)
+         RETURNING id",
+    )
+    .bind(fixture.workspace_id.into_uuid())
+    .bind(target)
+    .bind(format!("event:{}", fixture.event_id))
+    .bind(fixture.now)
+    .bind(fixture.now + time::Duration::days(30))
+    .fetch_one(&fixture.pool)
+    .await?;
+    let draft_body = format!("approved letter {}", Uuid::now_v7());
+    let payload = AutopilotActionPayload::RequestOutreach {
+        opportunity_id: OutreachOpportunityId::from_uuid(opportunity_id),
+        target_id: OutreachTargetId::from_uuid(target),
+        target_version: 1,
+        target_name: "Press 0".to_owned(),
+        phase: OutreachPhase::Initial,
+        template_key: "event.press.v1".to_owned(),
+        wave_id: None,
+        draft: crowdrelay_domain::outreach_letter::OutreachLetter {
+            subject: "Waves E2E — our new single".to_owned(),
+            body: draft_body.clone(),
+        },
+    };
+    let decision_id = Uuid::now_v7();
+    sqlx::query(
+        r#"
+        INSERT INTO viryaos_autopilot_decisions (
+            id, workspace_id, decision_key, context, subject_kind, subject_id,
+            decision_kind, confidence_basis_points, disposition, reason,
+            input_snapshot, policy_snapshot, recommendation, trace_id)
+        VALUES ($1,$2,$3,'outreach','outreach_opportunity',$4,
+                'request_relationship_outreach',9000,'require_approval','test',
+                '{}'::jsonb,'{}'::jsonb,$5,gen_random_uuid())
+        "#,
+    )
+    .bind(decision_id)
+    .bind(fixture.workspace_id.into_uuid())
+    .bind(format!("decision:outreach:draft:{decision_id}"))
+    .bind(Uuid::now_v7())
+    .bind(serde_json::to_value(&payload)?)
+    .execute(&fixture.pool)
+    .await?;
+    let action_id = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO viryaos_autopilot_actions (
+             id, workspace_id, decision_id, context, action_kind, subject_kind, subject_id,
+             idempotency_key, payload, status, action_class
+         ) VALUES ($1,$2,$3,'outreach','outreach.request','outreach_opportunity',$4,$5,$6,
+                   'queued','third_party')",
+    )
+    .bind(action_id)
+    .bind(fixture.workspace_id.into_uuid())
+    .bind(decision_id)
+    .bind(Uuid::now_v7())
+    .bind(format!("action:outreach:draft:{action_id}"))
+    .bind(serde_json::to_value(&payload)?)
+    .execute(&fixture.pool)
+    .await?;
+
+    sqlx::query(
+        "INSERT INTO viryaos_executor_instances (
+             workspace_id, executor_id, version, manifest_sha, observed_at, expires_at
+         ) VALUES ($1,'n8n-draft-test','test','test-manifest',$2,$3)",
+    )
+    .bind(fixture.workspace_id.into_uuid())
+    .bind(fixture.now)
+    .bind(fixture.now + time::Duration::minutes(30))
+    .execute(&fixture.pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO viryaos_executor_capabilities (
+             workspace_id, executor_id, capability, capability_version, observed_at, expires_at
+         ) VALUES ($1,'n8n-draft-test','outreach.send','1',$2,$3)",
+    )
+    .bind(fixture.workspace_id.into_uuid())
+    .bind(fixture.now)
+    .bind(fixture.now + time::Duration::minutes(30))
+    .execute(&fixture.pool)
+    .await?;
+
+    use crowdrelay_application::autopilot::AutopilotActionRepository;
+    let claim_now = OffsetDateTime::now_utc();
+    let claimed = fixture
+        .repository
+        .claim_due_actions(fixture.workspace_id, 8, claim_now)
+        .await?;
+    let action = claimed
+        .iter()
+        .find(|claimed| claimed.id.into_uuid() == action_id)
+        .ok_or("the queued pitch is claimable")?;
+    fixture
+        .repository
+        .execute_action(fixture.workspace_id, action, fixture.now)
+        .await?;
+
+    let emitted: serde_json::Value = sqlx::query_scalar(
+        "SELECT payload FROM outbox_events
+         WHERE workspace_id=$1 AND event_type='crowdrelay.outreach.requested'",
+    )
+    .bind(fixture.workspace_id.into_uuid())
+    .fetch_one(&fixture.pool)
+    .await?;
+    assert_eq!(
+        emitted["draft"]["subject"].as_str(),
+        Some("Waves E2E — our new single")
+    );
+    assert_eq!(
+        emitted["draft"]["body"].as_str(),
+        Some(draft_body.as_str()),
+        "the executor receives the approved words verbatim"
+    );
+    assert_eq!(
+        emitted["contact_email"].as_str().map(|e| e.contains('@')),
+        Some(true)
+    );
+    Ok(())
+}
+
+/// The application the organiser receives is the one the operator read —
+/// the payload carries `draft` verbatim, and dispatch refuses a row that
+/// predates the field.
+#[tokio::test]
+async fn a_dispatched_application_carries_the_approved_letter()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = fixture("apply-draft").await?;
+    let suffix = fixture.workspace_id.into_uuid().simple().to_string();
+    let opportunity_id = sqlx::query_scalar::<_, Uuid>(
+        "INSERT INTO viryaos_team_opportunities (
+             workspace_id, opportunity_kind, source, external_key, title,
+             organization, contact_email, verified_destination, eligible,
+             fit_basis_points, reputation_basis_points,
+             confidence_basis_points, status
+         ) VALUES ($1,'festival','scout',$2,$3,$4,$5,true,true,8000,
+                   5000, 5000, 'awaiting_approval')
+         RETURNING id",
+    )
+    .bind(fixture.workspace_id.into_uuid())
+    .bind(format!("apply-{suffix}"))
+    .bind("Summerfest 2027 open call")
+    .bind("Summerfest")
+    .bind(format!("bookings-{suffix}@example.test"))
+    .fetch_one(&fixture.pool)
+    .await?;
+    let draft_body = format!("approved application {}", Uuid::now_v7());
+    let payload = AutopilotActionPayload::ApplyLiveOpportunity {
+        opportunity_id: crowdrelay_domain::TeamOpportunityId::from_uuid(opportunity_id),
+        opportunity_kind: crowdrelay_domain::live_opportunities::LiveOpportunityKind::Festival,
+        score: 80,
+        draft: crowdrelay_domain::application_letter::ApplicationLetter {
+            subject: "VIRYA — application for Summerfest 2027 open call".to_owned(),
+            body: draft_body.clone(),
+        },
+    };
+    let decision_id = Uuid::now_v7();
+    sqlx::query(
+        r#"
+        INSERT INTO viryaos_autopilot_decisions (
+            id, workspace_id, decision_key, context, subject_kind, subject_id,
+            decision_kind, confidence_basis_points, disposition, reason,
+            input_snapshot, policy_snapshot, recommendation, trace_id)
+        VALUES ($1,$2,$3,'live_opportunity','team_opportunity',$4,
+                'apply_live_opportunity',9000,'require_approval','test',
+                '{}'::jsonb,'{}'::jsonb,$5,gen_random_uuid())
+        "#,
+    )
+    .bind(decision_id)
+    .bind(fixture.workspace_id.into_uuid())
+    .bind(format!("decision:apply:draft:{decision_id}"))
+    .bind(opportunity_id)
+    .bind(serde_json::to_value(&payload)?)
+    .execute(&fixture.pool)
+    .await?;
+    let action_id = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO viryaos_autopilot_actions (
+             id, workspace_id, decision_id, context, action_kind, subject_kind, subject_id,
+             idempotency_key, payload, status, action_class
+         ) VALUES ($1,$2,$3,'live_opportunity','apply_live_opportunity','team_opportunity',$4,$5,$6,
+                   'queued','third_party')",
+    )
+    .bind(action_id)
+    .bind(fixture.workspace_id.into_uuid())
+    .bind(decision_id)
+    .bind(opportunity_id)
+    .bind(format!("action:apply:draft:{action_id}"))
+    .bind(serde_json::to_value(&payload)?)
+    .execute(&fixture.pool)
+    .await?;
+
+    sqlx::query(
+        "INSERT INTO viryaos_executor_instances (
+             workspace_id, executor_id, version, manifest_sha, observed_at, expires_at
+         ) VALUES ($1,'n8n-draft-test','test','test-manifest',$2,$3)",
+    )
+    .bind(fixture.workspace_id.into_uuid())
+    .bind(fixture.now)
+    .bind(fixture.now + time::Duration::minutes(30))
+    .execute(&fixture.pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO viryaos_executor_capabilities (
+             workspace_id, executor_id, capability, capability_version, observed_at, expires_at
+         ) VALUES ($1,'n8n-draft-test','opportunity.application','1',$2,$3)",
+    )
+    .bind(fixture.workspace_id.into_uuid())
+    .bind(fixture.now)
+    .bind(fixture.now + time::Duration::minutes(30))
+    .execute(&fixture.pool)
+    .await?;
+
+    use crowdrelay_application::autopilot::AutopilotActionRepository;
+    let claimed = fixture
+        .repository
+        .claim_due_actions(fixture.workspace_id, 8, OffsetDateTime::now_utc())
+        .await?;
+    let action = claimed
+        .iter()
+        .find(|claimed| claimed.id.into_uuid() == action_id)
+        .ok_or("the queued application is claimable")?;
+    fixture
+        .repository
+        .execute_action(fixture.workspace_id, action, fixture.now)
+        .await?;
+
+    let emitted: serde_json::Value = sqlx::query_scalar(
+        "SELECT payload FROM outbox_events
+         WHERE workspace_id=$1 AND event_type='crowdrelay.opportunity.application_requested'",
+    )
+    .bind(fixture.workspace_id.into_uuid())
+    .fetch_one(&fixture.pool)
+    .await?;
+    assert_eq!(
+        emitted["draft"]["body"].as_str(),
+        Some(draft_body.as_str()),
+        "the executor receives the approved application verbatim"
+    );
+    assert_eq!(
+        emitted["contact_email"].as_str().map(|e| e.contains('@')),
+        Some(true)
+    );
+    Ok(())
+}
+
+/// The language pin for the composition fix: production rows carry
+/// `country_code` and leave `travel_band` NULL, so a Polish organiser must
+/// still get Polish words — the band is a cost hint, not a locale.
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn an_application_speaks_the_organisers_language() -> Result<(), Box<dyn std::error::Error>> {
+    use crowdrelay_application::autopilot::{ActionSubject, AutopilotContext, DecisionCandidate};
+    use crowdrelay_domain::autonomy::{Confidence, PolicyDisposition};
+    use crowdrelay_domain::live_opportunities::LiveOpportunityKind;
+    use crowdrelay_domain::{TeamOpportunityId, TraceContext};
+
+    let fixture = fixture("apply-lang").await?;
+    let suffix = fixture.workspace_id.into_uuid().simple().to_string();
+
+    async fn seed_opportunity(
+        fixture: &Fixture,
+        suffix: &str,
+        country_code: Option<&str>,
+    ) -> Result<Uuid, Box<dyn std::error::Error>> {
+        sqlx::query_scalar::<_, Uuid>(
+            "INSERT INTO viryaos_team_opportunities (
+                 workspace_id, opportunity_kind, source, external_key, title,
+                 organization, contact_email, verified_destination, eligible,
+                 fit_basis_points, reputation_basis_points,
+                 confidence_basis_points, status, country_code
+             ) VALUES ($1,'festival','scout',$2,$3,$4,$5,true,true,8000,
+                       5000, 5000, 'new', $6)
+             RETURNING id",
+        )
+        .bind(fixture.workspace_id.into_uuid())
+        .bind(format!("apply-{country_code:?}-{suffix}"))
+        .bind(format!("Festiwal {country_code:?} {suffix}"))
+        .bind(format!("Org {country_code:?}"))
+        .bind(format!("bookings-{suffix}@example.test"))
+        .bind(country_code)
+        .fetch_one(&fixture.pool)
+        .await
+        .map_err(Into::into)
+    }
+
+    async fn persisted_subject(
+        fixture: &Fixture,
+        opportunity_id: Uuid,
+    ) -> Result<String, Box<dyn std::error::Error>> {
+        let trace = TraceContext::root(fixture.workspace_id);
+        let candidate = DecisionCandidate {
+            context: AutopilotContext::LiveOpportunity,
+            subject: ActionSubject::TeamOpportunity(TeamOpportunityId::from_uuid(opportunity_id)),
+            decision_kind: "apply_live_opportunity",
+            confidence: Confidence::saturating_from_basis_points(9_000),
+            disposition: PolicyDisposition::RequireApproval,
+            reason: "test candidate",
+            input_snapshot: serde_json::json!({}),
+            policy_snapshot: serde_json::json!({}),
+            action: AutopilotActionPayload::ApplyLiveOpportunity {
+                opportunity_id: TeamOpportunityId::from_uuid(opportunity_id),
+                opportunity_kind: LiveOpportunityKind::Festival,
+                score: 80,
+                draft: Default::default(),
+            },
+            decision_key: format!("decision:apply-lang:{opportunity_id}"),
+            action_idempotency_key: format!("action:apply-lang:{opportunity_id}"),
+        };
+        let persisted = fixture
+            .repository
+            .persist_candidate(fixture.workspace_id, &candidate, &trace)
+            .await?;
+        assert!(
+            persisted.action_created,
+            "the candidate must persist an action"
+        );
+        sqlx::query_scalar::<_, String>(
+            "SELECT payload->'draft'->>'subject' FROM viryaos_autopilot_actions
+             WHERE workspace_id=$1 AND payload->>'opportunity_id'=$2",
+        )
+        .bind(fixture.workspace_id.into_uuid())
+        .bind(opportunity_id.to_string())
+        .fetch_one(&fixture.pool)
+        .await
+        .map_err(Into::into)
+    }
+
+    // The production shape: a Polish destination with no travel band set.
+    let polish = seed_opportunity(&fixture, &suffix, Some("PL")).await?;
+    let subject = persisted_subject(&fixture, polish).await?;
+    assert!(
+        subject.contains("zgłoszenie"),
+        "a PL organiser gets the Polish application, got: {subject}"
+    );
+
+    let german = seed_opportunity(&fixture, &suffix, Some("DE")).await?;
+    let subject = persisted_subject(&fixture, german).await?;
+    assert!(
+        subject.contains("application"),
+        "a non-PL organiser gets the English application, got: {subject}"
+    );
+
+    // And no locale at all still fails safe to English rather than guessing.
+    let unknown = seed_opportunity(&fixture, &suffix, None).await?;
+    let subject = persisted_subject(&fixture, unknown).await?;
+    assert!(
+        subject.contains("application"),
+        "a locale-less organiser gets the English application, got: {subject}"
     );
     Ok(())
 }

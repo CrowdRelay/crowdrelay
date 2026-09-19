@@ -207,7 +207,17 @@ impl PostgresAutopilotRepository {
                     phase,
                     template_key,
                     wave_id,
+                    draft,
                 } => {
+                    // The letter was composed when the action was written. A
+                    // row queued before then — or one whose draft was lost —
+                    // is refused here rather than passed to an executor that
+                    // would write on the band's behalf.
+                    if draft.subject.trim().is_empty() || draft.body.trim().is_empty() {
+                        return Err(RepositoryError::ConflictBecause(
+                            "outreach refused: this action carries no letter — the pitch composes when the action is written",
+                        ));
+                    }
                     let target = operations::lock_outreach_for_execution(
                         &mut transaction,
                         workspace_id,
@@ -250,6 +260,7 @@ impl PostgresAutopilotRepository {
                             "template_key": template_key,
                             "target_template_key": target.2,
                             "wave_id": wave_id,
+                            "draft": draft,
                             // What was true when the band said it, rather than
                             // when the agent drafted it. No adjectives: numbers,
                             // and the moment they were read.
@@ -951,8 +962,19 @@ impl PostgresAutopilotRepository {
                 AutopilotActionPayload::ExecuteReleaseMilestone { release_id, title, release_at, milestone } => {
                     operations::execute_release_milestone(&mut transaction, workspace_id, action.id, *release_id, title, *release_at, *milestone, now).await?;
                 }
-                AutopilotActionPayload::ApplyLiveOpportunity { opportunity_id, opportunity_kind, score } => {
-                    operations::execute_live_opportunity(&mut transaction, workspace_id, action.id, *opportunity_id, *opportunity_kind, *score, now).await?;
+                AutopilotActionPayload::ApplyLiveOpportunity { opportunity_id, opportunity_kind, score, draft } => {
+                    // The application letter was composed when the action was
+                    // written. A row queued before then — or one whose draft
+                    // was lost — is refused here rather than passed to an
+                    // executor that would write on the band's behalf.
+                    if draft.subject.trim().is_empty() || draft.body.trim().is_empty() {
+                        return Err(RepositoryError::ConflictBecause(
+                            "application refused: this action carries no letter — the application composes when the action is written",
+                        ));
+                    }
+                    operations::execute_live_opportunity(&mut transaction, workspace_id, action.id, &operations::ApplyRequest {
+                        opportunity_id: *opportunity_id, kind: *opportunity_kind, score: *score, draft,
+                    }, now).await?;
                 }
                 AutopilotActionPayload::EscalateEditorialPitch {
                     release_id, title, due_at,

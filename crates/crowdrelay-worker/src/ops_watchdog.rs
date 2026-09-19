@@ -7,7 +7,7 @@
 //! not actionable from there. FakAP remains the external health probe for
 //! API reachability; this watchdog catches silent failures FakAP cannot see.
 //!
-//! The watchdog monitors eighteen conditions. The count and this list are
+//! The watchdog monitors twenty conditions. The count and this list are
 //! gated against `conditions()` by `test_watchdog_conditions_documented_v1.py`:
 //! it said "ten" while seven alarms went undocumented, including two criticals,
 //! and this repository has a record of concluding a live capability is missing
@@ -36,7 +36,13 @@
 //!   the outbox correctly stops retrying and the delivery is `cancelled` rather
 //!   than `dead` — which means `ops/attention`, reporting dead deliveries and a
 //!   bare cancelled count, showed four refused press pitches as four increments
-//!   in a number that also held 39 stale refusals from August.
+//!   in a number that also held 39 stale refusals from August. Letters are
+//!   counted by the recipient keys their payloads carry, not by a type list —
+//!   the list form watched two types while an approved festival application
+//!   and the T+7 show report died 422 on 2026-09-15.
+//! - `delivery.event_refused` — refused deliveries carrying no named
+//!   recipient: stale consumer contracts and unrouted internal events in the
+//!   same cancelled-instead-of-dead blind spot. Warning, not critical.
 //! - `growth.unscoreable_live_opportunities` — the brain scored live
 //!   opportunities and denied every one. Read off its own denied decisions, not
 //!   off a guess at why: the first version counted rows missing strategic value
@@ -55,6 +61,12 @@
 //! - `executor.offline` — the API is up but no executor has heartbeated
 //!   recently, so nothing can actually execute. This is a silent failure
 //!   that FakAP (external health probe) cannot detect.
+//! - `executor.capability_unadvertised` — the registry is live but work is
+//!   parking `awaiting_executor` or cancelling `no_executor`: a capability
+//!   fell out of the advertised set while demand for it continues.
+//!   Production carried exactly this for eleven days when `team.email`'s
+//!   attestation aged past its freshness window — the heartbeat's own
+//!   fail-closed design dropped the capability, and nothing said so.
 //! - `execution.unknown_outcome` — autopilot actions are stuck in the
 //!   `unknown` execution state: their provider receipts were lost or
 //!   their outcomes cannot be established, and the receipt reconciliation
@@ -373,8 +385,16 @@ struct OpsSnapshot {
     /// The event list is deliberately narrow. A refused `ops.status_changed` is
     /// a stale consumer contract and costs nothing; a refused
     /// `agent.content_requested` is a press pitch the brain drafted, addressed
-    /// to a named journalist, that no longer has any route to them.
+    /// to a named journalist, that no longer has any route to them. The payload
+    /// keys — `contact_email`, `recipient_email`, `recipients` — are the
+    /// predicate, so a new letter type cannot add itself silently the way the
+    /// refused festival application did on 2026-09-15.
     refused_growth_deliveries: i64,
+    /// Refused deliveries in the same window that carry no named recipient —
+    /// stale consumer contracts and unrouted internal events. Warning-class:
+    /// the count exists so a non-letter event type dying at the bridge is
+    /// visible without alarming at letter severity.
+    refused_other_deliveries: i64,
     /// Live opportunities whose score ceiling is below the score floor.
     ///
     /// Not "none scored well" — *cannot* score well. With no strategic value and
@@ -447,7 +467,7 @@ struct OpsSnapshot {
     /// It is the one loss that scales with the operator being the bottleneck,
     /// which is the state this deployment is in — the queue is the throughput
     /// limit, and the queue empties itself every three days whether or not
-    /// anybody looked. None of the other sixteen conditions watches it: they
+    /// anybody looked. None of the other eighteen conditions watches it: they
     /// watch executors, feeds, drafts and the brain, all of which are working
     /// when this happens.
     approvals_expired_7d: i64,
@@ -460,6 +480,25 @@ struct OpsSnapshot {
     hours_to_next_approval_expiry: Option<i64>,
     /// Approvals currently outstanding, whatever their deadline.
     approvals_outstanding: i64,
+    /// Queued actions parked waiting on an executor capability nobody
+    /// advertises right now.
+    ///
+    /// The park sweep writes `last_error_kind='awaiting_executor'`; an action
+    /// carrying it has already tried dispatch once and found no live
+    /// advertisement. It unparks itself when the capability returns, so a
+    /// parked row is a current need, not history.
+    awaiting_executor_actions: i64,
+    /// Actions the grace sweep cancelled in the last week with
+    /// `last_error_kind='no_executor'`. Each is work the brain decided,
+    /// nobody executed, and the system threw away — the parked state above
+    /// made permanent.
+    no_executor_cancelled_7d: i64,
+    /// Distinct action kinds across both populations — the work classes that
+    /// cannot run. The capability an action needs is derived from its payload
+    /// in Rust (`executor_capability_for_payload`); reproducing that mapping
+    /// in SQL would be a second copy to drift, so the finding names the kind
+    /// and lets the operator map it to the executor that went dark.
+    unclaimed_action_kinds: Option<String>,
     /// Drafts waiting on a Reddit session (pending or deferred).
     reddit_posting_demand: i64,
     /// Count of credential rows eligible to establish a session — the same
@@ -672,11 +711,20 @@ async fn load_snapshot(
             )::bigint AS orphaned_publishing_actions_all_time,
             -- Growth-carrying events whose delivery was permanently refused.
             --
-            -- Only the event types that carry work outward: a pitch, a community
-            -- engagement, a push proposal. A refused `ops.status_changed` is a
-            -- stale consumer contract and costs nothing; a refused
-            -- `agent.content_requested` is the press pitch the brain drafted,
-            -- addressed to a journalist, never sent.
+            -- The discriminator is the payload, not an event-type list: a
+            -- delivery carrying a named recipient is a letter the brain
+            -- drafted for a specific human — a pitch, an approach, an
+            -- application, an invite. Two older event types stay named
+            -- explicitly because their payloads carry drafted work without an
+            -- email-shaped key. A refused `ops.status_changed` is a stale
+            -- consumer contract and lands in `refused_other_deliveries` as a
+            -- warning instead.
+            --
+            -- Measured 2026-09-15: an `opportunity.application_requested`
+            -- carrying `contact_email` and a `post_show_report_due` carrying
+            -- `recipients` both died 422 cancelled while this predicate's
+            -- two-type list watched neither — the list had silently encoded
+            -- "the only outward letters are these two".
             --
             -- Cancelled, not dead, which is why nothing reported this. A 4xx is
             -- `http_permanent_status` and the outbox correctly stops retrying —
@@ -689,9 +737,26 @@ async fn load_snapshot(
              WHERE d.workspace_id=$1
                AND d.status='cancelled'
                AND d.cancelled_at > now() - interval '7 days'
-               AND e.event_type IN ('crowdrelay.agent.content_requested',
-                                    'crowdrelay.community.engagement_requested')
+               AND (e.event_type IN ('crowdrelay.agent.content_requested',
+                                     'crowdrelay.community.engagement_requested')
+                    OR e.payload ? 'contact_email'
+                    OR e.payload ? 'recipient_email'
+                    OR e.payload ? 'recipients')
             )::bigint AS refused_growth_deliveries,
+            -- Refused deliveries that are not letters — stale consumer
+            -- contracts, unrouted internal events. Warning-class context for
+            -- the same cancelled-instead-of-dead blind spot.
+            (SELECT count(*) FROM webhook_deliveries d
+             JOIN outbox_events e ON e.id = d.outbox_event_id
+             WHERE d.workspace_id=$1
+               AND d.status='cancelled'
+               AND d.cancelled_at > now() - interval '7 days'
+               AND e.event_type NOT IN ('crowdrelay.agent.content_requested',
+                                        'crowdrelay.community.engagement_requested')
+               AND NOT (e.payload ? 'contact_email')
+               AND NOT (e.payload ? 'recipient_email')
+               AND NOT (e.payload ? 'recipients')
+            )::bigint AS refused_other_deliveries,
             -- Live opportunities the brain scored and then denied.
             --
             -- Read off the decisions the brain actually recorded rather than by
@@ -833,6 +898,36 @@ async fn load_snapshot(
             (SELECT count(*) FROM viryaos_autopilot_actions a
              WHERE a.workspace_id=$1 AND a.status='awaiting_approval'
             )::bigint AS approvals_outstanding,
+            -- Work waiting on a capability no live executor advertises. The
+            -- park sweep writes `last_error_kind='awaiting_executor'` and
+            -- re-parks every cycle, so the row is current demand, not a
+            -- snapshot of a moment ago.
+            (SELECT count(*) FROM viryaos_autopilot_actions a
+             WHERE a.workspace_id=$1
+               AND a.status='queued'
+               AND a.last_error_kind='awaiting_executor'
+            )::bigint AS awaiting_executor_actions,
+            -- The same need made permanent: parked past the 24-hour grace,
+            -- cancelled with `no_executor`. Bounded at a week for the same
+            -- reason the orphaned-draft count is — an alarm that can never
+            -- clear is one an operator learns to ignore.
+            (SELECT count(*) FROM viryaos_autopilot_actions a
+             WHERE a.workspace_id=$1
+               AND a.status='cancelled'
+               AND a.last_error_kind='no_executor'
+               AND a.finished_at > now() - interval '7 days'
+            )::bigint AS no_executor_cancelled_7d,
+            -- Which work classes cannot run. `action_kind` is the table's own
+            -- vocabulary; the capability each kind needs lives in Rust
+            -- (`executor_capability_for_payload`) and must not be re-mapped
+            -- here as a second copy.
+            (SELECT string_agg(DISTINCT a.action_kind, ',' ORDER BY a.action_kind)
+             FROM viryaos_autopilot_actions a
+             WHERE a.workspace_id=$1
+               AND ((a.status='queued' AND a.last_error_kind='awaiting_executor')
+                 OR (a.status='cancelled' AND a.last_error_kind='no_executor'
+                     AND a.finished_at > now() - interval '7 days'))
+            ) AS unclaimed_action_kinds,
             -- Filled in by the guarded follow-up below. The real values live
             -- in `agent_service_credentials`, which the agents service owns —
             -- on a CrowdRelay-only deployment the relation does not exist,

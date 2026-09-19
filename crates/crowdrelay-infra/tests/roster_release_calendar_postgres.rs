@@ -143,8 +143,12 @@ async fn a_same_week_pair_collides_and_the_quieter_release_moves()
         let outsider = workspace(&db.pool, "outsider", None).await?;
 
         let now = OffsetDateTime::now_utc();
-        // Same ISO week: act-a's filler and act-b's single.
-        let wednesday = now + time::Duration::days(14);
+        // Same ISO week: act-a's filler and act-b's single. The anchor must
+        // be a real Wednesday — a bare `now + 14d` lands on today's weekday,
+        // and on a Saturday `+2d` crosses into the next ISO week, so the pair
+        // never collides.
+        let days_to_wednesday = (2 - now.weekday().number_days_from_monday() as i64 + 7) % 7;
+        let wednesday = now + time::Duration::days(14 + days_to_wednesday);
         release(
             &db.pool,
             act_a,

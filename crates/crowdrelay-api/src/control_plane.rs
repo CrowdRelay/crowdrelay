@@ -203,6 +203,21 @@ pub(crate) fn router(state: crate::AppState) -> Router {
             "/v1/control-plane/autopilot/negotiations",
             get(crate::autopilot::negotiations),
         )
+        // P.4: the show's growth ladder — the approve-once read plus the two
+        // writes. Both writes reuse the canonical admin handlers; this surface
+        // only routes to them.
+        .route(
+            "/v1/control-plane/autopilot/events/{event_id}/growth-ladder",
+            get(crate::autopilot::show_ladder),
+        )
+        .route(
+            "/v1/control-plane/autopilot/events/{event_id}/growth-ladder/approve",
+            post(crate::autopilot::approve_show_ladder),
+        )
+        .route(
+            "/v1/control-plane/autopilot/events/{event_id}/growth-ladder/revoke",
+            post(crate::autopilot::revoke_show_ladder),
+        )
         .route(
             "/v1/control-plane/autopilot/team-opportunities/{opportunity_id}/terms",
             post(crate::autopilot::record_team_opportunity_terms),

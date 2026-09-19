@@ -76,8 +76,25 @@ async fn persist_decision_and_action_tx(
     }
     // ── Decision INSERT ──
     let decision_id = Uuid::now_v7();
+    // Letters are composed here, inside the same transaction that writes
+    // the action, so the payload carries the words the approver will read.
+    // A refusal leaves the draft empty — dispatch fails closed on it, and
+    // the briefing says "not composed" instead of showing invented text.
+    let mut action = candidate.action.clone();
+    match &mut action {
+        AutopilotActionPayload::RequestBookingOutreach { .. } => {
+            enrich_booking_draft(transaction, workspace_id, &mut action).await?;
+        }
+        AutopilotActionPayload::RequestOutreach { .. } => {
+            enrich_outreach_draft(transaction, workspace_id, &mut action).await?;
+        }
+        AutopilotActionPayload::ApplyLiveOpportunity { .. } => {
+            enrich_application_draft(transaction, workspace_id, &mut action).await?;
+        }
+        _ => {}
+    }
     let action_json =
-        serde_json::to_value(&candidate.action).map_err(|_| RepositoryError::Unexpected)?;
+        serde_json::to_value(&action).map_err(|_| RepositoryError::Unexpected)?;
     let inserted_decision = sqlx::query_scalar::<_, Uuid>(
         r#"
         INSERT INTO viryaos_autopilot_decisions (
@@ -457,6 +474,7 @@ async fn record_prediction_and_evidence_tx(
     .await?;
     Ok(evidence)
 }
+
 
 macro_rules! decision_persist {
     () => {

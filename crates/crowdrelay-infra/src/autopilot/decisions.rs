@@ -7,6 +7,7 @@ include!("decisions/opportunity_reads.rs");
 include!("decisions/booking_reads.rs");
 include!("decisions/cycle_reads.rs");
 include!("decisions/persist.rs");
+include!("decisions/persist_letters.rs");
 
 // Keep the heavy SQL implementations outside the `async_trait` procedural
 // attribute. Attribute macros run before nested `macro_rules!` invocations are
