@@ -1081,7 +1081,11 @@ async fn the_countdown_tags_every_likely_listener_in_one_pass()
     // lands the tag, and a second run rewrites nothing (ON CONFLICT is
     // statement-level, not per-row).
     let fixture = fixture("countdown-tags").await?;
-    let release_at = fixture.now + time::Duration::days(14);
+    // Whole seconds: the milestone lock compares the payload's release_at to
+    // the stored row's, and timestamptz rounds to µs — a now_utc()+days value
+    // keeps ns through the JSON payload and never equals the stored row.
+    let release_at =
+        OffsetDateTime::from_unix_timestamp(fixture.now.unix_timestamp() + 14 * 86_400)?;
     let created = fixture
         .repository
         .upsert_release_plan(
