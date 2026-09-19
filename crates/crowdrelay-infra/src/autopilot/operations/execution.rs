@@ -748,6 +748,10 @@ pub(in crate::autopilot) async fn execute_live_opportunity_terms(
             Option<i64>,
         ),
     >(
+        // NOTE: `ingress::team::create_show_for_accepted_terms` takes
+        // `organization` off this same locked row, so the acceptance and the
+        // show it creates describe one negotiation rather than two reads of
+        // a table that can move between them.
         r#"
         SELECT opportunity.title, opportunity.organization, opportunity.contact_email,
                terms.offered_fee_minor, terms.walk_away_minor, terms.currency,
@@ -834,6 +838,8 @@ pub(in crate::autopilot) async fn execute_live_opportunity_terms(
         .execute(&mut **tx)
         .await
         .map_err(map_sqlx)?;
+        ingress::team::create_show_for_accepted_terms(tx, workspace_id, opportunity_id, &row.1)
+            .await?;
     } else {
         // `counter_rounds + 1` from the row rather than from the payload: two
         // executions of the same drafted counter must not count as two asks.

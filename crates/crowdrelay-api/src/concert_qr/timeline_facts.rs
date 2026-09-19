@@ -23,6 +23,24 @@ struct TimelineEventRow {
     /// The shared night this event landed on, when the venue registry
     /// resolved one — the rendezvous block reads from here (4V.6b).
     place_event_id: Option<Uuid>,
+    /// The negotiation that produced this night, when one did. `None` for a
+    /// show nobody had to win — a hometown gig is still a show.
+    booking_opportunity_id: Option<Uuid>,
+}
+
+/// What it took to win the night: the negotiation behind this show.
+///
+/// Loaded only when the event carries a `booking_opportunity_id`. A show
+/// nobody had to win has no row here and the step reports that rather than an
+/// empty negotiation.
+#[derive(Debug, FromRow)]
+struct TimelineBookingRow {
+    organization: String,
+    state: String,
+    offered_fee_minor: Option<i64>,
+    settled_at: Option<OffsetDateTime>,
+    counter_rounds: Option<i32>,
+    currency: Option<String>,
 }
 
 #[derive(Debug, FromRow)]
@@ -167,6 +185,7 @@ struct TimelineFacts {
     counts: TimelineCountsRow,
     harvest: TimelineHarvestRow,
     cost: Option<TimelineCostRow>,
+    booking: Option<TimelineBookingRow>,
     crossbill_acts: Vec<TimelineActRow>,
     crossbill_edge: Option<TimelineCrossbillEdgeRow>,
     venue_beacons: Vec<TimelineBeaconRow>,
@@ -180,10 +199,15 @@ async fn load_timeline_facts(
     let Some(event) = sqlx::query_as::<_, TimelineEventRow>(
         r#"
         SELECT id, slug, title, venue, venue_address, status, starts_at, ends_at,
-               counterparty_name, counterparty_email, place_event_id
+               counterparty_name, counterparty_email, place_event_id,
+               booking_opportunity_id
         FROM events
         WHERE workspace_id = $1 AND slug = $2
-          AND status IN ('published','completed')
+          -- `draft` included since 0329. The ladder's first rung is
+          -- "Announced", so a show that is booked and unannounced is the one
+          -- case the timeline most needs to render, and it was the one case
+          -- that resolved 404.
+          AND status IN ('draft','published','completed')
         "#,
     )
     .bind(state.workspace_id.into_uuid())
@@ -484,6 +508,35 @@ async fn load_timeline_facts(
     .fetch_optional(&state.database)
     .await?;
 
+    // What the band went through to get the date. `None` when the show was
+    // not won through a negotiation, which is an ordinary answer and not a
+    // gap: the step says "no negotiation behind this night" rather than
+    // rendering an empty one.
+    let booking = match event.booking_opportunity_id {
+        Some(opportunity_id) => {
+            sqlx::query_as::<_, TimelineBookingRow>(
+                r#"
+                SELECT opportunity.organization,
+                       COALESCE(terms.state, opportunity.status) AS state,
+                       terms.offered_fee_minor,
+                       terms.settled_at,
+                       terms.counter_rounds,
+                       terms.currency
+                FROM viryaos_team_opportunities AS opportunity
+                LEFT JOIN viryaos_team_opportunity_terms AS terms
+                  ON terms.workspace_id = opportunity.workspace_id
+                 AND terms.opportunity_id = opportunity.id
+                WHERE opportunity.workspace_id = $1 AND opportunity.id = $2
+                "#,
+            )
+            .bind(workspace_id)
+            .bind(opportunity_id)
+            .fetch_optional(&state.database)
+            .await?
+        }
+        None => None,
+    };
+
     // The shared bill is the T-21 artifact: who else plays, and whether an
     // active crossbill edge lets the system push the night to a bill-mate's
     // audience. The cap travels with it — the consent's monthly ceiling and
@@ -597,6 +650,7 @@ async fn load_timeline_facts(
         counts,
         harvest,
         cost,
+        booking,
         crossbill_acts,
         crossbill_edge,
         venue_beacons,

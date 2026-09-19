@@ -192,14 +192,20 @@ async fn run(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
 
     // ── room_leak: per show, floor 1, NULL capacity is unmeasured. ─────────
     //
-    // One completed show with a 40-capacity pool and three distinct fans
+    // One completed show in a 300-capacity room with three distinct fans
     // scanned (one fan scanned twice — the second scan is the same
     // (workspace, event, fan) row and the UNIQUE refuses it, so the write is
     // retried with DO NOTHING, which is exactly what the dedupe means), and a
-    // second completed show with no admission pool at all.
+    // second completed show with no room capacity on record at all.
+    //
+    // The first show also issues a 40-pass pool, and the pool is the point:
+    // room size used to be `sum(admission_pools.capacity)`, so this show
+    // reported a forty-person room and a 750 bp leak rate. It is a
+    // three-hundred-person room that drew three people. The pool stays in the
+    // fixture so a regression back to pass-counting fails here.
     let first_show = sqlx::query_scalar::<_, Uuid>(
-        "INSERT INTO events (workspace_id, slug, title, venue, starts_at, status) \
-         VALUES ($1, 'leaky-show', 'Leaky Show', 'Klub Y', now() - interval '10 days', 'completed') \
+        "INSERT INTO events (workspace_id, slug, title, venue, starts_at, status, room_capacity) \
+         VALUES ($1, 'leaky-show', 'Leaky Show', 'Klub Y', now() - interval '10 days', 'completed', 300) \
          RETURNING id",
     )
     .bind(workspace)
@@ -272,10 +278,11 @@ async fn run(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
         per_show(leaky.scans, leaky.room_size),
         Measure::Rate {
             numerator: 3,
-            denominator: 40,
-            basis_points: 750,
+            denominator: 300,
+            basis_points: 100,
         },
-        "three distinct scans against a forty-capacity room is 750 bp"
+        "three distinct scans in a three-hundred-capacity room is 100 bp — the \
+         forty-pass pool on this show must not be mistaken for the room"
     );
     let unpooled = shows
         .iter()
@@ -286,10 +293,10 @@ async fn run(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
         Measure::Unmeasured {
             reason: "no admission capacity on record for this show",
         },
-        "a show with no admission pool is unmeasured, not zero"
+        "a show with no room capacity is unmeasured, not zero"
     );
     // The top line sums only the shows that could be judged: 3 scans over a
-    // 40-capacity room, and 40 clears the shared floor.
+    // 300-capacity room, and 300 clears the shared floor.
     let top = Measure::rate(
         shows
             .iter()
@@ -306,13 +313,13 @@ async fn run(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
         top,
         Measure::Rate {
             numerator: 3,
-            denominator: 40,
-            basis_points: 750,
+            denominator: 300,
+            basis_points: 100,
         },
-        "the unpooled show must not dilute the rate"
+        "the show with no room capacity must not dilute the rate"
     );
 
-    // When every completed show in the window lacks an admission pool the top
+    // When every completed show in the window lacks a room capacity the top
     // line is unmeasured — "we never knew the room sizes" — not a BelowFloor
     // that would read as "too few shows". A second workspace keeps this case
     // isolated from the pooled shows above.

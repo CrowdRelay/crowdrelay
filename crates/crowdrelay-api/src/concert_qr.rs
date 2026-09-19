@@ -561,7 +561,11 @@ async fn load_control_plane_events(
           ON checkin.workspace_id = event.workspace_id
          AND checkin.event_id = event.id
         WHERE event.workspace_id = $1
-          AND event.status IN ('published','completed')
+          -- `draft` included since 0329: a show created by accepting a
+          -- negotiation is booked and not yet announced, and announcing it is
+          -- the ladder's first step. A list that hid drafts hid exactly the
+          -- shows with work outstanding.
+          AND event.status IN ('draft','published','completed')
           AND event.starts_at >= now() - interval '90 days'
         GROUP BY event.id
         ORDER BY upcoming DESC,

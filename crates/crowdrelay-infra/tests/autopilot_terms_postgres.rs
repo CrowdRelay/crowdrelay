@@ -805,3 +805,350 @@ async fn terminal_progress_writes_the_reason_and_refuses_to_close_silently()
     assert_eq!(reason.as_deref(), Some("scout duplicate"));
     Ok(())
 }
+
+/// The seam this whole file sat next to and did not cover: an accepted
+/// negotiation has to become the show it agreed to.
+///
+/// Before this, the terms row reached `accepted` and nothing created an event.
+/// The show entered CrowdRelay later by config seeding or by syncing back from
+/// an external listing, so the growth ladder's first step waited on a row the
+/// booking pipeline already had every fact for.
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn accepting_terms_creates_the_show_it_agreed_to() -> Result<(), Box<dyn std::error::Error>> {
+    let fixture = fixture("terms-creates-show").await?;
+    record(
+        &fixture,
+        PromoterPosition::Offer { fee_minor: 400_000 },
+        "terms-open",
+    )
+    .await?;
+    let opened = ladder(&fixture).await?;
+
+    let payload = AutopilotActionPayload::AcceptLiveOpportunityTerms {
+        opportunity_id: fixture.opportunity_id,
+        fee_minor: opened.0,
+        currency: "PLN".to_owned(),
+    };
+    let action_id = queue_action(&fixture, &payload, "accept-creates-show").await?;
+    fixture
+        .repository
+        .execute_action(
+            fixture.workspace_id,
+            &ClaimedAutopilotAction {
+                id: AutopilotActionId::from_uuid(action_id),
+                payload,
+                attempt_number: 1,
+            },
+            fixture.now,
+        )
+        .await?;
+
+    let slug = format!("booking-{}", fixture.opportunity_id.into_uuid().simple());
+    let (title, venue, starts_at, status): (String, Option<String>, OffsetDateTime, String) =
+        sqlx::query_as(
+            "SELECT title, venue, starts_at, status FROM events \
+             WHERE workspace_id=$1 AND slug=$2",
+        )
+        .bind(fixture.workspace_id.into_uuid())
+        .bind(&slug)
+        .fetch_one(&fixture.pool)
+        .await?;
+
+    assert_eq!(title, "Terms E2E slot", "the show carries the agreed title");
+    assert_eq!(
+        venue.as_deref(),
+        Some("A promoter"),
+        "and the organisation it was agreed with"
+    );
+    assert_eq!(
+        starts_at.date(),
+        (fixture.now + time::Duration::days(60)).date(),
+        "on the date the opportunity carried all along"
+    );
+    // Accepting means the night exists. Announcing it is the ladder's first
+    // step and stays a human act, so a promoter's yes must not publish a date
+    // to fans before the band has written a word about it.
+    assert_eq!(status, "draft", "accepted, not announced");
+
+    // Re-running the same acceptance must not produce a second night. The
+    // action is retired and queued again exactly as a retry would arrive.
+    retire(&fixture, action_id).await?;
+    let repeat = AutopilotActionPayload::AcceptLiveOpportunityTerms {
+        opportunity_id: fixture.opportunity_id,
+        fee_minor: opened.0,
+        currency: "PLN".to_owned(),
+    };
+    let repeat_id = queue_action(&fixture, &repeat, "accept-again").await?;
+    let _ = fixture
+        .repository
+        .execute_action(
+            fixture.workspace_id,
+            &ClaimedAutopilotAction {
+                id: AutopilotActionId::from_uuid(repeat_id),
+                payload: repeat,
+                attempt_number: 2,
+            },
+            fixture.now,
+        )
+        .await;
+    let shows: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM events WHERE workspace_id=$1 AND slug=$2")
+            .bind(fixture.workspace_id.into_uuid())
+            .bind(&slug)
+            .fetch_one(&fixture.pool)
+            .await?;
+    assert_eq!(
+        shows, 1,
+        "one negotiation is one night, however often it retries"
+    );
+    Ok(())
+}
+
+/// The terms seam covers the negotiated win; the festival path is applied
+/// for, not negotiated, and its only "yes" is the operator marking the
+/// opportunity `won`. This pins that arm: a won festival slot becomes the
+/// draft show it promised, marked as a festival so the 500-act machinery
+/// engages, and only kinds that can be a night on a stage mint one.
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn a_won_festival_slot_becomes_the_draft_show() -> Result<(), Box<dyn std::error::Error>> {
+    use crowdrelay_application::autopilot::{
+        RecordTeamOpportunityProgress, TeamOpportunityProgress,
+    };
+
+    let fixture = fixture("won-festival").await?;
+    let festival_id = TeamOpportunityId::new();
+    sqlx::query(
+        r#"
+        INSERT INTO viryaos_team_opportunities (
+            id, workspace_id, opportunity_kind, source, external_key, title, organization,
+            verified_destination, fit_basis_points, confidence_basis_points, currency,
+            expected_fee_minor, estimated_cost_minor, event_starts_at, status
+        ) VALUES (
+            $1,$2,'festival','manual',$3,'Brutal Assault 2027 slot','Brutal Assault',
+            true,9000,9000,'PLN',0,400000,$4,'submitted'
+        )
+        "#,
+    )
+    .bind(festival_id.into_uuid())
+    .bind(fixture.workspace_id.into_uuid())
+    .bind(format!(
+        "festival-{}",
+        fixture.workspace_id.into_uuid().simple()
+    ))
+    .bind(fixture.now + time::Duration::days(200))
+    .execute(&fixture.pool)
+    .await?;
+
+    // A funding award won with a date set still mints no show — the kind
+    // gate is what keeps a grant off the stage calendar.
+    let grant_id = TeamOpportunityId::new();
+    sqlx::query(
+        r#"
+        INSERT INTO viryaos_team_opportunities (
+            id, workspace_id, opportunity_kind, source, external_key, title, organization,
+            verified_destination, fit_basis_points, confidence_basis_points, currency,
+            expected_fee_minor, estimated_cost_minor, event_starts_at, status
+        ) VALUES (
+            $1,$2,'funding','manual',$3,'Grant','Arts council',
+            true,9000,9000,'PLN',0,0,$4,'submitted'
+        )
+        "#,
+    )
+    .bind(grant_id.into_uuid())
+    .bind(fixture.workspace_id.into_uuid())
+    .bind(format!(
+        "grant-{}",
+        fixture.workspace_id.into_uuid().simple()
+    ))
+    .bind(fixture.now + time::Duration::days(200))
+    .execute(&fixture.pool)
+    .await?;
+
+    fixture
+        .repository
+        .record_team_opportunity_progress(
+            fixture.workspace_id,
+            RecordTeamOpportunityProgress {
+                opportunity_id: grant_id,
+                progress: TeamOpportunityProgress::Won,
+                occurred_at: fixture.now,
+                reason: None,
+            },
+            &IdempotencyKey::parse("progress-grant-won").expect("valid key"),
+            None,
+        )
+        .await?;
+    let grant_shows: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM events WHERE workspace_id=$1 AND booking_opportunity_id=$2",
+    )
+    .bind(fixture.workspace_id.into_uuid())
+    .bind(grant_id.into_uuid())
+    .fetch_one(&fixture.pool)
+    .await?;
+    assert_eq!(grant_shows, 0, "a grant won is not a night on a stage");
+
+    fixture
+        .repository
+        .record_team_opportunity_progress(
+            fixture.workspace_id,
+            RecordTeamOpportunityProgress {
+                opportunity_id: festival_id,
+                progress: TeamOpportunityProgress::Won,
+                occurred_at: fixture.now,
+                reason: None,
+            },
+            &IdempotencyKey::parse("progress-festival-won").expect("valid key"),
+            None,
+        )
+        .await?;
+    let show: Option<(String, String, Option<String>)> = sqlx::query_as(
+        "SELECT slug, status, festival_name FROM events \
+         WHERE workspace_id=$1 AND booking_opportunity_id=$2",
+    )
+    .bind(fixture.workspace_id.into_uuid())
+    .bind(festival_id.into_uuid())
+    .fetch_optional(&fixture.pool)
+    .await?;
+    let (slug, status, festival_name) =
+        show.expect("a won slot with a date becomes the draft show");
+    assert_eq!(
+        slug,
+        format!("booking-{}", festival_id.into_uuid().simple())
+    );
+    assert_eq!(status, "draft", "announcing stays the ladder's human step");
+    assert_eq!(
+        festival_name.as_deref(),
+        Some("Brutal Assault"),
+        "a festival kind marks the slot so the wide bill bound engages"
+    );
+
+    // A replayed Won (same idempotency key) neither re-writes nor duplicates.
+    let replay = fixture
+        .repository
+        .record_team_opportunity_progress(
+            fixture.workspace_id,
+            RecordTeamOpportunityProgress {
+                opportunity_id: festival_id,
+                progress: TeamOpportunityProgress::Won,
+                occurred_at: fixture.now,
+                reason: None,
+            },
+            &IdempotencyKey::parse("progress-festival-won").expect("valid key"),
+            None,
+        )
+        .await?;
+    assert!(replay.replayed);
+    let count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM events WHERE workspace_id=$1 AND booking_opportunity_id=$2",
+    )
+    .bind(fixture.workspace_id.into_uuid())
+    .bind(festival_id.into_uuid())
+    .fetch_one(&fixture.pool)
+    .await?;
+    assert_eq!(count, 1, "a replayed win is the same one night");
+
+    // A won slot with no date yet makes no show — the date is the night.
+    let dateless_id = TeamOpportunityId::new();
+    sqlx::query(
+        r#"
+        INSERT INTO viryaos_team_opportunities (
+            id, workspace_id, opportunity_kind, source, external_key, title, organization,
+            verified_destination, fit_basis_points, confidence_basis_points, currency,
+            expected_fee_minor, estimated_cost_minor, event_starts_at, status
+        ) VALUES (
+            $1,$2,'festival','manual',$3,'Unannounced slot','A festival',
+            true,9000,9000,'PLN',0,400000,NULL,'submitted'
+        )
+        "#,
+    )
+    .bind(dateless_id.into_uuid())
+    .bind(fixture.workspace_id.into_uuid())
+    .bind(format!(
+        "dateless-{}",
+        fixture.workspace_id.into_uuid().simple()
+    ))
+    .execute(&fixture.pool)
+    .await?;
+    fixture
+        .repository
+        .record_team_opportunity_progress(
+            fixture.workspace_id,
+            RecordTeamOpportunityProgress {
+                opportunity_id: dateless_id,
+                progress: TeamOpportunityProgress::Won,
+                occurred_at: fixture.now,
+                reason: None,
+            },
+            &IdempotencyKey::parse("progress-dateless-won").expect("valid key"),
+            None,
+        )
+        .await?;
+    let dateless_shows: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM events WHERE workspace_id=$1 AND booking_opportunity_id=$2",
+    )
+    .bind(fixture.workspace_id.into_uuid())
+    .bind(dateless_id.into_uuid())
+    .fetch_one(&fixture.pool)
+    .await?;
+    assert_eq!(dateless_shows, 0, "a show with no date is not a show");
+
+    // The recovery half: the festival announces its dates after the win, the
+    // operator enriches the row, and the enrichment — not a second Won, which
+    // the terminal guard would refuse — is what mints the night.
+    use crowdrelay_application::autopilot::{TeamOpportunityKind, UpsertTeamOpportunity};
+    use crowdrelay_domain::autonomy::Confidence;
+    fixture
+        .repository
+        .upsert_team_opportunity(
+            fixture.workspace_id,
+            UpsertTeamOpportunity {
+                opportunity_id: Some(dateless_id),
+                kind: TeamOpportunityKind::Festival,
+                source: "manual".to_owned(),
+                external_key: format!("dateless-{}", fixture.workspace_id.into_uuid().simple()),
+                title: "Unannounced slot".to_owned(),
+                organization: "A festival".to_owned(),
+                destination_url: None,
+                contact_email: None,
+                verified_destination: true,
+                fit_basis_points: 9000,
+                reputation_basis_points: 0,
+                confidence: Confidence::saturating_from_basis_points(9_000),
+                currency: "PLN".to_owned(),
+                expected_fee_minor: 0,
+                estimated_cost_minor: 400_000,
+                application_fee_minor: 0,
+                requires_contract: false,
+                exclusive: false,
+                eligible: true,
+                funding_amount_minor: 0,
+                own_contribution_minor: 0,
+                deadline: None,
+                event_starts_at: Some(fixture.now + time::Duration::days(120)),
+                country_code: None,
+                travel_band: None,
+                metadata: serde_json::json!({}),
+                strategic_value_basis_points: 0,
+                source_observed_at: Some(fixture.now),
+                expected_version: 0,
+            },
+            &IdempotencyKey::parse("dateless-enrich").expect("valid key"),
+            None,
+        )
+        .await?;
+    let recovered: Option<(String, Option<String>)> = sqlx::query_as(
+        "SELECT status, festival_name FROM events \
+         WHERE workspace_id=$1 AND booking_opportunity_id=$2",
+    )
+    .bind(fixture.workspace_id.into_uuid())
+    .bind(dateless_id.into_uuid())
+    .fetch_optional(&fixture.pool)
+    .await?;
+    let (status, festival_name) =
+        recovered.expect("the date landing on a won slot is still the win");
+    assert_eq!(status, "draft");
+    assert_eq!(festival_name.as_deref(), Some("A festival"));
+    Ok(())
+}
