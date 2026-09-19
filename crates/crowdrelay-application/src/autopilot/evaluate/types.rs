@@ -11,6 +11,31 @@ struct CycleLimits<'a> {
     touched_this_cycle: &'a mut std::collections::HashSet<uuid::Uuid>,
 }
 
+/// What one context did this cycle: how many candidates its detectors
+/// produced and how far down the persist funnel each got.
+///
+/// `decisions` alone cannot report the two quiet failure modes. A candidate
+/// the quota eats leaves no row anywhere, and a detector that produces
+/// nothing is indistinguishable from one whose work all survived — both read
+/// as "the context did nothing" when only one of them is healthy. Booking's
+/// supply alarm was silent for weeks under a snapshot bug that read "never
+/// requested" as "requested now"; a `candidates: 0` row against a live
+/// policy is the reading that would have named it on the first cycle.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ContextCycleActivity {
+    pub context: AutopilotContext,
+    /// The funnel top: candidates the context's detectors produced. A live
+    /// policy whose detectors found nothing reports 0 here.
+    pub candidates: u32,
+    /// Candidates that survived to a decision row.
+    pub decisions: u32,
+    /// Candidates that left an action an executor can claim.
+    pub actions: u32,
+    /// Candidates the 24h quota ate — the one persist outcome that leaves no
+    /// decision row at all, and therefore the one this count exists to name.
+    pub throttled: u32,
+}
+
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct AutopilotCycleReport {
     pub decisions: u32,
@@ -85,6 +110,26 @@ pub struct AutopilotCycleReport {
     /// Each entry is `(community, posts_waiting)`, most-wanted first. Empty
     /// when nothing is blocked, which is the healthy case.
     pub blocked_on_membership: Vec<(String, u32)>,
+    /// Per-context funnel: every enabled context registers on entry, so a
+    /// context that ran and produced nothing is distinguishable from one
+    /// whose candidates were all eaten before a row existed.
+    pub context_activity: std::collections::BTreeMap<AutopilotContext, ContextCycleActivity>,
+}
+
+impl AutopilotCycleReport {
+    /// The funnel entry for one context, created on first touch — that is
+    /// what lets a context report `candidates: 0` rather than being absent.
+    fn context_stats(&mut self, context: AutopilotContext) -> &mut ContextCycleActivity {
+        self.context_activity
+            .entry(context)
+            .or_insert_with(|| ContextCycleActivity {
+                context,
+                candidates: 0,
+                decisions: 0,
+                actions: 0,
+                throttled: 0,
+            })
+    }
 }
 
 #[derive(Debug, Error)]
