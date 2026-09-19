@@ -269,9 +269,11 @@ impl PostgresFanImportRepository {
             .fetch_all(&mut *tx)
             .await
             .map_err(FanImportError::Database)?;
+            let sender_key: HashMap<&str, &str> =
+                senders.iter().map(|sender| (*sender, *sender)).collect();
             for (email, id) in resolved {
-                if let Some(key) = senders.iter().find(|sender| **sender == email.as_str()) {
-                    fan_of.insert(key, id);
+                if let Some(key) = sender_key.get(email.as_str()) {
+                    fan_of.insert(*key, id);
                 }
             }
         }

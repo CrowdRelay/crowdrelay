@@ -222,13 +222,19 @@ pub(in crate::autopilot) async fn tag_likely_listeners(
     .await
     .map_err(map_sqlx)?;
 
-    for (fan_id, _, _, _) in &ranked {
+    // One statement for the whole ranked set — the tag write happens inside
+    // the dispatch transaction, so five hundred round trips would hold the
+    // action's locks open for nothing a set insert does in one.
+    if !ranked.is_empty() {
+        let fan_ids: Vec<uuid::Uuid> = ranked.iter().map(|(fan_id, _, _, _)| *fan_id).collect();
         sqlx::query(
             "INSERT INTO fan_audience_tags (workspace_id, fan_id, tag, source)
-             VALUES ($1, $2, $3, 'system') ON CONFLICT DO NOTHING",
+             SELECT $1, ranked.fan_id, $3, 'system'
+             FROM unnest($2::uuid[]) AS ranked(fan_id)
+             ON CONFLICT DO NOTHING",
         )
         .bind(workspace_id.into_uuid())
-        .bind(fan_id)
+        .bind(&fan_ids)
         .bind(&tag)
         .execute(&mut **tx)
         .await

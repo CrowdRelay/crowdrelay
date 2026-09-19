@@ -237,12 +237,11 @@ impl PostgresFanbaseRepository {
             .fetch_all(&mut *tx)
             .await
             .map_err(Self::unexpected)?;
+            let email_key: HashMap<&str, &str> =
+                emails.iter().map(|email| (*email, *email)).collect();
             for (email, id) in resolved {
-                if let Some(key) = emails
-                    .iter()
-                    .find(|candidate| **candidate == email.as_str())
-                {
-                    fan_of.insert(key, id);
+                if let Some(key) = email_key.get(email.as_str()) {
+                    fan_of.insert(*key, id);
                 }
             }
         }
@@ -415,13 +414,18 @@ impl PostgresFanbaseRepository {
             // `X-CrowdRelay-Request-Id`. Delivery is at-least-once and
             // consumers dedupe, so a batch of five hundred confirmations was
             // one email to a consumer that took the contract at its word.
+            // First-seen wins: `candidates` holds a repeat row per duplicate
+            // address, and the request ids must name the entry the operator
+            // saw first. Collecting in reverse keeps the earliest occurrence.
+            let entry_of: HashMap<&str, &FanbaseEntry> = candidates
+                .iter()
+                .rev()
+                .map(|(entry, candidate, _)| (*candidate, *entry))
+                .collect();
             let mut payloads: Vec<serde_json::Value> = Vec::with_capacity(recipients.len());
             let mut request_ids: Vec<String> = Vec::with_capacity(recipients.len());
             for (position, (fan_id, email)) in recipients.iter().enumerate() {
-                let entry = candidates
-                    .iter()
-                    .find(|(_, candidate, _)| candidate == email)
-                    .map(|(entry, _, _)| *entry);
+                let entry = entry_of.get(email).copied();
                 payloads.push(serde_json::json!({
                     "workspace_id": workspace_id,
                     "fan_id": fan_id,

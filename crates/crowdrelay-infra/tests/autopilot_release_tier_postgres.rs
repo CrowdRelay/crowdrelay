@@ -1071,3 +1071,105 @@ async fn a_filler_plan_owes_no_assets_gate() -> Result<(), Box<dyn std::error::E
     );
     Ok(())
 }
+
+#[tokio::test]
+#[ignore = "needs a live postgres"]
+async fn the_countdown_tags_every_likely_listener_in_one_pass()
+-> Result<(), Box<dyn std::error::Error>> {
+    // The countdown milestone tags its ranked listeners inside the dispatch
+    // transaction — the batch insert is what this pins: every consented fan
+    // lands the tag, and a second run rewrites nothing (ON CONFLICT is
+    // statement-level, not per-row).
+    let fixture = fixture("countdown-tags").await?;
+    let release_at = fixture.now + time::Duration::days(14);
+    let created = fixture
+        .repository
+        .upsert_release_plan(
+            fixture.workspace_id,
+            UpsertReleasePlan {
+                release_id: None,
+                source_key: "countdown-plan".into(),
+                title: "countdown title".into(),
+                release_at,
+                listen_url: Some("https://listen.example/countdown".into()),
+                tier: Some(ReleaseTier::Single),
+                active: true,
+                assets_ready: true,
+                communication_enabled: true,
+                press_enabled: true,
+                expected_version: 0,
+            },
+            &idem("countdown-tags"),
+            None,
+        )
+        .await?;
+
+    sqlx::query(
+        "INSERT INTO ecosystem_feature_flags (workspace_id, key, enabled, reason)
+         VALUES ($1, 'communication_campaigns_enabled', true, 'test')",
+    )
+    .bind(fixture.workspace_id.into_uuid())
+    .execute(&fixture.pool)
+    .await?;
+
+    let mut fans = Vec::new();
+    for idx in 0..3_i32 {
+        let fan = sqlx::query_scalar::<_, uuid::Uuid>(
+            "INSERT INTO fans (id, workspace_id, normalized_email, status)
+             VALUES (gen_random_uuid(), $1, $2, 'active') RETURNING id",
+        )
+        .bind(fixture.workspace_id.into_uuid())
+        .bind(format!("likely-{idx}@example.test"))
+        .fetch_one(&fixture.pool)
+        .await?;
+        sqlx::query(
+            "INSERT INTO fan_consents
+                 (workspace_id, fan_id, purpose, granted, policy_version, source)
+             VALUES ($1, $2, 'marketing', true, 'test-1', 'test')",
+        )
+        .bind(fixture.workspace_id.into_uuid())
+        .bind(fan)
+        .execute(&fixture.pool)
+        .await?;
+        fans.push(fan);
+    }
+
+    run_release_milestone(
+        &fixture,
+        created.release_id,
+        "countdown title",
+        release_at,
+        "countdown",
+    )
+    .await?;
+
+    let tag = format!("presave-{}", created.release_id.into_uuid());
+    let tagged = sqlx::query_scalar::<_, i64>(
+        "SELECT count(*) FROM fan_audience_tags
+         WHERE workspace_id = $1 AND tag = $2 AND source = 'system'",
+    )
+    .bind(fixture.workspace_id.into_uuid())
+    .bind(&tag)
+    .fetch_one(&fixture.pool)
+    .await?;
+    assert_eq!(
+        tagged,
+        fans.len() as i64,
+        "every ranked listener carries the countdown tag"
+    );
+
+    // And the named list still rides the outcome — the batch change wrote
+    // tags, not a different artifact.
+    let emitted = sqlx::query_scalar::<_, i64>(
+        "SELECT count(*) FROM outbox_events
+         WHERE workspace_id = $1
+           AND event_type = 'crowdrelay.release.likely_listeners'
+           AND jsonb_array_length(payload->'likely_listeners') = $2",
+    )
+    .bind(fixture.workspace_id.into_uuid())
+    .bind(fans.len() as i64)
+    .fetch_one(&fixture.pool)
+    .await?;
+    assert_eq!(emitted, 1, "the named list rides the outcome exactly once");
+    Ok(())
+}
