@@ -210,7 +210,9 @@ impl AutopilotBookingStateRepository for PostgresAutopilotRepository {
             })
                 || window_inverted
             {
-                return Err(RepositoryError::Unexpected);
+                return Err(RepositoryError::ConflictBecause(
+                    "an edition needs a non-empty label, an http(s) lineup URL and an open-before-close window",
+                ));
             }
 
             let mut transaction = self.pool.begin().await.map_err(map_sqlx)?;

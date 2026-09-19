@@ -3871,6 +3871,38 @@ paths:
         '404': { $ref: '#/components/responses/PrivateProblem' }
         '409': { $ref: '#/components/responses/PrivateProblem' }
         '503': { $ref: '#/components/responses/PrivateProblem' }
+  /admin/autopilot/booking-targets/{target_id}/editions:
+    post:
+      operationId: upsertAutopilotFestivalEdition
+      summary: Register or correct one edition's application window on a festival target
+      description: >-
+        The schedulable object under a festival series — "Brutal Assault 2027"
+        under "Brutal Assault" (plan §12-5 entity 5). Upserts on the natural
+        key `(target_id, edition_label)`: re-posting a corrected window
+        rewrites the same edition rather than filing a sibling. The close
+        date is what the deadline ask and the attention radar read. The
+        target must exist and be `target_kind=festival` — an edition hung on
+        a venue or promoter is a 409, not a stored mistake.
+      security:
+      - adminBearer: []
+      parameters:
+      - $ref: '#/components/parameters/IdempotencyKey'
+      - in: path
+        name: target_id
+        required: true
+        schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/FestivalEditionRequest' }
+      responses:
+        '200': { description: Edition written or idempotently replayed, content: { application/json: { schema: { $ref: '#/components/schemas/FestivalEditionMutation' } } } }
+        '400': { $ref: '#/components/responses/PrivateProblem' }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '404': { $ref: '#/components/responses/PrivateProblem' }
+        '409': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
   /admin/autopilot/booking-targets/{target_id}/venues/{venue_id}:
     post:
       operationId: linkAutopilotBookingTargetVenue
@@ -13333,6 +13365,30 @@ components:
             always needs a human, and the deterministic reader proposes the
             terms it finds for the human to confirm through the terms route.
         occurred_at: { type: string, format: date-time }
+
+    FestivalEditionRequest:
+      type: object
+      additionalProperties: false
+      required: [edition_label]
+      properties:
+        edition_label: { type: string, minLength: 1, maxLength: 120 }
+        starts_at:
+          type: string
+          format: date-time
+          description: >-
+            When the edition runs. Absent means the dates are not announced —
+            an application window can be known before the weekend is.
+        application_opens_at: { type: string, format: date-time }
+        application_closes_at: { type: string, format: date-time }
+        lineup_url: { type: string, maxLength: 2048, pattern: '^https?://' }
+    FestivalEditionMutation:
+      type: object
+      additionalProperties: false
+      required: [operation_id, edition_id, replayed]
+      properties:
+        operation_id: { type: string, format: uuid }
+        edition_id: { type: string, format: uuid }
+        replayed: { type: boolean }
 
     OutreachTargetKind:
       type: string
