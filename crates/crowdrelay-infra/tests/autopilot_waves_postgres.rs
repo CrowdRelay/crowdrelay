@@ -171,6 +171,10 @@ async fn queue_pitch(
         phase: OutreachPhase::Initial,
         template_key: "outreach.press.v1".to_owned(),
         wave_id,
+        draft: crowdrelay_domain::outreach_letter::OutreachLetter {
+            subject: format!("Act — {label}"),
+            body: format!("letter {label}"),
+        },
     };
     let decision_id = Uuid::now_v7();
     sqlx::query(
@@ -457,6 +461,10 @@ async fn a_served_lead_cannot_be_re_pitched() -> Result<(), Box<dyn std::error::
         phase: OutreachPhase::Initial,
         template_key: "event.press.v1".to_owned(),
         wave_id: None,
+        draft: crowdrelay_domain::outreach_letter::OutreachLetter {
+            subject: "Act — pitch".to_owned(),
+            body: format!("letter {}", Uuid::now_v7()),
+        },
     };
     let decision_id = Uuid::now_v7();
     sqlx::query(
@@ -616,6 +624,143 @@ async fn an_expiring_wave_takes_its_unapproved_pitches_with_it()
             .iter()
             .any(|anchor| anchor.anchor.id() == fixture.event_id
                 && anchor.target_kind == OutreachTargetKind::Press)
+    );
+    Ok(())
+}
+
+/// A pitch that does dispatch emits the approved letter verbatim — the
+/// executor receives the words the operator read, not a template key it
+/// would have to resolve.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn a_dispatched_pitch_carries_the_approved_letter() -> Result<(), Box<dyn std::error::Error>>
+{
+    let fixture = fixture("wave-draft").await?;
+    let target = sqlx::query_scalar::<_, Uuid>(
+        "SELECT id FROM viryaos_outreach_targets WHERE workspace_id=$1 AND display_name='Press 0'",
+    )
+    .bind(fixture.workspace_id.into_uuid())
+    .fetch_one(&fixture.pool)
+    .await?;
+    let opportunity_id = sqlx::query_scalar::<_, Uuid>(
+        "INSERT INTO viryaos_outreach_opportunities (
+             workspace_id, target_id, source, subject_kind, subject_key, template_key,
+             relevance_basis_points, confidence_basis_points, observed_at, expires_at
+         ) VALUES ($1,$2,'manual','event',$3,'event.press.v1',9000,9000,$4,$5)
+         RETURNING id",
+    )
+    .bind(fixture.workspace_id.into_uuid())
+    .bind(target)
+    .bind(format!("event:{}", fixture.event_id))
+    .bind(fixture.now)
+    .bind(fixture.now + time::Duration::days(30))
+    .fetch_one(&fixture.pool)
+    .await?;
+    let draft_body = format!("approved letter {}", Uuid::now_v7());
+    let payload = AutopilotActionPayload::RequestOutreach {
+        opportunity_id: OutreachOpportunityId::from_uuid(opportunity_id),
+        target_id: OutreachTargetId::from_uuid(target),
+        target_version: 1,
+        target_name: "Press 0".to_owned(),
+        phase: OutreachPhase::Initial,
+        template_key: "event.press.v1".to_owned(),
+        wave_id: None,
+        draft: crowdrelay_domain::outreach_letter::OutreachLetter {
+            subject: "Waves E2E — our new single".to_owned(),
+            body: draft_body.clone(),
+        },
+    };
+    let decision_id = Uuid::now_v7();
+    sqlx::query(
+        r#"
+        INSERT INTO viryaos_autopilot_decisions (
+            id, workspace_id, decision_key, context, subject_kind, subject_id,
+            decision_kind, confidence_basis_points, disposition, reason,
+            input_snapshot, policy_snapshot, recommendation, trace_id)
+        VALUES ($1,$2,$3,'outreach','outreach_opportunity',$4,
+                'request_relationship_outreach',9000,'require_approval','test',
+                '{}'::jsonb,'{}'::jsonb,$5,gen_random_uuid())
+        "#,
+    )
+    .bind(decision_id)
+    .bind(fixture.workspace_id.into_uuid())
+    .bind(format!("decision:outreach:draft:{decision_id}"))
+    .bind(Uuid::now_v7())
+    .bind(serde_json::to_value(&payload)?)
+    .execute(&fixture.pool)
+    .await?;
+    let action_id = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO viryaos_autopilot_actions (
+             id, workspace_id, decision_id, context, action_kind, subject_kind, subject_id,
+             idempotency_key, payload, status, action_class
+         ) VALUES ($1,$2,$3,'outreach','outreach.request','outreach_opportunity',$4,$5,$6,
+                   'queued','third_party')",
+    )
+    .bind(action_id)
+    .bind(fixture.workspace_id.into_uuid())
+    .bind(decision_id)
+    .bind(Uuid::now_v7())
+    .bind(format!("action:outreach:draft:{action_id}"))
+    .bind(serde_json::to_value(&payload)?)
+    .execute(&fixture.pool)
+    .await?;
+
+    sqlx::query(
+        "INSERT INTO viryaos_executor_instances (
+             workspace_id, executor_id, version, manifest_sha, observed_at, expires_at
+         ) VALUES ($1,'n8n-draft-test','test','test-manifest',$2,$3)",
+    )
+    .bind(fixture.workspace_id.into_uuid())
+    .bind(fixture.now)
+    .bind(fixture.now + time::Duration::minutes(30))
+    .execute(&fixture.pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO viryaos_executor_capabilities (
+             workspace_id, executor_id, capability, capability_version, observed_at, expires_at
+         ) VALUES ($1,'n8n-draft-test','outreach.send','1',$2,$3)",
+    )
+    .bind(fixture.workspace_id.into_uuid())
+    .bind(fixture.now)
+    .bind(fixture.now + time::Duration::minutes(30))
+    .execute(&fixture.pool)
+    .await?;
+
+    use crowdrelay_application::autopilot::AutopilotActionRepository;
+    let claim_now = OffsetDateTime::now_utc();
+    let claimed = fixture
+        .repository
+        .claim_due_actions(fixture.workspace_id, 8, claim_now)
+        .await?;
+    let action = claimed
+        .iter()
+        .find(|claimed| claimed.id.into_uuid() == action_id)
+        .ok_or("the queued pitch is claimable")?;
+    fixture
+        .repository
+        .execute_action(fixture.workspace_id, action, fixture.now)
+        .await?;
+
+    let emitted: serde_json::Value = sqlx::query_scalar(
+        "SELECT payload FROM outbox_events
+         WHERE workspace_id=$1 AND event_type='crowdrelay.outreach.requested'",
+    )
+    .bind(fixture.workspace_id.into_uuid())
+    .fetch_one(&fixture.pool)
+    .await?;
+    assert_eq!(
+        emitted["draft"]["subject"].as_str(),
+        Some("Waves E2E — our new single")
+    );
+    assert_eq!(
+        emitted["draft"]["body"].as_str(),
+        Some(draft_body.as_str()),
+        "the executor receives the approved words verbatim"
+    );
+    assert_eq!(
+        emitted["contact_email"].as_str().map(|e| e.contains('@')),
+        Some(true)
     );
     Ok(())
 }

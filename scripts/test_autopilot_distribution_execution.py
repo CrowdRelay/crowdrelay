@@ -40,7 +40,12 @@ class AutopilotDistributionExecutionContract(unittest.TestCase):
         self.assertIn("route.free!==true", encoded)
         self.assertIn("route.requires_login===true", encoded)
         self.assertIn("route.requires_captcha===true", encoded)
-        self.assertIn("one follow-up is the maximum", encoded)
+        # The letter is composed in CrowdRelay at approval time — the executor
+        # sends `draft.body` verbatim and refuses a payload without one. The
+        # "one follow-up is the maximum" promise lives in the composed letter
+        # (pinned by the domain tests), not in this handler.
+        self.assertIn("draft.body", encoded)
+        self.assertIn("no approved letter in the payload", encoded)
 
     def test_inbound_gmail_reply_closes_outreach_loop(self) -> None:
         path = ROOT / "n8n/examples/autopilot-outreach-reply-monitor.example.json"

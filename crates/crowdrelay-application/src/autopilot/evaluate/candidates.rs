@@ -618,6 +618,9 @@ fn outreach_candidate(
             phase,
             template_key: template_key.to_owned(),
             wave_id,
+            // Composed when the action persists — the evaluator is pure and
+            // the sender identity, target name and pitch live in Postgres.
+            draft: crowdrelay_domain::outreach_letter::OutreachLetter::default(),
         },
         decision_key: format!(
             "decision:outreach:v{}:{}:{}:tv{}:{:?}:{}:{}",

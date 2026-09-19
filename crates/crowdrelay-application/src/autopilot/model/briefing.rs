@@ -316,18 +316,37 @@ impl AutopilotActionPayload {
                 ],
                 deadline_note: String::new(),
             },
-            Self::RequestOutreach { target_name, phase, template_key, .. } => ActionBriefing {
+            Self::RequestOutreach { target_name, phase, template_key, draft, .. } => ActionBriefing {
                 summary: format!("Outreach contact: {}", target_name),
                 why_it_matters: "This approaches an outside target. You get one chance at contact.".into(),
                 steps: vec![
-                    BriefingStep { what_to_do: "Check the target, the phase and the template".into(), why_it_matters: "Make sure the message is personal to them".into() },
+                    BriefingStep { what_to_do: "Read the letter below".into(), why_it_matters: "It is the exact text the target receives — approve the words, not the idea".into() },
                     BriefingStep { what_to_do: "Click APPROVE to send it".into(), why_it_matters: "Once approved the message is sent".into() },
                 ],
-                content: vec![
-                    BriefingField { label: "Target".into(), value: target_name.clone() },
-                    BriefingField { label: "Phase".into(), value: friendly_enum(phase) },
-                    BriefingField { label: "Template".into(), value: friendly_template(template_key) },
-                ],
+                content: {
+                    let mut fields = vec![
+                        BriefingField { label: "Target".into(), value: target_name.clone() },
+                        BriefingField { label: "Phase".into(), value: friendly_enum(phase) },
+                        BriefingField { label: "Template".into(), value: friendly_template(template_key) },
+                    ];
+                    // The approval shows the words the send carries, not a
+                    // template key that resolves outside the repo.
+                    fields.push(BriefingField {
+                        label: "Subject".into(),
+                        value: match draft.subject.trim().is_empty() {
+                            true => "not composed".to_owned(),
+                            false => draft.subject.clone(),
+                        },
+                    });
+                    fields.push(BriefingField {
+                        label: "Body".into(),
+                        value: match draft.body.trim().is_empty() {
+                            true => "not composed".to_owned(),
+                            false => truncate(draft.body.clone(), 2000),
+                        },
+                    });
+                    fields
+                },
                 deadline_note: String::new(),
             },
             Self::RequestRepresentationApproach { target_name, note, draft, .. } => ActionBriefing {

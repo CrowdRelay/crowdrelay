@@ -207,7 +207,17 @@ impl PostgresAutopilotRepository {
                     phase,
                     template_key,
                     wave_id,
+                    draft,
                 } => {
+                    // The letter was composed when the action was written. A
+                    // row queued before then — or one whose draft was lost —
+                    // is refused here rather than passed to an executor that
+                    // would write on the band's behalf.
+                    if draft.subject.trim().is_empty() || draft.body.trim().is_empty() {
+                        return Err(RepositoryError::ConflictBecause(
+                            "outreach refused: this action carries no letter — the pitch composes when the action is written",
+                        ));
+                    }
                     let target = operations::lock_outreach_for_execution(
                         &mut transaction,
                         workspace_id,
@@ -250,6 +260,7 @@ impl PostgresAutopilotRepository {
                             "template_key": template_key,
                             "target_template_key": target.2,
                             "wave_id": wave_id,
+                            "draft": draft,
                             // What was true when the band said it, rather than
                             // when the agent drafted it. No adjectives: numbers,
                             // and the moment they were read.
