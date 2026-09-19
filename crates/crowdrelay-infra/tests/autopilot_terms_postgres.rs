@@ -805,3 +805,102 @@ async fn terminal_progress_writes_the_reason_and_refuses_to_close_silently()
     assert_eq!(reason.as_deref(), Some("scout duplicate"));
     Ok(())
 }
+
+/// The seam this whole file sat next to and did not cover: an accepted
+/// negotiation has to become the show it agreed to.
+///
+/// Before this, the terms row reached `accepted` and nothing created an event.
+/// The show entered CrowdRelay later by config seeding or by syncing back from
+/// an external listing, so the growth ladder's first step waited on a row the
+/// booking pipeline already had every fact for.
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn accepting_terms_creates_the_show_it_agreed_to() -> Result<(), Box<dyn std::error::Error>> {
+    let fixture = fixture("terms-creates-show").await?;
+    record(
+        &fixture,
+        PromoterPosition::Offer { fee_minor: 400_000 },
+        "terms-open",
+    )
+    .await?;
+    let opened = ladder(&fixture).await?;
+
+    let payload = AutopilotActionPayload::AcceptLiveOpportunityTerms {
+        opportunity_id: fixture.opportunity_id,
+        fee_minor: opened.0,
+        currency: "PLN".to_owned(),
+    };
+    let action_id = queue_action(&fixture, &payload, "accept-creates-show").await?;
+    fixture
+        .repository
+        .execute_action(
+            fixture.workspace_id,
+            &ClaimedAutopilotAction {
+                id: AutopilotActionId::from_uuid(action_id),
+                payload,
+                attempt_number: 1,
+            },
+            fixture.now,
+        )
+        .await?;
+
+    let slug = format!("booking-{}", fixture.opportunity_id.into_uuid().simple());
+    let (title, venue, starts_at, status): (String, Option<String>, OffsetDateTime, String) =
+        sqlx::query_as(
+            "SELECT title, venue, starts_at, status FROM events \
+             WHERE workspace_id=$1 AND slug=$2",
+        )
+        .bind(fixture.workspace_id.into_uuid())
+        .bind(&slug)
+        .fetch_one(&fixture.pool)
+        .await?;
+
+    assert_eq!(title, "Terms E2E slot", "the show carries the agreed title");
+    assert_eq!(
+        venue.as_deref(),
+        Some("A promoter"),
+        "and the organisation it was agreed with"
+    );
+    assert_eq!(
+        starts_at.date(),
+        (fixture.now + time::Duration::days(60)).date(),
+        "on the date the opportunity carried all along"
+    );
+    // Accepting means the night exists. Announcing it is the ladder's first
+    // step and stays a human act, so a promoter's yes must not publish a date
+    // to fans before the band has written a word about it.
+    assert_eq!(status, "draft", "accepted, not announced");
+
+    // Re-running the same acceptance must not produce a second night. The
+    // action is retired and queued again exactly as a retry would arrive.
+    retire(&fixture, action_id).await?;
+    let repeat = AutopilotActionPayload::AcceptLiveOpportunityTerms {
+        opportunity_id: fixture.opportunity_id,
+        fee_minor: opened.0,
+        currency: "PLN".to_owned(),
+    };
+    let repeat_id = queue_action(&fixture, &repeat, "accept-again").await?;
+    let _ = fixture
+        .repository
+        .execute_action(
+            fixture.workspace_id,
+            &ClaimedAutopilotAction {
+                id: AutopilotActionId::from_uuid(repeat_id),
+                payload: repeat,
+                attempt_number: 2,
+            },
+            fixture.now,
+        )
+        .await;
+    let shows: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM events WHERE workspace_id=$1 AND slug=$2")
+            .bind(fixture.workspace_id.into_uuid())
+            .bind(&slug)
+            .fetch_one(&fixture.pool)
+            .await?;
+    assert_eq!(
+        shows, 1,
+        "one negotiation is one night, however often it retries"
+    );
+    Ok(())
+}

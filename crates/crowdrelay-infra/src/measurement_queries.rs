@@ -132,14 +132,21 @@ WHERE workspace_id = $1
 "#;
 
 /// Claim 9 — "The room stops leaking": scans ÷ room size, per show. The master
-/// variable. `room_size` is nullable — a show with no admission capacity on
-/// record is unmeasured, not zero.
+/// variable. `room_size` is nullable — a show with no room capacity on record
+/// is unmeasured, not zero.
+///
+/// `room_size` is `events.room_capacity` and deliberately not the pass-pool
+/// total it used to be. `sum(admission_pools.capacity)` is how many passes the
+/// night issued — guestlist, winners, comps — so a sold-out three-hundred-cap
+/// room that issued twelve passes reported a room of twelve, and the leak rate
+/// came out near perfect on exactly the nights that leaked most. How many
+/// people the room holds is a fact about the venue, known when the show is
+/// booked and unchanged by anything ticketing does later.
 pub const ROOM_LEAK_SQL: &str = r#"
 SELECT e.slug, e.title, e.starts_at,
        (SELECT count(DISTINCT c.fan_id) FROM concert_checkins c
          WHERE c.workspace_id = $1 AND c.event_id = e.id) AS scans,
-       (SELECT sum(p.capacity) FROM admission_pools p
-         WHERE p.workspace_id = $1 AND p.event_id = e.id AND p.active) AS room_size
+       e.room_capacity::bigint AS room_size
 FROM events e
 WHERE e.workspace_id = $1 AND e.status = 'completed'
   AND e.starts_at >= $2 - interval '90 days' AND e.starts_at <= $2
