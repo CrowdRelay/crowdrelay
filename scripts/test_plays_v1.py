@@ -36,6 +36,10 @@ MIGRATION = MIGRATIONS / "0088_viryaos_plays.sql"
 DOMAIN = ROOT / "crates/crowdrelay-domain/src/plays.rs"
 MODEL = ROOT / "crates/crowdrelay-application/src/autopilot/model.rs"
 EVALUATE = ROOT / "crates/crowdrelay-application/src/autopilot/evaluate.rs"
+# `advance_play` was extracted from evaluate.rs to respect the modularity
+# contract — same convention as placements.rs: the counter assertions read
+# the evaluator and the chunk together.
+ADVANCE = ROOT / "crates/crowdrelay-application/src/autopilot/evaluate/play_advance.rs"
 CANDIDATE = ROOT / "crates/crowdrelay-application/src/autopilot/evaluate/plays.rs"
 PORTS = ROOT / "crates/crowdrelay-application/src/autopilot/ports.rs"
 VALIDATION = ROOT / "crates/crowdrelay-api/src/autopilot/validation.rs"
@@ -262,7 +266,7 @@ class PlaysContract(unittest.TestCase):
             "complete_play",
         ):
             self.assertIn(f"async fn {method}(", ports)
-        evaluate = read(EVALUATE)
+        evaluate = read(EVALUATE) + read(ADVANCE)
         self.assertIn("AutopilotContext::Plays =>", evaluate)
         self.assertIn("plays_started", evaluate)
         self.assertIn("play_steps_skipped", evaluate)
