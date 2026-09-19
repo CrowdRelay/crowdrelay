@@ -691,26 +691,26 @@ async fn enrich_application_draft(
     };
 
     let ws = workspace_id.into_uuid();
+    // The letter's language is the organiser's country, not the travel-cost
+    // band — `travel_band` says how far the van drives, `country_code` says
+    // which language lands in the organiser's inbox.
     let opportunity = sqlx::query_as::<
         _,
         (String, String, Option<String>, Option<OffsetDateTime>),
     >(
-        "SELECT title, organization, travel_band, deadline FROM viryaos_team_opportunities WHERE workspace_id = $1 AND id = $2",
+        "SELECT title, organization, country_code, deadline FROM viryaos_team_opportunities WHERE workspace_id = $1 AND id = $2",
     )
     .bind(ws)
     .bind(opportunity_id.into_uuid())
     .fetch_optional(&mut **transaction)
     .await
     .map_err(map_sqlx)?;
-    let Some((title, organization, travel_band, deadline)) = opportunity else {
+    let Some((title, organization, country_code, deadline)) = opportunity else {
         // An opportunity the action names must exist — the candidate
         // carried its id.
         return Err(RepositoryError::NotFound);
     };
-    let language = match travel_band.as_deref() {
-        Some("poland") => LetterLanguage::Polish,
-        _ => LetterLanguage::English,
-    };
+    let language = LetterLanguage::for_country(country_code.as_deref().unwrap_or(""));
     let pitch = sqlx::query_as::<_, (String, String)>(
         "SELECT title, listen_url FROM viryaos_release_plans WHERE workspace_id = $1 AND active AND listen_url IS NOT NULL AND btrim(listen_url) <> '' AND btrim(title) <> '' ORDER BY release_at DESC LIMIT 1",
     )

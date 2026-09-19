@@ -754,3 +754,130 @@ async fn run_stale_recipient_case(pool: &PgPool) -> Result<(), Box<dyn std::erro
     assert_eq!(touched, 0);
     Ok(())
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn a_reply_after_approval_retires_the_letter_before_it_sends()
+-> Result<(), Box<dyn std::error::Error>> {
+    let database = DisposableDatabase::create().await?;
+    let pool = &database.pool;
+    let result = run_reply_after_approval_case(pool).await;
+    database.drop_database().await;
+    result
+}
+
+async fn run_reply_after_approval_case(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
+    let now = OffsetDateTime::now_utc();
+    let act = workspace(pool, "Act One").await?;
+    let wroclaw = city_in(pool, "wroclaw", 51.11, 17.03).await?;
+    let anchor = seed_target(
+        pool,
+        act,
+        wroclaw,
+        "venue",
+        "Klub X",
+        "klubx@example.com",
+        90,
+    )
+    .await?;
+    let extra = seed_target(
+        pool,
+        act,
+        wroclaw,
+        "promoter",
+        "Promoter Jan",
+        "jan@example.com",
+        60,
+    )
+    .await?;
+    advertise(pool, act, "booking.outreach", now).await?;
+
+    // The operator approves the letter — then the promoter writes back before
+    // the send window opens. A reply is the lead becoming served, not a fresher
+    // prospect: the dispatch lock must refuse the wave the way the evaluator's
+    // `last_reply` hold already refused the proposal.
+    sqlx::query(
+        "INSERT INTO viryaos_booking_interactions
+             (workspace_id, target_id, direction, phase, disposition, source_key, occurred_at)
+         VALUES ($1, $2, 'inbound', 'reply', 'positive', $3, now())",
+    )
+    .bind(act)
+    .bind(extra)
+    .bind(format!("reply-{}", Uuid::now_v7()))
+    .execute(pool)
+    .await?;
+
+    let payload = serde_json::to_value(
+        crowdrelay_application::autopilot::AutopilotActionPayload::RequestBookingOutreach {
+            city_id: CityId::from_uuid(wroclaw),
+            target_id: BookingTargetId::from_uuid(anchor),
+            target_version: 1,
+            target_name: "Klub X".to_owned(),
+            score: 71,
+            phase: BookingOutreachPhase::Initial,
+            proposed_window: None,
+            additional_recipients: vec![(BookingTargetId::from_uuid(extra), 1)],
+            draft: crowdrelay_domain::booking_letter::BookingLetter {
+                subject: "Act One — booking in Wrocław".to_owned(),
+                body: "Cześć,\n\nJesteśmy Act One.".to_owned(),
+            },
+            venue_evidence: None,
+        },
+    )?;
+    let action_id = seed_booking_action(pool, act, wroclaw, payload).await?;
+
+    let repo = repository(pool);
+    let claim_now = OffsetDateTime::now_utc();
+    let claimed = repo
+        .claim_due_autonomous_actions(WorkspaceId::from_uuid(act), 8, claim_now)
+        .await?;
+    let action = claimed
+        .iter()
+        .find(|candidate| candidate.id.into_uuid() == action_id)
+        .expect("the queued outreach is claimable");
+    let outcome = repo
+        .execute_action(WorkspaceId::from_uuid(act), action, claim_now)
+        .await;
+    assert!(
+        matches!(
+            outcome,
+            Err(crowdrelay_application::RepositoryError::Conflict)
+        ),
+        "a target that replied after approval must refuse the wave, got {outcome:?}"
+    );
+
+    // The whole wave dies together — no reservation on the anchor, no outward
+    // intent in the outbox, nobody's outreach clock moved.
+    let reserved = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM viryaos_contact_governor
+         WHERE workspace_id = $1 AND last_action_id = $2",
+    )
+    .bind(act)
+    .bind(action_id)
+    .fetch_one(pool)
+    .await?;
+    assert_eq!(
+        reserved, 0,
+        "a replied wave may not leave half-reserved contacts"
+    );
+    let emitted = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM outbox_events
+         WHERE workspace_id = $1 AND event_type = 'crowdrelay.booking.outreach_requested'",
+    )
+    .bind(act)
+    .fetch_one(pool)
+    .await?;
+    assert_eq!(
+        emitted, 0,
+        "a replied lead may not receive the approved pitch"
+    );
+    let touched = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM viryaos_booking_targets
+         WHERE workspace_id = $1 AND last_outreach_at IS NOT NULL",
+    )
+    .bind(act)
+    .fetch_one(pool)
+    .await?;
+    assert_eq!(touched, 0);
+    Ok(())
+}
