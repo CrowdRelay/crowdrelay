@@ -815,6 +815,10 @@ impl AutopilotTeamStateRepository for PostgresAutopilotRepository {
             if changed.rows_affected() != 1 {
                 return Err(RepositoryError::Conflict);
             }
+            if matches!(command.progress, TeamOpportunityProgress::Won) {
+                create_show_for_won_opportunity(&mut tx, workspace_id, command.opportunity_id)
+                    .await?;
+            }
 
             tx.commit().await.map_err(map_sqlx)?;
             Ok(AutopilotControlMutation {
@@ -826,6 +830,54 @@ impl AutopilotTeamStateRepository for PostgresAutopilotRepository {
         })
         .await
     }
+}
+
+/// The second half of the seam `create_show_for_accepted_terms` opened: a
+/// festival slot is applied for, not negotiated — there are no terms rows to
+/// accept, so the only place the win can become a show is the operator
+/// marking the opportunity `won`.
+///
+/// Same guarantees as the terms path — `draft` (announcing stays a human
+/// step), the opportunity-derived slug so a Won after a terms-acceptance is
+/// a no-op rather than a second event, and no write without
+/// `event_starts_at`. The Won path adds two guards the terms path does not
+/// need: the kind gate, because `won` also exists for funding, press and
+/// sync (a grant won is not a night on a stage), and `festival_name` for the
+/// festival kind so the slot runs the festival machinery — the 500-act bill
+/// bound, the `festival` day projection, the post-festival follow-ups.
+async fn create_show_for_won_opportunity(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    workspace_id: WorkspaceId,
+    opportunity_id: TeamOpportunityId,
+) -> Result<(), RepositoryError> {
+    let slug = format!("booking-{}", opportunity_id.into_uuid().simple());
+    sqlx::query(
+        r#"
+        INSERT INTO events (
+            workspace_id, city_id, slug, title, venue, starts_at, status,
+            booking_opportunity_id, festival_name
+        )
+        SELECT $1, NULL, $2, opportunity.title, opportunity.organization,
+               opportunity.event_starts_at, 'draft', opportunity.id,
+               -- `festival_name` caps at 200 where `organization` allows
+               -- 240; a long organiser name must not fail the win.
+               CASE WHEN opportunity.opportunity_kind = 'festival'
+                    THEN left(opportunity.organization, 200) ELSE NULL END
+        FROM viryaos_team_opportunities AS opportunity
+        WHERE opportunity.workspace_id = $1
+          AND opportunity.id = $3
+          AND opportunity.event_starts_at IS NOT NULL
+          AND opportunity.opportunity_kind IN ('festival','showcase','support_slot','booking')
+        ON CONFLICT (workspace_id, slug) DO NOTHING
+        "#,
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(&slug)
+    .bind(opportunity_id.into_uuid())
+    .execute(&mut **tx)
+    .await
+    .map_err(map_sqlx)?;
+    Ok(())
 }
 
 impl PostgresAutopilotRepository {
