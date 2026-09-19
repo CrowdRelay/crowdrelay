@@ -889,3 +889,110 @@ async fn a_dispatched_application_carries_the_approved_letter()
     );
     Ok(())
 }
+
+/// The language pin for the composition fix: production rows carry
+/// `country_code` and leave `travel_band` NULL, so a Polish organiser must
+/// still get Polish words — the band is a cost hint, not a locale.
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn an_application_speaks_the_organisers_language() -> Result<(), Box<dyn std::error::Error>> {
+    use crowdrelay_application::autopilot::{ActionSubject, AutopilotContext, DecisionCandidate};
+    use crowdrelay_domain::autonomy::{Confidence, PolicyDisposition};
+    use crowdrelay_domain::live_opportunities::LiveOpportunityKind;
+    use crowdrelay_domain::{TeamOpportunityId, TraceContext};
+
+    let fixture = fixture("apply-lang").await?;
+    let suffix = fixture.workspace_id.into_uuid().simple().to_string();
+
+    async fn seed_opportunity(
+        fixture: &Fixture,
+        suffix: &str,
+        country_code: Option<&str>,
+    ) -> Result<Uuid, Box<dyn std::error::Error>> {
+        sqlx::query_scalar::<_, Uuid>(
+            "INSERT INTO viryaos_team_opportunities (
+                 workspace_id, opportunity_kind, source, external_key, title,
+                 organization, contact_email, verified_destination, eligible,
+                 fit_basis_points, reputation_basis_points,
+                 confidence_basis_points, status, country_code
+             ) VALUES ($1,'festival','scout',$2,$3,$4,$5,true,true,8000,
+                       5000, 5000, 'new', $6)
+             RETURNING id",
+        )
+        .bind(fixture.workspace_id.into_uuid())
+        .bind(format!("apply-{country_code:?}-{suffix}"))
+        .bind(format!("Festiwal {country_code:?} {suffix}"))
+        .bind(format!("Org {country_code:?}"))
+        .bind(format!("bookings-{suffix}@example.test"))
+        .bind(country_code)
+        .fetch_one(&fixture.pool)
+        .await
+        .map_err(Into::into)
+    }
+
+    async fn persisted_subject(
+        fixture: &Fixture,
+        opportunity_id: Uuid,
+    ) -> Result<String, Box<dyn std::error::Error>> {
+        let trace = TraceContext::root(fixture.workspace_id);
+        let candidate = DecisionCandidate {
+            context: AutopilotContext::LiveOpportunity,
+            subject: ActionSubject::TeamOpportunity(TeamOpportunityId::from_uuid(opportunity_id)),
+            decision_kind: "apply_live_opportunity",
+            confidence: Confidence::saturating_from_basis_points(9_000),
+            disposition: PolicyDisposition::RequireApproval,
+            reason: "test candidate",
+            input_snapshot: serde_json::json!({}),
+            policy_snapshot: serde_json::json!({}),
+            action: AutopilotActionPayload::ApplyLiveOpportunity {
+                opportunity_id: TeamOpportunityId::from_uuid(opportunity_id),
+                opportunity_kind: LiveOpportunityKind::Festival,
+                score: 80,
+                draft: Default::default(),
+            },
+            decision_key: format!("decision:apply-lang:{opportunity_id}"),
+            action_idempotency_key: format!("action:apply-lang:{opportunity_id}"),
+        };
+        let persisted = fixture
+            .repository
+            .persist_candidate(fixture.workspace_id, &candidate, &trace)
+            .await?;
+        assert!(
+            persisted.action_created,
+            "the candidate must persist an action"
+        );
+        sqlx::query_scalar::<_, String>(
+            "SELECT payload->'draft'->>'subject' FROM viryaos_autopilot_actions
+             WHERE workspace_id=$1 AND payload->>'opportunity_id'=$2",
+        )
+        .bind(fixture.workspace_id.into_uuid())
+        .bind(opportunity_id.to_string())
+        .fetch_one(&fixture.pool)
+        .await
+        .map_err(Into::into)
+    }
+
+    // The production shape: a Polish destination with no travel band set.
+    let polish = seed_opportunity(&fixture, &suffix, Some("PL")).await?;
+    let subject = persisted_subject(&fixture, polish).await?;
+    assert!(
+        subject.contains("zgłoszenie"),
+        "a PL organiser gets the Polish application, got: {subject}"
+    );
+
+    let german = seed_opportunity(&fixture, &suffix, Some("DE")).await?;
+    let subject = persisted_subject(&fixture, german).await?;
+    assert!(
+        subject.contains("application"),
+        "a non-PL organiser gets the English application, got: {subject}"
+    );
+
+    // And no locale at all still fails safe to English rather than guessing.
+    let unknown = seed_opportunity(&fixture, &suffix, None).await?;
+    let subject = persisted_subject(&fixture, unknown).await?;
+    assert!(
+        subject.contains("application"),
+        "a locale-less organiser gets the English application, got: {subject}"
+    );
+    Ok(())
+}
