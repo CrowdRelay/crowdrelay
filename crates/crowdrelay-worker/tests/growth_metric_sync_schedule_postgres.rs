@@ -261,6 +261,31 @@ async fn spotify_city_resolution_inner(pool: &PgPool) -> Result<()> {
         missing.is_none(),
         "a city absent from the catalog must resolve to None, not a guess"
     );
+
+    // ß is a digraph the fold expands to "ss" — Spotify reports the "ss"
+    // spelling while the catalog keeps the local one, and the join must
+    // still land.
+    sqlx::query(
+        "INSERT INTO cities (slug, name, country_code, latitude, longitude) \
+         VALUES ('weissenfels', 'Weißenfels', 'DE', 51.1989, 11.9683)",
+    )
+    .execute(pool)
+    .await?;
+    let (weissenfels_id, weissenfels_name) =
+        crowdrelay_worker::growth_metric_sync::resolve_spotify_city(pool, "DE", "Weissenfels")
+            .await?
+            .context("Weissenfels must resolve through the ß digraph fold")?;
+    ensure!(
+        weissenfels_name == "Weißenfels",
+        "expected Weißenfels, got {weissenfels_name}"
+    );
+    let also =
+        crowdrelay_worker::growth_metric_sync::resolve_spotify_city(pool, "DE", "Weißenfels")
+            .await?;
+    ensure!(
+        also.is_some_and(|(id, _)| id == weissenfels_id),
+        "the ß spelling must resolve to the same row"
+    );
     Ok(())
 }
 

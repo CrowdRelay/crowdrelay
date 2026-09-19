@@ -41,9 +41,13 @@ fn spotify_city_endonym<'a>(country_code: &str, name: &'a str) -> &'a str {
 
 /// Lowercases and folds the same diacritics the `resolve_spotify_city`
 /// query's `translate` removes from the catalog name. The two character
-/// lists are one list written twice — extend both or neither.
+/// lists are one list written twice — extend both or neither. `ß` is the
+/// one digraph: it is not a diacritic but a double-s, and Spotify reports
+/// the "ss" spelling ("Weissenfels"), so both sides expand it to "ss"
+/// before the fold — `translate` cannot because it maps one char to one.
 fn fold_spotify_city_name(name: &str) -> String {
     name.to_lowercase()
+        .replace('ß', "ss")
         .chars()
         .map(|c| match c {
             'ą' => 'a',
@@ -57,7 +61,6 @@ fn fold_spotify_city_name(name: &str) -> String {
             'ä' => 'a',
             'ö' => 'o',
             'ü' => 'u',
-            'ß' => 's',
             'é' | 'è' | 'ě' => 'e',
             'á' => 'a',
             'í' => 'i',
@@ -88,16 +91,17 @@ pub async fn resolve_spotify_city(
     let folded = fold_spotify_city_name(spotify_city_endonym(country_code, spotify_name));
     // `translate` is positional: each character in the second argument maps
     // to the same position in the third. The list mirrors
-    // `fold_spotify_city_name` exactly.
+    // `fold_spotify_city_name` exactly; `ß` is expanded to "ss" beforehand
+    // because translate cannot map one character to two.
     let matches: Vec<(Uuid, String)> = sqlx::query_as(
         r#"
         SELECT id, name
         FROM cities
         WHERE country_code = $1
           AND translate(
-              lower(name),
-              'ąćęłńóśźżäöüßéèěáířščžďťňůúý',
-              'acelnoszzaouseeeairsczdtnuuy'
+              lower(replace(name, 'ß', 'ss')),
+              'ąćęłńóśźżäöüéèěáířščžďťňůúý',
+              'acelnoszzaoueeeairsczdtnuuy'
           ) = $2
           -- A merged or rejected row is not a joinable city — the series
           -- would annotate a row the catalog has already disowned.
@@ -137,6 +141,10 @@ mod tests {
         assert_eq!(fold_spotify_city_name("Gdańsk"), "gdansk");
         assert_eq!(fold_spotify_city_name("München"), "munchen");
         assert_eq!(fold_spotify_city_name("Berlin"), "berlin");
+        // ß is a digraph, not a diacritic — both spellings Spotify might
+        // report land on the same fold the catalog row lands on.
+        assert_eq!(fold_spotify_city_name("Weißenfels"), "weissenfels");
+        assert_eq!(fold_spotify_city_name("Weissenfels"), "weissenfels");
     }
 
     #[test]
