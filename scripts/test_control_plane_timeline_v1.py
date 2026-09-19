@@ -14,8 +14,9 @@ relies on:
 - every query is workspace-scoped — `workspace_id` is the whole of tenant
   isolation, and a timeline that dropped it on any one of its dozen queries
   would leak another tenant's night;
-- only `published`/`completed` events resolve — drafts have no ladder, and
-  a played show must keep resolving so T+1/T+3/T+7 still have a page;
+- `draft`/`published`/`completed` events resolve — since 0329 a booked-but-
+  unannounced show is a draft whose first ladder rung is "Announced", so the
+  timeline must render it; `cancelled` still never resolves;
 - the nine steps exist in time order with their anchors — reordering them
   is exactly the regression the page is built to prevent;
 - owners resolve through `viryaos_team_assignments.source_id` (both
@@ -114,7 +115,13 @@ class ControlPlaneTimelineContract(unittest.TestCase):
             )
 
     def test_only_live_events_resolve(self) -> None:
-        self.assertIn("status IN ('published','completed')", self.source)
+        # `draft` joined the list in 0329: the booking seam's accepted
+        # negotiation materialises as a draft show, and the ladder's first
+        # rung is announcing it — a draft that 404'd could never become
+        # announced. `cancelled` stays excluded.
+        self.assertIn(
+            "status IN ('draft','published','completed')", self.source
+        )
 
     def test_the_ladder_is_complete_and_ordered(self) -> None:
         # The order the steps are pushed is the order the page renders —
