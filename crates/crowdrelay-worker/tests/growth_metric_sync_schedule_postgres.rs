@@ -212,6 +212,60 @@ async fn a_connection_that_just_failed_is_not_retried_immediately_inner(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn spotify_top_cities_resolve_against_the_city_catalog() -> Result<()> {
+    let database = DisposableDatabase::create().await?;
+    let result = spotify_city_resolution_inner(&database.pool).await;
+    database.drop_database().await;
+    result
+}
+
+async fn spotify_city_resolution_inner(pool: &PgPool) -> Result<()> {
+    // The seeded catalog carries local names only; Spotify reports English
+    // exonyms and undiacriticised spellings. Both directions must join, and
+    // a name with no catalog row must resolve to None rather than to a
+    // wrong city. The assertions run against the migration's own seed — if
+    // the catalog drifts, this test drifts with it, which is the point.
+    let (wroclaw_id, wroclaw_name) =
+        crowdrelay_worker::growth_metric_sync::resolve_spotify_city(pool, "PL", "Wroclaw")
+            .await?
+            .context("Wroclaw must resolve through the diacritic fold")?;
+    ensure!(
+        wroclaw_name == "Wrocław",
+        "expected Wrocław, got {wroclaw_name}"
+    );
+
+    let (warsaw_id, warsaw_name) =
+        crowdrelay_worker::growth_metric_sync::resolve_spotify_city(pool, "PL", "Warsaw")
+            .await?
+            .context("Warsaw must resolve through the exonym map")?;
+    ensure!(
+        warsaw_name == "Warszawa",
+        "expected Warszawa, got {warsaw_name}"
+    );
+    ensure!(
+        warsaw_id != wroclaw_id,
+        "Warsaw and Wroclaw resolved to the same city"
+    );
+
+    // Country scoping: a Warsaw outside Poland must not join Warszawa.
+    let us =
+        crowdrelay_worker::growth_metric_sync::resolve_spotify_city(pool, "US", "Warsaw").await?;
+    ensure!(
+        us.is_none(),
+        "the US Warsaw must not reach across the border to Warszawa"
+    );
+
+    let missing =
+        crowdrelay_worker::growth_metric_sync::resolve_spotify_city(pool, "PL", "Zakopane").await?;
+    ensure!(
+        missing.is_none(),
+        "a city absent from the catalog must resolve to None, not a guess"
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn the_worker_sleeps_instead_of_spinning_when_everything_is_backing_off() -> Result<()> {
     let database = DisposableDatabase::create().await?;
     let result = sleeps_instead_of_spinning_inner(&database.pool).await;
