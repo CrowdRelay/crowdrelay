@@ -962,8 +962,19 @@ impl PostgresAutopilotRepository {
                 AutopilotActionPayload::ExecuteReleaseMilestone { release_id, title, release_at, milestone } => {
                     operations::execute_release_milestone(&mut transaction, workspace_id, action.id, *release_id, title, *release_at, *milestone, now).await?;
                 }
-                AutopilotActionPayload::ApplyLiveOpportunity { opportunity_id, opportunity_kind, score } => {
-                    operations::execute_live_opportunity(&mut transaction, workspace_id, action.id, *opportunity_id, *opportunity_kind, *score, now).await?;
+                AutopilotActionPayload::ApplyLiveOpportunity { opportunity_id, opportunity_kind, score, draft } => {
+                    // The application letter was composed when the action was
+                    // written. A row queued before then — or one whose draft
+                    // was lost — is refused here rather than passed to an
+                    // executor that would write on the band's behalf.
+                    if draft.subject.trim().is_empty() || draft.body.trim().is_empty() {
+                        return Err(RepositoryError::ConflictBecause(
+                            "application refused: this action carries no letter — the application composes when the action is written",
+                        ));
+                    }
+                    operations::execute_live_opportunity(&mut transaction, workspace_id, action.id, &operations::ApplyRequest {
+                        opportunity_id: *opportunity_id, kind: *opportunity_kind, score: *score, draft,
+                    }, now).await?;
                 }
                 AutopilotActionPayload::EscalateEditorialPitch {
                     release_id, title, due_at,

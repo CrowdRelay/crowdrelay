@@ -764,3 +764,128 @@ async fn a_dispatched_pitch_carries_the_approved_letter() -> Result<(), Box<dyn 
     );
     Ok(())
 }
+
+/// The application the organiser receives is the one the operator read —
+/// the payload carries `draft` verbatim, and dispatch refuses a row that
+/// predates the field.
+#[tokio::test]
+async fn a_dispatched_application_carries_the_approved_letter()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = fixture("apply-draft").await?;
+    let suffix = fixture.workspace_id.into_uuid().simple().to_string();
+    let opportunity_id = sqlx::query_scalar::<_, Uuid>(
+        "INSERT INTO viryaos_team_opportunities (
+             workspace_id, opportunity_kind, source, external_key, title,
+             organization, contact_email, verified_destination, eligible,
+             fit_basis_points, reputation_basis_points,
+             confidence_basis_points, status
+         ) VALUES ($1,'festival','scout',$2,$3,$4,$5,true,true,8000,
+                   5000, 5000, 'awaiting_approval')
+         RETURNING id",
+    )
+    .bind(fixture.workspace_id.into_uuid())
+    .bind(format!("apply-{suffix}"))
+    .bind("Summerfest 2027 open call")
+    .bind("Summerfest")
+    .bind(format!("bookings-{suffix}@example.test"))
+    .fetch_one(&fixture.pool)
+    .await?;
+    let draft_body = format!("approved application {}", Uuid::now_v7());
+    let payload = AutopilotActionPayload::ApplyLiveOpportunity {
+        opportunity_id: crowdrelay_domain::TeamOpportunityId::from_uuid(opportunity_id),
+        opportunity_kind: crowdrelay_domain::live_opportunities::LiveOpportunityKind::Festival,
+        score: 80,
+        draft: crowdrelay_domain::application_letter::ApplicationLetter {
+            subject: "VIRYA — application for Summerfest 2027 open call".to_owned(),
+            body: draft_body.clone(),
+        },
+    };
+    let decision_id = Uuid::now_v7();
+    sqlx::query(
+        r#"
+        INSERT INTO viryaos_autopilot_decisions (
+            id, workspace_id, decision_key, context, subject_kind, subject_id,
+            decision_kind, confidence_basis_points, disposition, reason,
+            input_snapshot, policy_snapshot, recommendation, trace_id)
+        VALUES ($1,$2,$3,'live_opportunity','team_opportunity',$4,
+                'apply_live_opportunity',9000,'require_approval','test',
+                '{}'::jsonb,'{}'::jsonb,$5,gen_random_uuid())
+        "#,
+    )
+    .bind(decision_id)
+    .bind(fixture.workspace_id.into_uuid())
+    .bind(format!("decision:apply:draft:{decision_id}"))
+    .bind(opportunity_id)
+    .bind(serde_json::to_value(&payload)?)
+    .execute(&fixture.pool)
+    .await?;
+    let action_id = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO viryaos_autopilot_actions (
+             id, workspace_id, decision_id, context, action_kind, subject_kind, subject_id,
+             idempotency_key, payload, status, action_class
+         ) VALUES ($1,$2,$3,'live_opportunity','apply_live_opportunity','team_opportunity',$4,$5,$6,
+                   'queued','third_party')",
+    )
+    .bind(action_id)
+    .bind(fixture.workspace_id.into_uuid())
+    .bind(decision_id)
+    .bind(opportunity_id)
+    .bind(format!("action:apply:draft:{action_id}"))
+    .bind(serde_json::to_value(&payload)?)
+    .execute(&fixture.pool)
+    .await?;
+
+    sqlx::query(
+        "INSERT INTO viryaos_executor_instances (
+             workspace_id, executor_id, version, manifest_sha, observed_at, expires_at
+         ) VALUES ($1,'n8n-draft-test','test','test-manifest',$2,$3)",
+    )
+    .bind(fixture.workspace_id.into_uuid())
+    .bind(fixture.now)
+    .bind(fixture.now + time::Duration::minutes(30))
+    .execute(&fixture.pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO viryaos_executor_capabilities (
+             workspace_id, executor_id, capability, capability_version, observed_at, expires_at
+         ) VALUES ($1,'n8n-draft-test','opportunity.application','1',$2,$3)",
+    )
+    .bind(fixture.workspace_id.into_uuid())
+    .bind(fixture.now)
+    .bind(fixture.now + time::Duration::minutes(30))
+    .execute(&fixture.pool)
+    .await?;
+
+    use crowdrelay_application::autopilot::AutopilotActionRepository;
+    let claimed = fixture
+        .repository
+        .claim_due_actions(fixture.workspace_id, 8, OffsetDateTime::now_utc())
+        .await?;
+    let action = claimed
+        .iter()
+        .find(|claimed| claimed.id.into_uuid() == action_id)
+        .ok_or("the queued application is claimable")?;
+    fixture
+        .repository
+        .execute_action(fixture.workspace_id, action, fixture.now)
+        .await?;
+
+    let emitted: serde_json::Value = sqlx::query_scalar(
+        "SELECT payload FROM outbox_events
+         WHERE workspace_id=$1 AND event_type='crowdrelay.opportunity.application_requested'",
+    )
+    .bind(fixture.workspace_id.into_uuid())
+    .fetch_one(&fixture.pool)
+    .await?;
+    assert_eq!(
+        emitted["draft"]["body"].as_str(),
+        Some(draft_body.as_str()),
+        "the executor receives the approved application verbatim"
+    );
+    assert_eq!(
+        emitted["contact_email"].as_str().map(|e| e.contains('@')),
+        Some(true)
+    );
+    Ok(())
+}

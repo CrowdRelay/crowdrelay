@@ -577,15 +577,28 @@ async fn seed_deadline_calendar(
     Ok(())
 }
 
+/// The apply decision's own fields, bundled so the executor reads them as
+/// the request they are rather than a positional list.
+pub(in crate::autopilot) struct ApplyRequest<'a> {
+    pub opportunity_id: crowdrelay_domain::TeamOpportunityId,
+    pub kind: crowdrelay_domain::live_opportunities::LiveOpportunityKind,
+    pub score: u16,
+    pub draft: &'a crowdrelay_domain::application_letter::ApplicationLetter,
+}
+
 pub(in crate::autopilot) async fn execute_live_opportunity(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     workspace_id: WorkspaceId,
     action_id: crowdrelay_domain::AutopilotActionId,
-    opportunity_id: crowdrelay_domain::TeamOpportunityId,
-    kind: crowdrelay_domain::live_opportunities::LiveOpportunityKind,
-    score: u16,
+    request: &ApplyRequest<'_>,
     now: OffsetDateTime,
 ) -> Result<(), RepositoryError> {
+    let ApplyRequest {
+        opportunity_id,
+        kind,
+        score,
+        draft,
+    } = *request;
     let row = sqlx::query_as::<
         _,
         (
@@ -665,6 +678,9 @@ pub(in crate::autopilot) async fn execute_live_opportunity(
             "exclusive": row.9,
             "deadline": row.10,
             "payment_execution_allowed": false,
+            // The letter the approval read — the executor sends `draft.body`
+            // verbatim and writes nothing of its own.
+            "draft": draft,
         }),
     )
     .await?;

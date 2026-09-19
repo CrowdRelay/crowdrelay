@@ -76,10 +76,10 @@ async fn persist_decision_and_action_tx(
     }
     // ── Decision INSERT ──
     let decision_id = Uuid::now_v7();
-    // The booking letter is composed here, inside the same transaction that
-    // writes the action, so the payload carries the words the approver will
-    // read. A refusal leaves the draft empty — dispatch fails closed on it,
-    // and the briefing says "not composed" instead of showing invented text.
+    // Letters are composed here, inside the same transaction that writes
+    // the action, so the payload carries the words the approver will read.
+    // A refusal leaves the draft empty — dispatch fails closed on it, and
+    // the briefing says "not composed" instead of showing invented text.
     let mut action = candidate.action.clone();
     match &mut action {
         AutopilotActionPayload::RequestBookingOutreach { .. } => {
@@ -87,6 +87,9 @@ async fn persist_decision_and_action_tx(
         }
         AutopilotActionPayload::RequestOutreach { .. } => {
             enrich_outreach_draft(transaction, workspace_id, &mut action).await?;
+        }
+        AutopilotActionPayload::ApplyLiveOpportunity { .. } => {
+            enrich_application_draft(transaction, workspace_id, &mut action).await?;
         }
         _ => {}
     }
@@ -654,6 +657,77 @@ async fn enrich_outreach_draft(
         pitch_title: &pitch_title,
         pitch_url: &pitch_url,
         phase: *phase,
+    }) {
+        *draft = letter;
+    }
+    Ok(())
+}
+
+/// Composes the application letter onto an `ApplyLiveOpportunity` payload
+/// while the action is still being written — the same rule as the booking
+/// and outreach letters.
+///
+/// The organiser's name and the call's title come from the opportunity row
+/// itself; the language comes from its travel band (`poland` writes Polish,
+/// anything else writes English); the pitch is the tenant's most recent
+/// release plan with a listen link, which only shortens the letter when
+/// absent rather than refusing it.
+async fn enrich_application_draft(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    workspace_id: WorkspaceId,
+    action: &mut AutopilotActionPayload,
+) -> Result<(), RepositoryError> {
+    use crowdrelay_domain::application_letter::{compose_application_letter, ApplicationLetterInput};
+    use crowdrelay_domain::gig_letter::LetterLanguage;
+
+    let AutopilotActionPayload::ApplyLiveOpportunity {
+        draft,
+        opportunity_id,
+        opportunity_kind,
+        ..
+    } = action
+    else {
+        return Ok(());
+    };
+
+    let ws = workspace_id.into_uuid();
+    let opportunity = sqlx::query_as::<
+        _,
+        (String, String, Option<String>, Option<OffsetDateTime>),
+    >(
+        "SELECT title, organization, travel_band, deadline FROM viryaos_team_opportunities WHERE workspace_id = $1 AND id = $2",
+    )
+    .bind(ws)
+    .bind(opportunity_id.into_uuid())
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(map_sqlx)?;
+    let Some((title, organization, travel_band, deadline)) = opportunity else {
+        // An opportunity the action names must exist — the candidate
+        // carried its id.
+        return Err(RepositoryError::NotFound);
+    };
+    let language = match travel_band.as_deref() {
+        Some("poland") => LetterLanguage::Polish,
+        _ => LetterLanguage::English,
+    };
+    let pitch = sqlx::query_as::<_, (String, String)>(
+        "SELECT title, listen_url FROM viryaos_release_plans WHERE workspace_id = $1 AND active AND listen_url IS NOT NULL AND btrim(listen_url) <> '' AND btrim(title) <> '' ORDER BY release_at DESC LIMIT 1",
+    )
+    .bind(ws)
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(map_sqlx)?;
+    let sender = sender_identity_in_tx(transaction, ws).await?;
+    if let Ok(letter) = compose_application_letter(&ApplicationLetterInput {
+        language,
+        sender: &sender,
+        opportunity_title: &title,
+        organization: &organization,
+        kind: *opportunity_kind,
+        deadline,
+        pitch_title: pitch.as_ref().map(|(t, _)| t.as_str()),
+        pitch_url: pitch.as_ref().map(|(_, u)| u.as_str()),
     }) {
         *draft = letter;
     }

@@ -492,6 +492,10 @@ fn live_opportunity_candidate(
             opportunity_id: snapshot.opportunity_id,
             opportunity_kind: snapshot.kind,
             score,
+            // Pure evaluation carries no letter — the draft is composed in
+            // the persistence transaction, where the opportunity row, the
+            // release plan and the sender identity are all readable.
+            draft: Default::default(),
         },
         decision_key: format!(
             "decision:live:v{}:{}:{score}:{}",
