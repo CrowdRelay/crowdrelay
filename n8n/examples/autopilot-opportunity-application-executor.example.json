@@ -1,0 +1,209 @@
+{
+  "name": "CrowdRelay — CrowdRelayOS opportunity application executor",
+  "nodes": [
+    {
+      "name": "Called by verified ingress",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "position": [
+        -800,
+        112
+      ],
+      "parameters": {
+        "inputSource": "passthrough"
+      },
+      "typeVersion": 1.1
+    },
+    {
+      "name": "Validate safe application",
+      "type": "n8n-nodes-base.code",
+      "position": [
+        -560,
+        112
+      ],
+      "parameters": {
+        "jsCode": "// One event, one application, one organiser — the executor sends the words\n// the approval read, verbatim, to the address the guardrail-checked row\n// resolved.\n//\n// This node does not write any of the letter. CrowdRelay composed it when\n// the action was written — the words the operator approved ride in `draft`,\n// and a payload without one is refused rather than filled in here.\nconst e = $json;\nif (!e || e.type !== 'crowdrelay.opportunity.application_requested' || e.version !== 1) {\n  throw new Error('Unsupported opportunity event');\n}\nconst d = e.data ?? {};\n// Guardrails unchanged: never a paid, contractual or exclusive application.\nif (d.payment_execution_allowed !== false || Number(d.application_fee_minor || 0) !== 0\n    || d.requires_contract || d.exclusive) {\n  throw new Error('Guardrail violation: paid/contractual/exclusive application');\n}\nconst draft = d.draft || {};\nconst subject = String(draft.subject || '').trim();\nconst body = String(draft.body || '').trim();\n// The refusal that keeps the promise: no approved words, no send.\nif (!subject || !body) {\n  throw new Error('application refused: no approved letter in the payload — nothing may compose one here');\n}\nconst to = String(d.contact_email || '').trim();\nif (!to.includes('@')) throw new Error('No email executor for this opportunity');\nreturn [{ json: {\n  event_id: e.id,\n  action_id: d.action_id,\n  opportunity_id: d.opportunity_id,\n  SendTo: to,\n  SendSubject: subject.slice(0, 220),\n  SendBody: body,\n} }];"
+      },
+      "typeVersion": 2
+    },
+    {
+      "name": "Gmail — submit opportunity",
+      "type": "n8n-nodes-base.gmail",
+      "onError": "continueErrorOutput",
+      "position": [
+        -64,
+        112
+      ],
+      "parameters": {
+        "sendTo": "={{ $json.SendTo }}",
+        "message": "={{ $json.SendBody }}",
+        "options": {
+          "senderName": "Wojciech Bator / Virya",
+          "appendAttribution": false
+        },
+        "subject": "={{ $json.SendSubject }}",
+        "emailType": "text"
+      },
+      "typeVersion": 2.1
+    },
+    {
+      "name": "Prepare opportunity success receipt",
+      "type": "n8n-nodes-base.code",
+      "position": [
+        0,
+        0
+      ],
+      "parameters": {
+        "jsCode": "const src=$('Validate safe application').item.json||{};const sent=$json||{};return [{json:{action_id:src.action_id,claim_token:$('Resolve provider execution claim').item.json.claim_token,status:'succeeded',provider_reference:String(sent.id||sent.messageId||sent.threadId||'gmail').slice(0,240),metadata:{event_id:src.event_id,provider:'gmail',domain_transition:'submitted'},occurred_at:new Date().toISOString()}}];"
+      },
+      "typeVersion": 2
+    },
+    {
+      "name": "Fail closed on ambiguous provider error",
+      "type": "n8n-nodes-base.code",
+      "position": [
+        0,
+        208
+      ],
+      "parameters": {
+        "jsCode": "const src=$('Resolve provider execution claim').item.json||{}; throw new Error(`Provider outcome ambiguous for action ${src.action_id||'unknown'}; claim retained to prevent automatic duplicate`);"
+      },
+      "typeVersion": 2
+    },
+    {
+      "name": "Queue opportunity success receipt",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "position": [
+        272,
+        0
+      ],
+      "parameters": {
+        "options": {},
+        "workflowId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "VOSRECEIPT00001"
+        }
+      },
+      "typeVersion": 1.3,
+      "alwaysOutputData": true
+    },
+    {
+      "name": "Provider execution claim",
+      "type": "n8n-nodes-base.httpRequest",
+      "position": [
+        -400,
+        112
+      ],
+      "parameters": {
+        "url": "={{ 'https://signal-api.virya.music/v1/internal/autopilot/actions/' + $json.action_id + '/execution-claim' }}",
+        "method": "POST",
+        "options": {
+          "timeout": 30000
+        },
+        "jsonBody": "={{ ({executor_id:String($env.VIRYAOS_EXECUTOR_ID||'virya-n8n-primary').trim(),occurred_at:new Date().toISOString()}) }}",
+        "sendBody": true,
+        "sendHeaders": true,
+        "specifyBody": "json",
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "={{ 'Bearer ' + $env.CROWDRELAY_COMMERCE_API_KEY }}"
+            }
+          ]
+        }
+      },
+      "typeVersion": 4.4
+    },
+    {
+      "name": "Resolve provider execution claim",
+      "type": "n8n-nodes-base.code",
+      "position": [
+        -240,
+        112
+      ],
+      "parameters": {
+        "jsCode": "const src=$('Validate safe application').item.json||{}; const r=$json||{}; const disposition=String(r.disposition||'');\nif(disposition==='already_succeeded') return [];\nif(disposition!=='claimed'||!r.claim_token) throw new Error(`Provider execution ${disposition||'unclaimed'}; fail closed to prevent duplicate external side effects`);\nreturn [{json:{...src,claim_token:String(r.claim_token),attempt_number:Number(r.attempt_number||1)}}];"
+      },
+      "typeVersion": 2
+    }
+  ],
+  "connections": {
+    "Called by verified ingress": {
+      "main": [
+        [
+          {
+            "node": "Validate safe application",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate safe application": {
+      "main": [
+        [
+          {
+            "node": "Provider execution claim",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Gmail — submit opportunity": {
+      "main": [
+        [
+          {
+            "node": "Prepare opportunity success receipt",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Fail closed on ambiguous provider error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare opportunity success receipt": {
+      "main": [
+        [
+          {
+            "node": "Queue opportunity success receipt",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Provider execution claim": {
+      "main": [
+        [
+          {
+            "node": "Resolve provider execution claim",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Resolve provider execution claim": {
+      "main": [
+        [
+          {
+            "node": "Gmail — submit opportunity",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}

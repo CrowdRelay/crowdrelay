@@ -622,18 +622,37 @@ impl AutopilotActionPayload {
                 ],
                 deadline_note: String::new(),
             },
-            Self::ApplyLiveOpportunity { opportunity_id, opportunity_kind, score } => ActionBriefing {
+            Self::ApplyLiveOpportunity { opportunity_id, opportunity_kind, score, draft } => ActionBriefing {
                 summary: format!("Send a show application: {}", friendly_enum(opportunity_kind)),
                 why_it_matters: "This applies to a show or festival. Applying commits the calendar.".into(),
                 steps: vec![
-                    BriefingStep { what_to_do: "Check the application type and the result".into(), why_it_matters: "Make sure this is the right opportunity".into() },
+                    BriefingStep { what_to_do: "Read the letter below".into(), why_it_matters: "It is the exact text the organiser receives — approve the words, not the idea".into() },
                     BriefingStep { what_to_do: "Click APPROVE to send the application".into(), why_it_matters: "Once approved the application is sent".into() },
                 ],
-                content: vec![
-                    BriefingField { label: "Opportunity".into(), value: short_ref(opportunity_id) },
-                    BriefingField { label: "Type".into(), value: friendly_enum(opportunity_kind) },
-                    BriefingField { label: "Outcome".into(), value: score.to_string() },
-                ],
+                content: {
+                    let mut fields = vec![
+                        BriefingField { label: "Opportunity".into(), value: short_ref(opportunity_id) },
+                        BriefingField { label: "Type".into(), value: friendly_enum(opportunity_kind) },
+                        BriefingField { label: "Outcome".into(), value: score.to_string() },
+                    ];
+                    // The approval shows the words the send carries — an
+                    // application nobody read is an application nobody approved.
+                    fields.push(BriefingField {
+                        label: "Subject".into(),
+                        value: match draft.subject.trim().is_empty() {
+                            true => "not composed".to_owned(),
+                            false => draft.subject.clone(),
+                        },
+                    });
+                    fields.push(BriefingField {
+                        label: "Body".into(),
+                        value: match draft.body.trim().is_empty() {
+                            true => "not composed".to_owned(),
+                            false => truncate(draft.body.clone(), 2000),
+                        },
+                    });
+                    fields
+                },
                 deadline_note: String::new(),
             },
             Self::CounterLiveOpportunityTerms { opportunity_id, ask_minor, currency, round } => ActionBriefing {

@@ -891,6 +891,13 @@ pub enum AutopilotActionPayload {
         opportunity_id: TeamOpportunityId,
         opportunity_kind: LiveOpportunityKind,
         score: u16,
+        /// The letter the organiser receives — composed when the action is
+        /// written, so the approval reads the words that will be sent.
+        /// `#[serde(default)]` keeps rows queued before the field existed
+        /// decodable; they carry an empty draft and dispatch refuses them
+        /// rather than letting an executor write on the band's behalf.
+        #[serde(default)]
+        draft: crowdrelay_domain::application_letter::ApplicationLetter,
     },
     /// Ask the promoter for a different fee. Drafted by the agent, sent by a
     /// human at the current posture.
@@ -2020,6 +2027,25 @@ mod tests {
             }))?
         else {
             panic!("the legacy payload must still parse as RequestBookingAgentApproach")
+        };
+        assert!(draft.subject.is_empty() && draft.body.is_empty());
+        Ok(())
+    }
+
+    /// Application payloads queued before the letter rode along must still
+    /// parse — the draft deserializes empty and dispatch refuses it rather
+    /// than composing after the approval.
+    #[test]
+    fn apply_payload_without_draft_still_parses() -> Result<(), Box<dyn std::error::Error>> {
+        let AutopilotActionPayload::ApplyLiveOpportunity { draft, .. } =
+            serde_json::from_value(serde_json::json!({
+                "kind": "apply_live_opportunity",
+                "opportunity_id": uuid::Uuid::now_v7(),
+                "opportunity_kind": "festival",
+                "score": 42,
+            }))?
+        else {
+            panic!("the legacy payload must still parse as ApplyLiveOpportunity")
         };
         assert!(draft.subject.is_empty() && draft.body.is_empty());
         Ok(())
