@@ -748,6 +748,10 @@ pub(in crate::autopilot) async fn execute_live_opportunity_terms(
             Option<i64>,
         ),
     >(
+        // NOTE: `create_show_for_accepted_terms` takes `organization` off
+        // this same locked row, so the acceptance and the show it creates
+        // describe one negotiation rather than two reads of a table that can
+        // move between them.
         r#"
         SELECT opportunity.title, opportunity.organization, opportunity.contact_email,
                terms.offered_fee_minor, terms.walk_away_minor, terms.currency,
@@ -834,6 +838,7 @@ pub(in crate::autopilot) async fn execute_live_opportunity_terms(
         .execute(&mut **tx)
         .await
         .map_err(map_sqlx)?;
+        create_show_for_accepted_terms(tx, workspace_id, opportunity_id, &row.1).await?;
     } else {
         // `counter_rounds + 1` from the row rather than from the payload: two
         // executions of the same drafted counter must not count as two asks.
@@ -850,6 +855,72 @@ pub(in crate::autopilot) async fn execute_live_opportunity_terms(
         .await
         .map_err(map_sqlx)?;
     }
+    Ok(())
+}
+
+/// Turns an accepted negotiation into the show it agreed to.
+///
+/// Until this existed the loop was open at its first joint. A band negotiated
+/// a date inside CrowdRelay, the terms row reached `accepted`, and nothing
+/// created the event — so the show entered the system later by config seeding
+/// or by syncing back from an external listing, and the ladder's first step
+/// ("Announced", T-21) waited on a row the booking pipeline already had every
+/// fact for.
+///
+/// # Draft, not published
+///
+/// The status is `draft` deliberately. Accepting terms means the night exists;
+/// announcing it is the ladder's first step and stays a human act. A show that
+/// published itself the moment a promoter said yes would put a date in front
+/// of fans before the band had written a word about it.
+///
+/// # No date, no show
+///
+/// `event_starts_at` is nullable on the opportunity, and a show with no date
+/// is not a show. A funding award or a review contest accepts the same way and
+/// has no night attached, so the absence is ordinary rather than an error, and
+/// this returns without writing.
+///
+/// # Idempotent
+///
+/// The slug is derived from the opportunity id, so re-executing the same
+/// acceptance finds its own row and does nothing. Two shows for one
+/// negotiation is the failure worth preventing; `ON CONFLICT DO NOTHING` also
+/// means an operator who has since renamed or rescheduled the event keeps
+/// their edit.
+async fn create_show_for_accepted_terms(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    workspace_id: WorkspaceId,
+    opportunity_id: crowdrelay_domain::TeamOpportunityId,
+    organization: &str,
+) -> Result<(), RepositoryError> {
+    // The slug has to satisfy `^[a-z0-9][a-z0-9_-]{0,127}$`, so it is derived
+    // rather than taken from the title: a promoter's name carries capitals,
+    // punctuation and non-ASCII, and sanitising it would produce collisions
+    // between two nights at the same venue.
+    let slug = format!("booking-{}", opportunity_id.into_uuid().simple());
+    sqlx::query(
+        r#"
+        INSERT INTO events (
+            workspace_id, city_id, slug, title, venue, starts_at, status,
+            booking_opportunity_id
+        )
+        SELECT $1, NULL, $2, opportunity.title, $4, opportunity.event_starts_at,
+               'draft', opportunity.id
+        FROM viryaos_team_opportunities AS opportunity
+        WHERE opportunity.workspace_id = $1
+          AND opportunity.id = $3
+          AND opportunity.event_starts_at IS NOT NULL
+        ON CONFLICT (workspace_id, slug) DO NOTHING
+        "#,
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(&slug)
+    .bind(opportunity_id.into_uuid())
+    .bind(organization)
+    .execute(&mut **tx)
+    .await
+    .map_err(map_sqlx)?;
     Ok(())
 }
 

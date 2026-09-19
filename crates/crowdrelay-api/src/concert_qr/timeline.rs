@@ -1,4 +1,4 @@
-// The gig page's one night: the T-21→T+7 ladder as nine steps, each backed
+// The gig page's one night: the booking→T+7 ladder as ten steps, each backed
 // by the artifact that records it. `control_plane_events` answers "which
 // shows"; this answers "what state is Friday in" — each step's state, the
 // owner the handoff index names, and the one action open now, in time order.
@@ -68,7 +68,7 @@ struct TimelineEventView {
     place_event_id: Option<Uuid>,
 }
 
-/// `GET /v1/control-plane/events/{event_slug}/timeline` — the nine-step
+/// `GET /v1/control-plane/events/{event_slug}/timeline` — the ten-step
 /// ladder for one show. Published and completed events both resolve: a
 /// played night still owes the band T+1, T+3 and T+7.
 pub async fn control_plane_event_timeline(
@@ -235,7 +235,45 @@ fn build_steps(facts: &TimelineFacts, now: OffsetDateTime) -> Vec<TimelineStepVi
     // fail — its window closed without it. `skipped`, never a stale `due`
     // offering "Announce it" for a show that already played.
     let show_over = now > ends;
-    let mut steps = Vec::with_capacity(9);
+    let mut steps = Vec::with_capacity(10);
+
+    // Before T-21 — booked. The ladder used to open at "Announced", which
+    // assumed a date somebody had already won and could not show the work that
+    // won it. An operator reading nine steps could not see what the night cost
+    // to get, and a show created by accepting a negotiation arrived with its
+    // first rung already due and no account of why.
+    //
+    // `done` whenever the night exists: the date is the evidence, and a show
+    // in the table was booked however it got there. The detail separates the
+    // two ways that happened, because they read differently.
+    let booked_detail = match facts.booking.as_ref() {
+        Some(booking) => serde_json::json!({
+            "origin": "negotiated",
+            "organization": booking.organization,
+            "state": booking.state,
+            "agreed_at": booking.settled_at.map(format_time),
+            "fee_minor": booking.offered_fee_minor,
+            "currency": booking.currency,
+            // What the date cost in asks. Zero is a clean yes, not missing
+            // data; null means the negotiation never opened a ladder.
+            "counter_rounds": booking.counter_rounds,
+        }),
+        None => serde_json::json!({
+            // Not a gap. A hometown gig, a residency, a date a promoter
+            // offered outright — none has a negotiation behind it, and
+            // reporting one as missing would read as work left undone.
+            "origin": "direct",
+        }),
+    };
+    steps.push(step(
+        "booked",
+        "Booked",
+        "before T-21",
+        "done",
+        None,
+        None,
+        booked_detail,
+    ));
 
     // T-21 — announced. Proof is the lifecycle emission; the surfaces say
     // where the announcement actually landed. The shared bill rides here:

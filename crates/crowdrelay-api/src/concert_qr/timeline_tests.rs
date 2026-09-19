@@ -61,6 +61,7 @@ mod timeline_tests {
                 counterparty_name: None,
                 counterparty_email: None,
                 place_event_id: None,
+                booking_opportunity_id: None,
             },
             emissions: Vec::new(),
             surfaces: Vec::new(),
@@ -85,6 +86,7 @@ mod timeline_tests {
                 succeeded_requests: 0,
             },
             cost: None,
+            booking: None,
             crossbill_acts: Vec::new(),
             crossbill_edge: None,
             venue_beacons: Vec::new(),
@@ -92,17 +94,74 @@ mod timeline_tests {
         }
     }
 
-    fn states(steps: &[TimelineStepView]) -> Vec<(&'static str, &'static str)> {
-        steps.iter().map(|s| (s.key, s.state)).collect()
+    /// One step by key.
+    ///
+    /// These assertions used to index the ladder positionally, so inserting a
+    /// rung moved every later assertion onto its neighbour — which still
+    /// compiles and still passes for the wrong reason. The key is what the
+    /// test is actually about.
+    fn at<'a>(steps: &'a [TimelineStepView], key: &str) -> &'a TimelineStepView {
+        steps
+            .iter()
+            .find(|step| step.key == key)
+            .unwrap_or_else(|| panic!("the ladder has no {key} step"))
+    }
+
+    fn state_of(steps: &[TimelineStepView], key: &str) -> &'static str {
+        at(steps, key).state
     }
 
     #[test]
-    fn the_ladder_is_nine_steps_in_time_order() {
+    fn the_ladder_is_ten_steps_in_time_order() {
         let now = OffsetDateTime::now_utc();
         let steps = build_steps(&facts(now), now);
         assert_eq!(
             steps.iter().map(|s| s.anchor).collect::<Vec<_>>(),
-            ["T-21", "T-14", "T-7", "T-2", "T-0", "T-0", "T+1", "T+3", "T+7"]
+            [
+                "before T-21",
+                "T-21",
+                "T-14",
+                "T-7",
+                "T-2",
+                "T-0",
+                "T-0",
+                "T+1",
+                "T+3",
+                "T+7"
+            ]
+        );
+    }
+
+    /// A show exists because somebody got the date, so the first rung is
+    /// always done. The detail is what separates a night that was won from one
+    /// that was offered.
+    #[test]
+    fn the_ladder_opens_on_the_booking_and_says_which_kind_it_was() {
+        let now = OffsetDateTime::now_utc();
+        let steps = build_steps(&facts(now), now);
+        let booked = at(&steps, "booked");
+        assert_eq!(booked.state, "done");
+        assert_eq!(
+            booked.detail["origin"], "direct",
+            "no negotiation behind this night is an answer, not a gap"
+        );
+
+        let mut negotiated = facts(now);
+        negotiated.booking = Some(TimelineBookingRow {
+            organization: "Klub Y".to_string(),
+            state: "accepted".to_string(),
+            offered_fee_minor: Some(280_000),
+            settled_at: Some(now - Duration::days(40)),
+            counter_rounds: Some(2),
+            currency: Some("PLN".to_string()),
+        });
+        let steps = build_steps(&negotiated, now);
+        let booked = at(&steps, "booked");
+        assert_eq!(booked.detail["origin"], "negotiated");
+        assert_eq!(booked.detail["fee_minor"], 280_000);
+        assert_eq!(
+            booked.detail["counter_rounds"], 2,
+            "what the date cost in asks"
         );
     }
 
@@ -110,20 +169,19 @@ mod timeline_tests {
     fn a_show_ten_days_out_waits_on_most_of_the_ladder() {
         let now = OffsetDateTime::now_utc();
         let steps = build_steps(&facts(now), now);
-        let states = states(&steps);
         // T-21 passed eleven days ago with no emission: due.
-        assert_eq!(states[0], ("announced", "due"));
+        assert_eq!(state_of(&steps, "announced"), "due");
         // Inside T-14 with no brain read on record: due.
-        assert_eq!(states[1], ("sales_pace", "due"));
-        assert_eq!(states[2], ("bands_posting", "waiting"));
-        assert_eq!(states[3], ("nearby_fans", "waiting"));
-        assert_eq!(states[4], ("capture_plan", "waiting"));
+        assert_eq!(state_of(&steps, "sales_pace"), "due");
+        assert_eq!(state_of(&steps, "bands_posting"), "waiting");
+        assert_eq!(state_of(&steps, "nearby_fans"), "waiting");
+        assert_eq!(state_of(&steps, "capture_plan"), "waiting");
         // No campaign ten days out: waiting — the QR becomes urgent inside
         // the last week, not before.
-        assert_eq!(states[5], ("the_scan", "waiting"));
-        assert_eq!(states[6], ("recall", "waiting"));
-        assert_eq!(states[7], ("harvest", "waiting"));
-        assert_eq!(states[8], ("the_numbers", "waiting"));
+        assert_eq!(state_of(&steps, "the_scan"), "waiting");
+        assert_eq!(state_of(&steps, "recall"), "waiting");
+        assert_eq!(state_of(&steps, "harvest"), "waiting");
+        assert_eq!(state_of(&steps, "the_numbers"), "waiting");
     }
 
     #[test]
@@ -135,7 +193,7 @@ mod timeline_tests {
             emitted_at: now - Duration::days(3),
         });
         let steps = build_steps(&facts, now);
-        assert_eq!(states(&steps)[0], ("announced", "done"));
+        assert_eq!(state_of(&steps, "announced"), "done");
     }
 
     #[test]
@@ -146,8 +204,8 @@ mod timeline_tests {
         facts.counts.checkins = 17;
         facts.counts.qr_campaigns = 1;
         let steps = build_steps(&facts, now);
-        assert_eq!(states(&steps)[5], ("the_scan", "done"));
-        assert_eq!(steps[5].detail["checkins"], 17);
+        assert_eq!(state_of(&steps, "the_scan"), "done");
+        assert_eq!(at(&steps, "the_scan").detail["checkins"], 17);
     }
 
     #[test]
@@ -157,15 +215,14 @@ mod timeline_tests {
         facts.event.starts_at = now - Duration::days(2);
         facts.event.status = "completed".to_string();
         let steps = build_steps(&facts, now);
-        let states = states(&steps);
-        assert_eq!(states[5], ("the_scan", "skipped"));
+        assert_eq!(state_of(&steps, "the_scan"), "skipped");
         // Every pre-show step whose window closed without evidence reads
         // skipped — a played night must not light five stale "due" badges.
-        assert_eq!(states[0], ("announced", "skipped"));
-        assert_eq!(states[1], ("sales_pace", "skipped"));
-        assert_eq!(states[2], ("bands_posting", "skipped"));
-        assert_eq!(states[3], ("nearby_fans", "skipped"));
-        assert_eq!(states[4], ("capture_plan", "skipped"));
+        assert_eq!(state_of(&steps, "announced"), "skipped");
+        assert_eq!(state_of(&steps, "sales_pace"), "skipped");
+        assert_eq!(state_of(&steps, "bands_posting"), "skipped");
+        assert_eq!(state_of(&steps, "nearby_fans"), "skipped");
+        assert_eq!(state_of(&steps, "capture_plan"), "skipped");
     }
 
     #[test]
@@ -180,7 +237,7 @@ mod timeline_tests {
             skip_reason: Some("no_member_channel".to_string()),
         });
         let steps = build_steps(&facts, now);
-        assert_eq!(states(&steps)[2], ("bands_posting", "skipped"));
+        assert_eq!(state_of(&steps, "bands_posting"), "skipped");
     }
 
     #[test]
@@ -193,15 +250,15 @@ mod timeline_tests {
         let steps = build_steps(&facts, now);
         // The brain holds artifact requests for 72h after the source lands —
         // "source exists, nothing requested yet" is in-flight work.
-        assert_eq!(states(&steps)[7], ("harvest", "active"));
+        assert_eq!(state_of(&steps, "harvest"), "active");
         // Past the window with nothing collected: skipped.
         facts.harvest.occurred_at = Some(now - Duration::hours(80));
         let steps = build_steps(&facts, now);
-        assert_eq!(states(&steps)[7], ("harvest", "skipped"));
+        assert_eq!(state_of(&steps, "harvest"), "skipped");
         // A collected artifact is the only thing that says done.
         facts.harvest.succeeded_requests = 2;
         let steps = build_steps(&facts, now);
-        assert_eq!(states(&steps)[7], ("harvest", "done"));
+        assert_eq!(state_of(&steps, "harvest"), "done");
     }
 
     #[test]
@@ -218,7 +275,7 @@ mod timeline_tests {
             finished_at: Some(now - Duration::hours(29)),
         });
         let steps = build_steps(&facts, now);
-        assert_eq!(states(&steps)[6], ("recall", "skipped"));
+        assert_eq!(state_of(&steps, "recall"), "skipped");
     }
 
     #[test]
@@ -227,14 +284,14 @@ mod timeline_tests {
         // Before the show starts, absence is `waiting` — the brain cannot
         // have requested a recap for a night that has not happened.
         let steps = build_steps(&facts(now), now);
-        assert_eq!(states(&steps)[6], ("recall", "waiting"));
+        assert_eq!(state_of(&steps, "recall"), "waiting");
         // Two hours after doors the recap window is open (since_show <= 30h)
         // and the brain has queued nothing — absence inside an open window is
         // `due`, the same contract every other step keeps.
         let mut during_show = facts(now);
         during_show.event.starts_at = now - Duration::hours(2);
         let steps = build_steps(&during_show, now);
-        assert_eq!(states(&steps)[6], ("recall", "due"));
+        assert_eq!(state_of(&steps, "recall"), "due");
     }
 
     #[test]
@@ -256,9 +313,9 @@ mod timeline_tests {
             display_name: Some("Ola".to_string()),
         });
         let steps = build_steps(&facts, now);
-        assert_eq!(states(&steps)[8], ("the_numbers", "due"));
-        assert_eq!(steps[8].owner.as_deref(), Some("Ola"));
-        assert_eq!(steps[8].action.as_ref().unwrap().kind, "report");
+        assert_eq!(state_of(&steps, "the_numbers"), "due");
+        assert_eq!(at(&steps, "the_numbers").owner.as_deref(), Some("Ola"));
+        assert_eq!(at(&steps, "the_numbers").action.as_ref().unwrap().kind, "report");
     }
 
     #[test]
@@ -272,8 +329,8 @@ mod timeline_tests {
             status: "done".to_string(),
         });
         let steps = build_steps(&facts, now);
-        assert_eq!(states(&steps)[8], ("the_numbers", "done"));
-        let action = steps[8].action.as_ref().unwrap();
+        assert_eq!(state_of(&steps, "the_numbers"), "done");
+        let action = at(&steps, "the_numbers").action.as_ref().unwrap();
         assert_eq!(action.kind, "report");
         assert_eq!(action.label, "See the report");
     }
@@ -292,6 +349,6 @@ mod timeline_tests {
             finished_at: Some(now - Duration::hours(19)),
         });
         let steps = build_steps(&facts, now);
-        assert_eq!(states(&steps)[6], ("recall", "done"));
+        assert_eq!(state_of(&steps, "recall"), "done");
     }
 }
