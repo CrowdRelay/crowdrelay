@@ -23,8 +23,9 @@ use crowdrelay_domain::{
     booking::{
         BookingFollowUpDecision, BookingFollowUpPolicy, BookingOpportunityDecision,
         BookingOutreachPhase, BookingTargetDecision, BookingTargetSelectionPolicy,
-        BookingTargetSnapshot, CityOpportunitySnapshot, additional_booking_recipients,
-        estimated_attendance, evaluate_booking_followup, evaluate_booking_opportunity,
+        BookingTargetSnapshot, CityOpportunitySnapshot, FestivalWindowDecision,
+        FestivalWindowPolicy, additional_booking_recipients, estimated_attendance,
+        evaluate_booking_followup, evaluate_booking_opportunity, evaluate_festival_window,
         select_booking_target,
     },
     booking_window::{BookingWindowInputSet, BookingWindowInputs, propose_booking_window},
@@ -92,8 +93,8 @@ mod show_growth;
 use beacons::{beacon_candidate, beacon_discovery_candidate, beacon_invite_candidate};
 use booking_supply::booking_supply_candidate;
 use commercial::{
-    booking_candidate, booking_followup_candidate, campaign_lifecycle_candidate, funding_candidate,
-    merch_candidate, merch_price_candidate,
+    booking_candidate, booking_followup_candidate, campaign_lifecycle_candidate,
+    festival_window_candidate, funding_candidate, merch_candidate, merch_price_candidate,
 };
 use content_strategy::{content_arc_candidate, content_strategy_candidate};
 use crowdrelay_domain::worker_template::WorkerTemplate;
@@ -262,15 +263,36 @@ where
                             .load_booking_window_inputs(self.workspace_id, now)
                             .await?
                     };
+                    // Festival windows propose first: a closing application
+                    // is the most perishable ask a target can carry. A target
+                    // the deadline just proposed is excluded from both the
+                    // follow-up (the new letter is the fresh ask, the nudge
+                    // would be stale) and the city path (one letter per
+                    // target per cycle — the deadline wins over demand).
+                    let mut festival_proposed = std::collections::HashSet::new();
                     for target in &targets {
+                        if let Some(candidate) = festival_window_candidate(target, &policy, now)? {
+                            festival_proposed.insert(target.target_id);
+                            self.persist(&candidate, &mut limits, &mut report).await?;
+                            continue;
+                        }
                         if let Some(candidate) = booking_followup_candidate(target, &policy, now)? {
                             self.persist(&candidate, &mut limits, &mut report).await?;
                         }
                     }
+                    let city_targets: Vec<BookingTargetSnapshot> = targets
+                        .iter()
+                        .filter(|target| !festival_proposed.contains(&target.target_id))
+                        .cloned()
+                        .collect();
                     for snapshot in snapshots {
-                        if let Some(candidate) =
-                            booking_candidate(snapshot, &targets, &window_inputs, &policy, now)?
-                        {
+                        if let Some(candidate) = booking_candidate(
+                            snapshot,
+                            &city_targets,
+                            &window_inputs,
+                            &policy,
+                            now,
+                        )? {
                             self.persist(&candidate, &mut limits, &mut report).await?;
                         }
                     }

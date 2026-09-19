@@ -85,6 +85,29 @@ pub struct BookingTargetMutation {
     pub replayed: bool,
 }
 
+/// One edition of a festival series — the schedulable object: "Brutal
+/// Assault 2027" under the "Brutal Assault" target. Upserted on the natural
+/// key `(target_id, edition_label)`: an operator correcting a window writes
+/// the same edition, not a sibling row.
+#[derive(Clone, Debug)]
+pub struct UpsertFestivalEdition {
+    pub target_id: BookingTargetId,
+    pub edition_label: String,
+    /// When the edition runs. `None` is "dates not announced" — an
+    /// application window can be known before the weekend is.
+    pub starts_at: Option<OffsetDateTime>,
+    pub application_opens_at: Option<OffsetDateTime>,
+    pub application_closes_at: Option<OffsetDateTime>,
+    pub lineup_url: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct FestivalEditionMutation {
+    pub operation_id: uuid::Uuid,
+    pub edition_id: uuid::Uuid,
+    pub replayed: bool,
+}
+
 #[derive(Clone, Debug)]
 pub struct RecordBookingReply {
     pub target_id: BookingTargetId,
@@ -136,6 +159,17 @@ pub trait AutopilotBookingStateRepository: Send + Sync {
         idempotency_key: &crate::IdempotencyKey,
         request_id: Option<&crate::RequestId>,
     ) -> Result<BookingTargetMutation, RepositoryError>;
+
+    /// Registers or corrects one edition's window on a festival target. The
+    /// close date is what the deadline ask and the attention radar read —
+    /// without this write both are permanently blind.
+    async fn upsert_festival_edition(
+        &self,
+        workspace_id: WorkspaceId,
+        command: UpsertFestivalEdition,
+        idempotency_key: &IdempotencyKey,
+        request_id: Option<&RequestId>,
+    ) -> Result<FestivalEditionMutation, RepositoryError>;
 
     async fn record_booking_reply(
         &self,

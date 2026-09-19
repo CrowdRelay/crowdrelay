@@ -157,6 +157,7 @@ fn booking_target_snapshot(
         last_reply: parse_booking_reply_disposition(&row.last_reply_disposition)?,
         venue_evidence,
         days_until_application_close: row.days_until_application_close,
+        next_application_closes_at: row.next_application_closes_at,
         linked_venue_ids: row
             .linked_venue_ids
             .into_iter()

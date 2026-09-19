@@ -184,6 +184,141 @@ impl AutopilotBookingStateRepository for PostgresAutopilotRepository {
         })
         .await
     }
+
+    async fn upsert_festival_edition(
+        &self,
+        workspace_id: WorkspaceId,
+        command: UpsertFestivalEdition,
+        idempotency_key: &IdempotencyKey,
+        request_id: Option<&RequestId>,
+    ) -> Result<FestivalEditionMutation, RepositoryError> {
+        self.bounded(async {
+            let edition_label = command.edition_label.trim();
+            let lineup_url = command
+                .lineup_url
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty());
+            let window_inverted = command
+                .application_opens_at
+                .zip(command.application_closes_at)
+                .is_some_and(|(opens, closes)| opens >= closes);
+            if edition_label.is_empty()
+                || edition_label.chars().count() > 120
+                || lineup_url.is_some_and(|url| {
+                !(url.starts_with("http://") || url.starts_with("https://"))
+            })
+                || window_inverted
+            {
+                return Err(RepositoryError::Unexpected);
+            }
+
+            let mut transaction = self.pool.begin().await.map_err(map_sqlx)?;
+            let details = json!({
+                "target_id": command.target_id,
+                "edition_label": edition_label,
+                "starts_at": command.starts_at,
+                "application_opens_at": command.application_opens_at,
+                "application_closes_at": command.application_closes_at,
+                "lineup_url": lineup_url,
+            });
+            let operation_id = Uuid::now_v7();
+            if let Some(existing) = insert_operator_action(
+                &mut transaction,
+                workspace_id,
+                operation_id,
+                "upsert_festival_edition",
+                "booking_target",
+                command.target_id.into_uuid(),
+                "admin_api_key",
+                idempotency_key,
+                request_id,
+                &details,
+            )
+            .await?
+            {
+                // Replay: the first write already committed the edition under
+                // its natural key, so the id is looked up rather than stored —
+                // `insert_operator_action` refuses when stored details differ,
+                // and an `edition_id` appended post-write would differ on
+                // every retry.
+                let edition_id = sqlx::query_scalar::<_, uuid::Uuid>(
+                    "SELECT id FROM viryaos_festival_editions \
+                     WHERE workspace_id = $1 AND target_id = $2 AND edition_label = $3",
+                )
+                .bind(workspace_id.into_uuid())
+                .bind(command.target_id.into_uuid())
+                .bind(edition_label)
+                .fetch_optional(&mut *transaction)
+                .await
+                .map_err(map_sqlx)?
+                .ok_or(RepositoryError::NotFound)?;
+                transaction.commit().await.map_err(map_sqlx)?;
+                return Ok(FestivalEditionMutation {
+                    operation_id: existing,
+                    edition_id,
+                    replayed: true,
+                });
+            }
+
+            // An edition belongs to a festival series, not a room — writing
+            // one under a venue or promoter would feed the deadline radar a
+            // window nobody can apply through.
+            let target_kind = sqlx::query_scalar::<_, String>(
+                "SELECT target_kind FROM viryaos_booking_targets \
+                 WHERE workspace_id = $1 AND id = $2",
+            )
+            .bind(workspace_id.into_uuid())
+            .bind(command.target_id.into_uuid())
+            .fetch_optional(&mut *transaction)
+            .await
+            .map_err(map_sqlx)?;
+            match target_kind.as_deref() {
+                None => return Err(RepositoryError::NotFound),
+                Some("festival") => {}
+                Some(_) => {
+                    return Err(RepositoryError::ConflictBecause(
+                        "editions belong to festival targets — a venue or promoter has no application window",
+                    ));
+                }
+            }
+
+            let edition_id = sqlx::query_scalar::<_, uuid::Uuid>(
+                r#"
+                INSERT INTO viryaos_festival_editions (
+                    id, workspace_id, target_id, edition_label, starts_at,
+                    application_opens_at, application_closes_at, lineup_url
+                ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+                ON CONFLICT (workspace_id, target_id, edition_label) DO UPDATE
+                SET starts_at = EXCLUDED.starts_at,
+                    application_opens_at = EXCLUDED.application_opens_at,
+                    application_closes_at = EXCLUDED.application_closes_at,
+                    lineup_url = EXCLUDED.lineup_url
+                RETURNING id
+                "#,
+            )
+            .bind(Uuid::now_v7())
+            .bind(workspace_id.into_uuid())
+            .bind(command.target_id.into_uuid())
+            .bind(edition_label)
+            .bind(command.starts_at)
+            .bind(command.application_opens_at)
+            .bind(command.application_closes_at)
+            .bind(lineup_url)
+            .fetch_one(&mut *transaction)
+            .await
+            .map_err(map_sqlx)?;
+
+            transaction.commit().await.map_err(map_sqlx)?;
+            Ok(FestivalEditionMutation {
+                operation_id,
+                edition_id,
+                replayed: false,
+            })
+        })
+        .await
+    }
+
     async fn record_booking_reply(
         &self,
         workspace_id: WorkspaceId,

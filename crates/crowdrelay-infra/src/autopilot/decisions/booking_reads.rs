@@ -64,6 +64,16 @@ macro_rules! decision_booking_reads {
                           AND edition.application_closes_at >= now()
                         HAVING MIN(edition.application_closes_at) IS NOT NULL)
                            AS days_until_application_close,
+                       -- The same window as a timestamp: the countdown tells
+                       -- a reader how long is left, the timestamp tells a
+                       -- decision which edition it is deciding on. Both read
+                       -- the same MIN so they can never disagree.
+                       (SELECT MIN(edition.application_closes_at)
+                        FROM viryaos_festival_editions AS edition
+                        WHERE edition.workspace_id = target.workspace_id
+                          AND edition.target_id = target.id
+                          AND edition.application_closes_at >= now())
+                           AS next_application_closes_at,
                        -- §12-5 entity 6: a promoter's rooms are the union of
                        -- the primary venue_id and every edge row. UNION
                        -- dedupes a room that is both.

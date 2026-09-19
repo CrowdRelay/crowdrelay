@@ -15,8 +15,9 @@
 
 use std::time::Duration;
 
+use crowdrelay_application::IdempotencyKey;
 use crowdrelay_application::autopilot::{
-    AutopilotBookingStateRepository, AutopilotDecisionRepository,
+    AutopilotBookingStateRepository, AutopilotDecisionRepository, UpsertFestivalEdition,
 };
 use crowdrelay_domain::{BookingTargetId, VenueId, WorkspaceId};
 use crowdrelay_infra::{
@@ -478,6 +479,10 @@ async fn run_edge_case(
         Some(11),
         "the window's close did not reach the snapshot"
     );
+    assert!(
+        festival_row.next_application_closes_at.is_some(),
+        "the close timestamp — the edition's identity for a decision key — did not reach the snapshot"
+    );
     let promoter_row = snapshots
         .iter()
         .find(|s| s.target_id.into_uuid() == promoter)
@@ -486,5 +491,144 @@ async fn run_edge_case(
         promoter_row.days_until_application_close, None,
         "a non-festival carries no window"
     );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn an_edition_writes_replays_and_stays_on_festivals() -> Result<(), Box<dyn std::error::Error>>
+{
+    let database = DisposableDatabase::create().await?;
+    let repository = database.repository();
+    let result = run_edition_upsert_case(&database.pool, &repository).await;
+    database.drop_database().await;
+    result
+}
+
+async fn run_edition_upsert_case(
+    pool: &PgPool,
+    repository: &PostgresAutopilotRepository,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let workspace = seed_workspace(pool).await?;
+    let workspace_id = WorkspaceId::from_uuid(workspace);
+    let wroclaw = seed_city(pool, "wroclaw").await?;
+    let festival = seed_target(pool, workspace, wroclaw, "festival", "Brutal Assault").await?;
+    let venue = seed_target(pool, workspace, wroclaw, "venue", "Klub X").await?;
+    let key = IdempotencyKey::parse(format!("edition-{}", Uuid::now_v7().simple()))?;
+    let closes = time::OffsetDateTime::now_utc() + time::Duration::days(30);
+
+    let command = UpsertFestivalEdition {
+        target_id: BookingTargetId::from_uuid(festival),
+        edition_label: "BA 2027".to_owned(),
+        starts_at: Some(closes + time::Duration::days(60)),
+        application_opens_at: None,
+        application_closes_at: Some(closes),
+        lineup_url: Some("https://brutalassault.cz/lineup".to_owned()),
+    };
+    let first = repository
+        .upsert_festival_edition(workspace_id, command, &key, None)
+        .await?;
+    assert!(!first.replayed);
+
+    // The same key replays the same answer — the operator's retry is a
+    // no-op, not a second edition.
+    let replay = repository
+        .upsert_festival_edition(
+            workspace_id,
+            UpsertFestivalEdition {
+                target_id: BookingTargetId::from_uuid(festival),
+                edition_label: "BA 2027".to_owned(),
+                starts_at: Some(closes + time::Duration::days(60)),
+                application_opens_at: None,
+                application_closes_at: Some(closes),
+                lineup_url: Some("https://brutalassault.cz/lineup".to_owned()),
+            },
+            &key,
+            None,
+        )
+        .await?;
+    assert!(replay.replayed, "the same key must report a replay");
+    assert_eq!(replay.edition_id, first.edition_id);
+
+    // A corrected window under a new key rewrites the same edition row —
+    // natural-key upsert, not a sibling.
+    let corrected = repository
+        .upsert_festival_edition(
+            workspace_id,
+            UpsertFestivalEdition {
+                target_id: BookingTargetId::from_uuid(festival),
+                edition_label: "BA 2027".to_owned(),
+                starts_at: None,
+                application_opens_at: None,
+                application_closes_at: Some(closes + time::Duration::days(7)),
+                lineup_url: None,
+            },
+            &IdempotencyKey::parse(format!("edition-fix-{}", Uuid::now_v7().simple()))?,
+            None,
+        )
+        .await?;
+    assert_eq!(corrected.edition_id, first.edition_id);
+    let rows = sqlx::query_scalar::<_, i64>(
+        "SELECT count(*) FROM viryaos_festival_editions WHERE workspace_id = $1",
+    )
+    .bind(workspace)
+    .fetch_one(pool)
+    .await?;
+    assert_eq!(
+        rows, 1,
+        "the correction must rewrite the edition, not add one"
+    );
+    let stored_closes = sqlx::query_scalar::<_, time::OffsetDateTime>(
+        "SELECT application_closes_at FROM viryaos_festival_editions          WHERE workspace_id = $1 AND target_id = $2",
+    )
+    .bind(workspace)
+    .bind(festival)
+    .fetch_one(pool)
+    .await?;
+    assert_eq!(
+        stored_closes.unix_timestamp(),
+        (closes + time::Duration::days(7)).unix_timestamp(),
+        "the corrected close did not land"
+    );
+
+    // An edition hung on a venue is nonsense the writer refuses, before the
+    // FK would even run — the honest answer is a conflict, not a constraint
+    // error.
+    let wrong_kind = repository
+        .upsert_festival_edition(
+            workspace_id,
+            UpsertFestivalEdition {
+                target_id: BookingTargetId::from_uuid(venue),
+                edition_label: "Not An Edition".to_owned(),
+                starts_at: None,
+                application_opens_at: None,
+                application_closes_at: Some(closes),
+                lineup_url: None,
+            },
+            &IdempotencyKey::parse(format!("edition-venue-{}", Uuid::now_v7().simple()))?,
+            None,
+        )
+        .await;
+    assert!(wrong_kind.is_err(), "an edition on a venue must refuse");
+
+    // And a foreign workspace's festival answers the same 404 every other
+    // scoped write does.
+    let other = seed_workspace(pool).await?;
+    let foreign = repository
+        .upsert_festival_edition(
+            WorkspaceId::from_uuid(other),
+            UpsertFestivalEdition {
+                target_id: BookingTargetId::from_uuid(festival),
+                edition_label: "Stolen".to_owned(),
+                starts_at: None,
+                application_opens_at: None,
+                application_closes_at: Some(closes),
+                lineup_url: None,
+            },
+            &IdempotencyKey::parse(format!("edition-x-{}", Uuid::now_v7().simple()))?,
+            None,
+        )
+        .await;
+    assert!(foreign.is_err(), "a cross-tenant edition write must refuse");
     Ok(())
 }

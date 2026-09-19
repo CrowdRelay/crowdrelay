@@ -31,11 +31,11 @@ use crowdrelay_application::{
         SetAutopilotAuthority, SetGrowthEnvelope, SetGrowthPosture, SetManagerBookingPolicy,
         SetTourEconomics, SettleShowCost, ShowCostLedgerEntry, SuggestionReportOutcome,
         TeamOpportunityKind, TeamOpportunityProgress, UpsertBeacon, UpsertBookingTarget,
-        UpsertCityMarketSignal, UpsertContentSource, UpsertGrowthMetricSeries,
-        UpsertMerchProductEconomics, UpsertOutreachOpportunity, UpsertOutreachTarget,
-        UpsertPromotionBudgetGuardrail, UpsertPromotionCampaignState, UpsertReleasePlan,
-        UpsertSubmissionChannel, UpsertTeamOpportunity, UpsertTicketAllocationGuardrail,
-        assign_experiment_variant,
+        UpsertCityMarketSignal, UpsertContentSource, UpsertFestivalEdition,
+        UpsertGrowthMetricSeries, UpsertMerchProductEconomics, UpsertOutreachOpportunity,
+        UpsertOutreachTarget, UpsertPromotionBudgetGuardrail, UpsertPromotionCampaignState,
+        UpsertReleasePlan, UpsertSubmissionChannel, UpsertTeamOpportunity,
+        UpsertTicketAllocationGuardrail, assign_experiment_variant,
     },
 };
 use crowdrelay_domain::{
