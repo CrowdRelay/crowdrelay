@@ -410,6 +410,14 @@ impl AutopilotTeamStateRepository for PostgresAutopilotRepository {
                 .ok_or(RepositoryError::Conflict)?
             };
 
+            // The recovery half of the Won→show seam: a win marked before the
+            // date was known mints nothing at Won time, and re-marking won is
+            // a terminal-state Conflict — so the enrichment that lands the
+            // date is the only place the show can still be created. The
+            // helper gates on `status='won'` itself, so ordinary updates and
+            // fresh inserts fall straight through.
+            create_show_for_won_opportunity(&mut tx, workspace_id, opportunity_id).await?;
+
             tx.commit().await.map_err(map_sqlx)?;
             Ok(TeamOpportunityMutation {
                 operation_id,
@@ -717,12 +725,23 @@ impl AutopilotTeamStateRepository for PostgresAutopilotRepository {
             };
             // A refusal is a finding, not a disposal: `lost` and `dismissed`
             // must say why, or the same dead lead is scouted again next cycle.
-            // `won` needs none — the result is its own reason.
-            let reason = command.reason.as_deref().map(str::trim);
+            // `won` needs none — the result is its own reason. A blank reason
+            // is no reason at all (`status_reason` rejects the empty string),
+            // and the same length bound holds for every terminal kind.
+            let reason = command
+                .reason
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty());
+            if reason.is_some_and(|value| value.len() > 240) {
+                return Err(RepositoryError::ConflictBecause(
+                    "a status reason caps at 240 characters",
+                ));
+            }
             if matches!(
                 command.progress,
                 TeamOpportunityProgress::Lost | TeamOpportunityProgress::Dismissed
-            ) && reason.is_none_or(|value| value.is_empty() || value.len() > 240)
+            ) && reason.is_none()
             {
                 return Err(RepositoryError::ConflictBecause(
                     "lost and dismissed require a 1–240 character reason — a row that closes says why",
@@ -832,6 +851,85 @@ impl AutopilotTeamStateRepository for PostgresAutopilotRepository {
     }
 }
 
+/// Turns an accepted negotiation into the show it agreed to.
+///
+/// Until this existed the loop was open at its first joint. A band negotiated
+/// a date inside CrowdRelay, the terms row reached `accepted`, and nothing
+/// created the event — so the show entered the system later by config seeding
+/// or by syncing back from an external listing, and the ladder's first step
+/// ("Announced", T-21) waited on a row the booking pipeline already had every
+/// fact for.
+///
+/// # Draft, not published
+///
+/// The status is `draft` deliberately. Accepting terms means the night exists;
+/// announcing it is the ladder's first step and stays a human act. A show that
+/// published itself the moment a promoter said yes would put a date in front
+/// of fans before the band had written a word about it.
+///
+/// # No date, no show — and no night kind, no show
+///
+/// `event_starts_at` is nullable on the opportunity, and a show with no date
+/// is not a show. The kind gate matters too: a funding award or a press
+/// request accepts the same way but is not a night on a stage, so the insert
+/// is restricted to the negotiable stage kinds plus a direct booking — the
+/// same set the Won path applies below. A festival kind also stamps
+/// `festival_name` so the slot runs the festival machinery — without it a
+/// festival won on terms would project as an ordinary show and a later Won
+/// could not repair it (the derived slug insert would no-op).
+///
+/// # Idempotent
+///
+/// The slug is derived from the opportunity id, so re-executing the same
+/// acceptance finds its own row and does nothing. Two shows for one
+/// negotiation is the failure worth preventing; `ON CONFLICT DO NOTHING` also
+/// means an operator who has since renamed or rescheduled the event keeps
+/// their edit.
+pub(in crate::autopilot) async fn create_show_for_accepted_terms(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    workspace_id: WorkspaceId,
+    opportunity_id: TeamOpportunityId,
+    organization: &str,
+) -> Result<(), RepositoryError> {
+    // The slug has to satisfy `^[a-z0-9][a-z0-9_-]{0,127}$`, so it is derived
+    // rather than taken from the title: a promoter's name carries capitals,
+    // punctuation and non-ASCII, and sanitising it would produce collisions
+    // between two nights at the same venue.
+    let slug = format!("booking-{}", opportunity_id.into_uuid().simple());
+    sqlx::query(
+        r#"
+        INSERT INTO events (
+            workspace_id, city_id, slug, title, venue, starts_at, status,
+            booking_opportunity_id, festival_name
+        )
+        SELECT $1, NULL, $2, opportunity.title, $4, opportunity.event_starts_at,
+               'draft', opportunity.id,
+               -- `festival_name` caps at 200 where `organization` allows
+               -- 240; a long organiser name must not fail the acceptance.
+               CASE WHEN opportunity.opportunity_kind = 'festival'
+                    THEN left(btrim(opportunity.organization), 200) ELSE NULL END
+        FROM viryaos_team_opportunities AS opportunity
+        WHERE opportunity.workspace_id = $1
+          AND opportunity.id = $3
+          AND opportunity.event_starts_at IS NOT NULL
+          -- The mintable set: the negotiable kinds plus a direct booking.
+          -- Funding/press/interview/sync accept the same way but are not a
+          -- night on a stage — same gate the Won path applies below.
+          AND opportunity.opportunity_kind IN
+              ('festival','showcase','review_contest','support_slot','booking')
+        ON CONFLICT (workspace_id, slug) DO NOTHING
+        "#,
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(&slug)
+    .bind(opportunity_id.into_uuid())
+    .bind(organization)
+    .execute(&mut **tx)
+    .await
+    .map_err(map_sqlx)?;
+    Ok(())
+}
+
 /// The second half of the seam `create_show_for_accepted_terms` opened: a
 /// festival slot is applied for, not negotiated — there are no terms rows to
 /// accept, so the only place the win can become a show is the operator
@@ -862,12 +960,17 @@ async fn create_show_for_won_opportunity(
                -- `festival_name` caps at 200 where `organization` allows
                -- 240; a long organiser name must not fail the win.
                CASE WHEN opportunity.opportunity_kind = 'festival'
-                    THEN left(opportunity.organization, 200) ELSE NULL END
+                    THEN left(btrim(opportunity.organization), 200) ELSE NULL END
         FROM viryaos_team_opportunities AS opportunity
         WHERE opportunity.workspace_id = $1
           AND opportunity.id = $3
+          AND opportunity.status = 'won'
           AND opportunity.event_starts_at IS NOT NULL
-          AND opportunity.opportunity_kind IN ('festival','showcase','support_slot','booking')
+          -- The mintable set: the negotiable kinds plus a direct booking —
+          -- a won contest slot or booking offer is a night, a won grant or
+          -- press request is not. Same gate the terms path applies above.
+          AND opportunity.opportunity_kind IN
+              ('festival','showcase','review_contest','support_slot','booking')
         ON CONFLICT (workspace_id, slug) DO NOTHING
         "#,
     )

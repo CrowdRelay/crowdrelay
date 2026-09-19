@@ -1093,5 +1093,62 @@ async fn a_won_festival_slot_becomes_the_draft_show() -> Result<(), Box<dyn std:
     .fetch_one(&fixture.pool)
     .await?;
     assert_eq!(dateless_shows, 0, "a show with no date is not a show");
+
+    // The recovery half: the festival announces its dates after the win, the
+    // operator enriches the row, and the enrichment — not a second Won, which
+    // the terminal guard would refuse — is what mints the night.
+    use crowdrelay_application::autopilot::{TeamOpportunityKind, UpsertTeamOpportunity};
+    use crowdrelay_domain::autonomy::Confidence;
+    fixture
+        .repository
+        .upsert_team_opportunity(
+            fixture.workspace_id,
+            UpsertTeamOpportunity {
+                opportunity_id: Some(dateless_id),
+                kind: TeamOpportunityKind::Festival,
+                source: "manual".to_owned(),
+                external_key: format!("dateless-{}", fixture.workspace_id.into_uuid().simple()),
+                title: "Unannounced slot".to_owned(),
+                organization: "A festival".to_owned(),
+                destination_url: None,
+                contact_email: None,
+                verified_destination: true,
+                fit_basis_points: 9000,
+                reputation_basis_points: 0,
+                confidence: Confidence::saturating_from_basis_points(9_000),
+                currency: "PLN".to_owned(),
+                expected_fee_minor: 0,
+                estimated_cost_minor: 400_000,
+                application_fee_minor: 0,
+                requires_contract: false,
+                exclusive: false,
+                eligible: true,
+                funding_amount_minor: 0,
+                own_contribution_minor: 0,
+                deadline: None,
+                event_starts_at: Some(fixture.now + time::Duration::days(120)),
+                country_code: None,
+                travel_band: None,
+                metadata: serde_json::json!({}),
+                strategic_value_basis_points: 0,
+                source_observed_at: Some(fixture.now),
+                expected_version: 0,
+            },
+            &IdempotencyKey::parse("dateless-enrich").expect("valid key"),
+            None,
+        )
+        .await?;
+    let recovered: Option<(String, Option<String>)> = sqlx::query_as(
+        "SELECT status, festival_name FROM events \
+         WHERE workspace_id=$1 AND booking_opportunity_id=$2",
+    )
+    .bind(fixture.workspace_id.into_uuid())
+    .bind(dateless_id.into_uuid())
+    .fetch_optional(&fixture.pool)
+    .await?;
+    let (status, festival_name) =
+        recovered.expect("the date landing on a won slot is still the win");
+    assert_eq!(status, "draft");
+    assert_eq!(festival_name.as_deref(), Some("A festival"));
     Ok(())
 }

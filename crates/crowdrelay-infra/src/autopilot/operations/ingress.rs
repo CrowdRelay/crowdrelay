@@ -23,7 +23,9 @@ use crowdrelay_domain::{
 
 mod beacons;
 mod booking_discovery;
-mod team;
+// `execution` reaches the terms-accepted half of the won→show seam that
+// lives here — one contract, both halves in one file.
+pub(in crate::autopilot) mod team;
 
 #[async_trait]
 impl AutopilotOutreachStateRepository for PostgresAutopilotRepository {
