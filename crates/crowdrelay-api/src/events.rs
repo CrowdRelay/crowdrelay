@@ -400,7 +400,7 @@ pub async fn calendar(
         None,
     );
 
-    let filename = format!("virya-{}.ics", event.slug.as_str());
+    let filename = format!("{}-{}.ics", state.tenant.slug, event.slug.as_str());
     let Ok(disposition) = HeaderValue::from_str(&format!("attachment; filename=\"{filename}\""))
     else {
         return Problem::internal(request_id_value).into_response();
@@ -416,7 +416,7 @@ pub async fn calendar(
             (CONTENT_DISPOSITION, disposition),
             (CACHE_CONTROL, HeaderValue::from_static(PRIVATE_NO_STORE)),
         ],
-        render_ics(&event),
+        render_ics(&event, &state.tenant),
     )
         .into_response()
 }
@@ -660,21 +660,25 @@ fn submit_action(
     (state.action_submitter)(event_action);
 }
 
-fn render_ics(event: &PublicEvent) -> String {
+fn render_ics(event: &PublicEvent, tenant: &crate::tenant::TenantProfile) -> String {
     let starts_at = format_ics_time(event.starts_at);
     let fallback_end = event
         .starts_at
         .checked_add(time::Duration::hours(3))
         .unwrap_or(event.starts_at);
     let ends_at = format_ics_time(event.ends_at.unwrap_or(fallback_end));
-    let description = event.description.as_deref().unwrap_or("Virya live");
+    let fallback_description = format!("{} live", tenant.display_name);
+    let description = event
+        .description
+        .as_deref()
+        .unwrap_or(fallback_description.as_str());
     let location = [event.venue.as_deref(), event.venue_address.as_deref()]
         .into_iter()
         .flatten()
         .collect::<Vec<_>>()
         .join(", ");
     format!(
-        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//CrowdRelay//Virya Signal//EN\r\nCALSCALE:GREGORIAN\r\nBEGIN:VEVENT\r\nUID:{}@virya.music\r\nDTSTAMP:{}\r\nDTSTART:{}\r\nDTEND:{}\r\nSUMMARY:{}\r\nDESCRIPTION:{}\r\nLOCATION:{}\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n",
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//CrowdRelay//Signal//EN\r\nCALSCALE:GREGORIAN\r\nBEGIN:VEVENT\r\nUID:{}@crowdrelay.com\r\nDTSTAMP:{}\r\nDTSTART:{}\r\nDTEND:{}\r\nSUMMARY:{}\r\nDESCRIPTION:{}\r\nLOCATION:{}\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n",
         event.id,
         format_ics_time(OffsetDateTime::now_utc()),
         starts_at,
@@ -1064,6 +1068,44 @@ mod tests {
     use time::OffsetDateTime;
 
     use super::render_ics;
+    use crate::tenant::{
+        RegionalSource, TenantPalette, TenantProducts, TenantProfile, TenantRegionalProfile,
+        TenantRegionalProvenance,
+    };
+
+    fn test_tenant() -> TenantProfile {
+        TenantProfile {
+            slug: "the-openers".to_owned(),
+            display_name: "The Openers".to_owned(),
+            palette: TenantPalette::default(),
+            products: TenantProducts {
+                crowdrelay: true,
+                signal: true,
+                synesthesia: false,
+            },
+            regional: TenantRegionalProfile {
+                country_code: "DE".to_owned(),
+                region: "eu".to_owned(),
+                locale: "de-DE".to_owned(),
+                timezone: "Europe/Berlin".to_owned(),
+                currency: "EUR".to_owned(),
+                date_format: "dmy".to_owned(),
+                number_format: "comma_decimal".to_owned(),
+                data_region: None,
+            },
+            regional_provenance: TenantRegionalProvenance {
+                country_code: RegionalSource::TenantProfile,
+                region: RegionalSource::TenantProfile,
+                locale: RegionalSource::TenantProfile,
+                timezone: RegionalSource::TenantProfile,
+                currency: RegionalSource::TenantProfile,
+                date_format: RegionalSource::TenantProfile,
+                number_format: RegionalSource::TenantProfile,
+                data_region: RegionalSource::Unclassified,
+            },
+            parked: false,
+        }
+    }
 
     #[test]
     fn public_event_timestamps_are_rfc3339_strings() -> Result<(), Box<dyn std::error::Error>> {
@@ -1130,11 +1172,47 @@ mod tests {
             updated_at: OffsetDateTime::UNIX_EPOCH,
         };
 
-        let calendar = render_ics(&event);
+        let calendar = render_ics(&event, &test_tenant());
         assert!(calendar.contains("SUMMARY:Virya\\, live"));
         assert!(calendar.contains("DESCRIPTION:Line one\\nLine two"));
         assert!(calendar.contains("LOCATION:Club\\; Main"));
         assert!(calendar.contains("DTSTART:19700101T000000Z"));
+        assert!(calendar.contains("UID:"));
+        assert!(calendar.contains("@crowdrelay.com"));
+        assert!(!calendar.contains("virya.music"));
+        Ok(())
+    }
+
+    /// The ICS payload is fan-facing: a second tenant's calendar entry must
+    /// carry its own identity and the platform product name, never another
+    /// tenant's brand.
+    #[test]
+    fn calendar_uses_tenant_identity() -> Result<(), Box<dyn std::error::Error>> {
+        let event = PublicEvent {
+            id: EventId::new(),
+            slug: EventSlug::parse("berlin-2026")?,
+            title: "Club Night".to_owned(),
+            description: None,
+            city: None,
+            venue: None,
+            venue_address: None,
+            timezone: "Europe/Berlin".to_owned(),
+            starts_at: OffsetDateTime::UNIX_EPOCH,
+            doors_at: None,
+            ends_at: None,
+            ticket_url: None,
+            listen_url: None,
+            image_url: None,
+            trailer_url: None,
+            external_event_url: None,
+            festival_name: None,
+            acts: Vec::new(),
+            updated_at: OffsetDateTime::UNIX_EPOCH,
+        };
+
+        let calendar = render_ics(&event, &test_tenant());
+        assert!(calendar.contains("PRODID:-//CrowdRelay//Signal//EN"));
+        assert!(calendar.contains("DESCRIPTION:The Openers live"));
         Ok(())
     }
 }

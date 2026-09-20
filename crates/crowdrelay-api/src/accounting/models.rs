@@ -1,8 +1,9 @@
 #[derive(Clone, Debug, Deserialize)]
 pub struct AccountingMonthQuery {
     month: String,
-    #[serde(default = "default_currency")]
-    currency: String,
+    /// Omitted means the tenant's declared regional currency — an implicit
+    /// default must not silently read the books in another tenant's money.
+    currency: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -14,18 +15,18 @@ pub struct ConfigureAccountingProfileRequest {
     address_line1: String,
     postal_code: String,
     city: String,
-    #[serde(default = "default_country_code")]
-    country_code: String,
-    #[serde(default = "default_document_prefix")]
-    document_prefix: String,
+    /// Omitted means the tenant's declared regional country.
+    country_code: Option<String>,
+    /// Omitted means the neutral internal-document prefix.
+    document_prefix: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FinalizeAccountingDocumentRequest {
     month: String,
-    #[serde(default = "default_currency")]
-    currency: String,
+    /// Omitted means the tenant's declared regional currency.
+    currency: Option<String>,
     document_number: String,
 }
 

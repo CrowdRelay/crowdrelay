@@ -387,7 +387,7 @@ async fn request_discovery(
     let request_id_value = request_id(headers);
     let country_code = payload
         .country_code
-        .unwrap_or_else(|| "PL".to_owned())
+        .unwrap_or_else(|| state.tenant.regional.country_code.clone())
         .trim()
         .to_uppercase();
     let target_count = payload.target_count.unwrap_or(100);

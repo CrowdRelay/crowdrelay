@@ -80,7 +80,7 @@ pub async fn discover_team_opportunity(
         fit_basis_points: assessment.fit_basis_points,
         reputation_basis_points: assessment.reputation_basis_points,
         confidence: assessment.confidence,
-        currency: "PLN".to_owned(),
+        currency: state.tenant.regional.currency.clone(),
         expected_fee_minor: 0,
         estimated_cost_minor: 0,
         application_fee_minor: 0,

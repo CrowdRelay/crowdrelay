@@ -48,6 +48,8 @@ mod tests {
                 agent_service_url: "http://agent-service:8095".to_owned(),
                 agent_service_auth_key: Some("key".to_owned()),
                 env_proxy_url: None,
+                user_agent: "server:com.crowdrelay.community:v1.0.0 (by /u/test_tenant)"
+                    .to_owned(),
             },
             workspace_id,
         ))
@@ -251,6 +253,7 @@ mod tests {
             agent_service_url: "http://agent-service:8095".to_owned(),
             agent_service_auth_key: None,
             env_proxy_url: None,
+            user_agent: "server:com.crowdrelay.community:v1.0.0 (by /u/test_tenant)".to_owned(),
         }
     }
 

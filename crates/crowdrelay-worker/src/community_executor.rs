@@ -91,11 +91,12 @@ fn check_response_size(response: &reqwest::Response) -> Result<(), CommunityExec
 fn build_http_client(
     proxy_url: Option<&str>,
     operation_timeout: Duration,
+    user_agent: &str,
 ) -> Result<reqwest::Client, CommunityExecutorError> {
     let mut builder = reqwest::Client::builder()
         .connect_timeout(operation_timeout.min(Duration::from_secs(10)))
         .timeout(operation_timeout)
-        .user_agent(USER_AGENT);
+        .user_agent(user_agent);
     if let Some(proxy) = proxy_url {
         let proxy = reqwest::Proxy::all(proxy)
             .map_err(|e| CommunityExecutorError::RedditApi(format!("invalid proxy URL: {e}")))?;
@@ -166,11 +167,30 @@ const METRICS_POLL_MIN_INTERVAL: Duration = Duration::from_secs(15 * 60);
 const METRICS_POLL_BATCH: i64 = 10;
 
 /// Reddit requires a descriptive User-Agent following their guideline:
-/// `<platform>:<app ID>:<version string> (by /u/<username>)`
-const USER_AGENT: &str = "server:com.crowdrelay.community:v1.0.0 (by /u/virya_band)";
+/// `<platform>:<app ID>:<version string> (by /u/<username>)`. The username is
+/// the tenant's own Reddit identity — `CROWDRELAY_REDDIT_USERNAME` when the
+/// tenant has one configured, else the workspace slug (which at least names
+/// the tenant honestly to Reddit's ops team instead of another band's
+/// account). Virya keeps its account name as the historical default.
+fn reddit_user_agent(workspace_slug: &str) -> String {
+    let username = std::env::var("CROWDRELAY_REDDIT_USERNAME")
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| {
+            if workspace_slug == "virya" {
+                "virya_band".to_owned()
+            } else {
+                workspace_slug.to_owned()
+            }
+        });
+    format!("server:com.crowdrelay.community:v1.0.0 (by /u/{username})")
+}
 
 /// Public origin for smart link resolution. The smart_link stored in the
-/// action payload is a `/l/{slug}` path; Reddit needs a full URL.
+/// action payload is a `/l/{slug}` path; Reddit needs a full URL. The Virya
+/// default is a back-compat shim — every other tenant must declare its own
+/// `CROWDRELAY_PUBLIC_ORIGIN` rather than link posts to another band's site.
 const DEFAULT_PUBLIC_ORIGIN: &str = "https://virya.music";
 
 /// Reddit is read-only: this executor drafts posts and never publishes them.
@@ -238,6 +258,10 @@ pub enum CommunityExecutorError {
     RateLimited,
     #[error("http client build failed: {0}")]
     ClientBuild(reqwest::Error),
+    /// Startup configuration is missing and no tenant default exists — the
+    /// worker refuses rather than send another tenant's links or identity.
+    #[error("invalid community executor configuration: {0}")]
+    Config(String),
 }
 
 #[derive(Clone)]
@@ -260,6 +284,9 @@ pub struct CommunityExecutorWorker {
     /// Env-var proxy URL (manual override). The DB proxy from the sidecar
     /// takes precedence when available and fresh.
     env_proxy_url: Option<String>,
+    /// Reddit User-Agent, built once so a proxy-refresh rebuild sends the
+    /// same tenant identity.
+    user_agent: String,
 }
 
 impl CommunityExecutorWorker {
@@ -290,10 +317,21 @@ impl CommunityExecutorWorker {
         agent_service_url: String,
         agent_service_auth_key: Option<String>,
     ) -> Result<Self, CommunityExecutorError> {
-        let http_client = build_http_client(proxy_url.as_deref(), operation_timeout)?;
+        let workspace_slug =
+            std::env::var("CROWDRELAY_WORKSPACE_SLUG").unwrap_or_else(|_| "virya".to_owned());
+        let user_agent = reddit_user_agent(&workspace_slug);
+        let http_client = build_http_client(proxy_url.as_deref(), operation_timeout, &user_agent)?;
         let http_client = Arc::new(RwLock::new(http_client));
-        let public_origin = std::env::var("CROWDRELAY_PUBLIC_ORIGIN")
-            .unwrap_or_else(|_| DEFAULT_PUBLIC_ORIGIN.to_owned());
+        let public_origin = match std::env::var("CROWDRELAY_PUBLIC_ORIGIN") {
+            Ok(value) if !value.trim().is_empty() => value.trim().to_owned(),
+            _ if workspace_slug == "virya" => DEFAULT_PUBLIC_ORIGIN.to_owned(),
+            _ => {
+                return Err(CommunityExecutorError::Config(
+                    "CROWDRELAY_PUBLIC_ORIGIN is required for non-Virya community execution"
+                        .to_owned(),
+                ));
+            }
+        };
         // Read-only wins over whatever the caller asked for. The guard lives
         // here rather than at the call site because this type owns the
         // invariant, and `new` is public.
@@ -312,6 +350,7 @@ impl CommunityExecutorWorker {
             agent_service_url,
             agent_service_auth_key,
             env_proxy_url: proxy_url,
+            user_agent,
         })
     }
 
@@ -339,7 +378,11 @@ impl CommunityExecutorWorker {
                         self.env_proxy_url.clone()
                     };
                     if new_proxy != current_proxy {
-                        match build_http_client(new_proxy.as_deref(), self.operation_timeout) {
+                        match build_http_client(
+                            new_proxy.as_deref(),
+                            self.operation_timeout,
+                            &self.user_agent,
+                        ) {
                             Ok(new_client) => {
                                 tracing::info!(
                                     old = current_proxy.as_deref().unwrap_or("direct"),

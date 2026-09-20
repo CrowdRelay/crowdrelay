@@ -35,7 +35,7 @@ pub async fn configure_profile(
                 .into_response();
         }
     };
-    let Some(profile) = normalize_profile(payload) else {
+    let Some(profile) = normalize_profile(payload, &state.tenant.regional) else {
         return Problem::bad_request(request_id_value)
             .private()
             .into_response();
@@ -64,7 +64,11 @@ pub async fn preview_ticket_sales(
             .private()
             .into_response();
     }
-    let Some(period) = AccountingPeriod::parse(&query.month, &query.currency) else {
+    let currency = query
+        .currency
+        .clone()
+        .unwrap_or_else(|| state.tenant.regional.currency.clone());
+    let Some(period) = AccountingPeriod::parse(&query.month, &currency) else {
         return Problem::bad_request(request_id_value)
             .private()
             .into_response();
@@ -104,7 +108,11 @@ pub async fn finalize_ticket_sales(
                 .into_response();
         }
     };
-    let Some(period) = AccountingPeriod::parse(&payload.month, &payload.currency) else {
+    let currency = payload
+        .currency
+        .clone()
+        .unwrap_or_else(|| state.tenant.regional.currency.clone());
+    let Some(period) = AccountingPeriod::parse(&payload.month, &currency) else {
         return Problem::bad_request(request_id_value)
             .private()
             .into_response();
@@ -145,7 +153,11 @@ pub async fn list_invoice_requests(
             .private()
             .into_response();
     }
-    let Some(period) = AccountingPeriod::parse(&query.month, &query.currency) else {
+    let currency = query
+        .currency
+        .clone()
+        .unwrap_or_else(|| state.tenant.regional.currency.clone());
+    let Some(period) = AccountingPeriod::parse(&query.month, &currency) else {
         return Problem::bad_request(request_id_value)
             .private()
             .into_response();

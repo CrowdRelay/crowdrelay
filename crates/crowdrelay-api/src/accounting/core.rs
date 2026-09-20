@@ -47,23 +47,31 @@ impl AccountingPeriod {
     }
 }
 
-fn default_currency() -> String {
-    "PLN".to_owned()
-}
-fn default_country_code() -> String {
-    "PL".to_owned()
-}
-fn default_document_prefix() -> String {
-    "WEW/BILETY".to_owned()
-}
+/// The document prefix when the tenant's profile omits one. Tenant regional
+/// currency and country come from the declared tenant profile — never a
+/// hardcoded one, so a second tenant's unconfigured view is its own.
+const DEFAULT_DOCUMENT_PREFIX: &str = "INT/TICKETS";
 
 fn normalize_profile(
     request: ConfigureAccountingProfileRequest,
+    regional: &crate::tenant::TenantRegionalProfile,
 ) -> Option<ConfigureAccountingProfileRequest> {
     let regon = match request.regon {
         Some(value) => Some(clean_text(&value, 32)?),
         None => None,
     };
+    let country_code = request
+        .country_code
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(regional.country_code.as_str());
+    let document_prefix = request
+        .document_prefix
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(DEFAULT_DOCUMENT_PREFIX);
     Some(ConfigureAccountingProfileRequest {
         seller_name: clean_text(&request.seller_name, 200)?,
         tax_id: clean_text(&request.tax_id, 32)?,
@@ -71,8 +79,8 @@ fn normalize_profile(
         address_line1: clean_text(&request.address_line1, MAX_PROFILE_TEXT_CHARS)?,
         postal_code: clean_text(&request.postal_code, 32)?,
         city: clean_text(&request.city, 120)?,
-        country_code: normalize_country_code(&request.country_code)?,
-        document_prefix: clean_text(&request.document_prefix, 64)?,
+        country_code: Some(normalize_country_code(country_code)?),
+        document_prefix: Some(clean_text(document_prefix, 64)?),
     })
 }
 
@@ -92,7 +100,9 @@ fn normalize_country_code(value: &str) -> Option<String> {
     (value.len() == 2 && value.bytes().all(|byte| byte.is_ascii_uppercase())).then_some(value)
 }
 
-fn unconfigured_profile() -> AccountingProfileView {
+fn unconfigured_profile(
+    regional: &crate::tenant::TenantRegionalProfile,
+) -> AccountingProfileView {
     AccountingProfileView {
         seller_name: String::new(),
         tax_id: String::new(),
@@ -100,8 +110,8 @@ fn unconfigured_profile() -> AccountingProfileView {
         address_line1: String::new(),
         postal_code: String::new(),
         city: String::new(),
-        country_code: default_country_code(),
-        document_prefix: default_document_prefix(),
+        country_code: regional.country_code.clone(),
+        document_prefix: DEFAULT_DOCUMENT_PREFIX.to_owned(),
         updated_at: OffsetDateTime::UNIX_EPOCH,
     }
 }
@@ -172,7 +182,7 @@ async fn build_preview(
 ) -> Result<AccountingPreview, AccountingError> {
     let profile = load_profile_optional(state)
         .await?
-        .unwrap_or_else(unconfigured_profile);
+        .unwrap_or_else(|| unconfigured_profile(&state.tenant.regional));
     let currency = period.currency();
     let sales = load_sales(state, period).await?;
     let adjustments = load_adjustments(state, period).await?;
