@@ -18,7 +18,7 @@ from pathlib import Path
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
-MODEL = ROOT / "crates/crowdrelay-application/src/autopilot/model.rs"
+PARSER = ROOT / "crates/crowdrelay-application/src/autopilot/policy_config.rs"
 MAPPING = ROOT / "crates/crowdrelay-infra/src/autopilot/mapping.rs"
 CONTROL = ROOT / "crates/crowdrelay-infra/src/autopilot/control.rs"
 COMMAND = ROOT / "crates/crowdrelay-application/src/autopilot/control.rs"
@@ -33,7 +33,7 @@ def read(path: Path) -> str:
 
 class PolicyParametrizationContract(unittest.TestCase):
     def test_one_parse_function_is_the_source_of_truth(self) -> None:
-        model = read(MODEL)
+        model = read(PARSER)
         self.assertIn("pub fn parse_for(", model)
         # Every context has an arm in the single match.
         arms = model.split("impl AutopilotPolicyConfig", 1)[1].split("\n}\n", 1)[0].count(
@@ -57,7 +57,7 @@ class PolicyParametrizationContract(unittest.TestCase):
         self.assertIn("pub config: Option<serde_json::Value>", command)
 
     def test_reset_to_defaults_is_explicit_in_the_parser(self) -> None:
-        model = read(MODEL).split("impl AutopilotPolicyConfig", 1)[1][:6000]
+        model = read(PARSER).split("impl AutopilotPolicyConfig", 1)[1][:6000]
         self.assertIn("is_some_and(serde_json::Map::is_empty)", model)
         self.assertIn("wrap(default)", model)
 

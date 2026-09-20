@@ -51,6 +51,9 @@ mod phase {
     pub const GROWTH_METRIC_CAPTURE: &str = "growth_metric_capture";
     pub const EVALUATION: &str = "evaluation";
     pub const TEAM_HANDOFF_RECONCILIATION: &str = "team_handoff_reconciliation";
+    /// The roster brief's issue attempt — one org-wide artifact plus its
+    /// handoffs, raced once per member workspace and won by exactly one.
+    pub const ROSTER_BRIEF_ISSUE: &str = "roster_brief_issue";
     pub const NO_EXECUTOR_SWEEP: &str = "no_executor_sweep";
     pub const ABANDONED_CLAIM_SWEEP: &str = "abandoned_claim_sweep";
     pub const ACTION_EXECUTION: &str = "action_execution";
@@ -420,6 +423,21 @@ impl AutopilotWorker {
             Err(error) => {
                 degraded.failed(phase::TEAM_HANDOFF_RECONCILIATION);
                 tracing::warn!(error = %error, "ViryaOS team handoff reconciliation failed");
+            }
+        }
+        // The roster weekly brief rides the same handoff rail as the daily
+        // briefing, one sweep later so a handoff failure cannot take the
+        // brief down with it — and vice versa.
+        match self
+            .repository
+            .issue_roster_weekly_briefs(self.workspace_id, now)
+            .await
+        {
+            Ok(count) if count > 0 => tracing::info!(count, "issued ViryaOS roster weekly brief"),
+            Ok(_) => {}
+            Err(error) => {
+                degraded.failed(phase::ROSTER_BRIEF_ISSUE);
+                tracing::warn!(error = %error, "ViryaOS roster weekly brief issue failed");
             }
         }
         match self

@@ -146,6 +146,14 @@ pub struct RosterHeadline {
     pub acts_without_signal: u32,
 }
 
+/// Operator-tunable knobs for the `roster` autopilot context — deliberately
+/// none. The context exists so the weekly brief's queued handoffs carry a
+/// domain that names them, and the policy row carries posture
+/// (`require_approval`), not knobs, the way `BookingAgentPolicy` does.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct RosterPolicy {}
+
 /// The page: one organisation's acts, each with its week.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct RosterWeeklyBrief {

@@ -76,7 +76,9 @@ use serde::Serialize;
 use thiserror::Error;
 use time::OffsetDateTime;
 
-use super::{evidence_ledger::EvidenceLedger, model::*, ports::AutopilotDecisionRepository};
+use super::{
+    evidence_ledger::EvidenceLedger, model::*, policy_config::*, ports::AutopilotDecisionRepository,
+};
 mod beacons;
 mod booking_supply;
 mod commercial;
@@ -734,6 +736,12 @@ where
                     // to read and change — a cycle volunteering the band's
                     // name to an agent is the blast the season rule exists
                     // to prevent.
+                }
+                AutopilotContext::Roster => {
+                    // Roster handoffs are sweep-issued: the weekly brief is
+                    // composed and queued by the worker's roster sweep, not
+                    // proposed per-workspace here. The policy row holds
+                    // posture for a human to read and change.
                 }
             }
         }
