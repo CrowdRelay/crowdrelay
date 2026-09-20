@@ -3,7 +3,7 @@
 //! exists (§4i-6).
 
 use super::{
-    team::{first_reminder_at, queue_team_email_action},
+    team::{PendingInitialNotice, first_reminder_at},
     team_routing::{TeamRoutingRow, select_member_index_explained},
     *,
 };
@@ -22,6 +22,7 @@ pub(super) async fn issue_release_making_of_asks(
     now: OffsetDateTime,
     mutable_team: &mut [TeamRoutingRow],
     crew_locale: BriefingLocale,
+    pending_notices: &mut Vec<PendingInitialNotice>,
 ) -> Result<u32, RepositoryError> {
     let mut assigned = 0_u32;
     let making_of_asks = sqlx::query_as::<_, (Uuid, String, OffsetDateTime)>(
@@ -130,24 +131,19 @@ pub(super) async fn issue_release_making_of_asks(
                 "\"{plan_title}\" is inside R-14 — file the making-of material that already exists and mark it for this release."
             ),
         };
-        queue_team_email_action(
-            tx,
-            workspace_id,
+        pending_notices.push(PendingInitialNotice {
             assignment_id,
-            "release",
-            &member.normalized_email,
-            &member.display_name,
-            match crew_locale {
+            context: "release".to_owned(),
+            recipient_email: member.normalized_email.clone(),
+            recipient_name: member.display_name.clone(),
+            title: match crew_locale {
                 BriefingLocale::Pl => format!("Making-of do wydania: {plan_title}"),
                 BriefingLocale::En => format!("Making-of for the release: {plan_title}"),
             },
             detail,
-            Some(release_at),
-            0,
-            None,
-            now,
-        )
-        .await?;
+            due_at: Some(release_at),
+            source_action_id: None,
+        });
         member.open_assignments = member.open_assignments.saturating_add(1);
         member.recent_assignments = member.recent_assignments.saturating_add(1);
         member.asks_last_7d = member.asks_last_7d.saturating_add(1);

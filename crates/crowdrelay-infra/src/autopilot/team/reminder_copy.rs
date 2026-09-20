@@ -129,9 +129,16 @@ fn reminder_detail(row: &ReminderRow, crew_locale: BriefingLocale) -> String {
 /// duplicates of one task, and learns within a day to ignore all of them. One
 /// email that names the others is the same information and one interruption.
 fn digest_tail(others: &[String], locale: BriefingLocale) -> String {
+    // The list is bounded because the e-mail is: the n8n workflow slices
+    // task_detail at 1800 chars, and a tail that fills it alone would cut
+    // the named tasks mid-item — the digest's whole point — plus drop the
+    // closing line. Twenty-four is the reminder sweep's own batch size, so
+    // a tail this long already reads like a digest, not a list.
+    const MAX_SHOWN: usize = 24;
     if others.is_empty() {
         return String::new();
     }
+    let shown = others.len().min(MAX_SHOWN);
     let header = match (locale, others.len()) {
         (BriefingLocale::Pl, 1) => "Czeka na Ciebie jeszcze jedno zadanie:".to_owned(),
         (BriefingLocale::Pl, n) => format!("Czekają na Ciebie jeszcze {n} zadania:"),
@@ -139,8 +146,16 @@ fn digest_tail(others: &[String], locale: BriefingLocale) -> String {
         (BriefingLocale::En, n) => format!("{n} more tasks are waiting for you:"),
     };
     let mut tail = format!("\n\n{header}");
-    for other in others {
+    for other in others.iter().take(shown) {
         tail.push_str(&format!("\n• {other}"));
+    }
+    if shown < others.len() {
+        let folded = others.len() - shown;
+        let more = match locale {
+            BriefingLocale::Pl => format!("\n• … i {folded} więcej"),
+            BriefingLocale::En => format!("\n• … and {folded} more"),
+        };
+        tail.push_str(&more);
     }
     let closing = match locale {
         BriefingLocale::Pl => "\n\nWszystkie są w panelu operacyjnym pod tym samym linkiem.",
