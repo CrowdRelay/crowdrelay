@@ -444,3 +444,155 @@ async fn action_standings_cover_levers_and_templates_alike() {
 
     let _ = workspace;
 }
+
+/// Phase 4: attendance is a show outcome, and a show that never happened has
+/// no outcome to measure.
+///
+/// `show_attendance_rate_14d` observes redeemed admission passes over every
+/// pass valid for entry — revoked passes were taken back and are no show's
+/// fault. A cancelled event fails the measurement outright: zero attendance
+/// on a show that was never held is the absence of an outcome, not a zero
+/// rate, and writing it would teach the learner the lever failed.
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn show_attendance_rate_and_cancelled_event_guards() {
+    let f = setup().await.expect("fixture");
+    let workspace = f.workspace_id.into_uuid();
+
+    async fn insert_event(f: &Fixture, status: &str) -> uuid::Uuid {
+        let event_id = uuid::Uuid::now_v7();
+        sqlx::query(
+            r#"INSERT INTO events (id, workspace_id, slug, title, starts_at, status)
+               VALUES ($1,$2,$3,'Gig',$4,$5)"#,
+        )
+        .bind(event_id)
+        .bind(f.workspace_id.into_uuid())
+        .bind(format!("gig-{}", event_id.simple()))
+        .bind(f.now - time::Duration::days(20))
+        .bind(status)
+        .execute(&f.pool)
+        .await
+        .expect("event");
+        event_id
+    }
+
+    async fn insert_passes(f: &Fixture, event_id: uuid::Uuid, statuses: &[&str]) {
+        let pool_id = uuid::Uuid::now_v7();
+        sqlx::query(
+            r#"INSERT INTO admission_pools (id, workspace_id, event_id, name, capacity, slug)
+               VALUES ($1,$2,$3,'GA',100,$4)"#,
+        )
+        .bind(pool_id)
+        .bind(f.workspace_id.into_uuid())
+        .bind(event_id)
+        .bind(format!("ga-{}", pool_id.simple()))
+        .execute(&f.pool)
+        .await
+        .expect("pool");
+        for (i, status) in statuses.iter().enumerate() {
+            let fan_id = uuid::Uuid::now_v7();
+            sqlx::query(
+                r#"INSERT INTO fans (id, workspace_id, normalized_email, status)
+                   VALUES ($1,$2,$3,'active')"#,
+            )
+            .bind(fan_id)
+            .bind(f.workspace_id.into_uuid())
+            .bind(format!("pass-holder-{i}-{}", event_id.simple()))
+            .execute(&f.pool)
+            .await
+            .expect("fan");
+            // The pass lifecycle is constrained per status: `issued` holds a
+            // live claim token, `claimed`/`redeemed` have consumed it.
+            sqlx::query(
+                r#"INSERT INTO admission_passes
+                   (id, workspace_id, event_id, admission_pool_id, fan_id,
+                    issuance_method, public_reference, claim_expires_at,
+                    status, claim_token_hash, claim_token_consumed_at,
+                    claimed_at, redeemed_at)
+                   VALUES (gen_random_uuid(),$1,$2,$3,$4,'first_come',$5,
+                           now() + interval '30 days',$6,
+                           CASE WHEN $6 = 'issued' THEN gen_random_bytes(32) END,
+                           CASE WHEN $6 IN ('claimed','redeemed') THEN now() END,
+                           CASE WHEN $6 IN ('claimed','redeemed') THEN now() END,
+                           CASE WHEN $6 = 'redeemed' THEN now() END)"#,
+            )
+            .bind(f.workspace_id.into_uuid())
+            .bind(event_id)
+            .bind(pool_id)
+            .bind(fan_id)
+            .bind(format!("PASS-{}-{i}", event_id.simple()))
+            .bind(*status)
+            .execute(&f.pool)
+            .await
+            .expect("pass");
+        }
+    }
+
+    let action_id = insert_dispatch(&f, "opp-attendance", f.now - time::Duration::days(30)).await;
+
+    let claim = |event_id: uuid::Uuid| ClaimedAutopilotMeasurement {
+        id: AutopilotMeasurementId::from(uuid::Uuid::now_v7()),
+        action_id: AutopilotActionId::from(action_id),
+        kind: AutopilotMeasurementKind::ShowAttendanceRate14d,
+        subject_id: event_id,
+        baseline_value: 0.0,
+        action_finished_at: f.now - time::Duration::days(20),
+        attempt_number: 1,
+    };
+
+    // 2 redeemed of 4 valid (issued + expired count; the revoked pass was
+    // taken back before the show and is nobody's no-show).
+    let event_id = insert_event(&f, "completed").await;
+    insert_passes(
+        &f,
+        event_id,
+        &["redeemed", "redeemed", "issued", "expired", "revoked"],
+    )
+    .await;
+    let observed = f
+        .repository
+        .observe_measurement(f.workspace_id, &claim(event_id), f.now)
+        .await
+        .expect("attendance observation");
+    assert!(
+        (observed - 0.5).abs() < 1e-9,
+        "redeemed over valid-for-entry: got {observed}"
+    );
+
+    // A cancelled event abandons the measurement rather than reporting a
+    // zero the learner would blame on the action.
+    let cancelled = insert_event(&f, "cancelled").await;
+    insert_passes(&f, cancelled, &["issued", "issued"]).await;
+    let error = f
+        .repository
+        .observe_measurement(f.workspace_id, &claim(cancelled), f.now)
+        .await
+        .expect_err("a cancelled show has no outcome");
+    assert!(
+        matches!(
+            error,
+            crowdrelay_application::RepositoryError::ConflictBecause(kind)
+                if kind == AutopilotMeasurementKind::EVENT_CANCELLED
+        ),
+        "cancelled events abandon as event_cancelled, got {error:?}"
+    );
+
+    // An event that never ticketed through the platform has no denominator —
+    // the measurement cannot be read at all, and is not a zero rate.
+    let unticketed = insert_event(&f, "completed").await;
+    let error = f
+        .repository
+        .observe_measurement(f.workspace_id, &claim(unticketed), f.now)
+        .await
+        .expect_err("no passes means nothing to observe");
+    assert!(
+        matches!(
+            error,
+            crowdrelay_application::RepositoryError::ConflictBecause(kind)
+                if kind == AutopilotMeasurementKind::NO_ISSUED_PASSES
+        ),
+        "pass-free events abandon as no_issued_passes, got {error:?}"
+    );
+
+    let _ = workspace;
+}
