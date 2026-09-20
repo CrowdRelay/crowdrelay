@@ -351,15 +351,30 @@ impl AutopilotWorker {
                 // math and, when the watcher found nothing, the missing
                 // material itself. Both ride the same column — an operator
                 // reading "why did nothing happen" needs the two halves, not
-                // whichever one got stored first.
-                wait_reason = match (
+                // whichever one got stored first. A candidate the 24h quota
+                // ate is a third quiet: it leaves no decision row anywhere,
+                // so the context that produced it is named here or nowhere.
+                let mut quiet_parts: Vec<String> = [
                     report.supply_wait_reason.clone(),
                     report.gi_wait_reason.clone(),
-                ) {
-                    (Some(supply), Some(gi)) => Some(format!("{supply}; {gi}")),
-                    (Some(supply), None) => Some(supply),
-                    (None, gi) => gi,
-                };
+                ]
+                .into_iter()
+                .flatten()
+                .collect();
+                quiet_parts.extend(
+                    report
+                        .context_activity
+                        .values()
+                        .filter(|activity| activity.throttled > 0)
+                        .map(|activity| {
+                            format!(
+                                "{} asked {} time(s); its 24h quota was already spent",
+                                activity.context.as_str(),
+                                activity.throttled,
+                            )
+                        }),
+                );
+                wait_reason = (!quiet_parts.is_empty()).then(|| quiet_parts.join("; "));
                 tracing::info!(
                     decisions = report.decisions,
                     actions_enqueued = report.actions_enqueued,
@@ -371,6 +386,7 @@ impl AutopilotWorker {
                     gi_candidates = report.gi_candidates,
                     gi_wait_reason = ?report.gi_wait_reason,
                     gi_dispatch_log = ?report.gi_dispatch_log,
+                    context_activity = ?report.context_activity,
                     "autopilot cycle report"
                 );
                 // A prerequisite gate that drops candidates silently reads

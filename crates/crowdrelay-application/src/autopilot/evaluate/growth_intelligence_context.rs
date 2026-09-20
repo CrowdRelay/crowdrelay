@@ -573,6 +573,14 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
         }
         let selected_keys = portfolio::selected_keys(&selection);
         report.gi_candidates = u32::try_from(scored_candidates.len()).unwrap_or(u32::MAX);
+        // The funnel top is what the detectors scored, not what the
+        // portfolio selected — a cycle that produced candidates and spent
+        // none of them still produced candidates, and reporting 0 there
+        // would read as a silent detector.
+        for scored in &scored_candidates {
+            let stats = report.context_stats(scored.candidate.context);
+            stats.candidates = stats.candidates.saturating_add(1);
+        }
         report.gi_wait_reason = selection.wait_reason.clone();
         // The decision-time economic and epistemic record, per selected
         // candidate. `DecisionValue` is computed here and dropped, so without
@@ -637,18 +645,31 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
                 }
                 Err(e) => return Err(e.into()),
             };
-            if persisted.action_id.is_some() {
-                if let AutopilotActionPayload::RequestAgentRun { template_id, .. } =
+            if persisted.quota_throttled {
+                report.actions_throttled = report.actions_throttled.saturating_add(1);
+                let stats = report.context_stats(candidate.context);
+                stats.throttled = stats.throttled.saturating_add(1);
+            }
+            // An action_id is what lets a template claim its insights — the
+            // decision row alone dispatches nothing. The decision and action
+            // counts stand outside that gate: a persisted decision with no
+            // action (ObserveOnly, RecommendOnly, Deny, ActionConflict) is a
+            // real decision row and counts as one, the same as in `persist`.
+            if persisted.action_id.is_some()
+                && let AutopilotActionPayload::RequestAgentRun { template_id, .. } =
                     &scored.candidate.action
-                {
-                    dispatched_templates.insert(template_id.clone());
-                }
-                if persisted.decision_created {
-                    report.decisions = report.decisions.saturating_add(1);
-                }
-                if persisted.action_created {
-                    report.actions_enqueued = report.actions_enqueued.saturating_add(1);
-                }
+            {
+                dispatched_templates.insert(template_id.clone());
+            }
+            if persisted.decision_created {
+                report.decisions = report.decisions.saturating_add(1);
+                let stats = report.context_stats(candidate.context);
+                stats.decisions = stats.decisions.saturating_add(1);
+            }
+            if persisted.action_created {
+                report.actions_enqueued = report.actions_enqueued.saturating_add(1);
+                let stats = report.context_stats(candidate.context);
+                stats.actions = stats.actions.saturating_add(1);
             }
         }
         // Dispatch treatment-assigned candidates that were selected by
@@ -723,6 +744,12 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
                         }
                         Err(e) => return Err(e.into()),
                     };
+                    if persisted.quota_throttled {
+                        report.actions_throttled =
+                            report.actions_throttled.saturating_add(1);
+                        let stats = report.context_stats(candidate.context);
+                        stats.throttled = stats.throttled.saturating_add(1);
+                    }
                     if let Some(action_id) = persisted.action_id {
                         // P1: The prediction and initial evidence are now
                         // recorded atomically inside
@@ -759,13 +786,22 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
                                 )
                                 .await;
                         }
+                        // Only a real action id means this template's prompt
+                        // reached the agent service — a throttled, conflicted
+                        // or action-less persist dispatched nothing, and
+                        // marking it dispatched would retire insights nobody
+                        // read.
+                        dispatched_templates.insert(template_id.clone());
                     }
-                    dispatched_templates.insert(template_id.clone());
                     if persisted.decision_created {
                         report.decisions = report.decisions.saturating_add(1);
+                        let stats = report.context_stats(candidate.context);
+                        stats.decisions = stats.decisions.saturating_add(1);
                     }
                     if persisted.action_created {
                         report.actions_enqueued = report.actions_enqueued.saturating_add(1);
+                        let stats = report.context_stats(candidate.context);
+                        stats.actions = stats.actions.saturating_add(1);
                     }
                 } else {
                     // Treatment NOT selected by portfolio → record
