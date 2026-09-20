@@ -164,6 +164,55 @@ impl AutopilotMeasurementKind {
         EffectDirection::HigherIsBetter
     }
 
+    /// The key under which this kind's observed value lands in
+    /// `viryaos_growth_evidence.observed_metrics`, or `None` when the kind
+    /// already has its own learner.
+    ///
+    /// `None` is not "not learned" — the fan-growth and Signal-install kinds
+    /// return `None` because they write typed columns that dedicated
+    /// posteriors consume (`observed_fans`, `observed_incremental_fans`,
+    /// `durable_fans_30d`, `observed_signal_installs`). Duplicating them into
+    /// the map would let one observation reach two learners and count twice.
+    /// Everything else returns a key: the value a measurement produces is
+    /// evidence, and evidence that only reaches the outcomes table is stored,
+    /// not learned.
+    ///
+    /// Keys are stable identifiers in the metric-posterior vocabulary — a
+    /// kind's key never changes once shipped, and kinds that observe the
+    /// same quantity at different windows or scopes get different keys (a
+    /// one-hour discovery count and a fourteen-day one are different
+    /// measurements of different things).
+    #[must_use]
+    pub const fn learnable_metric_key(self) -> Option<&'static str> {
+        match self {
+            Self::TicketRevenue72h => Some("ticket_revenue_minor"),
+            Self::MerchGrossProxy7d => Some("merch_gross_minor"),
+            Self::PromotionRoas7d => Some("promotion_roas_bps"),
+            Self::BookingReply7d => Some("booking_replies"),
+            Self::BookingAgentReply30d => Some("booking_agent_replies"),
+            Self::OutreachReply7d => Some("outreach_replies"),
+            Self::AudienceTicketRevenue72h => Some("audience_ticket_revenue_minor"),
+            Self::ShowTicketRevenue7d => Some("show_ticket_revenue_minor"),
+            Self::ShowGrowthSurfaceClicks7d => Some("show_growth_clicks"),
+            Self::ShowGrowthAttributedTicketOrders7d => Some("show_growth_ticket_orders"),
+            Self::GrassrootsActivationReplies14d => Some("activation_replies"),
+            Self::AgentRunCommunityEngagement7d => Some("engagement_score"),
+            Self::FanLifecycleEngagement7d => Some("lifecycle_engagement_events"),
+            Self::ScannerDiscoveryQuality14d => Some("scanner_discoveries"),
+            Self::StrategistInsightQuality14d => Some("strategist_insights"),
+            Self::ScannerDiscoveryQuality1h => Some("scanner_discoveries_1h"),
+            Self::StrategistInsightQuality1h => Some("strategist_insights_1h"),
+            Self::AgentRunOutcomeQuality1h => Some("outcome_quality_1h"),
+            Self::AgentRunFanGrowth14d
+            | Self::AgentRunFanGrowth3d
+            | Self::IncrementalFanGrowth14d
+            | Self::IncrementalFanGrowth3d
+            | Self::DurableFanGrowth30d
+            | Self::AgentRunSignalInstalls7d
+            | Self::SignalInstalls1d => None,
+        }
+    }
+
     /// Whether the observed value is an effect rather than a level.
     ///
     /// A signed kind has already had its counterfactual subtracted, so a
