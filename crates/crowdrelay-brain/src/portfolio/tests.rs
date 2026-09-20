@@ -43,6 +43,8 @@ fn make_candidate(
         pragmatic_value: expected_fans,
         risk_penalty: None,
         opportunity_cost: 0.0,
+        economic_value_fans: None,
+        revenue_model_source: None,
         decision_mode: DecisionMode::Exploit,
     };
     PortfolioCandidate {

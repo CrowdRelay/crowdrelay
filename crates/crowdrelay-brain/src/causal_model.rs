@@ -110,6 +110,14 @@ pub struct DispatchPrediction {
     /// waits for data rather than the other way round.
     #[serde(default)]
     pub creative_family: Option<crowdrelay_domain::creative::CreativeFamily>,
+    /// Predicted values for the learned secondary metrics, in each metric's
+    /// own units (`metric_key → posterior mean`). Persisted on the dispatch
+    /// prediction row so a resolved `observed_metrics` entry can be compared
+    /// with what the brain said before dispatch — prediction error is the
+    /// calibration signal, and a metric with no prediction records nothing
+    /// rather than a zero the calibration would misread as a confident miss.
+    #[serde(default)]
+    pub expected_metrics: std::collections::BTreeMap<String, f64>,
 }
 
 /// The measured outcome of a dispatch, paired with the prediction that
@@ -286,6 +294,15 @@ pub struct CausalModel {
     /// existed still load — the posteriors then refill from evidence replay.
     #[serde(default)]
     pub metric_posteriors: HashMap<String, crate::metric_posterior::MetricPosterior>,
+
+    /// The tenant's learned revenue-per-fan exchange rate — what converts a
+    /// revenue-metric prediction into the fan-equivalent utility
+    /// `DecisionValue` adds in. Refreshed from first-party sales by the
+    /// loader each cycle; `serde(default)` keeps older checkpoints loadable
+    /// (the exchange then starts empty and refuses to convert until the
+    /// tenant has history, which is the safe direction).
+    #[serde(default)]
+    pub value_exchange: crate::value_exchange::ValueExchange,
 }
 
 /// Treatment-aware prediction statistics — the result of querying both the
@@ -303,7 +320,9 @@ pub struct CausalModel {
 /// available (the 30-day window hasn't elapsed), the brain falls back to Y14
 /// (14-day incremental) with **inflated uncertainty** via the Y14→Y30 bridge
 /// model. The `uses_y30` flag indicates which target drove the decision.
-#[derive(Clone, Copy, Debug, Serialize)]
+/// Not `Copy`: `secondary` carries per-metric predictions and a heap map
+/// cannot be a bitwise copy.
+#[derive(Clone, Debug, Serialize)]
 pub struct TreatmentAwareStats {
     /// Expected fans from the outcome model (fallback).
     pub expected_fans: f64,
@@ -351,6 +370,15 @@ pub struct TreatmentAwareStats {
     /// `Observational` since the causal model doesn't yet track per-template
     /// evidence quality. Phase 2 will derive this from the evidence table.
     pub evidence_quality: crate::evidence::EvidenceQuality,
+    /// Per-metric posterior predictions for this template and target —
+    /// `metric_key → (mean, std, confidence)` for every learned secondary
+    /// metric (ticket revenue, merch gross, replies, clicks, …). These are
+    /// *levels* in each metric's own units, carried as provenance so the
+    /// economic layer can convert revenue-denominated entries through the
+    /// value exchange and every other entry stays inspectable without ever
+    /// pretending to be fans.
+    #[serde(default)]
+    pub secondary: std::collections::BTreeMap<String, (f64, f64, u32)>,
 }
 
 /// Delegates to [`CausalModel::new`] rather than deriving.
@@ -449,6 +477,7 @@ impl CausalModel {
             calibration: crate::calibration::CalibrationByRegime::new(),
             context_effects: ContextGLM::new(),
             metric_posteriors: HashMap::new(),
+            value_exchange: crate::value_exchange::ValueExchange::default(),
             bridge: Y14Y30Bridge::new(),
         }
     }
@@ -906,6 +935,22 @@ impl CausalModel {
             )
         };
 
+        // Secondary metric predictions for this template/target — every
+        // learned metric, in its own units. Confidence 0 means the template
+        // has no direct observations and the estimate is pure partial pooling;
+        // downstream consumers decide which keys are convertible and which
+        // stay provenance.
+        let secondary = self
+            .metric_posteriors
+            .iter()
+            .map(|(key, posterior)| {
+                (
+                    key.clone(),
+                    posterior.predict_stats(template_id, target_key),
+                )
+            })
+            .collect();
+
         TreatmentAwareStats {
             expected_fans,
             treatment_effect,
@@ -921,6 +966,7 @@ impl CausalModel {
             p_meaningful_effect: p_meaningful,
             bridge_confidence: self.bridge.confidence(),
             bridge_is_reliable: self.bridge.confidence() >= MIN_BRIDGE_CONFIDENCE,
+            secondary,
             // Default to Observational — the application layer overrides
             // this via load_evidence_quality() when experiment assignments
             // exist. This is a conservative fallback, not a fake: when no

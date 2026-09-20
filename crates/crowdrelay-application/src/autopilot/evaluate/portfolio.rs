@@ -112,6 +112,7 @@ pub(super) fn select_portfolio(
     workspace_id: WorkspaceId,
     experimental_keys: &std::collections::HashSet<String>,
     sizing_multiplier: f64,
+    exchange: &crowdrelay_brain::ValueExchange,
 ) -> PortfolioRun {
     let candidates: Vec<PortfolioCandidate> = scored
         .iter()
@@ -140,7 +141,8 @@ pub(super) fn select_portfolio(
                 stats,
                 template_cost(policy, &p.template_id),
                 decision_mode,
-            );
+            )
+            .with_economic_value(stats, exchange);
             PortfolioCandidate {
                 opportunity_id: OpportunityId {
                     template_id: p.template_id.clone(),

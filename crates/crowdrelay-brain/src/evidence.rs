@@ -1059,6 +1059,7 @@ mod tests {
             },
             target_key: None,
             creative_family: None,
+            expected_metrics: Default::default(),
         };
         let evidence = GrowthEvidence::at_dispatch(
             uuid::Uuid::nil(),

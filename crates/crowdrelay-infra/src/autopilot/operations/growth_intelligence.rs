@@ -31,6 +31,7 @@ use super::*;
 
 mod community_targets;
 mod evidence_replay;
+mod exchange;
 use evidence_replay::{
     PosteriorReplay, apply_evidence_to_model, apply_evidence_to_model_with_contrast,
     apply_evidence_to_stored_strategy_posterior,
@@ -1148,7 +1149,7 @@ pub(in crate::autopilot) async fn load_causal_model(
 
     // Try to load a brain state checkpoint for fast startup.
     let checkpoint = super::evidence::load_brain_state(repo, workspace_id, "causal_model").await?;
-    let (model, belief) = if let Some((state_json, checkpoint_time)) = checkpoint {
+    let (mut model, belief) = if let Some((state_json, checkpoint_time)) = checkpoint {
         // Hashed before deserialization, from the bytes the row actually held.
         // `viryaos_brain_state` keeps one row per module and updates it in
         // place, so `checkpoint_time` says when and cannot say which — the
@@ -1250,6 +1251,11 @@ pub(in crate::autopilot) async fn load_causal_model(
         // No checkpoint — full replay from evidence table or legacy view.
         full_replay_with_origin(repo, workspace_id).await?
     };
+
+    // Refresh the value exchange from first-party sales before the model is
+    // used — and before the checkpoint saves it back, so the learned rate is
+    // durable state like every other posterior on the model.
+    exchange::refresh_value_exchange(repo, workspace_id, &mut model).await;
 
     Ok(LoadedCausalModel { model, belief })
 }
@@ -1405,6 +1411,7 @@ async fn full_replay(
             // teaches the template and audience type only.
             target_key: None,
             creative_family: None,
+            expected_metrics: Default::default(),
         };
         // The outcome model learns P(Y|action,context) from raw observed
         // fan counts, not from DiD estimates. Prefer observed_fans (raw)

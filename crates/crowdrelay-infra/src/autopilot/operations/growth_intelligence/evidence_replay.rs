@@ -340,6 +340,7 @@ pub(super) fn apply_evidence_to_model_with_contrast(
                 context: ev.context.clone(),
                 target_key: ev.target_key.clone(),
                 creative_family: ev.creative_family,
+                expected_metrics: Default::default(),
             };
             let outcome = PredictionOutcome::from_observation(prediction, raw_fans, 0.0);
             model.update(&outcome);

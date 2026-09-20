@@ -280,6 +280,11 @@ pub(super) fn community_engager_candidates(
             context: dispatch_context,
             target_key: Some(target_key.clone()),
             creative_family: Some(creative_family),
+            expected_metrics: treatment_stats
+                .secondary
+                .iter()
+                .map(|(key, (mean, _, _))| (key.clone(), *mean))
+                .collect(),
         };
         let action = AutopilotActionPayload::RequestAgentRun {
             template_id: "community-engager".to_owned(),
