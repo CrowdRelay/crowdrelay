@@ -30,6 +30,7 @@ pub(crate) mod operator_actions;
 mod placements;
 mod play_outcomes;
 mod plays;
+mod roster_brief;
 mod runtime;
 mod show_cost;
 mod state;

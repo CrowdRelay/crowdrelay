@@ -76,7 +76,9 @@ use serde::Serialize;
 use thiserror::Error;
 use time::OffsetDateTime;
 
-use super::{evidence_ledger::EvidenceLedger, model::*, ports::AutopilotDecisionRepository};
+use super::{
+    evidence_ledger::EvidenceLedger, model::*, policy_config::*, ports::AutopilotDecisionRepository,
+};
 mod beacons;
 mod booking_supply;
 mod commercial;
@@ -168,6 +170,10 @@ where
         let mut report = AutopilotCycleReport::default();
 
         for policy in policies.into_iter().filter(|policy| policy.enabled) {
+            // Registered before the arm runs so a context that produced
+            // nothing still reports `candidates: 0` — the reading a silent
+            // detector leaves, which `decisions` cannot show on its own.
+            report.context_stats(policy.context);
             match policy.context {
                 AutopilotContext::TicketYield => {
                     let snapshots = self
@@ -735,6 +741,12 @@ where
                     // name to an agent is the blast the season rule exists
                     // to prevent.
                 }
+                AutopilotContext::Roster => {
+                    // Roster handoffs are sweep-issued: the weekly brief is
+                    // composed and queued by the worker's roster sweep, not
+                    // proposed per-workspace here. The policy row holds
+                    // posture for a human to read and change.
+                }
             }
         }
 
@@ -801,6 +813,8 @@ where
         limits: &mut CycleLimits<'_>,
         report: &mut AutopilotCycleReport,
     ) -> Result<Option<Uuid>, AutopilotError> {
+        let stats = report.context_stats(candidate.context);
+        stats.candidates = stats.candidates.saturating_add(1);
         let class = candidate.action.action_class();
         let ceiling = limits
             .ceilings
@@ -888,9 +902,15 @@ where
         };
         if persisted.decision_created {
             report.decisions = report.decisions.saturating_add(1);
+            let stats = report.context_stats(candidate.context);
+            stats.decisions = stats.decisions.saturating_add(1);
         }
         if persisted.action_created {
             report.actions_enqueued = report.actions_enqueued.saturating_add(1);
+            report.context_stats(candidate.context).actions = report
+                .context_stats(candidate.context)
+                .actions
+                .saturating_add(1);
             if candidate.subject.is_contactable_person() {
                 limits.touched_this_cycle.insert(candidate.subject.uuid());
             }
@@ -917,6 +937,8 @@ where
         }
         if persisted.quota_throttled {
             report.actions_throttled = report.actions_throttled.saturating_add(1);
+            let stats = report.context_stats(candidate.context);
+            stats.throttled = stats.throttled.saturating_add(1);
         }
         Ok(persisted.action_id)
     }

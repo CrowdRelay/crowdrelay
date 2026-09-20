@@ -6,7 +6,7 @@
 //! so the whole template sits where the context list is defined. It holds no
 //! I/O of any kind.
 //!
-//! Twenty-one policy rows, four class ceilings and an envelope are the real
+//! One policy row per context, four class ceilings and an envelope are the real
 //! authority store; this module is the template that sets them all at once,
 //! so "let the agent work" is one decision instead of an afternoon. Two
 //! properties are load-bearing:

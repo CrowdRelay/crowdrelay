@@ -51,6 +51,9 @@ mod phase {
     pub const GROWTH_METRIC_CAPTURE: &str = "growth_metric_capture";
     pub const EVALUATION: &str = "evaluation";
     pub const TEAM_HANDOFF_RECONCILIATION: &str = "team_handoff_reconciliation";
+    /// The roster brief's issue attempt — one org-wide artifact plus its
+    /// handoffs, raced once per member workspace and won by exactly one.
+    pub const ROSTER_BRIEF_ISSUE: &str = "roster_brief_issue";
     pub const NO_EXECUTOR_SWEEP: &str = "no_executor_sweep";
     pub const ABANDONED_CLAIM_SWEEP: &str = "abandoned_claim_sweep";
     pub const ACTION_EXECUTION: &str = "action_execution";
@@ -348,15 +351,30 @@ impl AutopilotWorker {
                 // math and, when the watcher found nothing, the missing
                 // material itself. Both ride the same column — an operator
                 // reading "why did nothing happen" needs the two halves, not
-                // whichever one got stored first.
-                wait_reason = match (
+                // whichever one got stored first. A candidate the 24h quota
+                // ate is a third quiet: it leaves no decision row anywhere,
+                // so the context that produced it is named here or nowhere.
+                let mut quiet_parts: Vec<String> = [
                     report.supply_wait_reason.clone(),
                     report.gi_wait_reason.clone(),
-                ) {
-                    (Some(supply), Some(gi)) => Some(format!("{supply}; {gi}")),
-                    (Some(supply), None) => Some(supply),
-                    (None, gi) => gi,
-                };
+                ]
+                .into_iter()
+                .flatten()
+                .collect();
+                quiet_parts.extend(
+                    report
+                        .context_activity
+                        .values()
+                        .filter(|activity| activity.throttled > 0)
+                        .map(|activity| {
+                            format!(
+                                "{} asked {} time(s); its 24h quota was already spent",
+                                activity.context.as_str(),
+                                activity.throttled,
+                            )
+                        }),
+                );
+                wait_reason = (!quiet_parts.is_empty()).then(|| quiet_parts.join("; "));
                 tracing::info!(
                     decisions = report.decisions,
                     actions_enqueued = report.actions_enqueued,
@@ -368,6 +386,7 @@ impl AutopilotWorker {
                     gi_candidates = report.gi_candidates,
                     gi_wait_reason = ?report.gi_wait_reason,
                     gi_dispatch_log = ?report.gi_dispatch_log,
+                    context_activity = ?report.context_activity,
                     "autopilot cycle report"
                 );
                 // A prerequisite gate that drops candidates silently reads
@@ -420,6 +439,21 @@ impl AutopilotWorker {
             Err(error) => {
                 degraded.failed(phase::TEAM_HANDOFF_RECONCILIATION);
                 tracing::warn!(error = %error, "ViryaOS team handoff reconciliation failed");
+            }
+        }
+        // The roster weekly brief rides the same handoff rail as the daily
+        // briefing, one sweep later so a handoff failure cannot take the
+        // brief down with it — and vice versa.
+        match self
+            .repository
+            .issue_roster_weekly_briefs(self.workspace_id, now)
+            .await
+        {
+            Ok(count) if count > 0 => tracing::info!(count, "issued ViryaOS roster weekly brief"),
+            Ok(_) => {}
+            Err(error) => {
+                degraded.failed(phase::ROSTER_BRIEF_ISSUE);
+                tracing::warn!(error = %error, "ViryaOS roster weekly brief issue failed");
             }
         }
         match self

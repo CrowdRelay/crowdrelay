@@ -135,7 +135,7 @@ class PlaysContract(unittest.TestCase):
         self.assertIn("AutopilotContext::from_storage(&row.context)", read(MAPPING))
         self.assertIn('Self::Plays => "plays"', read(MODEL))
         self.assertIn('"plays" => Some(AutopilotContext::Plays)', read(VALIDATION))
-        self.assertIn("plays]", read(OPENAPI))
+        self.assertIn(", plays,", read(OPENAPI))
 
     def test_the_context_arrives_disabled_and_quota_limited(self) -> None:
         # A play that starts running because a migration landed is a play

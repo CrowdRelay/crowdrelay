@@ -17,6 +17,8 @@ use crowdrelay_domain::{
         BookingCandidateInput, BookingDiscoveryPolicy, Screening, screen_candidate,
     },
 };
+use sha2::{Digest, Sha256};
+use sqlx::{Postgres, Transaction};
 
 const fn booking_target_kind_str(kind: BookingTargetKind) -> &'static str {
     match kind {
@@ -188,12 +190,20 @@ impl AutopilotBookingDiscoveryRepository for PostgresAutopilotRepository {
                 return Err(RepositoryError::Conflict);
             }
             let city_slug = row.2.clone().ok_or(RepositoryError::Conflict)?;
-            let city_id = sqlx::query_scalar::<_, Uuid>("SELECT id FROM cities WHERE slug = $1")
-                .bind(&city_slug)
-                .fetch_optional(&mut *tx)
-                .await
-                .map_err(map_sqlx)?
-                .ok_or(RepositoryError::NotFound)?;
+            // A city the source named but nobody resolved is a pending city,
+            // not a dead end — blocking promotion on geography would leave
+            // the admitted queue stuck behind a 22-row city table while the
+            // festivals it describes sit mostly elsewhere.
+            let city_id =
+                match sqlx::query_scalar::<_, Uuid>("SELECT id FROM cities WHERE slug = $1")
+                    .bind(&city_slug)
+                    .fetch_optional(&mut *tx)
+                    .await
+                    .map_err(map_sqlx)?
+                {
+                    Some(id) => id,
+                    None => mint_pending_city(&mut tx, &city_slug).await?,
+                };
 
             let target_id_opt = sqlx::query_scalar::<_, Uuid>(
                 r#"
@@ -304,4 +314,95 @@ impl AutopilotBookingDiscoveryRepository for PostgresAutopilotRepository {
         })
         .await
     }
+}
+
+/// The `pending-*` row is the system's own spelling for "a place somebody
+/// asked for that nobody has resolved" — fan city requests mint the same
+/// shape, and the row lands on the same operator queue. A booking candidate
+/// carries only a slug, so the country is honestly unknown: 'XX' is the
+/// sentinel rather than a guess, and geocoding or moderation resolves it
+/// like any other pending city.
+///
+/// Deterministic on purpose: the same source slug derives the same pending
+/// slug, so a second candidate for the same place lands on the same row
+/// through the conflict path instead of minting a twin. The bumped
+/// `request_count` is the honest reading — the pipeline asked again.
+async fn mint_pending_city(
+    tx: &mut Transaction<'_, Postgres>,
+    city_slug: &str,
+) -> Result<Uuid, RepositoryError> {
+    // A slug that is all separators ('---', '_-_') has nothing to title-case
+    // but still passed the candidate column's checks — the source did name a
+    // place, just badly. The raw slug is the honest rendering, and the
+    // `XX\0{display}` hash keeps distinct garbage on distinct rows rather
+    // than failing the confirmation forever.
+    let display = pending_city_display(city_slug).unwrap_or_else(|| city_slug.to_owned());
+    sqlx::query_scalar::<_, Uuid>(
+        r#"
+        INSERT INTO cities (
+            slug, name, country_code, moderation_status,
+            request_count, first_requested_at, last_requested_at
+        )
+        VALUES ($1, $2, 'XX', 'pending', 1, now(), now())
+        ON CONFLICT (country_code, slug) DO UPDATE
+            SET request_count = cities.request_count + 1,
+                last_requested_at = now()
+        RETURNING id
+        "#,
+    )
+    .bind(pending_city_slug(&display))
+    .bind(&display)
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(map_sqlx)
+}
+
+/// "karpacz-gorny" reads to a person as "Karpacz Gorny" — a rendering of the
+/// slug the source supplied, not an invented name.
+fn pending_city_display(city_slug: &str) -> Option<String> {
+    let display = city_slug
+        .split(['-', '_'])
+        .filter(|part| !part.is_empty())
+        .map(|part| {
+            let mut characters = part.chars();
+            match characters.next() {
+                Some(first) => first.to_uppercase().collect::<String>() + characters.as_str(),
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    (!display.is_empty()).then_some(display)
+}
+
+/// Same shape as the fan-request convention (`requested_slug` in
+/// `mobile_fan.rs`): slugified label plus ten hash characters, so two
+/// unrelated places that slugify alike still land on different rows.
+fn pending_city_slug(display: &str) -> String {
+    let normalized = display
+        .to_lowercase()
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() {
+                character
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>()
+        .split('-')
+        .filter(|part| !part.is_empty())
+        .take(8)
+        .collect::<Vec<_>>()
+        .join("-");
+    let suffix = hex::encode(Sha256::digest(format!("XX\0{display}")))
+        .chars()
+        .take(10)
+        .collect::<String>();
+    let label = if normalized.is_empty() {
+        "city"
+    } else {
+        normalized.as_str()
+    };
+    format!("pending-{label}-{suffix}")
 }

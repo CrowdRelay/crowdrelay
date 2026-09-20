@@ -1089,10 +1089,13 @@ pub(in crate::autopilot) async fn load_beacon_invite_snapshots(
             beacon.relationship_score,
             FLOOR(EXTRACT(EPOCH FROM (event.starts_at - $2)) / 3600)::bigint
                 AS hours_until_event,
-            GREATEST(
-                0,
-                FLOOR(EXTRACT(EPOCH FROM ($2 - last_ask.asked_at)) / 3600)
-            )::bigint AS hours_since_last_invite_batch
+            CASE
+                WHEN last_ask.asked_at IS NULL THEN NULL
+                ELSE GREATEST(
+                    0,
+                    FLOOR(EXTRACT(EPOCH FROM ($2 - last_ask.asked_at)) / 3600)
+                )::bigint
+            END AS hours_since_last_invite_batch
         FROM viryaos_beacons AS beacon
         JOIN events AS event
           ON event.workspace_id = beacon.workspace_id
@@ -1167,10 +1170,13 @@ pub(in crate::autopilot) async fn load_booking_supply_snapshot(
                       AND target.accepts_booking
                 ),
                 (
-                    SELECT GREATEST(
-                        0,
-                        FLOOR(EXTRACT(EPOCH FROM ($2 - max(d.evaluated_at))) / 3600)
-                    )::bigint
+                    SELECT CASE
+                        WHEN max(d.evaluated_at) IS NULL THEN NULL
+                        ELSE GREATEST(
+                            0,
+                            FLOOR(EXTRACT(EPOCH FROM ($2 - max(d.evaluated_at))) / 3600)
+                        )::bigint
+                    END
                     FROM viryaos_autopilot_decisions AS d
                     WHERE d.workspace_id = $1
                       AND d.context = 'booking_opportunity'
