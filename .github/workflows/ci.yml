@@ -117,8 +117,11 @@ jobs:
 
       - name: Purge stale Rust cache entries
         # Swatinem/rust-cache keys on Cargo.lock hash; each lock change leaves
-        # the previous ~640 MB entry orphaned until 7-day TTL. Prune old
-        # entries before saving a new one to stay within the account quota.
+        # the previous ~640 MB entry orphaned until 7-day TTL. Prune every
+        # rust entry except the newest — the newest is the one this run is
+        # about to restore (and, under cancel-in-progress churn, often the
+        # only warm cache in the pool: a cancelled run never reaches the save
+        # step, so an unconditional purge used to leave every next run cold).
         if: github.ref == 'refs/heads/main' && github.job == 'rust-tests'
         continue-on-error: true
         env:
@@ -127,7 +130,7 @@ jobs:
         run: |
           set -euo pipefail
           mapfile -t ids < <(gh api "repos/${GITHUB_REPOSITORY}/actions/caches?per_page=100" \
-            --jq '.actions_caches[] | select(.key | startswith("v0-rust-")) | .id' 2>/dev/null || true)
+            --jq '[.actions_caches[] | select(.key | startswith("v0-rust-"))] | sort_by(.created_at) | reverse | .[1:][] | .id' 2>/dev/null || true)
           for id in "${ids[@]}"; do
             gh api -X DELETE "repos/${GITHUB_REPOSITORY}/actions/caches/${id}" 2>/dev/null || true
           done
