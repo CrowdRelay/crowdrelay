@@ -49,6 +49,26 @@ struct ReminderRow {
     payload: Option<serde_json::Value>,
 }
 
+/// A first-notice held for per-member batching.
+///
+/// The reminder sweep already sends one e-mail per person per pass; first
+/// notices used to go one-per-assignment, so a batch of approvals landing in
+/// a single cycle put a dozen same-minute mails in one inbox — twenty-one to
+/// two people on 2026-09-20. Holding them until every producer has run lets
+/// one e-mail carry the most urgent task and name the rest, the same digest
+/// the reminder path composes. Every assignment still keeps its own reminder
+/// ladder — batching changes interruptions, not bookkeeping.
+pub(super) struct PendingInitialNotice {
+    pub assignment_id: Uuid,
+    pub context: String,
+    pub recipient_email: String,
+    pub recipient_name: String,
+    pub title: String,
+    pub detail: String,
+    pub due_at: Option<OffsetDateTime>,
+    pub source_action_id: Option<Uuid>,
+}
+
 impl PostgresAutopilotRepository {
     /// Reconciles approvals and genuinely manual show-checklist work into one
     /// owner index. An assignment is committed only when the `team.email`
@@ -204,6 +224,10 @@ impl PostgresAutopilotRepository {
             .map_err(map_sqlx)?;
 
             let mut mutable_team = team;
+            // First notices collect here rather than mailing per assignment —
+            // `flush_initial_notices` sends one e-mail per member once every
+            // producer has offered its asks.
+            let mut pending_notices: Vec<PendingInitialNotice> = Vec::new();
             for action in approvals {
                 let need = assignment_need(&action.context, &action.action_kind);
                 let member_index = match select_member_index_explained(&mutable_team, need) {
@@ -256,26 +280,21 @@ impl PostgresAutopilotRepository {
                     continue;
                 }
 
-                queue_team_email_action(
-                    &mut tx,
-                    workspace_id,
+                pending_notices.push(PendingInitialNotice {
                     assignment_id,
-                    &action.context,
-                    &member.normalized_email,
-                    &member.display_name,
-                    friendly_action_title(&action.action_kind, crew_locale),
-                    enriched_task_detail(
+                    context: action.context.clone(),
+                    recipient_email: member.normalized_email.clone(),
+                    recipient_name: member.display_name.clone(),
+                    title: friendly_action_title(&action.action_kind, crew_locale),
+                    detail: enriched_task_detail(
                         &action.payload,
                         action.approval_expires_at,
                         None,
                         crew_locale,
                     ),
-                    action.approval_expires_at,
-                    0,
-                    Some(action.id),
-                    now,
-                )
-                .await?;
+                    due_at: action.approval_expires_at,
+                    source_action_id: Some(action.id),
+                });
                 member.open_assignments = member.open_assignments.saturating_add(1);
                 member.recent_assignments = member.recent_assignments.saturating_add(1);
                 member.asks_last_7d = member.asks_last_7d.saturating_add(1);
@@ -289,6 +308,7 @@ impl PostgresAutopilotRepository {
                     now,
                     &mut mutable_team,
                     crew_locale,
+                    &mut pending_notices,
                 )
                 .await?,
             );
@@ -342,21 +362,16 @@ impl PostgresAutopilotRepository {
                     continue;
                 }
 
-                queue_team_email_action(
-                    &mut tx,
-                    workspace_id,
+                pending_notices.push(PendingInitialNotice {
                     assignment_id,
-                    "show_operations",
-                    &member.normalized_email,
-                    &member.display_name,
-                    friendly_show_task_title(&task.task_key, crew_locale),
-                    show_task_detail(&task, crew_locale),
-                    Some(task.due_at),
-                    0,
-                    None,
-                    now,
-                )
-                .await?;
+                    context: "show_operations".to_owned(),
+                    recipient_email: member.normalized_email.clone(),
+                    recipient_name: member.display_name.clone(),
+                    title: friendly_show_task_title(&task.task_key, crew_locale),
+                    detail: show_task_detail(&task, crew_locale),
+                    due_at: Some(task.due_at),
+                    source_action_id: None,
+                });
                 member.open_assignments = member.open_assignments.saturating_add(1);
                 member.recent_assignments = member.recent_assignments.saturating_add(1);
                 member.asks_last_7d = member.asks_last_7d.saturating_add(1);
@@ -370,9 +385,12 @@ impl PostgresAutopilotRepository {
                     now,
                     &mut mutable_team,
                     crew_locale,
+                    &mut pending_notices,
                 )
                 .await?,
             );
+
+            flush_initial_notices(&mut tx, workspace_id, pending_notices, crew_locale, now).await?;
 
             tx.commit().await.map_err(map_sqlx)?;
             Ok(assigned)
@@ -776,6 +794,80 @@ pub(super) async fn queue_team_email_action(
     .execute(&mut **tx)
     .await
     .map_err(map_sqlx)?;
+    Ok(())
+}
+
+/// Sends every held first-notice as one e-mail per member: the earliest-due
+/// task supplies the subject and body, and the rest are named underneath it
+/// through the same digest tail the reminder sweep composes.
+///
+/// A batch of approvals landing in one cycle used to mail one notice per
+/// assignment, all stamped the same minute — the inbox learned to ignore
+/// VIRYA mail entirely, which is what the reminder digest was built to undo.
+/// The initial send had the same shape and the same cost; it gets the same
+/// fix. The e-mail is still one durable action row per member, idempotent on
+/// the primary assignment — a notice folded into somebody else's e-mail is
+/// never mailed on its own, and its assignment still keeps its own reminder
+/// ladder, so nothing named here can go silent.
+async fn flush_initial_notices(
+    tx: &mut Transaction<'_, Postgres>,
+    workspace_id: WorkspaceId,
+    pending: Vec<PendingInitialNotice>,
+    crew_locale: BriefingLocale,
+    now: OffsetDateTime,
+) -> Result<(), RepositoryError> {
+    let mut by_recipient: Vec<(String, Vec<PendingInitialNotice>)> = Vec::new();
+    for notice in pending {
+        match by_recipient
+            .iter_mut()
+            .find(|(email, _)| *email == notice.recipient_email)
+        {
+            Some((_, group)) => group.push(notice),
+            None => by_recipient.push((notice.recipient_email.clone(), vec![notice])),
+        }
+    }
+
+    for (_, mut group) in by_recipient {
+        // The most urgent task carries the e-mail — soonest deadline first,
+        // undated last — regardless of which producer offered it.
+        group.sort_by_key(|notice| (notice.due_at.is_none(), notice.due_at));
+        let Some(primary) = group.first() else {
+            continue;
+        };
+        let others: Vec<String> = group
+            .iter()
+            .skip(1)
+            .map(|notice| notice.title.clone())
+            .collect();
+        let tail = digest_tail(&others, crew_locale);
+        // The n8n workflow slices `task_detail` at 1800 chars — a tail
+        // appended behind a full-length detail would be cut wholesale, and
+        // the named tasks are the point of the digest. The primary's body
+        // gives up its room instead: the panel behind the link carries its
+        // full record.
+        let budget = 1800_usize.saturating_sub(tail.len());
+        let mut detail = primary.detail.clone();
+        if detail.len() > budget {
+            detail.truncate(detail.floor_char_boundary(budget));
+            detail.push('…');
+        }
+        detail.push_str(&tail);
+        queue_team_email_action(
+            tx,
+            workspace_id,
+            primary.assignment_id,
+            &primary.context,
+            &primary.recipient_email,
+            &primary.recipient_name,
+            primary.title.clone(),
+            detail,
+            primary.due_at,
+            0,
+            primary.source_action_id,
+            now,
+        )
+        .await?;
+    }
     Ok(())
 }
 

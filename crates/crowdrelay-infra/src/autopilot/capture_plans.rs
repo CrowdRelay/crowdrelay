@@ -15,7 +15,7 @@
 //!   assignment + reminder machinery every human handoff uses.
 
 use super::{
-    team::{first_reminder_at, queue_team_email_action},
+    team::{PendingInitialNotice, first_reminder_at},
     team_routing::{TeamRoutingRow, parse_team_skill, select_member_index},
     *,
 };
@@ -422,6 +422,7 @@ pub(in crate::autopilot) async fn issue_capture_plans(
     now: OffsetDateTime,
     mutable_team: &mut [TeamRoutingRow],
     crew_locale: crowdrelay_application::autopilot::BriefingLocale,
+    pending_notices: &mut Vec<PendingInitialNotice>,
 ) -> Result<u32, RepositoryError> {
     // `today` is bound as a DATE so the window compares dates to dates —
     // casting the instant session-side would let the connection's
@@ -573,6 +574,7 @@ pub(in crate::autopilot) async fn issue_capture_plans(
                 now,
                 mutable_team,
                 crew_locale,
+                pending_notices,
             )
             .await?,
         );
@@ -646,6 +648,7 @@ pub(in crate::autopilot) async fn issue_capture_plans(
                 now,
                 mutable_team,
                 crew_locale,
+                pending_notices,
             )
             .await?,
         );
@@ -690,6 +693,7 @@ async fn route_capture_plan(
     now: OffsetDateTime,
     mutable_team: &mut [TeamRoutingRow],
     crew_locale: crowdrelay_application::autopilot::BriefingLocale,
+    pending_notices: &mut Vec<PendingInitialNotice>,
 ) -> Result<u32, RepositoryError> {
     let member = mutable_team
         .get_mut(member_index)
@@ -722,14 +726,12 @@ async fn route_capture_plan(
         return Ok(0);
     }
 
-    queue_team_email_action(
-        tx,
-        workspace_id,
+    pending_notices.push(PendingInitialNotice {
         assignment_id,
-        "show_operations",
-        &member.normalized_email,
-        &member.display_name,
-        match crew_locale {
+        context: "show_operations".to_owned(),
+        recipient_email: member.normalized_email.clone(),
+        recipient_name: member.display_name.clone(),
+        title: match crew_locale {
             crowdrelay_application::autopilot::BriefingLocale::Pl => {
                 format!("Zabezpiecz materiał: {day_title}")
             }
@@ -737,7 +739,7 @@ async fn route_capture_plan(
                 format!("Secure the footage: {day_title}")
             }
         },
-        capture_plan_detail(
+        detail: capture_plan_detail(
             day_title,
             scheduled_for,
             &shots
@@ -746,12 +748,9 @@ async fn route_capture_plan(
                 .collect::<Vec<_>>(),
             crew_locale,
         ),
-        Some(due_at),
-        0,
-        None,
-        now,
-    )
-    .await?;
+        due_at: Some(due_at),
+        source_action_id: None,
+    });
 
     // The checklist's bare 'capture_plan' item meant "does this show
     // have a plan" — it does now. Marking it done keeps the checklist
