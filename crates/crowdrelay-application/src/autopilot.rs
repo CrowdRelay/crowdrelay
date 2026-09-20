@@ -12,6 +12,7 @@ mod evidence_ledger;
 mod growth_posture;
 mod measurement_ports;
 mod model;
+mod policy_config;
 mod ports;
 
 pub use belief_revision::*;
@@ -21,4 +22,5 @@ pub use evidence_ledger::*;
 pub use growth_posture::*;
 pub use measurement_ports::*;
 pub use model::*;
+pub use policy_config::*;
 pub use ports::*;

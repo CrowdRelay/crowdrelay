@@ -1,43 +1,35 @@
 //! Stable application-boundary types for ViryaOS Autopilot.
 
-use crowdrelay_brain::{AgentTier, GrowthIntelligencePolicy};
+use crowdrelay_brain::AgentTier;
 use crowdrelay_domain::{
     ArcId, AutopilotActionId, BeaconId, BookingAgentId, BookingTargetId, CityId, ContentSourceId,
     ContentSuggestionId, EventId, ExperimentId, ExperimentVariantId, FanId, GrowthMetricSeriesId,
     MerchProductId, MerchVariantId, OutreachOpportunityId, OutreachTargetId, PlayId,
     PromotionCampaignId, ReleasePlanId, TeamOpportunityId, TicketTypeId, WorkspaceId,
     action_class::ActionClass,
-    audience_lifecycle::FanLifecyclePolicy,
     autonomy::{AutonomyLevel, Confidence, PolicyDisposition},
-    beacons::{BeaconCampaignPolicy, BeaconOutreachPhase},
-    booking::{BookingOpportunityPolicy, BookingOutreachPhase, BookingVenueEvidence},
-    booking_agent::{AgentDrawEvidence, BookingAgentPolicy},
+    beacons::BeaconOutreachPhase,
+    booking::{BookingOutreachPhase, BookingVenueEvidence},
+    booking_agent::AgentDrawEvidence,
     booking_window::ProposedWindow,
-    campaign_lifecycle::{EventCampaignPhase, EventCampaignPolicy},
-    content_engine::ContentStrategyPolicy,
-    content_supply::{ContentArtifactKind, ContentSupplyPolicy},
-    experimentation::ExperimentPolicy,
+    campaign_lifecycle::EventCampaignPhase,
+    content_supply::ContentArtifactKind,
     free_reach::{WaveAnchor, WaveExpiry},
-    funding::FundingPolicy,
-    growth_debt::{GrowthDebtKind, GrowthDebtPolicy, GrowthDebtSubject},
-    growth_metrics::{GrowthMetricPolicy, GrowthSignal, MetricDirection, MetricPlatform},
+    growth_debt::{GrowthDebtKind, GrowthDebtSubject},
+    growth_metrics::{GrowthSignal, MetricDirection, MetricPlatform},
     learning::{OutcomeRecord, Standing},
-    live_opportunities::{LiveOpportunityKind, LiveOpportunityPolicy, LiveOpportunitySnapshot},
-    merch_bundle::MerchBundlePolicy,
-    merchandising::{MerchPricePolicy, MerchReorderPolicy},
+    live_opportunities::{LiveOpportunityKind, LiveOpportunitySnapshot},
     negotiation::{TermsRefusal, TermsSnapshot, TermsState},
-    outreach::{OutreachPhase, OutreachPolicy, OutreachTargetKind},
+    outreach::{OutreachPhase, OutreachTargetKind},
     play_measurement::PlayClaim,
     playlist_placement::{PlacementObservation, PlacementSnapshot, PlacementState},
-    plays::{PlayAnchorKind, PlayKind, PlayPolicy, PlayStepKind, PlayStepState, StepSkipReason},
-    pricing::TicketYieldPolicy,
-    promotion::PromotionBudgetPolicy,
-    release_autopilot::{ReleaseAutopilotPolicy, ReleaseMilestone},
-    representation::RepresentationPolicy,
-    show_growth::{ShowGrowthLever, ShowGrowthPolicy},
-    show_operations::{ShowOperationsPolicy, ShowTaskKind},
-    target_discovery::OutreachSupplyPolicy,
+    plays::{PlayAnchorKind, PlayKind, PlayStepKind, PlayStepState, StepSkipReason},
+    release_autopilot::ReleaseMilestone,
+    show_growth::ShowGrowthLever,
+    show_operations::ShowTaskKind,
 };
+
+use super::policy_config::AutopilotPolicyConfig;
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
@@ -84,6 +76,10 @@ pub enum AutopilotContext {
     /// asks for representation — a season-scarce application that refuses to
     /// exist without real draw evidence behind it.
     BookingAgent,
+    /// The organisation's own rail: roster-level handoffs (the weekly brief's
+    /// team emails) ride here so a label's manager mail is its own context
+    /// rather than borrowed show vocabulary.
+    Roster,
 }
 
 impl AutopilotContext {
@@ -92,7 +88,7 @@ impl AutopilotContext {
     /// Storage parsing is derived from this list rather than restating the
     /// names: a context the policy table can hold but a reader cannot parse
     /// fails the whole overview read, not just its own row.
-    pub const ALL: [Self; 25] = [
+    pub const ALL: [Self; 26] = [
         Self::TicketYield,
         Self::FanLifecycle,
         Self::CampaignLifecycle,
@@ -118,6 +114,7 @@ impl AutopilotContext {
         Self::ContentStrategy,
         Self::Representation,
         Self::BookingAgent,
+        Self::Roster,
     ];
 
     /// Parse the stored representation written by [`Self::as_str`].
@@ -156,152 +153,8 @@ impl AutopilotContext {
             Self::ContentStrategy => "content_strategy",
             Self::Representation => "representation",
             Self::BookingAgent => "booking_agent",
+            Self::Roster => "roster",
         }
-    }
-}
-
-/// Typed bounded-context configuration loaded from the policy store.
-#[derive(Clone, Debug, PartialEq)]
-pub enum AutopilotPolicyConfig {
-    TicketYield(TicketYieldPolicy),
-    FanLifecycle(FanLifecyclePolicy),
-    CampaignLifecycle(EventCampaignPolicy),
-    Merchandising(MerchReorderPolicy),
-    MerchPricing(MerchPricePolicy),
-    MerchBundle(MerchBundlePolicy),
-    BookingOpportunity(BookingOpportunityPolicy),
-    Outreach(OutreachPolicy),
-    ContentSupply(ContentSupplyPolicy),
-    PromotionBudget(PromotionBudgetPolicy),
-    Experimentation(ExperimentPolicy),
-    ShowOperations(ShowOperationsPolicy),
-    Release(ReleaseAutopilotPolicy),
-    LiveOpportunity(LiveOpportunityPolicy),
-    Funding(FundingPolicy),
-    Beacon(BeaconCampaignPolicy),
-    ShowGrowth(ShowGrowthPolicy),
-    GrowthMetrics(GrowthMetricPolicy),
-    GrowthDebt(GrowthDebtPolicy),
-    OutreachSupply(OutreachSupplyPolicy),
-    GrowthIntelligence(GrowthIntelligencePolicy),
-    Plays(PlayPolicy),
-    ContentStrategy(ContentStrategyPolicy),
-    Representation(RepresentationPolicy),
-    BookingAgent(BookingAgentPolicy),
-}
-
-impl AutopilotPolicyConfig {
-    /// Parses one context's operator config from its stored JSON.
-    ///
-    /// The single source of truth for "what config keys does this context
-    /// accept": the policy reader, the write path and the API validator all
-    /// call this, so a key cannot be accepted on write and silently dropped
-    /// on read. An empty object means "reset to defaults" — every knob is
-    /// optional and every type carries its own defaults.
-    pub fn parse_for(
-        context: AutopilotContext,
-        raw: serde_json::Value,
-    ) -> Result<Self, serde_json::Error> {
-        match context {
-            AutopilotContext::TicketYield => {
-                Self::parse_into(raw, Self::TicketYield, TicketYieldPolicy::default())
-            }
-            AutopilotContext::FanLifecycle => {
-                Self::parse_into(raw, Self::FanLifecycle, FanLifecyclePolicy::default())
-            }
-            AutopilotContext::CampaignLifecycle => {
-                Self::parse_into(raw, Self::CampaignLifecycle, EventCampaignPolicy::default())
-            }
-            AutopilotContext::Merchandising => {
-                Self::parse_into(raw, Self::Merchandising, MerchReorderPolicy::default())
-            }
-            AutopilotContext::MerchPricing => {
-                Self::parse_into(raw, Self::MerchPricing, MerchPricePolicy::default())
-            }
-            AutopilotContext::MerchBundle => {
-                Self::parse_into(raw, Self::MerchBundle, MerchBundlePolicy::default())
-            }
-            AutopilotContext::BookingOpportunity => Self::parse_into(
-                raw,
-                Self::BookingOpportunity,
-                BookingOpportunityPolicy::default(),
-            ),
-            AutopilotContext::Outreach => {
-                Self::parse_into(raw, Self::Outreach, OutreachPolicy::default())
-            }
-            AutopilotContext::ContentSupply => {
-                Self::parse_into(raw, Self::ContentSupply, ContentSupplyPolicy::default())
-            }
-            AutopilotContext::PromotionBudget => {
-                Self::parse_into(raw, Self::PromotionBudget, PromotionBudgetPolicy::default())
-            }
-            AutopilotContext::Experimentation => {
-                Self::parse_into(raw, Self::Experimentation, ExperimentPolicy::default())
-            }
-            AutopilotContext::ShowOperations => {
-                let parsed =
-                    Self::parse_into(raw, Self::ShowOperations, ShowOperationsPolicy::default())?;
-                if let Self::ShowOperations(policy) = &parsed {
-                    policy.validate().map_err(serde::de::Error::custom)?;
-                }
-                Ok(parsed)
-            }
-            AutopilotContext::Release => {
-                Self::parse_into(raw, Self::Release, ReleaseAutopilotPolicy::default())
-            }
-            AutopilotContext::LiveOpportunity => {
-                Self::parse_into(raw, Self::LiveOpportunity, LiveOpportunityPolicy::default())
-            }
-            AutopilotContext::Funding => {
-                Self::parse_into(raw, Self::Funding, FundingPolicy::default())
-            }
-            AutopilotContext::Beacon => {
-                Self::parse_into(raw, Self::Beacon, BeaconCampaignPolicy::default())
-            }
-            AutopilotContext::ShowGrowth => {
-                Self::parse_into(raw, Self::ShowGrowth, ShowGrowthPolicy::default())
-            }
-            AutopilotContext::GrowthMetrics => {
-                Self::parse_into(raw, Self::GrowthMetrics, GrowthMetricPolicy::default())
-            }
-            AutopilotContext::GrowthDebt => {
-                Self::parse_into(raw, Self::GrowthDebt, GrowthDebtPolicy::default())
-            }
-            AutopilotContext::OutreachSupply => {
-                Self::parse_into(raw, Self::OutreachSupply, OutreachSupplyPolicy::default())
-            }
-            AutopilotContext::GrowthIntelligence => Self::parse_into(
-                raw,
-                Self::GrowthIntelligence,
-                GrowthIntelligencePolicy::default(),
-            ),
-            AutopilotContext::Plays => Self::parse_into(raw, Self::Plays, PlayPolicy::default()),
-            AutopilotContext::ContentStrategy => {
-                Self::parse_into(raw, Self::ContentStrategy, ContentStrategyPolicy::default())
-            }
-            AutopilotContext::Representation => {
-                Self::parse_into(raw, Self::Representation, RepresentationPolicy::default())
-            }
-            AutopilotContext::BookingAgent => {
-                Self::parse_into(raw, Self::BookingAgent, BookingAgentPolicy::default())
-            }
-        }
-    }
-
-    fn parse_into<T>(
-        raw: serde_json::Value,
-        wrap: fn(T) -> Self,
-        default: T,
-    ) -> Result<Self, serde_json::Error>
-    where
-        T: serde::de::DeserializeOwned,
-    {
-        // An empty object is the reset-to-defaults spelling, matching how a
-        // provisioned workspace reads before anybody has tuned anything.
-        if raw.as_object().is_some_and(serde_json::Map::is_empty) {
-            return Ok(wrap(default));
-        }
-        serde_json::from_value::<T>(raw).map(wrap)
     }
 }
 

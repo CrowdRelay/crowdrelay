@@ -60,22 +60,22 @@ pub(in crate::autopilot) async fn load_team_routing(
         r#"SELECT profile.member_id, profile.member_key, member.display_name,
                   member.normalized_email, profile.active, profile.skills,
                   profile.capacity_basis_points,
-                  -- 'daily_briefing' rows are reads, not work: they are
-                  -- excluded everywhere in this roster so the one the sweep
-                  -- hands every member each morning neither consumes
-                  -- capacity nor teaches the follow-through metric that
-                  -- the member "settles work without completing it".
+                  -- 'daily_briefing' and 'roster_weekly_brief' rows are
+                  -- reads, not work: they are excluded everywhere in this
+                  -- roster so the ones the sweeps hand members neither
+                  -- consume capacity nor teach the follow-through metric
+                  -- that the member "settles work without completing it".
                   COUNT(assignment.id) FILTER (
                       WHERE assignment.status='open'
-                        AND assignment.source_kind <> 'daily_briefing'
+                        AND assignment.source_kind NOT IN ('daily_briefing','roster_weekly_brief')
                   ) open_assignments,
                   COUNT(assignment.id) FILTER (
                       WHERE assignment.assigned_at >= $2 - INTERVAL '30 days'
-                        AND assignment.source_kind <> 'daily_briefing'
+                        AND assignment.source_kind NOT IN ('daily_briefing','roster_weekly_brief')
                   ) recent_assignments,
                   COUNT(assignment.id) FILTER (
                       WHERE assignment.assigned_at >= $2 - INTERVAL '7 days'
-                        AND assignment.source_kind <> 'daily_briefing'
+                        AND assignment.source_kind NOT IN ('daily_briefing','roster_weekly_brief')
                   ) asks_last_7d,
                   -- Follow-through: of the work this member was given and that
                   -- has had time to be done, how much did they actually finish,
@@ -100,7 +100,7 @@ pub(in crate::autopilot) async fn load_team_routing(
                       WHERE history.workspace_id = profile.workspace_id
                         AND history.assignee_member_id = profile.member_id
                         AND history.status <> 'open'
-                        AND history.source_kind <> 'daily_briefing'
+                        AND history.source_kind NOT IN ('daily_briefing','roster_weekly_brief')
                         AND history.assigned_at < $2 - INTERVAL '1 day'
                   ), 5000) AS follow_through_basis_points,
                   -- The same measure, split by the skill the work needed.
@@ -130,7 +130,7 @@ pub(in crate::autopilot) async fn load_team_routing(
                    WHERE history.workspace_id = profile.workspace_id
                      AND history.assignee_member_id = profile.member_id
                      AND history.status <> 'open'
-                     AND history.source_kind <> 'daily_briefing'
+                     AND history.source_kind NOT IN ('daily_briefing','roster_weekly_brief')
                      AND history.assigned_at < $2 - INTERVAL '1 day'
                    GROUP BY history.required_skill
                ) skill

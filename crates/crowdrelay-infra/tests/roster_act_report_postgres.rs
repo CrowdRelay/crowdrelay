@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use crowdrelay_infra::roster_act_report::{CATALOGUE_ROTATION_TEMPLATE, roster_act_report};
 use sqlx::{Connection, PgConnection, PgPool, postgres::PgPoolOptions};
-use time::OffsetDateTime;
+use time::{OffsetDateTime, macros::datetime};
 use uuid::Uuid;
 
 struct DisposableDatabase {
@@ -416,4 +416,129 @@ async fn a_silent_quarter_is_an_empty_page_not_an_error() -> Result<(), Box<dyn 
     .await;
     database.drop_database().await;
     result
+}
+
+/// The release-collision warning on the per-act page: same calendar the
+/// org-level endpoint serves, filtered to this act — the labelmate's side
+/// of the week is named, the shared-fan count is the measured overlap, and
+/// an outsider releasing the same week is none of this roster's business.
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn a_shared_release_week_warns_on_the_acts_page() -> Result<(), Box<dyn std::error::Error>> {
+    let database = DisposableDatabase::create().await?;
+    let result = run_collision(&database.pool).await;
+    database.drop_database().await;
+    result
+}
+
+async fn release_plan(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    title: &str,
+    release_at: OffsetDateTime,
+    tier: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    sqlx::query(
+        r#"
+        INSERT INTO viryaos_release_plans
+            (workspace_id, source_key, title, release_at, tier, assets_ready, active)
+        VALUES ($1, $2, $3, $4, $5, true, true)
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(format!("src-{title}"))
+    .bind(title)
+    .bind(release_at)
+    .bind(tier)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn run_collision(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
+    // A fixed Wednesday inside the lookahead so the two release dates are
+    // a stable ISO week apart from `now`.
+    let now = datetime!(2026-10-07 12:00 UTC);
+    let org = organization(pool, "roster-label").await?;
+    let act = workspace(pool, "the-act", Some(org)).await?;
+    let labelmate = workspace(pool, "labelmate", Some(org)).await?;
+    let outsider = workspace(pool, "outsider", None).await?;
+
+    // The act's Track and the labelmate's Single share the ISO week of
+    // 2026-10-12; the Single outranks, so the act is the one asked to move.
+    release_plan(
+        pool,
+        act,
+        "Act Single B-side",
+        datetime!(2026-10-15 12:00 UTC),
+        "track",
+    )
+    .await?;
+    release_plan(
+        pool,
+        labelmate,
+        "Labelmate Lead Single",
+        datetime!(2026-10-17 12:00 UTC),
+        "single",
+    )
+    .await?;
+    // Same week, different organisation — not this collision's business.
+    release_plan(
+        pool,
+        outsider,
+        "Outsider Record",
+        datetime!(2026-10-16 12:00 UTC),
+        "single",
+    )
+    .await?;
+
+    // Two fans are on both acts' books — the measurable cost of the clash.
+    for email in ["shared-1@example.test", "shared-2@example.test"] {
+        for ws in [act, labelmate] {
+            sqlx::query(
+                "INSERT INTO fans (workspace_id, normalized_email, status) VALUES ($1, $2, 'active')",
+            )
+            .bind(ws)
+            .bind(email)
+            .execute(pool)
+            .await?;
+        }
+    }
+
+    let report = roster_act_report(pool, org, act, now)
+        .await?
+        .expect("a member act gets a page");
+
+    assert_eq!(report.release_collisions.len(), 1);
+    let collision = &report.release_collisions[0];
+    assert_eq!(
+        collision.week_start,
+        time::Date::from_calendar_date(2026, time::Month::October, 12)?,
+        "the ISO Monday of the shared week"
+    );
+    assert_eq!(collision.release_title, "Act Single B-side");
+    assert_eq!(collision.other_act, "labelmate");
+    assert_eq!(collision.other_release_title, "Labelmate Lead Single");
+    assert!(
+        collision.this_act_moves,
+        "the Track yields the week to the Single"
+    );
+    assert_eq!(
+        collision.shared_fans,
+        Some(2),
+        "the measured overlap, cited"
+    );
+    assert!(collision.reason.contains("Move it a week later"));
+
+    // And the labelmate's own page reads the same collision from its side.
+    let labelmate_report = roster_act_report(pool, org, labelmate, now)
+        .await?
+        .expect("the labelmate is a member too");
+    assert_eq!(labelmate_report.release_collisions.len(), 1);
+    assert!(
+        !labelmate_report.release_collisions[0].this_act_moves,
+        "the Single keeps the week from the labelmate's side"
+    );
+    assert_eq!(labelmate_report.release_collisions[0].other_act, "the-act");
+    Ok(())
 }

@@ -64,9 +64,10 @@ pub struct ReleaseCollision {
     pub moves_act: String,
     pub reason: String,
     /// How many active fans the two acts share across the organisation —
-    /// the count-only overlap between the two workspaces' fanbases. `None`
-    /// is unmeasured, not zero: a collision between audiences that share
-    /// nobody is a press clash only, and the reason says so either way.
+    /// the count-only overlap between the two workspaces' fanbases. The
+    /// overlap query measures every member pair, so `Some(0)` is a counted
+    /// zero: a collision between audiences that share nobody is a press
+    /// clash only, and the reason says so either way.
     pub shared_fans: Option<u32>,
 }
 
@@ -213,7 +214,9 @@ pub fn compose(
                 ranked.get(1)?.workspace_id.into_uuid(),
             );
             let pair = if a < b { (a, b) } else { (b, a) };
-            let shared = shared_by_pair.get(&pair).copied();
+            // The shared-fan query counts every member pair — a missing
+            // row is a measured zero, never an unmeasured one.
+            let shared = shared_by_pair.get(&pair).copied().or(Some(0));
             propose_move(week, ranked, shared)
         })
         .collect();

@@ -63,6 +63,32 @@ pub struct ActReportCityGain {
     pub count: u32,
 }
 
+/// One release-collision warning involving this act, from the roster's
+/// release calendar — the label's answer to "is this act about to fight a
+/// labelmate for the same week". The collision is org data, so it lives on
+/// this admin surface and never on the act's own control-plane page.
+#[derive(Clone, Debug, Serialize)]
+pub struct ActReleaseCollision {
+    /// The ISO Monday the colliding releases share — the frame the
+    /// calendar argues in.
+    pub week_start: Date,
+    /// This act's release in the collision.
+    pub release_id: Uuid,
+    pub release_title: String,
+    /// The labelmate sharing the week, and what of theirs collides.
+    pub other_act: String,
+    pub other_release_title: String,
+    /// True when the calendar's standing order asks this act to move —
+    /// false when the act keeps the week and the labelmate is asked.
+    pub this_act_moves: bool,
+    /// Count-only shared fans between the two workspaces — `Some(0)` is a
+    /// counted zero (the overlap query measures every member pair), and a
+    /// press clash only.
+    pub shared_fans: Option<u32>,
+    /// The calendar's own sentence on who keeps the week and why.
+    pub reason: String,
+}
+
 /// The quarterly page for one member act.
 #[derive(Clone, Debug, Serialize)]
 pub struct RosterActReport {
@@ -87,6 +113,11 @@ pub struct RosterActReport {
     /// rotation that landed). The crossbill the label owes under §4h-7.4,
     /// counted where it lands.
     pub rotations_landed: u32,
+    /// Every release collision this act is a party to in the lookahead
+    /// window — the calendar's own verdicts filtered to this act, so the
+    /// report and the calendar can never disagree about who was asked to
+    /// move. Empty is a clear run, not an unmeasured one.
+    pub release_collisions: Vec<ActReleaseCollision>,
 }
 
 /// The first day of the calendar quarter containing `now`. Quarter months
@@ -261,6 +292,55 @@ pub async fn roster_act_report(
     .await
     .map_err(map_sqlx)?;
 
+    // The act's release collisions, filtered from the whole organisation's
+    // calendar — one definition of "collision" and of shared fans, so this
+    // page cannot grow a second rule the calendar does not know about.
+    let calendar =
+        crate::roster_release_calendar::roster_release_calendar(pool, organization_id, now).await?;
+    let release_collisions = calendar
+        .collisions
+        .iter()
+        .filter_map(|collision| {
+            let this_act_moves = if collision.moves_workspace_id.into_uuid() == workspace_id {
+                true
+            } else if collision.stays_workspace_id.into_uuid() == workspace_id {
+                false
+            } else {
+                return None;
+            };
+            let (own_id, other_id) = if this_act_moves {
+                (collision.moves_workspace_id, collision.stays_workspace_id)
+            } else {
+                (collision.stays_workspace_id, collision.moves_workspace_id)
+            };
+            let own = collision
+                .releases
+                .iter()
+                .find(|release| release.workspace_id == own_id);
+            let other = collision
+                .releases
+                .iter()
+                .find(|release| release.workspace_id == other_id);
+            let (Some(own), Some(other)) = (own, other) else {
+                return None;
+            };
+            Some(ActReleaseCollision {
+                week_start: collision.week_start,
+                release_id: own.release_id,
+                release_title: own.title.clone(),
+                other_act: if this_act_moves {
+                    collision.stays_act.clone()
+                } else {
+                    collision.moves_act.clone()
+                },
+                other_release_title: other.title.clone(),
+                this_act_moves,
+                shared_fans: collision.shared_fans,
+                reason: collision.reason.clone(),
+            })
+        })
+        .collect();
+
     Ok(Some(RosterActReport {
         organization_id,
         workspace_id,
@@ -274,6 +354,7 @@ pub async fn roster_act_report(
             by_city,
         },
         rotations_landed: u32::try_from(rotations_landed.max(0)).unwrap_or(u32::MAX),
+        release_collisions,
     }))
 }
 

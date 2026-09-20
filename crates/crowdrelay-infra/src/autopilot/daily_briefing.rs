@@ -450,7 +450,7 @@ async fn compose_briefing(
          AND member.id = assignment.assignee_member_id
         WHERE assignment.workspace_id = $1
           AND assignment.status = 'open'
-          AND assignment.source_kind <> 'daily_briefing'
+          AND assignment.source_kind NOT IN ('daily_briefing','roster_weekly_brief')
         GROUP BY member.id, member.display_name, member.normalized_email
         ORDER BY MIN(assignment.due_at) NULLS LAST, 1
         LIMIT 5
@@ -464,7 +464,7 @@ async fn compose_briefing(
     let open_tasks_total: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM viryaos_team_assignments
          WHERE workspace_id = $1 AND status = 'open'
-           AND source_kind <> 'daily_briefing'",
+           AND source_kind NOT IN ('daily_briefing','roster_weekly_brief')",
     )
     .bind(ws)
     .fetch_one(&mut **tx)
@@ -752,7 +752,7 @@ async fn compose_briefing(
           ON assignment.workspace_id = profile.workspace_id
          AND assignment.assignee_member_id = profile.member_id
          AND assignment.assigned_at >= $2 - INTERVAL '7 days'
-         AND assignment.source_kind <> 'daily_briefing'
+         AND assignment.source_kind NOT IN ('daily_briefing','roster_weekly_brief')
         WHERE profile.workspace_id = $1
           AND profile.active
           AND member.status = 'active'
