@@ -1043,8 +1043,11 @@ pub(in crate::autopilot) async fn load_growth_intelligence_snapshots(
             community_engagement_history: history,
             // The measured standing from past dispatch outcomes. Workers
             // with no measured outcomes are untested (run at base cadence).
+            // Standings are keyed `action_kind:identity` — agent templates
+            // live under `agent.run.request:{template_id}` so a lever or a
+            // merch offer with the same name cannot collide with them.
             standing: standings
-                .get(*template_id)
+                .get(format!("agent.run.request:{template_id}").as_str())
                 .copied()
                 .unwrap_or(Standing::Untested { measured: 0 }),
             world_model: world_model.clone(),
@@ -1070,6 +1073,23 @@ pub(in crate::autopilot) async fn load_growth_intelligence_snapshots(
     );
 
     Ok(snapshots)
+}
+
+/// Standing per dispatch key (`action_kind:identity`) across every measured
+/// action kind — the generalized form of what used to be agent-template-only
+/// standing. Contexts outside growth intelligence (show-growth levers today)
+/// read this to refuse or narrow dispatches whose measured record has
+/// retired. Keys with no measured outcomes are simply absent — callers treat
+/// absence as `Standing::Untested`, never as zero evidence of harm.
+pub(in crate::autopilot) async fn load_action_standings(
+    repo: &PostgresAutopilotRepository,
+    workspace_id: WorkspaceId,
+) -> Result<std::collections::HashMap<String, Standing>, RepositoryError> {
+    Ok(
+        worker_signals::load_worker_signals(&repo.pool, workspace_id)
+            .await?
+            .standings,
+    )
 }
 
 /// Marks agent outcomes as consumed by the brain. Called after the evaluator

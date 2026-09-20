@@ -21,29 +21,60 @@ pub(super) async fn load_worker_signals(
     pool: &sqlx::PgPool,
     workspace_id: WorkspaceId,
 ) -> Result<WorkerSignals, RepositoryError> {
-    // Load agent standings from past measurement outcomes. The brain learns
-    // which worker templates produce fan growth and which don't, and adjusts
-    // dispatch cadence accordingly. We load raw outcomes ordered by
-    // observed_at DESC and compute the OutcomeRecord (with
-    // consecutive_worsened) in Rust — simpler and more testable than a
-    // window-function SQL approach.
+    // Load standings from past measurement outcomes. The brain learns which
+    // dispatches produce their measured outcome and which don't, and narrows
+    // cadence accordingly. The standing key is `action_kind` qualified by the
+    // payload's stable identity — `template_id` for agent runs, `lever` for
+    // show-growth requests — falling back to the bare kind (e.g.
+    // `tick.price.set:`) for kinds with no narrower identity. Kind-level keys
+    // are correct for levers that only exist at the action level, and nothing
+    // reads a key it did not dispatch.
+    //
+    // This used to read only `agent.run.request` rows, which meant every
+    // measured non-agent outcome — ticket revenue after a price change,
+    // clicks after a show lever — updated the outcomes table and nothing
+    // else. The Standing type already carries "a run of worsened retires" for
+    // plays and outreach kinds; the agent-only filter was the seam, not the
+    // model.
+    //
+    // We load raw outcomes ordered by observed_at DESC and compute the
+    // OutcomeRecord (with consecutive_worsened) in Rust — simpler and more
+    // testable than a window-function SQL approach.
     //
     // Bounded to the same window as operator feedback. Standing is about how
-    // a worker has been performing lately; scanning every outcome a workspace
-    // has ever recorded, every cycle, buys nothing a year-old result can
-    // still say.
+    // a dispatch has been performing lately; scanning every outcome a
+    // workspace has ever recorded, every cycle, buys nothing a year-old
+    // result can still say.
+    // The per-group cap matters as much as the outer one: without it the
+    // alphabetically-first keys (agent.run.request:*, the busiest kind) could
+    // fill the whole window and a show lever would never accumulate the
+    // outcomes that retire it. 200 recent outcomes per key is far more than
+    // any standing threshold consumes.
     let standing_rows: Vec<(String, String, OffsetDateTime)> = sqlx::query_as(
         r#"
-        SELECT action.payload->>'template_id' AS template_id,
-               outcome.effect_assessment,
-               outcome.observed_at
-        FROM viryaos_autopilot_outcomes outcome
-        JOIN viryaos_autopilot_actions action ON action.id = outcome.action_id
-        WHERE action.workspace_id = $1
-          AND action.action_kind = 'agent.run.request'
-          AND outcome.effect_assessment IS NOT NULL
-          AND outcome.observed_at > now() - ($2 || ' days')::interval
-        ORDER BY action.payload->>'template_id', outcome.observed_at DESC
+        SELECT group_key, effect_assessment, observed_at
+        FROM (
+            SELECT action.action_kind || ':' ||
+                   COALESCE(action.payload->>'template_id',
+                            action.payload->>'lever',
+                            '') AS group_key,
+                   outcome.effect_assessment,
+                   outcome.observed_at,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY action.action_kind || ':' ||
+                           COALESCE(action.payload->>'template_id',
+                                    action.payload->>'lever',
+                                    '')
+                       ORDER BY outcome.observed_at DESC
+                   ) AS rn
+            FROM viryaos_autopilot_outcomes outcome
+            JOIN viryaos_autopilot_actions action ON action.id = outcome.action_id
+            WHERE action.workspace_id = $1
+              AND outcome.effect_assessment IS NOT NULL
+              AND outcome.observed_at > now() - ($2 || ' days')::interval
+        ) ranked
+        WHERE rn <= 200
+        ORDER BY group_key, observed_at DESC
         LIMIT $3
         "#,
     )
@@ -79,10 +110,24 @@ pub(super) async fn load_worker_signals(
     // recent behaviour. Reading history without end made the cycle's cost
     // grow with the workspace's age for signal that had already decayed to
     // nothing.
-    let operator_feedback_rows: Vec<(String, String, f64, f64)> = sqlx::query_as(
+    // No action_kind filter: an operator approving or cancelling a show lever
+    // or a merch offer is execution-quality signal for that key too, not only
+    // for agent templates. `template_id` stays a separate column because the
+    // preference posterior is keyed by template alone — non-agent actions land
+    // on 'unknown' there, which is never queried, while their group_key feeds
+    // standing.
+    // Same per-group cap as the outcome query: approvals and cancellations on
+    // one busy key must not crowd every other key out of the window.
+    let operator_feedback_rows: Vec<(String, String, String, f64, f64)> = sqlx::query_as(
         r#"
-        SELECT COALESCE(action.payload->>'template_id', 'unknown') AS template_id,
-               oa.action AS operator_action,
+        SELECT template_id, group_key, operator_action, hours_to_decision, age_days
+        FROM (
+            SELECT COALESCE(action.payload->>'template_id', 'unknown') AS template_id,
+                   action.action_kind || ':' ||
+                   COALESCE(action.payload->>'template_id',
+                            action.payload->>'lever',
+                            '') AS group_key,
+                   oa.action AS operator_action,
                -- `::double precision` on both, and it is load-bearing. PostgreSQL
                -- 14 changed `EXTRACT` to return `numeric` where it used to return
                -- `double precision`, and dividing by a numeric literal keeps it
@@ -100,7 +145,14 @@ pub(super) async fn load_worker_signals(
                (EXTRACT(EPOCH FROM (oa.created_at - action.created_at)) / 3600.0)::double precision
                    AS hours_to_decision,
                (EXTRACT(EPOCH FROM (now() - oa.created_at)) / 86400.0)::double precision
-                   AS age_days
+                   AS age_days,
+               ROW_NUMBER() OVER (
+                   PARTITION BY action.action_kind || ':' ||
+                       COALESCE(action.payload->>'template_id',
+                                action.payload->>'lever',
+                                '')
+                   ORDER BY oa.created_at DESC
+               ) AS rn
         FROM operator_actions oa
         JOIN viryaos_autopilot_actions action ON action.id = oa.target_id
         -- Both sides carry the workspace. Constraining only the joined
@@ -110,11 +162,12 @@ pub(super) async fn load_worker_signals(
         -- narrows nothing and changes a sequential scan into an index scan.
         WHERE oa.workspace_id = $1
           AND action.workspace_id = $1
-          AND action.action_kind = 'agent.run.request'
           AND oa.target_type = 'autopilot_action'
           AND oa.action IN ('approve_autopilot_action', 'cancel_autopilot_action')
           AND oa.created_at > now() - ($2 || ' days')::interval
-        ORDER BY action.payload->>'template_id', oa.created_at DESC
+        ) ranked
+        WHERE rn <= 200
+        ORDER BY group_key, hours_to_decision DESC
         LIMIT $3
         "#,
     )
@@ -130,8 +183,8 @@ pub(super) async fn load_worker_signals(
     let standings: std::collections::HashMap<String, Standing> = {
         let mut records: std::collections::HashMap<String, OutcomeRecord> =
             std::collections::HashMap::new();
-        for (template_id, assessment, _observed_at) in &standing_rows {
-            let record = records.entry(template_id.clone()).or_default();
+        for (group_key, assessment, _observed_at) in &standing_rows {
+            let record = records.entry(group_key.clone()).or_default();
             record.improved += u32::from(assessment == "improved");
             record.neutral += u32::from(assessment == "neutral");
             record.worsened += u32::from(assessment == "worsened");
@@ -152,16 +205,17 @@ pub(super) async fn load_worker_signals(
         // update consecutive_worsened — only measured fan-growth outcomes can
         // trigger retirement. Operator cancellations affect the weight (and
         // thus cooldown) but cannot retire a worker on their own.
-        for (template_id, operator_action, hours_to_decision, _age_days) in &operator_feedback_rows
+        for (_template_id, group_key, operator_action, hours_to_decision, _age_days) in
+            &operator_feedback_rows
         {
-            let record = records.entry(template_id.clone()).or_default();
+            let record = records.entry(group_key.clone()).or_default();
             let approved = operator_action == "approve_autopilot_action";
             let fast = *hours_to_decision <= operator_fast_threshold_hours;
             *record = (*record).observe_operator(approved, fast);
         }
         records
             .into_iter()
-            .map(|(template_id, record)| (template_id, assess_standing(record, policy)))
+            .map(|(group_key, record)| (group_key, assess_standing(record, policy)))
             .collect()
     };
 
@@ -189,7 +243,8 @@ pub(super) async fn load_worker_signals(
         // (it's loaded in the application layer), so we use the default here.
         // Future: wire the policy through if per-workspace customization is needed.
         let half_life = 90.0_f64;
-        for (template_id, operator_action, _hours, age_days) in &operator_feedback_rows {
+        for (template_id, _group_key, operator_action, _hours, age_days) in &operator_feedback_rows
+        {
             let approved = operator_action == "approve_autopilot_action";
             posterior.observe(template_id, approved, *age_days, half_life);
         }
