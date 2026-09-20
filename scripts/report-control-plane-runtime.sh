@@ -58,7 +58,7 @@ json_counter() {
 observed_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
 payload="$(printf \
-  '{"apiHealthy":%s,"workerHealthy":%s,"schemaVersion":%s,"deployedSha":%s,"outboxPending":%s,"queueLag":%s,"awaitingApproval":%s,"lastHeartbeatAt":"%s"}' \
+  '{"apiHealthy":%s,"workerHealthy":%s,"schemaVersion":%s,"deployedSha":%s,"outboxPending":%s,"queueLag":%s,"awaitingApproval":%s,"northStarFans":%s,"lastHeartbeatAt":"%s"}' \
   "$(json_bool "${API_HEALTHY:-}")" \
   "$(json_bool "${WORKER_HEALTHY:-}")" \
   "$(json_counter "${SCHEMA_VERSION:-}")" \
@@ -66,6 +66,7 @@ payload="$(printf \
   "$(json_counter "${OUTBOX_PENDING:-}")" \
   "$(json_counter "${QUEUE_LAG:-}")" \
   "$(json_counter "${AWAITING_APPROVAL:-}")" \
+  "$(json_counter "${NORTH_STAR_FANS:-}")" \
   "$observed_at")"
 
 curl --fail-with-body --silent --show-error --max-time 15 \

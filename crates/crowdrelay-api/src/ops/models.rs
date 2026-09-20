@@ -235,6 +235,13 @@ pub(crate) struct OpsMetricsSnapshot {
     pub(crate) brain_signal_installs: i64,
     pub(crate) brain_signal_installs_identified: i64,
     pub(crate) brain_signal_fans_push_enabled: i64,
+    /// The fan graph's level — `activated_fans_30d`. Forwarded on the
+    /// heartbeat so the Control Plane can freeze the activation baseline and
+    /// later answer the ninety-day guarantee as a comparison, not an argument.
+    /// `None` when no activation KPI row exists yet: "never measured" is a
+    /// different fact from "measured zero", and only the second may freeze
+    /// a baseline.
+    pub(crate) brain_north_star_fans: Option<i64>,
 }
 
 #[derive(Debug, FromRow)]
@@ -275,6 +282,7 @@ struct OpsMetricsRow {
     brain_signal_installs: i64,
     brain_signal_installs_identified: i64,
     brain_signal_fans_push_enabled: i64,
+    brain_north_star_fans: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]

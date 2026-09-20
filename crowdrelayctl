@@ -202,6 +202,13 @@ report_control_plane_runtime() {
   awaiting_approval="$(awk '$1 == "crowdrelay_brain_approvals_awaiting" { print $2; exit }' <<<"$metrics")"
   [[ "$awaiting_approval" =~ ^[0-9]+$ ]] || awaiting_approval=""
 
+  # The fan graph's level travels too: the Control Plane freezes it as the
+  # activation baseline and answers the ninety-day guarantee as a comparison
+  # against whatever the heartbeat reports after the deadline. Same rule —
+  # empty on probe failure, reported as null, never a fabricated zero.
+  north_star_fans="$(awk '$1 == "crowdrelay_brain_north_star_fans" { print $2; exit }' <<<"$metrics")"
+  [[ "$north_star_fans" =~ ^[0-9]+$ ]] || north_star_fans=""
+
   if ! CONTROL_PLANE_BASE_URL="$CROWDRELAY_CONTROL_PLANE_BASE_URL" \
     CONTROL_PLANE_TELEMETRY_TOKEN="$CROWDRELAY_CONTROL_PLANE_TELEMETRY_TOKEN" \
     CONTROL_PLANE_TENANT_SLUG="$CROWDRELAY_CONTROL_PLANE_TENANT_SLUG" \
@@ -210,6 +217,7 @@ report_control_plane_runtime() {
     DEPLOYED_SHA="$CROWDRELAY_IMAGE_SHA" \
     OUTBOX_PENDING="$outbox_pending" \
     AWAITING_APPROVAL="$awaiting_approval" \
+    NORTH_STAR_FANS="$north_star_fans" \
     "$reporter"; then
     echo "Control Plane runtime report failed; production deploy remains valid." >&2
   fi

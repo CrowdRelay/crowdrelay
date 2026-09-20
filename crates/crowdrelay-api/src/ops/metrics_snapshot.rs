@@ -239,7 +239,19 @@ async fn load_metrics_snapshot(state: &OpsState) -> Result<OpsMetricsSnapshot, O
                 )::bigint AS signal_installs_identified,
                 (SELECT count(DISTINCT fan_id) FROM fan_push_endpoints
                   WHERE workspace_id = $1 AND active AND invalidated_at IS NULL
-                )::bigint AS signal_fans_push_enabled
+                )::bigint AS signal_fans_push_enabled,
+                -- The guarantee metric: the fan graph's own level, reported so
+                -- the Control Plane can freeze the activation baseline and
+                -- answer the ninety-day refund question as a query. It reads
+                -- the activation KPI directly — `activated_fans_30d` is the
+                -- contractual "fan graph" regardless of which north-star the
+                -- tenant's brain is pointed at. No COALESCE: a workspace
+                -- whose KPI was never computed reports NULL, and "never
+                -- measured" must not freeze a baseline of zero.
+                (SELECT activated_30d
+                 FROM viryaos_fan_activation_kpi
+                 WHERE workspace_id = $1
+                )::bigint AS north_star_fans
         )
         SELECT
             outbox.pending AS outbox_pending,
@@ -277,7 +289,8 @@ async fn load_metrics_snapshot(state: &OpsState) -> Result<OpsMetricsSnapshot, O
             brain.seconds_since_publication AS brain_seconds_since_publication,
             brain.signal_installs AS brain_signal_installs,
             brain.signal_installs_identified AS brain_signal_installs_identified,
-            brain.signal_fans_push_enabled AS brain_signal_fans_push_enabled
+            brain.signal_fans_push_enabled AS brain_signal_fans_push_enabled,
+            brain.north_star_fans AS brain_north_star_fans
         FROM outbox CROSS JOIN deliveries CROSS JOIN push CROSS JOIN worker
              CROSS JOIN brain
         "#,
@@ -321,6 +334,7 @@ async fn load_metrics_snapshot(state: &OpsState) -> Result<OpsMetricsSnapshot, O
         brain_evidence_resolved: row.brain_evidence_resolved,
         brain_seconds_since_evidence_resolved: row.brain_seconds_since_evidence_resolved,
         brain_seconds_since_publication: row.brain_seconds_since_publication,
+        brain_north_star_fans: row.brain_north_star_fans,
         brain_signal_installs: row.brain_signal_installs,
         brain_signal_installs_identified: row.brain_signal_installs_identified,
         brain_signal_fans_push_enabled: row.brain_signal_fans_push_enabled,
