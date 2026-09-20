@@ -788,6 +788,9 @@ crowdrelay_brain_actions_24h {}\n\
 # HELP crowdrelay_brain_actions_failed_24h Autopilot actions created in the last 24 hours that failed.\n\
 # TYPE crowdrelay_brain_actions_failed_24h gauge\n\
 crowdrelay_brain_actions_failed_24h {}\n\
+# HELP crowdrelay_brain_approvals_awaiting Autopilot asks waiting on a human approval, of any age.\n\
+# TYPE crowdrelay_brain_approvals_awaiting gauge\n\
+crowdrelay_brain_approvals_awaiting {}\n\
 # HELP crowdrelay_brain_measurements_pending Scheduled measurements that have not resolved.\n\
 # TYPE crowdrelay_brain_measurements_pending gauge\n\
 crowdrelay_brain_measurements_pending {}\n\
@@ -836,6 +839,7 @@ crowdrelay_brain_signal_fans_push_enabled {}\n",
         ops_snapshot.brain_decisions_24h,
         ops_snapshot.brain_actions_24h,
         ops_snapshot.brain_actions_failed_24h,
+        ops_snapshot.brain_approvals_awaiting,
         ops_snapshot.brain_measurements_pending,
         ops_snapshot.brain_measurements_resolved,
         ops_snapshot.brain_measurement_oldest_overdue_seconds,

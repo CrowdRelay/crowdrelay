@@ -194,6 +194,10 @@ pub(crate) struct OpsMetricsSnapshot {
     pub(crate) brain_decisions_24h: i64,
     pub(crate) brain_actions_24h: i64,
     pub(crate) brain_actions_failed_24h: i64,
+    /// Asks parked on a human decision right now, of any age. The count the
+    /// heartbeat forwards to the Control Plane so an approval queue the
+    /// operator never visits still reaches them through the notifier path.
+    pub(crate) brain_approvals_awaiting: i64,
     pub(crate) brain_measurements_pending: i64,
     pub(crate) brain_measurements_resolved: i64,
     /// Age of the oldest measurement that is due and still unresolved. Zero
@@ -256,6 +260,7 @@ struct OpsMetricsRow {
     brain_decisions_24h: i64,
     brain_actions_24h: i64,
     brain_actions_failed_24h: i64,
+    brain_approvals_awaiting: i64,
     brain_measurements_pending: i64,
     brain_measurements_resolved: i64,
     brain_measurement_oldest_overdue_seconds: i64,

@@ -109,6 +109,15 @@ async fn load_metrics_snapshot(state: &OpsState) -> Result<OpsMetricsSnapshot, O
                  WHERE workspace_id = $1 AND created_at > now() - INTERVAL '24 hours'
                    AND status = 'failed'
                 )::bigint AS actions_failed_24h,
+                -- Asks parked on a human decision. Not windowed: an ask that
+                -- has waited three days matters exactly as much as one that
+                -- arrived a minute ago, and a 24-hour window would let a
+                -- permanently ignored queue read as empty. Production carried
+                -- eleven of these for days because nothing counted them
+                -- anywhere an operator could see without a credential.
+                (SELECT count(*) FROM viryaos_autopilot_actions
+                 WHERE workspace_id = $1 AND status = 'awaiting_approval'
+                )::bigint AS approvals_awaiting,
                 (SELECT count(*) FROM viryaos_autopilot_measurements
                  WHERE workspace_id = $1 AND status = 'pending'
                 )::bigint AS measurements_pending,
@@ -254,6 +263,7 @@ async fn load_metrics_snapshot(state: &OpsState) -> Result<OpsMetricsSnapshot, O
             brain.decisions_24h AS brain_decisions_24h,
             brain.actions_24h AS brain_actions_24h,
             brain.actions_failed_24h AS brain_actions_failed_24h,
+            brain.approvals_awaiting AS brain_approvals_awaiting,
             brain.measurements_pending AS brain_measurements_pending,
             brain.measurements_resolved AS brain_measurements_resolved,
             brain.measurement_oldest_overdue_seconds AS brain_measurement_oldest_overdue_seconds,
@@ -299,6 +309,7 @@ async fn load_metrics_snapshot(state: &OpsState) -> Result<OpsMetricsSnapshot, O
         brain_decisions_24h: row.brain_decisions_24h,
         brain_actions_24h: row.brain_actions_24h,
         brain_actions_failed_24h: row.brain_actions_failed_24h,
+        brain_approvals_awaiting: row.brain_approvals_awaiting,
         brain_measurements_pending: row.brain_measurements_pending,
         brain_measurements_resolved: row.brain_measurements_resolved,
         brain_measurement_oldest_overdue_seconds: row.brain_measurement_oldest_overdue_seconds,

@@ -160,7 +160,7 @@ report_control_plane_runtime() {
   # 200 already proves what /v1/health/ready would have. This runs every 60s
   # under the heartbeat timer, where a second `docker compose exec` costs more
   # CPU than the reading is worth.
-  local api_healthy worker_healthy outbox_pending worker_id metrics
+  local api_healthy worker_healthy outbox_pending awaiting_approval worker_id metrics
   # Empty (unknown) until the probe succeeds — same semantics as the worker
   # probe below. A failed compose exec is a probe failure, not proof the API
   # is down: reporting false overwrites the last known good state in the
@@ -194,6 +194,14 @@ report_control_plane_runtime() {
   outbox_pending="$(awk '$1 == "crowdrelay_outbox_pending" { print $2; exit }' <<<"$metrics")"
   [[ "$outbox_pending" =~ ^[0-9]+$ ]] || outbox_pending=""
 
+  # The approval-queue depth travels the same way: asks parked on a human
+  # decision were the failure mode that left eleven approvals invisible for
+  # days, so the heartbeat carries the count and the Control Plane turns a
+  # rise into a notifier event. Empty on probe failure, reported as null —
+  # an unobserved queue must not overwrite a known backlog with a zero.
+  awaiting_approval="$(awk '$1 == "crowdrelay_brain_approvals_awaiting" { print $2; exit }' <<<"$metrics")"
+  [[ "$awaiting_approval" =~ ^[0-9]+$ ]] || awaiting_approval=""
+
   if ! CONTROL_PLANE_BASE_URL="$CROWDRELAY_CONTROL_PLANE_BASE_URL" \
     CONTROL_PLANE_TELEMETRY_TOKEN="$CROWDRELAY_CONTROL_PLANE_TELEMETRY_TOKEN" \
     CONTROL_PLANE_TENANT_SLUG="$CROWDRELAY_CONTROL_PLANE_TENANT_SLUG" \
@@ -201,6 +209,7 @@ report_control_plane_runtime() {
     WORKER_HEALTHY="$worker_healthy" \
     DEPLOYED_SHA="$CROWDRELAY_IMAGE_SHA" \
     OUTBOX_PENDING="$outbox_pending" \
+    AWAITING_APPROVAL="$awaiting_approval" \
     "$reporter"; then
     echo "Control Plane runtime report failed; production deploy remains valid." >&2
   fi
