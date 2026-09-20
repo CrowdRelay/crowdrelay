@@ -32,6 +32,7 @@ fn make_exp_prediction(template: &str) -> crate::causal_model::DispatchPredictio
         context: crate::causal_model::DispatchContext::default(),
         target_key: None,
         creative_family: None,
+        expected_metrics: Default::default(),
     }
 }
 

@@ -108,8 +108,9 @@ pub(super) async fn ensure_dispatch_envelope(
         r#"
         INSERT INTO viryaos_dispatch_predictions
             (workspace_id, action_id, template_id,
-             expected_new_fans, expected_signal_installs, context)
-        VALUES ($1, $2, $3, $4, $5, $6)
+             expected_new_fans, expected_signal_installs, context,
+             expected_metrics)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
         ON CONFLICT (action_id) DO NOTHING
         "#,
     )
@@ -119,6 +120,7 @@ pub(super) async fn ensure_dispatch_envelope(
     .bind(crowdrelay_brain::DEFAULT_EXPECTED_FANS)
     .bind(crowdrelay_brain::DEFAULT_EXPECTED_SIGNAL)
     .bind(&context_json)
+    .bind(serde_json::json!({}))
     .execute(&mut **transaction)
     .await
     .map_err(map_sqlx)?;

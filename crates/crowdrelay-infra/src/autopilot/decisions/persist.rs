@@ -407,8 +407,9 @@ async fn record_prediction_and_evidence_tx(
         r#"
         INSERT INTO viryaos_dispatch_predictions
             (workspace_id, action_id, template_id,
-             expected_new_fans, expected_signal_installs, context)
-        VALUES ($1, $2, $3, $4, $5, $6)
+             expected_new_fans, expected_signal_installs, context,
+             expected_metrics)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
         ON CONFLICT (action_id) DO NOTHING
         "#,
     )
@@ -418,6 +419,8 @@ async fn record_prediction_and_evidence_tx(
     .bind(prediction.expected_new_fans)
     .bind(prediction.expected_signal_installs)
     .bind(&pred_context_json)
+    .bind(serde_json::to_value(&prediction.expected_metrics)
+        .unwrap_or_else(|_| serde_json::json!({})))
     .execute(&mut **transaction)
     .await
     .map_err(map_sqlx)?;

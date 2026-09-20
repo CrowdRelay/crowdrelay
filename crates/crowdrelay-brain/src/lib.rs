@@ -77,6 +77,7 @@ pub mod tenant_preference;
 pub mod treatment_effect;
 pub mod tune_llm;
 pub mod validation;
+pub mod value_exchange;
 pub mod world_model;
 
 // Re-export the most commonly used types at the crate root.
@@ -138,6 +139,7 @@ pub use tenant_preference::{
     PresentationMetadata, TemplatePreference, TenantPreferencePolicy, TenantPreferencePosterior,
 };
 pub use treatment_effect::TreatmentEffectPosterior;
+pub use value_exchange::ValueExchange;
 pub use world_model::{
     EventProximity, GrowthTarget, GrowthTargetProgress, GrowthTrend, TargetStatus, WorldModel,
 };

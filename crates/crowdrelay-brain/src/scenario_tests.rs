@@ -69,6 +69,7 @@ fn make_stats(expected: f64, std: f64, confidence: u32) -> TreatmentAwareStats {
         evidence_quality: EvidenceQuality::Observational,
         bridge_confidence: 5,
         bridge_is_reliable: false,
+        secondary: std::collections::BTreeMap::new(),
     }
 }
 
@@ -141,6 +142,8 @@ fn make_dv(
         evidence_quality: evidence,
         bridge_confidence: 5,
         bridge_is_reliable: matches!(regime, EstimationRegime::Y30Direct),
+
+        secondary: std::collections::BTreeMap::new(),
     };
     DecisionValue::from_stats(
         &stats,

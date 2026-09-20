@@ -115,13 +115,6 @@ impl MetricPosterior {
             observation,
             observation_variance,
         );
-        self.effects.update_signed_with_target(
-            template_id,
-            None,
-            target_key,
-            observation,
-            observation_variance,
-        );
         if let Some(template) = template_id {
             *self
                 .effective_observations

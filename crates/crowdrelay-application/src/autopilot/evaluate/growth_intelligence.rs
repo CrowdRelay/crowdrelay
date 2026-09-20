@@ -426,6 +426,7 @@ pub fn evaluate_growth_intelligence(
         expected_new_fans: f64,
         expected_signal_installs: f64,
         context: &DispatchContext,
+        secondary: &std::collections::BTreeMap<String, (f64, f64, u32)>,
     ) -> DispatchPrediction {
         DispatchPrediction {
             template_id: template_id.to_owned(),
@@ -441,6 +442,13 @@ pub fn evaluate_growth_intelligence(
             // angles, and labelling them with this enum would pool families
             // that are not comparable.
             creative_family: None,
+            // The metric predictions the model made at decision time, keyed
+            // the way `observed_metrics` will be keyed — prediction error is
+            // the calibration signal later phases read.
+            expected_metrics: secondary
+                .iter()
+                .map(|(key, (mean, _, _))| (key.clone(), *mean))
+                .collect(),
         }
     }
 
@@ -470,6 +478,7 @@ pub fn evaluate_growth_intelligence(
                 expected_new_fans,
                 expected_signal_installs,
                 &dispatch_context,
+                &treatment_stats.secondary,
             ),
             efe_score,
             strategy_rank,
@@ -506,6 +515,7 @@ pub fn evaluate_growth_intelligence(
                 expected_new_fans,
                 expected_signal_installs,
                 &dispatch_context,
+                &treatment_stats.secondary,
             ),
             efe_score,
             strategy_rank,
@@ -546,6 +556,7 @@ pub fn evaluate_growth_intelligence(
                 expected_new_fans,
                 expected_signal_installs,
                 &dispatch_context,
+                &treatment_stats.secondary,
             ),
             efe_score,
             strategy_rank,
@@ -586,6 +597,7 @@ pub fn evaluate_growth_intelligence(
                 expected_new_fans,
                 expected_signal_installs,
                 &dispatch_context,
+                &treatment_stats.secondary,
             ),
             efe_score,
             strategy_rank,
@@ -629,6 +641,7 @@ pub fn evaluate_growth_intelligence(
                     expected_new_fans,
                     expected_signal_installs,
                     &dispatch_context,
+                    &treatment_stats.secondary,
                 ),
                 efe_score,
                 strategy_rank,
@@ -662,6 +675,7 @@ pub fn evaluate_growth_intelligence(
                 expected_new_fans,
                 expected_signal_installs,
                 &dispatch_context,
+                &treatment_stats.secondary,
             ),
             efe_score,
             strategy_rank,
@@ -702,6 +716,7 @@ pub fn evaluate_growth_intelligence(
                 expected_new_fans,
                 expected_signal_installs,
                 &dispatch_context,
+                &treatment_stats.secondary,
             ),
             efe_score,
             strategy_rank,
@@ -742,6 +757,7 @@ pub fn evaluate_growth_intelligence(
                 expected_new_fans,
                 expected_signal_installs,
                 &dispatch_context,
+                &treatment_stats.secondary,
             ),
             efe_score,
             strategy_rank,
@@ -795,6 +811,7 @@ pub fn evaluate_growth_intelligence(
                 expected_new_fans,
                 expected_signal_installs,
                 &dispatch_context,
+                &treatment_stats.secondary,
             ),
             efe_score,
             strategy_rank,
@@ -848,6 +865,7 @@ pub fn evaluate_growth_intelligence(
                 expected_new_fans,
                 expected_signal_installs,
                 &dispatch_context,
+                &treatment_stats.secondary,
             ),
             efe_score,
             strategy_rank,
@@ -956,7 +974,7 @@ fn candidate_from_request(
     let prediction = request.prediction.clone();
     let efe_score = request.efe_score;
     let strategy_rank = request.strategy_rank;
-    let treatment_stats = request.treatment_stats;
+    let treatment_stats = request.treatment_stats.clone();
     // `Confidence::MAX` is asserted, not measured: this context always
     // believes its own request is worth making. The evidence gate is the only
     // thing standing between that constant and unattended execution.
