@@ -480,6 +480,15 @@ struct OpsSnapshot {
     hours_to_next_approval_expiry: Option<i64>,
     /// Approvals currently outstanding, whatever their deadline.
     approvals_outstanding: i64,
+    /// Asks whose approval window closed more than two hours ago and still
+    /// read `awaiting_approval`. The deadline is the contract: at
+    /// `approval_expires_at` the row must leave the queue as
+    /// `cancelled`/`approval_expired`. The claim path sweeps its workspace
+    /// every cycle and retention sweeps globally every hour, so anything
+    /// past two intervals means *no* sweep is running — a parked tenant
+    /// before retention existed, or a worker that stopped claiming and is
+    /// not running retention either.
+    unswept_lapsed_approvals: i64,
     /// Queued actions parked waiting on an executor capability nobody
     /// advertises right now.
     ///
@@ -898,6 +907,15 @@ async fn load_snapshot(
             (SELECT count(*) FROM viryaos_autopilot_actions a
              WHERE a.workspace_id=$1 AND a.status='awaiting_approval'
             )::bigint AS approvals_outstanding,
+            -- Past the deadline by more than the sweep's cadence and still
+            -- `awaiting_approval`: neither the per-cycle claim sweep nor the
+            -- hourly retention pass has reached this workspace. Two hours is
+            -- two retention intervals, so a nonzero count cannot be jitter.
+            (SELECT count(*) FROM viryaos_autopilot_actions a
+             WHERE a.workspace_id=$1 AND a.status='awaiting_approval'
+               AND a.approval_expires_at IS NOT NULL
+               AND a.approval_expires_at <= now() - interval '2 hours'
+            )::bigint AS unswept_lapsed_approvals,
             -- Work waiting on a capability no live executor advertises. The
             -- park sweep writes `last_error_kind='awaiting_executor'` and
             -- re-parks every cycle, so the row is current demand, not a

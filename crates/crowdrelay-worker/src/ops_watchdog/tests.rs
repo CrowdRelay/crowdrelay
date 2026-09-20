@@ -67,6 +67,7 @@ fn publishing() -> PublishingPosture {
             approvals_expired_7d: 0,
             hours_to_next_approval_expiry: None,
             approvals_outstanding: 0,
+            unswept_lapsed_approvals: 0,
             // No work parked or cancelled on a missing executor.
             awaiting_executor_actions: 0,
             no_executor_cancelled_7d: 0,
@@ -1006,6 +1007,45 @@ fn publishing() -> PublishingPosture {
             "the alarm must say what is about to go as well as what went"
         );
         assert_eq!(condition.details["outstanding_now"], 2);
+    }
+
+    /// An ask still `awaiting_approval` two sweep intervals past its deadline
+    /// means no sweep reached it — the queue's dead piling up invisible.
+    ///
+    /// `load_needs_you` already hides expired rows, so these count nowhere:
+    /// too late to answer, never cancelled, not yet a recorded loss. The
+    /// alarm exists for the gap between the deadline being real and nobody
+    /// enforcing it.
+    #[test]
+    fn unswept_lapsed_approvals_raise_the_sweep_alarm() {
+        let mut snapshot = healthy();
+        snapshot.unswept_lapsed_approvals = 2;
+        let raised = conditions(&snapshot, publishing())
+            .into_iter()
+            .filter(|c| c.active)
+            .map(|c| c.key)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            raised,
+            vec!["approval.sweep_lagging"],
+            "a deadline nobody enforced must report without needing another fault"
+        );
+    }
+
+    /// Pending asks inside their window are not a lagging sweep.
+    #[test]
+    fn live_approvals_do_not_look_unswept() {
+        let mut snapshot = healthy();
+        snapshot.approvals_outstanding = 3;
+        let raised = conditions(&snapshot, publishing())
+            .into_iter()
+            .filter(|c| c.active)
+            .map(|c| c.key)
+            .collect::<Vec<_>>();
+        assert!(
+            !raised.contains(&"approval.sweep_lagging"),
+            "asks inside their window are the queue working: {raised:?}"
+        );
     }
 
 }

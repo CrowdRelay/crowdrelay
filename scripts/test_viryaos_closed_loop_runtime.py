@@ -44,7 +44,12 @@ class ViryaOsClosedLoopRuntime(unittest.TestCase):
         execution_caps = (ROOT / 'crates/crowdrelay-infra/src/autopilot/execution_capabilities.rs').read_text()
         self.assertIn('two_consecutive_worsened_effects', measurement)
         self.assertIn("INTERVAL '7 days'", measurement)
-        self.assertIn('approval_expired', actions)
+        # The claim path must still run the expiry sweep — the sweep itself
+        # moved to `autopilot/lapsed_sweep.rs` so the retention worker can
+        # run the same function globally (see test_suggestion_retention_v1).
+        self.assertIn('sweep_lapsed_approval_asks', actions)
+        self.assertIn('approval_expired',
+                      (ROOT / 'crates/crowdrelay-infra/src/autopilot/lapsed_sweep.rs').read_text())
         self.assertIn('reserve_contact_window', execution_caps)
         self.assertIn('last_action_id uuid,', (ROOT / 'migrations/0040_viryaos_closed_loop_runtime.sql').read_text())
         chief = (ROOT / 'crates/crowdrelay-infra/src/autopilot/operations/chief.rs').read_text()

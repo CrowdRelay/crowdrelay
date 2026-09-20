@@ -21,6 +21,8 @@ mod deliverability;
 mod executor_circuit;
 mod growth;
 mod growth_metrics;
+mod lapsed_sweep;
+pub use lapsed_sweep::{LapsedSweepStats, sweep_lapsed_approval_asks};
 mod measurement;
 mod objectives;
 mod operations;

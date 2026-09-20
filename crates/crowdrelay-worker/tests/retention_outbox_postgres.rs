@@ -168,6 +168,7 @@ fn worker(pool: &PgPool) -> Result<RetentionWorker> {
             terminal_outbox_retention: Duration::from_secs(30 * 24 * 3600),
             consumed_token_retention: Duration::from_secs(30 * 24 * 3600),
             terminal_push_retention: Duration::from_secs(30 * 24 * 3600),
+            decision_audit_retention: Duration::from_secs(180 * 24 * 3600),
             batch_size: 500,
         },
     )

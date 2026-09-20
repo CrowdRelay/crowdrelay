@@ -16,10 +16,14 @@
 //!   operator failed to act; showing it as a lapse would teach the queue's
 //!   reader to distrust their own diligence.
 //! * `awaiting_sweep` — past its deadline and still sitting in
-//!   `awaiting_approval`, because the sweep runs inside the claim path and has
-//!   not run for this workspace yet. `load_needs_you` filters these out with
-//!   `approval_expires_at > now()`, so without this read they are invisible on
-//!   both sides: too late to be pending, not yet cancelled.
+//!   `awaiting_approval`, because no sweep has run for this workspace yet.
+//!   The claim path sweeps on every autopilot cycle and the retention worker
+//!   sweeps globally every hour, so a nonzero population here means neither
+//!   reached it — a parked or disabled tenant, or a stalled worker (the
+//!   `approval.sweep_lagging` watchdog watches exactly this). `load_needs_you`
+//!   filters these out with `approval_expires_at > now()`, so without this
+//!   read they are invisible on both sides: too late to be pending, not yet
+//!   cancelled.
 //!
 //! Why it matters more here than the numbers suggest: every outbound channel in
 //! this system drafts and waits for a person, so the operator *is* the
@@ -125,16 +129,19 @@ pub async fn lapsed_approvals(
              AND decision.id = action.decision_id
             WHERE action.workspace_id = $1
               AND (
-                    -- Reaped by the sweep in the claim path.
+                    -- Reaped by a sweep — the claim path's per-cycle pass or
+                    -- the retention worker's hourly global one.
                     (
                         action.status = 'cancelled'
                         AND action.last_error_kind IN ('approval_expired', 'insufficient_evidence')
                         AND action.finished_at IS NOT NULL
                         AND action.finished_at > $2 - make_interval(days => $3::int)
                     )
-                    -- Past its deadline and not yet reaped: the sweep runs when
-                    -- a worker claims actions for this workspace, which may not
-                    -- have happened since the window closed.
+                    -- Past its deadline and not yet reaped. Both sweeps run
+                    -- independently of claim volume, so a row here means a
+                    -- workspace neither reached — parked, disabled, or a
+                    -- stalled worker; `approval.sweep_lagging` alarms on the
+                    -- same population past two sweep intervals.
                  OR (
                         action.status = 'awaiting_approval'
                         AND action.approval_expires_at IS NOT NULL

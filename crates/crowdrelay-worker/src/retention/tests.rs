@@ -57,6 +57,10 @@ mod tests {
                 terminal_push_retention: Duration::ZERO,
                 ..defaults
             },
+            RetentionWorkerConfig {
+                decision_audit_retention: Duration::ZERO,
+                ..defaults
+            },
         ] {
             assert_eq!(
                 RetentionWorker::new(lazy_pool()?, config).expect_err("config must be rejected"),

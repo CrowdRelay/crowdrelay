@@ -405,6 +405,36 @@ fn conditions(snapshot: &OpsSnapshot, posture: PublishingPosture) -> Vec<Conditi
             }),
         },
         Condition {
+            // The deadline is a contract, and this is the contract being
+            // broken. An ask past `approval_expires_at` must have already
+            // died — the claim sweep runs it every cycle and the retention
+            // worker runs the same sweep globally every hour. A row still
+            // `awaiting_approval` two intervals later means neither ran:
+            // the reads keep it hidden from the queue (it is too late to
+            // answer) while the state keeps it uncounted as a loss (it was
+            // never cancelled). The lapsed read calls these
+            // `awaiting_sweep`.
+            //
+            // Warning: nothing was corrupted and the fix is the sweep
+            // running, not operator action — but while it lasts the queue's
+            // dead pile up invisible on both sides.
+            key: "approval.sweep_lagging",
+            severity: "warning",
+            summary: "Approvals past their deadline are still marked awaiting_approval",
+            active: snapshot.unswept_lapsed_approvals > 0,
+            details: json!({
+                "unswept": snapshot.unswept_lapsed_approvals,
+                "sweep_grace": "2 hours",
+                "remedy": "the claim path sweeps on every autopilot cycle and \
+                           the retention worker sweeps globally every hour — \
+                           rows this stale mean neither ran for this workspace. \
+                           Check the worker is alive, that retention cycles \
+                           complete (look for the 'retention cycle completed' \
+                           log), and whether the tenant is parked with asks \
+                           still outstanding.",
+            }),
+        },
+        Condition {
             key: "executor.offline",
             severity: "critical",
             summary: "ViryaOS executor registry has no live executor",

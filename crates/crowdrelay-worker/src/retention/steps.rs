@@ -767,3 +767,82 @@ async fn delete_invalidated_push_endpoints(
     .map_err(RetentionRunError::Database)?;
     Ok(result.rows_affected())
 }
+
+/// The global leg of the approval-queue sweep. The claim path runs the same
+/// function per workspace per cycle, which covers live tenants; this pass
+/// exists for the ones it cannot reach — parked, autopilot-disabled, or
+/// simply starved — because an ask whose window closed must still die on
+/// schedule wherever it lives. One implementation, two callers, so the
+/// terminal states (`approval_expired`, `insufficient_evidence`) and the
+/// suggestion/arc cascades cannot drift apart.
+///
+/// The count sums every row the pass touched: asks cancelled plus the
+/// suggestions and arcs their deaths resolved.
+async fn sweep_lapsed_autopilot_asks(
+    transaction: &mut Transaction<'_, Postgres>,
+    batch_size: i64,
+) -> Result<u64, RetentionRunError> {
+    let stats = crowdrelay_infra::autopilot::sweep_lapsed_approval_asks(
+        transaction,
+        None,
+        time::OffsetDateTime::now_utc(),
+        Some(batch_size),
+    )
+    .await
+    .map_err(RetentionRunError::Database)?;
+    Ok(stats.approvals_expired
+        + stats.insufficient_evidence
+        + stats.suggestions_expired
+        + stats.arcs_retired)
+}
+
+/// Deletes decisions that produced nothing — no action, no outcome — past
+/// the audit window. The evaluation noise (`deny`, `observe_only`,
+/// `recommend_only`) is what this removes; a decision that became an action
+/// or recorded an outcome is part of the audit trail the lapsed read, the
+/// learning proof and the trace views join, and stays.
+///
+/// The `NOT EXISTS` guards restate what the RESTRICT keys on actions and
+/// outcomes already enforce — the query is honest about its own boundary
+/// rather than relying on the constraint to error.
+async fn delete_orphan_autopilot_decisions(
+    transaction: &mut Transaction<'_, Postgres>,
+    batch_size: i64,
+    decision_audit_retention_ms: i64,
+) -> Result<u64, RetentionRunError> {
+    let result = sqlx::query(
+        r#"
+        WITH candidates AS (
+            SELECT decision.workspace_id, decision.id
+            FROM viryaos_autopilot_decisions AS decision
+            WHERE decision.evaluated_at <=
+                    now() - ($2::bigint * interval '1 millisecond')
+                AND NOT EXISTS (
+                    SELECT 1
+                    FROM viryaos_autopilot_actions AS action
+                    WHERE action.workspace_id = decision.workspace_id
+                        AND action.decision_id = decision.id
+                )
+                AND NOT EXISTS (
+                    SELECT 1
+                    FROM viryaos_autopilot_outcomes AS outcome
+                    WHERE outcome.workspace_id = decision.workspace_id
+                        AND outcome.decision_id = decision.id
+                )
+            ORDER BY decision.evaluated_at, decision.id
+            FOR UPDATE OF decision SKIP LOCKED
+            LIMIT $1
+        )
+        DELETE FROM viryaos_autopilot_decisions AS decision
+        USING candidates
+        WHERE decision.workspace_id = candidates.workspace_id
+            AND decision.id = candidates.id
+        "#,
+    )
+    .bind(batch_size)
+    .bind(decision_audit_retention_ms)
+    .execute(&mut **transaction)
+    .await
+    .map_err(RetentionRunError::Database)?;
+    Ok(result.rows_affected())
+}

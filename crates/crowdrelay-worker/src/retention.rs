@@ -21,6 +21,14 @@ const DEFAULT_CONSUMED_TOKEN_RETENTION: Duration = Duration::from_secs(24 * 60 *
 /// 30-day window as terminal outbox events. They are not reprocessed, but
 /// keeping them longer only grows the tables the push worker scans.
 const DEFAULT_TERMINAL_PUSH_RETENTION: Duration = Duration::from_secs(30 * 24 * 60 * 60);
+/// Decisions that produced no action and no outcome are pruned after half a
+/// year. Every cycle writes a row per context — including `deny`,
+/// `observe_only` and `recommend_only` — so without a horizon the table
+/// grows with time, not with work. A decision referenced by an action or an
+/// outcome is audit (the lapsed-approvals read joins it for `reason`) and
+/// is never eligible: the RESTRICT keys on both tables enforce the same
+/// boundary the predicate states.
+const DEFAULT_DECISION_AUDIT_RETENTION: Duration = Duration::from_secs(180 * 24 * 60 * 60);
 const DEFAULT_BATCH_SIZE: u32 = 1_000;
 const MAX_BATCH_SIZE: u32 = 1_000;
 
@@ -33,6 +41,7 @@ pub struct RetentionWorkerConfig {
     pub terminal_outbox_retention: Duration,
     pub consumed_token_retention: Duration,
     pub terminal_push_retention: Duration,
+    pub decision_audit_retention: Duration,
     pub batch_size: u32,
 }
 
@@ -45,6 +54,7 @@ impl Default for RetentionWorkerConfig {
             terminal_outbox_retention: DEFAULT_TERMINAL_OUTBOX_RETENTION,
             consumed_token_retention: DEFAULT_CONSUMED_TOKEN_RETENTION,
             terminal_push_retention: DEFAULT_TERMINAL_PUSH_RETENTION,
+            decision_audit_retention: DEFAULT_DECISION_AUDIT_RETENTION,
             batch_size: DEFAULT_BATCH_SIZE,
         }
     }
@@ -59,6 +69,7 @@ pub struct RetentionWorker {
     terminal_outbox_retention_ms: i64,
     consumed_token_retention_ms: i64,
     terminal_push_retention_ms: i64,
+    decision_audit_retention_ms: i64,
     batch_size: i64,
 }
 
@@ -75,6 +86,7 @@ impl RetentionWorker {
             terminal_outbox_retention_ms: duration_milliseconds(config.terminal_outbox_retention)?,
             consumed_token_retention_ms: duration_milliseconds(config.consumed_token_retention)?,
             terminal_push_retention_ms: duration_milliseconds(config.terminal_push_retention)?,
+            decision_audit_retention_ms: duration_milliseconds(config.decision_audit_retention)?,
             batch_size: i64::from(config.batch_size),
         })
     }
@@ -123,6 +135,10 @@ impl RetentionWorker {
                                     stats.terminal_push_deliveries_deleted,
                                 invalidated_push_endpoints_deleted =
                                     stats.invalidated_push_endpoints_deleted,
+                                lapsed_autopilot_asks_swept =
+                                    stats.lapsed_autopilot_asks_swept,
+                                orphan_autopilot_decisions_deleted =
+                                    stats.orphan_autopilot_decisions_deleted,
                                 "retention cycle completed"
                             );
                         }
@@ -232,6 +248,20 @@ impl RetentionWorker {
             invalidated_push_endpoints_deleted,
             RetentionStep::InvalidatedPushEndpoints
         );
+        // The claim path runs this same sweep per workspace per cycle — but
+        // only while a worker is claiming. Parked tenants, disabled
+        // autopilots and starved claim loops accumulate asks that died at
+        // `approval_expires_at` yet still read `awaiting_approval`, hidden
+        // from `needs_you` and counted only as `awaiting_sweep`. Running it
+        // here globally is what makes the deadline real everywhere.
+        execute_step!(
+            lapsed_autopilot_asks_swept,
+            RetentionStep::LapsedAutopilotAsks
+        );
+        execute_step!(
+            orphan_autopilot_decisions_deleted,
+            RetentionStep::OldOrphanAutopilotDecisions
+        );
 
         if let Some(error) = first_failure {
             return Err(error);
@@ -327,6 +357,17 @@ impl RetentionWorker {
                 )
                 .await?
             }
+            RetentionStep::LapsedAutopilotAsks => {
+                sweep_lapsed_autopilot_asks(&mut transaction, self.batch_size).await?
+            }
+            RetentionStep::OldOrphanAutopilotDecisions => {
+                delete_orphan_autopilot_decisions(
+                    &mut transaction,
+                    self.batch_size,
+                    self.decision_audit_retention_ms,
+                )
+                .await?
+            }
         };
 
         transaction
@@ -357,6 +398,8 @@ enum RetentionStep {
     ExpiredCommunityObservations,
     OldTerminalPushDeliveries,
     InvalidatedPushEndpoints,
+    LapsedAutopilotAsks,
+    OldOrphanAutopilotDecisions,
 }
 
 impl RetentionStep {
@@ -380,6 +423,8 @@ impl RetentionStep {
             Self::ExpiredCommunityObservations => "expired_community_observations",
             Self::OldTerminalPushDeliveries => "old_terminal_push_deliveries",
             Self::InvalidatedPushEndpoints => "invalidated_push_endpoints",
+            Self::LapsedAutopilotAsks => "lapsed_autopilot_asks",
+            Self::OldOrphanAutopilotDecisions => "old_orphan_autopilot_decisions",
         }
     }
 }
@@ -405,6 +450,8 @@ pub struct RetentionStats {
     pub community_observations_deleted: u64,
     pub terminal_push_deliveries_deleted: u64,
     pub invalidated_push_endpoints_deleted: u64,
+    pub lapsed_autopilot_asks_swept: u64,
+    pub orphan_autopilot_decisions_deleted: u64,
 }
 
 impl RetentionStats {
@@ -428,6 +475,8 @@ impl RetentionStats {
             || self.community_observations_deleted > 0
             || self.terminal_push_deliveries_deleted > 0
             || self.invalidated_push_endpoints_deleted > 0
+            || self.lapsed_autopilot_asks_swept > 0
+            || self.orphan_autopilot_decisions_deleted > 0
     }
 }
 
@@ -438,6 +487,7 @@ fn validate_config(config: RetentionWorkerConfig) -> Result<(), RetentionWorkerB
         || config.terminal_outbox_retention.is_zero()
         || config.consumed_token_retention.is_zero()
         || config.terminal_push_retention.is_zero()
+        || config.decision_audit_retention.is_zero()
     {
         return Err(RetentionWorkerBuildError::ZeroDuration);
     }
@@ -454,6 +504,7 @@ fn validate_config(config: RetentionWorkerConfig) -> Result<(), RetentionWorkerB
         config.terminal_outbox_retention,
         config.consumed_token_retention,
         config.terminal_push_retention,
+        config.decision_audit_retention,
     ] {
         duration_milliseconds(value)?;
     }
