@@ -24,7 +24,10 @@
 
 use std::time::Duration;
 
-use crowdrelay_application::autopilot::AutopilotActionRepository;
+use crowdrelay_application::autopilot::{
+    AutopilotActionRepository, AutopilotRuntimeRepository, ClaimExecution, ExecutorReportStatus,
+    RecordExecutionReport,
+};
 use crowdrelay_domain::WorkspaceId;
 use crowdrelay_infra::{autopilot::PostgresAutopilotRepository, config::DatabaseConfig};
 use serde_json::{Value, json};
@@ -318,6 +321,200 @@ async fn an_executor_required_action_gets_no_premature_envelope()
         (0, 0, 0),
         "a dispatched intent is not evidence: the executor receipt writes those rows"
     );
+    Ok(())
+}
+
+/// A brain-requested artifact is the fourth loop closure: the brain asks for
+/// a piece of content, the executor produces it, and the provider-confirmed
+/// receipt both writes the learning envelope and schedules the fan-growth
+/// trio. Before this path a published video or post left nothing for the
+/// model to learn from — the artifact request sat in the do-nothing arm of
+/// `schedule_effect_measurement`.
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn a_content_artifact_receipt_writes_the_envelope_and_growth_measurements()
+-> Result<(), Box<dyn std::error::Error>> {
+    let f = setup().await?;
+    let now = OffsetDateTime::now_utc();
+    let suffix = f.workspace_id.into_uuid().simple().to_string();
+
+    // The artifact is made from a live content source — the dispatch path
+    // locks it before emitting the executor task.
+    let source_id = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO viryaos_content_sources
+           (id, workspace_id, source_kind, source_key, title, occurred_at, expires_at)
+         VALUES ($1,$2,'event',$3,'Envelope test event',$4,$5)",
+    )
+    .bind(source_id)
+    .bind(f.workspace_id.into_uuid())
+    .bind(format!("event-{suffix}"))
+    .bind(now - time::Duration::days(1))
+    .bind(now + time::Duration::days(60))
+    .execute(&f.pool)
+    .await?;
+
+    let action_id = seed_outcome_action(
+        &f,
+        "content.artifact.request",
+        json!({
+            "kind": "request_content_artifact",
+            "source_id": source_id,
+            "source_version": 1,
+            "artifact": "social_feed",
+            "template_key": "content.social_feed.v1",
+        }),
+        now,
+    )
+    .await?;
+
+    let claimed = f
+        .repository
+        .claim_due_autonomous_actions(f.workspace_id, 8, now)
+        .await?;
+    let action = claimed
+        .iter()
+        .find(|a| a.id.into_uuid() == action_id)
+        .expect("the queued artifact action must be claimable");
+    f.repository
+        .execute_action(f.workspace_id, action, now)
+        .await?;
+
+    // Executor-required: dispatch is an intent, not a produced artifact. No
+    // envelope and no measurements exist until the executor reports back.
+    let (prediction_rows, evidence_rows, measurement_rows) = sqlx::query_as::<_, (i64, i64, i64)>(
+        "SELECT \
+               (SELECT COUNT(*) FROM viryaos_dispatch_predictions WHERE action_id = $1)::bigint, \
+               (SELECT COUNT(*) FROM viryaos_growth_evidence \
+                WHERE workspace_id = $2 AND action_id = $1)::bigint, \
+               (SELECT COUNT(*) FROM viryaos_autopilot_measurements \
+                WHERE workspace_id = $2 AND action_id = $1)::bigint",
+    )
+    .bind(action_id)
+    .bind(f.workspace_id.into_uuid())
+    .fetch_one(&f.pool)
+    .await?;
+    assert_eq!(
+        (prediction_rows, evidence_rows, measurement_rows),
+        (0, 0, 0),
+        "a dispatched artifact request is not yet a produced artifact"
+    );
+
+    // The executor claim and the provider-confirmed receipt — the moment the
+    // artifact actually exists in front of an audience.
+    let produced_at = now + time::Duration::hours(2);
+    let claim = f
+        .repository
+        .claim_execution(
+            f.workspace_id,
+            ClaimExecution {
+                action_id: action_id.into(),
+                executor_id: "test-executor".to_owned(),
+                occurred_at: now + time::Duration::minutes(5),
+            },
+        )
+        .await
+        .expect("claim");
+    f.repository
+        .record_execution_report(
+            f.workspace_id,
+            RecordExecutionReport {
+                action_id: action_id.into(),
+                receipt_key: format!("artifact-{action_id}"),
+                executor_id: "test-executor".to_owned(),
+                status: ExecutorReportStatus::Succeeded,
+                claim_token: claim.claim_token,
+                provider_reference: Some("yt:envelope-test".to_owned()),
+                error_kind: None,
+                metadata: json!({}),
+                occurred_at: produced_at,
+            },
+        )
+        .await?;
+
+    // The cold-prior envelope the measurement trio will update on resolution.
+    let prediction = sqlx::query_as::<_, (String, f64)>(
+        "SELECT template_id, expected_new_fans FROM viryaos_dispatch_predictions \
+         WHERE action_id = $1",
+    )
+    .bind(action_id)
+    .fetch_one(&f.pool)
+    .await?;
+    assert_eq!(prediction.0, "content-artifact:content.social_feed.v1");
+    assert!(
+        (prediction.1 - crowdrelay_brain::DEFAULT_EXPECTED_FANS).abs() < f64::EPSILON,
+        "an artifact request predicts the cold prior, got {}",
+        prediction.1
+    );
+
+    let evidence = sqlx::query_as::<_, (String, Option<f64>, Option<OffsetDateTime>)>(
+        "SELECT channel, observed_fans, resolved_at FROM viryaos_growth_evidence \
+         WHERE workspace_id = $1 AND action_id = $2",
+    )
+    .bind(f.workspace_id.into_uuid())
+    .bind(action_id)
+    .fetch_one(&f.pool)
+    .await?;
+    assert_eq!(evidence.0, "other");
+    assert!(
+        evidence.1.is_none() && evidence.2.is_none(),
+        "the receipt envelope is an expectation, not an outcome: {evidence:?}"
+    );
+
+    // The fan-growth trio, anchored at the confirmed production time and
+    // pointed at the content source the artifact was made from.
+    let measurements = sqlx::query_as::<_, (String, Uuid, OffsetDateTime, OffsetDateTime)>(
+        "SELECT measurement_kind, subject_id, action_finished_at, due_at \
+         FROM viryaos_autopilot_measurements \
+         WHERE workspace_id = $1 AND action_id = $2 ORDER BY measurement_kind",
+    )
+    .bind(f.workspace_id.into_uuid())
+    .bind(action_id)
+    .fetch_all(&f.pool)
+    .await?;
+    let expected_windows: [(&str, i64); 3] = [
+        ("durable_fan_growth_30d", 44),
+        ("incremental_fan_growth_14d", 14),
+        ("incremental_fan_growth_3d", 3),
+    ];
+    assert_eq!(
+        measurements
+            .iter()
+            .map(|row| row.0.as_str())
+            .collect::<Vec<_>>(),
+        expected_windows
+            .iter()
+            .map(|(kind, _)| *kind)
+            .collect::<Vec<_>>()
+    );
+    for (kind, subject, finished, due) in &measurements {
+        assert_eq!(
+            *subject, source_id,
+            "{kind} must measure the artifact's source"
+        );
+        assert!(
+            *finished > now && *finished <= produced_at,
+            "{kind} anchors at the receipt, not the request"
+        );
+        let window = expected_windows
+            .iter()
+            .find(|(expected, _)| expected == kind)
+            .map(|(_, days)| *days)
+            .expect("expected measurement kind");
+        assert_eq!(
+            *due - *finished,
+            time::Duration::days(window),
+            "{kind} due_at"
+        );
+    }
+
+    let status = sqlx::query_scalar::<_, String>(
+        "SELECT status FROM viryaos_autopilot_actions WHERE id = $1",
+    )
+    .bind(action_id)
+    .fetch_one(&f.pool)
+    .await?;
+    assert_eq!(status, "succeeded");
     Ok(())
 }
 

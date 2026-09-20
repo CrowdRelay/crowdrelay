@@ -63,7 +63,6 @@ KNOWN_UNMEASURED = {
     "RequestBeaconInviteBatch",
     "RequestBeaconOutreach",
     "RequestBookingTargetDiscovery",
-    "RequestContentArtifact",
     "RequestMerchBundle",
     "RequestMerchReorder",
     "RequestOutreachDiscovery",
@@ -78,6 +77,10 @@ KNOWN_UNMEASURED = {
 # whole purpose is a change the brain can observe; losing its measurement
 # would silently reopen the learning gap this test exists to close.
 MUST_BE_MEASURED = {
+    # A produced artifact is content an audience sees; the fan-growth trio
+    # answers whether the brain's request moved anyone. The empty arm was
+    # how a shipped video left nothing the learner reads back.
+    "RequestContentArtifact",
     "RequestSignalPush",
     "RequestAgentRun",
     "RequestAgentContent",

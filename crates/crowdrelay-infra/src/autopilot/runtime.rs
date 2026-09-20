@@ -136,6 +136,11 @@ async fn apply_success_side_effects(
     if !payload_requires_executor(&payload) {
         return Ok(());
     }
+    // The envelope first, same as the first-party dispatch path below: an
+    // action whose candidates persisted without predictions carries no
+    // evidence row, and the measurements scheduled next would UPDATE rows
+    // that do not exist. No-op for kinds whose envelope already exists.
+    ensure_dispatch_envelope(transaction, workspace_id, command.action_id, &payload).await?;
     schedule_effect_measurement(
         transaction,
         workspace_id,

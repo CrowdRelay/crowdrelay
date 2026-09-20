@@ -284,10 +284,45 @@ pub(super) async fn schedule_effect_measurement(
                 ));
             }
         }
+        // A produced artifact is content the brain asked for and an audience
+        // now sees — the request half of the loop closed at the receipt, and
+        // the answer half is whether fans moved afterward. It sat in the
+        // do-nothing arm below: a shipped video left no measurement behind,
+        // so `suggestion_outcomes.results` carried operator-reported reach
+        // that nothing reads back into a belief.
+        //
+        // The window anchors at the executor-confirmed production time — the
+        // receipt's occurred_at — which is the same convention every other
+        // executor-backed action uses: producing the artifact and putting it
+        // in front of people is the executor's one job. Anchoring at request
+        // time would open the observation window before anyone could have
+        // seen the thing. The subject is the content source the artifact was
+        // made from, which is also the entity read models can point at.
+        AutopilotActionPayload::RequestContentArtifact { source_id, .. } => {
+            let (pre_action_daily_rate, pre_action_durable_daily_rate) =
+                fan_growth_baselines(transaction, workspace_id, action_id, now).await?;
+            plans.push((
+                AutopilotMeasurementKind::IncrementalFanGrowth14d,
+                source_id.into_uuid(),
+                pre_action_daily_rate,
+                now + time::Duration::days(14),
+            ));
+            plans.push((
+                AutopilotMeasurementKind::IncrementalFanGrowth3d,
+                source_id.into_uuid(),
+                pre_action_daily_rate,
+                now + time::Duration::days(3),
+            ));
+            plans.push((
+                AutopilotMeasurementKind::DurableFanGrowth30d,
+                source_id.into_uuid(),
+                pre_action_durable_daily_rate,
+                now + time::Duration::days(44),
+            ));
+        }
         AutopilotActionPayload::ChangeTicketCapacity { .. }
         | AutopilotActionPayload::RequestMerchReorder { .. }
         | AutopilotActionPayload::RequestMerchBundle { .. }
-        | AutopilotActionPayload::RequestContentArtifact { .. }
         | AutopilotActionPayload::RequestBeaconDiscovery { .. }
         | AutopilotActionPayload::RequestOutreachDiscovery { .. }
         | AutopilotActionPayload::RequestBookingTargetDiscovery { .. }
@@ -520,42 +555,8 @@ pub(super) async fn schedule_effect_measurement(
             // from what one subreddit sent, which makes a community that
             // performed exactly at its own baseline look like it destroyed a
             // fortnight of growth. Same ledger, same width, same community.
-            let community = measurement_unit_community(transaction, workspace_id, action_id).await?;
-            let pre_action_daily_rate = if let Some(handle) = &community {
-                sqlx::query_scalar::<_, f64>(
-                    r#"
-                    SELECT COUNT(DISTINCT fan_id)::double precision / 14.0
-                    FROM fan_provenance_events
-                    WHERE workspace_id = $1
-                      AND community = $3
-                      AND event_kind = 'conversion'
-                      AND fan_id IS NOT NULL
-                      AND occurred_at >= $2::timestamptz - INTERVAL '14 days'
-                      AND occurred_at < $2::timestamptz
-                    "#,
-                )
-                .bind(workspace_id.into_uuid())
-                .bind(now)
-                .bind(handle)
-                .fetch_one(&mut **transaction)
-                .await
-                .map_err(map_sqlx)?
-            } else {
-                sqlx::query_scalar::<_, f64>(
-                    r#"
-                    SELECT COUNT(*)::double precision / 14.0 FROM fans
-                    WHERE workspace_id = $1
-                      AND created_at >= $2::timestamptz - INTERVAL '14 days'
-                      AND created_at < $2::timestamptz
-                      AND status != 'suppressed'
-                    "#,
-                )
-                .bind(workspace_id.into_uuid())
-                .bind(now)
-                .fetch_one(&mut **transaction)
-                .await
-                .map_err(map_sqlx)?
-            };
+            let (pre_action_daily_rate, pre_action_durable_daily_rate) =
+                fan_growth_baselines(transaction, workspace_id, action_id, now).await?;
             plans.push((
                 AutopilotMeasurementKind::IncrementalFanGrowth14d,
                 action_id.into_uuid(),
@@ -593,44 +594,6 @@ pub(super) async fn schedule_effect_measurement(
             // from the last fourteen days cannot have a thirty-day durability
             // outcome yet. So the baseline window is the fourteen days ending
             // thirty days ago — same width, old enough to have been observed.
-            let pre_action_durable_daily_rate = if let Some(handle) = &community {
-                sqlx::query_scalar::<_, f64>(
-                    r#"
-                    SELECT COUNT(DISTINCT fan.id)::double precision / 14.0
-                    FROM fan_provenance_events AS conversion
-                    JOIN fans AS fan
-                      ON fan.workspace_id = conversion.workspace_id
-                     AND fan.id = conversion.fan_id
-                    WHERE conversion.workspace_id = $1
-                      AND conversion.community = $3
-                      AND conversion.event_kind = 'conversion'
-                      AND conversion.occurred_at >= $2 - INTERVAL '44 days'
-                      AND conversion.occurred_at < $2 - INTERVAL '30 days'
-                      AND fan.status = 'active'
-                    "#,
-                )
-                .bind(workspace_id.into_uuid())
-                .bind(now)
-                .bind(handle)
-                .fetch_one(&mut **transaction)
-                .await
-                .map_err(map_sqlx)?
-            } else {
-                sqlx::query_scalar::<_, f64>(
-                    r#"
-                    SELECT COUNT(*)::double precision / 14.0 FROM fans
-                    WHERE workspace_id = $1
-                      AND created_at >= $2 - INTERVAL '44 days'
-                      AND created_at < $2 - INTERVAL '30 days'
-                      AND status = 'active'
-                    "#,
-                )
-                .bind(workspace_id.into_uuid())
-                .bind(now)
-                .fetch_one(&mut **transaction)
-                .await
-                .map_err(map_sqlx)?
-            };
             plans.push((
                 AutopilotMeasurementKind::DurableFanGrowth30d,
                 action_id.into_uuid(),
@@ -854,6 +817,105 @@ pub(super) async fn schedule_effect_measurement(
         .map_err(map_sqlx)?;
     }
     Ok(())
+}
+
+/// The two counterfactual daily rates every fan-growth measurement trio is
+/// planned against: the matched 14-day arrival rate and the aged durable
+/// rate.
+///
+/// The rates are community-scoped when the action's experimental unit is a
+/// community (the observation resolves the same handle through
+/// `observable_community`, so the two sides of the subtraction count the same
+/// population over the same width), and workspace-scoped otherwise.
+///
+/// The durable rate is *not* the arrival rate filtered to active fans. Y30's
+/// outcome counts only arrivals that were still active thirty days later, so
+/// its counterfactual has to be built from arrivals old enough to have had a
+/// thirty-day durability outcome — the fourteen days ending thirty days ago.
+/// Reusing the arrival rate here biases every Y30 estimate negative by
+/// exactly the churn rate, which is how the brain used to learn that
+/// everything it did was harmful.
+async fn fan_growth_baselines(
+    transaction: &mut Transaction<'_, Postgres>,
+    workspace_id: WorkspaceId,
+    action_id: AutopilotActionId,
+    now: OffsetDateTime,
+) -> Result<(f64, f64), RepositoryError> {
+    let community = measurement_unit_community(transaction, workspace_id, action_id).await?;
+    let pre_action_daily_rate = if let Some(handle) = &community {
+        sqlx::query_scalar::<_, f64>(
+            r#"
+            SELECT COUNT(DISTINCT fan_id)::double precision / 14.0
+            FROM fan_provenance_events
+            WHERE workspace_id = $1
+              AND community = $3
+              AND event_kind = 'conversion'
+              AND fan_id IS NOT NULL
+              AND occurred_at >= $2::timestamptz - INTERVAL '14 days'
+              AND occurred_at < $2::timestamptz
+            "#,
+        )
+        .bind(workspace_id.into_uuid())
+        .bind(now)
+        .bind(handle)
+        .fetch_one(&mut **transaction)
+        .await
+        .map_err(map_sqlx)?
+    } else {
+        sqlx::query_scalar::<_, f64>(
+            r#"
+            SELECT COUNT(*)::double precision / 14.0 FROM fans
+            WHERE workspace_id = $1
+              AND created_at >= $2::timestamptz - INTERVAL '14 days'
+              AND created_at < $2::timestamptz
+              AND status != 'suppressed'
+            "#,
+        )
+        .bind(workspace_id.into_uuid())
+        .bind(now)
+        .fetch_one(&mut **transaction)
+        .await
+        .map_err(map_sqlx)?
+    };
+    let pre_action_durable_daily_rate = if let Some(handle) = &community {
+        sqlx::query_scalar::<_, f64>(
+            r#"
+            SELECT COUNT(DISTINCT fan.id)::double precision / 14.0
+            FROM fan_provenance_events AS conversion
+            JOIN fans AS fan
+              ON fan.workspace_id = conversion.workspace_id
+             AND fan.id = conversion.fan_id
+            WHERE conversion.workspace_id = $1
+              AND conversion.community = $3
+              AND conversion.event_kind = 'conversion'
+              AND conversion.occurred_at >= $2 - INTERVAL '44 days'
+              AND conversion.occurred_at < $2 - INTERVAL '30 days'
+              AND fan.status = 'active'
+            "#,
+        )
+        .bind(workspace_id.into_uuid())
+        .bind(now)
+        .bind(handle)
+        .fetch_one(&mut **transaction)
+        .await
+        .map_err(map_sqlx)?
+    } else {
+        sqlx::query_scalar::<_, f64>(
+            r#"
+            SELECT COUNT(*)::double precision / 14.0 FROM fans
+            WHERE workspace_id = $1
+              AND created_at >= $2 - INTERVAL '44 days'
+              AND created_at < $2 - INTERVAL '30 days'
+              AND status = 'active'
+            "#,
+        )
+        .bind(workspace_id.into_uuid())
+        .bind(now)
+        .fetch_one(&mut **transaction)
+        .await
+        .map_err(map_sqlx)?
+    };
+    Ok((pre_action_daily_rate, pre_action_durable_daily_rate))
 }
 
 /// The community handle this action's experimental unit refers to, when it is

@@ -67,6 +67,36 @@ pub(super) async fn ensure_dispatch_envelope(
             None,
             DispatchContext::default(),
         ),
+        // A brain-requested artifact is a fan-facing intervention like the
+        // kinds above, but its candidates persist through the plain path —
+        // no envelope anywhere. Its measurements are scheduled at the
+        // executor receipt, so the envelope is filled there; without it the
+        // fan-growth trio would UPDATE evidence rows that do not exist.
+        //
+        // `channel_for_template` reads `Other` for this template id, which is
+        // the honest surface: the artifact kind names the piece, not where
+        // it was published — a video and a newsletter block share the same
+        // request shape. The kind itself travels as `post_format`.
+        AutopilotActionPayload::RequestContentArtifact {
+            source_id,
+            artifact,
+            template_key,
+            ..
+        } => {
+            let artifact_key = serde_json::to_value(artifact)
+                .ok()
+                .and_then(|value| value.as_str().map(str::to_owned))
+                .unwrap_or_else(|| "unknown".to_owned());
+            (
+                format!("content-artifact:{template_key}"),
+                format!("source:{source_id}"),
+                Some(format!("source:{source_id}")),
+                DispatchContext {
+                    post_format: Some(artifact_key),
+                    ..DispatchContext::default()
+                },
+            )
+        }
         // Every other kind was created by the decision persist, which wrote
         // its envelope already — nothing to fill.
         _ => return Ok(()),
