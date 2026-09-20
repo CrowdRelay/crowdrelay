@@ -42,6 +42,7 @@ use crowdrelay_domain::{
     },
     funding::{FundingDecision, FundingOpportunitySnapshot, evaluate_funding},
     growth_envelope::{EnvelopeUsage, EnvelopeVerdict, GrowthEnvelope, check_envelope},
+    learning::Standing,
     live_opportunities::{
         LiveOpportunityDecision, LiveOpportunitySnapshot, evaluate_live_opportunity,
         live_opportunity_score,
@@ -571,6 +572,14 @@ where
                         .repository
                         .load_show_growth_snapshots(self.workspace_id, now)
                         .await?;
+                    // Measured standing per lever — the generalized form of
+                    // what agent templates already get. A lever whose own
+                    // outcomes retired it is refused here, before the domain
+                    // ladder can propose it again for the next event.
+                    let standings = self
+                        .repository
+                        .load_action_standings(self.workspace_id)
+                        .await?;
                     for snapshot in snapshots {
                         // One snapshot can emit two candidates: the §4e-2
                         // refusal of an unreciprocated crossbill lever, and —
@@ -580,6 +589,7 @@ where
                             snapshot,
                             &policy,
                             evidence.for_context(policy.context),
+                            &standings,
                             now,
                         )? {
                             self.persist(&candidate, &mut limits, &mut report).await?;

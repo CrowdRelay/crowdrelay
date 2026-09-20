@@ -373,6 +373,18 @@ pub trait AutopilotDecisionRepository: Send + Sync {
         now: OffsetDateTime,
     ) -> Result<Vec<ShowGrowthSnapshot>, RepositoryError>;
 
+    /// Measured standing per dispatch key (`action_kind:identity`, e.g.
+    /// `agent.run.request:social-post` or `show.growth.request:partner_cross_promo`)
+    /// across every measured action kind. Keys absent from the map have no
+    /// measured outcomes — callers treat absence as untested, never as harm.
+    async fn load_action_standings(
+        &self,
+        workspace_id: WorkspaceId,
+    ) -> Result<
+        std::collections::HashMap<String, crowdrelay_domain::learning::Standing>,
+        RepositoryError,
+    >;
+
     /// Returns every active metric series with its derived trend and the two
     /// pieces of context the rule needs but cannot see from one series alone:
     /// how long ago this series last produced a decision, and whether the same

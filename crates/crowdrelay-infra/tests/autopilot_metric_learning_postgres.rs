@@ -288,3 +288,159 @@ async fn typed_kinds_do_not_double_write_metrics() {
         "a typed kind leaves observed_metrics empty — no double learning"
     );
 }
+
+/// Phase 2: standing is keyed `action_kind:identity` over every measured
+/// action, not only agent templates. A show lever's own worsened outcomes
+/// retire it exactly the way a worker template's do, an unmeasured lever is
+/// simply absent (untested, never harmed), and an agent template's key cannot
+/// collide with a lever that happens to share its name.
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn action_standings_cover_levers_and_templates_alike() {
+    use crowdrelay_application::autopilot::AutopilotDecisionRepository;
+    use crowdrelay_domain::learning::Standing;
+
+    let f = setup().await.expect("fixture");
+    let workspace = f.workspace_id.into_uuid();
+
+    // One worsened outcome under one action. Three in a row is the
+    // retirement streak — measured outcomes only, which is what the
+    // outcomes table carries.
+    async fn seed_worsened_action(
+        f: &Fixture,
+        action_kind: &str,
+        payload: serde_json::Value,
+        worsened: usize,
+    ) {
+        for _ in 0..worsened {
+            let decision_id = uuid::Uuid::now_v7();
+            let action_id = uuid::Uuid::now_v7();
+            let measurement_id = uuid::Uuid::now_v7();
+            sqlx::query(
+                r#"INSERT INTO viryaos_autopilot_decisions
+                   (id, workspace_id, decision_key, context, subject_kind,
+                    subject_id, decision_kind, confidence_basis_points,
+                    disposition, reason, input_snapshot, policy_snapshot,
+                    recommendation, trace_id)
+                   VALUES ($1,$2,$3,'show_growth','event',$4,'activate',9000,
+                           'auto_execute','test','{}'::jsonb,'{}'::jsonb,
+                           '{}'::jsonb,gen_random_uuid())"#,
+            )
+            .bind(decision_id)
+            .bind(f.workspace_id.into_uuid())
+            .bind(format!("key-{action_id}"))
+            .bind(uuid::Uuid::now_v7())
+            .execute(&f.pool)
+            .await
+            .expect("decision");
+            sqlx::query(
+                r#"INSERT INTO viryaos_autopilot_actions
+                   (id, workspace_id, decision_id, context, action_kind,
+                    subject_kind, subject_id, idempotency_key, payload, status,
+                    action_class, finished_at)
+                   VALUES ($1,$2,$3,'show_growth',$4,'event',$5,$6,$7,
+                           'succeeded','third_party',$8)"#,
+            )
+            .bind(action_id)
+            .bind(f.workspace_id.into_uuid())
+            .bind(decision_id)
+            .bind(action_kind)
+            .bind(uuid::Uuid::now_v7())
+            .bind(format!("idem-{action_id}"))
+            .bind(&payload)
+            .bind(f.now)
+            .execute(&f.pool)
+            .await
+            .expect("action");
+            sqlx::query(
+                r#"INSERT INTO viryaos_autopilot_measurements
+                   (id, workspace_id, action_id, measurement_kind, subject_id,
+                    action_finished_at, baseline_value, due_at, status,
+                    available_at, finished_at)
+                   VALUES ($1,$2,$3,'show_growth_attributed_ticket_orders_7d',
+                           $3,$4,0,now(),'succeeded',now(),now())"#,
+            )
+            .bind(measurement_id)
+            .bind(f.workspace_id.into_uuid())
+            .bind(action_id)
+            .bind(f.now)
+            .execute(&f.pool)
+            .await
+            .expect("measurement");
+            sqlx::query(
+                r#"INSERT INTO viryaos_autopilot_outcomes
+                   (workspace_id, decision_id, action_id, measurement_id,
+                    metric_key, observed_value, baseline_value,
+                    effect_assessment, delta_basis_points, observed_at)
+                   VALUES ($1,$2,$3,$4,'effect.test',0,10,'worsened',-1000,
+                           now())"#,
+            )
+            .bind(f.workspace_id.into_uuid())
+            .bind(decision_id)
+            .bind(action_id)
+            .bind(measurement_id)
+            .execute(&f.pool)
+            .await
+            .expect("outcome");
+        }
+    }
+
+    seed_worsened_action(
+        &f,
+        "show.growth.request",
+        serde_json::json!({"kind": "request_show_growth", "lever": "partner_cross_promo"}),
+        3,
+    )
+    .await;
+    seed_worsened_action(
+        &f,
+        "agent.run.request",
+        serde_json::json!({"kind": "request_agent_run", "template_id": "social-post"}),
+        3,
+    )
+    .await;
+
+    let standings = f
+        .repository
+        .load_action_standings(f.workspace_id)
+        .await
+        .expect("standings");
+
+    assert_eq!(
+        standings.get("show.growth.request:partner_cross_promo"),
+        Some(&Standing::Retired {
+            reason: crowdrelay_domain::learning::RetirementReason::RepeatedlyWorsened,
+        }),
+        "a lever whose outcomes all worsened retires under its own key"
+    );
+    assert_eq!(
+        standings.get("agent.run.request:social-post"),
+        Some(&Standing::Retired {
+            reason: crowdrelay_domain::learning::RetirementReason::RepeatedlyWorsened,
+        }),
+        "agent templates keep standing under the kind-qualified key"
+    );
+    assert!(
+        !standings.contains_key("show.growth.request:grassroots_scene_relay"),
+        "an unmeasured lever is absent — untested, never harmed"
+    );
+
+    // And nothing leaks across workspaces — the other tenant's worsened run
+    // must not retire this workspace's lever.
+    let other = WorkspaceId::new();
+    sqlx::query("INSERT INTO workspaces (id, slug, name) VALUES ($1,$2,$3)")
+        .bind(other.into_uuid())
+        .bind(format!("standing-{}", other.into_uuid().simple()))
+        .bind("Other")
+        .execute(&f.pool)
+        .await
+        .expect("other workspace");
+    let other_standings = f
+        .repository
+        .load_action_standings(other)
+        .await
+        .expect("other standings");
+    assert!(other_standings.is_empty(), "workspace isolation");
+
+    let _ = workspace;
+}

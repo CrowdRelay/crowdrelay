@@ -357,6 +357,16 @@ impl AutopilotDecisionRepository for PostgresAutopilotRepository {
             .await
     }
 
+    async fn load_action_standings(
+        &self,
+        workspace_id: WorkspaceId,
+    ) -> Result<
+        std::collections::HashMap<String, crowdrelay_domain::learning::Standing>,
+        RepositoryError,
+    > {
+        self.load_action_standings_impl(workspace_id).await
+    }
+
     async fn load_growth_metric_snapshots(
         &self,
         workspace_id: WorkspaceId,

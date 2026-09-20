@@ -833,7 +833,7 @@ mod tests {
             },
         };
 
-        let candidates = show_growth::show_growth_candidates(snapshot(true), &policy, EvidenceCount(RATE_FLOOR), now)?;
+        let candidates = show_growth::show_growth_candidates(snapshot(true), &policy, EvidenceCount(RATE_FLOOR), &std::collections::HashMap::new(), now)?;
         assert_eq!(candidates.len(), 2, "the refusal and the next due lever");
         let declined = &candidates[0];
         assert_eq!(declined.decision_kind, "unreciprocated_crossbill");
@@ -860,7 +860,7 @@ mod tests {
 
         // The same due lever fires the moment the edge is reciprocated —
         // one candidate, the ordinary request, no refusal row.
-        let candidates = show_growth::show_growth_candidates(snapshot(false), &policy, EvidenceCount(RATE_FLOOR), now)?;
+        let candidates = show_growth::show_growth_candidates(snapshot(false), &policy, EvidenceCount(RATE_FLOOR), &std::collections::HashMap::new(), now)?;
         assert_eq!(candidates.len(), 1);
         let proposed = &candidates[0];
         assert_eq!(proposed.decision_kind, "activate_show_growth_lever");
@@ -872,6 +872,104 @@ mod tests {
                 ..
             }
         ));
+        Ok(())
+    }
+
+    /// Generalized standing: a lever whose own measured outcomes retired it is
+    /// refused on the Deny ledger — the same discipline agent templates get —
+    /// while a lever with no record stays untested and fires.
+    #[test]
+    fn a_retired_lever_is_refused_and_an_unmeasured_one_still_fires()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use crowdrelay_domain::learning::{RetirementReason, Standing};
+        use crowdrelay_domain::show_growth::{
+            ShowGrowthHistory, ShowGrowthLever, ShowGrowthPolicy, ShowGrowthSnapshot,
+        };
+
+        let policy = AutopilotPolicy {
+            context: AutopilotContext::ShowGrowth,
+            enabled: true,
+            autonomy_level: AutonomyLevel::RequireApproval,
+            minimum_confidence: Confidence::from_basis_points(8_000)?,
+            max_actions_24h: 10,
+            config: AutopilotPolicyConfig::ShowGrowth(ShowGrowthPolicy::default()),
+            version: 1,
+            guarded_until: None,
+            guardrail_reason: None,
+        };
+        let now = OffsetDateTime::UNIX_EPOCH + time::Duration::days(20_000);
+        let snapshot = ShowGrowthSnapshot {
+            event_id: EventId::new(),
+            published: true,
+            communication_enabled: true,
+            starts_at: now + time::Duration::days(40),
+            capacity: 100,
+            paid_tickets: 8,
+            paid_buyers: 6,
+            paid_tickets_last_7d: 2,
+            interested_fans: 30,
+            city_signal_fans: 20,
+            qualified_referrers_in_city: 4,
+            beacon_partners: 0,
+            attendees: 0,
+            morning_after_send_at: None,
+            unreciprocated_crossbill_edge: false,
+            ladder_approved: false,
+            history: ShowGrowthHistory {
+                canonical_link_setup_requested: true,
+                free_listing_sweep_requested: true,
+                audience_capture_setup_requested: true,
+                ..ShowGrowthHistory::default()
+            },
+        };
+
+        let mut standings = std::collections::HashMap::new();
+        standings.insert(
+            "show.growth.request:partner_cross_promo".to_owned(),
+            Standing::Retired {
+                reason: RetirementReason::RepeatedlyWorsened,
+            },
+        );
+        let candidates = show_growth::show_growth_candidates(
+            snapshot,
+            &policy,
+            EvidenceCount(RATE_FLOOR),
+            &standings,
+            now,
+        )?;
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].decision_kind, "lever_retired");
+        assert_eq!(candidates[0].disposition, PolicyDisposition::Deny);
+        assert!(candidates[0].reason.contains("lever_retired"));
+        assert!(matches!(
+            candidates[0].action,
+            AutopilotActionPayload::RequestShowGrowth {
+                lever: ShowGrowthLever::PartnerCrossPromo,
+                ..
+            }
+        ));
+
+        // An unrelated lever's retirement must not touch the one due —
+        // standing keys are per lever, not per ladder.
+        let mut standings = std::collections::HashMap::new();
+        standings.insert(
+            "show.growth.request:grassroots_scene_relay".to_owned(),
+            Standing::Retired {
+                reason: RetirementReason::OperatorRetired,
+            },
+        );
+        let candidates = show_growth::show_growth_candidates(
+            snapshot,
+            &policy,
+            EvidenceCount(RATE_FLOOR),
+            &standings,
+            now,
+        )?;
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(
+            candidates[0].decision_kind,
+            "activate_show_growth_lever"
+        );
         Ok(())
     }
 
@@ -925,7 +1023,7 @@ mod tests {
             },
         };
 
-        let parked = show_growth::show_growth_candidates(snapshot(false), &policy, EvidenceCount(RATE_FLOOR), now)?;
+        let parked = show_growth::show_growth_candidates(snapshot(false), &policy, EvidenceCount(RATE_FLOOR), &std::collections::HashMap::new(), now)?;
         assert_eq!(parked.len(), 1);
         assert_eq!(parked[0].disposition, PolicyDisposition::RequireApproval);
         assert_eq!(parked[0].policy_snapshot.get("ladder_authorized"), None);
@@ -933,7 +1031,7 @@ mod tests {
         // The flag rides the policy snapshot — the disposition stays honest
         // about what the level and confidence computed; the class ceiling and
         // the envelope run before the action insert honours the ladder.
-        let released = show_growth::show_growth_candidates(snapshot(true), &policy, EvidenceCount(RATE_FLOOR), now)?;
+        let released = show_growth::show_growth_candidates(snapshot(true), &policy, EvidenceCount(RATE_FLOOR), &std::collections::HashMap::new(), now)?;
         assert_eq!(released.len(), 1);
         assert_eq!(released[0].disposition, PolicyDisposition::RequireApproval);
         assert_eq!(
