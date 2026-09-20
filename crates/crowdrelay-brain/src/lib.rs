@@ -60,6 +60,7 @@ pub mod evidence;
 pub mod experiment;
 pub mod exploration;
 pub mod hypothesis;
+pub mod metric_posterior;
 pub mod opportunity;
 pub mod opportunity_graph;
 pub mod platform_yield;
@@ -112,6 +113,7 @@ pub use experiment::{
     ProvenanceEventKind, TreatmentAssignment,
 };
 pub use exploration::{CROSS_TEMPLATE_FACTOR, ExplorationMemory, VISIT_DECAY, context_hash};
+pub use metric_posterior::MetricPosterior;
 pub use opportunity::{OpportunityAction, OpportunityId};
 pub use portfolio::{
     DecisionMode, EfeSignal, PortfolioCandidate, PortfolioConfig, PortfolioOptimizer,

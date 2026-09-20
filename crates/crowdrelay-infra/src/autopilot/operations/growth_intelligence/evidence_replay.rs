@@ -180,6 +180,7 @@ pub(super) fn apply_evidence_to_model_with_contrast(
     let mut y14_treatment_updates = 0u32;
     let mut y30_treatment_updates = 0u32;
     let mut bridge_updates = 0u32;
+    let mut metric_updates = 0u32;
 
     // Per-horizon gating: in delta replay, only update the posteriors for
     // horizons that are new since the checkpoint. This prevents
@@ -265,6 +266,45 @@ pub(super) fn apply_evidence_to_model_with_contrast(
         let is_partial = ev.partial_resolution_count > 0 && ev.resolved_at.is_none();
         if is_partial {
             evidence_quality = evidence_quality.min_observational();
+        }
+
+        // ── Secondary metrics ──
+        //
+        // Every entry in `observed_metrics` folds into that metric's own
+        // posterior, once — when the row's `resolved_at` is new in this
+        // delta. Full resolution is the gate on purpose: a metric lands in
+        // the map when its own measurement completes, but the row re-enters
+        // the delta for every later horizon, and without the resolved_at
+        // gate each of those arrivals would re-teach the same number.
+        //
+        // Metrics are levels, not estimands — they are not contrasted
+        // against a control arm and they are deliberately outside the ITT
+        // gate below: a dispatch that produced revenue produced it whether
+        // or not the row qualifies for the treatment-effect posterior.
+        // What they lose by skipping the contrast is causal identification;
+        // what they gain is that every measurable outcome becomes learnable.
+        // `resolved_at.is_some()` is load-bearing, not redundant with the
+        // gate: under a full replay `horizon_is_new` is true for every row,
+        // resolved or not, and a mid-flight row's metric map already holds
+        // the measurements that have landed. Folding those now and again
+        // when `resolved_at` finally stamps would count them twice.
+        if !ev.observed_metrics.is_empty()
+            && ev.resolved_at.is_some()
+            && horizon_is_new(ev.resolved_at, None)
+        {
+            for (metric_key, observed) in &ev.observed_metrics {
+                let obs_var =
+                    2.0 * observed.abs().max(1.0) * evidence_quality.variance_multiplier();
+                model.update_metric(
+                    metric_key,
+                    Some(template.as_str()),
+                    target_key,
+                    *observed,
+                    obs_var,
+                    evidence_quality,
+                );
+                metric_updates += 1;
+            }
         }
 
         // Update the outcome model (P(Y|action,context)) from the raw
@@ -484,6 +524,7 @@ pub(super) fn apply_evidence_to_model_with_contrast(
             y14_treatment_updates,
             y30_treatment_updates,
             bridge_updates,
+            metric_updates,
             "evidence replay: posterior update summary"
         );
     }

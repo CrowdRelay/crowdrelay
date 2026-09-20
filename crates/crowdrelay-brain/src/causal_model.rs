@@ -269,6 +269,23 @@ pub struct CausalModel {
     /// honest uncertainty, which inflates the treatment-effect std for
     /// decisions based on Y14 alone.
     pub bridge: Y14Y30Bridge,
+    /// Secondary metric posteriors, keyed by the measurement's
+    /// `learnable_metric_key` — ticket revenue, replies, clicks, attendance,
+    /// engagement, quality checkpoints. One hierarchy per metric, each
+    /// pooling only observations recorded in that metric's units, so a
+    /// revenue reading can never be averaged into a click count.
+    ///
+    /// These are proximal outcomes, not estimands: they answer "what does
+    /// this action usually produce" for the economic, standing and harm
+    /// learners. The fan-growth estimands stay in the typed columns and the
+    /// treatment-effect posteriors above; a key colliding with those columns
+    /// is impossible because those kinds return `None` from
+    /// `learnable_metric_key`.
+    ///
+    /// Defaulted on deserialize so checkpoints written before the field
+    /// existed still load — the posteriors then refill from evidence replay.
+    #[serde(default)]
+    pub metric_posteriors: HashMap<String, crate::metric_posterior::MetricPosterior>,
 }
 
 /// Treatment-aware prediction statistics — the result of querying both the
@@ -431,6 +448,7 @@ impl CausalModel {
             template_expected_signal: HashMap::new(),
             calibration: crate::calibration::CalibrationByRegime::new(),
             context_effects: ContextGLM::new(),
+            metric_posteriors: HashMap::new(),
             bridge: Y14Y30Bridge::new(),
         }
     }
@@ -697,6 +715,53 @@ impl CausalModel {
     /// Y30 with honest uncertainty.
     pub fn update_bridge(&mut self, y14: f64, y30: f64) {
         self.bridge.update(y14, y30);
+    }
+
+    /// Folds one resolved secondary-metric observation into that metric's
+    /// posterior — the write half of the `observed_metrics` learning path.
+    ///
+    /// `metric_key` is the measurement's `learnable_metric_key`: each key owns
+    /// its own hierarchy, so units can never pool — a revenue reading cannot
+    /// be averaged into a click count, because they live under different
+    /// keys. `observation_variance` arrives already scaled by evidence
+    /// quality; `quality` separately weights the confidence, matching the
+    /// treatment-effect model's rule that being moved and being believed are
+    /// different things.
+    pub fn update_metric(
+        &mut self,
+        metric_key: &str,
+        template_id: Option<&str>,
+        target_key: Option<&str>,
+        observation: f64,
+        observation_variance: f64,
+        quality: crate::evidence::EvidenceQuality,
+    ) {
+        self.metric_posteriors
+            .entry(metric_key.to_owned())
+            .or_default()
+            .update(
+                template_id,
+                target_key,
+                observation,
+                observation_variance,
+                quality,
+            );
+    }
+
+    /// `(mean, std, confidence)` for a metric on a template and target, or
+    /// `None` when the metric has never been observed — an absent posterior
+    /// is the honest answer, not a zero the caller could mistake for a
+    /// measurement.
+    #[must_use]
+    pub fn predict_metric_stats(
+        &self,
+        metric_key: &str,
+        template_id: &str,
+        target_key: Option<&str>,
+    ) -> Option<(f64, f64, u32)> {
+        self.metric_posteriors
+            .get(metric_key)
+            .map(|posterior| posterior.predict_stats(template_id, target_key))
     }
 
     /// Returns treatment-aware prediction statistics — both the outcome model
