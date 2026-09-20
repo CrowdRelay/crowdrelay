@@ -123,9 +123,12 @@ fn enriched_task_detail(
     }
     text.push_str(&format!("\n\n{}", briefing.deadline_note));
 
-    // Truncate to fit the n8n workflow's slice(0, 1800) limit.
+    // Truncate to fit the n8n workflow's slice(0, 1800) limit — byte 1799 can
+    // sit mid-character in Polish copy or a post body, and `truncate` panics
+    // rather than rounding down. The ellipsis's own three bytes come out of
+    // the same budget, or the result is 1803 and the workflow cuts it anyway.
     if text.len() > 1800 {
-        text.truncate(1799);
+        text.truncate(text.floor_char_boundary(1797));
         text.push('…');
     }
     text

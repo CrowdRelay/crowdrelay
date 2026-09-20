@@ -844,8 +844,10 @@ async fn flush_initial_notices(
         // appended behind a full-length detail would be cut wholesale, and
         // the named tasks are the point of the digest. The primary's body
         // gives up its room instead: the panel behind the link carries its
-        // full record.
-        let budget = 1800_usize.saturating_sub(tail.len());
+        // full record. The ellipsis's three bytes come out of the body's
+        // budget too, or a full-length detail ends at 1803 and the workflow
+        // cuts the tail anyway.
+        let budget = 1800_usize.saturating_sub(tail.len() + 3);
         let mut detail = primary.detail.clone();
         if detail.len() > budget {
             detail.truncate(detail.floor_char_boundary(budget));

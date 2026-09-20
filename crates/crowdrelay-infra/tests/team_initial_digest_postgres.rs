@@ -89,6 +89,9 @@ async fn run(pool: &PgPool, url: &str) -> Result<(), Box<dyn std::error::Error>>
     for index in 0..5_i64 {
         awaiting_approval(pool, workspace, now, index).await?;
     }
+    // A published show a day out adds its checklist asks to the same
+    // member — the digest has to fold producers, not just approvals.
+    published_show(pool, workspace, now).await?;
 
     let database = DatabaseConfig {
         url: url.to_owned(),
@@ -102,7 +105,7 @@ async fn run(pool: &PgPool, url: &str) -> Result<(), Box<dyn std::error::Error>>
     let assigned = repository
         .reconcile_team_handoffs(WorkspaceId::from_uuid(workspace), now)
         .await?;
-    assert!(assigned >= 5, "the handoffs never got an owner");
+    assert!(assigned >= 12, "the handoffs never got an owner");
 
     // Every approval got its own assignment — batching the mail changes
     // interruptions, not the work index.
@@ -138,14 +141,27 @@ async fn run(pool: &PgPool, url: &str) -> Result<(), Box<dyn std::error::Error>>
         title, "Zatwierdź publikację w społeczności",
         "the digest did not lead with the approval's own title"
     );
+    // The earliest-due notice leads: approval 0 expires in seven hours,
+    // every show task waits for doors minus two.
     assert!(
-        detail.contains("jeszcze 4 zadania"),
-        "the digest did not name the other four tasks: {detail}"
+        detail.contains("Post 0"),
+        "the earliest-due task did not lead the digest: {detail}"
+    );
+    // Twelve notices — five approvals plus the seven checklist asks the
+    // sweep's own door-campaign mint makes live — one primary, eleven
+    // named in the tail, from two producers, not one.
+    assert!(
+        detail.contains("jeszcze 11 zadania"),
+        "the digest did not name the other eleven tasks: {detail}"
     );
     let named = detail
         .matches("• Zatwierdź publikację w społeczności")
         .count();
     assert_eq!(named, 4, "the tail did not name each folded task: {detail}");
+    assert!(
+        detail.contains("• Potwierdź obsadę koncertu"),
+        "the tail did not fold the show tasks in: {detail}"
+    );
 
     // A second sweep at the same instant sends nothing more — every approval
     // already owns an assignment, so none re-enters the notice batch.
@@ -293,6 +309,28 @@ async fn awaiting_approval(
     // its last rung, and `first_reminder_at` honestly schedules nothing —
     // this fixture wants ladders, not the boundary.
     .bind(now + time::Duration::hours(7 + index * 12))
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// A show a day out: every checklist ask lands on the same member the
+/// approvals do — the sweep mints the door campaign before it lists tasks,
+/// so the QR ask fires too; only the post-show one stays quiet (the doors
+/// have not closed).
+async fn published_show(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    now: OffsetDateTime,
+) -> Result<(), Box<dyn std::error::Error>> {
+    sqlx::query(
+        "INSERT INTO events (id, workspace_id, slug, title, starts_at, status, published_at)
+         VALUES ($1,$2,$3,'Crew digest show',$4,'published',now())",
+    )
+    .bind(Uuid::now_v7())
+    .bind(workspace_id)
+    .bind(format!("crew-digest-show-{}", Uuid::now_v7().simple()))
+    .bind(now + time::Duration::days(1))
     .execute(pool)
     .await?;
     Ok(())
