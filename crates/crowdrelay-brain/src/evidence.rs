@@ -418,6 +418,21 @@ pub struct GrowthEvidence {
     pub replayed_14d_at: Option<OffsetDateTime>,
     #[serde(default)]
     pub replayed_30d_at: Option<OffsetDateTime>,
+
+    // ── Secondary metrics ──
+    /// Every measured outcome that is not fan growth or Signal installs,
+    /// keyed by the measurement's `learnable_metric_key`: ticket revenue in
+    /// minor units, replies, clicks, engagement, quality checkpoints. The
+    /// fan kinds are deliberately absent — they write typed columns that the
+    /// outcome and treatment-effect posteriors consume, and a value in two
+    /// places is a value learned twice.
+    ///
+    /// Values are raw observations in the kind's natural units, never derived
+    /// deltas. Replay folds each key into the causal model's metric
+    /// posteriors once, at full resolution — a 3d fan-growth cursor must not
+    /// make a 7d revenue number look new.
+    #[serde(default)]
+    pub observed_metrics: std::collections::BTreeMap<String, f64>,
 }
 
 /// Contamination at or above which a randomised assignment is no longer a
@@ -476,6 +491,7 @@ impl Default for GrowthEvidence {
             replayed_3d_at: None,
             replayed_14d_at: None,
             replayed_30d_at: None,
+            observed_metrics: std::collections::BTreeMap::new(),
         }
     }
 }
@@ -540,6 +556,7 @@ impl GrowthEvidence {
             replayed_3d_at: None,
             replayed_14d_at: None,
             replayed_30d_at: None,
+            observed_metrics: std::collections::BTreeMap::new(),
         }
     }
 
@@ -552,6 +569,7 @@ impl GrowthEvidence {
             || self.observed_incremental_fans_3d.is_some()
             || self.durable_fans_30d.is_some()
             || self.converted
+            || !self.observed_metrics.is_empty()
     }
 
     /// The incremental outcome a learner should use, and how noisy it is.

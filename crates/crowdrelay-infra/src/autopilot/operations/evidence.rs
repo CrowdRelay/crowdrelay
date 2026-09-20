@@ -330,6 +330,7 @@ async fn load_evidence(
         replayed_3d_at: Option<OffsetDateTime>,
         replayed_14d_at: Option<OffsetDateTime>,
         replayed_30d_at: Option<OffsetDateTime>,
+        observed_metrics: serde_json::Value,
     }
 
     let rows: Vec<EvidenceRow> = sqlx::query_as(
@@ -347,7 +348,8 @@ async fn load_evidence(
                ge.episode_id, ge.resolved_at,
                ge.experiment_assignment_id, ea.experiment_uuid, ea.final_contamination,
                COALESCE(ge.partial_resolution_count, 0) AS partial_resolution_count,
-               ge.replayed_3d_at, ge.replayed_14d_at, ge.replayed_30d_at
+               ge.replayed_3d_at, ge.replayed_14d_at, ge.replayed_30d_at,
+               ge.observed_metrics
         FROM viryaos_growth_evidence ge
         -- Belt-and-suspenders fallback: if the 3d measurement wrote to
         -- dispatch_predictions.observed_new_fans but not to
@@ -597,6 +599,21 @@ async fn load_evidence(
                 replayed_3d_at: row.replayed_3d_at,
                 replayed_14d_at: row.replayed_14d_at,
                 replayed_30d_at: row.replayed_30d_at,
+                // A malformed entry is dropped, not defaulted into 0.0 —
+                // replaying a metric as zero would teach the posterior the
+                // measurement happened and produced nothing.
+                observed_metrics: row
+                    .observed_metrics
+                    .as_object()
+                    .map(|object| {
+                        object
+                            .iter()
+                            .filter_map(|(key, value)| {
+                                value.as_f64().map(|value| (key.clone(), value))
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default(),
             }
         })
         .collect();
