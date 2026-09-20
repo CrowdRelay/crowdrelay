@@ -7,7 +7,7 @@
 //! not actionable from there. FakAP remains the external health probe for
 //! API reachability; this watchdog catches silent failures FakAP cannot see.
 //!
-//! The watchdog monitors twenty conditions. The count and this list are
+//! The watchdog monitors 21 conditions. The count and this list are
 //! gated against `conditions()` by `test_watchdog_conditions_documented_v1.py`:
 //! it said "ten" while seven alarms went undocumented, including two criticals,
 //! and this repository has a record of concluding a live capability is missing
@@ -132,6 +132,13 @@
 //!   Reddit connection failing on an invalid credential — and none of the three
 //!   conditions above could see it, because all three watch the executor rather
 //!   than the channels the brain grows through.
+//! - `approval.sweep_lagging` — an approval ask outlived its deadline and is
+//!   still `awaiting_approval`. Two independent sweeps should have cancelled
+//!   it: the claim path sweeps on every autopilot cycle, and the retention
+//!   worker sweeps globally every hour. A row this stale means neither ran —
+//!   the lapsed read calls it `awaiting_sweep`, hidden from the queue on one
+//!   side and uncounted as a loss on the other. Warning, not critical: nothing
+//!   was corrupted, and the fix is the sweep running again, not a person's.
 //!
 //! # Contradictions are the one condition nothing else can find
 //!
