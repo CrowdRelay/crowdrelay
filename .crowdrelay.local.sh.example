@@ -15,6 +15,17 @@ CROWDRELAY_DEPLOY_WAIT_TIMEOUT_SECONDS="180"
 # Optional narrow Control Plane -> AREA management sidecar.
 CROWDRELAY_AREA_MANAGEMENT_ENABLED="false"
 
+# Optional Control Plane runtime heartbeat. When all three are set,
+# `crowdrelayctl heartbeat` (crowdrelay-heartbeat.timer, every 60s) and each
+# verified deploy PUT runtime status to
+# ${CROWDRELAY_CONTROL_PLANE_BASE_URL}/api/v1/tenants/${CROWDRELAY_CONTROL_PLANE_TENANT_SLUG}/runtime.
+# Point the base URL at an address this host can reach directly — the public
+# edge Basic Auth would strip the telemetry bearer. The token must equal the
+# Control Plane's CONTROL_PLANE_TELEMETRY_TOKEN.
+# CROWDRELAY_CONTROL_PLANE_BASE_URL="http://127.0.0.1:8090"
+# CROWDRELAY_CONTROL_PLANE_TELEMETRY_TOKEN=""
+# CROWDRELAY_CONTROL_PLANE_TENANT_SLUG="virya"
+
 # Optional remote deployment.
 CROWDRELAY_SSH_TARGET="deploy@example.com"
 CROWDRELAY_REMOTE_INSTALL_DIR="/srv/crowdrelay"
