@@ -128,12 +128,14 @@ pub(crate) fn router(state: crate::AppState) -> Router {
             "/v1/control-plane/ecosystem/flags/{key}",
             post(crate::ecosystem::update_flag),
         )
+        // The operator's third show write: a label that never ran a
+        // sync source types the night in by hand. Same handler
+        // staff/admin mount. (The comment sits above the route because a
+        // line comment inside the verb chain breaks the reachability
+        // contract's verb regex.)
         .route(
             "/v1/control-plane/events",
             get(crate::concert_qr::control_plane_events)
-                // The operator's third show write: a label that never ran a
-                // sync source types the night in by hand. Same handler
-                // staff/admin mount.
                 .post(crate::events::create_event)
                 .layer(DefaultBodyLimit::max(MAX_EVENT_BILL_BODY_BYTES)),
         )
