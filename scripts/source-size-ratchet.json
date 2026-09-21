@@ -24,12 +24,12 @@
   "crates/crowdrelay-brain/src/reach.rs": 1260,
   "crates/crowdrelay-brain/src/scenario_tests.rs": 1202,
   "crates/crowdrelay-domain/src/growth_metrics.rs": 1651,
-  "crates/crowdrelay-domain/src/plays.rs": 1532,
+  "crates/crowdrelay-domain/src/plays.rs": 1727,
   "crates/crowdrelay-domain/src/roster_plan.rs": 1707,
   "crates/crowdrelay-infra/src/acquisition.rs": 2012,
   "crates/crowdrelay-infra/src/admission.rs": 1451,
   "crates/crowdrelay-infra/src/autopilot.rs": 1498,
-  "crates/crowdrelay-infra/src/autopilot/actions_execution.rs": 1310,
+  "crates/crowdrelay-infra/src/autopilot/actions_execution.rs": 1394,
   "crates/crowdrelay-infra/src/autopilot/control.rs": 1215,
   "crates/crowdrelay-infra/src/autopilot/control_mutations.rs": 1208,
   "crates/crowdrelay-infra/src/autopilot/measurement.rs": 1345,
@@ -37,6 +37,7 @@
   "crates/crowdrelay-infra/src/autopilot/operations/ingress.rs": 1451,
   "crates/crowdrelay-infra/src/autopilot/operations/snapshots.rs": 1251,
   "crates/crowdrelay-infra/src/autopilot/play_outcomes.rs": 1357,
+  "crates/crowdrelay-infra/src/autopilot/plays.rs": 1553,
   "crates/crowdrelay-infra/src/autopilot/runtime.rs": 1233,
   "crates/crowdrelay-infra/src/autopilot/team.rs": 1112,
   "crates/crowdrelay-infra/src/config.rs": 1558,
@@ -45,6 +46,7 @@
   "crates/crowdrelay-infra/src/referrals.rs": 1797,
   "crates/crowdrelay-infra/tests/autopilot_experiment_integrity_postgres.rs": 4485,
   "crates/crowdrelay-infra/tests/autopilot_measurement_spine_postgres.rs": 1550,
+  "crates/crowdrelay-infra/tests/autopilot_plays_postgres.rs": 1533,
   "crates/crowdrelay-infra/tests/gig_outreach_postgres.rs": 1251,
   "crates/crowdrelay-infra/tests/gig_planning_postgres.rs": 1207,
   "crates/crowdrelay-worker/src/ad_conversion.rs": 1364,
@@ -55,6 +57,7 @@
   "crates/crowdrelay-worker/src/growth_metric_sync.rs": 2280,
   "crates/crowdrelay-worker/src/main.rs": 1423,
   "crates/crowdrelay-worker/src/receipt_reconciliation.rs": 1343,
-  "crates/crowdrelay-worker/src/retention.rs": 1419
+  "crates/crowdrelay-worker/src/retention.rs": 1419,
+  "crates/crowdrelay-worker/tests/community_relay_batch_postgres.rs": 1324
  }
 }

@@ -49,6 +49,23 @@ pub const REVISABLE_FIELDS: &[&str] = &[
     "opening_line",
 ];
 
+/// The fields a community relay delivery lets an operator rewrite.
+///
+/// Narrower than [`REVISABLE_FIELDS`] on purpose: a relay edit box fixes the
+/// title and body a subreddit will read, and nothing else — the subreddit,
+/// the target and the link are the batch's facts, not draft words. `title`
+/// is deliberately absent from the general list: on other payloads a
+/// top-level `title` is often evidence (a show's name), not the words being
+/// sent, and widening the general list to reach it here would let a revision
+/// quietly rewrite facts on those drafts too.
+pub const RELAY_REVISABLE_FIELDS: &[&str] = &["title", "body"];
+
+/// Reddit's own hard limit on a submission title. The general revision
+/// ceiling measures growth against the draft; this one is the platform's —
+/// a title past it does not fail at review, it fails at send, after the
+/// approval that carried it is already recorded.
+pub const RELAY_TITLE_CHAR_LIMIT: usize = 300;
+
 /// Why a revision was refused. Each variant is a sentence an operator should be
 /// able to read without knowing the codebase.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -142,10 +159,25 @@ pub fn review_revision(
     draft: &BTreeMap<String, String>,
     revision: &BTreeMap<String, String>,
 ) -> Result<BTreeMap<String, String>, RevisionRefusal> {
+    review_revision_fields(REVISABLE_FIELDS, draft, revision)
+}
+
+/// [`review_revision`] against a narrower allowlist — a surface that exposes
+/// only some of the general fields (a relay delivery's `title`/`body`)
+/// reviews against exactly the list it shows, never a wider one.
+///
+/// # Errors
+///
+/// Same refusals as [`review_revision`].
+pub fn review_revision_fields(
+    allowed: &[&str],
+    draft: &BTreeMap<String, String>,
+    revision: &BTreeMap<String, String>,
+) -> Result<BTreeMap<String, String>, RevisionRefusal> {
     let mut changed = BTreeMap::new();
 
     for (field, proposed) in revision {
-        if !REVISABLE_FIELDS.contains(&field.as_str()) {
+        if !allowed.contains(&field.as_str()) {
             return Err(RevisionRefusal::FieldNotRevisable {
                 field: field.clone(),
             });
@@ -200,10 +232,21 @@ pub fn review_revision(
 /// payload's business, not the operator's.
 #[must_use]
 pub fn revisable_fields(payload: &serde_json::Value) -> BTreeMap<String, String> {
+    revisable_fields_in(REVISABLE_FIELDS, payload)
+}
+
+/// [`revisable_fields`] against a narrower allowlist — pairs with
+/// [`review_revision_fields`] so a scoped edit surface and its gate can
+/// never disagree.
+#[must_use]
+pub fn revisable_fields_in(
+    allowed: &[&str],
+    payload: &serde_json::Value,
+) -> BTreeMap<String, String> {
     let mut fields = BTreeMap::new();
     let mut collect = |object: Option<&serde_json::Map<String, serde_json::Value>>| {
         let Some(object) = object else { return };
-        for field in REVISABLE_FIELDS {
+        for field in allowed {
             if let Some(serde_json::Value::String(text)) = object.get(*field) {
                 fields.insert((*field).to_owned(), text.clone());
             }

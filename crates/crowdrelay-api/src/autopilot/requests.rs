@@ -78,17 +78,28 @@ pub struct ApproveActionsRequest {
     pub remember: Option<RememberRequest>,
 }
 
-/// Approve a community relay batch, optionally overriding its cadence.
+/// Approve a community relay batch, optionally overriding its cadence and
+/// fixing a delivery's words.
 ///
 /// `interval_seconds` is the gap between two posts from the batch — the
 /// "one an hour so they don't ban us" the card shows. The table's CHECK
 /// (300–86400) is the floor and ceiling; an absent body approves at the
 /// batch's own default.
+///
+/// `revisions` maps a delivery's `action_id` — the id the card shows per
+/// target row — to `{field: replacement text}`. Only the post's own words
+/// may change (`draft_revision::RELAY_REVISABLE_FIELDS`: `title`, `body`);
+/// the community, the link and the media are the batch's facts. A refused
+/// edit refuses the whole approval — the batch never approves around a
+/// draft the operator meant to fix.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CommunityRelayApproveRequest {
     #[serde(default)]
     pub interval_seconds: Option<i32>,
+    #[serde(default)]
+    pub revisions:
+        Option<std::collections::BTreeMap<Uuid, std::collections::BTreeMap<String, String>>>,
 }
 
 #[derive(Debug, Deserialize)]
