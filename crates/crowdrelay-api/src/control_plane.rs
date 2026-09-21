@@ -45,6 +45,13 @@ pub(crate) fn router(state: crate::AppState) -> Router {
             "/v1/control-plane/ops/attention",
             get(crate::ops::attention),
         )
+        // The intelligence brief: one read composing the brain's verdict,
+        // its posture, its plan, what it found, what it did, and what needs
+        // the operator — the "are we getting anywhere" answer.
+        .route(
+            "/v1/control-plane/ops/intelligence",
+            get(crate::ops::intelligence),
+        )
         .route("/v1/control-plane/ops/outbox", get(crate::ops::list_outbox))
         .route(
             "/v1/control-plane/ops/outbox/{event_id}/retry",
