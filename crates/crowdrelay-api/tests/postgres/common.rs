@@ -50,27 +50,32 @@ pub async fn test_pool_with_url(env_var: &str) -> Result<(PgPool, String), sqlx:
         format!("{:08x}", h & 0xffff_ffff)
     };
 
-    // Once per test binary: drop clone leftovers older than a day so a
-    // crashed job cannot leak `pgt_*` databases on a persistent dev postgres.
-    // The sweep used to cover only clones of *this* template (`pgt_{sig}_%`),
-    // which left every other template's orphans behind — 143 had accumulated
-    // by 2026-09-21. The age check is what makes a cross-template sweep safe:
-    // a live clone is minutes old, so nothing under a day can be in use,
-    // regardless of which lane owns it.
-    const MAX_CLONE_AGE_SECS: u64 = 24 * 60 * 60;
+    // Once per test binary: drop clone leftovers older than a few hours so a
+    // crashed job cannot leak databases on a persistent dev postgres. The
+    // sweep covers every clone shape this helper has ever used — `pgt_*` plus
+    // the retired `crowdrelay_<tag>_<uuid>` and `ci_<uuid>` schemes — because
+    // each name carries a uuid v7 the sweep can age off without touching
+    // pg_stat_file. A live clone is minutes old, so nothing past four hours
+    // can be in use, regardless of which lane owns it; names without a
+    // trailing uuid fail the parse and are never dropped.
+    const MAX_CLONE_AGE_SECS: u64 = 4 * 60 * 60;
     let now_unix = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
     SWEEPED
         .get_or_try_init(|| async {
-            let stale: Vec<String> =
-                sqlx::query("SELECT datname FROM pg_database WHERE datname LIKE 'pgt\\_%'")
-                    .fetch_all(&mut admin)
-                    .await?
-                    .iter()
-                    .map(|row| row.get("datname"))
-                    .collect();
+            let stale: Vec<String> = sqlx::query(
+                "SELECT datname FROM pg_database \
+                 WHERE datname LIKE 'pgt\\_%' \
+                    OR datname LIKE 'crowdrelay\\_%' \
+                    OR datname LIKE 'ci\\_%'",
+            )
+            .fetch_all(&mut admin)
+            .await?
+            .iter()
+            .map(|row| row.get("datname"))
+            .collect();
             for datname in stale {
                 let old_enough = datname
                     .rsplit('_')
