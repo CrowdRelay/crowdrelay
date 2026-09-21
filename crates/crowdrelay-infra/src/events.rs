@@ -21,7 +21,7 @@ use crowdrelay_application::{
 use crowdrelay_domain::{
     CampaignId, CityId, EventAction, EventCity, EventId, EventInterestResult, EventSlug,
     FanEventInterest, FanId, PublicEvent, PublicEventAct, VisitorId, WorkspaceId, WorkspaceSlug,
-    slugify,
+    slugify, stable_slug,
 };
 use serde::Serialize;
 use serde_json::json;
@@ -605,7 +605,7 @@ impl PostgresEventRepository {
                         WHERE w.slug = $3
                         UNION ALL
                         SELECT bl.workspace_id
-                        FROM band_listings AS bl
+                        FROM viryaos_band_listings AS bl
                         WHERE lower(btrim(bl.act_name)) = lower(btrim($4))
                     ) AS candidate
                     HAVING count(DISTINCT candidate.workspace_id) = 1

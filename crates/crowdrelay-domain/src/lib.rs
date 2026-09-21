@@ -191,5 +191,5 @@ pub use trace::{CausationId, TraceContext, TraceId};
 pub use values::{
     CitySlug, CountryCode, CountryCodeError, DestinationUrl, DestinationUrlError, EventSlug,
     NormalizedEmail, NormalizedEmailError, ReferralCode, ReferralCodeError, SlugError,
-    SmartLinkSlug, WorkspaceSlug, slugify,
+    SmartLinkSlug, WorkspaceSlug, slugify, stable_slug,
 };

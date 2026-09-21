@@ -98,6 +98,8 @@ pub async fn create_event(
             timezone: timezone.as_deref(),
             venue: venue.as_deref(),
             venue_address: venue_address.as_deref(),
+            city_name: city_name.as_deref(),
+            city_region: city_region.as_deref(),
             ticket_url: ticket_url.as_deref(),
             doors_at: payload.doors_at,
             starts_at: payload.starts_at,
@@ -108,9 +110,14 @@ pub async fn create_event(
         .as_deref()
         .is_none_or(crowdrelay_infra::regional::is_known_iana_timezone);
     // City is a pair — name and country code together or neither — and a
-    // region only colours a pair that exists.
+    // region only colours a pair that exists. The name must also carry at
+    // least one ASCII-sluggable character, or the registry insert below
+    // would have nothing to key the row on.
     let city_ok = city_name.is_some() == city_country_code.is_some()
         && (city_region.is_none() || city_name.is_some())
+        && city_name
+            .as_deref()
+            .is_none_or(|name| crowdrelay_domain::slugify(name).is_some())
         && city_country_code.as_deref().is_none_or(|code| {
             code.len() == 2 && code.bytes().all(|byte| byte.is_ascii_uppercase())
         });

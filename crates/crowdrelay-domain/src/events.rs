@@ -242,6 +242,10 @@ pub struct EventWriteFields<'a> {
     pub timezone: Option<&'a str>,
     pub venue: Option<&'a str>,
     pub venue_address: Option<&'a str>,
+    /// Free text that joins the shared city registry — bounded here because
+    /// the `cities` columns themselves carry no length constraint.
+    pub city_name: Option<&'a str>,
+    pub city_region: Option<&'a str>,
     pub ticket_url: Option<&'a str>,
     pub doors_at: Option<OffsetDateTime>,
     pub starts_at: OffsetDateTime,
@@ -254,6 +258,8 @@ pub fn validate_event_write_fields(fields: &EventWriteFields<'_>) -> Result<(), 
     validate_optional_text(fields.timezone, 128).map_err(|_| PublicEventError::InvalidTimezone)?;
     validate_optional_text(fields.venue, 500)?;
     validate_optional_text(fields.venue_address, 500)?;
+    validate_optional_text(fields.city_name, 200)?;
+    validate_optional_text(fields.city_region, 100)?;
     validate_optional_https_url(fields.ticket_url)?;
     if fields
         .doors_at
@@ -654,6 +660,8 @@ mod act_tests {
             timezone: Some("Europe/Warsaw"),
             venue: Some("Test Club"),
             venue_address: Some("Main Street 1"),
+            city_name: Some("Warszawa"),
+            city_region: Some("mazowieckie"),
             ticket_url: Some("https://tickets.example/virya"),
             doors_at: Some(starts_at - time::Duration::hours(1)),
             starts_at,
@@ -667,6 +675,8 @@ mod act_tests {
                 timezone: None,
                 venue: None,
                 venue_address: None,
+                city_name: None,
+                city_region: None,
                 ticket_url: None,
                 doors_at: None,
                 starts_at,
@@ -711,6 +721,15 @@ mod act_tests {
         assert!(
             validate_event_write_fields(&EventWriteFields {
                 venue: Some("with\nnewline"),
+                ..valid
+            })
+            .is_err()
+        );
+        // The registry columns carry no length bound of their own — the write
+        // path is the only gate.
+        assert!(
+            validate_event_write_fields(&EventWriteFields {
+                city_name: Some("x".repeat(201).as_str()),
                 ..valid
             })
             .is_err()

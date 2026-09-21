@@ -115,10 +115,13 @@ impl PostgresEventRepository {
 
         // The city registry is deliberately workspace-less — cities are shared
         // geography, not tenant data. A name the sync never saw becomes a row
-        // here so the show joins the same city the gig planner ranks.
+        // here so the show joins the same city the gig planner ranks. The slug
+        // is `stable_slug` exactly as the sync adapters mint it — same fold,
+        // same fallback — so a hand-typed name lands on the row a provider
+        // would have made, not a duplicate beside it.
         let city_id = match (&command.city_name, &command.city_country_code) {
             (Some(name), Some(country)) => {
-                let slug = slugify(name).ok_or(EventStoreError::Conflict)?;
+                let slug = stable_slug(name, country);
                 sqlx::query_scalar::<_, Uuid>(
                     r#"
                     INSERT INTO cities (slug, name, country_code, region)

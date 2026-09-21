@@ -8,6 +8,7 @@
 use std::{fmt, str::FromStr};
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 use url::{Host, Url};
 
@@ -170,22 +171,68 @@ pub fn slugify(value: &str) -> Option<String> {
     (!slug.is_empty()).then_some(slug)
 }
 
+/// Derives a stable slug the way the event-sync adapters have always done
+/// it: the same fold grammar as [`slugify`], then — when the result is longer
+/// than a provider row ever needs — a 67-character stem plus a short
+/// content-hash suffix so two different long names can never collide.
+///
+/// Cities are deduplicated on `(country_code, slug)`, so the manual write
+/// path must produce the same slug for a name that sync already registered;
+/// this is that shared implementation, and `event_sync` delegates to it.
+/// `fallback` names the row when nothing folds to ASCII (sync passes the
+/// country code for cities).
+#[must_use]
+pub fn stable_slug(value: &str, fallback: &str) -> String {
+    let mut slug = String::with_capacity(value.len());
+    let mut previous_dash = false;
+    for character in value.chars().map(ascii_fold) {
+        if character.is_ascii_alphanumeric() {
+            slug.push(character.to_ascii_lowercase());
+            previous_dash = false;
+        } else if !previous_dash && !slug.is_empty() {
+            slug.push('-');
+            previous_dash = true;
+        }
+    }
+    while slug.ends_with('-') {
+        slug.pop();
+    }
+    if slug.is_empty() {
+        slug.push_str(fallback);
+    }
+    if slug.len() > 80 {
+        slug.truncate(67);
+        while slug.ends_with('-') {
+            slug.pop();
+        }
+        let hash = Sha256::digest(value.as_bytes());
+        let mut suffix = String::with_capacity(12);
+        for byte in hash.get(..6).unwrap_or(&[]) {
+            suffix.push_str(&format!("{byte:02x}"));
+        }
+        slug.push('-');
+        slug.push_str(&suffix);
+    }
+    slug
+}
+
 /// The diacritic fold `slugify` shares with the event-sync adapters: Central
 /// European titles arrive carrying ą/ł/ř/ů and friends, and a slug that
 /// silently dropped them ("Wrocław" → "wroca") reads broken beside the city
-/// it names.
+/// it names. Kept byte-identical to the sync grammar — a divergence here
+/// would mint a second city row for a name sync already registered.
 fn ascii_fold(character: char) -> char {
     match character {
         'ą' | 'Ą' | 'ä' | 'Ä' | 'á' | 'Á' | 'à' | 'À' | 'â' | 'Â' => 'a',
         'ć' | 'Ć' | 'č' | 'Č' => 'c',
         'ď' | 'Ď' => 'd',
-        'ę' | 'Ę' | 'é' | 'É' | 'ě' | 'Ě' | 'ë' | 'Ë' => 'e',
-        'í' | 'Í' | 'ï' | 'Ï' => 'i',
+        'ę' | 'Ę' | 'é' | 'É' | 'ě' | 'Ě' => 'e',
+        'í' | 'Í' => 'i',
         'ł' | 'Ł' => 'l',
-        'ń' | 'Ń' | 'ň' | 'Ň' | 'ñ' | 'Ñ' => 'n',
-        'ó' | 'Ó' | 'ö' | 'Ö' | 'ô' | 'Ô' => 'o',
+        'ń' | 'Ń' | 'ň' | 'Ň' => 'n',
+        'ó' | 'Ó' | 'ö' | 'Ö' => 'o',
         'ř' | 'Ř' => 'r',
-        'ś' | 'Ś' | 'š' | 'Š' | 'ß' => 's',
+        'ś' | 'Ś' | 'š' | 'Š' => 's',
         'ť' | 'Ť' => 't',
         'ü' | 'Ü' | 'ú' | 'Ú' | 'ů' | 'Ů' => 'u',
         'ý' | 'Ý' => 'y',
@@ -643,6 +690,25 @@ mod tests {
         // bound.
         let long = slugify(&"a".repeat(500)).expect("letters fold");
         assert!(long.len() <= MAX_SLUG_LENGTH - 4);
+    }
+
+    #[test]
+    fn stable_slug_matches_the_event_sync_grammar() {
+        // These expectations pin the sync adapters' historical output — the
+        // city registry dedupes on (country_code, slug), so the manual write
+        // path must mint the same slug for a name sync already stored.
+        assert_eq!(stable_slug("Łódź", "PL"), "lodz");
+        assert_eq!(stable_slug("  München  ", "DE"), "munchen");
+        // Nothing folds to ASCII — the caller's fallback names the row.
+        assert_eq!(stable_slug("🔥🔥", "PL"), "PL");
+        // Over-long names collapse to a 67-char stem + hash so two different
+        // long names can never share a slug.
+        let long_a = stable_slug(&"a".repeat(200), "x");
+        let long_b = stable_slug(&"b".repeat(200), "x");
+        assert_eq!(long_a.len(), 80);
+        assert!(long_a.starts_with(&"a".repeat(67)));
+        assert_ne!(long_a, long_b, "hash suffix distinguishes long names");
+        assert!(stable_slug("Krótki", "PL").len() <= 80);
     }
 
     #[test]
