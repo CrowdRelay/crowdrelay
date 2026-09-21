@@ -49,7 +49,11 @@ log "--- pass start ($mode, disk ${used_pct}%) ---"
 # ── 1. stale postgres test databases ────────────────────────────────────────
 if docker inspect "$PG_CONTAINER" >/dev/null 2>&1; then
   psql() { docker exec -i "$PG_CONTAINER" psql -U "$PG_USER" -d postgres -At "$@"; }
-  # pgt_*: age is in the name — uuid v7 leading 48 bits are unix ms.
+  # pgt_* and crowdrelay_<tag>_<uuid>: age is in the name — uuid v7 leading
+  # 48 bits are unix ms. crowdrelay_* is the previous clone naming; nothing
+  # creates it anymore but the strays still occupy disk. Named databases like
+  # crowdrelay_agents_boundary_test have no uuid suffix, so the regex cannot
+  # match them and they are never swept.
   # ci_*: no timestamp in the name, so age is the database dir's mtime.
   stale_dbs=$(psql -c "
     SELECT datname FROM (
@@ -59,12 +63,19 @@ if docker inspect "$PG_CONTAINER" >/dev/null 2>&1; then
             now() - to_timestamp(
               ('x' || lpad(substring(d.datname from 'pgt_[0-9a-f]+_([0-9a-f]{12})'), 16, '0')
               )::bit(64)::bigint / 1000.0)
+          WHEN d.datname LIKE 'crowdrelay\_%\_%' THEN
+            now() - to_timestamp(
+              ('x' || lpad(substring(d.datname from '_([0-9a-f]{12})[0-9a-f]{20}\$'), 16, '0')
+              )::bit(64)::bigint / 1000.0)
           ELSE
             now() - (pg_stat_file('base/' || d.oid || '/PG_VERSION')).modification
         END AS age,
         EXISTS (SELECT 1 FROM pg_stat_activity a WHERE a.datname = d.datname) AS has_conn
       FROM pg_database d
-      WHERE (d.datname LIKE 'pgt\_%' OR d.datname LIKE 'ci\_%')
+      WHERE (d.datname LIKE 'pgt\_%'
+          OR d.datname LIKE 'ci\_%'
+          OR (d.datname LIKE 'crowdrelay\_%\_%'
+              AND substring(d.datname from '_([0-9a-f]{32})\$') IS NOT NULL))
         AND d.datistemplate = false
     ) s
     WHERE age > interval '1 hour' * $AGE_HOURS AND NOT has_conn" 2>/dev/null)

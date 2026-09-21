@@ -106,7 +106,7 @@ jobs:
       CROWDRELAY_TENANT_DATA_REGION: eu
       CROWDRELAY_RANDOM_DRAWS_ENABLED: "false"
       CROWDRELAY_BOOTSTRAP_JSON: >-
-        {"workspace_name":"CrowdRelay CI","cities":[{"slug":"wroclaw","name":"Wroclaw","country":"PL","region":"Dolnoslaskie","lat":51.1079,"lng":17.0385}],"campaigns":[{"name":"CI launch","active":true,"smart_links":[{"slug":"ci-launch","destination_url":"http://localhost:4321/join","active":true}]}],"webhook_endpoints":[]}
+        {"workspace_name":"CrowdRelay CI","cities":[{"slug":"wroclaw","name":"Wrocław","country":"PL","region":"Dolnoslaskie","lat":51.1079,"lng":17.0385}],"campaigns":[{"name":"CI launch","active":true,"smart_links":[{"slug":"ci-launch","destination_url":"http://localhost:4321/join","active":true}]}],"webhook_endpoints":[]}
       RUST_LOG: info
       # sccache wraps rustc on the runner (installed at ~/.cargo/bin/sccache):
       # compilations cache by content hash, so a run only pays codegen for the
@@ -364,9 +364,19 @@ jobs:
           # dispatch.
           quarantined=""
           targets=()
-          for path in crates/*/tests/*_postgres.rs; do
-            package="$(basename "$(dirname "$(dirname "$path")")")"
-            target="$(basename "$path" .rs)"
+          # Each crate carries one consolidated `postgres` target
+          # (tests/postgres/main.rs) whose tests each clone a private database.
+          # Top-level *_postgres.rs targets remain for suites that cannot
+          # clone: agents_boundary shares a live database with the real agents
+          # service, so its tests must see the service's own writes.
+          for path in crates/*/tests/postgres/main.rs crates/*/tests/*_postgres.rs; do
+            if [ "$(basename "$path")" = "main.rs" ]; then
+              package="$(basename "$(dirname "$(dirname "$(dirname "$path")")")")"
+              target="postgres"
+            else
+              package="$(basename "$(dirname "$(dirname "$path")")")"
+              target="$(basename "$path" .rs)"
+            fi
             if [ -n "$quarantined" ] && [ "$target" = "$quarantined" ]; then
               echo "::warning::skipping quarantined suite $target"
               continue
@@ -374,7 +384,7 @@ jobs:
             targets+=("$package:$target")
           done
           if [ "${#targets[@]}" -eq 0 ]; then
-            echo "no *_postgres.rs integration targets found; the glob is wrong" >&2
+            echo "no postgres integration targets found; the glob is wrong" >&2
             exit 1
           fi
           printf 'running %s integration targets\n' "${#targets[@]}"
@@ -399,6 +409,13 @@ jobs:
           run_suite() {
             local package="$1" target="$2" db="$3"
             local url="postgres://crowdrelay:crowdrelay-ci-only@127.0.0.1:5432/${db}"
+            # The consolidated target's tests each clone a private database,
+            # so parallelism inside the binary is safe. Top-level *_postgres
+            # suites still share their database and stay serial.
+            local threads=1
+            if [ "$target" = "postgres" ]; then
+              threads=8
+            fi
             CROWDRELAY_DATABASE_URL="$url" \
             CROWDRELAY_TEST_DATABASE_URL="$url" \
             CROWDRELAY_OUTBOX_TEST_DATABASE_URL="$url" \
@@ -419,7 +436,7 @@ jobs:
               -- \
               --ignored \
               --nocapture \
-              --test-threads=1
+              --test-threads="$threads"
           }
 
           run_worker_filter() {
@@ -493,9 +510,11 @@ jobs:
             psql "$psql_url" -v ON_ERROR_STOP=1 -qAt \
               -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname='crowdrelay' AND pid <> pg_backend_pid()" || true
             for entry in "${targets[@]}"; do
+              package="${entry%%:*}"
               target="${entry##*:}"
+              db="ci_$(echo "${package}_${target}" | tr -c '[:alnum:]_' '_')"
               psql "$psql_url" -v ON_ERROR_STOP=1 -qAt \
-                -c "CREATE DATABASE ci_${target} WITH TEMPLATE crowdrelay"
+                -c "CREATE DATABASE ${db} WITH TEMPLATE crowdrelay"
             done
             psql "$psql_url" -v ON_ERROR_STOP=1 -qAt \
               -c "CREATE DATABASE ci_worker_filters WITH TEMPLATE crowdrelay"
@@ -505,8 +524,9 @@ jobs:
               for entry in "$@"; do
                 package="${entry%%:*}"
                 target="${entry##*:}"
+                db="ci_$(echo "${package}_${target}" | tr -c '[:alnum:]_' '_')"
                 printf '::group::%s / %s\n' "$package" "$target"
-                run_suite "$package" "$target" "ci_${target}"
+                run_suite "$package" "$target" "$db"
                 echo '::endgroup::'
               done
               # The unit-module filters share one dedicated database and run

@@ -144,6 +144,10 @@ test-postgres-env:
     export CROWDRELAY_BIND_ADDR=127.0.0.1:8080
     export CROWDRELAY_ALLOWED_ORIGINS=http://localhost:4321
     export CROWDRELAY_PUBLIC_SITE_BASE_URL=http://localhost:4321
+    # WORKSPACE_SLUG is `example` here, and a non-Virya workspace has no
+    # built-in public origin, so the community executor refuses to construct
+    # without one. CI exports the same value.
+    export CROWDRELAY_PUBLIC_ORIGIN=http://localhost:4321
     export CROWDRELAY_WORKSPACE_SLUG=example
     export CROWDRELAY_DEFAULT_COUNTRY_CODE=PL
     export CROWDRELAY_TENANT_REGION=eu
@@ -155,34 +159,40 @@ test-postgres-env:
     export CROWDRELAY_TENANT_DATA_REGION=eu
     export CROWDRELAY_RANDOM_DRAWS_ENABLED=false
     export CROWDRELAY_DATABASE_MAX_CONNECTIONS=5
-    export CROWDRELAY_BOOTSTRAP_JSON='{"workspace_name":"CrowdRelay local test","cities":[{"slug":"wroclaw","name":"Wroclaw","country":"PL","region":"Dolnoslaskie","lat":51.1079,"lng":17.0385}],"campaigns":[],"webhook_endpoints":[]}'
+    export CROWDRELAY_BOOTSTRAP_JSON='{"workspace_name":"CrowdRelay local test","cities":[{"slug":"wroclaw","name":"Wrocław","country":"PL","region":"Dolnoslaskie","lat":51.1079,"lng":17.0385}],"campaigns":[],"webhook_endpoints":[]}'
     {{CARGO}} run --locked --all-features --package crowdrelay-worker -- setup
-    # Every crate, not just crowdrelay-infra. This recipe ran
-    # `-p crowdrelay-infra` alone while CI globs `crates/*/tests/*_postgres.rs`
-    # across the workspace, so it reported green while CI ran tests it had never
-    # executed -- crowdrelay-worker's postgres targets (outbox, city geocoding,
-    # metric sync schedule, agent decision trace) were all invisible here. A
-    # local gate narrower than CI is worse than none: it teaches you to trust it.
+    # Every crate, exactly as CI does: one consolidated `postgres` target per
+    # crate (tests/postgres/main.rs) plus any top-level `*_postgres.rs` suite
+    # that keeps its own database semantics — agents_boundary shares a live
+    # database with the real agents service, so it cannot use the per-test
+    # clone the consolidated target gives every test.
     #
-    # One invocation per target, exactly as CI does. Not a formality: several
-    # suites share the one database rather than creating a disposable copy, and
-    # claims like `claim_deliveries` are workspace-wide, so two suites live at
-    # once makes one claim a row the other left pending. Running them together
-    # is stricter than CI and fails on that coupling alone. The coupling is
-    # worth fixing; reproducing CI is what this recipe is for.
+    # The consolidated target runs parallel: every test clones a private
+    # database from the migrated template, so no two tests share state. The
+    # serial pass per suite that the old layout needed is what made it slow.
     targets=()
-    for path in crates/*/tests/*_postgres.rs; do
-      package="$(basename "$(dirname "$(dirname "$path")")")"
-      targets+=("${package}:$(basename "$path" .rs)")
+    for path in crates/*/tests/postgres/main.rs crates/*/tests/*_postgres.rs; do
+      if [ "$(basename "$path")" = "main.rs" ]; then
+        package="$(basename "$(dirname "$(dirname "$(dirname "$path")")")")"
+        target="postgres"
+      else
+        package="$(basename "$(dirname "$(dirname "$path")")")"
+        target="$(basename "$path" .rs)"
+      fi
+      targets+=("${package}:${target}")
     done
     if [ "${#targets[@]}" -eq 0 ]; then
-      echo "no *_postgres.rs integration targets found; the glob is wrong" >&2
+      echo "no postgres integration targets found; the glob is wrong" >&2
       exit 1
     fi
     printf 'running %s integration targets\n' "${#targets[@]}"
     for entry in "${targets[@]}"; do
+      threads=1
+      if [ "${entry##*:}" = "postgres" ]; then
+        threads=8
+      fi
       {{CARGO}} test --locked --package "${entry%%:*}" --test "${entry##*:}" \
-        -- --ignored --test-threads=1
+        -- --ignored --test-threads="$threads"
     done
     # The outbox, reminder and retention suites live in unit-test modules rather
     # than their own integration target, so the glob above cannot see them.

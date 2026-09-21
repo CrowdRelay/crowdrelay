@@ -94,7 +94,7 @@ class DiscoveryPlaceStatusDurability(unittest.TestCase):
             [],
             "a new deliberate writer of discovery_places.status appeared; "
             "re-read scripts/test_discovery_place_status_durability_v1.py and "
-            "crates/crowdrelay-infra/tests/discovery_place_status_postgres.rs "
+            "crates/crowdrelay-infra/tests/postgres/discovery_place_status.rs "
             "before assuming this gate still covers the behaviour",
         )
 
