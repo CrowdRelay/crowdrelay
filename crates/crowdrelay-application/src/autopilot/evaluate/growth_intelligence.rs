@@ -908,7 +908,7 @@ pub(super) fn growth_intelligence_candidate(
     blocked_on_membership: &mut Vec<(String, u32)>,
     snapshot: &GrowthIntelligenceSnapshot,
     policy: &AutopilotPolicy,
-    evidence: EvidenceCount,
+    evidence: ContextEvidence,
     workspace_id: WorkspaceId,
     now: OffsetDateTime,
     causal_model: &CausalModel,
@@ -967,7 +967,7 @@ fn candidate_from_request(
     snapshot: &GrowthIntelligenceSnapshot,
     policy: &AutopilotPolicy,
     domain_policy: &GrowthIntelligencePolicy,
-    evidence: EvidenceCount,
+    evidence: ContextEvidence,
     workspace_id: WorkspaceId,
     now: OffsetDateTime,
 ) -> Result<ScoredCandidate, serde_json::Error> {

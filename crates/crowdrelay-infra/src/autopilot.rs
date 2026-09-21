@@ -68,7 +68,7 @@ use crowdrelay_application::{
         GROWTH_TEMPLATE_KEYS, GrowthCampaignProgress, GrowthDeliveryTotals,
         GrowthMetricPointMutation, GrowthMetricSeriesMutation, GrowthMetricSubject,
         GrowthMetricTrendView, GrowthObjectiveMutation, GrowthObjectiveView, GrowthOutreachSummary,
-        GrowthPosture, GrowthPostureView, LiveTermsSnapshot, LoadedCausalModel,
+        GrowthPosture, GrowthPostureView, HarmObservation, LiveTermsSnapshot, LoadedCausalModel,
         ManagerBookingPolicySummary, ManagerConfigMutation, MerchProductEconomicsMutation,
         NextBestAction, ORG_ATTENTION_BUDGET_ERROR_KIND, OutreachKindStanding, OutreachWaveAnchor,
         OutreachWaveSnapshot, OutreachWaveStart, OutreachWaveTransition, PLAYLIST_TEMPLATE_KEY,
@@ -309,6 +309,8 @@ struct GrowthEnvelopeRow {
     daily_third_party_touches: i32,
     subject_cooldown_hours: i32,
     max_recipients_per_step: i32,
+    weekly_approval_requests: i32,
+    weekly_bootstrap_actions: i32,
     parked: bool,
 }
 
@@ -577,6 +579,7 @@ struct ClaimedMeasurementRow {
     subject_id: Uuid,
     baseline_value: f64,
     action_finished_at: OffsetDateTime,
+    due_at: OffsetDateTime,
     attempt_number: i32,
 }
 

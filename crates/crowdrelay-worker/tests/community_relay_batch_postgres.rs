@@ -218,7 +218,15 @@ async fn many_communities_one_source_is_one_approval() -> Result<()> {
     engage_outcome(&pool, ws, target_b, source_id, "heavymetal").await?;
 
     let processed = worker(&pool, ws).run_once().await?;
-    ensure!(processed == 2, "both drafts processed, got {processed}");
+    if processed != 2 {
+        let reasons: Vec<(String, Option<String>)> = sqlx::query_as(
+            "SELECT status, rejection_reason FROM agent_outcomes WHERE workspace_id = $1",
+        )
+        .bind(ws.into_uuid())
+        .fetch_all(&pool)
+        .await?;
+        panic!("both drafts processed, got {processed}; outcomes: {reasons:?}");
+    }
 
     let batch = batch_row(&pool, ws, source_id).await?;
     let (status, _) = batch.expect("one batch row for the source");
@@ -707,6 +715,157 @@ async fn the_drip_claims_one_post_per_batch_per_interval() -> Result<()> {
     ensure!(
         claimed.is_empty(),
         "a revoked batch's pending rows never claim, got {}",
+        claimed.len()
+    );
+    Ok(())
+}
+
+/// A delivery's queue state and the standing answer recorded behind it.
+async fn delivery_state(
+    pool: &PgPool,
+    workspace_id: WorkspaceId,
+    target_id: Uuid,
+) -> Result<(String, Option<String>)> {
+    Ok(sqlx::query_as::<_, (String, Option<String>)>(
+        "SELECT status, approved_by FROM viryaos_autopilot_actions \
+         WHERE workspace_id=$1 AND action_kind='community.engage.request' \
+           AND payload->>'target_id' = $2::text",
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(target_id.to_string())
+    .fetch_one(pool)
+    .await?)
+}
+
+// ── Standing grants compose with the card ────────────────────────────
+
+/// The two approvals are different questions: the grant is the operator's
+/// standing "yes" to a community, the batch card is the "yes" to this
+/// content for the rest of the spread. A granted draft queues and drips
+/// without waiting on the card; the card's question stays open for the
+/// communities nobody granted — and a revoked batch vetoes the content
+/// even where a grant covers the target.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn a_grant_posts_its_community_while_the_card_covers_the_rest() -> Result<()> {
+    let pool = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
+        .await
+        .expect("connect to the migrated suite database");
+    let ws = workspace(&pool).await?;
+    let source_id = content_source(&pool, ws).await?;
+    let granted = community_target(&pool, ws, "metalpolska").await?;
+    let ungranted = community_target(&pool, ws, "heavymetal").await?;
+
+    crowdrelay_infra::standing_approvals::grant(
+        &pool,
+        ws.into_uuid(),
+        crowdrelay_infra::standing_approvals::GrantRequest {
+            action_kind: "community.engage.request",
+            target_key: &granted.to_string(),
+            class: crowdrelay_domain::action_class::ActionClass::ThirdParty,
+            granted_by: "operator:test",
+            days: 90,
+            note: None,
+        },
+        time::OffsetDateTime::now_utc(),
+    )
+    .await
+    .context("grant the community")?;
+
+    engage_outcome(&pool, ws, granted, source_id, "metalpolska").await?;
+    engage_outcome(&pool, ws, ungranted, source_id, "heavymetal").await?;
+    worker(&pool, ws).run_once().await?;
+
+    // The grant answered for its community alone — the batch keeps asking
+    // about the rest of the spread rather than inheriting one target's yes.
+    let (status, _) = batch_row(&pool, ws, source_id)
+        .await?
+        .expect("the batch exists");
+    ensure!(
+        status == "awaiting_approval",
+        "a per-target grant must not approve the whole spread, got {status}"
+    );
+
+    let (granted_status, granted_by) = delivery_state(&pool, ws, granted).await?;
+    ensure!(
+        granted_status == "queued",
+        "the granted community's draft queues, got {granted_status}"
+    );
+    ensure!(
+        granted_by.as_deref() == Some("standing_grant"),
+        "the grant is the recorded answer, got {granted_by:?}"
+    );
+    let (other_status, _) = delivery_state(&pool, ws, ungranted).await?;
+    ensure!(
+        other_status == "awaiting_approval",
+        "the ungranted community still waits on the card, got {other_status}"
+    );
+
+    // Both deliveries exist as posts once their actions execute; seed the
+    // rows the executor seeds on success. The granted one is claimable
+    // under the unanswered batch — its community is already a yes.
+    for (target, subreddit) in [(granted, "metalpolska"), (ungranted, "heavymetal")] {
+        pending_delivery(&pool, ws, target, source_id, subreddit).await?;
+    }
+    let executor = crowdrelay_worker::community_executor::CommunityExecutorWorker::new(
+        pool.clone(),
+        ws,
+        Duration::from_secs(30),
+        true,
+        None,
+        "http://agents.invalid".to_owned(),
+        None,
+        None,
+    )
+    .context("build executor")?;
+    let claimed = executor.claim_pending_actions().await?;
+    ensure!(
+        claimed.len() == 1,
+        "only the grant-covered delivery claims under an unanswered card, got {}",
+        claimed.len()
+    );
+
+    // The grant revoked mid-spread: the claimed row's community returns to
+    // waiting on the card — nothing posts on a dead answer.
+    crowdrelay_infra::standing_approvals::revoke(
+        &pool,
+        ws.into_uuid(),
+        "community.engage.request",
+        &granted.to_string(),
+        "operator:test",
+        time::OffsetDateTime::now_utc(),
+    )
+    .await
+    .context("revoke the grant")?;
+    sqlx::query(
+        "UPDATE community_posts SET status='pending'          WHERE workspace_id=$1 AND relay_source_id=$2 AND status='posting'",
+    )
+    .bind(ws.into_uuid())
+    .bind(source_id)
+    .execute(&pool)
+    .await?;
+    let claimed = executor.claim_pending_actions().await?;
+    ensure!(
+        claimed.is_empty(),
+        "a dead grant claims nothing — the card owns the question now, got {}",
+        claimed.len()
+    );
+
+    // The card's answer covers both again.
+    repository(&pool)
+        .approve_community_relay(
+            ws,
+            source_id,
+            None,
+            &IdempotencyKey::parse("grant-card-yes")?,
+            None,
+        )
+        .await
+        .context("approve the card")?;
+    let claimed = executor.claim_pending_actions().await?;
+    ensure!(
+        claimed.len() == 1,
+        "an approved card resumes the drip for the rest, got {}",
         claimed.len()
     );
     Ok(())

@@ -391,6 +391,7 @@ fn claimed_measurement(
         subject_id: row.subject_id,
         baseline_value: row.baseline_value,
         action_finished_at: row.action_finished_at,
+        due_at: row.due_at,
         attempt_number: u32::try_from(row.attempt_number)
             .map_err(|_| RepositoryError::Unexpected)?,
     })

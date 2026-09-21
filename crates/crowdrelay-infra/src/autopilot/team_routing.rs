@@ -44,8 +44,18 @@ pub(in crate::autopilot) async fn load_team_routing(
     workspace_id: WorkspaceId,
     now: OffsetDateTime,
 ) -> Result<Vec<TeamRoutingRow>, RepositoryError> {
-    // §4i-6: the weekly ask ceiling is the tenant's own setting — absent means
-    // uncapped, and whatever number they set binds every member the same way.
+    // §4i-6: the weekly ask ceiling is the tenant's own setting, and whatever
+    // number they set binds every member the same way.
+    //
+    // An absent setting used to mean uncapped, which made a person's attention
+    // the one quantity in this system with no ceiling — and the one that ran
+    // out. It now falls back to `DEFAULT_WEEKLY_ASK_CEILING`, which the daily
+    // briefing reports against too, so the number an operator reads and the
+    // number the router enforces cannot disagree.
+    //
+    // A stored value outside the writable range is treated as unset rather
+    // than as uncapped: the API refuses 0 for a stated reason, and a row that
+    // got past it by hand must not be a wider grant than the API would give.
     let weekly_ask_ceiling = sqlx::query_scalar::<_, String>(
         "SELECT value FROM tenant_settings
          WHERE workspace_id = $1 AND key = 'team_weekly_ask_ceiling'",
@@ -55,7 +65,10 @@ pub(in crate::autopilot) async fn load_team_routing(
     .await
     .map_err(map_sqlx)?
     .and_then(|value| value.trim().parse::<i32>().ok())
-    .filter(|ceiling| (1..=500).contains(ceiling));
+    .filter(|ceiling| (1..=500).contains(ceiling))
+    .or(Some(i32::from(
+        crowdrelay_domain::team_operations::DEFAULT_WEEKLY_ASK_CEILING,
+    )));
     let mut team = sqlx::query_as::<_, TeamRoutingRow>(
         r#"SELECT profile.member_id, profile.member_key, member.display_name,
                   member.normalized_email, profile.active, profile.skills,

@@ -440,6 +440,7 @@ async fn campaign_measurements_read_the_delivery_ledger() {
             subject_id: campaign_id,
             baseline_value: 0.0,
             action_finished_at: anchor,
+            due_at: f.now,
             attempt_number: 1,
         };
         let observed = f
@@ -493,6 +494,7 @@ async fn campaign_measurements_read_the_delivery_ledger() {
             subject_id: inflight_campaign,
             baseline_value: 0.0,
             action_finished_at: anchor,
+            due_at: f.now,
             attempt_number: 1,
         };
         let outcome = f
@@ -533,6 +535,7 @@ async fn campaign_measurements_read_the_delivery_ledger() {
             subject_id: dead_campaign,
             baseline_value: 0.0,
             action_finished_at: anchor,
+            due_at: f.now,
             attempt_number: 1,
         };
         let outcome = f

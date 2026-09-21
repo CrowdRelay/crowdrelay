@@ -7,7 +7,7 @@
 
 use std::collections::BTreeMap;
 
-use crowdrelay_domain::autonomy::EvidenceCount;
+use crowdrelay_domain::autonomy::{BootstrapAllowance, ContextEvidence, EvidenceCount};
 
 use super::model::AutopilotContext;
 
@@ -27,19 +27,52 @@ use super::model::AutopilotContext;
 #[derive(Clone, Debug, Default)]
 pub struct EvidenceLedger {
     counts: BTreeMap<AutopilotContext, i64>,
+    /// Unattended actions each context has already taken in the trailing
+    /// week, counted from the durable action rows. Absent means none.
+    bootstrap_spent: BTreeMap<AutopilotContext, i64>,
+    /// The operator's weekly warm-up cap, the same for every context. Zero
+    /// until an envelope is attached, so a ledger built without one grants no
+    /// warm-up rather than an unbounded one.
+    bootstrap_cap: i64,
 }
 
 impl EvidenceLedger {
     /// Builds a ledger from `(context, resolved outcome count)` pairs.
+    ///
+    /// The warm-up is absent until [`Self::with_bootstrap`] attaches it, which
+    /// means a caller that forgets it gets no warm-up at all. That is the
+    /// right direction to fail in: the floor without a warm-up is the
+    /// behaviour this ledger already had.
     #[must_use]
     pub fn from_counts(counts: BTreeMap<AutopilotContext, i64>) -> Self {
-        Self { counts }
+        Self {
+            counts,
+            bootstrap_spent: BTreeMap::new(),
+            bootstrap_cap: 0,
+        }
     }
 
-    /// The count for one context. Absent means none were ever measured.
+    /// Attaches the operator's weekly warm-up cap and what each context has
+    /// already spent against it.
     #[must_use]
-    pub fn for_context(&self, context: AutopilotContext) -> EvidenceCount {
-        EvidenceCount(self.counts.get(&context).copied().unwrap_or(0))
+    pub fn with_bootstrap(mut self, spent: BTreeMap<AutopilotContext, i64>, cap: u32) -> Self {
+        self.bootstrap_spent = spent;
+        self.bootstrap_cap = i64::from(cap);
+        self
+    }
+
+    /// What one context has learned, and what it may still spend learning.
+    ///
+    /// Absent from either map means zero: never measured and nothing spent.
+    #[must_use]
+    pub fn for_context(&self, context: AutopilotContext) -> ContextEvidence {
+        ContextEvidence {
+            observations: EvidenceCount(self.counts.get(&context).copied().unwrap_or(0)),
+            bootstrap: BootstrapAllowance {
+                spent: self.bootstrap_spent.get(&context).copied().unwrap_or(0),
+                cap: self.bootstrap_cap,
+            },
+        }
     }
 
     /// Every context that has at least one measured outcome, for the posture

@@ -812,6 +812,14 @@ impl AutopilotDecisionRepository for PostgresAutopilotRepository {
         self.load_growth_envelope_impl(workspace_id, now).await
     }
 
+    async fn load_bootstrap_spend(
+        &self,
+        workspace_id: WorkspaceId,
+        now: OffsetDateTime,
+    ) -> Result<std::collections::BTreeMap<AutopilotContext, i64>, RepositoryError> {
+        self.load_bootstrap_spend_impl(workspace_id, now).await
+    }
+
     async fn load_outward_touch_ages(
         &self,
         workspace_id: WorkspaceId,

@@ -3,7 +3,7 @@ mod tests_booking {
     use super::*;
     use crowdrelay_domain::{
         BookingTargetId, CityId, EventId,
-        autonomy::{AutonomyLevel, Confidence, PolicyDisposition},
+        autonomy::{AutonomyLevel, Confidence, EvidenceCount, PolicyDisposition},
     };
 
     // ---- §12-6: booking proposal carries room, window and recipient set ----
@@ -247,7 +247,7 @@ mod tests_booking {
             },
         };
 
-        let candidates = show_growth::show_growth_candidates(snapshot(true), &policy, EvidenceCount(RATE_FLOOR), &std::collections::HashMap::new(), now)?;
+        let candidates = show_growth::show_growth_candidates(snapshot(true), &policy, ContextEvidence::measured(EvidenceCount(RATE_FLOOR)), &std::collections::HashMap::new(), now)?;
         assert_eq!(candidates.len(), 2, "the refusal and the next due lever");
         let declined = &candidates[0];
         assert_eq!(declined.decision_kind, "unreciprocated_crossbill");
@@ -274,7 +274,7 @@ mod tests_booking {
 
         // The same due lever fires the moment the edge is reciprocated —
         // one candidate, the ordinary request, no refusal row.
-        let candidates = show_growth::show_growth_candidates(snapshot(false), &policy, EvidenceCount(RATE_FLOOR), &std::collections::HashMap::new(), now)?;
+        let candidates = show_growth::show_growth_candidates(snapshot(false), &policy, ContextEvidence::measured(EvidenceCount(RATE_FLOOR)), &std::collections::HashMap::new(), now)?;
         assert_eq!(candidates.len(), 1);
         let proposed = &candidates[0];
         assert_eq!(proposed.decision_kind, "activate_show_growth_lever");
@@ -347,7 +347,7 @@ mod tests_booking {
         let candidates = show_growth::show_growth_candidates(
             snapshot,
             &policy,
-            EvidenceCount(RATE_FLOOR),
+            ContextEvidence::measured(EvidenceCount(RATE_FLOOR)),
             &standings,
             now,
         )?;
@@ -375,7 +375,7 @@ mod tests_booking {
         let candidates = show_growth::show_growth_candidates(
             snapshot,
             &policy,
-            EvidenceCount(RATE_FLOOR),
+            ContextEvidence::measured(EvidenceCount(RATE_FLOOR)),
             &standings,
             now,
         )?;
@@ -437,7 +437,7 @@ mod tests_booking {
             },
         };
 
-        let parked = show_growth::show_growth_candidates(snapshot(false), &policy, EvidenceCount(RATE_FLOOR), &std::collections::HashMap::new(), now)?;
+        let parked = show_growth::show_growth_candidates(snapshot(false), &policy, ContextEvidence::measured(EvidenceCount(RATE_FLOOR)), &std::collections::HashMap::new(), now)?;
         assert_eq!(parked.len(), 1);
         assert_eq!(parked[0].disposition, PolicyDisposition::RequireApproval);
         assert_eq!(parked[0].policy_snapshot.get("ladder_authorized"), None);
@@ -445,7 +445,7 @@ mod tests_booking {
         // The flag rides the policy snapshot — the disposition stays honest
         // about what the level and confidence computed; the class ceiling and
         // the envelope run before the action insert honours the ladder.
-        let released = show_growth::show_growth_candidates(snapshot(true), &policy, EvidenceCount(RATE_FLOOR), &std::collections::HashMap::new(), now)?;
+        let released = show_growth::show_growth_candidates(snapshot(true), &policy, ContextEvidence::measured(EvidenceCount(RATE_FLOOR)), &std::collections::HashMap::new(), now)?;
         assert_eq!(released.len(), 1);
         assert_eq!(released[0].disposition, PolicyDisposition::RequireApproval);
         assert_eq!(

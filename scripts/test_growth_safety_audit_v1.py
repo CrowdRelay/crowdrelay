@@ -21,6 +21,12 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 EVALUATE = ROOT / "crates/crowdrelay-application/src/autopilot/evaluate.rs"
+# The funnel moved to its own chunk when the attention budget pushed the
+# parent past its 1000-line modularity contract. It is `include!`d back
+# into `evaluate.rs`, so the two are one compilation unit and this file
+# reads them as one. The property guarded here is unchanged: one caller,
+# one clamp, applied to every candidate.
+EVALUATE_PERSIST = ROOT / "crates/crowdrelay-application/src/autopilot/evaluate/persist.rs"
 PORTS = ROOT / "crates/crowdrelay-application/src/autopilot/ports.rs"
 ENVELOPE = ROOT / "crates/crowdrelay-domain/src/growth_envelope.rs"
 ACTION_CLASS = ROOT / "crates/crowdrelay-domain/src/action_class.rs"
@@ -37,7 +43,7 @@ def read(path: Path) -> str:
 
 class GrowthSafetyAudit(unittest.TestCase):
     def setUp(self) -> None:
-        self.evaluate = read(EVALUATE)
+        self.evaluate = read(EVALUATE) + "\n" + read(EVALUATE_PERSIST)
 
     def test_every_candidate_passes_through_one_funnel(self) -> None:
         # Twenty detectors each remembering to clamp is twenty chances to
@@ -47,7 +53,7 @@ class GrowthSafetyAudit(unittest.TestCase):
             for path in APPLICATION.rglob("*.rs")
             if "persist_candidate(" in read(path) and path.name != "ports.rs"
         ]
-        self.assertEqual([path.name for path in callers], ["evaluate.rs"])
+        self.assertEqual([path.name for path in callers], ["persist.rs"])
         self.assertEqual(self.evaluate.count(".persist_candidate("), 1)
         funnel = self.evaluate.split("async fn persist(", 1)[1]
         self.assertIn("clamp_disposition(candidate.disposition, ceiling)", funnel)

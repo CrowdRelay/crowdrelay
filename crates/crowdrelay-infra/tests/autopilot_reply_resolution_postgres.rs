@@ -22,7 +22,7 @@
 
 use crowdrelay_application::autopilot::{
     AutopilotMeasurementKind, AutopilotMeasurementRepository, ClaimedAutopilotMeasurement,
-    assess_measurement_effect,
+    HarmObservation, assess_measurement_effect,
 };
 use crowdrelay_domain::WorkspaceId;
 use crowdrelay_infra::{autopilot::PostgresAutopilotRepository, config::DatabaseConfig};
@@ -237,10 +237,17 @@ async fn run_due_measurement(
         .repository
         .observe_measurement(f.workspace_id, &measurement, now)
         .await?;
-    let effect = assess_measurement_effect(&measurement, observed)
+    let effect = assess_measurement_effect(&measurement, observed, &HarmObservation::default())
         .expect("a measurement the worker can classify");
     f.repository
-        .complete_measurement(f.workspace_id, &measurement, observed, effect, now)
+        .complete_measurement(
+            f.workspace_id,
+            &measurement,
+            observed,
+            effect,
+            Some(&HarmObservation::default()),
+            now,
+        )
         .await?;
     Ok((observed, measurement))
 }

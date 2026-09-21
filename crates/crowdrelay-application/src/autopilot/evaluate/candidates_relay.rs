@@ -14,7 +14,7 @@ fn relay_candidates(
     communities: &[CommunityRelayTarget],
     push_audience: Option<crowdrelay_domain::content_supply::SignalPushAudience>,
     confidence: crowdrelay_domain::autonomy::Confidence,
-    evidence: EvidenceCount,
+    evidence: ContextEvidence,
 ) -> Result<Vec<DecisionCandidate>, serde_json::Error> {
     let Some(post) = &snapshot.social_post else {
         return Ok(Vec::new());

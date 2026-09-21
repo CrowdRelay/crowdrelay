@@ -44,11 +44,11 @@ use crowdrelay_domain::deliverability::DeliverabilitySnapshot;
 
 use super::evidence_ledger::EvidenceLedger;
 use super::model::{
-    AutopilotPolicy, CandidatePersistence, ClaimedAutopilotAction, ClaimedPlayOutcome,
-    DecisionCandidate, LiveTermsSnapshot, OutreachKindStanding, OutreachWaveAnchor,
-    OutreachWaveSnapshot, OutreachWaveStart, OutreachWaveTransition, PlacementSettlement,
-    PlayAnchor, PlayKindStanding, PlayOutcomeObservation, PlayRunSnapshot, PlayStart,
-    PlayStepSettlement, PlaylistPlacementSnapshot, TermsSettlement,
+    AutopilotContext, AutopilotPolicy, CandidatePersistence, ClaimedAutopilotAction,
+    ClaimedPlayOutcome, DecisionCandidate, LiveTermsSnapshot, OutreachKindStanding,
+    OutreachWaveAnchor, OutreachWaveSnapshot, OutreachWaveStart, OutreachWaveTransition,
+    PlacementSettlement, PlayAnchor, PlayKindStanding, PlayOutcomeObservation, PlayRunSnapshot,
+    PlayStart, PlayStepSettlement, PlaylistPlacementSnapshot, TermsSettlement,
 };
 use crate::RepositoryError;
 
@@ -863,6 +863,19 @@ pub trait AutopilotDecisionRepository: Send + Sync {
         workspace_id: WorkspaceId,
         now: OffsetDateTime,
     ) -> Result<(GrowthEnvelope, EnvelopeUsage), RepositoryError>;
+
+    /// Unattended actions each context has taken in the trailing seven days,
+    /// for the warm-up allowance that keeps the evidence floor from sealing
+    /// itself shut.
+    ///
+    /// Counted from the durable action rows rather than a second ledger, for
+    /// the same reason the envelope counts its touches there: two ledgers can
+    /// disagree, and the one that is wrong is the one nobody is reading.
+    async fn load_bootstrap_spend(
+        &self,
+        workspace_id: WorkspaceId,
+        now: OffsetDateTime,
+    ) -> Result<std::collections::BTreeMap<AutopilotContext, i64>, RepositoryError>;
 
     /// Hours since the agent last reached each subject through an outward
     /// action, for the cooldown. One query per cycle, not one per candidate.

@@ -12,7 +12,7 @@ use crowdrelay_domain::{
         FanLifecycleDecision, FanLifecycleSnapshot, LifecycleTemplate, evaluate_fan_lifecycle,
     },
     autonomy::{
-        AutonomyLevel, Confidence, EvidenceCount, PolicyDisposition, disposition,
+        AutonomyLevel, Confidence, ContextEvidence, PolicyDisposition, disposition,
         disposition_with_evidence,
     },
     beacons::{
@@ -41,7 +41,9 @@ use crowdrelay_domain::{
         wave_is_worth_opening,
     },
     funding::{FundingDecision, FundingOpportunitySnapshot, evaluate_funding},
-    growth_envelope::{EnvelopeUsage, EnvelopeVerdict, GrowthEnvelope, check_envelope},
+    growth_envelope::{
+        EnvelopeUsage, EnvelopeVerdict, GrowthEnvelope, check_attention, check_envelope,
+    },
     learning::Standing,
     live_opportunities::{
         LiveOpportunityDecision, LiveOpportunitySnapshot, evaluate_live_opportunity,
@@ -142,7 +144,7 @@ where
         // confidence was computed from, so a context with four measured
         // outcomes could report a high number, clear its minimum, and be
         // handed unattended execution over an action nobody can recall.
-        let evidence = self
+        let evidence_counts = self
             .repository
             .load_resolved_evidence_counts(self.workspace_id)
             .await?;
@@ -152,6 +154,18 @@ where
             .repository
             .load_growth_envelope(self.workspace_id, now)
             .await?;
+        // The warm-up: how much unattended action each context may still take
+        // while below its floor. Without it the floor seals itself — acting is
+        // how the observations that clear it get made, and routing below-floor
+        // work through approval instead of denial made no difference against
+        // one operator and a 72-hour expiry. Measured: zero resolved outcomes
+        // against a floor of twenty.
+        let bootstrap_spent = self
+            .repository
+            .load_bootstrap_spend(self.workspace_id, now)
+            .await?;
+        let evidence =
+            evidence_counts.with_bootstrap(bootstrap_spent, envelope.weekly_bootstrap_actions);
         let touch_ages = self
             .repository
             .load_outward_touch_ages(self.workspace_id, now)
@@ -807,153 +821,9 @@ where
         }
         Ok(())
     }
-
-    /// The one place every candidate passes through, and therefore the only
-    /// place the class ceiling has to be applied.
-    ///
-    /// Doing it here rather than inside each of the twenty candidate functions
-    /// means a new detector cannot forget it, and a detector author cannot
-    /// choose to skip it.
-    ///
-    /// Returns the action_id if one was created or already existed. Callers
-    /// that don't need it can ignore the return value.
-    async fn persist(
-        &self,
-        candidate: &DecisionCandidate,
-        limits: &mut CycleLimits<'_>,
-        report: &mut AutopilotCycleReport,
-    ) -> Result<Option<Uuid>, AutopilotError> {
-        let stats = report.context_stats(candidate.context);
-        stats.candidates = stats.candidates.saturating_add(1);
-        let class = candidate.action.action_class();
-        let ceiling = limits
-            .ceilings
-            .iter()
-            .find_map(|(known, level)| (*known == class).then_some(*level))
-            // An absent row is the safest ceiling, never an absent limit.
-            .unwrap_or_else(|| class.safest_ceiling());
-        let clamped = clamp_disposition(candidate.disposition, ceiling);
-        if clamped != candidate.disposition {
-            report.actions_gated = report.actions_gated.saturating_add(1);
-        }
-
-        // The volume limits apply after the class ceiling, never instead of it:
-        // a full budget must not be able to let a third-party action through,
-        // and an empty one must not promote anything.
-        let subject_usage = EnvelopeUsage {
-            // Only contacts have a cooldown. An event is a topic, not a person:
-            // keying it there would let one show run a single growth lever a
-            // week and quietly starve the other nine.
-            hours_since_subject_touched: candidate
-                .subject
-                .is_contactable_person()
-                .then(|| {
-                    // Somebody this cycle already reached is touched now, not
-                    // whenever the cycle's snapshot says. Without this, two
-                    // contexts — or two plays around two different shows — can
-                    // each pass the cooldown against the same stale reading and
-                    // between them message one person twice in a minute.
-                    if limits
-                        .touched_this_cycle
-                        .contains(&candidate.subject.uuid())
-                    {
-                        return Some(0);
-                    }
-                    limits.touch_ages.get(&candidate.subject.uuid()).copied()
-                })
-                .flatten(),
-            ..*limits.usage
-        };
-        // A candidate already denied by policy (the §4i-2 show-week hold is
-        // one) owes the envelope nothing — counting it as a held action on top
-        // of the hold decision would report the same refusal twice.
-        let clamped = if matches!(clamped, PolicyDisposition::Deny) {
-            clamped
-        } else {
-            match check_envelope(class, limits.envelope, &subject_usage) {
-                EnvelopeVerdict::Allow => clamped,
-                EnvelopeVerdict::Hold(block) => {
-                    report.actions_held = report.actions_held.saturating_add(1);
-                    // A rehearsal produces the decision and its evidence but
-                    // nothing anybody can press send on. Every other block still
-                    // offers the work to a human, because "the budget is spent" is
-                    // not the same as "this should not happen".
-                    if block.may_offer_for_approval() {
-                        clamp_disposition(clamped, AutonomyLevel::RequireApproval)
-                    } else {
-                        clamp_disposition(clamped, AutonomyLevel::Recommend)
-                    }
-                }
-            }
-        };
-
-        let candidate = &DecisionCandidate {
-            disposition: clamped,
-            ..candidate.clone()
-        };
-        let persisted = match self
-            .repository
-            .persist_candidate(
-                self.workspace_id,
-                candidate,
-                &TraceContext::root(self.workspace_id),
-            )
-            .await
-        {
-            Ok(p) => p,
-            // A conflict means the candidate already exists or is in-flight.
-            // Skip it and continue the cycle rather than aborting all remaining
-            // candidates. This is the same semantics as ActionConflict in the
-            // infra layer, but catches any remaining uncovered index conflicts.
-            Err(RepositoryError::Conflict | RepositoryError::ConflictBecause(_)) => {
-                return Ok(None);
-            }
-            Err(e) => return Err(e.into()),
-        };
-        if persisted.decision_created {
-            report.decisions = report.decisions.saturating_add(1);
-            let stats = report.context_stats(candidate.context);
-            stats.decisions = stats.decisions.saturating_add(1);
-        }
-        if persisted.action_created {
-            report.actions_enqueued = report.actions_enqueued.saturating_add(1);
-            report.context_stats(candidate.context).actions = report
-                .context_stats(candidate.context)
-                .actions
-                .saturating_add(1);
-            if candidate.subject.is_contactable_person() {
-                limits.touched_this_cycle.insert(candidate.subject.uuid());
-            }
-            // Spend the budget as it is used, not once at the start of the
-            // cycle. Without this the weekly cap is read from a snapshot that
-            // never moves, and a single cycle with fifty findings enqueues all
-            // fifty against a budget of five.
-            match class {
-                ActionClass::OwnedAudience => {
-                    limits.usage.owned_audience_touches_7d =
-                        limits.usage.owned_audience_touches_7d.saturating_add(1);
-                }
-                ActionClass::ThirdParty => {
-                    limits.usage.third_party_touches_7d =
-                        limits.usage.third_party_touches_7d.saturating_add(1);
-                    // The daily wall spends from the same send — leaving it
-                    // stale would let one cycle enqueue a week of third-party
-                    // touches against a day-sized ceiling.
-                    limits.usage.third_party_touches_24h =
-                        limits.usage.third_party_touches_24h.saturating_add(1);
-                }
-                ActionClass::FirstPartyReversible | ActionClass::Paid => {}
-            }
-        }
-        if persisted.quota_throttled {
-            report.actions_throttled = report.actions_throttled.saturating_add(1);
-            let stats = report.context_stats(candidate.context);
-            stats.throttled = stats.throttled.saturating_add(1);
-        }
-        Ok(persisted.action_id)
-    }
 }
 
+include!("evaluate/persist.rs");
 include!("evaluate/live_terms.rs");
 include!("evaluate/types.rs");
 include!("evaluate/candidates.rs");

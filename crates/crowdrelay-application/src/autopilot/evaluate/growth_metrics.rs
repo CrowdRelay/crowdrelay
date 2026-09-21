@@ -26,7 +26,7 @@ fn cooldown_window(now: OffsetDateTime, cooldown_hours: u32) -> i64 {
 pub(super) fn growth_metric_candidate(
     snapshot: &GrowthMetricSnapshot,
     policy: &AutopilotPolicy,
-    evidence: EvidenceCount,
+    evidence: ContextEvidence,
     now: OffsetDateTime,
 ) -> Result<Option<DecisionCandidate>, serde_json::Error> {
     let AutopilotPolicyConfig::GrowthMetrics(domain_policy) = policy.config else {

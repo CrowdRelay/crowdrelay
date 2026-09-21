@@ -60,6 +60,39 @@ pub enum AutonomyLevel {
 }
 
 impl AutonomyLevel {
+    /// The stored representation — the vocabulary of the `ceiling` and
+    /// `autonomy_level` CHECK constraints.
+    ///
+    /// Here rather than beside each reader because three crates already need
+    /// it and each one that restates the list is a place the list can drift
+    /// from the constraint.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Observe => "observe",
+            Self::Recommend => "recommend",
+            Self::RequireApproval => "require_approval",
+            Self::BoundedAuto => "bounded_auto",
+        }
+    }
+
+    /// Parses what [`Self::as_str`] wrote.
+    ///
+    /// `None` for anything this build does not recognise. A caller reading an
+    /// authority row must treat that as the safest level, never as an absent
+    /// limit — a row a newer deploy wrote and this one cannot read is not a
+    /// grant of authority.
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "observe" => Some(Self::Observe),
+            "recommend" => Some(Self::Recommend),
+            "require_approval" => Some(Self::RequireApproval),
+            "bounded_auto" => Some(Self::BoundedAuto),
+            _ => None,
+        }
+    }
+
     /// Returns true when the level is permitted to enqueue an executable action.
     #[must_use]
     pub const fn may_enqueue(self) -> bool {
@@ -147,6 +180,14 @@ pub const fn internal_work_disposition(mapped: PolicyDisposition) -> PolicyDispo
 #[serde(transparent)]
 pub struct EvidenceCount(pub i64);
 
+impl Default for EvidenceCount {
+    /// Nothing measured. The state every estimator starts in, and the only
+    /// safe reading of a count nobody supplied.
+    fn default() -> Self {
+        Self::NONE
+    }
+}
+
 impl EvidenceCount {
     /// No observations at all — the state every estimator starts in.
     pub const NONE: Self = Self(0);
@@ -155,6 +196,89 @@ impl EvidenceCount {
     #[must_use]
     pub const fn clears(self, floor: i64) -> bool {
         self.0 >= floor
+    }
+}
+
+/// How much unattended action a context may still take while it is below the
+/// evidence floor.
+///
+/// # Why the floor needs one
+///
+/// [`disposition_with_evidence`] downgrades unattended execution to approval
+/// until a context has cleared its floor, and its own doc comment names the
+/// trap: *"acting is how the observations that clear the floor get made, so a
+/// gate that blocks action below the floor guarantees the floor is never
+/// reached."* It avoids that by routing below-floor work through approval
+/// rather than denial — which is correct in principle and, in production, the
+/// same thing. Approvals expire at 72 hours, one person empties the queue, and
+/// the floor of twenty was never approached from below: measured, zero
+/// resolved outcomes against a floor of twenty.
+///
+/// So the gate was self-sealing in practice. An allowance is the standard way
+/// out: a bounded number of unattended actions, spent per context per week,
+/// whose whole purpose is to produce the observations the floor is waiting
+/// for. It is deliberately small — this is the warm-up, not the posture.
+///
+/// # Why it is not a way around the ladder
+///
+/// The allowance is read only where the floor is what is holding an action
+/// back. Everything else still applies and applies first: a context below its
+/// confidence bar is still denied, `observe` and `recommend` still produce
+/// nothing, the class ceiling still clamps, and the envelope still bounds
+/// volume. An allowance cannot promote an action the operator's dial never
+/// permitted; it can only decline to punish a context for not yet having the
+/// evidence that acting is how you get.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct BootstrapAllowance {
+    /// Unattended actions this context has already taken inside the window,
+    /// counted from the durable action rows rather than a second ledger that
+    /// could disagree with them.
+    pub spent: i64,
+    /// The operator's cap. Zero means no warm-up at all, which is the honest
+    /// reading of an operator who set it to zero and the safe reading of a
+    /// workspace whose envelope row is missing.
+    pub cap: i64,
+}
+
+impl BootstrapAllowance {
+    /// No warm-up: every below-floor action waits for a person. The default,
+    /// and what an absent envelope row reads as.
+    pub const NONE: Self = Self { spent: 0, cap: 0 };
+
+    /// Whether one more unattended action fits inside the cap.
+    #[must_use]
+    pub const fn has_room(self) -> bool {
+        self.spent < self.cap
+    }
+}
+
+/// What a context has learned, and what it may still spend learning.
+///
+/// One value rather than two parameters because the two are only ever read
+/// together, and a caller that passed the right count with the wrong
+/// allowance would widen authority silently.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ContextEvidence {
+    pub observations: EvidenceCount,
+    pub bootstrap: BootstrapAllowance,
+}
+
+impl ContextEvidence {
+    /// A context with nothing measured and no warm-up left. The strictest
+    /// reading, and the right one for a caller that has not loaded either.
+    pub const UNPROVEN: Self = Self {
+        observations: EvidenceCount::NONE,
+        bootstrap: BootstrapAllowance::NONE,
+    };
+
+    /// Measured observations with no warm-up allowance, for a caller that has
+    /// a count but no envelope to read a cap from.
+    #[must_use]
+    pub const fn measured(observations: EvidenceCount) -> Self {
+        Self {
+            observations,
+            bootstrap: BootstrapAllowance::NONE,
+        }
     }
 }
 
@@ -185,24 +309,39 @@ impl EvidenceCount {
 /// The floor is the caller's, because the caller knows what it is counting.
 /// `measurement::RATE_FLOOR` is the floor for rates and the right default for
 /// anything counted per-observation.
+/// # The warm-up
+///
+/// Below the floor the downgrade is skipped while the context still has room
+/// in its [`BootstrapAllowance`]. That is not a hole in the gate — it is what
+/// keeps the gate from sealing itself shut. See the allowance's own comment
+/// for why, and for what it still cannot do.
 #[must_use]
 pub const fn disposition_with_evidence(
     level: AutonomyLevel,
     confidence: Confidence,
     minimum_confidence: Confidence,
-    observations: EvidenceCount,
+    evidence: ContextEvidence,
     floor: i64,
 ) -> PolicyDisposition {
     let granted = disposition(level, confidence, minimum_confidence);
-    if observations.clears(floor) {
+    if evidence.observations.clears(floor) {
         return granted;
     }
     match granted {
-        // The one downgrade: unattended execution becomes attended.
-        PolicyDisposition::AutoExecute => PolicyDisposition::RequireApproval,
+        // The one downgrade: unattended execution becomes attended — unless
+        // the context is still inside the warm-up that exists to produce the
+        // observations this floor is waiting for.
+        PolicyDisposition::AutoExecute => {
+            if evidence.bootstrap.has_room() {
+                PolicyDisposition::AutoExecute
+            } else {
+                PolicyDisposition::RequireApproval
+            }
+        }
         // Already at or below approval, or refused outright. A thin posterior
         // is no reason to widen authority, and no reason to narrow one that is
-        // already narrow.
+        // already narrow. The allowance is not read here: it answers "may this
+        // run unattended", and nothing at or below approval is asking that.
         other => other,
     }
 }
@@ -210,6 +349,20 @@ pub const fn disposition_with_evidence(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn autonomy_levels_round_trip() {
+        for level in [
+            AutonomyLevel::Observe,
+            AutonomyLevel::Recommend,
+            AutonomyLevel::RequireApproval,
+            AutonomyLevel::BoundedAuto,
+        ] {
+            assert_eq!(AutonomyLevel::parse(level.as_str()), Some(level));
+        }
+        assert_eq!(AutonomyLevel::parse("bounded-auto"), None);
+        assert_eq!(AutonomyLevel::parse(""), None);
+    }
 
     #[test]
     fn confidence_rejects_values_above_one_hundred_percent() {
@@ -271,7 +424,7 @@ mod tests {
                 AutonomyLevel::BoundedAuto,
                 Confidence::MAX,
                 minimum,
-                EvidenceCount(4),
+                ContextEvidence::measured(EvidenceCount(4)),
                 floor,
             ),
             PolicyDisposition::RequireApproval,
@@ -295,7 +448,7 @@ mod tests {
                     level,
                     Confidence::MAX,
                     minimum,
-                    EvidenceCount(floor),
+                    ContextEvidence::measured(EvidenceCount(floor)),
                     floor,
                 ),
                 disposition(level, Confidence::MAX, minimum),
@@ -321,7 +474,7 @@ mod tests {
                     level,
                     Confidence::MAX,
                     minimum,
-                    EvidenceCount::NONE,
+                    ContextEvidence::UNPROVEN,
                     crate::measurement::RATE_FLOOR,
                 ),
                 granted,
@@ -352,6 +505,141 @@ mod tests {
         }
     }
 
+    fn warm_up(spent: i64, cap: i64) -> ContextEvidence {
+        ContextEvidence {
+            observations: EvidenceCount::NONE,
+            bootstrap: BootstrapAllowance { spent, cap },
+        }
+    }
+
+    /// The trap the floor's own comment names, made real: with no warm-up,
+    /// nothing below the floor executes, so nothing produces the observations
+    /// the floor is waiting for and the gate never opens by itself.
+    #[test]
+    fn without_a_warm_up_the_floor_seals_itself() {
+        let minimum = Confidence::saturating_from_basis_points(8_000);
+        assert_eq!(
+            disposition_with_evidence(
+                AutonomyLevel::BoundedAuto,
+                Confidence::MAX,
+                minimum,
+                warm_up(0, 0),
+                crate::measurement::RATE_FLOOR,
+            ),
+            PolicyDisposition::RequireApproval
+        );
+    }
+
+    #[test]
+    fn a_warm_up_with_room_keeps_unattended_execution() {
+        let minimum = Confidence::saturating_from_basis_points(8_000);
+        assert_eq!(
+            disposition_with_evidence(
+                AutonomyLevel::BoundedAuto,
+                Confidence::MAX,
+                minimum,
+                warm_up(4, 5),
+                crate::measurement::RATE_FLOOR,
+            ),
+            PolicyDisposition::AutoExecute
+        );
+    }
+
+    /// The warm-up is bounded, which is the whole difference between it and
+    /// removing the floor.
+    #[test]
+    fn a_spent_warm_up_goes_back_to_asking() {
+        let minimum = Confidence::saturating_from_basis_points(8_000);
+        for spent in [5, 6, 50] {
+            assert_eq!(
+                disposition_with_evidence(
+                    AutonomyLevel::BoundedAuto,
+                    Confidence::MAX,
+                    minimum,
+                    warm_up(spent, 5),
+                    crate::measurement::RATE_FLOOR,
+                ),
+                PolicyDisposition::RequireApproval,
+                "spent {spent} of 5 must be exhausted"
+            );
+        }
+    }
+
+    /// The allowance answers "may this run unattended". Nothing at or below
+    /// approval is asking that, so a warm-up must not promote one.
+    #[test]
+    fn a_warm_up_never_promotes_a_narrower_level() {
+        let minimum = Confidence::saturating_from_basis_points(8_000);
+        for level in [
+            AutonomyLevel::Observe,
+            AutonomyLevel::Recommend,
+            AutonomyLevel::RequireApproval,
+        ] {
+            assert_eq!(
+                disposition_with_evidence(
+                    AutonomyLevel::BoundedAuto,
+                    Confidence::MAX,
+                    minimum,
+                    warm_up(0, 100),
+                    crate::measurement::RATE_FLOOR,
+                ),
+                PolicyDisposition::AutoExecute,
+                "the warm-up applies to bounded_auto"
+            );
+            assert_eq!(
+                disposition_with_evidence(
+                    level,
+                    Confidence::MAX,
+                    minimum,
+                    warm_up(0, 100),
+                    crate::measurement::RATE_FLOOR,
+                ),
+                disposition(level, Confidence::MAX, minimum),
+                "{level:?} must be untouched by a warm-up"
+            );
+        }
+    }
+
+    /// A denial is not a permissions question, and a warm-up is not an answer
+    /// to one. A context below its own confidence bar stays refused however
+    /// much allowance it has.
+    #[test]
+    fn a_warm_up_does_not_soften_a_denial() {
+        let confidence = Confidence::saturating_from_basis_points(7_999);
+        let minimum = Confidence::saturating_from_basis_points(8_000);
+        assert_eq!(
+            disposition_with_evidence(
+                AutonomyLevel::BoundedAuto,
+                confidence,
+                minimum,
+                warm_up(0, 100),
+                crate::measurement::RATE_FLOOR,
+            ),
+            PolicyDisposition::Deny
+        );
+    }
+
+    /// Above the floor the allowance is irrelevant: a context that has earned
+    /// its evidence is not spending a warm-up any more.
+    #[test]
+    fn a_cleared_floor_ignores_the_warm_up() {
+        let minimum = Confidence::saturating_from_basis_points(8_000);
+        let floor = crate::measurement::RATE_FLOOR;
+        assert_eq!(
+            disposition_with_evidence(
+                AutonomyLevel::BoundedAuto,
+                Confidence::MAX,
+                minimum,
+                ContextEvidence {
+                    observations: EvidenceCount(floor),
+                    bootstrap: BootstrapAllowance { spent: 999, cap: 0 },
+                },
+                floor,
+            ),
+            PolicyDisposition::AutoExecute
+        );
+    }
+
     /// A context that failed its own confidence bar stays refused. Thin
     /// evidence must not turn a denial into an approval queue item.
     #[test]
@@ -364,7 +652,7 @@ mod tests {
                 AutonomyLevel::BoundedAuto,
                 confidence,
                 minimum,
-                EvidenceCount::NONE,
+                ContextEvidence::UNPROVEN,
                 crate::measurement::RATE_FLOOR,
             ),
             PolicyDisposition::Deny

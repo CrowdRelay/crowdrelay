@@ -127,14 +127,19 @@ pub async fn get_brand_settings(
             let mut settings = HashMap::new();
             let effective: &crowdrelay_infra::tenant_settings::TenantBrandSettings =
                 effective.as_ref();
-            // The weekly ask ceiling (§4i-6) has no default — the panel shows
-            // the tenant's number when set and empty when uncapped.
+            // The weekly ask ceiling (§4i-6) has a default, and the panel
+            // shows it. An empty field used to mean uncapped, which is what
+            // it was — a person's attention was the one quantity here with no
+            // ceiling, and the one that ran out. The `overridden` list still
+            // says whether the tenant chose this number or inherited it.
             settings.insert(
                 "team_weekly_ask_ceiling".to_owned(),
                 overrides
                     .get("team_weekly_ask_ceiling")
                     .cloned()
-                    .unwrap_or_default(),
+                    .unwrap_or_else(|| {
+                        crowdrelay_domain::team_operations::DEFAULT_WEEKLY_ASK_CEILING.to_string()
+                    }),
             );
             // §4G.2: absent means the band has never stated an intent, and the
             // effective value is `unstated` — which the planner acts on. The

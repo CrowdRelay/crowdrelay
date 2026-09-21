@@ -731,6 +731,10 @@ async fn compose_briefing(
     // Asks handed out per member over the last seven days beside the
     // tenant's own weekly ceiling, plus the asks that expired never having
     // been assigned — the load and the dropped work, stated together.
+    //
+    // The same fallback the router applies, for the same reason: a briefing
+    // that reports "no ceiling" while the router is enforcing one tells the
+    // operator the opposite of what is happening to their crew.
     let weekly_ceiling: Option<i64> = sqlx::query_scalar::<_, String>(
         "SELECT value FROM tenant_settings
          WHERE workspace_id = $1 AND key = 'team_weekly_ask_ceiling'",
@@ -739,7 +743,11 @@ async fn compose_briefing(
     .fetch_optional(&mut **tx)
     .await
     .map_err(map_sqlx)?
-    .and_then(|value| value.trim().parse::<i64>().ok());
+    .and_then(|value| value.trim().parse::<i64>().ok())
+    .filter(|ceiling| (1..=500).contains(ceiling))
+    .or(Some(i64::from(
+        crowdrelay_domain::team_operations::DEFAULT_WEEKLY_ASK_CEILING,
+    )));
     let weekly_asks = sqlx::query_as::<_, (String, i64)>(
         r#"
         SELECT COALESCE(member.display_name, member.normalized_email) AS display_name,

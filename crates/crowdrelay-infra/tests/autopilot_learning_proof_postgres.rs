@@ -723,6 +723,7 @@ async fn an_unpublished_draft_is_not_measured_as_a_zero() -> Result<(), Box<dyn 
         subject_id: workspace_id.into_uuid(),
         baseline_value: 0.0,
         action_finished_at: now - time::Duration::days(14),
+        due_at: now,
         attempt_number: 1,
     };
 

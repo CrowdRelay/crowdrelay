@@ -248,6 +248,13 @@ pub(crate) fn router(state: crate::AppState) -> Router {
             "/v1/control-plane/autopilot/actions/{action_id}/approve",
             post(crate::autopilot::approve_action),
         )
+        // The same decision, several at a time. Approvals expire at 72 hours
+        // and the queue refills every cycle; answering them one at a time is
+        // a race the operator loses.
+        .route(
+            "/v1/control-plane/autopilot/actions/approve",
+            post(crate::autopilot::approve_actions),
+        )
         .route(
             "/v1/control-plane/autopilot/actions/{action_id}/cancel",
             post(crate::autopilot::cancel_action),
@@ -516,6 +523,21 @@ pub(crate) fn router(state: crate::AppState) -> Router {
         .route(
             "/v1/control-plane/nights/{place_event_id}/acts/{act_slug}/confirm",
             post(crate::night::confirm_night_act),
+        )
+        // "Stop asking me about this one." A per-action approval answers
+        // whether one post may go out; this answers whether a target's posts
+        // may, which is the decision an operator reaches after reading three
+        // drafts from the same community. The list includes revoked and
+        // expired grants on purpose — "which did we turn off, and when" is
+        // the question asked after a community goes quiet.
+        .route(
+            "/v1/control-plane/autopilot/standing-approvals",
+            post(crate::autopilot::grant_standing_approval)
+                .get(crate::autopilot::list_standing_approvals),
+        )
+        .route(
+            "/v1/control-plane/autopilot/standing-approvals/{action_kind}/{target_key}",
+            axum::routing::delete(crate::autopilot::revoke_standing_approval),
         )
         .route(
             "/v1/control-plane/community-posts/{community_post_id}/register-manual",

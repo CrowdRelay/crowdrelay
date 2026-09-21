@@ -508,7 +508,7 @@ mod tests {
             &policy,
             &communities,
             push_audience,
-            EvidenceCount::NONE,
+            ContextEvidence::UNPROVEN,
             now,
         )?;
         assert_eq!(candidates.len(), 3);
@@ -589,7 +589,7 @@ mod tests {
             &policy,
             &communities,
             push_audience,
-            EvidenceCount::NONE,
+            ContextEvidence::UNPROVEN,
             now,
         )?;
         for (first, second) in candidates.iter().zip(&again) {
@@ -641,7 +641,7 @@ mod tests {
             guardrail_reason: None,
         };
 
-        let candidates = content_candidates(&snapshot, &policy, &[], None, EvidenceCount::NONE, now)?;
+        let candidates = content_candidates(&snapshot, &policy, &[], None, ContextEvidence::UNPROVEN, now)?;
         assert_eq!(candidates.len(), 1);
         assert!(matches!(
             candidates[0].action,

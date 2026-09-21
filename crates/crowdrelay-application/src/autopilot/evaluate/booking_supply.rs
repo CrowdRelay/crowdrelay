@@ -9,7 +9,7 @@ use super::*;
 pub(super) fn booking_supply_candidate(
     snapshot: &crowdrelay_domain::booking_discovery::BookingSupplySnapshot,
     policy: &AutopilotPolicy,
-    evidence: EvidenceCount,
+    evidence: ContextEvidence,
     workspace_id: WorkspaceId,
     now: OffsetDateTime,
 ) -> Result<Option<DecisionCandidate>, serde_json::Error> {

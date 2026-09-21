@@ -48,6 +48,14 @@ CREATE TABLE community_relay_batches (
     revoked_at       timestamptz,
     revoked_by       text,
     observe_until    timestamptz,
+    -- The single notification the batch sends, claimed by the first draft
+    -- that parks under it. Not "when the row was created": a batch created
+    -- by a draft that queued on a standing grant or workspace policy has
+    -- nothing to ask yet, and a parked draft arriving later must still be
+    -- heard. First parked draft wins the UPDATE ... WHERE notified_at IS
+    -- NULL inside its transaction — exactly one alert per spread, no matter
+    -- how many communities it lands in or in what order drafts arrive.
+    notified_at      timestamptz,
     created_at       timestamptz NOT NULL DEFAULT now(),
     updated_at       timestamptz NOT NULL DEFAULT now(),
     UNIQUE (workspace_id, source_id),

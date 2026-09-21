@@ -26,7 +26,7 @@ fn lever_standing_key(lever: ShowGrowthLever) -> String {
 pub(super) fn show_growth_candidates(
     snapshot: ShowGrowthSnapshot,
     policy: &AutopilotPolicy,
-    evidence: EvidenceCount,
+    evidence: ContextEvidence,
     standings: &std::collections::HashMap<String, Standing>,
     now: OffsetDateTime,
 ) -> Result<Vec<DecisionCandidate>, serde_json::Error> {
@@ -90,7 +90,7 @@ fn request_candidate(
     domain_policy: ShowGrowthPolicy,
     lever: ShowGrowthLever,
     confidence: Confidence,
-    evidence: EvidenceCount,
+    evidence: ContextEvidence,
     standings: &std::collections::HashMap<String, Standing>,
     send_at: Option<OffsetDateTime>,
 ) -> Result<DecisionCandidate, serde_json::Error> {

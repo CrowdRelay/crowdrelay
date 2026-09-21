@@ -549,19 +549,41 @@ impl AutopilotWorker {
                 let mut failed = 0u32;
                 for measurement in measurements {
                     let observed_at = OffsetDateTime::now_utc();
+                    // Harm is observed before the primary metric: it exists
+                    // whether or not the metric is readable — a cancelled
+                    // event's measurement abandons while its harm is real.
+                    // `None` is a failed observation, distinct from a clean
+                    // zero reading: the completion writes no harm keys for
+                    // it, so a broken collector cannot teach "no harm" or
+                    // overwrite what an earlier attempt landed.
+                    let harm = self
+                        .repository
+                        .observe_action_harm(self.workspace_id, &measurement, observed_at)
+                        .await
+                        .inspect_err(|error| {
+                            tracing::warn!(
+                                measurement_id = %measurement.id,
+                                error = %error,
+                                "ViryaOS Autopilot harm observation failed — resolving without it"
+                            );
+                        })
+                        .ok();
+                    let assess_harm = harm.unwrap_or_default();
                     let result = async {
                         let observed = self
                             .repository
                             .observe_measurement(self.workspace_id, &measurement, observed_at)
                             .await?;
-                        let effect = assess_measurement_effect(&measurement, observed)
-                            .ok_or(RepositoryError::Unexpected)?;
+                        let effect =
+                            assess_measurement_effect(&measurement, observed, &assess_harm)
+                                .ok_or(RepositoryError::Unexpected)?;
                         self.repository
                             .complete_measurement(
                                 self.workspace_id,
                                 &measurement,
                                 observed,
                                 effect,
+                                harm.as_ref(),
                                 observed_at,
                             )
                             .await
@@ -581,13 +603,18 @@ impl AutopilotWorker {
                                 error_kind,
                                 "ViryaOS Autopilot delayed effect measurement failed"
                             );
+                            // `harm` rides along: a terminal failure merges
+                            // its keys in the same transaction that resolves
+                            // readiness, so the evidence row closes with the
+                            // harm it observed already on it.
                             let _ = self
                                 .repository
                                 .fail_measurement(
                                     self.workspace_id,
-                                    measurement.id,
+                                    &measurement,
                                     error_kind,
                                     retryable,
+                                    harm.as_ref(),
                                     OffsetDateTime::now_utc(),
                                 )
                                 .await

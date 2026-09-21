@@ -28,7 +28,7 @@
 
 use crowdrelay_application::autopilot::{
     AutopilotDecisionRepository, AutopilotMeasurementKind, AutopilotMeasurementRepository,
-    ClaimedAutopilotMeasurement, assess_measurement_effect,
+    ClaimedAutopilotMeasurement, HarmObservation, assess_measurement_effect,
 };
 use crowdrelay_domain::WorkspaceId;
 use crowdrelay_domain::ids::{AutopilotActionId, AutopilotMeasurementId};
@@ -176,6 +176,7 @@ async fn queue_measurement(
         subject_id: action_id,
         baseline_value,
         action_finished_at,
+        due_at: action_finished_at + time::Duration::days(7),
         attempt_number: 1,
     }
 }
@@ -197,10 +198,17 @@ async fn mark_processing(f: &Fixture, measurement: &ClaimedAutopilotMeasurement)
 /// tests exercise the real classification step rather than a hand-made effect.
 async fn resolve(f: &Fixture, measurement: &ClaimedAutopilotMeasurement, observed: f64) {
     mark_processing(f, measurement).await;
-    let effect = assess_measurement_effect(measurement, observed)
+    let effect = assess_measurement_effect(measurement, observed, &HarmObservation::default())
         .expect("a measurement the worker can classify");
     f.repository
-        .complete_measurement(f.workspace_id, measurement, observed, effect, f.now)
+        .complete_measurement(
+            f.workspace_id,
+            measurement,
+            observed,
+            effect,
+            Some(&HarmObservation::default()),
+            f.now,
+        )
         .await
         .expect("complete");
 }
@@ -218,10 +226,17 @@ async fn resolve_at(
     at: OffsetDateTime,
 ) {
     mark_processing(f, measurement).await;
-    let effect = assess_measurement_effect(measurement, observed)
+    let effect = assess_measurement_effect(measurement, observed, &HarmObservation::default())
         .expect("a measurement the worker can classify");
     f.repository
-        .complete_measurement(f.workspace_id, measurement, observed, effect, at)
+        .complete_measurement(
+            f.workspace_id,
+            measurement,
+            observed,
+            effect,
+            Some(&HarmObservation::default()),
+            at,
+        )
         .await
         .expect("complete");
 }
@@ -406,7 +421,7 @@ async fn c_a_negative_signed_effect_resolves_as_a_result() {
     )
     .await;
 
-    let effect = assess_measurement_effect(&incremental, -3.0)
+    let effect = assess_measurement_effect(&incremental, -3.0, &HarmObservation::default())
         .expect("a negative incremental outcome must classify, not vanish");
     assert_eq!(
         effect.assessment,
@@ -416,7 +431,14 @@ async fn c_a_negative_signed_effect_resolves_as_a_result() {
 
     mark_processing(&f, &incremental).await;
     f.repository
-        .complete_measurement(f.workspace_id, &incremental, -3.0, effect, f.now)
+        .complete_measurement(
+            f.workspace_id,
+            &incremental,
+            -3.0,
+            effect,
+            Some(&HarmObservation::default()),
+            f.now,
+        )
         .await
         .expect("a negative outcome completes");
     let (_, y14, _, resolved_at) = evidence_state(&f, action_id).await;
@@ -433,7 +455,7 @@ async fn c_a_negative_signed_effect_resolves_as_a_result() {
     )
     .await;
     assert!(
-        assess_measurement_effect(&raw, -1.0).is_none(),
+        assess_measurement_effect(&raw, -1.0, &HarmObservation::default()).is_none(),
         "a negative fan *count* is still a malformed reading"
     );
 }
@@ -816,10 +838,18 @@ async fn g_re_resolving_changes_nothing_and_touches_nothing_else() {
     // A second attempt on an already-succeeded measurement must not be able to
     // rewrite the outcome: the row is no longer `processing`.
     mark_processing(&f, &incremental).await;
-    let effect = assess_measurement_effect(&incremental, 99.0).expect("classifies");
+    let effect = assess_measurement_effect(&incremental, 99.0, &HarmObservation::default())
+        .expect("classifies");
     let _ = f
         .repository
-        .complete_measurement(f.workspace_id, &incremental, 99.0, effect, f.now)
+        .complete_measurement(
+            f.workspace_id,
+            &incremental,
+            99.0,
+            effect,
+            Some(&HarmObservation::default()),
+            f.now,
+        )
         .await;
     let (_, y14_again, _, resolved_again) = evidence_state(&f, action_id).await;
     assert_eq!(y14, y14_again, "the first outcome stands");

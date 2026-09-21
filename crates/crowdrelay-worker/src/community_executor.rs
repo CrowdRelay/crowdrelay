@@ -42,9 +42,11 @@ use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use crowdrelay_domain::WorkspaceId;
+use crowdrelay_domain::action_class::ActionClass;
 use crowdrelay_domain::publish_guard::{
     PublishChannel, PublishContext, content_hash, review_outbound_post,
 };
+use crowdrelay_domain::standing_approval::StandingGrant;
 use crowdrelay_infra::reddit_proxy::read_reddit_proxy_from_db;
 use serde::Deserialize;
 use serde_json::Value;
@@ -897,7 +899,32 @@ impl CommunityExecutorWorker {
                               c2.relay_source_id IS NULL AND NOT $4
                               OR (
                                   c2.relay_source_id IS NOT NULL
-                                  AND batch.status = 'approved'
+                                  -- A revoked or finished batch is a veto on
+                                  -- the content itself — no standing answer,
+                                  -- grant included, may carry it past that.
+                                  -- A missing batch row (LEFT JOIN miss)
+                                  -- means the delivery's provenance broke;
+                                  -- it waits rather than posts.
+                                  AND batch.status IN ('awaiting_approval', 'approved')
+                                  AND (
+                                      batch.status = 'approved'
+                                      -- The card hasn't answered yet, but a
+                                      -- live standing grant for this one
+                                      -- community already did. `is_live`'s
+                                      -- rule — granted class, unrevoked,
+                                      -- unexpired — is inlined here because
+                                      -- a join predicate cannot call it;
+                                      -- the table's CHECK already confines
+                                      -- action_class to grantable values.
+                                      OR EXISTS (
+                                          SELECT 1 FROM viryaos_standing_approvals sg
+                                          WHERE sg.workspace_id = c2.workspace_id
+                                            AND sg.action_kind = 'community.engage.request'
+                                            AND sg.target_key = c2.target_id::text
+                                            AND sg.revoked_at IS NULL
+                                            AND sg.expires_at > now()
+                                      )
+                                  )
                                   AND NOT EXISTS (
                                       SELECT 1 FROM community_posts last
                                       WHERE last.workspace_id = c2.workspace_id
@@ -925,13 +952,13 @@ impl CommunityExecutorWorker {
                     updated_at = now()
                 FROM target
                 WHERE cp.id = target.id
-                RETURNING cp.id, cp.action_id, cp.subreddit, cp.title, cp.body,
-                          cp.smart_link, cp.image_url, cp.media_id, cp.source_url,
-                          cp.relay_source_id, target.claimed_from
+                RETURNING cp.id, cp.action_id, cp.target_id, cp.subreddit, cp.title,
+                          cp.body, cp.smart_link, cp.image_url, cp.media_id,
+                          cp.source_url, cp.relay_source_id, target.claimed_from
             )
-            SELECT c.id, c.action_id, c.subreddit, c.title, c.body, c.smart_link,
-                   c.image_url, c.media_id, c.source_url, c.relay_source_id,
-                   c.claimed_from,
+            SELECT c.id, c.action_id, c.target_id, c.subreddit, c.title, c.body,
+                   c.smart_link, c.image_url, c.media_id, c.source_url,
+                   c.relay_source_id, c.claimed_from,
                    a.trace_id, a.causation_id, a.decision_id
             FROM claimed c
             LEFT JOIN viryaos_autopilot_actions a ON a.id = c.action_id
@@ -1000,7 +1027,7 @@ impl CommunityExecutorWorker {
         // the claim and before Reddit, is what turns "usually hourly" into
         // "never sooner than the interval".
         if let Some(source_id) = action.relay_source_id {
-            match self.relay_batch_gate(source_id).await? {
+            match self.relay_batch_gate(source_id, action.target_id).await? {
                 RelayBatchGate::Open => {}
                 RelayBatchGate::Defer(remaining) => {
                     tracing::info!(
@@ -1009,6 +1036,25 @@ impl CommunityExecutorWorker {
                         "relay batch interval not yet elapsed, deferring"
                     );
                     self.mark_rate_limited(action.id, remaining).await?;
+                    return Ok(());
+                }
+                RelayBatchGate::Parked => {
+                    // The grant this delivery was claimed under is gone and
+                    // the batch card hasn't answered — back to pending, where
+                    // the claim leaves it until the card or a grant says yes.
+                    tracing::info!(
+                        post_id = %action.id,
+                        source_id = %source_id,
+                        "grant no longer covers the target and the batch is unanswered — reparking"
+                    );
+                    sqlx::query(
+                        "UPDATE community_posts \
+                         SET status = 'pending', updated_at = now() \
+                         WHERE id = $1",
+                    )
+                    .bind(action.id)
+                    .execute(&self.pool)
+                    .await?;
                     return Ok(());
                 }
                 RelayBatchGate::Closed => {
@@ -1320,6 +1366,7 @@ impl CommunityExecutorWorker {
     async fn relay_batch_gate(
         &self,
         source_id: Uuid,
+        target_id: Option<Uuid>,
     ) -> Result<RelayBatchGate, CommunityExecutorError> {
         let batch = sqlx::query_as::<_, (String, i32)>(
             "SELECT status, interval_seconds FROM community_relay_batches \
@@ -1335,8 +1382,23 @@ impl CommunityExecutorWorker {
         let Some((status, interval_seconds)) = batch else {
             return Ok(RelayBatchGate::Closed);
         };
-        if status != "approved" {
-            return Ok(RelayBatchGate::Closed);
+        let authorized = match status.as_str() {
+            "approved" => true,
+            // The card is still unanswered, but a live standing grant for
+            // this delivery's own community can carry it — the operator's
+            // earlier "don't ask me about this one". The grant is re-checked
+            // rather than trusting the claim's snapshot: a revocation between
+            // claim and send lands exactly here.
+            "awaiting_approval" => self.live_standing_grant(target_id).await?,
+            // Revoked and done are the veto a grant cannot override.
+            _ => false,
+        };
+        if !authorized {
+            return Ok(if status == "awaiting_approval" {
+                RelayBatchGate::Parked
+            } else {
+                RelayBatchGate::Closed
+            });
         }
         let last_posted = sqlx::query_scalar::<_, Option<time::OffsetDateTime>>(
             r#"
@@ -1362,6 +1424,43 @@ impl CommunityExecutorWorker {
             }
         }
         Ok(RelayBatchGate::Open)
+    }
+
+    /// Whether a live standing grant covers this delivery's community —
+    /// "the operator already judged this target, stop asking". The row is
+    /// read and `StandingGrant::is_live` applied rather than duplicating
+    /// liveness in a WHERE clause; a class this build cannot parse is not a
+    /// grant, the same reading the ingest path gives the authority rows.
+    async fn live_standing_grant(
+        &self,
+        target_id: Option<Uuid>,
+    ) -> Result<bool, CommunityExecutorError> {
+        let Some(target_id) = target_id else {
+            return Ok(false);
+        };
+        let row: Option<(String, time::OffsetDateTime, Option<time::OffsetDateTime>)> =
+            sqlx::query_as(
+                r#"
+            SELECT action_class, expires_at, revoked_at
+            FROM viryaos_standing_approvals
+            WHERE workspace_id = $1
+              AND action_kind = 'community.engage.request'
+              AND target_key = $2
+            "#,
+            )
+            .bind(self.workspace_id.into_uuid())
+            .bind(target_id.to_string())
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(row
+            .and_then(|(class, expires_at, revoked_at)| {
+                ActionClass::parse(&class).map(|class| StandingGrant {
+                    class,
+                    expires_at,
+                    revoked_at,
+                })
+            })
+            .is_some_and(|grant| grant.is_live(time::OffsetDateTime::now_utc())))
     }
 
     /// Builds the final post body, appending the smart link as a full URL
@@ -1998,6 +2097,11 @@ enum RelayBatchGate {
     Defer(Duration),
     /// Batch missing, revoked or done — the delivery must not post.
     Closed,
+    /// The card has not answered and nothing else covers this delivery —
+    /// the grant that claimed it was revoked between claim and send. The
+    /// row returns to `pending` to wait on the card, not cancelled for an
+    /// answer nobody gave.
+    Parked,
 }
 
 #[derive(sqlx::FromRow)]
@@ -2013,6 +2117,9 @@ pub struct ClaimedAction {
     /// attempt, so it is in the log beside the post rather than after it.
     claimed_from: String,
     action_id: Uuid,
+    /// The community this delivery targets — the outreach target id a
+    /// standing grant keys on. `None` means no grant can cover the row.
+    target_id: Option<Uuid>,
     subreddit: String,
     title: String,
     body: String,
