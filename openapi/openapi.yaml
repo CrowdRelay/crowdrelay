@@ -1857,6 +1857,41 @@ paths:
               schema: { $ref: '#/components/schemas/SynesthesiaLeaderboardUnpublishResponse' }
         '401': { $ref: '#/components/responses/PrivateProblem' }
         '503': { $ref: '#/components/responses/PrivateProblem' }
+  /staff/events:
+    post:
+      operationId: createStaffEvent
+      summary: Enter one show by hand — the operator's own row, not a provider sync
+      description: 'Manual show entry for a label that never ran a sync source. Idempotent on Idempotency-Key: a retried submit returns the show it already created. publish=false stores a draft off the public list.'
+      security:
+      - staffBearer: []
+      parameters:
+      - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ManualEventCreateRequest'
+      responses:
+        '201':
+          description: Show created.
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/PrivateNoStore'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CreatedEvent'
+        '400':
+          $ref: '#/components/responses/PrivateProblem'
+        '401':
+          $ref: '#/components/responses/PrivateProblem'
+        '409':
+          $ref: '#/components/responses/PrivateProblem'
+        '413':
+          $ref: '#/components/responses/PrivateProblem'
+        '503':
+          $ref: '#/components/responses/PrivateProblem'
   /staff/events/{slug}/dashboard:
     get:
       operationId: getStaffEventDashboard
@@ -2124,6 +2159,41 @@ paths:
         '401':
           $ref: '#/components/responses/PrivateProblem'
         '404':
+          $ref: '#/components/responses/PrivateProblem'
+        '503':
+          $ref: '#/components/responses/PrivateProblem'
+  /admin/events:
+    post:
+      operationId: createAdminEvent
+      summary: Enter one show by hand — the operator's own row, not a provider sync
+      description: 'Manual show entry for a label that never ran a sync source. Idempotent on Idempotency-Key: a retried submit returns the show it already created. publish=false stores a draft off the public list.'
+      security:
+      - adminBearer: []
+      parameters:
+      - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ManualEventCreateRequest'
+      responses:
+        '201':
+          description: Show created.
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/PrivateNoStore'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CreatedEvent'
+        '400':
+          $ref: '#/components/responses/PrivateProblem'
+        '401':
+          $ref: '#/components/responses/PrivateProblem'
+        '409':
+          $ref: '#/components/responses/PrivateProblem'
+        '413':
           $ref: '#/components/responses/PrivateProblem'
         '503':
           $ref: '#/components/responses/PrivateProblem'
@@ -16439,6 +16509,68 @@ components:
           description: >-
             The festival this show is a slot inside of. Null or empty clears
             the marker back to an ordinary night.
+    ManualEventCreateRequest:
+      type: object
+      additionalProperties: false
+      required:
+      - title
+      - starts_at
+      properties:
+        title:
+          type: string
+          minLength: 1
+          maxLength: 300
+        starts_at:
+          type: string
+          format: date-time
+        doors_at:
+          type: string
+          format: date-time
+        ends_at:
+          type: string
+          format: date-time
+        venue:
+          type: string
+          maxLength: 500
+        venue_address:
+          type: string
+          maxLength: 500
+        city_name:
+          type: string
+          maxLength: 200
+          description: 'Free text joined to the shared city registry. A pair with city_country_code — both or neither.'
+        city_country_code:
+          type: string
+          pattern: ^[A-Z]{2}$
+        city_region:
+          type: string
+          maxLength: 100
+        timezone:
+          type: string
+          maxLength: 128
+          description: 'IANA zone name; absent resolves to the tenant crew timezone setting, then Europe/Warsaw.'
+        ticket_url:
+          type: string
+          format: uri
+        publish:
+          type: boolean
+          default: false
+          description: 'true announces the show publicly now; absent or false stores a draft that internal reads still see.'
+    CreatedEvent:
+      type: object
+      required:
+      - event_id
+      - slug
+      - status
+      properties:
+        event_id:
+          type: string
+          format: uuid
+        slug:
+          type: string
+        status:
+          type: string
+          enum: [draft, published]
     ConfigureTicketSaleRequest:
       type: object
       additionalProperties: false
