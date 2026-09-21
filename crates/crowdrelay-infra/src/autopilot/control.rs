@@ -799,6 +799,7 @@ impl AutopilotControlRepository for PostgresAutopilotRepository {
                     weekly_third_party_touches = $5,
                     subject_cooldown_hours = $6,
                     max_recipients_per_step = $7,
+                    weekly_approval_requests = $11,
                     weekly_bootstrap_actions = $10,
                     parked = $9,
                     version = version + 1,
@@ -816,6 +817,7 @@ impl AutopilotControlRepository for PostgresAutopilotRepository {
             .bind(command.expected_version)
             .bind(command.parked)
             .bind(bounded_i32(command.weekly_bootstrap_actions)?)
+            .bind(bounded_i32(command.weekly_approval_requests)?)
             .execute(&mut *transaction)
             .await
             .map_err(map_sqlx)?;

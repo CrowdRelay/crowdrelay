@@ -38,6 +38,44 @@ pub struct AssignActionRequest {
 pub struct ApproveActionRequest {
     #[serde(default)]
     pub revision: Option<std::collections::BTreeMap<String, String>>,
+    /// "…and stop asking me about this target."
+    ///
+    /// Writes a standing approval for the action's own target once the
+    /// approval itself succeeds. Absent means approve this one and ask again
+    /// next time, which stays the default: a standing grant is a change of
+    /// authority and should be something the operator typed, not something
+    /// they got by clicking the usual button.
+    #[serde(default)]
+    pub remember: Option<RememberRequest>,
+}
+
+/// How long "stop asking me" lasts, and why the operator said yes.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RememberRequest {
+    /// Omitted means `DEFAULT_GRANT_DAYS`. Bounded by `MAX_GRANT_DAYS`.
+    #[serde(default)]
+    pub days: Option<i64>,
+    #[serde(default)]
+    pub note: Option<String>,
+}
+
+/// Approve several parked actions in one call.
+///
+/// Explicit ids rather than a filter. "Approve everything in this context" is
+/// the shape that makes an approval meaningless — the operator would be
+/// granting authority over work they have not read, which is the thing the
+/// whole approval queue exists to prevent. Naming the ids means they saw them.
+///
+/// No revisions here: editing a draft is a per-action act and a batch that
+/// silently applied one operator correction to several drafts would be worse
+/// than making them do it one at a time.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ApproveActionsRequest {
+    pub action_ids: Vec<Uuid>,
+    #[serde(default)]
+    pub remember: Option<RememberRequest>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -57,6 +95,13 @@ pub struct AuthorityRequest {
 
 const fn default_daily_third_party_touches() -> u32 {
     3
+}
+
+/// The migration's default. An omitted field must not silently mean zero:
+/// zero here is "never ask a person about anything", which is a posture a
+/// tenant may choose and not one a stale client should choose for them.
+const fn default_weekly_approval_requests() -> u32 {
+    20
 }
 
 /// The migration's default, restated here so a caller that omits the field
@@ -85,6 +130,9 @@ pub struct GrowthEnvelopeRequest {
     /// Defaults rather than required, for the same reason as the daily wall
     /// above: a caller that predates the field gets the default rather than a
     /// 400 on a limit it never saw.
+    #[serde(default = "default_weekly_approval_requests")]
+    pub(super) weekly_approval_requests: u32,
+    /// As above.
     #[serde(default = "default_weekly_bootstrap_actions")]
     pub(super) weekly_bootstrap_actions: u32,
     pub(super) expected_version: i64,

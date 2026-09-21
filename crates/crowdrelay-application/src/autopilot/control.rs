@@ -709,6 +709,10 @@ pub struct SetGrowthEnvelope {
     pub daily_third_party_touches: u32,
     pub subject_cooldown_hours: u32,
     pub max_recipients_per_step: u32,
+    /// Decisions the agent may put in front of a person per rolling week.
+    /// When spent, findings surface as recommendations rather than approval
+    /// requests. Zero means never ask.
+    pub weekly_approval_requests: u32,
     /// Unattended actions one context may take per rolling week while below
     /// its evidence floor, so the floor can be reached. Zero disables the
     /// warm-up and restores the behaviour that never reached it.

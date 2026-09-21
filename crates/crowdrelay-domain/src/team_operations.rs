@@ -9,6 +9,38 @@ use serde::{Deserialize, Serialize};
 
 use crate::WorkspaceMemberId;
 
+/// Asks one member may be handed in a rolling seven days when the tenant has
+/// not set a number of their own.
+///
+/// # Why a default at all
+///
+/// The ceiling has always been the member's own number, and an unset one read
+/// as uncapped. Nothing else about crew mail is uncapped by accident, and this
+/// one was: `viryaos_autopilot_policies.max_actions_24h` defaults to 50 across
+/// 26 contexts, every `awaiting_approval` action becomes an assignment, and
+/// every assignment owes a first notice plus up to three reminders. So the
+/// only quantity with no ceiling was the one measured in a person's attention,
+/// and it is the quantity that actually ran out: the operator, not the code,
+/// was the throughput limit.
+///
+/// The envelope already bounds what the tenant's *audience* receives. This is
+/// the same idea pointed at the crew, and it belongs here beside the router
+/// that enforces it rather than in whichever reader looks first.
+///
+/// # Why ten
+///
+/// Ten asks is about two a day, which is what a band member with a job can
+/// actually action. The number is deliberately about work rather than about
+/// email — the sweep already digests a batch into one message, so the mail
+/// count is not the thing that saturates a person; the number of decisions
+/// waiting on them is.
+///
+/// It is a default, not a policy: a tenant who wants more sets more, and the
+/// router honours whatever they set. `None` still means uncapped in
+/// [`TeamMemberRoutingSnapshot`], because a reader that cannot express
+/// "no ceiling" cannot report one.
+pub const DEFAULT_WEEKLY_ASK_CEILING: u16 = 10;
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TeamSkill {
@@ -386,6 +418,44 @@ mod tests {
         assert!(
             select_team_assignee(&[busy], need).is_some(),
             "no ceiling set must not cap anyone"
+        );
+    }
+
+    /// `None` still means uncapped here, and the readers no longer produce
+    /// `None` — they fall back to this number. The router has to actually
+    /// stop at it, or the default is decoration.
+    #[test]
+    fn the_default_ceiling_stops_a_member_who_has_had_their_week() {
+        let need = TeamAssignmentNeed {
+            primary_skill: TeamSkill::Social,
+            secondary_skill: None,
+            allow_generalist: false,
+        };
+        let mut at_default = member("a-busy", vec![TeamSkill::Social], 0);
+        at_default.weekly_ask_ceiling = Some(DEFAULT_WEEKLY_ASK_CEILING);
+        at_default.asks_last_7d = DEFAULT_WEEKLY_ASK_CEILING;
+        assert_eq!(
+            select_team_assignee(&[at_default.clone()], need),
+            None,
+            "a member at the default ceiling is not eligible"
+        );
+
+        let mut under = at_default;
+        under.asks_last_7d = DEFAULT_WEEKLY_ASK_CEILING - 1;
+        assert!(
+            select_team_assignee(&[under], need).is_some(),
+            "one ask under the ceiling is still routable"
+        );
+    }
+
+    /// The default is a working number, not a formality. A ceiling of one is
+    /// unusable and one of several hundred is the uncapped behaviour wearing
+    /// a number.
+    #[test]
+    fn the_default_ceiling_is_a_number_somebody_could_work_to() {
+        assert!(
+            (2..=50).contains(&DEFAULT_WEEKLY_ASK_CEILING),
+            "a default of {DEFAULT_WEEKLY_ASK_CEILING} asks a week is not a week's work"
         );
     }
 

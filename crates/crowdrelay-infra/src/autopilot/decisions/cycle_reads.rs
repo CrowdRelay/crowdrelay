@@ -53,7 +53,8 @@ macro_rules! decision_cycle_reads {
                 SELECT agent_enabled, dry_run, weekly_owned_audience_touches,
                        weekly_third_party_touches, daily_third_party_touches,
                        subject_cooldown_hours,
-                       max_recipients_per_step, weekly_bootstrap_actions, parked
+                       max_recipients_per_step, weekly_approval_requests,
+                       weekly_bootstrap_actions, parked
                 FROM viryaos_growth_envelope
                 WHERE workspace_id = $1
                 "#,
@@ -80,6 +81,9 @@ macro_rules! decision_cycle_reads {
                     .unwrap_or(0),
                 max_recipients_per_step: bounded_u32(i64::from(row.max_recipients_per_step))
                     .unwrap_or(1),
+                // An unreadable budget is no asking, never unbounded asking.
+                weekly_approval_requests: bounded_u32(i64::from(row.weekly_approval_requests))
+                    .unwrap_or(0),
                 // An unreadable cap is no warm-up, never an unbounded one.
                 weekly_bootstrap_actions: bounded_u32(i64::from(row.weekly_bootstrap_actions))
                     .unwrap_or(0),
@@ -120,6 +124,35 @@ macro_rules! decision_cycle_reads {
                     _ => {}
                 }
             }
+
+            // Asks made, not asks still waiting. `approval_expires_at` is set
+            // when an action is parked for a person and survives the approval,
+            // so an operator who answers quickly has still been asked — and a
+            // budget that forgot them the moment they answered would bound
+            // nothing. Cancelled rows count too: the interruption happened.
+            //
+            // Counted for every class. An approval request about a
+            // first-party action costs a person exactly what one about a
+            // third-party action costs them, which is why this is not part of
+            // the class-keyed spend above.
+            usage.approval_requests_7d = bounded_u32(
+                sqlx::query_scalar::<_, i64>(
+                    r#"
+                    SELECT count(*)
+                    FROM viryaos_autopilot_actions
+                    WHERE workspace_id = $1
+                      AND approval_expires_at IS NOT NULL
+                      AND created_at >= $2::timestamptz - INTERVAL '7 days'
+                    "#,
+                )
+                .bind(workspace_id.into_uuid())
+                .bind(now)
+                .fetch_one(&self.pool)
+                .await
+                .map_err(map_sqlx)?,
+            )
+            .unwrap_or(u32::MAX);
+
             Ok((envelope, usage))
         })
         .await

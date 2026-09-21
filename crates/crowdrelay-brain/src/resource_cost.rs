@@ -33,6 +33,28 @@
 //! `PortfolioConfig`, not an additive cost. For now, it's a future
 //! dimension — not in `units`.
 //!
+//! # Operator attention is bounded, not priced, and deliberately so
+//!
+//! The scarcest resource this system spends is not tokens or API calls. It
+//! is the tenant's own attention: the authority ladder makes "ask a person"
+//! the cheapest move available in almost every context, and for as long as
+//! nothing charged for that move, an agent behaving exactly as designed
+//! filled a queue nobody could empty. Measured in production: seven drafts,
+//! four approvals, four hundred and twelve opportunities, zero posts
+//! published.
+//!
+//! The obvious repair is a sixth dimension here, and it is the wrong one.
+//! There is no defensible exchange rate between one operator decision and
+//! one expected fan — inventing one would be exactly the fake mathematics
+//! the paragraphs above refuse — and a fungible attention cost would let a
+//! high-value candidate buy an interruption the tenant did not have to sell.
+//!
+//! So attention is bounded instead, by `growth_envelope::check_attention`:
+//! a weekly ceiling on approval requests, applied after ranking, outside
+//! this type. When it is spent, findings surface as recommendations rather
+//! than as asks. Nothing here needs to know about it, and nothing here
+//! should pretend to.
+//!
 //! # None of the five dimensions is populated, ever
 //!
 //! Stronger than "not summed yet", and worth saying outright because the

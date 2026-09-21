@@ -68,6 +68,15 @@ pub struct AutopilotCycleReport {
     /// Decisions the volume envelope held back — the agent was switched off,
     /// rehearsing, out of budget, or inside a subject's cooldown.
     pub actions_held: u32,
+    /// Decisions that would have been parked for a person, and were not,
+    /// because the week's attention budget is spent.
+    ///
+    /// Its own counter rather than a share of `actions_held`, because it is
+    /// the one number on this report an operator can act on directly: a
+    /// cycle that withheld asks is the agent saying "I had more to show you
+    /// than you have time for". The findings are all still on the board as
+    /// recommendations — raising the budget surfaces them as asks again.
+    pub asks_withheld: u32,
     /// Decisions the class ceiling lowered — an action the context was willing
     /// to take unattended that now waits for a human. Counted separately from
     /// quota throttling because the two mean different things: throttled work

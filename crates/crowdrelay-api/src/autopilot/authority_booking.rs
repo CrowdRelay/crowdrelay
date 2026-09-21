@@ -126,6 +126,7 @@ pub async fn set_growth_envelope(
         || request.daily_third_party_touches > 100
         || request.subject_cooldown_hours > 8_760
         || request.weekly_bootstrap_actions > 100
+        || request.weekly_approval_requests > 1_000
         || !(1..=100_000).contains(&request.max_recipients_per_step)
     {
         return Problem::bad_request(request_id(&headers))
@@ -149,6 +150,7 @@ pub async fn set_growth_envelope(
                 daily_third_party_touches: request.daily_third_party_touches,
                 subject_cooldown_hours: request.subject_cooldown_hours,
                 max_recipients_per_step: request.max_recipients_per_step,
+                weekly_approval_requests: request.weekly_approval_requests,
                 weekly_bootstrap_actions: request.weekly_bootstrap_actions,
                 expected_version: request.expected_version,
                 parked: request.parked,
@@ -573,6 +575,7 @@ pub async fn growth_envelope(State(state): State<AppState>, headers: HeaderMap) 
                     "dryRun": envelope.dry_run,
                     "weeklyOwnedAudienceTouches": envelope.weekly_owned_audience_touches,
                     "weeklyThirdPartyTouches": envelope.weekly_third_party_touches,
+                    "weeklyApprovalRequests": envelope.weekly_approval_requests,
                     "weeklyBootstrapActions": envelope.weekly_bootstrap_actions,
                     "dailyThirdPartyTouches": envelope.daily_third_party_touches,
                     "subjectCooldownHours": envelope.subject_cooldown_hours,

@@ -44,6 +44,33 @@ pub struct GrowthEnvelope {
     pub subject_cooldown_hours: u32,
     /// Most recipients one step may reach. Bounds the cost of a wrong segment.
     pub max_recipients_per_step: u32,
+    /// Decisions the agent may put in front of a person in a rolling seven
+    /// days.
+    ///
+    /// # Why asking needs a budget
+    ///
+    /// Every other quantity here bounds what somebody *outside* the workspace
+    /// receives. Nothing bounded what the tenant's own crew received, and that
+    /// is the quantity that ran out: 26 contexts at 50 actions a day each,
+    /// every `awaiting_approval` action becoming an assignment, and every
+    /// assignment owing a first notice plus up to three reminders.
+    ///
+    /// The effect is worse than volume. The agent's authority ladder makes
+    /// "ask a person" the cheapest move available to it in almost every
+    /// context, and nothing charged it for that move — so an agent behaving
+    /// correctly produced a queue nobody could empty, and the approvals
+    /// expired at 72 hours faster than they were read. Measured in
+    /// production: seven drafts, four approvals, four hundred and twelve
+    /// opportunities, zero posts published.
+    ///
+    /// With a budget, asking stops being free. When it is spent the finding
+    /// still exists and still surfaces — it becomes a recommendation instead
+    /// of an action, so nothing is lost except the interruption.
+    ///
+    /// Zero means never ask: every finding stays a recommendation. That is a
+    /// coherent posture for a tenant who reads the board and wants no mail,
+    /// and it is deliberately expressible.
+    pub weekly_approval_requests: u32,
     /// Unattended actions one context may take in a rolling seven days while
     /// it is still below its evidence floor.
     ///
@@ -76,6 +103,12 @@ impl Default for GrowthEnvelope {
             daily_third_party_touches: 3,
             subject_cooldown_hours: 168,
             max_recipients_per_step: 250,
+            // Twenty decisions a week is about three a day, which is a number
+            // a band can actually work through. It is deliberately of the
+            // same order as the crew's per-member ask ceiling: the two bound
+            // the same scarce thing from two directions, and a workspace-wide
+            // budget far above the per-person one would be no budget at all.
+            weekly_approval_requests: 20,
             // Small enough that a mistake is five actions rather than a
             // campaign, large enough that twenty observations are a month
             // away rather than never.
@@ -128,6 +161,14 @@ pub struct EnvelopeUsage {
     /// Hours since the agent last reached *this* subject through any outward
     /// action. `None` when it never has.
     pub hours_since_subject_touched: Option<u32>,
+    /// Decisions the agent put in front of a person in the last seven days.
+    ///
+    /// Counted from the durable action rows, like every other spend here: an
+    /// action that was ever parked for approval carries an
+    /// `approval_expires_at`, and that mark survives the approval, so the
+    /// count is of asks made rather than of asks still waiting. An operator
+    /// who answers quickly has still been asked.
+    pub approval_requests_7d: u32,
 }
 
 impl EnvelopeUsage {
@@ -250,6 +291,51 @@ pub fn check_envelope(
         });
     }
     EnvelopeVerdict::Allow
+}
+
+/// Whether the agent may put another decision in front of a person this week.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case", tag = "verdict")]
+pub enum AttentionVerdict {
+    /// There is room in the budget. Park the action and ask.
+    Ask,
+    /// The budget is spent. The finding still surfaces, as a recommendation.
+    Exhausted { spent: u32, budget: u32 },
+}
+
+impl AttentionVerdict {
+    #[must_use]
+    pub const fn may_ask(self) -> bool {
+        matches!(self, Self::Ask)
+    }
+}
+
+/// Decides whether one more approval request fits inside the week.
+///
+/// Separate from [`check_envelope`] rather than folded into it, for two
+/// reasons that both matter:
+///
+/// 1. `check_envelope` returns early for classes that are not outward,
+///    because updating our own listing reaches nobody. An approval request
+///    reaches somebody whatever the class is — a person is asked about a
+///    first-party action exactly as much as about a third-party one — so this
+///    limit cannot live behind that early return.
+/// 2. The two bound different populations. The envelope bounds what the
+///    audience receives; this bounds what the tenant receives. Collapsing
+///    them would let a quiet week with the audience buy a loud one with the
+///    band, which is the trade nobody wants.
+///
+/// The kill switch and dry run are deliberately not consulted here. Both are
+/// already decided before an action exists, and a rehearsal asks nobody.
+#[must_use]
+pub const fn check_attention(envelope: &GrowthEnvelope, usage: &EnvelopeUsage) -> AttentionVerdict {
+    if usage.approval_requests_7d < envelope.weekly_approval_requests {
+        return AttentionVerdict::Ask;
+    }
+    AttentionVerdict::Exhausted {
+        spent: usage.approval_requests_7d,
+        budget: envelope.weekly_approval_requests,
+    }
 }
 
 #[cfg(test)]
@@ -385,6 +471,7 @@ mod tests {
             third_party_touches_7d: 0,
             third_party_touches_24h: 0,
             hours_since_subject_touched: None,
+            approval_requests_7d: 0,
         };
         assert!(matches!(
             check_envelope(ActionClass::OwnedAudience, &envelope, &usage),
@@ -446,6 +533,7 @@ mod tests {
             third_party_touches_7d: 10_000,
             third_party_touches_24h: 0,
             hours_since_subject_touched: Some(0),
+            approval_requests_7d: 0,
         };
         assert_eq!(
             held(check_envelope(
@@ -481,6 +569,67 @@ mod tests {
             }
             .spent(ActionClass::FirstPartyReversible),
             0
+        );
+    }
+
+    #[test]
+    fn asking_has_room_until_the_weekly_budget_is_spent() {
+        let envelope = GrowthEnvelope::default();
+        let budget = envelope.weekly_approval_requests;
+        assert!(budget > 0, "the default posture may ask");
+
+        let under = EnvelopeUsage {
+            approval_requests_7d: budget - 1,
+            ..EnvelopeUsage::default()
+        };
+        assert_eq!(check_attention(&envelope, &under), AttentionVerdict::Ask);
+
+        let at = EnvelopeUsage {
+            approval_requests_7d: budget,
+            ..EnvelopeUsage::default()
+        };
+        assert_eq!(
+            check_attention(&envelope, &at),
+            AttentionVerdict::Exhausted {
+                spent: budget,
+                budget
+            }
+        );
+    }
+
+    /// Asking is bounded whatever the action costs. A first-party action is
+    /// free to the audience and not free to the person being asked about it,
+    /// which is the whole reason this is not part of `check_envelope`.
+    #[test]
+    fn the_attention_budget_does_not_care_which_class_asked() {
+        let envelope = GrowthEnvelope {
+            weekly_approval_requests: 0,
+            ..GrowthEnvelope::default()
+        };
+        let usage = EnvelopeUsage::default();
+        assert!(!check_attention(&envelope, &usage).may_ask());
+        // ...while the envelope itself still waves first-party work straight
+        // through, because it reaches nobody.
+        assert_eq!(
+            check_envelope(ActionClass::FirstPartyReversible, &envelope, &usage),
+            EnvelopeVerdict::Allow
+        );
+    }
+
+    /// A budget of zero is a posture, not a misconfiguration: read the board,
+    /// send me nothing.
+    #[test]
+    fn a_zero_budget_never_asks() {
+        let envelope = GrowthEnvelope {
+            weekly_approval_requests: 0,
+            ..GrowthEnvelope::default()
+        };
+        assert_eq!(
+            check_attention(&envelope, &EnvelopeUsage::default()),
+            AttentionVerdict::Exhausted {
+                spent: 0,
+                budget: 0
+            }
         );
     }
 
