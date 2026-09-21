@@ -886,3 +886,127 @@ async fn an_audience_campaign_stores_the_approved_copy_and_a_draftless_one_refus
     );
     Ok(())
 }
+
+/// A release milestone is a `persist_candidate` action — the decision path
+/// wrote its decision row but never an envelope, so every measurement its
+/// schedule owns resolved into rows that did not exist and the release's
+/// outcomes taught the model nothing. The envelope now lands at dispatch like
+/// every other measured kind, and the milestone's own counters are due on the
+/// release, not on a promoter or an event.
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn a_release_milestone_leaves_dispatch_with_envelope_and_measurements()
+-> Result<(), Box<dyn std::error::Error>> {
+    use crowdrelay_application::autopilot::AutopilotActionPayload;
+    use crowdrelay_domain::release_autopilot::ReleaseMilestone;
+
+    let f = setup().await?;
+    let now = OffsetDateTime::now_utc();
+    // Micros, not nanos: the plan row stores timestamptz and the executor's
+    // staleness check compares the payload's timestamp to it — a nanosecond
+    // tail would read as a newer plan.
+    let release_at =
+        OffsetDateTime::from_unix_timestamp((now + time::Duration::days(10)).unix_timestamp())?;
+    let release_id = Uuid::now_v7();
+    sqlx::query(
+        r#"INSERT INTO viryaos_release_plans
+           (id, workspace_id, source_key, title, release_at, tier, listen_url)
+           VALUES ($1,$2,$3,'Signal Lost',$4,'single','https://example.test/listen')"#,
+    )
+    .bind(release_id)
+    .bind(f.workspace_id.into_uuid())
+    .bind(format!("release-{release_id}"))
+    .bind(release_at)
+    .execute(&f.pool)
+    .await?;
+    // The wave sends through the campaign machinery, which is flag-gated —
+    // a workspace without the flag refuses the milestone before any of the
+    // rows this test counts exist.
+    sqlx::query(
+        "INSERT INTO ecosystem_feature_flags (workspace_id, key, enabled) \
+         VALUES ($1, 'communication_campaigns_enabled', true)",
+    )
+    .bind(f.workspace_id.into_uuid())
+    .execute(&f.pool)
+    .await?;
+
+    let payload = serde_json::to_value(AutopilotActionPayload::ExecuteReleaseMilestone {
+        release_id: crowdrelay_domain::ReleasePlanId::from_uuid(release_id),
+        title: "Signal Lost".to_owned(),
+        release_at,
+        milestone: ReleaseMilestone::ReleaseDay,
+    })?;
+    let action_id = seed_outcome_action(&f, "release.milestone.execute", payload, now).await?;
+
+    let claimed = f
+        .repository
+        .claim_due_autonomous_actions(f.workspace_id, 8, now)
+        .await?;
+    let action = claimed
+        .iter()
+        .find(|a| a.id.into_uuid() == action_id)
+        .expect("the queued milestone action must be claimable");
+    f.repository
+        .execute_action(f.workspace_id, action, now)
+        .await?;
+
+    let prediction = sqlx::query_scalar::<_, String>(
+        "SELECT template_id FROM viryaos_dispatch_predictions WHERE action_id = $1",
+    )
+    .bind(action_id)
+    .fetch_one(&f.pool)
+    .await?;
+    assert_eq!(
+        prediction, "release-milestone:release_day",
+        "the envelope names the rung, so the posterior learns per milestone"
+    );
+
+    let evidence_rows = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*)::bigint FROM viryaos_growth_evidence \
+         WHERE workspace_id = $1 AND action_id = $2",
+    )
+    .bind(f.workspace_id.into_uuid())
+    .bind(action_id)
+    .fetch_one(&f.pool)
+    .await?;
+    assert_eq!(
+        evidence_rows, 1,
+        "one evidence row per dispatched milestone"
+    );
+
+    let kinds = sqlx::query_scalar::<_, String>(
+        "SELECT measurement_kind FROM viryaos_autopilot_measurements \
+         WHERE workspace_id = $1 AND action_id = $2 ORDER BY measurement_kind",
+    )
+    .bind(f.workspace_id.into_uuid())
+    .bind(action_id)
+    .fetch_all(&f.pool)
+    .await?;
+    for expected in [
+        "release_bound_acquisition_14d",
+        "release_fan_conversion_14d",
+        "release_link_clicks_14d",
+    ] {
+        assert!(
+            kinds.iter().any(|kind| kind == expected),
+            "measurement {expected} missing; scheduled: {kinds:?}"
+        );
+    }
+    assert!(
+        !kinds.iter().any(|kind| kind == "release_channel_lift_14d"),
+        "no lift measurement without a declared series: {kinds:?}"
+    );
+
+    // And the milestone itself still executed — the tracked link it needed
+    // exists because the executor wrote it.
+    let campaign = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*)::bigint FROM campaigns \
+         WHERE workspace_id = $1 AND release_plan_id = $2",
+    )
+    .bind(f.workspace_id.into_uuid())
+    .bind(release_id)
+    .fetch_one(&f.pool)
+    .await?;
+    assert_eq!(campaign, 1, "the milestone executor still owns its link");
+    Ok(())
+}

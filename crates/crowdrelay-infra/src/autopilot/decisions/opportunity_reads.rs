@@ -296,9 +296,41 @@ macro_rules! decision_opportunity_reads {
             "#)
             .bind(workspace_id.into_uuid()).bind(now).bind(MAX_SNAPSHOTS_PER_CONTEXT)
             .fetch_all(&self.pool).await.map_err(map_sqlx)?;
+            // The release outcome ledger, read back the way it was written to
+            // be read: per tier, the streak of most-recent R+14 verdicts that
+            // showed no lift. `within_noise` and `insufficient_evidence` both
+            // count — a release the report could not read earned no evidence
+            // either way — and the first `above_trend` resets the count. R+3
+            // is excluded: it is a pulse report, not a verdict on the wave.
+            let verdict_rows = sqlx::query_as::<_, (String, String)>(
+                r#"
+                SELECT tier, verdict
+                FROM viryaos_release_outcomes
+                WHERE workspace_id=$1 AND report_kind='release_r14'
+                ORDER BY generated_at DESC, release_id
+                LIMIT 200
+                "#,
+            )
+            .bind(workspace_id.into_uuid())
+            .fetch_all(&self.pool)
+            .await
+            .map_err(map_sqlx)?;
+            let mut miss_streaks = std::collections::HashMap::<String, u32>::new();
+            let mut streak_broken = std::collections::HashSet::<String>::new();
+            for (tier, verdict) in &verdict_rows {
+                if streak_broken.contains(tier) {
+                    continue;
+                }
+                if verdict == "above_trend" {
+                    streak_broken.insert(tier.clone());
+                } else {
+                    *miss_streaks.entry(tier.clone()).or_default() += 1;
+                }
+            }
             Ok(rows.into_iter().map(|row| ReleasePlanSnapshot {
                 release_id: ReleasePlanId::from_uuid(row.release_id), title: row.title,
                 release_at: row.release_at, active: row.active,
+                tier_release_miss_streak: miss_streaks.get(&row.tier).copied().unwrap_or(0),
                 tier: ReleaseTier::parse(&row.tier).unwrap_or_else(|| {
                     // The CHECK constraint owns this vocabulary; an unknown
                     // value means a migration widened it without widening the

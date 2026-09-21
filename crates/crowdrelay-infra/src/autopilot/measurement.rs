@@ -485,21 +485,33 @@ impl AutopilotMeasurementRepository for PostgresAutopilotRepository {
             // Without it, ticket revenue, replies, clicks and engagement were
             // measured, classified, and then invisible to every learner.
             //
-            // First writer wins per key, and `||` merges inside the row — two
-            // measurements completing in different transactions cannot
-            // read-merge-clobber each other's keys. The fan-growth kinds
-            // return `None` here on purpose: they write typed columns that
-            // dedicated posteriors consume, and a value in two places is a
-            // value learned twice.
+            // The write is additive, not first-wins: a batch action (a gig
+            // outreach to four promoters) carries one measurement per
+            // recipient under the same key, and a first-wins guard would keep
+            // only whichever replied earliest. Each measurement completes
+            // exactly once — the status claim is transactional — so adding on
+            // completion sums per-subject answers without a re-run ever
+            // doubling. The expression reads the row's own map, which Postgres
+            // re-fetches under the row lock, so two completions finishing
+            // together still both land.
+            //
+            // The fan-growth kinds return `None` here on purpose: they write
+            // typed columns that dedicated posteriors consume, and a value in
+            // two places is a value learned twice.
             if let Some(metric_key) = measurement.kind.learnable_metric_key() {
                 let _ = sqlx::query(
                     r#"
                     UPDATE viryaos_growth_evidence
                     SET observed_metrics = observed_metrics ||
-                        jsonb_build_object($3::text, to_jsonb($4::double precision))
+                        jsonb_build_object(
+                            $3::text,
+                            to_jsonb(
+                                COALESCE((observed_metrics->>$3)::double precision, 0)
+                                + $4::double precision
+                            )
+                        )
                     WHERE workspace_id = $1
                       AND action_id = $2
-                      AND NOT (observed_metrics ? $3)
                     "#,
                 )
                 .bind(workspace_id.into_uuid())

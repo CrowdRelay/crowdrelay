@@ -97,8 +97,101 @@ pub(super) async fn ensure_dispatch_envelope(
                 },
             )
         }
-        // Every other kind was created by the decision persist, which wrote
-        // its envelope already — nothing to fill.
+        // The persist-path kinds below are real interventions whose
+        // measurements write `observed_metrics` onto this row at completion.
+        // They pass through `persist_candidate`, which writes decision and
+        // action but no evidence — without the envelope filled here, those
+        // UPDATEs hit zero rows and the measured outcome never reaches a
+        // posterior. Each template id groups the action's own subject so the
+        // posterior learns the lever, not the workspace's weather.
+        AutopilotActionPayload::ChangeTicketPrice { ticket_type_id, .. } => (
+            "ticket-price".to_owned(),
+            format!("ticket-type:{ticket_type_id}"),
+            Some(format!("ticket-type:{ticket_type_id}")),
+            DispatchContext::default(),
+        ),
+        AutopilotActionPayload::ChangeMerchPrice { product_id, .. } => (
+            "merch-price".to_owned(),
+            format!("merch-product:{product_id}"),
+            Some(format!("merch-product:{product_id}")),
+            DispatchContext::default(),
+        ),
+        AutopilotActionPayload::RequestPromotionBudgetChange { campaign_id, .. } => (
+            "promotion-budget".to_owned(),
+            format!("promo-campaign:{campaign_id}"),
+            Some(format!("promo-campaign:{campaign_id}")),
+            DispatchContext::default(),
+        ),
+        AutopilotActionPayload::RequestBookingOutreach { target_id, .. } => (
+            "booking-outreach".to_owned(),
+            format!("booking-target:{target_id}"),
+            Some(format!("booking-target:{target_id}")),
+            DispatchContext::default(),
+        ),
+        AutopilotActionPayload::RequestGigOutreach { venue, .. } => (
+            "gig-outreach".to_owned(),
+            format!("venue:{venue}"),
+            None,
+            DispatchContext::default(),
+        ),
+        AutopilotActionPayload::RequestOutreach { target_id, .. } => (
+            "outreach".to_owned(),
+            format!("contact:{target_id}"),
+            Some(format!("contact:{target_id}")),
+            DispatchContext::default(),
+        ),
+        AutopilotActionPayload::RequestRepresentationApproach { target_id, .. } => (
+            "representation-approach".to_owned(),
+            format!("contact:{target_id}"),
+            Some(format!("contact:{target_id}")),
+            DispatchContext::default(),
+        ),
+        AutopilotActionPayload::RequestBookingAgentApproach { agent_id, .. } => (
+            "booking-agent-approach".to_owned(),
+            format!("agent:{agent_id}"),
+            Some(format!("agent:{agent_id}")),
+            DispatchContext::default(),
+        ),
+        AutopilotActionPayload::RequestAudienceCampaign { event_id, .. } => (
+            "audience-campaign".to_owned(),
+            format!("event:{event_id}"),
+            Some(format!("event:{event_id}")),
+            DispatchContext::default(),
+        ),
+        AutopilotActionPayload::RequestShowGrowth { event_id, lever, .. } => (
+            format!("show-growth:{}", lever.as_str()),
+            format!("event:{event_id}"),
+            Some(format!("event:{event_id}")),
+            DispatchContext::default(),
+        ),
+        // Internal rungs schedule no measurements — an envelope for one
+        // would sit unresolved forever, exactly the clutter the `_` arm's
+        // comment below warns against.
+        AutopilotActionPayload::ExecuteReleaseMilestone {
+            milestone: ReleaseMilestone::SeedCalendar | ReleaseMilestone::EditorialPitch,
+            ..
+        } => {
+            return Ok(());
+        }
+        AutopilotActionPayload::ExecuteReleaseMilestone {
+            release_id,
+            milestone,
+            ..
+        } => (
+            format!("release-milestone:{}", milestone.as_str()),
+            format!("release:{release_id}"),
+            Some(format!("release:{release_id}")),
+            DispatchContext::default(),
+        ),
+        AutopilotActionPayload::RequestFanLifecycleMessage { fan_id, .. } => (
+            "fan-lifecycle".to_owned(),
+            format!("fan:{fan_id}"),
+            Some(format!("fan:{fan_id}")),
+            DispatchContext::default(),
+        ),
+        // Everything left schedules no measurements — an internal mark, a
+        // held escalation, a task completion — so it owes no evidence row,
+        // and writing one would leave an unresolved row nothing resolves.
         _ => return Ok(()),
     };
 

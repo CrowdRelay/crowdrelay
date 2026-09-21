@@ -11,7 +11,7 @@
 use crate::RepositoryError;
 use async_trait::async_trait;
 use crowdrelay_domain::performance::{
-    EffectDirection, EffectResult, assess_effect, assess_signed_effect,
+    EffectAssessment, EffectDirection, EffectResult, assess_effect, assess_signed_effect,
 };
 use crowdrelay_domain::{AutopilotActionId, AutopilotMeasurementId, WorkspaceId};
 use serde::{Deserialize, Serialize};
@@ -131,6 +131,26 @@ pub enum AutopilotMeasurementKind {
     /// lever that moves only the first is a different lever than one that
     /// moves both. The subject is the event, not the action's target.
     ShowAttendanceRate14d,
+    /// Fans acquired through the release's own campaign links in the 14 days
+    /// after a milestone ran — `fan_acquisition_events` joined through the
+    /// campaign every milestone ensures before it sends. The subject is the
+    /// release plan, so each rung answers for its own window.
+    ReleaseBoundAcquisition14d,
+    /// Clicks on the release's tracked link in the 14 days after a milestone
+    /// ran. The link exists before anything shares it — a milestone that
+    /// moved nobody reads its own zero.
+    ReleaseLinkClicks14d,
+    /// Release-acquired fans who bought a ticket inside the same window —
+    /// the conversion half of "the release grew the fanbase": joining the
+    /// acquisition row to a paid order by the same address.
+    ReleaseFanConversion14d,
+    /// The release's own metric series — video views, listens — lifted over
+    /// the pre-release baseline: the post-release delta minus the delta of
+    /// the fourteen days before it. A signed effect, not a level: a release
+    /// can genuinely move its channels backwards. Scheduled only when a
+    /// `release_plan` series exists to read; the milestone's other
+    /// measurements report without it.
+    ReleaseChannelLift14d,
 }
 
 impl AutopilotMeasurementKind {
@@ -163,6 +183,10 @@ impl AutopilotMeasurementKind {
             Self::SignalInstalls1d => "signal_installs_1d",
             Self::BookingAgentReply30d => "booking_agent_reply_30d",
             Self::ShowAttendanceRate14d => "show_attendance_rate_14d",
+            Self::ReleaseBoundAcquisition14d => "release_bound_acquisition_14d",
+            Self::ReleaseLinkClicks14d => "release_link_clicks_14d",
+            Self::ReleaseFanConversion14d => "release_fan_conversion_14d",
+            Self::ReleaseChannelLift14d => "release_channel_lift_14d",
         }
     }
 
@@ -203,6 +227,10 @@ impl AutopilotMeasurementKind {
             Self::ShowGrowthSurfaceClicks7d => Some("show_growth_clicks"),
             Self::ShowGrowthAttributedTicketOrders7d => Some("show_growth_ticket_orders"),
             Self::ShowAttendanceRate14d => Some("show_attendance_rate"),
+            Self::ReleaseBoundAcquisition14d => Some("release_acquisitions"),
+            Self::ReleaseLinkClicks14d => Some("release_link_clicks"),
+            Self::ReleaseFanConversion14d => Some("release_fan_conversions"),
+            Self::ReleaseChannelLift14d => Some("release_channel_lift"),
             Self::GrassrootsActivationReplies14d => Some("activation_replies"),
             Self::AgentRunCommunityEngagement7d => Some("engagement_score"),
             Self::FanLifecycleEngagement7d => Some("lifecycle_engagement_events"),
@@ -236,6 +264,11 @@ impl AutopilotMeasurementKind {
             Self::IncrementalFanGrowth14d
                 | Self::IncrementalFanGrowth3d
                 | Self::DurableFanGrowth30d
+                // The lift observation is post-window delta minus pre-window
+                // delta — already signed, already a difference. Classifying
+                // it as a level would refuse the negative reading a release
+                // that moved backwards earns.
+                | Self::ReleaseChannelLift14d
         )
     }
 
@@ -259,6 +292,19 @@ impl AutopilotMeasurementKind {
     /// platform and there is no attendance signal to read. Absence of a
     /// denominator is not a rate of zero.
     pub const NO_ISSUED_PASSES: &'static str = "no_issued_passes";
+
+    /// Why a release-funnel measurement was abandoned: the release had no
+    /// campaign — the milestone executor only creates one when the plan
+    /// carries a listenable link. Without it the funnel arms return a real
+    /// zero that was never measured, and "nothing was instrumented" is not
+    /// "nobody came".
+    pub const NO_RELEASE_LINK: &'static str = "no_release_link";
+
+    /// Why a release channel-lift measurement was abandoned: the release had
+    /// series, but none of them anchored both the pre and post windows — a
+    /// feed that stalled, or a series too young to have a baseline. The lift
+    /// is unobservable rather than zero.
+    pub const NO_RELEASE_SERIES_DATA: &'static str = "no_release_series_data";
 
     /// Whether the kind's `subject_id` is an `events.id` — the kinds whose
     /// observation is a fact about a show. A cancelled show has no outcome
@@ -312,6 +358,20 @@ impl AutopilotMeasurementKind {
                 | Self::AgentRunSignalInstalls7d
                 | Self::SignalInstalls1d
                 | Self::AgentRunCommunityEngagement7d
+        )
+    }
+
+    /// Whether this kind counts events through the release's campaign —
+    /// the tracked link the milestone executor ensured. A release plan with
+    /// no listenable URL gets no campaign, and these arms would answer a
+    /// hard zero for a funnel that was never instrumented.
+    #[must_use]
+    pub const fn measures_release_funnel(self) -> bool {
+        matches!(
+            self,
+            Self::ReleaseBoundAcquisition14d
+                | Self::ReleaseLinkClicks14d
+                | Self::ReleaseFanConversion14d
         )
     }
 
@@ -394,6 +454,24 @@ pub fn assess_measurement_effect(
     measurement: &ClaimedAutopilotMeasurement,
     observed_value: f64,
 ) -> Option<EffectResult> {
+    if measurement.kind == AutopilotMeasurementKind::ReleaseChannelLift14d {
+        // The lift is a delta between two channel counts, so the signed
+        // assessor classifies it against zero — where any nonzero value
+        // saturates the basis-point scale. A video idling at −1 view is feed
+        // noise, not the release moving backwards, and letting it read
+        // Worsened hands the autonomy-demotion guard a verdict instrumentation
+        // never earned. Under a handful of units the honest answer is Neutral;
+        // the raw lift still lands in `observed_metrics` for the posterior.
+        let result = assess_signed_effect(measurement.counterfactual_value(), observed_value, 500)?;
+        return Some(EffectResult {
+            assessment: if observed_value.abs() < 5.0 {
+                EffectAssessment::Neutral
+            } else {
+                result.assessment
+            },
+            delta_basis_points: result.delta_basis_points,
+        });
+    }
     if measurement.kind.is_signed_effect() {
         // The observation is already an effect. Classify it against zero and
         // express it against the counterfactual it was measured against.
@@ -405,4 +483,49 @@ pub fn assess_measurement_effect(
         measurement.kind.direction(),
         500,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn claimed(kind: AutopilotMeasurementKind) -> ClaimedAutopilotMeasurement {
+        ClaimedAutopilotMeasurement {
+            id: AutopilotMeasurementId::from(uuid::Uuid::now_v7()),
+            action_id: AutopilotActionId::from(uuid::Uuid::now_v7()),
+            kind,
+            subject_id: uuid::Uuid::now_v7(),
+            baseline_value: 0.0,
+            action_finished_at: OffsetDateTime::now_utc(),
+            attempt_number: 1,
+        }
+    }
+
+    /// A channel lift inside feed noise classifies Neutral rather than
+    /// Worsened — a −1-view wobble must not reach the autonomy-demotion
+    /// guard as if the release moved its own audience backwards.
+    #[test]
+    fn release_channel_lift_reads_small_deltas_as_noise() {
+        let measurement = claimed(AutopilotMeasurementKind::ReleaseChannelLift14d);
+        for observed in [-4.0, -1.0, 0.0, 3.0, 4.9] {
+            let result =
+                assess_measurement_effect(&measurement, observed).expect("lift assessment");
+            assert_eq!(
+                result.assessment,
+                EffectAssessment::Neutral,
+                "lift {observed} should classify Neutral"
+            );
+        }
+    }
+
+    /// A lift beyond the noise floor keeps its real verdict — the floor is
+    /// a noise guard, not a sponge that soaks every regression.
+    #[test]
+    fn release_channel_lift_keeps_real_verdicts() {
+        let measurement = claimed(AutopilotMeasurementKind::ReleaseChannelLift14d);
+        let worsened = assess_measurement_effect(&measurement, -40.0).expect("worsened");
+        assert_eq!(worsened.assessment, EffectAssessment::Worsened);
+        let improved = assess_measurement_effect(&measurement, 40.0).expect("improved");
+        assert_eq!(improved.assessment, EffectAssessment::Improved);
+    }
 }
