@@ -213,12 +213,18 @@ impl GrowthStrategy {
     /// Derives the strategy from the world model, refined by the learned
     /// strategy posterior when there is enough evidence.
     ///
-    /// The rule-based `from_world_model` remains the prior — it encodes the
-    /// operator's domain knowledge and handles states the posterior has never
-    /// seen. The posterior overrides the prior only when it has enough
-    /// confidence (≥5 observations) and the expected fan yield difference
-    /// between the best and the prior's choice is large enough to justify
-    /// switching (≥1 expected incremental fan).
+    /// `incumbent` is the strategy this cycle would run without the
+    /// posterior — in production the hysteresis-adjusted rule output, so a
+    /// held strategy stays held rather than being silently dropped the first
+    /// cycle a posterior row exists. The posterior overrides the incumbent
+    /// only when a challenger clears two gates against it:
+    ///
+    /// - ≥5 observations in this (strategy, trend, proximity) cell, and
+    /// - P(challenger exceeds incumbent by ≥1 expected incremental fan) ≥ 0.6
+    ///   under the two Normal posteriors. The difference of two Normals is
+    ///   Normal(μc − μb, σc² + σb²), so this one probability carries both the
+    ///   materiality margin and the certainty requirement — a wide-variance
+    ///   point lead cannot switch on noise alone.
     ///
     /// This is the consumer the `StateConditionedStrategyPosterior` has been
     /// waiting for. It transforms strategy selection from a static rule engine
@@ -228,29 +234,37 @@ impl GrowthStrategy {
     pub fn from_world_model_with_posterior(
         world: &WorldModel,
         posterior: &crate::strategy_learning::StateConditionedStrategyPosterior,
+        incumbent: Self,
     ) -> Self {
-        let prior = Self::from_world_model(world);
+        let prior = incumbent;
         let trend = Self::trend_key(world.fan_growth_trend);
         let proximity = Self::proximity_key(world);
-        let (prior_mean, _) = posterior.predict(prior.as_str(), trend, proximity);
+        let (prior_mean, prior_var) = posterior.predict(prior.as_str(), trend, proximity);
         let prior_confidence = posterior.confidence(prior.as_str(), trend, proximity);
         let mut best = prior;
         let mut best_mean = prior_mean;
+        let mut best_var = prior_var;
         let mut best_confidence = prior_confidence;
         for candidate in Self::all() {
             if candidate == prior {
                 continue;
             }
-            let (mean, _) = posterior.predict(candidate.as_str(), trend, proximity);
+            let (mean, var) = posterior.predict(candidate.as_str(), trend, proximity);
             let confidence = posterior.confidence(candidate.as_str(), trend, proximity);
-            if confidence < 5 {
+            if confidence < 5 || confidence < best_confidence {
                 continue;
             }
-            if mean > best_mean + 1.0 && confidence >= best_confidence {
-                best = candidate;
-                best_mean = mean;
-                best_confidence = confidence;
+            let pooled_std = (var + best_var).sqrt();
+            let p_materially_better = crate::bayesian::normal_cdf(
+                (mean - best_mean - 1.0) / pooled_std.max(f64::EPSILON),
+            );
+            if p_materially_better < 0.6 {
+                continue;
             }
+            best = candidate;
+            best_mean = mean;
+            best_var = var;
+            best_confidence = confidence;
         }
         best
     }
@@ -846,7 +860,11 @@ mod tests {
         };
         let posterior = crate::strategy_learning::StateConditionedStrategyPosterior::new();
         assert_eq!(
-            GrowthStrategy::from_world_model_with_posterior(&world, &posterior),
+            GrowthStrategy::from_world_model_with_posterior(
+                &world,
+                &posterior,
+                GrowthStrategy::from_world_model(&world)
+            ),
             GrowthStrategy::ContentFirst
         );
     }
@@ -863,7 +881,11 @@ mod tests {
         // One observation of AggressiveDiscovery doing well
         posterior.update("aggressive_discovery", "steady", "far", 20.0, 4.0);
         assert_eq!(
-            GrowthStrategy::from_world_model_with_posterior(&world, &posterior),
+            GrowthStrategy::from_world_model_with_posterior(
+                &world,
+                &posterior,
+                GrowthStrategy::from_world_model(&world)
+            ),
             GrowthStrategy::ContentFirst,
             "low confidence (1 observation) should not override the prior"
         );
@@ -886,7 +908,11 @@ mod tests {
         }
         // ContentFirst (the prior) has no evidence, so its mean is 0
         assert_eq!(
-            GrowthStrategy::from_world_model_with_posterior(&world, &posterior),
+            GrowthStrategy::from_world_model_with_posterior(
+                &world,
+                &posterior,
+                GrowthStrategy::from_world_model(&world)
+            ),
             GrowthStrategy::AggressiveDiscovery,
             "strong evidence should override the prior"
         );
@@ -907,9 +933,70 @@ mod tests {
             posterior.update("aggressive_discovery", "steady", "far", 0.5, 4.0);
         }
         assert_eq!(
-            GrowthStrategy::from_world_model_with_posterior(&world, &posterior),
+            GrowthStrategy::from_world_model_with_posterior(
+                &world,
+                &posterior,
+                GrowthStrategy::from_world_model(&world)
+            ),
             GrowthStrategy::ContentFirst,
             "tiny yield difference should not override the prior"
+        );
+    }
+
+    #[test]
+    fn posterior_does_not_override_on_a_wide_variance_lead() {
+        // Five observations averaging ~4 fans but with observation variance
+        // 30 leave the posterior at mean ≈1.6, variance ≈2.4 — a >1 fan lead
+        // on the point means (the old gate would switch), yet P(beating the
+        // unobserved incumbent by ≥1 fan) ≈ 0.59 < 0.6.
+        let world = WorldModel {
+            total_fans: 100,
+            signal_conversion_rate_bps: 800,
+            fan_growth_trend: GrowthTrend::Steady,
+            ..Default::default()
+        };
+        let mut posterior = crate::strategy_learning::StateConditionedStrategyPosterior::new();
+        for _ in 0..5 {
+            posterior.update("aggressive_discovery", "steady", "far", 4.0, 30.0);
+        }
+        let (mean, _) = posterior.predict("aggressive_discovery", "steady", "far");
+        assert!(
+            mean > 1.0,
+            "fixture should clear the old margin gate: {mean}"
+        );
+        assert_eq!(
+            GrowthStrategy::from_world_model_with_posterior(
+                &world,
+                &posterior,
+                GrowthStrategy::from_world_model(&world)
+            ),
+            GrowthStrategy::ContentFirst,
+            "a mean lead inside the pooled spread must not override the prior"
+        );
+    }
+
+    #[test]
+    fn posterior_refines_the_incumbent_not_the_rule_output() {
+        // Hysteresis can hold a strategy the rules no longer choose: at day 18
+        // the rules say ContentFirst while hysteresis keeps EventDriven. The
+        // posterior must compare challengers against the strategy the brain
+        // would actually have run — the incumbent — or it silently drops the
+        // hysteresis the cycle established, and the provenance labels a
+        // hysteresis loss as a posterior override.
+        let world = WorldModel {
+            days_to_next_event: Some(18),
+            ..Default::default()
+        };
+        let incumbent = GrowthStrategy::from_world_model_with_hysteresis(
+            &world,
+            Some(GrowthStrategy::EventDriven),
+        );
+        assert_eq!(incumbent, GrowthStrategy::EventDriven);
+        let posterior = crate::strategy_learning::StateConditionedStrategyPosterior::new();
+        assert_eq!(
+            GrowthStrategy::from_world_model_with_posterior(&world, &posterior, incumbent),
+            GrowthStrategy::EventDriven,
+            "an empty posterior must preserve the hysteresis incumbent, not the rule output"
         );
     }
 }

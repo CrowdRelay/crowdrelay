@@ -30,7 +30,8 @@ NAMED_SYMBOLS = {
     "crates/crowdrelay-brain/src/decision_value.rs": [
         "pub fn total(",
         "pub risk_penalty",
-        "pub contamination",
+        "pub economic_value_fans",
+        "pub harm_fans",
     ],
     "crates/crowdrelay-domain/src/action_ledger.rs": [
         "pub enum SuccessEvidence",
@@ -56,16 +57,14 @@ NAMED_SYMBOLS = {
 # Values the document lists as dormant, as (label, regex that would prove a
 # consumer). A match means the value is now read somewhere, and the table is
 # out of date.
-DORMANT = [
-    (
-        "DecisionValue::contamination",
-        re.compile(r"\.contamination\s*[*+\-/]|[*+\-/]\s*\w+\.contamination"),
-    ),
-    (
-        "StateConditionedStrategyPosterior",
-        re.compile(r"strategy_posterior\s*\.\s*(predict|confidence)\s*\("),
-    ),
-]
+#
+# `StateConditionedStrategyPosterior` left this list when
+# `from_world_model_with_posterior` became its consumer — and the regex never
+# fired, because the parameter is named `posterior`, not
+# `strategy_posterior`. A dormant-edge regex must match the *binding the
+# consumer uses*, not the type name: check the call site before trusting the
+# pattern. `DecisionValue::contamination` was deleted outright.
+DORMANT: list[tuple[str, re.Pattern[str]]] = []
 
 
 def production_sources() -> list[Path]:
@@ -144,13 +143,14 @@ class BrainLearningLoopDoc(unittest.TestCase):
             r"\.await\s*\n\s*\.(unwrap_or|unwrap_or_default|unwrap_or_else|ok\(\))[^;]*;",
             source,
         )
-        # The strategy posterior load is the documented exception: it is
-        # dormant, nothing reads it, and it is no longer written back — so its
-        # default cannot reach a decision or overwrite learned state. If it ever
-        # gains a consumer, the dormancy gate above fires first.
-        self.assertLessEqual(
+        # No swallow is acceptable today: the strategy-posterior load — the
+        # exception this allowance once existed for — propagates with `.await?`
+        # now that the posterior gates the strategy override. Any new default
+        # on a repository read in this cycle is a regression to argue for in
+        # review, not a pattern to slip under a floor.
+        self.assertEqual(
             len(swallowed),
-            1,
+            0,
             f"a repository read in the growth-intelligence cycle is defaulting "
             f"its error instead of propagating: {swallowed}",
         )
@@ -193,6 +193,13 @@ class BrainLearningLoopDoc(unittest.TestCase):
             )
 
     def test_the_dormant_edges_are_still_dormant(self) -> None:
+        """Every DORMANT entry must still be unread on a decision path.
+
+        The list is legitimately empty: `test_the_dormant_world_model_fields_are_still_dormant`
+        is the standing guard for the remaining dormant set. Add an entry here
+        when a value is written on a decision path and deliberately unread —
+        and write the regex against the consumer's binding, not the type name.
+        """
         sources = production_sources()
         for label, pattern in DORMANT:
             consumers = [

@@ -609,7 +609,15 @@ pub(in crate::autopilot) fn apply_evidence_to_strategy_posterior(
         // small, when what is actually true is that we are less sure.
         if let Some((incremental_fans, variance_multiplier)) = strategy_observation(ev, checkpoint)
         {
-            let obs_var = 2.0 * incremental_fans.abs().max(1.0) * variance_multiplier;
+            // Same discount the causal-model paths apply: an observational
+            // row teaches the strategy posterior less than a randomized one.
+            // Now that the posterior can override the strategy, a row read
+            // at full weight regardless of how it was earned would let the
+            // weakest evidence move the biggest lever.
+            let obs_var = 2.0
+                * incremental_fans.abs().max(1.0)
+                * variance_multiplier
+                * ev.effective_evidence_quality().variance_multiplier();
             posterior.update(
                 &strategy,
                 growth_trend,

@@ -744,6 +744,36 @@ impl ExperimentAssignment {
         prediction: &crate::causal_model::DispatchPrediction,
         action_id: Option<uuid::Uuid>,
     ) -> Self {
+        Self::from_design_with_realized_holdout(
+            design,
+            unit_id,
+            candidate_id,
+            arm,
+            prediction,
+            action_id,
+            design.holdout_probability,
+        )
+    }
+
+    /// `from_design` where the holdout that actually ran differs from the
+    /// design's policy holdout — the insufficient-power case, where the
+    /// design asks for 10% but the power check answered "no control arm can
+    /// exist", so every unit rolls treatment.
+    ///
+    /// The two numbers record different truths and must not share a source:
+    /// `propensity` is the realized assignment probability (inverse-
+    /// probability weighting is only valid against what actually happened),
+    /// while `intended_holdout_probability` is what the design meant to run —
+    /// the number that later explains why the evidence is observational.
+    pub fn from_design_with_realized_holdout(
+        design: &ExperimentDesign,
+        unit_id: &str,
+        candidate_id: &str,
+        arm: TreatmentAssignment,
+        prediction: &crate::causal_model::DispatchPrediction,
+        action_id: Option<uuid::Uuid>,
+        realized_holdout_probability: f64,
+    ) -> Self {
         // P1-b: Deterministic assignment_id from (experiment_uuid, round,
         // unit_id). This makes retries idempotent — the same logical
         // assignment always produces the same PK, so ON CONFLICT can
@@ -778,14 +808,13 @@ impl ExperimentAssignment {
             // record "probability of treatment" for a unit that was not
             // treated, corrupting inverse-probability weighting.
             propensity: match arm {
-                TreatmentAssignment::Treatment => 1.0 - design.holdout_probability,
-                TreatmentAssignment::Control => design.holdout_probability,
+                TreatmentAssignment::Treatment => 1.0 - realized_holdout_probability,
+                TreatmentAssignment::Control => realized_holdout_probability,
             },
-            // P1-c: Preserve the design's holdout as the intended policy.
-            // The caller may zero design.holdout_probability for insufficient
-            // power AFTER calling from_design, which changes the realized
-            // propensity. The intended_holdout_probability captures the
-            // original design intent before any adjustment.
+            // P1-c: Preserve the design's holdout as the intended policy,
+            // independent of the realized roll: an insufficient-power
+            // design still records the 0.10 it asked for, so a later reader
+            // can see the control arm was designed away, not absent.
             intended_holdout_probability: design.holdout_probability,
             intended_template_id: design.intervention_key.clone(),
             context: prediction.context.clone(),
@@ -926,6 +955,27 @@ fn default_experiment_status() -> ExperimentStatus {
 }
 
 impl ExperimentDesign {
+    /// The evidence quality a dispatch under this design will produce.
+    ///
+    /// This is the decision-time read of what `ExperimentAssignment::kind`
+    /// will record at dispatch plus the `InsufficientPower` carve-out the
+    /// assignment documents: a design that cannot hold out a control arm
+    /// produces observational evidence even though its arm says Treatment.
+    /// The evaluator stamps this onto the candidate's `DecisionValue` so the
+    /// recorded provenance says `randomized_holdout` only when a holdout is
+    /// actually running — before this, every experimental dispatch was
+    /// recorded `observational`, the claim the measurement could never make.
+    #[must_use]
+    pub fn evidence_quality(&self) -> crate::evidence::EvidenceQuality {
+        if self.experiment_status == ExperimentStatus::InsufficientPower {
+            crate::evidence::EvidenceQuality::Observational
+        } else if self.interference_policy.is_interference_controllable() {
+            crate::evidence::EvidenceQuality::RandomizedHoldout
+        } else {
+            crate::evidence::EvidenceQuality::MatchedQuasiExperiment
+        }
+    }
+
     /// Creates a new experiment design for a given intervention in a cycle.
     ///
     /// The `experiment_uuid` is fresh (caller generates it). The
@@ -1808,71 +1858,4 @@ mod tests {
 }
 
 #[cfg(test)]
-mod unrandomisable_tests {
-    use super::*;
-
-    fn design(unit_kind: ExperimentUnitKind, units: usize) -> ExperimentDesign {
-        let mut design = ExperimentDesign::new(
-            uuid::Uuid::nil(),
-            "test-intervention",
-            "cycle-1",
-            unit_kind,
-            (0..units).map(|i| format!("unit-{i}")).collect(),
-            OffsetDateTime::UNIX_EPOCH,
-            0.1,
-            "test-strategy",
-        );
-        // Ask for a control arm; the point is whether one is reachable.
-        let _ = design.check_power(1, 1, 1);
-        design
-    }
-
-    #[test]
-    fn a_workspace_unit_can_never_hold_out_a_control() {
-        // One workspace is one unit. Splitting it into two arms is not a
-        // sample-size problem, and reporting it as one tells an operator to
-        // wait for growth that will not help.
-        let design = design(ExperimentUnitKind::Workspace, 1);
-        assert_eq!(
-            design.experiment_status,
-            ExperimentStatus::InsufficientPower
-        );
-        assert!(design.is_structurally_unrandomisable());
-    }
-
-    #[test]
-    fn a_workspace_unit_stays_unrandomisable_however_many_decisions_it_batches() {
-        // Production batches several decision keys into one workspace design.
-        // That inflates `eligible_units` without creating a second workspace,
-        // so it can look powered while still being a single unit of
-        // randomisation.
-        let design = design(ExperimentUnitKind::Workspace, 50);
-        if design.experiment_status == ExperimentStatus::InsufficientPower {
-            assert!(design.is_structurally_unrandomisable());
-        }
-    }
-
-    #[test]
-    fn a_community_unit_with_too_few_members_is_only_transient() {
-        // Same status, opposite meaning: this one resolves as the tenant
-        // reaches more communities, so it must not be reported as permanent.
-        let design = design(ExperimentUnitKind::TargetCommunity, 1);
-        assert_eq!(
-            design.experiment_status,
-            ExperimentStatus::InsufficientPower
-        );
-        assert!(
-            !design.is_structurally_unrandomisable(),
-            "a community design is short of units today, not incapable of \
-             randomising; calling it permanent would stop someone fixing it",
-        );
-    }
-
-    #[test]
-    fn a_powered_design_is_not_flagged() {
-        let design = design(ExperimentUnitKind::TargetCommunity, 40);
-        if design.experiment_status == ExperimentStatus::Active {
-            assert!(!design.is_structurally_unrandomisable());
-        }
-    }
-}
+mod unrandomisable_tests;

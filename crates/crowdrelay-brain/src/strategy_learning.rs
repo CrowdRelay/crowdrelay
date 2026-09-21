@@ -19,10 +19,12 @@
 //!
 //! The posterior is read by [`crate::strategy::GrowthStrategy::from_world_model_with_posterior`],
 //! which refines the rule-based strategy with learned evidence. The brain
-//! starts with the operator's rules and overrides them only when the
-//! posterior has ≥5 observations and the expected fan yield difference is
-//! ≥1 expected incremental fan. This transforms strategy selection from a
-//! static rule engine into a learning system.
+//! starts with the operator's rules and overrides them only when a challenger
+//! clears two gates: ≥5 observations in the cell, and P(challenger exceeds
+//! incumbent by ≥1 expected incremental fan) ≥ 0.6 under the two Normal
+//! posteriors — one probability carrying both the materiality margin and the
+//! certainty requirement. This transforms strategy selection from a static
+//! rule engine into a learning system.
 
 use std::collections::HashMap;
 

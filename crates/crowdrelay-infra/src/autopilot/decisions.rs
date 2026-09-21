@@ -545,36 +545,6 @@ impl AutopilotDecisionRepository for PostgresAutopilotRepository {
         super::operations::evidence::load_resolved_evidence_counts(self, workspace_id).await
     }
 
-    async fn load_evidence_quality(
-        &self,
-        workspace_id: WorkspaceId,
-        template_id: &str,
-        unit_id: &str,
-    ) -> Result<crowdrelay_brain::EvidenceQuality, RepositoryError> {
-        super::operations::experiment_assignments::load_evidence_quality(
-            self,
-            workspace_id,
-            template_id,
-            unit_id,
-        )
-        .await
-    }
-
-    async fn load_contamination_estimate(
-        &self,
-        workspace_id: WorkspaceId,
-        template_id: &str,
-        unit_id: &str,
-    ) -> Result<Option<f64>, RepositoryError> {
-        super::operations::experiment_assignments::load_contamination_estimate(
-            self,
-            workspace_id,
-            template_id,
-            unit_id,
-        )
-        .await
-    }
-
     async fn record_credit_allocation(
         &self,
         workspace_id: WorkspaceId,

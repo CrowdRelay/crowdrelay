@@ -81,7 +81,6 @@ fn decision_value(expected_fans: f64) -> DecisionValue {
         uses_y30: true,
         bridge_confidence: 0,
         bridge_is_reliable: true,
-        contamination: 0.0,
         resource_cost: ResourceCost::configured(1.0),
         pragmatic_value: expected_fans,
         risk_penalty: None,

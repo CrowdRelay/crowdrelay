@@ -396,9 +396,9 @@ async fn record_prediction_and_evidence_tx(
     workspace_id: WorkspaceId,
     action_id: Uuid,
     prediction: &crowdrelay_brain::DispatchPrediction,
-    _candidate: &DecisionCandidate,
     strategy: Option<&str>,
     holdout_probability: f64,
+    is_interference_controllable: bool,
 ) -> Result<crowdrelay_brain::GrowthEvidence, RepositoryError> {
     // ── Dispatch prediction ──
     let pred_context_json = serde_json::to_value(&prediction.context)
@@ -444,10 +444,19 @@ async fn record_prediction_and_evidence_tx(
     // `subreddit_type` names the community's genre (metal, indie), not a
     // handle — reading it as a channel mislabeled every community post.
     let channel = crowdrelay_brain::channel_for_template(&prediction.template_id);
+    // A holdout running through interference the design cannot control is a
+    // matched quasi-experiment, not a randomized one — the same call
+    // `ExperimentDesign::evidence_quality` and `measured_evidence_quality`
+    // make, so the dispatch-time stamp agrees with what measurement later
+    // writes rather than overstating it until then.
     let (treatment_propensity, evidence_quality) = if holdout_probability > 0.0 {
         (
             1.0 - holdout_probability,
-            crowdrelay_brain::EvidenceQuality::RandomizedHoldout,
+            if is_interference_controllable {
+                crowdrelay_brain::EvidenceQuality::RandomizedHoldout
+            } else {
+                crowdrelay_brain::EvidenceQuality::MatchedQuasiExperiment
+            },
         )
     } else {
         (1.0, crowdrelay_brain::EvidenceQuality::Observational)
@@ -686,9 +695,9 @@ macro_rules! decision_persist {
                 workspace_id,
                 real_action_id,
                 prediction,
-                candidate,
                 strategy,
                 _holdout_probability,
+                assignment.is_interference_controllable,
             )
             .await?;
             transaction.commit().await.map_err(map_sqlx)?;
@@ -773,9 +782,12 @@ macro_rules! decision_persist {
                         workspace_id,
                         action_id,
                         prediction,
-                        candidate,
                         strategy,
                         holdout_probability,
+                        // No assignment exists on this path — nothing here
+                        // guarantees interference control, so a nonzero
+                        // holdout could at most claim matched quality.
+                        false,
                     )
                     .await?;
                     let persistence = CandidatePersistence {

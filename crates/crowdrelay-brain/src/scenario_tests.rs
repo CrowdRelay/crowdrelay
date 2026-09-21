@@ -181,8 +181,7 @@ fn scenario_b_durability_wins_over_high_y14() {
         EstimationRegime::Y14Bridged,
         EvidenceQuality::Observational,
         1.0,
-    )
-    .with_contamination(0.0);
+    );
     // B: lower Y14 (3.0) but high durability (Y30=4.0), Y30Direct, randomized holdout
     let dv_b = make_dv(
         4.0,
@@ -190,8 +189,7 @@ fn scenario_b_durability_wins_over_high_y14() {
         EstimationRegime::Y30Direct,
         EvidenceQuality::RandomizedHoldout,
         1.0,
-    )
-    .with_contamination(0.0);
+    );
     let a = make_candidate_with_dv("community.engage", "djent", "audience_a", dv_a);
     let b = make_candidate_with_dv("community.engage", "metalcore", "audience_b", dv_b);
     let optimizer = PortfolioOptimizer::default();
@@ -654,41 +652,13 @@ fn scenario_k_strategy_failure() {
 }
 
 // ── Scenario L: Contamination — interference downgrades evidence ──
-
-#[test]
-fn scenario_l_contamination_downgrades_evidence() {
-    // A: looks like randomized holdout but has contamination = 0.5
-    let dv_a = make_dv(
-        5.0,
-        1.0,
-        EstimationRegime::Y30Direct,
-        EvidenceQuality::RandomizedHoldout,
-        1.0,
-    )
-    .with_contamination(0.5);
-    // B: clean MatchedQuasiExperiment with lower value
-    let dv_b = make_dv(
-        3.0,
-        1.0,
-        EstimationRegime::Y30Direct,
-        EvidenceQuality::MatchedQuasiExperiment,
-        1.0,
-    )
-    .with_contamination(0.0);
-    let a = make_candidate_with_dv("community.engage", "djent", "audience_a", dv_a);
-    let b = make_candidate_with_dv("community.engage", "metalcore", "audience_b", dv_b);
-    // Verify contamination is recorded in DecisionValue
-    assert!((a.decision_value.contamination - 0.5).abs() < 0.001);
-    assert!((b.decision_value.contamination - 0.0).abs() < 0.001);
-    // A still has higher total() (5.0 > 3.0) — contamination doesn't
-    // directly reduce pragmatic_value. But the provenance is inspectable:
-    // the learner can see that A's evidence is contaminated.
-    assert!(a.decision_value.total() > b.decision_value.total());
-    // The key invariant: contamination is visible, NOT hidden.
-    // The learner can downgrade A's evidence quality based on contamination.
-    assert!(a.decision_value.contamination > 0.1);
-    assert!(b.decision_value.contamination < 0.1);
-}
+//
+// Contamination used to be carried on `DecisionValue` here. It moved: the
+// live record is `final_contamination` on the experiment assignment row,
+// which `effective_evidence_quality()` folds into the replay's observation
+// variance — evidence.rs's contamination tests pin that halving. A decision-
+// time copy could only hold a stale prior round's number, so the field was
+// removed rather than carried write-only.
 
 // ── Verify EFE is NOT in the value path ──
 
