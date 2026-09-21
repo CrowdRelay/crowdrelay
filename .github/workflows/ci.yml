@@ -92,6 +92,10 @@ jobs:
       CROWDRELAY_ALLOWED_ORIGINS: http://localhost:4321
       CROWDRELAY_WORKSPACE_SLUG: example
       CROWDRELAY_PUBLIC_SITE_BASE_URL: http://localhost:4321
+      # WORKSPACE_SLUG is `example` here, and a non-Virya workspace has no
+      # implicit public origin — the community executor refuses to build one
+      # without it. Locally the slug defaults to virya and masks this.
+      CROWDRELAY_PUBLIC_ORIGIN: http://localhost:4321
       CROWDRELAY_DEFAULT_COUNTRY_CODE: PL
       CROWDRELAY_TENANT_REGION: eu
       CROWDRELAY_TENANT_LOCALE: pl-PL
