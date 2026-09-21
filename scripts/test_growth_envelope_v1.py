@@ -15,6 +15,8 @@ ROOT = Path(__file__).resolve().parents[1]
 MIGRATION = ROOT / "migrations/0076_viryaos_growth_envelope.sql"
 DOMAIN = ROOT / "crates/crowdrelay-domain/src/growth_envelope.rs"
 EVALUATE = ROOT / "crates/crowdrelay-application/src/autopilot/evaluate.rs"
+# `include!`d back into the parent, so the two are one compilation unit.
+EVALUATE_PERSIST = ROOT / "crates/crowdrelay-application/src/autopilot/evaluate/persist.rs"
 EVALUATE_TYPES = ROOT / "crates/crowdrelay-application/src/autopilot/evaluate/types.rs"
 LOADER = ROOT / "crates/crowdrelay-infra/src/autopilot/decisions/cycle_reads.rs"
 PERSIST = ROOT / "crates/crowdrelay-infra/src/autopilot/decisions/persist.rs"
@@ -33,7 +35,9 @@ class GrowthEnvelopeContract(unittest.TestCase):
     def setUp(self) -> None:
         self.migration = read(MIGRATION)
         self.domain = read(DOMAIN)
-        self.evaluate = read(EVALUATE) + "\n" + read(EVALUATE_TYPES)
+        self.evaluate = (
+            read(EVALUATE) + "\n" + read(EVALUATE_PERSIST) + "\n" + read(EVALUATE_TYPES)
+        )
 
     def test_a_new_workspace_starts_switched_off_and_rehearsing(self) -> None:
         # Both, not either: switching the agent on must not also be the moment
