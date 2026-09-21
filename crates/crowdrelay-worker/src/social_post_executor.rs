@@ -73,7 +73,7 @@ use tokio::{
 };
 use uuid::Uuid;
 
-mod tracked_links;
+pub(crate) mod tracked_links;
 
 /// How often to poll for unprocessed social post actions.
 const POLL_INTERVAL: Duration = Duration::from_secs(60);
@@ -606,6 +606,9 @@ impl SocialPostExecutorWorker {
                 channel: PublishChannel::Instagram,
                 approved_origins: &[self.public_origin.as_str()],
                 recent_content_hashes: &recent,
+                // Stored hashes cover the raw draft text; the reviewed
+                // caption carries the appended tracked link.
+                dedupe_text: action.text.as_deref(),
             },
         );
         if let Some(reason) = verdict.hold_reason() {
@@ -813,6 +816,9 @@ impl SocialPostExecutorWorker {
                 channel: PublishChannel::Social,
                 approved_origins: &[self.public_origin.as_str()],
                 recent_content_hashes: &recent,
+                // Stored hashes cover the raw draft text; the reviewed body
+                // carries the appended tracked link.
+                dedupe_text: action.text.as_deref(),
             },
         );
         if let Some(reason) = verdict.hold_reason() {

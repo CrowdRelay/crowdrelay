@@ -237,6 +237,34 @@ pub struct CoBillAct {
     pub consented_to_share_bills: bool,
 }
 
+/// A non-tenant act tied to the city — based there, or billed at one of its
+/// rooms — that shares genre with the tenant or shares only the city.
+///
+/// Names and evidence only. The registry knows where an act is based and
+/// what it has been billed on; it does not know whether the act is free,
+/// willing or priced, so naming one is a suggestion of who to *ask* — never
+/// a claim that they said yes. That distinction is why this list is not
+/// `co_bill`: a sibling's numbers are measured and consented, a peer's are
+/// not, and mixing the two would let a stranger's name borrow a measured
+/// act's claim.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct LocalAct {
+    pub name: String,
+    /// Genre tags the act and the tenant share, canonicalised. Empty means
+    /// the tie is the city alone — the act is local evidence, not a genre
+    /// claim.
+    pub shared_genres: Vec<String>,
+    /// Registry rooms the act has billed, platform-wide. Evidence of a
+    /// working band, not of availability.
+    pub billed_rooms: u16,
+    /// How the act can actually be asked — the strongest reach-out route
+    /// the registry holds (`email on file`, `billed in tracked rooms`,
+    /// `public page`). The planner only surfaces acts that have one; a
+    /// famous name with no route is a directory entry, not a suggestion.
+    #[serde(default)]
+    pub reachable_via: String,
+}
+
 /// What the planner knows about one city.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct CityOpportunity {
@@ -264,9 +292,31 @@ pub struct CityOpportunity {
     /// A show already on the calendar here. A city with one booked is not a
     /// gap, whatever else it scores.
     pub has_upcoming_show: bool,
+    /// Fans living in this city whose arrivals are attributed in the
+    /// provenance ledger — people who came through a tracked channel or an
+    /// owned path in the last 90 days. Reachable fans say who we *can* tell;
+    /// this says who already *came*, which is the difference between a
+    /// market and an audience.
+    #[serde(default)]
+    pub converted_fans_90d: u32,
+    /// The channel that produced the most of those fans, when any did —
+    /// carried so the reason can name where the city's fans actually
+    /// arrive from rather than asserting "our marketing works here".
+    #[serde(default)]
+    pub top_conversion_channel: Option<String>,
+    /// How many fans `top_conversion_channel` produced. Kept beside it
+    /// rather than reusing `converted_fans_90d`: that total counts every
+    /// channel, so naming one channel against it would claim fans the
+    /// channel never made.
+    #[serde(default)]
+    pub top_conversion_channel_fans: u32,
     pub venue: Option<VenueEvidence>,
     pub promoters: Vec<PromoterRef>,
     pub co_bill: Vec<CoBillAct>,
+    /// Non-tenant acts tied to this city — see [`LocalAct`] for why these
+    /// are suggestions to ask, never measured candidates.
+    #[serde(default)]
+    pub local_acts: Vec<LocalAct>,
 }
 
 /// One fact that contributed to the proposal, in words a promoter would use.
@@ -293,6 +343,10 @@ pub enum Reason {
     WarmPromoter { name: String },
     /// The room is running shows right now.
     RoomIsActive { days_since_last_event: u16 },
+    /// People in this city already arrived — attributed conversions, not
+    /// follower counts. `channel` names where most of them came through, in
+    /// the provenance ledger's own vocabulary.
+    FansConvertedHere { count: u32, channel: String },
 }
 
 /// Why no proposal was made. Each one names what would change it.
@@ -415,6 +469,13 @@ pub struct GigPlan {
     pub contact: Vec<PromoterContact>,
     /// Acts worth asking onto the bill. Asking, never announcing.
     pub invite_to_bill: Vec<String>,
+    /// Local non-tenant acts in this city worth knowing about when the bill
+    /// is assembled — the support-slot answer the peer registry can give.
+    /// Carried alongside `invite_to_bill`, not inside it: these names come
+    /// with no consent and no measured audience, so they can inform an ask
+    /// but cannot state what they add.
+    #[serde(default)]
+    pub local_acts: Vec<LocalAct>,
     /// Ordered strongest first. Never empty — a plan with no reasons is not
     /// produced at all.
     pub reasons: Vec<Reason>,
@@ -496,12 +557,39 @@ impl GigPlan {
                 "{venue} had something on {days_since_last_event} days ago, and we are \
                  looking at {city}."
             ),
+            Some(Reason::FansConvertedHere { count, channel }) => format!(
+                "{count} people around {city} already joined us through {}.",
+                channel_phrase(channel)
+            ),
             // Unreachable by construction: `plan_gig` never returns a proposal
             // with no reasons. Stated rather than unwrapped, because a panic
             // here would be an outreach the band cannot send and cannot
             // diagnose, and this sentence is still true.
             None => format!("We are looking at {city}, and {venue} is the room."),
         }
+    }
+}
+
+/// The provenance channel vocabulary, phrased for a person reading the
+/// reason. The ledger stores machine keys — `concert_qr` is a fact about a
+/// scan, and the sentence has to say "a show QR code" or it reads as
+/// telemetry pasted into a pitch. An unlisted channel renders as itself:
+/// honest and slightly technical beats invented.
+pub(crate) fn channel_phrase(channel: &str) -> &str {
+    match channel {
+        "concert_qr" => "a show QR code",
+        "ticket_purchase" => "buying a ticket",
+        "referral" => "another fan",
+        "synesthesia_claim" => "the synesthesia experience",
+        "fan_import" => "an import",
+        "fanbase_ingest" => "a synced fanbase list",
+        "reddit" => "Reddit",
+        "telegram" => "Telegram",
+        "discord" => "Discord",
+        "instagram" => "Instagram",
+        "facebook" => "Facebook",
+        "x" => "X",
+        other => other,
     }
 }
 
@@ -584,6 +672,19 @@ pub fn plan_gig(
 
     if let Some(draw) = venue.typical_draw {
         reasons.push(Reason::RoomDraws { typical_draw: draw });
+    }
+
+    // Attributed arrivals, not followers: people in this city who actually
+    // joined through a tracked channel. It sits with the audience reasons
+    // because it is audience evidence — a city where fans already convert is
+    // a city where a show lands on ground that is already warm.
+    if opportunity.top_conversion_channel_fans > 0
+        && let Some(channel) = opportunity.top_conversion_channel.as_deref()
+    {
+        reasons.push(Reason::FansConvertedHere {
+            count: opportunity.top_conversion_channel_fans,
+            channel: channel.to_owned(),
+        });
     }
 
     match opportunity.months_since_show {
@@ -746,6 +847,7 @@ pub fn plan_gig(
         venue: venue.name.clone(),
         contact,
         invite_to_bill,
+        local_acts: opportunity.local_acts.clone(),
         reasons,
         reach: ReachEstimate {
             reachable: reachable_fans,

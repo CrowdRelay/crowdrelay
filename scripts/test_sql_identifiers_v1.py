@@ -218,7 +218,7 @@ class SqlIdentifiersV1(unittest.TestCase):
         self.assertGreater(len(known_relations()), 100, "migration parse produced too few tables")
 
     def test_no_identifiers_in_code(self) -> None:
-        # `*` was the pre-CrowdRelay schema prefix. Migration 0344 renamed
+        # `*` was the pre-CrowdRelay schema prefix. Migration 0345 renamed
         # every such object and left `*` compat views only so binaries
         # and services from the previous release survive the swap window — new
         # code must always name the real relations.

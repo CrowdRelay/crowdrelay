@@ -58,6 +58,7 @@ pub mod mobile_fan;
 pub mod night;
 pub mod observability;
 pub mod organization_settings;
+pub mod peer_act_seed;
 pub mod place_reach;
 pub mod portfolio;
 pub mod proofs;

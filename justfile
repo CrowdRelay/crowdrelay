@@ -164,12 +164,14 @@ test-postgres-env:
     # metric sync schedule, agent decision trace) were all invisible here. A
     # local gate narrower than CI is worse than none: it teaches you to trust it.
     #
-    # One invocation per target, exactly as CI does. Not a formality: several
-    # suites share the one database rather than creating a disposable copy, and
-    # claims like `claim_deliveries` are workspace-wide, so two suites live at
-    # once makes one claim a row the other left pending. Running them together
-    # is stricter than CI and fails on that coupling alone. The coupling is
-    # worth fixing; reproducing CI is what this recipe is for.
+    # One invocation per target, exactly as CI does — and per-target databases,
+    # exactly as CI does. Several suites connect to their URL directly instead
+    # of cloning it through `test_pool`, so on one shared database their writes
+    # (events -> venue marks, workspaces, consents) land in the template every
+    # later suite clones. A venue mark for 'Test Club' left by events_postgres
+    # once beat the gig-outreach fixture's own room on `best_venue`'s id
+    # tiebreak and the approval refused the room as dormant. Per-target clones
+    # keep that pollution inside the suite that wrote it.
     targets=()
     for path in crates/*/tests/*_postgres.rs; do
       package="$(basename "$(dirname "$(dirname "$path")")")"
@@ -180,12 +182,56 @@ test-postgres-env:
       exit 1
     fi
     printf 'running %s integration targets\n' "${#targets[@]}"
+    # Clone every suite's database while the template is still pristine — the
+    # direct-connect suites must never see it again after this point.
+    {{COMPOSE}} exec -T postgres psql -U crowdrelay -d postgres -qAt \
+      -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity \
+          WHERE datname='crowdrelay_autopilot_test' AND pid <> pg_backend_pid()" || true
     for entry in "${targets[@]}"; do
+      db="cr_ci_$(basename "${entry##*:}" | head -c 55)"
+      {{COMPOSE}} exec -T postgres psql -U crowdrelay -d postgres -qAt \
+        -c "DROP DATABASE IF EXISTS \"${db}\" WITH (FORCE)" \
+        -c "CREATE DATABASE \"${db}\" WITH TEMPLATE crowdrelay_autopilot_test"
+    done
+    {{COMPOSE}} exec -T postgres psql -U crowdrelay -d postgres -qAt \
+      -c "DROP DATABASE IF EXISTS cr_ci_filters WITH (FORCE)" \
+      -c "CREATE DATABASE cr_ci_filters WITH TEMPLATE crowdrelay_autopilot_test"
+    for entry in "${targets[@]}"; do
+      db="cr_ci_$(basename "${entry##*:}" | head -c 55)"
+      url="postgres://crowdrelay:crowdrelay-local-only@127.0.0.1:5432/${db}"
+      export CROWDRELAY_DATABASE_URL="$url"
+      export CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL="$url"
+      export CROWDRELAY_TEST_DATABASE_URL="$url"
+      export CROWDRELAY_ADMISSION_TEST_DATABASE_URL="$url"
+      export CROWDRELAY_ECOSYSTEM_TEST_DATABASE_URL="$url"
+      export CROWDRELAY_EVENT_TEST_DATABASE_URL="$url"
+      export CROWDRELAY_FAN_LIFECYCLE_TEST_DATABASE_URL="$url"
+      export CROWDRELAY_MOBILE_FAN_TEST_DATABASE_URL="$url"
+      export CROWDRELAY_REFERRAL_TEST_DATABASE_URL="$url"
+      export CROWDRELAY_OUTBOX_TEST_DATABASE_URL="$url"
+      export CROWDRELAY_REMINDER_TEST_DATABASE_URL="$url"
+      export CROWDRELAY_RETENTION_TEST_DATABASE_URL="$url"
+      export CROWDRELAY_COMMUNITY_TEST_DATABASE_URL="$url"
+      export CROWDRELAY_AGENTS_TEST_DATABASE_URL="$url"
       {{CARGO}} test --locked --package "${entry%%:*}" --test "${entry##*:}" \
         -- --ignored --test-threads=1
     done
     # The outbox, reminder and retention suites live in unit-test modules rather
     # than their own integration target, so the glob above cannot see them.
+    url="postgres://crowdrelay:crowdrelay-local-only@127.0.0.1:5432/cr_ci_filters"
+    export CROWDRELAY_DATABASE_URL="$url"
+    export CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL="$url"
+    export CROWDRELAY_TEST_DATABASE_URL="$url"
+    export CROWDRELAY_ADMISSION_TEST_DATABASE_URL="$url"
+    export CROWDRELAY_ECOSYSTEM_TEST_DATABASE_URL="$url"
+    export CROWDRELAY_EVENT_TEST_DATABASE_URL="$url"
+    export CROWDRELAY_FAN_LIFECYCLE_TEST_DATABASE_URL="$url"
+    export CROWDRELAY_MOBILE_FAN_TEST_DATABASE_URL="$url"
+    export CROWDRELAY_REFERRAL_TEST_DATABASE_URL="$url"
+    export CROWDRELAY_OUTBOX_TEST_DATABASE_URL="$url"
+    export CROWDRELAY_REMINDER_TEST_DATABASE_URL="$url"
+    export CROWDRELAY_RETENTION_TEST_DATABASE_URL="$url"
+    export CROWDRELAY_COMMUNITY_TEST_DATABASE_URL="$url"
     for filter in \
       postgres_outbox_round_trip \
       due_reminder_is_enqueued_exactly_once \
@@ -205,6 +251,16 @@ test-postgres-env:
     do
       {{CARGO}} test --locked --package crowdrelay-api "$filter" -- --ignored --test-threads=1
     done
+    # Suite clones are cheap but not free; a green run leaves nothing behind.
+    # A failed run keeps its database for debugging — the next run's
+    # DROP IF EXISTS clears it before cloning anyway.
+    for entry in "${targets[@]}"; do
+      db="cr_ci_$(basename "${entry##*:}" | head -c 55)"
+      {{COMPOSE}} exec -T postgres psql -U crowdrelay -d postgres -qAt \
+        -c "DROP DATABASE IF EXISTS \"${db}\" WITH (FORCE)" || true
+    done
+    {{COMPOSE}} exec -T postgres psql -U crowdrelay -d postgres -qAt \
+      -c "DROP DATABASE IF EXISTS cr_ci_filters WITH (FORCE)" || true
 
 # Alias kept for muscle memory from the Makefile days
 test-postgres: test-postgres-env

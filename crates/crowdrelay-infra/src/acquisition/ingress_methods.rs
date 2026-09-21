@@ -158,6 +158,70 @@ impl PostgresAcquisitionRepository {
                     AND smart_links.id = candidates.smart_link_id
                     AND candidates.campaign_id
                         IS NOT DISTINCT FROM smart_links.campaign_id
+            ),
+            -- The interaction half of the provenance ledger. A click is the
+            -- cheapest honest signal a channel produces — weeks before a
+            -- conversion exists to count — and until now it landed in
+            -- click_events only, where the ranking reads never look.
+            -- fan_id stays NULL by design (anonymous until signup links it);
+            -- the same post-table UNION the conversion path uses resolves
+            -- action_id and format_key, so a channel can be ranked on what
+            -- it made people do, not just on followers it accumulated.
+            -- Rows repeat honestly per click; readers dedupe on
+            -- DISTINCT anonymous_visitor_id.
+            provenance AS (
+                INSERT INTO fan_provenance_events (
+                    workspace_id, fan_id, event_kind, channel, source_target,
+                    community, campaign_id, action_id, anonymous_visitor_id,
+                    attribution_method, attribution_confidence, occurred_at,
+                    format_key
+                )
+                SELECT click.workspace_id, NULL, 'interaction',
+                       COALESCE(link.channel_source, 'smart_link'),
+                       link.slug, link.channel_community, click.campaign_id,
+                       post.action_id, click.anonymous_visitor_id,
+                       'tracked_click', 1.0, click.occurred_at,
+                       post.format_key
+                FROM valid_candidates AS click
+                JOIN smart_links AS link
+                  ON link.workspace_id = click.workspace_id
+                 AND link.id = click.smart_link_id
+                LEFT JOIN LATERAL (
+                    SELECT post.action_id, source.format_key
+                    FROM (
+                        SELECT action_id, posted_at, created_at
+                        FROM community_posts
+                        WHERE workspace_id = click.workspace_id
+                          AND smart_link = '/l/' || link.slug
+                        UNION ALL
+                        SELECT action_id, posted_at, created_at
+                        FROM social_posts
+                        WHERE workspace_id = click.workspace_id
+                          AND smart_link = '/l/' || link.slug
+                        UNION ALL
+                        SELECT action_id, posted_at, created_at
+                        FROM telegram_posts
+                        WHERE workspace_id = click.workspace_id
+                          AND smart_link = '/l/' || link.slug
+                        UNION ALL
+                        SELECT action_id, posted_at, created_at
+                        FROM discord_posts
+                        WHERE workspace_id = click.workspace_id
+                          AND smart_link = '/l/' || link.slug
+                    ) AS post
+                    LEFT JOIN autopilot_actions AS act
+                      ON act.workspace_id = click.workspace_id
+                     AND act.id = post.action_id
+                    LEFT JOIN content_sources AS source
+                      ON source.workspace_id = click.workspace_id
+                     AND source.id::text = lower(act.payload->>'source_id')
+                    ORDER BY post.posted_at DESC NULLS LAST,
+                             post.created_at DESC
+                    LIMIT 1
+                ) AS post ON true
+                WHERE
+                    (SELECT count(*) FROM valid_candidates)
+                    = (SELECT count(*) FROM candidates)
             )
             INSERT INTO click_events (
                 workspace_id,

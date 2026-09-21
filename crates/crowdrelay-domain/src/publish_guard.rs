@@ -94,14 +94,12 @@ impl PublishChannel {
 
     /// The most links a post may carry on this channel.
     ///
-    /// A community repost legitimately carries two: the band's own permalink
-    /// (attribution) and the tracked smart link appended at dispatch. Every
-    /// other channel gets one.
+    /// Two, everywhere: every channel's dispatch appends the tracked smart
+    /// link the click ledger counts through, so one link belongs to the
+    /// transport and one to the draft. A draft carrying two of its own links
+    /// still publishes nothing — it becomes three on the wire and holds.
     const fn maximum_links(self) -> usize {
-        match self {
-            Self::Community => 2,
-            _ => 1,
-        }
+        2
     }
 }
 
@@ -208,6 +206,12 @@ pub struct PublishContext<'a> {
     /// Content hashes of what this channel published recently. A draft whose
     /// hash is in here is a repeat.
     pub recent_content_hashes: &'a BTreeSet<String>,
+    /// The text the duplicate check should hash — what the model wrote,
+    /// before transport additions like the tracked link appended at
+    /// dispatch. Those additions carry a per-action slug, so hashing the
+    /// reviewed body can never equal a stored draft hash and the check would
+    /// silently never fire. `None` hashes the body as reviewed.
+    pub dedupe_text: Option<&'a str>,
 }
 
 /// The share of letters that may be capitals before a post reads as shouting.
@@ -293,7 +297,7 @@ pub fn review_outbound_post(body: &str, context: &PublishContext<'_>) -> Publish
     }
     if context
         .recent_content_hashes
-        .contains(&content_hash(trimmed))
+        .contains(&content_hash(context.dedupe_text.unwrap_or(trimmed)))
     {
         return PublishVerdict::HoldForHuman(HoldReason::DuplicateOfRecentPost);
     }
@@ -461,6 +465,7 @@ mod tests {
             channel,
             approved_origins: ORIGINS,
             recent_content_hashes: &EMPTY,
+            dedupe_text: None,
         }
     }
 
@@ -649,9 +654,33 @@ mod tests {
             channel: PublishChannel::Telegram,
             approved_origins: ORIGINS,
             recent_content_hashes: &recent,
+            dedupe_text: None,
         };
         assert_eq!(
             review_outbound_post(&body, &context),
+            PublishVerdict::HoldForHuman(HoldReason::DuplicateOfRecentPost)
+        );
+    }
+
+    #[test]
+    fn a_tracked_link_appended_at_dispatch_does_not_hide_a_repeat() {
+        // The executors review the transport body — the draft plus the
+        // per-action smart link appended at dispatch — while the stored
+        // recent hashes cover the draft alone. Hashing the reviewed body
+        // could never equal a stored hash, so the check silently never
+        // fired. `dedupe_text` keeps the comparison on the draft.
+        let draft = good_post();
+        let mut recent = BTreeSet::new();
+        recent.insert(content_hash(&draft));
+        let reviewed = format!("{draft}\n\nhttps://virya.music/l/tg-7f3a");
+        let context = PublishContext {
+            channel: PublishChannel::Telegram,
+            approved_origins: ORIGINS,
+            recent_content_hashes: &recent,
+            dedupe_text: Some(&draft),
+        };
+        assert_eq!(
+            review_outbound_post(&reviewed, &context),
             PublishVerdict::HoldForHuman(HoldReason::DuplicateOfRecentPost)
         );
     }
@@ -666,6 +695,7 @@ mod tests {
             channel: PublishChannel::Telegram,
             approved_origins: ORIGINS,
             recent_content_hashes: &recent,
+            dedupe_text: None,
         };
         assert_eq!(
             content_hash(&reformatted),
@@ -696,6 +726,7 @@ mod tests {
             channel: PublishChannel::Telegram,
             approved_origins: &[],
             recent_content_hashes: &BTreeSet::new(),
+            dedupe_text: None,
         };
         let plain = "New single out this Friday. We recorded it live in one take \
                      at the old cinema in Wroclaw."

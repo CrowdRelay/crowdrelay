@@ -149,7 +149,7 @@ impl SocialPostExecutorWorker {
 /// tenant's own public origin. Anything else — a foreign host's `/l/` path,
 /// a URL that merely contains the marker — is a destination to validate, not
 /// a link to inherit.
-fn slug_in_cta<'a>(cta_url: &'a str, public_origin: &str) -> Option<&'a str> {
+pub(crate) fn slug_in_cta<'a>(cta_url: &'a str, public_origin: &str) -> Option<&'a str> {
     let path = cta_url.strip_prefix(public_origin).unwrap_or(cta_url);
     let slug = path.strip_prefix("/l/")?;
     let valid = !slug.is_empty()

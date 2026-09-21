@@ -122,6 +122,16 @@ pub struct WorldModel {
     /// Empty until a platform has enough history to measure.
     pub platform_growth: Vec<crate::platform_yield::PlatformGrowth>,
 
+    /// Per-channel attributed arrivals: fans and clickers each channel's
+    /// tracked links actually produced, read from `fan_provenance_events`.
+    ///
+    /// `platform_growth` counts followers going up; this counts people
+    /// arriving — the stronger claim, and the one that lets the ranker post
+    /// where fans come from rather than where the follower counter moved.
+    /// Empty until a tracked link has produced a click or a signup.
+    #[serde(default)]
+    pub channel_yield: Vec<crate::platform_yield::ChannelYield>,
+
     /// Best performing community by avg score, if any.
     pub best_performing_community: Option<String>,
     /// Worst performing community by avg score, if any.

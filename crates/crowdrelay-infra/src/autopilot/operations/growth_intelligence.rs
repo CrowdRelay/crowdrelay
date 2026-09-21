@@ -29,6 +29,7 @@
 
 use super::*;
 
+mod channel_yield;
 mod community_targets;
 mod evidence_replay;
 mod exchange;
@@ -856,6 +857,13 @@ pub(in crate::autopilot) async fn load_growth_intelligence_snapshots(
         })
         .collect();
 
+    // The attributed half of "where growth comes from": which channel's
+    // tracked links produced a fan or a clicker, from the provenance ledger
+    // rather than a scraped follower series. This is the query that turns
+    // attribution from measurement into control — `platform_growth` says a
+    // platform is compounding, this says a channel delivered a person.
+    let channel_yield = channel_yield::load_channel_yield(pool, workspace_id).await?;
+
     let off_platform_audience = u32::try_from(audience_row.0.max(0)).unwrap_or(u32::MAX);
     let off_platform_audience_this_month = u32::try_from(audience_row.1.max(0)).unwrap_or(u32::MAX);
     let connected_platforms = u32::try_from(audience_row.2.max(0)).unwrap_or(u32::MAX);
@@ -925,6 +933,7 @@ pub(in crate::autopilot) async fn load_growth_intelligence_snapshots(
         connected_platforms,
         fresh_platforms,
         platform_growth,
+        channel_yield,
         discovered_communities,
         active_communities,
         avg_community_engagement_bps,

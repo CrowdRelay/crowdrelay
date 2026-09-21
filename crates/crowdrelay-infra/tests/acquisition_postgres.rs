@@ -699,3 +699,4 @@ async fn community_conversion_does_not_write_when_fan_is_missing()
 
 include!("acquisition_postgres/helpers.rs");
 include!("acquisition_postgres/attribution.rs");
+include!("acquisition_postgres/attribution_channels.rs");

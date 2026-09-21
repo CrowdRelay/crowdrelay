@@ -1036,6 +1036,9 @@ mod tests {
             active_fans_30d: 60,
             months_since_show: Some(14),
             has_upcoming_show: false,
+            converted_fans_90d: 0,
+            top_conversion_channel: None,
+            top_conversion_channel_fans: 0,
             venue: Some(venue()),
             promoters: vec![PromoterRef {
                 key: "anna".to_owned(),
@@ -1045,6 +1048,7 @@ mod tests {
                 has_route: true,
             }],
             co_bill: Vec::new(),
+            local_acts: Vec::new(),
         }
     }
 

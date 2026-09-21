@@ -10,7 +10,7 @@
 -- CREATE OR REPLACE rewrites bodies that still name `viryaos_*`; compat views
 -- come last, after every old name is free to be claimed again.
 
--- Generates migrations/0344_rename_viryaos.sql body from the live catalog.
+-- Generates migrations/0345_rename_viryaos.sql body from the live catalog.
 -- Run: psql -At -f gen.sql (objects ordered so references resolve within the tx)
 \pset footer off
 SELECT '-- constraints (before table rename: ALTER references old table name)';

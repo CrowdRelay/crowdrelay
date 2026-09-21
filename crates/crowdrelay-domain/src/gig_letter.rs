@@ -30,6 +30,8 @@
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
+use crate::gig_plan::channel_phrase;
+
 /// The language the promoter reads (O.6).
 ///
 /// The letter was English for everybody. Virya books rooms in Poland, so every
@@ -121,9 +123,28 @@ pub fn opening_line(plan: &crate::gig_plan::GigPlan, language: LetterLanguage) -
         }) => format!(
             "W {venue} coś się działo {days_since_last_event} dni temu, a my patrzymy na {city}."
         ),
+        Some(Reason::FansConvertedHere { count, channel }) => format!(
+            "{count} osób w okolicy {city} już do nas dołączyło przez {}.",
+            channel_phrase_pl(channel)
+        ),
         // Unreachable by construction, for the same reason it is on the
         // English side: `plan_gig` never returns a proposal with no reasons.
         None => format!("Patrzymy na {city}, a {venue} jest tym klubem."),
+    }
+}
+
+/// The provenance channel vocabulary, phrased after "przez" for the Polish
+/// half of the letter — the same honesty rule as `channel_phrase`: an
+/// unlisted channel renders as itself rather than as an invented phrase.
+fn channel_phrase_pl(channel: &str) -> &str {
+    match channel {
+        "concert_qr" => "kod QR z koncertu",
+        "ticket_purchase" => "zakup biletu",
+        "referral" => "innego fana",
+        "synesthesia_claim" => "synestezję",
+        "fan_import" => "import",
+        "fanbase_ingest" => "zsynchronizowaną listę fanów",
+        other => other,
     }
 }
 
@@ -217,6 +238,14 @@ pub fn reason_line(reason: &crate::gig_plan::Reason, language: LetterLanguage) -
                 days_since_last_event,
             },
         ) => format!("w klubie coś się działo {days_since_last_event} dni temu"),
+        (LetterLanguage::English, Reason::FansConvertedHere { count, channel }) => format!(
+            "{count} people in the city already joined us through {}",
+            channel_phrase(channel)
+        ),
+        (LetterLanguage::Polish, Reason::FansConvertedHere { count, channel }) => format!(
+            "{count} osób w tym mieście dołączyło już przez {}",
+            channel_phrase_pl(channel)
+        ),
     }
 }
 

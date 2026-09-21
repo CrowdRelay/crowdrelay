@@ -386,6 +386,7 @@ impl TelegramExecutorWorker {
             )
             SELECT c.id, c.action_id, c.channel,
                    a.payload->'draft'->>'text' AS body,
+                   a.payload->'draft'->>'cta_url' AS cta_url,
                    a.trace_id
             FROM claimed c
             LEFT JOIN autopilot_actions a ON a.id = c.action_id
@@ -481,11 +482,20 @@ impl TelegramExecutorWorker {
         }
         let target_channel = &channel;
 
-        let body = action.body.as_deref().unwrap_or("");
-        if body.is_empty() {
+        let draft = action.body.as_deref().unwrap_or("");
+        if draft.is_empty() {
             self.mark_failed(action.id, "post body is empty").await?;
             return Ok(());
         }
+
+        // Bind a tracked link before the guard sees the text, so the guard
+        // reviews what the audience will actually see — the draft plus the
+        // appended `/l/` URL. Until now telegram posts went out with no
+        // smart link at all: the click was never recorded, the signup never
+        // attributed, and the channel the operator switched on taught the
+        // brain nothing.
+        let tracked_link = self.bind_tracked_link(action, target_channel).await?;
+        let body = self.publish_body(draft, tracked_link.as_deref());
 
         // The read a person used to do before a post went out under the
         // band's name. Automatic mode removes the person, not the read.
@@ -496,11 +506,14 @@ impl TelegramExecutorWorker {
         // preceded it.
         let recent = self.recent_content_hashes().await?;
         let verdict = review_outbound_post(
-            body,
+            &body,
             &PublishContext {
                 channel: PublishChannel::Telegram,
                 approved_origins: &[self.public_origin.as_str()],
                 recent_content_hashes: &recent,
+                // The recent hashes cover the stored draft; the reviewed body
+                // carries the appended link, which changes every action.
+                dedupe_text: Some(draft),
             },
         );
         if let Some(reason) = verdict.hold_reason() {
@@ -514,7 +527,7 @@ impl TelegramExecutorWorker {
         }
 
         let result = self
-            .submit_via_bot_api(target_channel, body, &bot_token)
+            .submit_via_bot_api(target_channel, &body, &bot_token)
             .await?;
 
         // Reach is what the credit allocator divides fan outcomes by, so a
@@ -608,6 +621,127 @@ impl TelegramExecutorWorker {
             "successfully posted to telegram"
         );
         Ok(())
+    }
+
+    /// Mints and binds the post's tracked link in its own transaction, after
+    /// the real channel is known and before the publish guard reviews the
+    /// text. Returns the `/l/{slug}` path the body should carry, or `None`
+    /// when the draft named a destination the validator refused — the post
+    /// goes out untracked rather than not at all, the same contract the
+    /// community and social paths keep.
+    ///
+    /// The slug is deterministic (`tg-{action_id}`) so a crash-retry upserts
+    /// rather than duplicating. `channel_community` is the channel actually
+    /// posted in — for Telegram that *is* the community the post reached.
+    ///
+    /// Destination resolution, in order:
+    /// - a CTA naming one of our `/l/` slugs → the destination that link
+    ///   already points at, re-minted under this post's own slug so the
+    ///   attribution chain resolves this post, not the earlier one;
+    /// - any other CTA → the tenant-origin validator, refused on a foreign
+    ///   host;
+    /// - no CTA at all → the public origin root. A post that asks nothing
+    ///   still carries a tracked link to the band's own page, because a link
+    ///   that exists can be clicked and attributed and one that does not
+    ///   cannot be either.
+    async fn bind_tracked_link(
+        &self,
+        action: &ClaimedAction,
+        channel: &str,
+    ) -> Result<Option<String>, TelegramExecutorError> {
+        let ws = self.workspace_id.into_uuid();
+        let origin = self.public_origin.trim_end_matches('/');
+        let cta = action
+            .cta_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|url| !url.is_empty());
+        let destination = if let Some(cta) = cta {
+            if let Some(slug) = crate::social_post_executor::tracked_links::slug_in_cta(cta, origin)
+            {
+                sqlx::query_scalar::<_, Option<String>>(
+                    "SELECT destination_url FROM smart_links \
+                     WHERE workspace_id = $1 AND slug = $2 AND active",
+                )
+                .bind(ws)
+                .bind(slug)
+                .fetch_optional(&self.pool)
+                .await?
+                .flatten()
+                .unwrap_or_else(|| origin.to_owned())
+            } else {
+                match crowdrelay_domain::acquisition::agent_smart_link_destination(
+                    cta,
+                    &[self.public_origin.as_str()],
+                ) {
+                    Ok(destination) => destination.as_str().to_owned(),
+                    Err(refusal) => {
+                        tracing::warn!(
+                            action_id = %action.action_id,
+                            refusal = %refusal,
+                            "refused a telegram link destination; the post goes out untracked"
+                        );
+                        return Ok(None);
+                    }
+                }
+            }
+        } else {
+            origin.to_owned()
+        };
+        let slug = format!("tg-{}", action.action_id.simple());
+        let mut tx = self.pool.begin().await?;
+        sqlx::query(
+            r#"
+            INSERT INTO smart_links
+                (workspace_id, slug, destination_url, active,
+                 channel_source, channel_community)
+            VALUES ($1, $2, $3, true, 'telegram', $4)
+            ON CONFLICT (workspace_id, slug) DO UPDATE SET
+                destination_url = EXCLUDED.destination_url,
+                active = true,
+                channel_source = EXCLUDED.channel_source,
+                channel_community = EXCLUDED.channel_community
+            "#,
+        )
+        .bind(ws)
+        .bind(&slug)
+        .bind(&destination)
+        .bind(channel)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            r#"
+            UPDATE telegram_posts AS post
+            SET smart_link = '/l/' || link.slug,
+                smart_link_id = link.id,
+                updated_at = now()
+            FROM smart_links AS link
+            WHERE post.id = $1 AND post.workspace_id = $2
+              AND link.workspace_id = $2 AND link.slug = $3
+            "#,
+        )
+        .bind(action.id)
+        .bind(ws)
+        .bind(&slug)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(Some(format!("/l/{slug}")))
+    }
+
+    /// The text that actually posts — the draft body plus the tracked link's
+    /// public URL when the post carries one and the draft did not already
+    /// inline it. Appended before the publish guard runs, so the guard
+    /// reviews what the audience will see: the URL is on the tenant's own
+    /// origin, which the guard already approves.
+    fn publish_body(&self, base: &str, link: Option<&str>) -> String {
+        match link {
+            Some(link) if link.starts_with("/l/") && !base.contains(link) => format!(
+                "{base}\n\n{}{link}",
+                self.public_origin.trim_end_matches('/')
+            ),
+            _ => base.to_owned(),
+        }
     }
 
     /// Submits a message via the Telegram Bot API sendMessage endpoint.
@@ -887,6 +1021,7 @@ struct ClaimedAction {
     action_id: Uuid,
     channel: String,
     body: Option<String>,
+    cta_url: Option<String>,
     trace_id: Option<Uuid>,
 }
 

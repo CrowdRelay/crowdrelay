@@ -455,7 +455,15 @@ impl PostgresContentEngineRepository {
                     ON alias.alias = lower(btrim(tag))
                 WHERE listing.workspace_id = $1
             ), candidates AS (
-                SELECT act.display_name, shared.shared_genres, billing.tracked_rooms
+                SELECT act.id AS peer_act_id, act.display_name,
+                       act.home_city_id,
+                       shared.shared_genres, billing.tracked_rooms,
+                       EXISTS (
+                           SELECT 1 FROM place_peer_act_facts AS fact
+                           WHERE fact.peer_act_id = act.id
+                             AND fact.workspace_id = $1
+                             AND fact.attribute = 'contact_email'
+                       ) AS holds_contact
                 FROM place_peer_acts AS act
                 CROSS JOIN LATERAL (
                     SELECT array_agg(DISTINCT their.genre ORDER BY their.genre)
@@ -490,12 +498,48 @@ impl PostgresContentEngineRepository {
                 id, workspace_id, name, handles, tier, watch_for, why,
                 proposed_by, status
             )
-            SELECT uuidv7(), $1, display_name, '{}'::jsonb, 'near_peer',
+            SELECT uuidv7(), $1, display_name,
+                   -- A seeded band sheet carries the act's public page as a
+                   -- global `link:social` fact; when that page is a YouTube
+                   -- channel the observer already knows how to read it, so
+                   -- the proposal arrives watchable instead of waiting for
+                   -- an operator to paste the same link in. Other platforms
+                   -- stay '{}' — a handle the observer cannot read is noise.
+                   COALESCE((
+                       SELECT jsonb_build_object('youtube', fact.value)
+                       FROM place_peer_act_facts AS fact
+                       WHERE fact.peer_act_id = candidates.peer_act_id
+                         AND fact.workspace_id IS NULL
+                         AND fact.attribute = 'link:social'
+                         AND fact.value ILIKE '%youtube.com/%'
+                       ORDER BY fact.observed_at DESC
+                       LIMIT 1
+                   ), '{}'::jsonb),
+                   -- A tier is a claim about level, and the registry only
+                   -- supports it with scene evidence: the act bills rooms we
+                   -- track, its home town resolves against the catalogue,
+                   -- or this tenant already holds its lead. A sheet row
+                   -- with none of the three — however famous, however
+                   -- genre-fitting — is a name worth watching, not a
+                   -- demonstrated peer, so it lands aspirational instead of
+                   -- borrowing a peer's claim on the strength of a genre
+                   -- tag alone.
+                   CASE WHEN tracked_rooms > 0
+                           OR home_city_id IS NOT NULL
+                           OR holds_contact
+                        THEN 'near_peer' ELSE 'aspirational' END,
                    '{}'::text[],
                    CASE WHEN array_length(shared_genres, 1) = 1
                         THEN 'shared genre ' || shared_genres[1]
                         ELSE 'shared genres ' || array_to_string(shared_genres, ', ')
-                   END || ' — billed in ' || tracked_rooms || ' tracked rooms',
+                   END ||
+                   CASE WHEN tracked_rooms > 0
+                        THEN ' — billed in ' || tracked_rooms || ' tracked rooms'
+                        WHEN home_city_id IS NOT NULL
+                        THEN ' — placed in a catalogued city'
+                        WHEN holds_contact THEN ' — contact lead on file'
+                        ELSE ' — directory entry, no circuit evidence yet'
+                   END,
                    $3, 'proposed'
             FROM candidates
             ON CONFLICT DO NOTHING

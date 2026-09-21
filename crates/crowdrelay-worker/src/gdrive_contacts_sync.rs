@@ -22,6 +22,7 @@ use crowdrelay_domain::scan_scope::ScanScope;
 use crowdrelay_domain::venue_seed::extract_seed_sheet;
 use crowdrelay_infra::{
     gdrive::{GDriveError, PostgresGDriveRepository},
+    peer_act_seed::PostgresPeerActSeedRepository,
     sensitive_response::SensitiveResponseKey,
     venue_seed::PostgresVenueSeedRepository,
 };
@@ -44,6 +45,13 @@ const FOLDER_MIME: &str = "application/vnd.google-apps.folder";
 /// Bound on rows read per file — a contact list beyond that is not a
 /// contact list.
 const MAX_ROWS_PER_FILE: usize = 5000;
+
+/// Bumped when what a scan *does* with a file changes — a new seed reader,
+/// a new sheet shape — so a file the old parser already saw is not skipped
+/// as "unchanged" under rules it predates. The revision rides inside the
+/// stored mtime marker (`<mtime>#<rev>`); content changes still invalidate
+/// on their own because the mtime half differs.
+const FILE_SCANNER_REVISION: u32 = 2;
 /// Drive page size.
 const DRIVE_PAGE_SIZE: usize = 100;
 const HTTP_TIMEOUT: Duration = Duration::from_secs(30);
@@ -113,6 +121,12 @@ struct CycleCounts {
     venues_imported: u64,
     venue_refusals: usize,
     venues_unknown_city: u64,
+    /// The same accounting for a band seed sheet: acts that imported into
+    /// the peer registry, rows refused, and acts whose city named no
+    /// catalogue city.
+    peer_acts_imported: u64,
+    peer_act_refusals: usize,
+    peer_acts_unresolved_city: u64,
 }
 
 impl GDriveContactsSyncWorker {
@@ -264,6 +278,9 @@ impl GDriveContactsSyncWorker {
                     counts.venues_imported += file_counts.venues_imported;
                     counts.venue_refusals += file_counts.venue_refusals;
                     counts.venues_unknown_city += file_counts.venues_unknown_city;
+                    counts.peer_acts_imported += file_counts.peer_acts_imported;
+                    counts.peer_act_refusals += file_counts.peer_act_refusals;
+                    counts.peer_acts_unresolved_city += file_counts.peer_acts_unresolved_city;
                 }
                 Err(error) => {
                     counts.files_failed += 1;
@@ -287,6 +304,9 @@ impl GDriveContactsSyncWorker {
             venues_imported = counts.venues_imported,
             venue_refusals = counts.venue_refusals,
             venues_unknown_city = counts.venues_unknown_city,
+            peer_acts_imported = counts.peer_acts_imported,
+            peer_act_refusals = counts.peer_act_refusals,
+            peer_acts_unresolved_city = counts.peer_acts_unresolved_city,
             "gdrive contacts sync cycle complete"
         );
         Ok(())
@@ -486,6 +506,13 @@ impl GDriveContactsSyncWorker {
         let mut counts = CycleCounts::default();
         let mtime = file.modified_time.clone().unwrap_or_default();
 
+        // The skip check keys on "this parser already read this exact file
+        // version" — the marker carries the scanner revision so a change in
+        // what a scan *does* (a new seed reader, multi-sheet xlsx) re-reads
+        // every file once instead of leaving a file the old parser
+        // misfiled — say, the 716-band workbook the single-sheet reader
+        // counted as a 17-row contact sheet — skipped-unchanged forever.
+        let state_marker = format!("{mtime}#{FILE_SCANNER_REVISION}");
         if !mtime.is_empty()
             && self
                 .repo
@@ -493,62 +520,105 @@ impl GDriveContactsSyncWorker {
                 .await
                 .map_err(|e| e.to_string())?
                 .as_deref()
-                == Some(mtime.as_str())
+                == Some(state_marker.as_str())
         {
             counts.files_skipped_unchanged = 1;
             return Ok(counts);
         }
 
-        let grid = self.fetch_grid(connection_id, file).await?;
-        let grid: Vec<Vec<String>> = grid.into_iter().take(MAX_ROWS_PER_FILE + 1).collect();
+        let sheets = self.fetch_sheets(connection_id, file).await?;
+        // Workbook reality: a .xlsx can be a dashboard over a data tab —
+        // the deep-scan feed keeps its 716-band table on "Master" behind a
+        // "Summary" cover sheet. Seed readers therefore inspect EVERY sheet;
+        // only sheets neither claims fall through to the contact reader,
+        // which judges each sheet on its own header.
+        let mut seed_rows_read = 0usize;
+        let mut contact_sheets: Vec<Vec<Vec<String>>> = Vec::new();
+        for raw in sheets {
+            let grid: Vec<Vec<String>> = raw.into_iter().take(MAX_ROWS_PER_FILE + 1).collect();
 
-        // A researched venue sheet is not a contact list: the venue check
-        // runs first and never falls through to extract_contacts — a seed
-        // row may carry an Email column and must not stage the room as a
-        // contact for it. Its rows import into the shared venue registry
-        // as attributed facts instead.
-        if let Some(report) = extract_seed_sheet(&grid) {
-            let summary = PostgresVenueSeedRepository::new(self.repo.pool().clone())
-                .import_sheet(self.workspace_id, &report)
-                .await
-                .map_err(|e: sqlx::Error| e.to_string())?;
-            self.repo
-                .record_file_state(
-                    self.workspace_id,
-                    &file.id,
-                    &file.name,
-                    &file.mime_type,
-                    &mtime,
-                    true,
-                    (report.venues.len() + report.refusals.len()) as i32,
-                    summary.imported as i32,
-                )
-                .await
-                .map_err(|e| e.to_string())?;
-            if !report.refusals.is_empty() {
-                tracing::info!(
-                    file = %file.name,
-                    refusals = ?report
-                        .refusals
-                        .iter()
-                        .map(|(row, refusal)| (*row, refusal.message()))
-                        .collect::<Vec<_>>(),
-                    "venue seed rows refused"
-                );
+            // A researched venue sheet is not a contact list: the venue
+            // check runs first and never falls through to extract_contacts
+            // — a seed row may carry an Email column and must not stage the
+            // room as a contact for it. Its rows import into the shared
+            // venue registry as attributed facts instead.
+            if let Some(report) = extract_seed_sheet(&grid) {
+                let summary = PostgresVenueSeedRepository::new(self.repo.pool().clone())
+                    .import_sheet(self.workspace_id, &report)
+                    .await
+                    .map_err(|e: sqlx::Error| e.to_string())?;
+                if !report.refusals.is_empty() {
+                    tracing::info!(
+                        file = %file.name,
+                        refusals = ?report
+                            .refusals
+                            .iter()
+                            .map(|(row, refusal)| (*row, refusal.message()))
+                            .collect::<Vec<_>>(),
+                        "venue seed rows refused"
+                    );
+                }
+                seed_rows_read += report.venues.len() + report.refusals.len();
+                counts.venues_imported += summary.imported;
+                counts.venue_refusals += report.refusals.len();
+                counts.venues_unknown_city += summary.unknown_city;
+                continue;
             }
-            counts.files_scanned = 1;
-            counts.venues_imported = summary.imported;
-            counts.venue_refusals = report.refusals.len();
-            counts.venues_unknown_city = summary.unknown_city;
-            return Ok(counts);
+
+            // A researched band sheet is not a contact list either: it
+            // feeds the shared peer-act registry — comparable acts, local
+            // support candidates, the watch list's proposals — under the
+            // same screening rules. A band row that carries an Email column
+            // must not stage the band as a press contact for it.
+            if let Some(report) = crowdrelay_domain::peer_act_seed::extract_seed_sheet(&grid) {
+                let summary = PostgresPeerActSeedRepository::new(self.repo.pool().clone())
+                    .import_sheet(self.workspace_id, &report)
+                    .await
+                    .map_err(|e: sqlx::Error| e.to_string())?;
+                if !report.refusals.is_empty() {
+                    tracing::info!(
+                        file = %file.name,
+                        refusals = ?report
+                            .refusals
+                            .iter()
+                            .map(|(row, refusal)| (*row, refusal.message()))
+                            .collect::<Vec<_>>(),
+                        "peer act seed rows refused"
+                    );
+                }
+                seed_rows_read += report.acts.len() + report.refusals.len();
+                counts.peer_acts_imported += summary.imported;
+                counts.peer_act_refusals += report.refusals.len();
+                counts.peer_acts_unresolved_city += summary.unresolved_city;
+                continue;
+            }
+
+            contact_sheets.push(grid);
         }
 
-        let report = extract_contacts(&grid);
-        if report.no_email_column {
+        // Contact extraction across the sheets neither seed reader claimed,
+        // merged into one source upsert — the file, not the tab, is the
+        // contact source, and one tab's rows must never mark another's
+        // disappeared.
+        let mut contacts = Vec::new();
+        let mut rows_read = seed_rows_read;
+        let mut saw_email_column = false;
+        for grid in &contact_sheets {
+            let report = extract_contacts(grid);
+            rows_read += report.rows_read;
+            if !report.no_email_column {
+                saw_email_column = true;
+                counts.rows_without_email += report.rows_without_email;
+                contacts.extend(report.contacts);
+            }
+        }
+
+        if !saw_email_column {
             // Not a contact list — record the mtime so we do not re-export
-            // it every hour, and never count it as a failure.
-            // If the file *used to* yield contacts (its email column was
-            // edited away), an empty upsert marks those staged rows
+            // it every hour, and never count it as a failure. This also
+            // fires when every sheet was a seed sheet: if the file *used
+            // to* yield contacts (edited into a seed sheet, or its email
+            // column removed), an empty upsert marks those staged rows
             // disappeared — the operator decides what that means.
             self.repo
                 .upsert_contacts_for_source(
@@ -567,9 +637,9 @@ impl GDriveContactsSyncWorker {
                     &file.id,
                     &file.name,
                     &file.mime_type,
-                    &mtime,
+                    &state_marker,
                     true,
-                    report.rows_read as i32,
+                    rows_read as i32,
                     0,
                 )
                 .await
@@ -584,7 +654,7 @@ impl GDriveContactsSyncWorker {
                 "gdrive",
                 &file.id,
                 &file.name,
-                &report.contacts,
+                &contacts,
                 true,
             )
             .await
@@ -595,27 +665,30 @@ impl GDriveContactsSyncWorker {
                 &file.id,
                 &file.name,
                 &file.mime_type,
-                &mtime,
+                &state_marker,
                 false,
-                report.rows_read as i32,
-                report.contacts.len() as i32,
+                rows_read as i32,
+                contacts.len() as i32,
             )
             .await
             .map_err(|e| e.to_string())?;
         counts.files_scanned = 1;
         counts.contacts_upserted = summary.upserted;
-        counts.rows_without_email = report.rows_without_email;
         counts.marked_disappeared = summary.marked_disappeared;
         Ok(counts)
     }
 
-    /// Turns one file into a grid of strings. Sheets export as CSV; real
-    /// spreadsheets download and parse through calamine; csv/tsv read raw.
-    async fn fetch_grid(
+    /// Turns one file into one grid per worksheet. Sheets export as CSV —
+    /// which carries only the first tab, a known limit noted below — real
+    /// workbooks download and yield every non-empty sheet so a data tab
+    /// behind a cover/dashboard sheet is not invisible; csv/tsv read raw
+    /// as a single grid.
+    async fn fetch_sheets(
         &self,
         connection_id: Uuid,
         file: &DriveFile,
-    ) -> Result<Vec<Vec<String>>, String> {
+    ) -> Result<Vec<Vec<Vec<String>>>, String> {
+        let single = |grid: Vec<Vec<String>>| vec![grid];
         match file.mime_type.as_str() {
             "application/vnd.google-apps.spreadsheet" => {
                 let csv_text = self
@@ -627,19 +700,19 @@ impl GDriveContactsSyncWorker {
                         ),
                     )
                     .await?;
-                parse_delimited(csv_text.as_bytes(), b',')
+                parse_delimited(csv_text.as_bytes(), b',').map(single)
             }
             "text/csv" => {
                 let text = self.download_media(connection_id, &file.id).await?;
-                parse_delimited(text.as_bytes(), b',')
+                parse_delimited(text.as_bytes(), b',').map(single)
             }
             "text/tab-separated-values" => {
                 let text = self.download_media(connection_id, &file.id).await?;
-                parse_delimited(text.as_bytes(), b'\t')
+                parse_delimited(text.as_bytes(), b'\t').map(single)
             }
             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" => {
                 let bytes = self.download_media_bytes(connection_id, &file.id).await?;
-                parse_xlsx(&bytes)
+                parse_xlsx_sheets(&bytes)
             }
             other => Err(format!("unsupported mime {other}")),
         }
@@ -721,14 +794,18 @@ impl GDriveContactsSyncWorker {
     }
 }
 
-/// xlsx → grid via calamine. First non-empty sheet wins — the Drive CSV
-/// export of a Google Sheet has the same single-sheet semantics.
-fn parse_xlsx(bytes: &[u8]) -> Result<Vec<Vec<String>>, String> {
+/// xlsx → one grid per non-empty worksheet via calamine. A workbook whose
+/// cover sheet is a dashboard must not hide its data tabs — the seed
+/// readers run per sheet. (The Drive CSV export of a Google Sheet still
+/// carries only the first tab — exporting a chosen tab would need the
+/// gid-aware export URL, which is a deliberate non-goal here.)
+fn parse_xlsx_sheets(bytes: &[u8]) -> Result<Vec<Vec<Vec<String>>>, String> {
     use calamine::{Data, Reader, Xlsx, open_workbook_from_rs};
     let mut workbook: Xlsx<std::io::Cursor<&[u8]>> =
         open_workbook_from_rs(std::io::Cursor::new(bytes))
             .map_err(|e| format!("xlsx open failed: {e}"))?;
     let names = workbook.sheet_names().to_owned();
+    let mut sheets = Vec::new();
     for name in names {
         let Ok(range) = workbook.worksheet_range(&name) else {
             continue;
@@ -758,7 +835,7 @@ fn parse_xlsx(bytes: &[u8]) -> Result<Vec<Vec<String>>, String> {
                     .collect()
             })
             .collect();
-        return Ok(grid);
+        sheets.push(grid);
     }
-    Ok(Vec::new())
+    Ok(sheets)
 }
