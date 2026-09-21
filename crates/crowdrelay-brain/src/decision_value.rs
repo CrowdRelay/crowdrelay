@@ -72,9 +72,20 @@ use crate::resource_cost::ResourceCost;
 /// `intrinsic_value_is_the_mean_above_coin_flip_and_scaled_below` for the test
 /// that pins both halves so a fourth version cannot drift.
 ///
-/// `uncertainty`, `evidence_quality`, `sample_size` and `contamination` do not
+/// `uncertainty`, `evidence_quality` and `sample_size` do not
 /// enter intrinsic value. `p_meaningful_effect` does, by the clause above; it is
 /// a probability about the effect's sign and size, not a spread.
+///
+/// Two fields once rode this list as carried-but-unpriced provenance and are
+/// now removed rather than carried write-only. `calibration_bias` was a
+/// per-template residual that always read 0.0 — live calibration instead runs
+/// upstream, where `CalibrationTracker` residuals shift the outcome model's
+/// prediction before any value is computed. `contamination` could only ever
+/// hold a stale prior round's estimate at decision time — this cycle's
+/// assignment is not persisted until dispatch, and
+/// `assignment_time_contamination` is stamped 0.0 at creation. The live record
+/// is `final_contamination` on the assignment row, computed at measurement and
+/// trace-joined one hop away.
 ///
 /// But `bridge_is_reliable` is read, one layer out.
 /// [`crate::portfolio::PortfolioOptimizer`] multiplies a `Y14Bridged`
@@ -153,8 +164,8 @@ pub enum RevenueModelSource {
 /// # Provenance
 ///
 /// Every DecisionValue carries full provenance: estimation regime,
-/// evidence quality, sample size, bridge confidence, contamination,
-/// and calibration bias. This lets the brain answer "why did you choose
+/// evidence quality, sample size and bridge confidence. This lets the
+/// brain answer "why did you choose
 /// A?" with inspectable evidence, not a single confidence number.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DecisionValue {
@@ -185,13 +196,6 @@ pub struct DecisionValue {
     /// When false, the optimizer should apply a confidence penalty
     /// to Y14Bridged candidates.
     pub bridge_is_reliable: bool,
-    /// Estimated contamination from concurrent actions (0.0–1.0).
-    /// 0.0 = clean, 1.0 = fully contaminated. Derived from the
-    /// experiment assignment's contamination estimate. High
-    /// contamination downgrades evidence quality.
-    #[serde(default)]
-    pub contamination: f64,
-
     // ── Resource economics ──
     /// The resource cost of this candidate.
     pub resource_cost: ResourceCost,
@@ -377,7 +381,6 @@ impl DecisionValue {
             uses_y30: stats.uses_y30,
             bridge_confidence: stats.bridge_confidence,
             bridge_is_reliable: stats.bridge_is_reliable,
-            contamination: 0.0,
             resource_cost,
             pragmatic_value: expected_y30,
             risk_penalty: if stats.p_meaningful_effect < 0.5 {
@@ -466,15 +469,6 @@ impl DecisionValue {
         }
         self
     }
-
-    /// Sets the contamination estimate on this DecisionValue. Called by
-    /// the application layer after loading contamination from the
-    /// experiment assignment state. Returns `self` for chaining.
-    #[must_use]
-    pub fn with_contamination(mut self, contamination: f64) -> Self {
-        self.contamination = contamination.clamp(0.0, 1.0);
-        self
-    }
 }
 
 #[cfg(test)]
@@ -516,7 +510,6 @@ mod tests {
             uses_y30: true,
             bridge_confidence: 5,
             bridge_is_reliable: false,
-            contamination: 0.0,
             resource_cost: ResourceCost::configured(1.0),
             pragmatic_value: 5.0,
             risk_penalty: Some(-0.2),
@@ -542,7 +535,6 @@ mod tests {
             uses_y30: true,
             bridge_confidence: 5,
             bridge_is_reliable: false,
-            contamination: 0.0,
             resource_cost: ResourceCost::configured(1.0),
             pragmatic_value: 5.0,
             risk_penalty: None, // NotModeled
@@ -672,62 +664,6 @@ mod tests {
         assert!(dv_low.total() < dv_high.total());
     }
 
-    /// Prediction error must not become a reward term.
-    ///
-    /// Calibration closes a real loop: `CalibrationTracker` records
-    /// (predicted, observed) per regime and
-    /// `correct_prediction_by_regime(OutcomeModel, ..)` shifts the *outcome
-    /// model's* prediction with it. That is calibration doing its job — it
-    /// changes what the brain expects, upstream of any value.
-    ///
-    /// `calibration_bias` on `DecisionValue` was a per-template residual
-    /// carried for provenance. It has been removed: the field was always 0.0,
-    /// the setter was gone, and the port method was a stub. Calibration
-    /// itself is not dead — `CalibrationTracker` records residuals per
-    /// regime and `correct_prediction_by_regime` shifts the outcome model's
-    /// prediction upstream of any value. But carrying a dead field that
-    /// always reads 0.0 is noise. If it ever reached `total()`, a template
-    /// the brain has been wrong about would rank differently from an
-    /// identical one it has been right about, at the same expected fans —
-    /// turning "how well did I predict" into "how much is this worth". Two
-    /// candidates whose economics are identical must score identically no
-    /// matter what the brain's track record on them is.
-    #[test]
-    fn contamination_does_not_change_the_economic_value() {
-        let candidate = |contamination: f64| DecisionValue {
-            expected_incremental_y30: 5.0,
-            uncertainty: 2.0,
-            p_meaningful_effect: 0.8,
-            estimation_regime: EstimationRegime::Y30Direct,
-            evidence_quality: EvidenceQuality::RandomizedHoldout,
-            sample_size: 10,
-            uses_y30: true,
-            bridge_confidence: 5,
-            bridge_is_reliable: false,
-            contamination,
-            resource_cost: ResourceCost::configured(1.0),
-            pragmatic_value: 5.0,
-            risk_penalty: None,
-            opportunity_cost: -1.0,
-            economic_value_fans: None,
-            revenue_model_source: None,
-            harm_fans: None,
-            decision_mode: DecisionMode::Exploit,
-        };
-
-        let well_predicted = candidate(0.0);
-        let contaminated = candidate(0.9);
-
-        // Contamination is the same kind of claim from the other direction: it
-        // says how much a measurement can be trusted, which belongs to evidence
-        // quality and to the variance the posterior is updated with — not to a
-        // number subtracted from what an action is worth.
-        assert!(
-            (well_predicted.total() - contaminated.total()).abs() < f64::EPSILON,
-            "contamination must qualify the evidence, not tax the economics"
-        );
-    }
-
     /// `total()` is exactly its three declared terms.
     ///
     /// The invariant this file opens with is that every additive term converts
@@ -748,7 +684,6 @@ mod tests {
             uses_y30: false,
             bridge_confidence: 0,
             bridge_is_reliable: false,
-            contamination: 0.7,
             resource_cost: ResourceCost::configured(9.0),
             pragmatic_value: 5.0,
             risk_penalty: Some(-0.25),
@@ -799,7 +734,6 @@ mod tests {
             uses_y30: true,
             bridge_confidence: 5,
             bridge_is_reliable: false,
-            contamination: 0.1,
             resource_cost: ResourceCost::configured(2.0),
             pragmatic_value: 5.0,
             risk_penalty: Some(-0.5),
@@ -816,7 +750,6 @@ mod tests {
         assert_eq!(back.estimation_regime, EstimationRegime::Y30Direct);
         assert_eq!(back.decision_mode, DecisionMode::Exploit);
         assert!(!back.bridge_is_reliable);
-        assert!((back.contamination - 0.1).abs() < 0.001);
         assert_eq!(back.risk_penalty, Some(-0.5));
     }
 
@@ -847,8 +780,8 @@ mod tests {
 
     #[test]
     fn serde_handles_missing_new_fields() {
-        // Brain state checkpoints from before this sprint won't have
-        // contamination. #[serde(default)] handles this.
+        // Brain state checkpoints from before Option fields existed omit
+        // them entirely; serde's Option handling yields None, not an error.
         let old_json = r#"{
             "expected_incremental_y30": 5.0,
             "uncertainty": 2.0,
@@ -865,8 +798,9 @@ mod tests {
             "decision_mode": "exploit"
         }"#;
         let back: DecisionValue = serde_json::from_str(old_json).unwrap();
-        assert!((back.contamination - 0.0).abs() < 0.001);
         assert!(back.risk_penalty.is_none());
+        assert!(back.economic_value_fans.is_none());
+        assert!(back.harm_fans.is_none());
     }
     /// Pins what intrinsic value actually is, on both sides of the boundary.
     ///

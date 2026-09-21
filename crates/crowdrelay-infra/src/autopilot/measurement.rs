@@ -296,16 +296,12 @@ impl AutopilotMeasurementRepository for PostgresAutopilotRepository {
             // is more efficient for the brain's read path.
             match measurement.kind {
                 // Engagement is the fastest signal this product can observe --
-                // upvotes and comments arrive in hours, in tens, per post --
-                // and it resolved into nothing. Only fan-growth and
-                // Signal-install kinds wrote back here, so the one measurement
-                // with enough volume to rank on was measured and discarded.
-                //
-                // It is stored, not learned from. Fitting a model on it today
-                // would mean fitting on zero rows, because nothing has been
-                // published yet. The point is that history starts accruing
-                // with the first post rather than with the decision to build
-                // the model.
+                // upvotes and comments arrive in hours, in tens, per post.
+                // This arm writes the typed `observed_engagement` column the
+                // evidence view joins on; the learned copy rides the generic
+                // `learnable_metric_key` merge below, which lands the value in
+                // `observed_metrics` under `engagement_score` for the metric
+                // posteriors to consume.
                 AutopilotMeasurementKind::AgentRunCommunityEngagement7d => {
                     let _ = sqlx::query(
                         r#"

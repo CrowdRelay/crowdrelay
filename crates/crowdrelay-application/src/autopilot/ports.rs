@@ -585,25 +585,6 @@ pub trait AutopilotDecisionRepository: Send + Sync {
         workspace_id: WorkspaceId,
     ) -> Result<EvidenceLedger, RepositoryError>;
 
-    /// Loads the strongest evidence quality for a template+unit from
-    /// the experiment assignment state. Returns `Observational` when
-    /// no experiment assignments exist.
-    async fn load_evidence_quality(
-        &self,
-        workspace_id: WorkspaceId,
-        template_id: &str,
-        unit_id: &str,
-    ) -> Result<crowdrelay_brain::EvidenceQuality, RepositoryError>;
-
-    /// Loads the contamination estimate for a unit+template from the
-    /// experiment assignment state. Returns 0.0 when no assignments exist.
-    async fn load_contamination_estimate(
-        &self,
-        workspace_id: WorkspaceId,
-        template_id: &str,
-        unit_id: &str,
-    ) -> Result<Option<f64>, RepositoryError>;
-
     /// Records a credit allocation — attributed credit for a fan outcome.
     /// CRITICAL: the raw observation in the evidence table is immutable.
     /// This stores attributed credit in a SEPARATE table
