@@ -110,7 +110,7 @@ pub(super) fn select_portfolio(
     policy: &GrowthIntelligencePolicy,
     pending_measurement_count: u32,
     workspace_id: WorkspaceId,
-    experimental_keys: &std::collections::HashSet<String>,
+    experimental_quality: &std::collections::HashMap<String, crowdrelay_brain::EvidenceQuality>,
     sizing_multiplier: f64,
     exchange: &crowdrelay_brain::ValueExchange,
 ) -> PortfolioRun {
@@ -137,13 +137,21 @@ pub(super) fn select_portfolio(
             } else {
                 DecisionMode::Explore
             };
-            let decision_value = DecisionValue::from_stats(
+            let mut decision_value = DecisionValue::from_stats(
                 stats,
                 template_cost(policy, &p.template_id),
                 decision_mode,
             )
             .with_economic_value(stats, exchange)
             .with_harm_cost(stats);
+            // A treatment-assigned candidate's dispatch executes under its
+            // experiment design, so the design — not the stats' Observational
+            // default — states what quality the measurement will carry. The
+            // same value lands in the pool entry and in the decision's
+            // provenance record because both are built from this object.
+            if let Some(quality) = experimental_quality.get(&c.decision_key) {
+                decision_value.evidence_quality = *quality;
+            }
             PortfolioCandidate {
                 opportunity_id: OpportunityId {
                     template_id: p.template_id.clone(),
@@ -176,7 +184,7 @@ pub(super) fn select_portfolio(
                 // candidates from active experiments. These candidates
                 // can use the experimental_dispatch_budget (additional
                 // slots beyond max_dispatches) when the VOI justifies it.
-                is_experimental: experimental_keys.contains(&c.decision_key),
+                is_experimental: experimental_quality.contains_key(&c.decision_key),
                 decision_value,
             }
         })

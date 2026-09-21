@@ -38,7 +38,6 @@ fn make_candidate(
         uses_y30: false,
         bridge_confidence: 0,
         bridge_is_reliable: false,
-        contamination: 0.0,
         resource_cost: ResourceCost::configured(1.0),
         pragmatic_value: expected_fans,
         risk_penalty: None,

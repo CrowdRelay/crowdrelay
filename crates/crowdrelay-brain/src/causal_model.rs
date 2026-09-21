@@ -105,9 +105,11 @@ pub struct DispatchPrediction {
     /// no creative surface (scanners, the strategist) and for rows written
     /// before families existed.
     ///
-    /// Recorded, not yet learned from: see
-    /// [`crowdrelay_domain::creative::CreativeFamily`] for why the estimator
-    /// waits for data rather than the other way round.
+    /// Learned from: evidence replay feeds resolved outcomes into
+    /// [`CausalModel::update_family_effect`], and the community-engager
+    /// Thompson-samples the next post's family via
+    /// [`CausalModel::predict_family_stats`]. See
+    /// [`crowdrelay_domain::creative::CreativeFamily`] for the family set.
     #[serde(default)]
     pub creative_family: Option<crowdrelay_domain::creative::CreativeFamily>,
     /// Predicted values for the learned secondary metrics, in each metric's
@@ -1032,10 +1034,12 @@ impl CausalModel {
             bridge_confidence: self.bridge.confidence(),
             bridge_is_reliable: self.bridge.confidence() >= MIN_BRIDGE_CONFIDENCE,
             secondary,
-            // Default to Observational — the application layer overrides
-            // this via load_evidence_quality() when experiment assignments
-            // exist. This is a conservative fallback, not a fake: when no
-            // experiments have been run, Observational is the honest quality.
+            // Default to Observational — the evaluator overrides this for
+            // treatment-assigned candidates with
+            // `ExperimentDesign::evidence_quality()`, the quality the design
+            // will stamp on the assignment at dispatch. A conservative
+            // fallback, not a fake: a non-experimental dispatch produces
+            // observational evidence, and that is what this says.
             evidence_quality: crate::evidence::EvidenceQuality::Observational,
         }
     }

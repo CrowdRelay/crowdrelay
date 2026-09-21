@@ -514,12 +514,19 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
             .filter(|(i, _)| !control_indices.contains(i))
             .map(|(_, c)| c.clone())
             .collect();
-        // Build the set of treatment-assigned decision_keys for marking
-        // candidates as is_experimental in the portfolio.
-        let experimental_keys: std::collections::HashSet<String> = arm_map
+        // Build the per-candidate evidence quality for treatment-assigned
+        // candidates: their dispatch executes under the experiment design in
+        // arm_map, so the design's quality — not the stats' Observational
+        // default — is what the decision record should claim. The map doubles
+        // as the is_experimental marker: its keys are exactly the treatment
+        // decision_keys.
+        let experimental_quality: std::collections::HashMap<
+            String,
+            crowdrelay_brain::EvidenceQuality,
+        > = arm_map
             .iter()
             .filter(|(_, (arm, _, _, _))| matches!(arm, ArmAssignment::Treatment))
-            .map(|(k, _)| k.clone())
+            .map(|(key, (_, design, _, _))| (key.clone(), design.evidence_quality()))
             .collect();
         // Run the portfolio optimizer on the treatment + non-experiment
         // candidates only. Control candidates are NOT in the pool.
@@ -553,7 +560,7 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
             &gi_policy,
             pending_measurement_count,
             self.workspace_id,
-            &experimental_keys,
+            &experimental_quality,
             sizing_multiplier,
             &causal_model.value_exchange,
         );
