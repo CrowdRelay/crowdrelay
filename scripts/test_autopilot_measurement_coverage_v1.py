@@ -83,7 +83,6 @@ MUST_BE_MEASURED = {
     "RequestSignalPush",
     "RequestAgentRun",
     "RequestAgentContent",
-    "RequestAudienceCampaign",
     "RequestCommunityEngagement",
     "RequestFanLifecycleMessage",
 }
