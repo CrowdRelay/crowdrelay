@@ -1041,6 +1041,7 @@ mod tests {
             image_url: None,
             media_id: None,
             source_url: None,
+            source_id: None,
             creative_family: None,
         }
     }

@@ -42,6 +42,22 @@ pub(super) fn growth_routes() -> Router<AppState> {
             "/v1/admin/autopilot/content-sources/{source_id}/relay-ladder/revoke",
             post(autopilot::revoke_relay_ladder),
         )
+        // The community relay batch: the same one-yes shape over a content
+        // piece's whole community spread. One card shows the image, the
+        // target list and the hourly drip; approving releases the spread at
+        // that cadence and revoking stops the part not yet sent.
+        .route(
+            "/v1/admin/autopilot/community-relays",
+            get(autopilot::list_community_relays),
+        )
+        .route(
+            "/v1/admin/autopilot/community-relays/{source_id}/approve",
+            post(autopilot::approve_community_relay),
+        )
+        .route(
+            "/v1/admin/autopilot/community-relays/{source_id}/revoke",
+            post(autopilot::revoke_community_relay),
+        )
         // P.4: the show ladder is the same one-yes shape as a wave, keyed on
         // the event rather than a batch — approve once and every rung whose
         // own evidence gates pass fires on schedule; revoke stops the rest.

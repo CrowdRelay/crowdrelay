@@ -298,6 +298,7 @@ fn treatment_candidate(target_id: uuid::Uuid, decision_key: &str) -> DecisionCan
             image_url: None,
             media_id: None,
             source_url: None,
+            source_id: None,
             creative_family: None,
         },
         decision_key: decision_key.to_owned(),

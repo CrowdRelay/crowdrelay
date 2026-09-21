@@ -218,6 +218,22 @@ pub(crate) fn router(state: crate::AppState) -> Router {
             "/v1/control-plane/autopilot/events/{event_id}/growth-ladder/revoke",
             post(crate::autopilot::revoke_show_ladder),
         )
+        // Community relay batches: a content piece's whole community spread as
+        // one card — image, targets, the hourly drip — instead of a parked
+        // action per community. The writes reuse the canonical handlers; this
+        // surface only routes to them.
+        .route(
+            "/v1/control-plane/autopilot/community-relays",
+            get(crate::autopilot::list_community_relays),
+        )
+        .route(
+            "/v1/control-plane/autopilot/community-relays/{source_id}/approve",
+            post(crate::autopilot::approve_community_relay),
+        )
+        .route(
+            "/v1/control-plane/autopilot/community-relays/{source_id}/revoke",
+            post(crate::autopilot::revoke_community_relay),
+        )
         .route(
             "/v1/control-plane/autopilot/team-opportunities/{opportunity_id}/terms",
             post(crate::autopilot::record_team_opportunity_terms),

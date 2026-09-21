@@ -82,6 +82,18 @@ pub trait AutopilotControlRepository: Send + Sync {
         now: OffsetDateTime,
     ) -> Result<Vec<NextBestAction>, RepositoryError>;
 
+    /// Every community relay batch — a content piece's whole community spread
+    /// read as one campaign: the content, the image, the target list, the
+    /// cadence, and once approved the posts and clicks the spread produced.
+    ///
+    /// Separate from the action queue because the batch *is* the queue entry —
+    /// the per-community deliveries it covers are detail rows under it, not
+    /// cards of their own.
+    async fn load_community_relays(
+        &self,
+        workspace_id: WorkspaceId,
+    ) -> Result<Vec<CommunityRelayBatchView>, RepositoryError>;
+
     /// The scout shortlist: every tracked opportunity with its link, costed
     /// figures, staleness and latest decision — including the rows that are
     /// closed, ineligible or stale, because a review surface that hides its
@@ -280,6 +292,36 @@ pub trait AutopilotControlRepository: Send + Sync {
         &self,
         workspace_id: WorkspaceId,
         event_id: EventId,
+        idempotency_key: &crate::IdempotencyKey,
+        request_id: Option<&crate::RequestId>,
+    ) -> Result<AutopilotControlMutation, RepositoryError>;
+
+    /// Approves a community relay batch — one "yes" over every delivery a
+    /// piece of content drafted to a community.
+    ///
+    /// Unlike the relay ladder this is a standing answer, not a point-in-time
+    /// release: the batch row persists, so a draft that lands after the
+    /// approval queues under it instead of parking a second ask. Deliveries
+    /// drip out at `interval_seconds` on the community executor; the card the
+    /// operator approved said exactly that cadence.
+    async fn approve_community_relay(
+        &self,
+        workspace_id: WorkspaceId,
+        source_id: uuid::Uuid,
+        interval_seconds: Option<i32>,
+        idempotency_key: &crate::IdempotencyKey,
+        request_id: Option<&crate::RequestId>,
+    ) -> Result<AutopilotControlMutation, RepositoryError>;
+
+    /// Revokes a community relay batch — "stop the rest of this spread".
+    ///
+    /// Parked deliveries lose their ask, queued deliveries are cancelled,
+    /// and the community_posts rows still waiting in the drip are cancelled.
+    /// A post already on Reddit keeps its record; a revoke cannot unpost.
+    async fn revoke_community_relay(
+        &self,
+        workspace_id: WorkspaceId,
+        source_id: uuid::Uuid,
         idempotency_key: &crate::IdempotencyKey,
         request_id: Option<&crate::RequestId>,
     ) -> Result<AutopilotControlMutation, RepositoryError>;

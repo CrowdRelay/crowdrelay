@@ -77,6 +77,8 @@
         /v1/control-plane/nights/* \
         /v1/control-plane/community-posts \
         /v1/control-plane/community-posts/* \
+        /v1/control-plane/autopilot/community-relays \
+        /v1/control-plane/autopilot/community-relays/* \
         /v1/control-plane/social-posts/* \
         /v1/control-plane/telegram-posts/* \
         /v1/control-plane/discord-posts/* \

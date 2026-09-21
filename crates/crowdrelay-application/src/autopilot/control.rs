@@ -469,6 +469,70 @@ pub struct NextBestAction {
     pub briefing: Option<ActionBriefing>,
 }
 
+/// One community relay batch — a piece of content's whole community spread,
+/// read as a single campaign rather than a card per community.
+///
+/// The card this feeds answers the only question the batch asks: "does this
+/// post go to these communities, one an hour?" — the content, the image, the
+/// target list and the cadence in one view, and after approval the same row
+/// reports what the spread actually did.
+#[derive(Clone, Debug, Serialize)]
+pub struct CommunityRelayBatchView {
+    /// The batch's identity: the content source every delivery carries.
+    pub source_id: uuid::Uuid,
+    /// `awaiting_approval`, `approved`, `revoked` or `done`.
+    pub status: String,
+    /// Seconds the executor leaves between two posts from this batch — the
+    /// cadence the operator approved.
+    pub interval_seconds: i32,
+    #[serde(with = "time::serde::rfc3339")]
+    pub created_at: OffsetDateTime,
+    #[serde(with = "time::serde::rfc3339::option")]
+    pub approved_at: Option<OffsetDateTime>,
+    #[serde(with = "time::serde::rfc3339::option")]
+    pub revoked_at: Option<OffsetDateTime>,
+    /// Approval + 7 days: the window the progress counts report against.
+    #[serde(with = "time::serde::rfc3339::option")]
+    pub observe_until: Option<OffsetDateTime>,
+    /// The source's own title and link — what the posts are about.
+    pub source_title: Option<String>,
+    pub source_url: Option<String>,
+    /// The image the posts carry, from the source row — never model-supplied.
+    pub image_url: Option<String>,
+    /// One drafted delivery as a sample of what the posts look like. Per-target
+    /// copy differs; this is the first draft's title and body.
+    pub sample_title: Option<String>,
+    pub sample_body: Option<String>,
+    /// Every community the batch is aimed at, with where its delivery stands.
+    pub targets: Vec<CommunityRelayDelivery>,
+    /// Progress counts across the batch's `community_posts` rows.
+    pub posts_posted: i64,
+    pub posts_pending: i64,
+    pub posts_failed: i64,
+    /// Clicks the batch's tracked links earned — the measurement half of the
+    /// card, live until `observe_until` closes the window.
+    pub clicks: i64,
+}
+
+/// One community inside a relay batch: where its delivery stands.
+///
+/// Named `Delivery`, not `Target`, because `content_supply::CommunityRelayTarget`
+/// already names the drafting input — target id plus language. This is the
+/// read side: the delivery's own state, not the target record.
+#[derive(Clone, Debug, Serialize)]
+pub struct CommunityRelayDelivery {
+    pub subreddit: String,
+    /// The post's language tag, when the target row carries one.
+    pub language: Option<String>,
+    /// `awaiting_approval`, `queued`, `posted`, `failed`, `cancelled` —
+    /// the delivery's own state, not the batch's.
+    pub status: String,
+    /// The Reddit permalink once the post landed.
+    #[serde(with = "time::serde::rfc3339::option")]
+    pub posted_at: Option<OffsetDateTime>,
+    pub post_url: Option<String>,
+}
+
 /// One row of the scout shortlist — every tracked opportunity, whether or not
 /// it is currently actionable.
 ///

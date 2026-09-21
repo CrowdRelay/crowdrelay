@@ -44,6 +44,12 @@ pub enum OutcomeRejection {
     /// post exists to share a release video; anything else is a post about
     /// nothing — which is how fabricated anecdotes reached Reddit.
     UnsourcedPost { source_id: Option<String> },
+    /// A community post whose relay batch the operator already answered:
+    /// revoked means the spread was refused, done means the observation
+    /// window closed. A draft landing after the answer is discarded, not
+    /// parked — re-asking the same spread is the flood the batch exists to
+    /// end.
+    RelayBatchClosed { source_id: Uuid, status: String },
     /// A scout finding with no usable link. The destination is the finding —
     /// a title and a vibe with nothing to check is model memory wearing a
     /// finding's clothes.
@@ -86,6 +92,10 @@ impl std::fmt::Display for OutcomeRejection {
             Self::UnsourcedPost { source_id } => write!(
                 f,
                 "UNSOURCED_POST: source_id {source_id:?} does not name an active, unexpired video content source for this workspace"
+            ),
+            Self::RelayBatchClosed { source_id, status } => write!(
+                f,
+                "RELAY_BATCH_CLOSED: relay batch for source {source_id} is {status} — the spread was already answered"
             ),
             Self::MissingFindingLink => write!(
                 f,

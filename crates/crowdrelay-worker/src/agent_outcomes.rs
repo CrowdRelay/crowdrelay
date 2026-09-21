@@ -607,6 +607,10 @@ impl AgentOutcomeWorker {
             // media fields are attached there, Rust-side, so the model's
             // text can never carry a URL it invented.
             let mut community_source: Option<CommunityPostSourceRow> = None;
+            // The content source behind a community draft is also its batch
+            // key: fifty drafts carrying one synced post are one approval,
+            // not fifty.
+            let mut batch_source_id: Option<Uuid> = None;
             if let Some(target_id) = community_target_id {
                 let admitted = sqlx::query_scalar::<_, bool>(
                     r#"
@@ -661,10 +665,10 @@ impl AgentOutcomeWorker {
                     .and_then(|i| i.get("source_id"))
                     .and_then(Value::as_str)
                     .map(str::to_owned);
-                let source_row: Option<CommunityPostSourceRow> = match source_id_raw
+                let source_uuid = source_id_raw
                     .as_deref()
-                    .and_then(|s| Uuid::parse_str(s).ok())
-                {
+                    .and_then(|s| Uuid::parse_str(s).ok());
+                let source_row: Option<CommunityPostSourceRow> = match source_uuid {
                     Some(source_id) => {
                         sqlx::query_as::<_, CommunityPostSourceRow>(
                             r#"
@@ -703,6 +707,7 @@ impl AgentOutcomeWorker {
                         .await?;
                     return Ok((None, None));
                 };
+                batch_source_id = source_uuid;
                 community_source = Some(source_row);
             }
 
@@ -753,6 +758,88 @@ impl AgentOutcomeWorker {
                 );
             }
 
+            // ── The relay batch is the unit of approval ──
+            //
+            // One synced post drafted for fifty communities is one question,
+            // not fifty cards. The batch row is the standing answer: a draft
+            // whose content the operator already approved queues into the
+            // drip directly; one whose batch was revoked or already observed
+            // is discarded rather than parked; one whose batch is still
+            // waiting joins the parked set the single card covers.
+            let mut relay_batch_created = false;
+            let mut batch_approved = false;
+            if let Some(source_id) = batch_source_id {
+                let created = sqlx::query_scalar::<_, String>(
+                    r#"
+                    INSERT INTO community_relay_batches (workspace_id, source_id)
+                    VALUES ($1, $2)
+                    ON CONFLICT (workspace_id, source_id) DO NOTHING
+                    RETURNING status
+                    "#,
+                )
+                .bind(outcome.workspace_id)
+                .bind(source_id)
+                .fetch_optional(&mut *tx)
+                .await?;
+                let batch_status = match created {
+                    Some(status) => {
+                        relay_batch_created = true;
+                        status
+                    }
+                    None => {
+                        sqlx::query_scalar::<_, String>(
+                            "SELECT status FROM community_relay_batches \
+                             WHERE workspace_id = $1 AND source_id = $2",
+                        )
+                        .bind(outcome.workspace_id)
+                        .bind(source_id)
+                        .fetch_one(&mut *tx)
+                        .await?
+                    }
+                };
+                match batch_status.as_str() {
+                    "revoked" | "done" => {
+                        let rejection = OutcomeRejection::RelayBatchClosed {
+                            source_id,
+                            status: batch_status,
+                        };
+                        tracing::info!(
+                            outcome_id = %outcome.id,
+                            rejection = %rejection,
+                            "discarding community draft — its relay batch was already answered"
+                        );
+                        drop(tx);
+                        self.reject_outcome(outcome.id, &rejection.to_string())
+                            .await?;
+                        return Ok((None, None));
+                    }
+                    // A bounded_auto workspace answered this spread by
+                    // standing policy — record that answer on the batch so
+                    // the drip and the card agree about who said yes, and so
+                    // drafts still landing queue under it.
+                    "awaiting_approval" if auto_execute => {
+                        sqlx::query(
+                            r#"
+                            UPDATE community_relay_batches
+                            SET status = 'approved',
+                                approved_at = now(),
+                                approved_by = 'policy:bounded_auto',
+                                observe_until = now() + INTERVAL '7 days',
+                                updated_at = now()
+                            WHERE workspace_id = $1 AND source_id = $2
+                            "#,
+                        )
+                        .bind(outcome.workspace_id)
+                        .bind(source_id)
+                        .execute(&mut *tx)
+                        .await?;
+                        batch_approved = true;
+                    }
+                    "approved" => batch_approved = true,
+                    _ => {}
+                }
+            }
+
             let action_details = if let Some(target_id) = community_target_id {
                 Some(
                     self.community_engagement_action(
@@ -760,6 +847,7 @@ impl AgentOutcomeWorker {
                         outcome,
                         target_id,
                         community_source.as_ref(),
+                        batch_source_id,
                     )
                     .await?,
                 )
@@ -964,19 +1052,35 @@ impl AgentOutcomeWorker {
                 })?;
                 let action_class = parsed.action_class().as_str();
 
-                if auto_execute {
+                // `batch_approved` queues beside `auto_execute`: the operator
+                // approved the content once at the batch, so a draft landing
+                // afterwards is already answered work — a second parked card
+                // for it is the flood the batch exists to end.
+                if auto_execute || batch_approved {
+                    let approved_by = if auto_execute {
+                        "policy:bounded_auto"
+                    } else {
+                        "operator:community_relay"
+                    };
+                    // The batch card is the approval, not a shortcut past the
+                    // hold that makes revoking meaningful: a draft queuing
+                    // under the operator's "yes" waits its class's window
+                    // exactly like one the ladder released. A bounded-auto row
+                    // keeps the same available_at it always had — the standing
+                    // policy is the operator's already-given answer.
                     sqlx::query_scalar::<_, Uuid>(
                         r#"
                     INSERT INTO viryaos_autopilot_actions (
                         id, workspace_id, decision_id, context, action_kind,
                         subject_kind, subject_id, idempotency_key, payload, status,
                         action_class, approved_at, approved_by, approval_expires_at,
-                        trace_id, causation_id
+                        trace_id, causation_id, available_at
                     )
                     VALUES (
                         $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,
-                        now(), 'policy:bounded_auto', NULL,
-                        $12, NULL
+                        now(), $13, NULL,
+                        $12, NULL,
+                        now() + make_interval(secs => $14::double precision)
                     )
                     ON CONFLICT DO NOTHING
                     RETURNING id
@@ -994,6 +1098,12 @@ impl AgentOutcomeWorker {
                     .bind("queued")
                     .bind(action_class)
                     .bind(trace_id)
+                    .bind(approved_by)
+                    .bind(if batch_approved && !auto_execute {
+                        parsed.action_class().hold_seconds() as f64
+                    } else {
+                        0.0
+                    })
                     .fetch_optional(&mut *tx)
                     .await?
                 } else {
@@ -1008,7 +1118,13 @@ impl AgentOutcomeWorker {
                     VALUES (
                         $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,
                         NULL, NULL,
-                        now() + INTERVAL '72 hours',
+                        -- A batched delivery has no per-action expiry: the
+                        -- batch card is the standing question and its rows
+                        -- live as long as it does. A 72h expiry here would
+                        -- silently kill a spread whose card still says
+                        -- "waiting on you".
+                        CASE WHEN $13::bool THEN NULL
+                             ELSE now() + INTERVAL '72 hours' END,
                         $12, NULL
                     )
                     ON CONFLICT DO NOTHING
@@ -1027,6 +1143,7 @@ impl AgentOutcomeWorker {
                     .bind("awaiting_approval")
                     .bind(action_class)
                     .bind(trace_id)
+                    .bind(batch_source_id.is_some())
                     .fetch_optional(&mut *tx)
                     .await?;
                     // A parked approval nobody hears about is a decision that
@@ -1038,7 +1155,13 @@ impl AgentOutcomeWorker {
                     // transaction: action + notification commit or neither
                     // does. Only on a real insert — a conflict is a re-run
                     // and must not re-notify.
-                    if let Some(inserted_id) = inserted {
+                    // One notification per batch, not one per community it
+                    // lands in. The first drafted delivery creates the batch
+                    // row; only that insert notifies. Later drafts join the
+                    // parked set the card already covers — a notification per
+                    // draft was the alert flood nobody could act on.
+                    let notify = batch_source_id.is_none() || relay_batch_created;
+                    if let (Some(inserted_id), true) = (inserted, notify) {
                         sqlx::query(
                             r#"
                             INSERT INTO outbox_events (workspace_id, event_type, event_version, payload, max_attempts, trace_id, causation_id, action_id)
@@ -1052,7 +1175,11 @@ impl AgentOutcomeWorker {
                                     'subject_id', $6::uuid,
                                     'reason', $7::text,
                                     'confidence_basis_points', $8::integer,
-                                    'approval_expires_at', now() + INTERVAL '72 hours',
+                                    'approval_expires_at',
+                                        CASE WHEN $11::bool THEN NULL
+                                             ELSE now() + INTERVAL '72 hours' END,
+                                    'relay_batch', $11::bool,
+                                    'source_id', $12::uuid,
                                     'trace_id', $9::uuid
                                 ),
                                 12,
@@ -1072,6 +1199,8 @@ impl AgentOutcomeWorker {
                         .bind(evidence_confidence_basis_points(outcome))
                         .bind(trace_id)
                         .bind(decision_id)
+                        .bind(batch_source_id.is_some())
+                        .bind(batch_source_id)
                         .execute(&mut *tx)
                         .await?;
                     }
