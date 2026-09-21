@@ -10,7 +10,7 @@
 
 use crowdrelay_application::autopilot::{
     AutopilotMeasurementKind, AutopilotMeasurementRepository, ClaimedAutopilotMeasurement,
-    assess_measurement_effect,
+    HarmObservation, assess_measurement_effect,
 };
 use crowdrelay_domain::WorkspaceId;
 use crowdrelay_domain::ids::{AutopilotActionId, AutopilotMeasurementId};
@@ -154,6 +154,7 @@ async fn queue_measurement(
         subject_id: action_id,
         baseline_value,
         action_finished_at,
+        due_at: action_finished_at + time::Duration::days(7),
         attempt_number: 1,
     }
 }
@@ -170,10 +171,17 @@ async fn resolve(f: &Fixture, measurement: &ClaimedAutopilotMeasurement, observe
     .execute(&f.pool)
     .await
     .expect("processing");
-    let effect = assess_measurement_effect(measurement, observed)
+    let effect = assess_measurement_effect(measurement, observed, &HarmObservation::default())
         .expect("a measurement the worker can classify");
     f.repository
-        .complete_measurement(f.workspace_id, measurement, observed, effect, f.now)
+        .complete_measurement(
+            f.workspace_id,
+            measurement,
+            observed,
+            effect,
+            Some(&HarmObservation::default()),
+            f.now,
+        )
         .await
         .expect("complete");
 }
@@ -240,10 +248,17 @@ async fn generic_metrics_merge_into_evidence() {
         Some(17.0),
         "a second metric merges without losing the first"
     );
+    let metric_keys: Vec<&String> = merged
+        .as_object()
+        .expect("metrics object")
+        .keys()
+        .filter(|key| !key.starts_with("harm:"))
+        .collect();
     assert_eq!(
-        merged.as_object().map(serde_json::Map::len),
-        Some(2),
-        "and nothing else lands in the map"
+        metric_keys.len(),
+        2,
+        "and no other metric lands in the map — the harm keys are the \
+         separate ledger every completion writes"
     );
 }
 
@@ -282,10 +297,16 @@ async fn typed_kinds_do_not_double_write_metrics() {
         Some(5.0),
         "the typed column still gets the value"
     );
-    assert_eq!(
-        metrics,
-        serde_json::json!({}),
-        "a typed kind leaves observed_metrics empty — no double learning"
+    let metric_keys: Vec<&String> = metrics
+        .as_object()
+        .expect("metrics object")
+        .keys()
+        .filter(|key| !key.starts_with("harm:"))
+        .collect();
+    assert!(
+        metric_keys.is_empty(),
+        "a typed kind writes no metric keys — the harm keys are the \
+         separate ledger every completion writes"
     );
 }
 
@@ -537,6 +558,7 @@ async fn show_attendance_rate_and_cancelled_event_guards() {
         subject_id: event_id,
         baseline_value: 0.0,
         action_finished_at: f.now - time::Duration::days(20),
+        due_at: f.now,
         attempt_number: 1,
     };
 
@@ -796,6 +818,7 @@ async fn release_milestone_metrics_reach_the_evidence_row() {
         subject_id: release_id,
         baseline_value: 0.0,
         action_finished_at: anchor,
+        due_at: f.now,
         attempt_number: 1,
     };
 
@@ -890,6 +913,7 @@ async fn release_funnel_abandons_when_no_link_was_tracked() {
             subject_id: release_id,
             baseline_value: 0.0,
             action_finished_at: anchor,
+            due_at: f.now,
             attempt_number: 1,
         };
         let outcome = f

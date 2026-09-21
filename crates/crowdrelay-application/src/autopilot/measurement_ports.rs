@@ -461,7 +461,112 @@ pub struct ClaimedAutopilotMeasurement {
     pub subject_id: uuid::Uuid,
     pub baseline_value: f64,
     pub action_finished_at: OffsetDateTime,
+    /// When the measurement's window ends — the harm collector bounds its
+    /// counts to the same window the primary metric covers, so "what the
+    /// action cost" and "what the action earned" answer about the same
+    /// span.
+    pub due_at: OffsetDateTime,
     pub attempt_number: u32,
+}
+
+/// What the action *cost*, counted per harm source inside the measurement's
+/// window. These are levels — counts of real events — never signed deltas,
+/// and each lands in the evidence row's `observed_metrics` under its
+/// `harm:*` key when the measurement resolves, terminal failure included.
+/// Every `harm:` key is lower-is-better by definition; the prefix is the
+/// vocabulary.
+///
+/// Attribution is per action: fans the action's sends actually reached,
+/// outreach targets the action actually wrote to, the event the action
+/// actually promoted. A harm event that cannot be tied to the action does
+/// not appear here — workspace-level harm is a different question.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct HarmObservation {
+    /// Consent withdrawals by fans the action contacted — one withdrawal is
+    /// one fan lost. Counted per fan, not per consent row: a fan who
+    /// rescinds marketing and notification consent after one send is still
+    /// one fan.
+    pub unsubscribes: f64,
+    /// Spam complaints filed against outreach targets this action wrote to.
+    /// Reputation damage, not a countable fan — this feeds the worsened
+    /// classification and the autonomy guard, never `harm_fans`.
+    pub complaints: f64,
+    /// Refund ledger entries against the event this action promoted —
+    /// money returned is a broken promise, a constraint signal rather than
+    /// a fan count.
+    pub refunds: f64,
+    /// Fans the action contacted who were suppressed (account deleted)
+    /// inside the window. Same identity conversion as unsubscribes: one
+    /// suppression is one fan lost.
+    pub fan_suppressions: f64,
+    /// The promoted event was cancelled — 0 or 1, event subjects only. A
+    /// cancelled show is harm to the audience relationship even though its
+    /// attendance outcome is unobservable.
+    pub show_cancellations: f64,
+    /// How many distinct fans the action's sends reached — the unsubscribe
+    /// denominator, not a harm key. Written nowhere; it exists so the
+    /// assessment override can tell churn from harm.
+    pub contacted: f64,
+}
+
+/// Baseline marketing churn, as a fraction of the audience reached —
+/// the same `0.005` floor `CampaignUnsubscribe7d` applies to its observed
+/// rate. A send that lost fewer withdrawals than the floor would have lost
+/// anyway did not earn a Worsened verdict for them.
+const UNSUBSCRIBE_CHURN_FLOOR: f64 = 0.005;
+
+impl HarmObservation {
+    /// Any harm observed at all.
+    #[must_use]
+    pub fn any(&self) -> bool {
+        self.unsubscribes > 0.0
+            || self.complaints > 0.0
+            || self.refunds > 0.0
+            || self.fan_suppressions > 0.0
+            || self.show_cancellations > 0.0
+    }
+
+    /// The harm the assessment override acts on. Every source counts raw
+    /// except unsubscribes, which carry baseline churn — the audience would
+    /// have lost a fraction with no send at all. Under the floor a
+    /// withdrawal is churn, not harm this action earned; above it, the
+    /// excess is real. Suppressions, complaints, refunds and cancellations
+    /// have no baseline excuse and count at face value.
+    #[must_use]
+    pub fn actionable(&self) -> bool {
+        let unsubscribe_harm =
+            self.unsubscribes >= (self.contacted * UNSUBSCRIBE_CHURN_FLOOR).max(1.0);
+        unsubscribe_harm
+            || self.complaints > 0.0
+            || self.refunds > 0.0
+            || self.fan_suppressions > 0.0
+            || self.show_cancellations > 0.0
+    }
+
+    /// The fan-equivalent loss — the only harm that enters
+    /// `DecisionValue::harm_fans`. Identity conversion: a withdrawal and a
+    /// suppression are each exactly one fan gone. Complaints, refunds and
+    /// cancellations are deliberately absent: they are constraint inputs
+    /// (Standing worsened, the autonomy guard), and pricing reputation in
+    /// fans would invent an exchange rate nobody measured.
+    #[must_use]
+    pub fn fan_equivalent_loss(&self) -> f64 {
+        self.unsubscribes + self.fan_suppressions
+    }
+
+    /// The `harm:*` entries for the `observed_metrics` merge — all five,
+    /// zeros included. A clean send is evidence too: a posterior that only
+    /// ever saw harmful actions would overstate the rate.
+    #[must_use]
+    pub fn entries(&self) -> [(&'static str, f64); 5] {
+        [
+            ("harm:unsubscribes", self.unsubscribes),
+            ("harm:complaints", self.complaints),
+            ("harm:refunds", self.refunds),
+            ("harm:fan_suppressions", self.fan_suppressions),
+            ("harm:show_cancellations", self.show_cancellations),
+        ]
+    }
 }
 
 impl ClaimedAutopilotMeasurement {
@@ -492,27 +597,79 @@ pub trait AutopilotMeasurementRepository: Send + Sync {
         now: OffsetDateTime,
     ) -> Result<f64, RepositoryError>;
 
+    /// Counts the harm events attributable to the measurement's action in
+    /// its window — the cost side of the ledger the value observation alone
+    /// does not see. Best called before `observe_measurement`: harm exists
+    /// whether or not the primary metric is observable, and a cancelled
+    /// event's measurement abandons while its harm is still real.
+    async fn observe_action_harm(
+        &self,
+        workspace_id: WorkspaceId,
+        measurement: &ClaimedAutopilotMeasurement,
+        now: OffsetDateTime,
+    ) -> Result<HarmObservation, RepositoryError>;
+
     async fn complete_measurement(
         &self,
         workspace_id: WorkspaceId,
         measurement: &ClaimedAutopilotMeasurement,
         observed_value: f64,
         effect: EffectResult,
+        harm: Option<&HarmObservation>,
         now: OffsetDateTime,
     ) -> Result<(), RepositoryError>;
 
+    /// Fails a measurement, retryable or terminal. `harm` rides along so a
+    /// terminal failure merges its `harm:*` keys in the same transaction
+    /// that resolves readiness — the evidence row closes with the harm it
+    /// observed already on it, and no replay delta can slip between the
+    /// two writes. On a retryable miss the row stays `pending` and the
+    /// merge is skipped: the retried completion owns it.
+    ///
+    /// `None` means the observation itself failed — no `harm:*` keys are
+    /// written at all. A failed look is not a clean reading: writing zeros
+    /// would teach the posterior "no harm" from a measurement that never
+    /// looked, and overwrite whatever a sibling attempt already landed.
     async fn fail_measurement(
         &self,
         workspace_id: WorkspaceId,
-        measurement_id: AutopilotMeasurementId,
+        measurement: &ClaimedAutopilotMeasurement,
         error_kind: &'static str,
         retryable: bool,
+        harm: Option<&HarmObservation>,
         now: OffsetDateTime,
     ) -> Result<(), RepositoryError>;
 }
 
 #[must_use]
 pub fn assess_measurement_effect(
+    measurement: &ClaimedAutopilotMeasurement,
+    observed_value: f64,
+    harm: &HarmObservation,
+) -> Option<EffectResult> {
+    let result = assess_primary(measurement, observed_value)?;
+    // A primary metric that did not move over real harm is not neutral:
+    // nothing gained, something lost is the definition of worsened. "Did
+    // not move" is the primary assessor's own verdict — Improved is the
+    // only classification that proves positive movement, whatever shape
+    // the kind's observed value takes (delta, rate, or level against a
+    // baseline). Harm under genuine growth does not veto the verdict —
+    // the send that grew fans while costing some nets out in `harm_fans`,
+    // where the subtraction is priced, not in a classification that would
+    // hide the growth signal.
+    let assessment = if harm.actionable() && result.assessment != EffectAssessment::Improved {
+        EffectAssessment::Worsened
+    } else {
+        result.assessment
+    };
+    Some(EffectResult {
+        assessment,
+        delta_basis_points: result.delta_basis_points,
+    })
+}
+
+/// The primary-metric classification, before the harm override.
+fn assess_primary(
     measurement: &ClaimedAutopilotMeasurement,
     observed_value: f64,
 ) -> Option<EffectResult> {
@@ -569,13 +726,15 @@ mod tests {
     use super::*;
 
     fn claimed(kind: AutopilotMeasurementKind) -> ClaimedAutopilotMeasurement {
+        let now = OffsetDateTime::now_utc();
         ClaimedAutopilotMeasurement {
             id: AutopilotMeasurementId::from(uuid::Uuid::now_v7()),
             action_id: AutopilotActionId::from(uuid::Uuid::now_v7()),
             kind,
             subject_id: uuid::Uuid::now_v7(),
             baseline_value: 0.0,
-            action_finished_at: OffsetDateTime::now_utc(),
+            action_finished_at: now - time::Duration::days(7),
+            due_at: now,
             attempt_number: 1,
         }
     }
@@ -588,7 +747,8 @@ mod tests {
         let measurement = claimed(AutopilotMeasurementKind::ReleaseChannelLift14d);
         for observed in [-4.0, -1.0, 0.0, 3.0, 4.9] {
             let result =
-                assess_measurement_effect(&measurement, observed).expect("lift assessment");
+                assess_measurement_effect(&measurement, observed, &HarmObservation::default())
+                    .expect("lift assessment");
             assert_eq!(
                 result.assessment,
                 EffectAssessment::Neutral,
@@ -602,9 +762,11 @@ mod tests {
     #[test]
     fn release_channel_lift_keeps_real_verdicts() {
         let measurement = claimed(AutopilotMeasurementKind::ReleaseChannelLift14d);
-        let worsened = assess_measurement_effect(&measurement, -40.0).expect("worsened");
+        let worsened = assess_measurement_effect(&measurement, -40.0, &HarmObservation::default())
+            .expect("worsened");
         assert_eq!(worsened.assessment, EffectAssessment::Worsened);
-        let improved = assess_measurement_effect(&measurement, 40.0).expect("improved");
+        let improved = assess_measurement_effect(&measurement, 40.0, &HarmObservation::default())
+            .expect("improved");
         assert_eq!(improved.assessment, EffectAssessment::Improved);
     }
 
@@ -615,15 +777,74 @@ mod tests {
     fn campaign_unsubscribe_reads_baseline_churn_as_neutral() {
         let measurement = claimed(AutopilotMeasurementKind::CampaignUnsubscribe7d);
         for rate in [0.0, 0.001, 0.0049] {
-            let result =
-                assess_measurement_effect(&measurement, rate).expect("unsubscribe assessment");
+            let result = assess_measurement_effect(&measurement, rate, &HarmObservation::default())
+                .expect("unsubscribe assessment");
             assert_eq!(
                 result.assessment,
                 EffectAssessment::Neutral,
                 "rate {rate} should classify Neutral"
             );
         }
-        let harmful = assess_measurement_effect(&measurement, 0.05).expect("harmful");
+        let harmful = assess_measurement_effect(&measurement, 0.05, &HarmObservation::default())
+            .expect("harmful");
         assert_eq!(harmful.assessment, EffectAssessment::Worsened);
+    }
+
+    /// The harm override: a flat metric over a send that still cost fans
+    /// reads Worsened, while the same harm under real growth keeps the
+    /// primary verdict — the cost is priced in `harm_fans`, not hidden.
+    #[test]
+    fn harm_with_no_positive_movement_classifies_worsened() {
+        let measurement = claimed(AutopilotMeasurementKind::TicketRevenue72h);
+        let harm = HarmObservation {
+            unsubscribes: 2.0,
+            ..HarmObservation::default()
+        };
+        let flat = assess_measurement_effect(&measurement, 0.0, &harm).expect("flat assessment");
+        assert_eq!(flat.assessment, EffectAssessment::Worsened);
+        // A signed kind takes the same verdict below zero — the level kinds
+        // refuse a negative reading outright as malformed, so the override
+        // only ever sees the zero-or-positive range for them.
+        let signed = claimed(AutopilotMeasurementKind::IncrementalFanGrowth3d);
+        let negative =
+            assess_measurement_effect(&signed, -10.0, &harm).expect("negative assessment");
+        assert_eq!(negative.assessment, EffectAssessment::Worsened);
+        let grew = assess_measurement_effect(&measurement, 500.0, &harm).expect("grew assessment");
+        assert_eq!(grew.assessment, EffectAssessment::Improved);
+        let clean = assess_measurement_effect(&measurement, 0.0, &HarmObservation::default())
+            .expect("clean assessment");
+        assert_eq!(clean.assessment, EffectAssessment::Neutral);
+    }
+
+    /// Unsubscribe counts under baseline churn stay neutral — the audience
+    /// would have lost them with no send at all, the same floor the
+    /// unsubscribe-rate kind applies. Past the floor, the excess is harm
+    /// the action earned; the other sources carry no baseline excuse.
+    #[test]
+    fn unsubscribe_churn_under_the_floor_stays_neutral() {
+        let measurement = claimed(AutopilotMeasurementKind::TicketRevenue72h);
+        // Two withdrawals across five hundred reached fans is 0.4% — under
+        // the 0.5% floor, churn rather than earned harm.
+        let churn = HarmObservation {
+            unsubscribes: 2.0,
+            contacted: 500.0,
+            ..HarmObservation::default()
+        };
+        let flat = assess_measurement_effect(&measurement, 0.0, &churn).expect("flat");
+        assert_eq!(flat.assessment, EffectAssessment::Neutral);
+        // Three of five hundred crosses the floor — the excess is real.
+        let harm = HarmObservation {
+            unsubscribes: 3.0,
+            ..churn
+        };
+        let flat = assess_measurement_effect(&measurement, 0.0, &harm).expect("flat");
+        assert_eq!(flat.assessment, EffectAssessment::Worsened);
+        // A complaint has no baseline excuse: one alone worsens a flat send.
+        let complaint = HarmObservation {
+            complaints: 1.0,
+            ..HarmObservation::default()
+        };
+        let flat = assess_measurement_effect(&measurement, 0.0, &complaint).expect("flat");
+        assert_eq!(flat.assessment, EffectAssessment::Worsened);
     }
 }

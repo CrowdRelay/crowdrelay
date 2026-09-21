@@ -117,6 +117,7 @@ fn measurement(
         subject_id,
         baseline_value: 0.0,
         action_finished_at: f.now - time::Duration::days(14),
+        due_at: f.now,
         attempt_number: 1,
     }
 }
