@@ -117,6 +117,10 @@ jobs:
       SCCACHE_DIR: /home/ubuntu/.cache/sccache
       SCCACHE_CACHE_SIZE: 4G
       SCCACHE_IDLE_TIMEOUT: "0"
+      # Incremental fingerprints double the target dir with per-crate work
+      # products nothing in CI ever reuses — a cancelled run's cache is cold
+      # anyway. On a 9 GB-free box that doubling is what fills the disk.
+      CARGO_INCREMENTAL: "0"
 
     steps:
       - name: Check out repository
@@ -303,6 +307,19 @@ jobs:
           cargo run --locked --all-features --package crowdrelay-worker -- setup
           cargo run --locked --all-features --package crowdrelay-worker -- setup
 
+      # Free the disk before the link-heavy suite phase: the box keeps ~9 GB
+      # headroom and this job alone accumulates test binaries on top of the
+      # Docker residue the end-of-job sweep would only reach too late. ld died
+      # on ENOSPC mid-suite on 2026-09-21. Only unattached/unused resources —
+      # the postgres service image is in use and is never touched.
+      - name: Reclaim disk before the suite lanes
+        continue-on-error: true
+        run: |
+          docker image prune -f 2>/dev/null || true
+          docker builder prune -f --filter until=72h 2>/dev/null || true
+          docker volume prune -f 2>/dev/null || true
+          df -h / | tail -1
+
       # Every integration target is discovered from the tree rather than
       # listed. The previous hand-written list named 9 of 24 suites, so every
       # autopilot_* one — including the growth-intelligence paths — never ran
@@ -391,7 +408,7 @@ jobs:
             CROWDRELAY_RETENTION_TEST_DATABASE_URL="$url" \
             CROWDRELAY_COMMUNITY_TEST_DATABASE_URL="$url" \
             CROWDRELAY_AGENTS_TEST_DATABASE_URL="$url" \
-            cargo test --locked \
+            cargo test --locked --all-features \
               --package "$package" \
               --test "$target" \
               -- \
@@ -417,7 +434,7 @@ jobs:
             CROWDRELAY_RETENTION_TEST_DATABASE_URL="$url" \
             CROWDRELAY_COMMUNITY_TEST_DATABASE_URL="$url" \
             CROWDRELAY_AGENTS_TEST_DATABASE_URL="$url" \
-            cargo test --locked \
+            cargo test --locked --all-features \
               --package crowdrelay-worker \
               "$filter" \
               -- \
@@ -433,7 +450,7 @@ jobs:
             local url="postgres://crowdrelay:crowdrelay-ci-only@127.0.0.1:5432/${db}"
             CROWDRELAY_DATABASE_URL="$url" \
             CROWDRELAY_TEST_DATABASE_URL="$url" \
-            cargo test --locked \
+            cargo test --locked --all-features \
               --package crowdrelay-api \
               "$filter" \
               -- \
