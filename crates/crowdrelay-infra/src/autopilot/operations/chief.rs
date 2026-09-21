@@ -642,6 +642,12 @@ async fn chief_stopped(
 /// Only settled, measured outcomes appear. A claim that could not be made is
 /// reported under `stopped` instead, because "we could not tell" belongs with
 /// the gaps rather than with the results.
+///
+/// Two ledgers feed the list: play outcomes (the ladder's own claims) and
+/// measurement outcomes (`viryaos_autopilot_outcomes` — one row per measured
+/// metric, the table the harm and secondary-metric write-backs land beside).
+/// For a metric outcome the claim strength is the evidence row's recorded
+/// quality: a randomized holdout attributes, anything weaker correlates.
 async fn chief_movements(
     repo: &PostgresAutopilotRepository,
     workspace_id: WorkspaceId,
@@ -649,17 +655,47 @@ async fn chief_movements(
     use crowdrelay_application::autopilot::ChiefOfStaffMovement;
     let rows = sqlx::query_as::<_, MovementRow>(
         r#"
-        SELECT
-            outcome.success_metric_platform || ' ' || outcome.success_metric_key AS subject,
-            outcome.claim,
-            outcome.effect_assessment AS assessment,
-            outcome.delta_basis_points
-        FROM viryaos_play_outcomes AS outcome
-        WHERE outcome.workspace_id = $1
-          AND outcome.evidence = 'measured'
-          AND outcome.effect_assessment IS NOT NULL
-          AND outcome.finished_at >= now() - INTERVAL '7 days'
-        ORDER BY outcome.finished_at DESC
+        SELECT subject, claim, assessment, delta_basis_points
+        FROM (
+            SELECT
+                outcome.success_metric_platform || ' ' || outcome.success_metric_key AS subject,
+                outcome.claim,
+                outcome.effect_assessment AS assessment,
+                outcome.delta_basis_points,
+                outcome.finished_at AS sort_at
+            FROM viryaos_play_outcomes AS outcome
+            WHERE outcome.workspace_id = $1
+              AND outcome.evidence = 'measured'
+              AND outcome.effect_assessment IS NOT NULL
+              AND outcome.finished_at >= now() - INTERVAL '7 days'
+
+            UNION ALL
+
+            SELECT
+                outcome.metric_key AS subject,
+                CASE WHEN evidence.evidence_quality = 'randomized_holdout'
+                     THEN 'attributed' ELSE 'correlational' END AS claim,
+                outcome.effect_assessment AS assessment,
+                outcome.delta_basis_points,
+                outcome.observed_at AS sort_at
+            FROM viryaos_autopilot_outcomes AS outcome
+            LEFT JOIN LATERAL (
+                SELECT e.evidence_quality
+                FROM viryaos_growth_evidence AS e
+                WHERE e.workspace_id = outcome.workspace_id
+                  AND e.action_id = outcome.action_id
+                ORDER BY CASE e.evidence_quality
+                         WHEN 'randomized_holdout' THEN 0
+                         WHEN 'matched_quasi_experiment' THEN 1
+                         ELSE 2 END
+                LIMIT 1
+            ) AS evidence ON true
+            WHERE outcome.workspace_id = $1
+              AND outcome.measurement_id IS NOT NULL
+              AND outcome.effect_assessment IS NOT NULL
+              AND outcome.observed_at >= now() - INTERVAL '7 days'
+        ) AS movements
+        ORDER BY sort_at DESC
         LIMIT 20
         "#,
     )

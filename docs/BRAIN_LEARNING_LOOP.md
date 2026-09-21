@@ -66,8 +66,9 @@ NEXT DECISION
   reported separately (`/v1/admin/ops/connections`) because a connected feed
   that returns nothing looks identical to a quiet audience.
 - **Influences the next decision**: yes. `GrowthStrategy::from_world_model_with_hysteresis`
-  reads the trend, and template priority within a strategy is ordered by
-  measured platform yield.
+  reads the trend, `from_world_model_with_posterior` may override that
+  incumbent when a challenger's posterior clears P(Δ ≥ 1 fan) ≥ 0.6, and
+  template priority within a strategy is ordered by measured platform yield.
 
 ### WORLD STATE → BELIEF → PREDICTION
 
@@ -108,13 +109,30 @@ NEXT DECISION
 ### PREDICTION → ECONOMIC VALUE
 
 - `DecisionValue::total()` is exactly `pragmatic_value + risk_penalty +
-  opportunity_cost`. Every term is in expected incremental Y30 fan-equivalents.
+  opportunity_cost + economic_value_fans + harm_fans`. Every term is in
+  expected incremental Y30 fan-equivalents.
+- `economic_value_fans` is the revenue term: a candidate's revenue prediction
+  converted through `ValueExchange::minor_per_fan`, the tenant's learned
+  revenue-per-fan rate. The exchange refuses to answer until it has ≥7 days
+  and ≥20 new fans of history — until then the term is `None`, not zero.
+- `harm_fans` is the harm term: the learned `harm:unsubscribes` +
+  `harm:fan_suppressions` posterior means, subtracted. Complaints, refunds
+  and cancellations are constraint inputs only — they have no honest
+  fan-equivalent price and are not given one.
 - `risk_penalty` is `None` — **not modelled**, not zero, and never derived from
   `uncertainty`.
-- `uncertainty`, `contamination`, `evidence_quality`,
+- `uncertainty`, `evidence_quality`,
   `bridge_is_reliable` are **provenance**. None enters `total()`. That is a
   real gap, taken deliberately: penalising uncertain candidates in a system
   that has resolved almost no outcomes is how a young learner stops learning.
+  `evidence_quality` is stamped from the live experiment design for
+  treatment-armed candidates — a dispatch under an active holdout records
+  `randomized_holdout`, not the `observational` default.
+- `contamination` was deleted rather than wired: at decision time the only
+  readable value was a stale prior-round row — this cycle's assignment is
+  persisted at dispatch — and `assignment_time_contamination` is stamped 0
+  at creation. The live record is the assignment row's `final_contamination`,
+  written at measurement and trace-joined one hop away.
 - EFE never enters `total()`. EFE decides what is worth learning about;
   `total()` decides what is worth doing.
 
@@ -168,6 +186,15 @@ NEXT DECISION
 - Randomised *design* becomes randomised *evidence* only when the outcome was
   read at the level the randomisation was performed at — see
   `measured_evidence_quality`.
+- The same completion transaction merges `observed_metrics` onto the evidence
+  row — one JSONB map of metric key to raw observed value, covering every
+  learnable kind (`learnable_metric_key`), including the five `harm:*` keys a
+  measurement collects across complaints, unsubscribes, suppressions, refunds
+  and cancellations. A failed harm observation merges `None` — no keys —
+  rather than zeros nobody earned.
+- Replay folds each key into `CausalModel::metric_posteriors`, and those
+  posteriors feed the next `DecisionValue`: `harm_fans` from the harm keys,
+  `economic_value_fans` for revenue-denominated keys through the exchange.
 
 ### MEASUREMENT → CALIBRATION → PREDICTION
 
@@ -188,31 +215,29 @@ NEXT DECISION
 partly, and not from one place.
 
 **Persisted at dispatch.** `viryaos_dispatch_predictions` holds the expected
-fans, the expected Signal installs, the `DispatchContext` and the timestamps.
-`viryaos_growth_evidence` holds the evidence quality, the sample size, the
-contamination estimate, the strategy, the target key and the creative family.
-Between them, most of the provenance a reader needs is durable.
+fans, the expected Signal installs, the `expected_metrics` map, the
+`DispatchContext` and the timestamps. `viryaos_growth_evidence` holds the
+evidence quality, the sample size, the strategy, the target key, the creative
+family, and the `observed_metrics` map once measurements complete.
 
-**Not persisted at all.** `DecisionValue` is computed per cycle, ranked on, and
-dropped. So `estimation_regime`, `bridge_confidence`, `bridge_is_reliable`,
-`decision_mode`, and the `total()` the portfolio actually sorted by exist only
-for the length of the cycle that produced them.
+**Persisted on the decision.** Every selected candidate's `DecisionValue`
+reaches `viryaos_autopilot_decisions.input_snapshot` as the
+`decision_value` provenance block (`portfolio::decision_provenance`) —
+economic terms (`intrinsic_y30`, `economic_value_fans`, `harm_fans`, the
+exchange rate used, `risk_penalty`, `opportunity_cost`, marginal
+`adjustments`), epistemic terms (`estimation_regime`, `evidence_quality`,
+`sample_size`, `uncertainty`, `uses_y30`, `bridge_confidence`,
+`bridge_is_reliable`), policy identity, and the `competition` block naming
+what else was considered and why each lost. The same value is serialised
+into the `portfolio_pool` row. `input_snapshot.learning` records the
+strategy prior vs applied pair (`strategy_source` = `prior` | `posterior` |
+`default`).
 
-Re-deriving them later does not recover them: the posteriors have moved, so a
-re-derivation answers "what would the brain decide now", which is a different
-question and looks identical in a report.
-
-`estimation_regime` is the one that matters most, and it is one column. Without
-it you cannot tell whether a prediction of 3.2 fans came from the outcome
-model, from a Y14 bridge — which the optimizer docks 20% when the bridge is
-uncalibrated — or from Y30 directly. Those are three different claims and the
-brain treats them differently. The vocabulary already exists and is stable:
-`EstimationRegime::as_str` / `parse`, and `y30_direct` / `y14_bridged` /
-`outcome_model` are already written to the calibration trackers.
-
-Deliberately not added here. A column is a migration and a write path, and the
-question of whether the rest of `DecisionValue` should travel with it is a
-design decision rather than a correctness fix.
+Re-deriving the rest later does not recover it: the posteriors have moved,
+so a re-derivation answers "what would the brain decide now", which is a
+different question and looks identical in a report. What is still not
+durable is the posterior state itself — the provenance records what the
+posteriors concluded, not what they were.
 
 ## Dormant edges
 
@@ -220,11 +245,18 @@ Written, never read on a decision path. Listed so nobody has to discover it.
 
 | Value | Written by | Read by |
 |---|---|---|
-| `StateConditionedStrategyPosterior` | `apply_evidence_to_stored_strategy_posterior` (sole writer) | nothing — threaded through candidate generation and discarded |
-| `DecisionValue::contamination` | `with_contamination`, brain tests only | never read |
-| `GrowthEvidence::creative_family` | dispatch | nothing decides on it |
 | `WorldModel`: `best_performing_community`, `worst_performing_community`, `promoted_outreach_targets` | the snapshot loader, two dedicated queries per cycle | nothing — and `WorldModel` is neither persisted nor served, so unread here is unread everywhere |
 | `SelfAssessment` verdict | `/v1/control-plane/ops/attention` | operator only; changes no ranking, by design |
+
+Wired or deleted since this table first listed them:
+
+- `StateConditionedStrategyPosterior` — read by
+  `GrowthStrategy::from_world_model_with_posterior`, gated on
+  P(challenger exceeds the hysteresis incumbent by ≥1 fan) ≥ 0.6.
+- `DecisionValue::contamination` — deleted; the truthful record is the
+  assignment row's `final_contamination`.
+- `GrowthEvidence::creative_family` — consumed by `update_family_effect` in
+  evidence replay and the community-engager's Thompson sampling.
 
 ---
 
@@ -233,22 +265,20 @@ Written, never read on a decision path. Listed so nobody has to discover it.
 1. **No economic use of uncertainty.** Recorded above as deliberate. It stops
    being defensible once there is enough resolved evidence to distinguish a
    tight estimate from a wide one.
-2. **Dormant strategy learning.** The posterior accumulates history nothing
-   consumes. Either wire it into exploration allocation or delete it; leaving
-   it indefinitely is the state that invites someone to assume it works.
-3. **WAIT is under-valued by construction.** Two of its four declared terms are
+2. **WAIT is under-valued by construction.** Two of its four declared terms are
    never computed, both in the direction that would favour waiting. The fix is
    to measure fatigue recovery, not to pick a number for it.
-4. **A decision's own reasoning is not durable.** `DecisionValue` never
-   reaches storage, so `estimation_regime`, the bridge confidence and the
-   `total()` the portfolio sorted by survive only the cycle. Re-deriving them
-   answers "what would the brain decide now" and looks the same in a report.
-   See the provenance section.
-5. **No goal-directed trajectory.** "100 durable fans in 21 days" has a
+3. **The posterior state itself is not durable per decision.** The
+   `decision_value` provenance block records what the posteriors concluded —
+   regime, quality, terms, competition — but not the posterior values that
+   produced them. Re-deriving them answers "what would the brain decide now",
+   which is a different question and looks the same in a report. See the
+   provenance section.
+4. **No goal-directed trajectory.** "100 durable fans in 21 days" has a
    baseline, a remaining delta, a feasible action space and a portfolio
    strategy. It has no expected trajectory and no replanning, so the deadline
    cannot change what the brain does. Deliberately not built — a second planner
    is worse than none.
-6. **The loop is correct and barely exercised.** Almost no outcome has
+5. **The loop is correct and barely exercised.** Almost no outcome has
    resolved. Most of the arithmetic above is right and untested by reality; no
    code change fixes that.

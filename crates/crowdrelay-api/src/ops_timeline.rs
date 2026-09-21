@@ -376,6 +376,30 @@ async fn load_trace_timeline(
               ON action.workspace_id = evidence.workspace_id
              AND action.id = evidence.action_id
             WHERE evidence.workspace_id = $1 AND action.trace_id = $2
+
+            UNION ALL
+
+            -- Metric observation: one event per key the measurement wrote
+            -- back into the evidence row's observed_metrics map — what the
+            -- loop actually measured, not just that it resolved. The value
+            -- rides in `state` as text: this surface is a diagnostic view,
+            -- and the raw observed number is the fact being shown.
+            SELECT
+                evidence.created_at AS occurred_at,
+                'metric_observation'::text AS source,
+                metric.key::text AS kind,
+                metric.value #>> '{}' AS state,
+                evidence.action_id::text AS action_id,
+                NULL::text AS decision_id,
+                NULL::text AS causation_id,
+                evidence.id::text || ':' || metric.key AS event_id,
+                'FACT'::text AS certainty
+            FROM viryaos_growth_evidence AS evidence
+            JOIN viryaos_autopilot_actions AS action
+              ON action.workspace_id = evidence.workspace_id
+             AND action.id = evidence.action_id
+            CROSS JOIN LATERAL jsonb_each(evidence.observed_metrics) AS metric
+            WHERE evidence.workspace_id = $1 AND action.trace_id = $2
         ) AS timeline
         ORDER BY occurred_at ASC, source ASC
         LIMIT 500

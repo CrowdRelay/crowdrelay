@@ -329,7 +329,11 @@ pub async fn preview_autopilot_cycle(
             match serde_json::from_value::<crowdrelay_brain::StateConditionedStrategyPosterior>(
                 state,
             ) {
-                Ok(posterior) => GrowthStrategy::from_world_model_with_posterior(world, &posterior),
+                Ok(posterior) => GrowthStrategy::from_world_model_with_posterior(
+                    world,
+                    &posterior,
+                    GrowthStrategy::from_world_model(world),
+                ),
                 Err(_) => GrowthStrategy::from_world_model(world),
             }
         }

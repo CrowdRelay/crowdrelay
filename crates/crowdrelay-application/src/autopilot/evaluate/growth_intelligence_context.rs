@@ -117,6 +117,7 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
                             let posterior_strategy = GrowthStrategy::from_world_model_with_posterior(
                                 &first.world_model,
                                 &posterior,
+                                hysteresis_strategy,
                             );
                             // The proof that learning changed behavior, not
                             // just belief. `hysteresis_strategy` is what the
@@ -389,7 +390,7 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
                 EXPERIMENT_WINDOW_HOURS
             };
             let logical_cycle_key = cooldown_window(now, experiment_window_hours).to_string();
-            let mut design = match self
+            let design = match self
                 .repository
                 .get_or_create_experiment_design(
                     self.workspace_id,
@@ -432,11 +433,12 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
                 }
                 Err(e) => return Err(e.into()),
             };
+            // The design's `holdout_probability` stays at the policy value —
+            // it is the *intended* holdout the assignment records. The
+            // realized roll is gated by `effective_holdout`, which drops to
+            // zero when the design cannot hold out a control arm.
             let is_insufficient_power =
                 design.experiment_status == crowdrelay_brain::ExperimentStatus::InsufficientPower;
-            if is_insufficient_power {
-                design.holdout_probability = 0.0;
-            }
             let effective_holdout = if is_insufficient_power {
                 0.0
             } else {
@@ -458,13 +460,14 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
                 let is_control = effective_holdout > 0.0 && roll < effective_holdout;
                 if is_control {
                     // Control arm: record assignment, no action dispatched.
-                    let assignment = crowdrelay_brain::ExperimentAssignment::from_design(
+                    let assignment = crowdrelay_brain::ExperimentAssignment::from_design_with_realized_holdout(
                         &design,
                         &unit_id,
                         &unit_id,
                         crowdrelay_brain::TreatmentAssignment::Control,
                         prediction,
                         None,
+                        effective_holdout,
                     )
                     .with_assigned_at(now);
                     match self
@@ -515,17 +518,28 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
             .map(|(_, c)| c.clone())
             .collect();
         // Build the per-candidate evidence quality for treatment-assigned
-        // candidates: their dispatch executes under the experiment design in
-        // arm_map, so the design's quality — not the stats' Observational
-        // default — is what the decision record should claim. The map doubles
-        // as the is_experimental marker: its keys are exactly the treatment
-        // decision_keys.
+        // candidates running under an *active* design: their dispatch
+        // executes under the experiment design in arm_map, so the design's
+        // quality — not the stats' Observational default — is what the
+        // decision record should claim. The map doubles as the
+        // is_experimental marker: its keys are exactly the treatment
+        // decision_keys that may spend the experimental dispatch budget.
+        //
+        // An InsufficientPower design is deliberately excluded: it can hold
+        // out no control, its evidence_quality() is Observational — the
+        // stats' own default — and its dispatches are observational work,
+        // not an experiment. Flagging them experimental would let
+        // observational candidates spend the extra dispatch slots that
+        // budget exists to protect.
         let experimental_quality: std::collections::HashMap<
             String,
             crowdrelay_brain::EvidenceQuality,
         > = arm_map
             .iter()
-            .filter(|(_, (arm, _, _, _))| matches!(arm, ArmAssignment::Treatment))
+            .filter(|(_, (arm, design, _, _))| {
+                matches!(arm, ArmAssignment::Treatment)
+                    && design.experiment_status == crowdrelay_brain::ExperimentStatus::Active
+            })
             .map(|(key, (_, design, _, _))| (key.clone(), design.evidence_quality()))
             .collect();
         // Run the portfolio optimizer on the treatment + non-experiment
@@ -596,8 +610,12 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
         // against posteriors that have since moved — a different question that
         // looks identical in a report. It rides in the decision's existing
         // `input_snapshot`, so there is no schema change.
-        let decision_provenance =
-            portfolio::decision_provenance(&selection, policy.version, &belief_origin);
+        let decision_provenance = portfolio::decision_provenance(
+            &selection,
+            policy.version,
+            &belief_origin,
+            causal_model.value_exchange.minor_per_fan(),
+        );
         // What learning did to this decision, recorded on the decision itself.
         // Without it the strategy is visible and its provenance is not, so
         // "the brain changed its mind because of what it measured" could only
@@ -706,13 +724,14 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
                 if is_selected {
                     // Treatment selected by portfolio → dispatch.
                     let treatment_assignment =
-                        crowdrelay_brain::ExperimentAssignment::from_design(
+                        crowdrelay_brain::ExperimentAssignment::from_design_with_realized_holdout(
                             design,
                             unit_id,
                             unit_id,
                             crowdrelay_brain::TreatmentAssignment::Treatment,
                             prediction,
                             None,
+                            *effective_holdout,
                         )
                         .with_assigned_at(now);
                     let mut candidate = candidate.clone();
@@ -821,13 +840,14 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
                     // system measures its outcome like control, but the
                     // estimand interpretation differs.
                     let withheld_assignment =
-                        crowdrelay_brain::ExperimentAssignment::from_design(
+                        crowdrelay_brain::ExperimentAssignment::from_design_with_realized_holdout(
                             design,
                             unit_id,
                             unit_id,
                             crowdrelay_brain::TreatmentAssignment::Treatment,
                             prediction,
                             None, // action_id=None — not dispatched
+                            *effective_holdout,
                         )
                         .with_assigned_at(now);
                     match self

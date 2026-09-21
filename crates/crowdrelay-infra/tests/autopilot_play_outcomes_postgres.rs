@@ -683,3 +683,105 @@ async fn a_workspace_level_series_wins_over_its_own_breakdown()
     }
     Ok(())
 }
+
+/// A measured metric outcome — not a play — must surface in the same `moved`
+/// list, carrying the claim strength its evidence row earned: randomized
+/// holdout attributes, anything weaker correlates.
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn the_brief_reports_metric_outcomes_alongside_play_outcomes()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = fixture("metric-movements").await?;
+    let decision_id = Uuid::now_v7();
+    let action_id = Uuid::now_v7();
+    let measurement_id = Uuid::now_v7();
+    sqlx::query(
+        r#"INSERT INTO viryaos_autopilot_decisions
+           (id, workspace_id, decision_key, context, subject_kind, subject_id,
+            decision_kind, confidence_basis_points, disposition, reason,
+            input_snapshot, policy_snapshot, recommendation, trace_id)
+           VALUES ($1,$2,$3,'growth_metrics','target_community',$4,
+                   'auto_execute',9000,'auto_execute','test',
+                   '{}'::jsonb,'{}'::jsonb,'{}'::jsonb,$5)"#,
+    )
+    .bind(decision_id)
+    .bind(fixture.workspace_id.into_uuid())
+    .bind(format!("key-{decision_id}"))
+    .bind(Uuid::now_v7())
+    .bind(Uuid::now_v7())
+    .execute(&fixture.pool)
+    .await?;
+    sqlx::query(
+        r#"INSERT INTO viryaos_autopilot_actions
+           (id, workspace_id, decision_id, context, action_kind, subject_kind,
+            subject_id, idempotency_key, payload, status, action_class,
+            trace_id, finished_at)
+           VALUES ($1,$2,$3,'growth_metrics','agent.run.request','target_community',
+                   $4,$5,'{}'::jsonb,'succeeded','third_party',$6,now())"#,
+    )
+    .bind(action_id)
+    .bind(fixture.workspace_id.into_uuid())
+    .bind(decision_id)
+    .bind(Uuid::now_v7())
+    .bind(format!("idem-{action_id}"))
+    .bind(Uuid::now_v7())
+    .execute(&fixture.pool)
+    .await?;
+    sqlx::query(
+        r#"INSERT INTO viryaos_autopilot_measurements
+           (id, workspace_id, action_id, measurement_kind, subject_id,
+            action_finished_at, baseline_value, due_at, available_at, trace_id,
+            status, finished_at)
+           VALUES ($1,$2,$3,'incremental_fan_growth_14d',$3,now(),10.0,
+                   now(), now(), $4, 'succeeded', now())"#,
+    )
+    .bind(measurement_id)
+    .bind(fixture.workspace_id.into_uuid())
+    .bind(action_id)
+    .bind(Uuid::now_v7())
+    .execute(&fixture.pool)
+    .await?;
+    sqlx::query(
+        r#"INSERT INTO viryaos_autopilot_outcomes
+           (workspace_id, decision_id, action_id, measurement_id, metric_key,
+            observed_value, baseline_value, effect_assessment, delta_basis_points)
+           VALUES ($1,$2,$3,$4,'incremental_fan_growth',14.0,10.0,'improved',4000)"#,
+    )
+    .bind(fixture.workspace_id.into_uuid())
+    .bind(decision_id)
+    .bind(action_id)
+    .bind(measurement_id)
+    .execute(&fixture.pool)
+    .await?;
+    // The claim strength comes from the evidence row's recorded quality —
+    // a randomized holdout is the only quality allowed to say 'attributed'.
+    sqlx::query(
+        r#"INSERT INTO viryaos_growth_evidence
+           (workspace_id, action_id, opportunity_id, timestamp, recipient_id,
+            channel, estimated_reach, treatment, propensity, converted,
+            predicted_fans, predicted_signal_installs, context, evidence_quality)
+           VALUES ($1,$2,'opp',now(),'recipient','reddit_post',100,'treatment',
+                   0.9,false,4.0,1.0,'{}'::jsonb,'randomized_holdout')"#,
+    )
+    .bind(fixture.workspace_id.into_uuid())
+    .bind(action_id)
+    .execute(&fixture.pool)
+    .await?;
+
+    let brief = fixture
+        .repository
+        .load_chief_of_staff(
+            fixture.workspace_id,
+            OffsetDateTime::now_utc() + time::Duration::hours(1),
+        )
+        .await?;
+    let movement = brief
+        .moved
+        .iter()
+        .find(|m| m.subject == "incremental_fan_growth")
+        .expect("the metric outcome must surface in moved");
+    assert_eq!(movement.claim, "attributed");
+    assert_eq!(movement.assessment, "improved");
+    assert_eq!(movement.delta_basis_points, Some(4000));
+    Ok(())
+}
