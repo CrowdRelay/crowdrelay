@@ -142,7 +142,8 @@ pub(super) fn select_portfolio(
                 template_cost(policy, &p.template_id),
                 decision_mode,
             )
-            .with_economic_value(stats, exchange);
+            .with_economic_value(stats, exchange)
+            .with_harm_cost(stats);
             PortfolioCandidate {
                 opportunity_id: OpportunityId {
                     template_id: p.template_id.clone(),

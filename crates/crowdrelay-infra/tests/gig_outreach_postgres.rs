@@ -18,7 +18,7 @@ use std::time::Duration;
 use crowdrelay_application::IdempotencyKey;
 use crowdrelay_application::autopilot::{
     AutopilotActionRepository, AutopilotMeasurementKind, AutopilotMeasurementRepository,
-    ClaimedAutopilotMeasurement, assess_measurement_effect,
+    ClaimedAutopilotMeasurement, HarmObservation, assess_measurement_effect,
 };
 use crowdrelay_domain::ids::{AutopilotActionId, AutopilotMeasurementId};
 use crowdrelay_domain::{CityId, WorkspaceId};
@@ -643,9 +643,10 @@ async fn a_settled_proposal_has_its_reasons_scored() -> Result<(), Box<dyn std::
                 subject_id: subject,
                 baseline_value: 0.0,
                 action_finished_at: now,
+                due_at: now + time::Duration::days(7),
                 attempt_number: 1,
             };
-            let effect = assess_measurement_effect(&measurement, 1.0)
+            let effect = assess_measurement_effect(&measurement, 1.0, &HarmObservation::default())
                 .ok_or("a reply the worker could not classify")?;
             AutopilotMeasurementRepository::complete_measurement(
                 &repository,
@@ -653,6 +654,7 @@ async fn a_settled_proposal_has_its_reasons_scored() -> Result<(), Box<dyn std::
                 &measurement,
                 1.0,
                 effect,
+                Some(&HarmObservation::default()),
                 now + time::Duration::days(3),
             )
             .await

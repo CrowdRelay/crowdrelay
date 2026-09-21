@@ -19,7 +19,14 @@ impl AutopilotMeasurementRepository for PostgresAutopilotRepository {
     ) -> Result<Vec<ClaimedAutopilotMeasurement>, RepositoryError> {
         self.bounded(async {
             let mut transaction = self.pool.begin().await.map_err(map_sqlx)?;
-            sqlx::query(
+            // A stale-exhausted measurement is a terminal failure detected
+            // outside the worker: like `fail_measurement`'s terminal arm it
+            // must close readiness, or the evidence row stays open forever
+            // and every metric — harm keys included — its siblings already
+            // wrote never reaches the learner. No harm merges here: the
+            // crashed attempt's observation never left its memory, so the
+            // row closes with whatever earlier attempts actually landed.
+            let stale_failed: Vec<(uuid::Uuid, String)> = sqlx::query_as(
                 r#"
                 UPDATE viryaos_autopilot_measurements
                 SET status = 'failed', finished_at = $2, last_error_kind = 'stale_retry_exhausted'
@@ -27,13 +34,26 @@ impl AutopilotMeasurementRepository for PostgresAutopilotRepository {
                   AND status = 'processing'
                   AND started_at <= $2 - INTERVAL '15 minutes'
                   AND attempt_count >= 3
+                RETURNING action_id, measurement_kind
                 "#,
             )
             .bind(workspace_id.into_uuid())
             .bind(now)
-            .execute(&mut *transaction)
+            .fetch_all(&mut *transaction)
             .await
             .map_err(map_sqlx)?;
+            for (action_id, kind_str) in stale_failed {
+                let measurement_kind = super::parse_measurement_kind(&kind_str)
+                    .unwrap_or(super::AutopilotMeasurementKind::AgentRunFanGrowth14d);
+                refresh_evidence_readiness(
+                    &mut transaction,
+                    workspace_id,
+                    AutopilotActionId::from(action_id),
+                    Some(measurement_kind),
+                    now,
+                )
+                .await?;
+            }
             sqlx::query(
                 r#"
                 UPDATE viryaos_autopilot_measurements
@@ -74,7 +94,7 @@ impl AutopilotMeasurementRepository for PostgresAutopilotRepository {
                 WHERE measurement.id = selected.id
                 RETURNING measurement.id, measurement.action_id, measurement.measurement_kind,
                           measurement.subject_id, measurement.baseline_value,
-                          measurement.action_finished_at,
+                          measurement.action_finished_at, measurement.due_at,
                           measurement.attempt_count AS attempt_number
                 "#,
             )
@@ -93,20 +113,36 @@ impl AutopilotMeasurementRepository for PostgresAutopilotRepository {
                 match claimed_measurement(row) {
                     Ok(measurement) => claimed.push(measurement),
                     Err(_) => {
-                        sqlx::query(
+                        let quarantined: Option<(uuid::Uuid,)> = sqlx::query_as(
                             r#"
                             UPDATE viryaos_autopilot_measurements
                             SET status='failed', finished_at=$3,
                                 last_error_kind='unsupported_measurement_kind'
                             WHERE workspace_id=$1 AND id=$2 AND status='processing'
+                            RETURNING action_id
                             "#,
                         )
                         .bind(workspace_id.into_uuid())
                         .bind(measurement_id)
                         .bind(now)
-                        .execute(&mut *transaction)
+                        .fetch_optional(&mut *transaction)
                         .await
                         .map_err(map_sqlx)?;
+                        if let Some((action_id,)) = quarantined {
+                            // The kind never parsed, so no horizon cursor can
+                            // be named — `None` still lets the row's full
+                            // resolution run, which is the part that cannot
+                            // be skipped: a quarantined measurement holding
+                            // the queue open strands its evidence row.
+                            refresh_evidence_readiness(
+                                &mut transaction,
+                                workspace_id,
+                                AutopilotActionId::from(action_id),
+                                None,
+                                now,
+                            )
+                            .await?;
+                        }
                     }
                 }
             }
@@ -131,12 +167,27 @@ impl AutopilotMeasurementRepository for PostgresAutopilotRepository {
         .await
     }
 
+    async fn observe_action_harm(
+        &self,
+        workspace_id: WorkspaceId,
+        measurement: &ClaimedAutopilotMeasurement,
+        _now: OffsetDateTime,
+    ) -> Result<HarmObservation, RepositoryError> {
+        self.bounded(observation::harm::observe_harm(
+            &self.pool,
+            workspace_id,
+            measurement,
+        ))
+        .await
+    }
+
     async fn complete_measurement(
         &self,
         workspace_id: WorkspaceId,
         measurement: &ClaimedAutopilotMeasurement,
         observed_value: f64,
         effect: EffectResult,
+        harm: Option<&HarmObservation>,
         now: OffsetDateTime,
     ) -> Result<(), RepositoryError> {
         self.bounded(async {
@@ -522,6 +573,18 @@ impl AutopilotMeasurementRepository for PostgresAutopilotRepository {
                 .await
                 .map_err(map_sqlx)?;
             }
+            // Harm keys — every observed source, zeros included: a clean
+            // reading is the evidence that teaches the posterior the rate
+            // is low. Unlike the additive metric merge above, the `||`
+            // overwrite is right here: harm counts are action-level totals
+            // for a window, not per-subject answers — sibling measurements
+            // of one action each observe the same whole, so the
+            // latest-closing window wins and nothing can double. `None`
+            // means the collector failed — nothing is written rather than
+            // zeros a broken observation did not earn.
+            if let Some(harm) = harm {
+                merge_harm_keys(&mut *transaction, workspace_id, measurement, harm).await?;
+            }
             if effect.assessment == EffectAssessment::Worsened {
                 let demoted_context = sqlx::query_scalar::<_, String>(
                     r#"
@@ -708,15 +771,17 @@ impl AutopilotMeasurementRepository for PostgresAutopilotRepository {
     async fn fail_measurement(
         &self,
         workspace_id: WorkspaceId,
-        measurement_id: AutopilotMeasurementId,
+        measurement: &ClaimedAutopilotMeasurement,
         error_kind: &'static str,
         retryable: bool,
+        harm: Option<&HarmObservation>,
         now: OffsetDateTime,
     ) -> Result<(), RepositoryError> {
         self.bounded(async {
             let mut transaction = self.pool.begin().await.map_err(map_sqlx)?;
-            let row: Option<(uuid::Uuid, String)> = sqlx::query_as::<_, (uuid::Uuid, String)>(
-                r#"
+            let row: Option<(uuid::Uuid, String, String)> =
+                sqlx::query_as::<_, (uuid::Uuid, String, String)>(
+                    r#"
                 UPDATE viryaos_autopilot_measurements
                 SET status = CASE WHEN $4 AND attempt_count < 3 THEN 'pending' ELSE 'failed' END,
                     available_at = CASE
@@ -727,22 +792,32 @@ impl AutopilotMeasurementRepository for PostgresAutopilotRepository {
                     finished_at = CASE WHEN $4 AND attempt_count < 3 THEN NULL ELSE $3 END,
                     last_error_kind = $5
                 WHERE workspace_id = $1 AND id = $2 AND status = 'processing'
-                RETURNING action_id, measurement_kind
+                RETURNING action_id, measurement_kind, status
                 "#,
-            )
-            .bind(workspace_id.into_uuid())
-            .bind(measurement_id.into_uuid())
-            .bind(now)
-            .bind(retryable)
-            .bind(error_kind)
-            .fetch_optional(&mut *transaction)
-            .await
-            .map_err(map_sqlx)?;
+                )
+                .bind(workspace_id.into_uuid())
+                .bind(measurement.id.into_uuid())
+                .bind(now)
+                .bind(retryable)
+                .bind(error_kind)
+                .fetch_optional(&mut *transaction)
+                .await
+                .map_err(map_sqlx)?;
             // An outcome that will never arrive must not hold the evidence
             // open forever. Readiness re-checks the queue: if this was the
             // last thing outstanding, the row closes with that outcome's
             // column still NULL, and the learner skips what it never learned.
-            if let Some((action_id, kind_str)) = row {
+            if let Some((action_id, kind_str, status)) = row {
+                // A terminal failure still leaves the harm it observed
+                // behind — the harm window elapsed even when the primary
+                // metric never read. Merging here, before readiness, means
+                // the row closes with the keys already on it: no replay
+                // delta can slip between the writes and strand them.
+                if status == "failed"
+                    && let Some(harm) = harm
+                {
+                    merge_harm_keys(&mut *transaction, workspace_id, measurement, harm).await?;
+                }
                 let measurement_kind = super::parse_measurement_kind(&kind_str)
                     .unwrap_or(super::AutopilotMeasurementKind::AgentRunFanGrowth14d);
                 refresh_evidence_readiness(
@@ -759,4 +834,46 @@ impl AutopilotMeasurementRepository for PostgresAutopilotRepository {
         })
         .await
     }
+}
+
+/// The `harm:*` keys as a jsonb object — all five, zeros included. A clean
+/// send is evidence too: a posterior that only ever saw harmful actions
+/// would overstate the rate.
+fn harm_keys_value(harm: &HarmObservation) -> Value {
+    Value::Object(
+        harm.entries()
+            .into_iter()
+            .map(|(key, value)| (key.to_owned(), json!(value)))
+            .collect(),
+    )
+}
+
+/// Merges the `harm:*` keys onto the evidence row inside the completion
+/// transaction — last-writer-wins on each key, deliberately unlike the
+/// additive metric merge: a harm count is the action-level total for the
+/// window, already summed across fans, so sibling measurements overwriting
+/// one another converge on the latest window's whole instead of doubling.
+async fn merge_harm_keys<'e, E>(
+    executor: E,
+    workspace_id: WorkspaceId,
+    measurement: &ClaimedAutopilotMeasurement,
+    harm: &HarmObservation,
+) -> Result<(), RepositoryError>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    sqlx::query(
+        r#"
+        UPDATE viryaos_growth_evidence
+        SET observed_metrics = observed_metrics || $3::jsonb
+        WHERE workspace_id = $1 AND action_id = $2
+        "#,
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(measurement.action_id.into_uuid())
+    .bind(harm_keys_value(harm))
+    .execute(executor)
+    .await
+    .map_err(map_sqlx)?;
+    Ok(())
 }

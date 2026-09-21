@@ -13,6 +13,7 @@
 
 mod campaigns;
 mod content_synergy;
+pub(super) mod harm;
 
 use super::super::*;
 use super::{dispatch_reached_an_audience, observable_community};

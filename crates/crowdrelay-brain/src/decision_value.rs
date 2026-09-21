@@ -255,11 +255,34 @@ pub struct DecisionValue {
     /// economy silently priced as everyone's.
     #[serde(default)]
     pub revenue_model_source: Option<RevenueModelSource>,
+    /// Harm cost: the fans this kind of action is predicted to lose —
+    /// learned unsubscribe and suppression counts, already in fan units so
+    /// no exchange rate is needed. Negative when modeled; `None` when no
+    /// harm observation exists yet, the same rule `economic_value_fans`
+    /// uses — the prior does not invent cost.
+    ///
+    /// Only the identity-convertible sources price here. Complaints,
+    /// refunds and cancellations stay out: they are constraint inputs —
+    /// they feed the worsened classification and the autonomy guard — and
+    /// pricing reputation or a broken promise in fans would invent an
+    /// exchange rate nobody measured.
+    #[serde(default)]
+    pub harm_fans: Option<f64>,
 
     // ── Decision mode ──
     /// Why the brain is dispatching this candidate.
     pub decision_mode: DecisionMode,
 }
+
+/// The metric keys whose observations are already denominated in fans —
+/// an unsubscribe and a suppression are each exactly one fan gone. The
+/// other harm keys (`harm:complaints`, `harm:refunds`,
+/// `harm:show_cancellations`) deliberately do not appear: they have no
+/// honest fan exchange rate, and they already steer through the worsened
+/// classification. These strings are the `harm:` vocabulary
+/// `HarmObservation::entries` writes — the two ends meet in the evidence
+/// row's `observed_metrics`, not in a shared import.
+pub const HARM_FAN_METRICS: &[&str] = &["harm:unsubscribes", "harm:fan_suppressions"];
 
 impl DecisionValue {
     /// Computes the total intrinsic value from components.
@@ -280,6 +303,7 @@ impl DecisionValue {
             + self.risk_penalty.unwrap_or(0.0)
             + self.opportunity_cost
             + self.economic_value_fans.unwrap_or(0.0)
+            + self.harm_fans.unwrap_or(0.0)
     }
 
     /// Constructs a DecisionValue from treatment-aware stats and resource
@@ -372,6 +396,10 @@ impl DecisionValue {
             // the term without it would price revenue at zero.
             economic_value_fans: None,
             revenue_model_source: None,
+            // The harm term is set by `with_harm_cost`, not here —
+            // `from_stats` has never seen the learned harm posteriors and
+            // constructing the term without them would price harm at zero.
+            harm_fans: None,
             decision_mode,
         }
     }
@@ -406,6 +434,35 @@ impl DecisionValue {
         if let Some(fans) = exchange.revenue_to_fans(predicted_revenue_minor) {
             self.economic_value_fans = Some(fans);
             self.revenue_model_source = Some(RevenueModelSource::Learned);
+        }
+        self
+    }
+
+    /// Converts the learned harm metrics into fan-equivalent cost. Only the
+    /// identity-convertible keys price — an unsubscribe and a suppression
+    /// are each exactly one fan gone; complaints, refunds and cancellations
+    /// carry no honest fan exchange rate and influence the decision through
+    /// the worsened classification instead.
+    ///
+    /// Confidence 0 means no harm observation exists for the template and
+    /// the mean is pure partial pooling — the portfolio average borrowed
+    /// for a kind that may never have harmed anyone. An unpriced harm is
+    /// worth zero, not the borrowed average: the same rule
+    /// `with_economic_value` applies to unearned revenue.
+    #[must_use]
+    pub fn with_harm_cost(mut self, stats: &TreatmentAwareStats) -> Self {
+        let loss: f64 = HARM_FAN_METRICS
+            .iter()
+            .filter_map(|key| {
+                stats
+                    .secondary
+                    .get(*key)
+                    .filter(|(_, _, confidence)| *confidence > 0)
+                    .map(|(mean, _, _)| *mean)
+            })
+            .sum();
+        if loss > 0.0 {
+            self.harm_fans = Some(-loss);
         }
         self
     }
@@ -466,6 +523,7 @@ mod tests {
             opportunity_cost: -1.0,
             economic_value_fans: None,
             revenue_model_source: None,
+            harm_fans: None,
             decision_mode: DecisionMode::Exploit,
         };
         // total = 5.0 + (-0.2) + (-1.0) = 3.8
@@ -491,6 +549,7 @@ mod tests {
             opportunity_cost: -1.0,
             economic_value_fans: None,
             revenue_model_source: None,
+            harm_fans: None,
             decision_mode: DecisionMode::Exploit,
         };
         // total = 5.0 + 0.0 + (-1.0) = 4.0
@@ -652,6 +711,7 @@ mod tests {
             opportunity_cost: -1.0,
             economic_value_fans: None,
             revenue_model_source: None,
+            harm_fans: None,
             decision_mode: DecisionMode::Exploit,
         };
 
@@ -695,6 +755,7 @@ mod tests {
             opportunity_cost: -1.5,
             economic_value_fans: None,
             revenue_model_source: None,
+            harm_fans: None,
             decision_mode: DecisionMode::Explore,
         };
         assert!(
@@ -745,6 +806,7 @@ mod tests {
             opportunity_cost: -1.0,
             economic_value_fans: None,
             revenue_model_source: None,
+            harm_fans: None,
             decision_mode: DecisionMode::Exploit,
         };
         let json = serde_json::to_string(&dv).unwrap();
@@ -897,6 +959,52 @@ mod tests {
 
         assert_eq!(value.economic_value_fans, None);
         assert_eq!(value.revenue_model_source, None);
+        assert!((value.total() - 4.0).abs() < 1e-9);
+    }
+
+    /// Learned unsubscribe and suppression counts subtract in fan units —
+    /// the identity conversion, no exchange rate. A send that loses three
+    /// fans while growing four nets one.
+    #[test]
+    fn learned_harm_subtracts_fan_equivalent_cost() {
+        let mut stats = make_stats(4.0, 1.0, 10);
+        stats
+            .secondary
+            .insert("harm:unsubscribes".to_owned(), (2.0, 1.0, 5));
+        stats
+            .secondary
+            .insert("harm:fan_suppressions".to_owned(), (1.0, 1.0, 5));
+        // Non-fan harm stays provenance: no honest exchange rate exists.
+        stats
+            .secondary
+            .insert("harm:complaints".to_owned(), (9.0, 1.0, 5));
+
+        let value =
+            DecisionValue::from_stats(&stats, ResourceCost::configured(1.0), DecisionMode::Exploit)
+                .with_harm_cost(&stats);
+
+        assert_eq!(value.harm_fans, Some(-3.0));
+        assert!(
+            (value.total() - 4.0 + 3.0).abs() < 1e-9,
+            "total = pragmatic + harm: {}",
+            value.total()
+        );
+    }
+
+    /// A template that never produced a harm observation prices nothing —
+    /// the confidence-0 pooled mean would tax it with harm it never caused.
+    #[test]
+    fn unmeasured_harm_prices_nothing() {
+        let mut stats = make_stats(4.0, 1.0, 10);
+        stats
+            .secondary
+            .insert("harm:unsubscribes".to_owned(), (2.0, 1.0, 0));
+
+        let value =
+            DecisionValue::from_stats(&stats, ResourceCost::configured(1.0), DecisionMode::Exploit)
+                .with_harm_cost(&stats);
+
+        assert_eq!(value.harm_fans, None);
         assert!((value.total() - 4.0).abs() < 1e-9);
     }
 
