@@ -50,7 +50,6 @@ KNOWN_UNMEASURED = {
     "CounterLiveOpportunityTerms",
     "EscalateEditorialPitch",
     "EscalateShowTask",
-    "ExecuteReleaseMilestone",
     "IssueCounterpartyReport",
     "IssueReferralCode",
     "PrepareFundingPackage",
@@ -84,7 +83,6 @@ MUST_BE_MEASURED = {
     "RequestSignalPush",
     "RequestAgentRun",
     "RequestAgentContent",
-    "RequestAudienceCampaign",
     "RequestCommunityEngagement",
     "RequestFanLifecycleMessage",
 }

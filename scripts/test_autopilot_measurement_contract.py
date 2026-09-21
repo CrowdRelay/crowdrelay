@@ -11,7 +11,18 @@ def text(path: str) -> str:
 
 class AutopilotMeasurementContract(unittest.TestCase):
     def test_db_enum_parser_and_rust_serializer_stay_aligned(self) -> None:
-        migration = text("migrations/0054_grassroots_distribution.sql")
+        # Every kinds migration rewrites the whole CHECK list, so the latest
+        # file carrying the constraint is the vocabulary of record. Pinning
+        # the original 0054 here would intersect the Rust side down to the
+        # kinds that existed then and let a typo in a newer arm pass.
+        kind_migrations = sorted(
+            path
+            for path in (ROOT / "migrations").glob("*.sql")
+            if "viryaos_autopilot_measurements_measurement_kind_check"
+            in path.read_text()
+        )
+        self.assertTrue(kind_migrations)
+        migration = kind_migrations[-1].read_text()
         # The measurement kinds moved out of `ports.rs` into their own module
         # when the signed/level distinction was added. This check follows the
         # vocabulary rather than the filename — it caught the move, which is
@@ -19,7 +30,7 @@ class AutopilotMeasurementContract(unittest.TestCase):
         ports = text("crates/crowdrelay-application/src/autopilot/measurement_ports.rs")
         support = text("crates/crowdrelay-infra/src/autopilot/support.rs")
         check = re.search(
-            r"viryaos_autopilot_measurements_measurement_kind_check CHECK \(measurement_kind IN \((.*?)\)\)",
+            r"viryaos_autopilot_measurements_measurement_kind_check\s+CHECK\s*\(measurement_kind IN \((.*?)\)\)",
             migration,
             re.S,
         )

@@ -170,6 +170,36 @@ pub(super) async fn schedule_effect_measurement(
                 &mut plans,
             )
             .await?;
+            // The send itself answers too: the emission row the executor just
+            // wrote binds this action to the communication campaign, and the
+            // delivery ledger will say whether the fans it reached bought a
+            // ticket or withdrew consent. Audience campaigns carry no tracked
+            // link, so the link-bound kinds stay unscheduled rather than
+            // observing a funnel that was never instrumented.
+            // `fetch_optional`: the emission insert is ON CONFLICT DO NOTHING
+            // on (workspace, event, phase) — a row bound to an earlier action
+            // survives a re-execution, and a miss must skip measurement, not
+            // fail the whole dispatch transaction.
+            let campaign_id = sqlx::query_scalar::<_, Uuid>(
+                r#"
+                SELECT communication_campaign_id
+                FROM viryaos_campaign_lifecycle_emissions
+                WHERE workspace_id=$1 AND action_id=$2
+                "#,
+            )
+            .bind(workspace_id.into_uuid())
+            .bind(action_id.into_uuid())
+            .fetch_optional(&mut **transaction)
+            .await
+            .map_err(map_sqlx)?;
+            if let Some(campaign_id) = campaign_id {
+                for (kind, days) in [
+                    (AutopilotMeasurementKind::CampaignTicketConversion14d, 14),
+                    (AutopilotMeasurementKind::CampaignUnsubscribe7d, 7),
+                ] {
+                    plans.push((kind, campaign_id, 0.0, now + time::Duration::days(days)));
+                }
+            }
         }
         AutopilotActionPayload::RaiseGrowthOpportunity { .. } => {
             // No measurement is scheduled yet. Measuring a raised finding means
@@ -330,6 +360,40 @@ pub(super) async fn schedule_effect_measurement(
                         0.0,
                         now + time::Duration::days(14),
                     ));
+                }
+                // The send itself answers separately from the release it
+                // served: the communication campaign the executor just
+                // created carries its own conversion and unsubscribe
+                // outcomes. `fetch_optional` — an outward milestone that
+                // sends no email (StartPress seeds outreach rows only) has
+                // no campaign row, and a miss must skip measurement, not
+                // fail the whole dispatch transaction.
+                let campaign = sqlx::query_scalar::<_, Uuid>(
+                    r#"
+                    SELECT id FROM communication_campaigns
+                    WHERE workspace_id=$1 AND slug=$2
+                    "#,
+                )
+                .bind(workspace_id.into_uuid())
+                .bind(format!(
+                    "viryaos-release-{release_id}-{}",
+                    operations::release_milestone_str(*milestone)
+                ))
+                .fetch_optional(&mut **transaction)
+                .await
+                .map_err(map_sqlx)?;
+                if let Some(campaign_id) = campaign {
+                    for (kind, days) in [
+                        (AutopilotMeasurementKind::CampaignTicketConversion14d, 14),
+                        (AutopilotMeasurementKind::CampaignUnsubscribe7d, 7),
+                    ] {
+                        plans.push((
+                            kind,
+                            campaign_id,
+                            0.0,
+                            now + time::Duration::days(days),
+                        ));
+                    }
                 }
                 let series_declared = sqlx::query_scalar::<_, bool>(
                     r#"

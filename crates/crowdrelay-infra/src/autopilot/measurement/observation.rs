@@ -11,6 +11,8 @@
 //! the classification downstream reads the same flag, so the two cannot drift
 //! into disagreeing about what a negative number means.
 
+mod campaigns;
+
 use super::super::*;
 use super::{dispatch_reached_an_audience, observable_community};
 
@@ -64,6 +66,27 @@ pub(super) async fn observe(
         return Err(RepositoryError::ConflictBecause(
             AutopilotMeasurementKind::NO_RELEASE_LINK,
         ));
+    }
+    // A campaign with no delivered receipt reached nobody — but whether it
+    // can still reach anyone depends on where the send is. `scheduled`
+    // means dispatched and awaiting ledger results, so the measurement
+    // retries rather than abandoning; every other state with no delivered
+    // receipt is terminal: draft never sent, cancelled never ran, completed
+    // reached nobody. Observing any of those writes the zeros of an email
+    // that did not leave as the campaign's performance.
+    if measurement.kind.measures_email_campaign() {
+        match campaigns::campaign_delivery_state(pool, workspace_id, measurement.subject_id).await?
+        {
+            campaigns::CampaignDeliveryState::Reached => {}
+            campaigns::CampaignDeliveryState::InFlight => {
+                return Err(RepositoryError::Unavailable);
+            }
+            campaigns::CampaignDeliveryState::NeverReached => {
+                return Err(RepositoryError::ConflictBecause(
+                    AutopilotMeasurementKind::NEVER_PUBLISHED,
+                ));
+            }
+        }
     }
     let observed = match measurement.kind {
             AutopilotMeasurementKind::TicketRevenue72h => sqlx::query_scalar::<_, f64>(
@@ -476,6 +499,13 @@ pub(super) async fn observe(
                 .ok_or(RepositoryError::ConflictBecause(
                     AutopilotMeasurementKind::NO_RELEASE_SERIES_DATA,
                 ))?
+            }
+            AutopilotMeasurementKind::CampaignTicketConversion14d => {
+                campaigns::ticket_conversions(pool, workspace_id, measurement.subject_id)
+                    .await?
+            }
+            AutopilotMeasurementKind::CampaignUnsubscribe7d => {
+                campaigns::unsubscribe_rate(pool, workspace_id, measurement.subject_id).await?
             }
             // Fan growth after an agent dispatch: count new fans created
             // in the 14-day window after the action finished. The
