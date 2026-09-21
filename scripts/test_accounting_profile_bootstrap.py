@@ -12,19 +12,19 @@ class AccountingProfileBootstrapContract(unittest.TestCase):
             core.index("async fn load_sales(")
         ]
         self.assertIn("load_profile_optional(state)", preview)
-        self.assertIn(".unwrap_or_else(unconfigured_profile)", preview)
+        self.assertIn("unwrap_or_else(|| unconfigured_profile(&state.tenant.regional))", preview)
         self.assertNotIn("let profile = load_profile(state).await?;", preview)
 
     def test_placeholder_is_safe_and_not_persisted(self):
         core = (ROOT / "crates/crowdrelay-api/src/accounting/core.rs").read_text()
         placeholder = core[
-            core.index("fn unconfigured_profile()"):
+            core.index("fn unconfigured_profile("):
             core.index("async fn load_profile_optional(")
         ]
         self.assertIn("seller_name: String::new()", placeholder)
         self.assertIn("tax_id: String::new()", placeholder)
-        self.assertIn("country_code: default_country_code()", placeholder)
-        self.assertIn("document_prefix: default_document_prefix()", placeholder)
+        self.assertIn("country_code: regional.country_code.clone()", placeholder)
+        self.assertIn("document_prefix: DEFAULT_DOCUMENT_PREFIX.to_owned()", placeholder)
         self.assertIn("updated_at: OffsetDateTime::UNIX_EPOCH", placeholder)
         self.assertNotIn("INSERT", placeholder)
         self.assertNotIn("UPDATE", placeholder)

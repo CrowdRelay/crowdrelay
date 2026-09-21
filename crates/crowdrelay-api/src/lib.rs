@@ -862,9 +862,12 @@ crowdrelay_brain_signal_fans_push_enabled {}\n",
     // would start from a number that was never true.
     if let Some(fans) = ops_snapshot.brain_north_star_fans {
         body.push_str(&format!(
-            "# HELP crowdrelay_brain_north_star_fans The fan graph's level (activated_fans_30d); the heartbeat forwards it so the Control Plane can freeze the activation baseline and answer the ninety-day guarantee as a query.\n\
-             # TYPE crowdrelay_brain_north_star_fans gauge\n\
-             crowdrelay_brain_north_star_fans {fans}\n"
+            concat!(
+                "# HELP crowdrelay_brain_north_star_fans The fan graph's level (activated_fans_30d); the heartbeat forwards it so the Control Plane can freeze the activation baseline and answer the ninety-day guarantee as a query.\n",
+                "# TYPE crowdrelay_brain_north_star_fans gauge\n",
+                "crowdrelay_brain_north_star_fans {}\n"
+            ),
+            fans
         ));
     }
 

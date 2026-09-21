@@ -50,7 +50,6 @@ KNOWN_UNMEASURED = {
     "CounterLiveOpportunityTerms",
     "EscalateEditorialPitch",
     "EscalateShowTask",
-    "ExecuteReleaseMilestone",
     "IssueCounterpartyReport",
     "IssueReferralCode",
     "PrepareFundingPackage",
