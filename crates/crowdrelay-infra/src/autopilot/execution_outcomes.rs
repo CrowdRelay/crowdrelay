@@ -86,6 +86,7 @@ pub(super) async fn record_execution_outcome(
         AutopilotActionPayload::RunPlayStep { step_index, .. } => {
             ("play_step_dispatched", f64::from(*step_index), None)
         }
+        AutopilotActionPayload::SetEventTicketUrl { .. } => ("event_ticket_url_set", 1.0, None),
         AutopilotActionPayload::RaiseGrowthDebt {
             overdue_basis_points,
             ..

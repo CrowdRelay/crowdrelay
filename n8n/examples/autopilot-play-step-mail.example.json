@@ -1,0 +1,122 @@
+{
+  "name": "CrowdRelay — Autopilot play-step mail",
+  "settings": {
+    "executionOrder": "v1",
+    "saveDataErrorExecution": "none",
+    "saveDataSuccessExecution": "none",
+    "saveManualExecutions": false
+  },
+  "staticData": null,
+  "meta": {
+    "instanceId": "example"
+  },
+  "active": false,
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "ps-trigger",
+      "name": "Called by verified ingress",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        -620,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// The email half of a play step. The in-process executor already ran\n// the step — push rows were written in the action's own transaction and\n// this emit is the audit of that, not a claim to claim. This consumer\n// turns the same decided send into a mail: one consented fan, the named\n// template, the show or release the step is about.\n//\n// It never chooses a different template, broadens the recipient, or sends\n// a step CrowdRelay did not request. First-party steps carry no fan and\n// are not mail; the curator wave parks behind `play.step.third_party` and\n// is not claimed by serving this lane.\nconst e = $json;\nif (!e || e.type !== 'crowdrelay.play.step_requested' || e.version !== 1) return [];\nconst d = e.data ?? {};\nconst NOT_MAIL = new Set(['listing_sweep', 'release_presave_live', 'release_curator_wave']);\nif (NOT_MAIL.has(d.step_kind)) return [];\nfor (const key of ['action_id', 'play_id', 'step_index', 'step_kind', 'template_key', 'fan_id']) {\n  if (d[key] === undefined || d[key] === null) throw new Error('play step missing ' + key);\n}\nconst fan = d.fan ?? {};\nif (!fan.email || !fan.email.includes('@')) return [];\nconst event = d.event ?? null;\nconst release = d.release ?? null;\n// A step whose moment has passed is skipped, not sent — a show ask that\n// lands after the show is a different, worse message than one not sent.\nif (event && event.starts_at && new Date(event.starts_at).getTime() < Date.now()) return [];\nreturn [{ json: {\n  event_id: String(e.id),\n  action_id: String(d.action_id),\n  play_id: String(d.play_id),\n  step_index: Number(d.step_index),\n  step_kind: String(d.step_kind),\n  template_key: String(d.template_key),\n  fan_id: String(d.fan_id),\n  email: String(fan.email),\n  display_name: fan.display_name || '',\n  locale: String(fan.locale || ''),\n  event_title: event ? String(event.title || '') : '',\n  event_venue: event ? String(event.venue || '') : '',\n  release_title: release ? String(release.title || '') : '',\n  release_link: release ? String(release.link || '') : '',\n  call_to_action_url: d.call_to_action_url || null,\n}}];"
+      },
+      "id": "ps-validate",
+      "name": "Validate play step",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -400,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Render the named template. CrowdRelay chose which step; this lane\n// renders it from the supplied facts. A default branch sends the wrong\n// message, which is worse than sending none — throw on a key you do not\n// know. Polish is the tenant's first language; a fan whose locale is not\n// English still reads Polish here.\nconst p = $input.first().json;\nconst key = p.template_key;\nconst pl = !(p.locale || '').toLowerCase().startsWith('en');\nconst name = p.display_name || '';\nconst hello = name ? (pl ? 'Czesc ' + name : 'Hi ' + name) : (pl ? 'Czesc' : 'Hi');\nconst show = p.event_title || '';\nconst venue = p.event_venue ? (' — ' + p.event_venue) : '';\nconst link = p.call_to_action_url || p.release_link || 'https://virya.music';\nlet subject, text;\nif (key === 'play.track_us.announce') {\n  subject = pl ? ('Nowy koncert: ' + show) : ('New date: ' + show);\n  text = [hello + ',', '', pl ? ('Gramy: ' + show + venue + '. Sledz nas, zeby kazda kolejna data dochodzila bez algorytmu:') : ('We play ' + show + venue + '. Track us so every next date reaches you without an algorithm:'), '', link, '', '- VIRYA'].join('\\n');\n} else if (key === 'play.track_us.post_show') {\n  subject = pl ? 'Dziekujemy, ze byles' : 'Thanks for being there';\n  text = [hello + ',', '', pl ? ('Wczoraj gralismy ' + show + '. Jesli chcesz slyszec o kazdej kolejnej dacie, sledz nas:') : ('Last night was ' + show + '. To hear about every next date, track us:'), '', link, '', '- VIRYA'].join('\\n');\n} else if (key === 'play.follow_ask.first') {\n  subject = pl ? 'Jedna prosba' : 'One ask';\n  text = [hello + ',', '', pl ? 'Sledz nas, zeby kolejne daty dochodzily do Ciebie bez posrednikow:' : 'Track us so the next dates reach you with no middleman:', '', link, '', '- VIRYA'].join('\\n');\n} else if (key === 'play.follow_ask.second') {\n  subject = pl ? 'Jeszcze raz' : 'Once more';\n  text = [hello + ',', '', pl ? 'Jedna wiadomosc latwo umknie. Sledz nas, a kolejna data juz nie umknie:' : 'One message is easy to miss. Track us and the next date will not be:', '', link, '', '- VIRYA'].join('\\n');\n} else if (key === 'play.follow_ask.final') {\n  subject = pl ? 'Ostatnia prosba' : 'The last ask';\n  text = [hello + ',', '', pl ? 'To ostatni raz, kiedy o to prosimy. Jesli chcesz daty prosto od nas:' : 'This is the last time we ask. If you want dates straight from us:', '', link, '', '- VIRYA'].join('\\n');\n} else if (key === 'play.dormant_revival.first') {\n  subject = pl ? 'Dlugo Cie nie bylo' : 'It has been a while';\n  text = [hello + ',', '', pl ? ('Rok minął, a ' + show + ' jest powodem, zeby napisac. Sledz nas, jesli chcesz znowu slyszec:') : ('A year passed, and ' + show + ' is the reason to write. Track us if you want to hear again:'), '', link, '', '- VIRYA'].join('\\n');\n} else if (key === 'play.dormant_revival.final') {\n  subject = pl ? 'Ostatni sygnal' : 'Last signal';\n  text = [hello + ',', '', pl ? 'To ostatnia wiadomosc — jesli chcesz zostac, jeden klik wystarczy:' : 'This is the last message — if you want to stay, one click is enough:', '', link, '', '- VIRYA'].join('\\n');\n} else if (key === 'play.release_runway.audience_announce') {\n  subject = pl ? ('Nadchodzi: ' + p.release_title) : ('Coming: ' + p.release_title);\n  text = [hello + ',', '', pl ? ('Nasza nowa plyta ' + p.release_title + ' wychodzi wkrotce. Pre-save jest zywy:') : ('Our new release ' + p.release_title + ' is out soon. The pre-save is live:'), '', link, '', '- VIRYA'].join('\\n');\n} else if (key === 'play.release_runway.release_day_push') {\n  subject = pl ? (p.release_title + ' — juz jest') : (p.release_title + ' — out today');\n  text = [hello + ',', '', pl ? ('Dzis wychodzi ' + p.release_title + '. Sluchaj tutaj:') : (p.release_title + ' is out today. Listen here:'), '', link, '', '- VIRYA'].join('\\n');\n} else if (key === 'play.release_runway.sustain_ask') {\n  subject = pl ? ('Jeszcze ' + p.release_title) : ('Still ' + p.release_title);\n  text = [hello + ',', '', pl ? ('Dwa tygodnie temu wyszla ' + p.release_title + '. Jesli miales/ales wrocic — to ten moment:') : ('Two weeks ago ' + p.release_title + ' came out. If you meant to come back — this is the moment:'), '', link, '', '- VIRYA'].join('\\n');\n} else {\n  throw new Error('Unknown play-step template: ' + key);\n}\nreturn [{ json: { ...p, subject, text } }];"
+      },
+      "id": "ps-render",
+      "name": "Render template by key",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -180,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.VIRYA_MAIL_DELIVERY_URL }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "={{ 'Bearer ' + $env.VIRYA_MAIL_DELIVERY_TOKEN }}"
+            },
+            {
+              "name": "Idempotency-Key",
+              "value": "={{ $json.event_id }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ JSON.stringify({to:$json.email,subject:$json.subject,text:$json.text}) }}",
+        "options": {
+          "timeout": 15000
+        }
+      },
+      "id": "ps-send",
+      "name": "Deliver step mail",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        40,
+        0
+      ]
+    }
+  ],
+  "connections": {
+    "Called by verified ingress": {
+      "main": [
+        [
+          {
+            "node": "Validate play step",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate play step": {
+      "main": [
+        [
+          {
+            "node": "Render template by key",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Render template by key": {
+      "main": [
+        [
+          {
+            "node": "Deliver step mail",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  }
+}

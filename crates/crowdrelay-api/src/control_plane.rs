@@ -90,6 +90,17 @@ pub(crate) fn router(state: crate::AppState) -> Router {
             "/v1/control-plane/ops/delivery-results",
             get(crate::ops::list_delivery_results),
         )
+        // Process-run read models: one pass of a pipeline over one subject,
+        // joined into the step shape the process pages render. The community
+        // relay is the first kind.
+        .route(
+            "/v1/control-plane/processes/relays",
+            get(crate::ops::process_relays),
+        )
+        .route(
+            "/v1/control-plane/processes/relays/{source_id}",
+            get(crate::ops::process_relay_run),
+        )
         .route(
             "/v1/control-plane/ecosystem/overview",
             get(crate::ecosystem::overview),

@@ -849,6 +849,20 @@ impl AutopilotActionPayload {
                 },
                 deadline_note: String::new(),
             },
+            Self::SetEventTicketUrl { event_id, ticket_url, play_id, step_index } => ActionBriefing {
+                summary: "Set the ticket link on a show's listing".into(),
+                why_it_matters: "A listing sweep found the show's own sale is live but the listing carries no ticket link. The fix is the canonical page the sale already answers — nothing invented.".into(),
+                steps: vec![
+                    BriefingStep { what_to_do: "Check the URL is the show's own page".into(), why_it_matters: "Fans will land where the band's tickets are actually sold".into() },
+                    BriefingStep { what_to_do: "Click APPROVE to write it to the listing".into(), why_it_matters: "The field stays empty until somebody says so".into() },
+                ],
+                content: vec![
+                    BriefingField { label: "Event".into(), value: short_ref(event_id) },
+                    BriefingField { label: "Ticket URL".into(), value: truncate(ticket_url.clone(), 2000) },
+                    BriefingField { label: "Proposed by".into(), value: format!("play {} step {}", short_ref(play_id), step_index) },
+                ],
+                deadline_note: String::new(),
+            },
             Self::SendTeamAssignmentEmail { task_title, task_detail, reminder_number, .. } => ActionBriefing {
                 summary: if *reminder_number > 0 { format!("Reminder: {}", task_title) } else { task_title.clone() },
                 why_it_matters: "This emails a task assignment to a crew member. Reminders keep going until the task is closed.".into(),

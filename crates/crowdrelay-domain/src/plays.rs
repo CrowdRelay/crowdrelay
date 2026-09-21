@@ -606,6 +606,201 @@ impl PlayStepKind {
             }
         }
     }
+
+    /// The push copy a fan-facing step delivers in-process.
+    ///
+    /// Every send lives or dies on whether the message sounds like the band,
+    /// so the words are domain policy — the same place the step's `reason`
+    /// lives — and not an executor's afterthought. `None` for a step that has
+    /// no fan-facing copy because it reaches nobody: a listing sweep, a
+    /// pre-save surface check and a curator wave never put a notification on
+    /// a fan's lock screen.
+    ///
+    /// Facts come from the anchor's own row, loaded executor-side. Copy names
+    /// what the record knows — a title, a date, a venue — and nothing else:
+    /// no invented hype, no invented urgency, no invented proof.
+    #[must_use]
+    pub fn push_copy(&self, facts: &PlayStepPushFacts<'_>) -> Option<PlayStepPush> {
+        let polish = facts.polish;
+        let (category, title, body, target_path) = match self {
+            Self::AnnounceAsk => {
+                let (title, date, venue) = (
+                    facts.event_title.unwrap_or_default(),
+                    facts.event_date.unwrap_or_default(),
+                    facts.event_venue.unwrap_or_default(),
+                );
+                (
+                    "shows",
+                    pick(polish, "VIRYA · nowy koncert", "VIRYA · new show"),
+                    pick(
+                        polish,
+                        format!("{title} — {date}, {venue}. Śledź nas, żeby następna data sama Cię znalazła."),
+                        format!("{title} — {date} at {venue}. Track us and the next date finds you."),
+                    ),
+                    facts.event_path.unwrap_or("/my-signal/").to_owned(),
+                )
+            }
+            Self::PostShowAsk => {
+                let title = facts.event_title.unwrap_or_default();
+                (
+                    "shows",
+                    pick(polish, "VIRYA · dzięki za wczoraj", "VIRYA · thanks for being there"),
+                    pick(
+                        polish,
+                        format!("{title} — dzięki, że byliście. Śledź nas, żeby wiedzieć o kolejnej dacie."),
+                        format!("{title} — thanks for being there. Track us to hear when the next one lands."),
+                    ),
+                    facts.event_path.unwrap_or("/my-signal/").to_owned(),
+                )
+            }
+            Self::FollowAskFirst => (
+                "community",
+                pick(polish, "VIRYA · zostań blisko", "VIRYA · stay close"),
+                pick(
+                    polish,
+                    "Jeden klik i dostajesz info o koncertach jako pierwszy.".to_owned(),
+                    "One click and show news reaches you first.".to_owned(),
+                ),
+                facts.follow_link.unwrap_or("/my-signal/").to_owned(),
+            ),
+            Self::FollowAskSecond => (
+                "community",
+                pick(polish, "VIRYA · jeszcze raz", "VIRYA · once more"),
+                pick(
+                    polish,
+                    "Pytaliśmy już raz — jeśli chcesz info o koncertach, to jeden klik.".to_owned(),
+                    "We asked once — if you want show news, it is one click.".to_owned(),
+                ),
+                facts.follow_link.unwrap_or("/my-signal/").to_owned(),
+            ),
+            Self::FollowAskFinal => (
+                "community",
+                pick(polish, "VIRYA · ostatni raz", "VIRYA · last ask"),
+                pick(
+                    polish,
+                    "To ostatnia wiadomość w tej sprawie — jeśli chcesz nas śledzić, kliknij tutaj.".to_owned(),
+                    "Last message about this — if you want to track us, tap here.".to_owned(),
+                ),
+                facts.follow_link.unwrap_or("/my-signal/").to_owned(),
+            ),
+            Self::DormantRevivalFirst => (
+                "shows",
+                pick(polish, "VIRYA · dawno Cię nie było", "VIRYA · it has been a while"),
+                pick(
+                    polish,
+                    "Gramy znów wkrótce — nowe daty już są, jeśli chcesz wrócić.".to_owned(),
+                    "We play again soon — new dates are up if you want to come back.".to_owned(),
+                ),
+                "/my-signal/".to_owned(),
+            ),
+            Self::DormantRevivalFinal => (
+                "shows",
+                pick(polish, "VIRYA · ostatni sygnał", "VIRYA · last signal"),
+                pick(
+                    polish,
+                    "To ostatnia wiadomość w tej sprawie — daty koncertów zawsze są na stronie.".to_owned(),
+                    "Last note on this — the dates are always on the page.".to_owned(),
+                ),
+                "/my-signal/".to_owned(),
+            ),
+            Self::ReleaseAudienceAnnounce => {
+                let (title, date) = (
+                    facts.release_title.unwrap_or_default(),
+                    facts.release_date.unwrap_or_default(),
+                );
+                (
+                    "releases",
+                    pick(polish, "VIRYA · nowy materiał", "VIRYA · new release"),
+                    pick(
+                        polish,
+                        format!("{title} — premiera {date}. Pre-save już działa."),
+                        format!("{title} lands {date}. Pre-save is live."),
+                    ),
+                    facts.release_link.unwrap_or("/my-signal/").to_owned(),
+                )
+            }
+            Self::ReleaseDayPush => {
+                let title = facts.release_title.unwrap_or_default();
+                (
+                    "releases",
+                    pick(polish, "VIRYA · premiera", "VIRYA · release day"),
+                    pick(
+                        polish,
+                        format!("{title} już jest — można słuchać."),
+                        format!("{title} is out — go listen."),
+                    ),
+                    facts.release_link.unwrap_or("/my-signal/").to_owned(),
+                )
+            }
+            Self::ReleaseSustainAsk => {
+                let title = facts.release_title.unwrap_or_default();
+                (
+                    "releases",
+                    pick(polish, "VIRYA · wciąż gra", "VIRYA · still playing"),
+                    pick(
+                        polish,
+                        format!("Jeśli premiera Cię ominęła — {title} wciąż gra."),
+                        format!("If release day slipped past — {title} is still there."),
+                    ),
+                    facts.release_link.unwrap_or("/my-signal/").to_owned(),
+                )
+            }
+            // No fan-facing copy: the step never puts a notification on a
+            // lock screen, so there is nothing to write.
+            Self::ListingSweep | Self::ReleasePresaveLive | Self::ReleaseCuratorWave => {
+                return None;
+            }
+        };
+        Some(PlayStepPush {
+            category,
+            title,
+            body,
+            target_path,
+        })
+    }
+}
+
+fn pick(polish: bool, pl: impl Into<String>, en: impl Into<String>) -> String {
+    if polish { pl.into() } else { en.into() }
+}
+
+/// The push notification one play step delivers — title, body and the in-app
+/// path the tap lands on, in the `fan_push_deliveries` shape.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PlayStepPush {
+    /// The `fan_push_deliveries.category` the step files under: shows for the
+    /// concert asks, releases for the runway, community for the follow ladder.
+    pub category: &'static str,
+    pub title: String,
+    pub body: String,
+    pub target_path: String,
+}
+
+/// The anchor facts a step's push copy is allowed to name.
+///
+/// Everything optional because every anchor does not carry every fact: a
+/// fan-anchored ladder has no show, an event-anchored ask has no release. The
+/// executor fills what the play's anchor row holds and leaves the rest `None`.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PlayStepPushFacts<'a> {
+    /// Polish-first copy, matching the tenant's voice everywhere else push
+    /// copy is written (`fan.locale` starting `pl`).
+    pub polish: bool,
+    pub event_title: Option<&'a str>,
+    /// `YYYY-MM-DD`, rendered executor-side so the copy never formats dates.
+    pub event_date: Option<&'a str>,
+    pub event_venue: Option<&'a str>,
+    /// The in-app path to the show — `/pl/my-signal/?event={slug}` in Polish,
+    /// `/my-signal/?event={slug}` otherwise.
+    pub event_path: Option<&'a str>,
+    /// The tracked follow link a ladder ask points at — `/l/{slug}`.
+    pub follow_link: Option<&'a str>,
+    pub release_title: Option<&'a str>,
+    /// `YYYY-MM-DD`.
+    pub release_date: Option<&'a str>,
+    /// The release's tracked link — the pre-save before release day, the
+    /// listen link after.
+    pub release_link: Option<&'a str>,
 }
 
 /// Why a step will never be sent. Recorded on the row, so an omission is a fact
