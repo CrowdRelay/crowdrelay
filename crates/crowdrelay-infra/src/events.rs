@@ -605,7 +605,7 @@ impl PostgresEventRepository {
                         WHERE w.slug = $3
                         UNION ALL
                         SELECT bl.workspace_id
-                        FROM viryaos_band_listings AS bl
+                        FROM band_listings AS bl
                         WHERE lower(btrim(bl.act_name)) = lower(btrim($4))
                     ) AS candidate
                     HAVING count(DISTINCT candidate.workspace_id) = 1

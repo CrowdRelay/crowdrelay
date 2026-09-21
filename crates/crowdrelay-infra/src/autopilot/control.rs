@@ -1234,6 +1234,9 @@ impl AutopilotControlRepository for PostgresAutopilotRepository {
         workspace_id: WorkspaceId,
         source_id: uuid::Uuid,
         interval_seconds: Option<i32>,
+        revisions: Option<
+            &std::collections::BTreeMap<uuid::Uuid, std::collections::BTreeMap<String, String>>,
+        >,
         idempotency_key: &IdempotencyKey,
         request_id: Option<&RequestId>,
     ) -> Result<AutopilotControlMutation, RepositoryError> {
@@ -1241,6 +1244,7 @@ impl AutopilotControlRepository for PostgresAutopilotRepository {
             workspace_id,
             source_id,
             interval_seconds,
+            revisions,
             idempotency_key,
             request_id,
         )

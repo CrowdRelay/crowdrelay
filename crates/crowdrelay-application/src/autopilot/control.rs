@@ -521,12 +521,21 @@ pub struct CommunityRelayBatchView {
 /// read side: the delivery's own state, not the target record.
 #[derive(Clone, Debug, Serialize)]
 pub struct CommunityRelayDelivery {
+    /// The delivery's action — the key a batch-approval revision names when
+    /// the operator edits this target's words on the card.
+    pub action_id: uuid::Uuid,
     pub subreddit: String,
     /// The post's language tag, when the target row carries one.
     pub language: Option<String>,
     /// `awaiting_approval`, `queued`, `posted`, `failed`, `cancelled` —
     /// the delivery's own state, not the batch's.
     pub status: String,
+    /// The title and body this delivery will post — the card's editable
+    /// surface, per target, because each community gets its own wording
+    /// and language. Edits go back through `approve` as revisions keyed
+    /// by `action_id`.
+    pub draft_title: Option<String>,
+    pub draft_body: Option<String>,
     /// The Reddit permalink once the post landed.
     #[serde(with = "time::serde::rfc3339::option")]
     pub posted_at: Option<OffsetDateTime>,

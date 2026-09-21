@@ -36,6 +36,13 @@ pub struct ProcessRelayRun {
     confidence_bp: i32,
     communities_decided: i64,
     push_decided: bool,
+    /// The batch row is the run's one ask: `awaiting_approval` when a person
+    /// has not answered, `approved` while the drip runs, `revoked`/`done`
+    /// once the answer landed. `None` while every draft is still landing.
+    batch_status: Option<String>,
+    interval_seconds: Option<i32>,
+    #[serde(with = "time::serde::rfc3339::option")]
+    observe_until: Option<OffsetDateTime>,
     /// Decided communities with no drafting outcome yet — the draft is
     /// queued, running, or failed before an approval existed.
     deciding: i64,
@@ -134,6 +141,9 @@ async fn load_relay_runs(state: &OpsState) -> Result<Vec<ProcessRelayRun>, OpsEr
             r.confidence_bp,
             r.communities_decided,
             r.push_decided,
+            b.status AS batch_status,
+            b.interval_seconds,
+            b.observe_until,
             cs.title,
             cs.occurred_at,
             cs.metadata->>'platform' AS platform,
@@ -158,44 +168,64 @@ async fn load_relay_runs(state: &OpsState) -> Result<Vec<ProcessRelayRun>, OpsEr
         FROM runs r
         LEFT JOIN content_sources cs
           ON cs.workspace_id = $1 AND cs.id = r.source_id
+        -- One approval per source: the batch row is the run's ask. Left join —
+        -- a run whose drafts are still landing has no batch yet.
+        LEFT JOIN community_relay_batches b
+          ON b.workspace_id = $1 AND b.source_id = r.source_id
         LEFT JOIN LATERAL (
+            -- One state word per delivery — the post ledger's word wins once
+            -- its row exists, so a posted receipt still reads posted after a
+            -- revoke cancels its action. Mirrors `RelayTarget::from`.
             SELECT
-                count(*) FILTER (
-                    WHERE le.status = 'awaiting_approval'
-                      AND (le.approval_expires_at IS NULL OR le.approval_expires_at > now())
-                ) AS awaiting,
-                count(*) FILTER (
-                    WHERE le.status = 'awaiting_approval'
-                      AND le.approval_expires_at <= now()
-                ) AS expired,
-                count(*) FILTER (WHERE le.status IN ('queued', 'processing')) AS queued,
-                count(*) FILTER (WHERE p.status IN ('pending', 'posting', 'rate_limited')
-                                       OR (le.status = 'succeeded' AND p.id IS NULL)) AS posting,
-                count(*) FILTER (WHERE p.status = 'posted') AS posted,
-                count(*) FILTER (WHERE p.status = 'awaiting_manual_post') AS manual,
-                count(*) FILTER (WHERE le.status = 'failed' OR p.status = 'failed') AS failed,
-                count(*) FILTER (WHERE le.status = 'cancelled') AS skipped,
+                count(*) FILTER (WHERE st = 'awaiting') AS awaiting,
+                count(*) FILTER (WHERE st = 'expired') AS expired,
+                count(*) FILTER (WHERE st = 'queued') AS queued,
+                count(*) FILTER (WHERE st = 'posting') AS posting,
+                count(*) FILTER (WHERE st = 'posted') AS posted,
+                count(*) FILTER (WHERE st = 'manual') AS manual,
+                count(*) FILTER (WHERE st = 'failed') AS failed,
+                count(*) FILTER (WHERE st = 'skipped') AS skipped,
                 count(*) AS acted,
-                max(p.posted_at) AS last_posted_at
-            FROM latest_engage le
-            -- The receipt belongs to the community, not the action attempt —
-            -- a retried target's earlier posted row is still the proof.
-            -- Scoped through the action's source_id so another run's post on
-            -- the same community never counts here.
-            LEFT JOIN LATERAL (
-                SELECT p.id, p.status, p.posted_at
-                FROM community_posts p
-                JOIN autopilot_actions pa
-                  ON pa.workspace_id = p.workspace_id AND pa.id = p.action_id
-                 AND pa.action_kind = 'community.engage.request'
-                 AND pa.payload->>'source_id' ~
-                     '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
-                 AND (pa.payload->>'source_id')::uuid = r.source_id
-                WHERE p.workspace_id = $1 AND p.target_id = le.target_id
-                ORDER BY p.created_at DESC
-                LIMIT 1
-            ) p ON true
-            WHERE le.source_id = r.source_id
+                max(posted_at) AS last_posted_at
+            FROM (
+                SELECT
+                    CASE
+                        WHEN p.status = 'posted' THEN 'posted'
+                        WHEN p.status = 'awaiting_manual_post' THEN 'manual'
+                        WHEN p.status = 'failed' THEN 'failed'
+                        WHEN p.status = 'cancelled' THEN 'skipped'
+                        WHEN p.status IN ('pending', 'posting', 'rate_limited') THEN 'posting'
+                        WHEN le.status = 'awaiting_approval'
+                             AND (le.approval_expires_at IS NULL
+                                  OR le.approval_expires_at > now()) THEN 'awaiting'
+                        WHEN le.status = 'awaiting_approval' THEN 'expired'
+                        WHEN le.status IN ('queued', 'processing') THEN 'queued'
+                        WHEN le.status = 'failed' THEN 'failed'
+                        -- cancelled, or succeeded with no seeded post (the
+                        -- seed guard declined it) — never landing.
+                        ELSE 'skipped'
+                    END AS st,
+                    p.posted_at
+                FROM latest_engage le
+                -- The receipt belongs to the community, not the action
+                -- attempt — a retried target's earlier posted row is still
+                -- the proof. Scoped through the action's source_id so
+                -- another run's post on the same community never counts.
+                LEFT JOIN LATERAL (
+                    SELECT p.id, p.status, p.posted_at
+                    FROM community_posts p
+                    JOIN autopilot_actions pa
+                      ON pa.workspace_id = p.workspace_id AND pa.id = p.action_id
+                     AND pa.action_kind = 'community.engage.request'
+                     AND pa.payload->>'source_id' ~
+                         '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+                     AND (pa.payload->>'source_id')::uuid = r.source_id
+                    WHERE p.workspace_id = $1 AND p.target_id = le.target_id
+                    ORDER BY p.created_at DESC
+                    LIMIT 1
+                ) p ON true
+                WHERE le.source_id = r.source_id
+            ) states
         ) act ON true
         -- A community whose drafting run failed never reaches the approval
         -- queue — without this count it would read "deciding" forever.
@@ -305,6 +335,9 @@ async fn load_relay_runs(state: &OpsState) -> Result<Vec<ProcessRelayRun>, OpsEr
             confidence_bp: row.confidence_bp,
             communities_decided: row.communities_decided,
             push_decided: row.push_decided,
+            batch_status: row.batch_status,
+            interval_seconds: row.interval_seconds,
+            observe_until: row.observe_until,
             awaiting: row.awaiting,
             expired: row.expired,
             queued: row.queued,
@@ -330,6 +363,9 @@ struct RelayRunRow {
     confidence_bp: i32,
     communities_decided: i64,
     push_decided: bool,
+    batch_status: Option<String>,
+    interval_seconds: Option<i32>,
+    observe_until: Option<OffsetDateTime>,
     title: Option<String>,
     occurred_at: Option<OffsetDateTime>,
     platform: Option<String>,
@@ -367,6 +403,16 @@ pub struct ProcessRelayRunDetail {
     occurred_at: Option<OffsetDateTime>,
     decided_at: OffsetDateTime,
     confidence_bp: i32,
+    /// The batch ask — the write path is per-source, so the approval step
+    /// renders once per run, not once per community.
+    batch_status: Option<String>,
+    interval_seconds: Option<i32>,
+    #[serde(with = "time::serde::rfc3339::option")]
+    approved_at: Option<OffsetDateTime>,
+    #[serde(with = "time::serde::rfc3339::option")]
+    revoked_at: Option<OffsetDateTime>,
+    #[serde(with = "time::serde::rfc3339::option")]
+    observe_until: Option<OffsetDateTime>,
     push: Option<RelayPushLeg>,
     /// True when the community list hit the bounded cap — the view says so
     /// rather than silently showing a partial fan-out. `targets_total` is
@@ -462,10 +508,17 @@ async fn load_relay_run(
             cs.metadata->>'platform' AS platform,
             cs.metadata->>'url' AS source_url,
             cs.metadata->>'thumbnail_url' AS thumbnail_url,
-            cs.metadata->>'body' AS body
+            cs.metadata->>'body' AS body,
+            b.status AS batch_status,
+            b.interval_seconds,
+            b.approved_at,
+            b.revoked_at,
+            b.observe_until
         FROM autopilot_decisions d
         LEFT JOIN content_sources cs
           ON cs.workspace_id = d.workspace_id AND cs.id = $2
+        LEFT JOIN community_relay_batches b
+          ON b.workspace_id = d.workspace_id AND b.source_id = $2
         WHERE d.workspace_id = $1
           AND d.decision_kind = 'relay_owned_post'
           AND d.subject_kind = 'target_community'
@@ -473,7 +526,9 @@ async fn load_relay_run(
           AND d.input_snapshot->>'source_id' ~
               '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
           AND (d.input_snapshot->>'source_id')::uuid = $2
-        GROUP BY cs.id, cs.title, cs.occurred_at, cs.metadata
+        GROUP BY cs.id, cs.title, cs.occurred_at, cs.metadata,
+                 b.status, b.interval_seconds, b.approved_at, b.revoked_at,
+                 b.observe_until
         "#,
     )
     .bind(state.workspace_id.into_uuid())
@@ -681,6 +736,11 @@ async fn load_relay_run(
         occurred_at: header.occurred_at,
         decided_at: header.decided_at,
         confidence_bp: header.confidence_bp,
+        batch_status: header.batch_status,
+        interval_seconds: header.interval_seconds,
+        approved_at: header.approved_at,
+        revoked_at: header.revoked_at,
+        observe_until: header.observe_until,
         push: push.map(|p| RelayPushLeg {
             action_id: p.action_id,
             status: p.status,
@@ -704,6 +764,11 @@ struct RelayRunHeaderRow {
     source_url: Option<String>,
     thumbnail_url: Option<String>,
     body: Option<String>,
+    batch_status: Option<String>,
+    interval_seconds: Option<i32>,
+    approved_at: Option<OffsetDateTime>,
+    revoked_at: Option<OffsetDateTime>,
+    observe_until: Option<OffsetDateTime>,
 }
 
 #[derive(Debug, FromRow)]
@@ -747,31 +812,37 @@ impl From<RelayTargetRow> for RelayTarget {
     fn from(row: RelayTargetRow) -> Self {
         // One word per step position, derived here so every consumer reads
         // the same state — the page never re-interprets three timestamps
-        // into its own vocabulary.
-        let state = match row.action_status.as_deref() {
-            // No approval ask yet — the drafting dispatch decides whether
-            // this reads as still-moving or dead.
-            None => match row.draft_status.as_deref() {
-                Some("failed") => "failed",
-                Some("cancelled") => "skipped",
-                _ => "deciding",
-            },
-            Some("awaiting_approval") => match row.approval_expires_at {
-                Some(expires) if expires <= OffsetDateTime::now_utc() => "expired",
-                _ => "awaiting_you",
-            },
-            Some("queued") | Some("processing") => "queued",
-            Some("cancelled") => "skipped",
+        // into its own vocabulary. The post ledger's word wins once its row
+        // exists: a revoke cancels the action but keeps a landed receipt, so
+        // posted/failed/cancelled posts never masquerade under the action's
+        // word.
+        let state = match row.post_status.as_deref() {
+            Some("posted") => "posted",
+            Some("awaiting_manual_post") => "manual",
             Some("failed") => "failed",
-            Some("succeeded") => match row.post_status.as_deref() {
-                None => "posting",
-                Some("posted") => "posted",
-                Some("awaiting_manual_post") => "manual",
+            Some("cancelled") => "skipped",
+            Some("pending") | Some("posting") | Some("rate_limited") => "posting",
+            _ => match row.action_status.as_deref() {
+                // No approval ask yet — the drafting dispatch decides whether
+                // this reads as still-moving or dead.
+                None => match row.draft_status.as_deref() {
+                    Some("failed") => "failed",
+                    Some("cancelled") => "skipped",
+                    _ => "deciding",
+                },
+                Some("awaiting_approval") => match row.approval_expires_at {
+                    Some(expires) if expires <= OffsetDateTime::now_utc() => "expired",
+                    _ => "awaiting_you",
+                },
+                Some("queued") | Some("processing") => "queued",
+                Some("cancelled") => "skipped",
                 Some("failed") => "failed",
-                Some("pending") | Some("posting") | Some("rate_limited") => "posting",
-                Some(_) => "posting",
+                // Posts seed when the action succeeds — a succeeded action
+                // with no row means the seed guard declined the delivery, so
+                // it will never land. Skipped, not still-posting.
+                Some("succeeded") => "skipped",
+                Some(_) => "deciding",
             },
-            Some(_) => "deciding",
         };
         Self {
             target_id: row.target_id,
@@ -869,6 +940,9 @@ mod target_state_tests {
     }
 
     /// Approved and handed off, but no post row yet — the executor is on it.
+    /// A `succeeded` action with no seeded post is the exception: posts seed
+    /// at success, so no row means the seed guard declined the delivery and
+    /// it will never land.
     #[test]
     fn executor_states_read_as_moving() {
         for status in ["queued", "processing"] {
@@ -876,19 +950,21 @@ mod target_state_tests {
             r.action_status = Some(status.to_owned());
             assert_eq!(state(r), "queued");
         }
-        let mut posted_no_row = row();
-        posted_no_row.action_status = Some("succeeded".to_owned());
-        assert_eq!(state(posted_no_row), "posting");
+        let mut declined = row();
+        declined.action_status = Some("succeeded".to_owned());
+        assert_eq!(state(declined), "skipped");
     }
 
     /// The community post row is the receipt: its status wins over the
-    /// action's own "succeeded".
+    /// action's own word — including a revoke that cancelled the action
+    /// after the post landed.
     #[test]
     fn the_post_row_is_the_proof() {
         for (post_status, expected) in [
             ("posted", "posted"),
             ("awaiting_manual_post", "manual"),
             ("failed", "failed"),
+            ("cancelled", "skipped"),
             ("pending", "posting"),
             ("posting", "posting"),
             ("rate_limited", "posting"),
@@ -898,6 +974,12 @@ mod target_state_tests {
             r.post_status = Some(post_status.to_owned());
             assert_eq!(state(r), expected, "post_status={post_status}");
         }
+
+        // Revoke cancels the action but keeps what already landed.
+        let mut landed_then_revoked = row();
+        landed_then_revoked.action_status = Some("cancelled".to_owned());
+        landed_then_revoked.post_status = Some("posted".to_owned());
+        assert_eq!(state(landed_then_revoked), "posted");
     }
 
     /// Cancelled reads as the operator's "skip"; failed carries its reason

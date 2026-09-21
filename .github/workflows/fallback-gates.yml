@@ -36,6 +36,10 @@ concurrency:
 jobs:
   cpu-gates:
     name: Checks without the self-hosted runner
+    # Hosted minutes are only free while the repository is public. When the
+    # visibility window is closed the job skips instead of dying on billing;
+    # it resumes on its own the next time the repository opens.
+    if: github.event.repository.private == false
     runs-on: ubuntu-latest
     timeout-minutes: 60
 

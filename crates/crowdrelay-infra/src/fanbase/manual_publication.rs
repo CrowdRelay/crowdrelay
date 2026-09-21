@@ -649,7 +649,7 @@ async fn record_content_publication_reach(
     // input, so interpolation is safe here.
     let query = format!(
         r#"
-        INSERT INTO viryaos_reach_events (
+        INSERT INTO reach_events (
             workspace_id, action_id, recipient_kind, recipient_id, channel,
             template_id, estimated_reach, status, metadata, trace_id, causation_id
         )
@@ -659,7 +659,7 @@ async fn record_content_publication_reach(
                                   'published', 'manual'),
                action.trace_id, post.action_id
         FROM {table} AS post
-        JOIN viryaos_autopilot_actions AS action
+        JOIN autopilot_actions AS action
           ON action.workspace_id = post.workspace_id AND action.id = post.action_id
         WHERE post.workspace_id = $1 AND post.id = $2
         ON CONFLICT (action_id, recipient_id, channel)
@@ -676,11 +676,11 @@ async fn record_content_publication_reach(
     // executed, so re-registering cannot walk the status backwards.
     let query = format!(
         r#"
-        UPDATE viryaos_experiment_assignments AS assignment
+        UPDATE experiment_assignments AS assignment
         SET execution_status = 'executed',
             trace_id = COALESCE(assignment.trace_id, action.trace_id)
         FROM {table} AS post
-        JOIN viryaos_autopilot_actions AS action
+        JOIN autopilot_actions AS action
           ON action.workspace_id = post.workspace_id AND action.id = post.action_id
         WHERE assignment.workspace_id = $1
           AND post.workspace_id = $1

@@ -40,6 +40,7 @@ struct BatchRow {
 #[derive(Debug, FromRow)]
 struct DeliveryRow {
     source_id: Uuid,
+    action_id: Uuid,
     subreddit: Option<String>,
     language: Option<String>,
     title: Option<String>,
@@ -112,6 +113,7 @@ pub(in crate::autopilot) async fn load_community_relays(
         r#"
         SELECT
             batch.source_id,
+            action.id AS action_id,
             action.payload ->> 'subreddit' AS subreddit,
             target.language,
             action.payload ->> 'title' AS title,
@@ -229,8 +231,11 @@ pub(in crate::autopilot) async fn load_community_relays(
                 targets: batch_deliveries
                     .into_iter()
                     .map(|delivery| CommunityRelayDelivery {
+                        action_id: delivery.action_id,
                         subreddit: delivery.subreddit.unwrap_or_default(),
                         language: delivery.language,
+                        draft_title: delivery.title,
+                        draft_body: delivery.body,
                         status: delivery_status(
                             delivery.post_status.as_deref(),
                             &delivery.action_status,

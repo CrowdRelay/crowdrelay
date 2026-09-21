@@ -13,14 +13,25 @@ struct AttentionEcosystemOverview {
 /// `PendingAutopilotAction` (which includes payload, briefing, assignee,
 /// executor readiness, etc.) — the attention snapshot is a summary view,
 /// not a detail modal.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, sqlx::FromRow)]
 struct PendingActionSummary {
     id: uuid::Uuid,
     context: String,
     action_kind: String,
     subject_kind: String,
+    /// The community the action targets, when the payload names one.
+    subreddit: Option<String>,
+    /// What the content is called, when the payload names one.
+    title: Option<String>,
+    /// Which workflow template the action runs, when the payload names one.
+    template_id: Option<String>,
     #[serde(with = "time::serde::rfc3339::option")]
     approval_expires_at: Option<OffsetDateTime>,
+    /// Total matching rows across the whole query, not just this page.
+    /// Carried on every row by the window function; not part of the wire
+    /// shape.
+    #[serde(skip)]
+    total_count: i64,
 }
 
 /// One channel's backlog of drafted-but-unpublished posts.
@@ -730,47 +741,39 @@ async fn load_open_findings(
 async fn load_needs_you(
     state: &OpsState,
 ) -> Result<(Vec<PendingActionSummary>, i64), OpsError> {
-    let rows: Vec<(uuid::Uuid, String, String, String, Option<OffsetDateTime>, i64)> =
-        sqlx::query_as(
-            r#"
-            SELECT
-                id,
-                context,
-                action_kind,
-                subject_kind,
-                approval_expires_at,
-                count(*) OVER ()::bigint AS total_count
-            FROM autopilot_actions
-            WHERE workspace_id = $1
-              AND status = 'awaiting_approval'
-              AND (approval_expires_at IS NULL OR approval_expires_at > now())
-              -- A delivery inside a community relay batch asks through the
-              -- batch card, not this list — one card for the spread, not one
-              -- per community it lands in.
-              AND NOT (
-                  action_kind = 'community.engage.request'
-                  AND payload ->> 'source_id' IS NOT NULL
-              )
-            ORDER BY created_at, id
-            LIMIT 50
-            "#,
-        )
-        .bind(state.workspace_id.into_uuid())
-        .fetch_all(&state.pool)
-        .await
-        .map_err(OpsError::sqlx)?;
-    let total = rows.first().map_or(0, |r| r.5);
-    let summaries = rows
-        .into_iter()
-        .map(|r| PendingActionSummary {
-            id: r.0,
-            context: r.1,
-            action_kind: r.2,
-            subject_kind: r.3,
-            approval_expires_at: r.4,
-        })
-        .collect();
-    Ok((summaries, total))
+    let rows = sqlx::query_as::<_, PendingActionSummary>(
+        r#"
+        SELECT
+            id,
+            context,
+            action_kind,
+            subject_kind,
+            payload ->> 'subreddit' AS subreddit,
+            payload ->> 'title' AS title,
+            payload ->> 'template_id' AS template_id,
+            approval_expires_at,
+            count(*) OVER ()::bigint AS total_count
+        FROM autopilot_actions
+        WHERE workspace_id = $1
+          AND status = 'awaiting_approval'
+          AND (approval_expires_at IS NULL OR approval_expires_at > now())
+          -- A delivery inside a community relay batch asks through the
+          -- batch card, not this list — one card for the spread, not one
+          -- per community it lands in.
+          AND NOT (
+              action_kind = 'community.engage.request'
+              AND payload ->> 'source_id' IS NOT NULL
+          )
+        ORDER BY created_at, id
+        LIMIT 50
+        "#,
+    )
+    .bind(state.workspace_id.into_uuid())
+    .fetch_all(&state.pool)
+    .await
+    .map_err(OpsError::sqlx)?;
+    let total = rows.first().map_or(0, |r| r.total_count);
+    Ok((rows, total))
 }
 
 /// What the approval queue already lost, and what it loses next.
