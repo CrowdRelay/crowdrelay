@@ -125,6 +125,12 @@ pub enum AutopilotMeasurementKind {
     /// approach's answer rather than the season's news. The observation
     /// counts inbound `reply` interactions on the agent since the send.
     BookingAgentReply30d,
+    /// Whether the audience actually showed up: redeemed admission passes
+    /// over passes valid for entry, observed fourteen days after the event.
+    /// Selling a ticket and filling the room are different outcomes, and a
+    /// lever that moves only the first is a different lever than one that
+    /// moves both. The subject is the event, not the action's target.
+    ShowAttendanceRate14d,
 }
 
 impl AutopilotMeasurementKind {
@@ -156,12 +162,63 @@ impl AutopilotMeasurementKind {
             Self::StrategistInsightQuality1h => "strategist_insight_quality_1h",
             Self::SignalInstalls1d => "signal_installs_1d",
             Self::BookingAgentReply30d => "booking_agent_reply_30d",
+            Self::ShowAttendanceRate14d => "show_attendance_rate_14d",
         }
     }
 
     #[must_use]
     pub const fn direction(self) -> EffectDirection {
         EffectDirection::HigherIsBetter
+    }
+
+    /// The key under which this kind's observed value lands in
+    /// `viryaos_growth_evidence.observed_metrics`, or `None` when the kind
+    /// already has its own learner.
+    ///
+    /// `None` is not "not learned" — the fan-growth and Signal-install kinds
+    /// return `None` because they write typed columns that dedicated
+    /// posteriors consume (`observed_fans`, `observed_incremental_fans`,
+    /// `durable_fans_30d`, `observed_signal_installs`). Duplicating them into
+    /// the map would let one observation reach two learners and count twice.
+    /// Everything else returns a key: the value a measurement produces is
+    /// evidence, and evidence that only reaches the outcomes table is stored,
+    /// not learned.
+    ///
+    /// Keys are stable identifiers in the metric-posterior vocabulary — a
+    /// kind's key never changes once shipped, and kinds that observe the
+    /// same quantity at different windows or scopes get different keys (a
+    /// one-hour discovery count and a fourteen-day one are different
+    /// measurements of different things).
+    #[must_use]
+    pub const fn learnable_metric_key(self) -> Option<&'static str> {
+        match self {
+            Self::TicketRevenue72h => Some("ticket_revenue_minor"),
+            Self::MerchGrossProxy7d => Some("merch_gross_minor"),
+            Self::PromotionRoas7d => Some("promotion_roas_bps"),
+            Self::BookingReply7d => Some("booking_replies"),
+            Self::BookingAgentReply30d => Some("booking_agent_replies"),
+            Self::OutreachReply7d => Some("outreach_replies"),
+            Self::AudienceTicketRevenue72h => Some("audience_ticket_revenue_minor"),
+            Self::ShowTicketRevenue7d => Some("show_ticket_revenue_minor"),
+            Self::ShowGrowthSurfaceClicks7d => Some("show_growth_clicks"),
+            Self::ShowGrowthAttributedTicketOrders7d => Some("show_growth_ticket_orders"),
+            Self::ShowAttendanceRate14d => Some("show_attendance_rate"),
+            Self::GrassrootsActivationReplies14d => Some("activation_replies"),
+            Self::AgentRunCommunityEngagement7d => Some("engagement_score"),
+            Self::FanLifecycleEngagement7d => Some("lifecycle_engagement_events"),
+            Self::ScannerDiscoveryQuality14d => Some("scanner_discoveries"),
+            Self::StrategistInsightQuality14d => Some("strategist_insights"),
+            Self::ScannerDiscoveryQuality1h => Some("scanner_discoveries_1h"),
+            Self::StrategistInsightQuality1h => Some("strategist_insights_1h"),
+            Self::AgentRunOutcomeQuality1h => Some("outcome_quality_1h"),
+            Self::AgentRunFanGrowth14d
+            | Self::AgentRunFanGrowth3d
+            | Self::IncrementalFanGrowth14d
+            | Self::IncrementalFanGrowth3d
+            | Self::DurableFanGrowth30d
+            | Self::AgentRunSignalInstalls7d
+            | Self::SignalInstalls1d => None,
+        }
     }
 
     /// Whether the observed value is an effect rather than a level.
@@ -190,6 +247,35 @@ impl AutopilotMeasurementKind {
     /// it and the repository raises it, and neither should own the other's
     /// vocabulary.
     pub const NEVER_PUBLISHED: &'static str = "dispatch_never_published";
+
+    /// Why an event-bound measurement was abandoned: the show was cancelled,
+    /// so its outcome is unobservable rather than zero. A cancelled event's
+    /// zero attendance would otherwise land in evidence as the lever's
+    /// fault.
+    pub const EVENT_CANCELLED: &'static str = "event_cancelled";
+
+    /// Why an attendance measurement was abandoned: the event had no
+    /// admission passes at all, meaning ticketing did not run through the
+    /// platform and there is no attendance signal to read. Absence of a
+    /// denominator is not a rate of zero.
+    pub const NO_ISSUED_PASSES: &'static str = "no_issued_passes";
+
+    /// Whether the kind's `subject_id` is an `events.id` — the kinds whose
+    /// observation is a fact about a show. A cancelled show has no outcome
+    /// to observe, and observing one anyway would write a zero that the
+    /// learner would read as the action's fault.
+    #[must_use]
+    pub const fn subject_is_event(self) -> bool {
+        matches!(
+            self,
+            Self::AudienceTicketRevenue72h
+                | Self::ShowTicketRevenue7d
+                | Self::ShowGrowthSurfaceClicks7d
+                | Self::ShowGrowthAttributedTicketOrders7d
+                | Self::GrassrootsActivationReplies14d
+                | Self::ShowAttendanceRate14d
+        )
+    }
 
     /// Whether this kind measures what an outbound post did to an audience.
     ///

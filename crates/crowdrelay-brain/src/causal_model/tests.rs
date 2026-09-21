@@ -814,6 +814,7 @@ fn prediction_error_does_not_manufacture_decision_value() {
         context: ctx.clone(),
         target_key: None,
         creative_family: None,
+        expected_metrics: Default::default(),
     };
     let outcome_a = PredictionOutcome::from_observation(pred_a, 5.0, 0.0);
     assert!(
@@ -829,6 +830,7 @@ fn prediction_error_does_not_manufacture_decision_value() {
         context: ctx.clone(),
         target_key: None,
         creative_family: None,
+        expected_metrics: Default::default(),
     };
     let outcome_b = PredictionOutcome::from_observation(pred_b, 5.0, 0.0);
     assert!(

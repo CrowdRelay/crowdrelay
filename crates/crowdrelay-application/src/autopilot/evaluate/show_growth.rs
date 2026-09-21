@@ -12,11 +12,22 @@ use super::{policy_evidence, *};
 /// The crossbill gate's named reason — the token the decision ledger carries
 /// when the partner lever is declined (§4e-2).
 const UNRECIPROCATED_CROSSBILL: &str = "unreciprocated_crossbill";
+/// The decision-ledger token for a lever whose own measured outcomes retired
+/// it. Recorded as a Deny so the operator sees the ladder stopped itself,
+/// rather than the lever silently never firing again.
+const LEVER_RETIRED: &str = "lever_retired";
+
+/// The standing key a lever's measured outcomes accumulate under — the same
+/// `action_kind:identity` shape the worker-signals loader groups by.
+fn lever_standing_key(lever: ShowGrowthLever) -> String {
+    format!("show.growth.request:{}", lever.as_str())
+}
 
 pub(super) fn show_growth_candidates(
     snapshot: ShowGrowthSnapshot,
     policy: &AutopilotPolicy,
     evidence: EvidenceCount,
+    standings: &std::collections::HashMap<String, Standing>,
     now: OffsetDateTime,
 ) -> Result<Vec<DecisionCandidate>, serde_json::Error> {
     let AutopilotPolicyConfig::ShowGrowth(domain_policy) = policy.config else {
@@ -34,6 +45,7 @@ pub(super) fn show_growth_candidates(
             lever,
             confidence,
             evidence,
+            standings,
             send_at,
         )?]),
         ShowGrowthDecision::Hold(ShowGrowthHoldReason::UnreciprocatedCrossbill) => {
@@ -61,6 +73,7 @@ pub(super) fn show_growth_candidates(
                     lever,
                     confidence,
                     evidence,
+                    standings,
                     send_at,
                 )?);
             }
@@ -70,6 +83,7 @@ pub(super) fn show_growth_candidates(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn request_candidate(
     snapshot: ShowGrowthSnapshot,
     policy: &AutopilotPolicy,
@@ -77,8 +91,19 @@ fn request_candidate(
     lever: ShowGrowthLever,
     confidence: Confidence,
     evidence: EvidenceCount,
+    standings: &std::collections::HashMap<String, Standing>,
     send_at: Option<OffsetDateTime>,
 ) -> Result<DecisionCandidate, serde_json::Error> {
+    // Standing is the lever's own measured record — a run of worsened
+    // outcomes retires it the same way it retires a worker template. An
+    // absent key means untested: full reach, because an unmeasured lever has
+    // earned neither trust nor refusal.
+    if standings
+        .get(lever_standing_key(lever).as_str())
+        .is_some_and(|standing| standing.is_retired())
+    {
+        return lever_retired_decline(snapshot, policy, domain_policy, lever);
+    }
     let disposition = disposition_with_evidence(
         policy.autonomy_level,
         confidence,
@@ -174,5 +199,43 @@ fn unreciprocated_crossbill_decline(
             "action:show-growth:{}:partner_cross_promo:{UNRECIPROCATED_CROSSBILL}",
             snapshot.event_id,
         ),
+    })
+}
+
+/// A lever whose measured record retired it is refused on the same ledger
+/// channel as the crossbill hold: a `Deny` decision naming the lever and the
+/// reason, with no action row. Standing is workspace-global, not per-event,
+/// so the refusal keys on the lever alone — the same verdict would be
+/// written for every event, and one row says it. When outcomes stop being
+/// worsened the standing recovers on its own and the ordinary request key
+/// fires the lever as if it had never been held.
+fn lever_retired_decline(
+    snapshot: ShowGrowthSnapshot,
+    policy: &AutopilotPolicy,
+    domain_policy: ShowGrowthPolicy,
+    lever: ShowGrowthLever,
+) -> Result<DecisionCandidate, serde_json::Error> {
+    Ok(DecisionCandidate {
+        context: policy.context,
+        subject: ActionSubject::Event(snapshot.event_id),
+        decision_kind: LEVER_RETIRED,
+        confidence: Confidence::saturating_from_basis_points(9_400),
+        disposition: PolicyDisposition::Deny,
+        reason: "lever_retired: this lever's own measured outcomes kept worsening, \
+                 so the brain stopped proposing it until an operator reinstates it",
+        input_snapshot: serde_json::to_value(snapshot)?,
+        policy_snapshot: policy_evidence(policy, domain_policy)?,
+        action: AutopilotActionPayload::RequestShowGrowth {
+            event_id: snapshot.event_id,
+            lever,
+            template_key: lever.template_key().to_owned(),
+            send_at: None,
+        },
+        decision_key: format!(
+            "decision:show-growth:v{}:{LEVER_RETIRED}:{}",
+            policy.version,
+            lever.as_str(),
+        ),
+        action_idempotency_key: format!("action:show-growth:{LEVER_RETIRED}:{}", lever.as_str(),),
     })
 }

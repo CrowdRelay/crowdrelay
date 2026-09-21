@@ -1255,6 +1255,7 @@ mod tests {
             context: crate::causal_model::DispatchContext::default(),
             target_key: None,
             creative_family: None,
+            expected_metrics: Default::default(),
         }
     }
 

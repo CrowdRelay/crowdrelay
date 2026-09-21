@@ -471,12 +471,44 @@ impl AutopilotMeasurementRepository for PostgresAutopilotRepository {
                     .await
                     .map_err(map_sqlx)?;
                 }
-                // Scanner/strategist proximal outcomes have no column on the
-                // evidence row — the observed value lives in the outcome table
-                // and these workers acquire no fans. Readiness below closes
-                // their evidence once their queue is empty, same as everyone
-                // else's.
+                // Scanner/strategist proximal outcomes have no typed column
+                // on the evidence row — the observed value lives in the
+                // outcome table, and any kind with a `learnable_metric_key`
+                // also lands in `observed_metrics` just below. Readiness
+                // closes their evidence once the queue is empty, same as
+                // everyone else's.
                 _ => {}
+            }
+            // Every kind with a learnable metric key also lands in the
+            // evidence row's `observed_metrics` map — the general write-back
+            // that makes the measurement reachable by the metric posteriors.
+            // Without it, ticket revenue, replies, clicks and engagement were
+            // measured, classified, and then invisible to every learner.
+            //
+            // First writer wins per key, and `||` merges inside the row — two
+            // measurements completing in different transactions cannot
+            // read-merge-clobber each other's keys. The fan-growth kinds
+            // return `None` here on purpose: they write typed columns that
+            // dedicated posteriors consume, and a value in two places is a
+            // value learned twice.
+            if let Some(metric_key) = measurement.kind.learnable_metric_key() {
+                let _ = sqlx::query(
+                    r#"
+                    UPDATE viryaos_growth_evidence
+                    SET observed_metrics = observed_metrics ||
+                        jsonb_build_object($3::text, to_jsonb($4::double precision))
+                    WHERE workspace_id = $1
+                      AND action_id = $2
+                      AND NOT (observed_metrics ? $3)
+                    "#,
+                )
+                .bind(workspace_id.into_uuid())
+                .bind(measurement.action_id.into_uuid())
+                .bind(metric_key)
+                .bind(observed_value)
+                .execute(&mut *transaction)
+                .await
+                .map_err(map_sqlx)?;
             }
             if effect.assessment == EffectAssessment::Worsened {
                 let demoted_context = sqlx::query_scalar::<_, String>(

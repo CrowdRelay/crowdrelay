@@ -60,6 +60,7 @@ pub mod evidence;
 pub mod experiment;
 pub mod exploration;
 pub mod hypothesis;
+pub mod metric_posterior;
 pub mod opportunity;
 pub mod opportunity_graph;
 pub mod platform_yield;
@@ -76,6 +77,7 @@ pub mod tenant_preference;
 pub mod treatment_effect;
 pub mod tune_llm;
 pub mod validation;
+pub mod value_exchange;
 pub mod world_model;
 
 // Re-export the most commonly used types at the crate root.
@@ -112,6 +114,7 @@ pub use experiment::{
     ProvenanceEventKind, TreatmentAssignment,
 };
 pub use exploration::{CROSS_TEMPLATE_FACTOR, ExplorationMemory, VISIT_DECAY, context_hash};
+pub use metric_posterior::MetricPosterior;
 pub use opportunity::{OpportunityAction, OpportunityId};
 pub use portfolio::{
     DecisionMode, EfeSignal, PortfolioCandidate, PortfolioConfig, PortfolioOptimizer,
@@ -136,6 +139,7 @@ pub use tenant_preference::{
     PresentationMetadata, TemplatePreference, TenantPreferencePolicy, TenantPreferencePosterior,
 };
 pub use treatment_effect::TreatmentEffectPosterior;
+pub use value_exchange::ValueExchange;
 pub use world_model::{
     EventProximity, GrowthTarget, GrowthTargetProgress, GrowthTrend, TargetStatus, WorldModel,
 };

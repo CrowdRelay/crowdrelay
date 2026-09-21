@@ -326,6 +326,7 @@ fn make_prediction() -> DispatchPrediction {
         context: DispatchContext::default(),
         target_key: Some("community:test".to_owned()),
         creative_family: None,
+        expected_metrics: Default::default(),
     }
 }
 

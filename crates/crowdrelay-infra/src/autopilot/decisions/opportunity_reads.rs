@@ -751,5 +751,14 @@ macro_rules! decision_opportunity_reads {
         .await
     }
 
+    async fn load_action_standings_impl(
+        &self,
+        workspace_id: WorkspaceId,
+    ) -> Result<std::collections::HashMap<String, crowdrelay_domain::learning::Standing>, RepositoryError>
+    {
+        self.bounded(operations::load_action_standings(self, workspace_id))
+            .await
+    }
+
     };
 }

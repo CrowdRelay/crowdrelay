@@ -1002,6 +1002,19 @@ fn repository_error_kind(error: RepositoryError) -> &'static str {
         {
             AutopilotMeasurementKind::NEVER_PUBLISHED
         }
+        // Same for the event-bound abandonments: "the show was cancelled" and
+        // "the show never ticketed here" are why the measurement has no
+        // outcome, and `state_changed` would say neither.
+        RepositoryError::ConflictBecause(reason)
+            if reason == AutopilotMeasurementKind::EVENT_CANCELLED =>
+        {
+            AutopilotMeasurementKind::EVENT_CANCELLED
+        }
+        RepositoryError::ConflictBecause(reason)
+            if reason == AutopilotMeasurementKind::NO_ISSUED_PASSES =>
+        {
+            AutopilotMeasurementKind::NO_ISSUED_PASSES
+        }
         // Same shape as the measurement kind above: the contact governor
         // raises the roster's spent monthly attention share as a named
         // conflict, and "of the four things this roster wanted to tell this

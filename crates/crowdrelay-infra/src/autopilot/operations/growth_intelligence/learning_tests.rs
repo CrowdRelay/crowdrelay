@@ -667,3 +667,111 @@ fn an_early_reading_that_moves_the_posterior_names_the_action_that_caused_it() {
          cites no action at all"
     );
 }
+
+/// A resolved row's `observed_metrics` reach the metric posteriors.
+///
+/// Revenue, clicks and replies used to die in the outcomes table. The
+/// posteriors they now feed are keyed by the metric, hierarchical by the
+/// template that produced it — so the assertion that matters is that a
+/// prediction for that template reports the observation, and that a metric
+/// never seen keeps reporting `None` rather than a zero a caller could
+/// mistake for a measurement.
+#[test]
+fn resolved_metrics_fold_into_their_own_posterior() {
+    // Two templates producing the same metric at different magnitudes —
+    // partial pooling only has something to show when the levels diverge.
+    let rows_for = |template: &str, value: f64| {
+        (0..8)
+            .map(|i| {
+                let mut observed = std::collections::BTreeMap::new();
+                observed.insert("ticket_revenue_minor".to_owned(), value);
+                observed.insert("show_growth_clicks".to_owned(), 17.0);
+                GrowthEvidence {
+                    opportunity_id: Some(format!("{template}:venue:price:ctx")),
+                    treatment: TreatmentAssignment::Treatment,
+                    action_id: Some(uuid::Uuid::from_u128(0xbeef_0000 + i)),
+                    resolved_at: Some(
+                        time::OffsetDateTime::UNIX_EPOCH + time::Duration::days(7 + i as i64),
+                    ),
+                    observed_metrics: observed,
+                    ..GrowthEvidence::default()
+                }
+            })
+            .collect::<Vec<_>>()
+    };
+    let mut rows = rows_for("ticket-price", 4200.0);
+    rows.extend(rows_for("show-budget", 200.0));
+
+    let mut model = CausalModel::new();
+    apply_evidence_to_model(&mut model, &rows);
+
+    let (price_mean, _std, confidence) = model
+        .predict_metric_stats("ticket_revenue_minor", "ticket-price", None)
+        .expect("the observed metric has a posterior");
+    let (budget_mean, _, _) = model
+        .predict_metric_stats("ticket_revenue_minor", "show-budget", None)
+        .expect("the metric learned both templates");
+    let (unseen_mean, _, _) = model
+        .predict_metric_stats("ticket_revenue_minor", "venue-booking", None)
+        .expect("the metric's global level exists");
+
+    assert!(
+        price_mean > 1000.0 && price_mean < 4200.0,
+        "the observed template learned most of its level but stays shrunk \
+         toward the pool: {price_mean}"
+    );
+    assert!(
+        price_mean > budget_mean,
+        "two templates with different outcomes diverge: {price_mean} vs {budget_mean}"
+    );
+    assert!(
+        unseen_mean >= budget_mean && unseen_mean <= price_mean,
+        "an unseen template reports the pooled global, between the two \
+         observed levels: {unseen_mean}"
+    );
+    assert_eq!(
+        confidence, 0,
+        "sixteen observational rows are 1.6 effective mass, floored"
+    );
+    let (clicks, _, _) = model
+        .predict_metric_stats("show_growth_clicks", "ticket-price", None)
+        .expect("the second metric learned too");
+    assert!(clicks > 0.0 && clicks < 100.0);
+    assert!(
+        model
+            .predict_metric_stats("never_measured", "ticket-price", None)
+            .is_none(),
+        "a metric with no observations reports None, not a zero"
+    );
+}
+
+/// The metrics gate is `resolved_at`, not the delta.
+///
+/// A partially resolved row carries intermediate measurements; its metric
+/// map may already hold values, but a 3d cursor must not teach a 7d revenue
+/// number. Metrics fold exactly once — when full resolution arrives.
+#[test]
+fn metrics_wait_for_full_resolution() {
+    use time::{Duration, OffsetDateTime};
+
+    let mut observed = std::collections::BTreeMap::new();
+    observed.insert("ticket_revenue_minor".to_owned(), 4200.0);
+    let row = GrowthEvidence {
+        opportunity_id: Some("ticket-price:venue:price:ctx".to_owned()),
+        treatment: TreatmentAssignment::Treatment,
+        // A 3d cursor stamped, no resolved_at: the row is mid-flight.
+        replayed_3d_at: Some(OffsetDateTime::UNIX_EPOCH + Duration::days(3)),
+        partial_resolution_count: 1,
+        observed_metrics: observed,
+        ..GrowthEvidence::default()
+    };
+
+    let mut model = CausalModel::new();
+    apply_evidence_to_model(&mut model, std::slice::from_ref(&row));
+    assert!(
+        model
+            .predict_metric_stats("ticket_revenue_minor", "ticket-price", None)
+            .is_none(),
+        "a row still mid-resolution teaches its metrics to nobody"
+    );
+}

@@ -555,6 +555,7 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
             self.workspace_id,
             &experimental_keys,
             sizing_multiplier,
+            &causal_model.value_exchange,
         );
         let selection = run.selection;
         // 5.1: publish the pool this selection was drawn from. The roster's
@@ -1134,11 +1135,7 @@ fn idle_exploration_candidate(
     let prompt = "The brain's current channels (Reddit, Telegram, Discord, Bandcamp, Metal Archives) are exhausted — fan growth is stagnant or regressing. Identify NEW platforms, communities, and audiences the band has not yet investigated. Consider: Spotify playlists, Bandsintown, Facebook groups, Instagram, TikTok, YouTube, podcast communities, local event listings, genre-specific forums. For each, report: platform name, audience size estimate, relevance to the band's genre, and how the brain could reach that audience. Prioritize platforms with the highest potential fan yield and lowest engagement friction. Write in Polish for the primary audience.";
     let prediction = DispatchPrediction {
         template_id: "growth-strategist".to_owned(),
-        expected_new_fans: 0.0,
-        expected_signal_installs: 0.0,
-        context: crowdrelay_brain::DispatchContext::default(),
-        target_key: None,
-        creative_family: None,
+        ..Default::default()
     };
     let AutopilotPolicyConfig::GrowthIntelligence(ref domain_policy) = policy.config else {
         return Ok(None);
@@ -1203,6 +1200,7 @@ fn idle_exploration_candidate(
             bridge_confidence: 0,
             bridge_is_reliable: false,
             evidence_quality: crowdrelay_brain::EvidenceQuality::Observational,
+            secondary: std::collections::BTreeMap::new(),
         },
         information_gain: 0.0,
         novelty: 1.0,

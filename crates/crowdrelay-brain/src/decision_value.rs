@@ -122,6 +122,21 @@ impl EstimationRegime {
     }
 }
 
+/// Where a candidate's revenue-to-fans conversion came from — recorded so an
+/// operator can tell a learned exchange rate from a configured one when they
+/// ask why revenue moved a ranking.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RevenueModelSource {
+    /// The tenant's own realized revenue-per-fan ratio, accumulated from
+    /// first-party ticket and merch sales by `ValueExchange`.
+    Learned,
+    /// A rate the tenant stated in configuration. Reserved — no configured
+    /// rate exists anywhere yet, and a variant nobody can produce beats a
+    /// constant somebody else picked.
+    Configured,
+}
+
 /// The complete decision value for a single candidate — the canonical
 /// object that the portfolio optimizer compares. Every additive term is
 /// in expected incremental Y30 fans (or a directly comparable unit).
@@ -225,6 +240,21 @@ pub struct DecisionValue {
     /// candidate instead of the next-best alternative. Negative.
     /// Computed by the optimizer relative to the portfolio, not here.
     pub opportunity_cost: f64,
+    /// Economic value: the candidate's predicted revenue (ticket sales,
+    /// merch) converted to fan-equivalent utility through the tenant's
+    /// learned exchange rate. `None` — contributing zero — when the kind has
+    /// no revenue prediction or the exchange has too little history to name
+    /// a rate. Positive-only by construction: a refund-net or a prediction
+    /// below zero is harm's business (harm terms), not a negative here.
+    #[serde(default)]
+    pub economic_value_fans: Option<f64>,
+    /// Where the revenue-to-fans conversion came from. `Learned` is the only
+    /// live source — the tenant's own realized ratio. `Configured` is the
+    /// seam for a tenant-stated rate, deliberately unused until one exists
+    /// in configuration: a compiled-in constant would be one tenant's
+    /// economy silently priced as everyone's.
+    #[serde(default)]
+    pub revenue_model_source: Option<RevenueModelSource>,
 
     // ── Decision mode ──
     /// Why the brain is dispatching this candidate.
@@ -246,7 +276,10 @@ impl DecisionValue {
     /// that the effect is noise.
     #[must_use]
     pub fn total(&self) -> f64 {
-        self.pragmatic_value + self.risk_penalty.unwrap_or(0.0) + self.opportunity_cost
+        self.pragmatic_value
+            + self.risk_penalty.unwrap_or(0.0)
+            + self.opportunity_cost
+            + self.economic_value_fans.unwrap_or(0.0)
     }
 
     /// Constructs a DecisionValue from treatment-aware stats and resource
@@ -334,8 +367,47 @@ impl DecisionValue {
                 None
             },
             opportunity_cost: 0.0, // Computed by optimizer relative to next-best
+            // The economic term is set by `with_economic_value`, not here —
+            // `from_stats` has never seen the exchange rate and constructing
+            // the term without it would price revenue at zero.
+            economic_value_fans: None,
+            revenue_model_source: None,
             decision_mode,
         }
+    }
+
+    /// Converts the candidate's predicted revenue metrics into fan-equivalent
+    /// utility and records where the conversion came from. Only the
+    /// revenue-denominated metric keys convert — replies, clicks and ratios
+    /// stay provenance. When the exchange cannot name a rate the term stays
+    /// `None`: an unpriced candidate is worth its fan prediction, not less.
+    #[must_use]
+    pub fn with_economic_value(
+        mut self,
+        stats: &TreatmentAwareStats,
+        exchange: &crate::value_exchange::ValueExchange,
+    ) -> Self {
+        // Confidence 0 means the template has never produced a revenue
+        // observation and the mean is pure partial pooling — the portfolio
+        // average borrowed for a kind that may structurally never earn. Such
+        // kinds also never schedule revenue measurements, so no observation
+        // would ever arrive to shrink the phantom estimate away. Only direct
+        // evidence converts; everything else stays worth its fan prediction.
+        let predicted_revenue_minor: f64 = crate::value_exchange::REVENUE_MINOR_METRICS
+            .iter()
+            .filter_map(|key| {
+                stats
+                    .secondary
+                    .get(*key)
+                    .filter(|(_, _, confidence)| *confidence > 0)
+                    .map(|(mean, _, _)| *mean)
+            })
+            .sum();
+        if let Some(fans) = exchange.revenue_to_fans(predicted_revenue_minor) {
+            self.economic_value_fans = Some(fans);
+            self.revenue_model_source = Some(RevenueModelSource::Learned);
+        }
+        self
     }
 
     /// Sets the contamination estimate on this DecisionValue. Called by
@@ -371,6 +443,7 @@ mod tests {
             evidence_quality: EvidenceQuality::Observational,
             bridge_confidence: 5,
             bridge_is_reliable: false,
+            secondary: std::collections::BTreeMap::new(),
         }
     }
 
@@ -391,6 +464,8 @@ mod tests {
             pragmatic_value: 5.0,
             risk_penalty: Some(-0.2),
             opportunity_cost: -1.0,
+            economic_value_fans: None,
+            revenue_model_source: None,
             decision_mode: DecisionMode::Exploit,
         };
         // total = 5.0 + (-0.2) + (-1.0) = 3.8
@@ -414,6 +489,8 @@ mod tests {
             pragmatic_value: 5.0,
             risk_penalty: None, // NotModeled
             opportunity_cost: -1.0,
+            economic_value_fans: None,
+            revenue_model_source: None,
             decision_mode: DecisionMode::Exploit,
         };
         // total = 5.0 + 0.0 + (-1.0) = 4.0
@@ -573,6 +650,8 @@ mod tests {
             pragmatic_value: 5.0,
             risk_penalty: None,
             opportunity_cost: -1.0,
+            economic_value_fans: None,
+            revenue_model_source: None,
             decision_mode: DecisionMode::Exploit,
         };
 
@@ -614,6 +693,8 @@ mod tests {
             pragmatic_value: 5.0,
             risk_penalty: Some(-0.25),
             opportunity_cost: -1.5,
+            economic_value_fans: None,
+            revenue_model_source: None,
             decision_mode: DecisionMode::Explore,
         };
         assert!(
@@ -662,6 +743,8 @@ mod tests {
             pragmatic_value: 5.0,
             risk_penalty: Some(-0.5),
             opportunity_cost: -1.0,
+            economic_value_fans: None,
+            revenue_model_source: None,
             decision_mode: DecisionMode::Exploit,
         };
         let json = serde_json::to_string(&dv).unwrap();
@@ -760,6 +843,108 @@ mod tests {
             "intrinsic value should be p x mean, got {}",
             dv.total()
         );
+    }
+
+    /// A candidate whose stats predict revenue — and only revenue metrics —
+    /// earns the fan-equivalent of that revenue through the tenant's learned
+    /// exchange rate.
+    #[test]
+    fn revenue_prediction_converts_to_fan_equivalent_value() {
+        let mut exchange = crate::value_exchange::ValueExchange::default();
+        // 10 days at 500_000 minor and 10 fans/day → 50_000 minor per fan.
+        for day in 1..=10 {
+            exchange.observe(day, 500_000.0, 10.0);
+        }
+        let mut stats = make_stats(4.0, 1.0, 10);
+        stats
+            .secondary
+            .insert("show_ticket_revenue_minor".to_owned(), (100_000.0, 1.0, 5));
+        stats
+            .secondary
+            .insert("merch_gross_minor".to_owned(), (50_000.0, 1.0, 5));
+
+        let value =
+            DecisionValue::from_stats(&stats, ResourceCost::configured(1.0), DecisionMode::Exploit)
+                .with_economic_value(&stats, &exchange);
+
+        // 150_000 minor at 50_000 minor/fan → 3.0 fan-equivalents.
+        assert_eq!(value.economic_value_fans, Some(3.0));
+        assert_eq!(
+            value.revenue_model_source,
+            Some(RevenueModelSource::Learned)
+        );
+        assert!(
+            (value.total() - 4.0 - 3.0).abs() < 1e-9,
+            "total = pragmatic + economic: {}",
+            value.total()
+        );
+    }
+
+    /// An exchange with too little history cannot price revenue — the
+    /// candidate is worth its fan prediction and no more, never a made-up
+    /// rate's number.
+    #[test]
+    fn unconfident_exchange_prices_nothing() {
+        let exchange = crate::value_exchange::ValueExchange::default();
+        let mut stats = make_stats(4.0, 1.0, 10);
+        stats
+            .secondary
+            .insert("show_ticket_revenue_minor".to_owned(), (100_000.0, 1.0, 5));
+
+        let value =
+            DecisionValue::from_stats(&stats, ResourceCost::configured(1.0), DecisionMode::Exploit)
+                .with_economic_value(&stats, &exchange);
+
+        assert_eq!(value.economic_value_fans, None);
+        assert_eq!(value.revenue_model_source, None);
+        assert!((value.total() - 4.0).abs() < 1e-9);
+    }
+
+    /// Replies, clicks and ROAS are provenance, not revenue — they must not
+    /// pass through the exchange as if they were currency.
+    #[test]
+    fn non_revenue_metrics_do_not_convert() {
+        let mut exchange = crate::value_exchange::ValueExchange::default();
+        for day in 1..=10 {
+            exchange.observe(day, 500_000.0, 10.0);
+        }
+        let mut stats = make_stats(4.0, 1.0, 10);
+        stats
+            .secondary
+            .insert("outreach_replies".to_owned(), (12.0, 1.0, 5));
+        stats
+            .secondary
+            .insert("promotion_roas_bps".to_owned(), (30_000.0, 1.0, 5));
+
+        let value =
+            DecisionValue::from_stats(&stats, ResourceCost::configured(1.0), DecisionMode::Exploit)
+                .with_economic_value(&stats, &exchange);
+
+        assert_eq!(value.economic_value_fans, None);
+        assert!((value.total() - 4.0).abs() < 1e-9);
+    }
+
+    /// A template that has never produced a revenue measurement borrows the
+    /// pooled mean with confidence 0 — and must not be priced by it, since no
+    /// observation would ever arrive to correct the phantom.
+    #[test]
+    fn pooled_only_revenue_prediction_does_not_convert() {
+        let mut exchange = crate::value_exchange::ValueExchange::default();
+        for day in 1..=10 {
+            exchange.observe(day, 500_000.0, 10.0);
+        }
+        let mut stats = make_stats(4.0, 1.0, 10);
+        // A pooled mean with zero direct confidence.
+        stats
+            .secondary
+            .insert("show_ticket_revenue_minor".to_owned(), (100_000.0, 1.0, 0));
+
+        let value =
+            DecisionValue::from_stats(&stats, ResourceCost::configured(1.0), DecisionMode::Exploit)
+                .with_economic_value(&stats, &exchange);
+
+        assert_eq!(value.economic_value_fans, None);
+        assert!((value.total() - 4.0).abs() < 1e-9);
     }
 
     /// The boundary is a kink, and that is a decision rather than an accident.
