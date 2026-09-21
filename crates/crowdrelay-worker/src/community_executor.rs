@@ -42,11 +42,14 @@ use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use crowdrelay_domain::WorkspaceId;
-use crowdrelay_domain::action_class::ActionClass;
+use crowdrelay_domain::action_class::{ActionClass, effective_authority};
+use crowdrelay_domain::autonomy::AutonomyLevel;
 use crowdrelay_domain::publish_guard::{
     PublishChannel, PublishContext, content_hash, review_outbound_post,
 };
-use crowdrelay_domain::standing_approval::StandingGrant;
+use crowdrelay_domain::standing_approval::{
+    StandingGrant, UnattendedAuthority, unattended_authority,
+};
 use crowdrelay_infra::reddit_proxy::read_reddit_proxy_from_db;
 use serde::Deserialize;
 use serde_json::Value;
@@ -859,6 +862,30 @@ impl CommunityExecutorWorker {
                                             AND sg.target_key = c2.target_id::text
                                             AND sg.revoked_at IS NULL
                                             AND sg.expires_at > now()
+                                            -- A grant is an answer only while
+                                            -- the question it answered is still
+                                            -- asked: the outreach context must
+                                            -- sit at require_approval or higher
+                                            -- and the class ceiling no stricter.
+                                            -- Dialled to observe/recommend, the
+                                            -- row stays parked — claiming it
+                                            -- would only repark and burn an
+                                            -- attempt on nothing attempted.
+                                            AND EXISTS (
+                                                SELECT 1
+                                                FROM viryaos_autopilot_policies p
+                                                WHERE p.workspace_id = c2.workspace_id
+                                                  AND p.context = 'outreach'
+                                                  AND p.autonomy_level IN
+                                                      ('require_approval', 'bounded_auto')
+                                            )
+                                            AND NOT EXISTS (
+                                                SELECT 1
+                                                FROM viryaos_growth_autonomy g
+                                                WHERE g.workspace_id = c2.workspace_id
+                                                  AND g.action_class = sg.action_class
+                                                  AND g.ceiling IN ('observe', 'recommend')
+                                            )
                                       )
                                   )
                                   AND NOT EXISTS (
@@ -975,9 +1002,14 @@ impl CommunityExecutorWorker {
                     return Ok(());
                 }
                 RelayBatchGate::Parked => {
-                    // The grant this delivery was claimed under is gone and
-                    // the batch card hasn't answered — back to pending, where
-                    // the claim leaves it until the card or a grant says yes.
+                    // The authority this delivery was claimed under is gone —
+                    // grant revoked or the context dialled below a question a
+                    // grant may answer — and the batch card itself hasn't
+                    // answered. Back to pending, where the claim leaves it
+                    // until the card or a grant says yes. The claim's
+                    // `attempts` bump is refunded: nothing was attempted, and
+                    // a context flip-flopping between sweeps must not burn
+                    // the transient-failure budget on parked rows.
                     tracing::info!(
                         post_id = %action.id,
                         source_id = %source_id,
@@ -985,10 +1017,13 @@ impl CommunityExecutorWorker {
                     );
                     sqlx::query(
                         "UPDATE community_posts \
-                         SET status = 'pending', updated_at = now() \
-                         WHERE id = $1",
+                         SET status = 'pending', \
+                             attempts = attempts - 1, \
+                             updated_at = now() \
+                         WHERE id = $1 AND workspace_id = $2",
                     )
                     .bind(action.id)
+                    .bind(self.workspace_id.into_uuid())
                     .execute(&self.pool)
                     .await?;
                     return Ok(());

@@ -870,3 +870,123 @@ async fn a_grant_posts_its_community_while_the_card_covers_the_rest() -> Result<
     );
     Ok(())
 }
+
+/// A grant is an answer only while the question it answered is still asked.
+/// The operator dialling `outreach` down to `observe` — or the class ceiling
+/// below `require_approval` — retires the grant's say without touching its
+/// row: the delivery stays parked rather than posting on a dead question.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn a_grant_stops_answering_once_the_axes_go_quiet() -> Result<()> {
+    let pool = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
+        .await
+        .expect("connect to the migrated suite database");
+    let ws = workspace(&pool).await?;
+    let source_id = content_source(&pool, ws).await?;
+    let granted = community_target(&pool, ws, "metalpolska").await?;
+
+    crowdrelay_infra::standing_approvals::grant(
+        &pool,
+        ws.into_uuid(),
+        crowdrelay_infra::standing_approvals::GrantRequest {
+            action_kind: "community.engage.request",
+            target_key: &granted.to_string(),
+            class: crowdrelay_domain::action_class::ActionClass::ThirdParty,
+            granted_by: "operator:test",
+            days: 90,
+            note: None,
+        },
+        time::OffsetDateTime::now_utc(),
+    )
+    .await
+    .context("grant the community")?;
+
+    engage_outcome(&pool, ws, granted, source_id, "metalpolska").await?;
+    worker(&pool, ws).run_once().await?;
+    pending_delivery(&pool, ws, granted, source_id, "metalpolska").await?;
+    let executor = crowdrelay_worker::community_executor::CommunityExecutorWorker::new(
+        pool.clone(),
+        ws,
+        Duration::from_secs(30),
+        true,
+        None,
+        "http://agents.invalid".to_owned(),
+        None,
+        None,
+    )
+    .context("build executor")?;
+
+    // Sanity: with the seeded axes — outreach at require_approval, the
+    // third-party ceiling no stricter — the live grant carries the row.
+    let claimed = executor.claim_pending_actions().await?;
+    ensure!(
+        claimed.len() == 1,
+        "the live grant claims under the unanswered card, got {}",
+        claimed.len()
+    );
+    sqlx::query(
+        "UPDATE community_posts SET status='pending', attempts = attempts - 1 \
+         WHERE workspace_id=$1 AND relay_source_id=$2 AND status='posting'",
+    )
+    .bind(ws.into_uuid())
+    .bind(source_id)
+    .execute(&pool)
+    .await?;
+
+    // The context goes quiet. The grant row is still live — unrevoked,
+    // unexpired — but there is no RequireApproval question left for it to
+    // answer, so the delivery parks instead of posting on a dead question.
+    sqlx::query(
+        "UPDATE viryaos_autopilot_policies SET autonomy_level='observe' \
+         WHERE workspace_id=$1 AND context='outreach'",
+    )
+    .bind(ws.into_uuid())
+    .execute(&pool)
+    .await?;
+    let claimed = executor.claim_pending_actions().await?;
+    ensure!(
+        claimed.is_empty(),
+        "a grant cannot answer a context that stopped asking, got {}",
+        claimed.len()
+    );
+
+    // Context restored but the class ceiling tightened below the question —
+    // the other axis going quiet must park the delivery just the same.
+    sqlx::query(
+        "UPDATE viryaos_autopilot_policies SET autonomy_level='require_approval' \
+         WHERE workspace_id=$1 AND context='outreach'",
+    )
+    .bind(ws.into_uuid())
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "UPDATE viryaos_growth_autonomy SET ceiling='observe' \
+         WHERE workspace_id=$1 AND action_class='third_party'",
+    )
+    .bind(ws.into_uuid())
+    .execute(&pool)
+    .await?;
+    let claimed = executor.claim_pending_actions().await?;
+    ensure!(
+        claimed.is_empty(),
+        "a ceiling below the question parks the grant's answer too, got {}",
+        claimed.len()
+    );
+
+    // The ceiling lifts again — the grant answers once more, and the
+    // refunded attempt means the parked churn cost the row nothing.
+    sqlx::query(
+        "UPDATE viryaos_growth_autonomy SET ceiling='require_approval' \
+         WHERE workspace_id=$1 AND action_class='third_party'",
+    )
+    .bind(ws.into_uuid())
+    .execute(&pool)
+    .await?;
+    let claimed = executor.claim_pending_actions().await?;
+    ensure!(
+        claimed.len() == 1,
+        "axes restored, the live grant claims again, got {}",
+        claimed.len()
+    );
+    Ok(())
+}
