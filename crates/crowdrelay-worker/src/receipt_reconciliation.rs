@@ -1038,6 +1038,9 @@ mod tests {
             title: "t".to_owned(),
             body: "b".to_owned(),
             smart_link: None,
+            image_url: None,
+            media_id: None,
+            source_url: None,
         }
     }
 

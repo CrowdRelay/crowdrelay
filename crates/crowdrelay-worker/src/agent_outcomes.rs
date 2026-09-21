@@ -13,9 +13,11 @@
 //! from: this path writes what an agent proposed, and
 //! `audience_graph::community_promotion` writes what discovery already found
 //! and the screening policy admitted. Both go through
-//! `screen_community_candidate` and both use the same
-//! `(workspace_id, display_name, target_kind)` conflict key, so whichever
-//! sees a community first wins the row and the other updates it.
+//! `screen_community_candidate`. Personal-contact kinds dedupe on
+//! `(workspace_id, display_name, target_kind)`; a community's identity is
+//! its subreddit instead, so both writers conflict on the normalized
+//! `normalize_subreddit(subreddit)` index — whichever sees a community first
+//! wins the row and the other updates it.
 //!
 //! Idempotency: `agent_outcomes.idempotency_key` is unique per
 //! (workspace_id, key), and the autopilot decision_key mirrors it, so worker
@@ -383,6 +385,30 @@ impl AgentOutcomeWorker {
         // agents service owns, and a failed statement inside a transaction
         // would abort the mapping it is only meant to annotate.
         let trace_id = self.resolve_trace(outcome).await;
+        // Which template produced this task decides what a community post may
+        // source its facts from: the engager shares release videos, the repost
+        // worker relays the band's own synced social posts. Resolved on the
+        // pool for the same reason the trace is — `agent_service_tasks` is a
+        // foreign schema. A failed lookup falls back to `video`, the strictest
+        // existing gate, so a missing table cannot widen what may be posted.
+        let producing_template: Option<String> = sqlx::query_scalar(
+            r#"
+            SELECT template_id FROM agent_service_tasks
+            WHERE workspace_id = $1 AND id = $2
+            "#,
+        )
+        .bind(outcome.workspace_id)
+        .bind(outcome.task_id)
+        .fetch_optional(&self.pool)
+        .await
+        .unwrap_or_else(|error| {
+            tracing::debug!(
+                outcome_id = %outcome.id,
+                error = %error,
+                "could not resolve the producing template; strictest source gate applies"
+            );
+            None
+        });
         let mut tx = self.pool.begin().await?;
         let decision_id = Uuid::now_v7();
 
@@ -575,6 +601,10 @@ impl AgentOutcomeWorker {
             // the model's target_id needed only to parse as a UUID. Both holes
             // close here: fabricated ids find no row, and refused communities
             // carry no admit.
+            // The validated source row survives to the payload build — its
+            // media fields are attached there, Rust-side, so the model's
+            // text can never carry a URL it invented.
+            let mut community_source: Option<CommunityPostSourceRow> = None;
             if let Some(target_id) = community_target_id {
                 let admitted = sqlx::query_scalar::<_, bool>(
                     r#"
@@ -607,10 +637,21 @@ impl AgentOutcomeWorker {
                 }
 
                 // Source gate: the post must name the trusted content source
-                // its facts come from — and only a release video may become
-                // a community thread post. Events, releases and stories are
-                // real material too, but they belong to other channels; a
-                // thread post exists to share a new video, nothing else.
+                // its facts come from — and which kinds it may name depends
+                // on which worker produced the draft. The engager shares
+                // release videos; the repost worker carries the band's own
+                // synced social posts. Events, releases and stories are real
+                // material too, but they belong to other channels.
+                //
+                // The row is fetched rather than existence-checked because
+                // its media fields are what the action payload carries —
+                // the model writes the words; the source's own media and
+                // permalink are attached here, where the model cannot
+                // substitute a URL it invented.
+                let allowed_source_kind = match producing_template.as_deref() {
+                    Some("community-repost") => "social_post",
+                    _ => "video",
+                };
                 let source_id_raw = outcome
                     .payload
                     .item
@@ -618,31 +659,35 @@ impl AgentOutcomeWorker {
                     .and_then(|i| i.get("source_id"))
                     .and_then(Value::as_str)
                     .map(str::to_owned);
-                let source_ok = match source_id_raw
+                let source_row: Option<CommunityPostSourceRow> = match source_id_raw
                     .as_deref()
                     .and_then(|s| Uuid::parse_str(s).ok())
                 {
                     Some(source_id) => {
-                        sqlx::query_scalar::<_, bool>(
+                        sqlx::query_as::<_, CommunityPostSourceRow>(
                             r#"
-                        SELECT EXISTS(
-                            SELECT 1 FROM viryaos_content_sources
-                            WHERE workspace_id = $1
-                              AND id = $2
-                              AND source_kind = 'video'
-                              AND active
-                              AND expires_at > now()
-                        )
+                        SELECT metadata->>'media_url' AS media_url,
+                               metadata->>'media_id' AS media_id,
+                               metadata->>'media_type' AS media_type,
+                               metadata->>'thumbnail_url' AS thumbnail_url,
+                               metadata->>'url' AS source_url
+                        FROM viryaos_content_sources
+                        WHERE workspace_id = $1
+                          AND id = $2
+                          AND source_kind = $3
+                          AND active
+                          AND expires_at > now()
                         "#,
                         )
                         .bind(outcome.workspace_id)
                         .bind(source_id)
-                        .fetch_one(&mut *tx)
+                        .bind(allowed_source_kind)
+                        .fetch_optional(&mut *tx)
                         .await?
                     }
-                    None => false,
+                    None => None,
                 };
-                if !source_ok {
+                let Some(source_row) = source_row else {
                     let rejection = OutcomeRejection::UnsourcedPost {
                         source_id: source_id_raw,
                     };
@@ -655,7 +700,8 @@ impl AgentOutcomeWorker {
                     self.reject_outcome(outcome.id, &rejection.to_string())
                         .await?;
                     return Ok((None, None));
-                }
+                };
+                community_source = Some(source_row);
             }
 
             // Check if the workspace's policy for the outcome's context is
@@ -745,6 +791,22 @@ impl AgentOutcomeWorker {
                 } else {
                     None
                 };
+                // Media comes from the source row the gate just validated —
+                // never from the model's payload. For a VIDEO the postable
+                // still is `thumbnail_url`; anything else carries `media_url`.
+                // `media_id` lets the executor re-mint the signed CDN URL
+                // when it has expired by post time.
+                let (image_url, media_id, source_url) = community_source
+                    .as_ref()
+                    .map(|s| {
+                        let still = if s.media_type.as_deref() == Some("VIDEO") {
+                            s.thumbnail_url.clone().or(s.media_url.clone())
+                        } else {
+                            s.media_url.clone().or(s.thumbnail_url.clone())
+                        };
+                        (still, s.media_id.clone(), s.source_url.clone())
+                    })
+                    .unwrap_or_default();
                 Some((
                     json!({
                         "kind": "request_community_engagement",
@@ -755,6 +817,9 @@ impl AgentOutcomeWorker {
                         "body": item.and_then(|i| i.get("body")).and_then(Value::as_str).unwrap_or(""),
                         "smart_link": tracked_link,
                         "source_id": item.and_then(|i| i.get("source_id")).and_then(Value::as_str),
+                        "image_url": image_url,
+                        "media_id": media_id,
+                        "source_url": source_url,
                     }),
                     "community.engage.request",
                 ))
@@ -1303,6 +1368,16 @@ impl AgentOutcomeWorker {
         let why_fit = item.get("why_fit").and_then(Value::as_str).unwrap_or("");
         let evidence = item.get("evidence_urls").cloned().unwrap_or(json!([]));
         let subreddit = item.get("subreddit").and_then(Value::as_str);
+        // The discovering agent scraped the subreddit — it knows the
+        // language its posts are written in, and the repost drafter writes
+        // in it. Bounded to the column's shape; garbage truncates to NULL
+        // rather than failing the insert.
+        let language = item
+            .get("language")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|l| !l.is_empty() && l.chars().count() <= 8)
+            .map(str::to_owned);
         // Community targets (Reddit subreddits, forums) are public spaces.
         // Auto-promote them so the brain's community-engager can dispatch
         // without waiting for operator review. Personal-contact kinds keep
@@ -1328,16 +1403,34 @@ impl AgentOutcomeWorker {
         } else {
             (None, None, None)
         };
-        sqlx::query(
+        // A community's identity is its subreddit, not its display name —
+        // the scanner may name the same sub "r/deathcore" one week and
+        // "Deathcore — news & discussion" the next, and display-name dedup
+        // let both live as separate promoted targets (eleven subreddits sat
+        // doubled in production, each drafted and posted to twice per wave).
+        // The subreddit-arbiter upsert keeps one row per community: a
+        // re-proposal lands on the existing row and is re-screened there,
+        // with status sticky so a discarded community does not resurrect.
+        // Personal-contact kinds keep display-name dedup — a person and a
+        // place do not share an identity.
+        let community_identity = is_community && subreddit.is_some_and(|s| !s.trim().is_empty());
+        let sql = if community_identity {
             r#"
             INSERT INTO agent_outreach_targets
                 (workspace_id, target_kind, display_name, contact_email, contact_domain,
                  why_fit, evidence, source_task_id, subreddit, status,
-                 place_id, screening_verdict, refusal_reason, screened_at)
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,
-                    CASE WHEN $12::text IS NULL THEN NULL ELSE now() END)
-            ON CONFLICT (workspace_id, display_name, target_kind) DO UPDATE SET
+                 place_id, screening_verdict, refusal_reason, screened_at, language)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,
+                    CASE WHEN $2::text = 'community' THEN normalize_subreddit($9) ELSE $9 END,
+                    $10,$11,$12,$13,
+                    CASE WHEN $12::text IS NULL THEN NULL ELSE now() END, $14)
+            ON CONFLICT (workspace_id, normalize_subreddit(subreddit))
+                WHERE target_kind = 'community'
+                  AND subreddit IS NOT NULL
+                  AND normalize_subreddit(subreddit) <> ''
+            DO UPDATE SET
                 subreddit = COALESCE(EXCLUDED.subreddit, agent_outreach_targets.subreddit),
+                language = COALESCE(EXCLUDED.language, agent_outreach_targets.language),
                 status = CASE
                     WHEN agent_outreach_targets.status = 'discarded' THEN agent_outreach_targets.status
                     WHEN EXCLUDED.status = 'promoted' THEN 'promoted'
@@ -1355,23 +1448,54 @@ impl AgentOutcomeWorker {
                 END,
                 screened_at = COALESCE(EXCLUDED.screened_at, agent_outreach_targets.screened_at),
                 updated_at = now()
-            "#,
-        )
-        .bind(outcome.workspace_id)
-        .bind(target_kind)
-        .bind(display_name)
-        .bind(contact_email)
-        .bind(contact_domain)
-        .bind(why_fit)
-        .bind(&evidence)
-        .bind(outcome.task_id)
-        .bind(subreddit)
-        .bind(initial_status)
-        .bind(place_id)
-        .bind(verdict)
-        .bind(refusal)
-        .execute(&mut **tx)
-        .await?;
+            "#
+        } else {
+            r#"
+            INSERT INTO agent_outreach_targets
+                (workspace_id, target_kind, display_name, contact_email, contact_domain,
+                 why_fit, evidence, source_task_id, subreddit, status,
+                 place_id, screening_verdict, refusal_reason, screened_at, language)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,
+                    CASE WHEN $12::text IS NULL THEN NULL ELSE now() END, $14)
+            ON CONFLICT (workspace_id, display_name, target_kind) DO UPDATE SET
+                subreddit = COALESCE(EXCLUDED.subreddit, agent_outreach_targets.subreddit),
+                language = COALESCE(EXCLUDED.language, agent_outreach_targets.language),
+                status = CASE
+                    WHEN agent_outreach_targets.status = 'discarded' THEN agent_outreach_targets.status
+                    WHEN EXCLUDED.status = 'promoted' THEN 'promoted'
+                    ELSE agent_outreach_targets.status
+                END,
+                place_id = COALESCE(EXCLUDED.place_id, agent_outreach_targets.place_id),
+                -- A re-proposal is re-screened against whatever the audience
+                -- graph knows now, which is how a community that was refused
+                -- for being too small gets readmitted once it has grown. The
+                -- verdict is only overwritten when this pass produced one.
+                screening_verdict = COALESCE(EXCLUDED.screening_verdict, agent_outreach_targets.screening_verdict),
+                refusal_reason = CASE
+                    WHEN EXCLUDED.screening_verdict IS NULL THEN agent_outreach_targets.refusal_reason
+                    ELSE EXCLUDED.refusal_reason
+                END,
+                screened_at = COALESCE(EXCLUDED.screened_at, agent_outreach_targets.screened_at),
+                updated_at = now()
+            "#
+        };
+        sqlx::query(sql)
+            .bind(outcome.workspace_id)
+            .bind(target_kind)
+            .bind(display_name)
+            .bind(contact_email)
+            .bind(contact_domain)
+            .bind(why_fit)
+            .bind(&evidence)
+            .bind(outcome.task_id)
+            .bind(subreddit)
+            .bind(initial_status)
+            .bind(place_id)
+            .bind(verdict)
+            .bind(refusal)
+            .bind(language)
+            .execute(&mut **tx)
+            .await?;
         // Community targets are auto-promoted — the operator does not need
         // to approve them. Personal-contact kinds keep the proposed → promoted
         // operator-approval flow and need an action row.
@@ -1437,6 +1561,18 @@ struct OutcomeRow {
     confidence_basis_points: i32,
     idempotency_key: String,
     trace_id: Option<Uuid>,
+}
+
+/// The validated content source behind a community post — read by the source
+/// gate, carried into the action payload so the media the post ships is the
+/// source's own, never a URL the model produced.
+#[derive(sqlx::FromRow)]
+struct CommunityPostSourceRow {
+    media_url: Option<String>,
+    media_id: Option<String>,
+    media_type: Option<String>,
+    thumbnail_url: Option<String>,
+    source_url: Option<String>,
 }
 
 #[cfg(test)]

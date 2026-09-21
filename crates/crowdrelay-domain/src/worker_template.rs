@@ -38,6 +38,9 @@ pub enum WorkerTemplate {
     TelegramPoster,
     DiscordPoster,
     CommunityEngager,
+    /// Carries one synced band social post into one admitted community —
+    /// the relay's per-(post × community) drafting worker.
+    CommunityRepost,
     SignalInviter,
     GrowthStrategist,
 }
@@ -75,7 +78,7 @@ pub enum TemplateAudience {
 
 impl WorkerTemplate {
     /// Every template, in the order the evaluator checks them.
-    pub const ALL: [Self; 11] = [
+    pub const ALL: [Self; 12] = [
         Self::RedditScanner,
         Self::TelegramScanner,
         Self::MetalArchivesScanner,
@@ -85,6 +88,7 @@ impl WorkerTemplate {
         Self::TelegramPoster,
         Self::DiscordPoster,
         Self::CommunityEngager,
+        Self::CommunityRepost,
         Self::SignalInviter,
         Self::GrowthStrategist,
     ];
@@ -101,6 +105,7 @@ impl WorkerTemplate {
             Self::TelegramPoster => "telegram-poster",
             Self::DiscordPoster => "discord-poster",
             Self::CommunityEngager => "community-engager",
+            Self::CommunityRepost => "community-repost",
             Self::SignalInviter => "signal-inviter",
             Self::GrowthStrategist => "growth-strategist",
         }
@@ -121,7 +126,7 @@ impl WorkerTemplate {
     #[must_use]
     pub const fn audience(self) -> TemplateAudience {
         match self {
-            Self::CommunityEngager => TemplateAudience::Community,
+            Self::CommunityEngager | Self::CommunityRepost => TemplateAudience::Community,
             // Read the world, write notes. Nobody is reached.
             Self::RedditScanner
             | Self::TelegramScanner
@@ -183,13 +188,18 @@ mod tests {
     }
 
     #[test]
-    fn only_the_community_engager_targets_one_community() {
-        assert_eq!(
-            WorkerTemplate::CommunityEngager.audience(),
-            TemplateAudience::Community
-        );
+    fn only_the_community_workers_target_one_community() {
         for template in WorkerTemplate::ALL {
-            if template != WorkerTemplate::CommunityEngager {
+            if matches!(
+                template,
+                WorkerTemplate::CommunityEngager | WorkerTemplate::CommunityRepost
+            ) {
+                assert_eq!(
+                    template.audience(),
+                    TemplateAudience::Community,
+                    "{template:?} should be community-scoped"
+                );
+            } else {
                 assert_ne!(
                     template.audience(),
                     TemplateAudience::Community,

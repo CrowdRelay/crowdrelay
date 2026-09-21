@@ -37,12 +37,17 @@
 //! closing the race window.
 
 use std::borrow::Cow;
+use std::collections::BTreeSet;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use crowdrelay_domain::WorkspaceId;
+use crowdrelay_domain::publish_guard::{
+    PublishChannel, PublishContext, content_hash, review_outbound_post,
+};
 use crowdrelay_infra::reddit_proxy::read_reddit_proxy_from_db;
 use serde::Deserialize;
+use serde_json::Value;
 use sqlx::PgPool;
 use thiserror::Error;
 use tokio::{
@@ -287,6 +292,11 @@ pub struct CommunityExecutorWorker {
     /// Reddit User-Agent, built once so a proxy-refresh rebuild sends the
     /// same tenant identity.
     user_agent: String,
+    /// The Meta Page token the social-post sync already uses. Reposts carry
+    /// the source's media, and the signed CDN URLs expire — at post time a
+    /// fresh one is minted through `/{media_id}` under this credential.
+    /// `None` means no re-mint: the stored URL is tried as-is.
+    facebook_page_access_token: Option<String>,
 }
 
 impl CommunityExecutorWorker {
@@ -316,6 +326,7 @@ impl CommunityExecutorWorker {
         proxy_url: Option<String>,
         agent_service_url: String,
         agent_service_auth_key: Option<String>,
+        facebook_page_access_token: Option<String>,
     ) -> Result<Self, CommunityExecutorError> {
         let workspace_slug =
             std::env::var("CROWDRELAY_WORKSPACE_SLUG").unwrap_or_else(|_| "virya".to_owned());
@@ -351,6 +362,7 @@ impl CommunityExecutorWorker {
             agent_service_auth_key,
             env_proxy_url: proxy_url,
             user_agent,
+            facebook_page_access_token,
         })
     }
 
@@ -638,7 +650,8 @@ impl CommunityExecutorWorker {
         sqlx::query(
             r#"
             INSERT INTO community_posts
-                (workspace_id, action_id, target_id, subreddit, title, body, smart_link, status)
+                (workspace_id, action_id, target_id, subreddit, title, body, smart_link,
+                 image_url, media_id, source_url, status)
             SELECT
                 $1,
                 a.id,
@@ -648,6 +661,9 @@ impl CommunityExecutorWorker {
                 COALESCE(a.payload->>'title', ''),
                 COALESCE(a.payload->>'body', ''),
                 a.payload->>'smart_link',
+                a.payload->>'image_url',
+                a.payload->>'media_id',
+                a.payload->>'source_url',
                 'pending'
             FROM viryaos_autopilot_actions a
             WHERE a.workspace_id = $1
@@ -662,9 +678,8 @@ impl CommunityExecutorWorker {
                     AND t.target_kind = 'community'
                     AND t.screening_verdict = 'admitted'
                     AND t.status = 'promoted'
-                    AND lower(t.subreddit) = lower(
-                        regexp_replace(COALESCE(a.payload->>'subreddit', ''), '^/?r/', '')
-                    )
+                    AND normalize_subreddit(t.subreddit) =
+                        normalize_subreddit(a.payload->>'subreddit')
               )
               AND NOT EXISTS (
                   SELECT 1 FROM community_posts cp WHERE cp.action_id = a.id
@@ -676,7 +691,33 @@ impl CommunityExecutorWorker {
         .execute(&mut *tx)
         .await?;
 
-        // Step 2: Claim pending and rate_limited (past backoff) rows.
+        // Step 2: Fail rows whose community stopped being admitted between
+        // seed and claim — a demoted or re-screened target must not receive
+        // the post it was queued for. Without this the row would sit in
+        // `pending` forever: the seed-time EXISTS gate does not revisit it.
+        sqlx::query(
+            r#"
+            UPDATE community_posts cp
+            SET status = 'failed',
+                error_message = 'community no longer an admitted target at post time',
+                updated_at = now()
+            WHERE cp.workspace_id = $1
+              AND cp.status IN ('pending', 'rate_limited', 'awaiting_manual_post')
+              AND NOT EXISTS (
+                  SELECT 1 FROM agent_outreach_targets t
+                  WHERE t.workspace_id = cp.workspace_id
+                    AND t.id = cp.target_id
+                    AND t.target_kind = 'community'
+                    AND t.screening_verdict = 'admitted'
+                    AND t.status = 'promoted'
+              )
+            "#,
+        )
+        .bind(ws)
+        .execute(&mut *tx)
+        .await?;
+
+        // Step 3: Claim pending and rate_limited (past backoff) rows.
         // Transition them to `posting` atomically.
         // Guardrail 2: exclude rows whose subreddit is on cooldown (a post
         // to that subreddit was made in the last SUBREDDIT_COOLDOWN_DAYS days).
@@ -704,10 +745,19 @@ impl CommunityExecutorWorker {
                           -- while a person is still the publisher.
                           OR (cp.status = 'awaiting_manual_post' AND $3)
                       )
+                      AND EXISTS (
+                          SELECT 1 FROM agent_outreach_targets t
+                          WHERE t.workspace_id = cp.workspace_id
+                            AND t.id = cp.target_id
+                            AND t.target_kind = 'community'
+                            AND t.screening_verdict = 'admitted'
+                            AND t.status = 'promoted'
+                      )
                       AND NOT EXISTS (
                           SELECT 1 FROM community_posts recent
                           WHERE recent.workspace_id = $1
-                            AND recent.subreddit = cp.subreddit
+                            AND normalize_subreddit(recent.subreddit) =
+                                normalize_subreddit(cp.subreddit)
                             AND recent.status = 'posted'
                             AND recent.posted_at > now() - make_interval(days => $2)
                       )
@@ -723,9 +773,11 @@ impl CommunityExecutorWorker {
                 FROM target
                 WHERE cp.id = target.id
                 RETURNING cp.id, cp.action_id, cp.subreddit, cp.title, cp.body,
-                          cp.smart_link, target.claimed_from
+                          cp.smart_link, cp.image_url, cp.media_id, cp.source_url,
+                          target.claimed_from
             )
             SELECT c.id, c.action_id, c.subreddit, c.title, c.body, c.smart_link,
+                   c.image_url, c.media_id, c.source_url,
                    c.claimed_from,
                    a.trace_id, a.causation_id, a.decision_id
             FROM claimed c
@@ -815,10 +867,54 @@ impl CommunityExecutorWorker {
             return Err(CommunityExecutorError::NoAgentsService);
         }
 
-        // Build the post body, appending the smart link as a full URL if present.
+        // The publish guard: the same mechanical review the owned channels
+        // run before a post leaves. This executor used to skip it — the one
+        // channel where the post lands in someone else's community was the
+        // one channel nothing re-read. A hold parks the draft for a person
+        // (`awaiting_manual_post`) with the reason; nothing is lost and
+        // nothing unreviewed goes out.
         let post_body = self.build_post_body(&action.body, action.smart_link.as_deref());
+        // The guard reads what a reader sees: the title is the message on
+        // every rung of the format ladder (the drafted body may be empty on
+        // an image post), so the review and the duplicate hash cover both.
+        let post_text = format!("{}\n\n{}", action.title, post_body);
+        let recent_hashes = self.recent_posted_hashes().await?;
+        let approved_origins = self.community_approved_origins();
+        let approved_origin_refs: Vec<&str> = approved_origins.iter().map(String::as_str).collect();
+        let verdict = review_outbound_post(
+            &post_text,
+            &PublishContext {
+                channel: PublishChannel::Community,
+                approved_origins: &approved_origin_refs,
+                recent_content_hashes: &recent_hashes,
+            },
+        );
+        if let Some(reason) = verdict.hold_reason() {
+            tracing::info!(
+                action_id = %action.action_id,
+                reason = reason.as_str(),
+                "community post held for an operator by the publish guard"
+            );
+            self.hold_for_human(action.id, reason.as_str()).await?;
+            return Ok(());
+        }
 
-        let reddit_result = self.submit_via_agent_browser(action, &post_body).await?;
+        // The picture, fresh if we can re-mint it. Stored media URLs are
+        // signed CDN links that expire between sync and post time; the
+        // Graph id re-mints a working one. Both media and the source
+        // permalink go to the agents service — the submit ladder there is
+        // image → link → self, so a subreddit that refuses image posts
+        // still gets the repost as a link rather than a failure.
+        let image_url = self.resolve_image_url(action).await;
+
+        let reddit_result = self
+            .submit_via_agent_browser(
+                action,
+                &post_body,
+                image_url.as_deref(),
+                action.source_url.as_deref(),
+            )
+            .await?;
 
         // Record success, and re-anchor the action's pending measurements to
         // `posted_at` in the same transaction: the exposure window starts
@@ -834,6 +930,7 @@ impl CommunityExecutorWorker {
             SET status = 'posted',
                 reddit_post_id = $2,
                 reddit_post_url = $3,
+                post_kind = $4,
                 posted_at = now(),
                 updated_at = now(),
                 error_message = NULL,
@@ -844,6 +941,7 @@ impl CommunityExecutorWorker {
         .bind(action.id)
         .bind(&reddit_result.post_id)
         .bind(&reddit_result.post_url)
+        .bind(&reddit_result.kind)
         .execute(&mut *posted_tx)
         .await?;
         crowdrelay_infra::fanbase::anchor_measurements_to_publication(
@@ -889,13 +987,19 @@ impl CommunityExecutorWorker {
         Ok(())
     }
 
-    /// Submits a self post through the agents service's logged-in browser
-    /// session (POST /reddit/post). A 429 maps to the executor's
+    /// Submits through the agents service (POST /reddit/post). The agents
+    /// side owns the format ladder: `image_url` asks for a native image post
+    /// (it downloads the bytes and runs Reddit's media-lease upload);
+    /// `link_url` is the source permalink a link post falls back to; with
+    /// neither working a plain self post goes out. The response's `kind`
+    /// records which rung actually posted. A 429 maps to the executor's
     /// rate-limit backoff; every other failure is surfaced to the caller.
     async fn submit_via_agent_browser(
         &self,
         action: &ClaimedAction,
         post_body: &str,
+        image_url: Option<&str>,
+        link_url: Option<&str>,
     ) -> Result<RedditSubmitResult, CommunityExecutorError> {
         let auth_key = self.agent_service_auth_key.as_deref().ok_or_else(|| {
             CommunityExecutorError::RedditApi("agent service auth key not configured".to_owned())
@@ -911,6 +1015,8 @@ impl CommunityExecutorWorker {
             "subreddit": action.subreddit,
             "title": action.title,
             "body": post_body,
+            "image_url": image_url,
+            "link_url": link_url,
         });
 
         let client = self
@@ -977,7 +1083,7 @@ impl CommunityExecutorWorker {
             r#"
             SELECT count(*) FROM community_posts
             WHERE workspace_id = $1
-              AND subreddit = $2
+              AND normalize_subreddit(subreddit) = normalize_subreddit($2)
               AND status = 'posted'
               AND posted_at > now() - make_interval(days => $3)
             "#,
@@ -1071,6 +1177,122 @@ impl CommunityExecutorWorker {
             (Some(link_host), Some(own_host)) => link_host == own_host,
             _ => false,
         }
+    }
+
+    /// The origins a link in a community post may point at: the workspace's
+    /// own origin (smart links) and the owned-social domains a repost's
+    /// permalink lives on. Trailing slashes keep `instagram.com.evil.example`
+    /// from passing as `instagram.com`.
+    fn community_approved_origins(&self) -> [String; 7] {
+        [
+            format!("{}/", self.public_origin.trim_end_matches('/')),
+            "https://instagram.com/".to_owned(),
+            "https://www.instagram.com/".to_owned(),
+            "https://facebook.com/".to_owned(),
+            "https://www.facebook.com/".to_owned(),
+            "https://fb.watch/".to_owned(),
+            "https://fb.com/".to_owned(),
+        ]
+    }
+
+    /// Content hashes of what this channel posted recently — the dedupe input
+    /// for the publish guard, so a relayed post that ships twice reads as the
+    /// repeat it is.
+    async fn recent_posted_hashes(&self) -> Result<BTreeSet<String>, CommunityExecutorError> {
+        let bodies: Vec<String> = sqlx::query_scalar(
+            r#"
+            SELECT body FROM community_posts
+            WHERE workspace_id = $1
+              AND status = 'posted'
+              AND posted_at > now() - INTERVAL '7 days'
+            "#,
+        )
+        .bind(self.workspace_id.into_uuid())
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(bodies.iter().map(|b| content_hash(b)).collect())
+    }
+
+    /// Parks the draft for a person: `awaiting_manual_post` with the reason
+    /// as the error message — the same hold shape `social_post_executor`
+    /// writes when its publish guard refuses.
+    async fn hold_for_human(
+        &self,
+        post_id: Uuid,
+        reason: &str,
+    ) -> Result<(), CommunityExecutorError> {
+        sqlx::query(
+            r#"
+            UPDATE community_posts
+            SET status = 'awaiting_manual_post',
+                error_message = $2,
+                updated_at = now()
+            WHERE id = $1
+            "#,
+        )
+        .bind(post_id)
+        .bind(reason)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// The still image to attach, fresh if re-minting is possible.
+    ///
+    /// Stored media URLs are signed CDN links and expire; when the action
+    /// carries the Graph id and the workspace has a Page token, a fresh URL
+    /// is minted at post time. IG media objects answer `media_url` /
+    /// `thumbnail_url` (the video's still — the mp4 itself cannot be an
+    /// image post); FB post objects answer `full_picture`. The two field
+    /// sets are tried in order because the id alone does not say which
+    /// object kind it names.
+    async fn resolve_image_url(&self, action: &ClaimedAction) -> Option<String> {
+        let (Some(media_id), Some(token)) = (
+            action.media_id.as_deref(),
+            self.facebook_page_access_token.as_deref(),
+        ) else {
+            return action.image_url.clone();
+        };
+        for fields in ["media_url,thumbnail_url", "full_picture"] {
+            let url = format!(
+                "https://graph.facebook.com/v21.0/{media_id}?fields={fields}&access_token={token}"
+            );
+            let client = self
+                .http_client
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone();
+            let response = match client.get(&url).send().await {
+                Ok(response) => response,
+                Err(error) => {
+                    tracing::warn!(
+                        media_id,
+                        error = %error.without_url(),
+                        "media url re-mint request failed — falling back to the stored url"
+                    );
+                    continue;
+                }
+            };
+            if !response.status().is_success() {
+                continue;
+            }
+            let parsed: serde_json::Value = match response.json().await {
+                Ok(parsed) => parsed,
+                Err(_) => continue,
+            };
+            // A video's `media_url` is the mp4 — the still is its thumbnail.
+            // A photo has no thumbnail, so the order reads: still first,
+            // then the media itself, then the FB shape.
+            let fresh = parsed
+                .get("thumbnail_url")
+                .and_then(Value::as_str)
+                .or_else(|| parsed.get("media_url").and_then(Value::as_str))
+                .or_else(|| parsed.get("full_picture").and_then(Value::as_str));
+            if let Some(fresh) = fresh {
+                return Some(fresh.to_owned());
+            }
+        }
+        action.image_url.clone()
     }
 
     /// Polls Reddit for post performance metrics on recently posted content.
@@ -1533,6 +1755,16 @@ struct ClaimedAction {
     title: String,
     body: String,
     smart_link: Option<String>,
+    /// The reposted post's own image, when the source had one. A signed CDN
+    /// URL that may have expired since the sync stored it — `media_id`
+    /// re-mints a fresh one at post time.
+    image_url: Option<String>,
+    /// Graph object id the image belongs to — `/{id}?fields=media_url` (or
+    /// `thumbnail_url`, or `full_picture` for a FB post) re-mints the URL.
+    media_id: Option<String>,
+    /// The band's own permalink — the link-post fallback when no image can
+    /// be carried, and the post's attribution target.
+    source_url: Option<String>,
     trace_id: Option<Uuid>,
     causation_id: Option<Uuid>,
     decision_id: Option<Uuid>,
@@ -1542,6 +1774,11 @@ struct ClaimedAction {
 struct RedditSubmitResult {
     post_id: String,
     post_url: String,
+    /// What actually shipped — `image` | `link` | `self`. The agents service
+    /// reports it so the ledger records the post that exists, not the one
+    /// that was attempted.
+    #[serde(default)]
+    kind: Option<String>,
 }
 
 #[derive(sqlx::FromRow)]

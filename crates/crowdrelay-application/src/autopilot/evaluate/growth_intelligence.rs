@@ -960,13 +960,19 @@ fn candidate_from_request(
     // `Confidence::MAX` is asserted, not measured: this context always
     // believes its own request is worth making. The evidence gate is the only
     // thing standing between that constant and unattended execution.
-    let disposition = disposition_with_evidence(
-        policy.autonomy_level,
-        Confidence::MAX,
-        policy.minimum_confidence,
-        evidence,
-        RATE_FLOOR,
-    );
+    //
+    // The dispatch itself is internal work — its outcomes re-gate on their
+    // own rows — so `require_approval` upgrades to auto-execution rather than
+    // parking an unreviewable "approve this prompt" card in front of the
+    // operator. `Deny`/`Observe`/`Recommend` still apply unchanged.
+    let disposition =
+        crowdrelay_domain::autonomy::internal_work_disposition(disposition_with_evidence(
+            policy.autonomy_level,
+            Confidence::MAX,
+            policy.minimum_confidence,
+            evidence,
+            RATE_FLOOR,
+        ));
     let action = AutopilotActionPayload::RequestAgentRun {
         template_id: request.template_id.to_owned(),
         prompt: request.prompt.clone(),
@@ -1118,6 +1124,10 @@ fn template_post_format(template_id: &str) -> Option<String> {
     match template_id {
         "reddit-scanner" => Some("text_report".to_owned()),
         "community-engager" => Some("text_post".to_owned()),
+        // The submitted rung varies (image → link → self); the intent is a
+        // media post, and `post_kind` on the community_posts row records
+        // what actually shipped.
+        "community-repost" => Some("media_post".to_owned()),
         "social-post" => Some("social_post".to_owned()),
         "telegram-poster" => Some("telegram_post".to_owned()),
         "discord-poster" => Some("discord_post".to_owned()),

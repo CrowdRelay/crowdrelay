@@ -68,13 +68,20 @@ pub(super) fn community_engager_candidates(
     }
     // `Confidence::MAX` is asserted, not measured. Without the evidence gate
     // this context licenses unattended execution on its own say-so.
-    let disposition = disposition_with_evidence(
-        policy.autonomy_level,
-        Confidence::MAX,
-        policy.minimum_confidence,
-        evidence,
-        RATE_FLOOR,
-    );
+    //
+    // The dispatch is internal work: the drafted post arrives back as its own
+    // `community.engage.request` and gates there with the composed text in
+    // front of the operator. Requiring a first approval for the prompt alone
+    // produced "approve the agent run" cards nobody could review — measured
+    // as part of the fourteen-day approval flood.
+    let disposition =
+        crowdrelay_domain::autonomy::internal_work_disposition(disposition_with_evidence(
+            policy.autonomy_level,
+            Confidence::MAX,
+            policy.minimum_confidence,
+            evidence,
+            RATE_FLOOR,
+        ));
     let is_retry = snapshot.hours_since_last_effective_run.is_none();
     let retry_window = domain_policy.failed_run_retry_hours.max(1);
     let key_window_hours = if is_retry {

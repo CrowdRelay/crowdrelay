@@ -429,6 +429,10 @@ mod tests {
                 url: Some("https://instagram.com/p/abc".to_owned()),
                 platform: "instagram".to_owned(),
                 body: Some("soundcheck done — see you tonight".to_owned()),
+                media_url: Some("https://cdn.instagram.example/img.jpg".to_owned()),
+                media_id: Some("1790".to_owned()),
+                media_type: Some("IMAGE".to_owned()),
+                thumbnail_url: None,
             }),
         };
         let policy = AutopilotPolicy {
@@ -446,10 +450,12 @@ mod tests {
             CommunityRelayTarget {
                 target_id: OutreachTargetId::new(),
                 subreddit: "indieheads".to_owned(),
+                language: Some("en".to_owned()),
             },
             CommunityRelayTarget {
                 target_id: OutreachTargetId::new(),
                 subreddit: "listentothis".to_owned(),
+                language: None,
             },
         ];
 
@@ -493,27 +499,39 @@ mod tests {
             ActionClass::OwnedAudience
         );
 
-        // Each admitted community gets the band's own words, attributed.
+        // Each admitted community gets a repost draft task — the post itself
+        // is written by the repost worker in the community's own language and
+        // lands on the approval queue as the composed text, not a caption
+        // dump. The brain picks the (post × community) pairs; the worker
+        // only writes.
         for (candidate, target) in candidates[1..].iter().zip(&communities) {
             match &candidate.action {
-                AutopilotActionPayload::RequestCommunityEngagement {
-                    target_id,
-                    subreddit,
-                    title,
-                    body,
+                AutopilotActionPayload::RequestAgentRun {
+                    template_id,
+                    prompt,
+                    tier,
                     ..
                 } => {
-                    assert_eq!(*target_id, target.target_id.into_uuid());
-                    assert_eq!(subreddit.as_deref(), Some(target.subreddit.as_str()));
-                    assert_eq!(title, "soundcheck done");
-                    assert!(body.contains("Originally posted on instagram"));
-                    assert!(body.contains("https://instagram.com/p/abc"));
+                    assert_eq!(template_id, "community-repost");
+                    assert!(prompt.contains(&format!("r/{}", target.subreddit)));
+                    assert!(prompt.contains(&target.target_id.into_uuid().to_string()));
+                    assert!(prompt.contains("soundcheck done — see you tonight"));
+                    assert!(prompt.contains("https://instagram.com/p/abc"));
+                    // The recorded language is handed to the drafter; an
+                    // unrecorded one is named as such, not guessed silently.
+                    match target.language.as_deref() {
+                        Some(language) => {
+                            assert!(prompt.contains(&format!("language: {language}")));
+                        }
+                        None => assert!(prompt.contains("not recorded")),
+                    }
+                    // A caption adaptation is free-tier work.
+                    assert_eq!(*tier, crowdrelay_brain::AgentTier::Basic);
                 }
                 other => {
-                    return Err(format!("expected community engagement, got {other:?}").into())
+                    return Err(format!("expected repost draft task, got {other:?}").into())
                 }
             }
-            assert_eq!(candidate.action.action_class(), ActionClass::ThirdParty);
             assert_eq!(candidate.decision_kind, "relay_owned_post");
             // The community is the subject — the inflight-subject index must
             // see N community relays as N different subjects, or the second
@@ -569,6 +587,10 @@ mod tests {
                 url: None,
                 platform: "facebook".to_owned(),
                 body: None,
+                media_url: None,
+                media_id: None,
+                media_type: None,
+                thumbnail_url: None,
             }),
         };
         let policy = AutopilotPolicy {

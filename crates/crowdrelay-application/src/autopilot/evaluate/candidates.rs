@@ -663,8 +663,16 @@ fn content_candidates(
             artifact,
             confidence,
         } => {
-            let disposition =
-                disposition(policy.autonomy_level, confidence, policy.minimum_confidence);
+            // Producing an artifact is internal work: the rendered copy
+            // lands in the content library and every use of it — a push, a
+            // feed post, a newsletter — gates on its own approval action.
+            // What used to arrive instead was an "approve this artifact"
+            // card describing work the operator could not review before it
+            // existed — five of them for one release's signal_push in a
+            // single pass, measured in production.
+            let disposition = crowdrelay_domain::autonomy::internal_work_disposition(
+                disposition(policy.autonomy_level, confidence, policy.minimum_confidence),
+            );
             Ok(vec![DecisionCandidate {
                 context: policy.context,
                 subject: ActionSubject::ContentSource(snapshot.source_id),

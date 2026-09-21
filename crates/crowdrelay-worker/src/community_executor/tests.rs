@@ -50,6 +50,7 @@ mod tests {
                 env_proxy_url: None,
                 user_agent: "server:com.crowdrelay.community:v1.0.0 (by /u/test_tenant)"
                     .to_owned(),
+                facebook_page_access_token: None,
             },
             workspace_id,
         ))
@@ -254,6 +255,7 @@ mod tests {
             agent_service_auth_key: None,
             env_proxy_url: None,
             user_agent: "server:com.crowdrelay.community:v1.0.0 (by /u/test_tenant)".to_owned(),
+            facebook_page_access_token: None,
         }
     }
 
@@ -278,6 +280,7 @@ mod tests {
             None,
             "http://agent-service:8095".to_owned(),
             Some("key".to_owned()),
+            None,
         )
         .expect("worker");
         assert!(

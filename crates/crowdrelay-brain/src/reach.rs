@@ -50,7 +50,9 @@ pub enum ReachChannel {
 pub fn channel_for_template(template_id: &str) -> ReachChannel {
     use crowdrelay_domain::worker_template::WorkerTemplate;
     match WorkerTemplate::parse(template_id) {
-        Some(WorkerTemplate::CommunityEngager) => ReachChannel::RedditPost,
+        Some(WorkerTemplate::CommunityEngager | WorkerTemplate::CommunityRepost) => {
+            ReachChannel::RedditPost
+        }
         Some(WorkerTemplate::SocialPost) => ReachChannel::SocialPost,
         Some(WorkerTemplate::TelegramPoster) => ReachChannel::TelegramPost,
         Some(WorkerTemplate::DiscordPoster) => ReachChannel::DiscordPost,

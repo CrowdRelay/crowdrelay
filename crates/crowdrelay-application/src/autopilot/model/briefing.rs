@@ -960,11 +960,12 @@ impl AutopilotActionPayload {
                 ],
                 deadline_note: String::new(),
             },
-            Self::RequestCommunityEngagement { platform, subreddit, title, body, smart_link, .. } => ActionBriefing {
+            Self::RequestCommunityEngagement { platform, subreddit, title, body, smart_link, image_url, source_url, .. } => ActionBriefing {
                 summary: format!("Social post: {} — {}", platform, title),
                 why_it_matters: "This posts to an outside platform such as Reddit. It cannot be unposted, and it lands in someone else's community.".into(),
                 steps: vec![
                     BriefingStep { what_to_do: "Read the post title and body".into(), why_it_matters: "Check tone, facts, and that it meets the platform's rules".into() },
+                    BriefingStep { what_to_do: "Check the attached image is the band's own".into(), why_it_matters: "A repost ships the original picture — what you see is what the community sees".into() },
                     BriefingStep { what_to_do: "Click APPROVE to publish it".into(), why_it_matters: "Once approved the post goes live on the platform".into() },
                 ],
                 content: vec![
@@ -972,6 +973,8 @@ impl AutopilotActionPayload {
                     BriefingField { label: "Subreddit".into(), value: subreddit.clone().unwrap_or("—".into()) },
                     BriefingField { label: "Title".into(), value: title.clone() },
                     BriefingField { label: "Body".into(), value: truncate(body.clone(), 2000) },
+                    BriefingField { label: "Image".into(), value: image_url.clone().unwrap_or("—".into()) },
+                    BriefingField { label: "Source".into(), value: source_url.clone().unwrap_or("—".into()) },
                     BriefingField { label: "Smart link".into(), value: smart_link.clone().unwrap_or("—".into()) },
                 ],
                 deadline_note: String::new(),

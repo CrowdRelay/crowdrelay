@@ -814,7 +814,7 @@ async fn load_snapshot(
                 FROM community_posts
                 WHERE workspace_id=$1
                   AND status='awaiting_manual_post'
-                GROUP BY lower(subreddit)
+                GROUP BY normalize_subreddit(subreddit)
                 HAVING count(*) > 1
              ) AS duplicated)::bigint AS duplicate_community_drafts,
             -- Phases that failed in EVERY one of the last N closed cycles.

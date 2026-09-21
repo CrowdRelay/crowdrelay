@@ -54,6 +54,18 @@ struct FlaggedRoom {
     avg_score: f64,
 }
 
+/// Mirrors the SQL `normalize_subreddit` function — lowercase, leading
+/// `r/` or `/r/` stripped. The keyed collections below must use the same
+/// shape as the SQL comparisons or the lookups silently miss.
+fn normalize_subreddit_key(raw: &str) -> String {
+    let lowered = raw.trim().to_lowercase();
+    lowered
+        .strip_prefix("/r/")
+        .or_else(|| lowered.strip_prefix("r/"))
+        .unwrap_or(lowered.as_str())
+        .to_string()
+}
+
 /// Raises one `community.decline.advisory` action per room that engages
 /// but converts nobody — at most a handful per sweep so the queue is a
 /// statement, not a wall. Returns the number raised.
@@ -66,11 +78,11 @@ pub(in crate::autopilot) async fn raise_decline_advisories(
 
     let conversions = sqlx::query_as::<_, (String, i64)>(
         r#"
-        SELECT lower(community) AS key, COUNT(*) AS fans
+        SELECT normalize_subreddit(community) AS key, COUNT(*) AS fans
         FROM fan_provenance_events
         WHERE workspace_id = $1 AND event_kind = 'conversion'
           AND occurred_at >= now() - make_interval(days => $2)
-        GROUP BY lower(community)
+        GROUP BY normalize_subreddit(community)
         "#,
     )
     .bind(ws)
@@ -99,7 +111,7 @@ pub(in crate::autopilot) async fn raise_decline_advisories(
                 JOIN community_posts cp ON cp.id = cpm.community_post_id
                 WHERE cp.workspace_id = $1
                   AND cp.status = 'posted'
-                  AND lower(cp.subreddit) = lower(t.subreddit)
+                  AND normalize_subreddit(cp.subreddit) = normalize_subreddit(t.subreddit)
                   AND cp.posted_at >= now() - make_interval(days => $2)
                 ORDER BY cpm.community_post_id, cpm.measured_at DESC
             ) m
@@ -115,7 +127,7 @@ pub(in crate::autopilot) async fn raise_decline_advisories(
           AND NOT EXISTS (
               SELECT 1 FROM fan_provenance_events fpe
               WHERE fpe.workspace_id = $1
-                AND lower(fpe.community) = lower(t.subreddit)
+                AND normalize_subreddit(fpe.community) = normalize_subreddit(t.subreddit)
                 AND fpe.event_kind = 'conversion'
                 AND fpe.occurred_at >= now() - make_interval(days => $2)
           )
@@ -138,7 +150,7 @@ pub(in crate::autopilot) async fn raise_decline_advisories(
     // silence.
     let flagged_keys: Vec<String> = flagged
         .iter()
-        .map(|room| room.subreddit.to_lowercase())
+        .map(|room| normalize_subreddit_key(&room.subreddit))
         .collect();
 
     let mut raised = 0u32;
@@ -286,7 +298,7 @@ async fn alternative_room(
         FROM fan_provenance_events fpe
         JOIN agent_outreach_targets t
           ON t.workspace_id = fpe.workspace_id
-         AND lower(t.subreddit) = lower(fpe.community)
+         AND normalize_subreddit(t.subreddit) = normalize_subreddit(fpe.community)
          AND t.status = 'promoted'
          AND t.target_kind = 'community'
          AND t.screening_verdict IS DISTINCT FROM 'refused'
@@ -294,7 +306,7 @@ async fn alternative_room(
         WHERE fpe.workspace_id = $1
           AND fpe.event_kind = 'conversion'
           AND fpe.occurred_at >= now() - make_interval(days => $2)
-          AND lower(fpe.community) <> lower($3)
+          AND normalize_subreddit(fpe.community) <> normalize_subreddit($3)
           AND NOT EXISTS (
               SELECT 1 FROM viryaos_autopilot_actions a
               WHERE a.workspace_id = $1
@@ -318,7 +330,7 @@ async fn alternative_room(
     .map_err(map_sqlx)?;
     if let Some((subreddit,)) = converted {
         let fans = conversions
-            .get(&subreddit.to_lowercase())
+            .get(&normalize_subreddit_key(&subreddit))
             .copied()
             .unwrap_or(0);
         return Ok(Some((
@@ -345,7 +357,7 @@ async fn alternative_room(
                 JOIN community_posts cp ON cp.id = cpm.community_post_id
                 WHERE cp.workspace_id = $1
                   AND cp.status = 'posted'
-                  AND lower(cp.subreddit) = lower(t.subreddit)
+                  AND normalize_subreddit(cp.subreddit) = normalize_subreddit(t.subreddit)
                   AND cp.posted_at >= now() - make_interval(days => $2)
                 ORDER BY cpm.community_post_id, cpm.measured_at DESC
             ) m
@@ -354,8 +366,8 @@ async fn alternative_room(
           AND t.status = 'promoted'
           AND t.target_kind = 'community'
           AND t.subreddit IS NOT NULL
-          AND lower(t.subreddit) <> lower($4)
-          AND lower(t.subreddit) <> ALL($5)
+          AND normalize_subreddit(t.subreddit) <> normalize_subreddit($4)
+          AND normalize_subreddit(t.subreddit) <> ALL($5)
           AND t.screening_verdict IS DISTINCT FROM 'refused'
           AND NOT EXISTS (
               SELECT 1 FROM viryaos_autopilot_actions a

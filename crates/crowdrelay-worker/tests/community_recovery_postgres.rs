@@ -184,6 +184,7 @@ async fn stale_posting_recovery_reaches_the_assignment() -> Result<()> {
             None,
             "http://agents.invalid".to_owned(),
             None,
+            None,
         )
         .context("build executor")?;
         worker.recover_stale_posting().await?;

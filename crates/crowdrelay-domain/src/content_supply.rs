@@ -87,6 +87,19 @@ pub struct SocialPostFact {
     pub platform: String,
     /// The caption itself, as truncated by the sync.
     pub body: Option<String>,
+    /// The post's media as the platform reported it — IG `media_url` (jpeg
+    /// for a photo, mp4 for a video), a carousel's first image, FB
+    /// `full_picture`. A signed CDN URL that expires; `media_id` re-mints it.
+    pub media_url: Option<String>,
+    /// The Graph object the media URL belongs to — the post itself, or the
+    /// chosen carousel child. The executor re-mints a fresh URL through
+    /// `/{media_id}?fields=media_url` (or `thumbnail_url` for a video).
+    pub media_id: Option<String>,
+    /// IG `media_type` (`IMAGE`/`VIDEO`/`CAROUSEL_ALBUM`); `None` on FB.
+    pub media_type: Option<String>,
+    /// The still a video post shows — what an image post can actually carry
+    /// when `media_type` is VIDEO.
+    pub thumbnail_url: Option<String>,
 }
 
 /// A community the workspace may post in: an outreach target the screening
@@ -97,6 +110,11 @@ pub struct CommunityRelayTarget {
     pub target_id: OutreachTargetId,
     /// The clean subreddit name (no `r/`), as stored on the admitted target.
     pub subreddit: String,
+    /// The language the community posts in — BCP-47-ish short code (`pl`,
+    /// `en`), declared by the discovery outcome that proposed the target.
+    /// `None` means nobody recorded it; the drafting worker then infers the
+    /// language from the subreddit's own description.
+    pub language: Option<String>,
 }
 
 /// How many fans a Signal push would reach right now, measured with the
@@ -171,8 +189,10 @@ pub enum ContentSupplyDecision {
         confidence: Confidence,
     },
     /// The band already made the post — the machine's job is to carry it to
-    /// the owned audience and admitted communities, verbatim. It is not a
-    /// new broadcast and it is not drafted material.
+    /// the owned audience (verbatim, with the original media) and to admitted
+    /// communities (drafted per community in that community's language by the
+    /// repost worker — a raw caption dump is what made forum reposts read as
+    /// spam). It is not a new broadcast.
     Relay {
         confidence: Confidence,
     },

@@ -78,21 +78,66 @@ fn relay_candidates(
         action_idempotency_key: format!("action:relay:{source}:signal_push"),
     }];
 
-    // Admitted communities: the band's own words and link, attributed. A
-    // community not on the admitted list never appears here, and the executor
-    // re-checks admission at post time.
+    // Admitted communities: one drafting task per (post × community). The
+    // caption used to be pasted verbatim with an English attribution line —
+    // a Polish caption plus an English tail on a Polish subreddit read as
+    // exactly what it was, a bot reposting itself. Now the repost worker
+    // writes the post in the community's own language from the caption's
+    // facts (and carries the post's original media — attached by the worker
+    // outcome mapping from the source row, never by the model). The drafted
+    // text lands on the operator's approval queue as the composed post, not
+    // a promise of one.
+    //
+    // A community not on the admitted list never appears here, and the
+    // executor re-checks admission at post time.
     for target in communities {
-        let community_body = match (&post.body, &post.url) {
-            (Some(caption), Some(url)) => {
-                format!("{caption}\n\nOriginally posted on {platform}: {url}")
-            }
-            (Some(caption), None) => caption.clone(),
-            (None, Some(url)) => {
-                format!("{}\n\nOriginally posted on {platform}: {url}", post.title)
-            }
-            (None, None) => post.title.clone(),
-        };
         let target_id = target.target_id.into_uuid();
+        let caption_facts = post.body.as_deref().unwrap_or(post.title.as_str());
+        let permalink = post.url.as_deref().unwrap_or("(none)");
+        let media_desc = match post.media_type.as_deref() {
+            Some("IMAGE") => "a photo (the original picture will be attached)",
+            Some("VIDEO") => "a video (its still frame will be attached)",
+            Some("CAROUSEL_ALBUM") => "a photo carousel (its first image will be attached)",
+            _ if post.media_url.is_some() => "a photo (the original picture will be attached)",
+            _ => "no media — the post will be a link post to the source",
+        };
+        let language = target
+            .language
+            .as_deref()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .unwrap_or("(not recorded — infer it from the community's own description)");
+        let prompt = format!(
+            "Draft one Reddit post carrying the band's own social post into r/{}.\n\n\
+            Source post (the ONLY facts you may use — the caption is the band's own words):\n\
+            - platform: {platform}\n\
+            - caption: {caption_facts}\n\
+            - permalink: {permalink}\n\
+            - media: {media_desc}\n\
+            - source_id: {source}\n\n\
+            Target community:\n\
+            - target_id: {target_id}\n\
+            - subreddit: r/{}\n\
+            - language: {language}",
+            target.subreddit, target.subreddit
+        );
+        // The drafting dispatch runs the workspace's autonomy level WITHOUT
+        // the evidence floor, upgraded for internal work. The floor exists to
+        // stop unattended action a tenant cannot take back on an untested
+        // estimator — but this action only queues a draft: the only
+        // irreversible step is the post itself, and that gates later, on the
+        // outcome's own `require_approval` action, with the composed text and
+        // the picture in front of the operator. Gating the dispatch did not
+        // protect anything; it parked an "approve the agent run" card in
+        // front of a prompt nobody can judge, and the real decision came
+        // later anyway.
+        let draft_disposition = crowdrelay_domain::autonomy::internal_work_disposition(
+            crowdrelay_domain::autonomy::disposition(
+                policy.autonomy_level,
+                confidence,
+                policy.minimum_confidence,
+            ),
+        );
         out.push(DecisionCandidate {
             context: policy.context,
             // The community is the subject, not the post: the inflight
@@ -102,17 +147,17 @@ fn relay_candidates(
             subject: ActionSubject::TargetCommunity(target_id),
             decision_kind: "relay_owned_post",
             confidence,
-            disposition,
-            reason: "band's own post carried to a community the workspace was admitted to",
+            disposition: draft_disposition,
+            reason: "band's own post drafted for a community the workspace was admitted to",
             input_snapshot: input_snapshot.clone(),
             policy_snapshot: policy_snapshot.clone(),
-            action: AutopilotActionPayload::RequestCommunityEngagement {
-                target_id,
-                platform: "reddit".to_owned(),
-                subreddit: Some(target.subreddit.clone()),
-                title: post.title.clone(),
-                body: community_body,
-                smart_link: None,
+            action: AutopilotActionPayload::RequestAgentRun {
+                template_id: "community-repost".to_owned(),
+                prompt,
+                priority: 2,
+                // A caption adaptation, not a judgment call — the free-tier
+                // route is the right spend for it.
+                tier: crowdrelay_brain::AgentTier::Basic,
             },
             decision_key: format!(
                 "decision:relay:v{}:{source}:community:{target_id}",

@@ -966,7 +966,12 @@ fn key_window_for_template(policy: &GrowthIntelligencePolicy, template_id: &str)
         WorkerTemplate::SocialPost => policy.social_post_cooldown_hours,
         WorkerTemplate::TelegramPoster => policy.telegram_poster_cooldown_hours,
         WorkerTemplate::DiscordPoster => policy.discord_poster_cooldown_hours,
-        WorkerTemplate::CommunityEngager => policy.community_engager_cooldown_hours,
+        // The repost worker shares the community channel and its cooldown —
+        // the subreddit-level 7-day spacing the executor enforces is the
+        // same one this key window approximates.
+        WorkerTemplate::CommunityEngager | WorkerTemplate::CommunityRepost => {
+            policy.community_engager_cooldown_hours
+        }
         WorkerTemplate::SignalInviter => policy.signal_inviter_cooldown_hours,
         WorkerTemplate::GrowthStrategist => policy.growth_strategist_cooldown_hours,
     }
@@ -1152,10 +1157,16 @@ fn idle_exploration_candidate(
             subject: ActionSubject::Workspace(workspace_id),
             decision_kind: "request_agent_run",
             confidence: Confidence::MAX,
-            disposition: disposition(
-                policy.autonomy_level,
-                Confidence::MAX,
-                policy.minimum_confidence,
+            // Internal drafting: the strategist's findings arrive as their
+            // own gated outcomes, so the dispatch does not wait on a prompt
+            // approval the operator cannot review. Deny/Observe/Recommend
+            // are unchanged by the upgrade.
+            disposition: crowdrelay_domain::autonomy::internal_work_disposition(
+                disposition(
+                    policy.autonomy_level,
+                    Confidence::MAX,
+                    policy.minimum_confidence,
+                ),
             ),
             reason: "exploring new horizons — current channels exhausted",
             input_snapshot: serde_json::json!({

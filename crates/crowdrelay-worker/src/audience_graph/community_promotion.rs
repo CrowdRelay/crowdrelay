@@ -201,13 +201,23 @@ pub(super) async fn promote_community_places(
              subreddit, status, place_id, screening_verdict, refusal_reason, screened_at)
         SELECT $1, 'community', candidate.name, candidate.why_fit,
                jsonb_build_array(place.url),
-               candidate.subreddit,
+               normalize_subreddit(candidate.subreddit),
                CASE WHEN candidate.verdict = 'admitted' THEN 'promoted' ELSE 'proposed' END,
                candidate.place_id, candidate.verdict, candidate.refusal, now()
         FROM unnest($2::uuid[], $3::text[], $4::text[], $5::text[], $6::text[], $7::text[])
              AS candidate(place_id, name, subreddit, why_fit, verdict, refusal)
         JOIN discovery_places AS place ON place.id = candidate.place_id
-        ON CONFLICT (workspace_id, display_name, target_kind) DO UPDATE SET
+        -- The conflict target is the normalized subreddit, not the display
+        -- name: a place promoted here may share a subreddit with a target
+        -- the scanner proposed under a different name, and display-name
+        -- dedup let both live (production held eleven doubled subreddits,
+        -- each drafted twice per wave). One row per subreddit — a second
+        -- proposal updates the same row.
+        ON CONFLICT (workspace_id, normalize_subreddit(subreddit))
+            WHERE target_kind = 'community'
+              AND subreddit IS NOT NULL
+              AND normalize_subreddit(subreddit) <> ''
+        DO UPDATE SET
             place_id = COALESCE(agent_outreach_targets.place_id, EXCLUDED.place_id),
             screening_verdict = EXCLUDED.screening_verdict,
             refusal_reason = EXCLUDED.refusal_reason,

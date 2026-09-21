@@ -155,6 +155,10 @@ async fn post_upsert_writes_and_repeats_idempotently() -> Result<()> {
         url: Some("https://instagram.example/p/abc".to_owned()),
         posted_at: Some(OffsetDateTime::now_utc()),
         caption: Some("the band's own words".to_owned()),
+        media_url: Some("https://cdn.instagram.example/img.jpg".to_owned()),
+        media_id: Some("media-1".to_owned()),
+        media_type: Some("IMAGE".to_owned()),
+        thumbnail_url: None,
     };
     worker
         .upsert_post("instagram", &entry)

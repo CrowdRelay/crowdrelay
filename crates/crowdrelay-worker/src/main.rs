@@ -457,6 +457,12 @@ async fn run(database: PgPool, config: &Config, standby: bool) -> Result<()> {
         posture,
     );
     let manual_mode = !posture.reddit.publishes();
+    // The community executor re-mints fresh Meta media URLs at post time — the
+    // signed CDN URLs captured at sync expire — so it needs the same Page
+    // token the social post executor publishes with.
+    let facebook_page_access_token = std::env::var("CROWDRELAY_FACEBOOK_PAGE_ACCESS_TOKEN")
+        .ok()
+        .filter(|v| !v.trim().is_empty());
     let community_executor = match CommunityExecutorWorker::new(
         database.clone(),
         workspace_id,
@@ -465,6 +471,7 @@ async fn run(database: PgPool, config: &Config, standby: bool) -> Result<()> {
         config.reddit_proxy_url.clone(),
         config.agent_service_url.clone(),
         agent_service_auth_key.clone(),
+        facebook_page_access_token.clone(),
     ) {
         Ok(worker) => {
             // Say which of the two reasons put it in manual mode. "Not
@@ -667,9 +674,6 @@ async fn run(database: PgPool, config: &Config, standby: bool) -> Result<()> {
     // counts into viryaos_growth_metric_series. No polling — wakes only on
     // NOTIFY or when the next scheduled sync time arrives.
     let youtube_api_key = std::env::var("CROWDRELAY_YOUTUBE_API_KEY")
-        .ok()
-        .filter(|v| !v.trim().is_empty());
-    let facebook_page_access_token = std::env::var("CROWDRELAY_FACEBOOK_PAGE_ACCESS_TOKEN")
         .ok()
         .filter(|v| !v.trim().is_empty());
     // Social post executor. Facebook Pages publish through the Graph API with

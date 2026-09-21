@@ -991,12 +991,20 @@ pub enum AutopilotActionPayload {
         /// Devin). The brain classifies each task based on stakes and complexity.
         tier: AgentTier,
     },
-    /// A community engagement post drafted by the `community-engager` worker
-    /// and approved by the operator. Execution emits an outbox event for the
-    /// configured executor to post to the external platform (e.g. Reddit) via
-    /// the agents service browser session. The autopilot never calls the
-    /// platform API directly — it follows the same ThirdParty outbox pattern
-    /// as outreach and booking.
+    /// A community engagement post drafted by a community worker
+    /// (`community-engager` for release videos, `community-repost` for the
+    /// band's own synced social posts) and approved by the operator.
+    /// Execution emits an outbox event for the configured executor to post
+    /// to the external platform (e.g. Reddit) via the agents service browser
+    /// session. The autopilot never calls the platform API directly — it
+    /// follows the same ThirdParty outbox pattern as outreach and booking.
+    ///
+    /// The media fields are attached by the outcome mapper from the
+    /// validated content source — never by the model — so the picture a
+    /// repost ships is the post's own. `image_url` is a signed CDN link that
+    /// may have expired by post time; the executor re-mints it from
+    /// `media_id`. `source_url` is the band's own permalink — the link-post
+    /// fallback and the attribution target.
     RequestCommunityEngagement {
         target_id: uuid::Uuid,
         platform: String,
@@ -1004,6 +1012,9 @@ pub enum AutopilotActionPayload {
         title: String,
         body: String,
         smart_link: Option<String>,
+        image_url: Option<String>,
+        media_id: Option<String>,
+        source_url: Option<String>,
     },
     /// A Signal push notification drafted by the `signal-inviter` worker and
     /// approved by the operator. Execution inserts `fan_push_deliveries` rows

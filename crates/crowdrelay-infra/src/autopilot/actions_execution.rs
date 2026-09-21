@@ -1234,6 +1234,9 @@ impl PostgresAutopilotRepository {
                     title,
                     body,
                     smart_link,
+                    image_url,
+                    media_id,
+                    source_url,
                 } => {
                     emit_outward_action(
                         &mut transaction,
@@ -1250,6 +1253,9 @@ impl PostgresAutopilotRepository {
                             "title": title,
                             "body": body,
                             "smart_link": smart_link,
+                            "image_url": image_url,
+                            "media_id": media_id,
+                            "source_url": source_url,
                         }),
                     )
                     .await?;

@@ -80,6 +80,23 @@ pub struct PostEntry {
     pub posted_at: Option<OffsetDateTime>,
     /// The band's own words, full but bounded — voice material.
     pub caption: Option<String>,
+    /// The media the post carries — IG `media_url` (a jpeg for IMAGE, the
+    /// mp4 for VIDEO), the first image child's `media_url` for a carousel,
+    /// FB `full_picture`. Signed CDN URLs expire; `media_id` is what lets
+    /// the executor re-mint a fresh one at post time. Callers that need a
+    /// still take `thumbnail_url` first, then this when the type is not
+    /// VIDEO.
+    pub media_url: Option<String>,
+    /// Graph object id `media_url` belongs to — the post's own id for a
+    /// single medium, the chosen child's for a carousel. Re-mint path:
+    /// `/{media_id}?fields=media_url` (or `thumbnail_url` for a video).
+    pub media_id: Option<String>,
+    /// IG `media_type` (`IMAGE`/`VIDEO`/`CAROUSEL_ALBUM`); `None` on FB,
+    /// where `full_picture` is always a still.
+    pub media_type: Option<String>,
+    /// The still a VIDEO post shows — kept apart from `media_url` so a video
+    /// repost can ship its frame as the photo rather than an unplayable mp4.
+    pub thumbnail_url: Option<String>,
 }
 
 #[derive(Clone)]
@@ -217,7 +234,7 @@ impl SocialPostSourceSyncWorker {
             .as_ref()
             .ok_or_else(|| "no Facebook Page access token configured".to_owned())?;
         let url = format!(
-            "{GRAPH_API_BASE}/{page_id}/posts?fields=id,message,created_time,permalink_url&limit={MAX_POSTS_PER_ACCOUNT}&access_token={token}"
+            "{GRAPH_API_BASE}/{page_id}/posts?fields=id,message,created_time,permalink_url,full_picture&limit={MAX_POSTS_PER_ACCOUNT}&access_token={token}"
         );
         // The token is inside the URL — strip it off transport errors so it
         // cannot reach a log line, the same guard the metric sync applies.
@@ -254,6 +271,13 @@ impl SocialPostSourceSyncWorker {
                 url: post.permalink_url.clone(),
                 posted_at: post.created_time.as_deref().and_then(parse_graph_timestamp),
                 caption,
+                // `full_picture` is the post's still — a photo's image, a
+                // video's thumbnail. The post id re-mints it via
+                // `/{id}?fields=full_picture` when the CDN URL has expired.
+                media_url: post.full_picture.clone(),
+                media_id: post.full_picture.as_ref().map(|_| post.id.clone()),
+                media_type: None,
+                thumbnail_url: None,
             };
             self.upsert_post("facebook", &entry).await?;
         }
@@ -268,7 +292,7 @@ impl SocialPostSourceSyncWorker {
             .as_ref()
             .ok_or_else(|| "no Facebook Page access token configured".to_owned())?;
         let url = format!(
-            "{GRAPH_API_BASE}/{ig_user_id}/media?fields=id,caption,timestamp,permalink,media_type&limit={MAX_POSTS_PER_ACCOUNT}&access_token={token}"
+            "{GRAPH_API_BASE}/{ig_user_id}/media?fields=id,caption,timestamp,permalink,media_type,media_url,thumbnail_url,children{{media_url,media_type,thumbnail_url}}&limit={MAX_POSTS_PER_ACCOUNT}&access_token={token}"
         );
         let response = self
             .http_client
@@ -309,12 +333,49 @@ impl SocialPostSourceSyncWorker {
             let Some(title) = title else {
                 continue;
             };
+            // Pick the still a repost can carry. A photo answers its own
+            // `media_url`; a video answers `thumbnail_url` (the mp4 cannot be
+            // an image post); a carousel answers its first image child's
+            // `media_url` — band photo posts are usually carousels, and the
+            // parent's media_url is empty. `media_id` names the Graph object
+            // the URL came from so the executor can re-mint it at post time.
+            let children = media.children.as_ref().map(|c| c.data.as_slice());
+            let (media_url, media_id) = match media.media_type.as_deref() {
+                // First child with a usable still wins: an IMAGE answers
+                // media_url, a VIDEO answers thumbnail_url (the mp4 itself
+                // cannot be an image post).
+                Some("CAROUSEL_ALBUM") => children
+                    .unwrap_or_default()
+                    .iter()
+                    .find_map(|c| {
+                        let url = if c.media_type.as_deref() == Some("VIDEO") {
+                            c.thumbnail_url.clone()
+                        } else {
+                            c.media_url.clone()
+                        };
+                        url.map(|u| (u, c.id.clone()))
+                    })
+                    .map(|(u, id)| (Some(u), Some(id)))
+                    .unwrap_or((None, None)),
+                Some("VIDEO") => (
+                    media
+                        .thumbnail_url
+                        .clone()
+                        .or_else(|| media.media_url.clone()),
+                    Some(media.id.clone()),
+                ),
+                _ => (media.media_url.clone(), Some(media.id.clone())),
+            };
             let entry = PostEntry {
                 external_id: media.id.clone(),
                 title,
                 url: media.permalink.clone(),
                 posted_at: media.timestamp.as_deref().and_then(parse_graph_timestamp),
                 caption,
+                media_url,
+                media_id,
+                media_type: media.media_type.clone(),
+                thumbnail_url: media.thumbnail_url.clone(),
             };
             self.upsert_post("instagram", &entry).await?;
         }
@@ -334,6 +395,13 @@ impl SocialPostSourceSyncWorker {
             "posted_at": entry.posted_at.map(|t| t.unix_timestamp()),
             "origin": format!("{platform}_graph_api"),
             "body": entry.caption,
+            // Media carried so the relay can post the original picture, not
+            // just the caption. `media_id` is the durable half — the URLs
+            // are signed CDN links and expire.
+            "media_id": entry.media_id,
+            "media_url": entry.media_url,
+            "media_type": entry.media_type,
+            "thumbnail_url": entry.thumbnail_url,
         });
 
         let mut tx = self.pool.begin().await.map_err(|e| format!("begin: {e}"))?;
@@ -423,6 +491,7 @@ struct FacebookPost {
     message: Option<String>,
     created_time: Option<String>,
     permalink_url: Option<String>,
+    full_picture: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -432,6 +501,19 @@ struct InstagramMedia {
     timestamp: Option<String>,
     permalink: Option<String>,
     media_type: Option<String>,
+    media_url: Option<String>,
+    thumbnail_url: Option<String>,
+    children: Option<GraphDataPage<InstagramMediaChild>>,
+}
+
+/// A carousel member — same media fields minus the caption/permalink the
+/// children endpoint does not repeat.
+#[derive(Debug, Deserialize)]
+struct InstagramMediaChild {
+    id: String,
+    media_url: Option<String>,
+    media_type: Option<String>,
+    thumbnail_url: Option<String>,
 }
 
 /// First line of a caption, shortened — the panel's readable name for a post.

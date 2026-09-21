@@ -514,7 +514,8 @@ pub(in crate::autopilot) async fn load_growth_intelligence_snapshots(
                     COUNT(DISTINCT dp.id)::bigint AS discovered,
                     COUNT(DISTINCT cp.subreddit)::bigint AS active
                 FROM discovery_places dp
-                LEFT JOIN community_posts cp ON cp.subreddit = dp.name
+                LEFT JOIN community_posts cp
+                    ON normalize_subreddit(cp.subreddit) = normalize_subreddit(dp.name)
                     AND cp.workspace_id = dp.workspace_id
                     AND cp.posted_at > now() - interval '30 days'
                 WHERE dp.workspace_id = $1 AND dp.status = 'active'

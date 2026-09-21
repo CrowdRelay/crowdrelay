@@ -158,7 +158,7 @@ fn conditions(snapshot: &OpsSnapshot, posture: PublishingPosture) -> Vec<Conditi
             active: snapshot.duplicate_community_drafts > 0,
             details: json!({
                 "redundant_drafts": snapshot.duplicate_community_drafts,
-                "remedy": "group community_posts by lower(subreddit) where status \
+                "remedy": "group community_posts by normalize_subreddit(subreddit) where status \
                            is awaiting_manual_post; publish one and cancel the \
                            rest. Reddit is case-insensitive, so r/MetalMemes and \
                            r/metalmemes are one place and posting both is posting \

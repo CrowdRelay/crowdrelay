@@ -901,3 +901,79 @@ async fn finding_reemit_inner(pool: &PgPool) -> Result<()> {
     );
     Ok(())
 }
+
+// ── Regression: one community is one row ─────────────────────────────
+//
+// The table's only uniqueness was (workspace_id, display_name,
+// target_kind), but a community's identity is its subreddit — the scanner
+// named the same sub "r/deathcore" one week and "/r/Deathcore - news,
+// reviews & discussion" the next, and both rows promoted. Production held
+// eleven doubled subreddits, every one drafted twice per wave: the relay
+// saw two admitted targets and the board saw two approvals for one post.
+//
+// The subreddit-arbiter upsert conflicts on normalize_subreddit(subreddit)
+// — lowercase, leading r/ or /r/ stripped — so the second proposal lands
+// on the first row. The pair below is the production shape: bare name
+// first, decorated display name and prefixed subreddit second.
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn a_reproposed_subreddit_lands_on_the_same_row() -> Result<()> {
+    let database = DisposableDatabase::create().await?;
+    let result = community_dedup_inner(&database.pool).await;
+    database.drop_database().await;
+    result
+}
+
+async fn community_dedup_inner(pool: &PgPool) -> Result<()> {
+    let ws = workspace(pool).await?;
+    for (display_name, subreddit) in [
+        ("r/deathcore", "deathcore"),
+        ("/r/Deathcore - news, reviews & discussion", "/r/Deathcore"),
+    ] {
+        insert_outcome(
+            pool,
+            ws,
+            "outreach_targets",
+            5000,
+            json!({
+                "item": {
+                    "target_kind": "community",
+                    "display_name": display_name,
+                    "subreddit": subreddit,
+                    "evidence_urls": ["https://reddit.com/r/deathcore"],
+                    "why_fit": "active death metal community",
+                },
+                "rationale": "scanner proposal",
+            }),
+        )
+        .await?;
+    }
+
+    worker(pool, ws).run_once().await?;
+
+    let rows: Vec<(String, Option<String>, String)> = sqlx::query_as(
+        "SELECT display_name, subreddit, status FROM agent_outreach_targets \
+         WHERE workspace_id = $1 AND target_kind = 'community'",
+    )
+    .bind(ws.into_uuid())
+    .fetch_all(pool)
+    .await?;
+    ensure!(
+        rows.len() == 1,
+        "two proposals for one subreddit must produce one target row, got {rows:?}"
+    );
+    let (display_name, subreddit, _) = &rows[0];
+    ensure!(
+        subreddit.as_deref() == Some("deathcore"),
+        "the stored subreddit is the canonical identity, got {subreddit:?}"
+    );
+    // The first display name survives — it is the label screening recorded
+    // against, and refreshing it to a later scan's phrasing churns the card
+    // an operator learned to recognize.
+    ensure!(
+        display_name == "r/deathcore",
+        "a re-proposal must not rename the row, got {display_name:?}"
+    );
+    Ok(())
+}

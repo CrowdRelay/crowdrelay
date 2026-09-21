@@ -49,6 +49,12 @@ pub enum PublishChannel {
     Instagram,
     /// A third-party social platform.
     Social,
+    /// A community the workspace was admitted to — Reddit, a forum. The post
+    /// lands under someone else's rules in someone else's space, which is
+    /// the strongest reason the guard runs here at all: a bad post on the
+    /// band's own channel costs reach; a bad post in a community costs the
+    /// account the whole growth loop reads through.
+    Community,
 }
 
 impl PublishChannel {
@@ -59,7 +65,7 @@ impl PublishChannel {
     /// low — the guard refuses emptiness, not brevity.
     const fn minimum_characters(self) -> usize {
         match self {
-            Self::Telegram | Self::Discord | Self::Instagram => 40,
+            Self::Telegram | Self::Discord | Self::Instagram | Self::Community => 40,
             // A social post is shorter by convention and by platform limit.
             Self::Social => 20,
         }
@@ -80,6 +86,21 @@ impl PublishChannel {
             Self::Instagram => 2_100,
             // The tightest common social limit.
             Self::Social => 280,
+            // Reddit accepts 40k, but a community post that long is a wall of
+            // spam, not a post — the drafters' ceiling (512) with headroom.
+            Self::Community => 2_000,
+        }
+    }
+
+    /// The most links a post may carry on this channel.
+    ///
+    /// A community repost legitimately carries two: the band's own permalink
+    /// (attribution) and the tracked smart link appended at dispatch. Every
+    /// other channel gets one.
+    const fn maximum_links(self) -> usize {
+        match self {
+            Self::Community => 2,
+            _ => 1,
         }
     }
 }
@@ -248,10 +269,10 @@ pub fn review_outbound_post(body: &str, context: &PublishContext<'_>) -> Publish
     }
 
     let links = extract_links(trimmed);
-    if links.len() > 1 {
+    if links.len() > context.channel.maximum_links() {
         return PublishVerdict::HoldForHuman(HoldReason::TooManyLinks);
     }
-    if let Some(link) = links.first() {
+    for link in &links {
         let approved = context
             .approved_origins
             .iter()

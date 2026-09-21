@@ -79,7 +79,7 @@ pub(super) async fn load_community_targets(
             SELECT (EXTRACT(EPOCH FROM (now() - MAX(cp.posted_at))) / 86400)::int AS days_since
             FROM community_posts cp
             WHERE cp.workspace_id = t.workspace_id
-              AND lower(cp.subreddit) = lower(t.subreddit)
+              AND normalize_subreddit(cp.subreddit) = normalize_subreddit(t.subreddit)
               AND cp.posted_at IS NOT NULL
         ) AS last_post ON true
         WHERE t.workspace_id = $1

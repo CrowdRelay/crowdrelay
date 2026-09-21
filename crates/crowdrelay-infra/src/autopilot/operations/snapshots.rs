@@ -555,6 +555,10 @@ struct ContentRow {
     post_url: Option<String>,
     post_platform: Option<String>,
     post_body: Option<String>,
+    post_media_url: Option<String>,
+    post_media_id: Option<String>,
+    post_media_type: Option<String>,
+    post_thumbnail_url: Option<String>,
     communication_enabled: Option<bool>,
     press_enabled: Option<bool>,
     release_tier: Option<String>,
@@ -585,6 +589,17 @@ pub(in crate::autopilot) async fn load_content_supply_snapshots(
                  THEN source.metadata->>'platform' END AS post_platform,
             CASE WHEN source.source_kind = 'social_post'
                  THEN source.metadata->>'body' END AS post_body,
+            -- The post's media, same provenance as the caption: the CDN URL
+            -- the sync stored plus the Graph id that re-mints it fresh at
+            -- post time (signed URLs expire).
+            CASE WHEN source.source_kind = 'social_post'
+                 THEN source.metadata->>'media_url' END AS post_media_url,
+            CASE WHEN source.source_kind = 'social_post'
+                 THEN source.metadata->>'media_id' END AS post_media_id,
+            CASE WHEN source.source_kind = 'social_post'
+                 THEN source.metadata->>'media_type' END AS post_media_type,
+            CASE WHEN source.source_kind = 'social_post'
+                 THEN source.metadata->>'thumbnail_url' END AS post_thumbnail_url,
             -- The three switches are release-plan vocabulary, so the read is
             -- scoped to release rows: a video or event whose own metadata
             -- happens to carry a `tier` key must not inherit release gating.
@@ -693,6 +708,10 @@ pub(in crate::autopilot) async fn load_content_supply_snapshots(
                             .clone()
                             .unwrap_or_else(|| "unknown".to_owned()),
                         body: row.post_body.clone(),
+                        media_url: row.post_media_url.clone(),
+                        media_id: row.post_media_id.clone(),
+                        media_type: row.post_media_type.clone(),
+                        thumbnail_url: row.post_thumbnail_url.clone(),
                     })
                 } else {
                     None
@@ -702,38 +721,72 @@ pub(in crate::autopilot) async fn load_content_supply_snapshots(
         .collect()
 }
 
+/// The most a single synced post may fan out to. One caption carried into
+/// fifty admitted communities was twenty-plus identical approvals on the
+/// board — and, if approved, the same photo landing in every metal subreddit
+/// in one afternoon, which is the shape moderators ban for. Three per post
+/// is a mention, not a carpet-bombing; the rotation below spreads the picks
+/// across the admitted set over successive posts instead of always naming
+/// the same three.
+const MAX_RELAY_COMMUNITIES_PER_POST: i64 = 3;
+
 /// The communities a synced band post may be relayed into. The predicate is
 /// the same one the community executor re-checks at post time — admitted by
 /// screening and promoted — so a relay can only name a place the second wall
 /// would still let through.
+///
+/// Ordering is a rotation, not a ranking of worth: communities the relay has
+/// never drafted for come first, then the least recently drafted-for. A live
+/// draft (pending, awaiting manual post) counts as a turn — stacking a second
+/// approval on a community already queued for one is the flood this ordering
+/// exists to prevent. `failed`/`cancelled` rows do not count: a draft that
+/// never landed consumed nothing from the community.
 pub(in crate::autopilot) async fn load_relay_community_targets(
     repo: &PostgresAutopilotRepository,
     workspace_id: WorkspaceId,
 ) -> Result<Vec<CommunityRelayTarget>, RepositoryError> {
-    let rows = sqlx::query_as::<_, (Uuid, String)>(
+    let rows = sqlx::query_as::<_, (Uuid, String, Option<String>)>(
         r#"
-        SELECT id, subreddit
-        FROM agent_outreach_targets
-        WHERE workspace_id = $1
-          AND target_kind = 'community'
-          AND screening_verdict = 'admitted'
-          AND status = 'promoted'
-          AND subreddit IS NOT NULL
-          AND btrim(subreddit) <> ''
-        ORDER BY created_at, id
-        LIMIT 50
+        SELECT t.id, t.subreddit, t.language
+        FROM agent_outreach_targets t
+        LEFT JOIN discovery_places place ON place.id = t.place_id
+        LEFT JOIN LATERAL (
+            SELECT MAX(cp.created_at) AS last_draft_at
+            FROM community_posts cp
+            WHERE cp.workspace_id = t.workspace_id
+              AND cp.target_id = t.id
+              AND cp.status IN ('pending', 'awaiting_manual_post', 'posted')
+        ) last ON true
+        WHERE t.workspace_id = $1
+          AND t.target_kind = 'community'
+          AND t.screening_verdict = 'admitted'
+          AND t.status = 'promoted'
+          AND t.subreddit IS NOT NULL
+          AND btrim(t.subreddit) <> ''
+          -- The audience graph's own judgement overrides the target row —
+          -- a community blocked in the console drops out of the relay pool
+          -- on the next pass, the same predicate the growth-intelligence
+          -- loader applies. A target with no place row predates the link
+          -- and stays eligible: unknown is not refused.
+          AND (place.id IS NULL
+               OR (place.status = 'active'
+                   AND place.membership_state NOT IN ('rejected', 'not_a_fit')))
+        ORDER BY last.last_draft_at ASC NULLS FIRST, t.created_at, t.id
+        LIMIT $2
         "#,
     )
     .bind(workspace_id.into_uuid())
+    .bind(MAX_RELAY_COMMUNITIES_PER_POST)
     .fetch_all(&repo.pool)
     .await
     .map_err(map_sqlx)?;
 
     rows.into_iter()
-        .map(|(id, subreddit)| {
+        .map(|(id, subreddit, language)| {
             Ok(CommunityRelayTarget {
                 target_id: OutreachTargetId::from_uuid(id),
                 subreddit,
+                language,
             })
         })
         .collect()

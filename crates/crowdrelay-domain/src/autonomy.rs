@@ -106,6 +106,35 @@ pub const fn disposition(
     }
 }
 
+/// The disposition for internal, first-party-reversible work — an agent
+/// drafting run, a deterministic artifact render — whose every external
+/// effect re-gates downstream on its own approval.
+///
+/// # Why `require_approval` upgrades instead of gating
+///
+/// A `require_approval` policy means "a person decides before anything
+/// reaches the outside world". An internal dispatch reaches nothing: the
+/// drafted post, pitch or artifact arrives back as its own action and waits
+/// there. Parking the dispatch behind the same approval does not protect an
+/// audience — it produces an "approve this prompt" card the operator cannot
+/// meaningfully review, a second card later for the thing they actually can,
+/// and an assignment email for each. Measured in production: forty-eight
+/// agent-run approvals in fourteen days, every one of them a prompt.
+///
+/// Upgrading `RequireApproval` to `AutoExecute` removes the meaningless gate
+/// while preserving every real one: `Deny` still denies (a context below its
+/// confidence floor should not even draft), and `ObserveOnly`/`RecommendOnly`
+/// still produce no action at all.
+#[must_use]
+pub const fn internal_work_disposition(mapped: PolicyDisposition) -> PolicyDisposition {
+    match mapped {
+        PolicyDisposition::RequireApproval | PolicyDisposition::AutoExecute => {
+            PolicyDisposition::AutoExecute
+        }
+        other => other,
+    }
+}
+
 /// How many observations stand behind the confidence a context reported.
 ///
 /// Separate from [`Confidence`] because they answer different questions and
@@ -298,6 +327,28 @@ mod tests {
                 granted,
                 "the evidence floor only ever downgrades AutoExecute"
             );
+        }
+    }
+
+    /// Internal work runs under require_approval — the approval that matters
+    /// is the downstream one on the external action — but every refusal still
+    /// refuses: a denied or observed context must not even draft.
+    #[test]
+    fn internal_work_upgrades_approval_but_never_refusal() {
+        assert_eq!(
+            internal_work_disposition(PolicyDisposition::RequireApproval),
+            PolicyDisposition::AutoExecute
+        );
+        assert_eq!(
+            internal_work_disposition(PolicyDisposition::AutoExecute),
+            PolicyDisposition::AutoExecute
+        );
+        for refusal in [
+            PolicyDisposition::Deny,
+            PolicyDisposition::ObserveOnly,
+            PolicyDisposition::RecommendOnly,
+        ] {
+            assert_eq!(internal_work_disposition(refusal), refusal);
         }
     }
 
