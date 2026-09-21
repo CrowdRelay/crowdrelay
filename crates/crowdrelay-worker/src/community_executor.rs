@@ -199,7 +199,7 @@ fn reddit_user_agent(workspace_slug: &str) -> String {
                 workspace_slug.to_owned()
             }
         });
-    format!("server:com.crowdrelay.community:v1.0.0 (by /u/{username})")
+    format!("server:music.crowdrelay.community:v1.0.0 (by /u/{username})")
 }
 
 /// Public origin for smart link resolution. The smart_link stored in the
