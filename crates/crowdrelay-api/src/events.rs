@@ -15,9 +15,10 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use crowdrelay_application::{
-    EventActEntry, EventCache, IdempotencyKey, ListFanEventInterests, MAX_PUBLIC_EVENT_LIMIT,
-    RegisterEventInterest, RegisterEventInterestCommand, RegisterEventInterestCommandArgs,
-    ReplaceEventActs, ReplaceEventActsCommand, RepositoryError, RequestId, SetEventCounterparty,
+    CreateEvent, CreateEventCommand, EventActEntry, EventCache, IdempotencyKey,
+    ListFanEventInterests, MAX_PUBLIC_EVENT_LIMIT, RegisterEventInterest,
+    RegisterEventInterestCommand, RegisterEventInterestCommandArgs, ReplaceEventActs,
+    ReplaceEventActsCommand, RepositoryError, RequestId, SetEventCounterparty,
     SetEventCounterpartyCommand, SetEventFestival, SetEventFestivalCommand, SetEventSupportSlots,
     SetEventSupportSlotsCommand,
 };
@@ -62,6 +63,7 @@ pub struct EventState {
     cache: Arc<EventCache>,
     register_interest: RegisterEventInterest,
     list_fan_interests: ListFanEventInterests,
+    create_event: CreateEvent,
     replace_acts: ReplaceEventActs,
     set_counterparty: SetEventCounterparty,
     set_support_slots: SetEventSupportSlots,
@@ -79,6 +81,7 @@ impl EventState {
         cache: Arc<EventCache>,
         register_interest: RegisterEventInterest,
         list_fan_interests: ListFanEventInterests,
+        create_event: CreateEvent,
         replace_acts: ReplaceEventActs,
         set_counterparty: SetEventCounterparty,
         set_support_slots: SetEventSupportSlots,
@@ -91,6 +94,7 @@ impl EventState {
             cache,
             register_interest,
             list_fan_interests,
+            create_event,
             replace_acts,
             set_counterparty,
             set_support_slots,
@@ -1049,6 +1053,8 @@ pub async fn set_event_festival(
         Err(error) => repository_problem(error, request_id_value).into_response(),
     }
 }
+
+include!("events/create.rs");
 
 fn repository_problem(error: RepositoryError, request_id: Option<String>) -> Problem {
     match error {

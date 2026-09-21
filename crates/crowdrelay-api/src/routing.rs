@@ -483,6 +483,11 @@ pub(super) fn application_routes(state: AppState) -> Router {
             "/v1/staff/events/{slug}/ticketing",
             get(ticketing::admin_overview),
         )
+        // Manual show entry — a label that never ran a sync source types the
+        // night in by hand. Idempotent on `Idempotency-Key` like every other
+        // retried write.
+        .route("/v1/staff/events", post(events::create_event))
+        .route("/v1/admin/events", post(events::create_event))
         .route(
             "/v1/staff/events/{slug}/acts",
             put(events::replace_event_acts),

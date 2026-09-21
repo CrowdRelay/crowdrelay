@@ -137,6 +137,63 @@ fn validate_slug(value: &str, allow_uppercase: bool) -> Result<String, SlugError
     Ok(value.to_owned())
 }
 
+/// Derives a slug-grammar string from free text: ASCII-folds the diacritics
+/// tenant names and cities actually carry, lowercases, collapses every other
+/// character run into one `-`, and caps the stem so a uniqueness suffix still
+/// fits under [`MAX_SLUG_LENGTH`].
+///
+/// Returns `None` when nothing folds to an ASCII letter or digit — the caller
+/// then chooses its own fallback rather than silently naming a show `-`.
+/// This is the same folding the event-sync adapters apply to provider data;
+/// keeping it here stops every new write path from growing its own copy.
+#[must_use]
+pub fn slugify(value: &str) -> Option<String> {
+    /// Long enough that a `-NN` collision suffix fits inside the slug bound.
+    const STEM_LIMIT: usize = MAX_SLUG_LENGTH - 4;
+    let mut slug = String::with_capacity(value.len().min(STEM_LIMIT));
+    let mut previous_dash = false;
+    for character in value.chars().map(ascii_fold) {
+        if character.is_ascii_alphanumeric() {
+            slug.push(character.to_ascii_lowercase());
+            previous_dash = false;
+        } else if !previous_dash && !slug.is_empty() {
+            slug.push('-');
+            previous_dash = true;
+        }
+        if slug.len() >= STEM_LIMIT {
+            break;
+        }
+    }
+    while slug.ends_with('-') {
+        slug.pop();
+    }
+    (!slug.is_empty()).then_some(slug)
+}
+
+/// The diacritic fold `slugify` shares with the event-sync adapters: Central
+/// European titles arrive carrying ą/ł/ř/ů and friends, and a slug that
+/// silently dropped them ("Wrocław" → "wroca") reads broken beside the city
+/// it names.
+fn ascii_fold(character: char) -> char {
+    match character {
+        'ą' | 'Ą' | 'ä' | 'Ä' | 'á' | 'Á' | 'à' | 'À' | 'â' | 'Â' => 'a',
+        'ć' | 'Ć' | 'č' | 'Č' => 'c',
+        'ď' | 'Ď' => 'd',
+        'ę' | 'Ę' | 'é' | 'É' | 'ě' | 'Ě' | 'ë' | 'Ë' => 'e',
+        'í' | 'Í' | 'ï' | 'Ï' => 'i',
+        'ł' | 'Ł' => 'l',
+        'ń' | 'Ń' | 'ň' | 'Ň' | 'ñ' | 'Ñ' => 'n',
+        'ó' | 'Ó' | 'ö' | 'Ö' | 'ô' | 'Ô' => 'o',
+        'ř' | 'Ř' => 'r',
+        'ś' | 'Ś' | 'š' | 'Š' | 'ß' => 's',
+        'ť' | 'Ť' => 't',
+        'ü' | 'Ü' | 'ú' | 'Ú' | 'ů' | 'Ů' => 'u',
+        'ý' | 'Ý' => 'y',
+        'ź' | 'Ź' | 'ż' | 'Ż' | 'ž' | 'Ž' => 'z',
+        other => other,
+    }
+}
+
 /// A safe HTTP(S) redirect target.
 #[derive(Clone, Eq, Hash, PartialEq)]
 pub struct DestinationUrl(String);
@@ -566,6 +623,26 @@ mod tests {
             assert!(!format!("{email:?}").contains(expected));
         }
         Ok(())
+    }
+
+    #[test]
+    fn slugify_folds_diacritics_and_collapses_separators() {
+        let cases = [
+            ("Virya live", Some("virya-live")),
+            ("Wrocław, Klub Łącznik!", Some("wroclaw-klub-lacznik")),
+            ("  --already--dashed--  ", Some("already-dashed")),
+            ("Café Örö", Some("cafe-oro")),
+            // Nothing folds to ASCII — the caller names its own fallback.
+            ("🔥🔥🔥", None),
+            ("", None),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(slugify(input).as_deref(), expected, "{input:?}");
+        }
+        // The stem leaves room for a `-NN` collision suffix inside the slug
+        // bound.
+        let long = slugify(&"a".repeat(500)).expect("letters fold");
+        assert!(long.len() <= MAX_SLUG_LENGTH - 4);
     }
 
     #[test]

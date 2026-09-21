@@ -165,8 +165,9 @@ pub use beacon_release::{
 pub use beacons::BeaconContactIdentity;
 pub use events::{
     EventAction, EventActionError, EventActionKind, EventCity, EventInterestResult, EventStatus,
-    FanEventInterest, MAX_EVENT_ACTS, MAX_EVENT_ACTS_FESTIVAL, PublicEvent, PublicEventAct,
-    PublicEventError, valid_act_slug, validate_act_fields,
+    EventWriteFields, FanEventInterest, MAX_EVENT_ACTS, MAX_EVENT_ACTS_FESTIVAL, PublicEvent,
+    PublicEventAct, PublicEventError, valid_act_slug, validate_act_fields,
+    validate_event_write_fields,
 };
 pub use fan_lifecycle::{
     FanActionToken, FanActionTokenError, FanConfirmationResult, FanUnsubscribeResult,
@@ -190,5 +191,5 @@ pub use trace::{CausationId, TraceContext, TraceId};
 pub use values::{
     CitySlug, CountryCode, CountryCodeError, DestinationUrl, DestinationUrlError, EventSlug,
     NormalizedEmail, NormalizedEmailError, ReferralCode, ReferralCodeError, SlugError,
-    SmartLinkSlug, WorkspaceSlug,
+    SmartLinkSlug, WorkspaceSlug, slugify,
 };

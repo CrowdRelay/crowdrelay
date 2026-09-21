@@ -57,6 +57,7 @@
     "crates/crowdrelay-worker/src/receipt_reconciliation.rs": 1343,
     "crates/crowdrelay-worker/src/retention.rs": 1419,
     "crates/crowdrelay-infra/src/autopilot/plays.rs": 1553,
-    "crates/crowdrelay-infra/tests/autopilot_plays_postgres.rs": 1533
+    "crates/crowdrelay-infra/tests/autopilot_plays_postgres.rs": 1533,
+    "crates/crowdrelay-infra/tests/events_postgres.rs": 1239
   }
 }

@@ -229,6 +229,42 @@ pub fn validate_act_fields(
     validate_optional_https_url(ticket_url)
 }
 
+/// The field set a manual show entry writes — the operator's own row, not a
+/// provider's. `PublicEvent::validate` re-checks the same rules on the way
+/// back out of the store, so this exists for the same reason
+/// [`validate_act_fields`] does: a write that would poison the public feed is
+/// refused at the door instead of stored.
+#[derive(Clone, Copy, Debug)]
+pub struct EventWriteFields<'a> {
+    pub title: &'a str,
+    /// `None` means the write resolves the tenant default — a stored row
+    /// always carries a zone, but the form is allowed not to name one.
+    pub timezone: Option<&'a str>,
+    pub venue: Option<&'a str>,
+    pub venue_address: Option<&'a str>,
+    pub ticket_url: Option<&'a str>,
+    pub doors_at: Option<OffsetDateTime>,
+    pub starts_at: OffsetDateTime,
+    pub ends_at: Option<OffsetDateTime>,
+}
+
+/// Validates one manual show write exactly as the public read path will.
+pub fn validate_event_write_fields(fields: &EventWriteFields<'_>) -> Result<(), PublicEventError> {
+    validate_required_text(fields.title, 300).map_err(|_| PublicEventError::InvalidTitle)?;
+    validate_optional_text(fields.timezone, 128).map_err(|_| PublicEventError::InvalidTimezone)?;
+    validate_optional_text(fields.venue, 500)?;
+    validate_optional_text(fields.venue_address, 500)?;
+    validate_optional_https_url(fields.ticket_url)?;
+    if fields
+        .doors_at
+        .is_some_and(|doors| doors > fields.starts_at)
+        || fields.ends_at.is_some_and(|ends| ends < fields.starts_at)
+    {
+        return Err(PublicEventError::InvalidSchedule);
+    }
+    Ok(())
+}
+
 fn validate_required_text(value: &str, maximum_bytes: usize) -> Result<(), PublicEventError> {
     if value.trim() != value
         || value.is_empty()
@@ -608,5 +644,76 @@ mod act_tests {
             ticket_url: None,
         });
         assert_eq!(event.validate(), Err(PublicEventError::InvalidActs));
+    }
+
+    #[test]
+    fn event_write_validation_mirrors_the_read_path() {
+        let starts_at = OffsetDateTime::UNIX_EPOCH + time::Duration::days(30);
+        let valid = EventWriteFields {
+            title: "Virya live",
+            timezone: Some("Europe/Warsaw"),
+            venue: Some("Test Club"),
+            venue_address: Some("Main Street 1"),
+            ticket_url: Some("https://tickets.example/virya"),
+            doors_at: Some(starts_at - time::Duration::hours(1)),
+            starts_at,
+            ends_at: Some(starts_at + time::Duration::hours(3)),
+        };
+        assert!(validate_event_write_fields(&valid).is_ok());
+        // The thinnest honest show — a title and a night — still validates.
+        assert!(
+            validate_event_write_fields(&EventWriteFields {
+                title: "Virya live",
+                timezone: None,
+                venue: None,
+                venue_address: None,
+                ticket_url: None,
+                doors_at: None,
+                starts_at,
+                ends_at: None,
+            })
+            .is_ok()
+        );
+
+        for bad_title in ["", " padded ", "t".repeat(301).as_str()] {
+            assert!(
+                validate_event_write_fields(&EventWriteFields {
+                    title: bad_title,
+                    ..valid
+                })
+                .is_err(),
+                "{bad_title:?}"
+            );
+        }
+        // Doors after start / end before start — the same impossible schedule
+        // the column check refuses.
+        assert_eq!(
+            validate_event_write_fields(&EventWriteFields {
+                doors_at: Some(starts_at + time::Duration::hours(1)),
+                ..valid
+            }),
+            Err(PublicEventError::InvalidSchedule)
+        );
+        assert_eq!(
+            validate_event_write_fields(&EventWriteFields {
+                ends_at: Some(starts_at - time::Duration::hours(1)),
+                ..valid
+            }),
+            Err(PublicEventError::InvalidSchedule)
+        );
+        assert!(
+            validate_event_write_fields(&EventWriteFields {
+                ticket_url: Some("http://insecure.example/x"),
+                ..valid
+            })
+            .is_err()
+        );
+        assert!(
+            validate_event_write_fields(&EventWriteFields {
+                venue: Some("with\nnewline"),
+                ..valid
+            })
+            .is_err()
+        );
     }
 }
