@@ -151,6 +151,17 @@ pub enum AutopilotMeasurementKind {
     /// `release_plan` series exists to read; the milestone's other
     /// measurements report without it.
     ReleaseChannelLift14d,
+    /// Delivered recipients who bought a ticket inside fourteen days —
+    /// the conversion an email to existing fans can actually produce. The
+    /// order must postdate that fan's delivery receipt, or a purchase that
+    /// predated the send would count as its work.
+    CampaignTicketConversion14d,
+    /// The unsubscribe rate among delivered recipients in the seven days
+    /// after their receipt — consent withdrawals recorded after the fan's
+    /// own delivery over the count the campaign reached. A harm metric:
+    /// more is worse, and the measurement answers for what the send cost,
+    /// not only what it earned.
+    CampaignUnsubscribe7d,
 }
 
 impl AutopilotMeasurementKind {
@@ -187,12 +198,20 @@ impl AutopilotMeasurementKind {
             Self::ReleaseLinkClicks14d => "release_link_clicks_14d",
             Self::ReleaseFanConversion14d => "release_fan_conversion_14d",
             Self::ReleaseChannelLift14d => "release_channel_lift_14d",
+            Self::CampaignTicketConversion14d => "campaign_ticket_conversion_14d",
+            Self::CampaignUnsubscribe7d => "campaign_unsubscribe_7d",
         }
     }
 
     #[must_use]
     pub const fn direction(self) -> EffectDirection {
-        EffectDirection::HigherIsBetter
+        match self {
+            // The one kind where more is worse: an unsubscribe is a fan
+            // spent, and the classification has to say so or a costly send
+            // would read as a success.
+            Self::CampaignUnsubscribe7d => EffectDirection::LowerIsBetter,
+            _ => EffectDirection::HigherIsBetter,
+        }
     }
 
     /// The key under which this kind's observed value lands in
@@ -231,6 +250,8 @@ impl AutopilotMeasurementKind {
             Self::ReleaseLinkClicks14d => Some("release_link_clicks"),
             Self::ReleaseFanConversion14d => Some("release_fan_conversions"),
             Self::ReleaseChannelLift14d => Some("release_channel_lift"),
+            Self::CampaignTicketConversion14d => Some("campaign_ticket_conversions"),
+            Self::CampaignUnsubscribe7d => Some("campaign_unsubscribe_rate"),
             Self::GrassrootsActivationReplies14d => Some("activation_replies"),
             Self::AgentRunCommunityEngagement7d => Some("engagement_score"),
             Self::FanLifecycleEngagement7d => Some("lifecycle_engagement_events"),
@@ -375,6 +396,20 @@ impl AutopilotMeasurementKind {
         )
     }
 
+    /// Whether this kind measures what a communication campaign did to the
+    /// fans it was sent to. The delivery ledger is the reach contract: a
+    /// campaign with no `delivered` receipt reached nobody, and observing
+    /// anyway would write the zeros of an email that never left as the
+    /// campaign's fault — the same failure `measures_outbound_reach` guards
+    /// for posts.
+    #[must_use]
+    pub const fn measures_email_campaign(self) -> bool {
+        matches!(
+            self,
+            Self::CampaignTicketConversion14d | Self::CampaignUnsubscribe7d
+        )
+    }
+
     /// Days of counterfactual the stored `baseline_value` rate covers.
     ///
     /// The observation subtracts `baseline_value × window` and the
@@ -454,6 +489,23 @@ pub fn assess_measurement_effect(
     measurement: &ClaimedAutopilotMeasurement,
     observed_value: f64,
 ) -> Option<EffectResult> {
+    if measurement.kind == AutopilotMeasurementKind::CampaignUnsubscribe7d {
+        // The observed value is a rate — withdrawals over delivered — and a
+        // send's audience carries baseline churn: a fraction of a percent
+        // would have left anyway. Below that floor the honest verdict is
+        // Neutral, not Worsened — otherwise every send that cost one fan in
+        // two hundred would read as harm and feed the demotion guard. The
+        // rate itself still lands in `observed_metrics` for the posterior.
+        let result = assess_effect(0.0, observed_value, EffectDirection::LowerIsBetter, 500)?;
+        return Some(EffectResult {
+            assessment: if observed_value < 0.005 {
+                EffectAssessment::Neutral
+            } else {
+                result.assessment
+            },
+            delta_basis_points: result.delta_basis_points,
+        });
+    }
     if measurement.kind == AutopilotMeasurementKind::ReleaseChannelLift14d {
         // The lift is a delta between two channel counts, so the signed
         // assessor classifies it against zero — where any nonzero value
@@ -527,5 +579,24 @@ mod tests {
         assert_eq!(worsened.assessment, EffectAssessment::Worsened);
         let improved = assess_measurement_effect(&measurement, 40.0).expect("improved");
         assert_eq!(improved.assessment, EffectAssessment::Improved);
+    }
+
+    /// A send's unsubscribe rate under half a percent is baseline churn, not
+    /// harm the send caused — without the floor every send that cost one fan
+    /// in a few hundred would read Worsened and feed the demotion guard.
+    #[test]
+    fn campaign_unsubscribe_reads_baseline_churn_as_neutral() {
+        let measurement = claimed(AutopilotMeasurementKind::CampaignUnsubscribe7d);
+        for rate in [0.0, 0.001, 0.0049] {
+            let result =
+                assess_measurement_effect(&measurement, rate).expect("unsubscribe assessment");
+            assert_eq!(
+                result.assessment,
+                EffectAssessment::Neutral,
+                "rate {rate} should classify Neutral"
+            );
+        }
+        let harmful = assess_measurement_effect(&measurement, 0.05).expect("harmful");
+        assert_eq!(harmful.assessment, EffectAssessment::Worsened);
     }
 }
