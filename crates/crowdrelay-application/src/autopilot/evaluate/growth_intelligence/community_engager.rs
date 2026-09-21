@@ -245,12 +245,43 @@ pub(super) fn community_engager_candidates(
         );
         // 14-day feedback horizon for community-engager (Y14).
         let efe_score = raw_efe * 0.95;
-        // The angle this post takes, rotated per community so every family
-        // gets comparable exposure in each one. Recorded on the prediction
-        // and the evidence row; nothing ranks by it yet.
+        // The angle this post takes. Once a family has measured evidence on
+        // this community the pick is Thompson-sampled from the per-family
+        // posteriors — the label the post carries is what those posteriors
+        // learn from, so the selection has to stay honest about which one
+        // ran. Until then rotation stands: the even spread is what makes the
+        // families comparable at all.
         let posts_so_far = community_history.iter().map(|h| h.post_count).sum::<u32>();
-        let creative_family =
-            CreativeFamily::rotate_with_event(posts_so_far, snapshot.has_upcoming_event);
+        let mut family_stats = std::collections::BTreeMap::new();
+        let mut any_family_observed = false;
+        for family in CreativeFamily::ALL {
+            match causal_model.predict_family_stats(
+                family,
+                "community-engager",
+                Some(&subreddit_type),
+                Some(&target_key),
+            ) {
+                Some((mean, std, _confidence)) => {
+                    any_family_observed = true;
+                    family_stats.insert(family, (mean, std));
+                }
+                None => {
+                    // Unmeasured families enter the draw at the skeptical
+                    // prior — wide enough to stay competitive, which is what
+                    // keeps them measurable instead of starved.
+                    family_stats.insert(family, (0.0, crowdrelay_brain::PRIOR_VARIANCE.sqrt()));
+                }
+            }
+        }
+        let creative_family = if any_family_observed {
+            CreativeFamily::choose(
+                &family_stats,
+                snapshot.has_upcoming_event,
+                family_choice_seed(&target_key, posts_so_far),
+            )
+        } else {
+            CreativeFamily::rotate_with_event(posts_so_far, snapshot.has_upcoming_event)
+        };
         // Per-community prompt: one post for this specific community.
         let mut prompt = format!(
             "Draft an authentic community post for r/{}. Write like a band member, not a marketer. Match this community's tone and language.",
@@ -355,6 +386,18 @@ pub(super) fn community_engager_candidates(
 /// the feedback loop: the brain feeds post performance data forward to the
 /// worker so it can write better posts and avoid wasting effort on dead
 /// communities.
+/// Deterministic seed for the family draw — the same community at the same
+/// post count picks the same family, so re-evaluating a candidate inside one
+/// cycle cannot re-roll the dice. `posts_so_far` is in the hash because the
+/// pick should move post to post, not stay pinned to one family forever.
+fn family_choice_seed(target_key: &str, posts_so_far: u32) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    target_key.hash(&mut hasher);
+    posts_so_far.hash(&mut hasher);
+    hasher.finish()
+}
+
 fn push_engagement_history(
     prompt: &mut String,
     history: &[crowdrelay_brain::CommunityEngagementSummary],

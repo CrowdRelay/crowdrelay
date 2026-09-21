@@ -195,6 +195,18 @@ pub(super) async fn ensure_dispatch_envelope(
         _ => return Ok(()),
     };
 
+    // The engager's chosen angle rides the engage payload so the published
+    // post's measurement teaches the family posterior. Every other kind
+    // leaves it `None` — the family is a property of drafted community
+    // content, not of a price change or a send.
+    let creative_family = match payload {
+        AutopilotActionPayload::RequestCommunityEngagement {
+            creative_family,
+            ..
+        } => *creative_family,
+        _ => None,
+    };
+
     let context_json =
         serde_json::to_value(&context).unwrap_or_else(|_| serde_json::json!({}));
     sqlx::query(
@@ -240,7 +252,7 @@ pub(super) async fn ensure_dispatch_envelope(
         crowdrelay_brain::DEFAULT_EXPECTED_SIGNAL,
         context,
         target_key,
-        None,
+        creative_family,
         None,
         crowdrelay_brain::EvidenceQuality::Observational,
     );

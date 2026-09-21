@@ -79,6 +79,33 @@ pub const EMERGING_TREND_LIFT: f64 = 1.125;
 pub const SIBLING_PROOF_MIN: u32 = 2;
 pub const SIBLING_PROOF_LIFT: f64 = 1.15;
 
+/// One outcome's report of what a production earned — `new_fans` from the
+/// suggestion's `results` payload — decays at this rate per older report.
+/// The most recent measured outcome is half the answer; the one before it
+/// a quarter. Two or three reports are all a format usually has, so the
+/// weighting stays shallow enough that a single viral outlier cannot pin
+/// the yield.
+pub const YIELD_EMA_ALPHA: f64 = 0.5;
+/// Measured yield shrinks toward the purpose prior rather than replacing
+/// it: a format's first report moves expected fans by a third, and the
+/// measured mean takes over only as reports accumulate.
+pub const YIELD_PRIOR_WEIGHT: f64 = 2.0;
+/// Bounds on the learned multiplier — one bad week cannot zero a format's
+/// rank, and one good one cannot make it the only thing suggested.
+pub const YIELD_MIN: f64 = 0.25;
+pub const YIELD_MAX: f64 = 4.0;
+
+/// What the band's own resolved outcomes measured for one format: the
+/// exponentially-weighted mean of reported `new_fans` (recent reports
+/// weigh more), and how many outcomes carried a real measurement.
+/// `measured` counts only outcomes that reported — `done` without a
+/// `new_fans` figure teaches the stale rule, not the yield.
+#[derive(Clone, Copy, Debug)]
+pub struct FormatYield {
+    pub measured_fans_ema: f64,
+    pub measured: u32,
+}
+
 /// Pareto says two or three, not everything over a threshold.
 pub const DEFAULT_LIMIT: usize = 3;
 
@@ -304,6 +331,11 @@ pub struct RankingInputs<'a> {
     pub arc_format_keys: &'a BTreeMap<String, Uuid>,
     /// Outcome count per format key — what the band has already tried.
     pub outcome_counts: &'a BTreeMap<String, u32>,
+    /// Measured new-fan yield per format key, learned from the resolved
+    /// outcomes' `results` payloads — the answer to "what did this format
+    /// actually earn when this band made it". Absent entries mean no
+    /// measurement exists and the purpose prior stands unmodified.
+    pub format_yield: &'a BTreeMap<String, FormatYield>,
     /// Suggestion count per format key — novelty decays as the engine
     /// repeats itself.
     pub suggestion_counts: &'a BTreeMap<String, u32>,
@@ -419,7 +451,22 @@ pub fn rank_suggestions(inputs: &RankingInputs<'_>) -> Vec<ScoredSuggestion> {
             .get(&entry.key)
             .copied()
             .unwrap_or(0);
-        let expected_fans = base_expected_fans(entry.purpose) * lift;
+        // The band's own measured yield argues against the purpose prior:
+        // the learned EMA replaces the guess in proportion to how many
+        // outcomes reported, clamped so a format can be argued down to a
+        // quarter or up to fourfold — never silenced, never crowned.
+        let base_fans = base_expected_fans(entry.purpose);
+        let yield_multiplier = inputs
+            .format_yield
+            .get(&entry.key)
+            .filter(|yield_| yield_.measured > 0)
+            .map_or(1.0, |yield_| {
+                let measured = f64::from(yield_.measured);
+                let shrunk = (YIELD_PRIOR_WEIGHT + measured * yield_.measured_fans_ema / base_fans)
+                    / (YIELD_PRIOR_WEIGHT + measured);
+                shrunk.clamp(YIELD_MIN, YIELD_MAX)
+            });
+        let expected_fans = base_fans * lift * yield_multiplier;
         let gain = information_gain(outcomes, PREDICT_STD_PRIOR);
         // Novelty decays as the same format keeps being offered — the
         // first playthrough suggestion is news, the fifth is nagging.
@@ -456,6 +503,7 @@ pub fn rank_suggestions(inputs: &RankingInputs<'_>) -> Vec<ScoredSuggestion> {
                 "sibling_productions": sibling_produced,
                 "efe_score": efe,
                 "lift": lift,
+                "format_yield": yield_multiplier,
             }),
             effort,
             covered_by_production: covered,
@@ -528,546 +576,4 @@ fn reason_for(
 }
 
 #[cfg(test)]
-mod tests {
-    use std::collections::BTreeMap;
-
-    use crowdrelay_domain::content_engine::{FormatCadence, FormatCategory, FormatRequirement};
-    use crowdrelay_domain::team_operations::TeamSkill;
-    use uuid::Uuid;
-
-    use super::*;
-
-    fn entry(key: &str, skill: TeamSkill, requires: FormatRequirement) -> ContentFormatEntry {
-        ContentFormatEntry {
-            key: key.to_owned(),
-            name: key.replace('_', " "),
-            category: FormatCategory::Evergreen,
-            purpose: FormatPurpose::Acquisition,
-            effort_standalone: Effort::Medium,
-            effort_marginal: Effort::Low,
-            skill,
-            requires,
-            distribution: "video artifact → YouTube, communities, fans, press".to_owned(),
-            cadence: FormatCadence::Recurring,
-            genre_fit: vec![],
-            notes: String::new(),
-            active: true,
-        }
-    }
-
-    fn profile() -> CapabilityProfile {
-        CapabilityProfile {
-            skills: [TeamSkill::Video, TeamSkill::Social].into_iter().collect(),
-            has_release_material: true,
-            has_show_material: true,
-        }
-    }
-
-    fn reach() -> ReachSnapshot {
-        ReachSnapshot {
-            communities: vec!["r/Metal".to_owned(), "r/listentothis".to_owned()],
-            press_contacts: 12,
-            consented_fans: 340,
-            peers: vec![],
-        }
-    }
-
-    fn today() -> Date {
-        Date::from_calendar_date(2026, time::Month::October, 1).unwrap()
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn inputs<'a>(
-        formats: &'a [ContentFormatEntry],
-        profile: &'a CapabilityProfile,
-        trends: &'a [ContentTrend],
-        production: &'a [ScheduledProduction],
-        open: &'a BTreeSet<String>,
-        declined: &'a BTreeSet<String>,
-        arc: &'a BTreeMap<String, Uuid>,
-        outcomes: &'a BTreeMap<String, u32>,
-        suggestions: &'a BTreeMap<String, u32>,
-        reach: &'a ReachSnapshot,
-    ) -> RankingInputs<'a> {
-        RankingInputs {
-            formats,
-            profile,
-            trends,
-            production,
-            open_format_keys: open,
-            declined_format_keys: declined,
-            retired_format_keys: &EMPTY_KEYS,
-            arc_format_keys: arc,
-            outcome_counts: outcomes,
-            suggestion_counts: suggestions,
-            sibling_produced: &EMPTY_COUNTS,
-            reach,
-            weights: EfeWeights::default(),
-            today: today(),
-        }
-    }
-
-    #[test]
-    fn the_video_gap_is_a_hard_filter() {
-        let formats = vec![entry(
-            "playthrough",
-            TeamSkill::Video,
-            FormatRequirement::Nothing,
-        )];
-        let no_film = CapabilityProfile {
-            skills: [TeamSkill::Social].into_iter().collect(),
-            ..profile()
-        };
-        let ranked = rank_suggestions(&inputs(
-            &formats,
-            &no_film,
-            &[],
-            &[],
-            &BTreeSet::new(),
-            &BTreeSet::new(),
-            &BTreeMap::new(),
-            &BTreeMap::new(),
-            &BTreeMap::new(),
-            &reach(),
-        ));
-        assert!(
-            ranked.is_empty(),
-            "no filmmaker means no playthrough suggestion"
-        );
-    }
-
-    #[test]
-    fn an_empty_promise_declines_the_suggestion() {
-        let formats = vec![entry(
-            "playthrough",
-            TeamSkill::Video,
-            FormatRequirement::Nothing,
-        )];
-        let nobody = ReachSnapshot::default();
-        let ranked = rank_suggestions(&inputs(
-            &formats,
-            &profile(),
-            &[],
-            &[],
-            &BTreeSet::new(),
-            &BTreeSet::new(),
-            &BTreeMap::new(),
-            &BTreeMap::new(),
-            &BTreeMap::new(),
-            &nobody,
-        ));
-        assert!(
-            ranked.is_empty(),
-            "a suggestion that reaches nobody is not worth raising"
-        );
-    }
-
-    #[test]
-    fn a_scheduled_shoot_makes_the_video_near_free() {
-        let shoot = [ScheduledProduction {
-            id: "shoot-1".to_owned(),
-            kind: ProductionEventKind::Shoot,
-            scheduled_for: today() + time::Duration::days(5),
-        }];
-        let ranked = rank_suggestions(&inputs(
-            &[entry(
-                "making_of",
-                TeamSkill::Video,
-                FormatRequirement::Nothing,
-            )],
-            &profile(),
-            &[],
-            &shoot,
-            &BTreeSet::new(),
-            &BTreeSet::new(),
-            &BTreeMap::new(),
-            &BTreeMap::new(),
-            &BTreeMap::new(),
-            &reach(),
-        ));
-        assert_eq!(ranked.len(), 1);
-        assert!(ranked[0].covered_by_production);
-        assert_eq!(
-            ranked[0].effort,
-            Effort::Low,
-            "the harvest rule prices the day already spent"
-        );
-        assert_eq!(
-            ranked[0].suggested_before,
-            Some(today() + time::Duration::days(5)),
-            "the suggestion dies when the covering day passes"
-        );
-        assert!(ranked[0].reason.contains("covers it"));
-    }
-
-    #[test]
-    fn a_shoot_beyond_the_horizon_does_not_cover() {
-        let far = [ScheduledProduction {
-            id: "shoot-far".to_owned(),
-            kind: ProductionEventKind::Shoot,
-            scheduled_for: today() + time::Duration::days(COVERAGE_HORIZON_DAYS + 30),
-        }];
-        let ranked = rank_suggestions(&inputs(
-            &[entry(
-                "making_of",
-                TeamSkill::Video,
-                FormatRequirement::Nothing,
-            )],
-            &profile(),
-            &[],
-            &far,
-            &BTreeSet::new(),
-            &BTreeSet::new(),
-            &BTreeMap::new(),
-            &BTreeMap::new(),
-            &BTreeMap::new(),
-            &reach(),
-        ));
-        assert_eq!(ranked.len(), 1);
-        assert!(
-            !ranked[0].covered_by_production,
-            "a production day outside the window is not coverage"
-        );
-        assert_eq!(ranked[0].effort, Effort::Medium);
-    }
-
-    #[test]
-    fn a_confirmed_trend_lifts_the_format() {
-        let now = time::OffsetDateTime::now_utc();
-        let trend = ContentTrend {
-            id: crowdrelay_domain::ContentTrendId::from_uuid(Uuid::from_u128(7)),
-            workspace_id: crowdrelay_domain::WorkspaceId::from_uuid(Uuid::from_u128(1)),
-            dimension: TrendDimension::Format,
-            pattern: "playthrough".to_owned(),
-            strength: 9000,
-            sources: 3,
-            evidence: serde_json::json!({}),
-            status: TrendStatus::Confirmed,
-            first_seen: now.date(),
-            last_seen: now.date(),
-            created_at: now,
-            updated_at: now,
-        };
-        let formats = vec![entry(
-            "playthrough",
-            TeamSkill::Video,
-            FormatRequirement::Nothing,
-        )];
-        let lifted = rank_suggestions(&inputs(
-            &formats,
-            &profile(),
-            std::slice::from_ref(&trend),
-            &[],
-            &BTreeSet::new(),
-            &BTreeSet::new(),
-            &BTreeMap::new(),
-            &BTreeMap::new(),
-            &BTreeMap::new(),
-            &reach(),
-        ));
-        let flat = rank_suggestions(&inputs(
-            &formats,
-            &profile(),
-            &[],
-            &[],
-            &BTreeSet::new(),
-            &BTreeSet::new(),
-            &BTreeMap::new(),
-            &BTreeMap::new(),
-            &BTreeMap::new(),
-            &reach(),
-        ));
-        assert!(
-            lifted[0].efe_score < flat[0].efe_score,
-            "corroborated evidence lowers EFE: {} vs {}",
-            lifted[0].efe_score,
-            flat[0].efe_score
-        );
-    }
-
-    static EMPTY_KEYS: BTreeSet<String> = BTreeSet::new();
-    static EMPTY_COUNTS: BTreeMap<String, u32> = BTreeMap::new();
-
-    #[test]
-    fn rank_then_cut_keeps_only_the_vital_few() {
-        let formats = vec![
-            entry("a", TeamSkill::Video, FormatRequirement::Nothing),
-            entry("b", TeamSkill::Video, FormatRequirement::Nothing),
-            entry("c", TeamSkill::Video, FormatRequirement::Nothing),
-            entry("d", TeamSkill::Video, FormatRequirement::Nothing),
-            entry("e", TeamSkill::Video, FormatRequirement::Nothing),
-        ];
-        let ranked = rank_suggestions(&inputs(
-            &formats,
-            &profile(),
-            &[],
-            &[],
-            &BTreeSet::new(),
-            &BTreeSet::new(),
-            &BTreeMap::new(),
-            &BTreeMap::new(),
-            &BTreeMap::new(),
-            &reach(),
-        ));
-        // The engine returns the full feasible ordering; the caller cuts
-        // to DEFAULT_LIMIT and names the tail.
-        assert_eq!(ranked.len(), formats.len());
-        let top = &ranked[..DEFAULT_LIMIT];
-        assert_eq!(top.len(), DEFAULT_LIMIT, "the caller keeps the vital few");
-        assert!(
-            ranked.windows(2).all(|w| w[0].efe_score <= w[1].efe_score),
-            "the ordering is EFE ascending"
-        );
-    }
-
-    #[test]
-    fn the_promise_carries_only_real_clauses() {
-        let promise = assemble_promise(
-            "video artifact → YouTube, communities, fans",
-            &ReachSnapshot {
-                communities: vec!["r/Metal".to_owned()],
-                press_contacts: 0,
-                consented_fans: 340,
-                peers: vec![],
-            },
-        );
-        let map = promise.as_object().unwrap();
-        assert!(map.contains_key("communities"));
-        assert_eq!(map["consented_fans"], 340);
-        assert!(
-            !map.contains_key("press_contacts"),
-            "the text names press but zero contacts is not a promise"
-        );
-    }
-
-    #[test]
-    fn a_collaboration_promises_the_peer_audience() {
-        let promise = assemble_promise(
-            "track → both audiences, streaming, press",
-            &ReachSnapshot {
-                communities: vec![],
-                press_contacts: 12,
-                consented_fans: 0,
-                peers: vec!["Void Congregation".to_owned()],
-            },
-        );
-        let map = promise.as_object().unwrap();
-        assert_eq!(map["peer_audience"][0], "Void Congregation");
-        assert_eq!(map["press_contacts"], 12);
-    }
-
-    #[test]
-    fn lexicon_patterns_lift_their_catalogue_keys() {
-        // The alias bridge is the whole claim: "rehearsal" facts must move
-        // `rehearsal_clip`, or corroboration is unreachable for it.
-        assert!(pattern_lifts("rehearsal", "rehearsal_clip"));
-        assert!(pattern_lifts("one_take", "live_session"));
-        assert!(pattern_lifts("studio_diary", "making_of"));
-        assert!(pattern_lifts("cover", "peer_cover"));
-        assert!(pattern_lifts("cover", "fan_cover_feature"));
-        assert!(!pattern_lifts("rehearsal", "playthrough"));
-    }
-
-    #[test]
-    fn an_active_arc_refuses_orphans_but_not_deadlines() {
-        let arc_id = Uuid::from_u128(42);
-        let arc: BTreeMap<String, Uuid> =
-            [("playthrough".to_owned(), arc_id)].into_iter().collect();
-        let formats = vec![
-            entry("playthrough", TeamSkill::Video, FormatRequirement::Nothing),
-            entry(
-                "official_video",
-                TeamSkill::Video,
-                FormatRequirement::Nothing,
-            ),
-            entry(
-                "rehearsal_clip",
-                TeamSkill::Video,
-                FormatRequirement::Nothing,
-            ),
-        ];
-        let shoot = [ScheduledProduction {
-            id: "shoot-1".to_owned(),
-            kind: ProductionEventKind::Shoot,
-            scheduled_for: today() + time::Duration::days(9),
-        }];
-        let ranked = rank_suggestions(&inputs(
-            &formats,
-            &profile(),
-            &[],
-            &shoot,
-            &BTreeSet::new(),
-            &BTreeSet::new(),
-            &arc,
-            &BTreeMap::new(),
-            &BTreeMap::new(),
-            &reach(),
-        ));
-        let keys: Vec<&str> = ranked.iter().map(|s| s.format_key.as_str()).collect();
-        assert!(
-            keys.contains(&"playthrough"),
-            "a spine beat still ranks: {keys:?}"
-        );
-        assert!(
-            keys.contains(&"official_video"),
-            "a shoot-covered orphan is the urgent, time-boxed exception: {keys:?}"
-        );
-        assert!(
-            !keys.contains(&"rehearsal_clip"),
-            "an orphan with no deadline waits for the next arc: {keys:?}"
-        );
-        assert_eq!(
-            ranked
-                .iter()
-                .find(|s| s.format_key == "playthrough")
-                .and_then(|s| s.arc_id),
-            Some(arc_id),
-            "the spine beat carries the arc it serves"
-        );
-    }
-
-    /// §4b-4 — a concept that has been offered six times and never
-    /// produced is retired, not re-offered: the filter is a hard stop on
-    /// the same footing as an open row or a declined taste signal.
-    #[test]
-    fn a_stale_concept_retires_itself() {
-        let formats = vec![
-            entry("playthrough", TeamSkill::Video, FormatRequirement::Nothing),
-            entry(
-                "rehearsal_clip",
-                TeamSkill::Video,
-                FormatRequirement::Nothing,
-            ),
-        ];
-        let empty: BTreeSet<String> = BTreeSet::new();
-        let empty_arc: BTreeMap<String, Uuid> = BTreeMap::new();
-        let empty_counts: BTreeMap<String, u32> = BTreeMap::new();
-        let retired: BTreeSet<String> = ["playthrough".to_owned()].into_iter().collect();
-        let profile = profile();
-        let reach = reach();
-        let base = inputs(
-            &formats,
-            &profile,
-            &[],
-            &[],
-            &empty,
-            &empty,
-            &empty_arc,
-            &empty_counts,
-            &empty_counts,
-            &reach,
-        );
-        let ranked = rank_suggestions(&RankingInputs {
-            retired_format_keys: &retired,
-            ..base
-        });
-        let keys: Vec<&str> = ranked.iter().map(|s| s.format_key.as_str()).collect();
-        assert!(
-            !keys.contains(&"playthrough"),
-            "six attempts without a single production retires the concept: {keys:?}"
-        );
-        assert!(
-            keys.contains(&"rehearsal_clip"),
-            "the fresh concept still ranks: {keys:?}"
-        );
-    }
-
-    #[test]
-    fn sibling_proof_lifts_but_never_resurrects() {
-        let formats = vec![
-            entry("playthrough", TeamSkill::Video, FormatRequirement::Nothing),
-            entry(
-                "rehearsal_clip",
-                TeamSkill::Video,
-                FormatRequirement::Nothing,
-            ),
-        ];
-        let reach = reach();
-        let empty = BTreeSet::new();
-        let empty_arc = BTreeMap::new();
-        let empty_counts = BTreeMap::new();
-        let proven = BTreeMap::from([("playthrough".to_owned(), 3_u32)]);
-
-        let ranked = rank_suggestions(&RankingInputs {
-            sibling_produced: &proven,
-            ..inputs(
-                &formats,
-                &profile(),
-                &[],
-                &[],
-                &empty,
-                &empty,
-                &empty_arc,
-                &empty_counts,
-                &empty_counts,
-                &reach,
-            )
-        });
-        // The roster-proven format leads and names the evidence.
-        assert_eq!(ranked[0].format_key, "playthrough");
-        assert_eq!(
-            ranked[0].evidence.get("sibling_productions"),
-            Some(&serde_json::json!(3))
-        );
-        assert!(ranked[0].reason.contains("same-style acts"));
-
-        // A single sibling production is an anecdote — below the floor, the
-        // ranking is untouched.
-        let anecdote = BTreeMap::from([("rehearsal_clip".to_owned(), 1_u32)]);
-        let with = rank_suggestions(&RankingInputs {
-            sibling_produced: &anecdote,
-            ..inputs(
-                &formats,
-                &profile(),
-                &[],
-                &[],
-                &empty,
-                &empty,
-                &empty_arc,
-                &empty_counts,
-                &empty_counts,
-                &reach,
-            )
-        });
-        let without = rank_suggestions(&inputs(
-            &formats,
-            &profile(),
-            &[],
-            &[],
-            &empty,
-            &empty,
-            &empty_arc,
-            &empty_counts,
-            &empty_counts,
-            &reach,
-        ));
-        assert_eq!(
-            with.iter().map(|s| &s.format_key).collect::<Vec<_>>(),
-            without.iter().map(|s| &s.format_key).collect::<Vec<_>>(),
-            "one production must not reorder"
-        );
-
-        // And the lift cannot argue back what the band itself declined —
-        // the decline gate fires before the term ever applies.
-        let declined = BTreeSet::from(["playthrough".to_owned()]);
-        let ranked = rank_suggestions(&RankingInputs {
-            sibling_produced: &proven,
-            ..inputs(
-                &formats,
-                &profile(),
-                &[],
-                &[],
-                &empty,
-                &declined,
-                &empty_arc,
-                &empty_counts,
-                &empty_counts,
-                &reach,
-            )
-        });
-        assert!(
-            !ranked.iter().any(|s| s.format_key == "playthrough"),
-            "the band's own decline outranks the label's experience"
-        );
-    }
-}
+mod tests;

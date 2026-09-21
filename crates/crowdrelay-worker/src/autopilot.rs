@@ -1020,7 +1020,8 @@ fn repository_error_kind(error: RepositoryError) -> &'static str {
         // no outcome, not a stale write.
         RepositoryError::ConflictBecause(reason)
             if reason == AutopilotMeasurementKind::NO_RELEASE_LINK
-                || reason == AutopilotMeasurementKind::NO_RELEASE_SERIES_DATA =>
+                || reason == AutopilotMeasurementKind::NO_RELEASE_SERIES_DATA
+                || reason == AutopilotMeasurementKind::NO_TRACKED_LINK =>
         {
             reason
         }

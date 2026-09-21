@@ -117,6 +117,22 @@ const OPERATOR_FEEDBACK_MAX_ROWS: i64 = 5_000;
 /// The worker templates the brain may dispatch, in the order the evaluator
 /// checks them.
 ///
+/// One subreddit's aggregated post performance — the row shape the
+/// engagement-history query returns.
+#[derive(Debug, sqlx::FromRow)]
+struct EngagementHistoryRow {
+    subreddit: String,
+    post_count: i64,
+    /// Posts whose latest metrics row carried a non-null `upvote_ratio` —
+    /// the honest weight for pooling the community's ratio into the
+    /// workspace figure.
+    ratio_post_count: i64,
+    avg_score: f64,
+    avg_upvotes: f64,
+    avg_comments: f64,
+    avg_upvote_ratio: Option<f64>,
+}
+
 /// Derived from [`WorkerTemplate::ALL`] rather than retyped. This was a
 /// hand-written `&[&str]`, one of three such lists across three crates, and
 /// `discord-poster` reached production present in this one and missing from
@@ -404,7 +420,7 @@ pub(in crate::autopilot) async fn load_growth_intelligence_snapshots(
     // per post is used, averaged across all posts to each subreddit in the
     // last 30 days. This gives the brain a signal: "r/abc gets 45 upvotes
     // on average, r/xyz gets 0 — don't waste LLM budget there."
-    let engagement_rows: Vec<(String, i64, f64, f64, f64, Option<f64>)> = sqlx::query_as(
+    let engagement_rows: Vec<EngagementHistoryRow> = sqlx::query_as(
         r#"
         WITH latest_per_post AS (
             SELECT DISTINCT ON (cpm.community_post_id)
@@ -422,6 +438,7 @@ pub(in crate::autopilot) async fn load_growth_intelligence_snapshots(
         )
         SELECT subreddit,
                COUNT(*)::bigint AS post_count,
+               COUNT(upvote_ratio)::bigint AS ratio_post_count,
                AVG(score)::double precision AS avg_score,
                AVG(upvotes)::double precision AS avg_upvotes,
                AVG(num_comments)::double precision AS avg_comments,
@@ -436,20 +453,21 @@ pub(in crate::autopilot) async fn load_growth_intelligence_snapshots(
     .await
     .map_err(map_sqlx)?;
 
+    // `ratio_post_count` — posts carrying a non-null `upvote_ratio` — is
+    // what the workspace-level average below weights by; `post_count`
+    // includes posts whose metrics row never reported one, and counting
+    // them would let unmeasured posts dilute measured ones.
     let engagement_history: Vec<CommunityEngagementSummary> = engagement_rows
         .into_iter()
-        .map(
-            |(subreddit, post_count, avg_score, avg_upvotes, avg_comments, avg_upvote_ratio)| {
-                CommunityEngagementSummary {
-                    subreddit,
-                    post_count: u32::try_from(post_count.max(0)).unwrap_or(0),
-                    avg_score,
-                    avg_upvotes,
-                    avg_comments,
-                    avg_upvote_ratio,
-                }
-            },
-        )
+        .map(|row| CommunityEngagementSummary {
+            subreddit: row.subreddit,
+            post_count: u32::try_from(row.post_count.max(0)).unwrap_or(0),
+            ratio_post_count: u32::try_from(row.ratio_post_count.max(0)).unwrap_or(0),
+            avg_score: row.avg_score,
+            avg_upvotes: row.avg_upvotes,
+            avg_comments: row.avg_comments,
+            avg_upvote_ratio: row.avg_upvote_ratio,
+        })
         .collect();
 
     // Standings and tenant preference, both derived from the same bounded
@@ -597,21 +615,26 @@ pub(in crate::autopilot) async fn load_growth_intelligence_snapshots(
         .unwrap_or(10_000)
     };
 
-    // Average community engagement (upvote ratio in basis points).
-    let avg_community_engagement_bps = if engagement_history.is_empty() {
+    // Average community engagement (upvote ratio in basis points),
+    // weighted by posts — the number a context feature should carry is the
+    // ratio across posts, not the mean of community means: a subreddit with
+    // forty posts argues forty times as hard as one with one.
+    let (weighted_posts, weighted_ratio_sum) =
+        engagement_history
+            .iter()
+            .fold((0_u64, 0.0_f64), |(posts, sum), e| {
+                match e.avg_upvote_ratio {
+                    Some(ratio) => (
+                        posts + u64::from(e.ratio_post_count),
+                        sum + ratio.clamp(0.0, 1.0) * f64::from(e.ratio_post_count),
+                    ),
+                    None => (posts, sum),
+                }
+            });
+    let avg_community_engagement_bps = if weighted_posts == 0 {
         0
     } else {
-        let avg_ratio: f64 = engagement_history
-            .iter()
-            .filter_map(|e| e.avg_upvote_ratio)
-            .map(|r| r.clamp(0.0, 1.0))
-            .sum::<f64>()
-            / engagement_history
-                .iter()
-                .filter(|e| e.avg_upvote_ratio.is_some())
-                .count()
-                .max(1) as f64;
-        u16::try_from((avg_ratio * 10_000.0) as u64).unwrap_or(0)
+        u16::try_from((weighted_ratio_sum / weighted_posts as f64 * 10_000.0) as u64).unwrap_or(0)
     };
 
     // engagement_history is ordered by avg_score DESC (from the SQL query),

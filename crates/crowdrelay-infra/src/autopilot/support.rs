@@ -448,6 +448,8 @@ fn parse_measurement_kind(value: &str) -> Result<AutopilotMeasurementKind, Repos
             Ok(AutopilotMeasurementKind::CampaignTicketConversion14d)
         }
         "campaign_unsubscribe_7d" => Ok(AutopilotMeasurementKind::CampaignUnsubscribe7d),
+        "content_link_clicks_7d" => Ok(AutopilotMeasurementKind::ContentLinkClicks7d),
+        "artifact_outcome_7d" => Ok(AutopilotMeasurementKind::ArtifactOutcome7d),
         _ => Err(RepositoryError::Unexpected),
     }
 }

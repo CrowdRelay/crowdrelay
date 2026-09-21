@@ -1237,6 +1237,7 @@ impl PostgresAutopilotRepository {
                     image_url,
                     media_id,
                     source_url,
+                    creative_family: _,
                 } => {
                     emit_outward_action(
                         &mut transaction,

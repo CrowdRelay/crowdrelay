@@ -454,6 +454,17 @@ pub(super) async fn schedule_effect_measurement(
                 pre_action_durable_daily_rate,
                 now + time::Duration::days(44),
             ));
+            // Did the produced artifact reach an audience — posts filed
+            // against this source inside the week after production. The
+            // request was executor-gated, so this measurement only exists
+            // once the receipt confirmed the artifact exists; its zero then
+            // means produced-and-never-posted, which is the real verdict.
+            plans.push((
+                AutopilotMeasurementKind::ArtifactOutcome7d,
+                source_id.into_uuid(),
+                0.0,
+                now + time::Duration::days(7),
+            ));
         }
         AutopilotActionPayload::ChangeTicketCapacity { .. }
         | AutopilotActionPayload::RequestMerchReorder { .. }
@@ -884,7 +895,7 @@ pub(super) async fn schedule_effect_measurement(
         // when the post is still awaiting manual publication. When the
         // operator registers the manual post URL, the measurement window is
         // re-anchored to the actual publication time.
-        AutopilotActionPayload::RequestAgentContent { .. } => {
+        AutopilotActionPayload::RequestAgentContent { draft, .. } => {
             let pre_action_daily_rate = sqlx::query_scalar::<_, f64>(
                 r#"
                 SELECT COUNT(*)::double precision / 14.0 FROM fans
@@ -916,6 +927,30 @@ pub(super) async fn schedule_effect_measurement(
                 pre_action_daily_rate,
                 now + time::Duration::days(3),
             ));
+            // What the post's own tracked link did — clicks on the `/l/`
+            // redirect the social executor mints for the draft's `cta_url`,
+            // joined through `social_posts.smart_link_id`. Scheduled only when
+            // the draft names a link for a platform the social executor
+            // claims; a draft with no link has nothing to attribute, and a
+            // telegram/discord draft's links ride untracked in its text, so
+            // scheduling there would produce a structural zero the learner
+            // would read as the content failing.
+            let linkable_platform = draft
+                .get("platform")
+                .and_then(|p| p.as_str())
+                .is_some_and(|p| matches!(p, "instagram" | "facebook" | "x"));
+            let has_cta = draft
+                .get("cta_url")
+                .and_then(|u| u.as_str())
+                .is_some_and(|u| !u.trim().is_empty());
+            if linkable_platform && has_cta {
+                plans.push((
+                    AutopilotMeasurementKind::ContentLinkClicks7d,
+                    action_id.into_uuid(),
+                    0.0,
+                    now + time::Duration::days(7),
+                ));
+            }
             // No AgentRunOutcomeQuality1h here either: the drafting task's
             // outcome links to the action that requested the draft, not to
             // this content action — the join can never match.
