@@ -125,6 +125,9 @@ pub async fn roster_overview(
         WHERE action.workspace_id = ANY($1)
           AND action.status = 'awaiting_approval'
           AND (action.approval_expires_at IS NULL OR action.approval_expires_at > $2)
+          -- Batched relay deliveries ask through the batch card, not here.
+          AND NOT (action.action_kind = 'community.engage.request'
+                   AND action.payload ->> 'source_id' IS NOT NULL)
         GROUP BY action.workspace_id
         "#,
     )

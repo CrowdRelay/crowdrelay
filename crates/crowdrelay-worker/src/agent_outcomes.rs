@@ -1015,9 +1015,16 @@ impl AgentOutcomeWorker {
                     let batch_status = match created {
                         Some(status) => status,
                         None => {
+                            // FOR UPDATE serializes this draft against an
+                            // approve/revoke landing mid-transaction: a card
+                            // answer waits for this read, and this read waits
+                            // for a card answer — never a parked action that
+                            // the release UPDATE already missed, and never a
+                            // flip that re-opens a revoked spread.
                             sqlx::query_scalar::<_, String>(
                                 "SELECT status FROM community_relay_batches \
-                                 WHERE workspace_id = $1 AND source_id = $2",
+                                 WHERE workspace_id = $1 AND source_id = $2 \
+                                 FOR UPDATE",
                             )
                             .bind(outcome.workspace_id)
                             .bind(source_id)
@@ -1056,6 +1063,7 @@ impl AgentOutcomeWorker {
                                     observe_until = now() + INTERVAL '7 days',
                                     updated_at = now()
                                 WHERE workspace_id = $1 AND source_id = $2
+                                  AND status = 'awaiting_approval'
                                 "#,
                             )
                             .bind(outcome.workspace_id)
@@ -1194,6 +1202,7 @@ impl AgentOutcomeWorker {
                             "UPDATE community_relay_batches \
                              SET notified_at = now(), updated_at = now() \
                              WHERE workspace_id = $1 AND source_id = $2 \
+                               AND status = 'awaiting_approval' \
                                AND notified_at IS NULL \
                              RETURNING source_id",
                         )

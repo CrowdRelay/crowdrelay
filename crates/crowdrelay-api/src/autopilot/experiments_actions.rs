@@ -751,6 +751,15 @@ pub async fn approve_community_relay(
             }
         }
     };
+    // The same floor the table's CHECK enforces — rejected here so an
+    // out-of-range override reads as a bad request, not a 500.
+    if let Some(seconds) = interval_seconds
+        && !(300..=86400).contains(&seconds)
+    {
+        return Problem::bad_request(request_id(&headers))
+            .private()
+            .into_response();
+    }
     let idempotency_key = match parse_idempotency_key(&headers) {
         Ok(value) => value,
         Err(response) => return response,

@@ -117,6 +117,9 @@ async fn load_metrics_snapshot(state: &OpsState) -> Result<OpsMetricsSnapshot, O
                 -- anywhere an operator could see without a credential.
                 (SELECT count(*) FROM viryaos_autopilot_actions
                  WHERE workspace_id = $1 AND status = 'awaiting_approval'
+                   -- Batched relay deliveries ask through the batch card.
+                   AND NOT (action_kind = 'community.engage.request'
+                            AND payload ->> 'source_id' IS NOT NULL)
                 )::bigint AS approvals_awaiting,
                 (SELECT count(*) FROM viryaos_autopilot_measurements
                  WHERE workspace_id = $1 AND status = 'pending'

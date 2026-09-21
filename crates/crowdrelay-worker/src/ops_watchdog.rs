@@ -913,6 +913,10 @@ async fn load_snapshot(
             ) AS hours_to_next_approval_expiry,
             (SELECT count(*) FROM viryaos_autopilot_actions a
              WHERE a.workspace_id=$1 AND a.status='awaiting_approval'
+               -- Batched relay deliveries ask through the batch card, so
+               -- they are one outstanding ask, not one per community.
+               AND NOT (a.action_kind='community.engage.request'
+                        AND a.payload->>'source_id' IS NOT NULL)
             )::bigint AS approvals_outstanding,
             -- Past the deadline by more than the sweep's cadence and still
             -- `awaiting_approval`: neither the per-cycle claim sweep nor the

@@ -145,6 +145,13 @@ impl PostgresAutopilotRepository {
                   AND action.status='awaiting_approval'
                   AND assignment.id IS NULL
                   AND (action.approval_expires_at IS NULL OR action.approval_expires_at>$2)
+                  -- A delivery inside a community relay batch asks through
+                  -- the batch card, not per-community assignments — one ask
+                  -- for the spread, not one email per community it lands in.
+                  AND NOT (
+                      action.action_kind = 'community.engage.request'
+                      AND action.payload ->> 'source_id' IS NOT NULL
+                  )
                 ORDER BY action.approval_expires_at NULLS LAST, action.created_at, action.id
                 FOR UPDATE OF action SKIP LOCKED
                 LIMIT 32

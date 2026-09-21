@@ -153,6 +153,16 @@ async fn workspace(pool: &PgPool) -> Result<Uuid, Box<dyn std::error::Error>> {
     .bind(id)
     .execute(pool)
     .await?;
+    // The fixture's member takes twelve handoffs; the workspace-wide weekly
+    // ask ceiling defaults to ten and would cap the sweep before the digest
+    // assertions ever run. The ceiling is its own tested surface — here it
+    // only needs to not interfere.
+    sqlx::query(
+        "INSERT INTO tenant_settings (workspace_id, key, value) VALUES ($1, 'team_weekly_ask_ceiling', '50')",
+    )
+    .bind(id)
+    .execute(pool)
+    .await?;
     Ok(id)
 }
 

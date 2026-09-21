@@ -635,6 +635,37 @@ impl CommunityExecutorWorker {
         .fetch_all(&mut *tx)
         .await?;
         for (batch_id, source_id) in finished {
+            // `done` closes the campaign: every delivery that never landed is
+            // cancelled here so it reads as undelivered on the card instead of
+            // sitting `pending` under a batch the claim lane no longer opens.
+            // Their parked/queued actions close with them — an open action
+            // under a done batch would dispatch, seed a post, and strand it.
+            sqlx::query(
+                r#"
+                UPDATE community_posts
+                SET status = 'cancelled', updated_at = now()
+                WHERE workspace_id = $1 AND relay_source_id = $2
+                  AND status IN ('pending', 'rate_limited', 'awaiting_manual_post')
+                "#,
+            )
+            .bind(ws)
+            .bind(source_id)
+            .execute(&mut *tx)
+            .await?;
+            sqlx::query(
+                r#"
+                UPDATE viryaos_autopilot_actions
+                SET status = 'cancelled', finished_at = now()
+                WHERE workspace_id = $1
+                  AND action_kind = 'community.engage.request'
+                  AND payload ->> 'source_id' = $2::text
+                  AND status IN ('awaiting_approval', 'queued')
+                "#,
+            )
+            .bind(ws)
+            .bind(source_id.to_string())
+            .execute(&mut *tx)
+            .await?;
             let (posted, undelivered, clicks) = sqlx::query_as::<_, (i64, i64, i64)>(
                 r#"
                 SELECT
@@ -655,31 +686,9 @@ impl CommunityExecutorWorker {
             .bind(source_id)
             .fetch_one(&mut *tx)
             .await?;
-            sqlx::query(
-                r#"
-                INSERT INTO outbox_events
-                    (workspace_id, event_type, event_version, payload, max_attempts)
-                VALUES (
-                    $1, 'crowdrelay.community.relay_observed', 1,
-                    jsonb_build_object(
-                        'batch_id', $2::uuid,
-                        'source_id', $3::uuid,
-                        'posts', $4::bigint,
-                        'undelivered', $5::bigint,
-                        'clicks', $6::bigint
-                    ),
-                    12
-                )
-                "#,
-            )
-            .bind(ws)
-            .bind(batch_id)
-            .bind(source_id)
-            .bind(posted)
-            .bind(undelivered)
-            .bind(clicks)
-            .execute(&mut *tx)
-            .await?;
+            // The card reads these counts live off the batch — no outbox
+            // event: nothing external consumes `relay_observed`, and an
+            // unrouted event type just becomes refused webhook deliveries.
             tracing::info!(
                 batch_id = %batch_id,
                 source_id = %source_id,
@@ -771,7 +780,19 @@ impl CommunityExecutorWorker {
                 -- cap — the operator approved the spread as one campaign.
                 CASE WHEN a.payload->>'source_id' ~ '^[0-9a-fA-F-]{36}$'
                      THEN (a.payload->>'source_id')::uuid END,
-                'pending'
+                -- A delivery whose batch was answered while its action was
+                -- mid-flight lands dead, not pending: revoke is a content
+                -- veto, and a post seeded under a closed batch would sit
+                -- claimable-in-name forever since the claim lane refuses
+                -- closed batches.
+                CASE WHEN a.payload->>'source_id' ~ '^[0-9a-fA-F-]{36}$'
+                          AND EXISTS (
+                              SELECT 1 FROM community_relay_batches rb
+                              WHERE rb.workspace_id = a.workspace_id
+                                AND rb.source_id = (a.payload->>'source_id')::uuid
+                                AND rb.status IN ('revoked', 'done')
+                          )
+                     THEN 'cancelled' ELSE 'pending' END
             FROM viryaos_autopilot_actions a
             WHERE a.workspace_id = $1
               AND a.action_kind = 'community.engage.request'
@@ -2033,18 +2054,29 @@ impl CommunityExecutorWorker {
             r#"
             UPDATE community_posts
             SET status = CASE
+                    WHEN EXISTS (
+                        SELECT 1 FROM community_relay_batches rb
+                        WHERE rb.workspace_id = community_posts.workspace_id
+                          AND rb.source_id = community_posts.relay_source_id
+                          AND rb.status IN ('revoked', 'done')
+                    ) THEN 'cancelled'
                     WHEN attempts >= $3 THEN 'failed'
                     ELSE 'rate_limited'
                 END,
                 rate_limited_until = CASE
-                    WHEN attempts >= $3 THEN NULL
+                    WHEN EXISTS (
+                        SELECT 1 FROM community_relay_batches rb
+                        WHERE rb.workspace_id = community_posts.workspace_id
+                          AND rb.source_id = community_posts.relay_source_id
+                          AND rb.status IN ('revoked', 'done')
+                    ) OR attempts >= $3 THEN NULL
                     ELSE now() + make_interval(secs => $4::double precision)
                 END,
                 error_message = $2,
                 updated_at = now()
             WHERE id = $1
               AND workspace_id = $5
-            RETURNING attempts >= $3
+            RETURNING status = 'failed'
             "#,
         )
         .bind(post_id)
@@ -2075,8 +2107,22 @@ impl CommunityExecutorWorker {
         sqlx::query(
             r#"
             UPDATE community_posts
-            SET status = 'rate_limited',
-                rate_limited_until = now() + make_interval(secs => $2::double precision),
+            SET status = CASE
+                    WHEN EXISTS (
+                        SELECT 1 FROM community_relay_batches rb
+                        WHERE rb.workspace_id = community_posts.workspace_id
+                          AND rb.source_id = community_posts.relay_source_id
+                          AND rb.status IN ('revoked', 'done')
+                    ) THEN 'cancelled'
+                    ELSE 'rate_limited' END,
+                rate_limited_until = CASE
+                    WHEN EXISTS (
+                        SELECT 1 FROM community_relay_batches rb
+                        WHERE rb.workspace_id = community_posts.workspace_id
+                          AND rb.source_id = community_posts.relay_source_id
+                          AND rb.status IN ('revoked', 'done')
+                    ) THEN NULL
+                    ELSE now() + make_interval(secs => $2::double precision) END,
                 updated_at = now()
             WHERE id = $1
             "#,

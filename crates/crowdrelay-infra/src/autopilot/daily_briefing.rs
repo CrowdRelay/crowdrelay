@@ -389,6 +389,9 @@ async fn compose_briefing(
         FROM viryaos_autopilot_actions
         WHERE workspace_id = $1 AND status = 'awaiting_approval'
           AND (approval_expires_at IS NULL OR approval_expires_at > $2)
+          -- Batched relay deliveries ask through the batch card, not here.
+          AND NOT (action_kind = 'community.engage.request'
+                   AND payload ->> 'source_id' IS NOT NULL)
         ORDER BY approval_expires_at NULLS LAST, created_at, id
         LIMIT 4
         "#,
@@ -402,7 +405,9 @@ async fn compose_briefing(
     let pending_total: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM viryaos_autopilot_actions
          WHERE workspace_id = $1 AND status = 'awaiting_approval'
-           AND (approval_expires_at IS NULL OR approval_expires_at > $2)",
+           AND (approval_expires_at IS NULL OR approval_expires_at > $2)
+           AND NOT (action_kind = 'community.engage.request'
+                    AND payload ->> 'source_id' IS NOT NULL)",
     )
     .bind(ws)
     .bind(now)

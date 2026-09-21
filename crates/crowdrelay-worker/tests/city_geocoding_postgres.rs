@@ -104,9 +104,14 @@ async fn city_state(pool: &PgPool, id: Uuid) -> Result<(Option<f64>, i32, Option
 }
 
 /// Removes the cities the bootstrap migrations seed, so a batch contains only
-/// what the scenario inserted.
+/// what the scenario inserted. Rows in tables that reference `cities` — the
+/// seeded aggregates, events and outreach targets — go first, or the delete
+/// trips the foreign keys.
 async fn clear_catalogue(pool: &PgPool) -> Result<()> {
-    sqlx::query("DELETE FROM cities")
+    // CASCADE clears the rows that reference seeded cities — aggregates,
+    // events, booking targets, outreach targets — which a plain DELETE
+    // trips over whenever the template adds a new dependent.
+    sqlx::raw_sql("TRUNCATE cities CASCADE")
         .execute(pool)
         .await
         .context("clear the seeded catalogue")?;
