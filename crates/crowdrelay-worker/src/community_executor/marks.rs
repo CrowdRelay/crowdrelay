@@ -22,10 +22,12 @@ impl CommunityExecutorWorker {
                 error_message = $2,
                 updated_at = now()
             WHERE id = $1
+              AND workspace_id = $3
             "#,
         )
         .bind(post_id)
         .bind(error)
+        .bind(self.workspace_id.into_uuid())
         .execute(&self.pool)
         .await?;
         self.propagate_failure(post_id, error).await
@@ -43,11 +45,13 @@ impl CommunityExecutorWorker {
         post_id: Uuid,
         error: &str,
     ) -> Result<(), CommunityExecutorError> {
-        let action_id: Option<Uuid> =
-            sqlx::query_scalar("SELECT action_id FROM community_posts WHERE id = $1")
-                .bind(post_id)
-                .fetch_optional(&self.pool)
-                .await?;
+        let action_id: Option<Uuid> = sqlx::query_scalar(
+            "SELECT action_id FROM community_posts WHERE id = $1 AND workspace_id = $2",
+        )
+        .bind(post_id)
+        .bind(self.workspace_id.into_uuid())
+        .fetch_optional(&self.pool)
+        .await?;
 
         // The action was marked 'succeeded' by actions_execution.rs before this
         // worker ran — that was premature. Correct it now so the operator sees
@@ -191,10 +195,12 @@ impl CommunityExecutorWorker {
                     ELSE now() + make_interval(secs => $2::double precision) END,
                 updated_at = now()
             WHERE id = $1
+              AND workspace_id = $3
             "#,
         )
         .bind(post_id)
         .bind(backoff.as_secs() as i64)
+        .bind(self.workspace_id.into_uuid())
         .execute(&self.pool)
         .await?;
         Ok(())
