@@ -94,9 +94,10 @@ mod trace_timeline_postgres_tests {
                (workspace_id, action_id, opportunity_id, timestamp, recipient_id,
                 channel, estimated_reach, treatment, propensity, converted,
                 predicted_fans, predicted_signal_installs, context, evidence_quality,
-                observed_incremental_fans, resolved_at)
+                observed_incremental_fans, resolved_at, observed_metrics)
                VALUES ($1,$2,'opp',now(),'recipient','reddit_post',100,'treatment',
-                       0.9,false,2.0,1.0,'{}'::jsonb,'observational',3.0,now())"#,
+                       0.9,false,2.0,1.0,'{}'::jsonb,'observational',3.0,now(),
+                       '{"incremental_fan_growth":3.0,"harm:complaints":0}'::jsonb)"#,
         )
         .bind(workspace_id.into_uuid())
         .bind(action_id)
@@ -121,5 +122,24 @@ mod trace_timeline_postgres_tests {
             .find(|e| e.source == "growth_evidence")
             .expect("growth evidence arm");
         assert_eq!(evidence.state.as_deref(), Some("resolved"));
+
+        // Each observed_metrics key lands as its own metric_observation event —
+        // what the loop measured, beside the row that resolved.
+        let observations: Vec<&TraceTimelineEvent> = events
+            .iter()
+            .filter(|e| e.source == "metric_observation")
+            .collect();
+        assert_eq!(
+            observations.len(),
+            2,
+            "expected one event per observed_metrics key: {observations:?}"
+        );
+        let fan_metric = observations
+            .iter()
+            .find(|e| e.kind == "incremental_fan_growth")
+            .expect("fan-growth observation");
+        assert_eq!(fan_metric.state.as_deref(), Some("3.0"));
+        assert_eq!(fan_metric.certainty, "FACT");
+        assert_eq!(fan_metric.action_id.as_deref(), Some(action_id.to_string().as_str()));
     }
 }

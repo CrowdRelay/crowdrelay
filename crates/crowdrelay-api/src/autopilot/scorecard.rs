@@ -183,6 +183,35 @@ pub struct LearningState {
     /// Measurements pending by horizon, so the operator can see
     /// when the next learning signal will arrive.
     pub measurements_by_horizon: Vec<MeasurementHorizon>,
+    /// Evidence rows carrying at least one key in `observed_metrics` — the
+    /// secondary-metric write-back the metric posteriors learn from.
+    pub evidence_with_metrics: i64,
+    /// Distinct metric keys ever written back. The vocabulary the brain is
+    /// learning, not just the volume.
+    pub metric_keys_observed: i64,
+    /// The learned revenue-per-fan exchange the economic value term prices
+    /// through. `None` while the tenant's history is too thin for a rate —
+    /// the brain itself refuses to answer in that state, so the surface
+    /// shows `null`, not a guess.
+    pub exchange: Option<ExchangeState>,
+}
+
+/// The tenant's realized revenue-per-fan rate, as the causal model's
+/// `ValueExchange` currently believes it. Persisted on the `causal_model`
+/// brain-state module; shown here so the operator can see what a revenue
+/// prediction converts into — and whether it converts at all.
+#[derive(Debug, Serialize)]
+pub struct ExchangeState {
+    /// Distinct day-buckets folded into the rate.
+    pub days_observed: u32,
+    /// Cumulative new fans across those days.
+    pub new_fans: f64,
+    /// Cumulative revenue in minor units across the same days.
+    pub revenue_minor: f64,
+    /// Minor units per new fan. `None` until the exchange's own floors
+    /// (enough days, enough fans, nonzero revenue) are met — the same
+    /// answer `ValueExchange::minor_per_fan` gives the portfolio.
+    pub minor_per_fan: Option<f64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -285,6 +314,31 @@ struct MeasurementHorizonRow {
     failed: i64,
     next_due_at: Option<OffsetDateTime>,
 }
+
+#[derive(Debug, FromRow)]
+struct MetricCoverageRow {
+    evidence_with_metrics: i64,
+    metric_keys_observed: i64,
+}
+
+/// The exchange fields as `ValueExchange` serializes them on the
+/// `causal_model` brain-state blob. Field names are the contract — the api
+/// crate deliberately holds no brain dependency, so the struct is mirrored
+/// rather than imported.
+#[derive(Debug, serde::Deserialize)]
+struct PersistedExchange {
+    revenue_minor: f64,
+    new_fans: f64,
+    days_observed: u32,
+}
+
+// The two floors `ValueExchange::minor_per_fan` gates on, mirrored from
+// crates/crowdrelay-brain/src/value_exchange.rs (MIN_EXCHANGE_DAYS,
+// MIN_EXCHANGE_FANS). They are duplicated rather than imported because the
+// api crate carries no brain dependency; if the floors move, this read must
+// move with them.
+const EXCHANGE_MIN_DAYS: u32 = 7;
+const EXCHANGE_MIN_FANS: f64 = 20.0;
 
 async fn load_agent_scorecard(
     state: &AppState,
@@ -667,6 +721,52 @@ async fn load_agent_scorecard(
     .fetch_all(pool)
     .await?;
 
+    // The secondary-metric ledger: how many evidence rows carry observed
+    // metric write-backs, and how wide the learned vocabulary is. The
+    // lateral unnest keeps both counts in one scan — rows whose map is
+    // empty drop out of the join, so `evidence_with_metrics` counts only
+    // rows that actually recorded a metric.
+    let metric_row = sqlx::query_as::<_, MetricCoverageRow>(
+        r#"
+        SELECT
+            count(DISTINCT evidence.id)::bigint AS evidence_with_metrics,
+            count(DISTINCT metric.key)::bigint AS metric_keys_observed
+        FROM viryaos_growth_evidence AS evidence
+        CROSS JOIN LATERAL jsonb_each(evidence.observed_metrics) AS metric
+        WHERE evidence.workspace_id = $1
+        "#,
+    )
+    .bind(workspace_id)
+    .fetch_one(pool)
+    .await?;
+
+    // The learned revenue-per-fan rate, from the causal model's persisted
+    // checkpoint. The brain refuses to price revenue until its own floors
+    // are met — `exchange` is absent in exactly that state, matching the
+    // `None` the portfolio sees.
+    let exchange_row = sqlx::query_scalar::<_, Option<serde_json::Value>>(
+        r#"
+        SELECT state -> 'value_exchange'
+        FROM viryaos_brain_state
+        WHERE workspace_id = $1 AND module = 'causal_model'
+        "#,
+    )
+    .bind(workspace_id)
+    .fetch_optional(pool)
+    .await?;
+    let exchange = exchange_row
+        .flatten()
+        .and_then(|value| serde_json::from_value::<PersistedExchange>(value).ok())
+        .map(|persisted| ExchangeState {
+            days_observed: persisted.days_observed,
+            new_fans: persisted.new_fans,
+            revenue_minor: persisted.revenue_minor,
+            minor_per_fan: (persisted.days_observed >= EXCHANGE_MIN_DAYS
+                && persisted.new_fans >= EXCHANGE_MIN_FANS
+                && persisted.revenue_minor > 0.0)
+                .then_some(persisted.revenue_minor / persisted.new_fans),
+        });
+
     Ok(AgentScorecard {
         status: AgentStatus {
             agent_enabled: status_row.agent_enabled,
@@ -713,6 +813,9 @@ async fn load_agent_scorecard(
                 failed: r.failed,
                 next_due_at: r.next_due_at,
             }).collect(),
+            evidence_with_metrics: metric_row.evidence_with_metrics,
+            metric_keys_observed: metric_row.metric_keys_observed,
+            exchange,
         },
     })
 }

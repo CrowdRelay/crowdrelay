@@ -316,6 +316,7 @@ pub(super) fn decision_provenance(
     selection: &PortfolioSelection,
     policy_version: i64,
     belief: &crate::autopilot::BeliefStateOrigin,
+    exchange_minor_per_fan: Option<f64>,
 ) -> HashMap<String, serde_json::Value> {
     selection
         .selected
@@ -331,6 +332,14 @@ pub(super) fn decision_provenance(
                     "pragmatic_value": value.pragmatic_value,
                     "risk_penalty": value.risk_penalty,
                     "opportunity_cost": value.opportunity_cost,
+                    // The exchange's output on this decision: the fan-
+                    // equivalent its revenue prediction earned, the harm the
+                    // learned harm posteriors priced, and the rate the
+                    // conversion ran at — null when the exchange is
+                    // unconfident, which is exactly when the term is absent.
+                    "economic_value_fans": value.economic_value_fans,
+                    "harm_fans": value.harm_fans,
+                    "exchange_minor_per_fan": exchange_minor_per_fan,
                     "resource_cost_units": value.resource_cost.units,
                     "adjustments": adjustments,
                 },
@@ -549,7 +558,7 @@ mod tests {
             checkpoint_updated_at: time::OffsetDateTime::UNIX_EPOCH,
             delta_evidence: 4,
         };
-        let provenance = decision_provenance(&selection, 7, &belief);
+        let provenance = decision_provenance(&selection, 7, &belief, Some(50_000.0));
         let mut subject = candidate("decision:a");
         crate::autopilot::evaluate::attach_decision_provenance(
             &mut subject,
@@ -677,7 +686,7 @@ mod tests {
             checkpoint_updated_at: time::OffsetDateTime::UNIX_EPOCH,
             delta_evidence: 4,
         };
-        let provenance = decision_provenance(&selection, 7, &belief);
+        let provenance = decision_provenance(&selection, 7, &belief, Some(50_000.0));
 
         let mut subject = candidate(decision_key);
         crate::autopilot::evaluate::attach_decision_provenance(

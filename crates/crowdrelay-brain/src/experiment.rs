@@ -744,6 +744,36 @@ impl ExperimentAssignment {
         prediction: &crate::causal_model::DispatchPrediction,
         action_id: Option<uuid::Uuid>,
     ) -> Self {
+        Self::from_design_with_realized_holdout(
+            design,
+            unit_id,
+            candidate_id,
+            arm,
+            prediction,
+            action_id,
+            design.holdout_probability,
+        )
+    }
+
+    /// `from_design` where the holdout that actually ran differs from the
+    /// design's policy holdout — the insufficient-power case, where the
+    /// design asks for 10% but the power check answered "no control arm can
+    /// exist", so every unit rolls treatment.
+    ///
+    /// The two numbers record different truths and must not share a source:
+    /// `propensity` is the realized assignment probability (inverse-
+    /// probability weighting is only valid against what actually happened),
+    /// while `intended_holdout_probability` is what the design meant to run —
+    /// the number that later explains why the evidence is observational.
+    pub fn from_design_with_realized_holdout(
+        design: &ExperimentDesign,
+        unit_id: &str,
+        candidate_id: &str,
+        arm: TreatmentAssignment,
+        prediction: &crate::causal_model::DispatchPrediction,
+        action_id: Option<uuid::Uuid>,
+        realized_holdout_probability: f64,
+    ) -> Self {
         // P1-b: Deterministic assignment_id from (experiment_uuid, round,
         // unit_id). This makes retries idempotent — the same logical
         // assignment always produces the same PK, so ON CONFLICT can
@@ -778,14 +808,13 @@ impl ExperimentAssignment {
             // record "probability of treatment" for a unit that was not
             // treated, corrupting inverse-probability weighting.
             propensity: match arm {
-                TreatmentAssignment::Treatment => 1.0 - design.holdout_probability,
-                TreatmentAssignment::Control => design.holdout_probability,
+                TreatmentAssignment::Treatment => 1.0 - realized_holdout_probability,
+                TreatmentAssignment::Control => realized_holdout_probability,
             },
-            // P1-c: Preserve the design's holdout as the intended policy.
-            // The caller may zero design.holdout_probability for insufficient
-            // power AFTER calling from_design, which changes the realized
-            // propensity. The intended_holdout_probability captures the
-            // original design intent before any adjustment.
+            // P1-c: Preserve the design's holdout as the intended policy,
+            // independent of the realized roll: an insufficient-power
+            // design still records the 0.10 it asked for, so a later reader
+            // can see the control arm was designed away, not absent.
             intended_holdout_probability: design.holdout_probability,
             intended_template_id: design.intervention_key.clone(),
             context: prediction.context.clone(),
