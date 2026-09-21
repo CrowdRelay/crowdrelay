@@ -9,7 +9,7 @@
 //! and a batch that was already answered rejects new drafts instead of
 //! re-asking.
 
-mod common;
+use crate::common;
 
 use std::time::Duration;
 

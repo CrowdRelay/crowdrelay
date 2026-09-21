@@ -1265,17 +1265,9 @@ async fn approve_and_run_fix(
 #[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn a_sweep_proposes_the_ticket_fix_in_ask_mode_and_applies_it_in_alone_mode()
 -> Result<(), Box<dyn std::error::Error>> {
-    let database_url =
-        std::env::var("CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL").map_err(|error| {
-            format!(
-                "CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL must target a disposable database: {error}"
-            )
-        })?;
-    let pool = PgPoolOptions::new()
-        .max_connections(4)
-        .connect(&database_url)
-        .await?;
-    crowdrelay_infra::database::MIGRATOR.run(&pool).await?;
+    let (pool, database_url) = common::test_pool_with_url("CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL")
+        .await
+        .expect("connect to the migrated suite database");
 
     let workspace_id = WorkspaceId::new();
     let suffix = workspace_id.into_uuid().simple().to_string();
@@ -1394,17 +1386,9 @@ async fn a_sweep_proposes_the_ticket_fix_in_ask_mode_and_applies_it_in_alone_mod
 #[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn a_third_party_step_parks_behind_its_own_capability()
 -> Result<(), Box<dyn std::error::Error>> {
-    let database_url =
-        std::env::var("CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL").map_err(|error| {
-            format!(
-                "CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL must target a disposable database: {error}"
-            )
-        })?;
-    let pool = PgPoolOptions::new()
-        .max_connections(4)
-        .connect(&database_url)
-        .await?;
-    crowdrelay_infra::database::MIGRATOR.run(&pool).await?;
+    let pool = common::test_pool("CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL")
+        .await
+        .expect("connect to the migrated suite database");
 
     let workspace_id = WorkspaceId::new();
     let suffix = workspace_id.into_uuid().simple().to_string();
