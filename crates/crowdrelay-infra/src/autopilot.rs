@@ -309,6 +309,7 @@ struct GrowthEnvelopeRow {
     daily_third_party_touches: i32,
     subject_cooldown_hours: i32,
     max_recipients_per_step: i32,
+    weekly_bootstrap_actions: i32,
     parked: bool,
 }
 

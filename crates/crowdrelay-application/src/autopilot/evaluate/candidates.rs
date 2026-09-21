@@ -667,7 +667,7 @@ fn content_candidates(
     policy: &AutopilotPolicy,
     communities: &[CommunityRelayTarget],
     push_audience: Option<crowdrelay_domain::content_supply::SignalPushAudience>,
-    evidence: EvidenceCount,
+    evidence: ContextEvidence,
     now: OffsetDateTime,
 ) -> Result<Vec<DecisionCandidate>, serde_json::Error> {
     let AutopilotPolicyConfig::ContentSupply(domain_policy) = &policy.config else {

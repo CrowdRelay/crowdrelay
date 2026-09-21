@@ -44,6 +44,16 @@ pub struct GrowthEnvelope {
     pub subject_cooldown_hours: u32,
     /// Most recipients one step may reach. Bounds the cost of a wrong segment.
     pub max_recipients_per_step: u32,
+    /// Unattended actions one context may take in a rolling seven days while
+    /// it is still below its evidence floor.
+    ///
+    /// The floor downgrades unattended execution to approval until a context
+    /// has twenty resolved outcomes, and acting is the only way those get
+    /// made — so with no warm-up the floor is never reached. Measured: zero
+    /// resolved outcomes against a floor of twenty. Zero here restores that
+    /// behaviour and reads in code as a deliberate "no warm-up", not as an
+    /// absent setting. See [`crate::autonomy::BootstrapAllowance`].
+    pub weekly_bootstrap_actions: u32,
     /// Tenant is parked: the autopilot cycle returns immediately without
     /// evaluating or producing anything. Set by the Control Plane on park,
     /// cleared on resume. Distinct from `agent_enabled` (which only holds
@@ -66,6 +76,10 @@ impl Default for GrowthEnvelope {
             daily_third_party_touches: 3,
             subject_cooldown_hours: 168,
             max_recipients_per_step: 250,
+            // Small enough that a mistake is five actions rather than a
+            // campaign, large enough that twenty observations are a month
+            // away rather than never.
+            weekly_bootstrap_actions: 5,
             parked: false,
         }
     }

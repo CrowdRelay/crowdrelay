@@ -709,6 +709,10 @@ pub struct SetGrowthEnvelope {
     pub daily_third_party_touches: u32,
     pub subject_cooldown_hours: u32,
     pub max_recipients_per_step: u32,
+    /// Unattended actions one context may take per rolling week while below
+    /// its evidence floor, so the floor can be reached. Zero disables the
+    /// warm-up and restores the behaviour that never reached it.
+    pub weekly_bootstrap_actions: u32,
     pub expected_version: i64,
     /// Tenant park flag: when true, the autopilot cycle skips entirely.
     /// Set by the Control Plane on park, cleared on resume.

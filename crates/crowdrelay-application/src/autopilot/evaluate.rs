@@ -12,7 +12,7 @@ use crowdrelay_domain::{
         FanLifecycleDecision, FanLifecycleSnapshot, LifecycleTemplate, evaluate_fan_lifecycle,
     },
     autonomy::{
-        AutonomyLevel, Confidence, EvidenceCount, PolicyDisposition, disposition,
+        AutonomyLevel, Confidence, ContextEvidence, PolicyDisposition, disposition,
         disposition_with_evidence,
     },
     beacons::{
@@ -142,7 +142,7 @@ where
         // confidence was computed from, so a context with four measured
         // outcomes could report a high number, clear its minimum, and be
         // handed unattended execution over an action nobody can recall.
-        let evidence = self
+        let evidence_counts = self
             .repository
             .load_resolved_evidence_counts(self.workspace_id)
             .await?;
@@ -152,6 +152,18 @@ where
             .repository
             .load_growth_envelope(self.workspace_id, now)
             .await?;
+        // The warm-up: how much unattended action each context may still take
+        // while below its floor. Without it the floor seals itself — acting is
+        // how the observations that clear it get made, and routing below-floor
+        // work through approval instead of denial made no difference against
+        // one operator and a 72-hour expiry. Measured: zero resolved outcomes
+        // against a floor of twenty.
+        let bootstrap_spent = self
+            .repository
+            .load_bootstrap_spend(self.workspace_id, now)
+            .await?;
+        let evidence =
+            evidence_counts.with_bootstrap(bootstrap_spent, envelope.weekly_bootstrap_actions);
         let touch_ages = self
             .repository
             .load_outward_touch_ages(self.workspace_id, now)

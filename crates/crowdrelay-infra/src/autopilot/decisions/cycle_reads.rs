@@ -53,7 +53,7 @@ macro_rules! decision_cycle_reads {
                 SELECT agent_enabled, dry_run, weekly_owned_audience_touches,
                        weekly_third_party_touches, daily_third_party_touches,
                        subject_cooldown_hours,
-                       max_recipients_per_step, parked
+                       max_recipients_per_step, weekly_bootstrap_actions, parked
                 FROM viryaos_growth_envelope
                 WHERE workspace_id = $1
                 "#,
@@ -80,6 +80,9 @@ macro_rules! decision_cycle_reads {
                     .unwrap_or(0),
                 max_recipients_per_step: bounded_u32(i64::from(row.max_recipients_per_step))
                     .unwrap_or(1),
+                // An unreadable cap is no warm-up, never an unbounded one.
+                weekly_bootstrap_actions: bounded_u32(i64::from(row.weekly_bootstrap_actions))
+                    .unwrap_or(0),
                 parked: row.parked,
             });
 
@@ -118,6 +121,58 @@ macro_rules! decision_cycle_reads {
                 }
             }
             Ok((envelope, usage))
+        })
+        .await
+    }
+
+    /// Unattended actions each context took in the trailing seven days.
+    ///
+    /// `approved_by = 'policy:bounded_auto'` is what the persist path stamps
+    /// on an action nobody approved, so it is exactly the set the warm-up
+    /// allowance is bounding. Counted from the durable rows for the same
+    /// reason the envelope counts its touches there: a second ledger can
+    /// disagree with the actions, and the one that is wrong is the one nobody
+    /// reads.
+    ///
+    /// Cancelled rows still count. The allowance bounds what the agent *did*
+    /// unattended, and an action an operator pulled back was still an action
+    /// that went out of the gate without them.
+    ///
+    /// A context whose name this build cannot parse is skipped rather than
+    /// bucketed somewhere: a spend attributed to the wrong context would widen
+    /// one allowance while narrowing another.
+    async fn load_bootstrap_spend_impl(
+        &self,
+        workspace_id: WorkspaceId,
+        now: OffsetDateTime,
+    ) -> Result<std::collections::BTreeMap<AutopilotContext, i64>, RepositoryError> {
+        self.bounded(async {
+            let rows = sqlx::query_as::<_, (String, i64)>(
+                r#"
+                SELECT context, count(*)
+                FROM viryaos_autopilot_actions
+                WHERE workspace_id = $1
+                  AND approved_by = 'policy:bounded_auto'
+                  -- Cast so the statement can be PREPAREd standalone, which is
+                  -- what `sql-result-types.py` needs to check it at all. Without
+                  -- it Postgres infers `interval` for $2 and the query silently
+                  -- drops out of the gate's count instead of being verified.
+                  AND created_at >= $2::timestamptz - INTERVAL '7 days'
+                GROUP BY context
+                "#,
+            )
+            .bind(workspace_id.into_uuid())
+            .bind(now)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(map_sqlx)?;
+
+            Ok(rows
+                .into_iter()
+                .filter_map(|(context, count)| {
+                    Some((AutopilotContext::from_storage(&context)?, count))
+                })
+                .collect())
         })
         .await
     }

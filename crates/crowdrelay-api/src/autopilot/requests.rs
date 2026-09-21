@@ -59,6 +59,14 @@ const fn default_daily_third_party_touches() -> u32 {
     3
 }
 
+/// The migration's default, restated here so a caller that omits the field
+/// gets the warm-up rather than silently switching it off. Zero would be the
+/// safer-looking number and the wrong one: zero is what the system already
+/// did, and it is why the evidence floor was never reached.
+const fn default_weekly_bootstrap_actions() -> u32 {
+    5
+}
+
 /// Whole-envelope write. Every field required: a partial update of a limit set
 /// is how one ceiling gets widened while another is believed tightened.
 #[derive(Debug, Deserialize)]
@@ -74,6 +82,11 @@ pub struct GrowthEnvelopeRequest {
     pub(super) daily_third_party_touches: u32,
     pub(super) subject_cooldown_hours: u32,
     pub(super) max_recipients_per_step: u32,
+    /// Defaults rather than required, for the same reason as the daily wall
+    /// above: a caller that predates the field gets the default rather than a
+    /// 400 on a limit it never saw.
+    #[serde(default = "default_weekly_bootstrap_actions")]
+    pub(super) weekly_bootstrap_actions: u32,
     pub(super) expected_version: i64,
     /// Tenant park flag. When true, the autopilot cycle skips entirely.
     /// Defaults to false for backward compatibility with existing callers

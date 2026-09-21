@@ -32,7 +32,7 @@ pub(super) fn community_engager_candidates(
     snapshot: &GrowthIntelligenceSnapshot,
     policy: &AutopilotPolicy,
     domain_policy: &GrowthIntelligencePolicy,
-    evidence: EvidenceCount,
+    evidence: ContextEvidence,
     _workspace_id: WorkspaceId,
     now: OffsetDateTime,
     causal_model: &CausalModel,
