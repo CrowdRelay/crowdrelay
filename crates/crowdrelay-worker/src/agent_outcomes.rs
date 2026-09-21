@@ -32,6 +32,8 @@ use crowdrelay_application::agent_outcomes::{
     provenance_admission, validate,
 };
 use crowdrelay_domain::WorkspaceId;
+use crowdrelay_domain::action_class::{ActionClass, effective_authority};
+use crowdrelay_domain::autonomy::AutonomyLevel;
 use crowdrelay_domain::target_discovery::{
     ScreeningVerdict, TargetDiscoveryPolicy, screen_community_candidate,
 };
@@ -46,6 +48,7 @@ use tokio::{
 use uuid::Uuid;
 
 include!("agent_outcomes/press_recipient.rs");
+include!("agent_outcomes/authority.rs");
 
 const BATCH_LIMIT: i64 = 32;
 
@@ -482,6 +485,21 @@ impl AgentOutcomeWorker {
             }
         };
 
+        // A social_post from the community-engager worker targets a specific
+        // community (Reddit, forum) and carries a valid target_id + subreddit.
+        // Regular social posts target owned channels (Instagram, Facebook, X)
+        // and materialize as campaign drafts. The distinction is in the item
+        // payload, not the outcome kind. The target_id must parse as a valid
+        // UUID — if it doesn't, the post falls through to the generic content
+        // path rather than pointing at a non-existent outreach target.
+        //
+        // Read here rather than beside the action insert because the context
+        // it decides is written on the decision row too, and a decision filed
+        // under one context with its action under another is a timeline that
+        // does not join.
+        let community_target_id = community_target_id(outcome);
+        let effective_context = effective_context(outcome, community_target_id);
+
         // Insert the decision row. decision_key mirrors the outcome's
         // idempotency_key so a worker retry is a no-op.
         let inserted_decision = sqlx::query_scalar::<_, Uuid>(
@@ -499,7 +517,7 @@ impl AgentOutcomeWorker {
         .bind(decision_id)
         .bind(outcome.workspace_id)
         .bind(&outcome.idempotency_key)
-        .bind(outcome.kind.autopilot_context())
+        .bind(effective_context)
         .bind(subject_kind)
         .bind(subject_id)
         .bind(outcome.kind.decision_kind())
@@ -566,35 +584,6 @@ impl AgentOutcomeWorker {
             && outcome.kind != OutcomeKind::OpportunityFindings
         {
             let action_id = Uuid::now_v7();
-
-            // A social_post from the community-engager worker targets a
-            // specific community (Reddit, forum) and carries a valid
-            // target_id + subreddit. Regular social posts target owned
-            // channels (Instagram, Facebook, X) and materialize as campaign
-            // drafts. The distinction is in the item payload, not the
-            // outcome kind. The target_id must parse as a valid UUID — if
-            // it doesn't, the post falls through to the generic content
-            // path rather than pointing at a non-existent outreach target.
-            let community_target_id = if outcome.kind == OutcomeKind::SocialPost {
-                outcome
-                    .payload
-                    .item
-                    .as_ref()
-                    .and_then(|i| i.get("platform"))
-                    .and_then(Value::as_str)
-                    .filter(|p| *p == "reddit")
-                    .and_then(|_| {
-                        outcome
-                            .payload
-                            .item
-                            .as_ref()
-                            .and_then(|i| i.get("target_id"))
-                            .and_then(Value::as_str)
-                            .and_then(|s| Uuid::parse_str(s).ok())
-                    })
-            } else {
-                None
-            };
 
             // Admission gate: the supplied target_id must name a real,
             // screened-and-admitted community target. Until the topical screen
@@ -706,19 +695,7 @@ impl AgentOutcomeWorker {
                 community_source = Some(source_row);
             }
 
-            // Check if the workspace's policy for the outcome's context is
-            // set to bounded_auto. If so, the action skips the approval step
-            // and goes straight to queued. Two cases:
-            //   1. Reddit community posts (promotion_budget context) — the
-            //      community executor's anti-spam guardrails (3 posts/24h,
-            //      7-day subreddit cooldown) serve as the bounds.
-            //   2. Signal pushes (fan_lifecycle context) — pushing to an
-            //      existing fan who opted in is fan lifecycle engagement,
-            //      not promotion spend. The push delivery rate limits and
-            //      the fan's own opt-in serve as the bounds.
-            // Press pitches and regular social posts always require human
-            // approval because they reach external audiences directly.
-            let is_reddit_community_post = community_target_id.is_some();
+            let is_community_post = community_target_id.is_some();
             let is_signal_push = outcome.kind == OutcomeKind::SignalPush;
             // A channel whose auto-post flag is set already carries the
             // operator's approval; asking again per post is asking twice, and
@@ -735,16 +712,6 @@ impl AgentOutcomeWorker {
             let channel_pre_approved = outcome.kind == OutcomeKind::SocialPost
                 && community_target_id.is_none()
                 && self.auto_post_platforms.permits(draft_platform);
-
-            let auto_execute = if is_reddit_community_post {
-                self.is_context_bounded_auto(&mut tx, "promotion_budget")
-                    .await?
-            } else if is_signal_push {
-                self.is_context_bounded_auto(&mut tx, "fan_lifecycle")
-                    .await?
-            } else {
-                channel_pre_approved
-            };
             if channel_pre_approved {
                 tracing::info!(
                     outcome_id = %outcome.id,
@@ -962,7 +929,27 @@ impl AgentOutcomeWorker {
                     );
                     AgentOutcomeError::UnpersistablePayload
                 })?;
-                let action_class = parsed.action_class().as_str();
+                let class = parsed.action_class();
+                let action_class = class.as_str();
+
+                // Whether this may run unattended, decided here because the
+                // class is decided here — on the payload, not on a literal.
+                //
+                // A channel flag is a standing approval the operator already
+                // gave, so it short-circuits. Everything else answers to both
+                // authority axes, the stricter winning, exactly as
+                // `evaluate::persist` does for the brain's own candidates.
+                let auto_execute = if channel_pre_approved {
+                    true
+                } else if is_community_post || is_signal_push {
+                    self.may_auto_execute(&mut tx, effective_context, class)
+                        .await?
+                } else {
+                    // Press pitches and everything unrecognised: a person
+                    // decides. An outcome kind nobody has classified is
+                    // exactly the case where asking is the right default.
+                    false
+                };
 
                 if auto_execute {
                     sqlx::query_scalar::<_, Uuid>(
@@ -985,7 +972,7 @@ impl AgentOutcomeWorker {
                     .bind(action_id)
                     .bind(outcome.workspace_id)
                     .bind(decision_id)
-                    .bind(outcome.kind.autopilot_context())
+                    .bind(effective_context)
                     .bind(action_kind)
                     .bind("agent_outcome")
                     .bind(outcome.id)
@@ -1018,7 +1005,7 @@ impl AgentOutcomeWorker {
                     .bind(action_id)
                     .bind(outcome.workspace_id)
                     .bind(decision_id)
-                    .bind(outcome.kind.autopilot_context())
+                    .bind(effective_context)
                     .bind(action_kind)
                     .bind("agent_outcome")
                     .bind(outcome.id)
@@ -1064,7 +1051,7 @@ impl AgentOutcomeWorker {
                         )
                         .bind(outcome.workspace_id)
                         .bind(inserted_id)
-                        .bind(outcome.kind.autopilot_context())
+                        .bind(effective_context)
                         .bind(action_kind)
                         .bind("agent_outcome")
                         .bind(outcome.id)
@@ -1460,32 +1447,6 @@ impl AgentOutcomeWorker {
         .execute(&self.pool)
         .await?;
         Ok(())
-    }
-
-    /// Checks whether the workspace's autopilot policy for the given context
-    /// is set to `bounded_auto`. This is the gate for autonomous execution:
-    /// if the operator has set the policy to `bounded_auto`, the action
-    /// skips the approval step and goes straight to `queued`. Returns
-    /// `false` if the policy is missing or not `bounded_auto` — fail-closed
-    /// to `require_approval`.
-    async fn is_context_bounded_auto(
-        &self,
-        tx: &mut Transaction<'_, Postgres>,
-        context: &str,
-    ) -> Result<bool, AgentOutcomeError> {
-        let autonomy: Option<String> = sqlx::query_scalar(
-            r#"
-            SELECT autonomy_level
-            FROM viryaos_autopilot_policies
-            WHERE workspace_id = $1 AND context = $2
-            LIMIT 1
-            "#,
-        )
-        .bind(self.workspace_id.into_uuid())
-        .bind(context)
-        .fetch_optional(&mut **tx)
-        .await?;
-        Ok(autonomy.as_deref() == Some("bounded_auto"))
     }
 }
 

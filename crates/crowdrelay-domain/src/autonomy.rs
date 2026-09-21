@@ -60,6 +60,39 @@ pub enum AutonomyLevel {
 }
 
 impl AutonomyLevel {
+    /// The stored representation — the vocabulary of the `ceiling` and
+    /// `autonomy_level` CHECK constraints.
+    ///
+    /// Here rather than beside each reader because three crates already need
+    /// it and each one that restates the list is a place the list can drift
+    /// from the constraint.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Observe => "observe",
+            Self::Recommend => "recommend",
+            Self::RequireApproval => "require_approval",
+            Self::BoundedAuto => "bounded_auto",
+        }
+    }
+
+    /// Parses what [`Self::as_str`] wrote.
+    ///
+    /// `None` for anything this build does not recognise. A caller reading an
+    /// authority row must treat that as the safest level, never as an absent
+    /// limit — a row a newer deploy wrote and this one cannot read is not a
+    /// grant of authority.
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "observe" => Some(Self::Observe),
+            "recommend" => Some(Self::Recommend),
+            "require_approval" => Some(Self::RequireApproval),
+            "bounded_auto" => Some(Self::BoundedAuto),
+            _ => None,
+        }
+    }
+
     /// Returns true when the level is permitted to enqueue an executable action.
     #[must_use]
     pub const fn may_enqueue(self) -> bool {
@@ -210,6 +243,20 @@ pub const fn disposition_with_evidence(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn autonomy_levels_round_trip() {
+        for level in [
+            AutonomyLevel::Observe,
+            AutonomyLevel::Recommend,
+            AutonomyLevel::RequireApproval,
+            AutonomyLevel::BoundedAuto,
+        ] {
+            assert_eq!(AutonomyLevel::parse(level.as_str()), Some(level));
+        }
+        assert_eq!(AutonomyLevel::parse("bounded-auto"), None);
+        assert_eq!(AutonomyLevel::parse(""), None);
+    }
 
     #[test]
     fn confidence_rejects_values_above_one_hundred_percent() {
