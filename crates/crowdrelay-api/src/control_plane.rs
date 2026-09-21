@@ -130,7 +130,12 @@ pub(crate) fn router(state: crate::AppState) -> Router {
         )
         .route(
             "/v1/control-plane/events",
-            get(crate::concert_qr::control_plane_events),
+            get(crate::concert_qr::control_plane_events)
+                // The operator's third show write: a label that never ran a
+                // sync source types the night in by hand. Same handler
+                // staff/admin mount.
+                .post(crate::events::create_event)
+                .layer(DefaultBodyLimit::max(MAX_EVENT_BILL_BODY_BYTES)),
         )
         .route(
             "/v1/control-plane/events/{event_slug}/timeline",

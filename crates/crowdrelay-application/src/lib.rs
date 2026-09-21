@@ -96,12 +96,12 @@ pub use ecosystem::{
     UpdateFeatureFlagCommand, UpdateShowChecklistCommand,
 };
 pub use events::{
-    EventActEntry, EventCache, EventCacheError, EventRepository, EventSnapshot,
-    ListFanEventInterests, LoadEvents, LoadEventsError, MAX_PUBLIC_EVENT_LIMIT,
-    RegisterEventInterest, RegisterEventInterestCommand, RegisterEventInterestCommandArgs,
-    RegisterEventInterestCommandError, ReplaceEventActs, ReplaceEventActsCommand,
-    SetEventCounterparty, SetEventCounterpartyCommand, SetEventFestival, SetEventFestivalCommand,
-    SetEventSupportSlots, SetEventSupportSlotsCommand,
+    CreateEvent, CreateEventCommand, CreatedEvent, EventActEntry, EventCache, EventCacheError,
+    EventRepository, EventSnapshot, ListFanEventInterests, LoadEvents, LoadEventsError,
+    MAX_PUBLIC_EVENT_LIMIT, RegisterEventInterest, RegisterEventInterestCommand,
+    RegisterEventInterestCommandArgs, RegisterEventInterestCommandError, ReplaceEventActs,
+    ReplaceEventActsCommand, SetEventCounterparty, SetEventCounterpartyCommand, SetEventFestival,
+    SetEventFestivalCommand, SetEventSupportSlots, SetEventSupportSlotsCommand,
 };
 pub use fan_identity::{
     DismissMergeCandidateCommand, FanIdentifierView, FanIdentity, FanIdentityError,

@@ -946,6 +946,292 @@ async fn events_mark_the_shared_venue_registry() -> Result<(), Box<dyn std::erro
     Ok(())
 }
 
+async fn seed_workspace(
+    pool: &PgPool,
+    workspace_id: WorkspaceId,
+    slug: &WorkspaceSlug,
+) -> Result<(), Box<dyn std::error::Error>> {
+    sqlx::query("INSERT INTO workspaces (id, slug, name) VALUES ($1, $2, $3)")
+        .bind(workspace_id.into_uuid())
+        .bind(slug.as_str())
+        .bind("Events E2E")
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+fn create_command(
+    workspace_id: WorkspaceId,
+    title: &str,
+    key: &str,
+    request: &str,
+) -> Result<crowdrelay_application::CreateEventCommand, Box<dyn std::error::Error>> {
+    Ok(crowdrelay_application::CreateEventCommand {
+        workspace_id,
+        slug_base: crowdrelay_domain::slugify(title).ok_or("a title that folds to a slug")?,
+        title: title.to_owned(),
+        timezone: None,
+        starts_at: OffsetDateTime::now_utc() + time::Duration::days(30),
+        doors_at: None,
+        ends_at: None,
+        venue: None,
+        venue_address: None,
+        city_name: None,
+        city_country_code: None,
+        city_region: None,
+        ticket_url: None,
+        publish: false,
+        idempotency_key: IdempotencyKey::parse(key)?,
+        request_id: RequestId::parse(request)?,
+    })
+}
+
+/// The whole point of the manual entry: an operator types the night in, the
+/// row lands where every show surface reads, and a retried submit answers
+/// the show it already booked instead of double-booking.
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_EVENT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn manual_show_entry_creates_publishes_and_replays() -> Result<(), Box<dyn std::error::Error>>
+{
+    let database_url = std::env::var("CROWDRELAY_EVENT_TEST_DATABASE_URL").map_err(|e| {
+        format!("CROWDRELAY_EVENT_TEST_DATABASE_URL must target a disposable database: {e}")
+    })?;
+    let pool = PgPoolOptions::new()
+        .max_connections(8)
+        .connect(&database_url)
+        .await?;
+    crowdrelay_infra::database::MIGRATOR.run(&pool).await?;
+
+    let workspace_id = WorkspaceId::new();
+    let workspace_slug = WorkspaceSlug::parse(format!(
+        "event-create-{}",
+        workspace_id.into_uuid().simple()
+    ))?;
+    seed_workspace(&pool, workspace_id, &workspace_slug).await?;
+    let database = DatabaseConfig {
+        url: database_url.clone(),
+        max_connections: 8,
+        connect_timeout: Duration::from_secs(3),
+        ping_timeout: Duration::from_secs(2),
+        operation_timeout: Duration::from_secs(5),
+        lock_timeout: Duration::from_secs(1),
+    };
+    let events =
+        PostgresEventRepository::new(pool.clone(), workspace_slug, &database, vec![1_440, 120]);
+
+    let starts_at = OffsetDateTime::now_utc() + time::Duration::days(30);
+    let command = crowdrelay_application::CreateEventCommand {
+        slug_base: crowdrelay_domain::slugify("Virya — Warszawa, Progresja")
+            .ok_or("a title that folds")?,
+        title: "Virya — Warszawa, Progresja".to_owned(),
+        venue: Some("Progresja".to_owned()),
+        venue_address: Some("Fort Wola 22".to_owned()),
+        city_name: Some("Warszawa".to_owned()),
+        city_country_code: Some("PL".to_owned()),
+        city_region: Some("mazowieckie".to_owned()),
+        ticket_url: Some("https://tickets.example.test/virya-warszawa".to_owned()),
+        doors_at: Some(starts_at - time::Duration::hours(1)),
+        starts_at,
+        ends_at: Some(starts_at + time::Duration::hours(3)),
+        publish: true,
+        ..create_command(
+            workspace_id,
+            "unused",
+            "event-create-0001",
+            "event-create-request-0001",
+        )?
+    };
+    let created = events.create_event(&command).await?;
+    assert_eq!(created.slug, "virya-warszawa-progresja");
+    assert_eq!(created.status, "published");
+
+    // The stored row carries what the form was asked for — and the timezone
+    // default resolved without one.
+    let stored = sqlx::query_as::<_, (String, Option<String>, String, bool)>(
+        r#"
+        SELECT e.status, c.slug, e.timezone, e.published_at IS NOT NULL
+        FROM events e
+        LEFT JOIN cities c ON c.id = e.city_id
+        WHERE e.id = $1
+        "#,
+    )
+    .bind(created.event_id.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(stored.0, "published");
+    assert_eq!(stored.1.as_deref(), Some("warszawa"));
+    assert_eq!(stored.2, "Europe/Warsaw");
+    assert!(stored.3, "a published show stamps when it announced");
+
+    // The public read path — the same list the fan site renders — sees it.
+    let published = events.load_published_events().await?;
+    assert_eq!(published.len(), 1);
+    assert_eq!(published[0].id, created.event_id);
+
+    // The replay protocol: same key + same body answers the original, even
+    // under a fresh request id; same key + a different body refuses.
+    let replayed = events.create_event(&command).await?;
+    assert_eq!(replayed, created);
+    let retry_new_request = crowdrelay_application::CreateEventCommand {
+        request_id: RequestId::parse("event-create-request-0001-retry")?,
+        ..command
+    };
+    assert_eq!(events.create_event(&retry_new_request).await?, created);
+    let tampered = crowdrelay_application::CreateEventCommand {
+        title: "A different night".to_owned(),
+        ..retry_new_request
+    };
+    assert!(matches!(
+        events.create_event(&tampered).await,
+        Err(crowdrelay_application::RepositoryError::Conflict)
+    ));
+    let event_count =
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM events WHERE workspace_id = $1")
+            .bind(workspace_id.into_uuid())
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(event_count, 1, "replays and refusals book nothing twice");
+    Ok(())
+}
+
+/// `publish: false` is the form's other half — the night exists for every
+/// internal read while the public list stays silent until announcing.
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_EVENT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn manual_show_entry_keeps_a_draft_off_the_public_list()
+-> Result<(), Box<dyn std::error::Error>> {
+    let database_url = std::env::var("CROWDRELAY_EVENT_TEST_DATABASE_URL").map_err(|e| {
+        format!("CROWDRELAY_EVENT_TEST_DATABASE_URL must target a disposable database: {e}")
+    })?;
+    let pool = PgPoolOptions::new()
+        .max_connections(8)
+        .connect(&database_url)
+        .await?;
+    crowdrelay_infra::database::MIGRATOR.run(&pool).await?;
+
+    let workspace_id = WorkspaceId::new();
+    let workspace_slug =
+        WorkspaceSlug::parse(format!("event-draft-{}", workspace_id.into_uuid().simple()))?;
+    seed_workspace(&pool, workspace_id, &workspace_slug).await?;
+    let database = DatabaseConfig {
+        url: database_url,
+        max_connections: 8,
+        connect_timeout: Duration::from_secs(3),
+        ping_timeout: Duration::from_secs(2),
+        operation_timeout: Duration::from_secs(5),
+        lock_timeout: Duration::from_secs(1),
+    };
+    let events =
+        PostgresEventRepository::new(pool.clone(), workspace_slug, &database, vec![1_440, 120]);
+
+    let created = events
+        .create_event(&create_command(
+            workspace_id,
+            "Quiet Tuesday",
+            "event-draft-0001",
+            "event-draft-request-0001",
+        )?)
+        .await?;
+    assert_eq!(created.status, "draft");
+    assert!(events.load_published_events().await?.is_empty());
+    let stored_status = sqlx::query_scalar::<_, String>("SELECT status FROM events WHERE id = $1")
+        .bind(created.event_id.into_uuid())
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(stored_status, "draft");
+    Ok(())
+}
+
+/// Two same-titled nights walk the `-N` suffix rather than colliding, and a
+/// command naming a foreign workspace never reaches the row — the repository
+/// answers NotFound the same way every other write does.
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_EVENT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn manual_show_entry_walks_slug_collisions_and_stays_in_workspace()
+-> Result<(), Box<dyn std::error::Error>> {
+    let database_url = std::env::var("CROWDRELAY_EVENT_TEST_DATABASE_URL").map_err(|e| {
+        format!("CROWDRELAY_EVENT_TEST_DATABASE_URL must target a disposable database: {e}")
+    })?;
+    let pool = PgPoolOptions::new()
+        .max_connections(8)
+        .connect(&database_url)
+        .await?;
+    crowdrelay_infra::database::MIGRATOR.run(&pool).await?;
+
+    let workspace_a = WorkspaceId::new();
+    let workspace_b = WorkspaceId::new();
+    let slug_a = WorkspaceSlug::parse(format!("event-a-{}", workspace_a.into_uuid().simple()))?;
+    let slug_b = WorkspaceSlug::parse(format!("event-b-{}", workspace_b.into_uuid().simple()))?;
+    seed_workspace(&pool, workspace_a, &slug_a).await?;
+    seed_workspace(&pool, workspace_b, &slug_b).await?;
+    let database = DatabaseConfig {
+        url: database_url,
+        max_connections: 8,
+        connect_timeout: Duration::from_secs(3),
+        ping_timeout: Duration::from_secs(2),
+        operation_timeout: Duration::from_secs(5),
+        lock_timeout: Duration::from_secs(1),
+    };
+    let events_a = PostgresEventRepository::new(pool.clone(), slug_a, &database, vec![1_440, 120]);
+    let events_b = PostgresEventRepository::new(pool.clone(), slug_b, &database, vec![1_440, 120]);
+
+    let first = events_a
+        .create_event(&create_command(
+            workspace_a,
+            "Virya live",
+            "event-a-0001",
+            "event-a-request-0001",
+        )?)
+        .await?;
+    let second = events_a
+        .create_event(&create_command(
+            workspace_a,
+            "Virya live",
+            "event-a-0002",
+            "event-a-request-0002",
+        )?)
+        .await?;
+    assert_eq!(first.slug, "virya-live");
+    assert_eq!(second.slug, "virya-live-2");
+
+    // A command carrying workspace B's id at workspace A's repository is a
+    // foreign write — NotFound, and no row lands under either workspace.
+    assert!(matches!(
+        events_a
+            .create_event(&create_command(
+                workspace_b,
+                "Virya live",
+                "event-b-foreign",
+                "event-b-foreign-request",
+            )?)
+            .await,
+        Err(crowdrelay_application::RepositoryError::NotFound)
+    ));
+    // Workspace B's own repository takes the same title fresh — slugs are
+    // per-workspace.
+    let b_first = events_b
+        .create_event(&create_command(
+            workspace_b,
+            "Virya live",
+            "event-b-0001",
+            "event-b-request-0001",
+        )?)
+        .await?;
+    assert_eq!(b_first.slug, "virya-live");
+    let counts = sqlx::query_scalar::<_, i64>(
+        "SELECT count(*) FROM events WHERE workspace_id = $1 OR workspace_id = $2",
+    )
+    .bind(workspace_a.into_uuid())
+    .bind(workspace_b.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        counts, 3,
+        "two for A, one for B, none for the foreign write"
+    );
+    Ok(())
+}
+
 fn test_sensitive_response_codec() -> SensitiveResponseCodec {
     SensitiveResponseCodec::new(SensitiveResponseKey::derive_from_secret(
         b"events-integration-response-secret",

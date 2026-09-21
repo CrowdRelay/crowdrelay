@@ -270,7 +270,9 @@ async fn append_outbox(
 async fn start_idempotency(
     transaction: &mut Transaction<'_, Postgres>,
     workspace_id: WorkspaceId,
-    command: &RegisterEventInterestCommand,
+    scope: &str,
+    key: &str,
+    request_id: &str,
     request_hash: &[u8],
     operation_timeout: Duration,
 ) -> Result<bool, EventStoreError> {
@@ -285,8 +287,8 @@ async fn start_idempotency(
         "#,
     )
     .bind(workspace_id.into_uuid())
-    .bind(INTEREST_IDEMPOTENCY_SCOPE)
-    .bind(command.idempotency_key().as_str())
+    .bind(scope)
+    .bind(key)
     .execute(&mut **transaction)
     .await
     .map_err(EventStoreError::from_sqlx)?;
@@ -304,10 +306,10 @@ async fn start_idempotency(
         "#,
     )
     .bind(workspace_id.into_uuid())
-    .bind(INTEREST_IDEMPOTENCY_SCOPE)
-    .bind(command.idempotency_key().as_str())
+    .bind(scope)
+    .bind(key)
     .bind(request_hash)
-    .bind(command.request_id().as_str())
+    .bind(request_id)
     .bind(lease_ms)
     .bind(IDEMPOTENCY_RETENTION_MILLISECONDS)
     .execute(&mut **transaction)
@@ -319,7 +321,8 @@ async fn start_idempotency(
 async fn lock_idempotency(
     transaction: &mut Transaction<'_, Postgres>,
     workspace_id: WorkspaceId,
-    command: &RegisterEventInterestCommand,
+    scope: &str,
+    key: &str,
 ) -> Result<IdempotencyRow, EventStoreError> {
     sqlx::query_as::<_, IdempotencyRow>(
         r#"
@@ -331,8 +334,8 @@ async fn lock_idempotency(
         "#,
     )
     .bind(workspace_id.into_uuid())
-    .bind(INTEREST_IDEMPOTENCY_SCOPE)
-    .bind(command.idempotency_key().as_str())
+    .bind(scope)
+    .bind(key)
     .fetch_one(&mut **transaction)
     .await
     .map_err(EventStoreError::from_sqlx)
@@ -341,7 +344,9 @@ async fn lock_idempotency(
 async fn reclaim_idempotency(
     transaction: &mut Transaction<'_, Postgres>,
     workspace_id: WorkspaceId,
-    command: &RegisterEventInterestCommand,
+    scope: &str,
+    key: &str,
+    request_id: &str,
     operation_timeout: Duration,
 ) -> Result<(), EventStoreError> {
     let lease_ms = duration_as_milliseconds(operation_timeout)?;
@@ -355,9 +360,9 @@ async fn reclaim_idempotency(
         "#,
     )
     .bind(workspace_id.into_uuid())
-    .bind(INTEREST_IDEMPOTENCY_SCOPE)
-    .bind(command.idempotency_key().as_str())
-    .bind(command.request_id().as_str())
+    .bind(scope)
+    .bind(key)
+    .bind(request_id)
     .bind(lease_ms)
     .execute(&mut **transaction)
     .await
@@ -368,12 +373,13 @@ async fn reclaim_idempotency(
     Ok(())
 }
 
-async fn complete_idempotency(
+async fn complete_idempotency<T: serde::Serialize>(
     transaction: &mut Transaction<'_, Postgres>,
     workspace_id: WorkspaceId,
-    command: &RegisterEventInterestCommand,
+    scope: &str,
+    key: &str,
     request_hash: &[u8],
-    result: &EventInterestResult,
+    result: &T,
 ) -> Result<(), EventStoreError> {
     let response = serde_json::to_value(result).map_err(|_| EventStoreError::Unexpected)?;
     let updated = sqlx::query(
@@ -387,8 +393,8 @@ async fn complete_idempotency(
         "#,
     )
     .bind(workspace_id.into_uuid())
-    .bind(INTEREST_IDEMPOTENCY_SCOPE)
-    .bind(command.idempotency_key().as_str())
+    .bind(scope)
+    .bind(key)
     .bind(request_hash)
     .bind(response)
     .execute(&mut **transaction)
