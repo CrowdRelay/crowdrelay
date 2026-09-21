@@ -1052,19 +1052,18 @@ impl AutopilotControlRepository for PostgresAutopilotRepository {
             let need = super::team::assignment_need(&action.0, &action.1);
             let assignment_id = Uuid::now_v7();
             let due_at = action.4;
-            let next_reminder_at = super::team::first_reminder_at(OffsetDateTime::now_utc(), due_at);
             let persisted_assignment_id = sqlx::query_scalar::<_, Uuid>(
                 r#"
                 INSERT INTO viryaos_team_assignments (
                     id, workspace_id, action_id, source_kind, source_id,
-                    assignee_member_id, required_skill, due_at, next_reminder_at
-                ) VALUES ($1,$2,$3,'autopilot_action',$4,$5,$6,$7,$8)
+                    assignee_member_id, required_skill, due_at
+                ) VALUES ($1,$2,$3,'autopilot_action',$4,$5,$6,$7)
                 ON CONFLICT (workspace_id, action_id) DO UPDATE
                 SET assignee_member_id=EXCLUDED.assignee_member_id,
                     required_skill=EXCLUDED.required_skill,
                     status='open', due_at=EXCLUDED.due_at,
                     assigned_at=now(), last_reminded_at=NULL,
-                    next_reminder_at=EXCLUDED.next_reminder_at,
+                    next_reminder_at=NULL,
                     first_overdue_reminder_at=NULL,
                     reminder_count=0, completed_at=NULL
                 RETURNING id
@@ -1077,14 +1076,13 @@ impl AutopilotControlRepository for PostgresAutopilotRepository {
             .bind(member.0)
             .bind(need.primary_skill.as_str())
             .bind(due_at)
-            .bind(next_reminder_at)
             .fetch_one(&mut *transaction)
             .await
             .map_err(map_sqlx)?;
 
             // An operator reassignment is still a real external handoff. Do not
             // The assignment itself is internal routing and must always
-            // commit. The reminder e-mail is best-effort: without a live
+            // commit. The notice e-mail is best-effort: without a live
             // team-email executor we skip it (and say so in the logs)
             // instead of refusing the operator's decision.
             let team_email_live =
