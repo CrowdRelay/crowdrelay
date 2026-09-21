@@ -116,9 +116,9 @@ class GateReachability(unittest.TestCase):
 
     def test_the_schema_gates_run_where_a_database_exists(self):
         """They can only run in the job that has Postgres, and must run there."""
-        postgres_job = self.ci.split("rust-postgres:", 1)
+        postgres_job = self.ci.split("rust-tests:", 1)
         self.assertEqual(
-            len(postgres_job), 2, "ci.yml no longer has a rust-postgres job"
+            len(postgres_job), 2, "ci.yml no longer has a rust-tests job"
         )
         # Everything from that job header to the next top-level job key.
         body = re.split(r"\n  [a-z][a-z0-9-]*:\n", postgres_job[1])[0]
@@ -127,7 +127,7 @@ class GateReachability(unittest.TestCase):
                 gate,
                 body,
                 f"{gate} needs a migrated schema and skips silently without one, "
-                "so it belongs in the rust-postgres job and nowhere else",
+                "so it belongs in the rust-tests job and nowhere else",
             )
 
 

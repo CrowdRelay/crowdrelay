@@ -32,11 +32,15 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # Job order below keeps every gate command of the shared check chain inside
-  # the span the task-runner drift contract inspects (from "Run repository
-  # checks" to the summary job); execution itself is fully parallel.
+  # One job, one compile. rust-postgres was folded into rust-tests on
+  # 2026-09-21: on a single 2-core self-hosted lane a second job bought a
+  # second checkout, toolchain setup and full workspace compile — the merge
+  # removes ~10 minutes of duplicate compile from every run. Job order below
+  # keeps every gate command of the shared check chain inside the span the
+  # task-runner drift contract inspects (from "Run repository checks" to the
+  # summary job).
   rust-tests:
-    name: Unit tests and contracts
+    name: Rust checks and PostgreSQL integration
     runs-on: [self-hosted, arm64]
     timeout-minutes: 40
 
@@ -100,6 +104,15 @@ jobs:
       CROWDRELAY_BOOTSTRAP_JSON: >-
         {"workspace_name":"CrowdRelay CI","cities":[{"slug":"wroclaw","name":"Wroclaw","country":"PL","region":"Dolnoslaskie","lat":51.1079,"lng":17.0385}],"campaigns":[{"name":"CI launch","active":true,"smart_links":[{"slug":"ci-launch","destination_url":"http://localhost:4321/join","active":true}]}],"webhook_endpoints":[]}
       RUST_LOG: info
+      # sccache wraps rustc on the runner (installed at ~/.cargo/bin/sccache):
+      # compilations cache by content hash, so a run only pays codegen for the
+      # crates a push actually changed. rust-cache still carries the registry,
+      # fingerprints and clippy artifacts. The 4G cap keeps the cache inside
+      # the box's disk headroom forever — no unbounded target-dir growth.
+      RUSTC_WRAPPER: sccache
+      SCCACHE_DIR: /home/ubuntu/.cache/sccache
+      SCCACHE_CACHE_SIZE: 4G
+      SCCACHE_IDLE_TIMEOUT: "0"
 
     steps:
       - name: Check out repository
@@ -281,97 +294,6 @@ jobs:
           [[ "$(printf '%s\n' "$digest_images" | grep -c '@sha256:')" -eq 3 ]]
           ./scripts/audit-public-tree.sh
 
-      - name: Sweep unattached Docker leftovers
-        # Service containers detach their volumes only after the job ends, so
-        # each job cleans what the previous one left. Only unattached
-        # resources are pruned — in-flight work is never touched.
-        if: always()
-        continue-on-error: true
-        run: docker volume prune -f 2>/dev/null || true
-
-  rust-postgres:
-    name: PostgreSQL integration
-    runs-on: [self-hosted, arm64]
-    timeout-minutes: 40
-
-    services:
-      postgres:
-        image: postgres:19beta3-alpine
-        env:
-          POSTGRES_DB: crowdrelay
-          POSTGRES_USER: crowdrelay
-          POSTGRES_PASSWORD: crowdrelay-ci-only
-        ports:
-          - 5432:5432
-        # --tmpfs keeps postgres data in RAM: the 18+ image declares
-        # VOLUME /var/lib/postgresql (data goes in a versioned subdir), and
-        # without an explicit mount the runner leaves an anonymous volume
-        # behind on every run (~7 GB/day of leak measured on this host). The
-        # mount must sit at the VOLUME path itself — mounting at
-        # /var/lib/postgresql/data trips the image's pg_ctlcluster layout
-        # check and the container refuses to start.
-        options: >-
-          --tmpfs /var/lib/postgresql
-          --health-cmd "pg_isready -U crowdrelay -d crowdrelay"
-          --health-interval 5s
-          --health-timeout 3s
-          --health-retries 20
-
-    env:
-      CROWDRELAY_ENV: test
-      CROWDRELAY_BIND_ADDR: 127.0.0.1:8080
-      CROWDRELAY_DATABASE_URL: postgres://crowdrelay:crowdrelay-ci-only@127.0.0.1:5432/crowdrelay
-      CROWDRELAY_TEST_DATABASE_URL: postgres://crowdrelay:crowdrelay-ci-only@127.0.0.1:5432/crowdrelay
-      CROWDRELAY_OUTBOX_TEST_DATABASE_URL: postgres://crowdrelay:crowdrelay-ci-only@127.0.0.1:5432/crowdrelay
-      CROWDRELAY_ADMISSION_TEST_DATABASE_URL: postgres://crowdrelay:crowdrelay-ci-only@127.0.0.1:5432/crowdrelay
-      CROWDRELAY_EVENT_TEST_DATABASE_URL: postgres://crowdrelay:crowdrelay-ci-only@127.0.0.1:5432/crowdrelay
-      CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL: postgres://crowdrelay:crowdrelay-ci-only@127.0.0.1:5432/crowdrelay
-      CROWDRELAY_ECOSYSTEM_TEST_DATABASE_URL: postgres://crowdrelay:crowdrelay-ci-only@127.0.0.1:5432/crowdrelay
-      CROWDRELAY_FAN_LIFECYCLE_TEST_DATABASE_URL: postgres://crowdrelay:crowdrelay-ci-only@127.0.0.1:5432/crowdrelay
-      CROWDRELAY_REFERRAL_TEST_DATABASE_URL: postgres://crowdrelay:crowdrelay-ci-only@127.0.0.1:5432/crowdrelay
-      CROWDRELAY_MOBILE_FAN_TEST_DATABASE_URL: postgres://crowdrelay:crowdrelay-ci-only@127.0.0.1:5432/crowdrelay
-      CROWDRELAY_REMINDER_TEST_DATABASE_URL: postgres://crowdrelay:crowdrelay-ci-only@127.0.0.1:5432/crowdrelay
-      CROWDRELAY_RETENTION_TEST_DATABASE_URL: postgres://crowdrelay:crowdrelay-ci-only@127.0.0.1:5432/crowdrelay
-      CROWDRELAY_COMMUNITY_TEST_DATABASE_URL: postgres://crowdrelay:crowdrelay-ci-only@127.0.0.1:5432/crowdrelay
-      CROWDRELAY_DATABASE_MAX_CONNECTIONS: 5
-      CROWDRELAY_ALLOWED_ORIGINS: http://localhost:4321
-      CROWDRELAY_WORKSPACE_SLUG: example
-      CROWDRELAY_PUBLIC_SITE_BASE_URL: http://localhost:4321
-      CROWDRELAY_DEFAULT_COUNTRY_CODE: PL
-      CROWDRELAY_TENANT_REGION: eu
-      CROWDRELAY_TENANT_LOCALE: pl-PL
-      CROWDRELAY_TENANT_TIMEZONE: Europe/Warsaw
-      CROWDRELAY_TENANT_CURRENCY: PLN
-      CROWDRELAY_TENANT_DATE_FORMAT: dmy
-      CROWDRELAY_TENANT_NUMBER_FORMAT: comma_decimal
-      CROWDRELAY_TENANT_DATA_REGION: eu
-      CROWDRELAY_RANDOM_DRAWS_ENABLED: "false"
-      CROWDRELAY_BOOTSTRAP_JSON: >-
-        {"workspace_name":"CrowdRelay CI","cities":[{"slug":"wroclaw","name":"Wroclaw","country":"PL","region":"Dolnoslaskie","lat":51.1079,"lng":17.0385}],"campaigns":[{"name":"CI launch","active":true,"smart_links":[{"slug":"ci-launch","destination_url":"http://localhost:4321/join","active":true}]}],"webhook_endpoints":[]}
-      RUST_LOG: info
-
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Activate repository-pinned Rust toolchain
-        run: |
-          echo "${HOME}/.cargo/bin" >> "$GITHUB_PATH"
-          echo "RUSTUP_HOME=${HOME}/.rustup" >> "$GITHUB_ENV"
-          echo "CARGO_HOME=${HOME}/.cargo" >> "$GITHUB_ENV"
-      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
-        with:
-          toolchain: 1.98.0
-          components: rustfmt, clippy
-
-      - name: Cache Rust build artifacts
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-        with:
-          save-if: false
-
-      # --all-features matches what clippy/test compile downstream; building
-      # the setup binary once with the same feature set avoids a second
-      # full-feature recompilation of the workspace in this job.
       - name: Run idempotent database and workspace setup
         run: |
           cargo run --locked --all-features --package crowdrelay-worker -- setup
@@ -614,7 +536,11 @@ jobs:
           python3 scripts/sql-result-types.py
           python3 scripts/test_sql_scalar_types_v1.py
 
+
       - name: Sweep unattached Docker leftovers
+        # Service containers detach their volumes only after the job ends, so
+        # each job cleans what the previous one left. Only unattached
+        # resources are pruned — in-flight work is never touched.
         if: always()
         continue-on-error: true
         run: docker volume prune -f 2>/dev/null || true
@@ -690,7 +616,7 @@ jobs:
     # run panel: everything above reports into one node instead of eight
     # independent dots.
     name: All checks passed
-    needs: [rust-tests, rust-postgres, dependency-security, containers]
+    needs: [rust-tests, dependency-security, containers]
     if: always()
     runs-on: [self-hosted, arm64]
     timeout-minutes: 5
