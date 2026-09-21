@@ -472,7 +472,8 @@ async fn a_content_artifact_receipt_writes_the_envelope_and_growth_measurements(
     .bind(action_id)
     .fetch_all(&f.pool)
     .await?;
-    let expected_windows: [(&str, i64); 3] = [
+    let expected_windows: [(&str, i64); 4] = [
+        ("artifact_outcome_7d", 7),
         ("durable_fan_growth_30d", 44),
         ("incremental_fan_growth_14d", 14),
         ("incremental_fan_growth_3d", 3),

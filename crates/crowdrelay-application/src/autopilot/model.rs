@@ -1005,6 +1005,11 @@ pub enum AutopilotActionPayload {
     /// may have expired by post time; the executor re-mints it from
     /// `media_id`. `source_url` is the band's own permalink — the link-post
     /// fallback and the attribution target.
+    ///
+    /// `creative_family` is the angle the engager chose for the draft —
+    /// carried onto the action so the published post's own measurement
+    /// teaches the family posterior, not only the run's workspace-level
+    /// one. `None` on payloads raised before the field existed.
     RequestCommunityEngagement {
         target_id: uuid::Uuid,
         platform: String,
@@ -1015,6 +1020,8 @@ pub enum AutopilotActionPayload {
         image_url: Option<String>,
         media_id: Option<String>,
         source_url: Option<String>,
+        #[serde(default)]
+        creative_family: Option<crowdrelay_domain::creative::CreativeFamily>,
     },
     /// A Signal push notification drafted by the `signal-inviter` worker and
     /// approved by the operator. Execution inserts `fan_push_deliveries` rows

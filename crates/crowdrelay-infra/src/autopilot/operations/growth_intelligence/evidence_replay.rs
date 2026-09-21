@@ -181,6 +181,7 @@ pub(super) fn apply_evidence_to_model_with_contrast(
     let mut y30_treatment_updates = 0u32;
     let mut bridge_updates = 0u32;
     let mut metric_updates = 0u32;
+    let mut family_updates = 0u32;
 
     // Per-horizon gating: in delta replay, only update the posteriors for
     // horizons that are new since the checkpoint. This prevents
@@ -429,6 +430,24 @@ pub(super) fn apply_evidence_to_model_with_contrast(
                 earned_quality,
             );
             y14_treatment_updates += 1;
+            // The angle the post was written under learns the same τ, in its
+            // own posterior — "which family produced fans" is the same
+            // estimand conditioned on the label the post carried. It lives
+            // inside the Y14 update for the same reason the main posterior
+            // does: the 3d horizon has no incremental estimate, and the 30d
+            // durable estimand is a different quantity.
+            if let Some(family) = ev.creative_family {
+                model.update_family_effect(
+                    family,
+                    &template,
+                    subreddit_type,
+                    target_key,
+                    tau_y14,
+                    obs_var,
+                    earned_quality,
+                );
+                family_updates += 1;
+            }
             // Record Y14Bridged calibration with the actual measurement-
             // determined evidence quality, not a synthesized one.
             model.calibration.record_by_regime(
@@ -526,6 +545,7 @@ pub(super) fn apply_evidence_to_model_with_contrast(
             y30_treatment_updates,
             bridge_updates,
             metric_updates,
+            family_updates,
             "evidence replay: posterior update summary"
         );
     }

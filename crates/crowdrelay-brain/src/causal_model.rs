@@ -303,6 +303,20 @@ pub struct CausalModel {
     /// tenant has history, which is the safe direction).
     #[serde(default)]
     pub value_exchange: crate::value_exchange::ValueExchange,
+    /// Per-creative-family treatment-effect posteriors — which *angle* a
+    /// community post took, learned from evidence rows that carried
+    /// `creative_family`. Keyed by family so a story can never borrow a
+    /// riff's evidence; each family's posterior pools internally by
+    /// template, subreddit type, and target, exactly like the main
+    /// treatment-effect model.
+    ///
+    /// Defaulted on deserialize: checkpoints written before the field
+    /// existed load empty and refill from evidence replay, and an empty map
+    /// reads as "no family measured yet" — the selection path then rotates,
+    /// which is the honest answer for a community with no evidence.
+    #[serde(default)]
+    pub family_effects:
+        HashMap<crowdrelay_domain::creative::CreativeFamily, TreatmentEffectPosterior>,
 }
 
 /// Treatment-aware prediction statistics — the result of querying both the
@@ -479,6 +493,7 @@ impl CausalModel {
             metric_posteriors: HashMap::new(),
             value_exchange: crate::value_exchange::ValueExchange::default(),
             bridge: Y14Y30Bridge::new(),
+            family_effects: HashMap::new(),
         }
     }
 
@@ -791,6 +806,56 @@ impl CausalModel {
         self.metric_posteriors
             .get(metric_key)
             .map(|posterior| posterior.predict_stats(template_id, target_key))
+    }
+
+    /// Folds a resolved treatment-effect observation into the posterior for
+    /// the creative family the post was written under.
+    ///
+    /// Same τ the main treatment-effect model just learned — the question
+    /// the family posterior answers is narrower: given that this post
+    /// happened, which *angle* produced the effect. The inner hierarchy keeps
+    /// the template, audience type and target levels so a story that worked
+    /// in r/djent is not read as a story that works everywhere.
+    #[allow(clippy::too_many_arguments)]
+    pub fn update_family_effect(
+        &mut self,
+        family: crowdrelay_domain::creative::CreativeFamily,
+        template_id: &str,
+        subreddit_type: Option<&str>,
+        target_key: Option<&str>,
+        observed_tau: f64,
+        observation_variance: f64,
+        quality: crate::evidence::EvidenceQuality,
+    ) {
+        self.family_effects
+            .entry(family)
+            .or_default()
+            .update_with_quality(
+                template_id,
+                subreddit_type,
+                target_key,
+                observed_tau,
+                observation_variance,
+                quality,
+            );
+    }
+
+    /// `(tau, std, confidence)` for one family's effect on this target, or
+    /// `None` when the family has never produced an observation for this
+    /// template — the selection path then draws the family at its prior,
+    /// which is what keeps an unmeasured family competitive rather than
+    /// starved.
+    #[must_use]
+    pub fn predict_family_stats(
+        &self,
+        family: crowdrelay_domain::creative::CreativeFamily,
+        template_id: &str,
+        subreddit_type: Option<&str>,
+        target_key: Option<&str>,
+    ) -> Option<(f64, f64, u32)> {
+        let posterior = self.family_effects.get(&family)?;
+        (posterior.observation_count(template_id) > 0)
+            .then(|| posterior.predict_stats_for_target(template_id, subreddit_type, target_key))
     }
 
     /// Returns treatment-aware prediction statistics — both the outcome model

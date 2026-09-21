@@ -139,6 +139,12 @@ impl UnengagedTarget {
 pub struct CommunityEngagementSummary {
     pub subreddit: String,
     pub post_count: u32,
+    /// Posts whose latest metrics row carries a non-null `upvote_ratio` —
+    /// the honest weight for pooling this community's ratio into a
+    /// workspace-level figure. `post_count` alone would let unmeasured
+    /// posts dilute measured ones.
+    #[serde(default)]
+    pub ratio_post_count: u32,
     pub avg_score: f64,
     pub avg_upvotes: f64,
     pub avg_comments: f64,

@@ -162,6 +162,19 @@ pub enum AutopilotMeasurementKind {
     /// more is worse, and the measurement answers for what the send cost,
     /// not only what it earned.
     CampaignUnsubscribe7d,
+    /// Clicks on the tracked link a social post carried, in the seven days
+    /// after it reached the audience. Joined through the post's own
+    /// `smart_link_id` — the workspace's whole click ledger would credit
+    /// the post with traffic it never drove. Scheduled only when the draft
+    /// named a link to track; a post that published without one reports
+    /// `no_tracked_link` rather than a zero it never earned.
+    ContentLinkClicks7d,
+    /// Posts filed against the artifact's content source in the seven days
+    /// after the executor confirmed production. Scheduled at the success
+    /// receipt — production is already a fact by the time the measurement
+    /// exists — so the observed zero means produced-and-never-posted, which
+    /// is a real outcome, not an unmeasurable one.
+    ArtifactOutcome7d,
 }
 
 impl AutopilotMeasurementKind {
@@ -200,6 +213,8 @@ impl AutopilotMeasurementKind {
             Self::ReleaseChannelLift14d => "release_channel_lift_14d",
             Self::CampaignTicketConversion14d => "campaign_ticket_conversion_14d",
             Self::CampaignUnsubscribe7d => "campaign_unsubscribe_7d",
+            Self::ContentLinkClicks7d => "content_link_clicks_7d",
+            Self::ArtifactOutcome7d => "artifact_outcome_7d",
         }
     }
 
@@ -252,6 +267,8 @@ impl AutopilotMeasurementKind {
             Self::ReleaseChannelLift14d => Some("release_channel_lift"),
             Self::CampaignTicketConversion14d => Some("campaign_ticket_conversions"),
             Self::CampaignUnsubscribe7d => Some("campaign_unsubscribe_rate"),
+            Self::ContentLinkClicks7d => Some("content_link_clicks"),
+            Self::ArtifactOutcome7d => Some("artifact_posts"),
             Self::GrassrootsActivationReplies14d => Some("activation_replies"),
             Self::AgentRunCommunityEngagement7d => Some("engagement_score"),
             Self::FanLifecycleEngagement7d => Some("lifecycle_engagement_events"),
@@ -327,6 +344,13 @@ impl AutopilotMeasurementKind {
     /// is unobservable rather than zero.
     pub const NO_RELEASE_SERIES_DATA: &'static str = "no_release_series_data";
 
+    /// Why a click measurement was abandoned: the post reached the audience
+    /// carrying no tracked link — the draft named a destination no `smart_links`
+    /// row was minted for, or the post ran on a channel with no link column.
+    /// A click count of zero there is not a result; it is a post that could
+    /// not have produced one.
+    pub const NO_TRACKED_LINK: &'static str = "no_tracked_link";
+
     /// Whether the kind's `subject_id` is an `events.id` — the kinds whose
     /// observation is a fact about a show. A cancelled show has no outcome
     /// to observe, and observing one anyway would write a zero that the
@@ -379,6 +403,9 @@ impl AutopilotMeasurementKind {
                 | Self::AgentRunSignalInstalls7d
                 | Self::SignalInstalls1d
                 | Self::AgentRunCommunityEngagement7d
+                // A post nobody published carried no link to click — the
+                // zero would be the draft's fault recorded as the content's.
+                | Self::ContentLinkClicks7d
         )
     }
 

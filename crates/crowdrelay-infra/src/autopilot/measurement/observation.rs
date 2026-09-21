@@ -12,6 +12,7 @@
 //! into disagreeing about what a negative number means.
 
 mod campaigns;
+mod content_synergy;
 
 use super::super::*;
 use super::{dispatch_reached_an_audience, observable_community};
@@ -506,6 +507,19 @@ pub(super) async fn observe(
             }
             AutopilotMeasurementKind::CampaignUnsubscribe7d => {
                 campaigns::unsubscribe_rate(pool, workspace_id, measurement.subject_id).await?
+            }
+            // What the post's own tracked link did — never the workspace's
+            // click ledger. A published post with no link to count through
+            // abandons as `no_tracked_link` rather than reporting a zero it
+            // was never instrumented to produce.
+            AutopilotMeasurementKind::ContentLinkClicks7d => {
+                content_synergy::content_link_clicks(pool, workspace_id, measurement).await?
+            }
+            // Posts filed against the artifact's content source in the week
+            // after production — produced-and-never-posted is the real zero
+            // this arm reports.
+            AutopilotMeasurementKind::ArtifactOutcome7d => {
+                content_synergy::artifact_outcome(pool, workspace_id, measurement).await?
             }
             // Fan growth after an agent dispatch: count new fans created
             // in the 14-day window after the action finished. The

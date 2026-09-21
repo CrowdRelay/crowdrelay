@@ -589,13 +589,17 @@ async fn load_delivery_results(
 
             UNION ALL
 
-            -- Social posts (Instagram/Facebook/X): content, platform, status
+            -- Social posts (Instagram/Facebook/X): content, platform, status.
+            -- `smart_link` rides inside the content object: when the executor
+            -- bound a tracked `/l/` redirect the operator publishing by hand
+            -- needs that URL, not the draft's bare destination — without it
+            -- the post's clicks can never be counted.
             SELECT
                 'social_post'::text AS kind,
                 sp.id::text AS id,
                 sp.action_id::text AS action_id,
                 sp.platform AS channel,
-                sp.content AS content,
+                sp.content || jsonb_build_object('smart_link', sp.smart_link) AS content,
                 sp.status AS status,
                 sp.platform_post_url AS url,
                 sp.created_at,

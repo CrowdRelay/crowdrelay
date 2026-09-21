@@ -12,7 +12,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crowdrelay_brain::content_suggestions::{
-    DEFAULT_LIMIT, RankingInputs, ReachSnapshot, ScheduledProduction, is_stale, rank_suggestions,
+    DEFAULT_LIMIT, FormatYield, RankingInputs, ReachSnapshot, ScheduledProduction, YIELD_EMA_ALPHA,
+    is_stale, rank_suggestions,
 };
 use crowdrelay_domain::{
     ContentSuggestionId, WorkspaceId,
@@ -203,6 +204,56 @@ impl PostgresContentEngineRepository {
         Ok((suggestions, outcomes, produced))
     }
 
+    /// What the band's own resolved outcomes measured per format — an EMA
+    /// of reported `results.new_fans` ordered by `resolved_at`, so recent
+    /// reports outweigh early ones, alongside how many outcomes reported a
+    /// figure at all. Only outcomes where the band actually made something
+    /// count — a `declined` or `expired` row cannot carry a real
+    /// measurement, and crediting one would teach the yield a production
+    /// that never happened.
+    pub(crate) async fn format_yields<'e, E>(
+        &self,
+        executor: E,
+        workspace_id: WorkspaceId,
+    ) -> Result<BTreeMap<String, FormatYield>>
+    where
+        E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+    {
+        // `jsonb_typeof` guards the cast — a string "12" or a stray object
+        // in `results` cannot abort the pass.
+        let rows = sqlx::query_as::<_, (String, f64)>(
+            r#"
+            SELECT s.format_key,
+                   (o.results->>'new_fans')::double precision AS new_fans
+            FROM viryaos_content_suggestions s
+            JOIN viryaos_suggestion_outcomes o
+              ON o.workspace_id = s.workspace_id
+             AND o.suggestion_id = s.id
+            WHERE s.workspace_id = $1 AND s.format_key IS NOT NULL
+              AND o.outcome IN ('done', 'done_differently')
+              AND jsonb_typeof(o.results->'new_fans') = 'number'
+            ORDER BY s.format_key, o.resolved_at, o.id
+            "#,
+        )
+        .bind(workspace_id.into_uuid())
+        .fetch_all(executor)
+        .await?;
+        let mut format_yield: BTreeMap<String, FormatYield> = BTreeMap::new();
+        for (format_key, new_fans) in rows {
+            let entry = format_yield.entry(format_key).or_insert(FormatYield {
+                measured_fans_ema: new_fans,
+                measured: 0,
+            });
+            entry.measured_fans_ema = if entry.measured == 0 {
+                new_fans
+            } else {
+                YIELD_EMA_ALPHA * new_fans + (1.0 - YIELD_EMA_ALPHA) * entry.measured_fans_ema
+            };
+            entry.measured += 1;
+        }
+        Ok(format_yield)
+    }
+
     /// 5.6 — shared learning, respecting per-band taste. Productions of each
     /// format pooled across the act's same-style siblings in the same
     /// organisation: the label's own ledger arguing for a format its other
@@ -348,6 +399,7 @@ impl PostgresContentEngineRepository {
         let arc_keys = self.arc_format_keys(workspace_id).await?;
         let (suggestion_counts, outcome_counts, produced_counts) =
             self.format_history(&self.pool, workspace_id).await?;
+        let format_yield = self.format_yields(&self.pool, workspace_id).await?;
         let sibling_produced = self.sibling_produced_counts(workspace_id).await?;
 
         // §4b-4 — a concept that has been offered STALE_ATTEMPT_LIMIT
@@ -479,6 +531,7 @@ impl PostgresContentEngineRepository {
             retired_format_keys: &retired_format_keys,
             arc_format_keys: &arc_keys,
             outcome_counts: &outcome_counts,
+            format_yield: &format_yield,
             suggestion_counts: &suggestion_counts,
             sibling_produced: &sibling_produced,
             reach: &reach,

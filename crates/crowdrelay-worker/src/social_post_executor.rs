@@ -73,6 +73,8 @@ use tokio::{
 };
 use uuid::Uuid;
 
+mod tracked_links;
+
 /// How often to poll for unprocessed social post actions.
 const POLL_INTERVAL: Duration = Duration::from_secs(60);
 /// A `posting` row older than this is considered a crashed attempt.
@@ -379,18 +381,32 @@ impl SocialPostExecutorWorker {
         // (reddit is handled by community_executor).
         // The existing `social_posts` table (migration 0168) requires a
         // `content` JSONB column — we store the full draft there.
+        // `smart_link_id` binds at insert when the draft already names a
+        // tracked link (`/l/{slug}` or `{origin}/l/{slug}`) — the slug
+        // namespace is ours, so the join cannot point anywhere else. A bare
+        // destination URL resolves in the claim pass below, which mints the
+        // `smart_links` row first.
         sqlx::query(
             r#"
-            INSERT INTO social_posts (workspace_id, action_id, platform, content, smart_link, status)
+            INSERT INTO social_posts (workspace_id, action_id, platform, content, smart_link, smart_link_id, status)
             SELECT
                 $1,
                 a.id,
                 a.payload->'draft'->>'platform',
                 a.payload->'draft',
-                a.payload->'draft'->>'cta_url',
+                COALESCE('/l/' || link.slug, a.payload->'draft'->>'cta_url'),
+                link.id,
                 'pending'
             FROM viryaos_autopilot_actions a
             JOIN agent_service_tasks t ON t.id = (a.payload->>'task_id')::uuid
+            LEFT JOIN smart_links link
+              ON link.workspace_id = a.workspace_id
+             AND link.slug = substring(a.payload->'draft'->>'cta_url' from '/l/([a-zA-Z0-9][a-zA-Z0-9_-]*)$')
+             -- Only our own link namespace counts: a bare `/l/` path or the
+             -- tenant origin. A foreign host's `/l/` path would bind this
+             -- post to one of our links it never meant.
+             AND (a.payload->'draft'->>'cta_url' LIKE '/l/%'
+                  OR a.payload->'draft'->>'cta_url' LIKE $2 || '/l/%')
             WHERE a.workspace_id = $1
               AND a.action_kind = 'agent.content.request'
               AND a.status = 'succeeded'
@@ -403,11 +419,12 @@ impl SocialPostExecutorWorker {
             "#,
         )
         .bind(ws)
+        .bind(self.public_origin.trim_end_matches('/'))
         .execute(&mut *tx)
         .await?;
 
         // Step 2: Claim pending and rate_limited (past backoff) rows.
-        let rows = sqlx::query_as::<_, ClaimedAction>(
+        let mut rows = sqlx::query_as::<_, ClaimedAction>(
             r#"
             WITH claimed AS (
                 UPDATE social_posts
@@ -425,11 +442,12 @@ impl SocialPostExecutorWorker {
                     LIMIT $2
                     FOR UPDATE SKIP LOCKED
                 )
-                RETURNING id, action_id, platform
+                RETURNING id, action_id, platform, smart_link, smart_link_id
             )
             SELECT c.id, c.action_id, c.platform,
                    a.payload->'draft'->>'text' AS text,
                    a.payload->'draft'->>'cta_url' AS cta_url,
+                   c.smart_link, c.smart_link_id,
                    a.trace_id
             FROM claimed c
             LEFT JOIN viryaos_autopilot_actions a ON a.id = c.action_id
@@ -439,6 +457,20 @@ impl SocialPostExecutorWorker {
         .bind(CLAIM_BATCH)
         .fetch_all(&mut *tx)
         .await?;
+
+        // Step 3: bind the tracked link for rows whose draft named a bare
+        // destination. `cta_url` is where the model wanted the audience to
+        // land; `smart_link` is the `/l/` redirect that lets the click be
+        // counted. A destination the validator refuses stays untracked —
+        // the post still goes out, and its click measurement abandons as
+        // `no_tracked_link` rather than recording a zero that was never
+        // observable.
+        for row in &mut rows {
+            if row.smart_link_id.is_some() {
+                continue;
+            }
+            self.resolve_tracked_link(&mut tx, row).await?;
+        }
 
         tx.commit().await?;
         Ok(rows)
@@ -554,6 +586,7 @@ impl SocialPostExecutorWorker {
                 .await?;
             return Ok(());
         }
+        let caption = self.publish_body(action, caption);
         let Some(image_url) = self.next_instagram_image().await? else {
             // Not a failure and not a defect: the tenant has published no
             // photo the system may use. An operator can fix it by adding one,
@@ -568,7 +601,7 @@ impl SocialPostExecutorWorker {
 
         let recent = self.recent_content_hashes("instagram").await?;
         let verdict = review_outbound_post(
-            caption,
+            &caption,
             &PublishContext {
                 channel: PublishChannel::Instagram,
                 approved_origins: &[self.public_origin.as_str()],
@@ -586,7 +619,7 @@ impl SocialPostExecutorWorker {
         }
 
         match self
-            .submit_to_instagram(&account_id, caption, &image_url, token)
+            .submit_to_instagram(&account_id, &caption, &image_url, token)
             .await
         {
             Ok(media_id) => {
@@ -764,6 +797,10 @@ impl SocialPostExecutorWorker {
                 .await?;
             return Ok(());
         }
+        // The tracked link is part of the published body — a post that
+        // carries it can have its clicks counted; one that does not is
+        // content that chose to be unmeasured.
+        let body = self.publish_body(action, body);
 
         // The read a person used to do before a post went out under the
         // band's name. A held post lands in the operator queue with its
@@ -771,7 +808,7 @@ impl SocialPostExecutorWorker {
         // preceded it.
         let recent = self.recent_content_hashes("facebook").await?;
         let verdict = review_outbound_post(
-            body,
+            &body,
             &PublishContext {
                 channel: PublishChannel::Social,
                 approved_origins: &[self.public_origin.as_str()],
@@ -788,7 +825,7 @@ impl SocialPostExecutorWorker {
             return Ok(());
         }
 
-        match self.submit_to_facebook_page(&page_id, body, token).await {
+        match self.submit_to_facebook_page(&page_id, &body, token).await {
             Ok(post_id) => {
                 // Same one-commit shape as the Instagram arm: post +
                 // re-anchored measurement windows land or neither does.
@@ -1052,10 +1089,14 @@ struct ClaimedAction {
     id: Uuid,
     action_id: Uuid,
     platform: String,
-    #[allow(dead_code)]
     text: Option<String>,
-    #[allow(dead_code)]
     cta_url: Option<String>,
+    /// The post's tracked link (`/l/{slug}`), once the draft's CTA has been
+    /// bound to a `smart_links` row. `None` means the post goes out
+    /// unmeasured — either it named no link or the destination failed
+    /// validation.
+    smart_link: Option<String>,
+    smart_link_id: Option<Uuid>,
     #[allow(dead_code)]
     trace_id: Option<Uuid>,
 }
