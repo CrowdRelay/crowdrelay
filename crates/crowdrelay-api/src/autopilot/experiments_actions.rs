@@ -699,3 +699,119 @@ async fn remember_action_target(
         })),
     }
 }
+
+/// `GET /v1/control-plane/autopilot/community-relays`
+///
+/// The community-relay batch feed: one row per piece of content's whole
+/// community spread — the image, the target list, the cadence — rather than
+/// the per-community delivery cards the batches replaced.
+pub async fn list_community_relays(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    match read(
+        &state,
+        1,
+        state
+            .autopilot
+            .load_community_relays(state.ops.workspace_id()),
+    )
+    .await
+    {
+        Ok(batches) => private_json(StatusCode::OK, batches),
+        Err(error) => repository_problem(error, request_id(&headers)),
+    }
+}
+
+/// Approves a community relay batch: the content's whole spread at once.
+///
+/// Deliveries already parked release into the queue; drafts still landing
+/// queue under the standing answer without asking again. The executor drips
+/// them at `interval_seconds` — the cadence the card showed — and an
+/// `interval_seconds` body field overrides it inside the table's floor.
+pub async fn approve_community_relay(
+    State(state): State<AppState>,
+    Path(source_id): Path<String>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    let Ok(source_id) = Uuid::parse_str(&source_id) else {
+        return Problem::not_found(request_id(&headers))
+            .private()
+            .into_response();
+    };
+    // Raw bytes rather than `Option<Json<_>>`: a malformed override must fail
+    // loudly, not silently approve at the default cadence.
+    let interval_seconds = if body.is_empty() {
+        None
+    } else {
+        match serde_json::from_slice::<CommunityRelayApproveRequest>(&body) {
+            Ok(request) => request.interval_seconds,
+            Err(_) => {
+                return Problem::bad_request(request_id(&headers))
+                    .private()
+                    .into_response();
+            }
+        }
+    };
+    // The same floor the table's CHECK enforces — rejected here so an
+    // out-of-range override reads as a bad request, not a 500.
+    if let Some(seconds) = interval_seconds
+        && !(300..=86400).contains(&seconds)
+    {
+        return Problem::bad_request(request_id(&headers))
+            .private()
+            .into_response();
+    }
+    let idempotency_key = match parse_idempotency_key(&headers) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let request_id_value = parsed_request_id(&headers);
+    match state
+        .autopilot
+        .approve_community_relay(
+            state.ops.workspace_id(),
+            source_id,
+            interval_seconds,
+            &idempotency_key,
+            request_id_value.as_ref(),
+        )
+        .await
+    {
+        Ok(result) => private_json(StatusCode::OK, result),
+        Err(error) => repository_problem(error, request_id(&headers)),
+    }
+}
+
+/// Revokes a community relay batch — "stop the rest of this spread".
+///
+/// Parked deliveries lose their ask, queued deliveries are cancelled, and the
+/// posts still waiting in the drip are cancelled. A post already on Reddit
+/// keeps its record.
+pub async fn revoke_community_relay(
+    State(state): State<AppState>,
+    Path(source_id): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    let Ok(source_id) = Uuid::parse_str(&source_id) else {
+        return Problem::not_found(request_id(&headers))
+            .private()
+            .into_response();
+    };
+    let idempotency_key = match parse_idempotency_key(&headers) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let request_id_value = parsed_request_id(&headers);
+    match state
+        .autopilot
+        .revoke_community_relay(
+            state.ops.workspace_id(),
+            source_id,
+            &idempotency_key,
+            request_id_value.as_ref(),
+        )
+        .await
+    {
+        Ok(result) => private_json(StatusCode::OK, result),
+        Err(error) => repository_problem(error, request_id(&headers)),
+    }
+}

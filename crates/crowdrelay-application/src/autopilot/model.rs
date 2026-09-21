@@ -1020,6 +1020,13 @@ pub enum AutopilotActionPayload {
         image_url: Option<String>,
         media_id: Option<String>,
         source_url: Option<String>,
+        /// The content source this post carries — the batch key. Every
+        /// community delivery drafted from one source posts under one
+        /// `community_relay_batches` row, so the operator approves the
+        /// content once instead of once per community. `None` only on
+        /// payloads raised before batches existed.
+        #[serde(default)]
+        source_id: Option<uuid::Uuid>,
         #[serde(default)]
         creative_family: Option<crowdrelay_domain::creative::CreativeFamily>,
     },

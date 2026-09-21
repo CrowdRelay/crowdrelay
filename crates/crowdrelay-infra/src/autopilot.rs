@@ -22,6 +22,7 @@ mod executor_circuit;
 mod growth;
 mod growth_metrics;
 mod lapsed_sweep;
+mod relay_mutations;
 pub use lapsed_sweep::{LapsedSweepStats, sweep_lapsed_approval_asks};
 mod measurement;
 mod objectives;
@@ -60,15 +61,15 @@ use crowdrelay_application::{
         AutopilotPolicySummary, AutopilotRuntimeRepository, AutopilotShowCostRepository,
         AutopilotTicketStateRepository, AutopilotWaveOutcomeRepository, BookingTargetMutation,
         CandidatePersistence, CityMarketSignalMutation, ClaimExecution, ClaimedAutopilotAction,
-        ClaimedAutopilotMeasurement, ClaimedPlayOutcome, ClaimedWaveOutcome, DecisionCandidate,
-        DeclareGrowthObjective, DeliveryFaultSubject, EvidenceLedger, EvidencePacket,
-        ExecutionClaimMutation, ExecutionReportMutation, ExecutorHeartbeatMutation,
-        ExecutorReportStatus, FestivalEditionMutation, FirstPartyGrowthMetricReport,
-        FreezeShowCostPrediction, GROWTH_STALL_AFTER_MINUTES, GROWTH_TEMPLATE_KEYS,
-        GrowthCampaignProgress, GrowthDeliveryTotals, GrowthMetricPointMutation,
-        GrowthMetricSeriesMutation, GrowthMetricSubject, GrowthMetricTrendView,
-        GrowthObjectiveMutation, GrowthObjectiveView, GrowthOutreachSummary, GrowthPosture,
-        GrowthPostureView, HarmObservation, LiveTermsSnapshot, LoadedCausalModel,
+        ClaimedAutopilotMeasurement, ClaimedPlayOutcome, ClaimedWaveOutcome,
+        CommunityRelayBatchView, DecisionCandidate, DeclareGrowthObjective, DeliveryFaultSubject,
+        EvidenceLedger, EvidencePacket, ExecutionClaimMutation, ExecutionReportMutation,
+        ExecutorHeartbeatMutation, ExecutorReportStatus, FestivalEditionMutation,
+        FirstPartyGrowthMetricReport, FreezeShowCostPrediction, GROWTH_STALL_AFTER_MINUTES,
+        GROWTH_TEMPLATE_KEYS, GrowthCampaignProgress, GrowthDeliveryTotals,
+        GrowthMetricPointMutation, GrowthMetricSeriesMutation, GrowthMetricSubject,
+        GrowthMetricTrendView, GrowthObjectiveMutation, GrowthObjectiveView, GrowthOutreachSummary,
+        GrowthPosture, GrowthPostureView, HarmObservation, LiveTermsSnapshot, LoadedCausalModel,
         ManagerBookingPolicySummary, ManagerConfigMutation, MerchProductEconomicsMutation,
         NextBestAction, ORG_ATTENTION_BUDGET_ERROR_KIND, OutreachKindStanding, OutreachWaveAnchor,
         OutreachWaveSnapshot, OutreachWaveStart, OutreachWaveTransition, PLAYLIST_TEMPLATE_KEY,

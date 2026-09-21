@@ -25,6 +25,9 @@ impl AgentOutcomeWorker {
     /// `None` means no grant is even looked for, which is the right default
     /// for an action whose reach is not one nameable thing: an operator
     /// cannot have judged "this target" when there is no this.
+    /// Which standing answer, if any, authorizes this action to run
+    /// unattended — the workspace's axes (`Policy`), a standing grant for
+    /// its one named target (`Grant`), or neither (`Denied`).
     async fn may_auto_execute(
         &self,
         tx: &mut Transaction<'_, Postgres>,
@@ -33,7 +36,7 @@ impl AgentOutcomeWorker {
         action_kind: &str,
         target_key: Option<&str>,
         now: OffsetDateTime,
-    ) -> Result<bool, AgentOutcomeError> {
+    ) -> Result<UnattendedAuthority, AgentOutcomeError> {
         let context_level: Option<String> = sqlx::query_scalar(
             r#"
             SELECT autonomy_level
@@ -50,7 +53,7 @@ impl AgentOutcomeWorker {
         // stricter than `observe` and the right reading of a context nobody
         // provisioned.
         let Some(context_level) = context_level.as_deref().and_then(AutonomyLevel::parse) else {
-            return Ok(false);
+            return Ok(UnattendedAuthority::Denied);
         };
         let ceiling: Option<String> = sqlx::query_scalar(
             r#"
@@ -71,13 +74,16 @@ impl AgentOutcomeWorker {
         let authority = effective_authority(context_level, ceiling);
         // The two axes have agreed. What is left is the question they cannot
         // ask: has the operator already judged *this target* and said not to
-        // be asked again. `standing_approval::may_act_unattended` owns the
-        // rule, including the three things a grant may not do.
+        // be asked again. `standing_approval::unattended_authority` owns the
+        // rule, including the three things a grant may not do, and the enum
+        // tells the caller which standing answer fired — a relay batch
+        // answers to `Policy` (the workspace spoke for the whole spread)
+        // where `Grant` speaks for this one community alone.
         let grant = match target_key {
             Some(target_key) => self.standing_grant(tx, action_kind, target_key).await?,
             None => None,
         };
-        Ok(may_act_unattended(authority, grant, now))
+        Ok(unattended_authority(authority, grant, now))
     }
 
     /// The live standing grant for one target, if the operator wrote one.

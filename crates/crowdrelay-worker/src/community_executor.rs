@@ -42,9 +42,11 @@ use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use crowdrelay_domain::WorkspaceId;
+use crowdrelay_domain::action_class::ActionClass;
 use crowdrelay_domain::publish_guard::{
     PublishChannel, PublishContext, content_hash, review_outbound_post,
 };
+use crowdrelay_domain::standing_approval::StandingGrant;
 use crowdrelay_infra::reddit_proxy::read_reddit_proxy_from_db;
 use serde::Deserialize;
 use serde_json::Value;
@@ -55,6 +57,11 @@ use tokio::{
     time::{MissedTickBehavior, interval, timeout},
 };
 use uuid::Uuid;
+
+mod marks;
+mod relay;
+
+use relay::RelayBatchGate;
 
 /// How often to poll for unprocessed community engagement actions.
 const POLL_INTERVAL: Duration = Duration::from_secs(60);
@@ -431,6 +438,10 @@ impl CommunityExecutorWorker {
         // mark them as failed — the operator must check Reddit manually.
         self.recover_stale_posting().await?;
 
+        // Batches whose observation window closed become result rows — the
+        // card answers "what did the week give us" instead of asking.
+        self.finish_observed_batches().await?;
+
         let actions = self.claim_pending_actions().await?;
         let mut processed = 0;
         for action in actions {
@@ -617,7 +628,13 @@ impl CommunityExecutorWorker {
     ///    `process_action` after the claim. This is safe with a single
     ///    worker (the current deployment) but would need to move into the
     ///    claim transaction if horizontal scaling is added.
-    async fn claim_pending_actions(&self) -> Result<Vec<ClaimedAction>, CommunityExecutorError> {
+    ///
+    /// Public so tests can drive the real claim — a pacing regression in
+    /// this query is what turns a one-per-hour drip into a burst, and a
+    /// test replaying the statements by hand would not see it.
+    pub async fn claim_pending_actions(
+        &self,
+    ) -> Result<Vec<ClaimedAction>, CommunityExecutorError> {
         let ws = self.workspace_id.into_uuid();
         let mut tx = self.pool.begin().await?;
 
@@ -625,21 +642,28 @@ impl CommunityExecutorWorker {
         // MAX_POSTS_PER_24H posts in the last 24 hours, don't claim any more.
         // Checking this inside the transaction prevents the "posting → failed"
         // transition that would otherwise briefly make an action look active.
+        //
+        // Campaign deliveries (relay_source_id set) are exempt and uncounted:
+        // an operator-approved drip of one post per batch interval cannot run
+        // under a one-per-day cap — fifty communities would take fifty days —
+        // and must not starve uncampaigned drafts either. Their pacing is the
+        // batch interval in the claim predicate below.
         let recent_posts: i64 = sqlx::query_scalar(
             r#"
             SELECT count(*) FROM community_posts
             WHERE workspace_id = $1
               AND status = 'posted'
               AND posted_at > now() - INTERVAL '24 hours'
+              AND relay_source_id IS NULL
             "#,
         )
         .bind(ws)
         .fetch_one(&mut *tx)
         .await?;
-        if recent_posts >= MAX_POSTS_PER_24H {
-            tx.commit().await?;
-            return Ok(Vec::new());
-        }
+        // The cap binds uncampaigned deliveries only. Campaign rows pace
+        // themselves on their batch interval, so the cap becoming reached
+        // closes the uncampaigned lane without parking the drip.
+        let cap_reached = recent_posts >= MAX_POSTS_PER_24H;
 
         // Step 1: Insert pending rows for unprocessed succeeded actions.
         //
@@ -653,7 +677,7 @@ impl CommunityExecutorWorker {
             r#"
             INSERT INTO community_posts
                 (workspace_id, action_id, target_id, subreddit, title, body, smart_link,
-                 image_url, media_id, source_url, status)
+                 image_url, media_id, source_url, relay_source_id, status)
             SELECT
                 $1,
                 a.id,
@@ -666,7 +690,24 @@ impl CommunityExecutorWorker {
                 a.payload->>'image_url',
                 a.payload->>'media_id',
                 a.payload->>'source_url',
-                'pending'
+                -- The batch key: a delivery drafted under a relay batch is
+                -- paced by the batch's own interval instead of the workspace
+                -- cap — the operator approved the spread as one campaign.
+                CASE WHEN a.payload->>'source_id' ~ '^[0-9a-fA-F-]{36}$'
+                     THEN (a.payload->>'source_id')::uuid END,
+                -- A delivery whose batch was answered while its action was
+                -- mid-flight lands dead, not pending: revoke is a content
+                -- veto, and a post seeded under a closed batch would sit
+                -- claimable-in-name forever since the claim lane refuses
+                -- closed batches.
+                CASE WHEN a.payload->>'source_id' ~ '^[0-9a-fA-F-]{36}$'
+                          AND EXISTS (
+                              SELECT 1 FROM community_relay_batches rb
+                              WHERE rb.workspace_id = a.workspace_id
+                                AND rb.source_id = (a.payload->>'source_id')::uuid
+                                AND rb.status IN ('revoked', 'done')
+                          )
+                     THEN 'cancelled' ELSE 'pending' END
             FROM viryaos_autopilot_actions a
             WHERE a.workspace_id = $1
               AND a.action_kind = 'community.engage.request'
@@ -728,44 +769,117 @@ impl CommunityExecutorWorker {
             WITH target AS (
                 SELECT id, status AS claimed_from FROM community_posts
                 WHERE id IN (
-                    SELECT cp.id FROM community_posts cp
-                    WHERE cp.workspace_id = $1
-                      AND (
-                          cp.status = 'pending'
-                          OR (cp.status = 'rate_limited' AND cp.rate_limited_until IS NOT NULL
-                              AND cp.rate_limited_until < now())
-                          -- Drafts manual mode wrote, adopted once publishing is
-                          -- on. Without this clause, turning autopilot on moved
-                          -- nothing: `awaiting_manual_post` was in no claim
-                          -- predicate, the parent action was already consumed,
-                          -- and the seven-day cooldown stopped the brain from
-                          -- drafting the community again. Five ready drafts for
-                          -- communities of 2.6M and 1M members were stranded
-                          -- permanently by a missing status in one WHERE clause.
-                          --
-                          -- $3 is false in manual mode, so nothing is adopted
-                          -- while a person is still the publisher.
-                          OR (cp.status = 'awaiting_manual_post' AND $3)
-                      )
-                      AND EXISTS (
-                          SELECT 1 FROM agent_outreach_targets t
-                          WHERE t.workspace_id = cp.workspace_id
-                            AND t.id = cp.target_id
-                            AND t.target_kind = 'community'
-                            AND t.screening_verdict = 'admitted'
-                            AND t.status = 'promoted'
-                      )
-                      AND NOT EXISTS (
-                          SELECT 1 FROM community_posts recent
-                          WHERE recent.workspace_id = $1
-                            AND normalize_subreddit(recent.subreddit) =
-                                normalize_subreddit(cp.subreddit)
-                            AND recent.status = 'posted'
-                            AND recent.posted_at > now() - make_interval(days => $2)
-                      )
-                    ORDER BY cp.created_at
+                    SELECT c.id
+                    FROM community_posts c
+                    -- One row per relay batch per sweep, not one per
+                    -- eligibility: every pending delivery of a batch passes
+                    -- its interval check while the batch has no recent post,
+                    -- so a flat claim could take five rows of one batch and
+                    -- post them back-to-back — the burst the interval exists
+                    -- to prevent. DISTINCT ON cannot take FOR UPDATE, so the
+                    -- dedup runs lock-free here and the lock happens on the
+                    -- outer select.
+                    JOIN (
+                        SELECT DISTINCT ON (
+                            COALESCE(c2.relay_source_id::text, c2.id::text)
+                        ) c2.id
+                        FROM community_posts c2
+                        LEFT JOIN community_relay_batches batch
+                            ON batch.workspace_id = c2.workspace_id
+                           AND batch.source_id = c2.relay_source_id
+                        WHERE c2.workspace_id = $1
+                          AND (
+                              c2.status = 'pending'
+                              OR (c2.status = 'rate_limited'
+                                  AND c2.rate_limited_until IS NOT NULL
+                                  AND c2.rate_limited_until < now())
+                              -- Drafts manual mode wrote, adopted once
+                              -- publishing is on. Without this clause,
+                              -- turning autopilot on moved nothing:
+                              -- `awaiting_manual_post` was in no claim
+                              -- predicate, the parent action was already
+                              -- consumed, and the seven-day cooldown stopped
+                              -- the brain from drafting the community again.
+                              -- Five ready drafts for communities of 2.6M and
+                              -- 1M members were stranded permanently by a
+                              -- missing status in one WHERE clause.
+                              --
+                              -- $3 is false in manual mode, so nothing is
+                              -- adopted while a person is still the publisher.
+                              OR (c2.status = 'awaiting_manual_post' AND $3)
+                          )
+                          AND EXISTS (
+                              SELECT 1 FROM agent_outreach_targets t
+                              WHERE t.workspace_id = c2.workspace_id
+                                AND t.id = c2.target_id
+                                AND t.target_kind = 'community'
+                                AND t.screening_verdict = 'admitted'
+                                AND t.status = 'promoted'
+                          )
+                          AND NOT EXISTS (
+                              SELECT 1 FROM community_posts recent
+                              WHERE recent.workspace_id = $1
+                                AND normalize_subreddit(recent.subreddit) =
+                                    normalize_subreddit(c2.subreddit)
+                                AND recent.status = 'posted'
+                                AND recent.posted_at > now() - make_interval(days => $2)
+                          )
+                          -- Two lanes. An uncampaigned delivery obeys the
+                          -- workspace 24h cap ($4). A campaign delivery obeys
+                          -- its batch: the batch must be live-approved, and
+                          -- the gap since the batch's last posted row must
+                          -- clear the interval the operator approved. The gap
+                          -- is measured, not scheduled — a worker that slept
+                          -- five hours posts one, not five.
+                          AND (
+                              c2.relay_source_id IS NULL AND NOT $4
+                              OR (
+                                  c2.relay_source_id IS NOT NULL
+                                  -- A revoked or finished batch is a veto on
+                                  -- the content itself — no standing answer,
+                                  -- grant included, may carry it past that.
+                                  -- A missing batch row (LEFT JOIN miss)
+                                  -- means the delivery's provenance broke;
+                                  -- it waits rather than posts.
+                                  AND batch.status IN ('awaiting_approval', 'approved')
+                                  AND (
+                                      batch.status = 'approved'
+                                      -- The card hasn't answered yet, but a
+                                      -- live standing grant for this one
+                                      -- community already did. `is_live`'s
+                                      -- rule — granted class, unrevoked,
+                                      -- unexpired — is inlined here because
+                                      -- a join predicate cannot call it;
+                                      -- the table's CHECK already confines
+                                      -- action_class to grantable values.
+                                      OR EXISTS (
+                                          SELECT 1 FROM viryaos_standing_approvals sg
+                                          WHERE sg.workspace_id = c2.workspace_id
+                                            AND sg.action_kind = 'community.engage.request'
+                                            AND sg.target_key = c2.target_id::text
+                                            AND sg.revoked_at IS NULL
+                                            AND sg.expires_at > now()
+                                      )
+                                  )
+                                  AND NOT EXISTS (
+                                      SELECT 1 FROM community_posts last
+                                      WHERE last.workspace_id = c2.workspace_id
+                                        AND last.relay_source_id = c2.relay_source_id
+                                        AND last.status = 'posted'
+                                        AND last.posted_at >
+                                            now() - make_interval(secs => batch.interval_seconds)
+                                  )
+                              )
+                          )
+                        -- The oldest due delivery per batch; uncampaigned rows
+                        -- each form their own group on `id`, so the lane split
+                        -- does not collapse them.
+                        ORDER BY COALESCE(c2.relay_source_id::text, c2.id::text),
+                                 c2.created_at
+                    ) pick ON pick.id = c.id
+                    ORDER BY c.created_at
                     LIMIT 5
-                    FOR UPDATE SKIP LOCKED
+                    FOR UPDATE OF c SKIP LOCKED
                 )
             ), claimed AS (
                 UPDATE community_posts AS cp
@@ -774,13 +888,13 @@ impl CommunityExecutorWorker {
                     updated_at = now()
                 FROM target
                 WHERE cp.id = target.id
-                RETURNING cp.id, cp.action_id, cp.subreddit, cp.title, cp.body,
-                          cp.smart_link, cp.image_url, cp.media_id, cp.source_url,
-                          target.claimed_from
+                RETURNING cp.id, cp.action_id, cp.target_id, cp.subreddit, cp.title,
+                          cp.body, cp.smart_link, cp.image_url, cp.media_id,
+                          cp.source_url, cp.relay_source_id, target.claimed_from
             )
-            SELECT c.id, c.action_id, c.subreddit, c.title, c.body, c.smart_link,
-                   c.image_url, c.media_id, c.source_url,
-                   c.claimed_from,
+            SELECT c.id, c.action_id, c.target_id, c.subreddit, c.title, c.body,
+                   c.smart_link, c.image_url, c.media_id, c.source_url,
+                   c.relay_source_id, c.claimed_from,
                    a.trace_id, a.causation_id, a.decision_id
             FROM claimed c
             LEFT JOIN viryaos_autopilot_actions a ON a.id = c.action_id
@@ -789,6 +903,7 @@ impl CommunityExecutorWorker {
         .bind(ws)
         .bind(SUBREDDIT_COOLDOWN_DAYS)
         .bind(!self.manual_mode)
+        .bind(cap_reached)
         .fetch_all(&mut *tx)
         .await?;
 
@@ -824,8 +939,10 @@ impl CommunityExecutorWorker {
             return Ok(());
         }
 
-        // Anti-spam: check 24h rate limit.
-        if self.rate_limit_reached().await? {
+        // Anti-spam: check 24h rate limit. Campaign deliveries are exempt —
+        // the operator approved the batch's drip; their guardrail is the
+        // per-batch interval the claim already enforced.
+        if action.relay_source_id.is_none() && self.rate_limit_reached().await? {
             tracing::info!("24h post limit reached, deferring");
             // Same reason as the cooldown above. `claim_pending_actions`
             // already refuses to claim anything while the cap is reached, and
@@ -837,6 +954,67 @@ impl CommunityExecutorWorker {
             self.mark_rate_limited(action.id, RATE_LIMIT_BACKOFF)
                 .await?;
             return Ok(());
+        }
+
+        // The batch's own cadence, re-checked at send time. The claim takes
+        // at most one due row per batch per sweep, but the check that
+        // mattered — "did this batch post inside its interval" — was answered
+        // before a sibling's send recorded `posted`. Rechecking here, after
+        // the claim and before Reddit, is what turns "usually hourly" into
+        // "never sooner than the interval".
+        if let Some(source_id) = action.relay_source_id {
+            match self.relay_batch_gate(source_id, action.target_id).await? {
+                RelayBatchGate::Open => {}
+                RelayBatchGate::Defer(remaining) => {
+                    tracing::info!(
+                        post_id = %action.id,
+                        source_id = %source_id,
+                        "relay batch interval not yet elapsed, deferring"
+                    );
+                    self.mark_rate_limited(action.id, remaining).await?;
+                    return Ok(());
+                }
+                RelayBatchGate::Parked => {
+                    // The grant this delivery was claimed under is gone and
+                    // the batch card hasn't answered — back to pending, where
+                    // the claim leaves it until the card or a grant says yes.
+                    tracing::info!(
+                        post_id = %action.id,
+                        source_id = %source_id,
+                        "grant no longer covers the target and the batch is unanswered — reparking"
+                    );
+                    sqlx::query(
+                        "UPDATE community_posts \
+                         SET status = 'pending', updated_at = now() \
+                         WHERE id = $1",
+                    )
+                    .bind(action.id)
+                    .execute(&self.pool)
+                    .await?;
+                    return Ok(());
+                }
+                RelayBatchGate::Closed => {
+                    // The batch's answer changed between claim and send —
+                    // a revoke lands exactly here. `pending` rows were
+                    // cancelled by the revoke itself; this one was already
+                    // claimed, so it is cancelled here rather than left to
+                    // be claimed again under a batch that is not approved.
+                    tracing::info!(
+                        post_id = %action.id,
+                        source_id = %source_id,
+                        "relay batch is no longer approved — cancelling the delivery"
+                    );
+                    sqlx::query(
+                        "UPDATE community_posts \
+                         SET status = 'cancelled', updated_at = now() \
+                         WHERE id = $1",
+                    )
+                    .bind(action.id)
+                    .execute(&self.pool)
+                    .await?;
+                    return Ok(());
+                }
+            }
         }
 
         // Manual mode: skip Reddit API, mark as awaiting manual post.
@@ -1574,174 +1752,10 @@ impl CommunityExecutorWorker {
         .await?;
         Ok(())
     }
-
-    /// Marks a community post as failed with an error message and
-    /// propagates the failure back to the parent autopilot action so the
-    /// ledger does not report success for a post that never went live.
-    async fn mark_failed(&self, post_id: Uuid, error: &str) -> Result<(), CommunityExecutorError> {
-        sqlx::query(
-            r#"
-            UPDATE community_posts
-            SET status = 'failed',
-                error_message = $2,
-                updated_at = now()
-            WHERE id = $1
-            "#,
-        )
-        .bind(post_id)
-        .bind(error)
-        .execute(&self.pool)
-        .await?;
-        self.propagate_failure(post_id, error).await
-    }
-
-    /// Tells the parent autopilot action, and the experiment assignment, that
-    /// the post did not go live.
-    ///
-    /// Split out of `mark_failed` because a transient failure defers the draft
-    /// without saying anything to the ledger — the action is terminal once told,
-    /// so propagating on the first network error made one outage look like a
-    /// batch of failed posts to the brain.
-    async fn propagate_failure(
-        &self,
-        post_id: Uuid,
-        error: &str,
-    ) -> Result<(), CommunityExecutorError> {
-        let action_id: Option<Uuid> =
-            sqlx::query_scalar("SELECT action_id FROM community_posts WHERE id = $1")
-                .bind(post_id)
-                .fetch_optional(&self.pool)
-                .await?;
-
-        // The action was marked 'succeeded' by actions_execution.rs before this
-        // worker ran — that was premature. Correct it now so the operator sees
-        // the real outcome in the autopilot ledger.
-        if let Some(action_id) = action_id {
-            let error_kind = if error.len() > 96 {
-                "community_post_failed"
-            } else {
-                error
-            };
-            sqlx::query(
-                r#"
-                UPDATE viryaos_autopilot_actions
-                SET status = 'failed',
-                    finished_at = now(),
-                    last_error_kind = $3,
-                    updated_at = now()
-                WHERE id = $1 AND workspace_id = $2 AND status = 'succeeded'
-                "#,
-            )
-            .bind(action_id)
-            .bind(self.workspace_id.into_uuid())
-            .bind(error_kind)
-            .execute(&self.pool)
-            .await?;
-            // Transition the experiment assignment execution_status from
-            // dispatched → failed. The external intervention was attempted
-            // but definitively failed. Monotonic: only dispatched → failed
-            // is allowed; if the assignment is not in 'dispatched' state,
-            // this is a no-op.
-            sqlx::query(
-                r#"
-                UPDATE viryaos_experiment_assignments
-                SET execution_status = 'failed',
-                    trace_id = COALESCE(trace_id, (SELECT trace_id FROM viryaos_autopilot_actions WHERE id = $2))
-                WHERE workspace_id = $1
-                  AND action_id = $2
-                  AND execution_status = 'dispatched'
-                "#,
-            )
-            .bind(self.workspace_id.into_uuid())
-            .bind(action_id)
-            .execute(&self.pool)
-            .await?;
-            tracing::warn!(
-                post_id = %post_id,
-                action_id = %action_id,
-                error = %error,
-                "community post failed — propagated failure to autopilot action"
-            );
-        }
-        Ok(())
-    }
-
-    /// Defers a draft after a failure that a later cycle may not hit.
-    ///
-    /// Bounded by `MAX_TRANSIENT_ATTEMPTS`: past that the draft is given up on
-    /// and the parent action is told, because a condition that has not resolved
-    /// in six attempts is not transient. `attempts` is incremented at claim time,
-    /// so the count is already accurate here.
-    ///
-    /// The decision is made in SQL so the read and the write cannot disagree
-    /// about the count.
-    async fn mark_transient_failure(
-        &self,
-        post_id: Uuid,
-        error: &str,
-    ) -> Result<(), CommunityExecutorError> {
-        let exhausted: bool = sqlx::query_scalar(
-            r#"
-            UPDATE community_posts
-            SET status = CASE
-                    WHEN attempts >= $3 THEN 'failed'
-                    ELSE 'rate_limited'
-                END,
-                rate_limited_until = CASE
-                    WHEN attempts >= $3 THEN NULL
-                    ELSE now() + make_interval(secs => $4::double precision)
-                END,
-                error_message = $2,
-                updated_at = now()
-            WHERE id = $1
-              AND workspace_id = $5
-            RETURNING attempts >= $3
-            "#,
-        )
-        .bind(post_id)
-        .bind(error)
-        .bind(MAX_TRANSIENT_ATTEMPTS)
-        .bind(RATE_LIMIT_BACKOFF.as_secs() as i64)
-        .bind(self.workspace_id.into_uuid())
-        .fetch_one(&self.pool)
-        .await?;
-        if exhausted {
-            // Only now is the parent action told. Propagating on the first
-            // transient failure is what made one outage look like a batch of
-            // failed posts to the brain.
-            self.propagate_failure(post_id, error).await?;
-        }
-        Ok(())
-    }
-
-    /// Marks a community post as rate-limited with a backoff window.
-    /// Does not propagate to the autopilot action because rate-limited
-    /// posts will be retried — the action stays 'succeeded' and the
-    /// community_posts row tracks the retry state.
-    async fn mark_rate_limited(
-        &self,
-        post_id: Uuid,
-        backoff: Duration,
-    ) -> Result<(), CommunityExecutorError> {
-        sqlx::query(
-            r#"
-            UPDATE community_posts
-            SET status = 'rate_limited',
-                rate_limited_until = now() + make_interval(secs => $2::double precision),
-                updated_at = now()
-            WHERE id = $1
-            "#,
-        )
-        .bind(post_id)
-        .bind(backoff.as_secs() as i64)
-        .execute(&self.pool)
-        .await?;
-        Ok(())
-    }
 }
 
 #[derive(sqlx::FromRow)]
-struct ClaimedAction {
+pub struct ClaimedAction {
     id: Uuid,
     /// The status this row held before the claim.
     ///
@@ -1753,6 +1767,9 @@ struct ClaimedAction {
     /// attempt, so it is in the log beside the post rather than after it.
     claimed_from: String,
     action_id: Uuid,
+    /// The community this delivery targets — the outreach target id a
+    /// standing grant keys on. `None` means no grant can cover the row.
+    target_id: Option<Uuid>,
     subreddit: String,
     title: String,
     body: String,
@@ -1767,6 +1784,10 @@ struct ClaimedAction {
     /// The band's own permalink — the link-post fallback when no image can
     /// be carried, and the post's attribution target.
     source_url: Option<String>,
+    /// The relay batch this delivery belongs to. `Some` means the row posts
+    /// under the batch's own interval — the workspace 24h cap does not
+    /// govern it.
+    relay_source_id: Option<Uuid>,
     trace_id: Option<Uuid>,
     causation_id: Option<Uuid>,
     decision_id: Option<Uuid>,

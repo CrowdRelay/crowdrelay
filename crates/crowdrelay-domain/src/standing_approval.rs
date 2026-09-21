@@ -84,33 +84,65 @@ impl StandingGrant {
     }
 }
 
-/// Whether an action may run without a person, given the authority its
-/// context and class already agreed on and whatever standing grant covers its
-/// target.
+/// Which standing answer, if any, lets an action run without a person.
+///
+/// The distinction matters to a caller whose own approval unit is wider than
+/// one target: a community relay batch is authorized by `Policy` — the
+/// workspace's standing configuration answers for every community the
+/// content was drafted into — while `Grant` queues only the one delivery
+/// its target covers and leaves the rest of the spread on the card.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum UnattendedAuthority {
+    /// No standing answer; a person must be asked.
+    Denied,
+    /// The workspace's own standing configuration — the context and class
+    /// axes both permitting — answers for every target alike.
+    Policy,
+    /// A live grant covers this action's one named target, and that target
+    /// only.
+    Grant,
+}
+
+/// The standing answer behind an unattended action, if there is one.
 ///
 /// `authority` is the output of [`crate::action_class::effective_authority`] —
 /// the stricter of the context level and the class ceiling. A grant is read
 /// only against `RequireApproval`, because that is the only level that is
 /// asking a question a standing answer can answer.
 #[must_use]
+pub fn unattended_authority(
+    authority: AutonomyLevel,
+    grant: Option<StandingGrant>,
+    now: OffsetDateTime,
+) -> UnattendedAuthority {
+    match authority {
+        // The operator already said this may run unattended. A grant adds
+        // nothing and its absence takes nothing away.
+        AutonomyLevel::BoundedAuto => UnattendedAuthority::Policy,
+        // The one question a standing grant answers.
+        AutonomyLevel::RequireApproval if grant.is_some_and(|grant| grant.is_live(now)) => {
+            UnattendedAuthority::Grant
+        }
+        // `RequireApproval` without a grant still asks. `Observe` and
+        // `Recommend` must not read a grant at all: a grant is an answer to
+        // "may this go out", not to "should this exist", and a context an
+        // operator dialled back to `recommend` is one they wanted quiet —
+        // finding a months-old grant still firing would be the opposite of
+        // the control the dial is for.
+        _ => UnattendedAuthority::Denied,
+    }
+}
+
+/// Whether an action may run without a person, given the authority its
+/// context and class already agreed on and whatever standing grant covers its
+/// target.
+#[must_use]
 pub fn may_act_unattended(
     authority: AutonomyLevel,
     grant: Option<StandingGrant>,
     now: OffsetDateTime,
 ) -> bool {
-    match authority {
-        // The operator already said this may run unattended. A grant adds
-        // nothing and its absence takes nothing away.
-        AutonomyLevel::BoundedAuto => true,
-        // The one question a standing grant answers.
-        AutonomyLevel::RequireApproval => grant.is_some_and(|grant| grant.is_live(now)),
-        // The operator said do not act. A grant is an answer to "may this go
-        // out", not to "should this exist", so it must not be read here: a
-        // context an operator dialled back to `recommend` is one they wanted
-        // quiet, and finding a months-old grant still firing would be the
-        // opposite of the control the dial is for.
-        AutonomyLevel::Observe | AutonomyLevel::Recommend => false,
-    }
+    unattended_authority(authority, grant, now) != UnattendedAuthority::Denied
 }
 
 /// When a grant written now should expire, for a caller who did not choose.

@@ -233,7 +233,10 @@ pub(in crate::autopilot) async fn load_chief_of_staff(
                       AND success.action_id=report.action_id AND success.status='succeeded'
                 )) executor_failed_24h,
             (SELECT count(*)::bigint FROM viryaos_autopilot_actions
-              WHERE workspace_id=$1 AND status='awaiting_approval') awaiting_approval,
+              WHERE workspace_id=$1 AND status='awaiting_approval'
+                -- Batched relay deliveries ask through the batch card.
+                AND NOT (action_kind='community.engage.request'
+                         AND payload->>'source_id' IS NOT NULL)) awaiting_approval,
             (SELECT COALESCE(sum(CASE
                 WHEN action_kind IN ('booking.outreach.request','outreach.request','beacon.outreach.request','beacon.discovery.request','opportunity.live.apply','representation.approach.request','booking_agent.approach.request','latarnik.invite.request') THEN 10
                 WHEN action_kind='show.growth.request' THEN 9
@@ -546,7 +549,12 @@ async fn chief_activity(
                 (action.status = 'succeeded'
                  AND action.finished_at >= now() - INTERVAL '24 hours'
                  AND action.approved_by = 'policy:bounded_auto')
-             OR action.status IN ('queued', 'processing', 'awaiting_approval')
+             OR action.status IN ('queued', 'processing')
+                -- The batch card is the one parked ask for a whole spread;
+                -- its deliveries are not fifty separate parked items.
+             OR (action.status = 'awaiting_approval'
+                 AND NOT (action.action_kind = 'community.engage.request'
+                          AND action.payload ->> 'source_id' IS NOT NULL))
           )
         GROUP BY 1, 2, 3
         ORDER BY count DESC, action.action_kind

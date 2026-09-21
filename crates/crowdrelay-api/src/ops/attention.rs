@@ -676,6 +676,13 @@ async fn load_needs_you(
             WHERE workspace_id = $1
               AND status = 'awaiting_approval'
               AND (approval_expires_at IS NULL OR approval_expires_at > now())
+              -- A delivery inside a community relay batch asks through the
+              -- batch card, not this list — one card for the spread, not one
+              -- per community it lands in.
+              AND NOT (
+                  action_kind = 'community.engage.request'
+                  AND payload ->> 'source_id' IS NOT NULL
+              )
             ORDER BY created_at, id
             LIMIT 50
             "#,

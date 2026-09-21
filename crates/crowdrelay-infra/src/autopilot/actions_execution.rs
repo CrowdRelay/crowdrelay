@@ -1237,6 +1237,7 @@ impl PostgresAutopilotRepository {
                     image_url,
                     media_id,
                     source_url,
+                    source_id,
                     creative_family: _,
                 } => {
                     emit_outward_action(
@@ -1257,6 +1258,7 @@ impl PostgresAutopilotRepository {
                             "image_url": image_url,
                             "media_id": media_id,
                             "source_url": source_url,
+                            "source_id": source_id,
                         }),
                     )
                     .await?;

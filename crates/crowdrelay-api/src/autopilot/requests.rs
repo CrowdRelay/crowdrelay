@@ -78,6 +78,19 @@ pub struct ApproveActionsRequest {
     pub remember: Option<RememberRequest>,
 }
 
+/// Approve a community relay batch, optionally overriding its cadence.
+///
+/// `interval_seconds` is the gap between two posts from the batch — the
+/// "one an hour so they don't ban us" the card shows. The table's CHECK
+/// (300–86400) is the floor and ceiling; an absent body approves at the
+/// batch's own default.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CommunityRelayApproveRequest {
+    #[serde(default)]
+    pub interval_seconds: Option<i32>,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AuthorityRequest {

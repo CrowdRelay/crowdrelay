@@ -218,6 +218,15 @@ pub(in crate::autopilot) async fn load_next_best_actions(
           -- whose every click comes back as a conflict.
           AND (action.action_status IS NULL
                OR action.action_status NOT IN ('succeeded', 'cancelled', 'failed'))
+          -- A community delivery inside a relay batch asks through the batch
+          -- card, not this queue — the spread is one decision, not one card
+          -- per community it lands in.
+          AND NOT EXISTS (
+              SELECT 1 FROM viryaos_autopilot_actions AS batched
+              WHERE batched.id = action.action_id
+                AND batched.action_kind = 'community.engage.request'
+                AND batched.payload ->> 'source_id' IS NOT NULL
+          )
           -- Only the newest decision per subject and kind. An evidence refresh
           -- writes a new decision row, and the queue must show the finding
           -- once, not once per cycle it survived.

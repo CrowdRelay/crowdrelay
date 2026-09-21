@@ -11,7 +11,7 @@ use super::*;
 /// One number for every outward class, taken from the domain so the SQL here
 /// and `gig_outreach`'s own insert cannot drift apart about how long "hold on"
 /// lasts. See `ActionClass::hold_seconds` for why the window exists at all.
-const OUTWARD_HOLD_SECONDS: f64 =
+pub(super) const OUTWARD_HOLD_SECONDS: f64 =
     crowdrelay_domain::action_class::ActionClass::ThirdParty.hold_seconds() as f64;
 
 /// Why an approve or cancel matched no row, in words an operator can act on.

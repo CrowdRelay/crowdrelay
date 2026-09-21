@@ -15,6 +15,7 @@ impl AgentOutcomeWorker {
         outcome: &ValidatedOutcome,
         target_id: Uuid,
         community_source: Option<&CommunityPostSourceRow>,
+        source_id: Option<Uuid>,
     ) -> Result<(Value, &'static str), AgentOutcomeError> {
         let item = outcome.payload.item.as_ref();
         let subreddit = item
@@ -90,7 +91,9 @@ impl AgentOutcomeWorker {
                 "title": item.and_then(|i| i.get("title")).and_then(Value::as_str).unwrap_or(""),
                 "body": item.and_then(|i| i.get("body")).and_then(Value::as_str).unwrap_or(""),
                 "smart_link": tracked_link,
-                "source_id": item.and_then(|i| i.get("source_id")).and_then(Value::as_str),
+                // The validated source row's id, not the model's string —
+                // this is the batch key the relay groups on.
+                "source_id": source_id,
                 "creative_family": creative_family,
                 "image_url": image_url,
                 "media_id": media_id,

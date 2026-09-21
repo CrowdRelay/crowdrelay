@@ -201,6 +201,13 @@ impl AutopilotControlRepository for PostgresAutopilotRepository {
                         WHERE action.workspace_id = $1
                           AND action.status = 'awaiting_approval'
                           AND (action.approval_expires_at IS NULL OR action.approval_expires_at > now())
+                          -- A delivery inside a community relay batch asks
+                          -- through the batch card, not this list — one card
+                          -- for the spread, not one per community it lands in.
+                          AND NOT (
+                              action.action_kind = 'community.engage.request'
+                              AND action.payload ->> 'source_id' IS NOT NULL
+                          )
                         ORDER BY action.created_at, action.id
                         LIMIT 50
                         "#,
@@ -397,6 +404,14 @@ impl AutopilotControlRepository for PostgresAutopilotRepository {
         now: OffsetDateTime,
     ) -> Result<Vec<NextBestAction>, RepositoryError> {
         self.bounded(operations::load_next_best_actions(self, workspace_id, now))
+            .await
+    }
+
+    async fn load_community_relays(
+        &self,
+        workspace_id: WorkspaceId,
+    ) -> Result<Vec<CommunityRelayBatchView>, RepositoryError> {
+        self.bounded(operations::load_community_relays(self, workspace_id))
             .await
     }
 
@@ -1211,6 +1226,35 @@ impl AutopilotControlRepository for PostgresAutopilotRepository {
         request_id: Option<&RequestId>,
     ) -> Result<AutopilotControlMutation, RepositoryError> {
         self.revoke_show_ladder_operator(workspace_id, event_id, idempotency_key, request_id)
+            .await
+    }
+
+    async fn approve_community_relay(
+        &self,
+        workspace_id: WorkspaceId,
+        source_id: uuid::Uuid,
+        interval_seconds: Option<i32>,
+        idempotency_key: &IdempotencyKey,
+        request_id: Option<&RequestId>,
+    ) -> Result<AutopilotControlMutation, RepositoryError> {
+        self.approve_community_relay_operator(
+            workspace_id,
+            source_id,
+            interval_seconds,
+            idempotency_key,
+            request_id,
+        )
+        .await
+    }
+
+    async fn revoke_community_relay(
+        &self,
+        workspace_id: WorkspaceId,
+        source_id: uuid::Uuid,
+        idempotency_key: &IdempotencyKey,
+        request_id: Option<&RequestId>,
+    ) -> Result<AutopilotControlMutation, RepositoryError> {
+        self.revoke_community_relay_operator(workspace_id, source_id, idempotency_key, request_id)
             .await
     }
 
