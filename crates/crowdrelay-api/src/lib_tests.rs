@@ -18,7 +18,8 @@ mod tests {
     };
     use crowdrelay_application::{
         AcquisitionRepository, AdmissionRepository, ClaimAdmissionPass, ConfirmFan,
-        ConfirmFanCommand, EventCache, EventRepository, FanLifecycleRepository, IssueAdmissionPass,
+        ConfirmFanCommand, CreateEventCommand, CreatedEvent, EventCache, EventRepository,
+        FanLifecycleRepository, IssueAdmissionPass,
         ListCities, ListFanEventInterests, LoadAdmissionPass, LoadReferralProgress,
         RedeemAdmissionPass, RedeemCoupon, RedeemCouponCommand, RedirectCache, ReferralRepository,
         RegisterEventInterest, RegisterEventInterestCommand, ReplaceEventActs, RepositoryError,
@@ -487,6 +488,29 @@ mod tests {
             assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
         }
 
+        // Manual show entry is POST-only: a staff token does not write the
+        // admin surface (admin ⊃ staff, so the reverse is a valid call), and
+        // neither staff nor admin tokens write the control-plane namespace.
+        for (uri, token) in [
+            ("/v1/admin/events", STAFF_KEY),
+            ("/v1/staff/events", CONTROL_PLANE_KEY),
+            ("/v1/control-plane/events", STAFF_KEY),
+            ("/v1/control-plane/events", ADMIN_KEY),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(uri)
+                        .header(AUTHORIZATION, format!("Bearer {token}"))
+                        .header(CONTENT_TYPE, "application/json")
+                        .body(Body::from("{}"))?,
+                )
+                .await?;
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{uri}");
+        }
+
         let internal_with_admin = app
             .clone()
             .oneshot(
@@ -761,6 +785,59 @@ mod tests {
         Ok(())
     }
 
+    /// The manual show form's boundary: a malformed field never reaches the
+    /// repository (400 at the door), while a well-formed one reaches it and —
+    /// with the stub unavailable — surfaces the store's own answer.
+    #[tokio::test]
+    async fn staff_event_create_validates_before_the_store()
+    -> Result<(), Box<dyn std::error::Error>> {
+        const STAFF_KEY: &str = "test-staff-api-key-123456789012";
+        let app = test_router()?;
+        let post = |body: &str, idempotency: Option<&str>| {
+            let mut request = Request::builder()
+                .method("POST")
+                .uri("/v1/staff/events")
+                .header(AUTHORIZATION, format!("Bearer {STAFF_KEY}"))
+                .header(CONTENT_TYPE, "application/json");
+            if let Some(key) = idempotency {
+                request = request.header("idempotency-key", key);
+            }
+            request.body(Body::from(body.to_owned()))
+        };
+        let valid_body = r#"{"title":"Virya live","starts_at":"2030-06-01T20:00:00Z","venue":"Progresja","city_name":"Warszawa","city_country_code":"PL","ticket_url":"https://tickets.example/virya","publish":false}"#;
+
+        // No Idempotency-Key — the write never starts.
+        let response = app.clone().oneshot(post(valid_body, None)?).await?;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        for bad_body in [
+            // Doors after start — the impossible schedule.
+            r#"{"title":"Virya live","starts_at":"2030-06-01T20:00:00Z","doors_at":"2030-06-01T21:00:00Z"}"#,
+            // An insecure door link.
+            r#"{"title":"Virya live","starts_at":"2030-06-01T20:00:00Z","ticket_url":"http://tickets.example/x"}"#,
+            // Half a city — a name alone cannot pick a registry row.
+            r#"{"title":"Virya live","starts_at":"2030-06-01T20:00:00Z","city_name":"Warszawa"}"#,
+            // A clock that is not a clock.
+            r#"{"title":"Virya live","starts_at":"2030-06-01T20:00:00Z","timezone":"../etc/passwd"}"#,
+            // An empty title — the one field with no default.
+            r#"{"title":"  ","starts_at":"2030-06-01T20:00:00Z"}"#,
+        ] {
+            let response = app
+                .clone()
+                .oneshot(post(bad_body, Some("event-create-test-key"))?)
+                .await?;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{bad_body}");
+        }
+
+        // Well-formed reaches the stubbed store — its Unavailable answer is
+        // the proof the boundary passed the request through.
+        let response = app
+            .oneshot(post(valid_body, Some("event-create-test-key-2"))?)
+            .await?;
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        Ok(())
+    }
+
     #[tokio::test]
     async fn public_cities_support_strong_etag_revalidation()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -947,6 +1024,7 @@ mod tests {
             cache,
             RegisterEventInterest::new(Arc::clone(&repository)),
             ListFanEventInterests::new(Arc::clone(&repository)),
+            crowdrelay_application::CreateEvent::new(Arc::clone(&repository)),
             ReplaceEventActs::new(Arc::clone(&repository)),
             SetEventCounterparty::new(Arc::clone(&repository)),
             crowdrelay_application::SetEventSupportSlots::new(Arc::clone(&repository)),

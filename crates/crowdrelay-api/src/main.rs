@@ -25,12 +25,12 @@ use crowdrelay_api::{
     ReferralState, TicketingState, tenant::TenantProfile,
 };
 use crowdrelay_application::{
-    AcquisitionRepository, AdmissionRepository, ClaimAdmissionPass, ConfirmFan, EventCache,
-    EventRepository, FanLifecycleRepository, IssueAdmissionPass, ListCities, ListFanEventInterests,
-    LoadAdmissionPass, LoadEvents, LoadReferralProgress, LoadSmartLinks, RedeemAdmissionPass,
-    RedeemCoupon, RedirectCache, ReferralRepository, RegisterEventInterest, ReplaceEventActs,
-    ResolveReferralCode, RevokeAdmissionPass, SetEventCounterparty, SetEventFestival,
-    SetEventSupportSlots, SignupFan, UnsubscribeFan,
+    AcquisitionRepository, AdmissionRepository, ClaimAdmissionPass, ConfirmFan, CreateEvent,
+    EventCache, EventRepository, FanLifecycleRepository, IssueAdmissionPass, ListCities,
+    ListFanEventInterests, LoadAdmissionPass, LoadEvents, LoadReferralProgress, LoadSmartLinks,
+    RedeemAdmissionPass, RedeemCoupon, RedirectCache, ReferralRepository, RegisterEventInterest,
+    ReplaceEventActs, ResolveReferralCode, RevokeAdmissionPass, SetEventCounterparty,
+    SetEventFestival, SetEventSupportSlots, SignupFan, UnsubscribeFan,
 };
 use crowdrelay_infra::{
     acquisition::{ClickBuffer, PostgresAcquisitionRepository},
@@ -209,6 +209,7 @@ async fn main() -> Result<()> {
         event_cache,
         RegisterEventInterest::new(Arc::clone(&event_repository)),
         ListFanEventInterests::new(Arc::clone(&event_repository)),
+        CreateEvent::new(Arc::clone(&event_repository)),
         ReplaceEventActs::new(Arc::clone(&event_repository)),
         SetEventCounterparty::new(Arc::clone(&event_repository)),
         SetEventSupportSlots::new(Arc::clone(&event_repository)),
