@@ -939,8 +939,9 @@ mod tests {
             .secondary
             .insert("show_ticket_revenue_minor".to_owned(), (100_000.0, 1.0, 0));
 
-        let value = DecisionValue::from_stats(&stats, ResourceCost::configured(1.0), DecisionMode::Exploit)
-            .with_economic_value(&stats, &exchange);
+        let value =
+            DecisionValue::from_stats(&stats, ResourceCost::configured(1.0), DecisionMode::Exploit)
+                .with_economic_value(&stats, &exchange);
 
         assert_eq!(value.economic_value_fans, None);
         assert!((value.total() - 4.0).abs() < 1e-9);

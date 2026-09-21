@@ -41,6 +41,17 @@ pub(super) async fn observe(
             AutopilotMeasurementKind::NEVER_PUBLISHED,
         ));
     }
+    // A cancelled show has no outcome: no attendance, no post-show clicks,
+    // no reply window that means anything. Observing anyway would write a
+    // zero the learners would read as the action failing, when the truth is
+    // the event never happened. Failed terminal, like never-published.
+    if measurement.kind.subject_is_event()
+        && event_is_cancelled(pool, workspace_id, measurement.subject_id).await?
+    {
+        return Err(RepositoryError::ConflictBecause(
+            AutopilotMeasurementKind::EVENT_CANCELLED,
+        ));
+    }
     let observed = match measurement.kind {
             AutopilotMeasurementKind::TicketRevenue72h => sqlx::query_scalar::<_, f64>(
                 r#"
@@ -295,6 +306,36 @@ pub(super) async fn observe(
                 .fetch_one(pool)
                 .await
                 .map_err(map_sqlx)?
+            }
+            // Attendance: redeemed admission passes over every pass that was
+            // valid for entry — issued, claimed and expired passes could all
+            // have been used or not; revoked ones were taken back and are no
+            // show's fault. The rate, not the count: a forty-cap room and a
+            // four-hundred-cap room answer the same question. An event with
+            // no passes at all did not ticket through the platform, so the
+            // measurement is abandoned rather than reported as a zero rate.
+            AutopilotMeasurementKind::ShowAttendanceRate14d => {
+                let (redeemed, valid): (f64, f64) = sqlx::query_as(
+                    r#"
+                    SELECT COUNT(*) FILTER (WHERE status = 'redeemed')::double precision,
+                           COUNT(*) FILTER (
+                               WHERE status IN ('issued','claimed','redeemed','expired')
+                           )::double precision
+                    FROM admission_passes
+                    WHERE workspace_id = $1 AND event_id = $2
+                    "#,
+                )
+                .bind(workspace_id.into_uuid())
+                .bind(measurement.subject_id)
+                .fetch_one(pool)
+                .await
+                .map_err(map_sqlx)?;
+                if valid <= 0.0 {
+                    return Err(RepositoryError::ConflictBecause(
+                        AutopilotMeasurementKind::NO_ISSUED_PASSES,
+                    ));
+                }
+                redeemed / valid
             }
             // Fan growth after an agent dispatch: count new fans created
             // in the 14-day window after the action finished. The
@@ -855,4 +896,27 @@ pub(super) async fn observe(
     } else {
         Err(RepositoryError::Unexpected)
     }
+}
+
+/// Whether the event a measurement is bound to was cancelled. A missing row
+/// is not cancelled — the subject guard asks only about terminal state, and
+/// an event id that resolves to nothing fails its own observation query.
+async fn event_is_cancelled(
+    pool: &sqlx::PgPool,
+    workspace_id: WorkspaceId,
+    event_id: uuid::Uuid,
+) -> Result<bool, RepositoryError> {
+    sqlx::query_scalar::<_, bool>(
+        r#"
+        SELECT EXISTS(
+            SELECT 1 FROM events
+            WHERE workspace_id = $1 AND id = $2 AND status = 'cancelled'
+        )
+        "#,
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(event_id)
+    .fetch_one(pool)
+    .await
+    .map_err(map_sqlx)
 }

@@ -163,6 +163,13 @@ pub(super) async fn schedule_effect_measurement(
                 baseline,
                 now + time::Duration::hours(72),
             ));
+            schedule_attendance(
+                transaction,
+                workspace_id,
+                event_id.into_uuid(),
+                &mut plans,
+            )
+            .await?;
         }
         AutopilotActionPayload::RaiseGrowthOpportunity { .. } => {
             // No measurement is scheduled yet. Measuring a raised finding means
@@ -283,6 +290,14 @@ pub(super) async fn schedule_effect_measurement(
                     now + time::Duration::days(14),
                 ));
             }
+
+            schedule_attendance(
+                transaction,
+                workspace_id,
+                event_id.into_uuid(),
+                &mut plans,
+            )
+            .await?;
         }
         // A produced artifact is content the brain asked for and an audience
         // now sees — the request half of the loop closed at the receipt, and
@@ -966,3 +981,49 @@ async fn measurement_unit_community(
     .map_err(map_sqlx)
 }
 
+
+/// Plans the attendance measurement for an event-bound action.
+///
+/// Attendance is the show's own outcome — every lever and every campaign
+/// works the same event, so each answers for whether the room filled.
+/// Anchored at the event's start plus a fortnight, not the dispatch: a
+/// lever that runs a month out still reads the settled count, and a
+/// post-show lever reads it as soon as it exists. A cancelled show has no
+/// attendance to observe — the observation arm refuses it again there, and
+/// skipping here keeps a dead measurement out of the queue in the first
+/// place.
+async fn schedule_attendance(
+    transaction: &mut Transaction<'_, Postgres>,
+    workspace_id: WorkspaceId,
+    event_id: uuid::Uuid,
+    plans: &mut Vec<(
+        AutopilotMeasurementKind,
+        uuid::Uuid,
+        f64,
+        OffsetDateTime,
+    )>,
+) -> Result<(), RepositoryError> {
+    let event_window: Option<(OffsetDateTime, String)> = sqlx::query_as(
+        r#"
+        SELECT starts_at, status
+        FROM events
+        WHERE workspace_id = $1 AND id = $2
+        "#,
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(event_id)
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(map_sqlx)?;
+    if let Some((starts_at, status)) = event_window
+        && status != "cancelled"
+    {
+        plans.push((
+            AutopilotMeasurementKind::ShowAttendanceRate14d,
+            event_id,
+            0.0,
+            starts_at + time::Duration::days(14),
+        ));
+    }
+    Ok(())
+}
