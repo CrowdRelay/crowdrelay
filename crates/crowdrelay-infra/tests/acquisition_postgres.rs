@@ -643,7 +643,7 @@ async fn community_conversion_does_not_write_when_fan_is_missing()
                COALESCE(link.channel_source, 'smart_link'),
                link.slug, link.channel_community, click.campaign_id,
                post.action_id,
-               'last_community_click', 1.0, fan.created_at
+               'last_tracked_click', 1.0, fan.created_at
         FROM click_events AS click
         JOIN smart_links AS link
           ON link.workspace_id = click.workspace_id

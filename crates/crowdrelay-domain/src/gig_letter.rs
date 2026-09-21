@@ -144,6 +144,12 @@ fn channel_phrase_pl(channel: &str) -> &str {
         "synesthesia_claim" => "synestezję",
         "fan_import" => "import",
         "fanbase_ingest" => "zsynchronizowaną listę fanów",
+        "reddit" => "Reddit",
+        "telegram" => "Telegram",
+        "discord" => "Discord",
+        "instagram" => "Instagram",
+        "facebook" => "Facebook",
+        "x" => "X",
         other => other,
     }
 }

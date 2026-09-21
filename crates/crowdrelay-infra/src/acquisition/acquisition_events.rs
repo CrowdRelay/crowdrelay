@@ -176,7 +176,7 @@ impl PostgresAcquisitionRepository {
         // switched on taught the brain nothing.
         //
         // format_key continues one hop further along the same chain:
-        //   action → payload.source_id → content_sources.format_key
+        //   action → payload.source_id → viryaos_content_sources.format_key
         // — the catalogue format the promoted artifact was declared in. The
         // outcome-ingest gate means every posted thread names a live source,
         // so a NULL here says "the source was filed without a format", which
@@ -189,7 +189,7 @@ impl PostgresAcquisitionRepository {
                 attribution_confidence, occurred_at, format_key
             )
             SELECT $1, $2, 'conversion',
-                   COALESCE(link.channel_source, 'smart_link'),
+                   link.channel_source,
                    link.slug, link.channel_community, click.campaign_id,
                    post.action_id,
                    'last_tracked_click', 1.0, fan.created_at,
@@ -205,9 +205,14 @@ impl PostgresAcquisitionRepository {
                 SELECT post.action_id, source.format_key
                 FROM (
                     -- community_posts stores only the text form of the link.
+                    -- posted_at is the "was live" fact: a pending or failed
+                    -- row never has one, while a post cancelled after going
+                    -- live keeps it — and the click it earned stays honest.
                     SELECT action_id, posted_at, created_at
                     FROM community_posts
                     WHERE workspace_id = $1 AND smart_link = '/l/' || link.slug
+                      AND posted_at IS NOT NULL
+                      AND posted_at <= click.occurred_at
                     UNION ALL
                     -- The other three carry the link's id too; matching it
                     -- survives a NULL or rewritten text column.
@@ -215,32 +220,42 @@ impl PostgresAcquisitionRepository {
                     FROM social_posts
                     WHERE workspace_id = $1
                       AND (smart_link = '/l/' || link.slug OR smart_link_id = link.id)
+                      AND posted_at IS NOT NULL
+                      AND posted_at <= click.occurred_at
                     UNION ALL
                     SELECT action_id, posted_at, created_at
                     FROM telegram_posts
                     WHERE workspace_id = $1
                       AND (smart_link = '/l/' || link.slug OR smart_link_id = link.id)
+                      AND posted_at IS NOT NULL
+                      AND posted_at <= click.occurred_at
                     UNION ALL
                     SELECT action_id, posted_at, created_at
                     FROM discord_posts
                     WHERE workspace_id = $1
                       AND (smart_link = '/l/' || link.slug OR smart_link_id = link.id)
+                      AND posted_at IS NOT NULL
+                      AND posted_at <= click.occurred_at
                 ) AS post
-                LEFT JOIN autopilot_actions AS act
+                LEFT JOIN viryaos_autopilot_actions AS act
                   ON act.workspace_id = $1
                  AND act.id = post.action_id
-                LEFT JOIN content_sources AS source
+                LEFT JOIN viryaos_content_sources AS source
                   ON source.workspace_id = $1
                  AND source.id::text = lower(act.payload->>'source_id')
                 ORDER BY post.posted_at DESC NULLS LAST,
-                         post.created_at DESC
+                         post.created_at DESC, post.action_id
                 LIMIT 1
             ) AS post ON true
             WHERE click.workspace_id = $1
               AND click.anonymous_visitor_id = $3
               AND link.channel_source IS NOT NULL
               AND click.occurred_at >= now() - INTERVAL '30 days'
-            ORDER BY click.occurred_at DESC
+              -- The click must precede the signup it is credited for —
+              -- otherwise a post-signup click writes a conversion row whose
+              -- occurred_at (fan.created_at) predates the click it cites.
+              AND click.occurred_at <= fan.created_at
+            ORDER BY click.occurred_at DESC, click.id
             LIMIT 1
             "#,
         )

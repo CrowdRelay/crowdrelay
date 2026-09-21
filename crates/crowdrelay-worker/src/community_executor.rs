@@ -1444,11 +1444,12 @@ impl CommunityExecutorWorker {
             r#"
             UPDATE community_posts
             SET status = 'awaiting_manual_post',
-                error_message = $2,
+                error_message = $3,
                 updated_at = now()
-            WHERE id = $1
+            WHERE workspace_id = $1 AND id = $2
             "#,
         )
+        .bind(self.workspace_id.into_uuid())
         .bind(post_id)
         .bind(reason)
         .execute(&self.pool)

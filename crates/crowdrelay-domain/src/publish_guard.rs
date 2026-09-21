@@ -277,10 +277,17 @@ pub fn review_outbound_post(body: &str, context: &PublishContext<'_>) -> Publish
         return PublishVerdict::HoldForHuman(HoldReason::TooManyLinks);
     }
     for link in &links {
-        let approved = context
-            .approved_origins
-            .iter()
-            .any(|origin| !origin.is_empty() && link.starts_with(origin));
+        // Origin equality must end at a host boundary: a bare starts_with
+        // passes `https://virya.music.evil.example/x` as `virya.music`. The
+        // match must be the whole origin followed by `/`, `?` or `#` (or the
+        // link is exactly the origin).
+        let approved = context.approved_origins.iter().any(|origin| {
+            let origin = origin.trim_end_matches('/');
+            !origin.is_empty()
+                && link
+                    .strip_prefix(origin)
+                    .is_some_and(|rest| rest.is_empty() || rest.starts_with(['/', '?', '#']))
+        });
         if !approved {
             return PublishVerdict::HoldForHuman(HoldReason::UnapprovedLink);
         }
@@ -504,6 +511,37 @@ mod tests {
             review_outbound_post(&body, &context(PublishChannel::Telegram)),
             PublishVerdict::HoldForHuman(HoldReason::UnapprovedLink)
         );
+    }
+
+    /// `virya.music.evil.example` shares the origin as a string prefix while
+    /// being a different host entirely — the approval must compare at a host
+    /// boundary, not a byte prefix.
+    #[test]
+    fn a_lookalike_host_is_held() {
+        for link in [
+            "https://virya.music.evil.example/track",
+            "https://virya.musicx.example/track",
+        ] {
+            let body = good_post().replace(LINK, link);
+            assert_eq!(
+                review_outbound_post(&body, &context(PublishChannel::Telegram)),
+                PublishVerdict::HoldForHuman(HoldReason::UnapprovedLink),
+                "a lookalike host must not inherit the origin: {link}"
+            );
+        }
+        for link in [
+            "https://virya.music/l/abc",
+            "https://virya.music?x=1",
+            "https://virya.music#frag",
+            "https://virya.music",
+        ] {
+            let body = good_post().replace(LINK, link);
+            assert_eq!(
+                review_outbound_post(&body, &context(PublishChannel::Telegram)),
+                PublishVerdict::Publish,
+                "the real origin must still publish: {link}"
+            );
+        }
     }
 
     /// The ways a link is written that are not "scheme at a word boundary".

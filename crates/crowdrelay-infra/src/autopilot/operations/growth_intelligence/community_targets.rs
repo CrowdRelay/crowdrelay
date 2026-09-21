@@ -132,7 +132,11 @@ pub(super) async fn load_community_targets(
         ORDER BY provenance.converted_fans DESC,
                  provenance.interactions DESC,
                  place.member_count DESC NULLS LAST,
-                 t.created_at DESC
+                 t.created_at DESC,
+                 -- Full tie-break: two targets admitted in the same second
+                 -- with identical evidence still need a stable order or the
+                 -- LIMIT cut lands on a coin flip between cycles.
+                 t.id
         LIMIT $2
         "#,
     )

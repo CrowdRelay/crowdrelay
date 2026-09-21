@@ -55,6 +55,8 @@ use tokio::{
 };
 use uuid::Uuid;
 
+use crate::tracked_link_text::link_is_inlined;
+
 /// How often to poll for unprocessed telegram post actions.
 const POLL_INTERVAL: Duration = Duration::from_secs(60);
 /// A `posting` row older than this is considered a crashed attempt.
@@ -282,7 +284,7 @@ impl TelegramExecutorWorker {
         if !action_ids.is_empty() {
             sqlx::query(
                 r#"
-                UPDATE autopilot_actions
+                UPDATE viryaos_autopilot_actions
                 SET status = 'unknown',
                     finished_at = NULL,
                     updated_at = now()
@@ -298,9 +300,9 @@ impl TelegramExecutorWorker {
 
             sqlx::query(
                 r#"
-                UPDATE experiment_assignments AS ea
+                UPDATE viryaos_experiment_assignments AS ea
                 SET execution_status = 'unknown',
-                    trace_id = COALESCE(ea.trace_id, (SELECT trace_id FROM autopilot_actions WHERE id = ea.action_id))
+                    trace_id = COALESCE(ea.trace_id, (SELECT trace_id FROM viryaos_autopilot_actions WHERE id = ea.action_id))
                 WHERE ea.workspace_id = $1
                   AND ea.action_id = ANY($2)
                   AND ea.execution_status = 'dispatched'
@@ -347,7 +349,7 @@ impl TelegramExecutorWorker {
                 a.id,
                 COALESCE(a.payload->'draft'->>'channel', ''),
                 'pending'
-            FROM autopilot_actions a
+            FROM viryaos_autopilot_actions a
             JOIN agent_service_tasks t ON t.id = (a.payload->>'task_id')::uuid
             WHERE a.workspace_id = $1
               AND a.action_kind = 'agent.content.request'
@@ -389,7 +391,7 @@ impl TelegramExecutorWorker {
                    a.payload->'draft'->>'cta_url' AS cta_url,
                    a.trace_id
             FROM claimed c
-            LEFT JOIN autopilot_actions a ON a.id = c.action_id
+            LEFT JOIN viryaos_autopilot_actions a ON a.id = c.action_id
             "#,
         )
         .bind(ws)
@@ -578,7 +580,7 @@ impl TelegramExecutorWorker {
 
         // Reach ledger.
         sqlx::query(
-            r#"INSERT INTO reach_events
+            r#"INSERT INTO viryaos_reach_events
                  (workspace_id, action_id, recipient_kind, recipient_id, channel,
                   template_id, estimated_reach, status, metadata, trace_id, causation_id)
                VALUES ($1, $2, 'telegram_channel', $3, 'telegram_post',
@@ -600,9 +602,9 @@ impl TelegramExecutorWorker {
         // dispatched → executed. Monotonic: only dispatched → executed.
         sqlx::query(
             r#"
-            UPDATE experiment_assignments
+            UPDATE viryaos_experiment_assignments
             SET execution_status = 'executed',
-                trace_id = COALESCE(trace_id, (SELECT trace_id FROM autopilot_actions WHERE id = $2))
+                trace_id = COALESCE(trace_id, (SELECT trace_id FROM viryaos_autopilot_actions WHERE id = $2))
             WHERE workspace_id = $1
               AND action_id = $2
               AND execution_status = 'dispatched'
@@ -736,7 +738,7 @@ impl TelegramExecutorWorker {
     /// origin, which the guard already approves.
     fn publish_body(&self, base: &str, link: Option<&str>) -> String {
         match link {
-            Some(link) if link.starts_with("/l/") && !base.contains(link) => format!(
+            Some(link) if link.starts_with("/l/") && !link_is_inlined(base, link) => format!(
                 "{base}\n\n{}{link}",
                 self.public_origin.trim_end_matches('/')
             ),
@@ -816,8 +818,8 @@ impl TelegramExecutorWorker {
         let metric_key = platform.audience_metric_key()?;
         let value: Option<f64> = sqlx::query_scalar(
             r#"SELECT point.value
-               FROM growth_metric_points AS point
-               JOIN growth_metric_series AS series ON series.id = point.series_id
+               FROM viryaos_growth_metric_points AS point
+               JOIN viryaos_growth_metric_series AS series ON series.id = point.series_id
                WHERE point.workspace_id = $1
                  AND series.platform = $2
                  AND series.metric_key = $3
@@ -964,7 +966,7 @@ impl TelegramExecutorWorker {
             r#"
             SELECT a.payload->'draft'->>'text'
             FROM telegram_posts AS post
-            JOIN autopilot_actions AS a
+            JOIN viryaos_autopilot_actions AS a
               ON a.id = post.action_id AND a.workspace_id = $1
             WHERE post.workspace_id = $1
               AND post.status = 'posted'

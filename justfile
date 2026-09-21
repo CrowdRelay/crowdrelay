@@ -113,7 +113,13 @@ ci: check validate-contract-assets contract-tests policy-checks
 test-postgres-env:
     #!/usr/bin/env bash
     set -euo pipefail
-    export CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL=postgres://crowdrelay:crowdrelay-local-only@127.0.0.1:5432/crowdrelay_autopilot_test
+    # A per-run template name: this postgres is shared by every worktree on the
+    # machine, and a parallel session's suite writes into a fixed
+    # `crowdrelay_autopilot_test` mid-run — its `event-*` workspaces once
+    # outnumbered this test's own seed inside the OSM sweep. A unique name
+    # means foreign writes land in their own template, never in this one.
+    pgtmpl="crowdrelay_autopilot_test_$$_$RANDOM"
+    export CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL=postgres://crowdrelay:crowdrelay-local-only@127.0.0.1:5432/${pgtmpl}
     export CROWDRELAY_TEST_DATABASE_URL=$CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL
     export CROWDRELAY_ADMISSION_TEST_DATABASE_URL=$CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL
     export CROWDRELAY_ECOSYSTEM_TEST_DATABASE_URL=$CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL
@@ -131,8 +137,8 @@ test-postgres-env:
     export CROWDRELAY_COMMUNITY_TEST_DATABASE_URL=$CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL
     {{COMPOSE}} up --detach --wait postgres
     {{COMPOSE}} exec -T postgres psql -U crowdrelay -d postgres \
-        -c "DROP DATABASE IF EXISTS crowdrelay_autopilot_test;" \
-        -c "CREATE DATABASE crowdrelay_autopilot_test;"
+        -c "DROP DATABASE IF EXISTS \"${pgtmpl}\";" \
+        -c "CREATE DATABASE \"${pgtmpl}\";"
     # The recipe dropped and recreated the database but never migrated it, so
     # every test that did not migrate itself failed on a missing column and the
     # suite could not pass on a clean checkout. Same `setup` entrypoint CI uses;
@@ -187,18 +193,20 @@ test-postgres-env:
     # direct-connect suites must never see it again after this point.
     {{COMPOSE}} exec -T postgres psql -U crowdrelay -d postgres -qAt \
       -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity \
-          WHERE datname='crowdrelay_autopilot_test' AND pid <> pg_backend_pid()" || true
+          WHERE datname='${pgtmpl}' AND pid <> pg_backend_pid()" || true
+    # Names carry the package too: two crates may own a target of the same
+    # stem, and a bare-stem name would point both at one database. Postgres
+    # caps identifiers at 63 bytes, so the stem truncates after the package.
     for entry in "${targets[@]}"; do
-      db="cr_ci_$(basename "${entry##*:}" | head -c 55)"
+      pkg="${entry%%:*}"; pkg="${pkg#crowdrelay-}"
+      db="cr_ci_${pkg}_$(echo "${entry##*:}" | head -c $((55 - ${#pkg})))"
       {{COMPOSE}} exec -T postgres psql -U crowdrelay -d postgres -qAt \
         -c "DROP DATABASE IF EXISTS \"${db}\" WITH (FORCE)" \
-        -c "CREATE DATABASE \"${db}\" WITH TEMPLATE crowdrelay_autopilot_test"
+        -c "CREATE DATABASE \"${db}\" WITH TEMPLATE \"${pgtmpl}\""
     done
-    {{COMPOSE}} exec -T postgres psql -U crowdrelay -d postgres -qAt \
-      -c "DROP DATABASE IF EXISTS cr_ci_filters WITH (FORCE)" \
-      -c "CREATE DATABASE cr_ci_filters WITH TEMPLATE crowdrelay_autopilot_test"
     for entry in "${targets[@]}"; do
-      db="cr_ci_$(basename "${entry##*:}" | head -c 55)"
+      pkg="${entry%%:*}"; pkg="${pkg#crowdrelay-}"
+      db="cr_ci_${pkg}_$(echo "${entry##*:}" | head -c $((55 - ${#pkg})))"
       url="postgres://crowdrelay:crowdrelay-local-only@127.0.0.1:5432/${db}"
       export CROWDRELAY_DATABASE_URL="$url"
       export CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL="$url"
@@ -236,7 +244,7 @@ test-postgres-env:
       db="cr_ci_f_$(echo "$filter" | head -c 50)"
       {{COMPOSE}} exec -T postgres psql -U crowdrelay -d postgres -qAt \
         -c "DROP DATABASE IF EXISTS \"${db}\" WITH (FORCE)" \
-        -c "CREATE DATABASE \"${db}\" WITH TEMPLATE crowdrelay_autopilot_test"
+        -c "CREATE DATABASE \"${db}\" WITH TEMPLATE \"${pgtmpl}\""
       url="postgres://crowdrelay:crowdrelay-local-only@127.0.0.1:5432/${db}"
       export CROWDRELAY_DATABASE_URL="$url"
       export CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL="$url"
@@ -257,7 +265,7 @@ test-postgres-env:
     db="cr_ci_f_archive_confirmation"
     {{COMPOSE}} exec -T postgres psql -U crowdrelay -d postgres -qAt \
       -c "DROP DATABASE IF EXISTS \"${db}\" WITH (FORCE)" \
-      -c "CREATE DATABASE \"${db}\" WITH TEMPLATE crowdrelay_autopilot_test"
+      -c "CREATE DATABASE \"${db}\" WITH TEMPLATE \"${pgtmpl}\""
     url="postgres://crowdrelay:crowdrelay-local-only@127.0.0.1:5432/${db}"
     export CROWDRELAY_DATABASE_URL="$url"
     export CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL="$url"
@@ -281,17 +289,26 @@ test-postgres-env:
     # A failed run keeps its database for debugging — the next run's
     # DROP IF EXISTS clears it before cloning anyway.
     for entry in "${targets[@]}"; do
-      db="cr_ci_$(basename "${entry##*:}" | head -c 55)"
+      pkg="${entry%%:*}"; pkg="${pkg#crowdrelay-}"
+      db="cr_ci_${pkg}_$(echo "${entry##*:}" | head -c $((55 - ${#pkg})))"
       {{COMPOSE}} exec -T postgres psql -U crowdrelay -d postgres -qAt \
         -c "DROP DATABASE IF EXISTS \"${db}\" WITH (FORCE)" || true
     done
-    {{COMPOSE}} exec -T postgres psql -U crowdrelay -d postgres -qAt \
-      -c "DROP DATABASE IF EXISTS cr_ci_filters WITH (FORCE)" || true
     for db in $({{COMPOSE}} exec -T postgres psql -U crowdrelay -d postgres -qAt \
       -c "SELECT datname FROM pg_database WHERE datname LIKE 'cr_ci_f_%'"); do
       {{COMPOSE}} exec -T postgres psql -U crowdrelay -d postgres -qAt \
         -c "DROP DATABASE IF EXISTS \"${db}\" WITH (FORCE)" || true
     done
+    # Per-test `pgt_<sig>_*` clones carry the FNV-1a signature of their source
+    # template — with a per-run template name only this run's leftovers match.
+    sig=$(python3 -c "h=0xcbf29ce484222325; [(h := ((h ^ b) * 0x100000001b3) & 0xffffffffffffffff) for b in b'${pgtmpl}']; print(format(h & 0xffffffff, '08x'))")
+    for db in $({{COMPOSE}} exec -T postgres psql -U crowdrelay -d postgres -qAt \
+      -c "SELECT datname FROM pg_database WHERE datname LIKE 'pgt_${sig}_%'"); do
+      {{COMPOSE}} exec -T postgres psql -U crowdrelay -d postgres -qAt \
+        -c "DROP DATABASE IF EXISTS \"${db}\" WITH (FORCE)" || true
+    done
+    {{COMPOSE}} exec -T postgres psql -U crowdrelay -d postgres -qAt \
+      -c "DROP DATABASE IF EXISTS \"${pgtmpl}\" WITH (FORCE)" || true
 
 # Alias kept for muscle memory from the Makefile days
 test-postgres: test-postgres-env

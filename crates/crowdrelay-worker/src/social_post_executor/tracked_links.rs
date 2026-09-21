@@ -11,6 +11,8 @@
 
 use uuid::Uuid;
 
+use crate::tracked_link_text::link_is_inlined;
+
 use super::{ClaimedAction, SocialPostExecutorError, SocialPostExecutorWorker};
 
 impl SocialPostExecutorWorker {
@@ -132,7 +134,7 @@ impl SocialPostExecutorWorker {
     /// that already inlined the link path is not handed it twice.
     pub(super) fn publish_body(&self, action: &ClaimedAction, base: &str) -> String {
         match (&action.smart_link, action.smart_link_id) {
-            (Some(link), Some(_)) if link.starts_with("/l/") && !base.contains(link.as_str()) => {
+            (Some(link), Some(_)) if link.starts_with("/l/") && !link_is_inlined(base, link) => {
                 format!(
                     "{base}\n\n{}{link}",
                     self.public_origin.trim_end_matches('/')
