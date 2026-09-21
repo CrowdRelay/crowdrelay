@@ -144,6 +144,7 @@ test-postgres-env:
     export CROWDRELAY_BIND_ADDR=127.0.0.1:8080
     export CROWDRELAY_ALLOWED_ORIGINS=http://localhost:4321
     export CROWDRELAY_PUBLIC_SITE_BASE_URL=http://localhost:4321
+    export CROWDRELAY_PUBLIC_ORIGIN=http://localhost:4321
     export CROWDRELAY_WORKSPACE_SLUG=example
     export CROWDRELAY_DEFAULT_COUNTRY_CODE=PL
     export CROWDRELAY_TENANT_REGION=eu
@@ -155,7 +156,7 @@ test-postgres-env:
     export CROWDRELAY_TENANT_DATA_REGION=eu
     export CROWDRELAY_RANDOM_DRAWS_ENABLED=false
     export CROWDRELAY_DATABASE_MAX_CONNECTIONS=5
-    export CROWDRELAY_BOOTSTRAP_JSON='{"workspace_name":"CrowdRelay local test","cities":[{"slug":"wroclaw","name":"Wroclaw","country":"PL","region":"Dolnoslaskie","lat":51.1079,"lng":17.0385}],"campaigns":[],"webhook_endpoints":[]}'
+    export CROWDRELAY_BOOTSTRAP_JSON='{"workspace_name":"CrowdRelay local test","cities":[{"slug":"wroclaw","name":"Wrocław","country":"PL","region":"Dolnoslaskie","lat":51.1079,"lng":17.0385}],"campaigns":[],"webhook_endpoints":[]}'
     {{CARGO}} run --locked --all-features --package crowdrelay-worker -- setup
     # Every crate, not just crowdrelay-infra. This recipe ran
     # `-p crowdrelay-infra` alone while CI globs `crates/*/tests/*_postgres.rs`
@@ -218,7 +219,46 @@ test-postgres-env:
     done
     # The outbox, reminder and retention suites live in unit-test modules rather
     # than their own integration target, so the glob above cannot see them.
-    url="postgres://crowdrelay:crowdrelay-local-only@127.0.0.1:5432/cr_ci_filters"
+    # Each still gets its own clone: `claim_deliveries` is workspace-wide, so a
+    # delivery a retention test leaves pending is a row the outbox test would
+    # claim — the same pollution the per-target clones exist to prevent.
+    for filter in \
+      postgres_outbox_round_trip \
+      due_reminder_is_enqueued_exactly_once \
+      cycle_deletes_expired_rows_scrubs_safe_payloads_and_preserves_audit \
+      publishing_adopts_the_drafts_manual_mode_wrote \
+      manual_mode_leaves_its_own_drafts_alone \
+      the_rate_limit_defers_a_draft_instead_of_failing_it \
+      every_component_is_recorded_with_its_missing_switch \
+      a_transient_failure_defers_the_draft_and_spares_the_action \
+      an_exhausted_draft_fails_and_corrects_the_ledger
+    do
+      db="cr_ci_f_$(echo "$filter" | head -c 50)"
+      {{COMPOSE}} exec -T postgres psql -U crowdrelay -d postgres -qAt \
+        -c "DROP DATABASE IF EXISTS \"${db}\" WITH (FORCE)" \
+        -c "CREATE DATABASE \"${db}\" WITH TEMPLATE crowdrelay_autopilot_test"
+      url="postgres://crowdrelay:crowdrelay-local-only@127.0.0.1:5432/${db}"
+      export CROWDRELAY_DATABASE_URL="$url"
+      export CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL="$url"
+      export CROWDRELAY_TEST_DATABASE_URL="$url"
+      export CROWDRELAY_ADMISSION_TEST_DATABASE_URL="$url"
+      export CROWDRELAY_ECOSYSTEM_TEST_DATABASE_URL="$url"
+      export CROWDRELAY_EVENT_TEST_DATABASE_URL="$url"
+      export CROWDRELAY_FAN_LIFECYCLE_TEST_DATABASE_URL="$url"
+      export CROWDRELAY_MOBILE_FAN_TEST_DATABASE_URL="$url"
+      export CROWDRELAY_REFERRAL_TEST_DATABASE_URL="$url"
+      export CROWDRELAY_OUTBOX_TEST_DATABASE_URL="$url"
+      export CROWDRELAY_REMINDER_TEST_DATABASE_URL="$url"
+      export CROWDRELAY_RETENTION_TEST_DATABASE_URL="$url"
+      export CROWDRELAY_COMMUNITY_TEST_DATABASE_URL="$url"
+      {{CARGO}} test --locked --package crowdrelay-worker "$filter" -- --ignored --test-threads=1
+    done
+    # Same for the ops-signal test inside the api crate's lib tests.
+    db="cr_ci_f_archive_confirmation"
+    {{COMPOSE}} exec -T postgres psql -U crowdrelay -d postgres -qAt \
+      -c "DROP DATABASE IF EXISTS \"${db}\" WITH (FORCE)" \
+      -c "CREATE DATABASE \"${db}\" WITH TEMPLATE crowdrelay_autopilot_test"
+    url="postgres://crowdrelay:crowdrelay-local-only@127.0.0.1:5432/${db}"
     export CROWDRELAY_DATABASE_URL="$url"
     export CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL="$url"
     export CROWDRELAY_TEST_DATABASE_URL="$url"
@@ -232,20 +272,6 @@ test-postgres-env:
     export CROWDRELAY_REMINDER_TEST_DATABASE_URL="$url"
     export CROWDRELAY_RETENTION_TEST_DATABASE_URL="$url"
     export CROWDRELAY_COMMUNITY_TEST_DATABASE_URL="$url"
-    for filter in \
-      postgres_outbox_round_trip \
-      due_reminder_is_enqueued_exactly_once \
-      cycle_deletes_expired_rows_scrubs_safe_payloads_and_preserves_audit \
-      publishing_adopts_the_drafts_manual_mode_wrote \
-      manual_mode_leaves_its_own_drafts_alone \
-      the_rate_limit_defers_a_draft_instead_of_failing_it \
-      every_component_is_recorded_with_its_missing_switch \
-      a_transient_failure_defers_the_draft_and_spares_the_action \
-      an_exhausted_draft_fails_and_corrects_the_ledger
-    do
-      {{CARGO}} test --locked --package crowdrelay-worker "$filter" -- --ignored --test-threads=1
-    done
-    # Same for the ops-signal test inside the api crate's lib tests.
     for filter in \
       archive_confirmation_is_not_organic_growth
     do
@@ -261,6 +287,11 @@ test-postgres-env:
     done
     {{COMPOSE}} exec -T postgres psql -U crowdrelay -d postgres -qAt \
       -c "DROP DATABASE IF EXISTS cr_ci_filters WITH (FORCE)" || true
+    for db in $({{COMPOSE}} exec -T postgres psql -U crowdrelay -d postgres -qAt \
+      -c "SELECT datname FROM pg_database WHERE datname LIKE 'cr_ci_f_%'"); do
+      {{COMPOSE}} exec -T postgres psql -U crowdrelay -d postgres -qAt \
+        -c "DROP DATABASE IF EXISTS \"${db}\" WITH (FORCE)" || true
+    done
 
 # Alias kept for muscle memory from the Makefile days
 test-postgres: test-postgres-env
