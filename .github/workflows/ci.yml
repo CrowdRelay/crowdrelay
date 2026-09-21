@@ -121,6 +121,11 @@ jobs:
       # products nothing in CI ever reuses — a cancelled run's cache is cold
       # anyway. On a 9 GB-free box that doubling is what fills the disk.
       CARGO_INCREMENTAL: "0"
+      # Full debuginfo is the majority of a debug test binary's size — ~60
+      # binaries at once is what pushed ld into ENOSPC on 2026-09-21.
+      # Line tables keep panic backtraces readable at a fraction of the cost.
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      CARGO_PROFILE_TEST_DEBUG: line-tables-only
 
     steps:
       - name: Check out repository
