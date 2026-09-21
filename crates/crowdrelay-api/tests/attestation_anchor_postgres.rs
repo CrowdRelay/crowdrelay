@@ -11,6 +11,8 @@
 //! Runs under `just test-postgres`, which provisions and migrates the
 //! disposable database this file points at via `CROWDRELAY_TEST_DATABASE_URL`.
 
+mod common;
+
 use std::{sync::Arc, time::Duration};
 
 use async_trait::async_trait;
@@ -48,7 +50,7 @@ use crowdrelay_infra::{
 };
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use sqlx::{Connection, PgConnection, PgPool, postgres::PgPoolOptions};
+use sqlx::PgPool;
 use tower::ServiceExt;
 use url::Url;
 use uuid::Uuid;
@@ -57,50 +59,6 @@ const ADMIN_KEY: &str = "test-admin-api-key-123456789012";
 const SIGNING_SECRET: &[u8] = b"attestation-anchor-test-signing-secret";
 
 // ── Disposable database, same pattern as the infra postgres suites. ──────────
-
-struct DisposableDatabase {
-    pool: PgPool,
-    admin_url: String,
-    name: String,
-}
-
-impl DisposableDatabase {
-    async fn create() -> Result<Self, Box<dyn std::error::Error>> {
-        let base = std::env::var("CROWDRELAY_TEST_DATABASE_URL")
-            .map_err(|_| "CROWDRELAY_TEST_DATABASE_URL must target a disposable database")?;
-        let name = format!("crowdrelay_anchor_{}", Uuid::now_v7().simple());
-        let mut admin = PgConnection::connect(&base).await?;
-        sqlx::query(&format!("CREATE DATABASE {name}"))
-            .execute(&mut admin)
-            .await?;
-        drop(admin);
-        let (head, _) = base.rsplit_once('/').ok_or("database url has no path")?;
-        let pool = PgPoolOptions::new()
-            .max_connections(4)
-            .connect(&format!("{head}/{name}"))
-            .await?;
-        crowdrelay_infra::database::MIGRATOR.run(&pool).await?;
-        Ok(Self {
-            pool,
-            admin_url: base,
-            name,
-        })
-    }
-
-    async fn drop_database(self) {
-        let Self {
-            pool,
-            admin_url,
-            name,
-        } = self;
-        pool.close().await;
-        if let Ok(mut admin) = PgConnection::connect(&admin_url).await {
-            let _ = sqlx::query(&format!("DROP DATABASE IF EXISTS {name} WITH (FORCE)"))
-                .execute(&mut admin)
-                .await;
-        }
-    }
-}
 
 // ── The smallest AppState that serves the real routes. ───────────────────────
 //
@@ -540,10 +498,11 @@ fn node_hash(left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
 #[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn an_attestation_is_anchored_once_and_the_anchor_says_so()
 -> Result<(), Box<dyn std::error::Error>> {
-    let database = DisposableDatabase::create().await?;
-    let result = run_anchor_suite(&database.pool).await;
-    database.drop_database().await;
-    result
+    let database = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
+        .await
+        .expect("connect to the migrated suite database");
+
+    run_anchor_suite(&database).await
 }
 
 async fn run_anchor_suite(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {

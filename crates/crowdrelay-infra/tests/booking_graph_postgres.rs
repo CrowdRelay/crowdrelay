@@ -13,6 +13,8 @@
 //!   snapshot's `linked_venue_ids` is the union of the primary `venue_id`
 //!   and every edge, never a cross-tenant leak.
 
+mod common;
+
 use std::time::Duration;
 
 use crowdrelay_application::IdempotencyKey;
@@ -24,72 +26,8 @@ use crowdrelay_infra::{
     autopilot::PostgresAutopilotRepository, config::DatabaseConfig,
     gdrive::PostgresGDriveRepository,
 };
-use sqlx::{Connection, PgConnection, PgPool, postgres::PgPoolOptions};
+use sqlx::PgPool;
 use uuid::Uuid;
-
-struct DisposableDatabase {
-    pool: PgPool,
-    /// The disposable database's own URL — what a repository's
-    /// `DatabaseConfig` carries when the test hands it a pool.
-    url: String,
-    admin_url: String,
-    name: String,
-}
-
-impl DisposableDatabase {
-    async fn create() -> Result<Self, Box<dyn std::error::Error>> {
-        let base = std::env::var("CROWDRELAY_TEST_DATABASE_URL")
-            .map_err(|_| "CROWDRELAY_TEST_DATABASE_URL must target a disposable database")?;
-        let name = format!("crowdrelay_bookgraph_{}", Uuid::now_v7().simple());
-        let mut admin = PgConnection::connect(&base).await?;
-        sqlx::query(&format!("CREATE DATABASE {name}"))
-            .execute(&mut admin)
-            .await?;
-        drop(admin);
-        let (head, _) = base.rsplit_once('/').ok_or("database url has no path")?;
-        let url = format!("{head}/{name}");
-        let pool = PgPoolOptions::new()
-            .max_connections(4)
-            .connect(&url)
-            .await?;
-        crowdrelay_infra::database::MIGRATOR.run(&pool).await?;
-        Ok(Self {
-            pool,
-            url,
-            admin_url: base,
-            name,
-        })
-    }
-
-    fn repository(&self) -> PostgresAutopilotRepository {
-        PostgresAutopilotRepository::new(
-            self.pool.clone(),
-            &DatabaseConfig {
-                url: self.url.clone(),
-                max_connections: 4,
-                connect_timeout: Duration::from_secs(3),
-                ping_timeout: Duration::from_secs(2),
-                operation_timeout: Duration::from_secs(10),
-                lock_timeout: Duration::from_secs(1),
-            },
-        )
-    }
-
-    async fn drop_database(self) {
-        let Self {
-            pool,
-            admin_url,
-            name,
-            ..
-        } = self;
-        pool.close().await;
-        if let Ok(mut admin) = PgConnection::connect(&admin_url).await {
-            let _ = sqlx::query(&format!("DROP DATABASE IF EXISTS {name} WITH (FORCE)"))
-                .execute(&mut admin)
-                .await;
-        }
-    }
-}
 
 async fn seed_workspace(pool: &PgPool) -> Result<Uuid, Box<dyn std::error::Error>> {
     let id = Uuid::now_v7();
@@ -183,10 +121,25 @@ async fn seed_contact(
 #[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn an_agent_kind_contact_promotes_into_booking_agents()
 -> Result<(), Box<dyn std::error::Error>> {
-    let database = DisposableDatabase::create().await?;
-    let result = run_agent_case(&database.pool).await;
-    database.drop_database().await;
-    result
+    let database = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
+        .await
+        .expect("connect to the migrated suite database");
+
+    run_agent_case(&database).await
+}
+
+fn repository(pool: &PgPool) -> PostgresAutopilotRepository {
+    PostgresAutopilotRepository::new(
+        pool.clone(),
+        &DatabaseConfig {
+            url: std::env::var("CROWDRELAY_TEST_DATABASE_URL").unwrap_or_default(),
+            max_connections: 4,
+            connect_timeout: Duration::from_secs(3),
+            ping_timeout: Duration::from_secs(2),
+            operation_timeout: Duration::from_secs(10),
+            lock_timeout: Duration::from_secs(1),
+        },
+    )
 }
 
 async fn run_agent_case(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
@@ -268,10 +221,11 @@ async fn run_agent_case(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>>
 #[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn an_edition_window_is_checked_and_never_crosses_tenants()
 -> Result<(), Box<dyn std::error::Error>> {
-    let database = DisposableDatabase::create().await?;
-    let result = run_edition_case(&database.pool).await;
-    database.drop_database().await;
-    result
+    let database = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
+        .await
+        .expect("connect to the migrated suite database");
+
+    run_edition_case(&database).await
 }
 
 async fn run_edition_case(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
@@ -330,11 +284,12 @@ async fn run_edition_case(pool: &PgPool) -> Result<(), Box<dyn std::error::Error
 #[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn a_promoter_edge_unions_rooms_and_never_leaks_tenants()
 -> Result<(), Box<dyn std::error::Error>> {
-    let database = DisposableDatabase::create().await?;
-    let repository = database.repository();
-    let result = run_edge_case(&database.pool, &repository).await;
-    database.drop_database().await;
-    result
+    let database = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
+        .await
+        .expect("connect to the migrated suite database");
+    let repository = repository(&database);
+
+    run_edge_case(&database, &repository).await
 }
 
 async fn run_edge_case(
@@ -498,11 +453,12 @@ async fn run_edge_case(
 #[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn an_edition_writes_replays_and_stays_on_festivals() -> Result<(), Box<dyn std::error::Error>>
 {
-    let database = DisposableDatabase::create().await?;
-    let repository = database.repository();
-    let result = run_edition_upsert_case(&database.pool, &repository).await;
-    database.drop_database().await;
-    result
+    let database = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
+        .await
+        .expect("connect to the migrated suite database");
+    let repository = repository(&database);
+
+    run_edition_upsert_case(&database, &repository).await
 }
 
 async fn run_edition_upsert_case(

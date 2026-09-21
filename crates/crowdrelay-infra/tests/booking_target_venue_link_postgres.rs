@@ -13,52 +13,10 @@
 //! a target inserted before its room existed, a room created after its target,
 //! a rename that should retract, and a promoter that must never acquire one.
 
-use sqlx::{Connection, PgConnection, PgPool, Row, postgres::PgPoolOptions};
+mod common;
+
+use sqlx::{PgPool, Row};
 use uuid::Uuid;
-
-struct DisposableDatabase {
-    pool: PgPool,
-    admin_url: String,
-    name: String,
-}
-
-impl DisposableDatabase {
-    async fn create() -> Result<Self, Box<dyn std::error::Error>> {
-        let base = std::env::var("CROWDRELAY_TEST_DATABASE_URL")
-            .map_err(|_| "CROWDRELAY_TEST_DATABASE_URL must target a disposable database")?;
-        let name = format!("crowdrelay_venuelink_{}", Uuid::now_v7().simple());
-        let mut admin = PgConnection::connect(&base).await?;
-        sqlx::query(&format!("CREATE DATABASE {name}"))
-            .execute(&mut admin)
-            .await?;
-        drop(admin);
-        let (head, _) = base.rsplit_once('/').ok_or("database url has no path")?;
-        let pool = PgPoolOptions::new()
-            .max_connections(2)
-            .connect(&format!("{head}/{name}"))
-            .await?;
-        crowdrelay_infra::database::MIGRATOR.run(&pool).await?;
-        Ok(Self {
-            pool,
-            admin_url: base,
-            name,
-        })
-    }
-
-    async fn drop_database(self) {
-        let Self {
-            pool,
-            admin_url,
-            name,
-        } = self;
-        pool.close().await;
-        if let Ok(mut admin) = PgConnection::connect(&admin_url).await {
-            let _ = sqlx::query(&format!("DROP DATABASE IF EXISTS {name} WITH (FORCE)"))
-                .execute(&mut admin)
-                .await;
-        }
-    }
-}
 
 async fn seed_workspace(pool: &PgPool) -> Result<Uuid, Box<dyn std::error::Error>> {
     let id = Uuid::now_v7();
@@ -148,10 +106,11 @@ async fn venue_link(pool: &PgPool, target_id: Uuid) -> Result<Option<Uuid>, sqlx
 #[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn a_booking_target_resolves_to_the_room_it_names() -> Result<(), Box<dyn std::error::Error>>
 {
-    let database = DisposableDatabase::create().await?;
-    let result = run_cases(&database.pool).await;
-    database.drop_database().await;
-    result
+    let database = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
+        .await
+        .expect("connect to the migrated suite database");
+
+    run_cases(&database).await
 }
 
 async fn run_cases(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
@@ -272,9 +231,12 @@ async fn the_backfill_links_targets_that_predate_the_migration()
     // rows the way the old schema would have, and running the backfill's own
     // statement — the alternative is asserting nothing about it, which is how
     // a backfill ships broken.
-    let database = DisposableDatabase::create().await?;
-    let result = async {
-        let pool = &database.pool;
+    let database = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
+        .await
+        .expect("connect to the migrated suite database");
+
+    async {
+        let pool = &database;
         let workspace = seed_workspace(pool).await?;
         let wroclaw = seed_city(pool, "wroclaw").await?;
 
@@ -317,7 +279,5 @@ async fn the_backfill_links_targets_that_predate_the_migration()
         );
         Ok::<(), Box<dyn std::error::Error>>(())
     }
-    .await;
-    database.drop_database().await;
-    result
+    .await
 }

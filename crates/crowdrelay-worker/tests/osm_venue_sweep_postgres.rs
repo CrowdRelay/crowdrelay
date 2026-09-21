@@ -10,6 +10,8 @@
 //! The same file drives the expiry sweep: an expired fact must be *gone*,
 //! not filtered — the row is the thing the licence says we may not hold.
 
+mod common;
+
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use anyhow::{Context, Result};
@@ -22,7 +24,7 @@ use crowdrelay_worker::{
     osm_venue_sweep::{Bbox, OsmElement, OsmVenueSweepWorker, OverpassProvider},
     venue_fact_expiry::delete_expired_facts,
 };
-use sqlx::{Connection, PgConnection, PgPool, Row, postgres::PgPoolOptions};
+use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
 /// Answers every city with the same canned element list — the sweep's own
@@ -36,59 +38,6 @@ struct CannedProvider {
 impl OverpassProvider for CannedProvider {
     async fn elements_in(&self, _bbox: Bbox) -> Result<Vec<OsmElement>> {
         Ok(self.elements.clone())
-    }
-}
-
-struct DisposableDatabase {
-    admin_url: String,
-    name: String,
-    pool: PgPool,
-}
-
-impl DisposableDatabase {
-    async fn create() -> Result<Self> {
-        let base_url = std::env::var("CROWDRELAY_TEST_DATABASE_URL")
-            .context("CROWDRELAY_TEST_DATABASE_URL must target a disposable database")?;
-        let (prefix, _) = base_url
-            .rsplit_once('/')
-            .context("database URL has no database name")?;
-        let admin_url = format!("{prefix}/postgres");
-        let name = format!("crowdrelay_osmsweep_{}", Uuid::now_v7().simple());
-        let mut admin = PgConnection::connect(&admin_url)
-            .await
-            .context("connect to the maintenance database")?;
-        // The name is a fresh UUID — nothing to quote, no caller text.
-        sqlx::query(&format!("CREATE DATABASE {name}"))
-            .execute(&mut admin)
-            .await
-            .context("create the disposable database")?;
-        drop(admin);
-        let pool = PgPoolOptions::new()
-            .max_connections(4)
-            .connect(&format!("{prefix}/{name}"))
-            .await
-            .context("connect to the disposable database")?;
-        crowdrelay_infra::database::MIGRATOR
-            .run(&pool)
-            .await
-            .context("apply migrations")?;
-        Ok(Self {
-            admin_url,
-            name,
-            pool,
-        })
-    }
-
-    async fn drop_database(self) {
-        self.pool.close().await;
-        if let Ok(mut admin) = PgConnection::connect(&self.admin_url).await {
-            let _ = sqlx::query(&format!(
-                "DROP DATABASE IF EXISTS {} WITH (FORCE)",
-                self.name
-            ))
-            .execute(&mut admin)
-            .await;
-        }
     }
 }
 
@@ -181,10 +130,11 @@ async fn facts_for(
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn a_swept_room_exists_with_its_anchor_and_licensed_facts() -> Result<()> {
-    let database = DisposableDatabase::create().await?;
-    let result = run_sweep_cases(&database.pool).await;
-    database.drop_database().await;
-    result
+    let database = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
+        .await
+        .expect("connect to the migrated suite database");
+
+    run_sweep_cases(&database).await
 }
 
 async fn run_sweep_cases(pool: &PgPool) -> Result<()> {
@@ -346,10 +296,11 @@ async fn run_sweep_cases(pool: &PgPool) -> Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn an_expired_fact_is_deleted_not_filtered() -> Result<()> {
-    let database = DisposableDatabase::create().await?;
-    let result = run_expiry_case(&database.pool).await;
-    database.drop_database().await;
-    result
+    let database = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
+        .await
+        .expect("connect to the migrated suite database");
+
+    run_expiry_case(&database).await
 }
 
 async fn run_expiry_case(pool: &PgPool) -> Result<()> {

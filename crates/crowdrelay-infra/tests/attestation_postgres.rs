@@ -15,56 +15,14 @@
 //! while this file was being written (as `event_check_ins`), which is the whole
 //! argument for driving them.
 
+mod common;
+
 use crowdrelay_infra::attestation::{
     AttestationError, AttestationSigningKey, PostgresAttestationRepository,
 };
-use sqlx::{Connection, PgConnection, PgPool, postgres::PgPoolOptions};
+use sqlx::PgPool;
 use time::OffsetDateTime;
 use uuid::Uuid;
-
-struct DisposableDatabase {
-    pool: PgPool,
-    admin_url: String,
-    name: String,
-}
-
-impl DisposableDatabase {
-    async fn create() -> Result<Self, Box<dyn std::error::Error>> {
-        let base = std::env::var("CROWDRELAY_TEST_DATABASE_URL")
-            .map_err(|_| "CROWDRELAY_TEST_DATABASE_URL must target a disposable database")?;
-        let name = format!("crowdrelay_attest_{}", Uuid::now_v7().simple());
-        let mut admin = PgConnection::connect(&base).await?;
-        sqlx::query(&format!("CREATE DATABASE {name}"))
-            .execute(&mut admin)
-            .await?;
-        drop(admin);
-        let (head, _) = base.rsplit_once('/').ok_or("database url has no path")?;
-        let pool = PgPoolOptions::new()
-            .max_connections(2)
-            .connect(&format!("{head}/{name}"))
-            .await?;
-        crowdrelay_infra::database::MIGRATOR.run(&pool).await?;
-        Ok(Self {
-            pool,
-            admin_url: base,
-            name,
-        })
-    }
-
-    async fn drop_database(self) {
-        let Self {
-            pool,
-            admin_url,
-            name,
-        } = self;
-        pool.close().await;
-        if let Ok(mut admin) = PgConnection::connect(&admin_url).await {
-            let _ = sqlx::query(&format!("DROP DATABASE IF EXISTS {name} WITH (FORCE)"))
-                .execute(&mut admin)
-                .await;
-        }
-    }
-}
 
 fn key() -> AttestationSigningKey {
     AttestationSigningKey::derive_from_secret(b"attestation-test-signing-secret")
@@ -239,10 +197,11 @@ async fn seed_ticket_history(
 #[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn an_attestation_survives_the_three_things_people_try()
 -> Result<(), Box<dyn std::error::Error>> {
-    let database = DisposableDatabase::create().await?;
-    let result = run(&database.pool).await;
-    database.drop_database().await;
-    result
+    let database = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
+        .await
+        .expect("connect to the migrated suite database");
+
+    run(&database).await
 }
 
 async fn run(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {

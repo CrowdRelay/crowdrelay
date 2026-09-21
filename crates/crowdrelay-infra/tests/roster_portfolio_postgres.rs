@@ -10,6 +10,8 @@
 //! the schema comes from `MIGRATOR.run`, so a migration that does not apply
 //! fails here before it can fail a deploy.
 
+mod common;
+
 use std::time::Duration;
 
 use crowdrelay_application::autopilot::{AutopilotDecisionRepository, PortfolioPoolEntry};
@@ -23,55 +25,9 @@ use crowdrelay_infra::organization_settings::{
 };
 use crowdrelay_infra::roster_portfolio::roster_portfolio_plan;
 use crowdrelay_infra::{autopilot::PostgresAutopilotRepository, config::DatabaseConfig};
-use sqlx::{Connection, PgConnection, PgPool, postgres::PgPoolOptions};
+use sqlx::PgPool;
 use time::OffsetDateTime;
 use uuid::Uuid;
-
-struct DisposableDatabase {
-    pool: PgPool,
-    admin_url: String,
-    name: String,
-}
-
-impl DisposableDatabase {
-    async fn create() -> Result<Self, Box<dyn std::error::Error>> {
-        let base = std::env::var("CROWDRELAY_TEST_DATABASE_URL")
-            .map_err(|_| "CROWDRELAY_TEST_DATABASE_URL must target a disposable database")?;
-        let name = format!("crowdrelay_51_{}", Uuid::now_v7().simple());
-        let mut admin = PgConnection::connect(&base).await?;
-        sqlx::query(&format!("CREATE DATABASE {name}"))
-            .execute(&mut admin)
-            .await?;
-        drop(admin);
-        let (head, _) = base.rsplit_once('/').ok_or("database url has no path")?;
-        let url = format!("{head}/{name}");
-        let pool = PgPoolOptions::new()
-            .max_connections(4)
-            .connect(&url)
-            .await?;
-        crowdrelay_infra::database::MIGRATOR.run(&pool).await?;
-        Ok(Self {
-            pool,
-            admin_url: base,
-            name,
-        })
-    }
-
-    async fn drop_database(self) {
-        let Self {
-            pool,
-            admin_url,
-            name,
-            ..
-        } = self;
-        pool.close().await;
-        if let Ok(mut admin) = PgConnection::connect(&admin_url).await {
-            let _ = sqlx::query(&format!("DROP DATABASE IF EXISTS {name} WITH (FORCE)"))
-                .execute(&mut admin)
-                .await;
-        }
-    }
-}
 
 fn repository(pool: &PgPool) -> PostgresAutopilotRepository {
     PostgresAutopilotRepository::new(
@@ -169,14 +125,16 @@ fn entry(
 #[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn a_locally_rejected_candidate_can_win_a_roster_slot()
 -> Result<(), Box<dyn std::error::Error>> {
-    let db = DisposableDatabase::create().await?;
-    let org = organization(&db.pool, "Roster").await?;
-    let act_a = workspace(&db.pool, "Act A", Some(org)).await?;
-    let act_b = workspace(&db.pool, "Act B", Some(org)).await?;
+    let db = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
+        .await
+        .expect("connect to the migrated suite database");
+    let org = organization(&db, "Roster").await?;
+    let act_a = workspace(&db, "Act A", Some(org)).await?;
+    let act_b = workspace(&db, "Act B", Some(org)).await?;
 
     // Act A published a pool where its own cap rejected the best-looking
     // remainder; act B published one middling candidate.
-    repository(&db.pool)
+    repository(&db)
         .replace_portfolio_pool(
             WorkspaceId::from_uuid(act_a),
             &[
@@ -200,7 +158,7 @@ async fn a_locally_rejected_candidate_can_win_a_roster_slot()
             OffsetDateTime::now_utc(),
         )
         .await?;
-    repository(&db.pool)
+    repository(&db)
         .replace_portfolio_pool(
             WorkspaceId::from_uuid(act_b),
             &[entry(
@@ -215,7 +173,7 @@ async fn a_locally_rejected_candidate_can_win_a_roster_slot()
         )
         .await?;
 
-    let plan = roster_portfolio_plan(&db.pool, org)
+    let plan = roster_portfolio_plan(&db, org)
         .await?
         .expect("an org with members returns a plan");
 
@@ -247,7 +205,6 @@ async fn a_locally_rejected_candidate_can_win_a_roster_slot()
     assert_eq!(act_a_row.selected, 2);
     assert_eq!(act_a_row.name, "Act A");
 
-    db.drop_database().await;
     Ok(())
 }
 
@@ -256,11 +213,13 @@ async fn a_locally_rejected_candidate_can_win_a_roster_slot()
 #[tokio::test]
 #[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn the_organisations_stated_cap_bounds_the_rank() -> Result<(), Box<dyn std::error::Error>> {
-    let db = DisposableDatabase::create().await?;
-    let org = organization(&db.pool, "Roster").await?;
-    let act_a = workspace(&db.pool, "Act A", Some(org)).await?;
+    let db = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
+        .await
+        .expect("connect to the migrated suite database");
+    let org = organization(&db, "Roster").await?;
+    let act_a = workspace(&db, "Act A", Some(org)).await?;
 
-    repository(&db.pool)
+    repository(&db)
         .replace_portfolio_pool(
             WorkspaceId::from_uuid(act_a),
             &[
@@ -293,11 +252,11 @@ async fn the_organisations_stated_cap_bounds_the_rank() -> Result<(), Box<dyn st
         )
         .await?;
 
-    OrganizationSettingsRepository::new(db.pool.clone())
+    OrganizationSettingsRepository::new(db.clone())
         .set(org, KEY_ROSTER_PORTFOLIO_MAX_DISPATCHES, "2")
         .await?;
 
-    let plan = roster_portfolio_plan(&db.pool, org)
+    let plan = roster_portfolio_plan(&db, org)
         .await?
         .expect("an org with members returns a plan");
 
@@ -310,7 +269,6 @@ async fn the_organisations_stated_cap_bounds_the_rank() -> Result<(), Box<dyn st
     );
     assert_eq!(plan.rejected_count, 1);
 
-    db.drop_database().await;
     Ok(())
 }
 
@@ -319,12 +277,14 @@ async fn the_organisations_stated_cap_bounds_the_rank() -> Result<(), Box<dyn st
 #[tokio::test]
 #[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn an_act_with_no_pool_is_named_not_silent() -> Result<(), Box<dyn std::error::Error>> {
-    let db = DisposableDatabase::create().await?;
-    let org = organization(&db.pool, "Roster").await?;
-    let act_a = workspace(&db.pool, "Act A", Some(org)).await?;
-    let quiet = workspace(&db.pool, "Quiet Act", Some(org)).await?;
+    let db = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
+        .await
+        .expect("connect to the migrated suite database");
+    let org = organization(&db, "Roster").await?;
+    let act_a = workspace(&db, "Act A", Some(org)).await?;
+    let quiet = workspace(&db, "Quiet Act", Some(org)).await?;
 
-    repository(&db.pool)
+    repository(&db)
         .replace_portfolio_pool(
             WorkspaceId::from_uuid(act_a),
             &[entry(
@@ -339,7 +299,7 @@ async fn an_act_with_no_pool_is_named_not_silent() -> Result<(), Box<dyn std::er
         )
         .await?;
 
-    let plan = roster_portfolio_plan(&db.pool, org)
+    let plan = roster_portfolio_plan(&db, org)
         .await?
         .expect("an org with members returns a plan");
 
@@ -353,7 +313,6 @@ async fn an_act_with_no_pool_is_named_not_silent() -> Result<(), Box<dyn std::er
     assert!(quiet_row.refreshed_at.is_none());
     assert_eq!(quiet_row.name, "Quiet Act");
 
-    db.drop_database().await;
     Ok(())
 }
 
@@ -363,12 +322,13 @@ async fn an_act_with_no_pool_is_named_not_silent() -> Result<(), Box<dyn std::er
 #[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn an_organisation_with_no_acts_has_nothing_to_pool() -> Result<(), Box<dyn std::error::Error>>
 {
-    let db = DisposableDatabase::create().await?;
-    let org = organization(&db.pool, "Empty Roster").await?;
+    let db = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
+        .await
+        .expect("connect to the migrated suite database");
+    let org = organization(&db, "Empty Roster").await?;
 
-    assert!(roster_portfolio_plan(&db.pool, org).await?.is_none());
+    assert!(roster_portfolio_plan(&db, org).await?.is_none());
 
-    db.drop_database().await;
     Ok(())
 }
 
@@ -377,11 +337,13 @@ async fn an_organisation_with_no_acts_has_nothing_to_pool() -> Result<(), Box<dy
 #[tokio::test]
 #[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn a_new_cycle_replaces_the_pool_whole() -> Result<(), Box<dyn std::error::Error>> {
-    let db = DisposableDatabase::create().await?;
-    let org = organization(&db.pool, "Roster").await?;
-    let act_a = workspace(&db.pool, "Act A", Some(org)).await?;
+    let db = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
+        .await
+        .expect("connect to the migrated suite database");
+    let org = organization(&db, "Roster").await?;
+    let act_a = workspace(&db, "Act A", Some(org)).await?;
 
-    repository(&db.pool)
+    repository(&db)
         .replace_portfolio_pool(
             WorkspaceId::from_uuid(act_a),
             &[
@@ -405,7 +367,7 @@ async fn a_new_cycle_replaces_the_pool_whole() -> Result<(), Box<dyn std::error:
             OffsetDateTime::now_utc(),
         )
         .await?;
-    repository(&db.pool)
+    repository(&db)
         .replace_portfolio_pool(
             WorkspaceId::from_uuid(act_a),
             &[entry(
@@ -420,7 +382,7 @@ async fn a_new_cycle_replaces_the_pool_whole() -> Result<(), Box<dyn std::error:
         )
         .await?;
 
-    let plan = roster_portfolio_plan(&db.pool, org)
+    let plan = roster_portfolio_plan(&db, org)
         .await?
         .expect("an org with members returns a plan");
     assert_eq!(
@@ -430,7 +392,6 @@ async fn a_new_cycle_replaces_the_pool_whole() -> Result<(), Box<dyn std::error:
     );
     assert_eq!(plan.selected[0].target, "r/new");
 
-    db.drop_database().await;
     Ok(())
 }
 
@@ -482,19 +443,21 @@ async fn spent_dispatch(
 #[tokio::test]
 #[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn a_permanently_outbid_act_stops_being_outbid() -> Result<(), Box<dyn std::error::Error>> {
-    let db = DisposableDatabase::create().await?;
-    let org = organization(&db.pool, "Roster").await?;
-    let busy = workspace(&db.pool, "Busy Act", Some(org)).await?;
-    let quiet = workspace(&db.pool, "Quiet Act", Some(org)).await?;
+    let db = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
+        .await
+        .expect("connect to the migrated suite database");
+    let org = organization(&db, "Roster").await?;
+    let busy = workspace(&db, "Busy Act", Some(org)).await?;
+    let quiet = workspace(&db, "Quiet Act", Some(org)).await?;
 
     // The busy act already spent five dispatches this week.
     for _ in 0..5 {
-        spent_dispatch(&db.pool, busy).await?;
+        spent_dispatch(&db, busy).await?;
     }
 
     // Its best candidate beats the quiet act's on intrinsic value — 9.0 vs
     // 7.0 — but pays 0.9^5 for the share it already holds: 5.31 < 7.0.
-    repository(&db.pool)
+    repository(&db)
         .replace_portfolio_pool(
             WorkspaceId::from_uuid(busy),
             &[entry(
@@ -508,7 +471,7 @@ async fn a_permanently_outbid_act_stops_being_outbid() -> Result<(), Box<dyn std
             OffsetDateTime::now_utc(),
         )
         .await?;
-    repository(&db.pool)
+    repository(&db)
         .replace_portfolio_pool(
             WorkspaceId::from_uuid(quiet),
             &[entry(
@@ -523,7 +486,7 @@ async fn a_permanently_outbid_act_stops_being_outbid() -> Result<(), Box<dyn std
         )
         .await?;
 
-    let plan = roster_portfolio_plan(&db.pool, org)
+    let plan = roster_portfolio_plan(&db, org)
         .await?
         .expect("an org with members returns a plan");
 
@@ -541,6 +504,5 @@ async fn a_permanently_outbid_act_stops_being_outbid() -> Result<(), Box<dyn std
         "the busy act's slot must show what its share cost"
     );
 
-    db.drop_database().await;
     Ok(())
 }

@@ -12,60 +12,17 @@
 //!   transaction, so a stale version on the second leaves the first
 //!   unreserved — all of them, or none of them.
 
+mod common;
+
 use std::time::Duration;
 
 use crowdrelay_application::autopilot::{AutopilotActionRepository, AutopilotDecisionRepository};
 use crowdrelay_domain::booking::BookingOutreachPhase;
 use crowdrelay_domain::{BookingTargetId, CityId, WorkspaceId};
 use crowdrelay_infra::{autopilot::PostgresAutopilotRepository, config::DatabaseConfig};
-use sqlx::{Connection, PgConnection, PgPool, postgres::PgPoolOptions};
+use sqlx::PgPool;
 use time::OffsetDateTime;
 use uuid::Uuid;
-
-struct DisposableDatabase {
-    pool: PgPool,
-    admin_url: String,
-    name: String,
-}
-
-impl DisposableDatabase {
-    async fn create() -> Result<Self, Box<dyn std::error::Error>> {
-        let base = std::env::var("CROWDRELAY_TEST_DATABASE_URL")
-            .map_err(|_| "CROWDRELAY_TEST_DATABASE_URL must target a disposable database")?;
-        let name = format!("crowdrelay_4v7_{}", Uuid::now_v7().simple());
-        let mut admin = PgConnection::connect(&base).await?;
-        sqlx::query(&format!("CREATE DATABASE {name}"))
-            .execute(&mut admin)
-            .await?;
-        drop(admin);
-        let (head, _) = base.rsplit_once('/').ok_or("database url has no path")?;
-        let url = format!("{head}/{name}");
-        let pool = PgPoolOptions::new()
-            .max_connections(4)
-            .connect(&url)
-            .await?;
-        crowdrelay_infra::database::MIGRATOR.run(&pool).await?;
-        Ok(Self {
-            pool,
-            admin_url: base,
-            name,
-        })
-    }
-
-    async fn drop_database(self) {
-        let Self {
-            pool,
-            admin_url,
-            name,
-        } = self;
-        pool.close().await;
-        if let Ok(mut admin) = PgConnection::connect(&admin_url).await {
-            let _ = sqlx::query(&format!("DROP DATABASE IF EXISTS {name} WITH (FORCE)"))
-                .execute(&mut admin)
-                .await;
-        }
-    }
-}
 
 fn repository(pool: &PgPool) -> PostgresAutopilotRepository {
     PostgresAutopilotRepository::new(
@@ -301,11 +258,12 @@ async fn seed_booking_action(
 #[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn a_venue_linked_target_carries_its_evidence_and_window_inputs()
 -> Result<(), Box<dyn std::error::Error>> {
-    let database = DisposableDatabase::create().await?;
-    let pool = &database.pool;
-    let result = run_evidence_case(pool).await;
-    database.drop_database().await;
-    result
+    let database = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
+        .await
+        .expect("connect to the migrated suite database");
+    let pool = &database;
+
+    run_evidence_case(pool).await
 }
 
 async fn run_evidence_case(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
@@ -510,11 +468,12 @@ async fn run_evidence_case(pool: &PgPool) -> Result<(), Box<dyn std::error::Erro
 #[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn booking_outreach_reserves_every_recipient_or_none()
 -> Result<(), Box<dyn std::error::Error>> {
-    let database = DisposableDatabase::create().await?;
-    let pool = &database.pool;
-    let result = run_execution_case(pool).await;
-    database.drop_database().await;
-    result
+    let database = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
+        .await
+        .expect("connect to the migrated suite database");
+    let pool = &database;
+
+    run_execution_case(pool).await
 }
 
 async fn run_execution_case(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
@@ -648,11 +607,12 @@ async fn run_execution_case(pool: &PgPool) -> Result<(), Box<dyn std::error::Err
 #[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn a_stale_second_recipient_aborts_and_reserves_nothing()
 -> Result<(), Box<dyn std::error::Error>> {
-    let database = DisposableDatabase::create().await?;
-    let pool = &database.pool;
-    let result = run_stale_recipient_case(pool).await;
-    database.drop_database().await;
-    result
+    let database = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
+        .await
+        .expect("connect to the migrated suite database");
+    let pool = &database;
+
+    run_stale_recipient_case(pool).await
 }
 
 async fn run_stale_recipient_case(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
@@ -759,11 +719,12 @@ async fn run_stale_recipient_case(pool: &PgPool) -> Result<(), Box<dyn std::erro
 #[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn a_reply_after_approval_retires_the_letter_before_it_sends()
 -> Result<(), Box<dyn std::error::Error>> {
-    let database = DisposableDatabase::create().await?;
-    let pool = &database.pool;
-    let result = run_reply_after_approval_case(pool).await;
-    database.drop_database().await;
-    result
+    let database = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
+        .await
+        .expect("connect to the migrated suite database");
+    let pool = &database;
+
+    run_reply_after_approval_case(pool).await
 }
 
 async fn run_reply_after_approval_case(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {

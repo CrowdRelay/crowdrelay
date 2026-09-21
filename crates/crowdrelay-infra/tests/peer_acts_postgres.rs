@@ -10,60 +10,16 @@
 //! side — the peer link still lands, because the band exists even when the
 //! tenant answer does not.
 
+mod common;
+
 use std::time::Duration;
 
 use crowdrelay_application::{EventActEntry, EventRepository, ReplaceEventActsCommand};
 use crowdrelay_domain::{WorkspaceId, WorkspaceSlug};
 use crowdrelay_infra::{config::DatabaseConfig, events::PostgresEventRepository};
-use sqlx::{Connection, PgConnection, PgPool, postgres::PgPoolOptions};
+use sqlx::PgPool;
 use time::OffsetDateTime;
 use uuid::Uuid;
-
-struct DisposableDatabase {
-    pool: PgPool,
-    admin_url: String,
-    name: String,
-}
-
-impl DisposableDatabase {
-    async fn create() -> Result<Self, Box<dyn std::error::Error>> {
-        let base = std::env::var("CROWDRELAY_TEST_DATABASE_URL")
-            .map_err(|_| "CROWDRELAY_TEST_DATABASE_URL must target a disposable database")?;
-        let name = format!("crowdrelay_peeracts_{}", Uuid::now_v7().simple());
-        let mut admin = PgConnection::connect(&base).await?;
-        sqlx::query(&format!("CREATE DATABASE {name}"))
-            .execute(&mut admin)
-            .await?;
-        drop(admin);
-        let (head, _) = base.rsplit_once('/').ok_or("database url has no path")?;
-        let url = format!("{head}/{name}");
-        let pool = PgPoolOptions::new()
-            .max_connections(4)
-            .connect(&url)
-            .await?;
-        crowdrelay_infra::database::MIGRATOR.run(&pool).await?;
-        Ok(Self {
-            pool,
-            admin_url: base,
-            name,
-        })
-    }
-
-    async fn drop_database(self) {
-        let Self {
-            pool,
-            admin_url,
-            name,
-            ..
-        } = self;
-        pool.close().await;
-        if let Ok(mut admin) = PgConnection::connect(&admin_url).await {
-            let _ = sqlx::query(&format!("DROP DATABASE IF EXISTS {name} WITH (FORCE)"))
-                .execute(&mut admin)
-                .await;
-        }
-    }
-}
 
 async fn seed_workspace(
     pool: &PgPool,
@@ -167,10 +123,11 @@ async fn act_links(
 #[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn a_bill_write_resolves_acts_to_tenants_and_peers() -> Result<(), Box<dyn std::error::Error>>
 {
-    let database = DisposableDatabase::create().await?;
-    let result = run_cases(&database.pool).await;
-    database.drop_database().await;
-    result
+    let database = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
+        .await
+        .expect("connect to the migrated suite database");
+
+    run_cases(&database).await
 }
 
 async fn run_cases(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
@@ -318,9 +275,12 @@ async fn run_cases(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn genre_alias_seed_resolves_spellings() -> Result<(), Box<dyn std::error::Error>> {
-    let database = DisposableDatabase::create().await?;
-    let result = async {
-        let pool = &database.pool;
+    let database = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
+        .await
+        .expect("connect to the migrated suite database");
+
+    async {
+        let pool = &database;
         let resolved = |alias: &'static str| {
             sqlx::query_scalar::<_, Option<String>>(
                 "SELECT canonical FROM place_genre_aliases WHERE alias = $1",
@@ -380,9 +340,7 @@ async fn genre_alias_seed_resolves_spellings() -> Result<(), Box<dyn std::error:
         }
         Ok(())
     }
-    .await;
-    database.drop_database().await;
-    result
+    .await
 }
 
 /// §N.4 — the package matcher: a consented roster sibling is named on the
@@ -393,10 +351,11 @@ async fn genre_alias_seed_resolves_spellings() -> Result<(), Box<dyn std::error:
 #[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn a_consented_sibling_is_named_on_the_bill_with_its_arithmetic()
 -> Result<(), Box<dyn std::error::Error>> {
-    let database = DisposableDatabase::create().await?;
-    let result = run_package(&database.pool).await;
-    database.drop_database().await;
-    result
+    let database = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
+        .await
+        .expect("connect to the migrated suite database");
+
+    run_package(&database).await
 }
 
 async fn run_package(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {

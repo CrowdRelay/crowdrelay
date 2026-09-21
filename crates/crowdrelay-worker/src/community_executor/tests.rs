@@ -100,6 +100,22 @@ mod tests {
         .execute(&worker.pool)
         .await
         .expect("action");
+        // The claim sweep fails a draft whose target is not an admitted
+        // community, so the draft needs a real promoted target behind it —
+        // a random uuid reads as "community was demoted" to that sweep.
+        let target_id = uuid::Uuid::now_v7();
+        sqlx::query(
+            "INSERT INTO agent_outreach_targets \
+               (id, workspace_id, target_kind, display_name, status, subreddit, \
+                screening_verdict) \
+             VALUES ($1,$2,'community',$3,'promoted',$3,'admitted')",
+        )
+        .bind(target_id)
+        .bind(workspace_id)
+        .bind(subreddit)
+        .execute(&worker.pool)
+        .await
+        .expect("target");
         sqlx::query(
             "INSERT INTO community_posts \
                (id, workspace_id, action_id, target_id, subreddit, title, body, status) \
@@ -108,7 +124,7 @@ mod tests {
         .bind(post_id)
         .bind(workspace_id)
         .bind(action_id)
-        .bind(uuid::Uuid::now_v7())
+        .bind(target_id)
         .bind(subreddit)
         .bind(status)
         .execute(&worker.pool)

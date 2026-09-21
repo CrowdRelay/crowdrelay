@@ -11,61 +11,15 @@
 //! spent; a repeated run of the same reference carries nobody twice; and a
 //! consent outside the organisation is not found.
 
-use std::time::Duration;
+mod common;
 
 use crowdrelay_infra::portfolio::PostgresPortfolioRepository;
 use crowdrelay_infra::roster_catalogue_rotation::{
     catalogue_rotation_plan, run_catalogue_rotation,
 };
-use sqlx::{Connection, PgConnection, PgPool, postgres::PgPoolOptions};
+use sqlx::PgPool;
 use time::OffsetDateTime;
 use uuid::Uuid;
-
-struct DisposableDatabase {
-    pool: PgPool,
-    admin_url: String,
-    name: String,
-}
-
-impl DisposableDatabase {
-    async fn create() -> Result<Self, Box<dyn std::error::Error>> {
-        let base = std::env::var("CROWDRELAY_TEST_DATABASE_URL")
-            .map_err(|_| "CROWDRELAY_TEST_DATABASE_URL must target a disposable database")?;
-        let name = format!("crowdrelay_catrot_{}", Uuid::now_v7().simple());
-        let mut admin = PgConnection::connect(&base).await?;
-        sqlx::query(&format!("CREATE DATABASE {name}"))
-            .execute(&mut admin)
-            .await?;
-        drop(admin);
-        let (head, _) = base.rsplit_once('/').ok_or("database url has no path")?;
-        let url = format!("{head}/{name}");
-        let pool = PgPoolOptions::new()
-            .max_connections(4)
-            .acquire_timeout(Duration::from_secs(10))
-            .connect(&url)
-            .await?;
-        crowdrelay_infra::database::MIGRATOR.run(&pool).await?;
-        Ok(Self {
-            pool,
-            admin_url: base,
-            name,
-        })
-    }
-
-    async fn drop_database(self) {
-        let Self {
-            pool,
-            admin_url,
-            name,
-        } = self;
-        pool.close().await;
-        if let Ok(mut admin) = PgConnection::connect(&admin_url).await {
-            let _ = sqlx::query(&format!("DROP DATABASE IF EXISTS {name} WITH (FORCE)"))
-                .execute(&mut admin)
-                .await;
-        }
-    }
-}
 
 async fn organization(pool: &PgPool, slug: &str) -> Result<Uuid, Box<dyn std::error::Error>> {
     let id = Uuid::now_v7();
@@ -171,15 +125,18 @@ async fn fan(
 #[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn a_rotation_lands_labelled_catalogue_inside_the_cap()
 -> Result<(), Box<dyn std::error::Error>> {
-    let db = DisposableDatabase::create().await?;
-    let result = async {
-        let org = organization(&db.pool, "label").await?;
-        let act_a = workspace(&db.pool, "act-a", Some(org)).await?;
-        let act_b = workspace(&db.pool, "act-b", Some(org)).await?;
+    let db = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
+        .await
+        .expect("connect to the migrated suite database");
+
+    async {
+        let org = organization(&db, "label").await?;
+        let act_a = workspace(&db, "act-a", Some(org)).await?;
+        let act_b = workspace(&db, "act-b", Some(org)).await?;
         let now = OffsetDateTime::now_utc();
 
         let edge = consent(
-            &db.pool,
+            &db,
             org,
             act_a,
             act_b,
@@ -189,10 +146,10 @@ async fn a_rotation_lands_labelled_catalogue_inside_the_cap()
         )
         .await?;
         // A second edge under another purpose must not propose a rotation.
-        consent(&db.pool, org, act_a, act_b, "cross_promote", "active", 4).await?;
+        consent(&db, org, act_a, act_b, "cross_promote", "active", 4).await?;
 
         let oldest = release(
-            &db.pool,
+            &db,
             act_b,
             "Month three",
             now - time::Duration::days(200),
@@ -201,7 +158,7 @@ async fn a_rotation_lands_labelled_catalogue_inside_the_cap()
         )
         .await?;
         release(
-            &db.pool,
+            &db,
             act_b,
             "Month twenty",
             now - time::Duration::days(30),
@@ -210,16 +167,16 @@ async fn a_rotation_lands_labelled_catalogue_inside_the_cap()
         )
         .await?;
         // Unreleased, cancelled and comms-disabled items are not catalogue.
-        release(&db.pool, act_b, "Future", now + time::Duration::days(30), true, true).await?;
-        release(&db.pool, act_b, "Cancelled", now - time::Duration::days(100), false, true)
+        release(&db, act_b, "Future", now + time::Duration::days(30), true, true).await?;
+        release(&db, act_b, "Cancelled", now - time::Duration::days(100), false, true)
             .await?;
-        release(&db.pool, act_b, "Quiet", now - time::Duration::days(150), true, false).await?;
+        release(&db, act_b, "Quiet", now - time::Duration::days(150), true, false).await?;
 
-        fan(&db.pool, act_a, "one@example.com").await?;
-        fan(&db.pool, act_a, "two@example.com").await?;
-        fan(&db.pool, act_b, "beneficiary-only@example.com").await?;
+        fan(&db, act_a, "one@example.com").await?;
+        fan(&db, act_a, "two@example.com").await?;
+        fan(&db, act_b, "beneficiary-only@example.com").await?;
 
-        let plan = catalogue_rotation_plan(&db.pool, org, now).await?;
+        let plan = catalogue_rotation_plan(&db, org, now).await?;
         assert_eq!(plan.proposals.len(), 1, "only the rotation edge proposes");
         let proposal = &plan.proposals[0];
         assert_eq!(proposal.consent_id, edge);
@@ -228,7 +185,7 @@ async fn a_rotation_lands_labelled_catalogue_inside_the_cap()
         assert_eq!(proposal.campaigns_this_month, 0);
         assert!(plan.exhausted.is_empty());
 
-        let run = run_catalogue_rotation(&db.pool, org, edge, now).await?;
+        let run = run_catalogue_rotation(&db, org, edge, now).await?;
         assert_eq!(run.release_id, oldest);
         assert_eq!(run.campaign_reference, format!("catalogue:{oldest}"));
         assert_eq!(run.queued, 2);
@@ -240,7 +197,7 @@ async fn a_rotation_lands_labelled_catalogue_inside_the_cap()
         )
         .bind(edge)
         .bind(&run.campaign_reference)
-        .fetch_one(&db.pool)
+        .fetch_one(&db)
         .await?;
         assert_eq!(ledgered, 2);
         let labelled: i64 = sqlx::query_scalar(
@@ -250,15 +207,15 @@ async fn a_rotation_lands_labelled_catalogue_inside_the_cap()
                  AND payload->'release'->>'id' = $1::text"#,
         )
         .bind(oldest.to_string())
-        .fetch_one(&db.pool)
+        .fetch_one(&db)
         .await?;
         assert_eq!(labelled, 2);
 
         // The cap is spent: the edge no longer proposes, and a run refuses.
-        let plan = catalogue_rotation_plan(&db.pool, org, now).await?;
+        let plan = catalogue_rotation_plan(&db, org, now).await?;
         assert!(plan.proposals.is_empty());
         assert!(plan.exhausted.is_empty(), "spent is not exhausted");
-        let err = run_catalogue_rotation(&db.pool, org, edge, now)
+        let err = run_catalogue_rotation(&db, org, edge, now)
             .await
             .expect_err("the cap refuses");
         assert!(matches!(
@@ -268,7 +225,7 @@ async fn a_rotation_lands_labelled_catalogue_inside_the_cap()
 
         // A direct replay of the same reference delivers nobody twice —
         // the ledger's uniqueness is the replay safety.
-        let repo = PostgresPortfolioRepository::new(db.pool.clone());
+        let repo = PostgresPortfolioRepository::new(db.clone());
         let replayed = repo
             .run_amplification_campaign(
                 act_a,
@@ -288,26 +245,27 @@ async fn a_rotation_lands_labelled_catalogue_inside_the_cap()
         ));
         Ok::<(), Box<dyn std::error::Error>>(())
     }
-    .await;
-    db.drop_database().await;
-    result
+    .await
 }
 
 #[tokio::test]
 #[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn edges_outside_the_organisation_are_absent() -> Result<(), Box<dyn std::error::Error>> {
-    let db = DisposableDatabase::create().await?;
-    let result = async {
-        let org = organization(&db.pool, "label-one").await?;
-        let other_org = organization(&db.pool, "label-two").await?;
-        let ours_a = workspace(&db.pool, "ours-a", Some(org)).await?;
-        let ours_b = workspace(&db.pool, "ours-b", Some(org)).await?;
-        let theirs_a = workspace(&db.pool, "theirs-a", Some(other_org)).await?;
-        let theirs_b = workspace(&db.pool, "theirs-b", Some(other_org)).await?;
+    let db = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
+        .await
+        .expect("connect to the migrated suite database");
+
+    async {
+        let org = organization(&db, "label-one").await?;
+        let other_org = organization(&db, "label-two").await?;
+        let ours_a = workspace(&db, "ours-a", Some(org)).await?;
+        let ours_b = workspace(&db, "ours-b", Some(org)).await?;
+        let theirs_a = workspace(&db, "theirs-a", Some(other_org)).await?;
+        let theirs_b = workspace(&db, "theirs-b", Some(other_org)).await?;
         let now = OffsetDateTime::now_utc();
 
         let theirs_edge = consent(
-            &db.pool,
+            &db,
             other_org,
             theirs_a,
             theirs_b,
@@ -317,7 +275,7 @@ async fn edges_outside_the_organisation_are_absent() -> Result<(), Box<dyn std::
         )
         .await?;
         release(
-            &db.pool,
+            &db,
             theirs_b,
             "Their back then",
             now - time::Duration::days(100),
@@ -327,25 +285,16 @@ async fn edges_outside_the_organisation_are_absent() -> Result<(), Box<dyn std::
         .await?;
         // Our org's edge exists but carries no releases yet — it reports
         // exhausted, not borrowed from the other label's catalogue.
-        let our_edge = consent(
-            &db.pool,
-            org,
-            ours_a,
-            ours_b,
-            "catalogue_rotation",
-            "active",
-            4,
-        )
-        .await?;
+        let our_edge = consent(&db, org, ours_a, ours_b, "catalogue_rotation", "active", 4).await?;
 
-        let plan = catalogue_rotation_plan(&db.pool, org, now).await?;
+        let plan = catalogue_rotation_plan(&db, org, now).await?;
         assert!(plan.proposals.is_empty());
         assert_eq!(plan.exhausted.len(), 1);
         assert_eq!(plan.exhausted[0].consent_id, our_edge);
 
         // Their edge under our org id is not found — membership is the
         // authority, not the id.
-        let err = run_catalogue_rotation(&db.pool, org, theirs_edge, now)
+        let err = run_catalogue_rotation(&db, org, theirs_edge, now)
             .await
             .expect_err("another org's edge is not ours");
         assert!(matches!(
@@ -354,7 +303,5 @@ async fn edges_outside_the_organisation_are_absent() -> Result<(), Box<dyn std::
         ));
         Ok::<(), Box<dyn std::error::Error>>(())
     }
-    .await;
-    db.drop_database().await;
-    result
+    .await
 }

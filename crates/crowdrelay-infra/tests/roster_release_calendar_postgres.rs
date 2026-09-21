@@ -10,58 +10,12 @@
 //! is measured, not assumed; an outsider workspace's release is absent; and
 //! an inactive release does not collide.
 
-use std::time::Duration;
+mod common;
 
 use crowdrelay_infra::roster_release_calendar::roster_release_calendar;
-use sqlx::{Connection, PgConnection, PgPool, postgres::PgPoolOptions};
+use sqlx::PgPool;
 use time::OffsetDateTime;
 use uuid::Uuid;
-
-struct DisposableDatabase {
-    pool: PgPool,
-    admin_url: String,
-    name: String,
-}
-
-impl DisposableDatabase {
-    async fn create() -> Result<Self, Box<dyn std::error::Error>> {
-        let base = std::env::var("CROWDRELAY_TEST_DATABASE_URL")
-            .map_err(|_| "CROWDRELAY_TEST_DATABASE_URL must target a disposable database")?;
-        let name = format!("crowdrelay_relcal_{}", Uuid::now_v7().simple());
-        let mut admin = PgConnection::connect(&base).await?;
-        sqlx::query(&format!("CREATE DATABASE {name}"))
-            .execute(&mut admin)
-            .await?;
-        drop(admin);
-        let (head, _) = base.rsplit_once('/').ok_or("database url has no path")?;
-        let url = format!("{head}/{name}");
-        let pool = PgPoolOptions::new()
-            .max_connections(4)
-            .acquire_timeout(Duration::from_secs(10))
-            .connect(&url)
-            .await?;
-        crowdrelay_infra::database::MIGRATOR.run(&pool).await?;
-        Ok(Self {
-            pool,
-            admin_url: base,
-            name,
-        })
-    }
-
-    async fn drop_database(self) {
-        let Self {
-            pool,
-            admin_url,
-            name,
-        } = self;
-        pool.close().await;
-        if let Ok(mut admin) = PgConnection::connect(&admin_url).await {
-            let _ = sqlx::query(&format!("DROP DATABASE IF EXISTS {name} WITH (FORCE)"))
-                .execute(&mut admin)
-                .await;
-        }
-    }
-}
 
 async fn organization(pool: &PgPool, slug: &str) -> Result<Uuid, Box<dyn std::error::Error>> {
     let id = Uuid::now_v7();
@@ -135,12 +89,15 @@ async fn fan(
 #[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn a_same_week_pair_collides_and_the_quieter_release_moves()
 -> Result<(), Box<dyn std::error::Error>> {
-    let db = DisposableDatabase::create().await?;
-    let result = async {
-        let org = organization(&db.pool, "label-one").await?;
-        let act_a = workspace(&db.pool, "act-a", Some(org)).await?;
-        let act_b = workspace(&db.pool, "act-b", Some(org)).await?;
-        let outsider = workspace(&db.pool, "outsider", None).await?;
+    let db = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
+        .await
+        .expect("connect to the migrated suite database");
+
+    async {
+        let org = organization(&db, "label-one").await?;
+        let act_a = workspace(&db, "act-a", Some(org)).await?;
+        let act_b = workspace(&db, "act-b", Some(org)).await?;
+        let outsider = workspace(&db, "outsider", None).await?;
 
         let now = OffsetDateTime::now_utc();
         // Same ISO week: act-a's filler and act-b's single. The anchor must
@@ -149,18 +106,9 @@ async fn a_same_week_pair_collides_and_the_quieter_release_moves()
         // never collides.
         let days_to_wednesday = (2 - now.weekday().number_days_from_monday() as i64 + 7) % 7;
         let wednesday = now + time::Duration::days(14 + days_to_wednesday);
+        release(&db, act_a, "Loose track", wednesday, "filler", true, true).await?;
         release(
-            &db.pool,
-            act_a,
-            "Loose track",
-            wednesday,
-            "filler",
-            true,
-            true,
-        )
-        .await?;
-        release(
-            &db.pool,
+            &db,
             act_b,
             "The single",
             wednesday + time::Duration::days(2),
@@ -171,7 +119,7 @@ async fn a_same_week_pair_collides_and_the_quieter_release_moves()
         .await?;
         // A clear week for act-a.
         release(
-            &db.pool,
+            &db,
             act_a,
             "Follow-up",
             now + time::Duration::days(30),
@@ -181,24 +129,12 @@ async fn a_same_week_pair_collides_and_the_quieter_release_moves()
         )
         .await?;
         // The outsider's release in the same colliding week must not appear.
-        release(
-            &db.pool, outsider, "Not ours", wednesday, "single", true, true,
-        )
-        .await?;
+        release(&db, outsider, "Not ours", wednesday, "single", true, true).await?;
         // An inactive release on a member act does not collide.
-        release(
-            &db.pool,
-            act_b,
-            "Cancelled",
-            wednesday,
-            "track",
-            true,
-            false,
-        )
-        .await?;
+        release(&db, act_b, "Cancelled", wednesday, "track", true, false).await?;
         // A release beyond the lookahead is not dragged in.
         release(
-            &db.pool,
+            &db,
             act_a,
             "Far future",
             now + time::Duration::days(200),
@@ -210,17 +146,17 @@ async fn a_same_week_pair_collides_and_the_quieter_release_moves()
 
         // Two shared fans, one exclusive to each side, one unsubscribed
         // (must not count).
-        fan(&db.pool, act_a, "shared-one@example.com", "active").await?;
-        fan(&db.pool, act_b, "shared-one@example.com", "active").await?;
-        fan(&db.pool, act_a, "shared-two@example.com", "active").await?;
-        fan(&db.pool, act_b, "shared-two@example.com", "active").await?;
-        fan(&db.pool, act_a, "only-a@example.com", "active").await?;
-        fan(&db.pool, act_b, "shared-lapsed@example.com", "unsubscribed").await?;
-        fan(&db.pool, act_a, "shared-lapsed@example.com", "active").await?;
+        fan(&db, act_a, "shared-one@example.com", "active").await?;
+        fan(&db, act_b, "shared-one@example.com", "active").await?;
+        fan(&db, act_a, "shared-two@example.com", "active").await?;
+        fan(&db, act_b, "shared-two@example.com", "active").await?;
+        fan(&db, act_a, "only-a@example.com", "active").await?;
+        fan(&db, act_b, "shared-lapsed@example.com", "unsubscribed").await?;
+        fan(&db, act_a, "shared-lapsed@example.com", "active").await?;
         // The outsider sharing an email must not inflate the member pair.
-        fan(&db.pool, outsider, "shared-one@example.com", "active").await?;
+        fan(&db, outsider, "shared-one@example.com", "active").await?;
 
-        let calendar = roster_release_calendar(&db.pool, org, now).await?;
+        let calendar = roster_release_calendar(&db, org, now).await?;
 
         // Three member releases in the window — the outsider's, the
         // cancelled one and the far-future one are all absent.
@@ -246,23 +182,22 @@ async fn a_same_week_pair_collides_and_the_quieter_release_moves()
         assert!(collision.reason.contains("2 active fans"));
         Ok::<(), Box<dyn std::error::Error>>(())
     }
-    .await;
-    db.drop_database().await;
-    result
+    .await
 }
 
 #[tokio::test]
 #[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn an_empty_roster_gets_an_empty_calendar() -> Result<(), Box<dyn std::error::Error>> {
-    let db = DisposableDatabase::create().await?;
-    let result = async {
-        let org = organization(&db.pool, "empty-label").await?;
-        let calendar = roster_release_calendar(&db.pool, org, OffsetDateTime::now_utc()).await?;
+    let db = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
+        .await
+        .expect("connect to the migrated suite database");
+
+    async {
+        let org = organization(&db, "empty-label").await?;
+        let calendar = roster_release_calendar(&db, org, OffsetDateTime::now_utc()).await?;
         assert!(calendar.releases.is_empty());
         assert!(calendar.collisions.is_empty());
         Ok::<(), Box<dyn std::error::Error>>(())
     }
-    .await;
-    db.drop_database().await;
-    result
+    .await
 }

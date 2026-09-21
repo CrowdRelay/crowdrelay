@@ -13,6 +13,8 @@
 //! - nothing tenant-owned: no `event_acts`, no contacts, no capacity claims;
 //! - a re-sweep refreshes rather than duplicates.
 
+mod common;
+
 use std::{sync::Arc, time::Duration};
 
 use anyhow::{Context, Result};
@@ -24,7 +26,7 @@ use crowdrelay_worker::{
         TicketmasterProvider, TicketmasterSweepWorker, TmEvent, parse_events_body,
     },
 };
-use sqlx::{Connection, PgConnection, PgPool, postgres::PgPoolOptions};
+use sqlx::PgPool;
 use uuid::Uuid;
 
 /// Answers every city with the same canned Discovery page — the payload is
@@ -38,58 +40,6 @@ struct CannedProvider {
 impl TicketmasterProvider for CannedProvider {
     async fn events_in(&self, _city: &SweepCity) -> Result<Vec<TmEvent>> {
         parse_events_body(self.body.as_bytes())
-    }
-}
-
-struct DisposableDatabase {
-    admin_url: String,
-    name: String,
-    pool: PgPool,
-}
-
-impl DisposableDatabase {
-    async fn create() -> Result<Self> {
-        let base_url = std::env::var("CROWDRELAY_TEST_DATABASE_URL")
-            .context("CROWDRELAY_TEST_DATABASE_URL must target a disposable database")?;
-        let (prefix, _) = base_url
-            .rsplit_once('/')
-            .context("database URL has no database name")?;
-        let admin_url = format!("{prefix}/postgres");
-        let name = format!("crowdrelay_tmsweep_{}", Uuid::now_v7().simple());
-        let mut admin = PgConnection::connect(&admin_url)
-            .await
-            .context("connect to the maintenance database")?;
-        sqlx::query(&format!("CREATE DATABASE {name}"))
-            .execute(&mut admin)
-            .await
-            .context("create the disposable database")?;
-        drop(admin);
-        let pool = PgPoolOptions::new()
-            .max_connections(4)
-            .connect(&format!("{prefix}/{name}"))
-            .await
-            .context("connect to the disposable database")?;
-        crowdrelay_infra::database::MIGRATOR
-            .run(&pool)
-            .await
-            .context("apply migrations")?;
-        Ok(Self {
-            admin_url,
-            name,
-            pool,
-        })
-    }
-
-    async fn drop_database(self) {
-        self.pool.close().await;
-        if let Ok(mut admin) = PgConnection::connect(&self.admin_url).await {
-            let _ = sqlx::query(&format!(
-                "DROP DATABASE IF EXISTS {} WITH (FORCE)",
-                self.name
-            ))
-            .execute(&mut admin)
-            .await;
-        }
     }
 }
 
@@ -181,10 +131,11 @@ const EVENT_AT_KNOWN_ROOM: &str = r#"{
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn a_tm_event_writes_evidence_onto_a_room_that_exists() -> Result<()> {
-    let database = DisposableDatabase::create().await?;
-    let result = run_sweep_cases(&database.pool).await;
-    database.drop_database().await;
-    result
+    let database = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
+        .await
+        .expect("connect to the migrated suite database");
+
+    run_sweep_cases(&database).await
 }
 
 async fn run_sweep_cases(pool: &PgPool) -> Result<()> {
@@ -336,10 +287,11 @@ async fn run_sweep_cases(pool: &PgPool) -> Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn an_unknown_room_mints_nothing() -> Result<()> {
-    let database = DisposableDatabase::create().await?;
-    let result = run_unknown_case(&database.pool).await;
-    database.drop_database().await;
-    result
+    let database = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
+        .await
+        .expect("connect to the migrated suite database");
+
+    run_unknown_case(&database).await
 }
 
 async fn run_unknown_case(pool: &PgPool) -> Result<()> {
@@ -413,10 +365,11 @@ async fn run_unknown_case(pool: &PgPool) -> Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn the_anchor_answers_before_the_name() -> Result<()> {
-    let database = DisposableDatabase::create().await?;
-    let result = run_anchor_case(&database.pool).await;
-    database.drop_database().await;
-    result
+    let database = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
+        .await
+        .expect("connect to the migrated suite database");
+
+    run_anchor_case(&database).await
 }
 
 /// A Ticketmaster venue id already anchored to a room wins over the name —

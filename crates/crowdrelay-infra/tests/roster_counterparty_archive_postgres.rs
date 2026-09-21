@@ -10,58 +10,12 @@
 //! nothing; an outsider workspace's mark never enters the archive; and the
 //! same email under a different tenant resolves to one registry row.
 
-use std::time::Duration;
+mod common;
 
 use crowdrelay_infra::roster_counterparty_archive::counterparty_archive;
-use sqlx::{Connection, PgConnection, PgPool, postgres::PgPoolOptions};
+use sqlx::PgPool;
 use time::OffsetDateTime;
 use uuid::Uuid;
-
-struct DisposableDatabase {
-    pool: PgPool,
-    admin_url: String,
-    name: String,
-}
-
-impl DisposableDatabase {
-    async fn create() -> Result<Self, Box<dyn std::error::Error>> {
-        let base = std::env::var("CROWDRELAY_TEST_DATABASE_URL")
-            .map_err(|_| "CROWDRELAY_TEST_DATABASE_URL must target a disposable database")?;
-        let name = format!("crowdrelay_cparch_{}", Uuid::now_v7().simple());
-        let mut admin = PgConnection::connect(&base).await?;
-        sqlx::query(&format!("CREATE DATABASE {name}"))
-            .execute(&mut admin)
-            .await?;
-        drop(admin);
-        let (head, _) = base.rsplit_once('/').ok_or("database url has no path")?;
-        let url = format!("{head}/{name}");
-        let pool = PgPoolOptions::new()
-            .max_connections(4)
-            .acquire_timeout(Duration::from_secs(10))
-            .connect(&url)
-            .await?;
-        crowdrelay_infra::database::MIGRATOR.run(&pool).await?;
-        Ok(Self {
-            pool,
-            admin_url: base,
-            name,
-        })
-    }
-
-    async fn drop_database(self) {
-        let Self {
-            pool,
-            admin_url,
-            name,
-        } = self;
-        pool.close().await;
-        if let Ok(mut admin) = PgConnection::connect(&admin_url).await {
-            let _ = sqlx::query(&format!("DROP DATABASE IF EXISTS {name} WITH (FORCE)"))
-                .execute(&mut admin)
-                .await;
-        }
-    }
-}
 
 async fn organization(pool: &PgPool, slug: &str) -> Result<Uuid, Box<dyn std::error::Error>> {
     let id = Uuid::now_v7();
@@ -121,18 +75,21 @@ async fn event(
 #[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn the_same_promoter_across_acts_reports_the_recurrence()
 -> Result<(), Box<dyn std::error::Error>> {
-    let db = DisposableDatabase::create().await?;
-    let result = async {
-        let org = organization(&db.pool, "label").await?;
-        let act_a = workspace(&db.pool, "act-a", Some(org)).await?;
-        let act_b = workspace(&db.pool, "act-b", Some(org)).await?;
-        let outsider = workspace(&db.pool, "outsider", None).await?;
+    let db = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
+        .await
+        .expect("connect to the migrated suite database");
+
+    async {
+        let org = organization(&db, "label").await?;
+        let act_a = workspace(&db, "act-a", Some(org)).await?;
+        let act_b = workspace(&db, "act-b", Some(org)).await?;
+        let outsider = workspace(&db, "outsider", None).await?;
         let now = OffsetDateTime::now_utc();
 
         // The shared promoter: act A met them twice, act B once — the
         // recurrence the archive exists to surface.
         event(
-            &db.pool,
+            &db,
             act_a,
             "a-first",
             now - time::Duration::days(90),
@@ -142,7 +99,7 @@ async fn the_same_promoter_across_acts_reports_the_recurrence()
         )
         .await?;
         event(
-            &db.pool,
+            &db,
             act_a,
             "a-second",
             now - time::Duration::days(30),
@@ -152,7 +109,7 @@ async fn the_same_promoter_across_acts_reports_the_recurrence()
         )
         .await?;
         event(
-            &db.pool,
+            &db,
             act_b,
             "b-first",
             now - time::Duration::days(10),
@@ -163,7 +120,7 @@ async fn the_same_promoter_across_acts_reports_the_recurrence()
         .await?;
         // An act-private counterparty: recurrence of one.
         event(
-            &db.pool,
+            &db,
             act_a,
             "a-third",
             now - time::Duration::days(5),
@@ -174,7 +131,7 @@ async fn the_same_promoter_across_acts_reports_the_recurrence()
         .await?;
         // A draft and a cancelled event mark nothing.
         event(
-            &db.pool,
+            &db,
             act_b,
             "b-draft",
             now + time::Duration::days(5),
@@ -184,7 +141,7 @@ async fn the_same_promoter_across_acts_reports_the_recurrence()
         )
         .await?;
         event(
-            &db.pool,
+            &db,
             act_b,
             "b-cancelled",
             now - time::Duration::days(3),
@@ -196,7 +153,7 @@ async fn the_same_promoter_across_acts_reports_the_recurrence()
         // The outsider's mark on the same promoter email resolves to the
         // same registry row but must not enter our archive.
         event(
-            &db.pool,
+            &db,
             outsider,
             "o-first",
             now - time::Duration::days(1),
@@ -206,7 +163,7 @@ async fn the_same_promoter_across_acts_reports_the_recurrence()
         )
         .await?;
 
-        let archive = counterparty_archive(&db.pool, org, now).await?;
+        let archive = counterparty_archive(&db, org, now).await?;
         assert_eq!(archive.member_count, 2);
         assert_eq!(
             archive.counterparties.len(),
@@ -238,14 +195,14 @@ async fn the_same_promoter_across_acts_reports_the_recurrence()
         let registry_count: i64 = sqlx::query_scalar(
             "SELECT count(*) FROM place_counterparties WHERE email_key = 'pat@promo.example'",
         )
-        .fetch_one(&db.pool)
+        .fetch_one(&db)
         .await?;
         assert_eq!(registry_count, 1);
         let mark_count: i64 = sqlx::query_scalar(
             "SELECT count(*) FROM place_counterparty_marks WHERE counterparty_id = (
                  SELECT id FROM place_counterparties WHERE email_key = 'pat@promo.example')",
         )
-        .fetch_one(&db.pool)
+        .fetch_one(&db)
         .await?;
         assert_eq!(
             mark_count, 4,
@@ -253,22 +210,23 @@ async fn the_same_promoter_across_acts_reports_the_recurrence()
         );
         Ok::<(), Box<dyn std::error::Error>>(())
     }
-    .await;
-    db.drop_database().await;
-    result
+    .await
 }
 
 #[tokio::test]
 #[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn a_retracted_counterparty_unmarks_the_event() -> Result<(), Box<dyn std::error::Error>> {
-    let db = DisposableDatabase::create().await?;
-    let result = async {
-        let org = organization(&db.pool, "label").await?;
-        let act = workspace(&db.pool, "act", Some(org)).await?;
+    let db = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
+        .await
+        .expect("connect to the migrated suite database");
+
+    async {
+        let org = organization(&db, "label").await?;
+        let act = workspace(&db, "act", Some(org)).await?;
         let now = OffsetDateTime::now_utc();
 
         let event_id = event(
-            &db.pool,
+            &db,
             act,
             "the-show",
             now - time::Duration::days(7),
@@ -280,18 +238,16 @@ async fn a_retracted_counterparty_unmarks_the_event() -> Result<(), Box<dyn std:
         // The show is cancelled — the claim it made retracts.
         sqlx::query("UPDATE events SET status = 'cancelled' WHERE id = $1")
             .bind(event_id)
-            .execute(&db.pool)
+            .execute(&db)
             .await?;
         let marks: i64 = sqlx::query_scalar("SELECT count(*) FROM place_counterparty_marks")
-            .fetch_one(&db.pool)
+            .fetch_one(&db)
             .await?;
         assert_eq!(marks, 0, "a cancelled night is not a met promoter");
 
-        let archive = counterparty_archive(&db.pool, org, now).await?;
+        let archive = counterparty_archive(&db, org, now).await?;
         assert!(archive.counterparties.is_empty());
         Ok::<(), Box<dyn std::error::Error>>(())
     }
-    .await;
-    db.drop_database().await;
-    result
+    .await
 }

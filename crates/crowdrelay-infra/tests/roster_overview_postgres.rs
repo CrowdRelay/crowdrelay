@@ -12,62 +12,16 @@
 //! count honours the latest-grant discipline (a revoked consent does not
 //! count); and the page leads with the act missing the most.
 
-use std::time::Duration;
+mod common;
 
 use crowdrelay_domain::roster_overview::{
     GAP_NO_BRIEFING, GAP_NO_REACHABLE_FANS, GAP_NO_UPCOMING_SHOW,
 };
 use crowdrelay_infra::roster_overview::roster_overview;
 use serde_json::json;
-use sqlx::{Connection, PgConnection, PgPool, postgres::PgPoolOptions};
+use sqlx::PgPool;
 use time::OffsetDateTime;
 use uuid::Uuid;
-
-struct DisposableDatabase {
-    pool: PgPool,
-    admin_url: String,
-    name: String,
-}
-
-impl DisposableDatabase {
-    async fn create() -> Result<Self, Box<dyn std::error::Error>> {
-        let base = std::env::var("CROWDRELAY_TEST_DATABASE_URL")
-            .map_err(|_| "CROWDRELAY_TEST_DATABASE_URL must target a disposable database")?;
-        let name = format!("crowdrelay_rosterovw_{}", Uuid::now_v7().simple());
-        let mut admin = PgConnection::connect(&base).await?;
-        sqlx::query(&format!("CREATE DATABASE {name}"))
-            .execute(&mut admin)
-            .await?;
-        drop(admin);
-        let (head, _) = base.rsplit_once('/').ok_or("database url has no path")?;
-        let url = format!("{head}/{name}");
-        let pool = PgPoolOptions::new()
-            .max_connections(4)
-            .acquire_timeout(Duration::from_secs(10))
-            .connect(&url)
-            .await?;
-        crowdrelay_infra::database::MIGRATOR.run(&pool).await?;
-        Ok(Self {
-            pool,
-            admin_url: base,
-            name,
-        })
-    }
-
-    async fn drop_database(self) {
-        let Self {
-            pool,
-            admin_url,
-            name,
-        } = self;
-        pool.close().await;
-        if let Ok(mut admin) = PgConnection::connect(&admin_url).await {
-            let _ = sqlx::query(&format!("DROP DATABASE IF EXISTS {name} WITH (FORCE)"))
-                .execute(&mut admin)
-                .await;
-        }
-    }
-}
 
 async fn organization(pool: &PgPool, slug: &str) -> Result<Uuid, Box<dyn std::error::Error>> {
     let id = Uuid::now_v7();
@@ -245,11 +199,14 @@ async fn upcoming_show(
 #[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn every_acts_attention_pipeline_and_gaps_land_under_that_act()
 -> Result<(), Box<dyn std::error::Error>> {
-    let database = DisposableDatabase::create().await?;
-    let pool = &database.pool;
+    let database = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
+        .await
+        .expect("connect to the migrated suite database");
+    let pool = &database;
     let now = OffsetDateTime::now_utc();
     let today = now.date();
-    let result = async {
+
+    async {
         let label = organization(pool, "roster-label").await?;
         let busy = workspace(pool, "busy-act", Some(label)).await?;
         let empty = workspace(pool, "empty-act", Some(label)).await?;
@@ -401,7 +358,5 @@ async fn every_acts_attention_pipeline_and_gaps_land_under_that_act()
 
         Ok(())
     }
-    .await;
-    database.drop_database().await;
-    result
+    .await
 }

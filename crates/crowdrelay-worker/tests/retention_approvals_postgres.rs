@@ -10,61 +10,14 @@
 //! These tests run the real worker's `run_once`, because a test that
 //! reimplemented the query would prove nothing about the one that ships.
 
+mod common;
+
 use std::time::Duration;
 
 use anyhow::{Context, Result, ensure};
 use crowdrelay_worker::retention::{RetentionWorker, RetentionWorkerConfig};
-use sqlx::{Connection, PgConnection, PgPool, postgres::PgPoolOptions};
+use sqlx::PgPool;
 use uuid::Uuid;
-
-struct DisposableDatabase {
-    admin_url: String,
-    name: String,
-    pool: PgPool,
-}
-
-impl DisposableDatabase {
-    async fn create() -> Result<Self> {
-        let base_url = std::env::var("CROWDRELAY_TEST_DATABASE_URL")
-            .context("CROWDRELAY_TEST_DATABASE_URL must target a disposable database")?;
-        let (prefix, _) = base_url
-            .rsplit_once('/')
-            .context("database URL has no database name")?;
-        let admin_url = format!("{prefix}/postgres");
-        let name = format!("crowdrelay_retention_{}", Uuid::now_v7().simple());
-        let mut admin = PgConnection::connect(&admin_url)
-            .await
-            .context("connect to the maintenance database")?;
-        sqlx::query(&format!("CREATE DATABASE {name}"))
-            .execute(&mut admin)
-            .await
-            .context("create the disposable database")?;
-        drop(admin);
-        let pool = PgPoolOptions::new()
-            .max_connections(4)
-            .connect(&format!("{prefix}/{name}"))
-            .await
-            .context("connect to the disposable database")?;
-        crowdrelay_infra::database::MIGRATOR
-            .run(&pool)
-            .await
-            .context("apply migrations")?;
-        Ok(Self {
-            admin_url,
-            name,
-            pool,
-        })
-    }
-
-    async fn drop_database(self) {
-        self.pool.close().await;
-        if let Ok(mut admin) = PgConnection::connect(&self.admin_url).await {
-            let _ = sqlx::query(&format!("DROP DATABASE IF EXISTS {} (FORCE)", self.name))
-                .execute(&mut admin)
-                .await;
-        }
-    }
-}
 
 async fn workspace(pool: &PgPool) -> Result<Uuid> {
     let id = Uuid::now_v7();
@@ -176,12 +129,15 @@ async fn action_state(pool: &PgPool, id: Uuid) -> Result<(String, Option<String>
 #[tokio::test]
 #[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn an_expired_approval_dies_without_a_claim() -> Result<()> {
-    let db = DisposableDatabase::create().await?;
-    let result = async {
-        let workspace_id = workspace(&db.pool).await?;
-        let decision_id = decision(&db.pool, workspace_id, 9000).await?;
+    let db = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
+        .await
+        .expect("connect to the migrated suite database");
+
+    async {
+        let workspace_id = workspace(&db).await?;
+        let decision_id = decision(&db, workspace_id, 9000).await?;
         let action_id = awaiting_approval(
-            &db.pool,
+            &db,
             workspace_id,
             decision_id,
             "workspace",
@@ -190,10 +146,10 @@ async fn an_expired_approval_dies_without_a_claim() -> Result<()> {
         )
         .await?;
 
-        let stats = worker(&db.pool)?.run_once().await?;
+        let stats = worker(&db)?.run_once().await?;
         ensure!(stats.lapsed_autopilot_asks_swept >= 1);
 
-        let (status, error_kind) = action_state(&db.pool, action_id).await?;
+        let (status, error_kind) = action_state(&db, action_id).await?;
         ensure!(status == "cancelled", "status: {status}");
         ensure!(
             error_kind.as_deref() == Some("approval_expired"),
@@ -201,9 +157,7 @@ async fn an_expired_approval_dies_without_a_claim() -> Result<()> {
         );
         Ok(())
     }
-    .await;
-    db.drop_database().await;
-    result
+    .await
 }
 
 /// One global pass covers every workspace — the claim path only ever
@@ -211,15 +165,18 @@ async fn an_expired_approval_dies_without_a_claim() -> Result<()> {
 #[tokio::test]
 #[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn the_sweep_reaches_every_workspace() -> Result<()> {
-    let db = DisposableDatabase::create().await?;
-    let result = async {
+    let db = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
+        .await
+        .expect("connect to the migrated suite database");
+
+    async {
         let mut action_ids = Vec::new();
         for _ in 0..2 {
-            let workspace_id = workspace(&db.pool).await?;
-            let decision_id = decision(&db.pool, workspace_id, 9000).await?;
+            let workspace_id = workspace(&db).await?;
+            let decision_id = decision(&db, workspace_id, 9000).await?;
             action_ids.push(
                 awaiting_approval(
-                    &db.pool,
+                    &db,
                     workspace_id,
                     decision_id,
                     "workspace",
@@ -230,17 +187,15 @@ async fn the_sweep_reaches_every_workspace() -> Result<()> {
             );
         }
 
-        let stats = worker(&db.pool)?.run_once().await?;
+        let stats = worker(&db)?.run_once().await?;
         ensure!(stats.lapsed_autopilot_asks_swept >= 2);
         for id in action_ids {
-            let (status, _) = action_state(&db.pool, id).await?;
+            let (status, _) = action_state(&db, id).await?;
             ensure!(status == "cancelled", "status: {status}");
         }
         Ok(())
     }
-    .await;
-    db.drop_database().await;
-    result
+    .await
 }
 
 /// A live ask inside its window is untouched — the sweep only kills what is
@@ -248,12 +203,15 @@ async fn the_sweep_reaches_every_workspace() -> Result<()> {
 #[tokio::test]
 #[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn a_fresh_approval_survives_the_sweep() -> Result<()> {
-    let db = DisposableDatabase::create().await?;
-    let result = async {
-        let workspace_id = workspace(&db.pool).await?;
-        let decision_id = decision(&db.pool, workspace_id, 9000).await?;
+    let db = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
+        .await
+        .expect("connect to the migrated suite database");
+
+    async {
+        let workspace_id = workspace(&db).await?;
+        let decision_id = decision(&db, workspace_id, 9000).await?;
         let action_id = awaiting_approval(
-            &db.pool,
+            &db,
             workspace_id,
             decision_id,
             "workspace",
@@ -262,16 +220,14 @@ async fn a_fresh_approval_survives_the_sweep() -> Result<()> {
         )
         .await?;
 
-        worker(&db.pool)?.run_once().await?;
+        worker(&db)?.run_once().await?;
 
-        let (status, error_kind) = action_state(&db.pool, action_id).await?;
+        let (status, error_kind) = action_state(&db, action_id).await?;
         ensure!(status == "awaiting_approval", "status: {status}");
         ensure!(error_kind.is_none(), "error_kind: {error_kind:?}");
         Ok(())
     }
-    .await;
-    db.drop_database().await;
-    result
+    .await
 }
 
 /// An ask whose decision carried zero confidence is withdrawn, not expired —
@@ -279,13 +235,16 @@ async fn a_fresh_approval_survives_the_sweep() -> Result<()> {
 #[tokio::test]
 #[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn a_zero_confidence_ask_is_withdrawn_not_expired() -> Result<()> {
-    let db = DisposableDatabase::create().await?;
-    let result = async {
-        let workspace_id = workspace(&db.pool).await?;
-        let decision_id = decision(&db.pool, workspace_id, 0).await?;
+    let db = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
+        .await
+        .expect("connect to the migrated suite database");
+
+    async {
+        let workspace_id = workspace(&db).await?;
+        let decision_id = decision(&db, workspace_id, 0).await?;
         // Still inside its window: the withdrawal is about evidence, not time.
         let action_id = awaiting_approval(
-            &db.pool,
+            &db,
             workspace_id,
             decision_id,
             "workspace",
@@ -294,9 +253,9 @@ async fn a_zero_confidence_ask_is_withdrawn_not_expired() -> Result<()> {
         )
         .await?;
 
-        worker(&db.pool)?.run_once().await?;
+        worker(&db)?.run_once().await?;
 
-        let (status, error_kind) = action_state(&db.pool, action_id).await?;
+        let (status, error_kind) = action_state(&db, action_id).await?;
         ensure!(status == "cancelled", "status: {status}");
         ensure!(
             error_kind.as_deref() == Some("insufficient_evidence"),
@@ -304,9 +263,7 @@ async fn a_zero_confidence_ask_is_withdrawn_not_expired() -> Result<()> {
         );
         Ok(())
     }
-    .await;
-    db.drop_database().await;
-    result
+    .await
 }
 
 /// A suggestion whose ask died must resolve with it, in the same pass —
@@ -314,9 +271,12 @@ async fn a_zero_confidence_ask_is_withdrawn_not_expired() -> Result<()> {
 #[tokio::test]
 #[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn a_dead_ask_expires_its_suggestion() -> Result<()> {
-    let db = DisposableDatabase::create().await?;
-    let result = async {
-        let workspace_id = workspace(&db.pool).await?;
+    let db = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
+        .await
+        .expect("connect to the migrated suite database");
+
+    async {
+        let workspace_id = workspace(&db).await?;
         let suggestion_id = Uuid::now_v7();
         sqlx::query(
             r#"
@@ -327,12 +287,12 @@ async fn a_dead_ask_expires_its_suggestion() -> Result<()> {
         )
         .bind(suggestion_id)
         .bind(workspace_id)
-        .execute(&db.pool)
+        .execute(&db)
         .await
         .context("insert suggestion")?;
-        let decision_id = decision(&db.pool, workspace_id, 9000).await?;
+        let decision_id = decision(&db, workspace_id, 9000).await?;
         awaiting_approval(
-            &db.pool,
+            &db,
             workspace_id,
             decision_id,
             "content_suggestion",
@@ -341,12 +301,12 @@ async fn a_dead_ask_expires_its_suggestion() -> Result<()> {
         )
         .await?;
 
-        worker(&db.pool)?.run_once().await?;
+        worker(&db)?.run_once().await?;
 
         let status: String =
             sqlx::query_scalar("SELECT status FROM viryaos_content_suggestions WHERE id = $1")
                 .bind(suggestion_id)
-                .fetch_one(&db.pool)
+                .fetch_one(&db)
                 .await?;
         ensure!(status == "expired", "suggestion status: {status}");
         let outcomes: i64 = sqlx::query_scalar(
@@ -354,14 +314,12 @@ async fn a_dead_ask_expires_its_suggestion() -> Result<()> {
              WHERE suggestion_id = $1 AND outcome = 'expired'",
         )
         .bind(suggestion_id)
-        .fetch_one(&db.pool)
+        .fetch_one(&db)
         .await?;
         ensure!(outcomes == 1, "outcome rows: {outcomes}");
         Ok(())
     }
-    .await;
-    db.drop_database().await;
-    result
+    .await
 }
 
 /// A second pass must be a no-op: the transitions are terminal and the
@@ -369,9 +327,12 @@ async fn a_dead_ask_expires_its_suggestion() -> Result<()> {
 #[tokio::test]
 #[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn a_second_pass_changes_nothing() -> Result<()> {
-    let db = DisposableDatabase::create().await?;
-    let result = async {
-        let workspace_id = workspace(&db.pool).await?;
+    let db = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
+        .await
+        .expect("connect to the migrated suite database");
+
+    async {
+        let workspace_id = workspace(&db).await?;
         let suggestion_id = Uuid::now_v7();
         sqlx::query(
             "INSERT INTO viryaos_content_suggestions (id, workspace_id, concept, status)
@@ -379,12 +340,12 @@ async fn a_second_pass_changes_nothing() -> Result<()> {
         )
         .bind(suggestion_id)
         .bind(workspace_id)
-        .execute(&db.pool)
+        .execute(&db)
         .await
         .context("insert suggestion")?;
-        let decision_id = decision(&db.pool, workspace_id, 9000).await?;
+        let decision_id = decision(&db, workspace_id, 9000).await?;
         awaiting_approval(
-            &db.pool,
+            &db,
             workspace_id,
             decision_id,
             "content_suggestion",
@@ -393,7 +354,7 @@ async fn a_second_pass_changes_nothing() -> Result<()> {
         )
         .await?;
 
-        let worker = worker(&db.pool)?;
+        let worker = worker(&db)?;
         worker.run_once().await?;
         let stats = worker.run_once().await?;
         ensure!(stats.lapsed_autopilot_asks_swept == 0, "stats: {stats:?}");
@@ -401,14 +362,12 @@ async fn a_second_pass_changes_nothing() -> Result<()> {
             "SELECT count(*)::bigint FROM viryaos_suggestion_outcomes WHERE suggestion_id = $1",
         )
         .bind(suggestion_id)
-        .fetch_one(&db.pool)
+        .fetch_one(&db)
         .await?;
         ensure!(outcomes == 1, "outcome rows: {outcomes}");
         Ok(())
     }
-    .await;
-    db.drop_database().await;
-    result
+    .await
 }
 
 /// Decisions that produced nothing age out; a decision that became an action
@@ -416,32 +375,35 @@ async fn a_second_pass_changes_nothing() -> Result<()> {
 #[tokio::test]
 #[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn orphan_decisions_age_out_but_audit_rows_stay() -> Result<()> {
-    let db = DisposableDatabase::create().await?;
-    let result = async {
-        let workspace_id = workspace(&db.pool).await?;
+    let db = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
+        .await
+        .expect("connect to the migrated suite database");
+
+    async {
+        let workspace_id = workspace(&db).await?;
         // Old, produced nothing: eligible.
-        let orphan = decision(&db.pool, workspace_id, 9000).await?;
+        let orphan = decision(&db, workspace_id, 9000).await?;
         sqlx::query(
             "UPDATE viryaos_autopilot_decisions SET evaluated_at = now() - interval '181 days'
              WHERE id = $1",
         )
         .bind(orphan)
-        .execute(&db.pool)
+        .execute(&db)
         .await?;
         // Old, produced an action: audit, never eligible.
-        let audit = decision(&db.pool, workspace_id, 9000).await?;
+        let audit = decision(&db, workspace_id, 9000).await?;
         sqlx::query(
             "UPDATE viryaos_autopilot_decisions SET evaluated_at = now() - interval '181 days'
              WHERE id = $1",
         )
         .bind(audit)
-        .execute(&db.pool)
+        .execute(&db)
         .await?;
-        awaiting_approval(&db.pool, workspace_id, audit, "workspace", workspace_id, 24).await?;
+        awaiting_approval(&db, workspace_id, audit, "workspace", workspace_id, 24).await?;
         // Young, produced nothing: inside the window.
-        let fresh = decision(&db.pool, workspace_id, 9000).await?;
+        let fresh = decision(&db, workspace_id, 9000).await?;
 
-        let stats = worker(&db.pool)?.run_once().await?;
+        let stats = worker(&db)?.run_once().await?;
         ensure!(
             stats.orphan_autopilot_decisions_deleted == 1,
             "stats: {stats:?}"
@@ -451,7 +413,7 @@ async fn orphan_decisions_age_out_but_audit_rows_stay() -> Result<()> {
             "SELECT id FROM viryaos_autopilot_decisions WHERE workspace_id = $1",
         )
         .bind(workspace_id)
-        .fetch_all(&db.pool)
+        .fetch_all(&db)
         .await?;
         remaining.sort();
         let mut expected = vec![audit, fresh];
@@ -459,7 +421,5 @@ async fn orphan_decisions_age_out_but_audit_rows_stay() -> Result<()> {
         ensure!(remaining == expected, "remaining: {remaining:?}");
         Ok(())
     }
-    .await;
-    db.drop_database().await;
-    result
+    .await
 }

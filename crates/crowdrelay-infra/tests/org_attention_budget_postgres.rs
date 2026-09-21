@@ -21,6 +21,8 @@
 //! the schema comes from `MIGRATOR.run`, so a migration that does not apply
 //! fails here before it can fail a deploy.
 
+mod common;
+
 use std::time::Duration;
 
 use crowdrelay_application::RepositoryError;
@@ -31,55 +33,9 @@ use crowdrelay_application::autopilot::{
 use crowdrelay_domain::booking::BookingOutreachPhase;
 use crowdrelay_domain::{AutopilotActionId, BookingTargetId, CityId, WorkspaceId};
 use crowdrelay_infra::{autopilot::PostgresAutopilotRepository, config::DatabaseConfig};
-use sqlx::{Connection, PgConnection, PgPool, postgres::PgPoolOptions};
+use sqlx::PgPool;
 use time::OffsetDateTime;
 use uuid::Uuid;
-
-struct DisposableDatabase {
-    pool: PgPool,
-    admin_url: String,
-    name: String,
-}
-
-impl DisposableDatabase {
-    async fn create() -> Result<Self, Box<dyn std::error::Error>> {
-        let base = std::env::var("CROWDRELAY_TEST_DATABASE_URL")
-            .map_err(|_| "CROWDRELAY_TEST_DATABASE_URL must target a disposable database")?;
-        let name = format!("crowdrelay_517_{}", Uuid::now_v7().simple());
-        let mut admin = PgConnection::connect(&base).await?;
-        sqlx::query(&format!("CREATE DATABASE {name}"))
-            .execute(&mut admin)
-            .await?;
-        drop(admin);
-        let (head, _) = base.rsplit_once('/').ok_or("database url has no path")?;
-        let url = format!("{head}/{name}");
-        let pool = PgPoolOptions::new()
-            .max_connections(4)
-            .connect(&url)
-            .await?;
-        crowdrelay_infra::database::MIGRATOR.run(&pool).await?;
-        Ok(Self {
-            pool,
-            admin_url: base,
-            name,
-        })
-    }
-
-    async fn drop_database(self) {
-        let Self {
-            pool,
-            admin_url,
-            name,
-            ..
-        } = self;
-        pool.close().await;
-        if let Ok(mut admin) = PgConnection::connect(&admin_url).await {
-            let _ = sqlx::query(&format!("DROP DATABASE IF EXISTS {name} WITH (FORCE)"))
-                .execute(&mut admin)
-                .await;
-        }
-    }
-}
 
 fn repository(pool: &PgPool) -> PostgresAutopilotRepository {
     PostgresAutopilotRepository::new(
@@ -329,8 +285,10 @@ async fn action_outcome(
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn a_roster_shares_one_monthly_attention_budget() -> Result<(), Box<dyn std::error::Error>> {
-    let database = DisposableDatabase::create().await?;
-    let pool = &database.pool;
+    let database = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
+        .await
+        .expect("connect to the migrated suite database");
+    let pool = &database;
     let now = OffsetDateTime::now_utc();
     let fan = "shared-fan@example.com";
 
@@ -417,15 +375,16 @@ async fn a_roster_shares_one_monthly_attention_budget() -> Result<(), Box<dyn st
     .await?;
     assert_eq!(emitted, 3, "a refused budget sends no letter");
 
-    database.drop_database().await;
     Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn a_different_organization_shares_nothing() -> Result<(), Box<dyn std::error::Error>> {
-    let database = DisposableDatabase::create().await?;
-    let pool = &database.pool;
+    let database = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
+        .await
+        .expect("connect to the migrated suite database");
+    let pool = &database;
     let now = OffsetDateTime::now_utc();
     let fan = "stranger-fan@example.com";
 
@@ -457,7 +416,6 @@ async fn a_different_organization_shares_nothing() -> Result<(), Box<dyn std::er
         "the ledger counts every roster's touch; the budget binds only its own"
     );
 
-    database.drop_database().await;
     Ok(())
 }
 
@@ -465,8 +423,10 @@ async fn a_different_organization_shares_nothing() -> Result<(), Box<dyn std::er
 #[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn a_lone_workspace_keeps_the_cooldown_and_gains_the_cap()
 -> Result<(), Box<dyn std::error::Error>> {
-    let database = DisposableDatabase::create().await?;
-    let pool = &database.pool;
+    let database = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
+        .await
+        .expect("connect to the migrated suite database");
+    let pool = &database;
     let now = OffsetDateTime::now_utc();
     let fan = "solo-fan@example.com";
 
@@ -520,15 +480,16 @@ async fn a_lone_workspace_keeps_the_cooldown_and_gains_the_cap()
     );
     assert_eq!(touches(pool, fan).await?, 3);
 
-    database.drop_database().await;
     Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn a_replayed_action_does_not_spend_twice() -> Result<(), Box<dyn std::error::Error>> {
-    let database = DisposableDatabase::create().await?;
-    let pool = &database.pool;
+    let database = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
+        .await
+        .expect("connect to the migrated suite database");
+    let pool = &database;
     let now = OffsetDateTime::now_utc();
     let fan = "replayed-fan@example.com";
 
@@ -569,15 +530,16 @@ async fn a_replayed_action_does_not_spend_twice() -> Result<(), Box<dyn std::err
         "a replayed action spent the same person twice"
     );
 
-    database.drop_database().await;
     Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn touches_older_than_thirty_days_stop_counting() -> Result<(), Box<dyn std::error::Error>> {
-    let database = DisposableDatabase::create().await?;
-    let pool = &database.pool;
+    let database = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
+        .await
+        .expect("connect to the migrated suite database");
+    let pool = &database;
     let now = OffsetDateTime::now_utc();
     let fan = "old-fan@example.com";
 
@@ -604,6 +566,5 @@ async fn touches_older_than_thirty_days_stop_counting() -> Result<(), Box<dyn st
         "a contact untouched for a month has a fresh share"
     );
 
-    database.drop_database().await;
     Ok(())
 }

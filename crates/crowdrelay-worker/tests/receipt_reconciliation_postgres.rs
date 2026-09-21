@@ -9,63 +9,16 @@
 //! fix writes a `receipt_reconciliation` report on resolve; these tests
 //! prove a resolved action closes instead of looping.
 
+mod common;
+
 use std::time::Duration;
 
 use anyhow::{Context, Result};
 use crowdrelay_domain::WorkspaceId;
 use crowdrelay_worker::receipt_reconciliation::ReceiptReconciliationWorker;
 use serde_json::json;
-use sqlx::{Connection, PgConnection, PgPool, postgres::PgPoolOptions};
+use sqlx::PgPool;
 use uuid::Uuid;
-
-struct DisposableDatabase {
-    admin_url: String,
-    name: String,
-    pool: PgPool,
-}
-
-impl DisposableDatabase {
-    async fn create() -> Result<Self> {
-        let base_url = std::env::var("CROWDRELAY_TEST_DATABASE_URL")
-            .context("CROWDRELAY_TEST_DATABASE_URL must target a disposable database")?;
-        let (prefix, _) = base_url
-            .rsplit_once('/')
-            .context("database URL has no database name")?;
-        let admin_url = format!("{prefix}/postgres");
-        let name = format!("crowdrelay_receipt_{}", Uuid::now_v7().simple());
-        let mut admin = PgConnection::connect(&admin_url)
-            .await
-            .context("connect to the maintenance database")?;
-        sqlx::query(&format!("CREATE DATABASE {name}"))
-            .execute(&mut admin)
-            .await
-            .context("create the disposable database")?;
-        drop(admin);
-        let pool = PgPoolOptions::new()
-            .max_connections(4)
-            .connect(&format!("{prefix}/{name}"))
-            .await
-            .context("connect to the disposable database")?;
-        crowdrelay_infra::database::MIGRATOR
-            .run(&pool)
-            .await
-            .context("apply migrations")?;
-        Ok(Self {
-            admin_url,
-            name,
-            pool,
-        })
-    }
-
-    async fn drop_database(self) {
-        self.pool.close().await;
-        if let Ok(mut admin) = PgConnection::connect(&self.admin_url).await {
-            let _ = sqlx::query(&format!("DROP DATABASE IF EXISTS {} (FORCE)", self.name))
-                .execute(&mut admin)
-                .await;
-        }
-    }
-}
 
 fn worker(pool: PgPool, workspace_id: WorkspaceId) -> ReceiptReconciliationWorker {
     ReceiptReconciliationWorker::new(
@@ -178,21 +131,24 @@ async fn action_status(pool: &PgPool, action_id: Uuid) -> Result<String> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn a_resolved_action_gets_a_synthesized_receipt_and_stays_closed() -> Result<()> {
-    let db = DisposableDatabase::create().await?;
-    let result = async {
-        let ws = workspace(&db.pool).await?;
-        let action_id = emitted_action_without_receipt(&db.pool, ws).await?;
+    let db = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
+        .await
+        .expect("connect to the migrated suite database");
+
+    async {
+        let ws = workspace(&db).await?;
+        let action_id = emitted_action_without_receipt(&db, ws).await?;
         let delivered_at: time::OffsetDateTime = sqlx::query_scalar(
             "SELECT delivered_at FROM outbox_events WHERE action_id = $1",
         )
         .bind(action_id)
-        .fetch_one(&db.pool)
+        .fetch_one(&db)
         .await?;
 
         // One cycle runs both sweeps in a transaction: gap → unknown,
         // outbox-delivered → resolved succeeded + synthesized receipt.
-        worker(db.pool.clone(), ws).run_once().await?;
-        assert_eq!(action_status(&db.pool, action_id).await?, "succeeded");
+        worker(db.clone(), ws).run_once().await?;
+        assert_eq!(action_status(&db, action_id).await?, "succeeded");
 
         let (executor_id, resolved_via, occurred_at): (String, String, time::OffsetDateTime) =
             sqlx::query_as(
@@ -203,7 +159,7 @@ async fn a_resolved_action_gets_a_synthesized_receipt_and_stays_closed() -> Resu
                 "#,
             )
             .bind(action_id)
-            .fetch_one(&db.pool)
+            .fetch_one(&db)
             .await
             .context("read synthesized receipt")?;
         assert_eq!(executor_id, "receipt_reconciliation");
@@ -218,22 +174,20 @@ async fn a_resolved_action_gets_a_synthesized_receipt_and_stays_closed() -> Resu
             "UPDATE viryaos_autopilot_actions SET finished_at = now() - interval '2 days' WHERE id = $1",
         )
         .bind(action_id)
-        .execute(&db.pool)
+        .execute(&db)
         .await?;
-        worker(db.pool.clone(), ws).run_once().await?;
-        assert_eq!(action_status(&db.pool, action_id).await?, "succeeded");
+        worker(db.clone(), ws).run_once().await?;
+        assert_eq!(action_status(&db, action_id).await?, "succeeded");
         let report_count: i64 = sqlx::query_scalar(
             "SELECT count(*) FROM viryaos_autopilot_execution_reports WHERE action_id = $1",
         )
         .bind(action_id)
-        .fetch_one(&db.pool)
+        .fetch_one(&db)
         .await?;
         assert_eq!(report_count, 1, "a re-resolution must not duplicate the receipt");
         Ok(())
     }
-    .await;
-    db.drop_database().await;
-    result
+    .await
 }
 
 /// When a real executor report already exists — the
@@ -247,15 +201,18 @@ async fn a_resolved_action_gets_a_synthesized_receipt_and_stays_closed() -> Resu
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn a_late_executor_report_is_not_duplicated() -> Result<()> {
-    let db = DisposableDatabase::create().await?;
-    let result = async {
-        let ws = workspace(&db.pool).await?;
-        let action_id = emitted_action_without_receipt(&db.pool, ws).await?;
+    let db = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
+        .await
+        .expect("connect to the migrated suite database");
+
+    async {
+        let ws = workspace(&db).await?;
+        let action_id = emitted_action_without_receipt(&db, ws).await?;
         // The gap sweep already ran: the action sits in `unknown`, waiting on
         // evidence. The executor's report lands before the resolver runs.
         sqlx::query("UPDATE viryaos_autopilot_actions SET status = 'unknown' WHERE id = $1")
             .bind(action_id)
-            .execute(&db.pool)
+            .execute(&db)
             .await
             .context("mark the action unknown")?;
         sqlx::query(
@@ -269,17 +226,17 @@ async fn a_late_executor_report_is_not_duplicated() -> Result<()> {
         .bind(ws.into_uuid())
         .bind(action_id)
         .bind(format!("n8n-{action_id}"))
-        .execute(&db.pool)
+        .execute(&db)
         .await
         .context("insert executor report")?;
 
-        worker(db.pool.clone(), ws).run_once().await?;
-        assert_eq!(action_status(&db.pool, action_id).await?, "succeeded");
+        worker(db.clone(), ws).run_once().await?;
+        assert_eq!(action_status(&db, action_id).await?, "succeeded");
         let report_count: i64 = sqlx::query_scalar(
             "SELECT count(*) FROM viryaos_autopilot_execution_reports WHERE action_id = $1",
         )
         .bind(action_id)
-        .fetch_one(&db.pool)
+        .fetch_one(&db)
         .await?;
         assert_eq!(
             report_count, 1,
@@ -287,7 +244,5 @@ async fn a_late_executor_report_is_not_duplicated() -> Result<()> {
         );
         Ok(())
     }
-    .await;
-    db.drop_database().await;
-    result
+    .await
 }

@@ -8,58 +8,16 @@
 //! halves but never `own_terms` or draw parts, and a band's confirmation of
 //! itself cannot be forged by the tenant that billed it.
 
+mod common;
+
 use crowdrelay_domain::night::ContributionKind;
 use crowdrelay_domain::venue_terms::{
     TermsContribution, VenueTermsEvidence, aggregate_venue_terms,
 };
 use crowdrelay_infra::night::{NightError, PostgresNightRepository, VenueTermsRow};
-use sqlx::{Connection, PgConnection, PgPool, postgres::PgPoolOptions};
+use sqlx::PgPool;
 use time::OffsetDateTime;
 use uuid::Uuid;
-
-struct DisposableDatabase {
-    pool: PgPool,
-    admin_url: String,
-    name: String,
-}
-
-impl DisposableDatabase {
-    async fn create() -> Result<Self, Box<dyn std::error::Error>> {
-        let base = std::env::var("CROWDRELAY_TEST_DATABASE_URL")
-            .map_err(|_| "CROWDRELAY_TEST_DATABASE_URL must target a disposable database")?;
-        let name = format!("crowdrelay_night_{}", Uuid::now_v7().simple());
-        let mut admin = PgConnection::connect(&base).await?;
-        sqlx::query(&format!("CREATE DATABASE {name}"))
-            .execute(&mut admin)
-            .await?;
-        drop(admin);
-        let (head, _) = base.rsplit_once('/').ok_or("database url has no path")?;
-        let pool = PgPoolOptions::new()
-            .max_connections(2)
-            .connect(&format!("{head}/{name}"))
-            .await?;
-        crowdrelay_infra::database::MIGRATOR.run(&pool).await?;
-        Ok(Self {
-            pool,
-            admin_url: base,
-            name,
-        })
-    }
-
-    async fn drop_database(self) {
-        let Self {
-            pool,
-            admin_url,
-            name,
-        } = self;
-        pool.close().await;
-        if let Ok(mut admin) = PgConnection::connect(&admin_url).await {
-            let _ = sqlx::query(&format!("DROP DATABASE IF EXISTS {name} WITH (FORCE)"))
-                .execute(&mut admin)
-                .await;
-        }
-    }
-}
 
 async fn seed_workspace(pool: &PgPool, slug: &str) -> Result<Uuid, Box<dyn std::error::Error>> {
     let id = Uuid::now_v7();
@@ -162,9 +120,12 @@ async fn place_event_of(pool: &PgPool, event_id: Uuid) -> Result<Option<Uuid>, s
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn two_workspaces_share_one_night() -> Result<(), Box<dyn std::error::Error>> {
-    let database = DisposableDatabase::create().await?;
-    let result = async {
-        let pool = &database.pool;
+    let database = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
+        .await
+        .expect("connect to the migrated suite database");
+
+    async {
+        let pool = &database;
         let city_id = seed_city(pool).await?;
         let alpha = seed_workspace(pool, "night-alpha").await?;
         let bravo = seed_workspace(pool, "night-bravo").await?;
@@ -183,17 +144,18 @@ async fn two_workspaces_share_one_night() -> Result<(), Box<dyn std::error::Erro
         );
         Ok::<(), Box<dyn std::error::Error>>(())
     }
-    .await;
-    database.drop_database().await;
-    result
+    .await
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn a_moved_show_rekeys_the_night() -> Result<(), Box<dyn std::error::Error>> {
-    let database = DisposableDatabase::create().await?;
-    let result = async {
-        let pool = &database.pool;
+    let database = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
+        .await
+        .expect("connect to the migrated suite database");
+
+    async {
+        let pool = &database;
         let city_id = seed_city(pool).await?;
         let alpha = seed_workspace(pool, "night-alpha").await?;
         let starts = OffsetDateTime::now_utc() + time::Duration::days(14);
@@ -239,17 +201,18 @@ async fn a_moved_show_rekeys_the_night() -> Result<(), Box<dyn std::error::Error
         );
         Ok::<(), Box<dyn std::error::Error>>(())
     }
-    .await;
-    database.drop_database().await;
-    result
+    .await
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn the_lenses_hold_their_boundaries() -> Result<(), Box<dyn std::error::Error>> {
-    let database = DisposableDatabase::create().await?;
-    let result = async {
-        let pool = &database.pool;
+    let database = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
+        .await
+        .expect("connect to the migrated suite database");
+
+    async {
+        let pool = &database;
         let repo = PostgresNightRepository::new(pool.clone());
         let city_id = seed_city(pool).await?;
 
@@ -422,17 +385,18 @@ async fn the_lenses_hold_their_boundaries() -> Result<(), Box<dyn std::error::Er
         );
         Ok::<(), Box<dyn std::error::Error>>(())
     }
-    .await;
-    database.drop_database().await;
-    result
+    .await
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn a_roster_reads_its_own_split() -> Result<(), Box<dyn std::error::Error>> {
-    let database = DisposableDatabase::create().await?;
-    let result = async {
-        let pool = &database.pool;
+    let database = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
+        .await
+        .expect("connect to the migrated suite database");
+
+    async {
+        let pool = &database;
         let repo = PostgresNightRepository::new(pool.clone());
         let city_id = seed_city(pool).await?;
         let alpha = seed_workspace(pool, "night-alpha").await?;
@@ -509,9 +473,7 @@ async fn a_roster_reads_its_own_split() -> Result<(), Box<dyn std::error::Error>
         }
         Ok::<(), Box<dyn std::error::Error>>(())
     }
-    .await;
-    database.drop_database().await;
-    result
+    .await
 }
 
 /// The repo's rows as the domain consumes them — the workspace key travels
@@ -533,9 +495,12 @@ fn terms_tuples(rows: &[VenueTermsRow]) -> Vec<TermsContribution> {
 #[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn a_venues_terms_band_clears_only_across_workspaces()
 -> Result<(), Box<dyn std::error::Error>> {
-    let database = DisposableDatabase::create().await?;
-    let result = async {
-        let pool = &database.pool;
+    let database = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
+        .await
+        .expect("connect to the migrated suite database");
+
+    async {
+        let pool = &database;
         let repo = PostgresNightRepository::new(pool.clone());
         let city_id = seed_city(pool).await?;
         let alpha = seed_workspace(pool, "terms-alpha").await?;
@@ -651,7 +616,5 @@ async fn a_venues_terms_band_clears_only_across_workspaces()
         );
         Ok::<(), Box<dyn std::error::Error>>(())
     }
-    .await;
-    database.drop_database().await;
-    result
+    .await
 }

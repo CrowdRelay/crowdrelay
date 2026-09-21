@@ -9,63 +9,16 @@
 //! disposable database and assert each task state maps to the honest
 //! assignment outcome.
 
+mod common;
+
 use std::time::Duration;
 
 use anyhow::{Context, Result};
 use crowdrelay_domain::WorkspaceId;
 use crowdrelay_worker::receipt_reconciliation::ReceiptReconciliationWorker;
 use serde_json::json;
-use sqlx::{Connection, PgConnection, PgPool, postgres::PgPoolOptions};
+use sqlx::PgPool;
 use uuid::Uuid;
-
-struct DisposableDatabase {
-    admin_url: String,
-    name: String,
-    pool: PgPool,
-}
-
-impl DisposableDatabase {
-    async fn create() -> Result<Self> {
-        let base_url = std::env::var("CROWDRELAY_TEST_DATABASE_URL")
-            .context("CROWDRELAY_TEST_DATABASE_URL must target a disposable database")?;
-        let (prefix, _) = base_url
-            .rsplit_once('/')
-            .context("database URL has no database name")?;
-        let admin_url = format!("{prefix}/postgres");
-        let name = format!("crowdrelay_agentrun_{}", Uuid::now_v7().simple());
-        let mut admin = PgConnection::connect(&admin_url)
-            .await
-            .context("connect to the maintenance database")?;
-        sqlx::query(&format!("CREATE DATABASE {name}"))
-            .execute(&mut admin)
-            .await
-            .context("create the disposable database")?;
-        drop(admin);
-        let pool = PgPoolOptions::new()
-            .max_connections(4)
-            .connect(&format!("{prefix}/{name}"))
-            .await
-            .context("connect to the disposable database")?;
-        crowdrelay_infra::database::MIGRATOR
-            .run(&pool)
-            .await
-            .context("apply migrations")?;
-        Ok(Self {
-            admin_url,
-            name,
-            pool,
-        })
-    }
-
-    async fn drop_database(self) {
-        self.pool.close().await;
-        if let Ok(mut admin) = PgConnection::connect(&self.admin_url).await {
-            let _ = sqlx::query(&format!("DROP DATABASE IF EXISTS {} (FORCE)", self.name))
-                .execute(&mut admin)
-                .await;
-        }
-    }
-}
 
 fn worker(pool: PgPool, workspace_id: WorkspaceId) -> ReceiptReconciliationWorker {
     ReceiptReconciliationWorker::new(
@@ -234,55 +187,58 @@ async fn execution_status(pool: &PgPool, action_id: Uuid) -> Result<String> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn completed_task_marks_assignment_executed() -> Result<()> {
-    let db = DisposableDatabase::create().await?;
-    let result = async {
-        let ws = workspace(&db.pool).await?;
-        create_foreign_task_table(&db.pool).await?;
-        let action_id = dispatched_agent_run(&db.pool, ws).await?;
-        task(&db.pool, ws, action_id, "completed", "1 hour").await?;
-        worker(db.pool.clone(), ws).run_once().await?;
-        assert_eq!(execution_status(&db.pool, action_id).await?, "executed");
+    let db = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
+        .await
+        .expect("connect to the migrated suite database");
+
+    async {
+        let ws = workspace(&db).await?;
+        create_foreign_task_table(&db).await?;
+        let action_id = dispatched_agent_run(&db, ws).await?;
+        task(&db, ws, action_id, "completed", "1 hour").await?;
+        worker(db.clone(), ws).run_once().await?;
+        assert_eq!(execution_status(&db, action_id).await?, "executed");
         Ok(())
     }
-    .await;
-    db.drop_database().await;
-    result
+    .await
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn failed_task_marks_assignment_failed() -> Result<()> {
-    let db = DisposableDatabase::create().await?;
-    let result = async {
-        let ws = workspace(&db.pool).await?;
-        create_foreign_task_table(&db.pool).await?;
-        let action_id = dispatched_agent_run(&db.pool, ws).await?;
-        task(&db.pool, ws, action_id, "failed", "1 hour").await?;
-        worker(db.pool.clone(), ws).run_once().await?;
-        assert_eq!(execution_status(&db.pool, action_id).await?, "failed");
+    let db = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
+        .await
+        .expect("connect to the migrated suite database");
+
+    async {
+        let ws = workspace(&db).await?;
+        create_foreign_task_table(&db).await?;
+        let action_id = dispatched_agent_run(&db, ws).await?;
+        task(&db, ws, action_id, "failed", "1 hour").await?;
+        worker(db.clone(), ws).run_once().await?;
+        assert_eq!(execution_status(&db, action_id).await?, "failed");
         Ok(())
     }
-    .await;
-    db.drop_database().await;
-    result
+    .await
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn fresh_queued_task_stays_dispatched() -> Result<()> {
-    let db = DisposableDatabase::create().await?;
-    let result = async {
-        let ws = workspace(&db.pool).await?;
-        create_foreign_task_table(&db.pool).await?;
-        let action_id = dispatched_agent_run(&db.pool, ws).await?;
-        task(&db.pool, ws, action_id, "queued", "1 hour").await?;
-        worker(db.pool.clone(), ws).run_once().await?;
-        assert_eq!(execution_status(&db.pool, action_id).await?, "dispatched");
+    let db = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
+        .await
+        .expect("connect to the migrated suite database");
+
+    async {
+        let ws = workspace(&db).await?;
+        create_foreign_task_table(&db).await?;
+        let action_id = dispatched_agent_run(&db, ws).await?;
+        task(&db, ws, action_id, "queued", "1 hour").await?;
+        worker(db.clone(), ws).run_once().await?;
+        assert_eq!(execution_status(&db, action_id).await?, "dispatched");
         Ok(())
     }
-    .await;
-    db.drop_database().await;
-    result
+    .await
 }
 
 /// A task still queued a day later belongs to a service that is down —
@@ -290,19 +246,20 @@ async fn fresh_queued_task_stays_dispatched() -> Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn stale_queued_task_is_reaped_failed() -> Result<()> {
-    let db = DisposableDatabase::create().await?;
-    let result = async {
-        let ws = workspace(&db.pool).await?;
-        create_foreign_task_table(&db.pool).await?;
-        let action_id = dispatched_agent_run(&db.pool, ws).await?;
-        task(&db.pool, ws, action_id, "queued", "2 days").await?;
-        worker(db.pool.clone(), ws).run_once().await?;
-        assert_eq!(execution_status(&db.pool, action_id).await?, "failed");
+    let db = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
+        .await
+        .expect("connect to the migrated suite database");
+
+    async {
+        let ws = workspace(&db).await?;
+        create_foreign_task_table(&db).await?;
+        let action_id = dispatched_agent_run(&db, ws).await?;
+        task(&db, ws, action_id, "queued", "2 days").await?;
+        worker(db.clone(), ws).run_once().await?;
+        assert_eq!(execution_status(&db, action_id).await?, "failed");
         Ok(())
     }
-    .await;
-    db.drop_database().await;
-    result
+    .await
 }
 
 /// `agent_service_tasks` belongs to the agents service. On a CrowdRelay-only
@@ -312,18 +269,19 @@ async fn stale_queued_task_is_reaped_failed() -> Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn a_missing_agents_schema_skips_the_sweep() -> Result<()> {
-    let db = DisposableDatabase::create().await?;
-    let result = async {
-        let ws = workspace(&db.pool).await?;
+    let db = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
+        .await
+        .expect("connect to the migrated suite database");
+
+    async {
+        let ws = workspace(&db).await?;
         // Deliberately NO create_foreign_task_table call.
-        let action_id = dispatched_agent_run(&db.pool, ws).await?;
-        worker(db.pool.clone(), ws).run_once().await?;
-        assert_eq!(execution_status(&db.pool, action_id).await?, "dispatched");
+        let action_id = dispatched_agent_run(&db, ws).await?;
+        worker(db.clone(), ws).run_once().await?;
+        assert_eq!(execution_status(&db, action_id).await?, "dispatched");
         Ok(())
     }
-    .await;
-    db.drop_database().await;
-    result
+    .await
 }
 
 /// The sweep only owns `agent.run.request` — a dispatched assignment for a
@@ -331,10 +289,13 @@ async fn a_missing_agents_schema_skips_the_sweep() -> Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn other_action_kinds_are_untouched() -> Result<()> {
-    let db = DisposableDatabase::create().await?;
-    let result = async {
-        let ws = workspace(&db.pool).await?;
-        create_foreign_task_table(&db.pool).await?;
+    let db = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
+        .await
+        .expect("connect to the migrated suite database");
+
+    async {
+        let ws = workspace(&db).await?;
+        create_foreign_task_table(&db).await?;
         let decision_id = Uuid::now_v7();
         sqlx::query(
             r#"
@@ -352,7 +313,7 @@ async fn other_action_kinds_are_untouched() -> Result<()> {
         .bind(format!("engage-{decision_id}"))
         .bind(ws.into_uuid())
         .bind(Uuid::now_v7())
-        .execute(&db.pool)
+        .execute(&db)
         .await
         .context("insert engage decision")?;
         let action_id = Uuid::now_v7();
@@ -370,7 +331,7 @@ async fn other_action_kinds_are_untouched() -> Result<()> {
         .bind(decision_id)
         .bind(ws.into_uuid())
         .bind(format!("action-{action_id}"))
-        .execute(&db.pool)
+        .execute(&db)
         .await
         .context("insert community action")?;
         let experiment_uuid = Uuid::now_v7();
@@ -382,7 +343,7 @@ async fn other_action_kinds_are_untouched() -> Result<()> {
         )
         .bind(experiment_uuid)
         .bind(ws.into_uuid())
-        .execute(&db.pool)
+        .execute(&db)
         .await
         .context("insert experiment design")?;
         sqlx::query(
@@ -402,14 +363,12 @@ async fn other_action_kinds_are_untouched() -> Result<()> {
         .bind(experiment_uuid)
         .bind(Uuid::now_v7())
         .bind(action_id)
-        .execute(&db.pool)
+        .execute(&db)
         .await
         .context("insert dispatched assignment")?;
-        worker(db.pool.clone(), ws).run_once().await?;
-        assert_eq!(execution_status(&db.pool, action_id).await?, "dispatched");
+        worker(db.clone(), ws).run_once().await?;
+        assert_eq!(execution_status(&db, action_id).await?, "dispatched");
         Ok(())
     }
-    .await;
-    db.drop_database().await;
-    result
+    .await
 }

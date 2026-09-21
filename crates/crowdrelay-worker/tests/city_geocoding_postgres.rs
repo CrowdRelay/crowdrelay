@@ -12,6 +12,8 @@
 //! own database rather than sharing one: batch counts only mean something when
 //! the batch is exactly what the test put there.
 
+mod common;
+
 use std::{
     sync::{
         Arc,
@@ -25,7 +27,7 @@ use async_trait::async_trait;
 use crowdrelay_worker::city_geocoding::{
     CityGeocodeWorker, GeocodeProvider, GeocodedPoint, MAX_GEOCODE_ATTEMPTS,
 };
-use sqlx::{Connection, PgConnection, PgPool, postgres::PgPoolOptions};
+use sqlx::PgPool;
 use uuid::Uuid;
 
 /// Replies from a fixed script and counts how often it was asked. The count is
@@ -63,69 +65,6 @@ impl GeocodeProvider for ScriptedProvider {
             anyhow::bail!("provider unavailable");
         }
         Ok(self.answer)
-    }
-}
-
-/// Splits `postgres://.../name` into the same URL pointed at `postgres` and the
-/// database name, so the test can create and drop its own.
-fn split_database_url(url: &str) -> Result<(String, String)> {
-    let (prefix, name) = url
-        .rsplit_once('/')
-        .context("database URL has no database name")?;
-    let name = name.split('?').next().unwrap_or(name);
-    ensure!(!name.is_empty(), "database URL has an empty database name");
-    Ok((format!("{prefix}/postgres"), name.to_owned()))
-}
-
-struct DisposableDatabase {
-    admin_url: String,
-    name: String,
-    pool: PgPool,
-}
-
-impl DisposableDatabase {
-    async fn create() -> Result<Self> {
-        let base_url = std::env::var("CROWDRELAY_TEST_DATABASE_URL")
-            .context("CROWDRELAY_TEST_DATABASE_URL must target a disposable database")?;
-        let (admin_url, _) = split_database_url(&base_url)?;
-        let name = format!("crowdrelay_geocode_{}", Uuid::now_v7().simple());
-        let mut admin = PgConnection::connect(&admin_url)
-            .await
-            .context("connect to the maintenance database")?;
-        // The name is a fresh UUID, so there is nothing to quote-escape and no
-        // caller-supplied text reaches this statement.
-        sqlx::query(&format!("CREATE DATABASE {name}"))
-            .execute(&mut admin)
-            .await
-            .context("create the disposable database")?;
-        drop(admin);
-
-        let (prefix, _) = base_url
-            .rsplit_once('/')
-            .context("database URL has no database name")?;
-        let pool = PgPoolOptions::new()
-            .max_connections(4)
-            .connect(&format!("{prefix}/{name}"))
-            .await
-            .context("connect to the disposable database")?;
-        crowdrelay_infra::database::MIGRATOR
-            .run(&pool)
-            .await
-            .context("apply migrations")?;
-        Ok(Self {
-            admin_url,
-            name,
-            pool,
-        })
-    }
-
-    async fn drop_database(self) {
-        self.pool.close().await;
-        if let Ok(mut admin) = PgConnection::connect(&self.admin_url).await {
-            let _ = sqlx::query(&format!("DROP DATABASE IF EXISTS {} (FORCE)", self.name))
-                .execute(&mut admin)
-                .await;
-        }
     }
 }
 
@@ -177,10 +116,11 @@ async fn clear_catalogue(pool: &PgPool) -> Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn the_geocoding_state_machine_resolves_backs_off_and_gives_up() -> Result<()> {
-    let database = DisposableDatabase::create().await?;
-    let result = run_scenarios(&database.pool).await;
-    database.drop_database().await;
-    result
+    let database = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
+        .await
+        .expect("connect to the migrated suite database");
+
+    run_scenarios(&database).await
 }
 
 async fn run_scenarios(pool: &PgPool) -> Result<()> {

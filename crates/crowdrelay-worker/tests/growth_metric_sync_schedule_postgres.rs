@@ -15,72 +15,15 @@
 //! a real row, and a test that reimplemented the SQL would prove nothing about
 //! the query that actually ships, which is why the two methods are public.
 
+mod common;
+
 use std::time::Duration;
 
 use anyhow::{Context, Result, ensure};
 use crowdrelay_infra::sensitive_response::SensitiveResponseKey;
 use crowdrelay_worker::growth_metric_sync::{FAILURE_RETRY_DELAY, GrowthMetricSyncWorker};
-use sqlx::{Connection, PgConnection, PgPool, postgres::PgPoolOptions};
+use sqlx::PgPool;
 use uuid::Uuid;
-
-struct DisposableDatabase {
-    admin_url: String,
-    name: String,
-    pool: PgPool,
-}
-
-impl DisposableDatabase {
-    async fn create() -> Result<Self> {
-        let base_url = std::env::var("CROWDRELAY_TEST_DATABASE_URL")
-            .context("CROWDRELAY_TEST_DATABASE_URL must target a disposable database")?;
-        let (admin_url, _) = split_database_url(&base_url)?;
-        let name = format!("crowdrelay_sync_schedule_{}", Uuid::now_v7().simple());
-        let mut admin = PgConnection::connect(&admin_url)
-            .await
-            .context("connect to the maintenance database")?;
-        // The name is a fresh UUID, so there is nothing to quote-escape and no
-        // caller-supplied text reaches this statement.
-        sqlx::query(&format!("CREATE DATABASE {name}"))
-            .execute(&mut admin)
-            .await
-            .context("create the disposable database")?;
-        drop(admin);
-
-        let (prefix, _) = base_url
-            .rsplit_once('/')
-            .context("database URL has no database name")?;
-        let pool = PgPoolOptions::new()
-            .max_connections(4)
-            .connect(&format!("{prefix}/{name}"))
-            .await
-            .context("connect to the disposable database")?;
-        crowdrelay_infra::database::MIGRATOR
-            .run(&pool)
-            .await
-            .context("apply migrations")?;
-        Ok(Self {
-            admin_url,
-            name,
-            pool,
-        })
-    }
-
-    async fn drop_database(self) {
-        self.pool.close().await;
-        if let Ok(mut admin) = PgConnection::connect(&self.admin_url).await {
-            let _ = sqlx::query(&format!("DROP DATABASE IF EXISTS {} (FORCE)", self.name))
-                .execute(&mut admin)
-                .await;
-        }
-    }
-}
-
-fn split_database_url(url: &str) -> Result<(String, String)> {
-    let (prefix, database) = url
-        .rsplit_once('/')
-        .context("database URL has no database name")?;
-    Ok((format!("{prefix}/postgres"), database.to_owned()))
-}
 
 /// A worker wired to the pool and to nothing else. Every scheduling decision
 /// this test makes is a database read, so the provider credentials are
@@ -167,11 +110,11 @@ async fn clear_connections(pool: &PgPool) -> Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn a_connection_that_just_failed_is_not_retried_immediately() -> Result<()> {
-    let database = DisposableDatabase::create().await?;
-    let result =
-        a_connection_that_just_failed_is_not_retried_immediately_inner(&database.pool).await;
-    database.drop_database().await;
-    result
+    let database = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
+        .await
+        .expect("connect to the migrated suite database");
+
+    a_connection_that_just_failed_is_not_retried_immediately_inner(&database).await
 }
 
 async fn a_connection_that_just_failed_is_not_retried_immediately_inner(
@@ -213,10 +156,11 @@ async fn a_connection_that_just_failed_is_not_retried_immediately_inner(
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn spotify_top_cities_resolve_against_the_city_catalog() -> Result<()> {
-    let database = DisposableDatabase::create().await?;
-    let result = spotify_city_resolution_inner(&database.pool).await;
-    database.drop_database().await;
-    result
+    let database = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
+        .await
+        .expect("connect to the migrated suite database");
+
+    spotify_city_resolution_inner(&database).await
 }
 
 async fn spotify_city_resolution_inner(pool: &PgPool) -> Result<()> {
@@ -292,10 +236,11 @@ async fn spotify_city_resolution_inner(pool: &PgPool) -> Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn the_worker_sleeps_instead_of_spinning_when_everything_is_backing_off() -> Result<()> {
-    let database = DisposableDatabase::create().await?;
-    let result = sleeps_instead_of_spinning_inner(&database.pool).await;
-    database.drop_database().await;
-    result
+    let database = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
+        .await
+        .expect("connect to the migrated suite database");
+
+    sleeps_instead_of_spinning_inner(&database).await
 }
 
 async fn sleeps_instead_of_spinning_inner(pool: &PgPool) -> Result<()> {
@@ -349,10 +294,11 @@ async fn sleeps_instead_of_spinning_inner(pool: &PgPool) -> Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn a_healthy_connection_is_unaffected_by_the_retry_delay() -> Result<()> {
-    let database = DisposableDatabase::create().await?;
-    let result = healthy_connection_inner(&database.pool).await;
-    database.drop_database().await;
-    result
+    let database = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
+        .await
+        .expect("connect to the migrated suite database");
+
+    healthy_connection_inner(&database).await
 }
 
 async fn healthy_connection_inner(pool: &PgPool) -> Result<()> {

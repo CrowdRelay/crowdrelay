@@ -15,72 +15,15 @@
 //! `autopilot/{team,control}.rs` require `profile.active AND
 //! member.status = 'active'` to route work. Both came back with the status.
 
+mod common;
+
 use anyhow::{Context, Result, ensure};
 use crowdrelay_domain::WorkspaceSlug;
 use crowdrelay_infra::config::{DatabaseConfig, TeamOperationsConfig};
 use crowdrelay_worker::bootstrap::bootstrap_team_operations;
-use sqlx::{Connection, PgConnection, PgPool, Row, postgres::PgPoolOptions};
+use sqlx::{PgPool, Row};
 use std::time::Duration;
 use uuid::Uuid;
-
-struct DisposableDatabase {
-    pool: PgPool,
-    url: String,
-    admin_url: String,
-    name: String,
-}
-
-impl DisposableDatabase {
-    async fn create() -> Result<Self> {
-        let base = std::env::var("CROWDRELAY_TEST_DATABASE_URL")
-            .context("CROWDRELAY_TEST_DATABASE_URL must target a disposable database")?;
-        let name = format!("crowdrelay_team_{}", Uuid::now_v7().simple());
-        let mut admin = PgConnection::connect(&base).await?;
-        sqlx::query(&format!("CREATE DATABASE {name}"))
-            .execute(&mut admin)
-            .await?;
-        drop(admin);
-        let (head, _) = base.rsplit_once('/').context("database url has no path")?;
-        let url = format!("{head}/{name}");
-        let pool = PgPoolOptions::new()
-            .max_connections(4)
-            .connect(&url)
-            .await?;
-        crowdrelay_infra::database::MIGRATOR.run(&pool).await?;
-        Ok(Self {
-            pool,
-            url,
-            admin_url: base,
-            name,
-        })
-    }
-
-    fn database_config(&self) -> DatabaseConfig {
-        DatabaseConfig {
-            url: self.url.clone(),
-            max_connections: 4,
-            connect_timeout: Duration::from_secs(5),
-            ping_timeout: Duration::from_secs(2),
-            operation_timeout: Duration::from_secs(10),
-            lock_timeout: Duration::from_secs(5),
-        }
-    }
-
-    async fn drop_database(self) {
-        let Self {
-            pool,
-            admin_url,
-            name,
-            ..
-        } = self;
-        pool.close().await;
-        if let Ok(mut admin) = PgConnection::connect(&admin_url).await {
-            let _ = sqlx::query(&format!("DROP DATABASE IF EXISTS {name} WITH (FORCE)"))
-                .execute(&mut admin)
-                .await;
-        }
-    }
-}
 
 /// One configured contact. The slot key is what maps to a source-controlled
 /// profile, so it has to be one the code knows.
@@ -116,17 +59,29 @@ async fn member_state(pool: &PgPool, email: &str) -> Result<MemberState> {
     })
 }
 
+fn db_config() -> DatabaseConfig {
+    DatabaseConfig {
+        url: std::env::var("CROWDRELAY_TEST_DATABASE_URL").expect("suite database url"),
+        max_connections: 4,
+        connect_timeout: Duration::from_secs(5),
+        ping_timeout: Duration::from_secs(2),
+        operation_timeout: Duration::from_secs(10),
+        lock_timeout: Duration::from_secs(5),
+    }
+}
+
 #[tokio::test]
 #[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn a_deploy_does_not_re_enable_a_disabled_member() -> Result<()> {
-    let database = DisposableDatabase::create().await?;
-    let result = disablement_survives(&database).await;
-    database.drop_database().await;
-    result
+    let database = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
+        .await
+        .expect("connect to the migrated suite database");
+
+    disablement_survives(&database).await
 }
 
-async fn disablement_survives(database: &DisposableDatabase) -> Result<()> {
-    let pool = &database.pool;
+async fn disablement_survives(database: &PgPool) -> Result<()> {
+    let pool = database;
     let slug = WorkspaceSlug::parse("team-bootstrap")?;
     sqlx::query("INSERT INTO workspaces (id, slug, name) VALUES ($1, $2, 'Team bootstrap test')")
         .bind(Uuid::now_v7())
@@ -137,7 +92,7 @@ async fn disablement_survives(database: &DisposableDatabase) -> Result<()> {
 
     let email = "member-one@team-bootstrap.test";
     let config = one_member(email);
-    let db_config = database.database_config();
+    let db_config = db_config();
 
     // First release: the member is created and is at work.
     bootstrap_team_operations(pool, &slug, &db_config, &config).await?;
@@ -202,14 +157,15 @@ async fn disablement_survives(database: &DisposableDatabase) -> Result<()> {
 #[tokio::test]
 #[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn an_invited_member_is_still_promoted_by_a_deploy() -> Result<()> {
-    let database = DisposableDatabase::create().await?;
-    let result = invitation_is_confirmed(&database).await;
-    database.drop_database().await;
-    result
+    let database = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
+        .await
+        .expect("connect to the migrated suite database");
+
+    invitation_is_confirmed(&database).await
 }
 
-async fn invitation_is_confirmed(database: &DisposableDatabase) -> Result<()> {
-    let pool = &database.pool;
+async fn invitation_is_confirmed(database: &PgPool) -> Result<()> {
+    let pool = database;
     let slug = WorkspaceSlug::parse("team-invited")?;
     sqlx::query("INSERT INTO workspaces (id, slug, name) VALUES ($1, $2, 'Team invite test')")
         .bind(Uuid::now_v7())
@@ -232,7 +188,7 @@ async fn invitation_is_confirmed(database: &DisposableDatabase) -> Result<()> {
     .await
     .context("insert invited member")?;
 
-    bootstrap_team_operations(pool, &slug, &database.database_config(), &one_member(email)).await?;
+    bootstrap_team_operations(pool, &slug, &db_config(), &one_member(email)).await?;
     let after = member_state(pool, email).await?;
     ensure!(
         after.status == "active",

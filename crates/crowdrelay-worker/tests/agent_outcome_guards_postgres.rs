@@ -10,63 +10,16 @@
 //! They also prove the positive case: a valid outcome with evidence and a
 //! real target identity flows through to a decision + action normally.
 
+mod common;
+
 use std::time::Duration;
 
 use anyhow::{Context, Result, ensure};
 use crowdrelay_domain::WorkspaceId;
 use crowdrelay_worker::agent_outcomes::AgentOutcomeWorker;
 use serde_json::json;
-use sqlx::{Connection, PgConnection, PgPool, postgres::PgPoolOptions};
+use sqlx::PgPool;
 use uuid::Uuid;
-
-struct DisposableDatabase {
-    admin_url: String,
-    name: String,
-    pool: PgPool,
-}
-
-impl DisposableDatabase {
-    async fn create() -> Result<Self> {
-        let base_url = std::env::var("CROWDRELAY_TEST_DATABASE_URL")
-            .context("CROWDRELAY_TEST_DATABASE_URL must target a disposable database")?;
-        let (prefix, _) = base_url
-            .rsplit_once('/')
-            .context("database URL has no database name")?;
-        let admin_url = format!("{prefix}/postgres");
-        let name = format!("crowdrelay_guards_{}", Uuid::now_v7().simple());
-        let mut admin = PgConnection::connect(&admin_url)
-            .await
-            .context("connect to the maintenance database")?;
-        sqlx::query(&format!("CREATE DATABASE {name}"))
-            .execute(&mut admin)
-            .await
-            .context("create the disposable database")?;
-        drop(admin);
-        let pool = PgPoolOptions::new()
-            .max_connections(4)
-            .connect(&format!("{prefix}/{name}"))
-            .await
-            .context("connect to the disposable database")?;
-        crowdrelay_infra::database::MIGRATOR
-            .run(&pool)
-            .await
-            .context("apply migrations")?;
-        Ok(Self {
-            admin_url,
-            name,
-            pool,
-        })
-    }
-
-    async fn drop_database(self) {
-        self.pool.close().await;
-        if let Ok(mut admin) = PgConnection::connect(&self.admin_url).await {
-            let _ = sqlx::query(&format!("DROP DATABASE IF EXISTS {} (FORCE)", self.name))
-                .execute(&mut admin)
-                .await;
-        }
-    }
-}
 
 async fn workspace(pool: &PgPool) -> Result<WorkspaceId> {
     let id = Uuid::now_v7();
@@ -189,10 +142,11 @@ async fn approval_event_count(pool: &PgPool, workspace_id: WorkspaceId) -> Resul
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn zero_confidence_outreach_target_produces_zero_decisions() -> Result<()> {
-    let database = DisposableDatabase::create().await?;
-    let result = zero_confidence_inner(&database.pool).await;
-    database.drop_database().await;
-    result
+    let database = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
+        .await
+        .expect("connect to the migrated suite database");
+
+    zero_confidence_inner(&database).await
 }
 
 async fn zero_confidence_inner(pool: &PgPool) -> Result<()> {
@@ -238,10 +192,11 @@ async fn zero_confidence_inner(pool: &PgPool) -> Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn zero_evidence_outreach_target_produces_zero_decisions() -> Result<()> {
-    let database = DisposableDatabase::create().await?;
-    let result = zero_evidence_inner(&database.pool).await;
-    database.drop_database().await;
-    result
+    let database = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
+        .await
+        .expect("connect to the migrated suite database");
+
+    zero_evidence_inner(&database).await
 }
 
 async fn zero_evidence_inner(pool: &PgPool) -> Result<()> {
@@ -287,10 +242,11 @@ async fn zero_evidence_inner(pool: &PgPool) -> Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn unnamed_target_produces_zero_decisions() -> Result<()> {
-    let database = DisposableDatabase::create().await?;
-    let result = unnamed_inner(&database.pool).await;
-    database.drop_database().await;
-    result
+    let database = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
+        .await
+        .expect("connect to the migrated suite database");
+
+    unnamed_inner(&database).await
 }
 
 async fn unnamed_inner(pool: &PgPool) -> Result<()> {
@@ -336,10 +292,11 @@ async fn unnamed_inner(pool: &PgPool) -> Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn valid_outreach_target_produces_normal_flow() -> Result<()> {
-    let database = DisposableDatabase::create().await?;
-    let result = valid_inner(&database.pool).await;
-    database.drop_database().await;
-    result
+    let database = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
+        .await
+        .expect("connect to the migrated suite database");
+
+    valid_inner(&database).await
 }
 
 async fn valid_inner(pool: &PgPool) -> Result<()> {
@@ -409,10 +366,11 @@ async fn valid_inner(pool: &PgPool) -> Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn zero_confidence_insight_still_creates_decision() -> Result<()> {
-    let database = DisposableDatabase::create().await?;
-    let result = insight_inner(&database.pool).await;
-    database.drop_database().await;
-    result
+    let database = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
+        .await
+        .expect("connect to the migrated suite database");
+
+    insight_inner(&database).await
 }
 
 async fn insight_inner(pool: &PgPool) -> Result<()> {
@@ -484,10 +442,11 @@ fn outreach_item() -> serde_json::Value {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn unverified_actionable_outcome_creates_nothing() -> Result<()> {
-    let database = DisposableDatabase::create().await?;
-    let result = unverified_actionable_inner(&database.pool).await;
-    database.drop_database().await;
-    result
+    let database = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
+        .await
+        .expect("connect to the migrated suite database");
+
+    unverified_actionable_inner(&database).await
 }
 
 async fn unverified_actionable_inner(pool: &PgPool) -> Result<()> {
@@ -527,10 +486,11 @@ async fn unverified_actionable_inner(pool: &PgPool) -> Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn a_passing_grounding_check_opens_the_same_gate() -> Result<()> {
-    let database = DisposableDatabase::create().await?;
-    let result = passing_grounding_inner(&database.pool).await;
-    database.drop_database().await;
-    result
+    let database = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
+        .await
+        .expect("connect to the migrated suite database");
+
+    passing_grounding_inner(&database).await
 }
 
 /// The other half of the pair. Without this, a gate that refused *everything*
@@ -571,10 +531,11 @@ async fn passing_grounding_inner(pool: &PgPool) -> Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn an_unverified_observation_still_reaches_the_board() -> Result<()> {
-    let database = DisposableDatabase::create().await?;
-    let result = unverified_observation_inner(&database.pool).await;
-    database.drop_database().await;
-    result
+    let database = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
+        .await
+        .expect("connect to the migrated suite database");
+
+    unverified_observation_inner(&database).await
 }
 
 /// The asymmetry that hid the outage, pinned deliberately.
@@ -629,10 +590,11 @@ async fn unverified_observation_inner(pool: &PgPool) -> Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn an_outcome_without_a_rationale_still_maps() -> Result<()> {
-    let database = DisposableDatabase::create().await?;
-    let result = rationaleless_inner(&database.pool).await;
-    database.drop_database().await;
-    result
+    let database = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
+        .await
+        .expect("connect to the migrated suite database");
+
+    rationaleless_inner(&database).await
 }
 
 async fn rationaleless_inner(pool: &PgPool) -> Result<()> {
@@ -710,10 +672,11 @@ async fn opportunity_count(pool: &PgPool, workspace_id: WorkspaceId) -> Result<i
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn a_finding_without_a_link_is_rejected() -> Result<()> {
-    let database = DisposableDatabase::create().await?;
-    let result = finding_no_link_inner(&database.pool).await;
-    database.drop_database().await;
-    result
+    let database = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
+        .await
+        .expect("connect to the migrated suite database");
+
+    finding_no_link_inner(&database).await
 }
 
 async fn finding_no_link_inner(pool: &PgPool) -> Result<()> {
@@ -748,10 +711,11 @@ async fn finding_no_link_inner(pool: &PgPool) -> Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn a_finding_outside_the_vocabulary_is_rejected() -> Result<()> {
-    let database = DisposableDatabase::create().await?;
-    let result = finding_bad_kind_inner(&database.pool).await;
-    database.drop_database().await;
-    result
+    let database = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
+        .await
+        .expect("connect to the migrated suite database");
+
+    finding_bad_kind_inner(&database).await
 }
 
 async fn finding_bad_kind_inner(pool: &PgPool) -> Result<()> {
@@ -786,10 +750,11 @@ async fn finding_bad_kind_inner(pool: &PgPool) -> Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn a_valid_finding_lands_a_row_and_a_decision_but_no_action() -> Result<()> {
-    let database = DisposableDatabase::create().await?;
-    let result = finding_valid_inner(&database.pool).await;
-    database.drop_database().await;
-    result
+    let database = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
+        .await
+        .expect("connect to the migrated suite database");
+
+    finding_valid_inner(&database).await
 }
 
 async fn finding_valid_inner(pool: &PgPool) -> Result<()> {
@@ -864,10 +829,11 @@ async fn finding_valid_inner(pool: &PgPool) -> Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn a_reemitted_finding_updates_the_same_row() -> Result<()> {
-    let database = DisposableDatabase::create().await?;
-    let result = finding_reemit_inner(&database.pool).await;
-    database.drop_database().await;
-    result
+    let database = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
+        .await
+        .expect("connect to the migrated suite database");
+
+    finding_reemit_inner(&database).await
 }
 
 async fn finding_reemit_inner(pool: &PgPool) -> Result<()> {
@@ -919,10 +885,11 @@ async fn finding_reemit_inner(pool: &PgPool) -> Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn a_reproposed_subreddit_lands_on_the_same_row() -> Result<()> {
-    let database = DisposableDatabase::create().await?;
-    let result = community_dedup_inner(&database.pool).await;
-    database.drop_database().await;
-    result
+    let database = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
+        .await
+        .expect("connect to the migrated suite database");
+
+    community_dedup_inner(&database).await
 }
 
 async fn community_dedup_inner(pool: &PgPool) -> Result<()> {

@@ -9,58 +9,12 @@
 //! an act outside the organisation gets no page; a cancelled night is not
 //! a room played; and a catalogue rotation is counted where it lands.
 
-use std::time::Duration;
+mod common;
 
 use crowdrelay_infra::roster_act_report::{CATALOGUE_ROTATION_TEMPLATE, roster_act_report};
-use sqlx::{Connection, PgConnection, PgPool, postgres::PgPoolOptions};
+use sqlx::PgPool;
 use time::{OffsetDateTime, macros::datetime};
 use uuid::Uuid;
-
-struct DisposableDatabase {
-    pool: PgPool,
-    admin_url: String,
-    name: String,
-}
-
-impl DisposableDatabase {
-    async fn create() -> Result<Self, Box<dyn std::error::Error>> {
-        let base = std::env::var("CROWDRELAY_TEST_DATABASE_URL")
-            .map_err(|_| "CROWDRELAY_TEST_DATABASE_URL must target a disposable database")?;
-        let name = format!("crowdrelay_actreport_{}", Uuid::now_v7().simple());
-        let mut admin = PgConnection::connect(&base).await?;
-        sqlx::query(&format!("CREATE DATABASE {name}"))
-            .execute(&mut admin)
-            .await?;
-        drop(admin);
-        let (head, _) = base.rsplit_once('/').ok_or("database url has no path")?;
-        let url = format!("{head}/{name}");
-        let pool = PgPoolOptions::new()
-            .max_connections(4)
-            .acquire_timeout(Duration::from_secs(10))
-            .connect(&url)
-            .await?;
-        crowdrelay_infra::database::MIGRATOR.run(&pool).await?;
-        Ok(Self {
-            pool,
-            admin_url: base,
-            name,
-        })
-    }
-
-    async fn drop_database(self) {
-        let Self {
-            pool,
-            admin_url,
-            name,
-        } = self;
-        pool.close().await;
-        if let Ok(mut admin) = PgConnection::connect(&admin_url).await {
-            let _ = sqlx::query(&format!("DROP DATABASE IF EXISTS {name} WITH (FORCE)"))
-                .execute(&mut admin)
-                .await;
-        }
-    }
-}
 
 async fn organization(pool: &PgPool, slug: &str) -> Result<Uuid, Box<dyn std::error::Error>> {
     let id = Uuid::now_v7();
@@ -223,10 +177,11 @@ async fn fan_in_city(
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn the_quarters_record_lands_under_the_right_act() -> Result<(), Box<dyn std::error::Error>> {
-    let database = DisposableDatabase::create().await?;
-    let result = run_report(&database.pool).await;
-    database.drop_database().await;
-    result
+    let database = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
+        .await
+        .expect("connect to the migrated suite database");
+
+    run_report(&database).await
 }
 
 async fn run_report(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
@@ -397,9 +352,12 @@ async fn run_report(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
 #[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn a_silent_quarter_is_an_empty_page_not_an_error() -> Result<(), Box<dyn std::error::Error>>
 {
-    let database = DisposableDatabase::create().await?;
-    let pool = database.pool.clone();
-    let result = async move {
+    let database = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
+        .await
+        .expect("connect to the migrated suite database");
+    let pool = database.clone();
+
+    async move {
         let now = OffsetDateTime::now_utc();
         let org = organization(&pool, "roster-label").await?;
         let act = workspace(&pool, "quiet-act", Some(org)).await?;
@@ -413,9 +371,7 @@ async fn a_silent_quarter_is_an_empty_page_not_an_error() -> Result<(), Box<dyn 
         assert_eq!(report.rotations_landed, 0);
         Ok::<(), Box<dyn std::error::Error>>(())
     }
-    .await;
-    database.drop_database().await;
-    result
+    .await
 }
 
 /// The release-collision warning on the per-act page: same calendar the
@@ -425,10 +381,11 @@ async fn a_silent_quarter_is_an_empty_page_not_an_error() -> Result<(), Box<dyn 
 #[tokio::test]
 #[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn a_shared_release_week_warns_on_the_acts_page() -> Result<(), Box<dyn std::error::Error>> {
-    let database = DisposableDatabase::create().await?;
-    let result = run_collision(&database.pool).await;
-    database.drop_database().await;
-    result
+    let database = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
+        .await
+        .expect("connect to the migrated suite database");
+
+    run_collision(&database).await
 }
 
 async fn release_plan(

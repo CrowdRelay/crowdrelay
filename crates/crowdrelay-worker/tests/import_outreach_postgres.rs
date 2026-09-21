@@ -6,56 +6,14 @@
 //! with an address. An import that silently dropped rows, or that re-admitted
 //! something an operator had discarded, would be worse than no import at all.
 
+mod common;
+
 use anyhow::{Context, Result, ensure};
 use crowdrelay_domain::WorkspaceId;
 use crowdrelay_worker::import_outreach::import_outreach;
-use sqlx::{Connection, PgConnection, PgPool, postgres::PgPoolOptions};
+use sqlx::PgPool;
 use std::io::Write;
 use uuid::Uuid;
-
-struct DisposableDatabase {
-    pool: PgPool,
-    admin_url: String,
-    name: String,
-}
-
-impl DisposableDatabase {
-    async fn create() -> Result<Self> {
-        let base = std::env::var("CROWDRELAY_TEST_DATABASE_URL")
-            .context("CROWDRELAY_TEST_DATABASE_URL must target a disposable database")?;
-        let name = format!("crowdrelay_import_{}", Uuid::now_v7().simple());
-        let mut admin = PgConnection::connect(&base).await?;
-        sqlx::query(&format!("CREATE DATABASE {name}"))
-            .execute(&mut admin)
-            .await?;
-        drop(admin);
-        let (head, _) = base.rsplit_once('/').context("database url has no path")?;
-        let pool = PgPoolOptions::new()
-            .max_connections(4)
-            .connect(&format!("{head}/{name}"))
-            .await?;
-        crowdrelay_infra::database::MIGRATOR.run(&pool).await?;
-        Ok(Self {
-            pool,
-            admin_url: base,
-            name,
-        })
-    }
-
-    async fn drop_database(self) {
-        let Self {
-            pool,
-            admin_url,
-            name,
-        } = self;
-        pool.close().await;
-        if let Ok(mut admin) = PgConnection::connect(&admin_url).await {
-            let _ = sqlx::query(&format!("DROP DATABASE IF EXISTS {name} WITH (FORCE)"))
-                .execute(&mut admin)
-                .await;
-        }
-    }
-}
 
 async fn workspace(pool: &PgPool) -> Result<WorkspaceId> {
     let id = Uuid::now_v7();
@@ -110,10 +68,11 @@ async fn count(pool: &PgPool, workspace_id: WorkspaceId) -> Result<i64> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn usable_rows_land_and_unusable_ones_are_refused() -> Result<()> {
-    let database = DisposableDatabase::create().await?;
-    let result = import_inner(&database.pool).await;
-    database.drop_database().await;
-    result
+    let database = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
+        .await
+        .expect("connect to the migrated suite database");
+
+    import_inner(&database).await
 }
 
 async fn import_inner(pool: &PgPool) -> Result<()> {
@@ -150,10 +109,11 @@ async fn import_inner(pool: &PgPool) -> Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn a_second_import_adds_nothing_and_keeps_a_discard_discarded() -> Result<()> {
-    let database = DisposableDatabase::create().await?;
-    let result = idempotent_inner(&database.pool).await;
-    database.drop_database().await;
-    result
+    let database = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
+        .await
+        .expect("connect to the migrated suite database");
+
+    idempotent_inner(&database).await
 }
 
 /// Re-running must be safe, and must not undo an operator's decision.

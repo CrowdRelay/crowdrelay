@@ -7,63 +7,16 @@
 //! table present, a dead credential beside queued drafts must raise
 //! `publishing.session_dead`.
 
+mod common;
+
 use std::time::Duration;
 
 use anyhow::{Context, Result};
 use crowdrelay_domain::WorkspaceId;
 use crowdrelay_worker::auto_post_platforms::{AutoPostPlatforms, PublishingPosture, RedditPosture};
 use crowdrelay_worker::ops_watchdog::OpsWatchdogWorker;
-use sqlx::{Connection, PgConnection, PgPool, postgres::PgPoolOptions};
+use sqlx::PgPool;
 use uuid::Uuid;
-
-struct DisposableDatabase {
-    admin_url: String,
-    name: String,
-    pool: PgPool,
-}
-
-impl DisposableDatabase {
-    async fn create() -> Result<Self> {
-        let base_url = std::env::var("CROWDRELAY_TEST_DATABASE_URL")
-            .context("CROWDRELAY_TEST_DATABASE_URL must target a disposable database")?;
-        let (prefix, _) = base_url
-            .rsplit_once('/')
-            .context("database URL has no database name")?;
-        let admin_url = format!("{prefix}/postgres");
-        let name = format!("crowdrelay_watchdog_{}", Uuid::now_v7().simple());
-        let mut admin = PgConnection::connect(&admin_url)
-            .await
-            .context("connect to the maintenance database")?;
-        sqlx::query(&format!("CREATE DATABASE {name}"))
-            .execute(&mut admin)
-            .await
-            .context("create the disposable database")?;
-        drop(admin);
-        let pool = PgPoolOptions::new()
-            .max_connections(4)
-            .connect(&format!("{prefix}/{name}"))
-            .await
-            .context("connect to the disposable database")?;
-        crowdrelay_infra::database::MIGRATOR
-            .run(&pool)
-            .await
-            .context("apply migrations")?;
-        Ok(Self {
-            admin_url,
-            name,
-            pool,
-        })
-    }
-
-    async fn drop_database(self) {
-        self.pool.close().await;
-        if let Ok(mut admin) = PgConnection::connect(&self.admin_url).await {
-            let _ = sqlx::query(&format!("DROP DATABASE IF EXISTS {} (FORCE)", self.name))
-                .execute(&mut admin)
-                .await;
-        }
-    }
-}
 
 fn watchdog(pool: PgPool, workspace_id: WorkspaceId) -> OpsWatchdogWorker {
     OpsWatchdogWorker::new(
@@ -200,13 +153,16 @@ async fn active_alerts(pool: &PgPool, workspace_id: WorkspaceId) -> Result<Vec<S
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn a_missing_credentials_table_does_not_blind_the_watchdog() -> Result<()> {
-    let db = DisposableDatabase::create().await?;
-    let result = async {
-        let ws = workspace(&db.pool).await?;
-        queued_draft(&db.pool, ws).await?;
+    let db = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
+        .await
+        .expect("connect to the migrated suite database");
+
+    async {
+        let ws = workspace(&db).await?;
+        queued_draft(&db, ws).await?;
         // No create_credentials_table call — the relation does not exist.
-        let transitions = watchdog(db.pool.clone(), ws).run_once().await?;
-        let alerts = active_alerts(&db.pool, ws).await?;
+        let transitions = watchdog(db.clone(), ws).run_once().await?;
+        let alerts = active_alerts(&db, ws).await?;
         assert!(
             alerts.contains(&"publishing.session_dead".to_owned()),
             "a queued draft with no credential service at all is a dead \
@@ -215,9 +171,7 @@ async fn a_missing_credentials_table_does_not_blind_the_watchdog() -> Result<()>
         assert!(transitions > 0, "the cycle ran and recorded the alert");
         Ok(())
     }
-    .await;
-    db.drop_database().await;
-    result
+    .await
 }
 
 /// With the table present, an `invalid` credential beside queued drafts
@@ -225,22 +179,25 @@ async fn a_missing_credentials_table_does_not_blind_the_watchdog() -> Result<()>
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn a_dead_credential_raises_session_dead_and_a_live_one_clears_it() -> Result<()> {
-    let db = DisposableDatabase::create().await?;
-    let result = async {
-        let ws = workspace(&db.pool).await?;
-        queued_draft(&db.pool, ws).await?;
-        create_credentials_table(&db.pool).await?;
+    let db = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
+        .await
+        .expect("connect to the migrated suite database");
+
+    async {
+        let ws = workspace(&db).await?;
+        queued_draft(&db, ws).await?;
+        create_credentials_table(&db).await?;
         sqlx::query(
             "INSERT INTO agent_service_credentials (workspace_id, provider, status, last_validation_error) \
              VALUES ($1,'reddit-browser','invalid','login rejected')",
         )
         .bind(ws.into_uuid())
-        .execute(&db.pool)
+        .execute(&db)
         .await
         .context("insert invalid credential")?;
 
-        watchdog(db.pool.clone(), ws).run_once().await?;
-        let alerts = active_alerts(&db.pool, ws).await?;
+        watchdog(db.clone(), ws).run_once().await?;
+        let alerts = active_alerts(&db, ws).await?;
         assert!(
             alerts.contains(&"publishing.session_dead".to_owned()),
             "invalid credential + queued draft must fire: {alerts:?}"
@@ -251,20 +208,18 @@ async fn a_dead_credential_raises_session_dead_and_a_live_one_clears_it() -> Res
              WHERE workspace_id=$1 AND provider='reddit-browser'",
         )
         .bind(ws.into_uuid())
-        .execute(&db.pool)
+        .execute(&db)
         .await
         .context("revive credential")?;
-        watchdog(db.pool.clone(), ws).run_once().await?;
-        let alerts = active_alerts(&db.pool, ws).await?;
+        watchdog(db.clone(), ws).run_once().await?;
+        let alerts = active_alerts(&db, ws).await?;
         assert!(
             !alerts.contains(&"publishing.session_dead".to_owned()),
             "an active credential means the queue can be worked: {alerts:?}"
         );
         Ok(())
     }
-    .await;
-    db.drop_database().await;
-    result
+    .await
 }
 
 /// An approval cancelled unanswered must reach the operator, against a real
@@ -282,39 +237,33 @@ async fn a_dead_credential_raises_session_dead_and_a_live_one_clears_it() -> Res
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn an_approval_cancelled_unanswered_reaches_the_operator() -> Result<()> {
-    let db = DisposableDatabase::create().await?;
-    let result = async {
-        let ws = workspace(&db.pool).await?;
+    let db = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
+        .await
+        .expect("connect to the migrated suite database");
+
+    async {
+        let ws = workspace(&db).await?;
 
         // An approval still outstanding, well inside its window.
-        approval_action(&db.pool, ws, "awaiting_approval", Some(48), None).await?;
-        watchdog(db.pool.clone(), ws).run_once().await?;
-        let alerts = active_alerts(&db.pool, ws).await?;
+        approval_action(&db, ws, "awaiting_approval", Some(48), None).await?;
+        watchdog(db.clone(), ws).run_once().await?;
+        let alerts = active_alerts(&db, ws).await?;
         assert!(
             !alerts.contains(&"approval.expired_unanswered".to_owned()),
             "work in the queue is the system working, not a finding: {alerts:?}"
         );
 
         // One the sweep cancelled because nobody answered it.
-        approval_action(
-            &db.pool,
-            ws,
-            "cancelled",
-            Some(-1),
-            Some("approval_expired"),
-        )
-        .await?;
-        watchdog(db.pool.clone(), ws).run_once().await?;
-        let alerts = active_alerts(&db.pool, ws).await?;
+        approval_action(&db, ws, "cancelled", Some(-1), Some("approval_expired")).await?;
+        watchdog(db.clone(), ws).run_once().await?;
+        let alerts = active_alerts(&db, ws).await?;
         assert!(
             alerts.contains(&"approval.expired_unanswered".to_owned()),
             "an approval discarded unanswered must be reported: {alerts:?}"
         );
         Ok(())
     }
-    .await;
-    db.drop_database().await;
-    result
+    .await
 }
 
 /// One approval action, with its decision. `expires_in_hours` may be negative to
@@ -389,22 +338,25 @@ async fn approval_action(
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn work_parked_on_a_dark_capability_reaches_the_operator() -> Result<()> {
-    let db = DisposableDatabase::create().await?;
-    let result = async {
-        let ws = workspace(&db.pool).await?;
-        live_executor(&db.pool, ws).await?;
+    let db = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
+        .await
+        .expect("connect to the migrated suite database");
+
+    async {
+        let ws = workspace(&db).await?;
+        live_executor(&db, ws).await?;
 
         // Nothing waiting: a live registry alone is not the finding.
-        watchdog(db.pool.clone(), ws).run_once().await?;
-        let alerts = active_alerts(&db.pool, ws).await?;
+        watchdog(db.clone(), ws).run_once().await?;
+        let alerts = active_alerts(&db, ws).await?;
         assert!(
             !alerts.contains(&"executor.capability_unadvertised".to_owned()),
             "a live registry with nothing parked is healthy: {alerts:?}"
         );
 
-        parked_action(&db.pool, ws).await?;
-        watchdog(db.pool.clone(), ws).run_once().await?;
-        let alerts = active_alerts(&db.pool, ws).await?;
+        parked_action(&db, ws).await?;
+        watchdog(db.clone(), ws).run_once().await?;
+        let alerts = active_alerts(&db, ws).await?;
         assert!(
             alerts.contains(&"executor.capability_unadvertised".to_owned()),
             "parked work beside a live registry must be reported: {alerts:?}"
@@ -417,20 +369,18 @@ async fn work_parked_on_a_dark_capability_reaches_the_operator() -> Result<()> {
                AND last_error_kind='awaiting_executor'",
         )
         .bind(ws.into_uuid())
-        .execute(&db.pool)
+        .execute(&db)
         .await
         .context("unpark action")?;
-        watchdog(db.pool.clone(), ws).run_once().await?;
-        let alerts = active_alerts(&db.pool, ws).await?;
+        watchdog(db.clone(), ws).run_once().await?;
+        let alerts = active_alerts(&db, ws).await?;
         assert!(
             !alerts.contains(&"executor.capability_unadvertised".to_owned()),
             "work unparked when its capability returns: {alerts:?}"
         );
         Ok(())
     }
-    .await;
-    db.drop_database().await;
-    result
+    .await
 }
 
 /// A live heartbeat row so `executor_active > 0` — the condition's other half.
@@ -505,18 +455,21 @@ async fn parked_action(pool: &PgPool, workspace_id: WorkspaceId) -> Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn a_refused_letter_under_an_unknown_event_type_still_raises_attention() -> Result<()> {
-    let db = DisposableDatabase::create().await?;
-    let result = async {
-        let ws = workspace(&db.pool).await?;
+    let db = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
+        .await
+        .expect("connect to the migrated suite database");
+
+    async {
+        let ws = workspace(&db).await?;
         refused_delivery(
-            &db.pool,
+            &db,
             ws,
             "crowdrelay.festival.application_requested",
             serde_json::json!({"action_id": Uuid::now_v7(), "contact_email": "fest@example.org"}),
         )
         .await?;
-        watchdog(db.pool.clone(), ws).run_once().await?;
-        let alerts = active_alerts(&db.pool, ws).await?;
+        watchdog(db.clone(), ws).run_once().await?;
+        let alerts = active_alerts(&db, ws).await?;
         assert!(
             alerts.contains(&"delivery.growth_event_refused".to_owned()),
             "a letter refused under an unlisted event type must still alarm: {alerts:?}"
@@ -525,23 +478,21 @@ async fn a_refused_letter_under_an_unknown_event_type_still_raises_attention() -
         // And a refused event with no named recipient is the warning, not the
         // critical alarm — the two must not bleed into each other.
         refused_delivery(
-            &db.pool,
+            &db,
             ws,
             "crowdrelay.ops.status_changed",
             serde_json::json!({"status": "degraded"}),
         )
         .await?;
-        watchdog(db.pool.clone(), ws).run_once().await?;
-        let alerts = active_alerts(&db.pool, ws).await?;
+        watchdog(db.clone(), ws).run_once().await?;
+        let alerts = active_alerts(&db, ws).await?;
         assert!(
             alerts.contains(&"delivery.event_refused".to_owned()),
             "a refused non-letter delivery warns: {alerts:?}"
         );
         Ok(())
     }
-    .await;
-    db.drop_database().await;
-    result
+    .await
 }
 
 /// One outbox event + one endpoint + one `cancelled` delivery joining them.

@@ -13,83 +13,14 @@
 //! The executors draft in manual mode, which is the default and what
 //! production runs, so these make no network call.
 
+mod common;
+
 use anyhow::{Context, Result, ensure};
 use crowdrelay_domain::WorkspaceId;
 use crowdrelay_worker::social_post_executor::SocialPostExecutorWorker;
 use serde_json::json;
-use sqlx::{Connection, PgConnection, PgPool, postgres::PgPoolOptions};
+use sqlx::PgPool;
 use uuid::Uuid;
-
-struct DisposableDatabase {
-    pool: PgPool,
-    admin_url: String,
-    name: String,
-}
-
-impl DisposableDatabase {
-    async fn create() -> Result<Self> {
-        let base = std::env::var("CROWDRELAY_TEST_DATABASE_URL")
-            .context("CROWDRELAY_TEST_DATABASE_URL must target a disposable database")?;
-        let name = format!("crowdrelay_pubartifact_{}", Uuid::now_v7().simple());
-        let mut admin = PgConnection::connect(&base).await?;
-        sqlx::query(&format!("CREATE DATABASE {name}"))
-            .execute(&mut admin)
-            .await?;
-        drop(admin);
-        let url = {
-            let (head, _) = base.rsplit_once('/').context("database url has no path")?;
-            format!("{head}/{name}")
-        };
-        let pool = PgPoolOptions::new()
-            .max_connections(4)
-            .connect(&url)
-            .await?;
-        crowdrelay_infra::database::MIGRATOR.run(&pool).await?;
-        // `agent_service_tasks` belongs to the TypeScript agents service, not
-        // to CrowdRelay's migrations — it is one of the `FOREIGN_RELATIONS` the
-        // SQL identifier gate allows for exactly that reason. The executor
-        // joins it, so the test has to stand it up. Mirrors the owning DDL in
-        // `crowdrelay-agents/src/store/db.ts`; only the columns this join
-        // touches are declared.
-        sqlx::query(
-            r#"CREATE TABLE IF NOT EXISTS agent_service_tasks (
-                 id           UUID PRIMARY KEY,
-                 workspace_id UUID NOT NULL,
-                 template_id  TEXT NOT NULL,
-                 model_id     TEXT NOT NULL,
-                 prompt       TEXT NOT NULL,
-                 status       TEXT NOT NULL DEFAULT 'queued',
-                 error        TEXT,
-                 created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
-                 started_at   TIMESTAMPTZ,
-                 completed_at TIMESTAMPTZ,
-                 metadata     JSONB NOT NULL DEFAULT '{}',
-                 tier         TEXT NOT NULL DEFAULT 'basic'
-               )"#,
-        )
-        .execute(&pool)
-        .await?;
-        Ok(Self {
-            pool,
-            admin_url: base,
-            name,
-        })
-    }
-
-    async fn drop_database(self) {
-        let Self {
-            pool,
-            admin_url,
-            name,
-        } = self;
-        pool.close().await;
-        if let Ok(mut admin) = PgConnection::connect(&admin_url).await {
-            let _ = sqlx::query(&format!("DROP DATABASE IF EXISTS {name} WITH (FORCE)"))
-                .execute(&mut admin)
-                .await;
-        }
-    }
-}
 
 async fn workspace(pool: &PgPool) -> Result<WorkspaceId> {
     let id = Uuid::now_v7();
@@ -101,6 +32,31 @@ async fn workspace(pool: &PgPool) -> Result<WorkspaceId> {
         .await
         .context("insert workspace")?;
     Ok(WorkspaceId::from_uuid(id))
+}
+
+/// `agent_service_tasks` belongs to the agents service — no CrowdRelay
+/// migration creates it — so the suite database gets the columns the
+/// executor joins on, same as `agent_run_assignment_postgres.rs` does.
+async fn create_foreign_task_table(pool: &PgPool) -> Result<()> {
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS agent_service_tasks (
+            id uuid PRIMARY KEY,
+            workspace_id uuid NOT NULL,
+            template_id text NOT NULL,
+            model_id text NOT NULL,
+            prompt text NOT NULL,
+            status text NOT NULL DEFAULT 'queued',
+            tier text NOT NULL DEFAULT 'basic',
+            metadata jsonb NOT NULL DEFAULT '{}'::jsonb,
+            created_at timestamptz NOT NULL DEFAULT now()
+        )
+        "#,
+    )
+    .execute(pool)
+    .await
+    .context("create the foreign agent task table")?;
+    Ok(())
 }
 
 /// The shape the executor actually joins on.
@@ -115,6 +71,7 @@ async fn seed_drafted_action(
     template_id: &str,
     platform: &str,
 ) -> Result<Uuid> {
+    create_foreign_task_table(pool).await?;
     let task_id = Uuid::now_v7();
     sqlx::query(
         r#"INSERT INTO agent_service_tasks
@@ -198,10 +155,11 @@ async fn social_post_rows(pool: &PgPool, action_id: Uuid) -> Result<Vec<(String,
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn a_drafted_social_post_becomes_an_artifact_awaiting_a_person() -> Result<()> {
-    let database = DisposableDatabase::create().await?;
-    let result = drafted_becomes_artifact(&database.pool).await;
-    database.drop_database().await;
-    result
+    let database = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
+        .await
+        .expect("connect to the migrated suite database");
+
+    drafted_becomes_artifact(&database).await
 }
 
 async fn drafted_becomes_artifact(pool: &PgPool) -> Result<()> {
@@ -230,10 +188,11 @@ async fn drafted_becomes_artifact(pool: &PgPool) -> Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn running_twice_does_not_double_draft() -> Result<()> {
-    let database = DisposableDatabase::create().await?;
-    let result = twice_is_idempotent(&database.pool).await;
-    database.drop_database().await;
-    result
+    let database = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
+        .await
+        .expect("connect to the migrated suite database");
+
+    twice_is_idempotent(&database).await
 }
 
 /// The executor polls. A second pass must not post the same draft again —
@@ -256,10 +215,11 @@ async fn twice_is_idempotent(pool: &PgPool) -> Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn another_templates_draft_is_not_claimed() -> Result<()> {
-    let database = DisposableDatabase::create().await?;
-    let result = wrong_template_ignored(&database.pool).await;
-    database.drop_database().await;
-    result
+    let database = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
+        .await
+        .expect("connect to the migrated suite database");
+
+    wrong_template_ignored(&database).await
 }
 
 /// Each executor claims only its own template's drafts.

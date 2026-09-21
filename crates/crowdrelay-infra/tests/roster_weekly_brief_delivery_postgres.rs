@@ -12,74 +12,16 @@
 //! executor read, the dedupe is a partial unique index — none of it is
 //! checked at compile time.
 
+mod common;
+
 use std::time::Duration;
 
 use crowdrelay_domain::WorkspaceId;
 use crowdrelay_infra::{autopilot::PostgresAutopilotRepository, config::DatabaseConfig};
 use serde_json::json;
-use sqlx::{Connection, PgConnection, PgPool, postgres::PgPoolOptions};
+use sqlx::PgPool;
 use time::{OffsetDateTime, macros::datetime};
 use uuid::Uuid;
-
-struct DisposableDatabase {
-    pool: PgPool,
-    admin_url: String,
-    name: String,
-}
-
-impl DisposableDatabase {
-    async fn create() -> Result<Self, Box<dyn std::error::Error>> {
-        let base = std::env::var("CROWDRELAY_TEST_DATABASE_URL")
-            .map_err(|_| "CROWDRELAY_TEST_DATABASE_URL must target a disposable database")?;
-        let name = format!("crowdrelay_rosterdel_{}", Uuid::now_v7().simple());
-        let mut admin = PgConnection::connect(&base).await?;
-        sqlx::query(&format!("CREATE DATABASE {name}"))
-            .execute(&mut admin)
-            .await?;
-        drop(admin);
-        let (head, _) = base.rsplit_once('/').ok_or("database url has no path")?;
-        let url = format!("{head}/{name}");
-        let pool = PgPoolOptions::new()
-            .max_connections(4)
-            .acquire_timeout(Duration::from_secs(10))
-            .connect(&url)
-            .await?;
-        crowdrelay_infra::database::MIGRATOR.run(&pool).await?;
-        Ok(Self {
-            pool,
-            admin_url: base,
-            name,
-        })
-    }
-
-    async fn repository(&self) -> PostgresAutopilotRepository {
-        PostgresAutopilotRepository::new(
-            self.pool.clone(),
-            &DatabaseConfig {
-                url: String::new(),
-                max_connections: 4,
-                connect_timeout: Duration::from_secs(3),
-                ping_timeout: Duration::from_secs(2),
-                operation_timeout: Duration::from_secs(10),
-                lock_timeout: Duration::from_secs(1),
-            },
-        )
-    }
-
-    async fn drop_database(self) {
-        let Self {
-            pool,
-            admin_url,
-            name,
-        } = self;
-        pool.close().await;
-        if let Ok(mut admin) = PgConnection::connect(&admin_url).await {
-            let _ = sqlx::query(&format!("DROP DATABASE IF EXISTS {name} WITH (FORCE)"))
-                .execute(&mut admin)
-                .await;
-        }
-    }
-}
 
 async fn organization(pool: &PgPool, slug: &str) -> Result<Uuid, Box<dyn std::error::Error>> {
     let id = Uuid::now_v7();
@@ -257,15 +199,30 @@ async fn roster_emails(
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn the_brief_issues_once_per_org_per_week() -> Result<(), Box<dyn std::error::Error>> {
-    let database = DisposableDatabase::create().await?;
-    let result = run_issue(&database).await;
-    database.drop_database().await;
-    result
+    let database = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
+        .await
+        .expect("connect to the migrated suite database");
+
+    run_issue(&database).await
 }
 
-async fn run_issue(database: &DisposableDatabase) -> Result<(), Box<dyn std::error::Error>> {
-    let pool = &database.pool;
-    let repository = database.repository().await;
+fn repository(pool: &PgPool) -> PostgresAutopilotRepository {
+    PostgresAutopilotRepository::new(
+        pool.clone(),
+        &DatabaseConfig {
+            url: String::new(),
+            max_connections: 4,
+            connect_timeout: Duration::from_secs(3),
+            ping_timeout: Duration::from_secs(2),
+            operation_timeout: Duration::from_secs(10),
+            lock_timeout: Duration::from_secs(1),
+        },
+    )
+}
+
+async fn run_issue(database: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
+    let pool = database;
+    let repository = repository(database);
 
     let label = organization(pool, "roster-label").await?;
     // Names fix member order: "alpha-act" precedes "beta-act", so alpha's
@@ -388,15 +345,16 @@ async fn run_issue(database: &DisposableDatabase) -> Result<(), Box<dyn std::err
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn a_workspace_without_email_gets_no_assignments() -> Result<(), Box<dyn std::error::Error>> {
-    let database = DisposableDatabase::create().await?;
-    let result = run_no_email(&database).await;
-    database.drop_database().await;
-    result
+    let database = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
+        .await
+        .expect("connect to the migrated suite database");
+
+    run_no_email(&database).await
 }
 
-async fn run_no_email(database: &DisposableDatabase) -> Result<(), Box<dyn std::error::Error>> {
-    let pool = &database.pool;
-    let repository = database.repository().await;
+async fn run_no_email(database: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
+    let pool = database;
+    let repository = repository(database);
 
     let label = organization(pool, "roster-label").await?;
     let alpha = workspace(pool, "alpha-act", Some(label)).await?;
@@ -427,15 +385,16 @@ async fn run_no_email(database: &DisposableDatabase) -> Result<(), Box<dyn std::
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn an_org_with_no_email_path_issues_nothing() -> Result<(), Box<dyn std::error::Error>> {
-    let database = DisposableDatabase::create().await?;
-    let result = run_no_path(&database).await;
-    database.drop_database().await;
-    result
+    let database = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
+        .await
+        .expect("connect to the migrated suite database");
+
+    run_no_path(&database).await
 }
 
-async fn run_no_path(database: &DisposableDatabase) -> Result<(), Box<dyn std::error::Error>> {
-    let pool = &database.pool;
-    let repository = database.repository().await;
+async fn run_no_path(database: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
+    let pool = database;
+    let repository = repository(database);
 
     let label = organization(pool, "roster-label").await?;
     let alpha = workspace(pool, "alpha-act", Some(label)).await?;

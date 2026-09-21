@@ -9,62 +9,14 @@
 //! on 2026-09-18. These tests run the real worker's `run_once`, because a test
 //! that reimplemented the query would prove nothing about the one that ships.
 
+mod common;
+
 use std::time::Duration;
 
 use anyhow::{Context, Result, ensure};
 use crowdrelay_worker::retention::{RetentionWorker, RetentionWorkerConfig};
-use sqlx::{Connection, PgConnection, PgPool, postgres::PgPoolOptions};
+use sqlx::PgPool;
 use uuid::Uuid;
-
-struct DisposableDatabase {
-    admin_url: String,
-    name: String,
-    pool: PgPool,
-}
-
-impl DisposableDatabase {
-    async fn create() -> Result<Self> {
-        let base_url = std::env::var("CROWDRELAY_TEST_DATABASE_URL")
-            .context("CROWDRELAY_TEST_DATABASE_URL must target a disposable database")?;
-        let (prefix, _) = base_url
-            .rsplit_once('/')
-            .context("database URL has no database name")?;
-        let admin_url = format!("{prefix}/postgres");
-        let name = format!("crowdrelay_retention_{}", Uuid::now_v7().simple());
-        let mut admin = PgConnection::connect(&admin_url)
-            .await
-            .context("connect to the maintenance database")?;
-        // The name is a fresh UUID, so there is nothing to quote-escape.
-        sqlx::query(&format!("CREATE DATABASE {name}"))
-            .execute(&mut admin)
-            .await
-            .context("create the disposable database")?;
-        drop(admin);
-        let pool = PgPoolOptions::new()
-            .max_connections(4)
-            .connect(&format!("{prefix}/{name}"))
-            .await
-            .context("connect to the disposable database")?;
-        crowdrelay_infra::database::MIGRATOR
-            .run(&pool)
-            .await
-            .context("apply migrations")?;
-        Ok(Self {
-            admin_url,
-            name,
-            pool,
-        })
-    }
-
-    async fn drop_database(self) {
-        self.pool.close().await;
-        if let Ok(mut admin) = PgConnection::connect(&self.admin_url).await {
-            let _ = sqlx::query(&format!("DROP DATABASE IF EXISTS {} (FORCE)", self.name))
-                .execute(&mut admin)
-                .await;
-        }
-    }
-}
 
 async fn workspace(pool: &PgPool) -> Result<Uuid> {
     let id = Uuid::now_v7();
@@ -181,27 +133,27 @@ fn worker(pool: &PgPool) -> Result<RetentionWorker> {
 #[tokio::test]
 #[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn a_referenced_terminal_event_survives_the_sweep() -> Result<()> {
-    let db = DisposableDatabase::create().await?;
-    let result = async {
-        let workspace_id = workspace(&db.pool).await?;
-        let referenced =
-            terminal_event(&db.pool, workspace_id, "crowdrelay.contact.attempted").await?;
-        let plain = terminal_event(&db.pool, workspace_id, "crowdrelay.fan.welcomed").await?;
-        action_emission(&db.pool, workspace_id, referenced).await?;
+    let db = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
+        .await
+        .expect("connect to the migrated suite database");
 
-        let stats = worker(&db.pool)?.run_once().await?;
+    async {
+        let workspace_id = workspace(&db).await?;
+        let referenced = terminal_event(&db, workspace_id, "crowdrelay.contact.attempted").await?;
+        let plain = terminal_event(&db, workspace_id, "crowdrelay.fan.welcomed").await?;
+        action_emission(&db, workspace_id, referenced).await?;
+
+        let stats = worker(&db)?.run_once().await?;
         ensure!(stats.terminal_outbox_events_deleted == 1);
 
         let remaining: Vec<Uuid> =
             sqlx::query_scalar("SELECT id FROM outbox_events WHERE workspace_id = $1")
                 .bind(workspace_id)
-                .fetch_all(&db.pool)
+                .fetch_all(&db)
                 .await?;
         ensure!(remaining == vec![referenced], "remaining: {remaining:?}");
         let _ = plain;
         Ok(())
     }
-    .await;
-    db.drop_database().await;
-    result
+    .await
 }

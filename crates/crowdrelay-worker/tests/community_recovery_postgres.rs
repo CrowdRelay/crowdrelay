@@ -7,62 +7,15 @@
 //! existing integrity test never saw it, because it replayed the UPDATEs by
 //! hand instead of calling the function. This test calls the function.
 
+mod common;
+
 use std::time::Duration;
 
 use anyhow::{Context, Result};
 use crowdrelay_domain::WorkspaceId;
 use crowdrelay_worker::community_executor::CommunityExecutorWorker;
-use sqlx::{Connection, PgConnection, PgPool, postgres::PgPoolOptions};
+use sqlx::PgPool;
 use uuid::Uuid;
-
-struct DisposableDatabase {
-    admin_url: String,
-    name: String,
-    pool: PgPool,
-}
-
-impl DisposableDatabase {
-    async fn create() -> Result<Self> {
-        let base_url = std::env::var("CROWDRELAY_TEST_DATABASE_URL")
-            .context("CROWDRELAY_TEST_DATABASE_URL must target a disposable database")?;
-        let (prefix, _) = base_url
-            .rsplit_once('/')
-            .context("database URL has no database name")?;
-        let admin_url = format!("{prefix}/postgres");
-        let name = format!("crowdrelay_recovery_{}", Uuid::now_v7().simple());
-        let mut admin = PgConnection::connect(&admin_url)
-            .await
-            .context("connect to the maintenance database")?;
-        sqlx::query(&format!("CREATE DATABASE {name}"))
-            .execute(&mut admin)
-            .await
-            .context("create the disposable database")?;
-        drop(admin);
-        let pool = PgPoolOptions::new()
-            .max_connections(4)
-            .connect(&format!("{prefix}/{name}"))
-            .await
-            .context("connect to the disposable database")?;
-        crowdrelay_infra::database::MIGRATOR
-            .run(&pool)
-            .await
-            .context("apply migrations")?;
-        Ok(Self {
-            admin_url,
-            name,
-            pool,
-        })
-    }
-
-    async fn drop_database(self) {
-        self.pool.close().await;
-        if let Ok(mut admin) = PgConnection::connect(&self.admin_url).await {
-            let _ = sqlx::query(&format!("DROP DATABASE IF EXISTS {} (FORCE)", self.name))
-                .execute(&mut admin)
-                .await;
-        }
-    }
-}
 
 async fn workspace(pool: &PgPool) -> Result<WorkspaceId> {
     let id = Uuid::now_v7();
@@ -172,12 +125,15 @@ async fn stale_posting_row(pool: &PgPool, workspace_id: WorkspaceId) -> Result<U
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn stale_posting_recovery_reaches_the_assignment() -> Result<()> {
-    let db = DisposableDatabase::create().await?;
-    let result = async {
-        let ws = workspace(&db.pool).await?;
-        let action_id = stale_posting_row(&db.pool, ws).await?;
+    let db = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
+        .await
+        .expect("connect to the migrated suite database");
+
+    async {
+        let ws = workspace(&db).await?;
+        let action_id = stale_posting_row(&db, ws).await?;
         let worker = CommunityExecutorWorker::new(
-            db.pool.clone(),
+            db.clone(),
             ws,
             Duration::from_secs(30),
             true,
@@ -192,7 +148,7 @@ async fn stale_posting_recovery_reaches_the_assignment() -> Result<()> {
         let post_status: String =
             sqlx::query_scalar("SELECT status FROM community_posts WHERE action_id = $1")
                 .bind(action_id)
-                .fetch_one(&db.pool)
+                .fetch_one(&db)
                 .await
                 .context("read post status")?;
         assert_eq!(post_status, "failed", "stale post must be marked failed");
@@ -200,7 +156,7 @@ async fn stale_posting_recovery_reaches_the_assignment() -> Result<()> {
         let action_status: String =
             sqlx::query_scalar("SELECT status FROM viryaos_autopilot_actions WHERE id = $1")
                 .bind(action_id)
-                .fetch_one(&db.pool)
+                .fetch_one(&db)
                 .await
                 .context("read action status")?;
         assert_eq!(action_status, "unknown", "action must be unknown");
@@ -211,7 +167,7 @@ async fn stale_posting_recovery_reaches_the_assignment() -> Result<()> {
             "SELECT execution_status FROM viryaos_experiment_assignments WHERE action_id = $1",
         )
         .bind(action_id)
-        .fetch_one(&db.pool)
+        .fetch_one(&db)
         .await
         .context("read assignment status")?;
         assert_eq!(
@@ -225,13 +181,11 @@ async fn stale_posting_recovery_reaches_the_assignment() -> Result<()> {
             "SELECT trace_id IS NOT NULL FROM viryaos_experiment_assignments WHERE action_id = $1",
         )
         .bind(action_id)
-        .fetch_one(&db.pool)
+        .fetch_one(&db)
         .await
         .context("read assignment trace")?;
         assert!(traced, "recovery must backfill trace_id from the action");
         Ok(())
     }
-    .await;
-    db.drop_database().await;
-    result
+    .await
 }

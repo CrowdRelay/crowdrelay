@@ -13,59 +13,17 @@
 //! mistakes were caught by driving the attestation queries rather than reading
 //! them; these are driven for the same reason.
 
+mod common;
+
 use crowdrelay_domain::gig_plan::{GigRefusal, TenantIntent, plan_gig};
 use crowdrelay_infra::gig_planning::{city_opportunities, stated_intent};
 use crowdrelay_infra::organization_settings::{
     KEY_ROSTER_PACKAGES_PER_PERIOD, OrganizationSettingsRepository,
 };
 use crowdrelay_infra::tenant_settings::{KEY_TENANT_INTENT, TenantSettingsRepository};
-use sqlx::{Connection, PgConnection, PgPool, postgres::PgPoolOptions};
+use sqlx::PgPool;
 use time::OffsetDateTime;
 use uuid::Uuid;
-
-struct DisposableDatabase {
-    pool: PgPool,
-    admin_url: String,
-    name: String,
-}
-
-impl DisposableDatabase {
-    async fn create() -> Result<Self, Box<dyn std::error::Error>> {
-        let base = std::env::var("CROWDRELAY_TEST_DATABASE_URL")
-            .map_err(|_| "CROWDRELAY_TEST_DATABASE_URL must target a disposable database")?;
-        let name = format!("crowdrelay_gigplan_{}", Uuid::now_v7().simple());
-        let mut admin = PgConnection::connect(&base).await?;
-        sqlx::query(&format!("CREATE DATABASE {name}"))
-            .execute(&mut admin)
-            .await?;
-        drop(admin);
-        let (head, _) = base.rsplit_once('/').ok_or("database url has no path")?;
-        let pool = PgPoolOptions::new()
-            .max_connections(2)
-            .connect(&format!("{head}/{name}"))
-            .await?;
-        crowdrelay_infra::database::MIGRATOR.run(&pool).await?;
-        Ok(Self {
-            pool,
-            admin_url: base,
-            name,
-        })
-    }
-
-    async fn drop_database(self) {
-        let Self {
-            pool,
-            admin_url,
-            name,
-        } = self;
-        pool.close().await;
-        if let Ok(mut admin) = PgConnection::connect(&admin_url).await {
-            let _ = sqlx::query(&format!("DROP DATABASE IF EXISTS {name} WITH (FORCE)"))
-                .execute(&mut admin)
-                .await;
-        }
-    }
-}
 
 async fn workspace(pool: &PgPool) -> Result<Uuid, Box<dyn std::error::Error>> {
     let id = Uuid::now_v7();
@@ -195,10 +153,11 @@ async fn played_show(
 #[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn the_evidence_handed_to_the_planner_is_what_the_database_holds()
 -> Result<(), Box<dyn std::error::Error>> {
-    let database = DisposableDatabase::create().await?;
-    let result = run(&database.pool).await;
-    database.drop_database().await;
-    result
+    let database = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
+        .await
+        .expect("connect to the migrated suite database");
+
+    run(&database).await
 }
 
 async fn run(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
@@ -901,17 +860,20 @@ async fn stated_intent_comes_from_the_act_that_stated_it(
 #[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn two_cities_sharing_a_slug_do_not_share_their_evidence()
 -> Result<(), Box<dyn std::error::Error>> {
-    let database = DisposableDatabase::create().await?;
-    let result = async {
-        let act = workspace(&database.pool).await?;
+    let database = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
+        .await
+        .expect("connect to the migrated suite database");
+
+    async {
+        let act = workspace(&database).await?;
         let now = OffsetDateTime::now_utc();
         // Wrocław, Poland — and a German namesake hundreds of kilometres away.
         // Same slug, different city, different audience.
-        let wroclaw_pl = city_in(&database.pool, "wroclaw", "PL", 51.1, 17.0).await?;
-        let wroclaw_de = city_in(&database.pool, "wroclaw", "DE", 48.0, 7.85).await?;
+        let wroclaw_pl = city_in(&database, "wroclaw", "PL", 51.1, 17.0).await?;
+        let wroclaw_de = city_in(&database, "wroclaw", "DE", 48.0, 7.85).await?;
         for index in 0..60 {
             reachable_fan(
-                &database.pool,
+                &database,
                 act,
                 wroclaw_pl,
                 &format!("pl{index}@example.com"),
@@ -920,17 +882,17 @@ async fn two_cities_sharing_a_slug_do_not_share_their_evidence()
         }
         for index in 0..30 {
             reachable_fan(
-                &database.pool,
+                &database,
                 act,
                 wroclaw_de,
                 &format!("de{index}@example.com"),
             )
             .await?;
         }
-        played_show(&database.pool, act, wroclaw_pl, "Klub X", "show-pl", 40).await?;
-        played_show(&database.pool, act, wroclaw_de, "Forum Y", "show-de", 40).await?;
+        played_show(&database, act, wroclaw_pl, "Klub X", "show-pl", 40).await?;
+        played_show(&database, act, wroclaw_de, "Forum Y", "show-de", 40).await?;
 
-        let opportunities = city_opportunities(&database.pool, act, now).await?;
+        let opportunities = city_opportunities(&database, act, now).await?;
         let pl = opportunities
             .iter()
             .find(|city| city.city_id.into_uuid() == wroclaw_pl)
@@ -966,9 +928,7 @@ async fn two_cities_sharing_a_slug_do_not_share_their_evidence()
         );
         Ok(())
     }
-    .await;
-    database.drop_database().await;
-    result
+    .await
 }
 
 /// Reachability has three honest answers, not two: a measured count (which
@@ -978,9 +938,12 @@ async fn two_cities_sharing_a_slug_do_not_share_their_evidence()
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn an_unlocatable_city_is_unmeasurable_not_zero() -> Result<(), Box<dyn std::error::Error>> {
-    let database = DisposableDatabase::create().await?;
-    let result = async {
-        let pool = &database.pool;
+    let database = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
+        .await
+        .expect("connect to the migrated suite database");
+
+    async {
+        let pool = &database;
         let workspace = workspace(pool).await?;
 
         // Measured, and the measurement is nobody.
@@ -1017,9 +980,7 @@ async fn an_unlocatable_city_is_unmeasurable_not_zero() -> Result<(), Box<dyn st
         );
         Ok(())
     }
-    .await;
-    database.drop_database().await;
-    result
+    .await
 }
 
 /// A peer act with one genre claim — returns the registry id so the same
@@ -1082,9 +1043,12 @@ async fn peer_on_bill(
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn comparable_acts_reach_the_planner() -> Result<(), Box<dyn std::error::Error>> {
-    let database = DisposableDatabase::create().await?;
-    let result = async {
-        let pool = &database.pool;
+    let database = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
+        .await
+        .expect("connect to the migrated suite database");
+
+    async {
+        let pool = &database;
         let act = workspace(pool).await?;
         let wroclaw = city(pool, "wroclaw-comparables").await?;
         let now = OffsetDateTime::now_utc();
@@ -1201,7 +1165,5 @@ async fn comparable_acts_reach_the_planner() -> Result<(), Box<dyn std::error::E
         );
         Ok(())
     }
-    .await;
-    database.drop_database().await;
-    result
+    .await
 }
