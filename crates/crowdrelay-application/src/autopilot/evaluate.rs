@@ -963,6 +963,7 @@ include!("evaluate/supply_quiet.rs");
 include!("evaluate/growth_intelligence_context.rs");
 include!("evaluate/hypothesis_validation.rs");
 include!("evaluate/tests.rs");
+include!("evaluate/tests_booking.rs");
 include!("evaluate/growth_metrics_tests.rs");
 include!("evaluate/growth_debt_tests.rs");
 include!("evaluate/content_strategy_tests.rs");

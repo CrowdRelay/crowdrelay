@@ -68,6 +68,8 @@ CONTRACT = {
         "autopilot/execution_dispatch.rs",
         "autopilot/execution_outcomes.rs",
         "autopilot/execution_capabilities.rs",
+        "autopilot/execution_mutations.rs",
+        "autopilot/execution_measurement.rs",
         "autopilot/support.rs",
     ],
     "crates/crowdrelay-infra/src/autopilot/decisions.rs": [
@@ -138,6 +140,7 @@ CONTRACT = {
         "evaluate/supply_quiet.rs",
         "evaluate/support.rs",
         "evaluate/tests.rs",
+        "evaluate/tests_booking.rs",
     ],
 }
 

@@ -543,12 +543,14 @@ impl CommunityExecutorWorker {
                 error_message = $2,
                 updated_at = now()
             WHERE id = ANY($1)
+              AND workspace_id = $3
             "#,
         )
         .bind(&post_ids)
         .bind(format!(
             "{CRASH_POSTING_ERROR_PREFIX} — check Reddit manually"
         ))
+        .bind(ws)
         .execute(&self.pool)
         .await?;
 
