@@ -356,6 +356,28 @@ pub struct OutboxItem {
     dead_at: Option<OffsetDateTime>,
 }
 
+/// A note the brain wrote for the humans around the band — a task that
+/// needs a person, a report that came due, a pitch that parked.
+///
+/// Read straight off `outbox_events` rather than off any delivery ledger:
+/// the emit is the durable record that the escalation happened, and an
+/// email that never delivered does not un-happen the fact. `delivered`
+/// tells the operator whether the mail behind the notice left the
+/// building; it never gates whether the notice is shown.
+#[derive(Debug, Serialize, FromRow)]
+pub struct BandNotice {
+    pub id: Uuid,
+    /// The outbox event type minus the `crowdrelay.` prefix.
+    pub kind: String,
+    /// The emitted payload — which event, release or deal it concerns.
+    pub detail: serde_json::Value,
+    /// Whether the email behind the notice was delivered. `false` is the
+    /// interesting case: the notice is still owed to the band.
+    pub delivered: bool,
+    #[serde(with = "time::serde::rfc3339")]
+    pub created_at: OffsetDateTime,
+}
+
 #[derive(Debug, Serialize, FromRow)]
 pub struct DeliveryItem {
     id: Uuid,

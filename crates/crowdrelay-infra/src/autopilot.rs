@@ -142,7 +142,10 @@ use crowdrelay_domain::{
         PlacementObservation, PlacementSnapshot, PlacementState, apply_observation,
         suppresses_identity,
     },
-    plays::{PlayAnchorKind, PlayKind, PlayPolicy, PlayStepKind, PlayStepState, StepAudience},
+    plays::{
+        PlayAnchorKind, PlayKind, PlayPolicy, PlayStepKind, PlayStepPushFacts, PlayStepState,
+        StepAudience,
+    },
     pricing::TicketYieldSnapshot,
     promotion::PromotionPerformanceSnapshot,
     release_autopilot::{

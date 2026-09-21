@@ -9,6 +9,7 @@ impl AutopilotActionPayload {
         match self {
             Self::ChangeTicketPrice { .. } => "ticket.price.change",
             Self::ChangeTicketCapacity { .. } => "ticket.capacity.change",
+            Self::SetEventTicketUrl { .. } => "event.ticket_url.set",
             Self::RequestFanLifecycleMessage { .. } => "fan.lifecycle.message.request",
             Self::RequestMerchReorder { .. } => "merch.reorder.request",
             Self::ChangeMerchPrice { .. } => "merch.price.change",

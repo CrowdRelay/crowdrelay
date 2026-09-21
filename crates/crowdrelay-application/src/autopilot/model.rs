@@ -393,6 +393,21 @@ pub enum AutopilotActionPayload {
         to_capacity: u32,
         guardrail_version: i64,
     },
+    /// A listing sweep found the one gap it can close safely on its own: the
+    /// event has a live ticket sale but the listing carries no ticket link.
+    /// The fix is the canonical page the sale already lives on — never an
+    /// invented URL — and it arrives as its own action so the operator sees,
+    /// approves, and audits it exactly like a price change. Under
+    /// `bounded_auto` it queues directly; under `require_approval` it waits
+    /// for the click.
+    SetEventTicketUrl {
+        event_id: EventId,
+        ticket_url: String,
+        /// The play and step whose sweep proposed the fix — audit lineage,
+        /// not execution input.
+        play_id: PlayId,
+        step_index: u16,
+    },
     RequestFanLifecycleMessage {
         fan_id: FanId,
         template_key: String,
@@ -1146,6 +1161,11 @@ impl AutopilotActionPayload {
             | Self::RequestOutreachDiscovery { .. }
             | Self::RequestBookingTargetDiscovery { .. }
             | Self::RequestContentArtifact { .. }
+            // Setting the ticket link on our own event row is a first-party
+            // write, undone by clearing the field. What makes it safe to
+            // class here is that the value is never invented — it is the
+            // canonical page the event's own live sale already answers.
+            | Self::SetEventTicketUrl { .. }
             | Self::AdjustExperiment { .. }
             | Self::CompleteShowTask { .. }
             | Self::EscalateShowTask { .. }

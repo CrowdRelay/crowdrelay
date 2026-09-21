@@ -296,6 +296,19 @@ async fn a_play_starts_once_reaches_a_fan_once_and_only_finishes_when_every_step
         "an awaiting-approval send has already spent the step's budget"
     );
 
+    // The fan holds one live push endpoint, so the in-process delivery leg
+    // has somewhere real to write.
+    sqlx::query(
+        "INSERT INTO fan_push_endpoints (workspace_id, fan_id, installation_id, transport, endpoint_address)
+         VALUES ($1,$2,$3,'android_fcm',$4)",
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(fan_id.into_uuid())
+    .bind(format!("install-{suffix}"))
+    .bind(format!("fcm-token-{suffix}-0123456789abcdef"))
+    .execute(&pool)
+    .await?;
+
     // Now execute it for real. This is the only place the dispatch query, the
     // recipient write and the outbox emission run together, and a mistake in
     // any of them is invisible from Rust.
@@ -366,6 +379,32 @@ async fn a_play_starts_once_reaches_a_fan_once_and_only_finishes_when_every_step
         .await?,
         1,
         "the send leaves through the existing outbox, not a new path"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM fan_push_deliveries
+             WHERE workspace_id=$1 AND fan_id=$2 AND source_kind='play_step'"
+        )
+        .bind(workspace_id.into_uuid())
+        .bind(fan_id.into_uuid())
+        .fetch_one(&pool)
+        .await?,
+        1,
+        "the in-process delivery leg wrote one queued push for the fan's one endpoint"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, serde_json::Value>(
+            "SELECT step.result FROM viryaos_play_steps AS step
+             WHERE step.workspace_id=$1 AND step.play_id=$2 AND step.step_index=1"
+        )
+        .bind(workspace_id.into_uuid())
+        .bind(play_id.into_uuid())
+        .fetch_one(&pool)
+        .await?
+        .pointer("/push_deliveries")
+        .cloned()
+        .ok_or("the step row records what the send did")?,
+        serde_json::json!(1)
     );
 
     repository
@@ -746,6 +785,23 @@ async fn a_sweep_play_runs_once_for_its_show_and_reaches_nobody()
         0,
         "a sweep reaches nobody, and recording a recipient would be a contact that never happened"
     );
+    let result = sqlx::query_scalar::<_, serde_json::Value>(
+        "SELECT result FROM viryaos_play_steps WHERE workspace_id=$1 AND play_id=$2 AND step_index=0",
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(play.play_id.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert!(
+        result["missing"]
+            .as_array()
+            .is_some_and(|missing| missing.iter().any(|item| item == "ticket_url")),
+        "a show with no ticket link is a finding the sweep reports, got {result}"
+    );
+    assert!(
+        result.get("proposed_fix").is_none(),
+        "no sale is open, so there is no link the sweep can honestly propose"
+    );
     // No workspace cleanup: the emitted outbox event holds a RESTRICT
     // reference, which is the delivery ledger refusing to lose a dispatched
     // intent. The database is disposable; the ledger is not.
@@ -1036,6 +1092,442 @@ async fn a_ladder_is_anchored_on_one_engaged_fan_and_needs_a_tracked_link()
     assert!(
         !play.anchor_active,
         "a fan who withdrew consent is a withdrawn anchor, exactly like a cancelled show"
+    );
+    Ok(())
+}
+
+/// One listing sweep over one event: starts the play, dispatches the step,
+/// executes it, and hands back the play id plus what the step recorded.
+///
+/// Factored because the propose/apply cycle runs twice below — once under
+/// the default ask-first posture and once under `bounded_auto` — and the
+/// difference between them is exactly one policy row, not two test bodies.
+async fn run_listing_sweep(
+    pool: &sqlx::PgPool,
+    repository: &PostgresAutopilotRepository,
+    workspace_id: WorkspaceId,
+    event_id: EventId,
+    anchor_at: OffsetDateTime,
+    now: OffsetDateTime,
+) -> Result<(Uuid, serde_json::Value), Box<dyn std::error::Error>> {
+    let kind = PlayKind::ListingCompletenessSweep;
+    let start = PlayStart {
+        kind,
+        anchor: PlayAnchorRef::Event { event_id },
+        anchor_at,
+        hypothesis: kind.hypothesis(),
+        success_metric_platform: kind.success_metric().0,
+        success_metric_key: kind.success_metric().1,
+        steps: kind
+            .steps()
+            .iter()
+            .map(|spec| {
+                let (due_at, expires_at) = step_schedule(*spec, anchor_at);
+                PlayStepPlan {
+                    index: spec.index,
+                    kind: spec.kind,
+                    class: spec.class,
+                    due_at,
+                    expires_at,
+                }
+            })
+            .collect(),
+        measurement_window_end: anchor_at + time::Duration::days(14),
+    };
+    repository.start_play(workspace_id, &start).await?;
+    let play = one_play(repository, workspace_id, now, event_id).await?;
+    let payload = AutopilotActionPayload::RunPlayStep {
+        play_id: play.play_id,
+        play_kind: kind,
+        step_index: 0,
+        step_kind: PlayStepKind::ListingSweep,
+        event_id: Some(event_id),
+        fan_id: None,
+        template_key: PlayStepKind::ListingSweep.template_key().to_owned(),
+    };
+    let decision_id = Uuid::now_v7();
+    sqlx::query(
+        r#"
+        INSERT INTO viryaos_autopilot_decisions (
+            id, workspace_id, decision_key, context, subject_kind, subject_id,
+            decision_kind, confidence_basis_points, disposition, reason,
+            input_snapshot, policy_snapshot, recommendation, trace_id)
+        VALUES ($1,$2,$3,'plays','event',$4,'run_play_step',9000,'auto_execute',
+                'test','{}'::jsonb,'{}'::jsonb,$5,gen_random_uuid())
+        "#,
+    )
+    .bind(decision_id)
+    .bind(workspace_id.into_uuid())
+    .bind(format!(
+        "decision:sweep:{}:{}",
+        play.play_id,
+        Uuid::now_v7()
+    ))
+    .bind(event_id.into_uuid())
+    .bind(serde_json::to_value(&payload)?)
+    .execute(pool)
+    .await?;
+    let action_id = Uuid::now_v7();
+    sqlx::query(
+        r#"
+        INSERT INTO viryaos_autopilot_actions (
+            id, workspace_id, decision_id, context, action_kind, subject_kind, subject_id,
+            idempotency_key, payload, status, action_class, attempt_count, started_at
+        )
+        VALUES ($1,$2,$3,'plays','play.step.run','event',$4,$5,$6,'processing',
+                'first_party_reversible',1,now())
+        "#,
+    )
+    .bind(action_id)
+    .bind(workspace_id.into_uuid())
+    .bind(decision_id)
+    .bind(event_id.into_uuid())
+    .bind(format!("action:sweep:{}:{}", play.play_id, Uuid::now_v7()))
+    .bind(serde_json::to_value(&payload)?)
+    .execute(pool)
+    .await?;
+    repository
+        .execute_action(
+            workspace_id,
+            &ClaimedAutopilotAction {
+                id: AutopilotActionId::from_uuid(action_id),
+                payload,
+                attempt_number: 1,
+            },
+            now,
+        )
+        .await?;
+    let result = sqlx::query_scalar::<_, serde_json::Value>(
+        "SELECT result FROM viryaos_play_steps WHERE workspace_id=$1 AND play_id=$2 AND step_index=0",
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(play.play_id.into_uuid())
+    .fetch_one(pool)
+    .await?;
+    Ok((play.play_id.into_uuid(), result))
+}
+
+/// The event a sweep checks: published, thirty days out, a live sale, and no
+/// ticket link — the one gap the sweep is allowed to close itself.
+async fn insert_sellable_unlinked_event(
+    pool: &sqlx::PgPool,
+    workspace_id: WorkspaceId,
+    suffix: &str,
+    anchor_at: OffsetDateTime,
+) -> Result<EventId, Box<dyn std::error::Error>> {
+    let event_id = EventId::new();
+    sqlx::query(
+        "INSERT INTO events (id, workspace_id, slug, title, starts_at, status, published_at)
+         VALUES ($1,$2,$3,$4,$5,'published',now())",
+    )
+    .bind(event_id.into_uuid())
+    .bind(workspace_id.into_uuid())
+    .bind(format!("fixable-show-{suffix}"))
+    .bind("Fixable show")
+    .bind(anchor_at)
+    .execute(pool)
+    .await?;
+    let pool_id = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO admission_pools (id, workspace_id, event_id, slug, name, capacity)
+         VALUES ($1,$2,$3,$4,'General',100)",
+    )
+    .bind(pool_id)
+    .bind(workspace_id.into_uuid())
+    .bind(event_id.into_uuid())
+    .bind(format!("pool-{suffix}"))
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO ticket_sales (
+             id, workspace_id, event_id, admission_pool_id, capacity,
+             sales_open_at, sales_close_at
+         ) VALUES ($1,$2,$3,$4,100,$5,$6)",
+    )
+    .bind(Uuid::now_v7())
+    .bind(workspace_id.into_uuid())
+    .bind(event_id.into_uuid())
+    .bind(pool_id)
+    .bind(anchor_at - time::Duration::days(30))
+    .bind(anchor_at - time::Duration::days(1))
+    .execute(pool)
+    .await?;
+    Ok(event_id)
+}
+
+/// Queues the fix action a sweep proposed and runs it, the same path the
+/// dispatcher takes after an approval click or a `bounded_auto` queue.
+async fn approve_and_run_fix(
+    pool: &sqlx::PgPool,
+    repository: &PostgresAutopilotRepository,
+    workspace_id: WorkspaceId,
+    event_id: EventId,
+    now: OffsetDateTime,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (fix_id, fix_payload) = sqlx::query_as::<_, (Uuid, serde_json::Value)>(
+        "SELECT id, payload FROM viryaos_autopilot_actions
+         WHERE workspace_id=$1 AND action_kind='event.ticket_url.set' AND subject_id=$2",
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(event_id.into_uuid())
+    .fetch_one(pool)
+    .await?;
+    sqlx::query(
+        "UPDATE viryaos_autopilot_actions SET status='queued' WHERE workspace_id=$1 AND id=$2",
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(fix_id)
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "UPDATE viryaos_autopilot_actions SET status='processing', attempt_count=1, started_at=now()
+         WHERE workspace_id=$1 AND id=$2",
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(fix_id)
+    .execute(pool)
+    .await?;
+    repository
+        .execute_action(
+            workspace_id,
+            &ClaimedAutopilotAction {
+                id: AutopilotActionId::from_uuid(fix_id),
+                payload: serde_json::from_value(fix_payload)?,
+                attempt_number: 1,
+            },
+            now,
+        )
+        .await?;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn a_sweep_proposes_the_ticket_fix_in_ask_mode_and_applies_it_in_alone_mode()
+-> Result<(), Box<dyn std::error::Error>> {
+    let database_url =
+        std::env::var("CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL").map_err(|error| {
+            format!(
+                "CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL must target a disposable database: {error}"
+            )
+        })?;
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&database_url)
+        .await?;
+    crowdrelay_infra::database::MIGRATOR.run(&pool).await?;
+
+    let workspace_id = WorkspaceId::new();
+    let suffix = workspace_id.into_uuid().simple().to_string();
+    sqlx::query("INSERT INTO workspaces (id, slug, name) VALUES ($1, $2, $3)")
+        .bind(workspace_id.into_uuid())
+        .bind(format!("sweep-fix-{suffix}"))
+        .bind("Sweep Fix E2E")
+        .execute(&pool)
+        .await?;
+    let now = OffsetDateTime::now_utc();
+    let anchor_at = now + time::Duration::days(30);
+    let database = DatabaseConfig {
+        url: database_url,
+        max_connections: 4,
+        connect_timeout: Duration::from_secs(3),
+        ping_timeout: Duration::from_secs(2),
+        operation_timeout: Duration::from_secs(10),
+        lock_timeout: Duration::from_secs(1),
+    };
+    let repository = PostgresAutopilotRepository::new(pool.clone(), &database);
+
+    // Ask mode: the seeded 'plays' policy is require_approval, so the fix is
+    // a proposal — recorded, attributable, and not yet applied.
+    let event_id = insert_sellable_unlinked_event(&pool, workspace_id, &suffix, anchor_at).await?;
+    let (_play_id, result) =
+        run_listing_sweep(&pool, &repository, workspace_id, event_id, anchor_at, now).await?;
+    assert_eq!(
+        result
+            .pointer("/proposed_fix/status")
+            .and_then(|s| s.as_str()),
+        Some("awaiting_approval"),
+        "under ask-first posture the fix waits for a person, got {result}"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT status FROM viryaos_autopilot_actions
+             WHERE workspace_id=$1 AND action_kind='event.ticket_url.set'"
+        )
+        .bind(workspace_id.into_uuid())
+        .fetch_one(&pool)
+        .await?,
+        "awaiting_approval"
+    );
+    assert!(
+        sqlx::query_scalar::<_, Option<String>>(
+            "SELECT ticket_url FROM events WHERE workspace_id=$1 AND id=$2"
+        )
+        .bind(workspace_id.into_uuid())
+        .bind(event_id.into_uuid())
+        .fetch_one(&pool)
+        .await?
+        .is_none(),
+        "a proposed fix has not written anything — the proposal is not the write"
+    );
+
+    approve_and_run_fix(&pool, &repository, workspace_id, event_id, now).await?;
+    let expected_url = format!("https://virya.music/live/fixable-show-{suffix}");
+    assert_eq!(
+        sqlx::query_scalar::<_, Option<String>>(
+            "SELECT ticket_url FROM events WHERE workspace_id=$1 AND id=$2"
+        )
+        .bind(workspace_id.into_uuid())
+        .bind(event_id.into_uuid())
+        .fetch_one(&pool)
+        .await?
+        .as_deref(),
+        Some(expected_url.as_str()),
+        "an approved fix writes the show's own sale page as the ticket link"
+    );
+
+    // Alone mode: the same finding queues the fix itself, and applying it is
+    // the dispatcher's next pass — the sweep never writes `events` itself.
+    sqlx::query(
+        "UPDATE viryaos_autopilot_policies SET autonomy_level='bounded_auto'
+         WHERE workspace_id=$1 AND context='plays'",
+    )
+    .bind(workspace_id.into_uuid())
+    .execute(&pool)
+    .await?;
+    let second_event =
+        insert_sellable_unlinked_event(&pool, workspace_id, &format!("{suffix}b"), anchor_at)
+            .await?;
+    let (_play_id, result) = run_listing_sweep(
+        &pool,
+        &repository,
+        workspace_id,
+        second_event,
+        anchor_at,
+        now,
+    )
+    .await?;
+    assert_eq!(
+        result
+            .pointer("/proposed_fix/status")
+            .and_then(|s| s.as_str()),
+        Some("queued"),
+        "under bounded_auto the fix queues without waiting on a person, got {result}"
+    );
+    approve_and_run_fix(&pool, &repository, workspace_id, second_event, now).await?;
+    assert_eq!(
+        sqlx::query_scalar::<_, Option<String>>(
+            "SELECT ticket_url FROM events WHERE workspace_id=$1 AND id=$2"
+        )
+        .bind(workspace_id.into_uuid())
+        .bind(second_event.into_uuid())
+        .fetch_one(&pool)
+        .await?
+        .as_deref(),
+        Some(format!("https://virya.music/live/fixable-show-{suffix}b").as_str()),
+        "the queued fix applies on its own dispatch"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn a_third_party_step_parks_behind_its_own_capability()
+-> Result<(), Box<dyn std::error::Error>> {
+    let database_url =
+        std::env::var("CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL").map_err(|error| {
+            format!(
+                "CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL must target a disposable database: {error}"
+            )
+        })?;
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&database_url)
+        .await?;
+    crowdrelay_infra::database::MIGRATOR.run(&pool).await?;
+
+    let workspace_id = WorkspaceId::new();
+    let suffix = workspace_id.into_uuid().simple().to_string();
+    sqlx::query("INSERT INTO workspaces (id, slug, name) VALUES ($1, $2, $3)")
+        .bind(workspace_id.into_uuid())
+        .bind(format!("cap-split-{suffix}"))
+        .bind("Capability Split")
+        .execute(&pool)
+        .await?;
+
+    // Two parked play-step dispatches: an owned-audience rung and the one
+    // step that reaches outside the workspace. The posture read must not
+    // price them as the same missing lane.
+    for (step_kind, key) in [
+        (PlayStepKind::FollowAskFirst, "owned"),
+        (PlayStepKind::ReleaseCuratorWave, "third-party"),
+    ] {
+        let payload = serde_json::to_value(AutopilotActionPayload::RunPlayStep {
+            play_id: crowdrelay_domain::PlayId::new(),
+            play_kind: PlayKind::ReleaseRunway,
+            step_index: 0,
+            step_kind,
+            event_id: None,
+            fan_id: None,
+            template_key: step_kind.template_key().to_owned(),
+        })?;
+        let decision_id = Uuid::now_v7();
+        sqlx::query(
+            r#"
+            INSERT INTO viryaos_autopilot_decisions (
+                id, workspace_id, decision_key, context, subject_kind, subject_id,
+                decision_kind, confidence_basis_points, disposition, reason,
+                input_snapshot, policy_snapshot, recommendation, trace_id)
+            VALUES ($1,$2,$3,'plays','event',$4,'run_play_step',9000,'auto_execute',
+                    'test','{}'::jsonb,'{}'::jsonb,$5,gen_random_uuid())
+            "#,
+        )
+        .bind(decision_id)
+        .bind(workspace_id.into_uuid())
+        .bind(format!("decision:cap:{key}:{suffix}"))
+        .bind(Uuid::now_v7())
+        .bind(&payload)
+        .execute(&pool)
+        .await?;
+        sqlx::query(
+            r#"
+            INSERT INTO viryaos_autopilot_actions (
+                id, workspace_id, decision_id, context, action_kind, subject_kind, subject_id,
+                idempotency_key, payload, status, action_class, last_error_kind
+            )
+            VALUES ($1,$2,$3,'plays','play.step.run','event',$4,$5,$6,'queued',
+                    'first_party_reversible','awaiting_executor')
+            "#,
+        )
+        .bind(Uuid::now_v7())
+        .bind(workspace_id.into_uuid())
+        .bind(decision_id)
+        .bind(Uuid::now_v7())
+        .bind(format!("action:cap:{key}:{suffix}"))
+        .bind(&payload)
+        .execute(&pool)
+        .await?;
+    }
+
+    let report = crowdrelay_infra::autopilot::executor_capability_posture(
+        &pool,
+        workspace_id,
+        OffsetDateTime::now_utc(),
+    )
+    .await?;
+    let missing: Vec<&str> = report
+        .capabilities
+        .iter()
+        .filter(|cap| cap.state == "missing")
+        .map(|cap| cap.capability.as_str())
+        .collect();
+    assert!(
+        missing.contains(&"play.step"),
+        "an owned-audience step parks behind play.step, got {missing:?}"
+    );
+    assert!(
+        missing.contains(&"play.step.third_party"),
+        "a curator wave parks behind its own name, got {missing:?}"
     );
     Ok(())
 }
