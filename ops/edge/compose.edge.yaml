@@ -18,6 +18,13 @@ services:
     image: caddy:2-alpine
     container_name: virya-edge-caddy
     restart: unless-stopped
+    logging:
+      # json-file is unbounded by default: the edge access log reached
+      # 1.7G before this was set (host logrotate is the backstop).
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
     environment:
       PUBLIC_HOST: ${VIRYA_EDGE_PUBLIC_HOST:?VIRYA_EDGE_PUBLIC_HOST required}
       # Argon2id, produced by `caddy hash-password`. Host state only.
@@ -56,6 +63,11 @@ services:
       dockerfile: bridge.Dockerfile
     container_name: virya-crowdrelay-n8n-bridge
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
     environment:
       BRIDGE_CONFIG_PATH: /opt/bridge/config.json
       BRIDGE_ROUTES_PATH: /opt/bridge/routes.json
