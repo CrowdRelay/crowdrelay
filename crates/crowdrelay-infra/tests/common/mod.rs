@@ -29,9 +29,9 @@ pub async fn test_pool(env_var: &str) -> Result<PgPool, Box<dyn std::error::Erro
     let admin_url = format!("{prefix}/postgres");
     let mut admin = PgConnection::connect(&admin_url).await?;
 
-    // Clone names carry a hash of the template so parallel sessions sharing
-    // this postgres only ever sweep their own leftovers — a generic `pgt_%`
-    // sweep could FORCE-drop another lane's live clone.
+    // Clone names carry a hash of the template (which parent a clone came
+    // from) plus a uuid v7 (when it was made), so the sweep can read a
+    // clone's age off its name without touching pg_stat_file.
     let sig = {
         let mut h = 0xcbf29ce484222325u64;
         for b in template.bytes() {
@@ -41,21 +41,37 @@ pub async fn test_pool(env_var: &str) -> Result<PgPool, Box<dyn std::error::Erro
         format!("{:08x}", h & 0xffff_ffff)
     };
 
-    // Once per test binary: drop clone leftovers from earlier runs so a
+    // Once per test binary: drop clone leftovers older than a day so a
     // crashed job cannot leak `pgt_*` databases on a persistent dev postgres.
-    // A leftover still open belongs to a test running in another lane — the
-    // DROP then fails harmlessly and stays for the next sweep.
+    // The sweep used to cover only clones of *this* template (`pgt_{sig}_%`),
+    // which left every other template's orphans behind — 143 had accumulated
+    // by 2026-09-21. The age check is what makes a cross-template sweep safe:
+    // a live clone is minutes old, so nothing under a day can be in use,
+    // regardless of which lane owns it.
+    const MAX_CLONE_AGE_SECS: u64 = 24 * 60 * 60;
+    let now_unix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
     SWEEPED
         .get_or_try_init(|| async {
-            let stale: Vec<String> = sqlx::query(&format!(
-                "SELECT datname FROM pg_database WHERE datname LIKE 'pgt\\_{sig}\\_%'"
-            ))
-            .fetch_all(&mut admin)
-            .await?
-            .iter()
-            .map(|row| row.get("datname"))
-            .collect();
+            let stale: Vec<String> =
+                sqlx::query("SELECT datname FROM pg_database WHERE datname LIKE 'pgt\\_%'")
+                    .fetch_all(&mut admin)
+                    .await?
+                    .iter()
+                    .map(|row| row.get("datname"))
+                    .collect();
             for datname in stale {
+                let old_enough = datname
+                    .rsplit('_')
+                    .next()
+                    .and_then(|s| Uuid::parse_str(s).ok())
+                    .and_then(|u| u.get_timestamp().map(|t| t.to_unix().0))
+                    .is_some_and(|ts| now_unix.saturating_sub(ts) > MAX_CLONE_AGE_SECS);
+                if !old_enough {
+                    continue;
+                }
                 let _ = sqlx::query(&format!(
                     "DROP DATABASE IF EXISTS \"{datname}\" WITH (FORCE)"
                 ))
