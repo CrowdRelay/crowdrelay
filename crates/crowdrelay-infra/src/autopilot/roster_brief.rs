@@ -6,7 +6,7 @@
 //! told it exists — a manager who does not curl the admin surface never saw
 //! the page. This sweep is the cadence: on the issuing workspace's local
 //! Monday morning it composes the same measured read into a durable
-//! `viryaos_roster_briefs` artifact, hands every owner/admin member of the
+//! `roster_briefs` artifact, hands every owner/admin member of the
 //! measured member workspaces a `roster_weekly_brief` assignment, and
 //! queues the proven `team.assignment.email` action for each recipient —
 //! the identical rail the daily briefing rides.
@@ -93,7 +93,7 @@ struct RosterBriefFrame {
 const fn roster_frame(locale: BriefingLocale) -> RosterBriefFrame {
     match locale {
         BriefingLocale::Pl => RosterBriefFrame {
-            title: "ViryaOS — tygodniowy przegląd rostera",
+            title: "CrowdRelay — tygodniowy przegląd rostera",
             week_label: "Tydzień rostera od {week}: {acts} zespołów.",
             weakest: "Najsłabszy mierzalny: {name} ({delta} fanów, okno 60 dni).",
             total: "Suma mierzonych: {total}.",
@@ -109,7 +109,7 @@ const fn roster_frame(locale: BriefingLocale) -> RosterBriefFrame {
             more: "+{n} więcej — pełna lista: /v1/admin/roster-plan/weekly-brief",
         },
         BriefingLocale::En => RosterBriefFrame {
-            title: "ViryaOS — weekly roster brief",
+            title: "CrowdRelay — weekly roster brief",
             week_label: "Roster week of {week}: {acts} acts.",
             weakest: "Weakest measured act: {name} ({delta} fans, 60d window).",
             total: "Measured total: {total}.",
@@ -200,7 +200,7 @@ impl PostgresAutopilotRepository {
             // member's worker has won, so it stays cheap.
             let already_issued: bool = sqlx::query_scalar(
                 "SELECT EXISTS(
-                     SELECT 1 FROM viryaos_roster_briefs
+                     SELECT 1 FROM roster_briefs
                      WHERE organization_id = $1 AND local_date = $2)",
             )
             .bind(organization_id)
@@ -263,7 +263,7 @@ impl PostgresAutopilotRepository {
             // inserts owns this week's delivery.
             let brief_id = sqlx::query_scalar::<_, Uuid>(
                 r#"
-                INSERT INTO viryaos_roster_briefs
+                INSERT INTO roster_briefs
                     (organization_id, local_date, title, body, sections)
                 VALUES ($1,$2,$3,$4,$5)
                 ON CONFLICT (organization_id, local_date) DO NOTHING
@@ -295,7 +295,7 @@ impl PostgresAutopilotRepository {
             // with a completion stamp), and the update stays inside the
             // member workspaces the brief speaks for.
             sqlx::query(
-                "UPDATE viryaos_team_assignments
+                "UPDATE team_assignments
                  SET status = 'cancelled', updated_at = now()
                  WHERE workspace_id = ANY($1)
                    AND source_kind = 'roster_weekly_brief'
@@ -383,7 +383,7 @@ impl PostgresAutopilotRepository {
                     let assignment_id = Uuid::now_v7();
                     let inserted = sqlx::query_scalar::<_, Uuid>(
                         r#"
-                        INSERT INTO viryaos_team_assignments (
+                        INSERT INTO team_assignments (
                             id, workspace_id, action_id, source_kind, source_id, source_ref,
                             assignee_member_id, required_skill, due_at, next_reminder_at
                         ) VALUES ($1,$2,NULL,'roster_weekly_brief',$3,NULL,$4,'briefing',$5,NULL)

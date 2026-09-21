@@ -80,14 +80,14 @@ async fn run(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
     // address — the record reads "2 wrote, 1 answered, 1 won" without ever
     // naming the other tenant.
     sqlx::query(
-        "UPDATE viryaos_booking_targets SET last_outreach_at = now() - interval '30 days'
+        "UPDATE booking_targets SET last_outreach_at = now() - interval '30 days'
          WHERE workspace_id = $1 AND contact_email = 'anna@example.com'",
     )
     .bind(act)
     .execute(pool)
     .await?;
     sqlx::query(
-        "INSERT INTO viryaos_outreach_targets
+        "INSERT INTO outreach_targets
             (workspace_id, target_kind, display_name, contact_email, last_outreach_at,
              last_reply_at, last_reply_disposition)
          VALUES ($1, 'support_slot', 'Anna (theirs)', 'anna@example.com',
@@ -99,11 +99,11 @@ async fn run(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
     // The prior reads replies from the interaction ledger, not the
     // denormalized disposition — seed the inbound row too.
     sqlx::query(
-        "INSERT INTO viryaos_outreach_interactions
+        "INSERT INTO outreach_interactions
             (workspace_id, target_id, direction, phase, disposition, source_key, occurred_at)
          SELECT workspace_id, id, 'inbound', 'reply', 'positive',
                 'seed-anna-reply', now() - interval '39 days'
-         FROM viryaos_outreach_targets
+         FROM outreach_targets
          WHERE workspace_id = $1 AND contact_email = 'anna@example.com'",
     )
     .bind(other)
@@ -181,7 +181,7 @@ async fn run(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
     .await?;
     // The band's own listing name on the bill stays out — an unresolved
     // collision must not offer "add yourself to your roster".
-    sqlx::query("INSERT INTO viryaos_band_listings (workspace_id, act_name) VALUES ($1, 'Virya')")
+    sqlx::query("INSERT INTO band_listings (workspace_id, act_name) VALUES ($1, 'Virya')")
         .bind(act)
         .execute(pool)
         .await?;
@@ -232,13 +232,13 @@ async fn run(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
         Some("gone@example.com"),
     )
     .await?;
-    sqlx::query("UPDATE viryaos_beacons SET do_not_contact = true WHERE id = $1")
+    sqlx::query("UPDATE beacons SET do_not_contact = true WHERE id = $1")
         .bind(suppressed)
         .execute(pool)
         .await?;
     beacon(pool, other, wroclaw, "Their Lens", "photographer", None).await?;
     sqlx::query(
-        "INSERT INTO viryaos_contact_governor
+        "INSERT INTO contact_governor
             (workspace_id, normalized_contact, last_outbound_at, next_contact_after, last_context)
          VALUES ($1, 'basia@example.com', now() - interval '10 days', now() - interval '3 days', 'beacon.outreach')",
     )
@@ -647,7 +647,7 @@ async fn community(
     active: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     sqlx::query(
-        "INSERT INTO viryaos_community_outreach_targets
+        "INSERT INTO community_outreach_targets
             (workspace_id, symbol_slug, community_name, platform, url,
              country_code, active)
          VALUES ($1, $2, $3, 'reddit', $4, $5, $6)",
@@ -672,7 +672,7 @@ async fn booking_target(
     active: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     sqlx::query(
-        "INSERT INTO viryaos_booking_targets
+        "INSERT INTO booking_targets
             (workspace_id, city_id, target_kind, display_name, contact_email,
              relationship_score, active)
          VALUES ($1, $2, $3, $4, $5, 60, $6)",
@@ -771,7 +771,7 @@ async fn beacon(
     email: Option<&str>,
 ) -> Result<Uuid, Box<dyn std::error::Error>> {
     Ok(sqlx::query_scalar::<_, Uuid>(
-        "INSERT INTO viryaos_beacons
+        "INSERT INTO beacons
             (workspace_id, city_id, beacon_kind, display_name, contact_email,
              accepts_outreach)
          VALUES ($1, $2, $3, $4, $5, true)
@@ -793,7 +793,7 @@ async fn staged_contact(
     city: Option<&str>,
 ) -> Result<Uuid, Box<dyn std::error::Error>> {
     Ok(sqlx::query_scalar::<_, Uuid>(
-        "INSERT INTO viryaos_drive_contacts
+        "INSERT INTO drive_contacts
             (workspace_id, normalized_email, display_name, city,
              source_file_id, source_file_name, suggested_kind)
          VALUES ($1, $2, $3, $4, 'file-1', 'contacts.xlsx', 'press')

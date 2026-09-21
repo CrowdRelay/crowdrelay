@@ -184,7 +184,7 @@ pub async fn roster_act_report(
     let actions = sqlx::query_as::<_, ActionRow>(
         r#"
         SELECT action_kind, status, COUNT(*) AS count
-        FROM viryaos_autopilot_actions
+        FROM autopilot_actions
         WHERE workspace_id = $1 AND created_at >= $2
         GROUP BY action_kind, status
         ORDER BY count DESC, action_kind, status

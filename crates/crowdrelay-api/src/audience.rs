@@ -343,7 +343,7 @@ pub async fn city_funnel(
                 count(*) FILTER (WHERE target.target_kind = 'promoter')::bigint AS promoters,
                 count(*) FILTER (WHERE target.target_kind = 'festival')::bigint AS festivals
             FROM agg
-            JOIN viryaos_booking_targets AS target
+            JOIN booking_targets AS target
               ON target.workspace_id = $1
              AND target.city_id = agg.city_id
              AND target.active
@@ -456,7 +456,7 @@ pub async fn city_venues(State(state): State<crate::AppState>, headers: HeaderMa
     let my_genres = match sqlx::query_scalar::<_, Vec<String>>(
         r#"
         SELECT COALESCE(array_agg(DISTINCT lower(btrim(g))), '{}')
-        FROM viryaos_band_listings AS bl, unnest(bl.genre_tags) AS g
+        FROM band_listings AS bl, unnest(bl.genre_tags) AS g
         WHERE bl.workspace_id = $1
         "#,
     )
@@ -548,7 +548,7 @@ pub async fn city_venues(State(state): State<crate::AppState>, headers: HeaderMa
             -- comparison time in `comparable`.
             SELECT a.act_workspace_id AS act_id_ws, NULL::uuid AS peer_id, g AS genre
             FROM event_acts AS a
-            JOIN viryaos_band_listings AS bl
+            JOIN band_listings AS bl
               ON bl.workspace_id = a.act_workspace_id
             CROSS JOIN LATERAL unnest(bl.genre_tags) AS g
             UNION ALL

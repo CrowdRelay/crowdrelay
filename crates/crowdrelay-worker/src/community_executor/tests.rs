@@ -68,7 +68,7 @@ mod tests {
         let decision_id = uuid::Uuid::now_v7();
         let action_id = uuid::Uuid::now_v7();
         sqlx::query(
-            "INSERT INTO viryaos_autopilot_decisions \
+            "INSERT INTO autopilot_decisions \
                (id, workspace_id, decision_key, context, subject_kind, subject_id, \
                 decision_kind, confidence_basis_points, disposition, reason, \
                 input_snapshot, policy_snapshot, recommendation, trace_id) \
@@ -84,7 +84,7 @@ mod tests {
         .await
         .expect("decision");
         sqlx::query(
-            "INSERT INTO viryaos_autopilot_actions \
+            "INSERT INTO autopilot_actions \
                (id, workspace_id, decision_id, context, action_kind, subject_kind, \
                 subject_id, idempotency_key, payload, status, action_class, \
                 finished_at) \
@@ -245,7 +245,7 @@ mod tests {
         );
         // And the parent action must not be marked failed: nothing failed.
         let action_status: String = sqlx::query_scalar(
-            "SELECT a.status FROM viryaos_autopilot_actions a \
+            "SELECT a.status FROM autopilot_actions a \
              JOIN community_posts c ON c.action_id = a.id WHERE c.id = $1",
         )
         .bind(held)
@@ -442,7 +442,7 @@ mod tests {
             .expect("defer");
         assert_eq!(status_of(&worker, draft).await, "rate_limited");
         let action_status: String = sqlx::query_scalar(
-            "SELECT a.status FROM viryaos_autopilot_actions a \
+            "SELECT a.status FROM autopilot_actions a \
              JOIN community_posts c ON c.action_id = a.id WHERE c.id = $1",
         )
         .bind(draft)
@@ -488,7 +488,7 @@ mod tests {
             "a draft given up on must not also carry a retry time"
         );
         let action_status: String = sqlx::query_scalar(
-            "SELECT a.status FROM viryaos_autopilot_actions a \
+            "SELECT a.status FROM autopilot_actions a \
              JOIN community_posts c ON c.action_id = a.id WHERE c.id = $1",
         )
         .bind(draft)

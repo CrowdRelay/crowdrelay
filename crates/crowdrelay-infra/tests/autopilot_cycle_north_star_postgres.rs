@@ -66,7 +66,7 @@ async fn cycle(
 ) -> Result<()> {
     sqlx::query(
         r#"
-        INSERT INTO viryaos_autopilot_cycle_runs
+        INSERT INTO autopilot_cycle_runs
             (id, workspace_id, trigger, started_at, finished_at, duration_ms,
              outcome, decisions_recorded, actions_created, north_star_value)
         VALUES ($1,$2,'scheduled',$3,$3,10,$4,0,0,$5)
@@ -305,7 +305,7 @@ async fn the_cycle_records_the_reading_it_was_given_not_a_fan_count() -> Result<
     close_cycle_run(&pool, workspace_id, cycle_id, &[], now, Some(1), None).await;
 
     let stored: Option<i32> = sqlx::query_scalar(
-        "SELECT north_star_value FROM viryaos_autopilot_cycle_runs WHERE workspace_id = $1 AND id = $2",
+        "SELECT north_star_value FROM autopilot_cycle_runs WHERE workspace_id = $1 AND id = $2",
     )
     .bind(workspace_id.into_uuid())
     .bind(cycle_id)
@@ -354,7 +354,7 @@ async fn a_cycle_that_took_no_reading_records_none() -> Result<()> {
     .await;
 
     let stored: Option<i32> = sqlx::query_scalar(
-        "SELECT north_star_value FROM viryaos_autopilot_cycle_runs WHERE workspace_id = $1 AND id = $2",
+        "SELECT north_star_value FROM autopilot_cycle_runs WHERE workspace_id = $1 AND id = $2",
     )
     .bind(workspace_id.into_uuid())
     .bind(cycle_id)
@@ -406,7 +406,7 @@ async fn a_degraded_cycle_records_which_phases_failed() -> Result<()> {
     .await;
 
     let row = sqlx::query(
-        "SELECT outcome, degraded_phases FROM viryaos_autopilot_cycle_runs \
+        "SELECT outcome, degraded_phases FROM autopilot_cycle_runs \
          WHERE workspace_id = $1 AND id = $2",
     )
     .bind(workspace_id.into_uuid())
@@ -447,7 +447,7 @@ async fn a_clean_cycle_records_an_empty_phase_list_not_null() -> Result<()> {
     close_cycle_run(&pool, workspace_id, cycle_id, &[], now, Some(7), None).await;
 
     let row = sqlx::query(
-        "SELECT outcome, degraded_phases FROM viryaos_autopilot_cycle_runs \
+        "SELECT outcome, degraded_phases FROM autopilot_cycle_runs \
          WHERE workspace_id = $1 AND id = $2",
     )
     .bind(workspace_id.into_uuid())
@@ -498,7 +498,7 @@ async fn a_quiet_cycle_records_its_reason_and_an_active_one_records_none() -> Re
     .await;
 
     let stored: Option<String> = sqlx::query_scalar(
-        "SELECT wait_reason FROM viryaos_autopilot_cycle_runs \
+        "SELECT wait_reason FROM autopilot_cycle_runs \
          WHERE workspace_id = $1 AND id = $2",
     )
     .bind(workspace_id.into_uuid())
@@ -523,7 +523,7 @@ async fn a_quiet_cycle_records_its_reason_and_an_active_one_records_none() -> Re
 
     let decision_id = Uuid::now_v7();
     sqlx::query(
-        "INSERT INTO viryaos_autopilot_decisions
+        "INSERT INTO autopilot_decisions
            (id, workspace_id, decision_key, context, subject_kind, subject_id,
             decision_kind, confidence_basis_points, disposition, reason,
             input_snapshot, policy_snapshot, recommendation, evaluated_at, trace_id)
@@ -539,7 +539,7 @@ async fn a_quiet_cycle_records_its_reason_and_an_active_one_records_none() -> Re
     .execute(&pool)
     .await?;
     sqlx::query(
-        "INSERT INTO viryaos_autopilot_actions
+        "INSERT INTO autopilot_actions
            (id, workspace_id, decision_id, context, action_kind, subject_kind,
             subject_id, idempotency_key, payload, status, created_at)
          VALUES ($1, $2, $3, 'live_opportunity', 'opportunity.live.apply',
@@ -566,7 +566,7 @@ async fn a_quiet_cycle_records_its_reason_and_an_active_one_records_none() -> Re
     .await;
 
     let stored: Option<String> = sqlx::query_scalar(
-        "SELECT wait_reason FROM viryaos_autopilot_cycle_runs \
+        "SELECT wait_reason FROM autopilot_cycle_runs \
          WHERE workspace_id = $1 AND id = $2",
     )
     .bind(workspace_id.into_uuid())
@@ -603,7 +603,7 @@ async fn the_latest_wait_reason_is_scoped_to_the_workspace() -> Result<()> {
     // The same query shape `ops/attention` runs: latest non-NULL reason,
     // workspace-scoped.
     let latest: Option<String> = sqlx::query_scalar(
-        "SELECT wait_reason FROM viryaos_autopilot_cycle_runs \
+        "SELECT wait_reason FROM autopilot_cycle_runs \
          WHERE workspace_id = $1 AND finished_at IS NOT NULL \
            AND wait_reason IS NOT NULL \
          ORDER BY started_at DESC LIMIT 1",

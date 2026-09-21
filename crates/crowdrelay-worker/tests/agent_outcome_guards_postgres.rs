@@ -94,7 +94,7 @@ fn worker(pool: &PgPool, workspace_id: WorkspaceId) -> AgentOutcomeWorker {
 /// Counts decisions for a workspace that came from agent outcomes.
 async fn decision_count(pool: &PgPool, workspace_id: WorkspaceId) -> Result<i64> {
     Ok(sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*) FROM viryaos_autopilot_decisions \
+        "SELECT COUNT(*) FROM autopilot_decisions \
          WHERE workspace_id = $1 AND subject_kind = 'agent_outcome'",
     )
     .bind(workspace_id.into_uuid())
@@ -105,7 +105,7 @@ async fn decision_count(pool: &PgPool, workspace_id: WorkspaceId) -> Result<i64>
 /// Counts actions for a workspace that came from agent outcomes.
 async fn action_count(pool: &PgPool, workspace_id: WorkspaceId) -> Result<i64> {
     Ok(sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*) FROM viryaos_autopilot_actions \
+        "SELECT COUNT(*) FROM autopilot_actions \
          WHERE workspace_id = $1 AND subject_kind = 'agent_outcome'",
     )
     .bind(workspace_id.into_uuid())
@@ -348,7 +348,7 @@ async fn valid_inner(pool: &PgPool) -> Result<()> {
     .fetch_one(pool)
     .await?;
     let action_id = sqlx::query_scalar::<_, Uuid>(
-        "SELECT id FROM viryaos_autopilot_actions \
+        "SELECT id FROM autopilot_actions \
          WHERE workspace_id = $1 AND subject_kind = 'agent_outcome'",
     )
     .bind(ws.into_uuid())
@@ -579,7 +579,7 @@ async fn unverified_observation_inner(pool: &PgPool) -> Result<()> {
 // ── Regression: a missing rationale must not die on reason_check ──────
 //
 // `payload.rationale` deserializes with `#[serde(default)]` — an outcome
-// that carries no rationale produces `""`, and `viryaos_autopilot_decisions
+// that carries no rationale produces `""`, and `autopilot_decisions
 // .reason` is CHECKed `btrim <> ''`. One production outcome (2026-08-28,
 // press_pitch) hit exactly this: the decision INSERT violated the CHECK,
 // the whole transaction aborted, and the outcome was rejected with a
@@ -617,7 +617,7 @@ async fn rationaleless_inner(pool: &PgPool) -> Result<()> {
         "a rationale-less outcome must still map to a decision"
     );
     let reason: String = sqlx::query_scalar(
-        "SELECT reason FROM viryaos_autopilot_decisions \
+        "SELECT reason FROM autopilot_decisions \
          WHERE workspace_id = $1 AND subject_kind = 'agent_outcome'",
     )
     .bind(ws.into_uuid())
@@ -641,7 +641,7 @@ async fn rationaleless_inner(pool: &PgPool) -> Result<()> {
 // ── Scout findings: link-or-drop, vocabulary, and the review surface ───────
 //
 // An `opportunity_findings` outcome is a scout carrying a link home. The
-// worker turns it into a `viryaos_team_opportunities` row plus a decision
+// worker turns it into a `team_opportunities` row plus a decision
 // that names the row — never an action, because the review act lives on the
 // shortlist's own controls. A finding without a usable link, a readable
 // description, or a kind inside the scout vocabulary is not a finding.
@@ -662,7 +662,7 @@ fn finding_item() -> serde_json::Value {
 
 async fn opportunity_count(pool: &PgPool, workspace_id: WorkspaceId) -> Result<i64> {
     Ok(sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*) FROM viryaos_team_opportunities WHERE workspace_id = $1",
+        "SELECT COUNT(*) FROM team_opportunities WHERE workspace_id = $1",
     )
     .bind(workspace_id.into_uuid())
     .fetch_one(pool)
@@ -778,7 +778,7 @@ async fn finding_valid_inner(pool: &PgPool) -> Result<()> {
         sqlx::query_as(
             "SELECT opportunity_kind, verified_destination, requires_contract, \
                 source_observed_at IS NOT NULL, status \
-         FROM viryaos_team_opportunities WHERE workspace_id = $1",
+         FROM team_opportunities WHERE workspace_id = $1",
         )
         .bind(ws.into_uuid())
         .fetch_one(pool)
@@ -796,8 +796,8 @@ async fn finding_valid_inner(pool: &PgPool) -> Result<()> {
     // The decision names the opportunity row — the shortlist joins on it.
     let (subject_kind, subject_matches): (String, bool) = sqlx::query_as(
         "SELECT d.subject_kind, d.subject_id = o.id \
-         FROM viryaos_autopilot_decisions d \
-         JOIN viryaos_team_opportunities o ON o.workspace_id = d.workspace_id \
+         FROM autopilot_decisions d \
+         JOIN team_opportunities o ON o.workspace_id = d.workspace_id \
          WHERE d.workspace_id = $1",
     )
     .bind(ws.into_uuid())
@@ -810,12 +810,11 @@ async fn finding_valid_inner(pool: &PgPool) -> Result<()> {
 
     // No action: the review act lives on the shortlist's own controls, and an
     // approved action no executor claims would sit queued forever.
-    let actions: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM viryaos_autopilot_actions WHERE workspace_id = $1",
-    )
-    .bind(ws.into_uuid())
-    .fetch_one(pool)
-    .await?;
+    let actions: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM autopilot_actions WHERE workspace_id = $1")
+            .bind(ws.into_uuid())
+            .fetch_one(pool)
+            .await?;
     ensure!(actions == 0, "a finding must create no action row");
 
     let status: String = sqlx::query_scalar("SELECT status FROM agent_outcomes WHERE id = $1")
@@ -855,12 +854,11 @@ async fn finding_reemit_inner(pool: &PgPool) -> Result<()> {
         opportunity_count(pool, ws).await? == 1,
         "kind + link is the finding's natural key — a re-emit must land on the same row"
     );
-    let version: i64 = sqlx::query_scalar(
-        "SELECT version FROM viryaos_team_opportunities WHERE workspace_id = $1",
-    )
-    .bind(ws.into_uuid())
-    .fetch_one(pool)
-    .await?;
+    let version: i64 =
+        sqlx::query_scalar("SELECT version FROM team_opportunities WHERE workspace_id = $1")
+            .bind(ws.into_uuid())
+            .fetch_one(pool)
+            .await?;
     ensure!(
         version == 2,
         "the re-emit must bump the row version, got {version}"

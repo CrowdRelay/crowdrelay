@@ -122,7 +122,7 @@ pub struct RecordBookingReply {
 /// What a booking agent said back, filed against the registry entity itself
 /// (§4h-10). Kept apart from `RecordBookingReply`: a booking target answers
 /// for one night, an agent answers for the season — so a decline here stamps
-/// `viryaos_booking_agents.refused_until` and a do-not-contact is the wall,
+/// `booking_agents.refused_until` and a do-not-contact is the wall,
 /// not a cooldown.
 #[derive(Clone, Copy, Debug)]
 pub struct RecordBookingAgentReply {

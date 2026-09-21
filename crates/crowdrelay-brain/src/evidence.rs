@@ -4,8 +4,8 @@
 //! The brain has multiple learning subsystems: the causal model, treatment
 //! effects, reach conversion, calibration, strategy learning. Previously,
 //! each subsystem had its own idea of what happened — the causal model
-//! read from `viryaos_brain_evidence`, the reach model read from
-//! `viryaos_reach_events`, and the experiment engine logged propensities
+//! read from `brain_evidence`, the reach model read from
+//! `reach_events`, and the experiment engine logged propensities
 //! separately.
 //!
 //! This module defines `GrowthEvidence` — a single record that captures

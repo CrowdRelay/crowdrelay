@@ -371,7 +371,7 @@ async fn ensure_canonical_show_link(
     // association implied by a naming convention.
     sqlx::query(
         r#"
-        UPDATE viryaos_show_growth_surfaces
+        UPDATE show_growth_surfaces
         SET attribution_url = $3, last_checked_at = now()
         WHERE workspace_id = $1 AND event_id = $2 AND attribution_url IS NULL
         "#,
@@ -390,7 +390,7 @@ async fn ensure_canonical_show_link(
 /// the harvest chain (recap, feed, story artifacts) demands. Called from every
 /// first-party moment that proves the night ended while the event still sits
 /// at `published`: a post-show lever firing, or reconciliation escalating. The
-/// `source_key` mirrors the `viryaos_events_project_content_sources` trigger
+/// `source_key` mirrors the `events_project_content_sources` trigger
 /// that registers the same source on a `completed` flip, so helper, trigger
 /// and operator upserts all converge on one row per show.
 pub(in crate::autopilot) async fn ensure_show_completed_source(
@@ -400,7 +400,7 @@ pub(in crate::autopilot) async fn ensure_show_completed_source(
 ) -> Result<(), RepositoryError> {
     sqlx::query(
         r#"
-        INSERT INTO viryaos_content_sources (
+        INSERT INTO content_sources (
             workspace_id, source_kind, source_key, title,
             occurred_at, expires_at, metadata, active
         )
@@ -525,7 +525,7 @@ async fn execute_first_party_growth_campaign(
     // and burn the lever's one shot. Truncate the event part so the lever
     // suffix — the part that makes campaigns distinct — always survives.
     let event_part: String = event.0.chars().take(90).collect();
-    let slug = format!("viryaos-{}-{}", event_part, suffix);
+    let slug = format!("crowdrelay-{}-{}", event_part, suffix);
     // `name` carries the event title into a 160-char CHECK bound.
     let display_name: String = event.1.chars().take(140).collect();
     let name = format!("{} · {}", display_name, lever.as_str());
@@ -535,7 +535,7 @@ async fn execute_first_party_growth_campaign(
             "lever": lever.as_str(),
             "ticket_url": event.4,
             "venue": event.3,
-            "managed_by": "viryaos_show_growth",
+            "managed_by": "show_growth",
             "relay_pack": {
                 "objective": "help a small number of proven local fans reach real metalheads through personal trust rather than mass promotion",
                 "preferred_actions": [
@@ -561,7 +561,7 @@ async fn execute_first_party_growth_campaign(
             "lever": lever.as_str(),
             "ticket_url": event.4,
             "venue": event.3,
-            "managed_by": "viryaos_show_growth",
+            "managed_by": "show_growth",
             // The event already carries its canonical listen URL, so send the
             // real value rather than an `env:` placeholder the executor may not
             // be able to resolve. An unresolvable CTA silently drops out of the
@@ -599,7 +599,7 @@ async fn execute_first_party_growth_campaign(
             // statement of record, not a pitch, so it carries the acts table
             // rather than a ticket link.
             "acts": event.6.clone().unwrap_or_else(|| json!([])),
-            "managed_by": "viryaos_show_growth",
+            "managed_by": "show_growth",
             "email_contract": {
                 "goal": "give the room one honest memory of the night — who played, where it was — so the band stays attached to the evening the fan actually had",
                 "rules": [
@@ -619,7 +619,7 @@ async fn execute_first_party_growth_campaign(
             "ticket_url": event.4,
             "venue": event.3,
             "festival_name": event.7,
-            "managed_by": "viryaos_show_growth",
+            "managed_by": "show_growth",
             // Same canonical links as the pre-show push. The difference is who
             // receives it: people who were in the room, which is the warmest
             // list the band will ever have and the only one where "come with us
@@ -651,7 +651,7 @@ async fn execute_first_party_growth_campaign(
             "lever": lever.as_str(),
             "ticket_url": event.4,
             "venue": event.3,
-            "managed_by": "viryaos_show_growth",
+            "managed_by": "show_growth",
             "offer_contract": {
                 "audience": "ticket_buyers",
                 "objective": "convert existing show intent into merch revenue before the event",
@@ -665,13 +665,13 @@ async fn execute_first_party_growth_campaign(
             "ticket_url": event.4,
             "venue": event.3,
             "festival_name": event.7,
-            "managed_by": "viryaos_show_growth"
+            "managed_by": "show_growth"
         }),
     };
     let segment_id = sqlx::query_scalar::<_, Uuid>(
         r#"
         INSERT INTO audience_segments(workspace_id,slug,name,description,filter,active)
-        VALUES($1,$2,$3,'ViryaOS attendance-growth segment',$4,true)
+        VALUES($1,$2,$3,'CrowdRelay attendance-growth segment',$4,true)
         ON CONFLICT(workspace_id,slug) DO UPDATE SET filter=EXCLUDED.filter,active=true
         RETURNING id
         "#,
@@ -718,7 +718,7 @@ async fn execute_first_party_growth_campaign(
                         'source_id',$7::text,'recipient_reason',$8::text
                     )
                 ),$6,at.trace_id,at.causation_id,at.id
-            FROM viryaos_autopilot_actions at WHERE at.id=$9
+            FROM autopilot_actions at WHERE at.id=$9
             RETURNING id
             "#,
         )
@@ -1134,7 +1134,7 @@ pub(in crate::autopilot) async fn issue_post_show_report(
     // auto-verify path uses, so re-evaluation holds instead of re-sending.
     sqlx::query(
         r#"INSERT INTO show_checklist_items(workspace_id,event_id,item_key,section,sort_order,status,note,updated_at)
-           VALUES($1,$2,'post_show_report','post_show',320,'done','T+7 report issued by ViryaOS to band and counterparty',$3)
+           VALUES($1,$2,'post_show_report','post_show',320,'done','T+7 report issued by CrowdRelay to band and counterparty',$3)
            ON CONFLICT(workspace_id,event_id,item_key) DO UPDATE
            SET status='done',note=EXCLUDED.note,updated_at=EXCLUDED.updated_at
            WHERE show_checklist_items.status<>'done'"#,

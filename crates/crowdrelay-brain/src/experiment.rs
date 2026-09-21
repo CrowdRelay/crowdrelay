@@ -885,7 +885,7 @@ impl ExperimentAssignment {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ExperimentDesign {
     /// The experiment UUID — shared by all assignments in this experiment.
-    /// Persisted in `viryaos_experiment_designs` so evaluator retries
+    /// Persisted in `experiment_designs` so evaluator retries
     /// converge on the same UUID. The same (workspace, intervention,
     /// logical_cycle_key) always resolves to the same experiment_uuid.
     pub experiment_uuid: uuid::Uuid,

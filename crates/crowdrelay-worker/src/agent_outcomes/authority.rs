@@ -40,7 +40,7 @@ impl AgentOutcomeWorker {
         let context_level: Option<String> = sqlx::query_scalar(
             r#"
             SELECT autonomy_level
-            FROM viryaos_autopilot_policies
+            FROM autopilot_policies
             WHERE workspace_id = $1 AND context = $2
             LIMIT 1
             "#,
@@ -58,7 +58,7 @@ impl AgentOutcomeWorker {
         let ceiling: Option<String> = sqlx::query_scalar(
             r#"
             SELECT ceiling
-            FROM viryaos_growth_autonomy
+            FROM growth_autonomy
             WHERE workspace_id = $1 AND action_class = $2
             LIMIT 1
             "#,
@@ -102,7 +102,7 @@ impl AgentOutcomeWorker {
         let row: Option<(String, OffsetDateTime, Option<OffsetDateTime>)> = sqlx::query_as(
             r#"
             SELECT action_class, expires_at, revoked_at
-            FROM viryaos_standing_approvals
+            FROM standing_approvals
             WHERE workspace_id = $1
               AND action_kind = $2
               AND target_key = $3

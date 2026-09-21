@@ -67,8 +67,8 @@ pub(super) async fn load_worker_signals(
                                     '')
                        ORDER BY outcome.observed_at DESC
                    ) AS rn
-            FROM viryaos_autopilot_outcomes outcome
-            JOIN viryaos_autopilot_actions action ON action.id = outcome.action_id
+            FROM autopilot_outcomes outcome
+            JOIN autopilot_actions action ON action.id = outcome.action_id
             WHERE action.workspace_id = $1
               AND outcome.effect_assessment IS NOT NULL
               AND outcome.observed_at > now() - ($2 || ' days')::interval
@@ -154,7 +154,7 @@ pub(super) async fn load_worker_signals(
                    ORDER BY oa.created_at DESC
                ) AS rn
         FROM operator_actions oa
-        JOIN viryaos_autopilot_actions action ON action.id = oa.target_id
+        JOIN autopilot_actions action ON action.id = oa.target_id
         -- Both sides carry the workspace. Constraining only the joined
         -- action left `operator_actions` with no indexable predicate, and
         -- every index on it leads with workspace_id — so the planner read

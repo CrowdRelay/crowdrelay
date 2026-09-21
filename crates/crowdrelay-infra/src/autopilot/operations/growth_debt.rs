@@ -44,7 +44,7 @@ struct LastDebtSignalRow {
 }
 
 /// Milestones a release plan is expected to record, from the CHECK constraint
-/// on `viryaos_release_milestones` (migration 0039, widened by
+/// on `release_milestones` (migration 0039, widened by
 /// `editorial_pitch` in 0100 and `catalogue_rotation` in 0300). The
 /// denominator is the declared set, not the recorded rows — otherwise a plan
 /// that recorded one milestone and stopped would report as 0% outstanding.
@@ -106,10 +106,10 @@ pub(in crate::autopilot) async fn load_growth_debt_observations(
                 1::bigint AS tracked_items,
                 target.relationship_score,
                 NULL::bigint AS hours_until_deadline
-            FROM viryaos_booking_targets AS target
+            FROM booking_targets AS target
             LEFT JOIN LATERAL (
                 SELECT max(interaction.occurred_at) AS last_interaction_at
-                FROM viryaos_booking_interactions AS interaction
+                FROM booking_interactions AS interaction
                 WHERE interaction.workspace_id = target.workspace_id
                   AND interaction.target_id = target.id
             ) AS touch ON true
@@ -140,10 +140,10 @@ pub(in crate::autopilot) async fn load_growth_debt_observations(
                 1::bigint,
                 target.relationship_score,
                 NULL::bigint
-            FROM viryaos_outreach_targets AS target
+            FROM outreach_targets AS target
             LEFT JOIN LATERAL (
                 SELECT max(interaction.occurred_at) AS last_interaction_at
-                FROM viryaos_outreach_interactions AS interaction
+                FROM outreach_interactions AS interaction
                 WHERE interaction.workspace_id = target.workspace_id
                   AND interaction.target_id = target.id
             ) AS touch ON true
@@ -170,7 +170,7 @@ pub(in crate::autopilot) async fn load_growth_debt_observations(
                 NULL::integer AS relationship_score,
                 FLOOR(EXTRACT(EPOCH FROM (event.starts_at - $2)) / 3600)::bigint
                     AS hours_until_deadline
-            FROM viryaos_show_growth_surfaces AS surface
+            FROM show_growth_surfaces AS surface
             JOIN events AS event
               ON event.workspace_id = surface.workspace_id
              AND event.id = surface.event_id
@@ -210,12 +210,12 @@ pub(in crate::autopilot) async fn load_growth_debt_observations(
                 NULL::integer AS relationship_score,
                 FLOOR(EXTRACT(EPOCH FROM (plan.release_at - $2)) / 3600)::bigint
                     AS hours_until_deadline
-            FROM viryaos_release_plans AS plan
+            FROM release_plans AS plan
             LEFT JOIN LATERAL (
                 SELECT
                     count(*)::bigint AS completed,
                     max(milestone.completed_at) AS last_completed_at
-                FROM viryaos_release_milestones AS milestone
+                FROM release_milestones AS milestone
                 WHERE milestone.workspace_id = plan.workspace_id
                   AND milestone.release_id = plan.id
             ) AS recorded ON true
@@ -226,14 +226,14 @@ pub(in crate::autopilot) async fn load_growth_debt_observations(
                 SELECT count(DISTINCT
                        decision.input_snapshot -> 'collision' ->> 'held_milestone'
                     )::bigint AS held
-                FROM viryaos_autopilot_decisions AS decision
+                FROM autopilot_decisions AS decision
                 WHERE decision.workspace_id = plan.workspace_id
                   AND decision.decision_kind = 'hold_release_milestone_collision'
                   AND decision.subject_kind = 'release_plan'
                   AND decision.subject_id = plan.id
                   AND NOT EXISTS (
                       SELECT 1
-                      FROM viryaos_release_milestones AS done
+                      FROM release_milestones AS done
                       WHERE done.workspace_id = plan.workspace_id
                         AND done.release_id = plan.id
                         AND done.milestone =
@@ -272,7 +272,7 @@ pub(in crate::autopilot) async fn load_growth_debt_observations(
                 NULL::integer AS relationship_score,
                 FLOOR(EXTRACT(EPOCH FROM (plan.release_at - $2)) / 3600)::bigint
                     AS hours_until_deadline
-            FROM viryaos_release_plans AS plan
+            FROM release_plans AS plan
             WHERE plan.workspace_id = $1
               AND plan.active
               AND plan.release_at > $2
@@ -304,7 +304,7 @@ pub(in crate::autopilot) async fn load_growth_debt_observations(
                 1::bigint AS tracked_items,
                 target.relationship_score,
                 NULL::bigint AS hours_until_deadline
-            FROM viryaos_outreach_targets AS target
+            FROM outreach_targets AS target
             WHERE target.workspace_id = $1
               AND target.active
               AND target.accepts_outreach
@@ -326,7 +326,7 @@ pub(in crate::autopilot) async fn load_growth_debt_observations(
                 1::bigint,
                 target.relationship_score,
                 NULL::bigint
-            FROM viryaos_booking_targets AS target
+            FROM booking_targets AS target
             WHERE target.workspace_id = $1
               AND target.active
               AND target.accepts_booking
@@ -344,7 +344,7 @@ pub(in crate::autopilot) async fn load_growth_debt_observations(
                     event.starts_at::date AS show_date,
                     cost.distance_km
                 FROM events AS event
-                LEFT JOIN viryaos_show_cost_ledger AS cost
+                LEFT JOIN show_cost_ledger AS cost
                   ON cost.workspace_id = event.workspace_id
                  AND cost.event_id = event.id
                 WHERE event.workspace_id = $1
@@ -523,7 +523,7 @@ pub(in crate::autopilot) async fn load_growth_debt_observations(
     let last_signals = sqlx::query_as::<_, LastDebtSignalRow>(
         r#"
         SELECT subject_id, decision_kind, max(evaluated_at) AS evaluated_at
-        FROM viryaos_autopilot_decisions
+        FROM autopilot_decisions
         WHERE workspace_id = $1
           AND context = 'growth_debt'
         GROUP BY subject_id, decision_kind
@@ -639,7 +639,7 @@ async fn load_moment_register(
     let moments = sqlx::query_scalar::<_, OffsetDateTime>(
         r#"
         SELECT occurred_at
-        FROM viryaos_content_sources
+        FROM content_sources
         WHERE workspace_id = $1
           AND active
           AND source_kind IN ('event','release','video')
@@ -700,7 +700,7 @@ async fn load_content_supply_policy(
     workspace: Uuid,
 ) -> Result<ContentSupplyPolicy, RepositoryError> {
     let raw = sqlx::query_scalar::<_, serde_json::Value>(
-        "SELECT config FROM viryaos_autopilot_policies \
+        "SELECT config FROM autopilot_policies \
          WHERE workspace_id = $1 AND context = 'content_supply'",
     )
     .bind(workspace)

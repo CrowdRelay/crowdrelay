@@ -147,13 +147,13 @@ pub async fn negotiations(State(state): State<AppState>, headers: HeaderMap) -> 
                            terms.settled_at DESC,
                            terms.opportunity_id
                    ) AS bucket_rank
-            FROM viryaos_team_opportunity_terms AS terms
-            JOIN viryaos_team_opportunities AS opportunity
+            FROM team_opportunity_terms AS terms
+            JOIN team_opportunities AS opportunity
               ON opportunity.workspace_id = terms.workspace_id
              AND opportunity.id = terms.opportunity_id
             LEFT JOIN LATERAL (
                 SELECT action.id, action.payload
-                FROM viryaos_autopilot_actions AS action
+                FROM autopilot_actions AS action
                 WHERE action.workspace_id = terms.workspace_id
                   AND action.subject_kind = 'team_opportunity'
                   AND action.subject_id = terms.opportunity_id

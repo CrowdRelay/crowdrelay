@@ -42,7 +42,7 @@ pub(in crate::autopilot) async fn execute_audience_campaign(
       WHERE event.workspace_id=$1 AND event.id=$2 AND event.status IN ('published','completed') FOR UPDATE OF event
     "#).bind(workspace_id.into_uuid()).bind(event_id.into_uuid()).fetch_optional(&mut **tx).await.map_err(map_sqlx)?.ok_or(RepositoryError::Conflict)?;
     let phase_key = campaign_phase_str(phase);
-    let segment_slug = format!("viryaos-{}-{}", row.0, phase_key);
+    let segment_slug = format!("crowdrelay-{}-{}", row.0, phase_key);
     let campaign_slug = segment_slug.clone();
     let filter = match phase {
         crowdrelay_domain::campaign_lifecycle::EventCampaignPhase::Announcement => {
@@ -64,7 +64,7 @@ pub(in crate::autopilot) async fn execute_audience_campaign(
     let segment_id = sqlx::query_scalar::<_, Uuid>(
         r#"
       INSERT INTO audience_segments(workspace_id,slug,name,description,filter,active)
-      VALUES($1,$2,$3,'ViryaOS managed lifecycle segment',$4,true)
+      VALUES($1,$2,$3,'CrowdRelay managed lifecycle segment',$4,true)
       ON CONFLICT(workspace_id,slug) DO UPDATE SET filter=EXCLUDED.filter,active=true
       RETURNING id
     "#,
@@ -78,7 +78,7 @@ pub(in crate::autopilot) async fn execute_audience_campaign(
     .map_err(map_sqlx)?;
     let campaign=sqlx::query_as::<_,(Uuid,String,Option<OffsetDateTime>)>(r#"
       INSERT INTO communication_campaigns(workspace_id,segment_id,slug,name,channel,template_key,content)
-      VALUES($1,$2,$3,$4,'email',$5,jsonb_build_object('event_id',$6::uuid,'managed_by','viryaos','subject',$7::text,'body',$8::text))
+      VALUES($1,$2,$3,$4,'email',$5,jsonb_build_object('event_id',$6::uuid,'managed_by','crowdrelay','subject',$7::text,'body',$8::text))
       ON CONFLICT(workspace_id,slug) DO UPDATE SET template_key=communication_campaigns.template_key
       RETURNING id,status,scheduled_at
     "#).bind(workspace_id.into_uuid()).bind(segment_id).bind(&campaign_slug).bind(format!("{} · {}",row.1,phase_key)).bind(template_key).bind(event_id.into_uuid()).bind(&draft.subject).bind(&draft.body).fetch_one(&mut **tx).await.map_err(map_sqlx)?;
@@ -92,7 +92,7 @@ pub(in crate::autopilot) async fn execute_audience_campaign(
         let outbox_id=sqlx::query_scalar::<_,Uuid>(r#"
           INSERT INTO outbox_events(workspace_id,event_type,event_version,payload,available_at,trace_id,causation_id,action_id)
           SELECT $1,'communication.campaign_due',1,jsonb_build_object('campaign_id',$2::uuid,'campaign_slug',$3::text,'channel','email','segment_id',$4::uuid,'template_key',$5::text,'send_evidence',jsonb_build_object('source_id',$7::text,'recipient_reason',$8::text)),$6,at.trace_id,at.causation_id,at.id
-          FROM viryaos_autopilot_actions at WHERE at.id=$9
+          FROM autopilot_actions at WHERE at.id=$9
           RETURNING id
         "#).bind(workspace_id.into_uuid()).bind(campaign.0).bind(&campaign_slug).bind(segment_id).bind(template_key).bind(now)
           .bind(format!("event-campaign:{campaign_slug}"))
@@ -104,14 +104,14 @@ pub(in crate::autopilot) async fn execute_audience_campaign(
     } else if !matches!(campaign.1.as_str(), "scheduled" | "completed") {
         return Err(RepositoryError::Conflict);
     }
-    sqlx::query(r#"INSERT INTO viryaos_campaign_lifecycle_emissions(workspace_id,event_id,phase,communication_campaign_id,action_id,emitted_at) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(workspace_id,event_id,phase) DO NOTHING"#)
+    sqlx::query(r#"INSERT INTO campaign_lifecycle_emissions(workspace_id,event_id,phase,communication_campaign_id,action_id,emitted_at) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(workspace_id,event_id,phase) DO NOTHING"#)
       .bind(workspace_id.into_uuid()).bind(event_id.into_uuid()).bind(phase_key).bind(campaign.0).bind(action_id.into_uuid()).bind(now).execute(&mut **tx).await.map_err(map_sqlx)?;
     if matches!(
         phase,
         crowdrelay_domain::campaign_lifecycle::EventCampaignPhase::Announcement
     ) {
         sqlx::query(r#"
-          INSERT INTO viryaos_outreach_opportunities(
+          INSERT INTO outreach_opportunities(
             workspace_id,target_id,source,subject_kind,subject_key,template_key,
             relevance_basis_points,confidence_basis_points,active,observed_at,expires_at)
           SELECT target.workspace_id,target.id,'event_autopilot','event',$2,
@@ -121,7 +121,7 @@ pub(in crate::autopilot) async fn execute_audience_campaign(
               ELSE 'event.press.v1'
             END,
             GREATEST(7000,LEAST(10000,target.relationship_score*100)),8800,true,$3,$3 + INTERVAL '30 days'
-          FROM viryaos_outreach_targets target
+          FROM outreach_targets target
           WHERE target.workspace_id=$1 AND target.active AND target.verified AND target.accepts_outreach AND NOT target.do_not_contact
             -- A target that already replied is served: a reply awaiting triage
             -- ('received'), a yes ('positive'), and a no ('declined') all mean
@@ -147,7 +147,7 @@ pub(in crate::autopilot) async fn lock_outreach_for_execution(
 ) -> Result<(String, String, String), RepositoryError> {
     sqlx::query_as::<_,(String,String,String)>(r#"
       SELECT target.display_name,target.contact_email,opportunity.template_key
-      FROM viryaos_outreach_opportunities opportunity JOIN viryaos_outreach_targets target
+      FROM outreach_opportunities opportunity JOIN outreach_targets target
         ON target.workspace_id=opportunity.workspace_id AND target.id=opportunity.target_id
       WHERE opportunity.workspace_id=$1 AND opportunity.id=$2 AND opportunity.target_id=$3
         AND opportunity.active AND opportunity.expires_at>now()
@@ -170,12 +170,12 @@ pub(in crate::autopilot) async fn record_outreach_sent(
     now: OffsetDateTime,
 ) -> Result<(), RepositoryError> {
     let followup = matches!(phase, crowdrelay_domain::outreach::OutreachPhase::FollowUp);
-    sqlx::query("UPDATE viryaos_outreach_targets SET last_outreach_at=$3,followup_count=CASE WHEN $4 THEN followup_count+1 ELSE 0 END,contact_verified_at=CASE WHEN contact_verified_at IS NULL OR contact_verified_at < $3 THEN $3 ELSE contact_verified_at END WHERE workspace_id=$1 AND id=$2")
+    sqlx::query("UPDATE outreach_targets SET last_outreach_at=$3,followup_count=CASE WHEN $4 THEN followup_count+1 ELSE 0 END,contact_verified_at=CASE WHEN contact_verified_at IS NULL OR contact_verified_at < $3 THEN $3 ELSE contact_verified_at END WHERE workspace_id=$1 AND id=$2")
       .bind(workspace_id.into_uuid()).bind(target_id.into_uuid()).bind(now).bind(followup).execute(&mut **tx).await.map_err(map_sqlx)?;
-    sqlx::query(r#"INSERT INTO viryaos_outreach_interactions(workspace_id,target_id,opportunity_id,direction,phase,source_key,occurred_at) VALUES($1,$2,$3,'outbound',$4,$5,$6) ON CONFLICT(workspace_id,target_id,source_key) DO NOTHING"#)
+    sqlx::query(r#"INSERT INTO outreach_interactions(workspace_id,target_id,opportunity_id,direction,phase,source_key,occurred_at) VALUES($1,$2,$3,'outbound',$4,$5,$6) ON CONFLICT(workspace_id,target_id,source_key) DO NOTHING"#)
       .bind(workspace_id.into_uuid()).bind(target_id.into_uuid()).bind(opportunity_id.into_uuid()).bind(outreach_phase_str(phase)).bind(format!("autopilot:{}",action_id)).bind(now).execute(&mut **tx).await.map_err(map_sqlx)?;
     // Record reach event for the unified reach ledger.
-    sqlx::query(r#"INSERT INTO viryaos_reach_events (workspace_id, action_id, recipient_kind, recipient_id, channel, template_id, estimated_reach, status, metadata) VALUES ($1, $2, 'outreach_target', $3::text, 'email', 'outreach', 1, 'sent', jsonb_build_object('phase', $4, 'opportunity_id', $5)) ON CONFLICT (action_id, recipient_id, channel) WHERE action_id IS NOT NULL DO NOTHING"#)
+    sqlx::query(r#"INSERT INTO reach_events (workspace_id, action_id, recipient_kind, recipient_id, channel, template_id, estimated_reach, status, metadata) VALUES ($1, $2, 'outreach_target', $3::text, 'email', 'outreach', 1, 'sent', jsonb_build_object('phase', $4, 'opportunity_id', $5)) ON CONFLICT (action_id, recipient_id, channel) WHERE action_id IS NOT NULL DO NOTHING"#)
       .bind(workspace_id.into_uuid()).bind(action_id.into_uuid()).bind(target_id.into_uuid()).bind(outreach_phase_str(phase)).bind(opportunity_id.into_uuid()).execute(&mut **tx).await.map_err(map_sqlx)?;
     Ok(())
 }
@@ -190,7 +190,7 @@ pub(in crate::autopilot) async fn load_content_source_for_execution(
     // execution delay, and the emitted payload ships this freshly read row
     // anyway, so a pinned version only converted routine churn into permanent
     // action failures. Liveness (active, unexpired) is the real gate.
-    sqlx::query_as::<_,(String,String,Value)>("SELECT source_kind,title,metadata FROM viryaos_content_sources WHERE workspace_id=$1 AND id=$2 AND active AND expires_at>now() FOR UPDATE")
+    sqlx::query_as::<_,(String,String,Value)>("SELECT source_kind,title,metadata FROM content_sources WHERE workspace_id=$1 AND id=$2 AND active AND expires_at>now() FOR UPDATE")
       .bind(workspace_id.into_uuid()).bind(source_id.into_uuid()).fetch_optional(&mut **tx).await.map_err(map_sqlx)?.ok_or(RepositoryError::Conflict)
 }
 
@@ -203,7 +203,7 @@ pub(in crate::autopilot) async fn execute_experiment_adjustment(
     allocations: &[crowdrelay_application::autopilot::ExperimentAllocation],
     complete: bool,
 ) -> Result<(), RepositoryError> {
-    let locked=sqlx::query_scalar::<_,i64>("SELECT version FROM viryaos_experiments WHERE workspace_id=$1 AND id=$2 AND version=$3 AND status='running' FOR UPDATE")
+    let locked=sqlx::query_scalar::<_,i64>("SELECT version FROM experiments WHERE workspace_id=$1 AND id=$2 AND version=$3 AND status='running' FOR UPDATE")
       .bind(workspace_id.into_uuid()).bind(experiment_id.into_uuid()).bind(expected_version).fetch_optional(&mut **tx).await.map_err(map_sqlx)?.ok_or(RepositoryError::Conflict)?;
     let total: u32 = allocations
         .iter()
@@ -213,14 +213,14 @@ pub(in crate::autopilot) async fn execute_experiment_adjustment(
         return Err(RepositoryError::Conflict);
     }
     for allocation in allocations {
-        let changed=sqlx::query("UPDATE viryaos_experiment_variants SET allocation_basis_points=$4,version=version+1 WHERE workspace_id=$1 AND experiment_id=$2 AND id=$3 AND active")
+        let changed=sqlx::query("UPDATE experiment_variants SET allocation_basis_points=$4,version=version+1 WHERE workspace_id=$1 AND experiment_id=$2 AND id=$3 AND active")
           .bind(workspace_id.into_uuid()).bind(experiment_id.into_uuid()).bind(allocation.variant_id.into_uuid()).bind(i32::from(allocation.allocation_basis_points)).execute(&mut **tx).await.map_err(map_sqlx)?;
         if changed.rows_affected() != 1 {
             return Err(RepositoryError::Conflict);
         }
     }
     let status = if complete { "completed" } else { "running" };
-    let changed=sqlx::query("UPDATE viryaos_experiments SET status=$4,winner_variant_id=CASE WHEN $5 THEN $3 ELSE winner_variant_id END,version=version+1 WHERE workspace_id=$1 AND id=$2 AND version=$6")
+    let changed=sqlx::query("UPDATE experiments SET status=$4,winner_variant_id=CASE WHEN $5 THEN $3 ELSE winner_variant_id END,version=version+1 WHERE workspace_id=$1 AND id=$2 AND version=$6")
       .bind(workspace_id.into_uuid()).bind(experiment_id.into_uuid()).bind(winner.into_uuid()).bind(status).bind(complete).bind(expected_version).execute(&mut **tx).await.map_err(map_sqlx)?;
     if changed.rows_affected() != 1 {
         return Err(RepositoryError::Conflict);
@@ -248,7 +248,7 @@ pub(in crate::autopilot) async fn complete_show_task(
     if !fact || task.is_physical() {
         return Err(RepositoryError::Conflict);
     }
-    sqlx::query(r#"INSERT INTO show_checklist_items(workspace_id,event_id,item_key,status,note,updated_at) VALUES($1,$2,$3,'done','Verified automatically by ViryaOS from first-party state',$4) ON CONFLICT(workspace_id,event_id,item_key) DO UPDATE SET status='done',note=EXCLUDED.note,updated_at=EXCLUDED.updated_at WHERE show_checklist_items.status<>'done'"#)
+    sqlx::query(r#"INSERT INTO show_checklist_items(workspace_id,event_id,item_key,status,note,updated_at) VALUES($1,$2,$3,'done','Verified automatically by CrowdRelay from first-party state',$4) ON CONFLICT(workspace_id,event_id,item_key) DO UPDATE SET status='done',note=EXCLUDED.note,updated_at=EXCLUDED.updated_at WHERE show_checklist_items.status<>'done'"#)
       .bind(workspace_id.into_uuid()).bind(event_id.into_uuid()).bind(task.key()).bind(now).execute(&mut **tx).await.map_err(map_sqlx)?;
     Ok(())
 }
@@ -300,7 +300,7 @@ pub(in crate::autopilot) async fn execute_release_milestone(
     >(
         r#"
         SELECT title,release_at,active,communication_enabled,press_enabled,source_key,tier,listen_url
-        FROM viryaos_release_plans WHERE workspace_id=$1 AND id=$2 FOR UPDATE
+        FROM release_plans WHERE workspace_id=$1 AND id=$2 FOR UPDATE
     "#,
     )
     .bind(workspace_id.into_uuid())
@@ -316,7 +316,7 @@ pub(in crate::autopilot) async fn execute_release_milestone(
         return Err(RepositoryError::Conflict);
     }
     let key = release_milestone_str(milestone);
-    let already=sqlx::query_scalar::<_,bool>("SELECT EXISTS(SELECT 1 FROM viryaos_release_milestones WHERE workspace_id=$1 AND release_id=$2 AND milestone=$3)")
+    let already=sqlx::query_scalar::<_,bool>("SELECT EXISTS(SELECT 1 FROM release_milestones WHERE workspace_id=$1 AND release_id=$2 AND milestone=$3)")
         .bind(workspace_id.into_uuid()).bind(release_id.into_uuid()).bind(key).fetch_one(&mut **tx).await.map_err(map_sqlx)?;
     if already {
         return Ok(());
@@ -436,7 +436,7 @@ pub(in crate::autopilot) async fn execute_release_milestone(
             .await?;
         }
     }
-    sqlx::query(r#"INSERT INTO viryaos_release_milestones(workspace_id,release_id,milestone,action_id,completed_at) VALUES($1,$2,$3,$4,$5) ON CONFLICT(workspace_id,release_id,milestone) DO NOTHING"#)
+    sqlx::query(r#"INSERT INTO release_milestones(workspace_id,release_id,milestone,action_id,completed_at) VALUES($1,$2,$3,$4,$5) ON CONFLICT(workspace_id,release_id,milestone) DO NOTHING"#)
         .bind(workspace_id.into_uuid()).bind(release_id.into_uuid()).bind(key).bind(action_id.into_uuid()).bind(now)
         .execute(&mut **tx).await.map_err(map_sqlx)?;
     Ok(())
@@ -461,7 +461,7 @@ async fn seed_release_calendar(
     ];
     for (slug, days, label) in milestones {
         let calendar_key = format!("release:{}:{}", release_id, slug);
-        let exists=sqlx::query_scalar::<_,bool>("SELECT EXISTS(SELECT 1 FROM viryaos_calendar_requests WHERE workspace_id=$1 AND calendar_key=$2)")
+        let exists=sqlx::query_scalar::<_,bool>("SELECT EXISTS(SELECT 1 FROM calendar_requests WHERE workspace_id=$1 AND calendar_key=$2)")
             .bind(workspace_id.into_uuid()).bind(&calendar_key).fetch_one(&mut **tx).await.map_err(map_sqlx)?;
         if exists {
             continue;
@@ -472,7 +472,7 @@ async fn seed_release_calendar(
         sqlx::query(r#"INSERT INTO outbox_events(id,workspace_id,event_type,event_version,payload,request_id,max_attempts) VALUES($1,$2,'crowdrelay.calendar.upsert_requested',1,$3,$4,12)"#)
           .bind(outbox_id).bind(workspace_id.into_uuid()).bind(json!({"action_id":action_id,"calendar_key":calendar_key,"title":format!("VIRYA · {title} · {label}"),"starts_at":starts_at,"source_kind":"release","source_id":release_id})).bind(format!("autopilot-action:{action_id}:{slug}"))
           .execute(&mut **tx).await.map_err(map_sqlx)?;
-        sqlx::query(r#"INSERT INTO viryaos_calendar_requests(workspace_id,source_kind,source_id,calendar_key,title,starts_at,action_id,outbox_event_id) VALUES($1,'release',$2,$3,$4,$5,$6,$7)"#)
+        sqlx::query(r#"INSERT INTO calendar_requests(workspace_id,source_kind,source_id,calendar_key,title,starts_at,action_id,outbox_event_id) VALUES($1,'release',$2,$3,$4,$5,$6,$7)"#)
           .bind(workspace_id.into_uuid()).bind(release_id.into_uuid()).bind(&calendar_key).bind(format!("VIRYA · {title} · {label}")).bind(starts_at).bind(action_id.into_uuid()).bind(outbox_id)
           .execute(&mut **tx).await.map_err(map_sqlx)?;
     }
@@ -488,7 +488,7 @@ async fn seed_release_outreach(
     now: OffsetDateTime,
 ) -> Result<(), RepositoryError> {
     sqlx::query(r#"
-      INSERT INTO viryaos_outreach_opportunities(
+      INSERT INTO outreach_opportunities(
         workspace_id,target_id,source,subject_kind,subject_key,template_key,
         relevance_basis_points,confidence_basis_points,active,observed_at,expires_at)
       SELECT target.workspace_id,target.id,'release_autopilot','release',$2,
@@ -497,7 +497,7 @@ async fn seed_release_outreach(
           WHEN 'endorsement' THEN 'release.endorsement.v1'
           ELSE 'release.press.v1' END,
         GREATEST(7000,LEAST(10000,target.relationship_score*100)),9000,true,$3,GREATEST($4 + INTERVAL '14 days',$3 + INTERVAL '14 days')
-      FROM viryaos_outreach_targets target
+      FROM outreach_targets target
       WHERE target.workspace_id=$1 AND target.active AND target.verified AND target.accepts_outreach AND NOT target.do_not_contact
         AND COALESCE(target.last_reply_disposition::text,'none') NOT IN ('received','positive','declined')
         AND target.target_kind IN ('press','radio','creator','media_patronage','endorsement')
@@ -521,7 +521,7 @@ async fn seed_deadline_calendar(
     starts_at: OffsetDateTime,
 ) -> Result<(), RepositoryError> {
     let exists = sqlx::query_scalar::<_, bool>(
-        "SELECT EXISTS(SELECT 1 FROM viryaos_calendar_requests WHERE workspace_id=$1 AND calendar_key=$2)",
+        "SELECT EXISTS(SELECT 1 FROM calendar_requests WHERE workspace_id=$1 AND calendar_key=$2)",
     )
     .bind(workspace_id.into_uuid())
     .bind(calendar_key)
@@ -559,7 +559,7 @@ async fn seed_deadline_calendar(
     .await
     .map_err(map_sqlx)?;
     sqlx::query(
-        r#"INSERT INTO viryaos_calendar_requests(
+        r#"INSERT INTO calendar_requests(
               workspace_id,source_kind,source_id,calendar_key,title,starts_at,action_id,outbox_event_id
            ) VALUES($1,$2,$3,$4,$5,$6,$7,$8)"#,
     )
@@ -619,7 +619,7 @@ pub(in crate::autopilot) async fn execute_live_opportunity(
         SELECT title, organization, destination_url, contact_email, currency,
                expected_fee_minor, estimated_cost_minor, application_fee_minor,
                requires_contract, exclusive, deadline
-        FROM viryaos_team_opportunities
+        FROM team_opportunities
         WHERE workspace_id=$1 AND id=$2 AND eligible AND verified_destination
           AND status IN ('new','prepared','awaiting_approval')
         FOR UPDATE
@@ -686,7 +686,7 @@ pub(in crate::autopilot) async fn execute_live_opportunity(
     .await?;
 
     sqlx::query(
-        "UPDATE viryaos_team_opportunities \
+        "UPDATE team_opportunities \
          SET status='submission_requested', last_action_at=$3, version=version+1 \
          WHERE workspace_id=$1 AND id=$2",
     )
@@ -757,8 +757,8 @@ pub(in crate::autopilot) async fn execute_live_opportunity_terms(
                terms.offered_fee_minor, terms.walk_away_minor, terms.currency,
                terms.floor_basis, terms.prior_fee_minor,
                terms.market_floor_minor
-        FROM viryaos_team_opportunity_terms AS terms
-        JOIN viryaos_team_opportunities AS opportunity
+        FROM team_opportunity_terms AS terms
+        JOIN team_opportunities AS opportunity
           ON opportunity.workspace_id = terms.workspace_id
          AND opportunity.id = terms.opportunity_id
         WHERE terms.workspace_id = $1
@@ -828,7 +828,7 @@ pub(in crate::autopilot) async fn execute_live_opportunity_terms(
 
     if accept {
         sqlx::query(
-            "UPDATE viryaos_team_opportunity_terms \
+            "UPDATE team_opportunity_terms \
              SET state='accepted', settled_at=$3, version=version+1 \
              WHERE workspace_id=$1 AND opportunity_id=$2 AND settled_at IS NULL",
         )
@@ -844,7 +844,7 @@ pub(in crate::autopilot) async fn execute_live_opportunity_terms(
         // `counter_rounds + 1` from the row rather than from the payload: two
         // executions of the same drafted counter must not count as two asks.
         sqlx::query(
-            "UPDATE viryaos_team_opportunity_terms \
+            "UPDATE team_opportunity_terms \
              SET state='countered', countered_fee_minor=$3, counter_rounds=counter_rounds+1, \
                  version=version+1 \
              WHERE workspace_id=$1 AND opportunity_id=$2 AND settled_at IS NULL",
@@ -882,7 +882,7 @@ pub(in crate::autopilot) async fn prepare_funding_package(
         r#"
         SELECT title, organization, destination_url, currency, funding_amount_minor,
                own_contribution_minor, deadline, metadata
-        FROM viryaos_team_opportunities
+        FROM team_opportunities
         WHERE workspace_id=$1 AND id=$2 AND opportunity_kind='funding' AND eligible
           AND package_status IN ('none','requested') AND status IN ('new','prepared')
         FOR UPDATE
@@ -929,7 +929,7 @@ pub(in crate::autopilot) async fn prepare_funding_package(
     .await?;
 
     sqlx::query(
-        "UPDATE viryaos_team_opportunities \
+        "UPDATE team_opportunities \
          SET package_status='requested', status='prepared', last_action_at=$3, version=version+1 \
          WHERE workspace_id=$1 AND id=$2",
     )
@@ -952,7 +952,7 @@ pub(in crate::autopilot) async fn submit_funding_application(
     let row = sqlx::query_as::<_, (String, String, Option<String>, String, OffsetDateTime)>(
         r#"
         SELECT title, organization, destination_url, currency, deadline
-        FROM viryaos_team_opportunities
+        FROM team_opportunities
         WHERE workspace_id=$1 AND id=$2 AND opportunity_kind='funding' AND eligible
           AND package_status='ready' AND status IN ('prepared','awaiting_approval')
           AND deadline>now()
@@ -989,7 +989,7 @@ pub(in crate::autopilot) async fn submit_funding_application(
     .await?;
 
     sqlx::query(
-        "UPDATE viryaos_team_opportunities \
+        "UPDATE team_opportunities \
          SET status='submission_requested', last_action_at=$3, version=version+1 \
          WHERE workspace_id=$1 AND id=$2",
     )
@@ -1032,7 +1032,7 @@ pub(in crate::autopilot) async fn escalate_editorial_pitch(
     )
     .await?;
     sqlx::query(
-        "UPDATE viryaos_release_plans SET editorial_pitch_escalated_at=$3 \
+        "UPDATE release_plans SET editorial_pitch_escalated_at=$3 \
          WHERE workspace_id=$1 AND id=$2 AND editorial_pitch_completed_at IS NULL",
     )
     .bind(workspace_id.into_uuid())
@@ -1094,7 +1094,7 @@ pub(in crate::autopilot) async fn execute_agent_run(
     let trace_id = sqlx::query_scalar::<_, Option<uuid::Uuid>>(
         r#"
         SELECT trace_id
-        FROM viryaos_autopilot_actions
+        FROM autopilot_actions
         WHERE workspace_id = $1 AND id = $2
         "#,
     )

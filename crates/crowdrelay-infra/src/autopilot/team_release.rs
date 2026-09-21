@@ -28,8 +28,8 @@ pub(super) async fn issue_release_making_of_asks(
     let making_of_asks = sqlx::query_as::<_, (Uuid, String, OffsetDateTime)>(
         r#"
         SELECT plan.id, plan.title, plan.release_at
-        FROM viryaos_release_plans plan
-        LEFT JOIN viryaos_team_assignments assignment
+        FROM release_plans plan
+        LEFT JOIN team_assignments assignment
           ON assignment.workspace_id=plan.workspace_id
          AND assignment.source_kind='release_making_of'
          AND assignment.source_id=plan.id
@@ -48,7 +48,7 @@ pub(super) async fn issue_release_making_of_asks(
           AND $2 <= plan.release_at + INTERVAL '7 days'
           AND assignment.id IS NULL
           AND NOT EXISTS (
-              SELECT 1 FROM viryaos_content_sources source
+              SELECT 1 FROM content_sources source
               WHERE source.workspace_id=plan.workspace_id
                 AND source.format_key='making_of'
                 AND source.active
@@ -100,7 +100,7 @@ pub(super) async fn issue_release_making_of_asks(
         let assignment_id = Uuid::now_v7();
         let inserted = sqlx::query_scalar::<_, Uuid>(
             r#"
-            INSERT INTO viryaos_team_assignments (
+            INSERT INTO team_assignments (
                 id, workspace_id, action_id, source_kind, source_id, source_ref,
                 assignee_member_id, required_skill, due_at, next_reminder_at
             ) VALUES ($1,$2,NULL,'release_making_of',$3,$4,$5,$6,$7,$8)
@@ -163,9 +163,9 @@ pub(super) async fn close_release_making_of_assignments(
     now: OffsetDateTime,
 ) -> Result<(), RepositoryError> {
     sqlx::query(
-        r#"UPDATE viryaos_team_assignments assignment
+        r#"UPDATE team_assignments assignment
            SET status='done', completed_at=$2, next_reminder_at=NULL
-           FROM viryaos_content_sources source
+           FROM content_sources source
            WHERE assignment.workspace_id=$1 AND assignment.status='open'
              AND assignment.source_kind='release_making_of'
              AND source.workspace_id=assignment.workspace_id
@@ -183,9 +183,9 @@ pub(super) async fn close_release_making_of_assignments(
     .map_err(map_sqlx)?;
 
     sqlx::query(
-        r#"UPDATE viryaos_team_assignments assignment
+        r#"UPDATE team_assignments assignment
            SET status='cancelled', completed_at=NULL, next_reminder_at=NULL
-           FROM viryaos_release_plans plan
+           FROM release_plans plan
            WHERE assignment.workspace_id=$1 AND assignment.status='open'
              AND assignment.source_kind='release_making_of'
              AND plan.workspace_id=assignment.workspace_id

@@ -127,7 +127,7 @@ class PlayMeasurementContract(unittest.TestCase):
         # verdict with nothing behind it. Found by a Postgres test, not by
         # reading the SQL.
         for constraint in ("reason_matches_evidence", "verdict_requires_evidence"):
-            clause = self.sql.split(f"viryaos_play_outcomes_{constraint}", 1)[1].split(
+            clause = self.sql.split(f"play_outcomes_{constraint}", 1)[1].split(
                 "\n", 2
             )[1]
             self.assertIn("IS NOT DISTINCT FROM", clause)
@@ -176,8 +176,8 @@ class PlayMeasurementContract(unittest.TestCase):
         # An action that was queued and never sent reached nobody. Counting it
         # would give every number here a denominator larger than the truth.
         observe = self.infra.split("observe_play_outcome_impl", 1)[1]
-        self.assertIn("viryaos_play_step_recipients", observe)
-        self.assertNotIn("viryaos_autopilot_actions", observe.split("Ok(PlayOutcome", 1)[0])
+        self.assertIn("play_step_recipients", observe)
+        self.assertNotIn("autopilot_actions", observe.split("Ok(PlayOutcome", 1)[0])
 
     # --- when the numbers are taken -------------------------------------
 

@@ -475,7 +475,7 @@ impl PgOutboxStore {
         // `UNKNOWN` from — `RUNNING` and `SUCCEEDED`. It used to read
         // `('succeeded', 'processing', 'queued', 'running')`, and both extra
         // values were wrong in a different way. `running` is not a value the
-        // `viryaos_autopilot_actions` status CHECK allows at all, so that arm
+        // `autopilot_actions` status CHECK allows at all, so that arm
         // never matched anything. `queued` matched, and matching was the
         // damage: `QUEUED -> UNKNOWN` is not a legal ledger transition, so the
         // trigger raised `check_violation` and took this whole transaction
@@ -492,7 +492,7 @@ impl PgOutboxStore {
         {
             sqlx::query(
                 r#"
-                UPDATE viryaos_autopilot_actions
+                UPDATE autopilot_actions
                 SET status = 'unknown',
                     updated_at = now()
                 WHERE id = $1
@@ -580,7 +580,7 @@ async fn mark_exhausted_delivery_leases_dead(
         // for every delivery — not just the one that poisoned it.
         sqlx::query(
             r#"
-            UPDATE viryaos_autopilot_actions AS action
+            UPDATE autopilot_actions AS action
             SET status = 'unknown', updated_at = now()
             FROM webhook_deliveries AS delivery
             JOIN outbox_events AS event

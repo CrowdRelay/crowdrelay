@@ -59,7 +59,7 @@ NEXT DECISION
 
 ### OBJECTIVE → WORLD STATE
 
-- **Truth**: `viryaos_growth_metric_points`, per platform and metric key.
+- **Truth**: `growth_metric_points`, per platform and metric key.
 - **Derived**: `WorldModel.north_star_current`, `north_star_this_month`,
   `GrowthTargetProgress`.
 - **UNKNOWN**: a platform with no recent point is not zero. Feed health is
@@ -72,7 +72,7 @@ NEXT DECISION
 
 ### WORLD STATE → BELIEF → PREDICTION
 
-- **Truth**: `viryaos_growth_evidence` rows with `resolved_at IS NOT NULL` and
+- **Truth**: `growth_evidence` rows with `resolved_at IS NOT NULL` and
   execution status not `unknown`.
 - **Derived**: the hierarchical Gamma-Poisson outcome model, the Y14 and Y30
   treatment-effect posteriors, the Y14→Y30 bridge, and the per-regime
@@ -153,9 +153,9 @@ NEXT DECISION
 
 ### EXECUTION
 
-- **Truth**: `viryaos_autopilot_actions.status` (lowercase vocabulary).
+- **Truth**: `autopilot_actions.status` (lowercase vocabulary).
 - **Projection**: `action_ledger.state` (uppercase), maintained by the
-  `viryaos_action_ledger_sync` trigger. One-way. `ActionState::from_action_status`
+  `action_ledger_sync` trigger. One-way. `ActionState::from_action_status`
   and that trigger are pinned equal, and both are pinned to the column's CHECK,
   by `scripts/test_action_state_parity_v1.py`.
 - **Independent**: `experiment_assignments.execution_status` (causal treatment
@@ -214,14 +214,14 @@ NEXT DECISION
 "What exactly did the brain know when it decided this?" is answerable, but only
 partly, and not from one place.
 
-**Persisted at dispatch.** `viryaos_dispatch_predictions` holds the expected
+**Persisted at dispatch.** `dispatch_predictions` holds the expected
 fans, the expected Signal installs, the `expected_metrics` map, the
-`DispatchContext` and the timestamps. `viryaos_growth_evidence` holds the
+`DispatchContext` and the timestamps. `growth_evidence` holds the
 evidence quality, the sample size, the strategy, the target key, the creative
 family, and the `observed_metrics` map once measurements complete.
 
 **Persisted on the decision.** Every selected candidate's `DecisionValue`
-reaches `viryaos_autopilot_decisions.input_snapshot` as the
+reaches `autopilot_decisions.input_snapshot` as the
 `decision_value` provenance block (`portfolio::decision_provenance`) —
 economic terms (`intrinsic_y30`, `economic_value_fans`, `harm_fans`, the
 exchange rate used, `risk_penalty`, `opportunity_cost`, marginal

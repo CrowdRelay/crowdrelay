@@ -3,7 +3,7 @@
 //! Three phases share the team-handoff sweep's transaction:
 //!
 //! - **Project**: every published gig is also a production day, so the
-//!   show ladder's calendar feeds `viryaos_production_events` without
+//!   show ladder's calendar feeds `production_events` without
 //!   anyone entering the same date twice.
 //! - **Settle**: open plans are judged against what the day actually
 //!   produced — content sources logged inside the harvest window — and
@@ -42,7 +42,7 @@ const LOCAL_EVENT_DAY: &str = r#"
 "#;
 
 /// Every published gig is also a production day: the capture plan for it
-/// hangs off `viryaos_production_events`, so the show ladder's calendar
+/// hangs off `production_events`, so the show ladder's calendar
 /// projects forward into the content engine's. Idempotent on
 /// `event_id` — the partial unique index is the race guard, `ON
 /// CONFLICT DO NOTHING` the acknowledgement.
@@ -59,7 +59,7 @@ pub(in crate::autopilot) async fn project_shows_to_production_events(
 ) -> Result<(), RepositoryError> {
     sqlx::query(&format!(
         r#"
-        INSERT INTO viryaos_production_events (id, workspace_id, kind, title, scheduled_for, event_id)
+        INSERT INTO production_events (id, workspace_id, kind, title, scheduled_for, event_id)
         SELECT uuidv7(), event.workspace_id,
                -- 6.3: a festival slot is a production day of its own kind —
                -- the shot list and harvest already know the difference.
@@ -87,7 +87,7 @@ pub(in crate::autopilot) async fn project_shows_to_production_events(
     // resurrect a dead day through the back door.
     sqlx::query(&format!(
         r#"
-        UPDATE viryaos_production_events day
+        UPDATE production_events day
         SET title = sync.title,
             scheduled_for = sync.day,
             status = COALESCE(sync.terminal_status, day.status),
@@ -131,7 +131,7 @@ pub(in crate::autopilot) async fn project_shows_to_production_events(
     // them in step.
     sqlx::query(
         r#"
-        UPDATE viryaos_team_assignments assignment
+        UPDATE team_assignments assignment
         SET due_at = (day.scheduled_for + 1)::timestamp AT TIME ZONE 'UTC',
             next_reminder_at = CASE
                 WHEN now() + INTERVAL '24 hours'
@@ -144,8 +144,8 @@ pub(in crate::autopilot) async fn project_shows_to_production_events(
             last_reminded_at = NULL,
             first_overdue_reminder_at = NULL,
             reminder_count = 0
-        FROM viryaos_capture_plans plan
-        JOIN viryaos_production_events day
+        FROM capture_plans plan
+        JOIN production_events day
           ON day.workspace_id = plan.workspace_id
          AND day.id = plan.production_event_id
         WHERE assignment.workspace_id = $1
@@ -303,8 +303,8 @@ pub(in crate::autopilot) async fn settle_capture_plans(
         r#"
         SELECT plan.id, plan.status AS plan_status,
                event.scheduled_for, event.status AS event_status
-        FROM viryaos_capture_plans plan
-        JOIN viryaos_production_events event
+        FROM capture_plans plan
+        JOIN production_events event
           ON event.workspace_id = plan.workspace_id
          AND event.id = plan.production_event_id
         WHERE plan.workspace_id = $1 AND plan.status IN ('draft','issued')
@@ -330,7 +330,7 @@ pub(in crate::autopilot) async fn settle_capture_plans(
                 .midnight()
                 .assume_utc();
             sqlx::query_scalar::<_, i64>(
-                r#"SELECT COUNT(*) FROM viryaos_content_sources s
+                r#"SELECT COUNT(*) FROM content_sources s
                    WHERE s.workspace_id=$1 AND s.active
                      AND s.source_kind IN ('video','story','social_post')
                      AND s.occurred_at >= $2 AND s.occurred_at < $3"#,
@@ -356,7 +356,7 @@ pub(in crate::autopilot) async fn settle_capture_plans(
                 // plans keep their landed count current until the verdict.
                 if plan_status == CapturePlanStatus::Issued {
                     sqlx::query(
-                        "UPDATE viryaos_capture_plans SET sources_landed=$3 \
+                        "UPDATE capture_plans SET sources_landed=$3 \
                          WHERE id=$2 AND workspace_id=$1 AND status='issued'",
                     )
                     .bind(workspace_id.into_uuid())
@@ -374,7 +374,7 @@ pub(in crate::autopilot) async fn settle_capture_plans(
         // The verdict writes the final yield with it — NULL for a draft
         // that was never measured, the count for anything issued.
         sqlx::query(
-            "UPDATE viryaos_capture_plans SET status=$3, sources_landed=$5, updated_at=now() \
+            "UPDATE capture_plans SET status=$3, sources_landed=$5, updated_at=now() \
              WHERE id=$2 AND workspace_id=$1 AND status=$4",
         )
         .bind(workspace_id.into_uuid())
@@ -434,12 +434,12 @@ pub(in crate::autopilot) async fn issue_capture_plans(
     let days = sqlx::query_as::<_, UnplannedProductionDayRow>(
         r#"
         SELECT event.id, event.kind, event.title, event.scheduled_for, event.event_id
-        FROM viryaos_production_events event
+        FROM production_events event
         WHERE event.workspace_id=$1 AND event.status='scheduled'
           AND event.kind <> 'other'
           AND event.scheduled_for BETWEEN $2 AND $2 + 1
           AND NOT EXISTS (
-              SELECT 1 FROM viryaos_capture_plans plan
+              SELECT 1 FROM capture_plans plan
               WHERE plan.production_event_id = event.id
                 AND plan.status <> 'abandoned'
           )
@@ -461,8 +461,8 @@ pub(in crate::autopilot) async fn issue_capture_plans(
         r#"
         SELECT plan.id AS plan_id, plan.assignee_member_id,
                event.kind, event.title, event.scheduled_for, event.event_id
-        FROM viryaos_capture_plans plan
-        JOIN viryaos_production_events event
+        FROM capture_plans plan
+        JOIN production_events event
           ON event.workspace_id = plan.workspace_id
          AND event.id = plan.production_event_id
         WHERE plan.workspace_id=$1 AND plan.status='draft' AND event.status='scheduled'
@@ -491,19 +491,19 @@ pub(in crate::autopilot) async fn issue_capture_plans(
         SELECT DISTINCT fmt.key, fmt.name, fmt.skill
         FROM (
             SELECT format_key AS key
-            FROM viryaos_content_suggestions
+            FROM content_suggestions
             WHERE workspace_id=$1
               AND (status='approved'
                    OR (status='raised' AND (expires_at IS NULL OR expires_at > now())))
               AND format_key IS NOT NULL
             UNION
             SELECT beat->>'format_key' AS key
-            FROM viryaos_arcs arc
+            FROM arcs arc
             CROSS JOIN LATERAL jsonb_array_elements(arc.spine) beat
             WHERE arc.workspace_id=$1 AND arc.status='active'
               AND jsonb_typeof(arc.spine) = 'array'
         ) needed
-        JOIN viryaos_content_format_entries fmt
+        JOIN content_format_entries fmt
           ON fmt.key = needed.key AND fmt.active
         ORDER BY fmt.key
         "#,
@@ -536,7 +536,7 @@ pub(in crate::autopilot) async fn issue_capture_plans(
         let items = items_json(&shots)?;
         let plan_id = sqlx::query_scalar::<_, Uuid>(
             r#"
-            INSERT INTO viryaos_capture_plans (
+            INSERT INTO capture_plans (
                 id, workspace_id, production_event_id, items,
                 assignee_member_id, status, issued_at
             ) VALUES ($1,$2,$3,$4,$5,$6, CASE WHEN $6 = 'issued' THEN now() END)
@@ -612,14 +612,14 @@ pub(in crate::autopilot) async fn issue_capture_plans(
         // issue_capture_plan — a day cancelled between the SELECT and
         // this write must not ship a shot list.
         let issued = sqlx::query_scalar::<_, Uuid>(
-            r#"UPDATE viryaos_capture_plans
+            r#"UPDATE capture_plans
                SET status='issued', assignee_member_id=$3, items=$4,
                    issued_at=now(), updated_at=now()
                WHERE id=$2 AND workspace_id=$1 AND status='draft'
                  AND EXISTS (
-                     SELECT 1 FROM viryaos_production_events event
+                     SELECT 1 FROM production_events event
                      WHERE event.workspace_id=$1
-                       AND event.id=viryaos_capture_plans.production_event_id
+                       AND event.id=capture_plans.production_event_id
                        AND event.status='scheduled'
                  )
                RETURNING id"#,
@@ -704,7 +704,7 @@ async fn route_capture_plan(
     let assignment_id = Uuid::now_v7();
     let inserted = sqlx::query_scalar::<_, Uuid>(
         r#"
-        INSERT INTO viryaos_team_assignments (
+        INSERT INTO team_assignments (
             id, workspace_id, action_id, source_kind, source_id, source_ref,
             assignee_member_id, required_skill, due_at, next_reminder_at
         ) VALUES ($1,$2,NULL,'capture_plan',$3,NULL,$4,$5,$6,$7)

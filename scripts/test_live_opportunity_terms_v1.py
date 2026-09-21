@@ -226,7 +226,7 @@ class LiveOpportunityTermsContract(unittest.TestCase):
         )
         # A settled negotiation is not reopened by another offer.
         upsert = read(INGRESS).split("ON CONFLICT (workspace_id, opportunity_id) DO UPDATE SET", 1)[1]
-        self.assertIn("WHERE viryaos_team_opportunity_terms.settled_at IS NULL", upsert)
+        self.assertIn("WHERE team_opportunity_terms.settled_at IS NULL", upsert)
 
     def test_the_send_is_external_work_behind_a_named_capability(self) -> None:
         execution = read(EXECUTION) + "\n" + read(EXECUTION_CAPS)
@@ -250,7 +250,7 @@ class LiveOpportunityTermsContract(unittest.TestCase):
         self.assertIn("enum: [offer, withdrawn]", request)
         self.assertIn("responds_by", request)
         # Nothing in the evaluation path may create one.
-        self.assertNotIn("INSERT INTO viryaos_team_opportunity_terms", self.infra)
+        self.assertNotIn("INSERT INTO team_opportunity_terms", self.infra)
 
     def test_both_halves_of_the_pipeline_are_costed_the_same_way(self) -> None:
         # Two ways of costing one trip is how a negotiation floor and an

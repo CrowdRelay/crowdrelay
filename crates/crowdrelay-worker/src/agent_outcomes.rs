@@ -58,7 +58,7 @@ const BATCH_LIMIT: i64 = 32;
 /// The `agent_outreach_targets_target_kind_check` vocabulary (migration 0138).
 ///
 /// Deliberately not `OutreachTargetKind`. That enum is the vocabulary of
-/// `viryaos_outreach_targets`, a different table in a different bounded
+/// `outreach_targets`, a different table in a different bounded
 /// context, and the two sets genuinely differ: this one accepts `community`
 /// and rejects `support_slot`, which is the reverse of the other. Reaching for
 /// the enum because the column names match would accept `support_slot` here
@@ -341,7 +341,7 @@ impl AgentOutcomeWorker {
                        task.id
                    )
             FROM agent_service_tasks AS task
-            LEFT JOIN viryaos_autopilot_actions AS action
+            LEFT JOIN autopilot_actions AS action
                    ON action.workspace_id = task.workspace_id
                   AND action.id = (task.metadata ->> 'action_id')::uuid
             WHERE task.workspace_id = $1 AND task.id = $2
@@ -446,7 +446,7 @@ impl AgentOutcomeWorker {
             // The model's opinion of itself, kept where it reads as exactly
             // that.
             //
-            // `viryaos_autopilot_decisions.confidence_basis_points` used to
+            // `autopilot_decisions.confidence_basis_points` used to
             // receive this number directly. That column holds the brain's own
             // evidence confidence everywhere else, and `next_best_action`
             // parses it into `Confidence` and ranks on it — so a self-report
@@ -507,7 +507,7 @@ impl AgentOutcomeWorker {
         // idempotency_key so a worker retry is a no-op.
         let inserted_decision = sqlx::query_scalar::<_, Uuid>(
             r#"
-            INSERT INTO viryaos_autopilot_decisions (
+            INSERT INTO autopilot_decisions (
                 id, workspace_id, decision_key, context, subject_kind, subject_id,
                 decision_kind, confidence_basis_points, disposition, reason,
                 input_snapshot, policy_snapshot, recommendation, trace_id
@@ -550,7 +550,7 @@ impl AgentOutcomeWorker {
             Some(id) => id,
             None => {
                 sqlx::query_scalar::<_, Uuid>(
-                    "SELECT id FROM viryaos_autopilot_decisions \
+                    "SELECT id FROM autopilot_decisions \
                      WHERE workspace_id = $1 AND decision_key = $2",
                 )
                 .bind(outcome.workspace_id)
@@ -669,7 +669,7 @@ impl AgentOutcomeWorker {
                                metadata->>'media_type' AS media_type,
                                metadata->>'thumbnail_url' AS thumbnail_url,
                                metadata->>'url' AS source_url
-                        FROM viryaos_content_sources
+                        FROM content_sources
                         WHERE workspace_id = $1
                           AND id = $2
                           AND source_kind = $3
@@ -1105,7 +1105,7 @@ impl AgentOutcomeWorker {
                     // just made that a window could still regret.
                     sqlx::query_scalar::<_, Uuid>(
                         r#"
-                    INSERT INTO viryaos_autopilot_actions (
+                    INSERT INTO autopilot_actions (
                         id, workspace_id, decision_id, context, action_kind,
                         subject_kind, subject_id, idempotency_key, payload, status,
                         action_class, approved_at, approved_by, approval_expires_at,
@@ -1144,7 +1144,7 @@ impl AgentOutcomeWorker {
                 } else {
                     let inserted = sqlx::query_scalar::<_, Uuid>(
                         r#"
-                    INSERT INTO viryaos_autopilot_actions (
+                    INSERT INTO autopilot_actions (
                         id, workspace_id, decision_id, context, action_kind,
                         subject_kind, subject_id, idempotency_key, payload, status,
                         action_class, approved_at, approved_by, approval_expires_at,
@@ -1274,7 +1274,7 @@ impl AgentOutcomeWorker {
             match inserted_action {
                 Some(id) => Some(id),
                 None => sqlx::query_scalar::<_, Option<Uuid>>(
-                    "SELECT id FROM viryaos_autopilot_actions \
+                    "SELECT id FROM autopilot_actions \
                  WHERE workspace_id = $1 AND idempotency_key = $2",
                 )
                 .bind(outcome.workspace_id)

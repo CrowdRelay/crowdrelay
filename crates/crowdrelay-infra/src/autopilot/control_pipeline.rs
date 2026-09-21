@@ -28,12 +28,12 @@ pub(super) async fn load_content_pipeline(
                        profile.member_key AS assignee_member_key,
                        member.display_name AS assignee_display_name,
                        assignment.due_at AS assignment_due_at
-                FROM viryaos_autopilot_actions action
-                LEFT JOIN viryaos_team_assignments assignment
+                FROM autopilot_actions action
+                LEFT JOIN team_assignments assignment
                   ON assignment.workspace_id=action.workspace_id
                  AND assignment.action_id=action.id
                  AND assignment.status='open'
-                LEFT JOIN viryaos_team_profiles profile
+                LEFT JOIN team_profiles profile
                   ON profile.workspace_id=assignment.workspace_id
                  AND profile.member_id=assignment.assignee_member_id
                 LEFT JOIN workspace_members member
@@ -58,11 +58,11 @@ pub(super) async fn load_content_pipeline(
             sqlx::query_scalar::<_, String>(
                 r#"
                 SELECT DISTINCT capability_row.capability
-                FROM viryaos_executor_capabilities capability_row
-                JOIN viryaos_executor_instances executor
+                FROM executor_capabilities capability_row
+                JOIN executor_instances executor
                   ON executor.workspace_id=capability_row.workspace_id
                  AND executor.executor_id=capability_row.executor_id
-                LEFT JOIN viryaos_executor_circuit_breakers breaker
+                LEFT JOIN executor_circuit_breakers breaker
                   ON breaker.workspace_id=executor.workspace_id
                  AND breaker.executor_id=executor.executor_id
                 WHERE capability_row.workspace_id=$1
@@ -80,7 +80,7 @@ pub(super) async fn load_content_pipeline(
             sqlx::query_scalar::<_, i64>(
                 r#"
                 SELECT count(*)
-                FROM viryaos_content_sources
+                FROM content_sources
                 WHERE workspace_id = $1
                   AND active
                   AND expires_at > now()
@@ -101,7 +101,7 @@ pub(super) async fn load_content_pipeline(
         SELECT date_trunc('week', created_at)::date AS week_start,
                count(*) AS revised_fields,
                avg(distance_chars)::bigint AS avg_distance_chars
-        FROM viryaos_draft_revisions
+        FROM draft_revisions
         WHERE workspace_id = $1
           AND created_at > now() - interval '30 days'
         GROUP BY 1
@@ -126,7 +126,7 @@ pub(super) async fn load_content_pipeline(
         let revised_actions_30d = sqlx::query_scalar::<_, i64>(
             r#"
             SELECT count(DISTINCT action_id)
-            FROM viryaos_draft_revisions
+            FROM draft_revisions
             WHERE workspace_id = $1
               AND created_at > now() - interval '30 days'
             "#,
@@ -188,7 +188,7 @@ pub(super) async fn load_content_pipeline(
         sqlx::query_as::<_, (Uuid, String)>(
             r#"
             SELECT id, title
-            FROM viryaos_content_sources
+            FROM content_sources
             WHERE workspace_id = $1 AND id = ANY($2)
             "#,
         )

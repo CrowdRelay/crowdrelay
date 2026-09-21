@@ -1,7 +1,7 @@
 //! Google Drive contacts sync: scan the connected Drive for tabular files,
 //! extract email-bearing rows, and stage them for operator review.
 //!
-//! Everything this worker writes lands in `viryaos_drive_contacts` —
+//! Everything this worker writes lands in `drive_contacts` —
 //! never in `fans` or `agent_outreach_targets`. Classification is the
 //! operator's job: a fan goes through `fan_import` (pending + DOI), a
 //! beacon through the outreach screening queue, and one address may be

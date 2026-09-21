@@ -1,4 +1,4 @@
-//! Google Drive contacts staging — `viryaos_drive_contacts`.
+//! Google Drive contacts staging — `drive_contacts`.
 //!
 //! Every email the connector extracts lands here first, deduplicated by
 //! `(workspace_id, normalized_email)`. Nothing reaches `fans` or
@@ -103,7 +103,7 @@ pub struct RegistrySummary {
 }
 
 /// The registry-resolved contact row shape. Every reader of
-/// `viryaos_drive_contacts` selects through this so `DriveContactRow`
+/// `drive_contacts` selects through this so `DriveContactRow`
 /// decodes identically whether it came from the review queue or a single
 /// fetch — a second column list is a decode fault waiting on the first
 /// divergent field.
@@ -124,7 +124,7 @@ const CONTACT_SELECT: &str = r#"
            COALESCE(venue.played_here, false) AS venue_played_here,
            cp.display_name AS matched_counterparty,
            COALESCE(cp.dealt_with, false) AS counterparty_worked_with
-    FROM viryaos_drive_contacts c
+    FROM drive_contacts c
     LEFT JOIN LATERAL (
         SELECT v.id AS venue_id, v.display_name,
                EXISTS (
@@ -192,7 +192,7 @@ impl PostgresGDriveRepository {
         file_id: &str,
     ) -> Result<Option<String>, GDriveError> {
         sqlx::query_scalar::<_, String>(
-            "SELECT last_mtime FROM viryaos_drive_files WHERE workspace_id = $1 AND file_id = $2",
+            "SELECT last_mtime FROM drive_files WHERE workspace_id = $1 AND file_id = $2",
         )
         .bind(workspace_id)
         .bind(file_id)
@@ -221,7 +221,7 @@ impl PostgresGDriveRepository {
         let file_name: String = file_name.chars().take(500).collect();
         sqlx::query(
             r#"
-            INSERT INTO viryaos_drive_files
+            INSERT INTO drive_files
                 (workspace_id, file_id, file_name, mime_type, last_mtime,
                  no_email_column, rows_read, contacts_written, last_scanned_at)
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, now())
@@ -300,19 +300,19 @@ impl PostgresGDriveRepository {
         for contact in ordered {
             sqlx::query(
                 r#"
-                INSERT INTO viryaos_drive_contacts (
+                INSERT INTO drive_contacts (
                     workspace_id, normalized_email, display_name, organization,
                     phone, suggested_kind, city, notes, source_file_id, source_file_name,
                     sources, last_seen_at, disappeared_at
                 )
                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, ARRAY[$11]::text[], now(), NULL)
                 ON CONFLICT (workspace_id, normalized_email) DO UPDATE SET
-                    display_name = COALESCE(EXCLUDED.display_name, viryaos_drive_contacts.display_name),
-                    organization = COALESCE(EXCLUDED.organization, viryaos_drive_contacts.organization),
-                    phone = COALESCE(EXCLUDED.phone, viryaos_drive_contacts.phone),
-                    suggested_kind = COALESCE(EXCLUDED.suggested_kind, viryaos_drive_contacts.suggested_kind),
-                    city = COALESCE(EXCLUDED.city, viryaos_drive_contacts.city),
-                    notes = COALESCE(EXCLUDED.notes, viryaos_drive_contacts.notes),
+                    display_name = COALESCE(EXCLUDED.display_name, drive_contacts.display_name),
+                    organization = COALESCE(EXCLUDED.organization, drive_contacts.organization),
+                    phone = COALESCE(EXCLUDED.phone, drive_contacts.phone),
+                    suggested_kind = COALESCE(EXCLUDED.suggested_kind, drive_contacts.suggested_kind),
+                    city = COALESCE(EXCLUDED.city, drive_contacts.city),
+                    notes = COALESCE(EXCLUDED.notes, drive_contacts.notes),
                     -- source_file_id doubles as the disappearance anchor:
                     -- the mark_disappeared sweep matches rows by the file
                     -- that last saw them. A sighting from a source that
@@ -320,18 +320,18 @@ impl PostgresGDriveRepository {
                     -- from a gdrive file that still tracks it.
                     source_file_id = CASE
                         WHEN $11 = 'gdrive'
-                             OR NOT 'gdrive' = ANY(viryaos_drive_contacts.sources)
+                             OR NOT 'gdrive' = ANY(drive_contacts.sources)
                         THEN EXCLUDED.source_file_id
-                        ELSE viryaos_drive_contacts.source_file_id
+                        ELSE drive_contacts.source_file_id
                     END,
                     source_file_name = CASE
                         WHEN $11 = 'gdrive'
-                             OR NOT 'gdrive' = ANY(viryaos_drive_contacts.sources)
+                             OR NOT 'gdrive' = ANY(drive_contacts.sources)
                         THEN EXCLUDED.source_file_name
-                        ELSE viryaos_drive_contacts.source_file_name
+                        ELSE drive_contacts.source_file_name
                     END,
                     sources = (SELECT array_agg(DISTINCT s) FROM unnest(
-                        viryaos_drive_contacts.sources || EXCLUDED.sources) AS s),
+                        drive_contacts.sources || EXCLUDED.sources) AS s),
                     last_seen_at = now(),
                     disappeared_at = NULL
                 "#,
@@ -359,7 +359,7 @@ impl PostgresGDriveRepository {
             // outcome.
             marked = sqlx::query(
                 r#"
-            UPDATE viryaos_drive_contacts
+            UPDATE drive_contacts
             SET disappeared_at = now()
             WHERE workspace_id = $1
               AND source_file_id = $2
@@ -401,7 +401,7 @@ impl PostgresGDriveRepository {
     ) -> Result<(), GDriveError> {
         sqlx::query(
             r#"
-            UPDATE viryaos_drive_contacts
+            UPDATE drive_contacts
             SET last_inbound_at = GREATEST(COALESCE(last_inbound_at, $3), $3),
                 updated_at = now()
             WHERE workspace_id = $1 AND normalized_email = $2
@@ -508,7 +508,7 @@ impl PostgresGDriveRepository {
                    count(*) FILTER (WHERE venue.played_here) AS own_rooms,
                    count(*) FILTER (WHERE cp.counterparty_id IS NOT NULL) AS known_counterparties,
                    count(*) FILTER (WHERE cp.dealt_with) AS dealt_with
-            FROM viryaos_drive_contacts c
+            FROM drive_contacts c
             LEFT JOIN LATERAL (
                 SELECT v.display_name,
                        EXISTS (
@@ -565,7 +565,7 @@ impl PostgresGDriveRepository {
             _ => return Err(GDriveError::NotFound),
         };
         let updated = sqlx::query_scalar::<_, Uuid>(&format!(
-            "UPDATE viryaos_drive_contacts SET {column} = $3 \
+            "UPDATE drive_contacts SET {column} = $3 \
                  WHERE workspace_id = $1 AND id = $2 RETURNING id"
         ))
         .bind(workspace_id)
@@ -711,7 +711,7 @@ impl PostgresGDriveRepository {
         .execute(&mut *tx)
         .await?;
         sqlx::query(
-            "UPDATE viryaos_drive_contacts SET beacon_outcome = 'promoted' WHERE workspace_id = $1 AND id = $2",
+            "UPDATE drive_contacts SET beacon_outcome = 'promoted' WHERE workspace_id = $1 AND id = $2",
         )
         .bind(workspace_id)
         .bind(contact.id)
@@ -765,7 +765,7 @@ impl PostgresGDriveRepository {
         )
         .await?;
         sqlx::query(
-            "UPDATE viryaos_drive_contacts SET beacon_outcome = 'promoted' WHERE workspace_id = $1 AND id = $2",
+            "UPDATE drive_contacts SET beacon_outcome = 'promoted' WHERE workspace_id = $1 AND id = $2",
         )
         .bind(workspace_id)
         .bind(contact.id)
@@ -776,7 +776,7 @@ impl PostgresGDriveRepository {
     }
 
     /// Promotes a contact onto the booking-agent list — a
-    /// `viryaos_booking_agents` row (§12-5 entity 4). An agent is the one
+    /// `booking_agents` row (§12-5 entity 4). An agent is the one
     /// booking-graph contact that is *not* city-scoped: the band pitches the
     /// agent for representation once, not a room for one night, so the
     /// candidate queue's city dance never applies. The sheet's organization
@@ -820,14 +820,14 @@ impl PostgresGDriveRepository {
             .filter(|org| !org.is_empty());
         sqlx::query(
             r#"
-            INSERT INTO viryaos_booking_agents
+            INSERT INTO booking_agents
                 (workspace_id, name, agency, contact_email, contact_verified_at)
             VALUES ($1, $2, $3, $4, now())
             ON CONFLICT (workspace_id, contact_email) DO UPDATE SET
                 name = EXCLUDED.name,
-                agency = COALESCE(EXCLUDED.agency, viryaos_booking_agents.agency),
+                agency = COALESCE(EXCLUDED.agency, booking_agents.agency),
                 contact_verified_at = COALESCE(
-                    viryaos_booking_agents.contact_verified_at, now()
+                    booking_agents.contact_verified_at, now()
                 )
             "#,
         )
@@ -850,7 +850,7 @@ impl PostgresGDriveRepository {
         )
         .await?;
         sqlx::query(
-            "UPDATE viryaos_drive_contacts SET beacon_outcome = 'promoted' WHERE workspace_id = $1 AND id = $2",
+            "UPDATE drive_contacts SET beacon_outcome = 'promoted' WHERE workspace_id = $1 AND id = $2",
         )
         .bind(workspace_id)
         .bind(contact.id)
@@ -860,7 +860,7 @@ impl PostgresGDriveRepository {
         Ok(())
     }
 
-    /// Promotes a contact into booking supply: a `viryaos_booking_candidates`
+    /// Promotes a contact into booking supply: a `booking_candidates`
     /// row, admitted on first-party grounds — the band's own sent mail is the
     /// evidence (`source_reference` carries the thread), which is exactly what
     /// `screen_candidate`'s inferred-route refusal exists to distinguish from.
@@ -1002,13 +1002,13 @@ impl PostgresGDriveRepository {
         // consumer that applies it to admitted rows.
         let status = sqlx::query_scalar::<_, String>(
             r#"
-            INSERT INTO viryaos_booking_candidates (
+            INSERT INTO booking_candidates (
                 workspace_id, target_kind, display_name, city_slug,
                 route_kind, route_value, source, source_reference,
                 evidence, fit_basis_points, status
             ) VALUES ($1,$2,$3,$4,'email',$5,'contact_scan',$6,$7,6000,'admitted')
             ON CONFLICT (workspace_id, route_kind, lower(btrim(route_value))) DO UPDATE SET
-                city_slug = COALESCE(viryaos_booking_candidates.city_slug, EXCLUDED.city_slug)
+                city_slug = COALESCE(booking_candidates.city_slug, EXCLUDED.city_slug)
             RETURNING status
             "#,
         )
@@ -1037,7 +1037,7 @@ impl PostgresGDriveRepository {
             return Ok(BookingPromoteOutcome::RouteRefused);
         }
         sqlx::query(
-            "UPDATE viryaos_drive_contacts SET beacon_outcome = 'promoted' WHERE workspace_id = $1 AND id = $2",
+            "UPDATE drive_contacts SET beacon_outcome = 'promoted' WHERE workspace_id = $1 AND id = $2",
         )
         .bind(workspace_id)
         .bind(contact.id)
@@ -1056,7 +1056,7 @@ impl PostgresGDriveRepository {
         contact_id: Uuid,
     ) -> Result<(), GDriveError> {
         sqlx::query(
-            "UPDATE viryaos_drive_contacts SET fan_outcome = 'promoted' WHERE workspace_id = $1 AND id = $2",
+            "UPDATE drive_contacts SET fan_outcome = 'promoted' WHERE workspace_id = $1 AND id = $2",
         )
         .bind(workspace_id)
         .bind(contact_id)
@@ -1229,7 +1229,7 @@ impl PostgresGDriveRepository {
     }
 }
 
-/// Files a contact on the representation list — the `viryaos_outreach_targets`
+/// Files a contact on the representation list — the `outreach_targets`
 /// row an approach can be requested against. Shared by the two beacon promote
 /// paths: an `agent`/`label` sheet kind files it directly, and a
 /// `booking_agent`/`talent_buyer` files it beside the registry row so the
@@ -1250,15 +1250,15 @@ async fn upsert_representation_target(
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
         r#"
-        INSERT INTO viryaos_outreach_targets
+        INSERT INTO outreach_targets
             (workspace_id, target_kind, display_name, contact_email,
              active, verified, accepts_outreach, do_not_contact)
         VALUES ($1, $2, $3, $4, true, true, false, false)
         ON CONFLICT (workspace_id, contact_email) DO UPDATE SET
             target_kind = CASE
-                WHEN viryaos_outreach_targets.target_kind IN ('agent','label')
+                WHEN outreach_targets.target_kind IN ('agent','label')
                     THEN EXCLUDED.target_kind
-                ELSE viryaos_outreach_targets.target_kind
+                ELSE outreach_targets.target_kind
             END,
             display_name = EXCLUDED.display_name,
             updated_at = now()

@@ -75,7 +75,7 @@ class FollowAskLadderContract(unittest.TestCase):
         # Named, not just shaped: waves have an `anchor_kind` too, and matching
         # on the shape alone compared the play enum against theirs.
         stored = latest_constraint(
-            r"viryaos_plays_anchor_kind_check\s+CHECK \(anchor_kind IN \((.*?)\)\)"
+            r"plays_anchor_kind_check\s+CHECK \(anchor_kind IN \((.*?)\)\)"
         )
         self.assertTrue(stored)
         declared = set(
@@ -171,7 +171,7 @@ class FollowAskLadderContract(unittest.TestCase):
         self.assertIn("fan.id = $3", audience)
         # Committed work, not delivered work: reading only the delivered table
         # re-offers the same fan every cycle and the ladder never climbs.
-        self.assertIn("viryaos_autopilot_actions", audience)
+        self.assertIn("autopilot_actions", audience)
         self.assertIn("status <> 'cancelled'", audience)
         self.assertIn("latest_consent.granted", audience)
 
@@ -215,9 +215,9 @@ class FollowAskLadderContract(unittest.TestCase):
 
     def test_the_stored_kinds_match_the_rust_enums(self) -> None:
         for pattern, header in (
-            (r"viryaos_plays_play_kind_check\s+CHECK \(play_kind IN \((.*?)\)\)", "impl PlayKind"),
+            (r"plays_play_kind_check\s+CHECK \(play_kind IN \((.*?)\)\)", "impl PlayKind"),
             (
-                r"viryaos_play_steps_step_kind_check\s+CHECK \(step_kind IN \((.*?)\)\)",
+                r"play_steps_step_kind_check\s+CHECK \(step_kind IN \((.*?)\)\)",
                 "impl PlayStepKind",
             ),
         ):
@@ -235,7 +235,7 @@ class FollowAskLadderContract(unittest.TestCase):
         # A play kind the learning table rejects is a play whose record cannot
         # be written, and the failure surfaces long after the campaign ran.
         learning = latest_constraint(
-            r"viryaos_play_learning_play_kind_check\s+CHECK \(play_kind IN \((.*?)\)\)"
+            r"play_learning_play_kind_check\s+CHECK \(play_kind IN \((.*?)\)\)"
         )
         self.assertIn("follow_ask_ladder", learning)
 

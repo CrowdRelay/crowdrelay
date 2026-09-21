@@ -112,7 +112,7 @@ async fn seed_action_and_post(
     let action_id = Uuid::now_v7();
     let decision_id = Uuid::now_v7();
     sqlx::query(
-        r#"INSERT INTO viryaos_autopilot_decisions
+        r#"INSERT INTO autopilot_decisions
            (id, workspace_id, decision_key, context, subject_kind, subject_id,
             decision_kind, confidence_basis_points, disposition, reason,
             input_snapshot, policy_snapshot, recommendation, trace_id)
@@ -127,7 +127,7 @@ async fn seed_action_and_post(
     .execute(pool)
     .await?;
     sqlx::query(
-        r#"INSERT INTO viryaos_autopilot_actions
+        r#"INSERT INTO autopilot_actions
            (id, workspace_id, decision_id, context, action_kind, subject_kind, subject_id,
             idempotency_key, payload, status, action_class, finished_at)
            VALUES ($1, $2, $3, 'outreach', 'community.engage.request', 'agent_outcome', $1,
@@ -490,7 +490,7 @@ async fn duplicate_community_posts_picks_most_recently_posted()
     let action_b = Uuid::now_v7();
     let decision_b = Uuid::now_v7();
     sqlx::query(
-        r#"INSERT INTO viryaos_autopilot_decisions
+        r#"INSERT INTO autopilot_decisions
            (id, workspace_id, decision_key, context, subject_kind, subject_id,
             decision_kind, confidence_basis_points, disposition, reason,
             input_snapshot, policy_snapshot, recommendation, trace_id)
@@ -505,7 +505,7 @@ async fn duplicate_community_posts_picks_most_recently_posted()
     .execute(&pool)
     .await?;
     sqlx::query(
-        r#"INSERT INTO viryaos_autopilot_actions
+        r#"INSERT INTO autopilot_actions
            (id, workspace_id, decision_id, context, action_kind, subject_kind, subject_id,
             idempotency_key, payload, status, action_class, finished_at)
            VALUES ($1, $2, $3, 'outreach', 'community.engage.request', 'agent_outcome', $1,

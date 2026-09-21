@@ -27,7 +27,7 @@ pub(in crate::autopilot) async fn record_booking_reply(
         };
         let (new_version, target_kind) = sqlx::query_as::<_, (i64, String)>(
             r#"
-            UPDATE viryaos_booking_targets
+            UPDATE booking_targets
             SET accepts_booking = CASE
                     WHEN $3 = 'do_not_contact' THEN false
                     ELSE accepts_booking
@@ -53,13 +53,13 @@ pub(in crate::autopilot) async fn record_booking_reply(
         // version bump invalidates any action prepared before this reply.
         sqlx::query(
             r#"
-            INSERT INTO viryaos_booking_target_history (
+            INSERT INTO booking_target_history (
                 workspace_id, target_id, version, target_kind, display_name, contact_email,
                 capacity, priority, relationship_score, active, accepts_booking
             )
             SELECT workspace_id, id, version, target_kind, display_name, contact_email,
                    capacity, priority, relationship_score, active, accepts_booking
-            FROM viryaos_booking_targets
+            FROM booking_targets
             WHERE workspace_id = $1 AND id = $2 AND version = $3
             "#,
         )
@@ -73,17 +73,17 @@ pub(in crate::autopilot) async fn record_booking_reply(
         if disposition == "do_not_contact" {
             sqlx::query(
                 r#"
-                INSERT INTO viryaos_contact_governor (
+                INSERT INTO contact_governor (
                     workspace_id, normalized_contact, last_context, last_action_id,
                     last_outbound_at, next_contact_after, do_not_contact
                 )
                 SELECT $1, lower(btrim(contact_email)), 'booking', NULL, $3, $3, true
-                FROM viryaos_booking_targets
+                FROM booking_targets
                 WHERE workspace_id=$1 AND id=$2
                 ON CONFLICT (workspace_id, normalized_contact) DO UPDATE
                 SET do_not_contact=true,
                     last_context=EXCLUDED.last_context,
-                    next_contact_after=GREATEST(viryaos_contact_governor.next_contact_after, EXCLUDED.next_contact_after),
+                    next_contact_after=GREATEST(contact_governor.next_contact_after, EXCLUDED.next_contact_after),
                     updated_at=now()
                 "#,
             )
@@ -96,7 +96,7 @@ pub(in crate::autopilot) async fn record_booking_reply(
         }
 
         sqlx::query(
-            "INSERT INTO viryaos_booking_interactions(workspace_id,target_id,direction,phase,disposition,source_key,occurred_at) VALUES($1,$2,'inbound','reply',$3,$4,$5)",
+            "INSERT INTO booking_interactions(workspace_id,target_id,direction,phase,disposition,source_key,occurred_at) VALUES($1,$2,'inbound','reply',$3,$4,$5)",
         )
         .bind(workspace_id.into_uuid())
         .bind(command.target_id.into_uuid())
@@ -116,7 +116,7 @@ pub(in crate::autopilot) async fn record_booking_reply(
         if !trimmed.is_empty() && trimmed.len() <= 4000 {
             sqlx::query(
                 r#"
-                INSERT INTO viryaos_reply_classifications (
+                INSERT INTO reply_classifications (
                     workspace_id, target_id, target_kind,
                     reply_text, previous_disposition,
                     classification_result, classified_disposition,
@@ -204,35 +204,35 @@ pub(in crate::autopilot) async fn load_chief_of_staff(
 
     let stats = sqlx::query_as::<_, ChiefStatsRow>(r#"
         SELECT
-            (SELECT count(*)::bigint FROM viryaos_autopilot_actions action
+            (SELECT count(*)::bigint FROM autopilot_actions action
               WHERE action.workspace_id=$1 AND action.status='succeeded'
                 AND action.finished_at >= $2 - INTERVAL '24 hours'
                 AND (
                     NOT EXISTS (
-                        SELECT 1 FROM viryaos_autopilot_action_emissions emission
+                        SELECT 1 FROM autopilot_action_emissions emission
                         WHERE emission.workspace_id=action.workspace_id AND emission.action_id=action.id
                     )
                     OR EXISTS (
-                        SELECT 1 FROM viryaos_autopilot_execution_reports report
+                        SELECT 1 FROM autopilot_execution_reports report
                         WHERE report.workspace_id=action.workspace_id AND report.action_id=action.id
                           AND report.status='succeeded'
                     )
                 )) executed_24h,
-            (SELECT count(*)::bigint FROM viryaos_autopilot_actions
+            (SELECT count(*)::bigint FROM autopilot_actions
               WHERE workspace_id=$1 AND status='failed' AND finished_at >= $2 - INTERVAL '24 hours') failed_24h,
-            (SELECT count(*)::bigint FROM viryaos_autopilot_action_emissions
+            (SELECT count(*)::bigint FROM autopilot_action_emissions
               WHERE workspace_id=$1 AND emitted_at >= $2 - INTERVAL '24 hours') emitted_24h,
-            (SELECT count(DISTINCT action_id)::bigint FROM viryaos_autopilot_execution_reports
+            (SELECT count(DISTINCT action_id)::bigint FROM autopilot_execution_reports
               WHERE workspace_id=$1 AND status='succeeded' AND occurred_at >= $2 - INTERVAL '24 hours') executor_confirmed_24h,
-            (SELECT count(DISTINCT report.action_id)::bigint FROM viryaos_autopilot_execution_reports report
+            (SELECT count(DISTINCT report.action_id)::bigint FROM autopilot_execution_reports report
               WHERE report.workspace_id=$1 AND report.status='failed'
                 AND report.occurred_at >= $2 - INTERVAL '24 hours'
                 AND NOT EXISTS (
-                    SELECT 1 FROM viryaos_autopilot_execution_reports success
+                    SELECT 1 FROM autopilot_execution_reports success
                     WHERE success.workspace_id=report.workspace_id
                       AND success.action_id=report.action_id AND success.status='succeeded'
                 )) executor_failed_24h,
-            (SELECT count(*)::bigint FROM viryaos_autopilot_actions
+            (SELECT count(*)::bigint FROM autopilot_actions
               WHERE workspace_id=$1 AND status='awaiting_approval'
                 -- Batched relay deliveries ask through the batch card.
                 AND NOT (action_kind='community.engage.request'
@@ -249,50 +249,50 @@ pub(in crate::autopilot) async fn load_chief_of_staff(
                 WHEN action_kind IN ('opportunity.terms.counter','opportunity.terms.accept') THEN 5
                 WHEN action_kind='funding.application.submit' THEN 10
                 WHEN action_kind LIKE 'experiment.%' THEN 3 ELSE 2 END),0)::bigint
-             FROM viryaos_autopilot_actions action
+             FROM autopilot_actions action
              WHERE action.workspace_id=$1 AND action.status='succeeded'
                AND action.finished_at >= $2 - INTERVAL '24 hours'
                AND (
                    NOT EXISTS (
-                       SELECT 1 FROM viryaos_autopilot_action_emissions emission
+                       SELECT 1 FROM autopilot_action_emissions emission
                        WHERE emission.workspace_id=action.workspace_id AND emission.action_id=action.id
                    )
                    OR EXISTS (
-                       SELECT 1 FROM viryaos_autopilot_execution_reports report
+                       SELECT 1 FROM autopilot_execution_reports report
                        WHERE report.workspace_id=action.workspace_id AND report.action_id=action.id
                          AND report.status='succeeded'
                    )
                )) estimated_minutes_saved_24h,
             (SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY
                        extract(epoch from completed_at - assigned_at) / 60)::bigint
-             FROM viryaos_team_assignments
+             FROM team_assignments
              WHERE workspace_id=$1 AND status='done' AND completed_at IS NOT NULL
                AND completed_at >= $2 - INTERVAL '7 days'
                AND completed_at > assigned_at
             ) median_assignment_turnaround_minutes_7d,
-            (SELECT count(*)::bigint FROM viryaos_team_assignments
+            (SELECT count(*)::bigint FROM team_assignments
              WHERE workspace_id=$1 AND status='done' AND completed_at IS NOT NULL
                AND completed_at >= $2 - INTERVAL '7 days'
                AND completed_at > assigned_at
             ) assignments_completed_7d,
-            (SELECT count(*)::bigint FROM viryaos_autopilot_outcomes
+            (SELECT count(*)::bigint FROM autopilot_outcomes
               WHERE workspace_id=$1 AND measurement_id IS NOT NULL AND observed_at >= $2 - INTERVAL '7 days' AND effect_assessment='improved') measured_improved_7d,
-            (SELECT count(*)::bigint FROM viryaos_autopilot_outcomes
+            (SELECT count(*)::bigint FROM autopilot_outcomes
               WHERE workspace_id=$1 AND measurement_id IS NOT NULL AND observed_at >= $2 - INTERVAL '7 days' AND effect_assessment='neutral') measured_neutral_7d,
-            (SELECT count(*)::bigint FROM viryaos_autopilot_outcomes
+            (SELECT count(*)::bigint FROM autopilot_outcomes
               WHERE workspace_id=$1 AND measurement_id IS NOT NULL AND observed_at >= $2 - INTERVAL '7 days' AND effect_assessment='worsened') measured_worsened_7d
     "#).bind(workspace_id.into_uuid()).bind(now).fetch_one(&repo.pool).await.map_err(map_sqlx)?;
 
     let opportunity_rows = sqlx::query_as::<_, ChiefOpportunityRow>(r#"
         SELECT decision.context, decision.decision_kind, decision.subject_kind, decision.subject_id,
                decision.confidence_basis_points, decision.reason, decision.disposition
-        FROM viryaos_autopilot_decisions decision
+        FROM autopilot_decisions decision
         WHERE decision.workspace_id=$1
           AND decision.evaluated_at >= $2 - INTERVAL '48 hours'
           AND decision.disposition IN ('recommend_only','require_approval','auto_execute')
           AND decision.context IN ('booking_opportunity','outreach','promotion_budget','merch_bundle','merch_pricing','ticket_yield','release','live_opportunity','funding','beacon','show_growth','growth_metrics','growth_debt','content_strategy')
           AND NOT EXISTS (
-              SELECT 1 FROM viryaos_autopilot_actions action
+              SELECT 1 FROM autopilot_actions action
               WHERE action.workspace_id=decision.workspace_id AND action.decision_id=decision.id
                 AND action.status IN ('succeeded','cancelled')
           )
@@ -322,7 +322,7 @@ pub(in crate::autopilot) async fn load_chief_of_staff(
             SELECT 'approval'::text kind, action.subject_kind, action.subject_id,
                    action.action_kind title, action.context detail,
                    action.approval_expires_at due_at
-            FROM viryaos_autopilot_actions action
+            FROM autopilot_actions action
             WHERE action.workspace_id=$1 AND action.status='awaiting_approval'
               AND action.approval_expires_at IS NOT NULL
               AND action.approval_expires_at BETWEEN $2 - INTERVAL '2 hours' AND $2 + INTERVAL '24 hours'
@@ -330,7 +330,7 @@ pub(in crate::autopilot) async fn load_chief_of_staff(
             SELECT CASE WHEN opportunity.opportunity_kind='funding' THEN 'funding_deadline' ELSE 'opportunity_deadline' END kind,
                    'team_opportunity'::text subject_kind, opportunity.id subject_id,
                    opportunity.title, opportunity.organization detail, opportunity.deadline due_at
-            FROM viryaos_team_opportunities opportunity
+            FROM team_opportunities opportunity
             WHERE opportunity.workspace_id=$1 AND opportunity.eligible AND opportunity.deadline IS NOT NULL
               AND opportunity.status IN ('new','prepared','awaiting_approval','submission_requested')
               AND opportunity.deadline BETWEEN $2 - INTERVAL '2 days' AND $2 + INTERVAL '14 days'
@@ -347,8 +347,8 @@ pub(in crate::autopilot) async fn load_chief_of_staff(
                 SELECT DISTINCT ON (edition.target_id)
                        edition.target_id, edition.edition_label,
                        edition.application_closes_at, target.display_name
-                FROM viryaos_festival_editions AS edition
-                JOIN viryaos_booking_targets AS target
+                FROM festival_editions AS edition
+                JOIN booking_targets AS target
                   ON target.workspace_id = edition.workspace_id
                  AND target.id = edition.target_id
                 WHERE edition.workspace_id = $1
@@ -397,7 +397,7 @@ pub(in crate::autopilot) async fn load_chief_of_staff(
         FROM events event CROSS JOIN task
         LEFT JOIN show_checklist_items checklist
           ON checklist.workspace_id=event.workspace_id AND checklist.event_id=event.id AND checklist.item_key=task.item_key
-        LEFT JOIN viryaos_autopilot_policies ops_policy
+        LEFT JOIN autopilot_policies ops_policy
           ON ops_policy.workspace_id=event.workspace_id AND ops_policy.context='show_operations'
         WHERE event.workspace_id=$1 AND event.status IN ('published','completed')
           AND event.starts_at <= $2 + INTERVAL '7 days'
@@ -543,7 +543,7 @@ async fn chief_activity(
             action.action_kind,
             COALESCE(action.action_class, 'first_party_reversible') AS action_class,
             count(*)::bigint AS count
-        FROM viryaos_autopilot_actions AS action
+        FROM autopilot_actions AS action
         WHERE action.workspace_id = $1
           AND (
                 (action.status = 'succeeded'
@@ -598,7 +598,7 @@ async fn chief_stopped(
         SELECT 'play_step_skipped' AS kind, step.skip_reason AS reason,
                count(*)::bigint AS count,
                'campaign steps that will never be sent' AS detail
-        FROM viryaos_play_steps AS step
+        FROM play_steps AS step
         WHERE step.workspace_id = $1
           AND step.skip_reason IS NOT NULL
           AND step.settled_at >= now() - INTERVAL '7 days'
@@ -607,7 +607,7 @@ async fn chief_stopped(
         SELECT 'action_failed', COALESCE(action.last_error_kind, 'unknown'),
                count(*)::bigint,
                'actions that reached their attempt limit'
-        FROM viryaos_autopilot_actions AS action
+        FROM autopilot_actions AS action
         WHERE action.workspace_id = $1
           AND action.status = 'failed'
           AND action.finished_at >= now() - INTERVAL '7 days'
@@ -615,13 +615,13 @@ async fn chief_stopped(
         UNION ALL
         SELECT 'play_retired', learning.retired_reason, count(*)::bigint,
                'play kinds the agent will not propose again'
-        FROM viryaos_play_learning AS learning
+        FROM play_learning AS learning
         WHERE learning.workspace_id = $1 AND learning.retired_reason IS NOT NULL
         GROUP BY learning.retired_reason
         UNION ALL
         SELECT 'outcome_insufficient', outcome.evidence_reason, count(*)::bigint,
                'campaigns whose effect could not be measured'
-        FROM viryaos_play_outcomes AS outcome
+        FROM play_outcomes AS outcome
         WHERE outcome.workspace_id = $1
           AND outcome.evidence = 'insufficient'
           AND outcome.finished_at >= now() - INTERVAL '7 days'
@@ -652,7 +652,7 @@ async fn chief_stopped(
 /// the gaps rather than with the results.
 ///
 /// Two ledgers feed the list: play outcomes (the ladder's own claims) and
-/// measurement outcomes (`viryaos_autopilot_outcomes` — one row per measured
+/// measurement outcomes (`autopilot_outcomes` — one row per measured
 /// metric, the table the harm and secondary-metric write-backs land beside).
 /// For a metric outcome the claim strength is the evidence row's recorded
 /// quality: a randomized holdout attributes, anything weaker correlates.
@@ -671,7 +671,7 @@ async fn chief_movements(
                 outcome.effect_assessment AS assessment,
                 outcome.delta_basis_points,
                 outcome.finished_at AS sort_at
-            FROM viryaos_play_outcomes AS outcome
+            FROM play_outcomes AS outcome
             WHERE outcome.workspace_id = $1
               AND outcome.evidence = 'measured'
               AND outcome.effect_assessment IS NOT NULL
@@ -686,10 +686,10 @@ async fn chief_movements(
                 outcome.effect_assessment AS assessment,
                 outcome.delta_basis_points,
                 outcome.observed_at AS sort_at
-            FROM viryaos_autopilot_outcomes AS outcome
+            FROM autopilot_outcomes AS outcome
             LEFT JOIN LATERAL (
                 SELECT e.evidence_quality
-                FROM viryaos_growth_evidence AS e
+                FROM growth_evidence AS e
                 WHERE e.workspace_id = outcome.workspace_id
                   AND e.action_id = outcome.action_id
                 ORDER BY CASE e.evidence_quality

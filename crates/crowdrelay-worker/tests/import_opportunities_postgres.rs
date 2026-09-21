@@ -1,6 +1,6 @@
 //! The hand-curated live-opportunity import, against a real schema.
 //!
-//! `viryaos_team_opportunities` held zero rows in production, so the
+//! `team_opportunities` held zero rows in production, so the
 //! `booking_opportunity` and `live_opportunity` autopilot contexts had never had
 //! a unit to act on — while the band's CRM held 797 festivals and competitions
 //! with fit scores, addresses and deadlines.
@@ -77,12 +77,12 @@ PL,Lodz,7000,4000,,false,5,Brak,B,,,,,false"
 }
 
 async fn count(pool: &PgPool, ws: WorkspaceId) -> Result<i64> {
-    Ok(sqlx::query_scalar(
-        "SELECT count(*) FROM viryaos_team_opportunities WHERE workspace_id = $1",
+    Ok(
+        sqlx::query_scalar("SELECT count(*) FROM team_opportunities WHERE workspace_id = $1")
+            .bind(ws.into_uuid())
+            .fetch_one(pool)
+            .await?,
     )
-    .bind(ws.into_uuid())
-    .fetch_one(pool)
-    .await?)
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -112,7 +112,7 @@ async fn import_inner(pool: &PgPool) -> Result<()> {
     // property that separates this import from the press-pitch path, where a
     // drafted action had no destination at all.
     let routeless: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM viryaos_team_opportunities \
+        "SELECT count(*) FROM team_opportunities \
          WHERE workspace_id = $1 AND contact_email IS NULL AND destination_url IS NULL",
     )
     .bind(ws.into_uuid())
@@ -127,7 +127,7 @@ async fn import_inner(pool: &PgPool) -> Result<()> {
     // checked. Automated discovery sets it false on purpose; this carries only the
     // assertion the band already recorded.
     let verified: Vec<(String, bool)> = sqlx::query_as(
-        "SELECT external_key, verified_destination FROM viryaos_team_opportunities \
+        "SELECT external_key, verified_destination FROM team_opportunities \
          WHERE workspace_id = $1 ORDER BY external_key",
     )
     .bind(ws.into_uuid())
@@ -146,7 +146,7 @@ async fn import_inner(pool: &PgPool) -> Result<()> {
     // Arrives as `new`, the status the booking autopilot picks up. A
     // hand-curated list is still a list the loop should screen.
     let fresh: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM viryaos_team_opportunities \
+        "SELECT count(*) FROM team_opportunities \
          WHERE workspace_id = $1 AND status = 'new'",
     )
     .bind(ws.into_uuid())
@@ -159,7 +159,7 @@ async fn import_inner(pool: &PgPool) -> Result<()> {
     // reach the live-opportunity score bar. A maps above the policy's 8_500
     // Landmark floor, B above the 6_000 Notable floor.
     let strategic: Vec<(String, i32)> = sqlx::query_as(
-        "SELECT external_key, strategic_value_basis_points FROM viryaos_team_opportunities \
+        "SELECT external_key, strategic_value_basis_points FROM team_opportunities \
          WHERE workspace_id = $1 ORDER BY external_key",
     )
     .bind(ws.into_uuid())
@@ -177,7 +177,7 @@ async fn import_inner(pool: &PgPool) -> Result<()> {
 
     // A closed edition lands ineligible, so the live-calendar index skips it.
     let eligible: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM viryaos_team_opportunities \
+        "SELECT count(*) FROM team_opportunities \
          WHERE workspace_id = $1 AND eligible",
     )
     .bind(ws.into_uuid())
@@ -189,7 +189,7 @@ async fn import_inner(pool: &PgPool) -> Result<()> {
     // date themselves by the month the event happens in, at low certainty, and
     // the brain cannot tell an estimate from a fact once it is a timestamp.
     let estimated: Option<String> = sqlx::query_scalar(
-        "SELECT metadata->>'typical_deadline_month' FROM viryaos_team_opportunities \
+        "SELECT metadata->>'typical_deadline_month' FROM team_opportunities \
          WHERE workspace_id = $1 AND external_key = 'ZG-002'",
     )
     .bind(ws.into_uuid())
@@ -200,7 +200,7 @@ async fn import_inner(pool: &PgPool) -> Result<()> {
         "the month estimate belongs in metadata, got {estimated:?}"
     );
     let no_deadline: Option<time::OffsetDateTime> = sqlx::query_scalar(
-        "SELECT deadline FROM viryaos_team_opportunities \
+        "SELECT deadline FROM team_opportunities \
          WHERE workspace_id = $1 AND external_key = 'ZG-002'",
     )
     .bind(ws.into_uuid())
@@ -231,14 +231,14 @@ async fn reimport_inner(pool: &PgPool) -> Result<()> {
 
     // The loop applies to the festival and an operator dismisses the showcase.
     sqlx::query(
-        "UPDATE viryaos_team_opportunities SET status = 'submitted' \
+        "UPDATE team_opportunities SET status = 'submitted' \
          WHERE workspace_id = $1 AND external_key = 'ZG-001'",
     )
     .bind(ws.into_uuid())
     .execute(pool)
     .await?;
     sqlx::query(
-        "UPDATE viryaos_team_opportunities SET status = 'dismissed', eligible = false \
+        "UPDATE team_opportunities SET status = 'dismissed', eligible = false \
          WHERE workspace_id = $1 AND external_key = 'ZG-003'",
     )
     .bind(ws.into_uuid())
@@ -268,7 +268,7 @@ PL,Lodz,7000,4000,,true,5,Brak,B,,,,,false"
 
     // Contact details and the deadline refresh: that is what a re-import is for.
     let (email, fit): (Option<String>, i32) = sqlx::query_as(
-        "SELECT contact_email, fit_basis_points FROM viryaos_team_opportunities \
+        "SELECT contact_email, fit_basis_points FROM team_opportunities \
          WHERE workspace_id = $1 AND external_key = 'ZG-001'",
     )
     .bind(ws.into_uuid())
@@ -283,7 +283,7 @@ PL,Lodz,7000,4000,,true,5,Brak,B,,,,,false"
     // Strategic value fills a blank but never overwrites: a nonzero value may
     // be operator judgement or loop learning the sheet does not know about.
     sqlx::query(
-        "UPDATE viryaos_team_opportunities SET strategic_value_basis_points = 8_800 \
+        "UPDATE team_opportunities SET strategic_value_basis_points = 8_800 \
          WHERE workspace_id = $1 AND external_key = 'ZG-001'",
     )
     .bind(ws.into_uuid())
@@ -291,7 +291,7 @@ PL,Lodz,7000,4000,,true,5,Brak,B,,,,,false"
     .await?;
     import_opportunities(pool, ws, csv.path()).await?;
     let kept: i32 = sqlx::query_scalar(
-        "SELECT strategic_value_basis_points FROM viryaos_team_opportunities \
+        "SELECT strategic_value_basis_points FROM team_opportunities \
          WHERE workspace_id = $1 AND external_key = 'ZG-001'",
     )
     .bind(ws.into_uuid())
@@ -305,7 +305,7 @@ PL,Lodz,7000,4000,,true,5,Brak,B,,,,,false"
     // Status does not move. Walking `submitted` back to `new` would put the band
     // in front of the same festival twice under its own name.
     let status: String = sqlx::query_scalar(
-        "SELECT status FROM viryaos_team_opportunities \
+        "SELECT status FROM team_opportunities \
          WHERE workspace_id = $1 AND external_key = 'ZG-001'",
     )
     .bind(ws.into_uuid())
@@ -321,7 +321,7 @@ PL,Lodz,7000,4000,,true,5,Brak,B,,,,,false"
     // an operator who verified a destination inside CrowdRelay must not lose it to
     // a re-export that happens not to carry the note.
     let still_verified: bool = sqlx::query_scalar(
-        "SELECT verified_destination FROM viryaos_team_opportunities \
+        "SELECT verified_destination FROM team_opportunities \
          WHERE workspace_id = $1 AND external_key = 'ZG-001'",
     )
     .bind(ws.into_uuid())
@@ -334,7 +334,7 @@ PL,Lodz,7000,4000,,true,5,Brak,B,,,,,false"
 
     // And a dismissal survives, even though the sheet now says eligible.
     let (status, eligible): (String, bool) = sqlx::query_as(
-        "SELECT status, eligible FROM viryaos_team_opportunities \
+        "SELECT status, eligible FROM team_opportunities \
          WHERE workspace_id = $1 AND external_key = 'ZG-003'",
     )
     .bind(ws.into_uuid())

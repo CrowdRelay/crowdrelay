@@ -264,7 +264,7 @@ async fn best_venue(
                                       lower(btrim(their_genre.genre))) AS genre
                       FROM (
                           SELECT unnest(listing.genre_tags) AS genre
-                          FROM viryaos_band_listings AS listing
+                          FROM band_listings AS listing
                           WHERE listing.workspace_id = act.act_workspace_id
                           UNION ALL
                           SELECT peer_genre.genre_tag
@@ -282,13 +282,13 @@ async fn best_venue(
         -- link names another room (§12-5 entity 6).
         -- Scoped to the workspace: capacity is shared knowledge, but whether
         -- *we* can write to the room is ours.
-        LEFT JOIN viryaos_booking_targets AS target
+        LEFT JOIN booking_targets AS target
           ON target.workspace_id = $1
          AND (
              target.venue_id = venue.id
              OR EXISTS (
                  SELECT 1
-                 FROM viryaos_booking_target_venues AS edge
+                 FROM booking_target_venues AS edge
                  WHERE edge.workspace_id = target.workspace_id
                    AND edge.target_id = target.id
                    AND edge.venue_id = venue.id
@@ -388,12 +388,12 @@ pub async fn promoter_targets_in_city(
                target.display_name,
                target.relationship_score,
                EXISTS (
-                   SELECT 1 FROM viryaos_booking_interactions AS interaction
+                   SELECT 1 FROM booking_interactions AS interaction
                    WHERE interaction.workspace_id = target.workspace_id
                      AND interaction.target_id = target.id
                      AND interaction.direction = 'inbound'
                ) AS answered_last_time
-        FROM viryaos_booking_targets AS target
+        FROM booking_targets AS target
         WHERE target.workspace_id = $1
           AND target.city_id = $2
           AND target.target_kind IN ('promoter', 'venue')
@@ -487,7 +487,7 @@ async fn city_opportunities_inner(
     let my_genres = sqlx::query_scalar::<_, Vec<String>>(
         r#"
         SELECT COALESCE(array_agg(DISTINCT lower(btrim(tag))), '{}')
-        FROM viryaos_band_listings AS listing, unnest(listing.genre_tags) AS tag
+        FROM band_listings AS listing, unnest(listing.genre_tags) AS tag
         WHERE listing.workspace_id = $1
         "#,
     )
@@ -1003,8 +1003,8 @@ pub async fn proposal_track_record(
                    action.id AS action_id,
                    action.status AS action_status,
                    action.payload AS action_payload
-            FROM viryaos_autopilot_decisions AS decision
-            JOIN viryaos_autopilot_actions AS action
+            FROM autopilot_decisions AS decision
+            JOIN autopilot_actions AS action
               ON action.workspace_id = decision.workspace_id
              AND action.decision_id = decision.id
             WHERE decision.workspace_id = $1
@@ -1012,14 +1012,14 @@ pub async fn proposal_track_record(
         ), reply_counts AS (
             SELECT outcome.action_id,
                    count(*) FILTER (WHERE outcome.observed_value > 0)::bigint AS replies
-            FROM viryaos_autopilot_outcomes AS outcome
+            FROM autopilot_outcomes AS outcome
             JOIN proposals ON proposals.action_id = outcome.action_id
             WHERE outcome.workspace_id = $1
               AND outcome.metric_key = 'effect.booking_reply_7d'
             GROUP BY outcome.action_id
         ), unfinished AS (
             SELECT measurement.action_id, count(*)::bigint AS n
-            FROM viryaos_autopilot_measurements AS measurement
+            FROM autopilot_measurements AS measurement
             JOIN proposals ON proposals.action_id = measurement.action_id
             WHERE measurement.workspace_id = $1
               AND measurement.status IN ('pending', 'processing')

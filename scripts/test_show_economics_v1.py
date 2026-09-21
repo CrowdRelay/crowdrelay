@@ -71,7 +71,7 @@ class ShowEconomicsContract(unittest.TestCase):
     def test_a_settlement_without_a_prediction_is_refused(self) -> None:
         settle = self.infra.split("fn settle_show_cost", 1)[1]
         refusal = settle.index("RepositoryError::NotFound")
-        update = settle.index("UPDATE viryaos_show_cost_ledger")
+        update = settle.index("UPDATE show_cost_ledger")
         self.assertLess(
             refusal,
             update,
@@ -121,7 +121,7 @@ class ShowEconomicsContract(unittest.TestCase):
         # still only a prediction, a plain `=` would wave through a verdict with
         # nothing behind it.
         for constraint in ("reason_matches_accuracy", "worst_line_requires_drift"):
-            clause = self.sql.split(f"viryaos_show_cost_ledger_{constraint}", 1)[1].split(
+            clause = self.sql.split(f"show_cost_ledger_{constraint}", 1)[1].split(
                 "\n", 2
             )[1]
             self.assertIn("IS NOT DISTINCT FROM", clause)
@@ -155,7 +155,7 @@ class ShowEconomicsContract(unittest.TestCase):
     def test_the_implied_road_rate_is_evidence_and_never_applied(self) -> None:
         self.assertIn("pub fn implied_transport_rate_minor_per_100km", self.domain)
         # Nothing writes the tour economics rates from a settlement.
-        self.assertNotIn("UPDATE viryaos_tour_economics", self.infra)
+        self.assertNotIn("UPDATE tour_economics", self.infra)
 
     def test_the_remedy_travels_with_the_finding(self) -> None:
         self.assertIn("pub const fn remedy(self)", self.domain)

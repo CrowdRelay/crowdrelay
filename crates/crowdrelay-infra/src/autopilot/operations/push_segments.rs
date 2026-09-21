@@ -345,7 +345,7 @@ pub(in crate::autopilot) async fn execute_signal_push(
     // fans (recipients), not deliveries: a fan with three endpoints is still
     // one person reached.
     let recipient_bound = sqlx::query_scalar::<_, i32>(
-        "SELECT max_recipients_per_step FROM viryaos_growth_envelope WHERE workspace_id = $1",
+        "SELECT max_recipients_per_step FROM growth_envelope WHERE workspace_id = $1",
     )
     .bind(workspace_id.into_uuid())
     .fetch_optional(&mut **tx)
@@ -432,7 +432,7 @@ pub(in crate::autopilot) async fn execute_signal_push(
     } else {
         0
     };
-    sqlx::query(r#"INSERT INTO viryaos_reach_events (workspace_id, action_id, recipient_kind, recipient_id, channel, template_id, estimated_reach, status, metadata) VALUES ($1, $2, 'platform_audience', 'signal_fans', 'signal_push', 'signal-inviter', $4, 'sent', jsonb_build_object('title', $3)) ON CONFLICT (action_id, recipient_id, channel) WHERE action_id IS NOT NULL DO NOTHING"#)
+    sqlx::query(r#"INSERT INTO reach_events (workspace_id, action_id, recipient_kind, recipient_id, channel, template_id, estimated_reach, status, metadata) VALUES ($1, $2, 'platform_audience', 'signal_fans', 'signal_push', 'signal-inviter', $4, 'sent', jsonb_build_object('title', $3)) ON CONFLICT (action_id, recipient_id, channel) WHERE action_id IS NOT NULL DO NOTHING"#)
         .bind(workspace_id.into_uuid())
         .bind(action_uuid)
         .bind(title)
@@ -537,7 +537,7 @@ pub async fn signal_push_audience(
     // an eligible audience of five thousand with a bound of fifty is a push
     // to fifty people, and the approval must say fifty.
     let send_cap = sqlx::query_scalar::<_, i32>(
-        "SELECT max_recipients_per_step FROM viryaos_growth_envelope WHERE workspace_id = $1",
+        "SELECT max_recipients_per_step FROM growth_envelope WHERE workspace_id = $1",
     )
     .bind(workspace_id.into_uuid())
     .fetch_optional(pool)

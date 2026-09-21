@@ -66,13 +66,13 @@ const AUDIENCE_WINDOW_CTE: &str = r#"
         ),
         target_series AS (
             SELECT s.id, s.platform
-            FROM viryaos_growth_metric_series s
+            FROM growth_metric_series s
             JOIN wanted w ON w.platform = s.platform AND w.metric_key = s.metric_key
             WHERE s.workspace_id = $1 AND s.active
         ),
         points AS (
             SELECT p.series_id, s.platform, p.captured_at, p.value
-            FROM viryaos_growth_metric_points p
+            FROM growth_metric_points p
             JOIN target_series s ON s.id = p.series_id
             WHERE p.workspace_id = $1
         ),
@@ -664,7 +664,7 @@ pub(in crate::autopilot) async fn load_growth_intelligence_snapshots(
             let activated: i64 = sqlx::query_scalar(
                 r#"
             SELECT COALESCE(activated_30d, 0)::bigint
-            FROM viryaos_fan_activation_kpi
+            FROM fan_activation_kpi
             WHERE workspace_id = $1
             "#,
             )
@@ -681,7 +681,7 @@ pub(in crate::autopilot) async fn load_growth_intelligence_snapshots(
                     let metric_counts: (i64, i64) = sqlx::query_as(
                         r#"
                 WITH target_series AS (
-                    SELECT id FROM viryaos_growth_metric_series
+                    SELECT id FROM growth_metric_series
                     WHERE workspace_id = $1
                       AND platform = $2
                       AND metric_key = $3
@@ -689,7 +689,7 @@ pub(in crate::autopilot) async fn load_growth_intelligence_snapshots(
                 ),
                 points AS (
                     SELECT p.series_id, p.captured_at, p.value
-                    FROM viryaos_growth_metric_points p
+                    FROM growth_metric_points p
                     JOIN target_series s ON s.id = p.series_id
                     WHERE p.workspace_id = $1
                 ),
@@ -1077,7 +1077,7 @@ pub(in crate::autopilot) async fn load_growth_intelligence_snapshots(
                 .unwrap_or(Standing::Untested { measured: 0 }),
             world_model: world_model.clone(),
             tenant_preference: tenant_preference.clone(),
-            // Hypothesis lifecycle: loaded from viryaos_growth_hypotheses.
+            // Hypothesis lifecycle: loaded from growth_hypotheses.
             // Templates without a persisted state default to Active,
             // preserving current behavior. The evaluator uses may_act()
             // to gate dispatch and sizing_multiplier() to scale budget.
@@ -1152,13 +1152,13 @@ pub(in crate::autopilot) async fn mark_insights_consumed(
 ///
 /// # Checkpoint + Delta Replay
 ///
-/// The brain loads a serialized checkpoint from `viryaos_brain_state` on
+/// The brain loads a serialized checkpoint from `brain_state` on
 /// startup, then applies only delta evidence (evidence with timestamp >
-/// checkpoint timestamp) from `viryaos_growth_evidence`. This is O(delta)
+/// checkpoint timestamp) from `growth_evidence`. This is O(delta)
 /// instead of O(full history) every cycle.
 ///
 /// If no checkpoint exists, the brain falls back to full replay from the
-/// evidence table (or the legacy `viryaos_brain_evidence` view for
+/// evidence table (or the legacy `brain_evidence` view for
 /// backward compatibility).
 ///
 /// In addition to the outcome model P(Y|action,context), this function also
@@ -1175,7 +1175,7 @@ pub(in crate::autopilot) async fn load_causal_model(
     let checkpoint = super::evidence::load_brain_state(repo, workspace_id, "causal_model").await?;
     let (mut model, belief) = if let Some((state_json, checkpoint_time)) = checkpoint {
         // Hashed before deserialization, from the bytes the row actually held.
-        // `viryaos_brain_state` keeps one row per module and updates it in
+        // `brain_state` keeps one row per module and updates it in
         // place, so `checkpoint_time` says when and cannot say which — the
         // state it labelled is gone by the next cycle. The content hash stays
         // true after the row moves on.
@@ -1396,7 +1396,7 @@ async fn full_replay(
                observed_incremental_fans,
                observed_signal_installs,
                context
-        FROM viryaos_brain_evidence
+        FROM brain_evidence
         WHERE workspace_id = $1
           AND resolved_at IS NOT NULL
           AND (observed_new_fans IS NOT NULL
@@ -1430,7 +1430,7 @@ async fn full_replay(
             expected_new_fans: expected_fans,
             expected_signal_installs: expected_signal,
             context,
-            // The legacy `viryaos_brain_evidence` view has no target
+            // The legacy `brain_evidence` view has no target
             // column. This path is the pre-evidence-table fallback, so it
             // teaches the template and audience type only.
             target_key: None,
@@ -1480,7 +1480,7 @@ pub(in crate::autopilot) async fn load_exploration_memory(
             SELECT template_id,
                    context,
                    predicted_at
-            FROM viryaos_dispatch_predictions
+            FROM dispatch_predictions
             WHERE workspace_id = $1
               AND predicted_at >= now() - INTERVAL '12 hours'
             ORDER BY predicted_at DESC
@@ -1525,7 +1525,7 @@ pub(in crate::autopilot) async fn load_last_dispatched_template(
     let template: Option<String> = sqlx::query_scalar(
         r#"
         SELECT template_id
-        FROM viryaos_dispatch_predictions
+        FROM dispatch_predictions
         WHERE workspace_id = $1
         ORDER BY predicted_at DESC
         LIMIT 1
@@ -1554,7 +1554,7 @@ pub(in crate::autopilot) async fn load_hypothesis_states(
     let rows: Vec<(String, String)> = sqlx::query_as(
         r#"
         SELECT template_id, state
-        FROM viryaos_growth_hypotheses
+        FROM growth_hypotheses
         WHERE workspace_id = $1
         "#,
     )
@@ -1581,15 +1581,15 @@ pub(in crate::autopilot) async fn save_hypothesis_state(
     let pool = &repo.pool;
     sqlx::query(
         r#"
-        INSERT INTO viryaos_growth_hypotheses (
+        INSERT INTO growth_hypotheses (
             workspace_id, template_id, state, last_transition_at, updated_at
         ) VALUES ($1, $2, $3, now(), now())
         ON CONFLICT (workspace_id, template_id)
             DO UPDATE SET state = $3,
                           last_transition_at = CASE
-                              WHEN viryaos_growth_hypotheses.state != $3
+                              WHEN growth_hypotheses.state != $3
                               THEN now()
-                              ELSE viryaos_growth_hypotheses.last_transition_at
+                              ELSE growth_hypotheses.last_transition_at
                           END,
                           updated_at = now()
         "#,

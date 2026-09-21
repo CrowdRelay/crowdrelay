@@ -34,13 +34,13 @@ pub(super) async fn record_failure(
     // to store, to decide the guard, and to decide the reason — and writing it
     // out three times is how the three drift apart.
     let consecutive = format!(
-        "(CASE WHEN viryaos_executor_circuit_breakers.last_failure_at \
+        "(CASE WHEN executor_circuit_breakers.last_failure_at \
            >= EXCLUDED.last_failure_at - INTERVAL '{WINDOW}' \
-         THEN viryaos_executor_circuit_breakers.failure_count + 1 ELSE 1 END)"
+         THEN executor_circuit_breakers.failure_count + 1 ELSE 1 END)"
     );
     let statement = format!(
         r#"
-        INSERT INTO viryaos_executor_circuit_breakers (
+        INSERT INTO executor_circuit_breakers (
             workspace_id, executor_id, failure_count, last_failure_at, reason
         ) VALUES ($1,$2,1,$3,$4)
         ON CONFLICT (workspace_id, executor_id) DO UPDATE
@@ -49,18 +49,18 @@ pub(super) async fn record_failure(
             guarded_until = CASE
                 WHEN {consecutive} >= {TRIP_THRESHOLD}
                 THEN GREATEST(
-                    COALESCE(viryaos_executor_circuit_breakers.guarded_until, EXCLUDED.last_failure_at),
+                    COALESCE(executor_circuit_breakers.guarded_until, EXCLUDED.last_failure_at),
                     EXCLUDED.last_failure_at + INTERVAL '{WINDOW}'
                 )
-                WHEN viryaos_executor_circuit_breakers.guarded_until > EXCLUDED.last_failure_at
-                THEN viryaos_executor_circuit_breakers.guarded_until
+                WHEN executor_circuit_breakers.guarded_until > EXCLUDED.last_failure_at
+                THEN executor_circuit_breakers.guarded_until
                 ELSE NULL END,
             reason = CASE
                 WHEN {consecutive} >= {TRIP_THRESHOLD}
                 THEN EXCLUDED.reason
-                ELSE viryaos_executor_circuit_breakers.reason END
-        WHERE viryaos_executor_circuit_breakers.last_failure_at IS NULL
-           OR viryaos_executor_circuit_breakers.last_failure_at <= EXCLUDED.last_failure_at
+                ELSE executor_circuit_breakers.reason END
+        WHERE executor_circuit_breakers.last_failure_at IS NULL
+           OR executor_circuit_breakers.last_failure_at <= EXCLUDED.last_failure_at
         "#
     );
     sqlx::query(&statement)
@@ -85,7 +85,7 @@ pub(super) async fn record_success(
 ) -> Result<(), RepositoryError> {
     sqlx::query(
         r#"
-        UPDATE viryaos_executor_circuit_breakers
+        UPDATE executor_circuit_breakers
         SET failure_count=0, last_failure_at=NULL, guarded_until=NULL, reason=NULL
         WHERE workspace_id=$1 AND executor_id=$2
           AND (last_failure_at IS NULL OR last_failure_at <= $3)

@@ -26,7 +26,7 @@ pub enum OutcomeKind {
     CampaignInsight,
     ReleasePlanNote,
     GenericInsight,
-    /// Scout discoveries: each item lands as a `viryaos_team_opportunities`
+    /// Scout discoveries: each item lands as a `team_opportunities`
     /// row and a review decision, never as an application.
     OpportunityFindings,
 }
@@ -77,7 +77,7 @@ impl OutcomeKind {
         }
     }
 
-    /// Decision kind written to `viryaos_autopilot_decisions.decision_kind`.
+    /// Decision kind written to `autopilot_decisions.decision_kind`.
     #[must_use]
     pub const fn decision_kind(self) -> &'static str {
         match self {
@@ -232,7 +232,7 @@ pub struct OutcomePayload {
 /// model reading perfect data emits 3000.
 ///
 /// This type exists because the value used to travel as a bare `i32` into
-/// `viryaos_autopilot_decisions.confidence_basis_points`, the column the
+/// `autopilot_decisions.confidence_basis_points`, the column the
 /// deterministic paths fill from `evidence_confidence` and that
 /// `next_best_action` parses into [`crowdrelay_domain::Confidence`]. Same
 /// column, same range, same parser — so a self-report ranked beside a

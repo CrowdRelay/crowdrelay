@@ -387,7 +387,7 @@ async fn run(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
         .enumerate()
     {
         sqlx::query(
-            "INSERT INTO viryaos_content_suggestions (id, workspace_id, concept, status) \
+            "INSERT INTO content_suggestions (id, workspace_id, concept, status) \
              VALUES ($1, $2, $3, $4)",
         )
         .bind(Uuid::now_v7())
@@ -426,7 +426,7 @@ async fn run(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
     for (days_overdue, told_after_days) in [(10_i64, Some(2_i64)), (6, Some(4)), (3, None)] {
         let due = OffsetDateTime::now_utc() - time::Duration::days(days_overdue);
         sqlx::query(
-            "INSERT INTO viryaos_team_assignments
+            "INSERT INTO team_assignments
                  (id, workspace_id, source_kind, source_id, assignee_member_id,
                   required_skill, status, due_at, first_overdue_reminder_at)
              VALUES ($1, $2, 'show_task', $3, $4, 'video', 'open', $5, $6)",
@@ -483,7 +483,7 @@ async fn run(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
     ] {
         let id = Uuid::now_v7();
         sqlx::query(
-            "INSERT INTO viryaos_team_assignments
+            "INSERT INTO team_assignments
                  (id, workspace_id, source_kind, source_id, assignee_member_id,
                   required_skill, status, due_at, first_overdue_reminder_at)
              VALUES ($1, $2, 'show_task', $3, $4, 'video', 'open', $5, $6)",
@@ -498,7 +498,7 @@ async fn run(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
         .await?;
         ids.push(id);
     }
-    let sweep_update = r#"UPDATE viryaos_team_assignments
+    let sweep_update = r#"UPDATE team_assignments
        SET last_reminded_at=$3, next_reminder_at=$4,
            reminder_count=reminder_count+1,
            first_overdue_reminder_at = COALESCE(first_overdue_reminder_at, CASE WHEN due_at IS NOT NULL AND $3 > due_at THEN $3 END)
@@ -515,7 +515,7 @@ async fn run(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
     }
     let read_stamp = |id: Uuid| async move {
         sqlx::query_scalar::<_, Option<OffsetDateTime>>(
-            "SELECT first_overdue_reminder_at FROM viryaos_team_assignments \
+            "SELECT first_overdue_reminder_at FROM team_assignments \
              WHERE workspace_id = $1 AND id = $2",
         )
         .bind(sweep_ws)
@@ -566,7 +566,7 @@ async fn run(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
         ),
     ] {
         sqlx::query(
-            "INSERT INTO viryaos_drive_contacts
+            "INSERT INTO drive_contacts
                  (workspace_id, normalized_email, source_file_id, source_file_name, last_inbound_at)
              VALUES ($1, $2, 'msg-1', 'gmail sync', $3)",
         )
@@ -603,7 +603,7 @@ async fn run(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
     repo.record_inbound_sighting(pull_ws, "a@x.pl", earlier)
         .await?;
     let stored: OffsetDateTime = sqlx::query_scalar(
-        "SELECT last_inbound_at FROM viryaos_drive_contacts \
+        "SELECT last_inbound_at FROM drive_contacts \
          WHERE workspace_id = $1 AND normalized_email = 'a@x.pl'",
     )
     .bind(pull_ws)

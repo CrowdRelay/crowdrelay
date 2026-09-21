@@ -141,7 +141,7 @@ pub async fn open_cycle_run(
     let id = uuid::Uuid::now_v7();
     let written = sqlx::query(
         r#"
-        INSERT INTO viryaos_autopilot_cycle_runs (id, workspace_id, trigger, started_at)
+        INSERT INTO autopilot_cycle_runs (id, workspace_id, trigger, started_at)
         VALUES ($1, $2, $3, $4)
         "#,
     )
@@ -187,7 +187,7 @@ pub async fn close_cycle_run(
 ) {
     let closed = sqlx::query(
         r#"
-        UPDATE viryaos_autopilot_cycle_runs AS run
+        UPDATE autopilot_cycle_runs AS run
         SET finished_at = $3,
             duration_ms = GREATEST(0, (EXTRACT(EPOCH FROM ($3 - run.started_at)) * 1000)::integer),
             outcome = CASE WHEN cardinality($4::text[]) > 0 THEN 'degraded' ELSE 'succeeded' END,
@@ -197,14 +197,14 @@ pub async fn close_cycle_run(
             degraded_phases = $4::text[],
             decisions_recorded = (
                 SELECT count(*)
-                FROM viryaos_autopilot_decisions AS decision
+                FROM autopilot_decisions AS decision
                 WHERE decision.workspace_id = run.workspace_id
                   AND decision.evaluated_at >= run.started_at
                   AND decision.evaluated_at <= $3
             ),
             actions_created = (
                 SELECT count(*)
-                FROM viryaos_autopilot_actions AS action
+                FROM autopilot_actions AS action
                 WHERE action.workspace_id = run.workspace_id
                   AND action.created_at >= run.started_at
                   AND action.created_at <= $3
@@ -222,7 +222,7 @@ pub async fn close_cycle_run(
             wait_reason = CASE
                 WHEN (
                     SELECT count(*)
-                    FROM viryaos_autopilot_actions AS action
+                    FROM autopilot_actions AS action
                     WHERE action.workspace_id = run.workspace_id
                       AND action.created_at >= run.started_at
                       AND action.created_at <= $3
@@ -279,7 +279,7 @@ pub async fn daily_north_star(
         SELECT DISTINCT ON (started_at::date)
                started_at::date AS day,
                north_star_value
-        FROM viryaos_autopilot_cycle_runs
+        FROM autopilot_cycle_runs
         WHERE workspace_id = $1
           AND north_star_value IS NOT NULL
           AND started_at >= now() - ($2::int * interval '1 day')

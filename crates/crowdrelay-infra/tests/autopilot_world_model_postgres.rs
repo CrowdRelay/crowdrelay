@@ -1,7 +1,7 @@
 //! The path from connected fanbases to the brain's belief about the world.
 //!
 //! This is the loop the whole product rests on — platforms are synced into
-//! `viryaos_growth_metric_series`, and the brain reads that to decide what to
+//! `growth_metric_series`, and the brain reads that to decide what to
 //! do — and until now nothing exercised it end to end. Both the growth metric
 //! sync worker and the snapshot loader had zero integration coverage, which is
 //! how a query naming three nonexistent tables reached the working tree and
@@ -37,7 +37,7 @@ async fn seed_series(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let series_id = Uuid::now_v7();
     sqlx::query(
-        "INSERT INTO viryaos_growth_metric_series
+        "INSERT INTO growth_metric_series
            (id, workspace_id, platform, metric_key, display_name)
          VALUES ($1, $2, $3, $4, $5)",
     )
@@ -50,7 +50,7 @@ async fn seed_series(
     .await?;
     for (captured_at, value) in points {
         sqlx::query(
-            "INSERT INTO viryaos_growth_metric_points
+            "INSERT INTO growth_metric_points
                (workspace_id, series_id, captured_at, value, source)
              VALUES ($1, $2, $3, $4, 'test')",
         )
@@ -213,7 +213,7 @@ async fn connected_platforms_reach_the_brain_as_audience_and_north_star()
 
 /// The default north star is real fans, not a platform counter.
 ///
-/// `activated_fans_30d` reads `viryaos_fan_activation_kpi.activated_30d`:
+/// `activated_fans_30d` reads `fan_activation_kpi.activated_30d`:
 /// signed up within 30 days, marketing consent granted, and a meaningful
 /// action inside 30 days of signing up. A fan who never consented, or who
 /// signed up before the window, must not inflate the reading — the brain
@@ -575,7 +575,7 @@ async fn pipeline_counts_count_places_not_posts() -> Result<(), Box<dyn std::err
     let decision_id = Uuid::now_v7();
     let subject_id = Uuid::now_v7();
     sqlx::query(
-        "INSERT INTO viryaos_autopilot_decisions
+        "INSERT INTO autopilot_decisions
            (id, workspace_id, decision_key, context, subject_kind, subject_id,
             decision_kind, confidence_basis_points, disposition, reason,
             input_snapshot, policy_snapshot, recommendation, trace_id)
@@ -598,7 +598,7 @@ async fn pipeline_counts_count_places_not_posts() -> Result<(), Box<dyn std::err
         // subject, so each post targets its own.
         let action_id = Uuid::now_v7();
         sqlx::query(
-            "INSERT INTO viryaos_autopilot_actions
+            "INSERT INTO autopilot_actions
                (id, workspace_id, decision_id, context, action_kind,
                 subject_kind, subject_id, idempotency_key, payload, status)
              VALUES ($1, $2, $3, 'outreach', 'community.post',
@@ -656,7 +656,7 @@ async fn pipeline_counts_count_places_not_posts() -> Result<(), Box<dyn std::err
         "two targets are proposed; posts against one must not multiply it"
     );
 
-    // No teardown. A trigger mirrors every action into `viryaos_action_ledger`,
+    // No teardown. A trigger mirrors every action into `action_ledger`,
     // which is append-only (DELETE raises) and holds an ON DELETE RESTRICT key
     // back to the workspace — so once a workspace has recorded an action, it
     // cannot be deleted. That is the audit guarantee working as intended; the

@@ -57,7 +57,7 @@ pub async fn sweep_lapsed_approval_asks(
         r#"
         WITH candidates AS (
             SELECT workspace_id, id
-            FROM viryaos_autopilot_actions
+            FROM autopilot_actions
             WHERE status = 'awaiting_approval'
               AND approval_expires_at IS NOT NULL
               AND approval_expires_at <= $2
@@ -66,7 +66,7 @@ pub async fn sweep_lapsed_approval_asks(
             FOR UPDATE SKIP LOCKED
             LIMIT $3
         )
-        UPDATE viryaos_autopilot_actions AS action
+        UPDATE autopilot_actions AS action
         SET status = 'cancelled',
             finished_at = $2,
             last_error_kind = 'approval_expired'
@@ -108,8 +108,8 @@ pub async fn sweep_lapsed_approval_asks(
         r#"
         WITH candidates AS (
             SELECT action.workspace_id, action.id
-            FROM viryaos_autopilot_actions AS action
-            JOIN viryaos_autopilot_decisions AS decision
+            FROM autopilot_actions AS action
+            JOIN autopilot_decisions AS decision
               ON decision.workspace_id = action.workspace_id
              AND decision.id = action.decision_id
             WHERE action.status = 'awaiting_approval'
@@ -119,7 +119,7 @@ pub async fn sweep_lapsed_approval_asks(
             FOR UPDATE OF action SKIP LOCKED
             LIMIT $3
         )
-        UPDATE viryaos_autopilot_actions AS action
+        UPDATE autopilot_actions AS action
         SET status = 'cancelled',
             finished_at = $2,
             last_error_kind = 'insufficient_evidence'
@@ -149,12 +149,12 @@ pub async fn sweep_lapsed_approval_asks(
     let suggestions_expired = sqlx::query(
         r#"
         WITH resolved AS (
-            UPDATE viryaos_content_suggestions AS suggestion
+            UPDATE content_suggestions AS suggestion
             SET status = 'expired', updated_at = $2
             WHERE suggestion.status = 'raised'
               AND ($1::uuid IS NULL OR suggestion.workspace_id = $1)
               AND EXISTS (
-                  SELECT 1 FROM viryaos_autopilot_actions AS action
+                  SELECT 1 FROM autopilot_actions AS action
                   WHERE action.workspace_id = suggestion.workspace_id
                     AND action.subject_kind = 'content_suggestion'
                     AND action.subject_id = suggestion.id
@@ -164,7 +164,7 @@ pub async fn sweep_lapsed_approval_asks(
               )
             RETURNING suggestion.id, suggestion.workspace_id
         )
-        INSERT INTO viryaos_suggestion_outcomes (
+        INSERT INTO suggestion_outcomes (
             workspace_id, suggestion_id, outcome, decided_by, reason
         )
         SELECT resolved.workspace_id, resolved.id, 'expired', 'system',
@@ -185,12 +185,12 @@ pub async fn sweep_lapsed_approval_asks(
     // suggestion cascade above.
     let arcs_retired = sqlx::query(
         r#"
-        UPDATE viryaos_arcs AS arc
+        UPDATE arcs AS arc
         SET status = 'retired', updated_at = $2
         WHERE arc.status = 'proposed'
           AND ($1::uuid IS NULL OR arc.workspace_id = $1)
           AND EXISTS (
-              SELECT 1 FROM viryaos_autopilot_actions AS action
+              SELECT 1 FROM autopilot_actions AS action
               WHERE action.workspace_id = arc.workspace_id
                 AND action.subject_kind = 'content_arc'
                 AND action.subject_id = arc.id

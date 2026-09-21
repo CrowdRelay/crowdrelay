@@ -33,7 +33,7 @@ pub(crate) async fn load_watchdog_summary(
             count(*) FILTER (WHERE active)::bigint AS active_alerts,
             count(*) FILTER (WHERE active AND severity = 'critical')::bigint AS critical_alerts,
             max(last_seen_at) AS last_observed_at
-        FROM viryaos_ops_alert_state
+        FROM ops_alert_state
         WHERE workspace_id = $1
         "#,
     )
@@ -108,7 +108,7 @@ pub(crate) async fn load_worker_summary(pool: &PgPool) -> Result<WorkerSummary, 
     // Last *finished* cycle — the honest signal that the worker gets through a
     // cycle, not just that it acquired a lease.
     //
-    // This used to read `MAX(evaluated_at)` from `viryaos_autopilot_decisions`,
+    // This used to read `MAX(evaluated_at)` from `autopilot_decisions`,
     // which is a proxy and not the thing: a cycle that runs correctly and finds
     // nothing worth deciding writes no decision row. Measured in production
     // 2026-09-13, that reported `crash_looping: true` against a worker with
@@ -116,7 +116,7 @@ pub(crate) async fn load_worker_summary(pool: &PgPool) -> Result<WorkerSummary, 
     // in 300-1700ms. Thirty minutes of healthy empty cycles was enough to raise
     // a crash-loop alarm in the operator's first view.
     //
-    // The proxy predates `viryaos_autopilot_cycle_runs` (migration 0233), which
+    // The proxy predates `autopilot_cycle_runs` (migration 0233), which
     // records cycle completion directly and whose own comment names the case
     // this signal wants: "NULL means the cycle never finished: the process died
     // mid-cycle, which is otherwise indistinguishable from a cycle that ran and
@@ -137,11 +137,11 @@ pub(crate) async fn load_worker_summary(pool: &PgPool) -> Result<WorkerSummary, 
         SELECT
             COALESCE((
                 SELECT EXTRACT(EPOCH FROM (now() - MAX(finished_at)))::bigint
-                FROM viryaos_autopilot_cycle_runs
+                FROM autopilot_cycle_runs
             ), 999999),
             COALESCE((
                 SELECT EXTRACT(EPOCH FROM (now() - MAX(evaluated_at)))::bigint
-                FROM viryaos_autopilot_decisions
+                FROM autopilot_decisions
             ), 999999)
         "#,
     )

@@ -5,7 +5,7 @@
 //! does not decide.
 //!
 //! The releases are the same rows each act's own release ladder reads —
-//! `viryaos_release_plans`, active and inside the lookahead. A release the
+//! `release_plans`, active and inside the lookahead. A release the
 //! act cancelled is absent from the calendar entirely, which is the honest
 //! answer to "what is coming" rather than a tombstone.
 //!
@@ -87,7 +87,7 @@ pub async fn roster_release_calendar(
     let rows = sqlx::query_as::<_, ReleaseRow>(
         r#"
         SELECT id, workspace_id, title, release_at, tier, assets_ready
-        FROM viryaos_release_plans
+        FROM release_plans
         WHERE workspace_id = ANY($1)
           AND active
           AND release_at >= $2

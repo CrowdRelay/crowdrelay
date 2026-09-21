@@ -48,7 +48,7 @@ EXECUTION = ROOT / "crates/crowdrelay-infra/src/autopilot/execution.rs"
 EXECUTION_CAPS = ROOT / "crates/crowdrelay-infra/src/autopilot/execution_capabilities.rs"
 ACTIONS = ROOT / "crates/crowdrelay-infra/src/autopilot/actions.rs"
 INFRA = ROOT / "crates/crowdrelay-infra/src/autopilot/plays.rs"
-CONTRACT = ROOT / "n8n/viryaos-executor-contract.md"
+CONTRACT = ROOT / "n8n/crowdrelay-executor-contract.md"
 OPENAPI = ROOT / "openapi/openapi.yaml"
 
 
@@ -99,11 +99,14 @@ class PlaysContract(unittest.TestCase):
         latest: str | None = None
         for path in sorted(MIGRATIONS.glob("*.sql")):
             text = read(path)
-            if "CREATE OR REPLACE FUNCTION viryaos_provision_autopilot_policies" in text:
+            if "CREATE OR REPLACE FUNCTION provision_autopilot_policies" in text:
                 latest = text.split(
-                    "CREATE OR REPLACE FUNCTION viryaos_provision_autopilot_policies", 1
+                    "CREATE OR REPLACE FUNCTION provision_autopilot_policies", 1
                 )[1]
         self.assertIsNotNone(latest, "no migration provisions autopilot policies")
+        # The rewritten body provisions several policy tables; only the rows
+        # bound for autopilot_policies are contexts.
+        latest = latest.split("INSERT INTO autopilot_policies", 1)[1].split(";", 1)[0]
         return set(re.findall(r"NEW\.id, '([a-z0-9_]+)'", latest))
 
     # --- the claim this file inherits -----------------------------------
@@ -218,12 +221,12 @@ class PlaysContract(unittest.TestCase):
         # still pending every cycle: the play makes no progress, and stalls
         # entirely the moment a step needs approval.
         audience = self.infra.split("const PLAY_AUDIENCE_SQL", 1)[1].split('"#;', 1)[0]
-        self.assertIn("viryaos_autopilot_actions", audience)
+        self.assertIn("autopilot_actions", audience)
         self.assertIn("'play.step.run'", audience)
         self.assertIn("status <> 'cancelled'", audience)
         steps = self.infra.split("load_play_snapshots_impl", 1)[1]
         self.assertIn("AS recipients_emitted", steps)
-        self.assertIn("viryaos_autopilot_actions", steps.split("AS recipients_emitted", 1)[0])
+        self.assertIn("autopilot_actions", steps.split("AS recipients_emitted", 1)[0])
 
     def test_only_the_announce_step_accepts_interest_instead_of_attendance(self) -> None:
         # Thanking somebody for coming who did not come is a worse message than
@@ -245,7 +248,8 @@ class PlaysContract(unittest.TestCase):
     def test_the_send_is_external_work_behind_a_named_capability(self) -> None:
         execution = read(EXECUTION) + "\n" + read(EXECUTION_CAPS)
         self.assertIn("AutopilotActionPayload::RunPlayStep { .. }", execution)
-        self.assertIn('AutopilotActionPayload::RunPlayStep { .. } => "play.step"', execution)
+        self.assertIn('AutopilotActionPayload::RunPlayStep { step_kind, .. }', execution)
+        self.assertIn('"play.step.third_party"', execution)
         self.assertIn('"crowdrelay.play.step_requested" => "play.step"', execution)
         requires = execution.split("fn payload_requires_executor", 1)[1].split("\n}", 1)[0]
         self.assertIn("RunPlayStep", requires)

@@ -163,7 +163,7 @@ impl PostgresAutopilotRepository {
                           AND opportunity.expires_at > now()
                           AND opportunity.template_key = $2
                     )::bigint
-                FROM viryaos_outreach_opportunities AS opportunity
+                FROM outreach_opportunities AS opportunity
                 WHERE opportunity.workspace_id = $1
                 "#,
             )
@@ -194,7 +194,7 @@ impl PostgresAutopilotRepository {
                           AND NOT target.do_not_contact
                     )::bigint,
                     count(*) FILTER (WHERE target.do_not_contact)::bigint
-                FROM viryaos_outreach_targets AS target
+                FROM outreach_targets AS target
                 WHERE target.workspace_id = $1
                 "#,
             )

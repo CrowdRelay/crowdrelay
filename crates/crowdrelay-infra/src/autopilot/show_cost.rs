@@ -79,7 +79,7 @@ impl PostgresAutopilotRepository {
         // The tolerance lives with the rest of the tour economics config, which
         // is where an operator already goes to argue with the cost model.
         let stored = sqlx::query_scalar::<_, Value>(
-            "SELECT settlement_policy FROM viryaos_tour_economics WHERE workspace_id = $1",
+            "SELECT settlement_policy FROM tour_economics WHERE workspace_id = $1",
         )
         .bind(workspace_id.into_uuid())
         .fetch_optional(&mut **transaction)
@@ -133,7 +133,7 @@ impl AutopilotShowCostRepository for PostgresAutopilotRepository {
 
             let inserted = sqlx::query_scalar::<_, Uuid>(
                 r#"
-                INSERT INTO viryaos_show_cost_ledger (
+                INSERT INTO show_cost_ledger (
                     workspace_id, event_id, predicted_at, tour_policy_snapshot,
                     distance_km, offered_fee_minor, application_fee_minor,
                     predicted_transport_minor, predicted_accommodation_minor,
@@ -192,7 +192,7 @@ impl AutopilotShowCostRepository for PostgresAutopilotRepository {
                     predicted_per_diem_minor, predicted_overhead_minor,
                     predicted_total_cost_minor, predicted_round_trip_km,
                     settled_at, accuracy, accuracy_reason
-                FROM viryaos_show_cost_ledger
+                FROM show_cost_ledger
                 WHERE workspace_id = $1 AND event_id = $2
                 FOR UPDATE
                 "#,
@@ -264,7 +264,7 @@ impl AutopilotShowCostRepository for PostgresAutopilotRepository {
 
             sqlx::query(
                 r#"
-                UPDATE viryaos_show_cost_ledger
+                UPDATE show_cost_ledger
                 SET settled_at = now(),
                     settled_by = $3,
                     settled_transport_minor = $4,
@@ -336,7 +336,7 @@ impl AutopilotShowCostRepository for PostgresAutopilotRepository {
                     ledger.total_variance_basis_points,
                     ledger.worst_line, ledger.worst_line_delta_minor,
                     ledger.implied_transport_rate_minor_per_100km
-                FROM viryaos_show_cost_ledger AS ledger
+                FROM show_cost_ledger AS ledger
                 JOIN events AS event
                   ON event.workspace_id = ledger.workspace_id
                  AND event.id = ledger.event_id

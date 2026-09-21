@@ -34,6 +34,7 @@ without their sibling checkout. `just test-postgres` and the deploy both have on
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 import sys
@@ -102,9 +103,10 @@ def baseline_minimum() -> int | None:
 
 
 def psql(sql: str, container: str) -> subprocess.CompletedProcess:
+    database = os.environ.get("SQL_GATE_DB", "crowdrelay")
     return subprocess.run(
         ["docker", "exec", "-i", container,
-         "psql", "-U", "crowdrelay", "-d", "crowdrelay", "-At", "-F", "|"],
+         "psql", "-U", "crowdrelay", "-d", database, "-At", "-F", "|"],
         input=sql, capture_output=True, text=True, timeout=300,
     )
 

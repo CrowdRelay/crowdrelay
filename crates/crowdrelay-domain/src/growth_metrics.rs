@@ -46,7 +46,7 @@ pub enum NorthStarMetric {
     /// "is the audience growing", which is the question the product is for.
     TotalAudience,
     /// Fans who signed up, consented, and did something meaningful within 30
-    /// days — `viryaos_fan_activation_kpi.activated_30d`, the acquisition
+    /// days — `fan_activation_kpi.activated_30d`, the acquisition
     /// KPI's definition verbatim.
     ///
     /// The default because it is the honest one: a Signal install can never
@@ -188,7 +188,7 @@ impl NorthStarMetric {
 ///
 /// This enum is the authority for the vocabulary:
 /// `scripts/test_platform_vocabulary_v1.py` fails when the
-/// `viryaos_growth_metric_series_platform_check` constraint and
+/// `growth_metric_series_platform_check` constraint and
 /// `MetricPlatform::ALL` disagree, so a migration cannot add or drop a value on
 /// its own. Adding one is a migration plus a match arm, never a new subsystem.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]

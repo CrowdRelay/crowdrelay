@@ -72,7 +72,7 @@ async fn run(pool: &PgPool, url: &str) -> Result<(), Box<dyn std::error::Error>>
     assert_eq!(queued, 2, "one email each for two people, not five");
 
     let emails = sqlx::query_as::<_, (String, serde_json::Value)>(
-        "SELECT action_kind, payload FROM viryaos_autopilot_actions
+        "SELECT action_kind, payload FROM autopilot_actions
          WHERE workspace_id = $1 AND action_kind = 'team.assignment.email'",
     )
     .bind(workspace)
@@ -98,7 +98,7 @@ async fn run(pool: &PgPool, url: &str) -> Result<(), Box<dyn std::error::Error>>
     // named in the body, so none may be reminded about again as if it had been
     // silent.
     let unreminded = sqlx::query_scalar::<_, i64>(
-        "SELECT count(*)::bigint FROM viryaos_team_assignments
+        "SELECT count(*)::bigint FROM team_assignments
          WHERE workspace_id = $1 AND reminder_count = 0",
     )
     .bind(workspace)
@@ -168,7 +168,7 @@ async fn run_quiet(pool: &PgPool, url: &str) -> Result<(), Box<dyn std::error::E
     // morning sweep sees the same assignment the night sweep declined to mail.
     let (still_due, unreminded) = sqlx::query_as::<_, (bool, i32)>(
         "SELECT next_reminder_at IS NOT NULL, reminder_count
-         FROM viryaos_team_assignments WHERE workspace_id = $1",
+         FROM team_assignments WHERE workspace_id = $1",
     )
     .bind(workspace)
     .fetch_one(pool)
@@ -232,7 +232,7 @@ async fn advertise_team_email(
     now: OffsetDateTime,
 ) -> Result<(), Box<dyn std::error::Error>> {
     sqlx::query(
-        r#"INSERT INTO viryaos_executor_instances (
+        r#"INSERT INTO executor_instances (
             workspace_id, executor_id, version, manifest_sha, observed_at, expires_at
         ) VALUES ($1,'n8n-crew-test','test','test-manifest',$2,$3)"#,
     )
@@ -242,7 +242,7 @@ async fn advertise_team_email(
     .execute(pool)
     .await?;
     sqlx::query(
-        r#"INSERT INTO viryaos_executor_capabilities (
+        r#"INSERT INTO executor_capabilities (
             workspace_id, executor_id, capability, capability_version, observed_at, expires_at
         ) VALUES ($1,'n8n-crew-test','team.email','1',$2,$3)"#,
     )
@@ -264,7 +264,7 @@ async fn assignment(
     index: i32,
 ) -> Result<(), Box<dyn std::error::Error>> {
     sqlx::query(
-        r#"INSERT INTO viryaos_team_assignments (
+        r#"INSERT INTO team_assignments (
             workspace_id, source_kind, source_id, assignee_member_id, required_skill,
             status, due_at, assigned_at, next_reminder_at, reminder_count
         ) VALUES ($1,'opportunity',$2,$3,'operations','open',$4,$5,$6,0)"#,

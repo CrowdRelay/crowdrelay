@@ -37,6 +37,6 @@ jobs:
           name: production-operational-readiness-${{ github.run_id }}
           path: |
             artifacts/operational-readiness.json
-            artifacts/virya-os-release-receipt.json
+            artifacts/crowdrelay-release-receipt.json
           if-no-files-found: warn
           retention-days: 3

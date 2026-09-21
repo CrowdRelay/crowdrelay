@@ -191,7 +191,7 @@ pub(in crate::autopilot) async fn load_acquisition_channels(
     let kpi: Option<(i64, i64, i64)> = sqlx::query_as(
         r#"
         SELECT active_30d, reachable_consented, retained_30d
-        FROM viryaos_fan_activation_kpi
+        FROM fan_activation_kpi
         WHERE workspace_id = $1
         "#,
     )

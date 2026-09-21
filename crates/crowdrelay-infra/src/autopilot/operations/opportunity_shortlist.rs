@@ -114,10 +114,10 @@ pub(in crate::autopilot) async fn load_opportunity_shortlist(
                 decision.id AS latest_decision_id,
                 decision.decision_kind AS latest_decision_kind,
                 decision.disposition AS latest_decision_disposition
-            FROM viryaos_team_opportunities AS opportunity
+            FROM team_opportunities AS opportunity
             LEFT JOIN LATERAL (
                 SELECT candidate.id, candidate.decision_kind, candidate.disposition
-                FROM viryaos_autopilot_decisions AS candidate
+                FROM autopilot_decisions AS candidate
                 WHERE candidate.workspace_id = opportunity.workspace_id
                   AND candidate.subject_kind = 'team_opportunity'
                   AND candidate.subject_id = opportunity.id

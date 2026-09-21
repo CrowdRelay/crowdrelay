@@ -83,7 +83,7 @@ async fn insert_agent(
 ) -> Result<Uuid, sqlx::Error> {
     let agent_id = Uuid::now_v7();
     sqlx::query(
-        "INSERT INTO viryaos_booking_agents \
+        "INSERT INTO booking_agents \
             (workspace_id, id, name, agency, contact_email, contact_verified_at) \
          VALUES ($1, $2, $3, 'Agency Under Test', $4, \
                  CASE WHEN $5 THEN now() ELSE NULL END)",
@@ -224,7 +224,7 @@ async fn advertise_approach_capability(
 ) -> Result<(), sqlx::Error> {
     let now = OffsetDateTime::now_utc();
     sqlx::query(
-        "INSERT INTO viryaos_executor_instances \
+        "INSERT INTO executor_instances \
             (workspace_id, executor_id, version, manifest_sha, observed_at, expires_at) \
          VALUES ($1, 'n8n-agent-test', 'test', 'test-manifest', $2, $3)",
     )
@@ -234,7 +234,7 @@ async fn advertise_approach_capability(
     .execute(pool)
     .await?;
     sqlx::query(
-        "INSERT INTO viryaos_executor_capabilities \
+        "INSERT INTO executor_capabilities \
             (workspace_id, executor_id, capability, capability_version, observed_at, expires_at) \
          VALUES ($1, 'n8n-agent-test', 'booking_agent.approach', '1', $2, $3)",
     )
@@ -262,7 +262,7 @@ async fn the_registry_approach_queues_once_and_spends_the_season()
     // The workspace provisioned its policy on insert — posture exists for
     // the context the same day the tenant does.
     let provisioned: bool = sqlx::query_scalar(
-        "SELECT EXISTS (SELECT 1 FROM viryaos_autopilot_policies \
+        "SELECT EXISTS (SELECT 1 FROM autopilot_policies \
          WHERE workspace_id = $1 AND context = 'booking_agent' \
            AND autonomy_level = 'require_approval')",
     )
@@ -307,12 +307,11 @@ async fn the_registry_approach_queues_once_and_spends_the_season()
         }
         other => panic!("expected a draw refusal, got {other:?}"),
     }
-    let queued: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM viryaos_autopilot_actions WHERE workspace_id = $1",
-    )
-    .bind(workspace_id)
-    .fetch_one(&pool)
-    .await?;
+    let queued: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM autopilot_actions WHERE workspace_id = $1")
+            .bind(workspace_id)
+            .fetch_one(&pool)
+            .await?;
     assert_eq!(queued, 0, "a thin pitch queued an approach anyway");
 
     seed_agent_draw(&pool, workspace_id).await?;
@@ -346,7 +345,7 @@ async fn the_registry_approach_queues_once_and_spends_the_season()
         other => panic!("expected a queued approach, got {other:?}"),
     };
     let (status, context, action_class): (String, String, String) = sqlx::query_as(
-        "SELECT status, context, action_class FROM viryaos_autopilot_actions \
+        "SELECT status, context, action_class FROM autopilot_actions \
          WHERE workspace_id = $1 AND id = $2",
     )
     .bind(workspace_id)
@@ -360,7 +359,7 @@ async fn the_registry_approach_queues_once_and_spends_the_season()
     );
     let evidence_ok: bool = sqlx::query_scalar(
         "SELECT (payload->'evidence'->>'paid_tickets_12m')::int >= 50 \
-         FROM viryaos_autopilot_actions WHERE workspace_id = $1 AND id = $2",
+         FROM autopilot_actions WHERE workspace_id = $1 AND id = $2",
     )
     .bind(workspace_id)
     .bind(action_id)
@@ -370,7 +369,7 @@ async fn the_registry_approach_queues_once_and_spends_the_season()
     let draft_ready: bool = sqlx::query_scalar(
         "SELECT length(trim(payload->'draft'->>'subject')) > 0 \
          AND length(trim(payload->'draft'->>'body')) > 0 \
-         FROM viryaos_autopilot_actions WHERE workspace_id = $1 AND id = $2",
+         FROM autopilot_actions WHERE workspace_id = $1 AND id = $2",
     )
     .bind(workspace_id)
     .bind(action_id)
@@ -464,7 +463,7 @@ async fn the_registry_approach_queues_once_and_spends_the_season()
         .await?;
 
     let stamped: Option<OffsetDateTime> = sqlx::query_scalar(
-        "SELECT approached_at FROM viryaos_booking_agents \
+        "SELECT approached_at FROM booking_agents \
          WHERE workspace_id = $1 AND id = $2",
     )
     .bind(workspace_id)
@@ -474,10 +473,10 @@ async fn the_registry_approach_queues_once_and_spends_the_season()
     assert!(stamped.is_some(), "the send never spent the season");
     let (ledger_row, reach_row, outbox_row): (i64, i64, i64) = sqlx::query_as(
         "SELECT \
-            (SELECT count(*) FROM viryaos_booking_agent_interactions \
+            (SELECT count(*) FROM booking_agent_interactions \
               WHERE workspace_id = $1 AND agent_id = $2 \
                 AND direction = 'outbound' AND phase = 'approach'), \
-            (SELECT count(*) FROM viryaos_reach_events \
+            (SELECT count(*) FROM reach_events \
               WHERE workspace_id = $1 AND recipient_kind = 'booking_agent' \
                 AND recipient_id = $2::text), \
             (SELECT count(*) FROM outbox_events \
@@ -523,7 +522,7 @@ async fn the_registry_approach_queues_once_and_spends_the_season()
         )
         .await?;
     let measurement: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM viryaos_autopilot_measurements \
+        "SELECT count(*) FROM autopilot_measurements \
          WHERE workspace_id = $1 AND measurement_kind = 'booking_agent_reply_30d'",
     )
     .bind(workspace_id)
@@ -578,7 +577,7 @@ async fn a_moved_gate_fails_the_dispatch() -> Result<(), Box<dyn std::error::Err
     // The agent asked not to be contacted after the approval was filed —
     // exactly the move the dispatch re-gate exists to catch.
     sqlx::query(
-        "UPDATE viryaos_booking_agents SET do_not_contact = true \
+        "UPDATE booking_agents SET do_not_contact = true \
          WHERE workspace_id = $1 AND id = $2",
     )
     .bind(workspace_id)
@@ -617,7 +616,7 @@ async fn a_moved_gate_fails_the_dispatch() -> Result<(), Box<dyn std::error::Err
 
     let (stamped, outbox_row): (Option<OffsetDateTime>, i64) = sqlx::query_as(
         "SELECT \
-            (SELECT approached_at FROM viryaos_booking_agents \
+            (SELECT approached_at FROM booking_agents \
               WHERE workspace_id = $1 AND id = $2), \
             (SELECT count(*) FROM outbox_events \
               WHERE workspace_id = $1 \
@@ -666,7 +665,7 @@ async fn the_reply_writes_the_door() -> Result<(), Box<dyn std::error::Error>> {
         )
         .await?;
     let door: Option<time::Date> = sqlx::query_scalar(
-        "SELECT refused_until FROM viryaos_booking_agents \
+        "SELECT refused_until FROM booking_agents \
          WHERE workspace_id = $1 AND id = $2",
     )
     .bind(workspace_id)
@@ -693,7 +692,7 @@ async fn the_reply_writes_the_door() -> Result<(), Box<dyn std::error::Error>> {
 
     // The inbound reply itself is on the agent's own ledger.
     let replies: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM viryaos_booking_agent_interactions \
+        "SELECT count(*) FROM booking_agent_interactions \
          WHERE workspace_id = $1 AND agent_id = $2 \
            AND direction = 'inbound' AND disposition = 'declined'",
     )
@@ -720,10 +719,10 @@ async fn the_reply_writes_the_door() -> Result<(), Box<dyn std::error::Error>> {
         .await?;
     let (flag, governor): (bool, bool) = sqlx::query_as(
         "SELECT \
-            (SELECT do_not_contact FROM viryaos_booking_agents \
+            (SELECT do_not_contact FROM booking_agents \
               WHERE workspace_id = $1 AND id = $2), \
-            (SELECT EXISTS (SELECT 1 FROM viryaos_contact_governor g \
-              JOIN viryaos_booking_agents a \
+            (SELECT EXISTS (SELECT 1 FROM contact_governor g \
+              JOIN booking_agents a \
                 ON a.workspace_id = g.workspace_id \
                AND lower(btrim(a.contact_email)) = g.normalized_contact \
               WHERE a.workspace_id = $1 AND a.id = $2 AND g.do_not_contact))",
@@ -763,7 +762,7 @@ async fn the_reply_writes_the_door() -> Result<(), Box<dyn std::error::Error>> {
         )
         .await?;
     let verified_at: Option<OffsetDateTime> = sqlx::query_scalar(
-        "SELECT contact_verified_at FROM viryaos_booking_agents \
+        "SELECT contact_verified_at FROM booking_agents \
          WHERE workspace_id = $1 AND id = $2",
     )
     .bind(workspace_id)

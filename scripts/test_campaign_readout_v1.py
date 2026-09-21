@@ -202,7 +202,7 @@ class CalendarRoutingWiringContract(unittest.TestCase):
         self.assertIn("show_pairs", self.infra)
 
     def test_uses_show_cost_ledger_distances(self) -> None:
-        self.assertIn("viryaos_show_cost_ledger", self.infra)
+        self.assertIn("show_cost_ledger", self.infra)
         self.assertIn("distance_km", self.infra)
 
     def test_thresholds_match_domain_defaults(self) -> None:
@@ -310,10 +310,10 @@ class AgentScorecardContract(unittest.TestCase):
 
     def test_uses_existing_tables_not_new_state(self) -> None:
         # Must read from existing ledger tables, not create new ones
-        self.assertIn("viryaos_autopilot_actions", self.scorecard)
-        self.assertIn("viryaos_autopilot_outcomes", self.scorecard)
-        self.assertIn("viryaos_growth_posture", self.scorecard)
-        self.assertIn("viryaos_executor_capabilities", self.scorecard)
+        self.assertIn("autopilot_actions", self.scorecard)
+        self.assertIn("autopilot_outcomes", self.scorecard)
+        self.assertIn("growth_posture", self.scorecard)
+        self.assertIn("executor_capabilities", self.scorecard)
 
     def test_no_writes(self) -> None:
         # The scorecard must be read-only

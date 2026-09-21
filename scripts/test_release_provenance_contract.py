@@ -24,6 +24,6 @@ class ReleaseProvenanceContract(unittest.TestCase):
   self.assertIn('cp Cargo.lock "$staging/Cargo.lock"',package)
  def test_readiness_is_full_system_not_team_email_only(self):
   verifier=(ROOT/'scripts/verify-production-readiness.py').read_text()
-  for token in ('backend-sha-drift','release-components-missing','dependency-lock-missing','artifact-manifest-missing','virya-os-release-receipt.json'):
+  for token in ('backend-sha-drift','release-components-missing','dependency-lock-missing','artifact-manifest-missing','crowdrelay-release-receipt.json'):
    self.assertIn(token,verifier)
 if __name__=='__main__': unittest.main()

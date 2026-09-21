@@ -37,7 +37,7 @@ async fn decision(pool: &PgPool, workspace_id: Uuid, confidence: i32) -> Result<
     let id = Uuid::now_v7();
     sqlx::query(
         r#"
-        INSERT INTO viryaos_autopilot_decisions (
+        INSERT INTO autopilot_decisions (
             id, workspace_id, decision_key, context, subject_kind, subject_id,
             decision_kind, confidence_basis_points, disposition, reason,
             input_snapshot, policy_snapshot, recommendation, trace_id
@@ -71,7 +71,7 @@ async fn awaiting_approval(
     let id = Uuid::now_v7();
     sqlx::query(
         r#"
-        INSERT INTO viryaos_autopilot_actions (
+        INSERT INTO autopilot_actions (
             id, workspace_id, decision_id, context, action_kind, subject_kind,
             subject_id, idempotency_key, payload, status,
             approval_expires_at, trace_id
@@ -114,7 +114,7 @@ fn worker(pool: &PgPool) -> Result<RetentionWorker> {
 
 async fn action_state(pool: &PgPool, id: Uuid) -> Result<(String, Option<String>)> {
     let row = sqlx::query_as::<_, (String, Option<String>)>(
-        "SELECT status, last_error_kind FROM viryaos_autopilot_actions WHERE id = $1",
+        "SELECT status, last_error_kind FROM autopilot_actions WHERE id = $1",
     )
     .bind(id)
     .fetch_one(pool)
@@ -280,7 +280,7 @@ async fn a_dead_ask_expires_its_suggestion() -> Result<()> {
         let suggestion_id = Uuid::now_v7();
         sqlx::query(
             r#"
-            INSERT INTO viryaos_content_suggestions (
+            INSERT INTO content_suggestions (
                 id, workspace_id, concept, status
             ) VALUES ($1, $2, 'a beat the brain proposed', 'raised')
             "#,
@@ -304,13 +304,13 @@ async fn a_dead_ask_expires_its_suggestion() -> Result<()> {
         worker(&db)?.run_once().await?;
 
         let status: String =
-            sqlx::query_scalar("SELECT status FROM viryaos_content_suggestions WHERE id = $1")
+            sqlx::query_scalar("SELECT status FROM content_suggestions WHERE id = $1")
                 .bind(suggestion_id)
                 .fetch_one(&db)
                 .await?;
         ensure!(status == "expired", "suggestion status: {status}");
         let outcomes: i64 = sqlx::query_scalar(
-            "SELECT count(*)::bigint FROM viryaos_suggestion_outcomes
+            "SELECT count(*)::bigint FROM suggestion_outcomes
              WHERE suggestion_id = $1 AND outcome = 'expired'",
         )
         .bind(suggestion_id)
@@ -335,7 +335,7 @@ async fn a_second_pass_changes_nothing() -> Result<()> {
         let workspace_id = workspace(&db).await?;
         let suggestion_id = Uuid::now_v7();
         sqlx::query(
-            "INSERT INTO viryaos_content_suggestions (id, workspace_id, concept, status)
+            "INSERT INTO content_suggestions (id, workspace_id, concept, status)
              VALUES ($1, $2, 'a beat the brain proposed', 'raised')",
         )
         .bind(suggestion_id)
@@ -359,7 +359,7 @@ async fn a_second_pass_changes_nothing() -> Result<()> {
         let stats = worker.run_once().await?;
         ensure!(stats.lapsed_autopilot_asks_swept == 0, "stats: {stats:?}");
         let outcomes: i64 = sqlx::query_scalar(
-            "SELECT count(*)::bigint FROM viryaos_suggestion_outcomes WHERE suggestion_id = $1",
+            "SELECT count(*)::bigint FROM suggestion_outcomes WHERE suggestion_id = $1",
         )
         .bind(suggestion_id)
         .fetch_one(&db)
@@ -384,7 +384,7 @@ async fn orphan_decisions_age_out_but_audit_rows_stay() -> Result<()> {
         // Old, produced nothing: eligible.
         let orphan = decision(&db, workspace_id, 9000).await?;
         sqlx::query(
-            "UPDATE viryaos_autopilot_decisions SET evaluated_at = now() - interval '181 days'
+            "UPDATE autopilot_decisions SET evaluated_at = now() - interval '181 days'
              WHERE id = $1",
         )
         .bind(orphan)
@@ -393,7 +393,7 @@ async fn orphan_decisions_age_out_but_audit_rows_stay() -> Result<()> {
         // Old, produced an action: audit, never eligible.
         let audit = decision(&db, workspace_id, 9000).await?;
         sqlx::query(
-            "UPDATE viryaos_autopilot_decisions SET evaluated_at = now() - interval '181 days'
+            "UPDATE autopilot_decisions SET evaluated_at = now() - interval '181 days'
              WHERE id = $1",
         )
         .bind(audit)
@@ -409,12 +409,11 @@ async fn orphan_decisions_age_out_but_audit_rows_stay() -> Result<()> {
             "stats: {stats:?}"
         );
 
-        let mut remaining: Vec<Uuid> = sqlx::query_scalar(
-            "SELECT id FROM viryaos_autopilot_decisions WHERE workspace_id = $1",
-        )
-        .bind(workspace_id)
-        .fetch_all(&db)
-        .await?;
+        let mut remaining: Vec<Uuid> =
+            sqlx::query_scalar("SELECT id FROM autopilot_decisions WHERE workspace_id = $1")
+                .bind(workspace_id)
+                .fetch_all(&db)
+                .await?;
         remaining.sort();
         let mut expected = vec![audit, fresh];
         expected.sort();

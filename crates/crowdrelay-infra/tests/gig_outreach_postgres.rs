@@ -78,7 +78,7 @@ async fn run(pool: &PgPool, url: &str) -> Result<(), Box<dyn std::error::Error>>
     // One action, not one per promoter. This is the §12-6 rule, and it is the
     // difference between everybody hearing and two of three hearing.
     let (kind, status, payload) = sqlx::query_as::<_, (String, String, serde_json::Value)>(
-        "SELECT action_kind, status, payload FROM viryaos_autopilot_actions
+        "SELECT action_kind, status, payload FROM autopilot_actions
          WHERE workspace_id = $1 AND id = $2",
     )
     .bind(act)
@@ -133,7 +133,7 @@ async fn run(pool: &PgPool, url: &str) -> Result<(), Box<dyn std::error::Error>>
         "the reasons the band approved on did not reach the letter"
     );
     let total_actions = sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*) FROM viryaos_autopilot_actions WHERE workspace_id = $1",
+        "SELECT COUNT(*) FROM autopilot_actions WHERE workspace_id = $1",
     )
     .bind(act)
     .fetch_one(pool)
@@ -142,8 +142,8 @@ async fn run(pool: &PgPool, url: &str) -> Result<(), Box<dyn std::error::Error>>
 
     // Every action carries a decision, or the trace cannot explain the send.
     let decision_kind = sqlx::query_scalar::<_, String>(
-        "SELECT decision.decision_kind FROM viryaos_autopilot_actions AS action
-         JOIN viryaos_autopilot_decisions AS decision ON decision.id = action.decision_id
+        "SELECT decision.decision_kind FROM autopilot_actions AS action
+         JOIN autopilot_decisions AS decision ON decision.id = action.decision_id
          WHERE action.workspace_id = $1 AND action.id = $2",
     )
     .bind(act)
@@ -158,7 +158,7 @@ async fn run(pool: &PgPool, url: &str) -> Result<(), Box<dyn std::error::Error>>
     // cancel path refused anything past `awaiting_approval`. An operator who
     // saw the mistake immediately had nothing to click.
     let available_at = sqlx::query_scalar::<_, OffsetDateTime>(
-        "SELECT available_at FROM viryaos_autopilot_actions WHERE workspace_id = $1 AND id = $2",
+        "SELECT available_at FROM autopilot_actions WHERE workspace_id = $1 AND id = $2",
     )
     .bind(act)
     .bind(action_id)
@@ -207,7 +207,7 @@ async fn run(pool: &PgPool, url: &str) -> Result<(), Box<dyn std::error::Error>>
     // And nothing was written for it — a refused approval leaves no action to
     // cancel later.
     let actions_now = sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*) FROM viryaos_autopilot_actions WHERE workspace_id = $1",
+        "SELECT COUNT(*) FROM autopilot_actions WHERE workspace_id = $1",
     )
     .bind(act)
     .fetch_one(pool)
@@ -244,7 +244,7 @@ async fn run(pool: &PgPool, url: &str) -> Result<(), Box<dyn std::error::Error>>
         "a blocked promoter did not stop the outreach"
     );
     let reserved = sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*) FROM viryaos_contact_governor
+        "SELECT COUNT(*) FROM contact_governor
          WHERE workspace_id = $1 AND last_action_id = $2",
     )
     .bind(act)
@@ -256,7 +256,7 @@ async fn run(pool: &PgPool, url: &str) -> Result<(), Box<dyn std::error::Error>>
         "the promoter the governor admitted kept a reservation from a letter nobody received"
     );
     let emitted = sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*) FROM viryaos_autopilot_action_emissions
+        "SELECT COUNT(*) FROM autopilot_action_emissions
          WHERE workspace_id = $1 AND action_id = $2",
     )
     .bind(act)
@@ -307,7 +307,7 @@ async fn run(pool: &PgPool, url: &str) -> Result<(), Box<dyn std::error::Error>>
     if let Ok(GigOutreachOutcome::Queued { action_id, .. }) = queued {
         let called_back = sqlx::query_scalar::<_, String>(
             r#"
-            UPDATE viryaos_autopilot_actions
+            UPDATE autopilot_actions
             SET status = 'cancelled', finished_at = now()
             WHERE workspace_id = $1 AND id = $2
               AND (
@@ -385,7 +385,7 @@ async fn a_reply_belongs_to_the_letter_that_preceded_it(
     let city_id = city_in(pool, "reply-owner", "PL", 51.75, 19.46).await?;
     promoter(pool, act, city_id, "Dorota", "dorota@example.com", 70).await?;
     let target = sqlx::query_scalar::<_, Uuid>(
-        "SELECT id FROM viryaos_booking_targets
+        "SELECT id FROM booking_targets
          WHERE workspace_id = $1 AND contact_email = 'dorota@example.com'",
     )
     .bind(act)
@@ -401,7 +401,7 @@ async fn a_reply_belongs_to_the_letter_that_preceded_it(
         ("initial", "inbound", reply_at, "the-reply"),
     ] {
         sqlx::query(
-            "INSERT INTO viryaos_booking_interactions
+            "INSERT INTO booking_interactions
                 (workspace_id, target_id, direction, phase, source_key, occurred_at)
              VALUES ($1, $2, $3, $4, $5, $6)",
         )
@@ -420,13 +420,13 @@ async fn a_reply_belongs_to_the_letter_that_preceded_it(
         sqlx::query_scalar::<_, f64>(
             r#"
             SELECT CASE WHEN EXISTS (
-                SELECT 1 FROM viryaos_booking_interactions AS reply
+                SELECT 1 FROM booking_interactions AS reply
                 WHERE reply.workspace_id=$1 AND reply.target_id=$2
                   AND reply.direction='inbound'
                   AND reply.occurred_at >= $3
                   AND reply.occurred_at < $3 + INTERVAL '7 days'
                   AND NOT EXISTS (
-                      SELECT 1 FROM viryaos_booking_interactions AS newer
+                      SELECT 1 FROM booking_interactions AS newer
                       WHERE newer.workspace_id=reply.workspace_id
                         AND newer.target_id=reply.target_id
                         AND newer.direction='outbound'
@@ -498,7 +498,7 @@ async fn two_promoters_with_one_name_both_receive_the_letter(
     );
 
     let addressed = sqlx::query_scalar::<_, serde_json::Value>(
-        "SELECT payload -> 'recipients' FROM viryaos_autopilot_actions
+        "SELECT payload -> 'recipients' FROM autopilot_actions
          WHERE workspace_id = $1 AND id = $2",
     )
     .bind(act)
@@ -547,14 +547,14 @@ async fn a_settled_proposal_has_its_reasons_scored() -> Result<(), Box<dyn std::
         promoter(pool, act, wroclaw, "Anna", "anna@example.com", 70).await?;
         promoter(pool, act, wroclaw, "Bogdan", "bogdan@example.com", 60).await?;
         let anna = sqlx::query_scalar::<_, Uuid>(
-            "SELECT id FROM viryaos_booking_targets
+            "SELECT id FROM booking_targets
              WHERE workspace_id = $1 AND contact_email = 'anna@example.com'",
         )
         .bind(act)
         .fetch_one(pool)
         .await?;
         let bogdan = sqlx::query_scalar::<_, Uuid>(
-            "SELECT id FROM viryaos_booking_targets
+            "SELECT id FROM booking_targets
              WHERE workspace_id = $1 AND contact_email = 'bogdan@example.com'",
         )
         .bind(act)
@@ -591,7 +591,7 @@ async fn a_settled_proposal_has_its_reasons_scored() -> Result<(), Box<dyn std::
         // it rather than teleporting the action to succeeded.
         for status in ["processing", "succeeded"] {
             sqlx::query(
-                "UPDATE viryaos_autopilot_actions
+                "UPDATE autopilot_actions
                  SET status = $3, finished_at = $4
                  WHERE workspace_id = $1 AND id = $2",
             )
@@ -622,7 +622,7 @@ async fn a_settled_proposal_has_its_reasons_scored() -> Result<(), Box<dyn std::
         for subject in [anna, bogdan] {
             let measurement_id = Uuid::now_v7();
             sqlx::query(
-                "INSERT INTO viryaos_autopilot_measurements
+                "INSERT INTO autopilot_measurements
                     (id, workspace_id, action_id, measurement_kind, subject_id,
                      action_finished_at, baseline_value, due_at, status,
                      available_at, started_at)
@@ -742,9 +742,9 @@ async fn a_settled_proposal_has_its_reasons_scored() -> Result<(), Box<dyn std::
         };
         // Approved a year ago, from the ledger's point of view.
         sqlx::query(
-            "UPDATE viryaos_autopilot_decisions SET evaluated_at = now() - interval '365 days'
+            "UPDATE autopilot_decisions SET evaluated_at = now() - interval '365 days'
              WHERE workspace_id = $1
-               AND id = (SELECT decision_id FROM viryaos_autopilot_actions
+               AND id = (SELECT decision_id FROM autopilot_actions
                          WHERE workspace_id = $1 AND id = $2)",
         )
         .bind(act)
@@ -841,8 +841,8 @@ async fn run_revision(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
         other => return Err(format!("an empty revision was taken: {other:?}").into()),
     }
     let (actions, decisions, audits) = sqlx::query_as::<_, (i64, i64, i64)>(
-        "SELECT (SELECT COUNT(*) FROM viryaos_autopilot_actions WHERE workspace_id = $1),
-                (SELECT COUNT(*) FROM viryaos_autopilot_decisions WHERE workspace_id = $1),
+        "SELECT (SELECT COUNT(*) FROM autopilot_actions WHERE workspace_id = $1),
+                (SELECT COUNT(*) FROM autopilot_decisions WHERE workspace_id = $1),
                 (SELECT COUNT(*) FROM operator_actions WHERE workspace_id = $1)",
     )
     .bind(act)
@@ -875,7 +875,7 @@ async fn run_revision(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
 
     // The payload the action carries is what the executor renders — verbatim.
     let stored_line = sqlx::query_scalar::<_, String>(
-        "SELECT payload ->> 'opening_line' FROM viryaos_autopilot_actions
+        "SELECT payload ->> 'opening_line' FROM autopilot_actions
          WHERE workspace_id = $1 AND id = $2",
     )
     .bind(act)
@@ -892,7 +892,7 @@ async fn run_revision(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
     let rows = sqlx::query_as::<_, (String, String, String, String, i32, serde_json::Value)>(
         "SELECT audit.action, revision.field, revision.before_text,
                 revision.after_text, revision.distance_chars, audit.details
-         FROM viryaos_draft_revisions AS revision
+         FROM draft_revisions AS revision
          JOIN operator_actions AS audit ON audit.id = revision.operation_id
          WHERE revision.workspace_id = $1 AND revision.action_id = $2",
     )
@@ -929,7 +929,7 @@ async fn run_revision(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
         other => return Err(format!("a replayed key queued again: {other:?}").into()),
     }
     let still = sqlx::query_scalar::<_, String>(
-        "SELECT payload ->> 'opening_line' FROM viryaos_autopilot_actions
+        "SELECT payload ->> 'opening_line' FROM autopilot_actions
          WHERE workspace_id = $1 AND id = $2",
     )
     .bind(act)
@@ -1131,7 +1131,7 @@ async fn promoter(
     score: i32,
 ) -> Result<(), Box<dyn std::error::Error>> {
     sqlx::query(
-        "INSERT INTO viryaos_booking_targets
+        "INSERT INTO booking_targets
             (workspace_id, city_id, target_kind, display_name, contact_email,
              relationship_score, capacity)
          VALUES ($1, $2, 'promoter', $3, $4, $5, 300)",
@@ -1154,7 +1154,7 @@ async fn advertise(
     now: OffsetDateTime,
 ) -> Result<(), Box<dyn std::error::Error>> {
     sqlx::query(
-        "INSERT INTO viryaos_executor_instances
+        "INSERT INTO executor_instances
             (workspace_id, executor_id, version, manifest_sha, observed_at, expires_at)
          VALUES ($1,'n8n-gig-test','1','sha',$2,$3)
          ON CONFLICT DO NOTHING",
@@ -1165,7 +1165,7 @@ async fn advertise(
     .execute(pool)
     .await?;
     sqlx::query(
-        "INSERT INTO viryaos_executor_capabilities
+        "INSERT INTO executor_capabilities
             (workspace_id, executor_id, capability, capability_version, observed_at, expires_at)
          VALUES ($1,'n8n-gig-test',$2,'1',$3,$4)",
     )
@@ -1189,7 +1189,7 @@ async fn unblock_contact(
     sqlx::query(
         // `next_contact_after >= last_outbound_at` is a CHECK, so the window
         // is cleared by moving both backwards rather than only one.
-        "UPDATE viryaos_contact_governor
+        "UPDATE contact_governor
          SET do_not_contact = false,
              last_outbound_at = now() - INTERVAL '30 days',
              next_contact_after = now() - INTERVAL '29 days'
@@ -1209,7 +1209,7 @@ async fn block_contact(
     now: OffsetDateTime,
 ) -> Result<(), Box<dyn std::error::Error>> {
     sqlx::query(
-        "INSERT INTO viryaos_contact_governor
+        "INSERT INTO contact_governor
             (workspace_id, normalized_contact, last_context, last_outbound_at,
              next_contact_after, do_not_contact)
          VALUES ($1, $2, 'manual', $3, $3, true)",

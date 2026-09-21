@@ -2,7 +2,7 @@
 // replies need human review and how recent replies were classified.
 //
 // This is a read model, not a pipeline. Every row comes from
-// `viryaos_reply_classifications`, which the worker populates. The operator
+// `reply_classifications`, which the worker populates. The operator
 // sees:
 // - Replies waiting for human review (NeedsHuman), newest first.
 // - Recent auto-classifications, newest first.
@@ -84,7 +84,7 @@ pub async fn reply_triage_handler(
                classification_result, classified_disposition, human_review_reason,
                proposed_fee_minor, proposed_currency, proposed_opportunity_id,
                confidence_basis_points, matched_rules, classified_at
-        FROM viryaos_reply_classifications
+        FROM reply_classifications
         WHERE workspace_id = $1
           AND classification_result = 'needs_human'
         ORDER BY classified_at DESC
@@ -102,7 +102,7 @@ pub async fn reply_triage_handler(
                classification_result, classified_disposition, human_review_reason,
                proposed_fee_minor, proposed_currency, proposed_opportunity_id,
                confidence_basis_points, matched_rules, classified_at
-        FROM viryaos_reply_classifications
+        FROM reply_classifications
         WHERE workspace_id = $1
           AND classification_result = 'auto'
           AND classified_disposition IS NOT NULL
@@ -123,7 +123,7 @@ pub async fn reply_triage_handler(
             count(*) FILTER (WHERE classification_result = 'auto' AND classified_disposition = 'declined')::bigint AS auto_declined_count,
             count(*) FILTER (WHERE classification_result = 'auto' AND classified_disposition = 'do_not_contact')::bigint AS auto_do_not_contact_count,
             count(*) FILTER (WHERE classification_result = 'auto' AND classified_disposition IS NULL)::bigint AS pending_count
-        FROM viryaos_reply_classifications
+        FROM reply_classifications
         WHERE workspace_id = $1
         "#,
     )

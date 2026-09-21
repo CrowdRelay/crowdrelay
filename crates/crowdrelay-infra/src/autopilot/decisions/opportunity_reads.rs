@@ -23,7 +23,7 @@ macro_rules! decision_opportunity_reads {
                     END AS months_since_last_show,
                     EXISTS (
                         SELECT 1
-                        FROM viryaos_autopilot_actions AS action
+                        FROM autopilot_actions AS action
                         WHERE action.workspace_id = $1
                           AND action.subject_id = city.id
                           AND action.action_kind = 'booking.outreach.request'
@@ -77,7 +77,7 @@ macro_rules! decision_opportunity_reads {
                 ) AS last_show ON true
                 LEFT JOIN LATERAL (
                     SELECT action.finished_at
-                    FROM viryaos_autopilot_actions AS action
+                    FROM autopilot_actions AS action
                     WHERE action.workspace_id = $1
                       AND action.subject_id = city.id
                       AND action.action_kind = 'booking.outreach.request'
@@ -104,7 +104,7 @@ macro_rules! decision_opportunity_reads {
                     r#"
                     SELECT city_id, signal_kind, score_basis_points, confidence_basis_points,
                            observed_at, expires_at
-                    FROM viryaos_city_market_signals
+                    FROM city_market_signals
                     WHERE workspace_id = $1
                       AND city_id = ANY($2)
                       AND observed_at <= $3
@@ -207,7 +207,7 @@ macro_rules! decision_opportunity_reads {
                     -- NUMERIC in PostgreSQL, and both of these are `*_minor`
                     -- bigints, so without the cast the two columns arrive as
                     -- NUMERIC and the `i64` fields they decode into fail. Latent
-                    -- rather than live: it needs one `viryaos_promotion_campaign_states`
+                    -- rather than live: it needs one `promotion_campaign_states`
                     -- row to fire, and production has none yet. Its sibling in
                     -- `growth_intelligence/worker_signals.rs` was the same mistake
                     -- and did fire, aborting every autopilot cycle for two hours.
@@ -227,16 +227,16 @@ macro_rules! decision_opportunity_reads {
                     COALESCE(last_change.finished_at, state.last_budget_change_at) AS last_budget_change_at,
                     state.observed_at,
                     state.expires_at
-                FROM viryaos_promotion_campaign_states AS state
+                FROM promotion_campaign_states AS state
                 LEFT JOIN events AS event
                   ON event.workspace_id = state.workspace_id
                  AND event.id = state.event_id
-                LEFT JOIN viryaos_promotion_budget_guardrails AS guardrail
+                LEFT JOIN promotion_budget_guardrails AS guardrail
                   ON guardrail.workspace_id = state.workspace_id
                  AND guardrail.currency = state.currency
                 LEFT JOIN LATERAL (
                     SELECT action.finished_at
-                    FROM viryaos_autopilot_actions AS action
+                    FROM autopilot_actions AS action
                     WHERE action.workspace_id = state.workspace_id
                       AND action.subject_id = state.id
                       AND action.action_kind = 'promotion.budget_change.request'
@@ -272,19 +272,19 @@ macro_rules! decision_opportunity_reads {
             let rows = sqlx::query_as::<_, ReleaseSnapshotRow>(r#"
                 SELECT plan.id AS release_id, plan.title, plan.release_at, plan.active, plan.tier,
                        plan.assets_ready, plan.communication_enabled, plan.press_enabled,
-                       EXISTS(SELECT 1 FROM viryaos_release_milestones m WHERE m.workspace_id=plan.workspace_id AND m.release_id=plan.id AND m.milestone='seed_calendar') calendar_seeded,
-                       EXISTS(SELECT 1 FROM viryaos_release_milestones m WHERE m.workspace_id=plan.workspace_id AND m.release_id=plan.id AND m.milestone='announcement') announcement_sent,
-                       EXISTS(SELECT 1 FROM viryaos_release_milestones m WHERE m.workspace_id=plan.workspace_id AND m.release_id=plan.id AND m.milestone='start_press') press_started,
-                       EXISTS(SELECT 1 FROM viryaos_release_milestones m WHERE m.workspace_id=plan.workspace_id AND m.release_id=plan.id AND m.milestone='fan_warmup') fan_warmup_sent,
-                       EXISTS(SELECT 1 FROM viryaos_release_milestones m WHERE m.workspace_id=plan.workspace_id AND m.release_id=plan.id AND m.milestone='countdown') countdown_sent,
-                       EXISTS(SELECT 1 FROM viryaos_release_milestones m WHERE m.workspace_id=plan.workspace_id AND m.release_id=plan.id AND m.milestone='release_day') release_day_sent,
-                       EXISTS(SELECT 1 FROM viryaos_release_milestones m WHERE m.workspace_id=plan.workspace_id AND m.release_id=plan.id AND m.milestone='sustain') sustain_sent,
-                       EXISTS(SELECT 1 FROM viryaos_release_milestones m WHERE m.workspace_id=plan.workspace_id AND m.release_id=plan.id AND m.milestone='wrap') wrap_sent,
-                       EXISTS(SELECT 1 FROM viryaos_release_milestones m WHERE m.workspace_id=plan.workspace_id AND m.release_id=plan.id AND m.milestone='catalogue_rotation') catalogue_rotation_sent,
-                       EXISTS(SELECT 1 FROM viryaos_release_milestones m WHERE m.workspace_id=plan.workspace_id AND m.release_id=plan.id AND m.milestone='editorial_pitch') editorial_pitch_parked,
+                       EXISTS(SELECT 1 FROM release_milestones m WHERE m.workspace_id=plan.workspace_id AND m.release_id=plan.id AND m.milestone='seed_calendar') calendar_seeded,
+                       EXISTS(SELECT 1 FROM release_milestones m WHERE m.workspace_id=plan.workspace_id AND m.release_id=plan.id AND m.milestone='announcement') announcement_sent,
+                       EXISTS(SELECT 1 FROM release_milestones m WHERE m.workspace_id=plan.workspace_id AND m.release_id=plan.id AND m.milestone='start_press') press_started,
+                       EXISTS(SELECT 1 FROM release_milestones m WHERE m.workspace_id=plan.workspace_id AND m.release_id=plan.id AND m.milestone='fan_warmup') fan_warmup_sent,
+                       EXISTS(SELECT 1 FROM release_milestones m WHERE m.workspace_id=plan.workspace_id AND m.release_id=plan.id AND m.milestone='countdown') countdown_sent,
+                       EXISTS(SELECT 1 FROM release_milestones m WHERE m.workspace_id=plan.workspace_id AND m.release_id=plan.id AND m.milestone='release_day') release_day_sent,
+                       EXISTS(SELECT 1 FROM release_milestones m WHERE m.workspace_id=plan.workspace_id AND m.release_id=plan.id AND m.milestone='sustain') sustain_sent,
+                       EXISTS(SELECT 1 FROM release_milestones m WHERE m.workspace_id=plan.workspace_id AND m.release_id=plan.id AND m.milestone='wrap') wrap_sent,
+                       EXISTS(SELECT 1 FROM release_milestones m WHERE m.workspace_id=plan.workspace_id AND m.release_id=plan.id AND m.milestone='catalogue_rotation') catalogue_rotation_sent,
+                       EXISTS(SELECT 1 FROM release_milestones m WHERE m.workspace_id=plan.workspace_id AND m.release_id=plan.id AND m.milestone='editorial_pitch') editorial_pitch_parked,
                        plan.editorial_pitch_completed_at,
                        plan.editorial_pitch_escalated_at
-                FROM viryaos_release_plans plan
+                FROM release_plans plan
                 WHERE plan.workspace_id=$1 AND plan.active
                   -- The lookback must outlast the ladder's last rung (the
                   -- R+30 catalogue rotation) with slack to catch up after a
@@ -305,7 +305,7 @@ macro_rules! decision_opportunity_reads {
             let verdict_rows = sqlx::query_as::<_, (String, String)>(
                 r#"
                 SELECT tier, verdict
-                FROM viryaos_release_outcomes
+                FROM release_outcomes
                 WHERE workspace_id=$1 AND report_kind='release_r14'
                 ORDER BY generated_at DESC, release_id
                 LIMIT 200
@@ -418,7 +418,7 @@ macro_rules! decision_opportunity_reads {
             let rows = sqlx::query_as::<_, (Uuid, String, OffsetDateTime)>(
                 r#"
                 SELECT release_id, milestone, completed_at
-                FROM viryaos_release_milestones
+                FROM release_milestones
                 WHERE workspace_id=$1 AND release_id = ANY($2)
                 ORDER BY release_id, completed_at
                 "#,
@@ -452,7 +452,7 @@ macro_rules! decision_opportunity_reads {
                 r#"
                 SELECT DISTINCT subject_id,
                        input_snapshot -> 'collision' ->> 'held_milestone' AS milestone
-                FROM viryaos_autopilot_decisions
+                FROM autopilot_decisions
                 WHERE workspace_id = $1
                   AND decision_kind = 'hold_release_milestone_collision'
                   AND subject_kind = 'release_plan'
@@ -491,7 +491,7 @@ macro_rules! decision_opportunity_reads {
                    toll_minor_per_km, accommodation_minor_per_room_night, crew_per_room,
                    per_diem_minor_per_person_day, fixed_overhead_minor,
                    overnight_threshold_km, minimum_margin_minor
-            FROM viryaos_tour_economics
+            FROM tour_economics
             WHERE workspace_id = $1
             "#,
         )
@@ -580,7 +580,7 @@ macro_rules! decision_opportunity_reads {
                            -- every opportunity's pipeline rather than none.
                            (
                                SELECT COUNT(*)
-                               FROM viryaos_team_opportunities pipeline
+                               FROM team_opportunities pipeline
                                WHERE pipeline.workspace_id=opportunity.workspace_id
                                  AND pipeline.status IN ('submitted','replied')
                                  AND EXTRACT(YEAR FROM COALESCE(pipeline.event_starts_at,$2))
@@ -589,12 +589,12 @@ macro_rules! decision_opportunity_reads {
                            +
                            (
                                SELECT COUNT(*)
-                               FROM viryaos_booking_targets target
+                               FROM booking_targets target
                                WHERE target.workspace_id=opportunity.workspace_id
                                  AND target.active
                                  AND (
                                      SELECT interaction.disposition
-                                     FROM viryaos_booking_interactions interaction
+                                     FROM booking_interactions interaction
                                      WHERE interaction.workspace_id=target.workspace_id
                                        AND interaction.target_id=target.id
                                      ORDER BY interaction.occurred_at DESC, interaction.id DESC
@@ -610,8 +610,8 @@ macro_rules! decision_opportunity_reads {
                            far_shot_minimum_score_basis_points,
                        COALESCE((manager.value->>'prefer_weekend_one_shots')::boolean,true)
                            prefer_weekend_one_shots
-                FROM viryaos_team_opportunities opportunity
-                LEFT JOIN viryaos_manager_config manager
+                FROM team_opportunities opportunity
+                LEFT JOIN manager_config manager
                   ON manager.workspace_id=opportunity.workspace_id
                  AND manager.config_key='booking_policy'
                 WHERE opportunity.workspace_id=$1
@@ -701,7 +701,7 @@ macro_rules! decision_opportunity_reads {
                        verified_destination,contact_email,metadata,fit_basis_points,reputation_basis_points,confidence_basis_points,
                        expected_fee_minor,estimated_cost_minor,application_fee_minor,requires_contract,exclusive,eligible,
                        funding_amount_minor,own_contribution_minor,deadline,package_status,status
-                FROM viryaos_team_opportunities
+                FROM team_opportunities
                 WHERE workspace_id=$1 AND opportunity_kind='funding' AND eligible
                   AND status IN ('new','prepared','awaiting_approval') AND deadline>$2
                 ORDER BY deadline, funding_amount_minor DESC, id LIMIT $3

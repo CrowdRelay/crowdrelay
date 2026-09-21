@@ -10,7 +10,7 @@ on every deploy, forever, with nothing surfacing the reversal.
 Two statements forced access back on:
 
   * `team.rs` set `workspace_members.status = 'active'` and
-    `viryaos_team_profiles.active = true`;
+    `team_profiles.active = true`;
   * `admission.rs` set `workspace_members.status = 'active'`.
 
 `admission/support.rs` requires `m.status = 'active'` to operate a gate, and
@@ -135,7 +135,7 @@ class BootstrapDecisionDurability(unittest.TestCase):
             team,
             "team bootstrap must not re-enable a disabled member",
         )
-        team_profile_conflict = team[team.index("viryaos_team_profiles") :]
+        team_profile_conflict = team[team.index("team_profiles") :]
         team_profile_conflict = team_profile_conflict[
             : team_profile_conflict.index('"#')
         ]

@@ -29,11 +29,11 @@ INFRA_SIGNAL = (ROOT / "crates/crowdrelay-infra/src/beacon_signal/signal.rs").re
 class BeaconSignalModeV2Contract(unittest.TestCase):
     def test_schema_models_full_lifecycle_without_second_crm(self) -> None:
         for table in (
-            "viryaos_beacon_signal_event_engagements",
-            "viryaos_beacon_signal_coverage",
-            "viryaos_beacon_press_assets",
+            "beacon_signal_event_engagements",
+            "beacon_signal_coverage",
+            "beacon_press_assets",
         ):
-            self.assertIn(f"CREATE TABLE {table}", MIGRATION)
+            self.assertIn(f"CREATE TABLE viryaos_{table}", MIGRATION)
         self.assertIn("REFERENCES viryaos_beacons (workspace_id, id) ON DELETE CASCADE", MIGRATION)
         self.assertIn("REFERENCES events (workspace_id, id) ON DELETE SET NULL (event_id)", MIGRATION)
         self.assertIn("'eligible','notified','opened','interested','helping','completed','declined'", MIGRATION)
@@ -78,9 +78,9 @@ class BeaconSignalModeV2Contract(unittest.TestCase):
         self.assertIn('Some("completed")', INFRA_SIGNAL)
         self.assertIn('Some("declined")', INFRA_SIGNAL)
         self.assertIn("let (campaign_status, campaign_disposition) = match next_status", INFRA_SIGNAL)
-        self.assertIn("viryaos_beacon_campaigns.status='partner' THEN 'partner'", INFRA_SIGNAL)
+        self.assertIn("beacon_campaigns.status='partner' THEN 'partner'", INFRA_SIGNAL)
         self.assertIn("status NOT IN ('suppressed','closed')", INFRA_SIGNAL)
-        self.assertIn("viryaos_beacon_campaigns.status='declined' THEN 'declined'", INFRA_SIGNAL)
+        self.assertIn("beacon_campaigns.status='declined' THEN 'declined'", INFRA_SIGNAL)
         self.assertNotIn("let campaign_status = match payload.action", INFRA_SIGNAL)
         self.assertIn("crowdrelay.beacon.signal_engagement_recorded", INFRA_SIGNAL)
 
@@ -98,7 +98,7 @@ class BeaconSignalModeV2Contract(unittest.TestCase):
         self.assertIn("valid_press_url", ADMIN)
         self.assertIn("crowdrelay.beacon.coverage_submitted", INFRA_SIGNAL)
         self.assertIn("crowdrelay.beacon.press_request_resolved", ADMIN)
-        self.assertIn("viryaos_beacon_press_assets", MEMBER)
+        self.assertIn("beacon_press_assets", MEMBER)
         self.assertIn("PressRoomEventView", MEMBER)
         self.assertIn("event.description", MEMBER)
         self.assertIn("event.trailer_url", MEMBER)
@@ -144,7 +144,7 @@ class BeaconSignalModeV2Contract(unittest.TestCase):
 
     def test_leave_is_channel_scoped_unless_global_dnc_is_explicit(self) -> None:
         self.assertIn("do_not_contact: bool", LIFECYCLE)
-        self.assertIn("UPDATE viryaos_beacon_signal_sessions", INFRA_SIGNAL)
+        self.assertIn("UPDATE beacon_signal_sessions", INFRA_SIGNAL)
         self.assertIn("audience_kind='beacon'", INFRA_SIGNAL)
         self.assertIn("if command.do_not_contact", INFRA_SIGNAL)
         self.assertIn("accepts_outreach=false,do_not_contact=true", INFRA_SIGNAL)

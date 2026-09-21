@@ -217,7 +217,7 @@ async fn an_active_release_projects_into_the_supply_chain() -> Result<(), Box<dy
 
     let (occurred, expires, active): (OffsetDateTime, OffsetDateTime, bool) = sqlx::query_as(
         "SELECT occurred_at, expires_at, active
-         FROM viryaos_content_sources
+         FROM content_sources
          WHERE workspace_id=$1 AND source_kind='release' AND source_key=$2",
     )
     .bind(fixture.workspace_id.into_uuid())
@@ -239,7 +239,7 @@ async fn an_active_release_projects_into_the_supply_chain() -> Result<(), Box<dy
         "SELECT metadata->>'tier', metadata->>'listen_url',
                 (metadata->>'communication_enabled')::boolean,
                 (metadata->>'press_enabled')::boolean
-         FROM viryaos_content_sources
+         FROM content_sources
          WHERE workspace_id=$1 AND source_kind='release' AND source_key=$2",
     )
     .bind(fixture.workspace_id.into_uuid())
@@ -268,7 +268,7 @@ async fn an_active_release_projects_into_the_supply_chain() -> Result<(), Box<dy
         )
         .await?;
     let dormant: bool = sqlx::query_scalar(
-        "SELECT active FROM viryaos_content_sources
+        "SELECT active FROM content_sources
          WHERE workspace_id=$1 AND source_key=$2",
     )
     .bind(fixture.workspace_id.into_uuid())
@@ -303,7 +303,7 @@ async fn an_active_release_projects_into_the_supply_chain() -> Result<(), Box<dy
         "SELECT count(*)::bigint, bool_and(active),
                 max(title), max(metadata->>'tier'),
                 bool_and((metadata->>'press_enabled')::boolean)
-         FROM viryaos_content_sources
+         FROM content_sources
          WHERE workspace_id=$1 AND source_key=$2",
     )
     .bind(fixture.workspace_id.into_uuid())
@@ -351,7 +351,7 @@ async fn a_flag_flip_defeats_a_queued_release_artifact() -> Result<(), Box<dyn s
         )
         .await?;
     let (source_id, source_version): (uuid::Uuid, i64) = sqlx::query_as(
-        "SELECT id, version FROM viryaos_content_sources
+        "SELECT id, version FROM content_sources
          WHERE workspace_id=$1 AND source_kind='release' AND source_key=$2",
     )
     .bind(fixture.workspace_id.into_uuid())
@@ -364,7 +364,7 @@ async fn a_flag_flip_defeats_a_queued_release_artifact() -> Result<(), Box<dyn s
     let decision_id = uuid::Uuid::now_v7();
     let action_id = uuid::Uuid::now_v7();
     sqlx::query(
-        r#"INSERT INTO viryaos_autopilot_decisions
+        r#"INSERT INTO autopilot_decisions
            (id, workspace_id, decision_key, context, subject_kind, subject_id,
             decision_kind, confidence_basis_points, disposition, reason,
             input_snapshot, policy_snapshot, recommendation, evaluated_at, trace_id)
@@ -379,7 +379,7 @@ async fn a_flag_flip_defeats_a_queued_release_artifact() -> Result<(), Box<dyn s
     .execute(&fixture.pool)
     .await?;
     sqlx::query(
-        r#"INSERT INTO viryaos_autopilot_actions
+        r#"INSERT INTO autopilot_actions
            (id, workspace_id, decision_id, context, action_kind, subject_kind,
             subject_id, idempotency_key, payload, status,
             approved_at, approved_by, available_at)
@@ -463,7 +463,7 @@ async fn run_release_milestone(
     let decision_id = uuid::Uuid::now_v7();
     let action_id = uuid::Uuid::now_v7();
     sqlx::query(
-        r#"INSERT INTO viryaos_autopilot_decisions
+        r#"INSERT INTO autopilot_decisions
            (id, workspace_id, decision_key, context, subject_kind, subject_id,
             decision_kind, confidence_basis_points, disposition, reason,
             input_snapshot, policy_snapshot, recommendation, evaluated_at, trace_id)
@@ -478,7 +478,7 @@ async fn run_release_milestone(
     .execute(&fixture.pool)
     .await?;
     sqlx::query(
-        r#"INSERT INTO viryaos_autopilot_actions
+        r#"INSERT INTO autopilot_actions
            (id, workspace_id, decision_id, context, action_kind, subject_kind,
             subject_id, idempotency_key, payload, status,
             approved_at, approved_by, available_at)
@@ -660,7 +660,7 @@ async fn the_sustain_milestone_writes_the_r3_report_and_binds_the_release_campai
     // emit returns Unavailable and the whole sustain arm rolls back. The R+3
     // report rides show.escalation, same delivery class as the T+7 report.
     sqlx::query(
-        "INSERT INTO viryaos_executor_instances (
+        "INSERT INTO executor_instances (
             workspace_id, executor_id, version, manifest_sha, observed_at, expires_at
         ) VALUES ($1,'n8n-r3-test','test','test-manifest',$2,$3)",
     )
@@ -670,7 +670,7 @@ async fn the_sustain_milestone_writes_the_r3_report_and_binds_the_release_campai
     .execute(&fixture.pool)
     .await?;
     sqlx::query(
-        "INSERT INTO viryaos_executor_capabilities (
+        "INSERT INTO executor_capabilities (
             workspace_id, executor_id, capability, capability_version, observed_at, expires_at
         ) VALUES ($1,'n8n-r3-test','show.escalation','1',$2,$3)",
     )
@@ -690,7 +690,7 @@ async fn the_sustain_milestone_writes_the_r3_report_and_binds_the_release_campai
     .await?;
 
     let sustain_done: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM viryaos_release_milestones
+        "SELECT EXISTS(SELECT 1 FROM release_milestones
          WHERE workspace_id=$1 AND release_id=$2 AND milestone='sustain')",
     )
     .bind(fixture.workspace_id.into_uuid())
@@ -829,7 +829,7 @@ async fn a_held_milestone_dedupes_in_week_and_refires_after_it_clears()
 -> Result<(), Box<dyn std::error::Error>> {
     let fixture = fixture("refire").await?;
     sqlx::query(
-        "INSERT INTO viryaos_autopilot_policies
+        "INSERT INTO autopilot_policies
          (workspace_id, context, enabled, autonomy_level, max_actions_24h)
          VALUES ($1, 'release', true, 'require_approval', 10)
          ON CONFLICT (workspace_id, context) DO UPDATE
@@ -904,7 +904,7 @@ async fn a_held_milestone_dedupes_in_week_and_refires_after_it_clears()
         "a re-evaluated hold dedupes against the row it already wrote"
     );
     let decisions = sqlx::query_scalar::<_, i64>(
-        "SELECT count(*) FROM viryaos_autopilot_decisions WHERE workspace_id=$1",
+        "SELECT count(*) FROM autopilot_decisions WHERE workspace_id=$1",
     )
     .bind(fixture.workspace_id.into_uuid())
     .fetch_one(&fixture.pool)
@@ -941,7 +941,7 @@ async fn a_held_milestone_dedupes_in_week_and_refires_after_it_clears()
 async fn a_held_milestone_is_not_growth_debt() -> Result<(), Box<dyn std::error::Error>> {
     let fixture = fixture("debt").await?;
     sqlx::query(
-        "INSERT INTO viryaos_autopilot_policies
+        "INSERT INTO autopilot_policies
          (workspace_id, context, enabled, autonomy_level, max_actions_24h)
          VALUES ($1, 'release', true, 'require_approval', 10)
          ON CONFLICT (workspace_id, context) DO UPDATE

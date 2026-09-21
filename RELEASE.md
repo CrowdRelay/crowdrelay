@@ -1,6 +1,6 @@
 # CrowdRelay 1.0.0
 
-CrowdRelay 1.0.0 is the stable service-contract release of the backend and ViryaOS operations plane.
+CrowdRelay 1.0.0 is the stable service-contract release of the backend and CrowdRelay operations plane.
 
 ## 1.x compatibility promise
 

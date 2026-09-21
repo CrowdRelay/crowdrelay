@@ -56,7 +56,7 @@ async fn decision(
     let id = Uuid::now_v7();
     sqlx::query(
         r#"
-        INSERT INTO viryaos_autopilot_decisions (
+        INSERT INTO autopilot_decisions (
             id, workspace_id, decision_key, context, subject_kind, subject_id,
             decision_kind, confidence_basis_points, disposition, reason,
             input_snapshot, policy_snapshot, recommendation, evaluated_at, trace_id
@@ -87,7 +87,7 @@ async fn pending_action(
     let decision_id = decision(pool, workspace_id, subject_id).await?;
     sqlx::query(
         r#"
-        INSERT INTO viryaos_autopilot_actions (
+        INSERT INTO autopilot_actions (
             id, workspace_id, decision_id, context, action_kind, subject_kind, subject_id,
             idempotency_key, payload, status, available_at, approval_expires_at
         ) VALUES ($1,$2,$3,'booking_opportunity',$4,'content_suggestion',$5,
@@ -121,7 +121,7 @@ async fn slipped_action(
     let decision_id = decision(pool, workspace_id, subject_id).await?;
     sqlx::query(
         r#"
-        INSERT INTO viryaos_autopilot_actions (
+        INSERT INTO autopilot_actions (
             id, workspace_id, decision_id, context, action_kind, subject_kind, subject_id,
             idempotency_key, payload, status, available_at, finished_at, last_error_kind
         ) VALUES ($1,$2,$3,'booking_opportunity',$4,'content_suggestion',$5,
@@ -149,8 +149,8 @@ async fn briefing(
     local_date: Date,
 ) -> Result<(), Box<dyn std::error::Error>> {
     sqlx::query(
-        "INSERT INTO viryaos_daily_briefings (workspace_id, local_date, title, body)
-         VALUES ($1, $2, 'ViryaOS — morning briefing', 'a briefing body')",
+        "INSERT INTO daily_briefings (workspace_id, local_date, title, body)
+         VALUES ($1, $2, 'CrowdRelay — morning briefing', 'a briefing body')",
     )
     .bind(workspace_id)
     .bind(local_date)
@@ -168,7 +168,7 @@ async fn north_star_day(
     value: i32,
 ) -> Result<(), Box<dyn std::error::Error>> {
     sqlx::query(
-        "INSERT INTO viryaos_autopilot_cycle_runs
+        "INSERT INTO autopilot_cycle_runs
              (id, workspace_id, trigger, started_at, finished_at, outcome, north_star_value)
          VALUES ($1, $2, 'scheduled', $3, $3 + INTERVAL '1 minute', 'succeeded', $4)",
     )

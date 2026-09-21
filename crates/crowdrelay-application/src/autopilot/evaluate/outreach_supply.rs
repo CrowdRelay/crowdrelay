@@ -6,7 +6,7 @@
 //! The one decision that keeps the pitcher from looping over an empty table.
 //!
 //! Every outreach capability the executor advertises reads from
-//! `viryaos_outreach_targets`. Discovery fills that table, but discovery has
+//! `outreach_targets`. Discovery fills that table, but discovery has
 //! only ever been an inbound endpoint: something outside had to decide to run
 //! it. That made zero targets a stable state rather than a problem the agent
 //! could notice, which is the difference between a growth engine and a very

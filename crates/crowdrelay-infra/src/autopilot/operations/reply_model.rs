@@ -1,7 +1,7 @@
 //! Reply probability model repository — persistence and loading for the
 //! hierarchical Beta-Bernoulli P(positive reply) model.
 //!
-//! The model is stored as a serialized jsonb blob in `viryaos_brain_state`
+//! The model is stored as a serialized jsonb blob in `brain_state`
 //! with `module = 'reply_probability'`, following the same pattern as the
 //! causal model checkpoint. On load, the checkpoint is deserialized and
 //! updated from outreach interaction outcomes observed since the checkpoint
@@ -133,13 +133,13 @@ pub(in crate::autopilot) async fn load_outreach_reply_outcomes(
                     reply.occurred_at,
                     outbound.occurred_at + INTERVAL '30 days'
                 ) AS observed_at
-            FROM viryaos_outreach_interactions AS outbound
-            JOIN viryaos_outreach_targets AS target
+            FROM outreach_interactions AS outbound
+            JOIN outreach_targets AS target
               ON target.workspace_id = outbound.workspace_id
              AND target.id = outbound.target_id
             LEFT JOIN LATERAL (
                 SELECT interaction.disposition, interaction.occurred_at
-                FROM viryaos_outreach_interactions AS interaction
+                FROM outreach_interactions AS interaction
                 WHERE interaction.workspace_id = outbound.workspace_id
                   AND interaction.target_id = outbound.target_id
                   AND interaction.direction = 'inbound'

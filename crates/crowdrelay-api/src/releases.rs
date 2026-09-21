@@ -392,12 +392,12 @@ async fn announce_release_inner(
     .await
     .map_err(|_| AnnounceReleaseError::Unavailable)?;
 
-    // Feed the trusted release fact into ViryaOS Content Supply inside the
+    // Feed the trusted release fact into CrowdRelay Content Supply inside the
     // same transaction. This is a projection only; Rust policy still decides
     // which artifacts are due and n8n only executes the resulting request.
     sqlx::query(
         r#"
-        INSERT INTO viryaos_content_sources(
+        INSERT INTO content_sources(
             workspace_id,source_kind,source_key,title,occurred_at,expires_at,metadata,active
         ) VALUES(
             $1,'release',$2,$3,
@@ -408,13 +408,13 @@ async fn announce_release_inner(
         ON CONFLICT(workspace_id,source_kind,source_key) DO UPDATE SET
             title=EXCLUDED.title,
             occurred_at=EXCLUDED.occurred_at,
-            expires_at=GREATEST(viryaos_content_sources.expires_at,EXCLUDED.expires_at),
+            expires_at=GREATEST(content_sources.expires_at,EXCLUDED.expires_at),
             -- The sync workers key the same `spotify:{id}` row and carry the
             -- provider fields (url, body, origin); merge so an announce cannot
             -- strip them — shared keys take the operator's write.
-            metadata=viryaos_content_sources.metadata||EXCLUDED.metadata,
+            metadata=content_sources.metadata||EXCLUDED.metadata,
             active=true,
-            version=viryaos_content_sources.version+1
+            version=content_sources.version+1
         "#,
     )
     .bind(workspace_id)

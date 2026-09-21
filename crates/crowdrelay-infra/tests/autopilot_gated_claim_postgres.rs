@@ -46,7 +46,7 @@ async fn gated_actions_are_parked_without_spending_an_attempt()
     // operator has not switched on.
     sqlx::query(
         r#"
-        INSERT INTO viryaos_executor_instances (
+        INSERT INTO executor_instances (
             workspace_id, executor_id, version, manifest_sha, observed_at, expires_at
         ) VALUES ($1,'n8n-gated-test','test','test-manifest',$2,$3)
         "#,
@@ -166,7 +166,7 @@ async fn gated_actions_are_parked_without_spending_an_attempt()
     assert_eq!(attempts, 1);
 
     // The test database is disposable (CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL),
-    // so we skip workspace cleanup. The viryaos_action_ledger is append-only
+    // so we skip workspace cleanup. The action_ledger is append-only
     // (a trigger rejects DELETE), and it has ON DELETE RESTRICT on workspace_id,
     // so deleting the workspace would fail once any action has been claimed
     // and recorded in the ledger.
@@ -181,7 +181,7 @@ async fn advertise(
 ) -> Result<(), Box<dyn std::error::Error>> {
     sqlx::query(
         r#"
-        INSERT INTO viryaos_executor_capabilities (
+        INSERT INTO executor_capabilities (
             workspace_id, executor_id, capability, capability_version, observed_at, expires_at
         ) VALUES ($1,'n8n-gated-test',$2,'1',$3,$4)
         "#,
@@ -202,7 +202,7 @@ async fn action_state(
     let row = sqlx::query_as::<_, (String, i32, Option<String>, bool)>(
         r#"
         SELECT status, attempt_count, last_error_kind, available_at > now()
-        FROM viryaos_autopilot_actions
+        FROM autopilot_actions
         WHERE id = $1
         "#,
     )
@@ -224,7 +224,7 @@ async fn seed_action(
     let subject_id = Uuid::now_v7();
     sqlx::query(
         r#"
-        INSERT INTO viryaos_autopilot_decisions (
+        INSERT INTO autopilot_decisions (
             id, workspace_id, decision_key, context, subject_kind, subject_id,
             decision_kind, confidence_basis_points, disposition, reason,
             input_snapshot, policy_snapshot, recommendation, evaluated_at, trace_id
@@ -243,7 +243,7 @@ async fn seed_action(
 
     sqlx::query(
         r#"
-        INSERT INTO viryaos_autopilot_actions (
+        INSERT INTO autopilot_actions (
             id, workspace_id, decision_id, context, action_kind, subject_kind, subject_id,
             idempotency_key, payload, status, approved_at, approved_by, available_at
         ) VALUES ($1,$2,$3,'content_supply',$4,'test_subject',$5,$6,$7,
@@ -309,7 +309,7 @@ async fn the_posture_names_missing_lanes_and_what_they_park()
     // One executor, one advertised lane.
     sqlx::query(
         r#"
-        INSERT INTO viryaos_executor_instances (
+        INSERT INTO executor_instances (
             workspace_id, executor_id, version, manifest_sha, observed_at, expires_at
         ) VALUES ($1,'n8n-gated-test','test','test-manifest',$2,$3)
         "#,
@@ -340,7 +340,7 @@ async fn the_posture_names_missing_lanes_and_what_they_park()
     )
     .await?;
     sqlx::query(
-        "UPDATE viryaos_autopilot_actions SET last_error_kind = 'awaiting_executor'
+        "UPDATE autopilot_actions SET last_error_kind = 'awaiting_executor'
          WHERE workspace_id = $1",
     )
     .bind(workspace_id.into_uuid())
@@ -389,7 +389,7 @@ async fn the_posture_names_missing_lanes_and_what_they_park()
     // A breaker holding the only executor open turns the lane blocked — not
     // missing, because the lane exists and something measurable holds it.
     sqlx::query(
-        "INSERT INTO viryaos_executor_circuit_breakers
+        "INSERT INTO executor_circuit_breakers
             (workspace_id, executor_id, failure_count, last_failure_at, guarded_until, reason)
          VALUES ($1, 'n8n-gated-test', 3, $2, $3, 'consecutive_failures')",
     )

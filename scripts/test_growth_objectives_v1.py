@@ -73,7 +73,7 @@ class GrowthObjectivesContract(unittest.TestCase):
         for column in ("state", "progress_basis_points", "projected_value"):
             self.assertNotIn(f"{column} text", self.sql)
             self.assertNotIn(f"{column} integer", self.sql)
-        self.assertNotIn("UPDATE viryaos_growth_objectives\n                SET state", self.infra)
+        self.assertNotIn("UPDATE growth_objectives\n                SET state", self.infra)
         loader = self.infra.split("async fn load_growth_objectives", 1)[1]
         self.assertIn("assess_objective(", loader)
 
@@ -81,7 +81,7 @@ class GrowthObjectivesContract(unittest.TestCase):
         self.assertIn("baseline_value bigint NOT NULL", self.sql)
         declare = self.infra.split("async fn declare_growth_objective", 1)[1]
         frozen = declare.index("latest_series_value")
-        inserted = declare.index("INSERT INTO viryaos_growth_objectives")
+        inserted = declare.index("INSERT INTO growth_objectives")
         self.assertLess(frozen, inserted)
         self.assertIn(
             "Progress measured from a baseline that\n-- moves is not progress",
@@ -103,7 +103,7 @@ class GrowthObjectivesContract(unittest.TestCase):
         `NOT NULL` and every reader of the row is entitled to trust it.
         """
         declare = self.infra.split("async fn declare_growth_objective", 1)[1]
-        insert = declare.index("INSERT INTO viryaos_growth_objectives")
+        insert = declare.index("INSERT INTO growth_objectives")
         refusal = declare.index("RepositoryError::ConflictBecause")
         self.assertLess(
             refusal,
@@ -171,7 +171,7 @@ class GrowthObjectivesContract(unittest.TestCase):
 
     def test_a_retired_target_is_kept_not_deleted(self) -> None:
         self.assertIn("retired_at timestamptz", self.sql)
-        self.assertNotIn("DELETE FROM viryaos_growth_objectives", self.infra)
+        self.assertNotIn("DELETE FROM growth_objectives", self.infra)
         retire = self.infra.split("async fn retire_growth_objective", 1)[1]
         self.assertIn("SET retired_at = now()", retire)
 

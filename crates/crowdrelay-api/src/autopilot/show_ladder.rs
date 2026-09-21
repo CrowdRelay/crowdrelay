@@ -104,7 +104,7 @@ pub async fn show_ladder(
         FROM events AS event
         LEFT JOIN LATERAL (
             SELECT approval.approved_at, approval.approved_by, approval.revoked_at
-            FROM viryaos_show_ladder_approvals AS approval
+            FROM show_ladder_approvals AS approval
             WHERE approval.workspace_id = event.workspace_id
               AND approval.event_id = event.id
             ORDER BY approval.approved_at DESC, approval.id DESC
@@ -145,7 +145,7 @@ pub async fn show_ladder(
                action.approved_by,
                action.payload,
                action.payload ->> 'lever' AS lever
-        FROM viryaos_autopilot_actions AS action
+        FROM autopilot_actions AS action
         WHERE action.workspace_id = $1
           AND action.context = 'show_growth'
           AND action.subject_kind = 'event'

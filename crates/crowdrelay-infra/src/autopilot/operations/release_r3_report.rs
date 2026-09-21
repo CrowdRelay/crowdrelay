@@ -8,7 +8,7 @@
 //! names what cannot be claimed — streams above all, since no platform play
 //! count reaches this system. A recipient can repeat every figure.
 //!
-//! Every report also lands a `viryaos_release_outcomes` row (1R.12): the
+//! Every report also lands a `release_outcomes` row (1R.12): the
 //! outbox payload reaches the band, but learning needs a row it can join —
 //! tier × timing × verdict — from the first release onward.
 
@@ -41,7 +41,7 @@ fn event_type(kind: &str) -> &'static str {
 }
 
 /// Emits the report inside the milestone transaction and persists the same
-/// figures as a `viryaos_release_outcomes` row. The caller's row lock already
+/// figures as a `release_outcomes` row. The caller's row lock already
 /// proved the plan is live and the milestone due; the report reads the
 /// campaign binding lazily so a plan whose listen_url arrived late still
 /// names the gap rather than skipping it.
@@ -70,7 +70,7 @@ pub(in crate::autopilot) async fn issue_release_outcome_report(
     // tier × timing × outcome join, and it only exists if collected before
     // the sample is large enough to read.
     let tier = sqlx::query_scalar::<_, String>(
-        "SELECT tier FROM viryaos_release_plans WHERE workspace_id = $1 AND id = $2",
+        "SELECT tier FROM release_plans WHERE workspace_id = $1 AND id = $2",
     )
     .bind(workspace_id.into_uuid())
     .bind(release_id.into_uuid())
@@ -119,7 +119,7 @@ pub(in crate::autopilot) async fn issue_release_outcome_report(
         "#,
     )
     .bind(workspace_id.into_uuid())
-    .bind(format!("viryaos-release-{release_id}-%"))
+    .bind(format!("crowdrelay-release-{release_id}-%"))
     .fetch_all(&mut **tx)
     .await
     .map_err(map_sqlx)?;
@@ -316,7 +316,7 @@ pub(in crate::autopilot) async fn issue_release_outcome_report(
                 "sustain",
             ]
             .iter()
-            .map(|phase| format!("viryaos-release-{release_id}-{phase}"))
+            .map(|phase| format!("crowdrelay-release-{release_id}-{phase}"))
             .collect::<Vec<_>>(),
         )
         .fetch_one(&mut **tx)
@@ -378,7 +378,7 @@ pub(in crate::autopilot) async fn issue_release_outcome_report(
     // upserts on the milestone key so a re-fired send cannot double-count.
     sqlx::query(
         r#"
-        INSERT INTO viryaos_release_outcomes (
+        INSERT INTO release_outcomes (
             workspace_id, release_id, report_kind, tier, release_at,
             generated_at, window_days, verdict, action_id, payload
         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)

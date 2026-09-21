@@ -62,7 +62,7 @@ async fn fixture(label: &str) -> Result<Fixture, Box<dyn std::error::Error>> {
     let opportunity_id = TeamOpportunityId::new();
     sqlx::query(
         r#"
-        INSERT INTO viryaos_team_opportunities (
+        INSERT INTO team_opportunities (
             id, workspace_id, opportunity_kind, source, external_key, title, organization,
             verified_destination, fit_basis_points, confidence_basis_points, currency,
             expected_fee_minor, estimated_cost_minor, event_starts_at, status
@@ -122,7 +122,7 @@ async fn record(
 async fn ladder(fixture: &Fixture) -> Result<(i64, i64, i64, String), Box<dyn std::error::Error>> {
     Ok(sqlx::query_as::<_, (i64, i64, i64, String)>(
         "SELECT walk_away_minor, target_minor, opening_ask_minor, state
-         FROM viryaos_team_opportunity_terms WHERE workspace_id=$1 AND opportunity_id=$2",
+         FROM team_opportunity_terms WHERE workspace_id=$1 AND opportunity_id=$2",
     )
     .bind(fixture.workspace_id.into_uuid())
     .bind(fixture.opportunity_id.into_uuid())
@@ -153,7 +153,7 @@ async fn the_ladder_is_computed_once_and_survives_a_better_offer()
     // the agent looks again, and the numbers the last counter was argued from
     // do not move under it.
     sqlx::query(
-        "UPDATE viryaos_team_opportunity_terms SET state='countered', countered_fee_minor=$3, \
+        "UPDATE team_opportunity_terms SET state='countered', countered_fee_minor=$3, \
          counter_rounds=1 WHERE workspace_id=$1 AND opportunity_id=$2",
     )
     .bind(fixture.workspace_id.into_uuid())
@@ -175,7 +175,7 @@ async fn the_ladder_is_computed_once_and_survives_a_better_offer()
     );
     assert_eq!(improved.3, "proposed");
     let rounds = sqlx::query_scalar::<_, i32>(
-        "SELECT counter_rounds FROM viryaos_team_opportunity_terms \
+        "SELECT counter_rounds FROM team_opportunity_terms \
          WHERE workspace_id=$1 AND opportunity_id=$2",
     )
     .bind(fixture.workspace_id.into_uuid())
@@ -202,7 +202,7 @@ async fn a_withdrawal_settles_it_and_nothing_reopens_it() -> Result<(), Box<dyn 
     .await?;
     record(&fixture, PromoterPosition::Withdrawn, "terms-withdrawn").await?;
     let settled = sqlx::query_as::<_, (String, Option<String>)>(
-        "SELECT state, settled_reason FROM viryaos_team_opportunity_terms \
+        "SELECT state, settled_reason FROM team_opportunity_terms \
          WHERE workspace_id=$1 AND opportunity_id=$2",
     )
     .bind(fixture.workspace_id.into_uuid())
@@ -328,7 +328,7 @@ async fn the_floor_still_holds_when_the_move_is_finally_sent()
         )
         .await?;
     let after = sqlx::query_as::<_, (String, Option<i64>, i32)>(
-        "SELECT state, countered_fee_minor, counter_rounds FROM viryaos_team_opportunity_terms \
+        "SELECT state, countered_fee_minor, counter_rounds FROM team_opportunity_terms \
          WHERE workspace_id=$1 AND opportunity_id=$2",
     )
     .bind(fixture.workspace_id.into_uuid())
@@ -358,12 +358,10 @@ async fn the_floor_still_holds_when_the_move_is_finally_sent()
 /// queued. Only the in-flight uniqueness index cares, and it is right to: one
 /// live move per opportunity at a time is exactly the rule.
 async fn retire(fixture: &Fixture, action_id: Uuid) -> Result<(), Box<dyn std::error::Error>> {
-    sqlx::query(
-        "UPDATE viryaos_autopilot_actions SET status='failed', finished_at=now() WHERE id=$1",
-    )
-    .bind(action_id)
-    .execute(&fixture.pool)
-    .await?;
+    sqlx::query("UPDATE autopilot_actions SET status='failed', finished_at=now() WHERE id=$1")
+        .bind(action_id)
+        .execute(&fixture.pool)
+        .await?;
     Ok(())
 }
 
@@ -375,7 +373,7 @@ async fn queue_action(
     let decision_id = Uuid::now_v7();
     sqlx::query(
         r#"
-        INSERT INTO viryaos_autopilot_decisions (
+        INSERT INTO autopilot_decisions (
             id, workspace_id, decision_key, context, subject_kind, subject_id,
             decision_kind, confidence_basis_points, disposition, reason,
             input_snapshot, policy_snapshot, recommendation
@@ -394,7 +392,7 @@ async fn queue_action(
     let action_id = Uuid::now_v7();
     sqlx::query(
         r#"
-        INSERT INTO viryaos_autopilot_actions (
+        INSERT INTO autopilot_actions (
             id, workspace_id, decision_id, context, action_kind, subject_kind, subject_id,
             idempotency_key, payload, status, action_class, attempt_count, started_at
         )
@@ -462,7 +460,7 @@ async fn the_floor_cites_the_counterpartys_precedent_and_the_market()
     // says which of them bound, so the drafted counter can cite it.
     let fixture = fixture("terms-floor-basis").await?;
     sqlx::query(
-        "UPDATE viryaos_team_opportunities SET contact_email='booker@promoter.example', \
+        "UPDATE team_opportunities SET contact_email='booker@promoter.example', \
          organization='Promoter Co' WHERE workspace_id=$1 AND id=$2",
     )
     .bind(fixture.workspace_id.into_uuid())
@@ -476,7 +474,7 @@ async fn the_floor_cites_the_counterpartys_precedent_and_the_market()
     let prior_opportunity = TeamOpportunityId::new();
     sqlx::query(
         r#"
-        INSERT INTO viryaos_team_opportunities (
+        INSERT INTO team_opportunities (
             id, workspace_id, opportunity_kind, source, external_key, title, organization,
             contact_email, verified_destination, fit_basis_points, confidence_basis_points,
             currency, expected_fee_minor, estimated_cost_minor, event_starts_at, status
@@ -494,7 +492,7 @@ async fn the_floor_cites_the_counterpartys_precedent_and_the_market()
     .await?;
     sqlx::query(
         r#"
-        INSERT INTO viryaos_team_opportunity_terms (
+        INSERT INTO team_opportunity_terms (
             workspace_id, opportunity_id, state, currency, offered_fee_minor,
             walk_away_minor, target_minor, opening_ask_minor, countered_fee_minor,
             responds_by, settled_at
@@ -519,7 +517,7 @@ async fn the_floor_cites_the_counterpartys_precedent_and_the_market()
     .await?;
     let row = sqlx::query_as::<_, (i64, String, Option<i64>, Option<i64>)>(
         "SELECT walk_away_minor, floor_basis, prior_fee_minor, market_floor_minor \
-         FROM viryaos_team_opportunity_terms WHERE workspace_id=$1 AND opportunity_id=$2",
+         FROM team_opportunity_terms WHERE workspace_id=$1 AND opportunity_id=$2",
     )
     .bind(fixture.workspace_id.into_uuid())
     .bind(fixture.opportunity_id.into_uuid())
@@ -569,7 +567,7 @@ async fn the_floor_cites_the_counterpartys_precedent_and_the_market()
     .await?;
     let target_id = Uuid::now_v7();
     sqlx::query(
-        "INSERT INTO viryaos_booking_targets \
+        "INSERT INTO booking_targets \
          (id, workspace_id, city_id, target_kind, display_name, contact_email) \
          VALUES ($3,$1,$2,'promoter','Promoter Co','booker@promoter.example')",
     )
@@ -579,7 +577,7 @@ async fn the_floor_cites_the_counterpartys_precedent_and_the_market()
     .execute(&fixture.pool)
     .await?;
     sqlx::query(
-        "INSERT INTO viryaos_booking_target_venues (workspace_id, target_id, venue_id) \
+        "INSERT INTO booking_target_venues (workspace_id, target_id, venue_id) \
          VALUES ($1,$2,$3)",
     )
     .bind(fixture.workspace_id.into_uuid())
@@ -624,7 +622,7 @@ async fn the_floor_cites_the_counterpartys_precedent_and_the_market()
     let next_opportunity = TeamOpportunityId::new();
     sqlx::query(
         r#"
-        INSERT INTO viryaos_team_opportunities (
+        INSERT INTO team_opportunities (
             id, workspace_id, opportunity_kind, source, external_key, title, organization,
             contact_email, verified_destination, fit_basis_points, confidence_basis_points,
             currency, expected_fee_minor, estimated_cost_minor, event_starts_at, status
@@ -656,7 +654,7 @@ async fn the_floor_cites_the_counterpartys_precedent_and_the_market()
         .await?;
     let row = sqlx::query_as::<_, (i64, String, Option<i64>, Option<i64>)>(
         "SELECT walk_away_minor, floor_basis, prior_fee_minor, market_floor_minor \
-         FROM viryaos_team_opportunity_terms WHERE workspace_id=$1 AND opportunity_id=$2",
+         FROM team_opportunity_terms WHERE workspace_id=$1 AND opportunity_id=$2",
     )
     .bind(fixture.workspace_id.into_uuid())
     .bind(next_opportunity.into_uuid())
@@ -729,7 +727,7 @@ async fn terminal_progress_writes_the_reason_and_refuses_to_close_silently()
         )
         .await?;
     let (status, reason): (String, Option<String>) = sqlx::query_as(
-        "SELECT status, status_reason FROM viryaos_team_opportunities \
+        "SELECT status, status_reason FROM team_opportunities \
          WHERE workspace_id=$1 AND id=$2",
     )
     .bind(fixture.workspace_id.into_uuid())
@@ -760,7 +758,7 @@ async fn terminal_progress_writes_the_reason_and_refuses_to_close_silently()
     let fresh_id = TeamOpportunityId::new();
     sqlx::query(
         r#"
-        INSERT INTO viryaos_team_opportunities (
+        INSERT INTO team_opportunities (
             id, workspace_id, opportunity_kind, source, external_key, title, organization,
             verified_destination, fit_basis_points, confidence_basis_points, currency,
             expected_fee_minor, estimated_cost_minor, event_starts_at, status
@@ -794,7 +792,7 @@ async fn terminal_progress_writes_the_reason_and_refuses_to_close_silently()
         )
         .await?;
     let (status, reason): (String, Option<String>) = sqlx::query_as(
-        "SELECT status, status_reason FROM viryaos_team_opportunities \
+        "SELECT status, status_reason FROM team_opportunities \
          WHERE workspace_id=$1 AND id=$2",
     )
     .bind(fixture.workspace_id.into_uuid())
@@ -921,7 +919,7 @@ async fn a_won_festival_slot_becomes_the_draft_show() -> Result<(), Box<dyn std:
     let festival_id = TeamOpportunityId::new();
     sqlx::query(
         r#"
-        INSERT INTO viryaos_team_opportunities (
+        INSERT INTO team_opportunities (
             id, workspace_id, opportunity_kind, source, external_key, title, organization,
             verified_destination, fit_basis_points, confidence_basis_points, currency,
             expected_fee_minor, estimated_cost_minor, event_starts_at, status
@@ -946,7 +944,7 @@ async fn a_won_festival_slot_becomes_the_draft_show() -> Result<(), Box<dyn std:
     let grant_id = TeamOpportunityId::new();
     sqlx::query(
         r#"
-        INSERT INTO viryaos_team_opportunities (
+        INSERT INTO team_opportunities (
             id, workspace_id, opportunity_kind, source, external_key, title, organization,
             verified_destination, fit_basis_points, confidence_basis_points, currency,
             expected_fee_minor, estimated_cost_minor, event_starts_at, status
@@ -1053,7 +1051,7 @@ async fn a_won_festival_slot_becomes_the_draft_show() -> Result<(), Box<dyn std:
     let dateless_id = TeamOpportunityId::new();
     sqlx::query(
         r#"
-        INSERT INTO viryaos_team_opportunities (
+        INSERT INTO team_opportunities (
             id, workspace_id, opportunity_kind, source, external_key, title, organization,
             verified_destination, fit_basis_points, confidence_basis_points, currency,
             expected_fee_minor, estimated_cost_minor, event_starts_at, status

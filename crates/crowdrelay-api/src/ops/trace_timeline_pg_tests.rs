@@ -1,6 +1,6 @@
 // Executes `load_trace_timeline` against a real schema. This endpoint
 // 500'd on every call in production — an arm named a column
-// (`created_at`) that `viryaos_autopilot_decisions` never had — because
+// (`created_at`) that `autopilot_decisions` never had — because
 // the query sat in the sql-result-types *unprepared* baseline and
 // nothing else ever ran it. Preparing is not executing: this test walks
 // a seeded decision→action→measurement→growth-evidence chain through
@@ -42,7 +42,7 @@ mod trace_timeline_postgres_tests {
             .await
             .expect("workspace");
         sqlx::query(
-            r#"INSERT INTO viryaos_autopilot_decisions
+            r#"INSERT INTO autopilot_decisions
                (id, workspace_id, decision_key, context, subject_kind, subject_id,
                 decision_kind, confidence_basis_points, disposition, reason,
                 input_snapshot, policy_snapshot, recommendation, trace_id)
@@ -59,7 +59,7 @@ mod trace_timeline_postgres_tests {
         .await
         .expect("decision");
         sqlx::query(
-            r#"INSERT INTO viryaos_autopilot_actions
+            r#"INSERT INTO autopilot_actions
                (id, workspace_id, decision_id, context, action_kind, subject_kind,
                 subject_id, idempotency_key, payload, status, action_class,
                 trace_id, finished_at)
@@ -76,7 +76,7 @@ mod trace_timeline_postgres_tests {
         .await
         .expect("action");
         sqlx::query(
-            r#"INSERT INTO viryaos_autopilot_measurements
+            r#"INSERT INTO autopilot_measurements
                (id, workspace_id, action_id, measurement_kind, subject_id,
                 action_finished_at, baseline_value, due_at, available_at, trace_id)
                VALUES ($1,$2,$3,'incremental_fan_growth_3d',$3,now(),1.0,
@@ -90,7 +90,7 @@ mod trace_timeline_postgres_tests {
         .await
         .expect("measurement");
         sqlx::query(
-            r#"INSERT INTO viryaos_growth_evidence
+            r#"INSERT INTO growth_evidence
                (workspace_id, action_id, opportunity_id, timestamp, recipient_id,
                 channel, estimated_reach, treatment, propensity, converted,
                 predicted_fans, predicted_signal_installs, context, evidence_quality,

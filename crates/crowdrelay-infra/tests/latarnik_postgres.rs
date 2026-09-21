@@ -283,7 +283,7 @@ async fn run_send(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let (kind, status, payload) = sqlx::query_as::<_, (String, String, serde_json::Value)>(
-        "SELECT action_kind, status, payload FROM viryaos_autopilot_actions
+        "SELECT action_kind, status, payload FROM autopilot_actions
          WHERE workspace_id = $1 AND id = $2",
     )
     .bind(act)
@@ -316,7 +316,7 @@ async fn run_send(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
 
     // O.2 applies here too: an outward send waits before a worker may claim it.
     let available_at = sqlx::query_scalar::<_, OffsetDateTime>(
-        "SELECT available_at FROM viryaos_autopilot_actions WHERE workspace_id = $1 AND id = $2",
+        "SELECT available_at FROM autopilot_actions WHERE workspace_id = $1 AND id = $2",
     )
     .bind(act)
     .bind(action_id)
@@ -450,7 +450,7 @@ async fn beacon(
 ) -> Result<Uuid, Box<dyn std::error::Error>> {
     Ok(sqlx::query_scalar::<_, Uuid>(
         r#"
-        INSERT INTO viryaos_beacons
+        INSERT INTO beacons
             (workspace_id, city_id, beacon_kind, display_name, contact_email,
              active, verified, accepts_outreach, relationship_score)
         VALUES ($1, $2, $3, $4, $5, true, true, $6, $7)
@@ -492,7 +492,7 @@ async fn replied(
     .await?;
     sqlx::query(
         r#"
-        INSERT INTO viryaos_beacon_campaigns
+        INSERT INTO beacon_campaigns
             (workspace_id, beacon_id, event_id, status, last_reply_disposition)
         VALUES ($1, $2, $3, 'contacted', 'received')
         "#,
@@ -515,7 +515,7 @@ async fn contacted(
 ) -> Result<(), Box<dyn std::error::Error>> {
     sqlx::query(
         r#"
-        INSERT INTO viryaos_contact_governor
+        INSERT INTO contact_governor
             (workspace_id, normalized_contact, last_context, last_outbound_at, next_contact_after)
         VALUES ($1, $2, $3, $4, $4)
         "#,

@@ -579,7 +579,7 @@ impl CommunityExecutorWorker {
         if !action_ids.is_empty() {
             sqlx::query(
                 r#"
-                UPDATE viryaos_autopilot_actions
+                UPDATE autopilot_actions
                 SET status = 'unknown',
                     finished_at = NULL,
                     updated_at = now()
@@ -599,9 +599,9 @@ impl CommunityExecutorWorker {
             // or 'failed' via reconciliation.
             sqlx::query(
                 r#"
-                UPDATE viryaos_experiment_assignments AS ea
+                UPDATE experiment_assignments AS ea
                 SET execution_status = 'unknown',
-                    trace_id = COALESCE(ea.trace_id, (SELECT trace_id FROM viryaos_autopilot_actions WHERE id = ea.action_id))
+                    trace_id = COALESCE(ea.trace_id, (SELECT trace_id FROM autopilot_actions WHERE id = ea.action_id))
                 WHERE ea.workspace_id = $1
                   AND ea.action_id = ANY($2)
                   AND ea.execution_status = 'dispatched'
@@ -711,7 +711,7 @@ impl CommunityExecutorWorker {
                                 AND rb.status IN ('revoked', 'done')
                           )
                      THEN 'cancelled' ELSE 'pending' END
-            FROM viryaos_autopilot_actions a
+            FROM autopilot_actions a
             WHERE a.workspace_id = $1
               AND a.action_kind = 'community.engage.request'
               AND a.status = 'succeeded'
@@ -856,7 +856,7 @@ impl CommunityExecutorWorker {
                                       -- the table's CHECK already confines
                                       -- action_class to grantable values.
                                       OR EXISTS (
-                                          SELECT 1 FROM viryaos_standing_approvals sg
+                                          SELECT 1 FROM standing_approvals sg
                                           WHERE sg.workspace_id = c2.workspace_id
                                             AND sg.action_kind = 'community.engage.request'
                                             AND sg.target_key = c2.target_id::text
@@ -873,7 +873,7 @@ impl CommunityExecutorWorker {
                                             -- attempt on nothing attempted.
                                             AND EXISTS (
                                                 SELECT 1
-                                                FROM viryaos_autopilot_policies p
+                                                FROM autopilot_policies p
                                                 WHERE p.workspace_id = c2.workspace_id
                                                   AND p.context = 'outreach'
                                                   AND p.autonomy_level IN
@@ -881,7 +881,7 @@ impl CommunityExecutorWorker {
                                             )
                                             AND NOT EXISTS (
                                                 SELECT 1
-                                                FROM viryaos_growth_autonomy g
+                                                FROM growth_autonomy g
                                                 WHERE g.workspace_id = c2.workspace_id
                                                   AND g.action_class = sg.action_class
                                                   AND g.ceiling IN ('observe', 'recommend')
@@ -924,7 +924,7 @@ impl CommunityExecutorWorker {
                    c.relay_source_id, c.claimed_from,
                    a.trace_id, a.causation_id, a.decision_id
             FROM claimed c
-            LEFT JOIN viryaos_autopilot_actions a ON a.id = c.action_id
+            LEFT JOIN autopilot_actions a ON a.id = c.action_id
             "#,
         )
         .bind(ws)
@@ -1172,7 +1172,7 @@ impl CommunityExecutorWorker {
         // it. Both writes are idempotent (`ON CONFLICT DO NOTHING`, a
         // monotonic from-guard), so rolling them into `posted_tx` only
         // shrinks the window where the record can lie.
-        sqlx::query(r#"INSERT INTO viryaos_reach_events (workspace_id, action_id, recipient_kind, recipient_id, channel, template_id, estimated_reach, status, metadata, trace_id, causation_id) VALUES ($1, $2, 'subreddit_audience', $3, 'reddit_post', 'community-engager', $5, 'delivered', jsonb_build_object('subreddit', $3, 'post_url', $4), $6, $2) ON CONFLICT (action_id, recipient_id, channel) WHERE action_id IS NOT NULL DO NOTHING"#).bind(self.workspace_id.into_uuid()).bind(action.action_id).bind(&action.subreddit).bind(&reddit_result.post_url).bind(100_i32).bind(action.trace_id).execute(&mut *posted_tx).await?; // reach ledger — estimated_reach=100 as a conservative default for subreddit broadcasts (actual subscriber count not available at this layer). causation_id = action_id (the action caused the reach event).
+        sqlx::query(r#"INSERT INTO reach_events (workspace_id, action_id, recipient_kind, recipient_id, channel, template_id, estimated_reach, status, metadata, trace_id, causation_id) VALUES ($1, $2, 'subreddit_audience', $3, 'reddit_post', 'community-engager', $5, 'delivered', jsonb_build_object('subreddit', $3, 'post_url', $4), $6, $2) ON CONFLICT (action_id, recipient_id, channel) WHERE action_id IS NOT NULL DO NOTHING"#).bind(self.workspace_id.into_uuid()).bind(action.action_id).bind(&action.subreddit).bind(&reddit_result.post_url).bind(100_i32).bind(action.trace_id).execute(&mut *posted_tx).await?; // reach ledger — estimated_reach=100 as a conservative default for subreddit broadcasts (actual subscriber count not available at this layer). causation_id = action_id (the action caused the reach event).
         // Transition the experiment assignment execution_status from
         // dispatched → executed. This is the actual execution boundary:
         // the external intervention (Reddit post) has been confirmed.
@@ -1181,9 +1181,9 @@ impl CommunityExecutorWorker {
         // Propagate trace_id from the autopilot action for trace continuity.
         sqlx::query(
             r#"
-            UPDATE viryaos_experiment_assignments
+            UPDATE experiment_assignments
             SET execution_status = 'executed',
-                trace_id = COALESCE(trace_id, (SELECT trace_id FROM viryaos_autopilot_actions WHERE id = $2))
+                trace_id = COALESCE(trace_id, (SELECT trace_id FROM autopilot_actions WHERE id = $2))
             WHERE workspace_id = $1
               AND action_id = $2
               AND execution_status = 'dispatched'

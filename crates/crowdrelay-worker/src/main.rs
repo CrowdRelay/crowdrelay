@@ -385,7 +385,7 @@ async fn run(database: PgPool, config: &Config, standby: bool) -> Result<()> {
         ))
     } else {
         tracing::info!(
-            "ViryaOS autonomous decisioning is disabled; team-email dispatch remains capability-gated"
+            "CrowdRelay autonomous decisioning is disabled; team-email dispatch remains capability-gated"
         );
         None
     };
@@ -671,7 +671,7 @@ async fn run(database: PgPool, config: &Config, standby: bool) -> Result<()> {
     };
     // Growth metric sync: reactive worker that LISTENs on Postgres NOTIFY
     // for new YouTube/Spotify/Reddit connections and syncs subscriber/follower
-    // counts into viryaos_growth_metric_series. No polling — wakes only on
+    // counts into growth_metric_series. No polling — wakes only on
     // NOTIFY or when the next scheduled sync time arrives.
     let youtube_api_key = std::env::var("CROWDRELAY_YOUTUBE_API_KEY")
         .ok()
@@ -962,11 +962,11 @@ async fn run(database: PgPool, config: &Config, standby: bool) -> Result<()> {
             Some(worker) => worker.run(autopilot_shutdown).await,
             None => wait_for_shutdown(autopilot_shutdown).await,
         }
-        "ViryaOS Autopilot worker"
+        "CrowdRelay Autopilot worker"
     });
     runtime_tasks.spawn(async move {
         team_email_worker.run(team_email_shutdown).await;
-        "ViryaOS team-email worker"
+        "CrowdRelay team-email worker"
     });
     runtime_tasks.spawn(async move {
         match push_delivery_worker {

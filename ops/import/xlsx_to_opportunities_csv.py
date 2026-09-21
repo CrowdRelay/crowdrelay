@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Turn the band's booking sheet into one CSV the opportunity importer can read.
 
-`viryaos_team_opportunities` is what the `booking_opportunity` and
+`team_opportunities` is what the `booking_opportunity` and
 `live_opportunity` autopilot contexts rank and act on, and in production it held
 zero rows — the whole live arm of the growth loop had never had a unit to work
 with. Meanwhile the CRM's `Zgloszenia` sheet holds 797 festivals, competitions
@@ -32,7 +32,7 @@ WORKBOOK = "VIRYA — CRM _ KONTAKTY — EDYTUJ TU.xlsx"
 SHEET = "Zgloszenia"
 SOURCE = "crm:zgloszenia"
 
-# `viryaos_team_opportunities_opportunity_kind_check` accepts exactly these five.
+# `team_opportunities_opportunity_kind_check` accepts exactly these five.
 # `support_slot` and `funding` are not produced here: nothing in this sheet is a
 # support slot or a grant, and guessing one would put a row in front of the
 # funding autopilot that has no money in it.

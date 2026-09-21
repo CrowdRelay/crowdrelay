@@ -73,7 +73,7 @@ async fn admitted_community(pool: &PgPool, workspace_id: WorkspaceId) -> Result<
 
     let source_id = Uuid::now_v7();
     sqlx::query(
-        "INSERT INTO viryaos_content_sources \
+        "INSERT INTO content_sources \
          (id, workspace_id, source_kind, source_key, title, occurred_at, expires_at, metadata) \
          VALUES ($1,$2,'video',$3,'a video', now(), now() + interval '30 days', \
                  jsonb_build_object('media_url','https://cdn.example/v.jpg', \
@@ -159,7 +159,7 @@ async fn grant_standing(pool: &PgPool, workspace_id: WorkspaceId, target_id: Uui
 /// The single action this workspace produced: status, context and class.
 async fn only_action(pool: &PgPool, workspace_id: WorkspaceId) -> Result<(String, String, String)> {
     let rows: Vec<(String, String, String)> = sqlx::query_as(
-        "SELECT status, context, action_class FROM viryaos_autopilot_actions \
+        "SELECT status, context, action_class FROM autopilot_actions \
          WHERE workspace_id = $1",
     )
     .bind(workspace_id.into_uuid())
@@ -321,12 +321,12 @@ async fn remembering_an_approval_keys_the_grant_on_the_community() -> Result<()>
     ensure!(worker(&database, ws).run_once().await? == 1, "one outcome");
 
     let action_id: Uuid =
-        sqlx::query_scalar("SELECT id FROM viryaos_autopilot_actions WHERE workspace_id = $1")
+        sqlx::query_scalar("SELECT id FROM autopilot_actions WHERE workspace_id = $1")
             .bind(ws.into_uuid())
             .fetch_one(&database)
             .await?;
     let subject_id: Uuid =
-        sqlx::query_scalar("SELECT subject_id FROM viryaos_autopilot_actions WHERE id = $1")
+        sqlx::query_scalar("SELECT subject_id FROM autopilot_actions WHERE id = $1")
             .bind(action_id)
             .fetch_one(&database)
             .await?;
@@ -378,7 +378,7 @@ async fn remembering_an_approval_keys_the_grant_on_the_community() -> Result<()>
     ensure!(worker(&database, ws).run_once().await? == 1, "one outcome");
 
     let queued: i64 = sqlx::query_scalar(
-        "SELECT count(*)::bigint FROM viryaos_autopilot_actions \
+        "SELECT count(*)::bigint FROM autopilot_actions \
          WHERE workspace_id = $1 AND status = 'queued'",
     )
     .bind(ws.into_uuid())

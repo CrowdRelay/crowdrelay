@@ -44,7 +44,7 @@ async fn queued_team_assignment_email_uses_fast_lane_and_emits_bridge_event()
 
     sqlx::query(
         r#"
-        INSERT INTO viryaos_executor_instances (
+        INSERT INTO executor_instances (
             workspace_id, executor_id, version, manifest_sha, observed_at, expires_at
         ) VALUES ($1,'n8n-team-email-test','test','test-manifest',$2,$3)
         "#,
@@ -56,7 +56,7 @@ async fn queued_team_assignment_email_uses_fast_lane_and_emits_bridge_event()
     .await?;
     sqlx::query(
         r#"
-        INSERT INTO viryaos_executor_capabilities (
+        INSERT INTO executor_capabilities (
             workspace_id, executor_id, capability, capability_version, observed_at, expires_at
         ) VALUES ($1,'n8n-team-email-test','team.email','1',$2,$3)
         "#,
@@ -104,7 +104,7 @@ async fn queued_team_assignment_email_uses_fast_lane_and_emits_bridge_event()
     )
     .await?;
     sqlx::query(
-        "UPDATE viryaos_autopilot_actions SET status='processing', attempt_count=5, started_at=$3 WHERE workspace_id=$1 AND id=$2",
+        "UPDATE autopilot_actions SET status='processing', attempt_count=5, started_at=$3 WHERE workspace_id=$1 AND id=$2",
     )
     .bind(workspace_id.into_uuid())
     .bind(unrelated_action_id)
@@ -130,7 +130,7 @@ async fn queued_team_assignment_email_uses_fast_lane_and_emits_bridge_event()
     assert_eq!(claimed[0].payload.action_kind(), "team.assignment.email");
 
     let unrelated_status = sqlx::query_scalar::<_, String>(
-        "SELECT status FROM viryaos_autopilot_actions WHERE workspace_id=$1 AND id=$2",
+        "SELECT status FROM autopilot_actions WHERE workspace_id=$1 AND id=$2",
     )
     .bind(workspace_id.into_uuid())
     .bind(unrelated_action_id)
@@ -143,7 +143,7 @@ async fn queued_team_assignment_email_uses_fast_lane_and_emits_bridge_event()
         .await?;
 
     let action_status = sqlx::query_scalar::<_, String>(
-        "SELECT status FROM viryaos_autopilot_actions WHERE workspace_id=$1 AND id=$2",
+        "SELECT status FROM autopilot_actions WHERE workspace_id=$1 AND id=$2",
     )
     .bind(workspace_id.into_uuid())
     .bind(team_action_id)
@@ -166,7 +166,7 @@ async fn queued_team_assignment_email_uses_fast_lane_and_emits_bridge_event()
     assert_eq!(outbox_payload["recipient_email"], "member1@example.test");
 
     let emission_count = sqlx::query_scalar::<_, i64>(
-        "SELECT count(*)::bigint FROM viryaos_autopilot_action_emissions WHERE workspace_id=$1 AND action_id=$2",
+        "SELECT count(*)::bigint FROM autopilot_action_emissions WHERE workspace_id=$1 AND action_id=$2",
     )
     .bind(workspace_id.into_uuid())
     .bind(team_action_id)
@@ -310,7 +310,7 @@ async fn queued_team_assignment_email_uses_fast_lane_and_emits_bridge_event()
     );
 
     let claim_state = sqlx::query_as::<_, (String, Option<String>)>(
-        "SELECT status, provider_reference FROM viryaos_autopilot_execution_claims \
+        "SELECT status, provider_reference FROM autopilot_execution_claims \
          WHERE workspace_id=$1 AND action_id=$2 AND executor_id=$3",
     )
     .bind(workspace_id.into_uuid())
@@ -337,7 +337,7 @@ async fn seed_action(
     let decision_id = Uuid::now_v7();
     sqlx::query(
         r#"
-        INSERT INTO viryaos_autopilot_decisions (
+        INSERT INTO autopilot_decisions (
             id, workspace_id, decision_key, context, subject_kind, subject_id,
             decision_kind, confidence_basis_points, disposition, reason,
             input_snapshot, policy_snapshot, recommendation, evaluated_at
@@ -356,7 +356,7 @@ async fn seed_action(
 
     sqlx::query(
         r#"
-        INSERT INTO viryaos_autopilot_actions (
+        INSERT INTO autopilot_actions (
             id, workspace_id, decision_id, context, action_kind, subject_kind, subject_id,
             idempotency_key, payload, status, approved_at, approved_by, available_at
         ) VALUES ($1,$2,$3,'booking_opportunity',$4,'test_subject',$5,$6,$7,

@@ -34,8 +34,8 @@ async fn latest_series_value(
     sqlx::query_as::<_, (i64, OffsetDateTime)>(
         r#"
         SELECT point.value, point.captured_at
-        FROM viryaos_growth_metric_points AS point
-        JOIN viryaos_growth_metric_series AS series
+        FROM growth_metric_points AS point
+        JOIN growth_metric_series AS series
           ON series.workspace_id = point.workspace_id
          AND series.id = point.series_id
          AND series.active
@@ -110,7 +110,7 @@ impl AutopilotObjectiveRepository for PostgresAutopilotRepository {
             };
             let inserted = sqlx::query_as::<_, (Uuid, i64)>(
                 r#"
-                INSERT INTO viryaos_growth_objectives (
+                INSERT INTO growth_objectives (
                     workspace_id, platform, metric_key, scope_kind, scope_id,
                     direction, baseline_value, target_value, deadline, declared_by
                 )
@@ -143,7 +143,7 @@ impl AutopilotObjectiveRepository for PostgresAutopilotRepository {
                     let existing = sqlx::query_as::<_, (Uuid, i64)>(
                         r#"
                         SELECT id, baseline_value
-                        FROM viryaos_growth_objectives
+                        FROM growth_objectives
                         WHERE workspace_id = $1 AND platform = $2 AND metric_key = $3
                           AND scope_kind = $4 AND scope_id IS NOT DISTINCT FROM $5
                         "#,
@@ -183,7 +183,7 @@ impl AutopilotObjectiveRepository for PostgresAutopilotRepository {
             // missing row cannot be reviewed.
             let updated = sqlx::query_as::<_, (i64,)>(
                 r#"
-                UPDATE viryaos_growth_objectives
+                UPDATE growth_objectives
                 SET retired_at = now()
                 WHERE workspace_id = $1 AND id = $2 AND retired_at IS NULL
                 RETURNING baseline_value
@@ -198,7 +198,7 @@ impl AutopilotObjectiveRepository for PostgresAutopilotRepository {
                 Some((baseline,)) => (baseline, false),
                 None => {
                     let existing = sqlx::query_as::<_, (i64,)>(
-                        "SELECT baseline_value FROM viryaos_growth_objectives
+                        "SELECT baseline_value FROM growth_objectives
                          WHERE workspace_id=$1 AND id=$2",
                     )
                     .bind(workspace_id.into_uuid())
@@ -231,7 +231,7 @@ impl AutopilotObjectiveRepository for PostgresAutopilotRepository {
                 r#"
                 SELECT id, platform, metric_key, scope_kind, scope_id, direction,
                        baseline_value, target_value, declared_at, deadline, declared_by
-                FROM viryaos_growth_objectives
+                FROM growth_objectives
                 WHERE workspace_id = $1 AND retired_at IS NULL
                 ORDER BY deadline
                 LIMIT 64

@@ -31,7 +31,7 @@
 //!
 //! # The honest gap
 //!
-//! `viryaos_drive_contacts` rows carry at most a free-text `city` (migration
+//! `drive_contacts` rows carry at most a free-text `city` (migration
 //! 0295) — not a joinable `city_id`, and "Wroclaw" typed without its
 //! diacritic does not equal `cities.name`. The staging queue's raw contacts
 //! therefore cannot be city-filtered without pattern-matching prose, which
@@ -297,7 +297,7 @@ pub async fn who_can_help(
                CASE WHEN act.peer_act_id IS NOT NULL THEN 'peer'
                     ELSE 'unclaimed' END AS resolution,
                EXISTS (
-                   SELECT 1 FROM viryaos_beacons AS beacon
+                   SELECT 1 FROM beacons AS beacon
                    WHERE beacon.workspace_id = $1
                      AND beacon.city_id IS NOT DISTINCT FROM $3
                      AND beacon.beacon_kind = 'scene_partner'
@@ -316,7 +316,7 @@ pub async fn who_can_help(
         WHERE act.workspace_id = $1 AND act.event_id = $2
           AND act.act_workspace_id IS NULL
           AND NOT EXISTS (
-              SELECT 1 FROM viryaos_band_listings AS own
+              SELECT 1 FROM band_listings AS own
               WHERE own.workspace_id = $1
                 AND place_venue_key(own.act_name)
                     = place_venue_key(act.act_name)
@@ -371,7 +371,7 @@ pub async fn who_can_help(
             r#"
             SELECT venue.id, venue.display_name,
                    EXISTS (
-                       SELECT 1 FROM viryaos_beacons AS beacon
+                       SELECT 1 FROM beacons AS beacon
                        WHERE beacon.workspace_id = $1
                          AND beacon.city_id IS NOT DISTINCT FROM $2
                          AND beacon.beacon_kind = 'venue'
@@ -385,7 +385,7 @@ pub async fn who_can_help(
             UNION ALL
             SELECT NULL, $3,
                    EXISTS (
-                       SELECT 1 FROM viryaos_beacons AS beacon
+                       SELECT 1 FROM beacons AS beacon
                        WHERE beacon.workspace_id = $1
                          AND beacon.city_id IS NOT DISTINCT FROM $2
                          AND beacon.beacon_kind = 'venue'
@@ -537,7 +537,7 @@ pub async fn who_can_help(
         SELECT id, target_kind, display_name, accepts_booking,
                relationship_score, (venue_id IS NOT NULL) AS venue_linked,
                contact_email, venue_id
-        FROM viryaos_booking_targets
+        FROM booking_targets
         WHERE workspace_id = $1 AND city_id = $2 AND active
         ORDER BY relationship_score DESC, display_name
         LIMIT $3
@@ -625,7 +625,7 @@ pub async fn who_can_help(
     match sqlx::query_as::<_, (Uuid, String, String, String, String, String)>(
         r#"
         SELECT id, community_name, platform, url, self_promo_policy, country_code
-        FROM viryaos_community_outreach_targets
+        FROM community_outreach_targets
         WHERE workspace_id = $1 AND country_code = $2 AND active
         ORDER BY priority DESC, community_name
         LIMIT $3
@@ -747,13 +747,13 @@ pub async fn who_can_help(
         SELECT beacon.id, beacon.display_name, beacon.verified,
                beacon.relationship_score,
                EXISTS (
-                   SELECT 1 FROM viryaos_contact_governor AS governor
+                   SELECT 1 FROM contact_governor AS governor
                    WHERE governor.workspace_id = beacon.workspace_id
                      AND beacon.contact_email IS NOT NULL
                      AND governor.normalized_contact
                          = lower(btrim(beacon.contact_email))
                ) AS contacted_before
-        FROM viryaos_beacons AS beacon
+        FROM beacons AS beacon
         WHERE beacon.workspace_id = $1 AND beacon.city_id = $2
           AND beacon.beacon_kind = 'photographer'
           AND beacon.active AND NOT beacon.do_not_contact

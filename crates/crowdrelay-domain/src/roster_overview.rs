@@ -7,7 +7,7 @@
 //! columns, all measured rather than inferred:
 //!
 //! * **Attention** is the act's position inside the shared fan-attention
-//!   budget — what it spent (`viryaos_contact_touches`, trailing 30 days),
+//!   budget — what it spent (`contact_touches`, trailing 30 days),
 //!   who it cannot reach yet (governor rows still in cooldown), and which
 //!   doors are closed (`do_not_contact`). The budget is org-wide, so the page
 //!   also carries the org's total spend: one act's "3" means something

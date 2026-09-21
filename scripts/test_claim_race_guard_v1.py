@@ -3,7 +3,7 @@
 
 Job claims are guarded by pinning the prior status:
 
-    UPDATE viryaos_beacon_invite_delivery_jobs
+    UPDATE beacon_invite_delivery_jobs
     SET status='claimed', claim_token_hash=$3, ...
     WHERE workspace_id=$1 AND id=$2 AND status='queued'
 
@@ -66,7 +66,7 @@ class ClaimRaceGuard(unittest.TestCase):
         """Without this predicate there is no race guard to read."""
         self.assertRegex(
             self.source,
-            r"UPDATE viryaos_beacon_invite_delivery_jobs[\s\S]{0,400}?AND status='queued'",
+            r"UPDATE beacon_invite_delivery_jobs[\s\S]{0,400}?AND status='queued'",
             "the claim no longer pins status='queued', so it would overwrite "
             "a claim another worker already holds",
         )

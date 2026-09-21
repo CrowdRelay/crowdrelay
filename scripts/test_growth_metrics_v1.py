@@ -142,7 +142,7 @@ class GrowthMetricsContract(unittest.TestCase):
         # skips the bucket or overwrites history.
         infra = read(INFRA)
         capture = infra.split("impl AutopilotFirstPartyGrowthMetrics", 1)[1]
-        statements = capture.count("INSERT INTO viryaos_growth_metric_points")
+        statements = capture.count("INSERT INTO growth_metric_points")
         self.assertGreaterEqual(statements, 2)
         self.assertEqual(
             capture.count("date_trunc('hour', $2::timestamptz)"),
@@ -176,7 +176,7 @@ class GrowthMetricsContract(unittest.TestCase):
     def test_observations_outside_the_derived_window_are_reclaimed(self) -> None:
         retention = read(RETENTION)
         self.assertIn("delete_expired_growth_metric_points", retention)
-        self.assertIn("viryaos_growth_metric_points", retention)
+        self.assertIn("growth_metric_points", retention)
 
     def test_absent_windows_are_optional_rather_than_zero(self) -> None:
         # "We have no observation that old" and "the number did not move" are

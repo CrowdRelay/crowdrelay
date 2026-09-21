@@ -8,14 +8,14 @@ Three platform vocabularies must stay aligned:
 
 1. SYNCED_PLATFORMS — platforms the worker looks for in fanbase_connections
 2. fanbase_connections_platform_check — platforms allowed in the DB
-3. viryaos_growth_metric_series_platform_check — metric platforms allowed in the DB
+3. growth_metric_series_platform_check — metric platforms allowed in the DB
 
 Invariants enforced:
 
 - Every SYNCED_PLATFORMS entry must be in fanbase_connections_platform_check
   (so connections can be found for sync).
 - Every platform string passed to record_metric_point() must be in
-  viryaos_growth_metric_series_platform_check (so metrics can be recorded).
+  growth_metric_series_platform_check (so metrics can be recorded).
   Note: this is NOT the same as SYNCED_PLATFORMS — e.g. Reddit syncs from
   connections with platform='reddit' but records metrics as platform='social'.
 
@@ -154,7 +154,7 @@ class PlatformVocabularyContract(unittest.TestCase):
 
     def test_metric_platforms_in_growth_series(self):
         """Every platform string passed to record_metric_point() must be
-        in the effective viryaos_growth_metric_series_platform_check
+        in the effective growth_metric_series_platform_check
         constraint. Without this, recording a metric point fails with
         a constraint violation at runtime."""
         source = SYNC_SOURCE.read_text()
@@ -167,7 +167,7 @@ class PlatformVocabularyContract(unittest.TestCase):
             missing,
             set(),
             f"Platforms passed to record_metric_point but missing from "
-            f"viryaos_growth_metric_series_platform_check: {missing}. "
+            f"growth_metric_series_platform_check: {missing}. "
             f"Add them to the next migration that updates this constraint.",
         )
 

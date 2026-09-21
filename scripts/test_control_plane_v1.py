@@ -65,14 +65,14 @@ class ControlPlaneContract(unittest.TestCase):
 
     def test_parked_work_of_a_handled_finding_is_withdrawn_in_the_same_transaction(self) -> None:
         block = self.control.split("async fn mark_decision_handled_operator", 1)[1].split("\n    async fn", 1)[0]
-        withdraw = block.split("UPDATE viryaos_autopilot_actions", 1)[1].split("transaction.commit()", 1)[0]
+        withdraw = block.split("UPDATE autopilot_actions", 1)[1].split("transaction.commit()", 1)[0]
         self.assertIn("status = 'cancelled'", withdraw)
         self.assertIn("status = 'awaiting_approval'", withdraw)
         # And only after the ledger row exists, so a crash between them leaves
         # either both or neither.
         self.assertLess(
             block.find('"handle_autopilot_decision_externally"'),
-            block.find("UPDATE viryaos_autopilot_actions"),
+            block.find("UPDATE autopilot_actions"),
         )
 
     def test_handling_requires_a_real_finding(self) -> None:
@@ -80,7 +80,7 @@ class ControlPlaneContract(unittest.TestCase):
         # whatever lands on that id later.
         block = self.control.split("async fn mark_decision_handled_operator", 1)[1].split("\n    async fn", 1)[0]
         guard = block.split("SELECT EXISTS (", 1)[1].split(")", 1)[0]
-        self.assertIn("viryaos_autopilot_decisions", guard)
+        self.assertIn("autopilot_decisions", guard)
         self.assertIn("RepositoryError::NotFound", block)
 
     def test_board_entries_address_real_rows(self) -> None:

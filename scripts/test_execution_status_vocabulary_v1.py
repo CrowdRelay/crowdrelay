@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """`ExecutionStatus` and the column's CHECK must know the same words.
 
-`viryaos_experiment_assignments.execution_status` is the causal layer's answer
+`experiment_assignments.execution_status` is the causal layer's answer
 to "was the treatment realized". Two things read it, in two languages: the
 `ExecutionStatus` enum in `crowdrelay-brain/src/experiment.rs`, and the CHECK
 constraint that decides what the column may hold. Nothing made them agree.

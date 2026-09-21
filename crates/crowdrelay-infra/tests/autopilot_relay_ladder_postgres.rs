@@ -56,7 +56,7 @@ async fn fixture(label: &str) -> Result<Fixture, Box<dyn std::error::Error>> {
         (other_source_id, format!("{label}-post-b-{suffix}")),
     ] {
         sqlx::query(
-            "INSERT INTO viryaos_content_sources (
+            "INSERT INTO content_sources (
                  id, workspace_id, source_kind, source_key, title, occurred_at, expires_at
              ) VALUES ($1,$2,'social_post',$3,$4,$5,$6)",
         )
@@ -109,7 +109,7 @@ async fn seed_rung(
 ) -> Result<Uuid, Box<dyn std::error::Error>> {
     let decision_id = Uuid::now_v7();
     sqlx::query(
-        "INSERT INTO viryaos_autopilot_decisions (
+        "INSERT INTO autopilot_decisions (
              id, workspace_id, decision_key, context, subject_kind, subject_id,
              decision_kind, confidence_basis_points, disposition, reason,
              input_snapshot, policy_snapshot, recommendation, trace_id
@@ -131,7 +131,7 @@ async fn seed_rung(
     let action_id = Uuid::now_v7();
     let now = OffsetDateTime::now_utc();
     sqlx::query(
-        "INSERT INTO viryaos_autopilot_actions (
+        "INSERT INTO autopilot_actions (
              id, workspace_id, decision_id, context, action_kind, subject_kind,
              subject_id, idempotency_key, payload, status, action_class,
              approved_at, approved_by, approval_expires_at
@@ -164,7 +164,7 @@ async fn rung_state(
     action_id: Uuid,
 ) -> Result<(String, Option<String>, OffsetDateTime), Box<dyn std::error::Error>> {
     let row: (String, Option<String>, OffsetDateTime) = sqlx::query_as(
-        "SELECT status, approved_by, available_at FROM viryaos_autopilot_actions \
+        "SELECT status, approved_by, available_at FROM autopilot_actions \
          WHERE workspace_id=$1 AND id=$2",
     )
     .bind(workspace_id.into_uuid())
@@ -264,7 +264,7 @@ async fn approving_a_post_ladder_queues_the_whole_spread_and_revoke_stops_it()
     )
     .await?;
     sqlx::query(
-        "UPDATE viryaos_autopilot_actions SET approval_expires_at=$3 \
+        "UPDATE autopilot_actions SET approval_expires_at=$3 \
          WHERE workspace_id=$1 AND id=$2",
     )
     .bind(fixture.workspace_id.into_uuid())

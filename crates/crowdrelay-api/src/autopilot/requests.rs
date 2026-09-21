@@ -1,4 +1,4 @@
-// Transport-only request DTOs for the ViryaOS operator API.
+// Transport-only request DTOs for the CrowdRelay operator API.
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -496,7 +496,7 @@ pub struct ContentSourceRequest {
     active: Option<bool>,
     /// The catalogue format this artifact was produced in. Omit to leave it
     /// undeclared (create) or unchanged (edit); when present it must name a
-    /// `viryaos_content_format_entries` key.
+    /// `content_format_entries` key.
     format_key: Option<String>,
     expected_version: i64,
 }

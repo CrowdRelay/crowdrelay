@@ -37,7 +37,7 @@ async fn stale_posting_row(pool: &PgPool, workspace_id: WorkspaceId) -> Result<U
     let decision_id = Uuid::now_v7();
     sqlx::query(
         r#"
-        INSERT INTO viryaos_autopilot_decisions (
+        INSERT INTO autopilot_decisions (
             id, workspace_id, decision_key, context, subject_kind, subject_id,
             decision_kind, confidence_basis_points, disposition, reason,
             input_snapshot, policy_snapshot, recommendation, trace_id
@@ -57,7 +57,7 @@ async fn stale_posting_row(pool: &PgPool, workspace_id: WorkspaceId) -> Result<U
     let action_id = Uuid::now_v7();
     sqlx::query(
         r#"
-        INSERT INTO viryaos_autopilot_actions (
+        INSERT INTO autopilot_actions (
             id, workspace_id, decision_id, context, action_kind, subject_kind,
             subject_id, idempotency_key, payload, status, finished_at, trace_id
         ) VALUES ($1,$2,$3,'growth_intelligence','community.engage.request',
@@ -75,7 +75,7 @@ async fn stale_posting_row(pool: &PgPool, workspace_id: WorkspaceId) -> Result<U
     .context("insert engage action")?;
     let experiment_uuid = Uuid::now_v7();
     sqlx::query(
-        r#"INSERT INTO viryaos_experiment_designs
+        r#"INSERT INTO experiment_designs
            (experiment_uuid, workspace_id, intervention_key, logical_cycle_key,
             unit_kind, holdout_probability, interference_policy)
            VALUES ($1,$2,'community.engage','cycle-1','target_community',0.0,'none')"#,
@@ -86,7 +86,7 @@ async fn stale_posting_row(pool: &PgPool, workspace_id: WorkspaceId) -> Result<U
     .await
     .context("insert experiment design")?;
     sqlx::query(
-        r#"INSERT INTO viryaos_experiment_assignments
+        r#"INSERT INTO experiment_assignments
            (workspace_id, id, experiment_uuid, unit_id, unit_kind,
             arm, intended_template_id, propensity, prediction, context, strategy,
             eligibility_criteria, selection_context, interference_policy,
@@ -154,7 +154,7 @@ async fn stale_posting_recovery_reaches_the_assignment() -> Result<()> {
         assert_eq!(post_status, "failed", "stale post must be marked failed");
 
         let action_status: String =
-            sqlx::query_scalar("SELECT status FROM viryaos_autopilot_actions WHERE id = $1")
+            sqlx::query_scalar("SELECT status FROM autopilot_actions WHERE id = $1")
                 .bind(action_id)
                 .fetch_one(&db)
                 .await
@@ -164,7 +164,7 @@ async fn stale_posting_recovery_reaches_the_assignment() -> Result<()> {
         // The assertion that matters: the UPDATE that used to throw on a
         // nonexistent `experiment_assignments` qualifier now lands.
         let assignment_status: String = sqlx::query_scalar(
-            "SELECT execution_status FROM viryaos_experiment_assignments WHERE action_id = $1",
+            "SELECT execution_status FROM experiment_assignments WHERE action_id = $1",
         )
         .bind(action_id)
         .fetch_one(&db)
@@ -178,7 +178,7 @@ async fn stale_posting_recovery_reaches_the_assignment() -> Result<()> {
         // And the recovered assignment still carries its trace id, taken
         // from the action row — the COALESCE arm that was silently broken.
         let traced: bool = sqlx::query_scalar(
-            "SELECT trace_id IS NOT NULL FROM viryaos_experiment_assignments WHERE action_id = $1",
+            "SELECT trace_id IS NOT NULL FROM experiment_assignments WHERE action_id = $1",
         )
         .bind(action_id)
         .fetch_one(&db)

@@ -149,7 +149,7 @@ async fn enrich_outreach_draft(
 
     let ws = workspace_id.into_uuid();
     let target = sqlx::query_as::<_, (String, String)>(
-        "SELECT display_name, target_kind FROM viryaos_outreach_targets WHERE workspace_id = $1 AND id = $2",
+        "SELECT display_name, target_kind FROM outreach_targets WHERE workspace_id = $1 AND id = $2",
     )
     .bind(ws)
     .bind(target_id.into_uuid())
@@ -165,7 +165,7 @@ async fn enrich_outreach_draft(
         return Ok(());
     };
     let pitch = sqlx::query_as::<_, (String, String)>(
-        "SELECT title, listen_url FROM viryaos_release_plans WHERE workspace_id = $1 AND active AND listen_url IS NOT NULL AND btrim(listen_url) <> '' AND btrim(title) <> '' ORDER BY release_at DESC LIMIT 1",
+        "SELECT title, listen_url FROM release_plans WHERE workspace_id = $1 AND active AND listen_url IS NOT NULL AND btrim(listen_url) <> '' AND btrim(title) <> '' ORDER BY release_at DESC LIMIT 1",
     )
     .bind(ws)
     .fetch_optional(&mut **transaction)
@@ -221,7 +221,7 @@ async fn enrich_application_draft(
         _,
         (String, String, Option<String>, Option<OffsetDateTime>),
     >(
-        "SELECT title, organization, country_code, deadline FROM viryaos_team_opportunities WHERE workspace_id = $1 AND id = $2",
+        "SELECT title, organization, country_code, deadline FROM team_opportunities WHERE workspace_id = $1 AND id = $2",
     )
     .bind(ws)
     .bind(opportunity_id.into_uuid())
@@ -235,7 +235,7 @@ async fn enrich_application_draft(
     };
     let language = LetterLanguage::for_country(country_code.as_deref().unwrap_or(""));
     let pitch = sqlx::query_as::<_, (String, String)>(
-        "SELECT title, listen_url FROM viryaos_release_plans WHERE workspace_id = $1 AND active AND listen_url IS NOT NULL AND btrim(listen_url) <> '' AND btrim(title) <> '' ORDER BY release_at DESC LIMIT 1",
+        "SELECT title, listen_url FROM release_plans WHERE workspace_id = $1 AND active AND listen_url IS NOT NULL AND btrim(listen_url) <> '' AND btrim(title) <> '' ORDER BY release_at DESC LIMIT 1",
     )
     .bind(ws)
     .fetch_optional(&mut **transaction)

@@ -60,7 +60,7 @@ async fn seed_awaiting_action(
     draft_text: &str,
 ) -> Result<Uuid, Box<dyn std::error::Error>> {
     let decision_id: Uuid = sqlx::query_scalar(
-        "INSERT INTO viryaos_autopilot_decisions
+        "INSERT INTO autopilot_decisions
              (id, workspace_id, decision_key, context, subject_kind, subject_id,
               decision_kind, confidence_basis_points, disposition, reason,
               input_snapshot, policy_snapshot, recommendation, evaluated_at, trace_id)
@@ -76,7 +76,7 @@ async fn seed_awaiting_action(
     .fetch_one(pool)
     .await?;
     sqlx::query_scalar(
-        "INSERT INTO viryaos_autopilot_actions
+        "INSERT INTO autopilot_actions
              (id, workspace_id, decision_id, context, action_kind, subject_kind,
               subject_id, idempotency_key, payload, status)
          VALUES ($1,$2,$3,'content_supply','agent.content.draft','content_source',
@@ -129,7 +129,7 @@ async fn approve_with_revision_rewrites_payload_and_records_distance()
     assert!(!mutation.replayed);
 
     let (status, payload): (String, serde_json::Value) =
-        sqlx::query_as("SELECT status, payload FROM viryaos_autopilot_actions WHERE id = $1")
+        sqlx::query_as("SELECT status, payload FROM autopilot_actions WHERE id = $1")
             .bind(action_id)
             .fetch_one(&pool)
             .await?;
@@ -147,7 +147,7 @@ async fn approve_with_revision_rewrites_payload_and_records_distance()
 
     let rows: Vec<(String, String, String, i32)> = sqlx::query_as(
         "SELECT field, before_text, after_text, distance_chars
-         FROM viryaos_draft_revisions WHERE action_id = $1",
+         FROM draft_revisions WHERE action_id = $1",
     )
     .bind(action_id)
     .fetch_all(&pool)
@@ -187,7 +187,7 @@ async fn approve_with_revision_refuses_locked_field_and_keeps_draft()
     ));
 
     let (status, payload): (String, serde_json::Value) =
-        sqlx::query_as("SELECT status, payload FROM viryaos_autopilot_actions WHERE id = $1")
+        sqlx::query_as("SELECT status, payload FROM autopilot_actions WHERE id = $1")
             .bind(action_id)
             .fetch_one(&pool)
             .await?;
@@ -268,7 +268,7 @@ async fn approve_with_revision_replays_under_the_same_key() -> Result<(), Box<dy
     assert!(replayed.replayed);
 
     let revision_rows: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM viryaos_draft_revisions WHERE action_id = $1")
+        sqlx::query_scalar("SELECT count(*) FROM draft_revisions WHERE action_id = $1")
             .bind(action_id)
             .fetch_one(&pool)
             .await?;
@@ -313,7 +313,7 @@ async fn seed_classed_action(
     payload: serde_json::Value,
 ) -> Result<Uuid, Box<dyn std::error::Error>> {
     let decision_id: Uuid = sqlx::query_scalar(
-        "INSERT INTO viryaos_autopilot_decisions
+        "INSERT INTO autopilot_decisions
              (id, workspace_id, decision_key, context, subject_kind, subject_id,
               decision_kind, confidence_basis_points, disposition, reason,
               input_snapshot, policy_snapshot, recommendation, evaluated_at, trace_id)
@@ -329,7 +329,7 @@ async fn seed_classed_action(
     .fetch_one(pool)
     .await?;
     sqlx::query_scalar(
-        "INSERT INTO viryaos_autopilot_actions
+        "INSERT INTO autopilot_actions
              (id, workspace_id, decision_id, context, action_kind, subject_kind,
               subject_id, idempotency_key, payload, status, action_class)
          VALUES ($1,$2,$3,'content_supply','agent.content.draft','content_source',

@@ -86,9 +86,9 @@ pub async fn admin_candidates(
                beacon.relationship_score, profile.status AS signal_status,
                COALESCE(profile.invite_count,0)::integer AS invite_count,
                profile.last_invited_at
-        FROM viryaos_beacons beacon
+        FROM beacons beacon
         LEFT JOIN cities city ON city.id=beacon.city_id
-        LEFT JOIN viryaos_beacon_signal_profiles profile
+        LEFT JOIN beacon_signal_profiles profile
           ON profile.workspace_id=beacon.workspace_id AND profile.beacon_id=beacon.id
         WHERE beacon.workspace_id=$1
           AND beacon.active AND beacon.verified AND beacon.accepts_outreach
@@ -122,12 +122,12 @@ pub async fn admin_dashboard(State(state): State<crate::AppState>, headers: Head
         r#"
         WITH session_counts AS (
             SELECT workspace_id,beacon_id,count(*)::bigint AS active_sessions
-            FROM viryaos_beacon_signal_sessions
+            FROM beacon_signal_sessions
             WHERE revoked_at IS NULL AND expires_at > now()
             GROUP BY workspace_id,beacon_id
         ), endpoint_counts AS (
             SELECT session.workspace_id,session.beacon_id,count(DISTINCT endpoint.id)::bigint AS active_push_endpoints
-            FROM viryaos_beacon_signal_sessions session
+            FROM beacon_signal_sessions session
             JOIN fan_push_endpoints endpoint
               ON endpoint.workspace_id=session.workspace_id
              AND endpoint.audience_kind='beacon'
@@ -137,16 +137,16 @@ pub async fn admin_dashboard(State(state): State<crate::AppState>, headers: Head
             GROUP BY session.workspace_id,session.beacon_id
         ), request_counts AS (
             SELECT workspace_id,beacon_id,count(*)::bigint AS open_press_requests
-            FROM viryaos_beacon_press_requests WHERE status='open'
+            FROM beacon_press_requests WHERE status='open'
             GROUP BY workspace_id,beacon_id
         ), engagement_counts AS (
             SELECT workspace_id,beacon_id,count(*)::bigint AS active_engagements
-            FROM viryaos_beacon_signal_event_engagements
+            FROM beacon_signal_event_engagements
             WHERE status NOT IN ('completed','declined')
             GROUP BY workspace_id,beacon_id
         ), coverage_counts AS (
             SELECT workspace_id,beacon_id,count(*)::bigint AS coverage_count
-            FROM viryaos_beacon_signal_coverage GROUP BY workspace_id,beacon_id
+            FROM beacon_signal_coverage GROUP BY workspace_id,beacon_id
         )
         SELECT beacon.id AS beacon_id,beacon.display_name,beacon.beacon_kind,beacon.contact_email,
                city.name AS city,
@@ -164,8 +164,8 @@ pub async fn admin_dashboard(State(state): State<crate::AppState>, headers: Head
                COALESCE(request_counts.open_press_requests,0)::bigint AS open_press_requests,
                COALESCE(engagement_counts.active_engagements,0)::bigint AS active_engagements,
                COALESCE(coverage_counts.coverage_count,0)::bigint AS coverage_count
-        FROM viryaos_beacons beacon
-        LEFT JOIN viryaos_beacon_signal_profiles profile
+        FROM beacons beacon
+        LEFT JOIN beacon_signal_profiles profile
           ON profile.workspace_id=beacon.workspace_id AND profile.beacon_id=beacon.id
         LEFT JOIN cities city ON city.id=beacon.city_id
         LEFT JOIN session_counts ON session_counts.workspace_id=beacon.workspace_id AND session_counts.beacon_id=beacon.id
@@ -246,8 +246,8 @@ pub async fn admin_set_state(
         r#"
         SELECT profile.status,profile.joined_at,beacon.active,beacon.verified,
                beacon.accepts_outreach,beacon.do_not_contact
-        FROM viryaos_beacon_signal_profiles profile
-        JOIN viryaos_beacons beacon
+        FROM beacon_signal_profiles profile
+        JOIN beacons beacon
           ON beacon.workspace_id=profile.workspace_id AND beacon.id=profile.beacon_id
         WHERE profile.workspace_id=$1 AND profile.beacon_id=$2
         FOR UPDATE OF profile,beacon
@@ -272,21 +272,21 @@ pub async fn admin_set_state(
     }
     let update = match payload.status {
         AdminProfileState::Active => sqlx::query(
-            "UPDATE viryaos_beacon_signal_profiles SET status='active',paused_at=NULL,revoked_at=NULL,invite_token_hash=NULL,invite_expires_at=NULL,updated_at=now() WHERE workspace_id=$1 AND beacon_id=$2",
+            "UPDATE beacon_signal_profiles SET status='active',paused_at=NULL,revoked_at=NULL,invite_token_hash=NULL,invite_expires_at=NULL,updated_at=now() WHERE workspace_id=$1 AND beacon_id=$2",
         )
         .bind(workspace_id)
         .bind(beacon_id)
         .execute(&mut *tx)
         .await,
         AdminProfileState::Paused => sqlx::query(
-            "UPDATE viryaos_beacon_signal_profiles SET status='paused',paused_at=now(),invite_token_hash=NULL,invite_expires_at=NULL,updated_at=now() WHERE workspace_id=$1 AND beacon_id=$2",
+            "UPDATE beacon_signal_profiles SET status='paused',paused_at=now(),invite_token_hash=NULL,invite_expires_at=NULL,updated_at=now() WHERE workspace_id=$1 AND beacon_id=$2",
         )
         .bind(workspace_id)
         .bind(beacon_id)
         .execute(&mut *tx)
         .await,
         AdminProfileState::Revoked => sqlx::query(
-            "UPDATE viryaos_beacon_signal_profiles SET status='revoked',revoked_at=now(),paused_at=NULL,invite_token_hash=NULL,invite_expires_at=NULL,updated_at=now() WHERE workspace_id=$1 AND beacon_id=$2",
+            "UPDATE beacon_signal_profiles SET status='revoked',revoked_at=now(),paused_at=NULL,invite_token_hash=NULL,invite_expires_at=NULL,updated_at=now() WHERE workspace_id=$1 AND beacon_id=$2",
         )
         .bind(workspace_id)
         .bind(beacon_id)
@@ -300,7 +300,7 @@ pub async fn admin_set_state(
     if matches!(payload.status, AdminProfileState::Revoked) {
         for result in [
             sqlx::query(
-                "UPDATE viryaos_beacon_signal_sessions SET revoked_at=COALESCE(revoked_at,now()) WHERE workspace_id=$1 AND beacon_id=$2 AND revoked_at IS NULL",
+                "UPDATE beacon_signal_sessions SET revoked_at=COALESCE(revoked_at,now()) WHERE workspace_id=$1 AND beacon_id=$2 AND revoked_at IS NULL",
             )
             .bind(workspace_id)
             .bind(beacon_id)
@@ -312,7 +312,7 @@ pub async fn admin_set_state(
                 SET active=false,invalidated_at=COALESCE(invalidated_at,now()),updated_at=now()
                 WHERE endpoint.workspace_id=$1 AND endpoint.audience_kind='beacon' AND endpoint.active
                   AND endpoint.principal_hash IN (
-                      SELECT token_hash FROM viryaos_beacon_signal_sessions
+                      SELECT token_hash FROM beacon_signal_sessions
                       WHERE workspace_id=$1 AND beacon_id=$2
                   )
                 "#,
@@ -379,7 +379,7 @@ pub async fn admin_resolve_press_request(
     };
     let updated = sqlx::query_as::<_, (Uuid, Option<Uuid>, String)>(
         r#"
-        UPDATE viryaos_beacon_press_requests
+        UPDATE beacon_press_requests
         SET status=$3,resolved_at=now(),resolution_note=$4,updated_at=now()
         WHERE workspace_id=$1 AND id=$2 AND status='open'
         RETURNING beacon_id,event_id,request_kind
@@ -444,7 +444,7 @@ pub async fn admin_press_assets(
         SELECT asset.id,asset.event_id,event.title AS event_title,asset.asset_key,
                asset.asset_kind,asset.label_pl,asset.label_en,asset.url,
                asset.sort_order,asset.active,asset.updated_at
-        FROM viryaos_beacon_press_assets asset
+        FROM beacon_press_assets asset
         LEFT JOIN events event
           ON event.workspace_id=asset.workspace_id AND event.id=asset.event_id
         WHERE asset.workspace_id=$1
@@ -516,7 +516,7 @@ pub async fn admin_upsert_press_asset(
     let asset_id = payload.asset_id.unwrap_or_else(Uuid::now_v7);
     let result = sqlx::query_scalar::<_, Uuid>(
         r#"
-        INSERT INTO viryaos_beacon_press_assets
+        INSERT INTO beacon_press_assets
             (id,workspace_id,event_id,asset_key,asset_kind,label_pl,label_en,url,sort_order,active)
         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
         ON CONFLICT (workspace_id,asset_key,event_id) DO UPDATE SET
@@ -572,14 +572,14 @@ pub async fn admin_engagements(
                engagement.notification_count,
                COALESCE(coverage.coverage_count,0)::bigint AS coverage_count,
                engagement.last_notified_at,engagement.updated_at
-        FROM viryaos_beacon_signal_event_engagements engagement
-        JOIN viryaos_beacons beacon
+        FROM beacon_signal_event_engagements engagement
+        JOIN beacons beacon
           ON beacon.workspace_id=engagement.workspace_id AND beacon.id=engagement.beacon_id
         JOIN events event
           ON event.workspace_id=engagement.workspace_id AND event.id=engagement.event_id
         LEFT JOIN (
             SELECT workspace_id,beacon_id,event_id,count(*)::bigint AS coverage_count
-            FROM viryaos_beacon_signal_coverage
+            FROM beacon_signal_coverage
             GROUP BY workspace_id,beacon_id,event_id
         ) coverage
           ON coverage.workspace_id=engagement.workspace_id
@@ -614,8 +614,8 @@ pub async fn admin_coverage(State(state): State<crate::AppState>, headers: Heade
         SELECT coverage.id,coverage.beacon_id,beacon.display_name,coverage.event_id,
                event.title AS event_title,coverage.coverage_kind,coverage.url,coverage.title,
                coverage.created_at
-        FROM viryaos_beacon_signal_coverage coverage
-        JOIN viryaos_beacons beacon
+        FROM beacon_signal_coverage coverage
+        JOIN beacons beacon
           ON beacon.workspace_id=coverage.workspace_id AND beacon.id=coverage.beacon_id
         JOIN events event
           ON event.workspace_id=coverage.workspace_id AND event.id=coverage.event_id
@@ -652,8 +652,8 @@ pub async fn admin_press_requests(
                request.event_id, event.title AS event_title, request.request_kind,
                request.details, request.status, request.resolution_note,
                request.created_at, request.resolved_at
-        FROM viryaos_beacon_press_requests request
-        JOIN viryaos_beacons beacon
+        FROM beacon_press_requests request
+        JOIN beacons beacon
           ON beacon.workspace_id=request.workspace_id AND beacon.id=request.beacon_id
         LEFT JOIN events event
           ON event.workspace_id=request.workspace_id AND event.id=request.event_id

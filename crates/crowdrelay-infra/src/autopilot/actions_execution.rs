@@ -643,7 +643,7 @@ impl PostgresAutopilotRepository {
                         r#"
                         SELECT beacon.display_name, beacon.contact_email,
                                event.title, event.slug, event.starts_at
-                        FROM viryaos_beacons AS beacon
+                        FROM beacons AS beacon
                         JOIN events AS event
                           ON event.workspace_id = beacon.workspace_id AND event.id = $3
                         WHERE beacon.workspace_id = $1 AND beacon.id = $2
@@ -1340,7 +1340,7 @@ impl PostgresAutopilotRepository {
 
             let completed = sqlx::query(
                 r#"
-                UPDATE viryaos_autopilot_actions
+                UPDATE autopilot_actions
                 SET status = 'succeeded', finished_at = $3, last_error_kind = NULL
                 WHERE workspace_id = $1 AND id = $2 AND status = 'processing'
                 "#,
@@ -1374,7 +1374,7 @@ impl PostgresAutopilotRepository {
             }
             sqlx::query(
                 r#"
-                INSERT INTO viryaos_autopilot_action_attempts (
+                INSERT INTO autopilot_action_attempts (
                     workspace_id, action_id, attempt_number, outcome, occurred_at
                 ) VALUES ($1,$2,$3,'succeeded',$4)
                 "#,

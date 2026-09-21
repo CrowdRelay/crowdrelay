@@ -3,7 +3,7 @@
 //! and outcomes. The peer write path — operator create, resolve, scanner
 //! proposals — lives in `content_peers.rs`.
 //!
-//! Every query is workspace-scoped — `viryaos_content_format_entries` is the
+//! Every query is workspace-scoped — `content_format_entries` is the
 //! only global table, because the catalogue is a seeded prior shared by all
 //! tenants. Status moves go through `*_can_transition`-guarded updates that
 //! match the expected current state in the `WHERE` clause, so two concurrent
@@ -483,7 +483,7 @@ impl PostgresContentEngineRepository {
     ) -> Result<Option<i64>> {
         let id = sqlx::query_scalar::<_, i64>(
             r#"
-            INSERT INTO viryaos_peer_observations (
+            INSERT INTO peer_observations (
                 workspace_id, peer_id, observed_at, platform, kind, fact, url, metrics
             )
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
@@ -514,7 +514,7 @@ impl PostgresContentEngineRepository {
         let rows = sqlx::query_as::<_, ObservationRow>(
             r#"
             SELECT id, workspace_id, peer_id, observed_at, platform, kind, fact, url, metrics
-            FROM viryaos_peer_observations
+            FROM peer_observations
             WHERE workspace_id = $1
             ORDER BY observed_at DESC, id DESC
             LIMIT $2
@@ -537,7 +537,7 @@ impl PostgresContentEngineRepository {
     ) -> Result<Option<i64>> {
         let id = sqlx::query_scalar::<_, i64>(
             r#"
-            INSERT INTO viryaos_fan_observations (
+            INSERT INTO fan_observations (
                 workspace_id, place_id, observed_at, platform, kind, fact, url, metrics
             )
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
@@ -568,7 +568,7 @@ impl PostgresContentEngineRepository {
         let rows = sqlx::query_as::<_, FanObservationRow>(
             r#"
             SELECT id, workspace_id, place_id, observed_at, platform, kind, fact, url, metrics
-            FROM viryaos_fan_observations
+            FROM fan_observations
             WHERE workspace_id = $1
             ORDER BY observed_at DESC, id DESC
             LIMIT $2
@@ -591,7 +591,7 @@ impl PostgresContentEngineRepository {
             r#"
             SELECT key, name, category, purpose, effort_standalone, effort_marginal,
                    skill, requires, distribution, cadence, genre_fit, notes, active
-            FROM viryaos_content_format_entries
+            FROM content_format_entries
             WHERE active
             ORDER BY category, key
             "#,
@@ -626,7 +626,7 @@ impl PostgresContentEngineRepository {
             SELECT
                 COALESCE(
                     (SELECT array_agg(DISTINCT skill)
-                     FROM viryaos_team_profiles p
+                     FROM team_profiles p
                      JOIN workspace_members m
                        ON m.workspace_id = p.workspace_id
                       AND m.id = p.member_id
@@ -637,7 +637,7 @@ impl PostgresContentEngineRepository {
                     ARRAY[]::text[]
                 ) AS skills,
                 EXISTS (
-                    SELECT 1 FROM viryaos_release_plans
+                    SELECT 1 FROM release_plans
                     WHERE workspace_id = $1 AND active
                       AND release_at >= now() - make_interval(days => $2)
                 ) AS has_release_material,
@@ -672,7 +672,7 @@ impl PostgresContentEngineRepository {
     ) -> Result<ProductionEvent> {
         let row = sqlx::query_as::<_, ProductionEventRow>(
             r#"
-            INSERT INTO viryaos_production_events (
+            INSERT INTO production_events (
                 id, workspace_id, kind, title, scheduled_for, event_id, notes
             )
             VALUES ($1, $2, $3, $4, $5, $6, $7)
@@ -700,7 +700,7 @@ impl PostgresContentEngineRepository {
     ) -> Result<Vec<ProductionEvent>> {
         let rows = sqlx::query_as::<_, ProductionEventRow>(
             r#"
-            SELECT * FROM viryaos_production_events
+            SELECT * FROM production_events
             WHERE workspace_id = $1 AND status = 'scheduled' AND scheduled_for >= $2
             ORDER BY scheduled_for ASC
             "#,
@@ -724,7 +724,7 @@ impl PostgresContentEngineRepository {
         }
         let row = sqlx::query_as::<_, ProductionEventRow>(
             r#"
-            UPDATE viryaos_production_events
+            UPDATE production_events
             SET status = $4, updated_at = now()
             WHERE id = $2 AND workspace_id = $1 AND status = $3
             RETURNING *
@@ -752,7 +752,7 @@ impl PostgresContentEngineRepository {
     ) -> Result<CapturePlan> {
         let row = sqlx::query_as::<_, CapturePlanRow>(
             r#"
-            INSERT INTO viryaos_capture_plans (
+            INSERT INTO capture_plans (
                 id, workspace_id, production_event_id, items, assignee_member_id
             )
             VALUES ($1, $2, $3, $4, $5)
@@ -783,14 +783,14 @@ impl PostgresContentEngineRepository {
     ) -> Result<CapturePlan> {
         let row = sqlx::query_as::<_, CapturePlanRow>(
             r#"
-            UPDATE viryaos_capture_plans
+            UPDATE capture_plans
             SET status = 'issued', assignee_member_id = $3,
                 issued_at = now(), updated_at = now()
             WHERE id = $2 AND workspace_id = $1 AND status = 'draft'
               AND EXISTS (
-                  SELECT 1 FROM viryaos_production_events e
+                  SELECT 1 FROM production_events e
                   WHERE e.workspace_id = $1
-                    AND e.id = viryaos_capture_plans.production_event_id
+                    AND e.id = capture_plans.production_event_id
                     AND e.status = 'scheduled'
               )
             RETURNING *
@@ -812,7 +812,7 @@ impl PostgresContentEngineRepository {
     ) -> Result<Vec<CapturePlan>> {
         let rows = sqlx::query_as::<_, CapturePlanRow>(
             r#"
-            SELECT * FROM viryaos_capture_plans
+            SELECT * FROM capture_plans
             WHERE workspace_id = $1 AND production_event_id = $2
             ORDER BY created_at ASC
             "#,
@@ -829,7 +829,7 @@ impl PostgresContentEngineRepository {
     pub async fn create_arc(&self, workspace_id: WorkspaceId, arc: &NewArc) -> Result<Arc> {
         let row = sqlx::query_as::<_, ArcRow>(
             r#"
-            INSERT INTO viryaos_arcs (
+            INSERT INTO arcs (
                 id, workspace_id, title, summary, horizon_start, horizon_end, spine, evidence
             )
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
@@ -866,7 +866,7 @@ impl PostgresContentEngineRepository {
         }
         let row = sqlx::query_as::<_, ArcRow>(
             r#"
-            UPDATE viryaos_arcs
+            UPDATE arcs
             SET status = $4,
                 approved_at = CASE WHEN $4 = 'approved' THEN now() ELSE approved_at END,
                 approved_by = CASE WHEN $4 = 'approved' THEN $5 ELSE approved_by END,
@@ -893,7 +893,7 @@ impl PostgresContentEngineRepository {
     ) -> Result<Vec<Arc>> {
         let rows = sqlx::query_as::<_, ArcRow>(
             r#"
-            SELECT * FROM viryaos_arcs
+            SELECT * FROM arcs
             WHERE workspace_id = $1 AND ($2::text IS NULL OR status = $2)
             ORDER BY created_at DESC
             "#,
@@ -919,7 +919,7 @@ impl PostgresContentEngineRepository {
     ) -> Result<ContentSuggestion> {
         let row = sqlx::query_as::<_, SuggestionRow>(
             r#"
-            INSERT INTO viryaos_content_suggestions (
+            INSERT INTO content_suggestions (
                 id, workspace_id, arc_id, format_key, concept, reason, evidence,
                 suggested_after, suggested_before, effort,
                 proposed_assignee_member_id, distribution_promise, expires_at
@@ -958,7 +958,7 @@ impl PostgresContentEngineRepository {
     ) -> Result<Vec<ContentSuggestion>> {
         let rows = sqlx::query_as::<_, SuggestionRow>(
             r#"
-            SELECT * FROM viryaos_content_suggestions
+            SELECT * FROM content_suggestions
             WHERE workspace_id = $1 AND status IN ('raised', 'approved')
               AND (status = 'approved' OR expires_at IS NULL OR expires_at > now())
               AND (status <> 'approved' OR suggested_before IS NULL OR suggested_before >= CURRENT_DATE)
@@ -987,7 +987,7 @@ impl PostgresContentEngineRepository {
         };
         let changed = sqlx::query(
             r#"
-            UPDATE viryaos_content_suggestions
+            UPDATE content_suggestions
             SET status = $3, updated_at = now()
             WHERE id = $2 AND workspace_id = $1 AND status IN ('raised', 'approved')
             "#,
@@ -1003,7 +1003,7 @@ impl PostgresContentEngineRepository {
         }
         let row = sqlx::query_as::<_, OutcomeRow>(
             r#"
-            INSERT INTO viryaos_suggestion_outcomes (
+            INSERT INTO suggestion_outcomes (
                 workspace_id, suggestion_id, outcome, decided_by, reason, results
             )
             VALUES ($1, $2, $3, $4, $5, $6)
@@ -1032,7 +1032,7 @@ impl PostgresContentEngineRepository {
     ) -> Result<Vec<SuggestionOutcome>> {
         let rows = sqlx::query_as::<_, OutcomeRow>(
             r#"
-            SELECT * FROM viryaos_suggestion_outcomes
+            SELECT * FROM suggestion_outcomes
             WHERE workspace_id = $1 AND suggestion_id = $2
             ORDER BY resolved_at DESC, id DESC
             "#,

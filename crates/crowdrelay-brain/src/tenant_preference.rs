@@ -296,7 +296,7 @@ impl TenantPreferencePosterior {
 /// TODO: Wire presentation metadata into the operator-facing read
 /// path (decision trail / approval queue) when the operator UI
 /// supports presentation state. At that point, add a dedicated
-/// `presentation` jsonb column on `viryaos_autopilot_decisions` —
+/// `presentation` jsonb column on `autopilot_decisions` —
 /// do NOT smuggle it into `input_snapshot` (worker input) or
 /// `recommendation` (action payload).
 ///

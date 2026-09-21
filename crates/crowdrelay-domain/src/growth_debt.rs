@@ -169,7 +169,7 @@ impl GrowthDebtKind {
     /// The decision kind recorded against this finding.
     ///
     /// Per-kind rather than one shared value, because the cooldown is read back
-    /// out of `viryaos_autopilot_decisions` by grouping on it: one event can owe
+    /// out of `autopilot_decisions` by grouping on it: one event can owe
     /// both skipped levers and a stalled release plan, and raising one must not
     /// silence the other for a fortnight.
     #[must_use]

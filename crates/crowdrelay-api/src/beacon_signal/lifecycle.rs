@@ -82,11 +82,11 @@ pub(super) async fn mint_invite_batch_tx(
     let eligible = sqlx::query_as::<_, (Uuid, String, String)>(
         r#"
         SELECT beacon.id, beacon.display_name, beacon.contact_email
-        FROM viryaos_beacons beacon
+        FROM beacons beacon
         JOIN (
             SELECT DISTINCT ON (lower(other.contact_email)) other.id
-            FROM viryaos_beacons other
-            LEFT JOIN viryaos_beacon_signal_profiles profile
+            FROM beacons other
+            LEFT JOIN beacon_signal_profiles profile
               ON profile.workspace_id=other.workspace_id
              AND profile.beacon_id=other.id
             WHERE other.workspace_id=$1 AND other.id=ANY($2)
@@ -103,8 +103,8 @@ pub(super) async fn mint_invite_batch_tx(
               )
               AND NOT EXISTS (
                   SELECT 1
-                  FROM viryaos_beacons covered
-                  JOIN viryaos_beacon_signal_profiles covered_profile
+                  FROM beacons covered
+                  JOIN beacon_signal_profiles covered_profile
                     ON covered_profile.workspace_id=covered.workspace_id
                    AND covered_profile.beacon_id=covered.id
                   WHERE covered.workspace_id=other.workspace_id
@@ -160,12 +160,12 @@ pub(super) async fn mint_invite_batch_tx(
     let covered_ids: std::collections::HashSet<Uuid> = sqlx::query_scalar::<_, Uuid>(
         r#"
         SELECT other.id
-        FROM viryaos_beacons other
+        FROM beacons other
         WHERE other.workspace_id=$1 AND other.id=ANY($2)
           AND EXISTS (
               SELECT 1
-              FROM viryaos_beacons covered
-              JOIN viryaos_beacon_signal_profiles covered_profile
+              FROM beacons covered
+              JOIN beacon_signal_profiles covered_profile
                 ON covered_profile.workspace_id=covered.workspace_id
                AND covered_profile.beacon_id=covered.id
               WHERE covered.workspace_id=other.workspace_id
@@ -224,7 +224,7 @@ pub(super) async fn mint_invite_batch_tx(
 
     let invited_ids: Vec<Uuid> = match sqlx::query_scalar::<_, Uuid>(
         r#"
-        INSERT INTO viryaos_beacon_signal_profiles (
+        INSERT INTO beacon_signal_profiles (
             workspace_id, beacon_id, status, invite_token_hash, invite_expires_at,
             radius_km, locale, nearby_gigs_enabled, invite_count, last_invited_at,
             paused_at, revoked_at, pending_invite_job_id
@@ -236,10 +236,10 @@ pub(super) async fn mint_invite_batch_tx(
             status='invited', invite_token_hash=EXCLUDED.invite_token_hash,
             invite_expires_at=EXCLUDED.invite_expires_at, radius_km=EXCLUDED.radius_km,
             locale=EXCLUDED.locale, nearby_gigs_enabled=true,
-            invite_count=viryaos_beacon_signal_profiles.invite_count + 1,
+            invite_count=beacon_signal_profiles.invite_count + 1,
             last_invited_at=now(), paused_at=NULL, revoked_at=NULL,
             pending_invite_job_id=EXCLUDED.pending_invite_job_id, updated_at=now()
-        WHERE viryaos_beacon_signal_profiles.status <> 'active'
+        WHERE beacon_signal_profiles.status <> 'active'
         RETURNING beacon_id
         "#,
     )
@@ -285,7 +285,7 @@ pub(super) async fn mint_invite_batch_tx(
     if !invited_ids.is_empty()
         && let Err(error) = sqlx::query(
             r#"
-            UPDATE viryaos_beacon_signal_sessions
+            UPDATE beacon_signal_sessions
             SET revoked_at=COALESCE(revoked_at, now())
             WHERE workspace_id=$1 AND beacon_id=ANY($2) AND revoked_at IS NULL
             "#,

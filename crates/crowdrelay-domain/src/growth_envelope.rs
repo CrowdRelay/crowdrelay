@@ -12,7 +12,7 @@
 //! kill switch means the only way to stop the agent is a deploy.
 //!
 //! Nothing here is stored twice. Outward touches are already durable rows in
-//! `viryaos_autopilot_actions`; the envelope counts them rather than keeping a
+//! `autopilot_actions`; the envelope counts them rather than keeping a
 //! second ledger that could disagree.
 
 use serde::{Deserialize, Serialize};

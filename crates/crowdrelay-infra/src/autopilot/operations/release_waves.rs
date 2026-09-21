@@ -20,7 +20,7 @@ pub(in crate::autopilot) async fn execute_release_campaign(
         return Err(RepositoryError::Conflict);
     }
     let phase = release_milestone_str(milestone);
-    let campaign_slug = format!("viryaos-release-{}-{}", release_id, phase);
+    let campaign_slug = format!("crowdrelay-release-{}-{}", release_id, phase);
     // The late waves do not re-send to fans an earlier phase already reached
     // (§4i-4 / Gap 2): "you might have missed it" is only honest when the
     // segment provably excludes the already-contacted. `excluded_campaign_slugs`
@@ -29,7 +29,7 @@ pub(in crate::autopilot) async fn execute_release_campaign(
     let (segment_slug, segment_name, segment_filter) = match milestone {
         crowdrelay_domain::release_autopilot::ReleaseMilestone::Wrap
         | crowdrelay_domain::release_autopilot::ReleaseMilestone::CatalogueRotation => (
-            format!("viryaos-release-{release_id}-missed"),
+            format!("crowdrelay-release-{release_id}-missed"),
             format!("{title} · missed the release"),
             json!({
                 "statuses": ["active"],
@@ -38,7 +38,7 @@ pub(in crate::autopilot) async fn execute_release_campaign(
             }),
         ),
         crowdrelay_domain::release_autopilot::ReleaseMilestone::Countdown => (
-            format!("viryaos-release-{release_id}-likely"),
+            format!("crowdrelay-release-{release_id}-likely"),
             format!("{title} · likely listeners"),
             json!({
                 "statuses": ["active"],
@@ -47,7 +47,7 @@ pub(in crate::autopilot) async fn execute_release_campaign(
             }),
         ),
         _ => (
-            format!("viryaos-release-{}", release_id),
+            format!("crowdrelay-release-{}", release_id),
             format!("{title} · release audience"),
             json!({
                 "statuses": ["active"],
@@ -55,7 +55,7 @@ pub(in crate::autopilot) async fn execute_release_campaign(
             }),
         ),
     };
-    let segment_id=sqlx::query_scalar::<_,Uuid>(r#"INSERT INTO audience_segments(workspace_id,slug,name,description,filter,active) VALUES($1,$2,$3,'VIRYA OS release audience',$4,true) ON CONFLICT(workspace_id,slug) DO UPDATE SET active=true, filter=EXCLUDED.filter RETURNING id"#)
+    let segment_id=sqlx::query_scalar::<_,Uuid>(r#"INSERT INTO audience_segments(workspace_id,slug,name,description,filter,active) VALUES($1,$2,$3,'CrowdRelay release audience',$4,true) ON CONFLICT(workspace_id,slug) DO UPDATE SET active=true, filter=EXCLUDED.filter RETURNING id"#)
       .bind(workspace_id.into_uuid()).bind(&segment_slug).bind(&segment_name).bind(&segment_filter).fetch_one(&mut **tx).await.map_err(map_sqlx)?;
     let template = format!("release.{phase}.v1");
     let growth_goal = match milestone {
@@ -86,7 +86,7 @@ pub(in crate::autopilot) async fn execute_release_campaign(
             $1,$2,$3,$4,'email',$5,
             jsonb_build_object(
                 'release_id',$6::uuid,
-                'managed_by','viryaos',
+                'managed_by','crowdrelay',
                 'growth_goal',$7::text,
                 'audience_note',$8::text
             )
@@ -115,7 +115,7 @@ pub(in crate::autopilot) async fn execute_release_campaign(
     if campaign.1 == "draft" {
         // The outbox row carries the action's trace spine — `ops/trace` shows
         // the decision → action → campaign hop, not a context-free orphan.
-        let outbox_id=sqlx::query_scalar::<_,Uuid>(r#"INSERT INTO outbox_events(workspace_id,event_type,event_version,payload,available_at,trace_id,causation_id,action_id) SELECT $1,'communication.campaign_due',1,jsonb_build_object('campaign_id',$2::uuid,'campaign_slug',$3::text,'channel','email','segment_id',$4::uuid,'template_key',$5::text,'send_evidence',jsonb_build_object('source_id',$7::text,'recipient_reason',$8::text)),$6,at.trace_id,at.causation_id,at.id FROM viryaos_autopilot_actions at WHERE at.id=$9 RETURNING id"#)
+        let outbox_id=sqlx::query_scalar::<_,Uuid>(r#"INSERT INTO outbox_events(workspace_id,event_type,event_version,payload,available_at,trace_id,causation_id,action_id) SELECT $1,'communication.campaign_due',1,jsonb_build_object('campaign_id',$2::uuid,'campaign_slug',$3::text,'channel','email','segment_id',$4::uuid,'template_key',$5::text,'send_evidence',jsonb_build_object('source_id',$7::text,'recipient_reason',$8::text)),$6,at.trace_id,at.causation_id,at.id FROM autopilot_actions at WHERE at.id=$9 RETURNING id"#)
           .bind(workspace_id.into_uuid()).bind(campaign.0).bind(&campaign_slug).bind(segment_id).bind(&template).bind(now)
           .bind(format!("release-campaign:{campaign_slug}"))
           .bind("marketing-consent segment — every fan in it opted in")
@@ -145,7 +145,7 @@ fn earlier_release_campaign_slugs(release_id: crowdrelay_domain::ReleasePlanId) 
         "wrap",
     ]
     .iter()
-    .map(|phase| format!("viryaos-release-{release_id}-{phase}"))
+    .map(|phase| format!("crowdrelay-release-{release_id}-{phase}"))
     .collect()
 }
 /// The tag the countdown write marks likely listeners with. Bounded by the

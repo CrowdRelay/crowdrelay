@@ -42,7 +42,7 @@ impl PostgresAutopilotRepository {
         let config = self
             .bounded(async {
                 sqlx::query_scalar::<_, serde_json::Value>(
-                    "SELECT config FROM viryaos_autopilot_policies \
+                    "SELECT config FROM autopilot_policies \
                      WHERE workspace_id=$1 AND context='live_opportunity'",
                 )
                 .bind(workspace_id.into_uuid())
@@ -70,7 +70,7 @@ impl PostgresAutopilotRepository {
                            walk_away_minor, target_minor, opening_ask_minor,
                            countered_fee_minor, counter_rounds, responds_by,
                            floor_basis
-                    FROM viryaos_team_opportunity_terms
+                    FROM team_opportunity_terms
                     WHERE workspace_id = $1
                       AND settled_at IS NULL
                     ORDER BY responds_by
@@ -163,7 +163,7 @@ impl PostgresAutopilotRepository {
                 sqlx::query_as::<_, (Uuid, Uuid)>(
                     r#"
                     SELECT DISTINCT ON (o.id) o.id AS opportunity_id, e.id AS event_id
-                    FROM viryaos_team_opportunities o
+                    FROM team_opportunities o
                     JOIN events e
                       ON e.workspace_id = o.workspace_id
                      AND e.status IN ('published', 'completed')
@@ -216,7 +216,7 @@ impl PostgresAutopilotRepository {
         self.bounded(async {
             sqlx::query(
                 r#"
-                UPDATE viryaos_team_opportunity_terms
+                UPDATE team_opportunity_terms
                 SET state = $3, settled_at = $4, settled_reason = $5, version = version + 1
                 WHERE workspace_id = $1
                   AND opportunity_id = $2

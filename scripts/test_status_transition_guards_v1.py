@@ -9,8 +9,8 @@ actually produce.
 
 Two surfaces, with very different backstops:
 
-- **`viryaos_autopilot_actions.status`** is projected into the action ledger by
-  the `viryaos_action_ledger_sync` trigger (migration 0190), which raises
+- **`autopilot_actions.status`** is projected into the action ledger by
+  the `action_ledger_sync` trigger (migration 0190), which raises
   `check_violation` on an edge it does not recognise — aborting whichever
   transaction the write was part of, not just the write. The outbox
   ambiguous-delivery path guarded on
@@ -22,7 +22,7 @@ Two surfaces, with very different backstops:
   status CHECK allows at all, so the arm matched nothing while reading as
   though it did.
 
-- **`viryaos_experiment_assignments.execution_status`** has no trigger and no
+- **`experiment_assignments.execution_status`** has no trigger and no
   runtime enforcement whatsoever. `ExecutionStatus::can_transition_to` in
   `crowdrelay-brain/src/experiment.rs` is documented as its state machine and
   has no production caller — only its own unit tests. Every write is a
@@ -189,21 +189,21 @@ class Surface:
 def surfaces() -> list[Surface]:
     return [
         Surface(
-            "viryaos_autopilot_actions",
+            "autopilot_actions",
             "status",
             check_vocabulary(
                 ACTION_CHECK,
-                "viryaos_autopilot_actions_status_check\n    CHECK (status IN (",
+                "autopilot_actions_status_check\n    CHECK (status IN (",
             ),
             action_ledger_edges(),
             action_ledger_states(),
         ),
         Surface(
-            "viryaos_experiment_assignments",
+            "experiment_assignments",
             "execution_status",
             check_vocabulary(
                 ASSIGNMENT_CHECK,
-                "viryaos_experiment_assignments_execution_status_valid\n"
+                "experiment_assignments_execution_status_valid\n"
                 "    CHECK (execution_status IN (",
             ),
             execution_status_edges(),
@@ -223,7 +223,7 @@ class AgentTargetKindVocabulary(unittest.TestCase):
     then raises `check_violation` inside the outcome's transaction.
 
     The trap this also pins: the list is deliberately *not*
-    `OutreachTargetKind`. That enum belongs to `viryaos_outreach_targets`, and
+    `OutreachTargetKind`. That enum belongs to `outreach_targets`, and
     the two sets differ in both directions — this one accepts `community` and
     rejects `support_slot`.
     """

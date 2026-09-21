@@ -2,7 +2,7 @@
 """The executor contract's capability list must match what CrowdRelay routes by.
 
 `executor_capability_for_event` maps every outbound event type to the capability
-an executor must advertise to receive it. `n8n/viryaos-executor-contract.md` is
+an executor must advertise to receive it. `n8n/crowdrelay-executor-contract.md` is
 what an executor operator reads to build that heartbeat. When the two disagree,
 the failure is silent and total: an operator cannot advertise a capability the
 contract never mentions, so CrowdRelay emits events that reach a consumer which
@@ -30,7 +30,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 CAPABILITIES = ROOT / "crates/crowdrelay-infra/src/autopilot/execution_capabilities.rs"
-CONTRACT = ROOT / "n8n/viryaos-executor-contract.md"
+CONTRACT = ROOT / "n8n/crowdrelay-executor-contract.md"
 
 # Capabilities CrowdRelay satisfies in-process and no external executor should
 # register. Empty today, and listed as a named concept so that adding one is a
@@ -40,9 +40,18 @@ INTERNAL_ONLY: set[str] = set()
 
 def code_capabilities() -> set[str]:
     source = CAPABILITIES.read_text()
-    found = set(re.findall(r'=>\s*"([a-z][a-z0-9_.]*)"', source))
+    found = set(re.findall(r'=>\s*"([a-z][a-z0-9._]*)"', source))
     # Capabilities referenced through a constant rather than a match arm.
-    found |= set(re.findall(r'CAPABILITY: &str = "([a-z][a-z0-9_.]*)"', source))
+    found |= set(re.findall(r'CAPABILITY: &str = "([a-z][a-z0-9._]*)"', source))
+    # Conditional arms (`=> { if ... { "cap" } }`) hide from the arm regex;
+    # every quoted literal inside the payload-capability function is a
+    # capability name, so read them there.
+    payload_fn = re.split(
+        r"\n(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?fn ",
+        source.split("fn executor_capability_for_payload", 1)[1],
+        1,
+    )[0]
+    found |= set(re.findall(r'"([a-z][a-z0-9._]*\.[a-z0-9._]+)"', payload_fn))
     found.discard("unknown")
     return found - INTERNAL_ONLY
 
@@ -50,7 +59,7 @@ def code_capabilities() -> set[str]:
 def contract_capabilities() -> set[str]:
     for line in CONTRACT.read_text().splitlines():
         if line.startswith("Capabilities:"):
-            return set(re.findall(r"`([a-z][a-z0-9_.]*)`", line))
+            return set(re.findall(r"`([a-z][a-z0-9._]*)`", line))
     raise AssertionError("the contract has no `Capabilities:` line")
 
 

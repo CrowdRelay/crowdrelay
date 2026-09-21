@@ -269,7 +269,7 @@ impl Default for BookingManagerPolicy {
             stretch_minimum_score_basis_points: 9_000,
             prefer_weekend_one_shots: true,
             // Markets are the tenant's own territory, declared per workspace
-            // in `viryaos_manager_config` — a fresh tenant with no configured
+            // in `manager_config` — a fresh tenant with no configured
             // policy must not silently inherit another band's geography. An
             // operator who *writes* a policy still declares at least one
             // market: `is_valid` keeps that write contract.

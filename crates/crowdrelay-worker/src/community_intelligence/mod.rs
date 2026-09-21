@@ -6,7 +6,7 @@
 //!       ↓
 //! ParsedObservation ── entities ────────────────→ community_entities
 //!       │                metrics ───────────────→ community_observations
-//!       └── items (dated posts fans engaged with) → viryaos_fan_observations
+//!       └── items (dated posts fans engaged with) → fan_observations
 //!       ↓
 //! Worker → Repository.insert_observation()
 //! ```

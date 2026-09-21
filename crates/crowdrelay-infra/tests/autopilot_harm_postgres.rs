@@ -76,7 +76,7 @@ async fn insert_dispatch(
     let decision_id = uuid::Uuid::now_v7();
     let action_id = uuid::Uuid::now_v7();
     sqlx::query(
-        r#"INSERT INTO viryaos_autopilot_decisions
+        r#"INSERT INTO autopilot_decisions
            (id, workspace_id, decision_key, context, subject_kind, subject_id,
             decision_kind, confidence_basis_points, disposition, reason,
             input_snapshot, policy_snapshot, recommendation, trace_id)
@@ -92,7 +92,7 @@ async fn insert_dispatch(
     .await
     .expect("decision");
     sqlx::query(
-        r#"INSERT INTO viryaos_autopilot_actions
+        r#"INSERT INTO autopilot_actions
            (id, workspace_id, decision_id, context, action_kind, subject_kind,
             subject_id, idempotency_key, payload, status, action_class, finished_at)
            VALUES ($1,$2,$3,'growth_metrics','audience.campaign.request','target_community',
@@ -114,7 +114,7 @@ async fn insert_dispatch(
     .await
     .expect("action");
     sqlx::query(
-        r#"INSERT INTO viryaos_growth_evidence
+        r#"INSERT INTO growth_evidence
            (workspace_id, action_id, opportunity_id, timestamp, recipient_id,
             channel, estimated_reach, treatment, propensity, converted,
             predicted_fans, predicted_signal_installs, context, evidence_quality)
@@ -366,7 +366,7 @@ async fn harm_counts_each_source_against_the_action_that_caused_it() {
     // Complaint on an outreach target the action reached.
     let target_id = uuid::Uuid::now_v7();
     sqlx::query(
-        r#"INSERT INTO viryaos_outreach_targets
+        r#"INSERT INTO outreach_targets
            (id, workspace_id, target_kind, display_name, contact_email)
            VALUES ($1,$2,'press','Weekly Rag',$3)"#,
     )
@@ -377,7 +377,7 @@ async fn harm_counts_each_source_against_the_action_that_caused_it() {
     .await
     .expect("target");
     sqlx::query(
-        r#"INSERT INTO viryaos_reach_events
+        r#"INSERT INTO reach_events
            (workspace_id, action_id, recipient_kind, recipient_id, channel,
             template_id, estimated_reach, status, sent_at)
            VALUES ($1,$2,'outreach_target',$3,'email','pitch-sender',1,'sent',$4)"#,
@@ -390,7 +390,7 @@ async fn harm_counts_each_source_against_the_action_that_caused_it() {
     .await
     .expect("reach");
     sqlx::query(
-        r#"INSERT INTO viryaos_outreach_delivery_faults
+        r#"INSERT INTO outreach_delivery_faults
            (workspace_id, target_id, fault, occurred_at)
            VALUES ($1,$2,'complaint',$3)"#,
     )
@@ -509,7 +509,7 @@ async fn harm_counts_each_source_against_the_action_that_caused_it() {
     // The harm keys land on the evidence row's observed_metrics when the
     // measurement completes — zeros included, a clean source is evidence.
     sqlx::query(
-        r#"INSERT INTO viryaos_autopilot_measurements
+        r#"INSERT INTO autopilot_measurements
            (id, workspace_id, action_id, measurement_kind, subject_id,
             action_finished_at, baseline_value, due_at, available_at, status,
             started_at, attempt_count)
@@ -539,7 +539,7 @@ async fn harm_counts_each_source_against_the_action_that_caused_it() {
         .await
         .expect("complete");
     let metrics: serde_json::Value = sqlx::query_scalar(
-        "SELECT observed_metrics FROM viryaos_growth_evidence \
+        "SELECT observed_metrics FROM growth_evidence \
          WHERE workspace_id = $1 AND action_id = $2",
     )
     .bind(workspace)
@@ -611,7 +611,7 @@ async fn terminal_failure_keeps_the_harm_it_observed() {
     // Retryable miss first: the row returns to pending and no harm lands —
     // the retried completion owns the merge.
     sqlx::query(
-        r#"INSERT INTO viryaos_autopilot_measurements
+        r#"INSERT INTO autopilot_measurements
            (id, workspace_id, action_id, measurement_kind, subject_id,
             action_finished_at, baseline_value, due_at, available_at, status,
             started_at, attempt_count)
@@ -640,7 +640,7 @@ async fn terminal_failure_keeps_the_harm_it_observed() {
         .await
         .expect("retryable fail");
     let metrics: serde_json::Value = sqlx::query_scalar(
-        "SELECT observed_metrics FROM viryaos_growth_evidence \
+        "SELECT observed_metrics FROM growth_evidence \
          WHERE workspace_id = $1 AND action_id = $2",
     )
     .bind(workspace)
@@ -656,7 +656,7 @@ async fn terminal_failure_keeps_the_harm_it_observed() {
     // Terminal failure: the harm the measurement already observed lands with
     // the row's close — the retry path is exhausted at attempt 3.
     sqlx::query(
-        "UPDATE viryaos_autopilot_measurements \
+        "UPDATE autopilot_measurements \
          SET status='processing', started_at=now(), attempt_count=3 \
          WHERE workspace_id=$1 AND id=$2",
     )
@@ -677,7 +677,7 @@ async fn terminal_failure_keeps_the_harm_it_observed() {
         .await
         .expect("terminal fail");
     let metrics: serde_json::Value = sqlx::query_scalar(
-        "SELECT observed_metrics FROM viryaos_growth_evidence \
+        "SELECT observed_metrics FROM growth_evidence \
          WHERE workspace_id = $1 AND action_id = $2",
     )
     .bind(workspace)
@@ -691,7 +691,7 @@ async fn terminal_failure_keeps_the_harm_it_observed() {
         "terminal failure still leaves the harm it observed"
     );
     let status: String = sqlx::query_scalar(
-        "SELECT status FROM viryaos_autopilot_measurements \
+        "SELECT status FROM autopilot_measurements \
          WHERE workspace_id = $1 AND id = $2",
     )
     .bind(workspace)
@@ -760,7 +760,7 @@ async fn unobserved_harm_writes_no_keys() {
         anchor + time::Duration::days(7),
     );
     sqlx::query(
-        r#"INSERT INTO viryaos_autopilot_measurements
+        r#"INSERT INTO autopilot_measurements
            (id, workspace_id, action_id, measurement_kind, subject_id,
             action_finished_at, baseline_value, due_at, available_at, status,
             started_at, attempt_count)
@@ -791,7 +791,7 @@ async fn unobserved_harm_writes_no_keys() {
         .expect("terminal fail");
 
     let metrics: serde_json::Value = sqlx::query_scalar(
-        "SELECT observed_metrics FROM viryaos_growth_evidence \
+        "SELECT observed_metrics FROM growth_evidence \
          WHERE workspace_id = $1 AND action_id = $2",
     )
     .bind(workspace)

@@ -137,8 +137,8 @@ impl PostgresAutopilotRepository {
                 r#"
                 SELECT action.id, action.context, action.action_kind,
                        action.subject_id, action.approval_expires_at, action.payload
-                FROM viryaos_autopilot_actions action
-                LEFT JOIN viryaos_team_assignments assignment
+                FROM autopilot_actions action
+                LEFT JOIN team_assignments assignment
                   ON assignment.workspace_id=action.workspace_id
                  AND assignment.action_id=action.id
                 WHERE action.workspace_id=$1
@@ -194,7 +194,7 @@ impl PostgresAutopilotRepository {
                 LEFT JOIN show_checklist_items checklist
                   ON checklist.workspace_id=event.workspace_id
                  AND checklist.event_id=event.id AND checklist.item_key=task.item_key
-                LEFT JOIN viryaos_team_assignments assignment
+                LEFT JOIN team_assignments assignment
                   ON assignment.workspace_id=event.workspace_id
                  AND assignment.source_kind='show_task'
                  AND assignment.source_id=event.id
@@ -263,7 +263,7 @@ impl PostgresAutopilotRepository {
                 let assignment_id = Uuid::now_v7();
                 let inserted = sqlx::query_scalar::<_, Uuid>(
                     r#"
-                    INSERT INTO viryaos_team_assignments (
+                    INSERT INTO team_assignments (
                         id, workspace_id, action_id, source_kind, source_id, source_ref,
                         assignee_member_id, required_skill, due_at, next_reminder_at
                     ) VALUES ($1,$2,$3,'autopilot_action',$4,NULL,$5,$6,$7,$8)
@@ -345,7 +345,7 @@ impl PostgresAutopilotRepository {
                 let assignment_id = Uuid::now_v7();
                 let inserted = sqlx::query_scalar::<_, Uuid>(
                     r#"
-                    INSERT INTO viryaos_team_assignments (
+                    INSERT INTO team_assignments (
                         id, workspace_id, action_id, source_kind, source_id, source_ref,
                         assignee_member_id, required_skill, due_at, next_reminder_at
                     ) VALUES ($1,$2,NULL,'show_task',$3,$4,$5,$6,$7,$8)
@@ -454,26 +454,26 @@ impl PostgresAutopilotRepository {
                        member.display_name, member.normalized_email,
                        assignment.due_at, assignment.reminder_count,
                        action.payload
-                FROM viryaos_team_assignments assignment
+                FROM team_assignments assignment
                 JOIN workspace_members member
                   ON member.workspace_id=assignment.workspace_id
                  AND member.id=assignment.assignee_member_id
-                LEFT JOIN viryaos_autopilot_actions action
+                LEFT JOIN autopilot_actions action
                   ON action.workspace_id=assignment.workspace_id
                  AND action.id=assignment.action_id
                 LEFT JOIN events event
                   ON assignment.source_kind='show_task'
                  AND event.workspace_id=assignment.workspace_id
                  AND event.id=assignment.source_id
-                LEFT JOIN viryaos_capture_plans plan
+                LEFT JOIN capture_plans plan
                   ON assignment.source_kind='capture_plan'
                  AND plan.workspace_id=assignment.workspace_id
                  AND plan.id=assignment.source_id
-                LEFT JOIN viryaos_release_plans release
+                LEFT JOIN release_plans release
                   ON assignment.source_kind='release_making_of'
                  AND release.workspace_id=assignment.workspace_id
                  AND release.id=assignment.source_id
-                LEFT JOIN viryaos_production_events day
+                LEFT JOIN production_events day
                   ON day.workspace_id=assignment.workspace_id
                  AND day.id=plan.production_event_id
                 WHERE assignment.workspace_id=$1
@@ -573,7 +573,7 @@ impl PostgresAutopilotRepository {
                 for row in &group {
                     let row_next = next_reminder_at(now, row.due_at, row.reminder_count);
                     sqlx::query(
-                        r#"UPDATE viryaos_team_assignments
+                        r#"UPDATE team_assignments
                            SET last_reminded_at=$3, next_reminder_at=$4,
                                reminder_count=reminder_count+1,
                                first_overdue_reminder_at = COALESCE(first_overdue_reminder_at, CASE WHEN due_at IS NOT NULL AND $3 > due_at THEN $3 END)
@@ -602,11 +602,11 @@ async fn close_resolved_assignments(
     now: OffsetDateTime,
 ) -> Result<(), RepositoryError> {
     sqlx::query(
-        r#"UPDATE viryaos_team_assignments assignment
+        r#"UPDATE team_assignments assignment
            SET status = CASE WHEN action.status IN ('queued','processing','succeeded') THEN 'done' ELSE 'cancelled' END,
                completed_at = CASE WHEN action.status IN ('queued','processing','succeeded') THEN $2 ELSE NULL END,
                next_reminder_at = NULL
-           FROM viryaos_autopilot_actions action
+           FROM autopilot_actions action
            WHERE assignment.workspace_id=$1 AND assignment.workspace_id=action.workspace_id
              AND assignment.action_id=action.id AND assignment.status='open'
              AND action.status <> 'awaiting_approval'"#,
@@ -615,7 +615,7 @@ async fn close_resolved_assignments(
     .execute(&mut **tx).await.map_err(map_sqlx)?;
 
     sqlx::query(
-        r#"UPDATE viryaos_team_assignments assignment
+        r#"UPDATE team_assignments assignment
            SET status='done', completed_at=$2, next_reminder_at=NULL
            FROM show_checklist_items checklist
            WHERE assignment.workspace_id=$1 AND assignment.status='open'
@@ -632,7 +632,7 @@ async fn close_resolved_assignments(
     .map_err(map_sqlx)?;
 
     sqlx::query(
-        r#"UPDATE viryaos_team_assignments assignment
+        r#"UPDATE team_assignments assignment
            SET status='cancelled', completed_at=NULL, next_reminder_at=NULL
            FROM events event
            WHERE assignment.workspace_id=$1 AND assignment.status='open'
@@ -650,11 +650,11 @@ async fn close_resolved_assignments(
     // checklist item does: `done` is work finished, `abandoned` is a day
     // that passed — chasing either is noise.
     sqlx::query(
-        r#"UPDATE viryaos_team_assignments assignment
+        r#"UPDATE team_assignments assignment
            SET status = CASE WHEN plan.status='done' THEN 'done' ELSE 'cancelled' END,
                completed_at = CASE WHEN plan.status='done' THEN $2 ELSE NULL END,
                next_reminder_at = NULL
-           FROM viryaos_capture_plans plan
+           FROM capture_plans plan
            WHERE assignment.workspace_id=$1 AND assignment.status='open'
              AND assignment.source_kind='capture_plan'
              AND plan.workspace_id=assignment.workspace_id
@@ -698,9 +698,8 @@ pub(super) async fn queue_team_email_action(
     // preceded it.
     let trace = TraceContext::root(workspace_id);
     let trace_id = trace.trace_id().into_uuid();
-    let decision_id =
-        if let Some(id) = sqlx::query_scalar::<_, Uuid>(
-            r#"INSERT INTO viryaos_autopilot_decisions (
+    let decision_id = if let Some(id) = sqlx::query_scalar::<_, Uuid>(
+        r#"INSERT INTO autopilot_decisions (
                id, workspace_id, decision_key, context, subject_kind, subject_id,
                decision_kind, confidence_basis_points, disposition, reason,
                input_snapshot, policy_snapshot, recommendation, evaluated_at, trace_id
@@ -708,28 +707,32 @@ pub(super) async fn queue_team_email_action(
                      'auto_execute','Durable human handoff notification',
                      $6,$7,$8,$9,$10)
            ON CONFLICT (workspace_id, decision_key) DO NOTHING RETURNING id"#,
+    )
+    .bind(Uuid::now_v7())
+    .bind(workspace_id.into_uuid())
+    .bind(&decision_key)
+    .bind(context)
+    .bind(assignment_id)
+    .bind(json!({"assignment_id":assignment_id,"reminder_number":reminder_number}))
+    .bind(json!({"provider_completion_required":true,"capability":"team.email"}))
+    .bind(json!({"send_friendly_email":true}))
+    .bind(now)
+    .bind(trace_id)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(map_sqlx)?
+    {
+        id
+    } else {
+        sqlx::query_scalar::<_, Uuid>(
+            "SELECT id FROM autopilot_decisions WHERE workspace_id=$1 AND decision_key=$2",
         )
-        .bind(Uuid::now_v7())
         .bind(workspace_id.into_uuid())
         .bind(&decision_key)
-        .bind(context)
-        .bind(assignment_id)
-        .bind(json!({"assignment_id":assignment_id,"reminder_number":reminder_number}))
-        .bind(json!({"provider_completion_required":true,"capability":"team.email"}))
-        .bind(json!({"send_friendly_email":true}))
-        .bind(now)
-        .bind(trace_id)
-        .fetch_optional(&mut **tx)
+        .fetch_one(&mut **tx)
         .await
         .map_err(map_sqlx)?
-        {
-            id
-        } else {
-            sqlx::query_scalar::<_, Uuid>(
-            "SELECT id FROM viryaos_autopilot_decisions WHERE workspace_id=$1 AND decision_key=$2",
-        ).bind(workspace_id.into_uuid()).bind(&decision_key)
-        .fetch_one(&mut **tx).await.map_err(map_sqlx)?
-        };
+    };
 
     // Crew mail keeps the tenant's night quiet — `available_at` holds the
     // notice to the window's end instead of a 03:00 inbox. The row exists,
@@ -779,7 +782,7 @@ pub(super) async fn queue_team_email_action(
     let action_trace =
         TraceContext::for_action(workspace_id, trace.trace_id(), action_id, Some(decision_id));
     sqlx::query(
-        r#"INSERT INTO viryaos_autopilot_actions (
+        r#"INSERT INTO autopilot_actions (
                id, workspace_id, decision_id, context, action_kind, subject_kind, subject_id,
                idempotency_key, payload, status, approved_at, approved_by, available_at,
                trace_id, causation_id
@@ -1014,7 +1017,7 @@ pub(super) fn friendly_action_title(action_kind: &str, locale: BriefingLocale) -
         ("opportunity.terms.counter", BriefingLocale::En) => "Approve the terms counter",
         ("opportunity.terms.accept", BriefingLocale::Pl) => "Zatwierdź przyjęcie warunków",
         ("opportunity.terms.accept", BriefingLocale::En) => "Approve accepting the terms",
-        (other, _) => return format!("VIRYA OS — {}", other.replace(['.', '_'], " ")),
+        (other, _) => return format!("CrowdRelay — {}", other.replace(['.', '_'], " ")),
     };
     title.to_owned()
 }

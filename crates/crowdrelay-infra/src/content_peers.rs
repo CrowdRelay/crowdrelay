@@ -179,7 +179,7 @@ impl PostgresContentEngineRepository {
         };
         let row = sqlx::query_as::<_, PeerRow>(
             r#"
-            INSERT INTO viryaos_peers (
+            INSERT INTO peers (
                 id, workspace_id, name, handles, tier, watch_for, why,
                 proposed_by, status, confirmed_at
             )
@@ -223,7 +223,7 @@ impl PostgresContentEngineRepository {
         // match.
         let standing = sqlx::query_scalar::<_, Uuid>(
             r#"
-            SELECT id FROM viryaos_peers
+            SELECT id FROM peers
             WHERE workspace_id = $1 AND lower(btrim(name)) = lower(btrim($2))
             "#,
         )
@@ -259,7 +259,7 @@ impl PostgresContentEngineRepository {
             Ok(Some(_)) => {
                 let row = sqlx::query_as::<_, PeerRow>(
                     r#"
-                    SELECT * FROM viryaos_peers
+                    SELECT * FROM peers
                     WHERE workspace_id = $1 AND id = $2
                     "#,
                 )
@@ -296,7 +296,7 @@ impl PostgresContentEngineRepository {
     ) -> Result<Vec<Peer>> {
         let rows = sqlx::query_as::<_, PeerRow>(
             r#"
-            SELECT * FROM viryaos_peers
+            SELECT * FROM peers
             WHERE workspace_id = $1
               AND ($2::text IS NULL OR status = $2)
             ORDER BY created_at ASC
@@ -371,7 +371,7 @@ impl PostgresContentEngineRepository {
             Ok(Some(_)) => {
                 let row = sqlx::query_as::<_, PeerRow>(
                     r#"
-                    SELECT * FROM viryaos_peers
+                    SELECT * FROM peers
                     WHERE workspace_id = $1 AND id = $2
                     "#,
                 )
@@ -405,7 +405,7 @@ impl PostgresContentEngineRepository {
     {
         let row = sqlx::query_as::<_, PeerRow>(
             r#"
-            UPDATE viryaos_peers
+            UPDATE peers
             SET status = $3,
                 rejection_reason = CASE WHEN $3 = 'rejected' THEN $4 END,
                 confirmed_at = CASE WHEN $3 = 'confirmed' THEN now() END,
@@ -449,7 +449,7 @@ impl PostgresContentEngineRepository {
             r#"
             WITH mine AS (
                 SELECT DISTINCT COALESCE(alias.canonical, lower(btrim(tag))) AS genre
-                FROM viryaos_band_listings AS listing
+                FROM band_listings AS listing
                 CROSS JOIN unnest(listing.genre_tags) AS tag
                 LEFT JOIN place_genre_aliases AS alias
                     ON alias.alias = lower(btrim(tag))
@@ -479,14 +479,14 @@ impl PostgresContentEngineRepository {
                 ) AS billing
                 WHERE shared.shared_genres IS NOT NULL
                   AND NOT EXISTS (
-                      SELECT 1 FROM viryaos_peers AS existing
+                      SELECT 1 FROM peers AS existing
                       WHERE existing.workspace_id = $1
                         AND lower(btrim(existing.name)) = lower(btrim(act.display_name))
                   )
                 ORDER BY billing.tracked_rooms DESC, act.name_key
                 LIMIT $2
             )
-            INSERT INTO viryaos_peers (
+            INSERT INTO peers (
                 id, workspace_id, name, handles, tier, watch_for, why,
                 proposed_by, status
             )

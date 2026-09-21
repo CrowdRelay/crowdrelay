@@ -322,7 +322,7 @@ impl SocialPostExecutorWorker {
         if !action_ids.is_empty() {
             sqlx::query(
                 r#"
-                UPDATE viryaos_autopilot_actions
+                UPDATE autopilot_actions
                 SET status = 'unknown',
                     finished_at = NULL,
                     updated_at = now()
@@ -338,9 +338,9 @@ impl SocialPostExecutorWorker {
 
             sqlx::query(
                 r#"
-                UPDATE viryaos_experiment_assignments AS ea
+                UPDATE experiment_assignments AS ea
                 SET execution_status = 'unknown',
-                    trace_id = COALESCE(ea.trace_id, (SELECT trace_id FROM viryaos_autopilot_actions WHERE id = ea.action_id))
+                    trace_id = COALESCE(ea.trace_id, (SELECT trace_id FROM autopilot_actions WHERE id = ea.action_id))
                 WHERE ea.workspace_id = $1
                   AND ea.action_id = ANY($2)
                   AND ea.execution_status = 'dispatched'
@@ -397,7 +397,7 @@ impl SocialPostExecutorWorker {
                 COALESCE('/l/' || link.slug, a.payload->'draft'->>'cta_url'),
                 link.id,
                 'pending'
-            FROM viryaos_autopilot_actions a
+            FROM autopilot_actions a
             JOIN agent_service_tasks t ON t.id = (a.payload->>'task_id')::uuid
             LEFT JOIN smart_links link
               ON link.workspace_id = a.workspace_id
@@ -450,7 +450,7 @@ impl SocialPostExecutorWorker {
                    c.smart_link, c.smart_link_id,
                    a.trace_id
             FROM claimed c
-            LEFT JOIN viryaos_autopilot_actions a ON a.id = c.action_id
+            LEFT JOIN autopilot_actions a ON a.id = c.action_id
             "#,
         )
         .bind(ws)
@@ -743,7 +743,7 @@ impl SocialPostExecutorWorker {
         let image_url: Option<String> = sqlx::query_scalar(
             r#"
             SELECT asset.url
-            FROM viryaos_beacon_press_assets AS asset
+            FROM beacon_press_assets AS asset
             LEFT JOIN LATERAL (
                 SELECT max(post.posted_at) AS last_published_at
                 FROM social_posts AS post

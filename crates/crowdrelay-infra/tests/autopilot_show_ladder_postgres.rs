@@ -124,7 +124,7 @@ async fn seed_rung(
     let decision_id = Uuid::now_v7();
     sqlx::query(
         r#"
-        INSERT INTO viryaos_autopilot_decisions (
+        INSERT INTO autopilot_decisions (
             id, workspace_id, decision_key, context, subject_kind, subject_id,
             decision_kind, confidence_basis_points, disposition, reason,
             input_snapshot, policy_snapshot, recommendation, evaluated_at, trace_id
@@ -144,7 +144,7 @@ async fn seed_rung(
     let action_id = Uuid::now_v7();
     sqlx::query(
         r#"
-        INSERT INTO viryaos_autopilot_actions (
+        INSERT INTO autopilot_actions (
             id, workspace_id, decision_id, context, action_kind, subject_kind, subject_id,
             idempotency_key, payload, status, approved_at, approved_by, available_at
         ) VALUES ($1,$2,$3,'show_growth',$4,'event',$5,$6,$7,$8,$9,$10,$11)
@@ -172,7 +172,7 @@ async fn rung_state(
     action_id: Uuid,
 ) -> Result<(String, Option<String>), Box<dyn std::error::Error>> {
     let row: (String, Option<String>) = sqlx::query_as(
-        "SELECT status, approved_by FROM viryaos_autopilot_actions \
+        "SELECT status, approved_by FROM autopilot_actions \
          WHERE workspace_id=$1 AND id=$2",
     )
     .bind(workspace_id.into_uuid())
@@ -235,7 +235,7 @@ async fn ladder_approval_releases_parked_rungs_and_revoke_cancels_only_its_own()
 
     // The live approval row is what future snapshots read.
     let live: bool = sqlx::query_scalar(
-        "SELECT EXISTS (SELECT 1 FROM viryaos_show_ladder_approvals \
+        "SELECT EXISTS (SELECT 1 FROM show_ladder_approvals \
          WHERE workspace_id=$1 AND event_id=$2 AND revoked_at IS NULL)",
     )
     .bind(fixture.workspace_id.into_uuid())
@@ -357,7 +357,7 @@ async fn ladder_authorized_candidates_queue_with_operator_provenance()
 
     let (status, approved_by, available_at): (String, Option<String>, OffsetDateTime) =
         sqlx::query_as(
-            "SELECT status, approved_by, available_at FROM viryaos_autopilot_actions \
+            "SELECT status, approved_by, available_at FROM autopilot_actions \
              WHERE workspace_id=$1 AND subject_id=$2 AND context='show_growth'",
         )
         .bind(fixture.workspace_id.into_uuid())
@@ -385,7 +385,7 @@ async fn ladder_authorized_candidates_queue_with_operator_provenance()
         )
         .await?;
     let (status, _): (String, Option<String>) = sqlx::query_as(
-        "SELECT status, approved_by FROM viryaos_autopilot_actions \
+        "SELECT status, approved_by FROM autopilot_actions \
          WHERE workspace_id=$1 AND subject_id=$2 AND context='show_growth'",
     )
     .bind(fixture.workspace_id.into_uuid())

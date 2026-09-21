@@ -127,7 +127,7 @@ impl ActionClass {
     /// True when an operator may grant this class a standing approval for one
     /// named target — see [`crate::standing_approval`].
     ///
-    /// Money never. The `viryaos_standing_approvals` CHECK is the guarantee;
+    /// Money never. The `standing_approvals` CHECK is the guarantee;
     /// this says the same thing in Rust so a caller learns it from a type
     /// rather than from a constraint violation. Every posture already keeps
     /// `paid` behind approval, and no row may be the first thing that does

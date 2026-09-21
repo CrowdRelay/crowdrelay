@@ -14,7 +14,7 @@ class OpsWatchdogContract(unittest.TestCase):
         # The watchdog tracks alert state in the DB but no longer emits
         # outbox events — Discord spam was removed because it was not
         # actionable from there. Alert state is exposed via the ops API.
-        self.assertIn("viryaos_ops_alert_state", worker)
+        self.assertIn("ops_alert_state", worker)
         self.assertIn("ALERT_REPEAT_AFTER", worker)
         self.assertNotIn("crowdrelay.ops.status_changed", worker)
         # The rule is that the watchdog does not *emit*, not that it may not read.
@@ -35,7 +35,7 @@ class OpsWatchdogContract(unittest.TestCase):
         watchdog = (ROOT / "crates/crowdrelay-api/src/ops_summary.rs").read_text()
         self.assertIn("watchdog: WatchdogSummary", ops)
         self.assertIn("crate::ops_summary::load_watchdog_summary", ops)
-        self.assertIn("FROM viryaos_ops_alert_state", watchdog)
+        self.assertIn("FROM ops_alert_state", watchdog)
         self.assertIn("active_alerts", watchdog)
         self.assertIn("critical_alerts", watchdog)
 

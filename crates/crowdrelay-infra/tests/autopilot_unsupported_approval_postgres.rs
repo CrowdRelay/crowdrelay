@@ -31,7 +31,7 @@ async fn action_state(
     action_id: Uuid,
 ) -> Result<(String, Option<String>), Box<dyn std::error::Error>> {
     Ok(sqlx::query_as::<_, (String, Option<String>)>(
-        "SELECT status, last_error_kind FROM viryaos_autopilot_actions WHERE id = $1",
+        "SELECT status, last_error_kind FROM autopilot_actions WHERE id = $1",
     )
     .bind(action_id)
     .fetch_one(pool)
@@ -50,7 +50,7 @@ async fn seed_awaiting_approval(
     let subject_id = Uuid::now_v7();
     sqlx::query(
         r#"
-        INSERT INTO viryaos_autopilot_decisions (
+        INSERT INTO autopilot_decisions (
             id, workspace_id, decision_key, context, subject_kind, subject_id,
             decision_kind, confidence_basis_points, disposition, reason,
             input_snapshot, policy_snapshot, recommendation, evaluated_at, trace_id
@@ -73,7 +73,7 @@ async fn seed_awaiting_approval(
     // the row is cleared for being unanswerable, not for being old.
     sqlx::query(
         r#"
-        INSERT INTO viryaos_autopilot_actions (
+        INSERT INTO autopilot_actions (
             id, workspace_id, decision_id, context, action_kind, subject_kind, subject_id,
             idempotency_key, payload, status, available_at, approval_expires_at
         ) VALUES ($1,$2,$3,'booking_opportunity','outreach.target.request','agent_outcome',$4,
@@ -155,7 +155,7 @@ async fn a_zero_confidence_approval_is_cleared_and_a_supported_one_is_not()
         "an approval with evidence behind it must stay in the queue"
     );
 
-    // No teardown: the workspace id is fresh per run and `viryaos_action_ledger`
+    // No teardown: the workspace id is fresh per run and `action_ledger`
     // holds a RESTRICT foreign key to it, so deleting would fail on rows the
     // claim path legitimately wrote.
     Ok(())

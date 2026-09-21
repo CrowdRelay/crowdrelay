@@ -18,7 +18,7 @@
 //!
 //! The source is `place_event_contributions` rows of kind `terms` and only
 //! those. The tenant's own negotiation archive
-//! (`viryaos_team_opportunity_terms`) settles against an opportunity id that
+//! (`team_opportunity_terms`) settles against an opportunity id that
 //! carries no venue key, so no venue-attributable fee row lands anywhere
 //! else — contributions are the whole honest scope, not a partial one.
 //!

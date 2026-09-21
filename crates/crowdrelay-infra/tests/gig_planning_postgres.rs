@@ -237,7 +237,7 @@ async fn run(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
 
     // ── Give it a promoter, and it proposes ─────────────────────────────────
     sqlx::query(
-        "INSERT INTO viryaos_booking_targets
+        "INSERT INTO booking_targets
             (workspace_id, city_id, target_kind, display_name, contact_email,
              relationship_score, capacity)
          VALUES ($1, $2, 'promoter', 'Anna', 'anna@example.com', 70, 300)",
@@ -1056,7 +1056,7 @@ async fn comparable_acts_reach_the_planner() -> Result<(), Box<dyn std::error::E
         // The tenant declares a genre; without it "comparable" has no "mine"
         // side to intersect and every act counts as incomparable.
         sqlx::query(
-            "INSERT INTO viryaos_band_listings (workspace_id, act_name, genre_tags)
+            "INSERT INTO band_listings (workspace_id, act_name, genre_tags)
              VALUES ($1, 'Test Act', '{doom metal}')",
         )
         .bind(act)
@@ -1084,7 +1084,7 @@ async fn comparable_acts_reach_the_planner() -> Result<(), Box<dyn std::error::E
         // 'dream pop' as its own set and the count below would change.
         let other = workspace(pool).await?;
         sqlx::query(
-            "INSERT INTO viryaos_band_listings (workspace_id, act_name, genre_tags)
+            "INSERT INTO band_listings (workspace_id, act_name, genre_tags)
              VALUES ($1, 'Other Act', '{dream pop}')",
         )
         .bind(other)
@@ -1130,7 +1130,7 @@ async fn comparable_acts_reach_the_planner() -> Result<(), Box<dyn std::error::E
         // proposes, and the comparable-acts reason — strongest first — is
         // what the opening line renders.
         sqlx::query(
-            "INSERT INTO viryaos_booking_targets
+            "INSERT INTO booking_targets
                 (workspace_id, city_id, target_kind, display_name, contact_email,
                  relationship_score)
              VALUES ($1, $2, 'promoter', 'Anna', 'anna@example.com', 70)",

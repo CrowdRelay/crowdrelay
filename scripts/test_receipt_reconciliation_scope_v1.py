@@ -84,7 +84,7 @@ class ReceiptReconciliationScope(unittest.TestCase):
     def test_the_write_stays_pinned_to_the_state_it_resolved_from(self) -> None:
         source = production_source()
         body = source[source.index("async fn resolve_action(") :]
-        update = body[body.index("UPDATE viryaos_autopilot_actions") :]
+        update = body[body.index("UPDATE autopilot_actions") :]
         update = update[: update.index('"#')]
         self.assertIn(
             "AND status = 'unknown'",

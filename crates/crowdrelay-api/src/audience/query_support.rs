@@ -355,7 +355,7 @@ async fn ensure_recipient_snapshot(
     // reported count. An absent envelope row reads as the domain default —
     // never as "no bound".
     let recipient_bound = sqlx::query_scalar::<_, i32>(
-        "SELECT max_recipients_per_step FROM viryaos_growth_envelope WHERE workspace_id = $1",
+        "SELECT max_recipients_per_step FROM growth_envelope WHERE workspace_id = $1",
     )
     .bind(workspace_id)
     .fetch_optional(&mut *transaction)
@@ -807,7 +807,7 @@ mod tests {
             purchased_event_slugs: Vec::new(),
             excluded_purchased_event_slugs: Vec::new(),
             excluded_scan_checkin_event_slugs: Vec::new(),
-            excluded_campaign_slugs: vec!["viryaos-release-abc-wrap".to_owned()],
+            excluded_campaign_slugs: vec!["crowdrelay-release-abc-wrap".to_owned()],
             synesthesia_completed: Some(true),
             marketing_consent: Some(true),
             tags_all: vec!["ambassador".to_owned()],

@@ -201,7 +201,7 @@ async fn candidates_are_screened_on_write_and_only_promote_when_confirmed()
 
     let (contact_email, discovered_from) =
         sqlx::query_as::<_, (String, Option<Uuid>)>(
-            "SELECT contact_email, discovered_from_candidate_id FROM viryaos_outreach_targets WHERE workspace_id=$1 AND id=$2",
+            "SELECT contact_email, discovered_from_candidate_id FROM outreach_targets WHERE workspace_id=$1 AND id=$2",
         )
         .bind(workspace_id.into_uuid())
         .bind(target_id.into_uuid())
@@ -211,7 +211,7 @@ async fn candidates_are_screened_on_write_and_only_promote_when_confirmed()
     assert_eq!(discovered_from, Some(admitted_id));
 
     let status = sqlx::query_scalar::<_, String>(
-        "SELECT status FROM viryaos_outreach_candidates WHERE workspace_id=$1 AND id=$2",
+        "SELECT status FROM outreach_candidates WHERE workspace_id=$1 AND id=$2",
     )
     .bind(workspace_id.into_uuid())
     .bind(admitted_id)
@@ -284,7 +284,7 @@ async fn candidate_id(
     route_value: &str,
 ) -> Result<Uuid, Box<dyn std::error::Error>> {
     Ok(sqlx::query_scalar::<_, Uuid>(
-        "SELECT id FROM viryaos_outreach_candidates WHERE workspace_id=$1 AND route_value=$2",
+        "SELECT id FROM outreach_candidates WHERE workspace_id=$1 AND route_value=$2",
     )
     .bind(workspace_id.into_uuid())
     .bind(route_value)
@@ -298,7 +298,7 @@ async fn refusal(
     route_value: &str,
 ) -> Result<Option<String>, Box<dyn std::error::Error>> {
     Ok(sqlx::query_scalar::<_, Option<String>>(
-        "SELECT refusal_reason FROM viryaos_outreach_candidates WHERE workspace_id=$1 AND route_value=$2",
+        "SELECT refusal_reason FROM outreach_candidates WHERE workspace_id=$1 AND route_value=$2",
     )
     .bind(workspace_id.into_uuid())
     .bind(route_value)
@@ -312,7 +312,7 @@ async fn pitch_class(
     route_value: &str,
 ) -> Result<Option<String>, Box<dyn std::error::Error>> {
     Ok(sqlx::query_scalar::<_, Option<String>>(
-        "SELECT pitch_class FROM viryaos_outreach_candidates WHERE workspace_id=$1 AND route_value=$2",
+        "SELECT pitch_class FROM outreach_candidates WHERE workspace_id=$1 AND route_value=$2",
     )
     .bind(workspace_id.into_uuid())
     .bind(route_value)
@@ -385,7 +385,7 @@ async fn a_content_sources_format_must_name_a_catalogue_entry()
     );
     assert_eq!(
         sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*) FROM viryaos_content_sources WHERE workspace_id = $1 AND source_key = 'video-bad'"
+            "SELECT COUNT(*) FROM content_sources WHERE workspace_id = $1 AND source_key = 'video-bad'"
         )
         .bind(workspace_id.into_uuid())
         .fetch_one(&pool)
@@ -476,7 +476,7 @@ async fn an_approved_suggestion_resolves_on_the_bands_report()
         concept: &str,
     ) -> Result<Uuid, sqlx::Error> {
         sqlx::query_scalar::<_, Uuid>(
-            "INSERT INTO viryaos_content_suggestions
+            "INSERT INTO content_suggestions
                  (id, workspace_id, format_key, concept, status)
              VALUES ($1, $2, 'playthrough', $3, $4) RETURNING id",
         )
@@ -532,16 +532,14 @@ async fn an_approved_suggestion_resolves_on_the_bands_report()
     .await?;
     assert!(!recorded.replayed);
     assert_eq!(
-        sqlx::query_scalar::<_, String>(
-            "SELECT status FROM viryaos_content_suggestions WHERE id = $1"
-        )
-        .bind(approved)
-        .fetch_one(&pool)
-        .await?,
+        sqlx::query_scalar::<_, String>("SELECT status FROM content_suggestions WHERE id = $1")
+            .bind(approved)
+            .fetch_one(&pool)
+            .await?,
         "done"
     );
     let (outcome, decided_by): (String, Option<String>) = sqlx::query_as(
-        "SELECT outcome, decided_by FROM viryaos_suggestion_outcomes
+        "SELECT outcome, decided_by FROM suggestion_outcomes
          WHERE workspace_id = $1 AND suggestion_id = $2",
     )
     .bind(workspace_id.into_uuid())
@@ -564,7 +562,7 @@ async fn an_approved_suggestion_resolves_on_the_bands_report()
     assert!(replayed.replayed);
     assert_eq!(
         sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*) FROM viryaos_suggestion_outcomes WHERE suggestion_id = $1"
+            "SELECT COUNT(*) FROM suggestion_outcomes WHERE suggestion_id = $1"
         )
         .bind(approved)
         .fetch_one(&pool)
@@ -587,7 +585,7 @@ async fn an_approved_suggestion_resolves_on_the_bands_report()
     )
     .await?;
     let (outcome, reason): (String, Option<String>) = sqlx::query_as(
-        "SELECT outcome, reason FROM viryaos_suggestion_outcomes
+        "SELECT outcome, reason FROM suggestion_outcomes
          WHERE workspace_id = $1 AND suggestion_id = $2",
     )
     .bind(workspace_id.into_uuid())
@@ -597,12 +595,10 @@ async fn an_approved_suggestion_resolves_on_the_bands_report()
     assert_eq!(outcome, "done_differently");
     assert_eq!(reason.as_deref(), Some("filmed a rehearsal clip instead"));
     assert_eq!(
-        sqlx::query_scalar::<_, String>(
-            "SELECT status FROM viryaos_content_suggestions WHERE id = $1"
-        )
-        .bind(differently)
-        .fetch_one(&pool)
-        .await?,
+        sqlx::query_scalar::<_, String>("SELECT status FROM content_suggestions WHERE id = $1")
+            .bind(differently)
+            .fetch_one(&pool)
+            .await?,
         "done",
         "the terminal status is `done` — the outcome row holds the nuance"
     );
@@ -664,7 +660,7 @@ async fn an_approved_suggestion_resolves_on_the_bands_report()
         .execute(&pool)
         .await?;
     let foreign: Uuid = sqlx::query_scalar(
-        "INSERT INTO viryaos_content_suggestions
+        "INSERT INTO content_suggestions
              (id, workspace_id, format_key, concept, status)
          VALUES ($1, $2, 'playthrough', 'foreign beat', 'approved') RETURNING id",
     )
@@ -686,12 +682,10 @@ async fn an_approved_suggestion_resolves_on_the_bands_report()
         "another tenant's suggestion is not found, not conflict: {cross:?}"
     );
     assert_eq!(
-        sqlx::query_scalar::<_, String>(
-            "SELECT status FROM viryaos_content_suggestions WHERE id = $1"
-        )
-        .bind(foreign)
-        .fetch_one(&pool)
-        .await?,
+        sqlx::query_scalar::<_, String>("SELECT status FROM content_suggestions WHERE id = $1")
+            .bind(foreign)
+            .fetch_one(&pool)
+            .await?,
         "approved",
         "the foreign row is untouched"
     );

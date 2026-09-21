@@ -12,13 +12,13 @@
 pub const UNSHARED_SQL: &str = r#"
 WITH happened AS (
     SELECT s.id
-    FROM viryaos_content_sources s
+    FROM content_sources s
     WHERE s.workspace_id = $1
       AND s.created_at >= $2 - interval '90 days' AND s.created_at <= $2
 )
 SELECT count(*) AS happened,
        count(*) FILTER (WHERE EXISTS (
-           SELECT 1 FROM viryaos_autopilot_actions a
+           SELECT 1 FROM autopilot_actions a
            WHERE a.workspace_id = $1
              AND a.subject_kind = 'content_source' AND a.subject_id = h.id
              AND a.status = 'succeeded')) AS shared
@@ -29,8 +29,8 @@ FROM happened h
 pub const AMPLIFICATION_SPEED_SQL: &str = r#"
 WITH first_artifact AS (
     SELECT s.id, s.created_at, min(a.finished_at) AS first_at
-    FROM viryaos_content_sources s
-    JOIN viryaos_autopilot_actions a
+    FROM content_sources s
+    JOIN autopilot_actions a
       ON a.workspace_id = s.workspace_id
      AND a.subject_kind = 'content_source' AND a.subject_id = s.id
      AND a.status = 'succeeded' AND a.finished_at IS NOT NULL
@@ -50,10 +50,10 @@ WHERE first_at >= created_at
 pub const SUGGESTIONS_READ_SQL: &str = r#"
 SELECT count(*) AS shown,
        count(*) FILTER (WHERE s.status IN ('approved','done') OR EXISTS (
-           SELECT 1 FROM viryaos_suggestion_outcomes o
+           SELECT 1 FROM suggestion_outcomes o
            WHERE o.workspace_id = $1 AND o.suggestion_id = s.id
              AND o.outcome IN ('done','done_differently'))) AS acted
-FROM viryaos_content_suggestions s
+FROM content_suggestions s
 WHERE s.workspace_id = $1
   AND s.created_at >= $2 - interval '90 days' AND s.created_at <= $2
 "#;
@@ -63,7 +63,7 @@ pub const OUTREACH_CONVERTS_SQL: &str = r#"
 SELECT channel,
        count(*) AS sent,
        count(*) FILTER (WHERE status IN ('replied','positive_reply','declined','converted')) AS replied
-FROM viryaos_reach_events
+FROM reach_events
 WHERE workspace_id = $1
   AND recipient_kind IN ('outreach_target','community','subreddit_audience')
   AND status <> 'failed'
@@ -76,7 +76,7 @@ ORDER BY channel
 /// measured factor only — the minutes-by-hand multiplier is the chief's model.
 pub const TIME_SAVED_SQL: &str = r#"
 SELECT count(*) AS approvals
-FROM viryaos_autopilot_actions
+FROM autopilot_actions
 WHERE workspace_id = $1
   AND approved_at IS NOT NULL
   AND approved_at >= $2 - interval '90 days' AND approved_at <= $2
@@ -88,7 +88,7 @@ WHERE workspace_id = $1
 pub const PLAN_FOLLOWED_SQL: &str = r#"
 WITH beats AS (
     SELECT a.id AS arc_id, (b ->> 'at')::date AS at
-    FROM viryaos_arcs a,
+    FROM arcs a,
          jsonb_array_elements(CASE WHEN jsonb_typeof(a.spine) = 'array' THEN a.spine ELSE '[]'::jsonb END) b
     WHERE a.workspace_id = $1
       AND a.status IN ('approved','active','completed')
@@ -100,10 +100,10 @@ due AS (
 ),
 delivered AS (
     SELECT s.arc_id, count(*) AS n
-    FROM viryaos_content_suggestions s
+    FROM content_suggestions s
     WHERE s.workspace_id = $1 AND s.arc_id IS NOT NULL
       AND (s.status = 'done' OR EXISTS (
-          SELECT 1 FROM viryaos_suggestion_outcomes o
+          SELECT 1 FROM suggestion_outcomes o
           WHERE o.workspace_id = $1 AND o.suggestion_id = s.id
             AND o.outcome IN ('done','done_differently')))
       AND s.created_at >= $2 - interval '90 days' AND s.created_at <= $2
@@ -121,11 +121,11 @@ SELECT count(*) AS n,
        percentile_cont(0.5) WITHIN GROUP (
            ORDER BY EXTRACT(EPOCH FROM (first_overdue_reminder_at - due_at))::double precision / 86400.0
        ) AS median_days,
-       (SELECT count(*) FROM viryaos_team_assignments late
+       (SELECT count(*) FROM team_assignments late
          WHERE late.workspace_id = $1 AND late.status = 'open'
            AND late.due_at IS NOT NULL AND late.due_at < $2
            AND late.first_overdue_reminder_at IS NULL) AS slipped_untold
-FROM viryaos_team_assignments
+FROM team_assignments
 WHERE workspace_id = $1
   AND due_at IS NOT NULL AND first_overdue_reminder_at IS NOT NULL
   AND due_at >= $2 - interval '90 days' AND due_at <= $2
@@ -218,7 +218,7 @@ SELECT count(*) AS imported,
            SELECT 1 FROM fans f
            JOIN latest_marketing lm ON lm.fan_id = f.id AND lm.granted
            WHERE f.workspace_id = $1 AND f.normalized_email = d.normalized_email)) AS confirmed
-FROM viryaos_drive_contacts d
+FROM drive_contacts d
 WHERE d.workspace_id = $1 AND d.fan_outcome = 'promoted'
 "#;
 
@@ -262,7 +262,7 @@ WITH reports AS (
 )
 SELECT count(*) AS delivered,
        count(*) FILTER (WHERE EXISTS (
-           SELECT 1 FROM viryaos_drive_contacts d
+           SELECT 1 FROM drive_contacts d
            WHERE d.workspace_id = $1
              AND d.normalized_email = r.email
              AND d.last_inbound_at > r.sent_at)) AS conversations

@@ -10,7 +10,7 @@ pub async fn admin_beacon_network(
         r#"
         SELECT id,country_code,target_count,status,discovered_count,report_filename,
                report_sha256,requested_at,completed_at,failure_kind
-        FROM viryaos_beacon_network_discovery_runs
+        FROM beacon_network_discovery_runs
         WHERE workspace_id=$1
         ORDER BY requested_at DESC,id DESC
         LIMIT 25
@@ -30,7 +30,7 @@ pub async fn admin_beacon_network(
         r#"
         SELECT id,display_name,beacon_kind,contact_email,destination_url,source_url,
                verified,accepts_outreach,do_not_contact,metadata
-        FROM viryaos_beacons
+        FROM beacons
         WHERE workspace_id=$1
           -- Discovery is one way onto this list; importing researched
           -- contacts is the other. Both arrive unverified and both need the
@@ -58,8 +58,8 @@ pub async fn admin_beacon_network(
         SELECT beacon.id,beacon.display_name,beacon.beacon_kind,beacon.contact_email,
                beacon.destination_url,beacon.source_url,beacon.verified,beacon.accepts_outreach,
                beacon.do_not_contact,beacon.metadata
-        FROM viryaos_beacons beacon
-        LEFT JOIN viryaos_beacon_signal_profiles profile
+        FROM beacons beacon
+        LEFT JOIN beacon_signal_profiles profile
           ON profile.workspace_id=beacon.workspace_id AND profile.beacon_id=beacon.id
         WHERE beacon.workspace_id=$1
           AND (beacon.metadata ? 'network_discovery_run_id' OR beacon.metadata ? 'imported_from')
@@ -72,8 +72,8 @@ pub async fn admin_beacon_network(
           AND COALESCE(profile.status,'') NOT IN ('active','paused','revoked')
           AND NOT EXISTS (
               SELECT 1
-              FROM viryaos_beacons covered
-              JOIN viryaos_beacon_signal_profiles covered_profile
+              FROM beacons covered
+              JOIN beacon_signal_profiles covered_profile
                 ON covered_profile.workspace_id=covered.workspace_id
                AND covered_profile.beacon_id=covered.id
               WHERE covered.workspace_id=beacon.workspace_id
@@ -108,7 +108,7 @@ pub async fn admin_beacon_network(
         WITH recent_jobs AS (
             SELECT id,workspace_id,status,beacon_ids,ttl_days,radius_km,locale,claimed_by,
                    claimed_at,claim_expires_at,reported_at,provider_summary,created_at
-            FROM viryaos_beacon_invite_delivery_jobs
+            FROM beacon_invite_delivery_jobs
             WHERE workspace_id=$1
             ORDER BY created_at DESC,id DESC
             LIMIT 50
@@ -122,16 +122,16 @@ pub async fn admin_beacon_network(
                        WHERE session.revoked_at IS NULL AND session.expires_at > now()
                          AND profile.status='active'
                    )::bigint AS active_count
-            FROM viryaos_beacon_signal_sessions session
+            FROM beacon_signal_sessions session
             JOIN recent_jobs job
               ON job.workspace_id=session.workspace_id AND job.id=session.source_invite_job_id
-            JOIN viryaos_beacon_signal_profiles profile
+            JOIN beacon_signal_profiles profile
               ON profile.workspace_id=session.workspace_id AND profile.beacon_id=session.beacon_id
             GROUP BY session.source_invite_job_id
         ), push_metrics AS (
             SELECT session.source_invite_job_id AS job_id,
                    count(DISTINCT session.beacon_id)::bigint AS push_enabled_count
-            FROM viryaos_beacon_signal_sessions session
+            FROM beacon_signal_sessions session
             JOIN recent_jobs job
               ON job.workspace_id=session.workspace_id AND job.id=session.source_invite_job_id
             JOIN fan_push_endpoints endpoint
@@ -149,10 +149,10 @@ pub async fn admin_beacon_network(
                          AND engagement.updated_at < session.expires_at
                          AND (session.revoked_at IS NULL OR engagement.updated_at < session.revoked_at)
                    )::bigint AS helping_count
-            FROM viryaos_beacon_signal_sessions session
+            FROM beacon_signal_sessions session
             JOIN recent_jobs job
               ON job.workspace_id=session.workspace_id AND job.id=session.source_invite_job_id
-            JOIN viryaos_beacon_signal_event_engagements engagement
+            JOIN beacon_signal_event_engagements engagement
               ON engagement.workspace_id=session.workspace_id
              AND engagement.beacon_id=session.beacon_id
             GROUP BY session.source_invite_job_id
@@ -163,10 +163,10 @@ pub async fn admin_beacon_network(
                          AND coverage.created_at < session.expires_at
                          AND (session.revoked_at IS NULL OR coverage.created_at < session.revoked_at)
                    )::bigint AS coverage_count
-            FROM viryaos_beacon_signal_sessions session
+            FROM beacon_signal_sessions session
             JOIN recent_jobs job
               ON job.workspace_id=session.workspace_id AND job.id=session.source_invite_job_id
-            JOIN viryaos_beacon_signal_coverage coverage
+            JOIN beacon_signal_coverage coverage
               ON coverage.workspace_id=session.workspace_id
              AND coverage.beacon_id=session.beacon_id
             GROUP BY session.source_invite_job_id
@@ -216,14 +216,14 @@ pub async fn admin_beacon_network(
               AND target_kind <> 'community'
             UNION ALL
             SELECT id::text, route_is_published
-            FROM viryaos_outreach_candidates
+            FROM outreach_candidates
             WHERE workspace_id=$1 AND status IN ('admitted','promoted')
         )
         SELECT count(*)
         FROM researched
         WHERE researched.has_route
           AND NOT EXISTS (
-            SELECT 1 FROM viryaos_beacons beacon
+            SELECT 1 FROM beacons beacon
             WHERE beacon.workspace_id=$1
               AND beacon.metadata -> 'imported_from' ->> 'source_id' = researched.source_id
           )
@@ -429,7 +429,7 @@ async fn request_discovery(
     }
     let run_id = Uuid::now_v7();
     if let Err(error) = sqlx::query(
-        "INSERT INTO viryaos_beacon_network_discovery_runs (id,workspace_id,country_code,target_count) VALUES ($1,$2,$3,$4)",
+        "INSERT INTO beacon_network_discovery_runs (id,workspace_id,country_code,target_count) VALUES ($1,$2,$3,$4)",
     )
     .bind(run_id)
     .bind(workspace_id)
@@ -527,7 +527,7 @@ async fn approve_candidate(
     let candidate = match sqlx::query_as::<_, (bool, Option<String>, Value)>(
         r#"
         SELECT do_not_contact,source_url,metadata
-        FROM viryaos_beacons
+        FROM beacons
         WHERE workspace_id=$1 AND id=$2 AND active AND metadata ? 'network_discovery_run_id'
         FOR UPDATE
         "#,
@@ -557,7 +557,7 @@ async fn approve_candidate(
     });
     if let Err(error) = sqlx::query(
         r#"
-        UPDATE viryaos_beacons
+        UPDATE beacons
         SET verified=true,accepts_outreach=true,
             metadata=metadata || jsonb_build_object('network_review',$3::jsonb),
             version=version+1
@@ -628,8 +628,8 @@ async fn preview_invites(
     let rows = match sqlx::query_as::<_, (String, i64)>(
         r#"
         SELECT beacon.beacon_kind,count(*)::bigint
-        FROM viryaos_beacons beacon
-        LEFT JOIN viryaos_beacon_signal_profiles profile
+        FROM beacons beacon
+        LEFT JOIN beacon_signal_profiles profile
           ON profile.workspace_id=beacon.workspace_id AND profile.beacon_id=beacon.id
         WHERE beacon.workspace_id=$1 AND beacon.id=ANY($2)
           AND beacon.active AND beacon.verified AND beacon.accepts_outreach
@@ -640,8 +640,8 @@ async fn preview_invites(
           AND COALESCE(profile.status,'') NOT IN ('active','paused','revoked')
           AND NOT EXISTS (
               SELECT 1
-              FROM viryaos_beacons covered
-              JOIN viryaos_beacon_signal_profiles covered_profile
+              FROM beacons covered
+              JOIN beacon_signal_profiles covered_profile
                 ON covered_profile.workspace_id=covered.workspace_id
                AND covered_profile.beacon_id=covered.id
               WHERE covered.workspace_id=beacon.workspace_id
@@ -770,8 +770,8 @@ async fn queue_invites(
     let eligible_count = match sqlx::query_scalar::<_, i64>(
         r#"
         SELECT count(*)
-        FROM viryaos_beacons beacon
-        LEFT JOIN viryaos_beacon_signal_profiles profile
+        FROM beacons beacon
+        LEFT JOIN beacon_signal_profiles profile
           ON profile.workspace_id=beacon.workspace_id AND profile.beacon_id=beacon.id
         WHERE beacon.workspace_id=$1 AND beacon.id=ANY($2)
           AND beacon.active AND beacon.verified AND beacon.accepts_outreach
@@ -784,8 +784,8 @@ async fn queue_invites(
           AND COALESCE(profile.status,'') NOT IN ('active','paused','revoked')
           AND NOT EXISTS (
               SELECT 1
-              FROM viryaos_beacons covered
-              JOIN viryaos_beacon_signal_profiles covered_profile
+              FROM beacons covered
+              JOIN beacon_signal_profiles covered_profile
                 ON covered_profile.workspace_id=covered.workspace_id
                AND covered_profile.beacon_id=covered.id
               WHERE covered.workspace_id=beacon.workspace_id
@@ -825,7 +825,7 @@ async fn queue_invites(
     let job_id = Uuid::now_v7();
     if let Err(error) = sqlx::query(
         r#"
-        INSERT INTO viryaos_beacon_invite_delivery_jobs
+        INSERT INTO beacon_invite_delivery_jobs
           (id,workspace_id,beacon_ids,ttl_days,radius_km,locale)
         VALUES ($1,$2,$3,$4,$5,$6)
         "#,

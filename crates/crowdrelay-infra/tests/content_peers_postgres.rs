@@ -45,7 +45,7 @@ async fn seed_listing(
     genre_tags: &[&str],
 ) -> Result<(), Box<dyn std::error::Error>> {
     sqlx::query(
-        "INSERT INTO viryaos_band_listings (workspace_id, act_name, genre_tags) \
+        "INSERT INTO band_listings (workspace_id, act_name, genre_tags) \
          VALUES ($1, $2, $3)",
     )
     .bind(workspace_id)

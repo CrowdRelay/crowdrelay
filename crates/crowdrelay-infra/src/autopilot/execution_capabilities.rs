@@ -245,7 +245,7 @@ pub(in crate::autopilot) async fn ensure_executor_capability(
     capability: &str,
 ) -> Result<(), RepositoryError> {
     let registry_enabled = sqlx::query_scalar::<_, bool>(
-        "SELECT EXISTS (SELECT 1 FROM viryaos_executor_instances WHERE workspace_id=$1)",
+        "SELECT EXISTS (SELECT 1 FROM executor_instances WHERE workspace_id=$1)",
     )
     .bind(workspace_id.into_uuid())
     .fetch_one(&mut **transaction)
@@ -258,11 +258,11 @@ pub(in crate::autopilot) async fn ensure_executor_capability(
         r#"
         SELECT EXISTS (
             SELECT 1
-            FROM viryaos_executor_capabilities capability
-            JOIN viryaos_executor_instances executor
+            FROM executor_capabilities capability
+            JOIN executor_instances executor
               ON executor.workspace_id=capability.workspace_id
              AND executor.executor_id=capability.executor_id
-            LEFT JOIN viryaos_executor_circuit_breakers breaker
+            LEFT JOIN executor_circuit_breakers breaker
               ON breaker.workspace_id=executor.workspace_id
              AND breaker.executor_id=executor.executor_id
             WHERE capability.workspace_id=$1
@@ -304,7 +304,7 @@ pub(in crate::autopilot) async fn executor_registry_is_active(
     workspace_id: WorkspaceId,
 ) -> Result<bool, RepositoryError> {
     sqlx::query_scalar::<_, bool>(
-        "SELECT EXISTS (SELECT 1 FROM viryaos_executor_instances WHERE workspace_id=$1)",
+        "SELECT EXISTS (SELECT 1 FROM executor_instances WHERE workspace_id=$1)",
     )
     .bind(workspace_id.into_uuid())
     .fetch_one(&mut **transaction)
@@ -338,7 +338,7 @@ pub async fn capability_is_serviceable(
     capability: &str,
 ) -> Result<bool, RepositoryError> {
     let registry_active = sqlx::query_scalar::<_, bool>(
-        "SELECT EXISTS (SELECT 1 FROM viryaos_executor_instances WHERE workspace_id=$1)",
+        "SELECT EXISTS (SELECT 1 FROM executor_instances WHERE workspace_id=$1)",
     )
     .bind(workspace_id.into_uuid())
     .fetch_one(pool)
@@ -370,11 +370,11 @@ where
         r#"
         SELECT EXISTS (
             SELECT 1
-            FROM viryaos_executor_capabilities capability
-            JOIN viryaos_executor_instances executor
+            FROM executor_capabilities capability
+            JOIN executor_instances executor
               ON executor.workspace_id=capability.workspace_id
              AND executor.executor_id=capability.executor_id
-            LEFT JOIN viryaos_executor_circuit_breakers breaker
+            LEFT JOIN executor_circuit_breakers breaker
               ON breaker.workspace_id=executor.workspace_id
              AND breaker.executor_id=executor.executor_id
             WHERE capability.workspace_id=$1
@@ -405,7 +405,7 @@ pub(in crate::autopilot) async fn executor_capability_available(
 
 /// The roster's monthly share of one person's attention (§4d-3): how many
 /// touches the whole organization may spend on one contact in a trailing
-/// thirty days, counted in `viryaos_contact_touches`.
+/// thirty days, counted in `contact_touches`.
 ///
 /// The governor says *not twice this week*; the budget says *of the four
 /// things this roster wants to tell this person this month, these three were
@@ -430,7 +430,7 @@ pub(in crate::autopilot) const ORG_MONTHLY_CONTACT_BUDGET: u32 = 3;
 /// expired. It stays one statement: a pre-check followed by an insert would
 /// leave a gap two acts could both pass through.
 ///
-/// The monthly budget is the same rule one level up. `viryaos_contact_touches`
+/// The monthly budget is the same rule one level up. `contact_touches`
 /// counts what the organization already sent this person in the trailing
 /// thirty days — the workspace's own rows included, so the cap binds a lone
 /// tenant too — and the count rides inside the insert's `WHERE` for the same
@@ -475,12 +475,12 @@ pub(in crate::autopilot) async fn reserve_contact_window(
         r#"
         SELECT COUNT(*) >= $4 AND NOT EXISTS (
             SELECT 1
-            FROM viryaos_contact_touches replay
+            FROM contact_touches replay
             WHERE replay.workspace_id = $1
               AND replay.normalized_contact = $2
               AND replay.action_id = $5
         )
-        FROM viryaos_contact_touches sibling
+        FROM contact_touches sibling
         JOIN workspaces sibling_ws ON sibling_ws.id = sibling.workspace_id
         JOIN workspaces self_ws ON self_ws.id = $1
         WHERE sibling.normalized_contact = $2
@@ -507,14 +507,14 @@ pub(in crate::autopilot) async fn reserve_contact_window(
     }
     let reserved = sqlx::query_scalar::<_, String>(
         r#"
-        INSERT INTO viryaos_contact_governor (
+        INSERT INTO contact_governor (
             workspace_id, normalized_contact, last_context, last_action_id,
             last_outbound_at, next_contact_after
         )
         SELECT $1,$2,$3,$4,$5,$5 + INTERVAL '7 days'
         WHERE NOT EXISTS (
             SELECT 1
-            FROM viryaos_contact_governor sibling
+            FROM contact_governor sibling
             JOIN workspaces sibling_ws ON sibling_ws.id = sibling.workspace_id
             JOIN workspaces self_ws ON self_ws.id = $1
             WHERE sibling.normalized_contact = $2
@@ -526,14 +526,14 @@ pub(in crate::autopilot) async fn reserve_contact_window(
         AND (
             EXISTS (
                 SELECT 1
-                FROM viryaos_contact_touches replay
+                FROM contact_touches replay
                 WHERE replay.workspace_id = $1
                   AND replay.normalized_contact = $2
                   AND replay.action_id = $4
             )
             OR (
                 SELECT COUNT(*)
-                FROM viryaos_contact_touches sibling
+                FROM contact_touches sibling
                 JOIN workspaces sibling_ws ON sibling_ws.id = sibling.workspace_id
                 JOIN workspaces self_ws ON self_ws.id = $1
                 WHERE sibling.normalized_contact = $2
@@ -550,10 +550,10 @@ pub(in crate::autopilot) async fn reserve_contact_window(
             last_action_id=EXCLUDED.last_action_id,
             last_outbound_at=EXCLUDED.last_outbound_at,
             next_contact_after=EXCLUDED.next_contact_after
-        WHERE NOT viryaos_contact_governor.do_not_contact
+        WHERE NOT contact_governor.do_not_contact
           AND (
-              viryaos_contact_governor.next_contact_after <= EXCLUDED.last_outbound_at
-              OR viryaos_contact_governor.last_action_id = EXCLUDED.last_action_id
+              contact_governor.next_contact_after <= EXCLUDED.last_outbound_at
+              OR contact_governor.last_action_id = EXCLUDED.last_action_id
           )
         RETURNING normalized_contact
         "#,
@@ -575,7 +575,7 @@ pub(in crate::autopilot) async fn reserve_contact_window(
     // turns the second insert into a no-op instead of a second spend.
     sqlx::query(
         r#"
-        INSERT INTO viryaos_contact_touches (
+        INSERT INTO contact_touches (
             workspace_id, normalized_contact, action_id, touched_at
         ) VALUES ($1,$2,$3,$4)
         ON CONFLICT (workspace_id, normalized_contact, action_id) DO NOTHING
@@ -647,11 +647,11 @@ pub async fn executor_capability_posture(
         r#"
         SELECT capability.capability, capability.executor_id,
                capability.expires_at, executor.expires_at, breaker.guarded_until
-        FROM viryaos_executor_capabilities capability
-        JOIN viryaos_executor_instances executor
+        FROM executor_capabilities capability
+        JOIN executor_instances executor
           ON executor.workspace_id = capability.workspace_id
          AND executor.executor_id = capability.executor_id
-        LEFT JOIN viryaos_executor_circuit_breakers breaker
+        LEFT JOIN executor_circuit_breakers breaker
           ON breaker.workspace_id = executor.workspace_id
          AND breaker.executor_id = executor.executor_id
         WHERE capability.workspace_id = $1
@@ -662,7 +662,7 @@ pub async fn executor_capability_posture(
     .await?;
 
     let executors_registered = sqlx::query_scalar::<_, bool>(
-        "SELECT EXISTS (SELECT 1 FROM viryaos_executor_instances WHERE workspace_id = $1)",
+        "SELECT EXISTS (SELECT 1 FROM executor_instances WHERE workspace_id = $1)",
     )
     .bind(ws)
     .fetch_one(pool)
@@ -674,7 +674,7 @@ pub async fn executor_capability_posture(
     let parked_payloads = sqlx::query_scalar::<_, Value>(
         r#"
         SELECT payload
-        FROM viryaos_autopilot_actions
+        FROM autopilot_actions
         WHERE workspace_id = $1
           AND status = 'queued'
           AND last_error_kind = 'awaiting_executor'

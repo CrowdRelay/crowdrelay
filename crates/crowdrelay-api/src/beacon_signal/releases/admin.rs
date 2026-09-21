@@ -28,10 +28,10 @@ pub async fn admin_list_release_campaigns(
                recipient.parcel_locker_code,recipient.confirmed_at,recipient.prepared_at,
                recipient.sent_at,recipient.delivered_at,recipient.activation_due_at,
                recipient.activation_queued_at,recipient.activation_suppressed_at
-        FROM viryaos_beacon_release_recipients recipient
-        JOIN viryaos_beacons beacon
+        FROM beacon_release_recipients recipient
+        JOIN beacons beacon
           ON beacon.workspace_id=recipient.workspace_id AND beacon.id=recipient.beacon_id
-        JOIN viryaos_beacon_release_campaigns campaign
+        JOIN beacon_release_campaigns campaign
           ON campaign.workspace_id=recipient.workspace_id AND campaign.id=recipient.campaign_id
         LEFT JOIN cities city ON city.id=beacon.city_id
         WHERE recipient.workspace_id=$1
@@ -221,7 +221,7 @@ pub async fn admin_list_release_recipients(
     let request_id_value = request_id(&headers);
     let workspace_id = state.ticketing.workspace_id().into_uuid();
     let exists = match sqlx::query_scalar::<_, bool>(
-        "SELECT EXISTS(SELECT 1 FROM viryaos_beacon_release_campaigns WHERE workspace_id=$1 AND id=$2)",
+        "SELECT EXISTS(SELECT 1 FROM beacon_release_campaigns WHERE workspace_id=$1 AND id=$2)",
     )
     .bind(workspace_id)
     .bind(campaign_id)
@@ -244,8 +244,8 @@ pub async fn admin_list_release_recipients(
                recipient.parcel_locker_code,recipient.confirmed_at,recipient.prepared_at,
                recipient.sent_at,recipient.delivered_at,recipient.activation_due_at,
                recipient.activation_queued_at,recipient.activation_suppressed_at
-        FROM viryaos_beacon_release_recipients recipient
-        JOIN viryaos_beacons beacon
+        FROM beacon_release_recipients recipient
+        JOIN beacons beacon
           ON beacon.workspace_id=recipient.workspace_id AND beacon.id=recipient.beacon_id
         LEFT JOIN cities city ON city.id=beacon.city_id
         WHERE recipient.workspace_id=$1 AND recipient.campaign_id=$2

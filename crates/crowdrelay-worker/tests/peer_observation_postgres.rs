@@ -168,7 +168,7 @@ async fn sweep_proposes_before_it_observes() -> Result<(), Box<dyn std::error::E
     // and genre are run-unique because the peer-act graph is global.
     let genre = format!("sweep-{unique}");
     sqlx::query(
-        "INSERT INTO viryaos_band_listings (workspace_id, act_name, genre_tags) \
+        "INSERT INTO band_listings (workspace_id, act_name, genre_tags) \
          VALUES ($1, $2, $3)",
     )
     .bind(workspace_id.into_uuid())

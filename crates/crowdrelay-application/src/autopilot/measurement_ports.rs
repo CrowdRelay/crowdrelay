@@ -230,7 +230,7 @@ impl AutopilotMeasurementKind {
     }
 
     /// The key under which this kind's observed value lands in
-    /// `viryaos_growth_evidence.observed_metrics`, or `None` when the kind
+    /// `growth_evidence.observed_metrics`, or `None` when the kind
     /// already has its own learner.
     ///
     /// `None` is not "not learned" — the fan-growth and Signal-install kinds

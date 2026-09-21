@@ -2,7 +2,7 @@
 //!
 //! Worth a database rather than a unit test for the usual reason: the edge
 //! is a row on `amplification_consents` gated by `organization_id`, the
-//! catalogue is `viryaos_release_plans`, the carry-ledger is
+//! catalogue is `release_plans`, the carry-ledger is
 //! `amplification_deliveries`, and the dispatch is the capped campaign CTE —
 //! none of it checked at compile time. What is asserted: the plan proposes
 //! the oldest unrotated released release with the edge's real headroom; a
@@ -87,7 +87,7 @@ async fn release(
     let id = Uuid::now_v7();
     sqlx::query(
         r#"
-        INSERT INTO viryaos_release_plans
+        INSERT INTO release_plans
             (id, workspace_id, source_key, title, release_at,
              active, communication_enabled, listen_url)
         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)

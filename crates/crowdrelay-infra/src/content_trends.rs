@@ -92,7 +92,7 @@ impl PostgresContentEngineRepository {
         let peer_rows = sqlx::query_as::<_, FactRow>(
             r#"
             SELECT id, peer_id AS source_key, observed_at, platform, fact
-            FROM viryaos_peer_observations
+            FROM peer_observations
             WHERE workspace_id = $1 AND observed_at >= $2 AND observed_at <= $3
             "#,
         )
@@ -104,7 +104,7 @@ impl PostgresContentEngineRepository {
         let fan_rows = sqlx::query_as::<_, FactRow>(
             r#"
             SELECT id, place_id AS source_key, observed_at, platform, fact
-            FROM viryaos_fan_observations
+            FROM fan_observations
             WHERE workspace_id = $1 AND observed_at >= $2 AND observed_at <= $3
             "#,
         )
@@ -138,7 +138,7 @@ impl PostgresContentEngineRepository {
         for trend in &trends {
             sqlx::query(
                 r#"
-                INSERT INTO viryaos_content_trends (
+                INSERT INTO content_trends (
                     id, workspace_id, dimension, pattern, strength, sources,
                     evidence, status, first_seen, last_seen
                 )
@@ -150,8 +150,8 @@ impl PostgresContentEngineRepository {
                     status = EXCLUDED.status,
                     -- The row's horizon only widens: a pattern rediscovered
                     -- after fading keeps its original first sighting.
-                    first_seen = LEAST(viryaos_content_trends.first_seen, EXCLUDED.first_seen),
-                    last_seen = GREATEST(viryaos_content_trends.last_seen, EXCLUDED.last_seen),
+                    first_seen = LEAST(content_trends.first_seen, EXCLUDED.first_seen),
+                    last_seen = GREATEST(content_trends.last_seen, EXCLUDED.last_seen),
                     updated_at = now()
                 "#,
             )
@@ -179,15 +179,15 @@ impl PostgresContentEngineRepository {
         let seen_patterns: Vec<&str> = trends.iter().map(|trend| trend.pattern.as_str()).collect();
         sqlx::query(
             r#"
-            UPDATE viryaos_content_trends
+            UPDATE content_trends
             SET status = 'faded', updated_at = now()
             WHERE workspace_id = $1
               AND status <> 'faded'
               AND NOT EXISTS (
                   SELECT 1
                   FROM unnest($2::text[], $3::text[]) AS seen(dimension, pattern)
-                  WHERE seen.dimension = viryaos_content_trends.dimension
-                    AND seen.pattern = viryaos_content_trends.pattern
+                  WHERE seen.dimension = content_trends.dimension
+                    AND seen.pattern = content_trends.pattern
               )
             "#,
         )
@@ -208,7 +208,7 @@ impl PostgresContentEngineRepository {
             r#"
             SELECT id, workspace_id, dimension, pattern, strength, sources,
                    evidence, status, first_seen, last_seen, created_at, updated_at
-            FROM viryaos_content_trends
+            FROM content_trends
             WHERE workspace_id = $1
             ORDER BY strength DESC, pattern
             "#,

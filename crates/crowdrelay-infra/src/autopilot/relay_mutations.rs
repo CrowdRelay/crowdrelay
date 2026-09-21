@@ -90,7 +90,7 @@ impl PostgresAutopilotRepository {
             let now = OffsetDateTime::now_utc();
             let released: Vec<Uuid> = sqlx::query_scalar(
                 r#"
-                UPDATE viryaos_autopilot_actions
+                UPDATE autopilot_actions
                 SET status='queued', approved_at=$3, approved_by='operator:community_relay',
                     -- O.2: an outward send waits out its hold window before a
                     -- worker may claim it — the batch is the approval, not a
@@ -119,7 +119,7 @@ impl PostgresAutopilotRepository {
             // a reminder keeps asking somebody to approve what already
             // queued.
             sqlx::query(
-                "UPDATE viryaos_team_assignments \
+                "UPDATE team_assignments \
                  SET status='done', completed_at=$3, next_reminder_at=NULL \
                  WHERE workspace_id=$1 AND action_id = ANY($2) AND status='open'",
             )
@@ -212,7 +212,7 @@ impl PostgresAutopilotRepository {
             }
             let now = OffsetDateTime::now_utc();
             let cancelled: Vec<Uuid> = sqlx::query_scalar(
-                "UPDATE viryaos_autopilot_actions \
+                "UPDATE autopilot_actions \
                  SET status='cancelled', finished_at=$3 \
                  WHERE workspace_id=$1 \
                    AND action_kind='community.engage.request' \
@@ -227,7 +227,7 @@ impl PostgresAutopilotRepository {
             .await
             .map_err(map_sqlx)?;
             sqlx::query(
-                "UPDATE viryaos_team_assignments \
+                "UPDATE team_assignments \
                  SET status='cancelled', completed_at=NULL, next_reminder_at=NULL \
                  WHERE workspace_id=$1 AND action_id = ANY($2) AND status='open'",
             )

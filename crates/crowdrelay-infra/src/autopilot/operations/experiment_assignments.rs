@@ -75,7 +75,7 @@ pub(in crate::autopilot) async fn get_or_create_experiment_design(
     // (no row → SELECT the persisted design).
     let insert_row = sqlx::query(
         r#"
-        INSERT INTO viryaos_experiment_designs
+        INSERT INTO experiment_designs
             (workspace_id, intervention_key, logical_cycle_key, unit_kind,
              holdout_probability, interference_policy, eligible_units,
              estimand, eligibility_criteria, selection_context,
@@ -179,7 +179,7 @@ pub(in crate::autopilot) async fn get_or_create_experiment_design(
         let computed_status_str = computed_status.as_str();
         sqlx::query(
             r#"
-            UPDATE viryaos_experiment_designs
+            UPDATE experiment_designs
             SET experiment_status = $2,
                 expected_treatment_count = $3,
                 expected_control_count = $4
@@ -206,7 +206,7 @@ pub(in crate::autopilot) async fn get_or_create_experiment_design(
                    holdout_probability, interference_policy, unit_kind,
                    eligible_units, estimand, eligibility_criteria,
                    selection_context, strategy, designed_at
-            FROM viryaos_experiment_designs
+            FROM experiment_designs
             WHERE workspace_id = $1
               AND intervention_key = $2
               AND logical_cycle_key = $3
@@ -316,7 +316,7 @@ pub(in crate::autopilot) async fn get_or_create_experiment_design(
 }
 
 /// Records a first-class experiment assignment in the
-/// `viryaos_experiment_assignments` table. The experimental unit is
+/// `experiment_assignments` table. The experimental unit is
 /// explicitly defined — not always workspace-wide. When interference is
 /// not controllable, the `experiment_kind` is downgraded to
 /// `matched_quasi_experiment`.
@@ -349,7 +349,7 @@ pub(in crate::autopilot) async fn record_experiment_assignment(
     // skip evidence creation to prevent duplicates.
     let inserted = sqlx::query(
         r#"
-        INSERT INTO viryaos_experiment_assignments
+        INSERT INTO experiment_assignments
             (id, workspace_id, unit_id, unit_kind, arm, assigned_at,
              propensity, intended_holdout_probability, intended_template_id,
              context, prediction, action_id, strategy, experiment_kind,
@@ -506,7 +506,7 @@ pub(in crate::autopilot) async fn update_execution_status(
     // level race condition possible.
     let moved = sqlx::query(
         r#"
-        UPDATE viryaos_experiment_assignments
+        UPDATE experiment_assignments
         SET execution_status = $3
         WHERE workspace_id = $1
           AND id = $2
@@ -524,7 +524,7 @@ pub(in crate::autopilot) async fn update_execution_status(
     .map_err(map_sqlx)?;
     if moved.rows_affected() == 0 {
         let current = sqlx::query_scalar::<_, String>(
-            "SELECT execution_status FROM viryaos_experiment_assignments \
+            "SELECT execution_status FROM experiment_assignments \
              WHERE workspace_id = $1 AND id = $2",
         )
         .bind(workspace_id.into_uuid())
@@ -569,7 +569,7 @@ pub(in crate::autopilot) async fn update_execution_status_by_action_id(
     //   unknown    → executed | failed  (reconciliation)
     let moved = sqlx::query(
         r#"
-        UPDATE viryaos_experiment_assignments
+        UPDATE experiment_assignments
         SET execution_status = $3
         WHERE workspace_id = $1
           AND action_id = $2
@@ -587,7 +587,7 @@ pub(in crate::autopilot) async fn update_execution_status_by_action_id(
     .map_err(map_sqlx)?;
     if moved.rows_affected() == 0 {
         let current = sqlx::query_scalar::<_, String>(
-            "SELECT execution_status FROM viryaos_experiment_assignments \
+            "SELECT execution_status FROM experiment_assignments \
              WHERE workspace_id = $1 AND action_id = $2",
         )
         .bind(workspace_id.into_uuid())
@@ -638,7 +638,7 @@ pub(in crate::autopilot) async fn evaluate_contamination(
     let concurrent_count: i64 = sqlx::query_scalar(
         r#"
         SELECT COUNT(DISTINCT ea.id)
-        FROM viryaos_experiment_assignments ea
+        FROM experiment_assignments ea
         WHERE ea.workspace_id = $1
           AND ea.unit_id = $2
           AND ea.arm = 'treatment'
@@ -680,7 +680,7 @@ pub(in crate::autopilot) async fn evaluate_contamination(
     };
     sqlx::query(
         r#"
-        UPDATE viryaos_experiment_assignments
+        UPDATE experiment_assignments
         SET final_contamination = $3,
             final_evidence_quality = $4,
             contamination_resolved_at = $5
@@ -700,7 +700,7 @@ pub(in crate::autopilot) async fn evaluate_contamination(
     .await
     .map_err(map_sqlx)?;
     // CRITICAL INVARIANT: evidence rows are immutable. We do NOT
-    // backward-rewrite viryaos_growth_evidence.evidence_quality based
+    // backward-rewrite growth_evidence.evidence_quality based
     // on the current contamination assessment. The final_contamination
     // and final_evidence_quality are stored on the experiment assignment
     // row, and `load_growth_evidence` joins them onto the evidence it hands
@@ -742,8 +742,8 @@ pub(in crate::autopilot) async fn resolve_control_evidence(
     let controls = sqlx::query_as::<_, (String, String, time::OffsetDateTime)>(
         r#"
         SELECT assignment.id, target.display_name, assignment.assigned_at
-        FROM viryaos_experiment_assignments AS assignment
-        JOIN viryaos_growth_evidence AS evidence
+        FROM experiment_assignments AS assignment
+        JOIN growth_evidence AS evidence
           ON evidence.workspace_id = assignment.workspace_id
          AND evidence.experiment_assignment_id = assignment.id
         JOIN agent_outreach_targets AS target
@@ -828,7 +828,7 @@ pub(in crate::autopilot) async fn resolve_control_evidence(
         .map_err(map_sqlx)?;
         sqlx::query(
             r#"
-            UPDATE viryaos_growth_evidence
+            UPDATE growth_evidence
             SET observed_incremental_fans = COALESCE(observed_incremental_fans, $3),
                 durable_fans_30d = COALESCE(durable_fans_30d, $4),
                 resolved_at = COALESCE(resolved_at, $5)
@@ -868,15 +868,15 @@ pub(in crate::autopilot) async fn close_completed_experiments(
 ) -> Result<u64, RepositoryError> {
     let result = sqlx::query(
         r#"
-        UPDATE viryaos_experiment_designs AS design
+        UPDATE experiment_designs AS design
         SET experiment_status = 'completed'
         WHERE design.workspace_id = $1
           AND design.experiment_status IN ('active', 'insufficient_power')
           AND design.designed_at + INTERVAL '44 days' <= $2
           AND NOT EXISTS (
               SELECT 1
-              FROM viryaos_experiment_assignments AS assignment
-              JOIN viryaos_growth_evidence AS evidence
+              FROM experiment_assignments AS assignment
+              JOIN growth_evidence AS evidence
                 ON evidence.workspace_id = assignment.workspace_id
                AND evidence.experiment_assignment_id = assignment.id
               WHERE assignment.workspace_id = design.workspace_id

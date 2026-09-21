@@ -31,7 +31,7 @@ impl AutopilotTeamStateRepository for PostgresAutopilotRepository {
             let mut tx = self.pool.begin().await.map_err(map_sqlx)?;
 
             let natural = sqlx::query_as::<_, (Uuid, i64)>(
-                "SELECT id, version FROM viryaos_release_plans \
+                "SELECT id, version FROM release_plans \
                  WHERE workspace_id=$1 AND source_key=$2 FOR UPDATE",
             )
             .bind(workspace_id.into_uuid())
@@ -78,7 +78,7 @@ impl AutopilotTeamStateRepository for PostgresAutopilotRepository {
             .await?
             {
                 let version = sqlx::query_scalar::<_, i64>(
-                    "SELECT version FROM viryaos_release_plans WHERE workspace_id=$1 AND id=$2",
+                    "SELECT version FROM release_plans WHERE workspace_id=$1 AND id=$2",
                 )
                 .bind(workspace_id.into_uuid())
                 .bind(release_id.into_uuid())
@@ -98,7 +98,7 @@ impl AutopilotTeamStateRepository for PostgresAutopilotRepository {
             let version = if command.expected_version == 0 && natural.is_none() {
                 sqlx::query_scalar::<_, i64>(
                     r#"
-                    INSERT INTO viryaos_release_plans(
+                    INSERT INTO release_plans(
                         id, workspace_id, source_key, title, release_at, listen_url,
                         tier, active, assets_ready, communication_enabled, press_enabled
                     ) VALUES($1,$2,$3,$4,$5,$6,COALESCE($7,'track'),$8,$9,$10,$11)
@@ -127,7 +127,7 @@ impl AutopilotTeamStateRepository for PostgresAutopilotRepository {
                 };
                 sqlx::query_scalar::<_, i64>(
                     r#"
-                    UPDATE viryaos_release_plans
+                    UPDATE release_plans
                     SET title=$3,
                         release_at=$4,
                         listen_url=$5,
@@ -207,7 +207,7 @@ impl AutopilotTeamStateRepository for PostgresAutopilotRepository {
             let mut tx = self.pool.begin().await.map_err(map_sqlx)?;
 
             let natural = sqlx::query_as::<_, (Uuid, i64)>(
-                "SELECT id, version FROM viryaos_team_opportunities \
+                "SELECT id, version FROM team_opportunities \
                  WHERE workspace_id=$1 AND source=$2 AND external_key=$3 FOR UPDATE",
             )
             .bind(workspace_id.into_uuid())
@@ -268,7 +268,7 @@ impl AutopilotTeamStateRepository for PostgresAutopilotRepository {
             .await?
             {
                 let version = sqlx::query_scalar::<_, i64>(
-                    "SELECT version FROM viryaos_team_opportunities WHERE workspace_id=$1 AND id=$2",
+                    "SELECT version FROM team_opportunities WHERE workspace_id=$1 AND id=$2",
                 )
                 .bind(workspace_id.into_uuid())
                 .bind(opportunity_id.into_uuid())
@@ -288,7 +288,7 @@ impl AutopilotTeamStateRepository for PostgresAutopilotRepository {
             let version = if command.expected_version == 0 && natural.is_none() {
                 sqlx::query_scalar::<_, i64>(
                     r#"
-                    INSERT INTO viryaos_team_opportunities(
+                    INSERT INTO team_opportunities(
                         id, workspace_id, opportunity_kind, source, external_key, title,
                         organization, destination_url, contact_email, verified_destination,
                         fit_basis_points, reputation_basis_points, confidence_basis_points,
@@ -345,7 +345,7 @@ impl AutopilotTeamStateRepository for PostgresAutopilotRepository {
                 };
                 sqlx::query_scalar::<_, i64>(
                     r#"
-                    UPDATE viryaos_team_opportunities
+                    UPDATE team_opportunities
                     SET opportunity_kind=$3,
                         title=$4,
                         organization=$5,
@@ -475,7 +475,7 @@ impl AutopilotTeamStateRepository for PostgresAutopilotRepository {
             // Guarded on it not already being marked: the first person to say
             // so is the record, and a second click is not a second submission.
             let changed = sqlx::query(
-                "UPDATE viryaos_release_plans SET editorial_pitch_completed_at=now(), \
+                "UPDATE release_plans SET editorial_pitch_completed_at=now(), \
                  version=version+1 \
                  WHERE workspace_id=$1 AND id=$2 AND editorial_pitch_completed_at IS NULL",
             )
@@ -553,10 +553,10 @@ impl AutopilotTeamStateRepository for PostgresAutopilotRepository {
             let prior_fee_minor = sqlx::query_scalar::<_, i64>(
                 r#"
                 SELECT t.offered_fee_minor
-                FROM viryaos_team_opportunity_terms t
-                JOIN viryaos_team_opportunities o
+                FROM team_opportunity_terms t
+                JOIN team_opportunities o
                   ON o.workspace_id = t.workspace_id AND o.id = t.opportunity_id
-                JOIN viryaos_team_opportunities self_o
+                JOIN team_opportunities self_o
                   ON self_o.workspace_id = t.workspace_id AND self_o.id = $2
                 WHERE t.workspace_id = $1
                   AND t.state = 'accepted'
@@ -636,7 +636,7 @@ impl AutopilotTeamStateRepository for PostgresAutopilotRepository {
                 // recording that somebody walked away from a conversation that
                 // never started would be inventing the conversation.
                 PromoterPosition::Withdrawn => sqlx::query(
-                    "UPDATE viryaos_team_opportunity_terms \
+                    "UPDATE team_opportunity_terms \
                      SET state='declined', settled_at=$3, settled_reason='promoter_withdrew', \
                          version=version+1 \
                      WHERE workspace_id=$1 AND opportunity_id=$2 AND settled_at IS NULL",
@@ -658,7 +658,7 @@ impl AutopilotTeamStateRepository for PostgresAutopilotRepository {
                         ladder_inputs.ok_or(RepositoryError::Unexpected)?;
                     sqlx::query(
                         r#"
-                        INSERT INTO viryaos_team_opportunity_terms (
+                        INSERT INTO team_opportunity_terms (
                             workspace_id, opportunity_id, state, currency, offered_fee_minor,
                             walk_away_minor, target_minor, opening_ask_minor, floor_basis,
                             prior_fee_minor, market_floor_minor, responds_by
@@ -667,8 +667,8 @@ impl AutopilotTeamStateRepository for PostgresAutopilotRepository {
                             state='proposed',
                             offered_fee_minor=EXCLUDED.offered_fee_minor,
                             responds_by=EXCLUDED.responds_by,
-                            version=viryaos_team_opportunity_terms.version+1
-                        WHERE viryaos_team_opportunity_terms.settled_at IS NULL
+                            version=team_opportunity_terms.version+1
+                        WHERE team_opportunity_terms.settled_at IS NULL
                         "#,
                     )
                     .bind(workspace_id.into_uuid())
@@ -781,13 +781,13 @@ impl AutopilotTeamStateRepository for PostgresAutopilotRepository {
             // earlier close recorded.
             let sql = match command.progress {
                 TeamOpportunityProgress::PackageReady => {
-                    "UPDATE viryaos_team_opportunities \
+                    "UPDATE team_opportunities \
                      SET package_status='ready', status='prepared', version=version+1 \
                      WHERE workspace_id=$1 AND id=$2 AND opportunity_kind='funding' \
                        AND package_status='requested'"
                 }
                 TeamOpportunityProgress::Submitted => {
-                    "UPDATE viryaos_team_opportunities SET status='submitted', version=version+1 \
+                    "UPDATE team_opportunities SET status='submitted', version=version+1 \
                      WHERE workspace_id=$1 AND id=$2 AND status='submission_requested'"
                 }
                 // Replied/won/lost are thread outcomes — they only exist
@@ -795,17 +795,17 @@ impl AutopilotTeamStateRepository for PostgresAutopilotRepository {
                 // never-sent opportunity 'won' would fabricate a send, a
                 // reply and a win in the cross-tenant prior.
                 TeamOpportunityProgress::Replied => {
-                    "UPDATE viryaos_team_opportunities SET status='replied', version=version+1 \
+                    "UPDATE team_opportunities SET status='replied', version=version+1 \
                      WHERE workspace_id=$1 AND id=$2 \
                        AND status IN ('submission_requested','submitted','replied')"
                 }
                 TeamOpportunityProgress::Won => {
-                    "UPDATE viryaos_team_opportunities SET status='won', status_reason=$3, version=version+1 \
+                    "UPDATE team_opportunities SET status='won', status_reason=$3, version=version+1 \
                      WHERE workspace_id=$1 AND id=$2 \
                        AND status IN ('submission_requested','submitted','replied')"
                 }
                 TeamOpportunityProgress::Lost => {
-                    "UPDATE viryaos_team_opportunities SET status='lost', status_reason=$3, version=version+1 \
+                    "UPDATE team_opportunities SET status='lost', status_reason=$3, version=version+1 \
                      WHERE workspace_id=$1 AND id=$2 \
                        AND status IN ('submission_requested','submitted','replied')"
                 }
@@ -814,7 +814,7 @@ impl AutopilotTeamStateRepository for PostgresAutopilotRepository {
                 // thread is evidence and the honest end states are
                 // won/lost. Dismissing it would erase the send record.
                 TeamOpportunityProgress::Dismissed => {
-                    "UPDATE viryaos_team_opportunities SET status='dismissed', status_reason=$3, version=version+1 \
+                    "UPDATE team_opportunities SET status='dismissed', status_reason=$3, version=version+1 \
                      WHERE workspace_id=$1 AND id=$2 \
                        AND status IN ('new','prepared','awaiting_approval','submission_requested')"
                 }
@@ -908,7 +908,7 @@ pub(in crate::autopilot) async fn create_show_for_accepted_terms(
                -- 240; a long organiser name must not fail the acceptance.
                CASE WHEN opportunity.opportunity_kind = 'festival'
                     THEN left(btrim(opportunity.organization), 200) ELSE NULL END
-        FROM viryaos_team_opportunities AS opportunity
+        FROM team_opportunities AS opportunity
         WHERE opportunity.workspace_id = $1
           AND opportunity.id = $3
           AND opportunity.event_starts_at IS NOT NULL
@@ -961,7 +961,7 @@ async fn create_show_for_won_opportunity(
                -- 240; a long organiser name must not fail the win.
                CASE WHEN opportunity.opportunity_kind = 'festival'
                     THEN left(btrim(opportunity.organization), 200) ELSE NULL END
-        FROM viryaos_team_opportunities AS opportunity
+        FROM team_opportunities AS opportunity
         WHERE opportunity.workspace_id = $1
           AND opportunity.id = $3
           AND opportunity.status = 'won'
@@ -1011,8 +1011,8 @@ impl PostgresAutopilotRepository {
             r#"
             WITH matched AS (
                 SELECT target.id, target.venue_id
-                FROM viryaos_booking_targets AS target
-                JOIN viryaos_team_opportunities AS opportunity
+                FROM booking_targets AS target
+                JOIN team_opportunities AS opportunity
                   ON opportunity.workspace_id = target.workspace_id
                  AND opportunity.id = $2
                 WHERE target.workspace_id = $1
@@ -1029,7 +1029,7 @@ impl PostgresAutopilotRepository {
             SELECT venue_id FROM matched WHERE venue_id IS NOT NULL
             UNION
             SELECT edge.venue_id
-            FROM viryaos_booking_target_venues AS edge
+            FROM booking_target_venues AS edge
             JOIN matched ON matched.id = edge.target_id
             WHERE edge.workspace_id = $1
             "#,
@@ -1047,7 +1047,7 @@ impl PostgresAutopilotRepository {
         // and never converts, so the band must be the same unit the floor is
         // quoted in.
         let currency = sqlx::query_scalar::<_, String>(
-            "SELECT currency FROM viryaos_team_opportunities \
+            "SELECT currency FROM team_opportunities \
              WHERE workspace_id = $1 AND id = $2",
         )
         .bind(workspace_id.into_uuid())

@@ -25,7 +25,7 @@ PORTS = ROOT / "crates/crowdrelay-application/src/autopilot/ports.rs"
 SNAPSHOTS = ROOT / "crates/crowdrelay-infra/src/autopilot/operations/snapshots.rs"
 EXECUTION = ROOT / "crates/crowdrelay-infra/src/autopilot/execution.rs"
 ACTIONS_EXECUTION = ROOT / "crates/crowdrelay-infra/src/autopilot/actions_execution.rs"
-CONTRACT_DOC = ROOT / "n8n/viryaos-executor-contract.md"
+CONTRACT_DOC = ROOT / "n8n/crowdrelay-executor-contract.md"
 
 
 def read(path: Path) -> str:

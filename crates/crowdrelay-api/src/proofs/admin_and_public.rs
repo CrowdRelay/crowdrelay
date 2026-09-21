@@ -322,7 +322,7 @@ async fn create_audit_batch(
                    jsonb_build_array(
                        'crowdrelay/attestation/v1', att.id, att.digest, att.issued_at
                    )::text
-            FROM viryaos_attestations AS att
+            FROM attestations AS att
             WHERE att.workspace_id = $1
               AND NOT EXISTS (
                   SELECT 1 FROM external_proof_items AS item

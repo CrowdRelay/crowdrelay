@@ -43,7 +43,7 @@ async fn seed_listing(
     genre_tags: &[&str],
 ) -> Result<(), Box<dyn std::error::Error>> {
     sqlx::query(
-        "INSERT INTO viryaos_band_listings (workspace_id, act_name, genre_tags) \
+        "INSERT INTO band_listings (workspace_id, act_name, genre_tags) \
          VALUES ($1, $2, $3)",
     )
     .bind(workspace_id)
@@ -462,7 +462,7 @@ async fn run_package(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
     .execute(pool)
     .await?;
     sqlx::query(
-        "INSERT INTO viryaos_booking_targets
+        "INSERT INTO booking_targets
             (workspace_id, city_id, target_kind, display_name, contact_email,
              relationship_score, capacity)
          VALUES ($1, $2, 'promoter', 'Anna', 'anna@example.com', 70, 300)",

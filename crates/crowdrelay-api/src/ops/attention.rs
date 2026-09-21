@@ -404,15 +404,15 @@ async fn load_brain_assessment(state: &OpsState) -> Result<BrainSelfAssessment, 
     let quiet = sqlx::query_as::<_, (i64, Option<String>)>(
         r#"
         SELECT
-            (SELECT count(*) FROM viryaos_autopilot_cycle_runs
+            (SELECT count(*) FROM autopilot_cycle_runs
              WHERE workspace_id = $1 AND finished_at IS NOT NULL
                AND actions_created = 0
                AND started_at > COALESCE((
-                   SELECT max(started_at) FROM viryaos_autopilot_cycle_runs
+                   SELECT max(started_at) FROM autopilot_cycle_runs
                    WHERE workspace_id = $1 AND finished_at IS NOT NULL
                      AND actions_created > 0
                ), '-infinity'::timestamptz)) AS quiet_cycles,
-            (SELECT wait_reason FROM viryaos_autopilot_cycle_runs
+            (SELECT wait_reason FROM autopilot_cycle_runs
              WHERE workspace_id = $1 AND finished_at IS NOT NULL
                AND actions_created = 0
                AND wait_reason IS NOT NULL
@@ -441,7 +441,7 @@ async fn load_brain_assessment(state: &OpsState) -> Result<BrainSelfAssessment, 
 /// assessment must not fail because a diagnostic could not be read.
 async fn load_calibration_readout(state: &OpsState) -> Option<CalibrationReadout> {
     let state_json = sqlx::query_scalar::<_, serde_json::Value>(
-        "SELECT state FROM viryaos_brain_state WHERE workspace_id = $1 AND module = 'causal_model'",
+        "SELECT state FROM brain_state WHERE workspace_id = $1 AND module = 'causal_model'",
     )
     .bind(state.workspace_id().into_uuid())
     .fetch_optional(&state.pool)
@@ -491,7 +491,7 @@ async fn load_alerts(state: &OpsState) -> Result<Vec<OpsAlert>, OpsError> {
         r#"
         SELECT alert_key, severity, summary, active, first_seen_at, last_seen_at,
                last_alerted_at, recovered_at, details
-        FROM viryaos_ops_alert_state
+        FROM ops_alert_state
         WHERE workspace_id = $1
           AND (active OR recovered_at >= now() - INTERVAL '24 hours')
         ORDER BY active DESC,
@@ -740,7 +740,7 @@ async fn load_needs_you(
                 subject_kind,
                 approval_expires_at,
                 count(*) OVER ()::bigint AS total_count
-            FROM viryaos_autopilot_actions
+            FROM autopilot_actions
             WHERE workspace_id = $1
               AND status = 'awaiting_approval'
               AND (approval_expires_at IS NULL OR approval_expires_at > now())

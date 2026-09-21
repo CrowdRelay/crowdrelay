@@ -64,7 +64,7 @@ impl PostgresAutopilotRepository {
             let operation_id = Uuid::now_v7();
             // The audit row records which fields the operator meant to edit —
             // names only; the before/after text lives in
-            // `viryaos_draft_revisions` once the edit is accepted.
+            // `draft_revisions` once the edit is accepted.
             let details = match revision {
                 Some(revision) => json!({
                     "requested_status": target_status,
@@ -87,7 +87,7 @@ impl PostgresAutopilotRepository {
             .await?;
             if let Some(existing) = replay {
                 let status = sqlx::query_scalar::<_, String>(
-                    "SELECT status FROM viryaos_autopilot_actions WHERE workspace_id = $1 AND id = $2",
+                    "SELECT status FROM autopilot_actions WHERE workspace_id = $1 AND id = $2",
                 )
                 .bind(workspace_id.into_uuid())
                 .bind(action_id.into_uuid())
@@ -115,7 +115,7 @@ impl PostgresAutopilotRepository {
                 && target_status == "queued"
                 && let Some((payload,)) = sqlx::query_as::<_, (serde_json::Value,)>(
                     r#"
-                    SELECT payload FROM viryaos_autopilot_actions
+                    SELECT payload FROM autopilot_actions
                     WHERE workspace_id = $1 AND id = $2 AND status = 'awaiting_approval'
                     FOR UPDATE
                     "#,
@@ -146,7 +146,7 @@ impl PostgresAutopilotRepository {
                     // an approved action carrying the unapproved text.
                     sqlx::query_scalar::<_, String>(
                         r#"
-                        UPDATE viryaos_autopilot_actions
+                        UPDATE autopilot_actions
                         SET status = 'queued', payload = $3,
                             approved_at = now(), approved_by = 'operator:admin_api_key',
                             -- O.2: an outward send waits out its hold window
@@ -171,7 +171,7 @@ impl PostgresAutopilotRepository {
                 } else {
                     sqlx::query_scalar::<_, String>(
                         r#"
-                        UPDATE viryaos_autopilot_actions
+                        UPDATE autopilot_actions
                         SET status = 'queued', approved_at = now(),
                             approved_by = 'operator:admin_api_key',
                             available_at = now() + CASE
@@ -195,7 +195,7 @@ impl PostgresAutopilotRepository {
             } else {
                 sqlx::query_scalar::<_, String>(
                     r#"
-                    UPDATE viryaos_autopilot_actions
+                    UPDATE autopilot_actions
                     SET status = 'cancelled', finished_at = now()
                     WHERE workspace_id = $1 AND id = $2
                       AND (
@@ -234,7 +234,7 @@ impl PostgresAutopilotRepository {
                         "SELECT status,
                                 approval_expires_at IS NOT NULL
                                   AND approval_expires_at <= now() AS expired
-                         FROM viryaos_autopilot_actions
+                         FROM autopilot_actions
                          WHERE workspace_id = $1 AND id = $2",
                     )
                     .bind(workspace_id.into_uuid())
@@ -255,7 +255,7 @@ impl PostgresAutopilotRepository {
             if target_status == "queued" {
                 sqlx::query(
                     r#"
-                    UPDATE viryaos_team_assignments
+                    UPDATE team_assignments
                     SET status='done', completed_at=now(), next_reminder_at=NULL
                     WHERE workspace_id=$1 AND action_id=$2 AND status='open'
                     "#,
@@ -284,7 +284,7 @@ impl PostgresAutopilotRepository {
                             );
                         sqlx::query(
                             r#"
-                            INSERT INTO viryaos_draft_revisions
+                            INSERT INTO draft_revisions
                                 (workspace_id, action_id, operation_id, field,
                                  before_text, after_text, distance_chars)
                             VALUES ($1, $2, $3, $4, $5, $6, $7)
@@ -305,7 +305,7 @@ impl PostgresAutopilotRepository {
             } else {
                 sqlx::query(
                     r#"
-                    UPDATE viryaos_team_assignments
+                    UPDATE team_assignments
                     SET status='cancelled', completed_at=NULL, next_reminder_at=NULL
                     WHERE workspace_id=$1 AND action_id=$2 AND status='open'
                     "#,
@@ -323,7 +323,7 @@ impl PostgresAutopilotRepository {
                 // in the open queue while its ask is dead.
                 let payload = sqlx::query_scalar::<_, serde_json::Value>(
                     r#"
-                    SELECT payload FROM viryaos_autopilot_actions
+                    SELECT payload FROM autopilot_actions
                     WHERE workspace_id = $1 AND id = $2
                     "#,
                 )
@@ -339,7 +339,7 @@ impl PostgresAutopilotRepository {
                         // the anchor cooldown remembers the answer.
                         sqlx::query(
                             r#"
-                            UPDATE viryaos_arcs
+                            UPDATE arcs
                             SET status = 'retired', updated_at = now()
                             WHERE workspace_id = $1 AND id = $2 AND status = 'proposed'
                             "#,
@@ -355,7 +355,7 @@ impl PostgresAutopilotRepository {
                     }) => {
                         let changed = sqlx::query(
                             r#"
-                            UPDATE viryaos_content_suggestions
+                            UPDATE content_suggestions
                             SET status = 'declined', updated_at = now()
                             WHERE workspace_id = $1 AND id = $2 AND status IN ('raised', 'approved')
                             "#,
@@ -378,7 +378,7 @@ impl PostgresAutopilotRepository {
                         if changed > 0 {
                             sqlx::query(
                                 r#"
-                                INSERT INTO viryaos_suggestion_outcomes (
+                                INSERT INTO suggestion_outcomes (
                                     workspace_id, suggestion_id, outcome, decided_by, reason, results
                                 ) VALUES ($1, $2, 'declined', $3, $4, '{}'::jsonb)
                                 "#,
@@ -428,7 +428,7 @@ impl PostgresAutopilotRepository {
             let exists = sqlx::query_scalar::<_, bool>(
                 r#"
                 SELECT EXISTS (
-                    SELECT 1 FROM viryaos_autopilot_decisions
+                    SELECT 1 FROM autopilot_decisions
                     WHERE workspace_id = $1 AND id = $2
                 )
                 "#,
@@ -466,7 +466,7 @@ impl PostgresAutopilotRepository {
             }
             sqlx::query(
                 r#"
-                UPDATE viryaos_autopilot_actions
+                UPDATE autopilot_actions
                 SET status = 'cancelled', finished_at = now()
                 WHERE workspace_id = $1 AND decision_id = $2 AND status = 'awaiting_approval'
                 "#,
@@ -484,12 +484,12 @@ impl PostgresAutopilotRepository {
             sqlx::query(
                 r#"
                 WITH resolved AS (
-                    UPDATE viryaos_content_suggestions AS suggestion
+                    UPDATE content_suggestions AS suggestion
                     SET status = 'done', updated_at = now()
                     WHERE suggestion.workspace_id = $1
                       AND suggestion.status = 'raised'
                       AND EXISTS (
-                          SELECT 1 FROM viryaos_autopilot_actions AS action
+                          SELECT 1 FROM autopilot_actions AS action
                           WHERE action.workspace_id = suggestion.workspace_id
                             AND action.decision_id = $2
                             AND action.subject_kind = 'content_suggestion'
@@ -498,7 +498,7 @@ impl PostgresAutopilotRepository {
                       )
                     RETURNING suggestion.id
                 )
-                INSERT INTO viryaos_suggestion_outcomes (
+                INSERT INTO suggestion_outcomes (
                     workspace_id, suggestion_id, outcome, decided_by, reason
                 )
                 SELECT $1, resolved.id, 'done', 'operator:admin_api_key',
@@ -517,12 +517,12 @@ impl PostgresAutopilotRepository {
             // a plan the band is already running.
             sqlx::query(
                 r#"
-                UPDATE viryaos_arcs AS arc
+                UPDATE arcs AS arc
                 SET status = 'retired', updated_at = now()
                 WHERE arc.workspace_id = $1
                   AND arc.status = 'proposed'
                   AND EXISTS (
-                      SELECT 1 FROM viryaos_autopilot_actions AS action
+                      SELECT 1 FROM autopilot_actions AS action
                       WHERE action.workspace_id = arc.workspace_id
                         AND action.decision_id = $2
                         AND action.subject_kind = 'content_arc'
@@ -557,7 +557,7 @@ impl PostgresAutopilotRepository {
             let row = sqlx::query_as::<_, (Option<String>, i64, Option<OffsetDateTime>)>(
                 r#"
                 SELECT posture, expected_version, set_at
-                FROM viryaos_growth_posture
+                FROM growth_posture
                 WHERE workspace_id = $1
                 "#,
             )
@@ -625,7 +625,7 @@ impl PostgresAutopilotRepository {
             // succeeds when nobody else raced one in.
             let current: Option<i64> = sqlx::query_scalar(
                 r#"
-                SELECT expected_version FROM viryaos_growth_posture
+                SELECT expected_version FROM growth_posture
                 WHERE workspace_id = $1 FOR UPDATE
                 "#,
             )
@@ -644,7 +644,7 @@ impl PostgresAutopilotRepository {
             for context in AutopilotContext::ALL {
                 sqlx::query(
                     r#"
-                    UPDATE viryaos_autopilot_policies
+                    UPDATE autopilot_policies
                     SET enabled = true,
                         autonomy_level = $3,
                         -- The row's own revision counter, and the reason this
@@ -686,13 +686,13 @@ impl PostgresAutopilotRepository {
             ] {
                 sqlx::query(
                     r#"
-                    INSERT INTO viryaos_growth_autonomy (
+                    INSERT INTO growth_autonomy (
                         workspace_id, action_class, ceiling, rationale
                     ) VALUES ($1, $2, $3, $4)
                     ON CONFLICT (workspace_id, action_class) DO UPDATE
                     SET ceiling = EXCLUDED.ceiling,
                         rationale = EXCLUDED.rationale,
-                        version = viryaos_growth_autonomy.version + 1
+                        version = growth_autonomy.version + 1
                     "#,
                 )
                 .bind(workspace_id.into_uuid())
@@ -711,12 +711,12 @@ impl PostgresAutopilotRepository {
             let (agent_enabled, dry_run) = command.posture.envelope();
             sqlx::query(
                 r#"
-                INSERT INTO viryaos_growth_envelope (workspace_id, agent_enabled, dry_run)
+                INSERT INTO growth_envelope (workspace_id, agent_enabled, dry_run)
                 VALUES ($1, $2, $3)
                 ON CONFLICT (workspace_id) DO UPDATE
                 SET agent_enabled = EXCLUDED.agent_enabled,
                     dry_run = EXCLUDED.dry_run,
-                    version = viryaos_growth_envelope.version + 1
+                    version = growth_envelope.version + 1
                 "#,
             )
             .bind(workspace_id.into_uuid())
@@ -728,7 +728,7 @@ impl PostgresAutopilotRepository {
 
             sqlx::query(
                 r#"
-                INSERT INTO viryaos_growth_posture (
+                INSERT INTO growth_posture (
                     workspace_id, posture, expected_version, set_at
                 ) VALUES ($1, $2, $3, now())
                 ON CONFLICT (workspace_id) DO UPDATE
@@ -808,7 +808,7 @@ impl PostgresAutopilotRepository {
             // A foreign or misspelt source id is a not-found, not a released
             // count of zero.
             let exists = sqlx::query_scalar::<_, bool>(
-                "SELECT EXISTS (SELECT 1 FROM viryaos_content_sources \
+                "SELECT EXISTS (SELECT 1 FROM content_sources \
                  WHERE workspace_id=$1 AND id=$2 AND source_kind='social_post')",
             )
             .bind(workspace_id.into_uuid())
@@ -822,7 +822,7 @@ impl PostgresAutopilotRepository {
             let now = OffsetDateTime::now_utc();
             let released: Vec<Uuid> = sqlx::query_scalar(
                 r#"
-                UPDATE viryaos_autopilot_actions
+                UPDATE autopilot_actions
                 SET status='queued', approved_at=$3, approved_by='operator:relay_ladder',
                     -- O.2: an outward send waits out its hold window before a
                     -- worker may claim it — the ladder is the approval, not a
@@ -851,7 +851,7 @@ impl PostgresAutopilotRepository {
             // a reminder keeps asking somebody to approve what already
             // queued.
             sqlx::query(
-                "UPDATE viryaos_team_assignments \
+                "UPDATE team_assignments \
                  SET status='done', completed_at=$3, next_reminder_at=NULL \
                  WHERE workspace_id=$1 AND action_id = ANY($2) AND status='open'",
             )
@@ -908,7 +908,7 @@ impl PostgresAutopilotRepository {
                 // Report the live state, not the remembered one — an approve
                 // replayed after a revoke must not answer "approved".
                 let live = sqlx::query_scalar::<_, bool>(
-                    "SELECT EXISTS (SELECT 1 FROM viryaos_show_ladder_approvals \
+                    "SELECT EXISTS (SELECT 1 FROM show_ladder_approvals \
                      WHERE workspace_id=$1 AND event_id=$2 AND revoked_at IS NULL)",
                 )
                 .bind(workspace_id.into_uuid())
@@ -939,7 +939,7 @@ impl PostgresAutopilotRepository {
             }
             let now = OffsetDateTime::now_utc();
             sqlx::query(
-                "INSERT INTO viryaos_show_ladder_approvals \
+                "INSERT INTO show_ladder_approvals \
                  (workspace_id, event_id, approved_by, approved_at) \
                  VALUES ($1,$2,'admin_api_key',$3) \
                  ON CONFLICT (workspace_id, event_id) WHERE revoked_at IS NULL \
@@ -953,7 +953,7 @@ impl PostgresAutopilotRepository {
             .map_err(map_sqlx)?;
             let released: Vec<Uuid> = sqlx::query_scalar(
                 r#"
-                UPDATE viryaos_autopilot_actions
+                UPDATE autopilot_actions
                 SET status='queued', approved_at=$3, approved_by='operator:show_ladder',
                     -- O.2: an outward send waits out its hold window before a
                     -- worker may claim it — the ladder is the approval, not a
@@ -980,7 +980,7 @@ impl PostgresAutopilotRepository {
             // A parked rung can carry an open crew assignment — close it, or a
             // reminder keeps asking somebody to approve what already queued.
             sqlx::query(
-                "UPDATE viryaos_team_assignments \
+                "UPDATE team_assignments \
                  SET status='done', completed_at=$3, next_reminder_at=NULL \
                  WHERE workspace_id=$1 AND action_id = ANY($2) AND status='open'",
             )
@@ -1046,7 +1046,7 @@ impl PostgresAutopilotRepository {
                 });
             }
             let exists = sqlx::query_scalar::<_, bool>(
-                "SELECT EXISTS (SELECT 1 FROM viryaos_content_sources \
+                "SELECT EXISTS (SELECT 1 FROM content_sources \
                  WHERE workspace_id=$1 AND id=$2 AND source_kind='social_post')",
             )
             .bind(workspace_id.into_uuid())
@@ -1059,7 +1059,7 @@ impl PostgresAutopilotRepository {
             }
             let now = OffsetDateTime::now_utc();
             let cancelled: Vec<Uuid> = sqlx::query_scalar(
-                "UPDATE viryaos_autopilot_actions \
+                "UPDATE autopilot_actions \
                  SET status='cancelled', finished_at=$3 \
                  WHERE workspace_id=$1 \
                    AND context='content_supply' \
@@ -1074,7 +1074,7 @@ impl PostgresAutopilotRepository {
             .await
             .map_err(map_sqlx)?;
             sqlx::query(
-                "UPDATE viryaos_team_assignments \
+                "UPDATE team_assignments \
                  SET status='cancelled', completed_at=NULL, next_reminder_at=NULL \
                  WHERE workspace_id=$1 AND action_id = ANY($2) AND status='open'",
             )
@@ -1127,7 +1127,7 @@ impl PostgresAutopilotRepository {
             .await?;
             if let Some(existing) = replay {
                 let live = sqlx::query_scalar::<_, bool>(
-                    "SELECT EXISTS (SELECT 1 FROM viryaos_show_ladder_approvals \
+                    "SELECT EXISTS (SELECT 1 FROM show_ladder_approvals \
                      WHERE workspace_id=$1 AND event_id=$2 AND revoked_at IS NULL)",
                 )
                 .bind(workspace_id.into_uuid())
@@ -1158,7 +1158,7 @@ impl PostgresAutopilotRepository {
             }
             let now = OffsetDateTime::now_utc();
             let revoked = sqlx::query(
-                "UPDATE viryaos_show_ladder_approvals \
+                "UPDATE show_ladder_approvals \
                  SET revoked_at=$3, revoked_by='admin_api_key' \
                  WHERE workspace_id=$1 AND event_id=$2 AND revoked_at IS NULL",
             )
@@ -1172,7 +1172,7 @@ impl PostgresAutopilotRepository {
                 return Err(RepositoryError::Conflict);
             }
             let cancelled: Vec<Uuid> = sqlx::query_scalar(
-                "UPDATE viryaos_autopilot_actions \
+                "UPDATE autopilot_actions \
                  SET status='cancelled', finished_at=$3 \
                  WHERE workspace_id=$1 AND context='show_growth' \
                    AND subject_kind='event' AND subject_id=$2 \
@@ -1186,7 +1186,7 @@ impl PostgresAutopilotRepository {
             .await
             .map_err(map_sqlx)?;
             sqlx::query(
-                "UPDATE viryaos_team_assignments \
+                "UPDATE team_assignments \
                  SET status='cancelled', completed_at=NULL, next_reminder_at=NULL \
                  WHERE workspace_id=$1 AND action_id = ANY($2) AND status='open'",
             )

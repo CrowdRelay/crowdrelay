@@ -32,7 +32,7 @@ async fn creative_family_for_task(
     sqlx::query_scalar::<_, Option<String>>(
         r#"
         SELECT ev.creative_family
-        FROM viryaos_growth_evidence AS ev
+        FROM growth_evidence AS ev
         JOIN agent_service_tasks AS task
           ON task.workspace_id = ev.workspace_id
          AND (task.metadata->>'action_id')::uuid = ev.action_id

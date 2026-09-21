@@ -121,12 +121,10 @@ async fn report(pool: &sqlx::PgPool) -> Result<(), sqlx::Error> {
 }
 
 async fn decision_total(pool: &sqlx::PgPool, workspace: uuid::Uuid) -> Result<i64, sqlx::Error> {
-    sqlx::query_scalar(
-        "SELECT count(*)::bigint FROM viryaos_autopilot_decisions WHERE workspace_id = $1",
-    )
-    .bind(workspace)
-    .fetch_one(pool)
-    .await
+    sqlx::query_scalar("SELECT count(*)::bigint FROM autopilot_decisions WHERE workspace_id = $1")
+        .bind(workspace)
+        .fetch_one(pool)
+        .await
 }
 
 /// Question 1 — is `confidence_basis_points` carrying information?
@@ -142,7 +140,7 @@ async fn confidence_distribution(
     let rows = sqlx::query(
         r#"
         SELECT confidence_basis_points AS bp, count(*)::bigint AS hits
-        FROM viryaos_autopilot_decisions
+        FROM autopilot_decisions
         WHERE workspace_id = $1
         GROUP BY confidence_basis_points
         ORDER BY hits DESC
@@ -197,7 +195,7 @@ async fn subject_diversity(
         SELECT count(DISTINCT subject_id)::bigint AS subjects,
                count(DISTINCT context)::bigint     AS contexts,
                count(DISTINCT decision_key)::bigint AS keys
-        FROM viryaos_autopilot_decisions
+        FROM autopilot_decisions
         WHERE workspace_id = $1
         "#,
     )
@@ -226,7 +224,7 @@ async fn subject_diversity(
     let per_context = sqlx::query(
         r#"
         SELECT context, count(*)::bigint AS hits
-        FROM viryaos_autopilot_decisions
+        FROM autopilot_decisions
         WHERE workspace_id = $1
         GROUP BY context ORDER BY hits DESC LIMIT 8
         "#,
@@ -253,13 +251,13 @@ async fn learning_state(pool: &sqlx::PgPool, workspace: uuid::Uuid) -> Result<()
     let row = sqlx::query(
         r#"
         SELECT
-          (SELECT count(*)::bigint FROM viryaos_growth_evidence
+          (SELECT count(*)::bigint FROM growth_evidence
             WHERE workspace_id = $1)                                                      AS evidence,
-          (SELECT count(*)::bigint FROM viryaos_growth_evidence
+          (SELECT count(*)::bigint FROM growth_evidence
             WHERE workspace_id = $1 AND resolved_at IS NOT NULL)                          AS resolved,
-          (SELECT count(*)::bigint FROM viryaos_autopilot_actions
+          (SELECT count(*)::bigint FROM autopilot_actions
             WHERE workspace_id = $1)                                                      AS actions,
-          (SELECT count(*)::bigint FROM viryaos_reach_events
+          (SELECT count(*)::bigint FROM reach_events
             WHERE workspace_id = $1)                                                      AS reach
         "#,
     )
@@ -300,7 +298,7 @@ async fn prior_sensitivity(pool: &sqlx::PgPool, workspace: uuid::Uuid) -> Result
     let templates = sqlx::query(
         r#"
         SELECT DISTINCT input_snapshot #>> '{prediction,template_id}' AS template
-        FROM viryaos_autopilot_decisions
+        FROM autopilot_decisions
         WHERE workspace_id = $1
           AND input_snapshot #>> '{prediction,template_id}' IS NOT NULL
         LIMIT 12

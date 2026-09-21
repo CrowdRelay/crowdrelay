@@ -240,14 +240,13 @@ pub async fn public_config(
     // a "parked" banner. A single-row PK lookup — cheap enough for a cached
     // endpoint. A missing envelope row means the workspace was never
     // configured, which reads as not parked.
-    let parked = sqlx::query_scalar::<_, bool>(
-        "SELECT parked FROM viryaos_growth_envelope WHERE workspace_id = $1",
-    )
-    .bind(state.ops.workspace_id().into_uuid())
-    .fetch_optional(state.autopilot.pool())
-    .await
-    .unwrap_or(None)
-    .unwrap_or(false);
+    let parked =
+        sqlx::query_scalar::<_, bool>("SELECT parked FROM growth_envelope WHERE workspace_id = $1")
+            .bind(state.ops.workspace_id().into_uuid())
+            .fetch_optional(state.autopilot.pool())
+            .await
+            .unwrap_or(None)
+            .unwrap_or(false);
     let mut profile = state.tenant.clone();
     profile.parked = parked;
     (

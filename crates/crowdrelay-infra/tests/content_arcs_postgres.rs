@@ -61,7 +61,7 @@ async fn refresh_arcs_proposes_once_then_the_lifecycle_moves_it()
     .fetch_one(&pool)
     .await?;
     sqlx::query(
-        "INSERT INTO viryaos_team_profiles
+        "INSERT INTO team_profiles
              (workspace_id, member_id, member_key, active, skills)
          VALUES ($1, $2, 'crew', true, ARRAY['video','photography','social','english_copy']::text[])",
     )
@@ -72,7 +72,7 @@ async fn refresh_arcs_proposes_once_then_the_lifecycle_moves_it()
 
     // The anchor: a release four weeks out — inside the proposal window.
     let release_id: Uuid = sqlx::query_scalar(
-        "INSERT INTO viryaos_release_plans (workspace_id, source_key, title, release_at, active)
+        "INSERT INTO release_plans (workspace_id, source_key, title, release_at, active)
          VALUES ($1, 'arc-test', 'Arc Single', now() + interval '30 days', true)
          RETURNING id",
     )
@@ -118,7 +118,7 @@ async fn refresh_arcs_proposes_once_then_the_lifecycle_moves_it()
         Some("operator"),
     )
     .await?;
-    sqlx::query("UPDATE viryaos_arcs SET horizon_start = $2 WHERE id = $1")
+    sqlx::query("UPDATE arcs SET horizon_start = $2 WHERE id = $1")
         .bind(arc.id.into_uuid())
         .bind(today)
         .execute(&pool)
@@ -152,7 +152,7 @@ async fn refresh_arcs_proposes_once_then_the_lifecycle_moves_it()
 
     // The horizon closes: the season completes, and the lifecycle moves it
     // without an operator touching anything.
-    sqlx::query("UPDATE viryaos_arcs SET horizon_start = $2, horizon_end = $3 WHERE id = $1")
+    sqlx::query("UPDATE arcs SET horizon_start = $2, horizon_end = $3 WHERE id = $1")
         .bind(arc.id.into_uuid())
         .bind(today - time::Duration::days(10))
         .bind(today - time::Duration::days(1))
@@ -208,7 +208,7 @@ async fn an_active_arc_refuses_orphan_suggestions_end_to_end()
     .fetch_one(&pool)
     .await?;
     sqlx::query(
-        "INSERT INTO viryaos_team_profiles
+        "INSERT INTO team_profiles
              (workspace_id, member_id, member_key, active, skills)
          VALUES ($1, $2, 'crew', true, ARRAY['video','photography','social','english_copy']::text[])",
     )
@@ -230,7 +230,7 @@ async fn an_active_arc_refuses_orphan_suggestions_end_to_end()
     // Release material — the spine's formats require it, and the capability
     // gate answers from the calendar, not from the arc itself.
     sqlx::query(
-        "INSERT INTO viryaos_release_plans (workspace_id, source_key, title, release_at, active)
+        "INSERT INTO release_plans (workspace_id, source_key, title, release_at, active)
          VALUES ($1, 'arc-suppress', 'Arc Single', now() + interval '30 days', true)",
     )
     .bind(workspace_id.into_uuid())
@@ -258,7 +258,7 @@ async fn an_active_arc_refuses_orphan_suggestions_end_to_end()
             },
         )
         .await?;
-    sqlx::query("UPDATE viryaos_arcs SET status = 'active' WHERE id = $1")
+    sqlx::query("UPDATE arcs SET status = 'active' WHERE id = $1")
         .bind(arc.id.into_uuid())
         .execute(&pool)
         .await?;
@@ -301,7 +301,7 @@ async fn seed_capability_and_anchor(
     .fetch_one(pool)
     .await?;
     sqlx::query(
-        "INSERT INTO viryaos_team_profiles
+        "INSERT INTO team_profiles
              (workspace_id, member_id, member_key, active, skills)
          VALUES ($1, $2, 'crew', true, ARRAY['video','photography','social','english_copy']::text[])",
     )
@@ -310,7 +310,7 @@ async fn seed_capability_and_anchor(
     .execute(pool)
     .await?;
     sqlx::query(
-        "INSERT INTO viryaos_release_plans (workspace_id, source_key, title, release_at, active)
+        "INSERT INTO release_plans (workspace_id, source_key, title, release_at, active)
          VALUES ($1, 'arc-test', 'Arc Single', now() + interval '30 days', true)",
     )
     .bind(workspace_id.into_uuid())
@@ -326,13 +326,13 @@ async fn retire_formats(
     workspace_id: WorkspaceId,
     keep: &[&str],
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let keys: Vec<String> = sqlx::query_scalar("SELECT key FROM viryaos_content_format_entries")
+    let keys: Vec<String> = sqlx::query_scalar("SELECT key FROM content_format_entries")
         .fetch_all(pool)
         .await?;
     for key in keys.iter().filter(|k| !keep.contains(&k.as_str())) {
         for _ in 0..6 {
             let suggestion_id: Uuid = sqlx::query_scalar(
-                "INSERT INTO viryaos_content_suggestions
+                "INSERT INTO content_suggestions
                      (id, workspace_id, format_key, concept, status)
                  VALUES ($1, $2, $3, 'stale beat', 'expired') RETURNING id",
             )
@@ -342,7 +342,7 @@ async fn retire_formats(
             .fetch_one(pool)
             .await?;
             sqlx::query(
-                "INSERT INTO viryaos_suggestion_outcomes
+                "INSERT INTO suggestion_outcomes
                      (workspace_id, suggestion_id, outcome, resolved_at)
                  VALUES ($1, $2, 'expired', now() - interval '50 days')",
             )

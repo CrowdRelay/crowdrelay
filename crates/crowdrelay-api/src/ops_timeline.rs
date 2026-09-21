@@ -216,7 +216,7 @@ async fn load_trace_timeline(
                 NULL::text AS causation_id,
                 id::text AS event_id,
                 'FACT'::text AS certainty
-            FROM viryaos_autopilot_decisions
+            FROM autopilot_decisions
             WHERE workspace_id = $1 AND trace_id = $2
 
             UNION ALL
@@ -232,7 +232,7 @@ async fn load_trace_timeline(
                 causation_id::text AS causation_id,
                 id::text AS event_id,
                 'FACT'::text AS certainty
-            FROM viryaos_autopilot_actions
+            FROM autopilot_actions
             WHERE workspace_id = $1 AND trace_id = $2
 
             UNION ALL
@@ -286,7 +286,7 @@ async fn load_trace_timeline(
                 NULL::text AS causation_id,
                 id::text AS event_id,
                 'INFERENCE'::text AS certainty
-            FROM viryaos_autopilot_measurements
+            FROM autopilot_measurements
             WHERE workspace_id = $1 AND trace_id = $2
 
             UNION ALL
@@ -302,7 +302,7 @@ async fn load_trace_timeline(
                 NULL::text AS causation_id,
                 id::text AS event_id,
                 'FACT'::text AS certainty
-            FROM viryaos_evidence_events
+            FROM evidence_events
             WHERE workspace_id = $1 AND trace_id = $2
 
             UNION ALL
@@ -318,7 +318,7 @@ async fn load_trace_timeline(
                 causation_id::text AS causation_id,
                 id::text AS event_id,
                 'FACT'::text AS certainty
-            FROM viryaos_reach_events
+            FROM reach_events
             WHERE workspace_id = $1 AND trace_id = $2
 
             UNION ALL
@@ -371,8 +371,8 @@ async fn load_trace_timeline(
                 NULL::text AS causation_id,
                 evidence.id::text AS event_id,
                 'FACT'::text AS certainty
-            FROM viryaos_growth_evidence AS evidence
-            JOIN viryaos_autopilot_actions AS action
+            FROM growth_evidence AS evidence
+            JOIN autopilot_actions AS action
               ON action.workspace_id = evidence.workspace_id
              AND action.id = evidence.action_id
             WHERE evidence.workspace_id = $1 AND action.trace_id = $2
@@ -394,8 +394,8 @@ async fn load_trace_timeline(
                 NULL::text AS causation_id,
                 evidence.id::text || ':' || metric.key AS event_id,
                 'FACT'::text AS certainty
-            FROM viryaos_growth_evidence AS evidence
-            JOIN viryaos_autopilot_actions AS action
+            FROM growth_evidence AS evidence
+            JOIN autopilot_actions AS action
               ON action.workspace_id = evidence.workspace_id
              AND action.id = evidence.action_id
             CROSS JOIN LATERAL jsonb_each(evidence.observed_metrics) AS metric

@@ -35,7 +35,7 @@ impl PostgresAutopilotRepository {
                         -- not a delivery, and counting it would make a broken
                         -- executor look like a bounce problem.
                         SELECT count(*)::bigint
-                        FROM viryaos_autopilot_actions AS action
+                        FROM autopilot_actions AS action
                         WHERE action.workspace_id = $1
                           AND action.action_class = 'third_party'
                           AND action.status = 'succeeded'
@@ -43,14 +43,14 @@ impl PostgresAutopilotRepository {
                     ) AS sent_30d,
                     (
                         SELECT count(*)::bigint
-                        FROM viryaos_outreach_delivery_faults AS fault
+                        FROM outreach_delivery_faults AS fault
                         WHERE fault.workspace_id = $1
                           AND fault.fault IN ('hard_bounce', 'soft_bounce')
                           AND fault.occurred_at > $2 - INTERVAL '30 days'
                     ) AS bounces_30d,
                     (
                         SELECT count(*)::bigint
-                        FROM viryaos_outreach_delivery_faults AS fault
+                        FROM outreach_delivery_faults AS fault
                         WHERE fault.workspace_id = $1
                           AND fault.fault = 'complaint'
                           AND fault.occurred_at > $2 - INTERVAL '30 days'
@@ -66,7 +66,7 @@ impl PostgresAutopilotRepository {
                                 -- if it never sent. Both truths come from the
                                 -- same ledger, so they cannot disagree.
                                 SELECT min(done.finished_at)
-                                FROM viryaos_autopilot_actions AS done
+                                FROM autopilot_actions AS done
                                 WHERE done.workspace_id = $1
                                   AND done.action_class = 'third_party'
                                   AND done.status = 'succeeded'
@@ -112,7 +112,7 @@ impl PostgresAutopilotRepository {
                 DeliveryFaultSubject::ContactEmail(ref email) => {
                     let resolved = sqlx::query_scalar::<_, Uuid>(
                         r#"
-                        SELECT id FROM viryaos_outreach_targets
+                        SELECT id FROM outreach_targets
                         WHERE workspace_id = $1
                           AND contact_email = lower(btrim($2))
                         "#,
@@ -160,7 +160,7 @@ impl PostgresAutopilotRepository {
             // first delivery already did it.
             let inserted = sqlx::query(
                 r#"
-                INSERT INTO viryaos_outreach_delivery_faults (
+                INSERT INTO outreach_delivery_faults (
                     workspace_id, target_id, fault, provider_reference, occurred_at
                 ) VALUES ($1,$2,$3,$4,$5)
                 ON CONFLICT (workspace_id, provider_reference) DO NOTHING
@@ -188,7 +188,7 @@ impl PostgresAutopilotRepository {
                 // The address does not exist. Retrying it is how a sender comes
                 // to look like somebody working from a bought list.
                 sqlx::query(
-                    "UPDATE viryaos_outreach_targets \
+                    "UPDATE outreach_targets \
                      SET active = false, accepts_outreach = false, version = version + 1 \
                      WHERE workspace_id = $1 AND id = $2",
                 )
@@ -198,7 +198,7 @@ impl PostgresAutopilotRepository {
                 .await
                 .map_err(map_sqlx)?;
                 sqlx::query(
-                    "UPDATE viryaos_outreach_opportunities SET active = false \
+                    "UPDATE outreach_opportunities SET active = false \
                      WHERE workspace_id = $1 AND target_id = $2",
                 )
                 .bind(workspace_id.into_uuid())

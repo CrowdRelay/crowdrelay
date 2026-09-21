@@ -160,7 +160,7 @@ class ViryaOsAutopilotV1(unittest.TestCase):
         self.assertIn("viryaos_promotion_campaign_observations", migration)
         self.assertIn("AutopilotMarketStateRepository", app)
         self.assertIn("upsert_autopilot_promotion_state", infra)
-        self.assertIn("EXCLUDED.observed_at > viryaos_promotion_campaign_states.observed_at", infra)
+        self.assertIn("EXCLUDED.observed_at > promotion_campaign_states.observed_at", infra)
         self.assertIn("crowdrelay.promotion.budget_change_requested", infra)
         self.assertIn("ensure_promotion_state_current", infra)
 
@@ -172,7 +172,7 @@ class ViryaOsAutopilotV1(unittest.TestCase):
         market = (DOMAIN / "market_intelligence.rs").read_text()
         self.assertIn("viryaos_city_market_signals", migration)
         self.assertIn("viryaos_city_market_signal_observations", migration)
-        self.assertIn("EXCLUDED.observed_at > viryaos_city_market_signals.observed_at", infra)
+        self.assertIn("EXCLUDED.observed_at > city_market_signals.observed_at", infra)
         self.assertIn("aggregate_city_market_evidence", infra)
         self.assertIn("signal_families", market)
         self.assertIn(".min(10)", booking)
@@ -284,7 +284,7 @@ class ViryaOsAutopilotV1(unittest.TestCase):
         self.assertIn("AutopilotMeasurementKind::AudienceTicketRevenue72h", scheduling)
         self.assertIn("RequestContentArtifact { .. }", scheduling)
 
-    def test_original_viryaos_operating_plan_is_feature_complete(self):
+    def test_original_operating_plan_is_feature_complete(self):
         modules = {path.stem for path in DOMAIN.glob("*.rs")}
         for module in (
             "pricing", "merchandising", "audience_lifecycle", "booking",
@@ -381,11 +381,11 @@ class ViryaOsAutopilotV1(unittest.TestCase):
         # permanent Conflict. Execution must still refuse dead evidence:
         # inactive or expired sources never execute.
         self.assertIn(
-            "FROM viryaos_content_sources WHERE workspace_id=$1 AND id=$2 AND active AND expires_at>now()",
+            "FROM content_sources WHERE workspace_id=$1 AND id=$2 AND active AND expires_at>now()",
             INFRA_TEXT,
         )
         execution_query = INFRA_TEXT.split(
-            "SELECT source_kind,title,metadata FROM viryaos_content_sources", 1
+            "SELECT source_kind,title,metadata FROM content_sources", 1
         )[1].split("FOR UPDATE", 1)[0]
         self.assertNotIn("version=", execution_query)
 
@@ -470,11 +470,11 @@ class ViryaOsAutopilotV1(unittest.TestCase):
         openapi = OPENAPI.read_text()
         self.assertIn("ChiefOfStaffAttentionItem", APP_TEXT)
         self.assertIn("approval_expires_at", infra)
-        self.assertIn("viryaos_team_opportunities", infra)
+        self.assertIn("team_opportunities", infra)
         self.assertIn("opportunity.deadline", infra)
         self.assertIn("attention_items", openapi)
         self.assertIn("maxItems: 12", openapi)
-        self.assertNotIn("viryaos_chief_of_staff_tasks", infra)
+        self.assertNotIn("chief_of_staff_tasks", infra)
 
 if __name__ == "__main__":
     unittest.main()

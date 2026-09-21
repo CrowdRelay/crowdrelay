@@ -50,7 +50,7 @@ async fn emitted_action_without_receipt(pool: &PgPool, workspace_id: WorkspaceId
     let action_id = Uuid::now_v7();
     sqlx::query(
         r#"
-        INSERT INTO viryaos_autopilot_decisions (
+        INSERT INTO autopilot_decisions (
             id, workspace_id, decision_key, context, subject_kind, subject_id,
             decision_kind, confidence_basis_points, disposition, reason,
             input_snapshot, policy_snapshot, recommendation, trace_id
@@ -69,7 +69,7 @@ async fn emitted_action_without_receipt(pool: &PgPool, workspace_id: WorkspaceId
     .context("insert dispatching decision")?;
     sqlx::query(
         r#"
-        INSERT INTO viryaos_autopilot_actions (
+        INSERT INTO autopilot_actions (
             id, workspace_id, decision_id, context, action_kind, subject_kind,
             subject_id, idempotency_key, payload, status, finished_at, trace_id
         ) VALUES ($1,$2,$3,'outreach_supply','outreach.discovery.request','workspace',
@@ -103,7 +103,7 @@ async fn emitted_action_without_receipt(pool: &PgPool, workspace_id: WorkspaceId
     .context("insert delivered outbox event")?;
     sqlx::query(
         r#"
-        INSERT INTO viryaos_autopilot_action_emissions
+        INSERT INTO autopilot_action_emissions
             (workspace_id, action_id, emission_key, outbox_event_id)
         VALUES ($1,$2,$3,$4)
         "#,
@@ -119,7 +119,7 @@ async fn emitted_action_without_receipt(pool: &PgPool, workspace_id: WorkspaceId
 }
 
 async fn action_status(pool: &PgPool, action_id: Uuid) -> Result<String> {
-    sqlx::query_scalar("SELECT status FROM viryaos_autopilot_actions WHERE id = $1")
+    sqlx::query_scalar("SELECT status FROM autopilot_actions WHERE id = $1")
         .bind(action_id)
         .fetch_one(pool)
         .await
@@ -138,12 +138,11 @@ async fn a_resolved_action_gets_a_synthesized_receipt_and_stays_closed() -> Resu
     async {
         let ws = workspace(&db).await?;
         let action_id = emitted_action_without_receipt(&db, ws).await?;
-        let delivered_at: time::OffsetDateTime = sqlx::query_scalar(
-            "SELECT delivered_at FROM outbox_events WHERE action_id = $1",
-        )
-        .bind(action_id)
-        .fetch_one(&db)
-        .await?;
+        let delivered_at: time::OffsetDateTime =
+            sqlx::query_scalar("SELECT delivered_at FROM outbox_events WHERE action_id = $1")
+                .bind(action_id)
+                .fetch_one(&db)
+                .await?;
 
         // One cycle runs both sweeps in a transaction: gap → unknown,
         // outbox-delivered → resolved succeeded + synthesized receipt.
@@ -154,7 +153,7 @@ async fn a_resolved_action_gets_a_synthesized_receipt_and_stays_closed() -> Resu
             sqlx::query_as(
                 r#"
                 SELECT executor_id, metadata->>'resolved_via', occurred_at
-                FROM viryaos_autopilot_execution_reports
+                FROM autopilot_execution_reports
                 WHERE action_id = $1 AND status = 'succeeded'
                 "#,
             )
@@ -171,7 +170,7 @@ async fn a_resolved_action_gets_a_synthesized_receipt_and_stays_closed() -> Resu
         // The closure property: age the action past the gap threshold
         // again and run a second cycle — it must NOT re-enter `unknown`.
         sqlx::query(
-            "UPDATE viryaos_autopilot_actions SET finished_at = now() - interval '2 days' WHERE id = $1",
+            "UPDATE autopilot_actions SET finished_at = now() - interval '2 days' WHERE id = $1",
         )
         .bind(action_id)
         .execute(&db)
@@ -179,12 +178,15 @@ async fn a_resolved_action_gets_a_synthesized_receipt_and_stays_closed() -> Resu
         worker(db.clone(), ws).run_once().await?;
         assert_eq!(action_status(&db, action_id).await?, "succeeded");
         let report_count: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM viryaos_autopilot_execution_reports WHERE action_id = $1",
+            "SELECT count(*) FROM autopilot_execution_reports WHERE action_id = $1",
         )
         .bind(action_id)
         .fetch_one(&db)
         .await?;
-        assert_eq!(report_count, 1, "a re-resolution must not duplicate the receipt");
+        assert_eq!(
+            report_count, 1,
+            "a re-resolution must not duplicate the receipt"
+        );
         Ok(())
     }
     .await
@@ -210,14 +212,14 @@ async fn a_late_executor_report_is_not_duplicated() -> Result<()> {
         let action_id = emitted_action_without_receipt(&db, ws).await?;
         // The gap sweep already ran: the action sits in `unknown`, waiting on
         // evidence. The executor's report lands before the resolver runs.
-        sqlx::query("UPDATE viryaos_autopilot_actions SET status = 'unknown' WHERE id = $1")
+        sqlx::query("UPDATE autopilot_actions SET status = 'unknown' WHERE id = $1")
             .bind(action_id)
             .execute(&db)
             .await
             .context("mark the action unknown")?;
         sqlx::query(
             r#"
-            INSERT INTO viryaos_autopilot_execution_reports
+            INSERT INTO autopilot_execution_reports
                 (id, workspace_id, action_id, receipt_key, executor_id, status, occurred_at)
             VALUES ($1,$2,$3,$4,'virya-n8n-primary','succeeded',now())
             "#,
@@ -233,7 +235,7 @@ async fn a_late_executor_report_is_not_duplicated() -> Result<()> {
         worker(db.clone(), ws).run_once().await?;
         assert_eq!(action_status(&db, action_id).await?, "succeeded");
         let report_count: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM viryaos_autopilot_execution_reports WHERE action_id = $1",
+            "SELECT count(*) FROM autopilot_execution_reports WHERE action_id = $1",
         )
         .bind(action_id)
         .fetch_one(&db)

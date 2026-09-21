@@ -631,7 +631,7 @@ async fn capability_profile_reads_roster_and_material() -> Result<(), Box<dyn st
     .fetch_one(&pool)
     .await?;
     sqlx::query(
-        "INSERT INTO viryaos_team_profiles
+        "INSERT INTO team_profiles
              (workspace_id, member_id, member_key, active, skills)
          VALUES ($1, $2, 'filmer', true, ARRAY['video','photography']::text[])",
     )
@@ -654,7 +654,7 @@ async fn capability_profile_reads_roster_and_material() -> Result<(), Box<dyn st
     .fetch_one(&pool)
     .await?;
     sqlx::query(
-        "INSERT INTO viryaos_team_profiles
+        "INSERT INTO team_profiles
              (workspace_id, member_id, member_key, active, skills)
          VALUES ($1, $2, 'gone', false, ARRAY['english_copy']::text[])",
     )
@@ -677,7 +677,7 @@ async fn capability_profile_reads_roster_and_material() -> Result<(), Box<dyn st
     .fetch_one(&pool)
     .await?;
     sqlx::query(
-        "INSERT INTO viryaos_team_profiles
+        "INSERT INTO team_profiles
              (workspace_id, member_id, member_key, active, skills)
          VALUES ($1, $2, 'disabled', true, ARRAY['polish_copy']::text[])",
     )
@@ -706,7 +706,7 @@ async fn capability_profile_reads_roster_and_material() -> Result<(), Box<dyn st
     .execute(&pool)
     .await?;
     sqlx::query(
-        "INSERT INTO viryaos_release_plans (workspace_id, source_key, title, release_at, active)
+        "INSERT INTO release_plans (workspace_id, source_key, title, release_at, active)
          VALUES ($1, $2, 'Cap Release', now() + interval '14 days', true)",
     )
     .bind(workspace_id.into_uuid())
@@ -767,7 +767,7 @@ async fn suggestion_engine_raises_only_what_the_band_can_do()
     .fetch_one(&pool)
     .await?;
     sqlx::query(
-        "INSERT INTO viryaos_team_profiles
+        "INSERT INTO team_profiles
              (workspace_id, member_id, member_key, active, skills)
          VALUES ($1, $2, 'crew', true,
                  ARRAY['general','operations','booking','approval','technical',
@@ -781,7 +781,7 @@ async fn suggestion_engine_raises_only_what_the_band_can_do()
 
     // Material: an upcoming release and a published show.
     sqlx::query(
-        "INSERT INTO viryaos_release_plans (workspace_id, source_key, title, release_at, active)
+        "INSERT INTO release_plans (workspace_id, source_key, title, release_at, active)
          VALUES ($1, $2, 'Sug Release', now() + interval '14 days', true)",
     )
     .bind(workspace_id.into_uuid())
@@ -837,7 +837,7 @@ async fn suggestion_engine_raises_only_what_the_band_can_do()
     .execute(&pool)
     .await?;
     sqlx::query(
-        "INSERT INTO viryaos_outreach_candidates
+        "INSERT INTO outreach_candidates
              (workspace_id, target_kind, display_name, source, source_reference,
               evidence, route_kind, route_value, route_is_published, status)
          VALUES ($1, 'press', 'Test Zine', 'operator_import', 'fixture',
@@ -906,7 +906,7 @@ async fn suggestion_engine_raises_only_what_the_band_can_do()
     .fetch_one(&pool)
     .await?;
     sqlx::query(
-        "INSERT INTO viryaos_team_profiles
+        "INSERT INTO team_profiles
              (workspace_id, member_id, member_key, active, skills)
          VALUES ($1, $2, 'solo', true, ARRAY['social']::text[])",
     )
@@ -962,7 +962,7 @@ async fn a_lapsed_suggestion_expires_and_frees_its_queue_slot()
     .fetch_one(&pool)
     .await?;
     sqlx::query(
-        "INSERT INTO viryaos_team_profiles
+        "INSERT INTO team_profiles
              (workspace_id, member_id, member_key, active, skills)
          VALUES ($1, $2, 'crew', true, ARRAY['social']::text[])",
     )
@@ -984,7 +984,7 @@ async fn a_lapsed_suggestion_expires_and_frees_its_queue_slot()
     // never returns.
     for ordinal in 0..3 {
         sqlx::query(
-            "INSERT INTO viryaos_content_suggestions (
+            "INSERT INTO content_suggestions (
                  id, workspace_id, format_key, concept, reason, evidence,
                  distribution_promise, status, expires_at
              ) VALUES ($1,$2,'playthrough',$3,'stale ask','{}',
@@ -1002,9 +1002,9 @@ async fn a_lapsed_suggestion_expires_and_frees_its_queue_slot()
 
     let (expired, outcomes): (i64, i64) = sqlx::query_as(
         "SELECT
-             (SELECT count(*) FROM viryaos_content_suggestions
+             (SELECT count(*) FROM content_suggestions
                WHERE workspace_id = $1 AND status = 'expired'),
-             (SELECT count(*) FROM viryaos_suggestion_outcomes
+             (SELECT count(*) FROM suggestion_outcomes
                WHERE workspace_id = $1 AND outcome = 'expired')",
     )
     .bind(workspace_id.into_uuid())

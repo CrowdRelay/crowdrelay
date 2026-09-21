@@ -262,7 +262,7 @@ impl PostgresAttestationRepository {
 
         sqlx::query(
             r#"
-            INSERT INTO viryaos_attestations
+            INSERT INTO attestations
                 (workspace_id, act_name, figures, issued_at, valid_until, digest, signature)
             VALUES ($1, $2, $3, $4, $5, $6, $7)
             -- A digest collides only when the same workspace issues the same
@@ -281,7 +281,7 @@ impl PostgresAttestationRepository {
             ON CONFLICT (digest) DO UPDATE
             SET revoked_at = NULL,
                 share_token = gen_random_uuid()
-            WHERE viryaos_attestations.workspace_id = EXCLUDED.workspace_id
+            WHERE attestations.workspace_id = EXCLUDED.workspace_id
             "#,
         )
         .bind(workspace_id)
@@ -314,7 +314,7 @@ impl PostgresAttestationRepository {
         let row = sqlx::query(
             r#"
             SELECT workspace_id, act_name, figures, issued_at, valid_until, digest, signature, revoked_at
-            FROM viryaos_attestations WHERE share_token = $1
+            FROM attestations WHERE share_token = $1
             "#,
         )
         .bind(share_token)
@@ -335,7 +335,7 @@ impl PostgresAttestationRepository {
         let row = sqlx::query(
             r#"
             SELECT workspace_id, act_name, figures, issued_at, valid_until, digest, signature, revoked_at
-            FROM viryaos_attestations WHERE digest = $1
+            FROM attestations WHERE digest = $1
             "#,
         )
         .bind(digest)
@@ -387,7 +387,7 @@ impl PostgresAttestationRepository {
         digest: &str,
     ) -> Result<Uuid, AttestationError> {
         sqlx::query_scalar::<_, Uuid>(
-            "SELECT share_token FROM viryaos_attestations
+            "SELECT share_token FROM attestations
              WHERE workspace_id = $1 AND digest = $2",
         )
         .bind(workspace_id)
@@ -405,7 +405,7 @@ impl PostgresAttestationRepository {
         now: OffsetDateTime,
     ) -> Result<(), AttestationError> {
         let changed = sqlx::query(
-            "UPDATE viryaos_attestations SET revoked_at = $3
+            "UPDATE attestations SET revoked_at = $3
              WHERE workspace_id = $1 AND digest = $2 AND revoked_at IS NULL",
         )
         .bind(workspace_id)
@@ -422,7 +422,7 @@ impl PostgresAttestationRepository {
         // reports revoked, so the operator's retry must not fail. Only a
         // digest the workspace never issued is NotFound.
         let exists = sqlx::query_scalar::<_, bool>(
-            "SELECT EXISTS(SELECT 1 FROM viryaos_attestations
+            "SELECT EXISTS(SELECT 1 FROM attestations
              WHERE workspace_id = $1 AND digest = $2)",
         )
         .bind(workspace_id)
@@ -443,7 +443,7 @@ impl PostgresAttestationRepository {
         digest: &str,
     ) -> Result<Uuid, AttestationError> {
         sqlx::query_scalar::<_, Uuid>(
-            "UPDATE viryaos_attestations SET share_token = gen_random_uuid()
+            "UPDATE attestations SET share_token = gen_random_uuid()
              WHERE workspace_id = $1 AND digest = $2 RETURNING share_token",
         )
         .bind(workspace_id)
@@ -464,7 +464,7 @@ impl PostgresAttestationRepository {
     ) -> Result<Vec<AttestationSummary>, AttestationError> {
         let rows = sqlx::query(
             "SELECT digest, act_name, share_token, issued_at, valid_until, revoked_at
-             FROM viryaos_attestations
+             FROM attestations
              WHERE workspace_id = $1
              ORDER BY issued_at DESC
              LIMIT 200",
@@ -507,7 +507,7 @@ impl PostgresAttestationRepository {
                    batch.status AS batch_status,
                    batch.created_at AS batched_at,
                    batch.confirmed_at AS confirmed_at
-            FROM viryaos_attestations AS att
+            FROM attestations AS att
             LEFT JOIN external_proof_items AS item
               ON item.workspace_id = att.workspace_id
              AND item.source_kind = 'attestation'

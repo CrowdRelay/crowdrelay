@@ -106,7 +106,7 @@ impl AutopilotBookingStateRepository for PostgresAutopilotRepository {
             let version = if command.expected_version == 0 {
                 sqlx::query_scalar::<_, i64>(
                     r#"
-                    INSERT INTO viryaos_booking_targets (
+                    INSERT INTO booking_targets (
                         id, workspace_id, city_id, target_kind, display_name, contact_email,
                         capacity, priority, relationship_score, active, accepts_booking
                     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
@@ -130,7 +130,7 @@ impl AutopilotBookingStateRepository for PostgresAutopilotRepository {
             } else {
                 sqlx::query_scalar::<_, i64>(
                     r#"
-                    UPDATE viryaos_booking_targets
+                    UPDATE booking_targets
                     SET city_id = $3, target_kind = $4, display_name = $5, contact_email = $6,
                         capacity = $7, priority = $8, relationship_score = $9, active = $10,
                         accepts_booking = $11, version = version + 1
@@ -158,13 +158,13 @@ impl AutopilotBookingStateRepository for PostgresAutopilotRepository {
 
             sqlx::query(
                 r#"
-                INSERT INTO viryaos_booking_target_history (
+                INSERT INTO booking_target_history (
                     workspace_id, target_id, version, target_kind, display_name, contact_email,
                     capacity, priority, relationship_score, active, accepts_booking
                 )
                 SELECT workspace_id, id, version, target_kind, display_name, contact_email,
                        capacity, priority, relationship_score, active, accepts_booking
-                FROM viryaos_booking_targets
+                FROM booking_targets
                 WHERE workspace_id = $1 AND id = $2 AND version = $3
                 "#,
             )
@@ -245,7 +245,7 @@ impl AutopilotBookingStateRepository for PostgresAutopilotRepository {
                 // and an `edition_id` appended post-write would differ on
                 // every retry.
                 let edition_id = sqlx::query_scalar::<_, uuid::Uuid>(
-                    "SELECT id FROM viryaos_festival_editions \
+                    "SELECT id FROM festival_editions \
                      WHERE workspace_id = $1 AND target_id = $2 AND edition_label = $3",
                 )
                 .bind(workspace_id.into_uuid())
@@ -267,7 +267,7 @@ impl AutopilotBookingStateRepository for PostgresAutopilotRepository {
             // one under a venue or promoter would feed the deadline radar a
             // window nobody can apply through.
             let target_kind = sqlx::query_scalar::<_, String>(
-                "SELECT target_kind FROM viryaos_booking_targets \
+                "SELECT target_kind FROM booking_targets \
                  WHERE workspace_id = $1 AND id = $2",
             )
             .bind(workspace_id.into_uuid())
@@ -287,7 +287,7 @@ impl AutopilotBookingStateRepository for PostgresAutopilotRepository {
 
             let edition_id = sqlx::query_scalar::<_, uuid::Uuid>(
                 r#"
-                INSERT INTO viryaos_festival_editions (
+                INSERT INTO festival_editions (
                     id, workspace_id, target_id, edition_label, starts_at,
                     application_opens_at, application_closes_at, lineup_url
                 ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
@@ -345,7 +345,7 @@ impl AutopilotBookingStateRepository for PostgresAutopilotRepository {
             // A bare `SELECT 1` is int4 on the wire — decoding it as i64
             // fails before the row is even looked at. EXISTS answers a bool.
             let target_exists = sqlx::query_scalar::<_, bool>(
-                "SELECT EXISTS (SELECT 1 FROM viryaos_booking_targets \
+                "SELECT EXISTS (SELECT 1 FROM booking_targets \
                  WHERE workspace_id = $1 AND id = $2)",
             )
             .bind(workspace_id.into_uuid())
@@ -368,7 +368,7 @@ impl AutopilotBookingStateRepository for PostgresAutopilotRepository {
             }
             let rows = sqlx::query(
                 r#"
-                INSERT INTO viryaos_booking_target_venues (workspace_id, target_id, venue_id)
+                INSERT INTO booking_target_venues (workspace_id, target_id, venue_id)
                 VALUES ($1, $2, $3)
                 ON CONFLICT DO NOTHING
                 "#,
@@ -394,7 +394,7 @@ impl AutopilotBookingStateRepository for PostgresAutopilotRepository {
             // A bare `SELECT 1` is int4 on the wire — decoding it as i64
             // fails before the row is even looked at. EXISTS answers a bool.
             let target_exists = sqlx::query_scalar::<_, bool>(
-                "SELECT EXISTS (SELECT 1 FROM viryaos_booking_targets \
+                "SELECT EXISTS (SELECT 1 FROM booking_targets \
                  WHERE workspace_id = $1 AND id = $2)",
             )
             .bind(workspace_id.into_uuid())
@@ -407,7 +407,7 @@ impl AutopilotBookingStateRepository for PostgresAutopilotRepository {
             }
             let rows = sqlx::query(
                 r#"
-                DELETE FROM viryaos_booking_target_venues
+                DELETE FROM booking_target_venues
                 WHERE workspace_id = $1 AND target_id = $2 AND venue_id = $3
                 "#,
             )
@@ -511,7 +511,7 @@ impl AutopilotMerchStateRepository for PostgresAutopilotRepository {
             let version = if command.expected_version == 0 {
                 sqlx::query_scalar::<_, i64>(
                     r#"
-                    INSERT INTO viryaos_merch_product_economics (
+                    INSERT INTO merch_product_economics (
                         workspace_id, product_id, minimum_price_minor, maximum_price_minor,
                         unit_cost_minor, version
                     ) VALUES ($1,$2,$3,$4,$5,1)
@@ -531,7 +531,7 @@ impl AutopilotMerchStateRepository for PostgresAutopilotRepository {
             } else {
                 sqlx::query_scalar::<_, i64>(
                     r#"
-                    UPDATE viryaos_merch_product_economics
+                    UPDATE merch_product_economics
                     SET minimum_price_minor = $3,
                         maximum_price_minor = $4,
                         unit_cost_minor = $5,
@@ -554,7 +554,7 @@ impl AutopilotMerchStateRepository for PostgresAutopilotRepository {
 
             sqlx::query(
                 r#"
-                INSERT INTO viryaos_merch_product_economics_history (
+                INSERT INTO merch_product_economics_history (
                     workspace_id, product_id, minimum_price_minor, maximum_price_minor,
                     unit_cost_minor, version
                 ) VALUES ($1,$2,$3,$4,$5,$6)
@@ -623,7 +623,7 @@ impl AutopilotMarketStateRepository for PostgresAutopilotRepository {
             .await?;
             if let Some(existing_operation_id) = replay {
                 let version = sqlx::query_scalar::<_, i64>(
-                    "SELECT version FROM viryaos_promotion_budget_guardrails WHERE workspace_id = $1 AND currency = $2",
+                    "SELECT version FROM promotion_budget_guardrails WHERE workspace_id = $1 AND currency = $2",
                 )
                 .bind(workspace_id.into_uuid())
                 .bind(&command.currency)
@@ -643,7 +643,7 @@ impl AutopilotMarketStateRepository for PostgresAutopilotRepository {
             let version = if command.expected_version == 0 {
                 sqlx::query_scalar::<_, i64>(
                     r#"
-                    INSERT INTO viryaos_promotion_budget_guardrails (
+                    INSERT INTO promotion_budget_guardrails (
                         workspace_id, currency, maximum_total_daily_budget_minor,
                         maximum_monthly_spend_minor
                     ) VALUES ($1,$2,$3,$4)
@@ -661,7 +661,7 @@ impl AutopilotMarketStateRepository for PostgresAutopilotRepository {
             } else {
                 sqlx::query_scalar::<_, i64>(
                     r#"
-                    UPDATE viryaos_promotion_budget_guardrails
+                    UPDATE promotion_budget_guardrails
                     SET maximum_total_daily_budget_minor = $3,
                         maximum_monthly_spend_minor = $4,
                         version = version + 1
@@ -682,13 +682,13 @@ impl AutopilotMarketStateRepository for PostgresAutopilotRepository {
 
             sqlx::query(
                 r#"
-                INSERT INTO viryaos_promotion_budget_guardrail_history (
+                INSERT INTO promotion_budget_guardrail_history (
                     workspace_id, currency, version, maximum_total_daily_budget_minor,
                     maximum_monthly_spend_minor
                 )
                 SELECT workspace_id, currency, version, maximum_total_daily_budget_minor,
                        maximum_monthly_spend_minor
-                FROM viryaos_promotion_budget_guardrails
+                FROM promotion_budget_guardrails
                 WHERE workspace_id = $1 AND currency = $2 AND version = $3
                 "#,
             )
@@ -722,7 +722,7 @@ impl AutopilotMarketStateRepository for PostgresAutopilotRepository {
             let existing_campaign_id = sqlx::query_scalar::<_, Uuid>(
                 r#"
                 SELECT id
-                FROM viryaos_promotion_campaign_states
+                FROM promotion_campaign_states
                 WHERE workspace_id = $1 AND provider = $2 AND external_campaign_key = $3
                 FOR UPDATE
                 "#,
@@ -775,7 +775,7 @@ impl AutopilotMarketStateRepository for PostgresAutopilotRepository {
 
             let upserted = sqlx::query_scalar::<_, Uuid>(
                 r#"
-                INSERT INTO viryaos_promotion_campaign_states (
+                INSERT INTO promotion_campaign_states (
                     id, workspace_id, provider, external_campaign_key, event_id, currency,
                     current_daily_budget_minor, minimum_daily_budget_minor, maximum_daily_budget_minor,
                     spend_last_7d_minor, spend_month_to_date_minor, attributed_revenue_last_7d_minor, active,
@@ -797,7 +797,7 @@ impl AutopilotMarketStateRepository for PostgresAutopilotRepository {
                     observed_at = EXCLUDED.observed_at,
                     expires_at = EXCLUDED.expires_at,
                     updated_at = now()
-                WHERE EXCLUDED.observed_at > viryaos_promotion_campaign_states.observed_at
+                WHERE EXCLUDED.observed_at > promotion_campaign_states.observed_at
                 RETURNING id
                 "#,
             )
@@ -827,7 +827,7 @@ impl AutopilotMarketStateRepository for PostgresAutopilotRepository {
             }
             sqlx::query(
                 r#"
-                INSERT INTO viryaos_promotion_campaign_observations (
+                INSERT INTO promotion_campaign_observations (
                     workspace_id, campaign_id, current_daily_budget_minor,
                     spend_last_7d_minor, spend_month_to_date_minor, attributed_revenue_last_7d_minor, active,
                     observed_at, expires_at
@@ -879,7 +879,7 @@ impl AutopilotMarketStateRepository for PostgresAutopilotRepository {
             let existing_signal_id = sqlx::query_scalar::<_, Uuid>(
                 r#"
                 SELECT id
-                FROM viryaos_city_market_signals
+                FROM city_market_signals
                 WHERE workspace_id = $1
                   AND source = $2
                   AND city_id = $3
@@ -929,7 +929,7 @@ impl AutopilotMarketStateRepository for PostgresAutopilotRepository {
 
             let upserted = sqlx::query_scalar::<_, Uuid>(
                 r#"
-                INSERT INTO viryaos_city_market_signals (
+                INSERT INTO city_market_signals (
                     id, workspace_id, source, city_id, signal_kind, score_basis_points,
                     confidence_basis_points, observed_at, expires_at
                 ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
@@ -939,7 +939,7 @@ impl AutopilotMarketStateRepository for PostgresAutopilotRepository {
                     observed_at = EXCLUDED.observed_at,
                     expires_at = EXCLUDED.expires_at,
                     updated_at = now()
-                WHERE EXCLUDED.observed_at > viryaos_city_market_signals.observed_at
+                WHERE EXCLUDED.observed_at > city_market_signals.observed_at
                 RETURNING id
                 "#,
             )
@@ -961,7 +961,7 @@ impl AutopilotMarketStateRepository for PostgresAutopilotRepository {
             }
             sqlx::query(
                 r#"
-                INSERT INTO viryaos_city_market_signal_observations (
+                INSERT INTO city_market_signal_observations (
                     workspace_id, signal_id, score_basis_points, confidence_basis_points,
                     observed_at, expires_at
                 ) VALUES ($1,$2,$3,$4,$5,$6)
@@ -1069,7 +1069,7 @@ impl AutopilotTicketStateRepository for PostgresAutopilotRepository {
             let version = if command.expected_version == 0 {
                 sqlx::query_scalar::<_, i64>(
                     r#"
-                    INSERT INTO viryaos_ticket_type_allocation_guardrails (
+                    INSERT INTO ticket_type_allocation_guardrails (
                         workspace_id, ticket_type_id, minimum_capacity,
                         maximum_capacity, step_capacity, version
                     ) VALUES ($1,$2,$3,$4,$5,1)
@@ -1089,7 +1089,7 @@ impl AutopilotTicketStateRepository for PostgresAutopilotRepository {
             } else {
                 sqlx::query_scalar::<_, i64>(
                     r#"
-                    UPDATE viryaos_ticket_type_allocation_guardrails
+                    UPDATE ticket_type_allocation_guardrails
                     SET minimum_capacity = $3,
                         maximum_capacity = $4,
                         step_capacity = $5,
@@ -1113,7 +1113,7 @@ impl AutopilotTicketStateRepository for PostgresAutopilotRepository {
             };
             sqlx::query(
                 r#"
-                INSERT INTO viryaos_ticket_type_allocation_guardrail_history (
+                INSERT INTO ticket_type_allocation_guardrail_history (
                     workspace_id, ticket_type_id, version, minimum_capacity,
                     maximum_capacity, step_capacity
                 ) VALUES ($1,$2,$3,$4,$5,$6)

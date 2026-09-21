@@ -123,8 +123,8 @@ pub async fn lapsed_approvals(
                 action.approval_expires_at,
                 decision.reason,
                 count(*) OVER ()::bigint AS total_count
-            FROM viryaos_autopilot_actions AS action
-            JOIN viryaos_autopilot_decisions AS decision
+            FROM autopilot_actions AS action
+            JOIN autopilot_decisions AS decision
               ON decision.workspace_id = action.workspace_id
              AND decision.id = action.decision_id
             WHERE action.workspace_id = $1
@@ -177,7 +177,7 @@ pub async fn lapsed_approvals(
     let expiring_within_24h = sqlx::query_scalar::<_, i64>(
         r#"
         SELECT count(*)::bigint
-        FROM viryaos_autopilot_actions AS action
+        FROM autopilot_actions AS action
         WHERE action.workspace_id = $1
           AND action.status = 'awaiting_approval'
           AND action.approval_expires_at IS NOT NULL

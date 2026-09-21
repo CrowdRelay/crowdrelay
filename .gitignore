@@ -42,7 +42,7 @@ backups/
 # and FileNotFoundError on every runner.
 n8n/*
 !n8n/README.md
-!n8n/viryaos-executor-contract.md
+!n8n/crowdrelay-executor-contract.md
 !n8n/examples/
 !n8n/examples/**
 

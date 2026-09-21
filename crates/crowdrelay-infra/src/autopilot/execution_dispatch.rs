@@ -211,7 +211,7 @@ pub(super) async fn ensure_dispatch_envelope(
         serde_json::to_value(&context).unwrap_or_else(|_| serde_json::json!({}));
     sqlx::query(
         r#"
-        INSERT INTO viryaos_dispatch_predictions
+        INSERT INTO dispatch_predictions
             (workspace_id, action_id, template_id,
              expected_new_fans, expected_signal_installs, context,
              expected_metrics)
@@ -322,7 +322,7 @@ async fn gate_outward_emission(
     let gate_row = sqlx::query_as::<_, (Option<String>, Uuid)>(
         r#"
         SELECT action_class, subject_id
-        FROM viryaos_autopilot_actions
+        FROM autopilot_actions
         WHERE workspace_id = $1 AND id = $2
         "#,
     )
@@ -355,7 +355,7 @@ async fn gate_outward_emission(
     let last_contact = sqlx::query_scalar::<_, Option<OffsetDateTime>>(
         r#"
         SELECT max(created_at)
-        FROM viryaos_autopilot_actions
+        FROM autopilot_actions
         WHERE workspace_id = $1
           AND subject_id = $2
           AND action_class IN ('owned_audience', 'third_party')
@@ -384,7 +384,7 @@ async fn gate_outward_emission(
                 r#"
                 SELECT EXISTS (
                     SELECT 1
-                    FROM viryaos_autopilot_action_emissions emission
+                    FROM autopilot_action_emissions emission
                     JOIN outbox_events outbound
                       ON outbound.id = emission.outbox_event_id
                      AND outbound.workspace_id = emission.workspace_id
@@ -475,10 +475,10 @@ pub(super) async fn emit_external_action_keyed(
         r#"
         WITH action_trace AS (
             SELECT trace_id, causation_id
-            FROM viryaos_autopilot_actions
+            FROM autopilot_actions
             WHERE id = $2
         ), emission AS (
-            INSERT INTO viryaos_autopilot_action_emissions (
+            INSERT INTO autopilot_action_emissions (
                 workspace_id, action_id, emission_key, outbox_event_id
             ) VALUES ($1,$2,$3,$4)
             ON CONFLICT (workspace_id, emission_key) DO NOTHING
@@ -513,7 +513,7 @@ pub(super) async fn emit_external_action_keyed(
         r#"
         SELECT EXISTS (
             SELECT 1
-            FROM viryaos_autopilot_action_emissions
+            FROM autopilot_action_emissions
             WHERE workspace_id = $1 AND emission_key = $2 AND action_id = $3
         )
         "#,

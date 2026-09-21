@@ -58,7 +58,7 @@ async fn seed_member(
 ) -> Result<Uuid, Box<dyn std::error::Error>> {
     let member_id = seed_member_row(pool, workspace_id, member_key).await?;
     sqlx::query(
-        "INSERT INTO viryaos_team_profiles
+        "INSERT INTO team_profiles
              (workspace_id, member_id, member_key, active, skills)
          VALUES ($1, $2, $3, true, ARRAY['video']::text[])",
     )
@@ -97,7 +97,7 @@ async fn seed_team_email_executor(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let now = OffsetDateTime::now_utc();
     sqlx::query(
-        r#"INSERT INTO viryaos_executor_instances (
+        r#"INSERT INTO executor_instances (
             workspace_id, executor_id, version, manifest_sha, observed_at, expires_at
         ) VALUES ($1,'n8n-briefing-test','test','test-manifest',$2,$3)"#,
     )
@@ -107,7 +107,7 @@ async fn seed_team_email_executor(
     .execute(pool)
     .await?;
     sqlx::query(
-        r#"INSERT INTO viryaos_executor_capabilities (
+        r#"INSERT INTO executor_capabilities (
             workspace_id, executor_id, capability, capability_version, observed_at, expires_at
         ) VALUES ($1,'n8n-briefing-test','team.email','1',$2,$3)"#,
     )
@@ -124,7 +124,7 @@ async fn briefing_rows(
     workspace_id: WorkspaceId,
 ) -> Result<Vec<(Uuid, time::Date, String, String)>, Box<dyn std::error::Error>> {
     Ok(sqlx::query_as(
-        "SELECT id, local_date, title, body FROM viryaos_daily_briefings
+        "SELECT id, local_date, title, body FROM daily_briefings
          WHERE workspace_id = $1 ORDER BY local_date",
     )
     .bind(workspace_id.into_uuid())
@@ -137,7 +137,7 @@ async fn briefing_assignments(
     workspace_id: WorkspaceId,
 ) -> Result<Vec<(Uuid, String)>, Box<dyn std::error::Error>> {
     Ok(sqlx::query_as(
-        "SELECT assignee_member_id, status FROM viryaos_team_assignments
+        "SELECT assignee_member_id, status FROM team_assignments
          WHERE workspace_id = $1 AND source_kind = 'daily_briefing'
          ORDER BY assignee_member_id",
     )
@@ -151,7 +151,7 @@ async fn briefing_emails(
     workspace_id: WorkspaceId,
 ) -> Result<i64, Box<dyn std::error::Error>> {
     Ok(sqlx::query_scalar(
-        "SELECT COUNT(*) FROM viryaos_autopilot_actions
+        "SELECT COUNT(*) FROM autopilot_actions
          WHERE workspace_id = $1 AND action_kind = 'team.assignment.email'",
     )
     .bind(workspace_id.into_uuid())
@@ -180,7 +180,7 @@ async fn the_briefing_issues_once_a_day_to_every_active_member()
     // Yesterday's shoot produced 4 of 5 planned pieces — the briefing
     // reports the leverage number, not just "done".
     let day_id: Uuid = sqlx::query_scalar(
-        "INSERT INTO viryaos_production_events
+        "INSERT INTO production_events
              (id, workspace_id, kind, title, scheduled_for, status)
          VALUES ($1,$2,'shoot','Studio day', DATE '2026-10-04', 'done')
          RETURNING id",
@@ -190,7 +190,7 @@ async fn the_briefing_issues_once_a_day_to_every_active_member()
     .fetch_one(&pool)
     .await?;
     sqlx::query(
-        "INSERT INTO viryaos_capture_plans
+        "INSERT INTO capture_plans
              (id, workspace_id, production_event_id, items, status, issued_at, sources_landed)
          VALUES ($1,$2,$3,$4,'done', now() - interval '2 days', 4)",
     )
@@ -510,7 +510,7 @@ async fn the_briefing_names_approved_work_awaiting_a_report()
         ("rehearsal clip while the strings are fresh", None),
     ] {
         sqlx::query(
-            "INSERT INTO viryaos_content_suggestions
+            "INSERT INTO content_suggestions
                  (id, workspace_id, format_key, concept, status, suggested_before)
              VALUES ($1, $2, 'playthrough', $3, 'approved', $4::date)",
         )

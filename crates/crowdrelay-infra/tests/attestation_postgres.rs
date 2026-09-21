@@ -238,12 +238,11 @@ async fn run(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
     );
 
     // ── The happy path: a link-holder verifies. ─────────────────────────────
-    let token = sqlx::query_scalar::<_, Uuid>(
-        "SELECT share_token FROM viryaos_attestations WHERE digest = $1",
-    )
-    .bind(&issued.digest)
-    .fetch_one(pool)
-    .await?;
+    let token =
+        sqlx::query_scalar::<_, Uuid>("SELECT share_token FROM attestations WHERE digest = $1")
+            .bind(&issued.digest)
+            .fetch_one(pool)
+            .await?;
 
     let seen = repository.read_by_token(token, now).await?;
     assert!(seen.unedited, "a freshly issued document read as edited");
@@ -264,11 +263,10 @@ async fn run(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
     //
     // The trigger refuses, which is the strongest possible answer: the edit
     // does not happen at all, so there is no edited document to detect.
-    let edit =
-        sqlx::query("UPDATE viryaos_attestations SET figures = '[]'::jsonb WHERE digest = $1")
-            .bind(&issued.digest)
-            .execute(pool)
-            .await;
+    let edit = sqlx::query("UPDATE attestations SET figures = '[]'::jsonb WHERE digest = $1")
+        .bind(&issued.digest)
+        .execute(pool)
+        .await;
     assert!(
         edit.is_err(),
         "an issued attestation's figures were editable in place"
@@ -278,7 +276,7 @@ async fn run(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
         "valid_until = now() + interval '900 days'",
     ] {
         let forced = sqlx::query(&format!(
-            "UPDATE viryaos_attestations SET {column} WHERE digest = $1"
+            "UPDATE attestations SET {column} WHERE digest = $1"
         ))
         .bind(&issued.digest)
         .execute(pool)
@@ -296,7 +294,7 @@ async fn run(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
     let forged_digest = "f".repeat(64);
     sqlx::query(
         r#"
-        INSERT INTO viryaos_attestations
+        INSERT INTO attestations
             (workspace_id, act_name, figures, issued_at, valid_until, digest, signature)
         VALUES ($1, 'Virya', '[]'::jsonb, now(), now() + interval '30 days', $2, $3)
         "#,

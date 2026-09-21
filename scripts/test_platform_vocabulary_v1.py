@@ -11,7 +11,7 @@ behind.
 So this compares the two, in both directions:
 
   fanbase_connections_platform_check          <-> domain::fanbase::Platform::ALL
-  viryaos_growth_metric_series_platform_check <-> domain::growth_metrics::MetricPlatform::ALL
+  growth_metric_series_platform_check <-> domain::growth_metrics::MetricPlatform::ALL
 
 The latest ALTER wins, so the check reads the effective constraint the way
 Postgres would after a full migrate. A value present in the database but

@@ -295,8 +295,8 @@ async fn pool_summary(pool: &sqlx::PgPool, workspace_id: Uuid) -> Result<PoolSum
               AND NOT beacon.do_not_contact
               AND (beacon.contact_email IS NULL OR btrim(beacon.contact_email) = '')
           )::bigint
-        FROM viryaos_beacon_signal_profiles profile
-        JOIN viryaos_beacons beacon
+        FROM beacon_signal_profiles profile
+        JOIN beacons beacon
           ON beacon.workspace_id=profile.workspace_id AND beacon.id=profile.beacon_id
         WHERE profile.workspace_id=$1 AND profile.status='active'
           AND 'releases'=ANY(profile.topics)
@@ -330,12 +330,12 @@ async fn load_campaigns(
                count(*) FILTER (WHERE recipient.status='delivered')::bigint AS delivered_count,
                count(*) FILTER (WHERE recipient.status='declined')::bigint AS declined_count,
                count(*) FILTER (WHERE recipient.status='expired')::bigint AS expired_count
-        FROM viryaos_beacon_release_campaigns campaign
+        FROM beacon_release_campaigns campaign
         JOIN merch_variants variant
           ON variant.workspace_id=campaign.workspace_id AND variant.id=campaign.variant_id
         JOIN merch_products product
           ON product.workspace_id=variant.workspace_id AND product.id=variant.product_id
-        LEFT JOIN viryaos_beacon_release_recipients recipient
+        LEFT JOIN beacon_release_recipients recipient
           ON recipient.workspace_id=campaign.workspace_id AND recipient.campaign_id=campaign.id
         WHERE campaign.workspace_id=$1
         GROUP BY campaign.id,variant.sku,product.name,variant.label
@@ -393,11 +393,11 @@ pub(super) async fn executor_capability_available_tx(
         r#"
         SELECT EXISTS (
             SELECT 1
-            FROM viryaos_executor_capabilities capability_row
-            JOIN viryaos_executor_instances executor
+            FROM executor_capabilities capability_row
+            JOIN executor_instances executor
               ON executor.workspace_id=capability_row.workspace_id
              AND executor.executor_id=capability_row.executor_id
-            LEFT JOIN viryaos_executor_circuit_breakers breaker
+            LEFT JOIN executor_circuit_breakers breaker
               ON breaker.workspace_id=executor.workspace_id
              AND breaker.executor_id=executor.executor_id
             WHERE capability_row.workspace_id=$1

@@ -80,7 +80,7 @@ class DormantRevivalContract(unittest.TestCase):
     def test_a_fan_the_agent_just_talked_at_is_left_alone(self) -> None:
         # The weekly envelope bounds contact; it does not know this fan has
         # just had a whole three-rung ladder.
-        self.assertIn("viryaos_play_step_recipients", self.anchors)
+        self.assertIn("play_step_recipients", self.anchors)
         self.assertIn("INTERVAL '6 months'", self.anchors)
 
     def test_one_revival_per_fan_for_ever(self) -> None:

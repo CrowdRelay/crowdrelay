@@ -113,7 +113,7 @@ async fn measurement_unit_community(
     let unit_id: Option<String> = sqlx::query_scalar::<_, String>(
         r#"
         SELECT unit_id
-        FROM viryaos_experiment_assignments
+        FROM experiment_assignments
         WHERE workspace_id = $1
           AND action_id = $2
           AND unit_kind = 'target_community'

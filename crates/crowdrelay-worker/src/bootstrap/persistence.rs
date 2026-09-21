@@ -153,7 +153,7 @@ async fn ensure_autopilot_policies(
 ) -> Result<(), BootstrapError> {
     sqlx::query(
         r#"
-        INSERT INTO viryaos_autopilot_policies (workspace_id, context)
+        INSERT INTO autopilot_policies (workspace_id, context)
         SELECT $1, context.name
         FROM (VALUES
             ('ticket_yield'),

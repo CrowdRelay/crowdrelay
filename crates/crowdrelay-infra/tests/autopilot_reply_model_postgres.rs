@@ -2,7 +2,7 @@
 //! outreach interaction → outcome loading → model update → prediction.
 //!
 //! These tests prove the Beta-Bernoulli reply model actually learns from
-//! real data in `viryaos_outreach_interactions` and produces non-prior
+//! real data in `outreach_interactions` and produces non-prior
 //! predictions. The model is a shadow advisory signal; these tests verify
 //! the learning machinery, not ranking influence.
 //!
@@ -74,7 +74,7 @@ async fn setup() -> Result<Fixture, Box<dyn std::error::Error>> {
 async fn insert_target(f: &Fixture, kind: &str, display_name: &str) -> uuid::Uuid {
     let id = uuid::Uuid::now_v7();
     sqlx::query(
-        r#"INSERT INTO viryaos_outreach_targets
+        r#"INSERT INTO outreach_targets
            (id, workspace_id, target_kind, display_name, contact_email)
            VALUES ($1, $2, $3, $4, $5)"#,
     )
@@ -97,7 +97,7 @@ async fn insert_outbound(
     source_key: &str,
 ) {
     sqlx::query(
-        r#"INSERT INTO viryaos_outreach_interactions
+        r#"INSERT INTO outreach_interactions
            (workspace_id, target_id, direction, phase, disposition, source_key, occurred_at)
            VALUES ($1, $2, 'outbound', 'initial', 'none', $3, $4)"#,
     )
@@ -119,7 +119,7 @@ async fn insert_inbound(
     source_key: &str,
 ) {
     sqlx::query(
-        r#"INSERT INTO viryaos_outreach_interactions
+        r#"INSERT INTO outreach_interactions
            (workspace_id, target_id, direction, phase, disposition, source_key, occurred_at)
            VALUES ($1, $2, 'inbound', 'reply', $3, $4, $5)"#,
     )
@@ -286,7 +286,7 @@ async fn d_delta_replay_includes_no_reply_window_closed_after_checkpoint() {
         .await
         .expect("save checkpoint");
     sqlx::query(
-        "UPDATE viryaos_brain_state SET updated_at = $2 \
+        "UPDATE brain_state SET updated_at = $2 \
          WHERE workspace_id = $1 AND module = 'reply_probability'",
     )
     .bind(f.workspace_id.into_uuid())

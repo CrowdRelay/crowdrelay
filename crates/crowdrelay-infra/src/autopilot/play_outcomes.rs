@@ -74,7 +74,7 @@ pub(super) async fn read_series(
         r#"
         WITH matching AS (
             SELECT series.id, series.direction, (series.subject_kind IS NULL) AS workspace_level
-            FROM viryaos_growth_metric_series AS series
+            FROM growth_metric_series AS series
             WHERE series.workspace_id = $1
               AND series.platform = $2
               AND series.metric_key = $3
@@ -116,7 +116,7 @@ pub(super) async fn read_series(
     let points = sqlx::query_as::<_, MetricPointRow>(
         r#"
         SELECT point.captured_at, point.value
-        FROM viryaos_growth_metric_points AS point
+        FROM growth_metric_points AS point
         WHERE point.workspace_id = $1
           AND point.series_id = $2
           AND point.captured_at <= $3
@@ -170,7 +170,7 @@ pub(super) async fn open_play_outcomes(
     for claim in PlayClaim::all() {
         sqlx::query(
             r#"
-            INSERT INTO viryaos_play_outcomes (
+            INSERT INTO play_outcomes (
                 workspace_id, play_id, claim,
                 success_metric_platform, success_metric_key,
                 baseline_captured_at, baseline_value, baseline_milli_per_day,
@@ -208,7 +208,7 @@ impl PostgresAutopilotRepository {
                 r#"
                 WITH due AS (
                     SELECT outcome.id
-                    FROM viryaos_play_outcomes AS outcome
+                    FROM play_outcomes AS outcome
                     WHERE outcome.workspace_id = $1
                       AND outcome.status = 'pending'
                       AND outcome.available_at <= $2
@@ -220,7 +220,7 @@ impl PostgresAutopilotRepository {
                     LIMIT $3
                     FOR UPDATE SKIP LOCKED
                 )
-                UPDATE viryaos_play_outcomes AS outcome
+                UPDATE play_outcomes AS outcome
                 SET status = 'processing',
                     attempt_count = outcome.attempt_count + 1,
                     started_at = $2
@@ -228,7 +228,7 @@ impl PostgresAutopilotRepository {
                 WHERE outcome.workspace_id = $1 AND outcome.id = due.id
                 RETURNING
                     outcome.id, outcome.play_id,
-                    (SELECT play.play_kind FROM viryaos_plays AS play
+                    (SELECT play.play_kind FROM plays AS play
                       WHERE play.workspace_id = outcome.workspace_id
                         AND play.id = outcome.play_id) AS play_kind,
                     outcome.claim,
@@ -291,8 +291,8 @@ impl PostgresAutopilotRepository {
             let recipients_reached = sqlx::query_scalar::<_, i64>(
                 r#"
                 SELECT count(*)::bigint
-                FROM viryaos_play_step_recipients AS recipient
-                JOIN viryaos_play_steps AS step
+                FROM play_step_recipients AS recipient
+                JOIN play_steps AS step
                   ON step.workspace_id = recipient.workspace_id
                  AND step.id = recipient.step_id
                 WHERE recipient.workspace_id = $1
@@ -349,7 +349,7 @@ impl PostgresAutopilotRepository {
             let mut transaction = self.pool.begin().await.map_err(map_sqlx)?;
             let updated = sqlx::query(
                 r#"
-                UPDATE viryaos_play_outcomes
+                UPDATE play_outcomes
                 SET status = 'succeeded',
                     finished_at = $3,
                     observed_at = $4,
@@ -416,7 +416,7 @@ impl PostgresAutopilotRepository {
             // one, so a retry cannot find a half-written verdict.
             sqlx::query(
                 r#"
-                UPDATE viryaos_play_outcomes
+                UPDATE play_outcomes
                 SET status = CASE
                         WHEN $5 AND attempt_count < 5 THEN 'pending'
                         ELSE 'failed'
@@ -506,10 +506,10 @@ impl AutopilotPlayLedgerRepository for PostgresAutopilotRepository {
                     play.state,
                     play.started_at,
                     play.completed_at,
-                    (SELECT count(*)::bigint FROM viryaos_play_steps AS step
+                    (SELECT count(*)::bigint FROM play_steps AS step
                       WHERE step.workspace_id = play.workspace_id
                         AND step.play_id = play.id) AS steps_total,
-                    (SELECT count(*)::bigint FROM viryaos_play_steps AS step
+                    (SELECT count(*)::bigint FROM play_steps AS step
                       WHERE step.workspace_id = play.workspace_id
                         AND step.play_id = play.id
                         AND step.settled_at IS NOT NULL) AS steps_settled,
@@ -517,18 +517,18 @@ impl AutopilotPlayLedgerRepository for PostgresAutopilotRepository {
                     -- one nobody could send both settle, and reporting them as
                     -- one number is how a campaign that did nothing reads as a
                     -- campaign that ran.
-                    (SELECT count(*)::bigint FROM viryaos_play_steps AS step
+                    (SELECT count(*)::bigint FROM play_steps AS step
                       WHERE step.workspace_id = play.workspace_id
                         AND step.play_id = play.id
                         AND step.skip_reason IS NOT NULL) AS steps_skipped,
                     (SELECT count(*)::bigint
-                       FROM viryaos_play_step_recipients AS recipient
-                       JOIN viryaos_play_steps AS step
+                       FROM play_step_recipients AS recipient
+                       JOIN play_steps AS step
                          ON step.workspace_id = recipient.workspace_id
                         AND step.id = recipient.step_id
                       WHERE recipient.workspace_id = play.workspace_id
                         AND step.play_id = play.id) AS recipients_reached
-                FROM viryaos_plays AS play
+                FROM plays AS play
                 WHERE play.workspace_id = $1
                 ORDER BY play.started_at DESC
                 LIMIT $2
@@ -556,7 +556,7 @@ impl AutopilotPlayLedgerRepository for PostgresAutopilotRepository {
                     outcome.evidence, outcome.evidence_reason, outcome.effect_assessment,
                     outcome.delta_basis_points, outcome.baseline_milli_per_day,
                     outcome.observed_milli_per_day, outcome.recipients_reached
-                FROM viryaos_play_outcomes AS outcome
+                FROM play_outcomes AS outcome
                 WHERE outcome.workspace_id = $1
                   AND outcome.play_id = ANY($2)
                 ORDER BY outcome.play_id, outcome.claim
@@ -740,7 +740,7 @@ pub(super) async fn record_play_outcome(
         r#"
         SELECT play_kind, improved_count, neutral_count, worsened_count,
                insufficient_count, consecutive_worsened, retired_reason
-        FROM viryaos_play_learning
+        FROM play_learning
         WHERE workspace_id = $1 AND play_kind = $2
         FOR UPDATE
         "#,
@@ -771,7 +771,7 @@ pub(super) async fn record_play_outcome(
 
     sqlx::query(
         r#"
-        INSERT INTO viryaos_play_learning (
+        INSERT INTO play_learning (
             workspace_id, play_kind, improved_count, neutral_count, worsened_count,
             insufficient_count, consecutive_worsened, weight_basis_points,
             retired_at, retired_reason
@@ -791,7 +791,7 @@ pub(super) async fn record_play_outcome(
             -- every later write would make an old decision look new.
             retired_at = CASE
                 WHEN EXCLUDED.retired_reason IS NULL THEN NULL
-                ELSE COALESCE(viryaos_play_learning.retired_at, now())
+                ELSE COALESCE(play_learning.retired_at, now())
             END,
             retired_reason = EXCLUDED.retired_reason
         "#,
@@ -845,7 +845,7 @@ async fn play_learning_policy(
     workspace_id: WorkspaceId,
 ) -> Result<StandingPolicy, RepositoryError> {
     let config = sqlx::query_scalar::<_, Value>(
-        "SELECT config FROM viryaos_autopilot_policies WHERE workspace_id=$1 AND context='plays'",
+        "SELECT config FROM autopilot_policies WHERE workspace_id=$1 AND context='plays'",
     )
     .bind(workspace_id.into_uuid())
     .fetch_optional(&mut **transaction)
@@ -890,7 +890,7 @@ impl PostgresAutopilotRepository {
                 r#"
                 SELECT play_kind, improved_count, neutral_count, worsened_count,
                        insufficient_count, consecutive_worsened, retired_reason
-                FROM viryaos_play_learning
+                FROM play_learning
                 WHERE workspace_id = $1
                 "#,
             )
@@ -970,7 +970,7 @@ impl PostgresAutopilotRepository {
                 r#"
                 SELECT target_kind, improved_count, neutral_count, worsened_count,
                        insufficient_count, consecutive_worsened, retired_reason
-                FROM viryaos_outreach_kind_learning
+                FROM outreach_kind_learning
                 WHERE workspace_id = $1
                 "#,
             )
@@ -1030,7 +1030,7 @@ pub(super) async fn create_wave_outcome(
     let window_end = approved_at + time::Duration::days(WAVE_OUTCOME_WINDOW_DAYS);
     sqlx::query(
         r#"
-        INSERT INTO viryaos_outreach_wave_outcomes (
+        INSERT INTO outreach_wave_outcomes (
             workspace_id, wave_id, target_kind,
             window_start, window_end, pitches_sent,
             available_at
@@ -1073,7 +1073,7 @@ impl PostgresAutopilotRepository {
                 r#"
                 WITH due AS (
                     SELECT outcome.id
-                    FROM viryaos_outreach_wave_outcomes AS outcome
+                    FROM outreach_wave_outcomes AS outcome
                     WHERE outcome.workspace_id = $1
                       AND outcome.status = 'pending'
                       AND outcome.window_end <= $2
@@ -1081,7 +1081,7 @@ impl PostgresAutopilotRepository {
                     LIMIT $3
                     FOR UPDATE SKIP LOCKED
                 )
-                UPDATE viryaos_outreach_wave_outcomes AS outcome
+                UPDATE outreach_wave_outcomes AS outcome
                 SET status = 'processing',
                     attempt_count = outcome.attempt_count + 1,
                     started_at = $2
@@ -1136,14 +1136,14 @@ impl PostgresAutopilotRepository {
                     count(*) FILTER (WHERE interaction.disposition = 'declined')::bigint AS declined,
                     count(*) FILTER (WHERE interaction.disposition = 'do_not_contact')::bigint AS do_not_contact,
                     count(*)::bigint AS total
-                FROM viryaos_outreach_interactions AS interaction
+                FROM outreach_interactions AS interaction
                 WHERE interaction.workspace_id = $1
                   AND interaction.direction = 'inbound'
                   AND interaction.occurred_at >= $2
                   AND interaction.occurred_at <= $3
                   AND interaction.target_id IN (
                       SELECT (payload->>'target_id')::uuid
-                      FROM viryaos_autopilot_actions AS action
+                      FROM autopilot_actions AS action
                       WHERE action.workspace_id = $1
                         AND action.context = 'outreach'
                         AND action.payload->>'wave_id' = $4::text
@@ -1186,7 +1186,7 @@ impl PostgresAutopilotRepository {
             let mut transaction = self.pool.begin().await.map_err(map_sqlx)?;
             let updated = sqlx::query(
                 r#"
-                UPDATE viryaos_outreach_wave_outcomes
+                UPDATE outreach_wave_outcomes
                 SET status = 'succeeded',
                     finished_at = $3,
                     observed_at = $4,
@@ -1246,7 +1246,7 @@ impl PostgresAutopilotRepository {
         self.bounded(async {
             sqlx::query(
                 r#"
-                UPDATE viryaos_outreach_wave_outcomes
+                UPDATE outreach_wave_outcomes
                 SET status = CASE WHEN $4 THEN 'pending' ELSE 'failed' END,
                     last_error_kind = $3,
                     last_error_retryable = $4,
@@ -1291,7 +1291,7 @@ async fn record_outreach_kind_outcome(
         r#"
         SELECT target_kind, improved_count, neutral_count, worsened_count,
                insufficient_count, consecutive_worsened, retired_reason
-        FROM viryaos_outreach_kind_learning
+        FROM outreach_kind_learning
         WHERE workspace_id = $1 AND target_kind = $2
         FOR UPDATE
         "#,
@@ -1318,7 +1318,7 @@ async fn record_outreach_kind_outcome(
 
     sqlx::query(
         r#"
-        INSERT INTO viryaos_outreach_kind_learning (
+        INSERT INTO outreach_kind_learning (
             workspace_id, target_kind, improved_count, neutral_count, worsened_count,
             insufficient_count, consecutive_worsened, weight_basis_points,
             retired_at, retired_reason
@@ -1336,7 +1336,7 @@ async fn record_outreach_kind_outcome(
             weight_basis_points = EXCLUDED.weight_basis_points,
             retired_at = CASE
                 WHEN EXCLUDED.retired_reason IS NULL THEN NULL
-                ELSE COALESCE(viryaos_outreach_kind_learning.retired_at, now())
+                ELSE COALESCE(outreach_kind_learning.retired_at, now())
             END,
             retired_reason = EXCLUDED.retired_reason
         "#,

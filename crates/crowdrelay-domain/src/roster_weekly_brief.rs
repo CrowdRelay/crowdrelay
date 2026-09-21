@@ -1,8 +1,8 @@
 //! The roster-level weekly brief — one page a manager reads top-down.
 //!
 //! Per act, the machinery already exists: the daily briefing
-//! (`viryaos_daily_briefings`, one per workspace per tenant-local day), the
-//! approval queue (`viryaos_autopilot_actions` rows awaiting a human), and the
+//! (`daily_briefings`, one per workspace per tenant-local day), the
+//! approval queue (`autopilot_actions` rows awaiting a human), and the
 //! brain's self-assessment over the sixty-day North Star series. What was
 //! missing is the roster's view of all three at once — a manager runs eight
 //! acts, and "go check each one's panel" is not an answer to "who needs me

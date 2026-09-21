@@ -1,5 +1,5 @@
 {
-  "name": "CrowdRelay — CrowdRelayOS opportunity application executor",
+  "name": "CrowdRelay — CrowdRelay opportunity application executor",
   "nodes": [
     {
       "name": "Called by verified ingress",
@@ -100,7 +100,7 @@
         "options": {
           "timeout": 30000
         },
-        "jsonBody": "={{ ({executor_id:String($env.VIRYAOS_EXECUTOR_ID||'virya-n8n-primary').trim(),occurred_at:new Date().toISOString()}) }}",
+        "jsonBody": "={{ ({executor_id:String($env.CROWDRELAY_EXECUTOR_ID||'virya-n8n-primary').trim(),occurred_at:new Date().toISOString()}) }}",
         "sendBody": true,
         "sendHeaders": true,
         "specifyBody": "json",

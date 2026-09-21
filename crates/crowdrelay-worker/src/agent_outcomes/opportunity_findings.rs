@@ -163,7 +163,7 @@ async fn insert_opportunity_finding(
 
     let opportunity_id = sqlx::query_scalar::<_, Uuid>(
         r#"
-        INSERT INTO viryaos_team_opportunities
+        INSERT INTO team_opportunities
             (workspace_id, opportunity_kind, source, external_key, title,
              organization, destination_url, contact_email, country_code,
              verified_destination, fit_basis_points, reputation_basis_points,
@@ -177,31 +177,31 @@ async fn insert_opportunity_finding(
             title = EXCLUDED.title,
             organization = EXCLUDED.organization,
             contact_email = COALESCE(
-                EXCLUDED.contact_email, viryaos_team_opportunities.contact_email),
+                EXCLUDED.contact_email, team_opportunities.contact_email),
             country_code = COALESCE(
-                EXCLUDED.country_code, viryaos_team_opportunities.country_code),
-            deadline = COALESCE(EXCLUDED.deadline, viryaos_team_opportunities.deadline),
+                EXCLUDED.country_code, team_opportunities.country_code),
+            deadline = COALESCE(EXCLUDED.deadline, team_opportunities.deadline),
             event_starts_at = COALESCE(
-                EXCLUDED.event_starts_at, viryaos_team_opportunities.event_starts_at),
+                EXCLUDED.event_starts_at, team_opportunities.event_starts_at),
             fit_basis_points = GREATEST(
-                EXCLUDED.fit_basis_points, viryaos_team_opportunities.fit_basis_points),
+                EXCLUDED.fit_basis_points, team_opportunities.fit_basis_points),
             reputation_basis_points = GREATEST(
                 EXCLUDED.reputation_basis_points,
-                viryaos_team_opportunities.reputation_basis_points),
+                team_opportunities.reputation_basis_points),
             confidence_basis_points = GREATEST(
                 EXCLUDED.confidence_basis_points,
-                viryaos_team_opportunities.confidence_basis_points),
+                team_opportunities.confidence_basis_points),
             -- The scout owns only its `discovery` block; every other key
             -- the operator or the loop wrote is preserved.
-            metadata = viryaos_team_opportunities.metadata || EXCLUDED.metadata,
+            metadata = team_opportunities.metadata || EXCLUDED.metadata,
             -- The most recent observation stands.
             source_observed_at = GREATEST(
-                COALESCE(viryaos_team_opportunities.source_observed_at,
+                COALESCE(team_opportunities.source_observed_at,
                          EXCLUDED.source_observed_at),
                 COALESCE(EXCLUDED.source_observed_at,
-                         viryaos_team_opportunities.source_observed_at)),
+                         team_opportunities.source_observed_at)),
             updated_at = now(),
-            version = viryaos_team_opportunities.version + 1
+            version = team_opportunities.version + 1
         RETURNING id
         "#,
     )

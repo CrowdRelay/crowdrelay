@@ -561,7 +561,7 @@ pub async fn growth_envelope(State(state): State<AppState>, headers: HeaderMap) 
             // per-row concern, not a policy concern. Read it directly so the
             // caller can pass it back as `expected_version`.
             let version = sqlx::query_scalar::<_, i64>(
-                "SELECT version FROM viryaos_growth_envelope WHERE workspace_id = $1",
+                "SELECT version FROM growth_envelope WHERE workspace_id = $1",
             )
             .bind(state.ops.workspace_id().into_uuid())
             .fetch_optional(state.autopilot.pool())

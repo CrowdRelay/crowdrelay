@@ -18,8 +18,8 @@ class WorkerRuntimeSupervisionContract(unittest.TestCase):
             "retention worker",
             "event sync worker",
             "weighted draw worker",
-            "ViryaOS Autopilot worker",
-            "ViryaOS team-email worker",
+            "CrowdRelay Autopilot worker",
+            "CrowdRelay team-email worker",
             "fan push delivery worker",
             "CrowdRelay ops watchdog",
         ):

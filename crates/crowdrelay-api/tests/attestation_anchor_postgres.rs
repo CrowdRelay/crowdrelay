@@ -416,7 +416,7 @@ async fn seed_attestation(
         PostgresAttestationRepository::new(pool.clone(), signing_key()).sign_digest(digest);
     sqlx::query_scalar::<_, Uuid>(
         r#"
-        INSERT INTO viryaos_attestations
+        INSERT INTO attestations
             (workspace_id, act_name, figures, issued_at, valid_until, digest, signature)
         VALUES ($1, 'Anchor Test Act', '[]'::jsonb, now() - interval '1 hour',
                 now() + interval '30 days', $2, $3)
@@ -596,7 +596,7 @@ async fn run_anchor_suite(pool: &PgPool) -> Result<(), Box<dyn std::error::Error
         SELECT jsonb_build_array(
             'crowdrelay/attestation/v1', att.id, att.digest, att.issued_at
         )::text
-        FROM viryaos_attestations AS att
+        FROM attestations AS att
         WHERE att.id = $1
         "#,
     )

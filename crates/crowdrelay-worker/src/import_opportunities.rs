@@ -1,7 +1,7 @@
 //! Bulk import of hand-curated live opportunities: festivals, competitions,
 //! showcases.
 //!
-//! `viryaos_team_opportunities` is what the `booking_opportunity` and
+//! `team_opportunities` is what the `booking_opportunity` and
 //! `live_opportunity` autopilot contexts rank and act on, and in production it
 //! held zero rows. The whole live arm of the growth loop had never had a single
 //! unit to work with — the same shape as `communities_joined` sitting at 0 — while
@@ -86,7 +86,7 @@ pub struct ImportSummary {
     pub with_deadline: usize,
 }
 
-/// The vocabulary `viryaos_team_opportunities_opportunity_kind_check` accepts.
+/// The vocabulary `team_opportunities_opportunity_kind_check` accepts.
 ///
 /// Checked here rather than left to the database so a bad row is reported with
 /// its title and line instead of aborting the run with a constraint error.
@@ -244,7 +244,7 @@ pub async fn import_opportunities(
 
         sqlx::query(
             r#"
-            INSERT INTO viryaos_team_opportunities
+            INSERT INTO team_opportunities
                 (workspace_id, opportunity_kind, source, external_key, title,
                  organization, destination_url, contact_email, country_code,
                  fit_basis_points, confidence_basis_points,
@@ -255,33 +255,33 @@ pub async fn import_opportunities(
                 -- Contact details and the deadline are what a re-import is for:
                 -- the sheet is the band's live record and CrowdRelay's copy goes
                 -- stale. COALESCE so a blanked cell does not erase what we have.
-                contact_email = COALESCE(EXCLUDED.contact_email, viryaos_team_opportunities.contact_email),
-                destination_url = COALESCE(EXCLUDED.destination_url, viryaos_team_opportunities.destination_url),
-                country_code = COALESCE(EXCLUDED.country_code, viryaos_team_opportunities.country_code),
-                deadline = COALESCE(EXCLUDED.deadline, viryaos_team_opportunities.deadline),
+                contact_email = COALESCE(EXCLUDED.contact_email, team_opportunities.contact_email),
+                destination_url = COALESCE(EXCLUDED.destination_url, team_opportunities.destination_url),
+                country_code = COALESCE(EXCLUDED.country_code, team_opportunities.country_code),
+                deadline = COALESCE(EXCLUDED.deadline, team_opportunities.deadline),
                 fit_basis_points = EXCLUDED.fit_basis_points,
                 confidence_basis_points = EXCLUDED.confidence_basis_points,
                 -- The sheet fills a blank strategic value but never overwrites
                 -- one: a nonzero value may be operator judgement or something
                 -- the loop learned, and the sheet does not know that.
                 strategic_value_basis_points = CASE
-                    WHEN viryaos_team_opportunities.strategic_value_basis_points = 0
+                    WHEN team_opportunities.strategic_value_basis_points = 0
                         THEN EXCLUDED.strategic_value_basis_points
-                    ELSE viryaos_team_opportunities.strategic_value_basis_points
+                    ELSE team_opportunities.strategic_value_basis_points
                 END,
                 -- Promotes false to true and never the reverse. A verification
                 -- is an assertion somebody made about the destination; the sheet
                 -- can add one, and an operator who verified a row inside
                 -- CrowdRelay must not have it taken away by a re-export that
                 -- happens not to carry the note.
-                verified_destination = viryaos_team_opportunities.verified_destination
+                verified_destination = team_opportunities.verified_destination
                     OR EXCLUDED.verified_destination,
                 -- A re-import that still carries the link is a fresh
                 -- observation of it; a row that lost its link keeps whatever
                 -- observation it had rather than fabricating one.
                 source_observed_at = COALESCE(
                     EXCLUDED.source_observed_at,
-                    viryaos_team_opportunities.source_observed_at),
+                    team_opportunities.source_observed_at),
                 title = EXCLUDED.title,
                 -- `status`, `eligible` and `metadata` are deliberately absent.
                 -- Status is the loop's own record of what it did — a re-import
@@ -290,7 +290,7 @@ pub async fn import_opportunities(
                 -- metadata may have been corrected by an operator or enriched by
                 -- the loop since, and the sheet does not know that.
                 updated_at = now(),
-                version = viryaos_team_opportunities.version + 1
+                version = team_opportunities.version + 1
             "#,
         )
         .bind(workspace_id.into_uuid())

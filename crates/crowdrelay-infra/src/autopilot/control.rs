@@ -36,7 +36,7 @@ impl AutopilotControlRepository for PostgresAutopilotRepository {
                         SELECT context, enabled, autonomy_level,
                                minimum_confidence_basis_points, max_actions_24h, config, version,
                                guarded_until, guardrail_reason
-                        FROM viryaos_autopilot_policies
+                        FROM autopilot_policies
                         WHERE workspace_id = $1
                         ORDER BY context
                         "#,
@@ -49,7 +49,7 @@ impl AutopilotControlRepository for PostgresAutopilotRepository {
                     let promotion_budget_guardrails = sqlx::query_as::<_, PromotionBudgetGuardrailRow>(
                         r#"
                         SELECT currency, maximum_total_daily_budget_minor, maximum_monthly_spend_minor, version
-                        FROM viryaos_promotion_budget_guardrails
+                        FROM promotion_budget_guardrails
                         WHERE workspace_id = $1
                         ORDER BY currency
                         "#,
@@ -70,7 +70,7 @@ impl AutopilotControlRepository for PostgresAutopilotRepository {
                     let available_assignees = sqlx::query_as::<_, (Uuid, String, String)>(
                         r#"
                         SELECT profile.member_id, profile.member_key, member.display_name
-                        FROM viryaos_team_profiles profile
+                        FROM team_profiles profile
                         JOIN workspace_members member
                           ON member.workspace_id=profile.workspace_id AND member.id=profile.member_id
                         WHERE profile.workspace_id=$1 AND profile.active AND member.status='active'
@@ -93,7 +93,7 @@ impl AutopilotControlRepository for PostgresAutopilotRepository {
                         r#"
                         SELECT id, context, decision_kind, confidence_basis_points,
                                disposition, reason, evaluated_at
-                        FROM viryaos_autopilot_decisions
+                        FROM autopilot_decisions
                         WHERE workspace_id = $1
                         ORDER BY evaluated_at DESC, id DESC
                         LIMIT 50
@@ -125,10 +125,10 @@ impl AutopilotControlRepository for PostgresAutopilotRepository {
                                latest_report.provider_reference,
                                latest_report.occurred_at AS executor_reported_at,
                                latest_report.metadata AS executor_metadata
-                        FROM viryaos_autopilot_actions action
+                        FROM autopilot_actions action
                         LEFT JOIN LATERAL (
                             SELECT report.status, report.executor_id, report.provider_reference, report.occurred_at, report.metadata
-                            FROM viryaos_autopilot_execution_reports report
+                            FROM autopilot_execution_reports report
                             WHERE report.workspace_id=action.workspace_id AND report.action_id=action.id
                             ORDER BY report.occurred_at DESC, report.id DESC
                             LIMIT 1
@@ -152,11 +152,11 @@ impl AutopilotControlRepository for PostgresAutopilotRepository {
                                measurement.measurement_kind, outcome.effect_assessment,
                                outcome.delta_basis_points, outcome.baseline_value,
                                outcome.observed_value, outcome.observed_at
-                        FROM viryaos_autopilot_outcomes AS outcome
-                        JOIN viryaos_autopilot_measurements AS measurement
+                        FROM autopilot_outcomes AS outcome
+                        JOIN autopilot_measurements AS measurement
                           ON measurement.workspace_id = outcome.workspace_id
                          AND measurement.id = outcome.measurement_id
-                        JOIN viryaos_autopilot_actions AS action
+                        JOIN autopilot_actions AS action
                           ON action.workspace_id = outcome.workspace_id
                          AND action.id = outcome.action_id
                         WHERE outcome.workspace_id = $1
@@ -187,12 +187,12 @@ impl AutopilotControlRepository for PostgresAutopilotRepository {
                                profile.member_key AS assignee_member_key,
                                member.display_name AS assignee_display_name,
                                assignment.due_at AS assignment_due_at
-                        FROM viryaos_autopilot_actions action
-                        LEFT JOIN viryaos_team_assignments assignment
+                        FROM autopilot_actions action
+                        LEFT JOIN team_assignments assignment
                           ON assignment.workspace_id=action.workspace_id
                          AND assignment.action_id=action.id
                          AND assignment.status='open'
-                        LEFT JOIN viryaos_team_profiles profile
+                        LEFT JOIN team_profiles profile
                           ON profile.workspace_id=assignment.workspace_id
                          AND profile.member_id=assignment.assignee_member_id
                         LEFT JOIN workspace_members member
@@ -223,11 +223,11 @@ impl AutopilotControlRepository for PostgresAutopilotRepository {
                     let live_capabilities = sqlx::query_scalar::<_, String>(
                         r#"
                         SELECT DISTINCT capability_row.capability
-                        FROM viryaos_executor_capabilities capability_row
-                        JOIN viryaos_executor_instances executor
+                        FROM executor_capabilities capability_row
+                        JOIN executor_instances executor
                           ON executor.workspace_id=capability_row.workspace_id
                          AND executor.executor_id=capability_row.executor_id
-                        LEFT JOIN viryaos_executor_circuit_breakers breaker
+                        LEFT JOIN executor_circuit_breakers breaker
                           ON breaker.workspace_id=executor.workspace_id
                          AND breaker.executor_id=executor.executor_id
                         WHERE capability_row.workspace_id=$1
@@ -255,11 +255,11 @@ impl AutopilotControlRepository for PostgresAutopilotRepository {
                                   AND action.finished_at >= now() - INTERVAL '24 hours'
                                   AND (
                                       NOT EXISTS (
-                                          SELECT 1 FROM viryaos_autopilot_action_emissions emission
+                                          SELECT 1 FROM autopilot_action_emissions emission
                                           WHERE emission.workspace_id=action.workspace_id AND emission.action_id=action.id
                                       )
                                       OR EXISTS (
-                                          SELECT 1 FROM viryaos_autopilot_execution_reports report
+                                          SELECT 1 FROM autopilot_execution_reports report
                                           WHERE report.workspace_id=action.workspace_id AND report.action_id=action.id
                                             AND report.status='succeeded'
                                       )
@@ -270,29 +270,29 @@ impl AutopilotControlRepository for PostgresAutopilotRepository {
                                   AND action.finished_at >= now() - INTERVAL '24 hours'
                             ) AS failed_24h,
                             (SELECT count(DISTINCT report.action_id)::bigint
-                             FROM viryaos_autopilot_execution_reports report
+                             FROM autopilot_execution_reports report
                              WHERE report.workspace_id=$1 AND report.status='succeeded'
                                AND report.occurred_at >= now() - INTERVAL '24 hours') AS executor_confirmed_24h,
                             (SELECT count(DISTINCT report.action_id)::bigint
-                             FROM viryaos_autopilot_execution_reports report
+                             FROM autopilot_execution_reports report
                              WHERE report.workspace_id=$1 AND report.status='failed'
                                AND report.occurred_at >= now() - INTERVAL '24 hours'
                                AND NOT EXISTS (
-                                   SELECT 1 FROM viryaos_autopilot_execution_reports success
+                                   SELECT 1 FROM autopilot_execution_reports success
                                    WHERE success.workspace_id=report.workspace_id
                                      AND success.action_id=report.action_id AND success.status='succeeded'
                                )) AS executor_failed_24h,
                             (SELECT count(*)::bigint
-                             FROM viryaos_autopilot_action_emissions emission
-                             JOIN viryaos_autopilot_actions emitted_action
+                             FROM autopilot_action_emissions emission
+                             JOIN autopilot_actions emitted_action
                                ON emitted_action.workspace_id=emission.workspace_id AND emitted_action.id=emission.action_id
                              WHERE emission.workspace_id=$1 AND emitted_action.status='succeeded'
                                AND NOT EXISTS (
-                                   SELECT 1 FROM viryaos_autopilot_execution_reports report
+                                   SELECT 1 FROM autopilot_execution_reports report
                                    WHERE report.workspace_id=emission.workspace_id AND report.action_id=emission.action_id
                                      AND report.status IN ('succeeded','failed')
                                )) AS awaiting_executor
-                        FROM viryaos_autopilot_actions action
+                        FROM autopilot_actions action
                         WHERE action.workspace_id = $1
                           AND (
                               action.status IN ('queued','processing')
@@ -440,7 +440,7 @@ impl AutopilotControlRepository for PostgresAutopilotRepository {
             >(
                 r#"
                 SELECT value, source, source_revision, version, synced_at
-                FROM viryaos_manager_config
+                FROM manager_config
                 WHERE workspace_id=$1 AND config_key='booking_policy'
                 "#,
             )
@@ -497,7 +497,7 @@ impl AutopilotControlRepository for PostgresAutopilotRepository {
             let row = sqlx::query_as::<_, (Value, i64)>(
                 r#"
                 SELECT to_jsonb(config) - 'workspace_id' - 'version' - 'updated_at', config.version
-                FROM viryaos_tour_economics AS config
+                FROM tour_economics AS config
                 WHERE config.workspace_id = $1
                 "#,
             )
@@ -573,7 +573,7 @@ impl AutopilotControlRepository for PostgresAutopilotRepository {
             .await?
             {
                 let version = sqlx::query_scalar::<_, i64>(
-                    "SELECT version FROM viryaos_tour_economics WHERE workspace_id=$1",
+                    "SELECT version FROM tour_economics WHERE workspace_id=$1",
                 )
                 .bind(workspace_id.into_uuid())
                 .fetch_optional(&mut *transaction)
@@ -592,7 +592,7 @@ impl AutopilotControlRepository for PostgresAutopilotRepository {
             // afternoon must not silently overwrite each other's fuel price.
             let version = sqlx::query_scalar::<_, i64>(
                 r#"
-                UPDATE viryaos_tour_economics SET
+                UPDATE tour_economics SET
                     transport_minor_per_100km_round_trip=$2,
                     transport_rate_covers_vehicles=$3,
                     vehicle_seats=$4,
@@ -688,7 +688,7 @@ impl AutopilotControlRepository for PostgresAutopilotRepository {
             .await?
             {
                 let version = sqlx::query_scalar::<_, i64>(
-                    "SELECT version FROM viryaos_manager_config WHERE workspace_id=$1 AND config_key='booking_policy'",
+                    "SELECT version FROM manager_config WHERE workspace_id=$1 AND config_key='booking_policy'",
                 )
                 .bind(workspace_id.into_uuid())
                 .fetch_optional(&mut *transaction)
@@ -708,7 +708,7 @@ impl AutopilotControlRepository for PostgresAutopilotRepository {
             let version = if command.expected_version == 0 {
                 sqlx::query_scalar::<_, i64>(
                     r#"
-                    INSERT INTO viryaos_manager_config(
+                    INSERT INTO manager_config(
                         workspace_id,config_key,value,source,source_revision,version,synced_at
                     ) VALUES($1,'booking_policy',$2,$3,$4,1,now())
                     ON CONFLICT (workspace_id,config_key) DO UPDATE SET
@@ -716,7 +716,7 @@ impl AutopilotControlRepository for PostgresAutopilotRepository {
                         source=EXCLUDED.source,
                         source_revision=EXCLUDED.source_revision,
                         synced_at=now(),
-                        version=viryaos_manager_config.version+1
+                        version=manager_config.version+1
                     RETURNING version
                     "#,
                 )
@@ -730,7 +730,7 @@ impl AutopilotControlRepository for PostgresAutopilotRepository {
             } else {
                 sqlx::query_scalar::<_, i64>(
                     r#"
-                    UPDATE viryaos_manager_config
+                    UPDATE manager_config
                     SET value=$2, source=$3, source_revision=$4,
                         synced_at=now(), version=version+1
                     WHERE workspace_id=$1 AND config_key='booking_policy' AND version=$5
@@ -807,7 +807,7 @@ impl AutopilotControlRepository for PostgresAutopilotRepository {
             };
             let updated = sqlx::query(
                 r#"
-                UPDATE viryaos_growth_envelope
+                UPDATE growth_envelope
                 SET agent_enabled = $2,
                     dry_run = $3,
                     weekly_owned_audience_touches = $4,
@@ -840,7 +840,7 @@ impl AutopilotControlRepository for PostgresAutopilotRepository {
                 // A workspace with no envelope row has never been configured,
                 // which is a different problem from losing a version race.
                 let exists = sqlx::query_scalar::<_, bool>(
-                    "SELECT EXISTS (SELECT 1 FROM viryaos_growth_envelope WHERE workspace_id = $1)",
+                    "SELECT EXISTS (SELECT 1 FROM growth_envelope WHERE workspace_id = $1)",
                 )
                 .bind(workspace_id.into_uuid())
                 .fetch_one(&mut *transaction)
@@ -906,7 +906,7 @@ impl AutopilotControlRepository for PostgresAutopilotRepository {
 
             let updated = sqlx::query(
                 r#"
-                UPDATE viryaos_autopilot_policies
+                UPDATE autopilot_policies
                 SET enabled = $3,
                     autonomy_level = $4,
                     minimum_confidence_basis_points = $5,
@@ -934,7 +934,7 @@ impl AutopilotControlRepository for PostgresAutopilotRepository {
             .map_err(map_sqlx)?;
             if updated.rows_affected() != 1 {
                 let exists = sqlx::query_scalar::<_, bool>(
-                    "SELECT EXISTS (SELECT 1 FROM viryaos_autopilot_policies WHERE workspace_id = $1 AND context = $2)",
+                    "SELECT EXISTS (SELECT 1 FROM autopilot_policies WHERE workspace_id = $1 AND context = $2)",
                 )
                 .bind(workspace_id.into_uuid())
                 .bind(command.context.as_str())
@@ -1002,7 +1002,7 @@ impl AutopilotControlRepository for PostgresAutopilotRepository {
             let action = sqlx::query_as::<_, (String, String, String, Uuid, Option<OffsetDateTime>)>(
                 r#"
                 SELECT context, action_kind, subject_kind, subject_id, approval_expires_at
-                FROM viryaos_autopilot_actions
+                FROM autopilot_actions
                 WHERE workspace_id=$1 AND id=$2 AND status='awaiting_approval'
                   AND (approval_expires_at IS NULL OR approval_expires_at > now())
                 FOR UPDATE
@@ -1035,7 +1035,7 @@ impl AutopilotControlRepository for PostgresAutopilotRepository {
             let member = sqlx::query_as::<_, (Uuid, String, String, String)>(
                 r#"
                 SELECT profile.member_id, profile.member_key, member.display_name, member.normalized_email
-                FROM viryaos_team_profiles profile
+                FROM team_profiles profile
                 JOIN workspace_members member
                   ON member.workspace_id=profile.workspace_id AND member.id=profile.member_id
                 WHERE profile.workspace_id=$1 AND profile.member_key=$2
@@ -1055,7 +1055,7 @@ impl AutopilotControlRepository for PostgresAutopilotRepository {
             let next_reminder_at = super::team::first_reminder_at(OffsetDateTime::now_utc(), due_at);
             let persisted_assignment_id = sqlx::query_scalar::<_, Uuid>(
                 r#"
-                INSERT INTO viryaos_team_assignments (
+                INSERT INTO team_assignments (
                     id, workspace_id, action_id, source_kind, source_id,
                     assignee_member_id, required_skill, due_at, next_reminder_at
                 ) VALUES ($1,$2,$3,'autopilot_action',$4,$5,$6,$7,$8)
@@ -1096,10 +1096,10 @@ impl AutopilotControlRepository for PostgresAutopilotRepository {
                 let title = super::team::friendly_action_title(&action.1, crew_locale);
                 let detail = match crew_locale {
                     crowdrelay_application::autopilot::BriefingLocale::Pl => {
-                        format!("Wymaga Twojej decyzji w VIRYA OS: {title}.")
+                        format!("Wymaga Twojej decyzji w CrowdRelay: {title}.")
                     }
                     crowdrelay_application::autopilot::BriefingLocale::En => {
-                        format!("Needs your decision in VIRYA OS: {title}.")
+                        format!("Needs your decision in CrowdRelay: {title}.")
                     }
                 };
                 super::team::queue_team_email_action(

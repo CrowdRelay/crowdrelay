@@ -372,7 +372,7 @@ async fn t6_control_evidence_not_silent() {
 
     // Verify the evidence row exists.
     let evidence_count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM viryaos_growth_evidence \
+        "SELECT COUNT(*) FROM growth_evidence \
          WHERE workspace_id = $1 AND treatment = 'control'",
     )
     .bind(f.workspace_id.into_uuid())
@@ -432,7 +432,7 @@ async fn t7_control_evidence_idempotent_on_retry() {
 
     // Verify exactly 1 evidence row (not 2).
     let evidence_count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM viryaos_growth_evidence \
+        "SELECT COUNT(*) FROM growth_evidence \
          WHERE workspace_id = $1 AND treatment = 'control'",
     )
     .bind(f.workspace_id.into_uuid())
@@ -447,7 +447,7 @@ async fn t7_control_evidence_idempotent_on_retry() {
 
     // Verify exactly 1 assignment row (not 2).
     let assignment_count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM viryaos_experiment_assignments \
+        "SELECT COUNT(*) FROM experiment_assignments \
          WHERE workspace_id = $1 AND arm = 'control'",
     )
     .bind(f.workspace_id.into_uuid())
@@ -516,7 +516,7 @@ async fn t8_execution_status_persisted() {
 
     // Verify control execution_status.
     let control_status: String = sqlx::query_scalar(
-        "SELECT execution_status FROM viryaos_experiment_assignments \
+        "SELECT execution_status FROM experiment_assignments \
          WHERE workspace_id = $1 AND unit_id = 'r/t8control'",
     )
     .bind(f.workspace_id.into_uuid())
@@ -527,7 +527,7 @@ async fn t8_execution_status_persisted() {
 
     // Verify withheld execution_status.
     let withheld_status: String = sqlx::query_scalar(
-        "SELECT execution_status FROM viryaos_experiment_assignments \
+        "SELECT execution_status FROM experiment_assignments \
          WHERE workspace_id = $1 AND unit_id = 'r/t8treatment'",
     )
     .bind(f.workspace_id.into_uuid())
@@ -588,7 +588,7 @@ async fn t9_execution_status_monotonic() {
         .expect("update attempt");
 
     let control_status: String = sqlx::query_scalar(
-        "SELECT execution_status FROM viryaos_experiment_assignments \
+        "SELECT execution_status FROM experiment_assignments \
          WHERE workspace_id = $1 AND unit_id = 'r/t9control'",
     )
     .bind(f.workspace_id.into_uuid())
@@ -625,7 +625,7 @@ async fn t9_execution_status_monotonic() {
         .expect("update attempt");
 
     let withheld_status: String = sqlx::query_scalar(
-        "SELECT execution_status FROM viryaos_experiment_assignments \
+        "SELECT execution_status FROM experiment_assignments \
          WHERE workspace_id = $1 AND unit_id = 'r/t9treatment'",
     )
     .bind(f.workspace_id.into_uuid())
@@ -675,7 +675,7 @@ async fn t10_evidence_episodes_rebuildable() {
 
     // Verify the episode was created.
     let episode_count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM viryaos_growth_episodes \
+        "SELECT COUNT(*) FROM growth_episodes \
          WHERE workspace_id = $1 AND action_id = $2",
     )
     .bind(f.workspace_id.into_uuid())
@@ -693,7 +693,7 @@ async fn t10_evidence_episodes_rebuildable() {
     let original: (String, f64, f64, f64, Option<f64>, Option<i32>, bool) = sqlx::query_as(
         "SELECT treatment, propensity, predicted_fans, predicted_signal_installs, \
                 observed_fans, actual_reach, converted \
-         FROM viryaos_growth_episodes \
+         FROM growth_episodes \
          WHERE workspace_id = $1 AND action_id = $2",
     )
     .bind(f.workspace_id.into_uuid())
@@ -703,14 +703,14 @@ async fn t10_evidence_episodes_rebuildable() {
     .expect("original episode");
 
     // Delete all episodes.
-    sqlx::query("DELETE FROM viryaos_growth_episodes WHERE workspace_id = $1")
+    sqlx::query("DELETE FROM growth_episodes WHERE workspace_id = $1")
         .bind(f.workspace_id.into_uuid())
         .execute(&f.pool)
         .await
         .expect("delete episodes");
 
     let count_after_delete: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM viryaos_growth_episodes WHERE workspace_id = $1")
+        sqlx::query_scalar("SELECT COUNT(*) FROM growth_episodes WHERE workspace_id = $1")
             .bind(f.workspace_id.into_uuid())
             .fetch_one(&f.pool)
             .await
@@ -718,19 +718,18 @@ async fn t10_evidence_episodes_rebuildable() {
     assert_eq!(count_after_delete, 0, "episodes must be deleted");
 
     // Rebuild from evidence.
-    let rebuilt_count: i32 =
-        sqlx::query_scalar("SELECT viryaos_rebuild_growth_episodes_from_evidence($1)")
-            .bind(f.workspace_id.into_uuid())
-            .fetch_one(&f.pool)
-            .await
-            .expect("rebuild");
+    let rebuilt_count: i32 = sqlx::query_scalar("SELECT rebuild_growth_episodes_from_evidence($1)")
+        .bind(f.workspace_id.into_uuid())
+        .fetch_one(&f.pool)
+        .await
+        .expect("rebuild");
     assert_eq!(rebuilt_count, 1, "rebuild must produce 1 episode");
 
     // Verify semantic equality.
     let rebuilt: (String, f64, f64, f64, Option<f64>, Option<i32>, bool) = sqlx::query_as(
         "SELECT treatment, propensity, predicted_fans, predicted_signal_installs, \
                 observed_fans, actual_reach, converted \
-         FROM viryaos_growth_episodes \
+         FROM growth_episodes \
          WHERE workspace_id = $1 AND action_id = $2",
     )
     .bind(f.workspace_id.into_uuid())
@@ -764,7 +763,7 @@ async fn t10_evidence_episodes_rebuildable() {
 
     // Idempotence: rebuild again and verify the same state.
     let rebuilt_count_2: i32 =
-        sqlx::query_scalar("SELECT viryaos_rebuild_growth_episodes_from_evidence($1)")
+        sqlx::query_scalar("SELECT rebuild_growth_episodes_from_evidence($1)")
             .bind(f.workspace_id.into_uuid())
             .fetch_one(&f.pool)
             .await
@@ -777,7 +776,7 @@ async fn t10_evidence_episodes_rebuildable() {
     let rebuilt2: (String, f64, f64, f64, Option<f64>, Option<i32>, bool) = sqlx::query_as(
         "SELECT treatment, propensity, predicted_fans, predicted_signal_installs, \
                 observed_fans, actual_reach, converted \
-         FROM viryaos_growth_episodes \
+         FROM growth_episodes \
          WHERE workspace_id = $1 AND action_id = $2",
     )
     .bind(f.workspace_id.into_uuid())
@@ -866,7 +865,7 @@ async fn t11_stale_posting_transitions_to_unknown_not_failed() {
     .expect("mark post failed");
 
     sqlx::query(
-        r#"UPDATE viryaos_autopilot_actions
+        r#"UPDATE autopilot_actions
            SET status = 'unknown', finished_at = NULL, updated_at = now()
            WHERE id = $1 AND status IN ('succeeded', 'processing')"#,
     )
@@ -876,7 +875,7 @@ async fn t11_stale_posting_transitions_to_unknown_not_failed() {
     .expect("mark action unknown");
 
     sqlx::query(
-        r#"UPDATE viryaos_experiment_assignments
+        r#"UPDATE experiment_assignments
            SET execution_status = 'unknown'
            WHERE workspace_id = $1 AND action_id = $2 AND execution_status = 'dispatched'"#,
     )
@@ -897,7 +896,7 @@ async fn t11_stale_posting_transitions_to_unknown_not_failed() {
 
     // Verify: autopilot_actions.status = 'unknown'
     let action_status: String =
-        sqlx::query_scalar("SELECT status FROM viryaos_autopilot_actions WHERE id = $1")
+        sqlx::query_scalar("SELECT status FROM autopilot_actions WHERE id = $1")
             .bind(action_id)
             .fetch_one(&f.pool)
             .await
@@ -909,7 +908,7 @@ async fn t11_stale_posting_transitions_to_unknown_not_failed() {
 
     // Verify: action_ledger.state = 'UNKNOWN'
     let ledger_state: String =
-        sqlx::query_scalar("SELECT state FROM viryaos_action_ledger WHERE action_id = $1")
+        sqlx::query_scalar("SELECT state FROM action_ledger WHERE action_id = $1")
             .bind(action_id)
             .fetch_one(&f.pool)
             .await
@@ -918,7 +917,7 @@ async fn t11_stale_posting_transitions_to_unknown_not_failed() {
 
     // Verify: experiment_assignments.execution_status = 'unknown'
     let exec_status: String = sqlx::query_scalar(
-        "SELECT execution_status FROM viryaos_experiment_assignments \
+        "SELECT execution_status FROM experiment_assignments \
          WHERE workspace_id = $1 AND action_id = $2",
     )
     .bind(f.workspace_id.into_uuid())
@@ -935,7 +934,7 @@ async fn t11_stale_posting_transitions_to_unknown_not_failed() {
     // as a realized treatment failure. Unknown is excluded from both
     // realized-treatment and failed-treatment counts.
     let evidence_treatment: String = sqlx::query_scalar(
-        "SELECT treatment FROM viryaos_growth_evidence \
+        "SELECT treatment FROM growth_evidence \
          WHERE workspace_id = $1 AND action_id = $2",
     )
     .bind(f.workspace_id.into_uuid())
@@ -1013,7 +1012,7 @@ async fn t12_real_failure_transitions_to_failed() {
     .expect("mark post failed");
 
     sqlx::query(
-        r#"UPDATE viryaos_autopilot_actions
+        r#"UPDATE autopilot_actions
            SET status = 'failed', finished_at = now(), updated_at = now()
            WHERE id = $1 AND status = 'succeeded'"#,
     )
@@ -1023,7 +1022,7 @@ async fn t12_real_failure_transitions_to_failed() {
     .expect("mark action failed");
 
     sqlx::query(
-        r#"UPDATE viryaos_experiment_assignments
+        r#"UPDATE experiment_assignments
            SET execution_status = 'failed'
            WHERE workspace_id = $1 AND action_id = $2 AND execution_status = 'dispatched'"#,
     )
@@ -1035,7 +1034,7 @@ async fn t12_real_failure_transitions_to_failed() {
 
     // Verify: autopilot_actions.status = 'failed'
     let action_status: String =
-        sqlx::query_scalar("SELECT status FROM viryaos_autopilot_actions WHERE id = $1")
+        sqlx::query_scalar("SELECT status FROM autopilot_actions WHERE id = $1")
             .bind(action_id)
             .fetch_one(&f.pool)
             .await
@@ -1044,7 +1043,7 @@ async fn t12_real_failure_transitions_to_failed() {
 
     // Verify: action_ledger.state = 'FAILED'
     let ledger_state: String =
-        sqlx::query_scalar("SELECT state FROM viryaos_action_ledger WHERE action_id = $1")
+        sqlx::query_scalar("SELECT state FROM action_ledger WHERE action_id = $1")
             .bind(action_id)
             .fetch_one(&f.pool)
             .await
@@ -1053,7 +1052,7 @@ async fn t12_real_failure_transitions_to_failed() {
 
     // Verify: experiment_assignments.execution_status = 'failed'
     let exec_status: String = sqlx::query_scalar(
-        "SELECT execution_status FROM viryaos_experiment_assignments \
+        "SELECT execution_status FROM experiment_assignments \
          WHERE workspace_id = $1 AND action_id = $2",
     )
     .bind(f.workspace_id.into_uuid())
@@ -1096,7 +1095,7 @@ async fn t13_trace_id_continuity_across_lifecycle() {
 
     // Insert a reach_event with the same trace_id.
     sqlx::query(
-        r#"INSERT INTO viryaos_reach_events
+        r#"INSERT INTO reach_events
            (workspace_id, action_id, recipient_kind, recipient_id, channel,
             template_id, estimated_reach, status, trace_id)
            VALUES ($1, $2, 'subreddit_audience', 'r/t13', 'reddit_post',
@@ -1111,7 +1110,7 @@ async fn t13_trace_id_continuity_across_lifecycle() {
 
     // Insert a measurement with the same trace_id.
     sqlx::query(
-        r#"INSERT INTO viryaos_autopilot_measurements
+        r#"INSERT INTO autopilot_measurements
            (id, workspace_id, action_id, measurement_kind, subject_id,
             action_finished_at, baseline_value, due_at, available_at, trace_id)
            VALUES ($1, $2, $3, 'ticket_revenue_72h', $4, now(), 0.0,
@@ -1128,7 +1127,7 @@ async fn t13_trace_id_continuity_across_lifecycle() {
 
     // Verify: all lifecycle records have the same trace_id.
     let decision_trace: Option<uuid::Uuid> = sqlx::query_scalar(
-        "SELECT trace_id FROM viryaos_autopilot_decisions \
+        "SELECT trace_id FROM autopilot_decisions \
          WHERE workspace_id = $1 AND trace_id = $2 LIMIT 1",
     )
     .bind(f.workspace_id.into_uuid())
@@ -1143,7 +1142,7 @@ async fn t13_trace_id_continuity_across_lifecycle() {
     );
 
     let action_trace: Option<uuid::Uuid> = sqlx::query_scalar(
-        "SELECT trace_id FROM viryaos_autopilot_actions \
+        "SELECT trace_id FROM autopilot_actions \
          WHERE id = $1 AND trace_id = $2",
     )
     .bind(action_id)
@@ -1166,7 +1165,7 @@ async fn t13_trace_id_continuity_across_lifecycle() {
     assert_eq!(outbox_trace, Some(trace_id), "outbox must have trace_id");
 
     let reach_trace: Option<uuid::Uuid> = sqlx::query_scalar(
-        "SELECT trace_id FROM viryaos_reach_events \
+        "SELECT trace_id FROM reach_events \
          WHERE workspace_id = $1 AND action_id = $2 AND trace_id = $3",
     )
     .bind(f.workspace_id.into_uuid())
@@ -1182,7 +1181,7 @@ async fn t13_trace_id_continuity_across_lifecycle() {
     );
 
     let measurement_trace: Option<uuid::Uuid> = sqlx::query_scalar(
-        "SELECT trace_id FROM viryaos_autopilot_measurements \
+        "SELECT trace_id FROM autopilot_measurements \
          WHERE workspace_id = $1 AND action_id = $2 AND trace_id = $3",
     )
     .bind(f.workspace_id.into_uuid())
@@ -1199,7 +1198,7 @@ async fn t13_trace_id_continuity_across_lifecycle() {
 
     // Verify: no lifecycle record has a DIFFERENT trace_id for this action.
     let mismatched: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM viryaos_autopilot_actions \
+        "SELECT COUNT(*) FROM autopilot_actions \
          WHERE id = $1 AND trace_id IS NOT NULL AND trace_id != $2",
     )
     .bind(action_id)
@@ -1284,12 +1283,12 @@ async fn t14_cross_layer_invariant_forbidden_mappings() {
     // Executed → Treated
     let executed_action = uuid::Uuid::now_v7();
     sqlx::query(
-        r#"INSERT INTO viryaos_autopilot_actions
+        r#"INSERT INTO autopilot_actions
            (id, workspace_id, decision_id, context, action_kind, subject_kind,
             subject_id, idempotency_key, payload, status, approved_at, available_at, finished_at, trace_id)
            SELECT $1, $2, decision_id, 'growth_metrics', 'community.engage.request', 'target_community',
                   $3, $4, '{"kind":"community.engage.request"}', 'succeeded', now(), now(), now(), $5
-           FROM viryaos_autopilot_actions WHERE id = $6"#,
+           FROM autopilot_actions WHERE id = $6"#,
     )
     .bind(executed_action)
     .bind(f.workspace_id.into_uuid())
@@ -1326,12 +1325,12 @@ async fn t14_cross_layer_invariant_forbidden_mappings() {
     // Failed → never Treated
     let failed_action = uuid::Uuid::now_v7();
     sqlx::query(
-        r#"INSERT INTO viryaos_autopilot_actions
+        r#"INSERT INTO autopilot_actions
            (id, workspace_id, decision_id, context, action_kind, subject_kind,
             subject_id, idempotency_key, payload, status, approved_at, available_at, finished_at, trace_id)
            SELECT $1, $2, decision_id, 'growth_metrics', 'community.engage.request', 'target_community',
                   $3, $4, '{"kind":"community.engage.request"}', 'failed', now(), now(), now(), $5
-           FROM viryaos_autopilot_actions WHERE id = $6"#,
+           FROM autopilot_actions WHERE id = $6"#,
     )
     .bind(failed_action)
     .bind(f.workspace_id.into_uuid())
@@ -1367,12 +1366,12 @@ async fn t14_cross_layer_invariant_forbidden_mappings() {
     // Unknown → never Treated, never Failed
     let unknown_action = uuid::Uuid::now_v7();
     sqlx::query(
-        r#"INSERT INTO viryaos_autopilot_actions
+        r#"INSERT INTO autopilot_actions
            (id, workspace_id, decision_id, context, action_kind, subject_kind,
             subject_id, idempotency_key, payload, status, approved_at, available_at, trace_id)
            SELECT $1, $2, decision_id, 'growth_metrics', 'community.engage.request', 'target_community',
                   $3, $4, '{"kind":"community.engage.request"}', 'unknown', now(), now(), $5
-           FROM viryaos_autopilot_actions WHERE id = $6"#,
+           FROM autopilot_actions WHERE id = $6"#,
     )
     .bind(unknown_action)
     .bind(f.workspace_id.into_uuid())
@@ -1409,7 +1408,7 @@ async fn t14_cross_layer_invariant_forbidden_mappings() {
 
     // Control → never Treated: arm='control', execution_status='control'
     let (control_arm, control_exec): (String, String) = sqlx::query_as(
-        "SELECT arm::text, execution_status FROM viryaos_experiment_assignments \
+        "SELECT arm::text, execution_status FROM experiment_assignments \
          WHERE workspace_id = $1 AND unit_id = 'r/t14control'",
     )
     .bind(f.workspace_id.into_uuid())
@@ -1421,7 +1420,7 @@ async fn t14_cross_layer_invariant_forbidden_mappings() {
 
     // Withheld → never Treated: arm='treatment', execution_status='withheld'
     let (withheld_arm, withheld_exec): (String, String) = sqlx::query_as(
-        "SELECT arm::text, execution_status FROM viryaos_experiment_assignments \
+        "SELECT arm::text, execution_status FROM experiment_assignments \
          WHERE workspace_id = $1 AND unit_id = 'r/t14withheld'",
     )
     .bind(f.workspace_id.into_uuid())
@@ -1433,7 +1432,7 @@ async fn t14_cross_layer_invariant_forbidden_mappings() {
 
     // Executed → Treated: arm='treatment', execution_status='executed'
     let (executed_arm, executed_exec): (String, String) = sqlx::query_as(
-        "SELECT arm::text, execution_status FROM viryaos_experiment_assignments \
+        "SELECT arm::text, execution_status FROM experiment_assignments \
          WHERE workspace_id = $1 AND unit_id = 'r/t14executed'",
     )
     .bind(f.workspace_id.into_uuid())
@@ -1447,7 +1446,7 @@ async fn t14_cross_layer_invariant_forbidden_mappings() {
     // (the arm is 'treatment' for ITT, but execution_status='failed' means
     // the intervention did NOT happen — per-protocol excludes it)
     let (failed_arm, failed_exec): (String, String) = sqlx::query_as(
-        "SELECT arm::text, execution_status FROM viryaos_experiment_assignments \
+        "SELECT arm::text, execution_status FROM experiment_assignments \
          WHERE workspace_id = $1 AND unit_id = 'r/t14failed'",
     )
     .bind(f.workspace_id.into_uuid())
@@ -1459,7 +1458,7 @@ async fn t14_cross_layer_invariant_forbidden_mappings() {
 
     // Unknown → never Treated, never Failed: arm='treatment', execution_status='unknown'
     let (unknown_arm, unknown_exec): (String, String) = sqlx::query_as(
-        "SELECT arm::text, execution_status FROM viryaos_experiment_assignments \
+        "SELECT arm::text, execution_status FROM experiment_assignments \
          WHERE workspace_id = $1 AND unit_id = 'r/t14unknown'",
     )
     .bind(f.workspace_id.into_uuid())
@@ -1477,7 +1476,7 @@ async fn t14_cross_layer_invariant_forbidden_mappings() {
     let duplicate_assignments: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM (
             SELECT action_id, COUNT(*) as cnt
-            FROM viryaos_experiment_assignments
+            FROM experiment_assignments
             WHERE workspace_id = $1 AND action_id IS NOT NULL
             GROUP BY action_id HAVING COUNT(*) > 1
         ) dup",
@@ -1495,7 +1494,7 @@ async fn t14_cross_layer_invariant_forbidden_mappings() {
     let evidence_dupes: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM (
             SELECT action_id, COUNT(*) as cnt
-            FROM viryaos_growth_evidence
+            FROM growth_evidence
             WHERE workspace_id = $1 AND action_id IS NOT NULL
             GROUP BY action_id HAVING COUNT(*) > 1
         ) dup",
@@ -1512,7 +1511,7 @@ async fn t14_cross_layer_invariant_forbidden_mappings() {
 
 /// T15: SQL/Rust reconciliation parity.
 ///
-/// The SQL fallback function `viryaos_action_ledger_reconcile` and the
+/// The SQL fallback function `action_ledger_reconcile` and the
 /// Rust `community_post_to_evidence` + `resolve_observation` + `legal_transition` pipeline must
 /// produce identical classification for the same community_posts fixture
 /// states. This proves the SQL fallback does not have weaker causal
@@ -1541,14 +1540,14 @@ async fn t15_sql_rust_reconciliation_parity() {
     insert_community_post(&f.pool, f.workspace_id, action1, "posted", "r/t15a").await;
     // Transition action to unknown so reconciliation can run.
     sqlx::query(
-        "UPDATE viryaos_autopilot_actions SET status = 'unknown', finished_at = NULL \
+        "UPDATE autopilot_actions SET status = 'unknown', finished_at = NULL \
          WHERE id = $1",
     )
     .bind(action1)
     .execute(&f.pool)
     .await
     .expect("mark unknown");
-    let result1: String = sqlx::query_scalar("SELECT viryaos_action_ledger_reconcile($1)")
+    let result1: String = sqlx::query_scalar("SELECT action_ledger_reconcile($1)")
         .bind(action1)
         .fetch_one(&f.pool)
         .await
@@ -1571,14 +1570,14 @@ async fn t15_sql_rust_reconciliation_parity() {
     )
     .await;
     sqlx::query(
-        "UPDATE viryaos_autopilot_actions SET status = 'unknown', finished_at = NULL \
+        "UPDATE autopilot_actions SET status = 'unknown', finished_at = NULL \
          WHERE id = $1",
     )
     .bind(action2)
     .execute(&f.pool)
     .await
     .expect("mark unknown");
-    let result2: String = sqlx::query_scalar("SELECT viryaos_action_ledger_reconcile($1)")
+    let result2: String = sqlx::query_scalar("SELECT action_ledger_reconcile($1)")
         .bind(action2)
         .fetch_one(&f.pool)
         .await
@@ -1601,14 +1600,14 @@ async fn t15_sql_rust_reconciliation_parity() {
     )
     .await;
     sqlx::query(
-        "UPDATE viryaos_autopilot_actions SET status = 'unknown', finished_at = NULL \
+        "UPDATE autopilot_actions SET status = 'unknown', finished_at = NULL \
          WHERE id = $1",
     )
     .bind(action3)
     .execute(&f.pool)
     .await
     .expect("mark unknown");
-    let result3: String = sqlx::query_scalar("SELECT viryaos_action_ledger_reconcile($1)")
+    let result3: String = sqlx::query_scalar("SELECT action_ledger_reconcile($1)")
         .bind(action3)
         .fetch_one(&f.pool)
         .await
@@ -1623,14 +1622,14 @@ async fn t15_sql_rust_reconciliation_parity() {
     let action4 = insert_decision_and_action(&f.pool, f.workspace_id, trace4).await;
     insert_community_post(&f.pool, f.workspace_id, action4, "posting", "r/t15d").await;
     sqlx::query(
-        "UPDATE viryaos_autopilot_actions SET status = 'unknown', finished_at = NULL \
+        "UPDATE autopilot_actions SET status = 'unknown', finished_at = NULL \
          WHERE id = $1",
     )
     .bind(action4)
     .execute(&f.pool)
     .await
     .expect("mark unknown");
-    let result4: String = sqlx::query_scalar("SELECT viryaos_action_ledger_reconcile($1)")
+    let result4: String = sqlx::query_scalar("SELECT action_ledger_reconcile($1)")
         .bind(action4)
         .fetch_one(&f.pool)
         .await
@@ -1658,7 +1657,7 @@ async fn t16_trace_continuity_no_fake_continuity() {
 
     // Insert a reach_event with the action's trace_id.
     sqlx::query(
-        r#"INSERT INTO viryaos_reach_events
+        r#"INSERT INTO reach_events
            (workspace_id, action_id, recipient_kind, recipient_id, channel,
             template_id, estimated_reach, status, trace_id)
            VALUES ($1, $2, 'subreddit_audience', 'r/t16', 'reddit_post',
@@ -1672,7 +1671,7 @@ async fn t16_trace_continuity_no_fake_continuity() {
     .expect("insert reach event");
 
     let reach_trace: Option<uuid::Uuid> = sqlx::query_scalar(
-        "SELECT trace_id FROM viryaos_reach_events \
+        "SELECT trace_id FROM reach_events \
          WHERE workspace_id = $1 AND action_id = $2",
     )
     .bind(f.workspace_id.into_uuid())
@@ -1691,7 +1690,7 @@ async fn t16_trace_continuity_no_fake_continuity() {
     // The legacy shape is an *action* with no trace, which production still has
     // (52 of 203 actions carried one when this was measured). It used to be
     // built from a decision with no trace too, but migration 0231 made
-    // `viryaos_autopilot_decisions.trace_id` NOT NULL, so that decision can no
+    // `autopilot_decisions.trace_id` NOT NULL, so that decision can no
     // longer exist and the case had to be built from one that can.
     //
     // This does not soften the assertion. The claim under test is that a
@@ -1703,7 +1702,7 @@ async fn t16_trace_continuity_no_fake_continuity() {
     let decision_id = uuid::Uuid::now_v7();
     let legacy_action_id = uuid::Uuid::now_v7();
     sqlx::query(
-        r#"INSERT INTO viryaos_autopilot_decisions
+        r#"INSERT INTO autopilot_decisions
            (id, workspace_id, decision_key, context, subject_kind, subject_id,
             decision_kind, confidence_basis_points, disposition, reason,
             input_snapshot, policy_snapshot, recommendation, trace_id)
@@ -1720,7 +1719,7 @@ async fn t16_trace_continuity_no_fake_continuity() {
     .expect("insert legacy decision");
 
     sqlx::query(
-        r#"INSERT INTO viryaos_autopilot_actions
+        r#"INSERT INTO autopilot_actions
            (id, workspace_id, decision_id, context, action_kind, subject_kind,
             subject_id, idempotency_key, payload, status, approved_at, available_at,
             finished_at, trace_id)
@@ -1739,7 +1738,7 @@ async fn t16_trace_continuity_no_fake_continuity() {
 
     // Verify the legacy action has NULL trace_id.
     let legacy_trace: Option<uuid::Uuid> =
-        sqlx::query_scalar("SELECT trace_id FROM viryaos_autopilot_actions WHERE id = $1")
+        sqlx::query_scalar("SELECT trace_id FROM autopilot_actions WHERE id = $1")
             .bind(legacy_action_id)
             .fetch_one(&f.pool)
             .await
@@ -1752,7 +1751,7 @@ async fn t16_trace_continuity_no_fake_continuity() {
     // Insert a reach_event for the legacy action with NULL trace_id
     // (simulating what the community executor should do).
     sqlx::query(
-        r#"INSERT INTO viryaos_reach_events
+        r#"INSERT INTO reach_events
            (workspace_id, action_id, recipient_kind, recipient_id, channel,
             template_id, estimated_reach, status, trace_id)
            VALUES ($1, $2, 'subreddit_audience', 'r/t16legacy', 'reddit_post',
@@ -1765,7 +1764,7 @@ async fn t16_trace_continuity_no_fake_continuity() {
     .expect("insert legacy reach event");
 
     let legacy_reach_trace: Option<uuid::Uuid> = sqlx::query_scalar(
-        "SELECT trace_id FROM viryaos_reach_events \
+        "SELECT trace_id FROM reach_events \
          WHERE workspace_id = $1 AND action_id = $2",
     )
     .bind(f.workspace_id.into_uuid())
@@ -1817,7 +1816,7 @@ async fn t17_one_episode_per_action() {
 
     // Verify: exactly one episode exists.
     let episode_count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM viryaos_growth_episodes \
+        "SELECT COUNT(*) FROM growth_episodes \
          WHERE workspace_id = $1 AND action_id = $2",
     )
     .bind(f.workspace_id.into_uuid())
@@ -1828,16 +1827,15 @@ async fn t17_one_episode_per_action() {
     assert_eq!(episode_count, 1, "exactly one episode per action");
 
     // Rebuild — must still produce exactly one episode (upsert, not insert).
-    let rebuilt: i32 =
-        sqlx::query_scalar("SELECT viryaos_rebuild_growth_episodes_from_evidence($1)")
-            .bind(f.workspace_id.into_uuid())
-            .fetch_one(&f.pool)
-            .await
-            .expect("rebuild 1");
+    let rebuilt: i32 = sqlx::query_scalar("SELECT rebuild_growth_episodes_from_evidence($1)")
+        .bind(f.workspace_id.into_uuid())
+        .fetch_one(&f.pool)
+        .await
+        .expect("rebuild 1");
     assert_eq!(rebuilt, 1, "rebuild must produce 1 episode");
 
     let episode_count_after_rebuild: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM viryaos_growth_episodes \
+        "SELECT COUNT(*) FROM growth_episodes \
          WHERE workspace_id = $1 AND action_id = $2",
     )
     .bind(f.workspace_id.into_uuid())
@@ -1851,16 +1849,15 @@ async fn t17_one_episode_per_action() {
     );
 
     // Rebuild again — idempotence.
-    let rebuilt2: i32 =
-        sqlx::query_scalar("SELECT viryaos_rebuild_growth_episodes_from_evidence($1)")
-            .bind(f.workspace_id.into_uuid())
-            .fetch_one(&f.pool)
-            .await
-            .expect("rebuild 2");
+    let rebuilt2: i32 = sqlx::query_scalar("SELECT rebuild_growth_episodes_from_evidence($1)")
+        .bind(f.workspace_id.into_uuid())
+        .fetch_one(&f.pool)
+        .await
+        .expect("rebuild 2");
     assert_eq!(rebuilt2, 1, "second rebuild must also produce 1 episode");
 
     let episode_count_after_rebuild2: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM viryaos_growth_episodes \
+        "SELECT COUNT(*) FROM growth_episodes \
          WHERE workspace_id = $1 AND action_id = $2",
     )
     .bind(f.workspace_id.into_uuid())
@@ -1875,7 +1872,7 @@ async fn t17_one_episode_per_action() {
 
     // Verify: growth_evidence.action_id is NOT NULL (invariant).
     let null_evidence: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM viryaos_growth_evidence \
+        "SELECT COUNT(*) FROM growth_evidence \
          WHERE workspace_id = $1 AND action_id IS NULL",
     )
     .bind(f.workspace_id.into_uuid())
@@ -1947,7 +1944,7 @@ async fn t18_insert_vs_select_strictness() {
 
     // This used to inject `experiment_status = 'INVALID_STATUS'` and assert the
     // retry path errored rather than silently falling back to Active.
-    // `viryaos_experiment_designs_experiment_status_check` was added since, and
+    // `experiment_designs_experiment_status_check` was added since, and
     // now refuses the write — so the corrupt row cannot be built, and the test
     // was failing in its own setup rather than on the property it asserts.
     //
@@ -1955,7 +1952,7 @@ async fn t18_insert_vs_select_strictness() {
     // invalid `experiment_status` is unrepresentable rather than merely
     // detected on read. Assert it at the boundary that now owns it.
     let corrupt_write = sqlx::query(
-        "UPDATE viryaos_experiment_designs SET experiment_status = 'INVALID_STATUS' \
+        "UPDATE experiment_designs SET experiment_status = 'INVALID_STATUS' \
          WHERE workspace_id = $1 AND experiment_uuid = $2",
     )
     .bind(f.workspace_id.into_uuid())
@@ -2057,12 +2054,12 @@ async fn t19_full_chain_three_branches() {
         .expect("transition to failed");
     // `update_execution_status_by_action_id` writes the *assignment's* causal
     // realisation, which is an independent state machine — it does not touch
-    // `viryaos_autopilot_actions.status`, and the ledger projects the action,
+    // `autopilot_actions.status`, and the ledger projects the action,
     // not the assignment. Without this the action kept the fixture's
     // `succeeded`, the ledger read SUCCEEDED, and the branch asserted FAILED
     // against a failure it had never actually recorded.
     sqlx::query(
-        "UPDATE viryaos_autopilot_actions SET status = 'failed', finished_at = now() \
+        "UPDATE autopilot_actions SET status = 'failed', finished_at = now() \
          WHERE id = $1",
     )
     .bind(action_failure)
@@ -2087,7 +2084,7 @@ async fn t19_full_chain_three_branches() {
     // projection — to read UNKNOWN. `finished_at` is cleared because confirmation
     // was lost, which is what the gap detector records.
     sqlx::query(
-        "UPDATE viryaos_autopilot_actions SET status = 'unknown', finished_at = NULL \
+        "UPDATE autopilot_actions SET status = 'unknown', finished_at = NULL \
          WHERE id = $1",
     )
     .bind(action_unknown)
@@ -2097,7 +2094,7 @@ async fn t19_full_chain_three_branches() {
 
     // ── Verify: execution_status per branch ──
     let (success_arm, success_exec): (String, String) = sqlx::query_as(
-        "SELECT arm::text, execution_status FROM viryaos_experiment_assignments \
+        "SELECT arm::text, execution_status FROM experiment_assignments \
          WHERE workspace_id = $1 AND unit_id = 'r/t19success'",
     )
     .bind(f.workspace_id.into_uuid())
@@ -2108,7 +2105,7 @@ async fn t19_full_chain_three_branches() {
     assert_eq!(success_exec, "executed", "SUCCESS branch: executed");
 
     let (failure_arm, failure_exec): (String, String) = sqlx::query_as(
-        "SELECT arm::text, execution_status FROM viryaos_experiment_assignments \
+        "SELECT arm::text, execution_status FROM experiment_assignments \
          WHERE workspace_id = $1 AND unit_id = 'r/t19failure'",
     )
     .bind(f.workspace_id.into_uuid())
@@ -2119,7 +2116,7 @@ async fn t19_full_chain_three_branches() {
     assert_eq!(failure_exec, "failed", "FAILURE branch: failed");
 
     let (unknown_arm, unknown_exec): (String, String) = sqlx::query_as(
-        "SELECT arm::text, execution_status FROM viryaos_experiment_assignments \
+        "SELECT arm::text, execution_status FROM experiment_assignments \
          WHERE workspace_id = $1 AND unit_id = 'r/t19unknown'",
     )
     .bind(f.workspace_id.into_uuid())
@@ -2134,7 +2131,7 @@ async fn t19_full_chain_three_branches() {
 
     // ── Verify: action ledger state per branch ──
     let success_ledger: String =
-        sqlx::query_scalar("SELECT state FROM viryaos_action_ledger WHERE action_id = $1")
+        sqlx::query_scalar("SELECT state FROM action_ledger WHERE action_id = $1")
             .bind(action_success)
             .fetch_one(&f.pool)
             .await
@@ -2145,7 +2142,7 @@ async fn t19_full_chain_three_branches() {
     );
 
     let failure_ledger: String =
-        sqlx::query_scalar("SELECT state FROM viryaos_action_ledger WHERE action_id = $1")
+        sqlx::query_scalar("SELECT state FROM action_ledger WHERE action_id = $1")
             .bind(action_failure)
             .fetch_one(&f.pool)
             .await
@@ -2153,7 +2150,7 @@ async fn t19_full_chain_three_branches() {
     assert_eq!(failure_ledger, "FAILED", "FAILURE branch: ledger FAILED");
 
     let unknown_ledger: String =
-        sqlx::query_scalar("SELECT state FROM viryaos_action_ledger WHERE action_id = $1")
+        sqlx::query_scalar("SELECT state FROM action_ledger WHERE action_id = $1")
             .bind(action_unknown)
             .fetch_one(&f.pool)
             .await
@@ -2165,7 +2162,7 @@ async fn t19_full_chain_three_branches() {
 
     // ── Verify: trace_id continuity per branch ──
     let success_trace: Option<uuid::Uuid> =
-        sqlx::query_scalar("SELECT trace_id FROM viryaos_autopilot_actions WHERE id = $1")
+        sqlx::query_scalar("SELECT trace_id FROM autopilot_actions WHERE id = $1")
             .bind(action_success)
             .fetch_one(&f.pool)
             .await
@@ -2177,7 +2174,7 @@ async fn t19_full_chain_three_branches() {
     );
 
     let failure_trace: Option<uuid::Uuid> =
-        sqlx::query_scalar("SELECT trace_id FROM viryaos_autopilot_actions WHERE id = $1")
+        sqlx::query_scalar("SELECT trace_id FROM autopilot_actions WHERE id = $1")
             .bind(action_failure)
             .fetch_one(&f.pool)
             .await
@@ -2189,7 +2186,7 @@ async fn t19_full_chain_three_branches() {
     );
 
     let unknown_trace: Option<uuid::Uuid> =
-        sqlx::query_scalar("SELECT trace_id FROM viryaos_autopilot_actions WHERE id = $1")
+        sqlx::query_scalar("SELECT trace_id FROM autopilot_actions WHERE id = $1")
             .bind(action_unknown)
             .fetch_one(&f.pool)
             .await
@@ -2202,7 +2199,7 @@ async fn t19_full_chain_three_branches() {
 
     // ── Verify: growth evidence exists per branch ──
     let evidence_count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM viryaos_growth_evidence \
+        "SELECT COUNT(*) FROM growth_evidence \
          WHERE workspace_id = $1 AND action_id IN ($2, $3, $4)",
     )
     .bind(f.workspace_id.into_uuid())
@@ -2219,7 +2216,7 @@ async fn t19_full_chain_three_branches() {
 
     // ── Verify: growth episodes exist per branch ──
     let episode_count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM viryaos_growth_episodes \
+        "SELECT COUNT(*) FROM growth_episodes \
          WHERE workspace_id = $1 AND action_id IN ($2, $3, $4)",
     )
     .bind(f.workspace_id.into_uuid())
@@ -2266,7 +2263,7 @@ async fn t20_causation_id_propagation_across_boundaries() {
 
     // Insert decision (root — no causation_id)
     sqlx::query(
-        r#"INSERT INTO viryaos_autopilot_decisions
+        r#"INSERT INTO autopilot_decisions
            (id, workspace_id, decision_key, context, subject_kind, subject_id,
             decision_kind, confidence_basis_points, disposition, reason,
             input_snapshot, policy_snapshot, recommendation, trace_id)
@@ -2285,7 +2282,7 @@ async fn t20_causation_id_propagation_across_boundaries() {
 
     // Insert action with causation_id = decision_id
     sqlx::query(
-        r#"INSERT INTO viryaos_autopilot_actions
+        r#"INSERT INTO autopilot_actions
            (id, workspace_id, decision_id, context, action_kind, subject_kind,
             subject_id, idempotency_key, payload, status, approved_at, available_at,
             finished_at, trace_id, causation_id)
@@ -2321,7 +2318,7 @@ async fn t20_causation_id_propagation_across_boundaries() {
 
     // Verify: action.causation_id = decision_id
     let action_causation: Option<uuid::Uuid> =
-        sqlx::query_scalar("SELECT causation_id FROM viryaos_autopilot_actions WHERE id = $1")
+        sqlx::query_scalar("SELECT causation_id FROM autopilot_actions WHERE id = $1")
             .bind(action_id)
             .fetch_one(&f.pool)
             .await
@@ -2350,7 +2347,7 @@ async fn t20_causation_id_propagation_across_boundaries() {
 
     // Verify: ledger has causation_id propagated
     let ledger_causation: Option<uuid::Uuid> =
-        sqlx::query_scalar("SELECT causation_id FROM viryaos_action_ledger WHERE action_id = $1")
+        sqlx::query_scalar("SELECT causation_id FROM action_ledger WHERE action_id = $1")
             .bind(action_id)
             .fetch_one(&f.pool)
             .await
@@ -2395,7 +2392,7 @@ async fn t21_ambiguous_outcome_transitions_action_to_unknown() {
     // Manually transition the action to unknown (simulating what the
     // outbox worker does in finish_delivery).
     sqlx::query(
-        "UPDATE viryaos_autopilot_actions SET status = 'unknown', updated_at = now() \
+        "UPDATE autopilot_actions SET status = 'unknown', updated_at = now() \
          WHERE id = $1 AND status IN ('succeeded', 'processing', 'queued', 'running')",
     )
     .bind(action_id)
@@ -2405,7 +2402,7 @@ async fn t21_ambiguous_outcome_transitions_action_to_unknown() {
 
     // Verify: action status is 'unknown'
     let action_status: String =
-        sqlx::query_scalar("SELECT status FROM viryaos_autopilot_actions WHERE id = $1")
+        sqlx::query_scalar("SELECT status FROM autopilot_actions WHERE id = $1")
             .bind(action_id)
             .fetch_one(&f.pool)
             .await
@@ -2417,7 +2414,7 @@ async fn t21_ambiguous_outcome_transitions_action_to_unknown() {
 
     // Verify: ledger state is UNKNOWN
     let ledger_state: String =
-        sqlx::query_scalar("SELECT state FROM viryaos_action_ledger WHERE action_id = $1")
+        sqlx::query_scalar("SELECT state FROM action_ledger WHERE action_id = $1")
             .bind(action_id)
             .fetch_one(&f.pool)
             .await
@@ -2449,7 +2446,7 @@ async fn t22_outbox_reconciliation_resolves_unknown_to_succeeded() {
 
     // Transition action to unknown first
     sqlx::query(
-        "UPDATE viryaos_autopilot_actions SET status = 'unknown', updated_at = now() \
+        "UPDATE autopilot_actions SET status = 'unknown', updated_at = now() \
          WHERE id = $1 AND status = 'succeeded'",
     )
     .bind(action_id)
@@ -2474,7 +2471,7 @@ async fn t22_outbox_reconciliation_resolves_unknown_to_succeeded() {
     .expect("insert delivered outbox event");
 
     // Run the SQL reconciliation function
-    let result: String = sqlx::query_scalar("SELECT viryaos_action_ledger_reconcile($1)")
+    let result: String = sqlx::query_scalar("SELECT action_ledger_reconcile($1)")
         .bind(action_id)
         .fetch_one(&f.pool)
         .await
@@ -2508,7 +2505,7 @@ async fn t23_outbox_reconciliation_stays_unknown_for_ambiguous_dead() {
 
     // Transition action to unknown first
     sqlx::query(
-        "UPDATE viryaos_autopilot_actions SET status = 'unknown', updated_at = now() \
+        "UPDATE autopilot_actions SET status = 'unknown', updated_at = now() \
          WHERE id = $1 AND status = 'succeeded'",
     )
     .bind(action_id)
@@ -2533,7 +2530,7 @@ async fn t23_outbox_reconciliation_stays_unknown_for_ambiguous_dead() {
     .expect("insert dead outbox event");
 
     // Run the SQL reconciliation function
-    let result: String = sqlx::query_scalar("SELECT viryaos_action_ledger_reconcile($1)")
+    let result: String = sqlx::query_scalar("SELECT action_ledger_reconcile($1)")
         .bind(action_id)
         .fetch_one(&f.pool)
         .await
@@ -2566,7 +2563,7 @@ async fn t24_outbox_reconciliation_resolves_unknown_to_failed_for_permanent() {
 
     // Transition action to unknown first
     sqlx::query(
-        "UPDATE viryaos_autopilot_actions SET status = 'unknown', updated_at = now() \
+        "UPDATE autopilot_actions SET status = 'unknown', updated_at = now() \
          WHERE id = $1 AND status = 'succeeded'",
     )
     .bind(action_id)
@@ -2591,7 +2588,7 @@ async fn t24_outbox_reconciliation_resolves_unknown_to_failed_for_permanent() {
     .expect("insert dead outbox event");
 
     // Run the SQL reconciliation function
-    let result: String = sqlx::query_scalar("SELECT viryaos_action_ledger_reconcile($1)")
+    let result: String = sqlx::query_scalar("SELECT action_ledger_reconcile($1)")
         .bind(action_id)
         .fetch_one(&f.pool)
         .await
@@ -2627,7 +2624,7 @@ async fn insert_executor_action_with_assignment(
     let fan_id = uuid::Uuid::now_v7();
 
     sqlx::query(
-        r#"INSERT INTO viryaos_autopilot_decisions
+        r#"INSERT INTO autopilot_decisions
            (id, workspace_id, decision_key, context, subject_kind, subject_id,
             decision_kind, confidence_basis_points, disposition, reason,
             input_snapshot, policy_snapshot, recommendation, trace_id)
@@ -2650,7 +2647,7 @@ async fn insert_executor_action_with_assignment(
         "template_key": "test"
     });
     sqlx::query(
-        r#"INSERT INTO viryaos_autopilot_actions
+        r#"INSERT INTO autopilot_actions
            (id, workspace_id, decision_id, context, action_kind, subject_kind,
             subject_id, idempotency_key, payload, status, approved_at, available_at,
             finished_at, trace_id)
@@ -2673,7 +2670,7 @@ async fn insert_executor_action_with_assignment(
     let experiment_uuid = uuid::Uuid::now_v7();
     insert_experiment_design(pool, workspace_id, experiment_uuid).await;
     sqlx::query(
-        r#"INSERT INTO viryaos_experiment_assignments
+        r#"INSERT INTO experiment_assignments
            (workspace_id, id, experiment_uuid, unit_id, unit_kind,
             arm, intended_template_id, propensity, prediction, context, strategy,
             eligibility_criteria, selection_context, interference_policy,
@@ -2713,7 +2710,7 @@ async fn insert_executor_action_with_assignment(
     .await
     .expect("insert outbox event");
     sqlx::query(
-        r#"INSERT INTO viryaos_autopilot_action_emissions
+        r#"INSERT INTO autopilot_action_emissions
            (workspace_id, action_id, emission_key, outbox_event_id, emitted_at)
            VALUES ($1, $2, $3, $4, $5)"#,
     )
@@ -2733,7 +2730,7 @@ async fn insert_executor_action_with_assignment(
 async fn insert_executor_instance(pool: &sqlx::PgPool, workspace_id: WorkspaceId) {
     let now = OffsetDateTime::now_utc();
     sqlx::query(
-        r#"INSERT INTO viryaos_executor_instances
+        r#"INSERT INTO executor_instances
            (workspace_id, executor_id, version, manifest_sha, observed_at, expires_at)
            VALUES ($1,'test-executor','test','test-manifest',$2,$3)"#,
     )
@@ -2744,7 +2741,7 @@ async fn insert_executor_instance(pool: &sqlx::PgPool, workspace_id: WorkspaceId
     .await
     .expect("insert executor instance");
     sqlx::query(
-        r#"INSERT INTO viryaos_executor_capabilities
+        r#"INSERT INTO executor_capabilities
            (workspace_id, executor_id, capability, capability_version, observed_at, expires_at)
            VALUES ($1,'test-executor','fan.lifecycle.message','1',$2,$3)"#,
     )
@@ -2774,7 +2771,7 @@ async fn t25a_unknown_plus_success_receipt_resolves_both() {
 
     // Transition action to unknown (simulating gap detection).
     sqlx::query(
-        "UPDATE viryaos_autopilot_actions SET status = 'unknown', finished_at = NULL, updated_at = now() \
+        "UPDATE autopilot_actions SET status = 'unknown', finished_at = NULL, updated_at = now() \
          WHERE id = $1 AND status = 'succeeded'",
     )
     .bind(action_id)
@@ -2818,7 +2815,7 @@ async fn t25a_unknown_plus_success_receipt_resolves_both() {
 
     // Verify: action resolved to succeeded.
     let action_status: String =
-        sqlx::query_scalar("SELECT status FROM viryaos_autopilot_actions WHERE id = $1")
+        sqlx::query_scalar("SELECT status FROM autopilot_actions WHERE id = $1")
             .bind(action_id)
             .fetch_one(&f.pool)
             .await
@@ -2830,7 +2827,7 @@ async fn t25a_unknown_plus_success_receipt_resolves_both() {
 
     // Verify: assignment resolved to executed.
     let exec_status: String = sqlx::query_scalar(
-        "SELECT execution_status FROM viryaos_experiment_assignments WHERE action_id = $1",
+        "SELECT execution_status FROM experiment_assignments WHERE action_id = $1",
     )
     .bind(action_id)
     .fetch_one(&f.pool)
@@ -2860,7 +2857,7 @@ async fn t25b_unknown_plus_failure_receipt_resolves_both() {
 
     // Transition action to unknown.
     sqlx::query(
-        "UPDATE viryaos_autopilot_actions SET status = 'unknown', finished_at = NULL, updated_at = now() \
+        "UPDATE autopilot_actions SET status = 'unknown', finished_at = NULL, updated_at = now() \
          WHERE id = $1 AND status = 'succeeded'",
     )
     .bind(action_id)
@@ -2901,7 +2898,7 @@ async fn t25b_unknown_plus_failure_receipt_resolves_both() {
         .expect("record failure receipt");
 
     let action_status: String =
-        sqlx::query_scalar("SELECT status FROM viryaos_autopilot_actions WHERE id = $1")
+        sqlx::query_scalar("SELECT status FROM autopilot_actions WHERE id = $1")
             .bind(action_id)
             .fetch_one(&f.pool)
             .await
@@ -2909,7 +2906,7 @@ async fn t25b_unknown_plus_failure_receipt_resolves_both() {
     assert_eq!(action_status, "failed");
 
     let exec_status: String = sqlx::query_scalar(
-        "SELECT execution_status FROM viryaos_experiment_assignments WHERE action_id = $1",
+        "SELECT execution_status FROM experiment_assignments WHERE action_id = $1",
     )
     .bind(action_id)
     .fetch_one(&f.pool)
@@ -2979,7 +2976,7 @@ async fn t25c_duplicate_success_receipt_is_idempotent() {
 
     // Verify: no state regression.
     let action_status: String =
-        sqlx::query_scalar("SELECT status FROM viryaos_autopilot_actions WHERE id = $1")
+        sqlx::query_scalar("SELECT status FROM autopilot_actions WHERE id = $1")
             .bind(action_id)
             .fetch_one(&f.pool)
             .await
@@ -2987,7 +2984,7 @@ async fn t25c_duplicate_success_receipt_is_idempotent() {
     assert_eq!(action_status, "succeeded");
 
     let exec_status: String = sqlx::query_scalar(
-        "SELECT execution_status FROM viryaos_experiment_assignments WHERE action_id = $1",
+        "SELECT execution_status FROM experiment_assignments WHERE action_id = $1",
     )
     .bind(action_id)
     .fetch_one(&f.pool)
@@ -2997,7 +2994,7 @@ async fn t25c_duplicate_success_receipt_is_idempotent() {
 
     // Verify: only one receipt row.
     let receipt_count: i64 =
-        sqlx::query_scalar("SELECT count(*)::bigint FROM viryaos_autopilot_execution_reports WHERE workspace_id = $1 AND action_id = $2")
+        sqlx::query_scalar("SELECT count(*)::bigint FROM autopilot_execution_reports WHERE workspace_id = $1 AND action_id = $2")
             .bind(f.workspace_id.into_uuid())
             .bind(action_id)
             .fetch_one(&f.pool)
@@ -3067,7 +3064,7 @@ async fn t25d_duplicate_failure_receipt_is_idempotent() {
     assert!(second.replayed);
 
     let action_status: String =
-        sqlx::query_scalar("SELECT status FROM viryaos_autopilot_actions WHERE id = $1")
+        sqlx::query_scalar("SELECT status FROM autopilot_actions WHERE id = $1")
             .bind(action_id)
             .fetch_one(&f.pool)
             .await
@@ -3075,7 +3072,7 @@ async fn t25d_duplicate_failure_receipt_is_idempotent() {
     assert_eq!(action_status, "failed");
 
     let exec_status: String = sqlx::query_scalar(
-        "SELECT execution_status FROM viryaos_experiment_assignments WHERE action_id = $1",
+        "SELECT execution_status FROM experiment_assignments WHERE action_id = $1",
     )
     .bind(action_id)
     .fetch_one(&f.pool)
@@ -3102,7 +3099,7 @@ async fn t25e_late_success_after_unknown_resolves_correctly() {
 
     // Simulate gap detection: action → unknown, assignment → unknown.
     sqlx::query(
-        "UPDATE viryaos_autopilot_actions SET status = 'unknown', finished_at = NULL, updated_at = now() \
+        "UPDATE autopilot_actions SET status = 'unknown', finished_at = NULL, updated_at = now() \
          WHERE id = $1 AND status = 'succeeded'",
     )
     .bind(action_id)
@@ -3144,7 +3141,7 @@ async fn t25e_late_success_after_unknown_resolves_correctly() {
         .expect("late success receipt");
 
     let action_status: String =
-        sqlx::query_scalar("SELECT status FROM viryaos_autopilot_actions WHERE id = $1")
+        sqlx::query_scalar("SELECT status FROM autopilot_actions WHERE id = $1")
             .bind(action_id)
             .fetch_one(&f.pool)
             .await
@@ -3155,7 +3152,7 @@ async fn t25e_late_success_after_unknown_resolves_correctly() {
     );
 
     let exec_status: String = sqlx::query_scalar(
-        "SELECT execution_status FROM viryaos_experiment_assignments WHERE action_id = $1",
+        "SELECT execution_status FROM experiment_assignments WHERE action_id = $1",
     )
     .bind(action_id)
     .fetch_one(&f.pool)
@@ -3184,7 +3181,7 @@ async fn t25f_late_failure_after_unknown_resolves_correctly() {
     .await;
 
     sqlx::query(
-        "UPDATE viryaos_autopilot_actions SET status = 'unknown', finished_at = NULL, updated_at = now() \
+        "UPDATE autopilot_actions SET status = 'unknown', finished_at = NULL, updated_at = now() \
          WHERE id = $1 AND status = 'succeeded'",
     )
     .bind(action_id)
@@ -3225,7 +3222,7 @@ async fn t25f_late_failure_after_unknown_resolves_correctly() {
         .expect("late failure receipt");
 
     let action_status: String =
-        sqlx::query_scalar("SELECT status FROM viryaos_autopilot_actions WHERE id = $1")
+        sqlx::query_scalar("SELECT status FROM autopilot_actions WHERE id = $1")
             .bind(action_id)
             .fetch_one(&f.pool)
             .await
@@ -3236,7 +3233,7 @@ async fn t25f_late_failure_after_unknown_resolves_correctly() {
     );
 
     let exec_status: String = sqlx::query_scalar(
-        "SELECT execution_status FROM viryaos_experiment_assignments WHERE action_id = $1",
+        "SELECT execution_status FROM experiment_assignments WHERE action_id = $1",
     )
     .bind(action_id)
     .fetch_one(&f.pool)
@@ -3300,8 +3297,8 @@ async fn t25g_resolved_terminal_cannot_regress() {
     // Verify state after success.
     let (action_status, exec_status): (String, String) = sqlx::query_as(
         "SELECT a.status, ea.execution_status \
-         FROM viryaos_autopilot_actions a \
-         JOIN viryaos_experiment_assignments ea ON ea.action_id = a.id \
+         FROM autopilot_actions a \
+         JOIN experiment_assignments ea ON ea.action_id = a.id \
          WHERE a.id = $1",
     )
     .bind(action_id)
@@ -3334,8 +3331,8 @@ async fn t25g_resolved_terminal_cannot_regress() {
     // Verify: state must NOT regress.
     let (action_status_after, exec_status_after): (String, String) = sqlx::query_as(
         "SELECT a.status, ea.execution_status \
-         FROM viryaos_autopilot_actions a \
-         JOIN viryaos_experiment_assignments ea ON ea.action_id = a.id \
+         FROM autopilot_actions a \
+         JOIN experiment_assignments ea ON ea.action_id = a.id \
          WHERE a.id = $1",
     )
     .bind(action_id)
@@ -3387,7 +3384,7 @@ async fn t25h_no_split_brain_after_commit() {
 
         // Transition action to unknown.
         sqlx::query(
-            "UPDATE viryaos_autopilot_actions SET status = 'unknown', finished_at = NULL, updated_at = now() \
+            "UPDATE autopilot_actions SET status = 'unknown', finished_at = NULL, updated_at = now() \
              WHERE id = $1 AND status = 'succeeded'",
         )
         .bind(action_id)
@@ -3438,8 +3435,8 @@ async fn t25h_no_split_brain_after_commit() {
         // Verify: action and assignment agree.
         let (action_status, exec_status): (String, String) = sqlx::query_as(
             "SELECT a.status, ea.execution_status \
-             FROM viryaos_autopilot_actions a \
-             JOIN viryaos_experiment_assignments ea ON ea.action_id = a.id \
+             FROM autopilot_actions a \
+             JOIN experiment_assignments ea ON ea.action_id = a.id \
              WHERE a.id = $1",
         )
         .bind(action_id)
@@ -3480,7 +3477,7 @@ async fn insert_growth_evidence_row(
     resolved: bool,
 ) {
     sqlx::query(
-        r#"INSERT INTO viryaos_growth_evidence
+        r#"INSERT INTO growth_evidence
            (workspace_id, action_id, opportunity_id, timestamp, audience,
             recipient_id, channel, estimated_reach, treatment, propensity,
             observed_fans, observed_incremental_fans, durable_fans_30d,
@@ -3515,7 +3512,7 @@ async fn insert_assignment_for_evidence_test(
     let experiment_uuid = uuid::Uuid::now_v7();
     insert_experiment_design(pool, workspace_id, experiment_uuid).await;
     sqlx::query(
-        r#"INSERT INTO viryaos_experiment_assignments
+        r#"INSERT INTO experiment_assignments
            (workspace_id, id, experiment_uuid, unit_id, unit_kind,
             arm, intended_template_id, propensity, prediction, context, strategy,
             eligibility_criteria, selection_context, interference_policy,
@@ -3538,7 +3535,7 @@ async fn insert_assignment_for_evidence_test(
 
     // Same guard `insert_executor_action_with_assignment` already documents:
     // `record_execution_report` inserts its receipt only
-    // `WHERE EXISTS (SELECT 1 FROM viryaos_autopilot_action_emissions ...)`,
+    // `WHERE EXISTS (SELECT 1 FROM autopilot_action_emissions ...)`,
     // because reporting the outcome of something never dispatched is
     // meaningless. This helper was never given an emission, so every test that
     // reports an outcome through it failed with `NotFound` — the repository was
@@ -3554,7 +3551,7 @@ async fn insert_assignment_for_evidence_test(
     .await
     .expect("insert outbox event");
     sqlx::query(
-        r#"INSERT INTO viryaos_autopilot_action_emissions
+        r#"INSERT INTO autopilot_action_emissions
            (workspace_id, action_id, emission_key, outbox_event_id, emitted_at)
            VALUES ($1, $2, $3, $4, $5)"#,
     )
@@ -3689,7 +3686,7 @@ async fn t26_concurrent_resolution_race_one_winner() {
 
     // Set the action to 'unknown' (simulating gap detection).
     sqlx::query(
-        "UPDATE viryaos_autopilot_actions SET status = 'unknown', finished_at = NULL \
+        "UPDATE autopilot_actions SET status = 'unknown', finished_at = NULL \
          WHERE id = $1 AND workspace_id = $2",
     )
     .bind(action_id)
@@ -3736,7 +3733,7 @@ async fn t26_concurrent_resolution_race_one_winner() {
 
     // Verify: action is succeeded (not duplicated, not corrupted).
     let final_status: String =
-        sqlx::query_scalar("SELECT status FROM viryaos_autopilot_actions WHERE id = $1")
+        sqlx::query_scalar("SELECT status FROM autopilot_actions WHERE id = $1")
             .bind(action_id)
             .fetch_one(&f.pool)
             .await
@@ -3748,7 +3745,7 @@ async fn t26_concurrent_resolution_race_one_winner() {
 
     // Verify: exactly one assignment transition (dispatched → executed).
     let exec_status: String = sqlx::query_scalar(
-        "SELECT execution_status FROM viryaos_experiment_assignments \
+        "SELECT execution_status FROM experiment_assignments \
                             WHERE workspace_id = $1 AND action_id = $2",
     )
     .bind(f.workspace_id.into_uuid())
@@ -3773,7 +3770,7 @@ async fn t26_concurrent_resolution_race_one_winner() {
     // for one receipt key contradicts the idempotency contract the suite
     // relies on elsewhere. Two genuine observations need two receipt keys.
     let report_count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM viryaos_autopilot_execution_reports \
+        "SELECT COUNT(*) FROM autopilot_execution_reports \
          WHERE workspace_id = $1 AND action_id = $2",
     )
     .bind(f.workspace_id.into_uuid())
@@ -3804,7 +3801,7 @@ async fn t27_contradictory_provider_facts_no_state_change() {
 
     // Set the action to 'failed' (definitive failure).
     sqlx::query(
-        "UPDATE viryaos_autopilot_actions SET status = 'failed', finished_at = now() \
+        "UPDATE autopilot_actions SET status = 'failed', finished_at = now() \
          WHERE id = $1 AND workspace_id = $2",
     )
     .bind(action_id)
@@ -3850,7 +3847,7 @@ async fn t27_contradictory_provider_facts_no_state_change() {
 
     // Verify: action is STILL failed — not revived.
     let final_status: String =
-        sqlx::query_scalar("SELECT status FROM viryaos_autopilot_actions WHERE id = $1")
+        sqlx::query_scalar("SELECT status FROM autopilot_actions WHERE id = $1")
             .bind(action_id)
             .fetch_one(&f.pool)
             .await
@@ -3862,7 +3859,7 @@ async fn t27_contradictory_provider_facts_no_state_change() {
 
     // Verify: assignment is STILL failed — not revived.
     let exec_status: String = sqlx::query_scalar(
-        "SELECT execution_status FROM viryaos_experiment_assignments \
+        "SELECT execution_status FROM experiment_assignments \
                             WHERE workspace_id = $1 AND action_id = $2",
     )
     .bind(f.workspace_id.into_uuid())
@@ -3952,7 +3949,7 @@ async fn north_star_a_success_lost_unknown_recovery_one_effect() {
         .expect("success report");
 
     // `record_execution_report` files the executor's receipt; it does not move
-    // `viryaos_autopilot_actions.status`, which the dispatcher and the
+    // `autopilot_actions.status`, which the dispatcher and the
     // reconciliation sweep own. This assertion used to read `succeeded` only
     // because the fixture inserted the action already succeeded — it was true
     // before the report was ever made. Assert what the report actually did,
@@ -3960,7 +3957,7 @@ async fn north_star_a_success_lost_unknown_recovery_one_effect() {
     // confirmation-loss step below acts on a real success rather than a
     // fixture constant.
     let receipt_status: String = sqlx::query_scalar(
-        "SELECT status FROM viryaos_autopilot_execution_claims \
+        "SELECT status FROM autopilot_execution_claims \
          WHERE workspace_id = $1 AND action_id = $2",
     )
     .bind(f.workspace_id.into_uuid())
@@ -3975,7 +3972,7 @@ async fn north_star_a_success_lost_unknown_recovery_one_effect() {
     mark_action_succeeded(&f.pool, action_id).await;
 
     let status_after_success: String =
-        sqlx::query_scalar("SELECT status FROM viryaos_autopilot_actions WHERE id = $1")
+        sqlx::query_scalar("SELECT status FROM autopilot_actions WHERE id = $1")
             .bind(action_id)
             .fetch_one(&f.pool)
             .await
@@ -3984,7 +3981,7 @@ async fn north_star_a_success_lost_unknown_recovery_one_effect() {
 
     // 3. Confirmation lost — community executor crash marks it unknown.
     sqlx::query(
-        "UPDATE viryaos_autopilot_actions SET status = 'unknown', finished_at = NULL \
+        "UPDATE autopilot_actions SET status = 'unknown', finished_at = NULL \
          WHERE id = $1 AND workspace_id = $2 AND status IN ('succeeded', 'processing')",
     )
     .bind(action_id)
@@ -3994,7 +3991,7 @@ async fn north_star_a_success_lost_unknown_recovery_one_effect() {
     .expect("confirmation lost");
 
     sqlx::query(
-        "UPDATE viryaos_experiment_assignments SET execution_status = 'unknown' \
+        "UPDATE experiment_assignments SET execution_status = 'unknown' \
          WHERE workspace_id = $1 AND action_id = $2 AND execution_status = 'executed'",
     )
     .bind(f.workspace_id.into_uuid())
@@ -4004,7 +4001,7 @@ async fn north_star_a_success_lost_unknown_recovery_one_effect() {
     .expect("assignment to unknown");
 
     let status_after_loss: String =
-        sqlx::query_scalar("SELECT status FROM viryaos_autopilot_actions WHERE id = $1")
+        sqlx::query_scalar("SELECT status FROM autopilot_actions WHERE id = $1")
             .bind(action_id)
             .fetch_one(&f.pool)
             .await
@@ -4023,7 +4020,7 @@ async fn north_star_a_success_lost_unknown_recovery_one_effect() {
     .await;
 
     // Run the SQL reconciliation function (same as T15 uses).
-    let result: String = sqlx::query_scalar("SELECT viryaos_action_ledger_reconcile($1)")
+    let result: String = sqlx::query_scalar("SELECT action_ledger_reconcile($1)")
         .bind(action_id)
         .fetch_one(&f.pool)
         .await
@@ -4035,7 +4032,7 @@ async fn north_star_a_success_lost_unknown_recovery_one_effect() {
 
     // 5. Assert: action recovered to succeeded.
     let status_after_recovery: String =
-        sqlx::query_scalar("SELECT status FROM viryaos_autopilot_actions WHERE id = $1")
+        sqlx::query_scalar("SELECT status FROM autopilot_actions WHERE id = $1")
             .bind(action_id)
             .fetch_one(&f.pool)
             .await
@@ -4047,7 +4044,7 @@ async fn north_star_a_success_lost_unknown_recovery_one_effect() {
 
     // 6. Assert: exactly one evidence record (no duplication during loss/recovery).
     let evidence_count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM viryaos_growth_evidence \
+        "SELECT COUNT(*) FROM growth_evidence \
          WHERE workspace_id = $1 AND action_id = $2",
     )
     .bind(f.workspace_id.into_uuid())
@@ -4062,7 +4059,7 @@ async fn north_star_a_success_lost_unknown_recovery_one_effect() {
 
     // 7. Assert: exactly one episode.
     let episode_count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM viryaos_growth_episodes \
+        "SELECT COUNT(*) FROM growth_episodes \
          WHERE workspace_id = $1 AND action_id = $2",
     )
     .bind(f.workspace_id.into_uuid())
@@ -4074,7 +4071,7 @@ async fn north_star_a_success_lost_unknown_recovery_one_effect() {
 
     // 8. Assert: trace_id preserved throughout.
     let final_trace: Option<uuid::Uuid> =
-        sqlx::query_scalar("SELECT trace_id FROM viryaos_autopilot_actions WHERE id = $1")
+        sqlx::query_scalar("SELECT trace_id FROM autopilot_actions WHERE id = $1")
             .bind(action_id)
             .fetch_one(&f.pool)
             .await
@@ -4132,7 +4129,7 @@ async fn north_star_b_unknown_definitive_failure_safe_retry_one_effect() {
 
     // 2. Confirmation lost — action goes to unknown.
     sqlx::query(
-        "UPDATE viryaos_autopilot_actions SET status = 'unknown', finished_at = NULL \
+        "UPDATE autopilot_actions SET status = 'unknown', finished_at = NULL \
          WHERE id = $1 AND workspace_id = $2",
     )
     .bind(action_id_1)
@@ -4142,7 +4139,7 @@ async fn north_star_b_unknown_definitive_failure_safe_retry_one_effect() {
     .expect("set unknown");
 
     sqlx::query(
-        "UPDATE viryaos_experiment_assignments SET execution_status = 'unknown' \
+        "UPDATE experiment_assignments SET execution_status = 'unknown' \
          WHERE workspace_id = $1 AND action_id = $2",
     )
     .bind(f.workspace_id.into_uuid())
@@ -4173,7 +4170,7 @@ async fn north_star_b_unknown_definitive_failure_safe_retry_one_effect() {
     .expect("set error message");
 
     // 4. Reconciliation resolves UNKNOWN → FAILED via SQL function.
-    let result: String = sqlx::query_scalar("SELECT viryaos_action_ledger_reconcile($1)")
+    let result: String = sqlx::query_scalar("SELECT action_ledger_reconcile($1)")
         .bind(action_id_1)
         .fetch_one(&f.pool)
         .await
@@ -4185,7 +4182,7 @@ async fn north_star_b_unknown_definitive_failure_safe_retry_one_effect() {
 
     // 5. Assert: action is failed.
     let status_after_fail: String =
-        sqlx::query_scalar("SELECT status FROM viryaos_autopilot_actions WHERE id = $1")
+        sqlx::query_scalar("SELECT status FROM autopilot_actions WHERE id = $1")
             .bind(action_id_1)
             .fetch_one(&f.pool)
             .await
@@ -4246,7 +4243,7 @@ async fn north_star_b_unknown_definitive_failure_safe_retry_one_effect() {
 
     // 7. Assert: original action is STILL failed (not revived by retry).
     let original_status: String =
-        sqlx::query_scalar("SELECT status FROM viryaos_autopilot_actions WHERE id = $1")
+        sqlx::query_scalar("SELECT status FROM autopilot_actions WHERE id = $1")
             .bind(action_id_1)
             .fetch_one(&f.pool)
             .await
@@ -4258,7 +4255,7 @@ async fn north_star_b_unknown_definitive_failure_safe_retry_one_effect() {
 
     // 8. Assert: retry action is succeeded.
     let retry_status: String =
-        sqlx::query_scalar("SELECT status FROM viryaos_autopilot_actions WHERE id = $1")
+        sqlx::query_scalar("SELECT status FROM autopilot_actions WHERE id = $1")
             .bind(action_id_2)
             .fetch_one(&f.pool)
             .await
@@ -4267,7 +4264,7 @@ async fn north_star_b_unknown_definitive_failure_safe_retry_one_effect() {
 
     // 9. Assert: two evidence records (one per action), no duplication.
     let evidence_count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM viryaos_growth_evidence \
+        "SELECT COUNT(*) FROM growth_evidence \
          WHERE workspace_id = $1 AND action_id IN ($2, $3)",
     )
     .bind(f.workspace_id.into_uuid())
@@ -4283,7 +4280,7 @@ async fn north_star_b_unknown_definitive_failure_safe_retry_one_effect() {
 
     // 10. Assert: two episodes (one per action).
     let episode_count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM viryaos_growth_episodes \
+        "SELECT COUNT(*) FROM growth_episodes \
          WHERE workspace_id = $1 AND action_id IN ($2, $3)",
     )
     .bind(f.workspace_id.into_uuid())
@@ -4314,7 +4311,7 @@ async fn t28a_first_assignment_for_action_succeeds() {
     .await;
 
     let count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM viryaos_experiment_assignments \
+        "SELECT COUNT(*) FROM experiment_assignments \
          WHERE workspace_id = $1 AND action_id = $2",
     )
     .bind(f.workspace_id.into_uuid())
@@ -4346,7 +4343,7 @@ async fn t28b_second_assignment_for_same_action_fails() {
     // action_id must fail due to the partial unique index.
     let experiment_uuid_2 = uuid::Uuid::now_v7();
     let result = sqlx::query(
-        r#"INSERT INTO viryaos_experiment_assignments
+        r#"INSERT INTO experiment_assignments
            (id, workspace_id, experiment_uuid, unit_id, unit_kind,
             arm, intended_template_id, propensity, prediction, context, strategy,
             eligibility_criteria, selection_context, interference_policy,
@@ -4378,7 +4375,7 @@ async fn t28b_second_assignment_for_same_action_fails() {
 }
 
 /// T28c: An action id belongs to exactly one workspace — the primary key
-/// on `viryaos_autopilot_actions.id` makes cross-workspace reuse impossible.
+/// on `autopilot_actions.id` makes cross-workspace reuse impossible.
 #[tokio::test]
 #[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn t28c_action_id_cannot_repeat_across_workspaces() {
@@ -4405,10 +4402,10 @@ async fn t28c_action_id_cannot_repeat_across_workspaces() {
         .expect("insert workspace 2");
 
     // Reusing the id in a second workspace must be refused by
-    // `viryaos_autopilot_actions_pkey`, which is on `id` alone.
+    // `autopilot_actions_pkey`, which is on `id` alone.
     let decision_id_2 = uuid::Uuid::now_v7();
     sqlx::query(
-        r#"INSERT INTO viryaos_autopilot_decisions
+        r#"INSERT INTO autopilot_decisions
            (id, workspace_id, decision_key, context, subject_kind, subject_id,
             decision_kind, confidence_basis_points, disposition, reason,
             input_snapshot, policy_snapshot, recommendation, trace_id)
@@ -4425,7 +4422,7 @@ async fn t28c_action_id_cannot_repeat_across_workspaces() {
     .expect("insert decision in workspace 2");
 
     let repeated = sqlx::query(
-        r#"INSERT INTO viryaos_autopilot_actions
+        r#"INSERT INTO autopilot_actions
            (id, workspace_id, decision_id, context, action_kind, subject_kind,
             subject_id, idempotency_key, payload, status)
            VALUES ($1,$2,$3,'growth_metrics','signal.push.request','target_community',
@@ -4450,13 +4447,12 @@ async fn t28c_action_id_cannot_repeat_across_workspaces() {
     // arises. The original test asserted the opposite — two workspaces sharing
     // one action_id — which the primary key has never permitted, so it could
     // not construct its own premise.
-    let count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM viryaos_experiment_assignments WHERE action_id = $1",
-    )
-    .bind(action_id)
-    .fetch_one(&f.pool)
-    .await
-    .expect("count");
+    let count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM experiment_assignments WHERE action_id = $1")
+            .bind(action_id)
+            .fetch_one(&f.pool)
+            .await
+            .expect("count");
     assert_eq!(count, 1, "an action id belongs to exactly one workspace");
 }
 
@@ -4474,7 +4470,7 @@ async fn t28d_null_action_id_remains_allowed() {
     // Insert two assignments with NULL action_id — both should succeed.
     for unit in ["r/t28d-1", "r/t28d-2"] {
         sqlx::query(
-            r#"INSERT INTO viryaos_experiment_assignments
+            r#"INSERT INTO experiment_assignments
                (id, workspace_id, experiment_uuid, unit_id, unit_kind,
                 arm, intended_template_id, propensity, prediction, context, strategy,
                 eligibility_criteria, selection_context, interference_policy,
@@ -4495,7 +4491,7 @@ async fn t28d_null_action_id_remains_allowed() {
     }
 
     let count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM viryaos_experiment_assignments \
+        "SELECT COUNT(*) FROM experiment_assignments \
          WHERE workspace_id = $1 AND action_id IS NULL",
     )
     .bind(f.workspace_id.into_uuid())
@@ -4530,7 +4526,7 @@ async fn t28e_experiment_unit_uniqueness_remains_intact() {
     // with a DIFFERENT action_id must still fail.
     let action_id_2 = uuid::Uuid::now_v7();
     let result = sqlx::query(
-        r#"INSERT INTO viryaos_experiment_assignments
+        r#"INSERT INTO experiment_assignments
            (id, workspace_id, experiment_uuid, unit_id, unit_kind,
             arm, intended_template_id, propensity, prediction, context, strategy,
             eligibility_criteria, selection_context, interference_policy,

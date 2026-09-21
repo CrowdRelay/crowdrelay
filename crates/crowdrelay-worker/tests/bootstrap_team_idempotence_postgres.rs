@@ -3,7 +3,7 @@
 //! `bootstrap_team_operations` runs inside `setup`, and `scripts/deploy.sh` runs
 //! `setup` on every release before either long-running service starts. That
 //! makes it an unattended periodic writer over `workspace_members` and
-//! `viryaos_team_profiles`.
+//! `team_profiles`.
 //!
 //! Its conflict clauses used to set `status = 'active'` and `active = true`
 //! unconditionally, so a disablement lasted exactly until the next release.
@@ -46,7 +46,7 @@ async fn member_state(pool: &PgPool, email: &str) -> Result<MemberState> {
     let row = sqlx::query(
         "SELECT member.status, profile.active \
          FROM workspace_members AS member \
-         JOIN viryaos_team_profiles AS profile ON profile.member_id = member.id \
+         JOIN team_profiles AS profile ON profile.member_id = member.id \
          WHERE member.normalized_email = $1",
     )
     .bind(email)
@@ -108,7 +108,7 @@ async fn disablement_survives(database: &PgPool) -> Result<()> {
         .await
         .context("disable member")?;
     sqlx::query(
-        "UPDATE viryaos_team_profiles SET active = false WHERE member_id = \
+        "UPDATE team_profiles SET active = false WHERE member_id = \
          (SELECT id FROM workspace_members WHERE normalized_email = $1)",
     )
     .bind(email)
@@ -134,7 +134,7 @@ async fn disablement_survives(database: &PgPool) -> Result<()> {
     // member key stay current, and a disabled member is still a known one.
     let refreshed = sqlx::query(
         "SELECT profile.member_key, cardinality(profile.skills) AS skill_count \
-         FROM viryaos_team_profiles AS profile \
+         FROM team_profiles AS profile \
          JOIN workspace_members AS member ON member.id = profile.member_id \
          WHERE member.normalized_email = $1",
     )

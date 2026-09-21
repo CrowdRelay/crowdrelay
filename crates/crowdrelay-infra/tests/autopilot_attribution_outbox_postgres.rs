@@ -3,7 +3,7 @@
 //! does not retry forever.
 //!
 //! The production failure this pins down ran silently for weeks: two
-//! `viryaos_attribution_requests` rows passed 2,000 attempts each because
+//! `attribution_requests` rows passed 2,000 attempts each because
 //! proportional credit wrote one ledger row per competing action while a
 //! leftover unique index from migration 0167 allowed only one row per
 //! (measurement_id, attribution_version). Every second insert raised
@@ -65,7 +65,7 @@ async fn insert_action(f: &Fixture, dispatched_at: OffsetDateTime) -> uuid::Uuid
     let decision_id = uuid::Uuid::now_v7();
     let action_id = uuid::Uuid::now_v7();
     sqlx::query(
-        r#"INSERT INTO viryaos_autopilot_decisions
+        r#"INSERT INTO autopilot_decisions
            (id, workspace_id, decision_key, context, subject_kind, subject_id,
             decision_kind, confidence_basis_points, disposition, reason,
             input_snapshot, policy_snapshot, recommendation, trace_id)
@@ -81,7 +81,7 @@ async fn insert_action(f: &Fixture, dispatched_at: OffsetDateTime) -> uuid::Uuid
     .await
     .expect("decision");
     sqlx::query(
-        r#"INSERT INTO viryaos_autopilot_actions
+        r#"INSERT INTO autopilot_actions
            (id, workspace_id, decision_id, context, action_kind, subject_kind,
             subject_id, idempotency_key, payload, status, action_class, finished_at)
            VALUES ($1,$2,$3,'growth_metrics','agent.run.request','target_community',
@@ -107,7 +107,7 @@ async fn insert_treatment_evidence(
     observed_incremental: Option<f64>,
 ) {
     sqlx::query(
-        r#"INSERT INTO viryaos_growth_evidence
+        r#"INSERT INTO growth_evidence
            (workspace_id, action_id, opportunity_id, timestamp, recipient_id,
             channel, estimated_reach, treatment, propensity, converted,
             predicted_fans, predicted_signal_installs, context, evidence_quality,
@@ -156,7 +156,7 @@ async fn credits_for_every_competing_action_land_and_close_the_request() {
     }
     let measurement_id = uuid::Uuid::now_v7();
     sqlx::query(
-        r#"INSERT INTO viryaos_autopilot_measurements
+        r#"INSERT INTO autopilot_measurements
            (id, workspace_id, action_id, measurement_kind, subject_id,
             action_finished_at, baseline_value, due_at, available_at, status,
             finished_at)
@@ -170,7 +170,7 @@ async fn credits_for_every_competing_action_land_and_close_the_request() {
     .await
     .expect("measurement");
     sqlx::query(
-        r#"INSERT INTO viryaos_attribution_requests
+        r#"INSERT INTO attribution_requests
            (workspace_id, measurement_id, action_id, attribution_version)
            VALUES ($1,$2,$3,1)"#,
     )
@@ -188,20 +188,18 @@ async fn credits_for_every_competing_action_land_and_close_the_request() {
         .expect("batch");
 
     assert_eq!(processed, 1);
-    let status: String = sqlx::query_scalar(
-        "SELECT status FROM viryaos_attribution_requests WHERE measurement_id = $1",
-    )
-    .bind(measurement_id)
-    .fetch_one(&f.pool)
-    .await
-    .expect("status");
+    let status: String =
+        sqlx::query_scalar("SELECT status FROM attribution_requests WHERE measurement_id = $1")
+            .bind(measurement_id)
+            .fetch_one(&f.pool)
+            .await
+            .expect("status");
     assert_eq!(status, "done");
-    let credits: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM viryaos_fan_credit_ledger WHERE measurement_id = $1",
-    )
-    .bind(measurement_id)
-    .fetch_one(&f.pool)
-    .await
-    .expect("credits");
+    let credits: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM fan_credit_ledger WHERE measurement_id = $1")
+            .bind(measurement_id)
+            .fetch_one(&f.pool)
+            .await
+            .expect("credits");
     assert_eq!(credits, 2, "every competing action keeps its credit row");
 }

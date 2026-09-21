@@ -9,8 +9,8 @@
 //! The representation feature (`crate::representation`) already answers the
 //! same gates for an `outreach_target` of kind `agent` by joining the
 //! registry row on address. This module is the registry's own path: the
-//! subject is `viryaos_booking_agents.id`, the ledger is
-//! `viryaos_booking_agent_interactions`, and the reply an operator files
+//! subject is `booking_agents.id`, the ledger is
+//! `booking_agent_interactions`, and the reply an operator files
 //! here writes `refused_until` and `do_not_contact` on the row every other
 //! path reads.
 //!
@@ -115,14 +115,14 @@ impl PostgresBookingAgentRepository {
                    agent.contact_verified_at, agent.approached_at,
                    agent.refused_until, agent.version,
                    EXISTS (
-                       SELECT 1 FROM viryaos_autopilot_actions action
+                       SELECT 1 FROM autopilot_actions action
                        WHERE action.workspace_id = agent.workspace_id
                          AND action.context = 'booking_agent'
                          AND action.action_kind = 'booking_agent.approach.request'
                          AND action.subject_id = agent.id
                          AND action.status IN ('awaiting_approval','queued','processing')
                    ) AS approach_pending
-            FROM viryaos_booking_agents AS agent
+            FROM booking_agents AS agent
             WHERE agent.workspace_id = $1
             ORDER BY agent.do_not_contact, NOT agent.active,
                      agent.approached_at ASC NULLS FIRST, agent.name ASC
@@ -189,7 +189,7 @@ impl PostgresBookingAgentRepository {
         // refusal — the refusal below is for a *different* approach to the
         // same agent.
         if let Some((existing, status)) = sqlx::query_as::<_, (Uuid, String)>(
-            "SELECT id, status FROM viryaos_autopilot_actions WHERE workspace_id = $1 AND idempotency_key = $2 AND action_kind = 'booking_agent.approach.request'",
+            "SELECT id, status FROM autopilot_actions WHERE workspace_id = $1 AND idempotency_key = $2 AND action_kind = 'booking_agent.approach.request'",
         )
         .bind(workspace_id)
         .bind(idempotency_key.as_str())
@@ -207,7 +207,7 @@ impl PostgresBookingAgentRepository {
             r#"
             SELECT name, agency, active, do_not_contact, contact_verified_at,
                    approached_at, refused_until, version
-            FROM viryaos_booking_agents
+            FROM booking_agents
             WHERE workspace_id = $1 AND id = $2
             FOR UPDATE
             "#,
@@ -221,7 +221,7 @@ impl PostgresBookingAgentRepository {
         let approach_pending = sqlx::query_scalar::<_, bool>(
             r#"
             SELECT EXISTS (
-                SELECT 1 FROM viryaos_autopilot_actions
+                SELECT 1 FROM autopilot_actions
                 WHERE workspace_id = $1 AND context = 'booking_agent'
                   AND action_kind = 'booking_agent.approach.request'
                   AND subject_id = $2
@@ -235,10 +235,10 @@ impl PostgresBookingAgentRepository {
         .await?;
 
         // The ledger counts beside the registry stamp: a send recorded only
-        // in `viryaos_booking_agent_interactions` still spent the season.
+        // in `booking_agent_interactions` still spent the season.
         let ledger_approach = sqlx::query_scalar::<_, Option<OffsetDateTime>>(
             r#"
-            SELECT max(occurred_at) FROM viryaos_booking_agent_interactions
+            SELECT max(occurred_at) FROM booking_agent_interactions
             WHERE workspace_id = $1 AND agent_id = $2
               AND direction = 'outbound' AND phase = 'approach'
             "#,
@@ -319,7 +319,7 @@ impl PostgresBookingAgentRepository {
         let decision_key = format!("booking_agent.approach:{}", idempotency_key.as_str());
         let decision_id = match sqlx::query_scalar::<_, Uuid>(
             r#"
-            INSERT INTO viryaos_autopilot_decisions (
+            INSERT INTO autopilot_decisions (
                 id, workspace_id, decision_key, context, subject_kind, subject_id,
                 decision_kind, confidence_basis_points, disposition, reason,
                 input_snapshot, policy_snapshot, recommendation, evaluated_at, trace_id
@@ -353,7 +353,7 @@ impl PostgresBookingAgentRepository {
             // the two inserts. Reuse the decision and queue the action it was
             // meant to carry.
             None => sqlx::query_scalar::<_, Uuid>(
-                "SELECT id FROM viryaos_autopilot_decisions WHERE workspace_id = $1 AND decision_key = $2",
+                "SELECT id FROM autopilot_decisions WHERE workspace_id = $1 AND decision_key = $2",
             )
             .bind(workspace_id)
             .bind(&decision_key)
@@ -370,7 +370,7 @@ impl PostgresBookingAgentRepository {
         );
         sqlx::query(
             r#"
-            INSERT INTO viryaos_autopilot_actions (
+            INSERT INTO autopilot_actions (
                 id, workspace_id, decision_id, context, action_kind,
                 subject_kind, subject_id, idempotency_key, payload, status,
                 action_class, approval_expires_at, trace_id, causation_id
@@ -540,7 +540,7 @@ pub(crate) async fn lock_agent_for_execution(
         r#"
         SELECT name, agency, contact_email, active, do_not_contact,
                contact_verified_at, approached_at, refused_until
-        FROM viryaos_booking_agents
+        FROM booking_agents
         WHERE workspace_id = $1 AND id = $2 AND version = $3
         FOR UPDATE
         "#,
@@ -558,7 +558,7 @@ pub(crate) async fn lock_agent_for_execution(
     // later of the two records of the knock.
     let ledger_approach = sqlx::query_scalar::<_, Option<OffsetDateTime>>(
         r#"
-        SELECT max(occurred_at) FROM viryaos_booking_agent_interactions
+        SELECT max(occurred_at) FROM booking_agent_interactions
         WHERE workspace_id = $1 AND agent_id = $2
           AND direction = 'outbound' AND phase = 'approach'
         "#,
@@ -627,7 +627,7 @@ pub(crate) async fn record_approach_sent(
     now: OffsetDateTime,
 ) -> Result<(), crowdrelay_application::RepositoryError> {
     sqlx::query(
-        "UPDATE viryaos_booking_agents SET approached_at = $3, version = version + 1 WHERE workspace_id = $1 AND id = $2",
+        "UPDATE booking_agents SET approached_at = $3, version = version + 1 WHERE workspace_id = $1 AND id = $2",
     )
     .bind(workspace_id.into_uuid())
     .bind(agent_id.into_uuid())
@@ -636,7 +636,7 @@ pub(crate) async fn record_approach_sent(
     .await
     .map_err(map_sqlx)?;
     sqlx::query(
-        r#"INSERT INTO viryaos_booking_agent_interactions
+        r#"INSERT INTO booking_agent_interactions
            (workspace_id, agent_id, direction, phase, disposition, source_key, occurred_at)
            VALUES ($1,$2,'outbound','approach','none',$3,$4)
            ON CONFLICT (workspace_id, agent_id, source_key) DO NOTHING"#,
@@ -649,7 +649,7 @@ pub(crate) async fn record_approach_sent(
     .await
     .map_err(map_sqlx)?;
     sqlx::query(
-        r#"INSERT INTO viryaos_reach_events
+        r#"INSERT INTO reach_events
            (workspace_id, action_id, recipient_kind, recipient_id, channel, template_id, estimated_reach, status, metadata)
            VALUES ($1, $2, 'booking_agent', $3::text, 'email', 'booking_agent_approach', 1, 'sent',
                    jsonb_build_object('kind', 'approach'))

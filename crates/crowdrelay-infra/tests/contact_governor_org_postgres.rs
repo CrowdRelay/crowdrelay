@@ -1,6 +1,6 @@
 //! The contact governor must bind across an organization, not just a workspace.
 //!
-//! `viryaos_contact_governor` is keyed `(workspace_id, normalized_contact)`, and
+//! `contact_governor` is keyed `(workspace_id, normalized_contact)`, and
 //! an act is a workspace: a roster of eight acts is eight workspaces under one
 //! `organizations` row. Keyed that way alone, the same person takes one message
 //! per act per week with every cooldown satisfied, and a `do_not_contact` given
@@ -38,7 +38,7 @@ const TEST_DATABASE_URL_KEY: &str = "CROWDRELAY_TEST_DATABASE_URL";
 const SIBLING_BLOCK: &str = r#"
 SELECT NOT EXISTS (
     SELECT 1
-    FROM viryaos_contact_governor sibling
+    FROM contact_governor sibling
     JOIN workspaces sibling_ws ON sibling_ws.id = sibling.workspace_id
     JOIN workspaces self_ws ON self_ws.id = $1
     WHERE sibling.normalized_contact = $2
@@ -105,7 +105,7 @@ async fn record_contact(
 ) {
     sqlx::query(
         r#"
-        INSERT INTO viryaos_contact_governor (
+        INSERT INTO contact_governor (
             workspace_id, normalized_contact, last_context,
             last_outbound_at, next_contact_after, do_not_contact
         ) VALUES ($1, $2, 'test', $3, $4, $5)
@@ -251,7 +251,7 @@ async fn an_act_does_not_block_itself() {
 fn the_reservation_still_carries_the_sibling_gate() {
     let source = include_str!("../src/autopilot/execution_capabilities.rs");
     for fragment in [
-        "FROM viryaos_contact_governor sibling",
+        "FROM contact_governor sibling",
         "self_ws.organization_id IS NOT NULL",
         "sibling_ws.organization_id = self_ws.organization_id",
         "sibling.do_not_contact OR sibling.next_contact_after",

@@ -60,7 +60,7 @@ pub struct ArcTrendSupport {
     /// Catalogue format keys this trend lifts (the alias bridge the ranker
     /// already applies — the caller passes bridged keys).
     pub format_keys: Vec<String>,
-    /// `viryaos_content_trends.id`s — the arc's evidence names them so the
+    /// `content_trends.id`s — the arc's evidence names them so the
     /// band can check the claim instead of trusting it.
     pub trend_ids: Vec<String>,
 }

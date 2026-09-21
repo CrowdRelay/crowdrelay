@@ -58,6 +58,10 @@ KNOWN_UNMEASURED = {
     "RaiseGrowthDebt",
     "RaiseDeclineAdvisory",
     "RaiseGrowthOpportunity",
+    # Setting the ticket URL is a write, not a claim: the outcome it serves
+    # (a fan reaching checkout) is already measured by the ticket-revenue
+    # kinds the surrounding actions schedule.
+    "SetEventTicketUrl",
     "RequestBeaconDiscovery",
     "RequestBeaconInviteBatch",
     "RequestBeaconOutreach",

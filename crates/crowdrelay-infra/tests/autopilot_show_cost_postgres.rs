@@ -59,7 +59,7 @@ async fn fixture(label: &str) -> Result<Fixture, Box<dyn std::error::Error>> {
     // Rates are provisioned with the workspace; this only guarantees they
     // exist if that ever stops being true.
     sqlx::query(
-        "INSERT INTO viryaos_tour_economics (workspace_id) VALUES ($1)
+        "INSERT INTO tour_economics (workspace_id) VALUES ($1)
          ON CONFLICT (workspace_id) DO NOTHING",
     )
     .bind(workspace_id.into_uuid())
@@ -119,7 +119,7 @@ async fn a_prediction_is_frozen_once_and_a_settlement_scores_the_model_against_i
     );
 
     let predicted_total = sqlx::query_scalar::<_, Option<i64>>(
-        "SELECT predicted_total_cost_minor FROM viryaos_show_cost_ledger
+        "SELECT predicted_total_cost_minor FROM show_cost_ledger
          WHERE workspace_id=$1 AND event_id=$2",
     )
     .bind(fixture.workspace_id.into_uuid())
@@ -158,7 +158,7 @@ async fn a_prediction_is_frozen_once_and_a_settlement_scores_the_model_against_i
 
     let row = sqlx::query_as::<_, (String, Option<String>, Option<i64>, Option<i64>)>(
         "SELECT accuracy, worst_line, settled_total_cost_minor, implied_transport_rate_minor_per_100km
-         FROM viryaos_show_cost_ledger WHERE workspace_id=$1 AND event_id=$2",
+         FROM show_cost_ledger WHERE workspace_id=$1 AND event_id=$2",
     )
     .bind(fixture.workspace_id.into_uuid())
     .bind(fixture.event_id.into_uuid())
@@ -198,7 +198,7 @@ async fn a_prediction_is_frozen_once_and_a_settlement_scores_the_model_against_i
         .await?;
     assert!(again.replayed);
     let unchanged = sqlx::query_scalar::<_, Option<i64>>(
-        "SELECT settled_total_cost_minor FROM viryaos_show_cost_ledger
+        "SELECT settled_total_cost_minor FROM show_cost_ledger
          WHERE workspace_id=$1 AND event_id=$2",
     )
     .bind(fixture.workspace_id.into_uuid())
@@ -252,23 +252,21 @@ async fn the_schema_refuses_a_verdict_on_an_unsettled_show()
     let fixture = fixture("show-cost-schema").await?;
     freeze(&fixture).await?;
 
-    let verdict_without_settlement = sqlx::query(
-        "UPDATE viryaos_show_cost_ledger SET accuracy='calibrated' WHERE workspace_id=$1",
-    )
-    .bind(fixture.workspace_id.into_uuid())
-    .execute(&fixture.pool)
-    .await;
+    let verdict_without_settlement =
+        sqlx::query("UPDATE show_cost_ledger SET accuracy='calibrated' WHERE workspace_id=$1")
+            .bind(fixture.workspace_id.into_uuid())
+            .execute(&fixture.pool)
+            .await;
     assert!(
         verdict_without_settlement.is_err(),
         "a show nobody settled has no verdict, not a neutral one"
     );
 
-    let line_without_drift = sqlx::query(
-        "UPDATE viryaos_show_cost_ledger SET worst_line='transport' WHERE workspace_id=$1",
-    )
-    .bind(fixture.workspace_id.into_uuid())
-    .execute(&fixture.pool)
-    .await;
+    let line_without_drift =
+        sqlx::query("UPDATE show_cost_ledger SET worst_line='transport' WHERE workspace_id=$1")
+            .bind(fixture.workspace_id.into_uuid())
+            .execute(&fixture.pool)
+            .await;
     assert!(
         line_without_drift.is_err(),
         "only a drifting verdict may point an operator at a rate to change"

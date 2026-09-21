@@ -1,7 +1,7 @@
 //! One person, two roles (P.1).
 //!
 //! A promoter who books the band, a journalist who reviewed the record and a
-//! photographer who shot the show are all `viryaos_beacons` rows. If any of
+//! photographer who shot the show are all `beacons` rows. If any of
 //! them also wants the dates, they are a `fans` row as well — and nothing in
 //! the system knew those were the same person.
 //!
@@ -142,7 +142,7 @@ const DUAL_ROLE_CORE: &str = r#"
         -- A reply outranks a score, so it is read rather than inferred: any
         -- beacon campaign on this person that got an answer counts.
         EXISTS (
-            SELECT 1 FROM viryaos_beacon_campaigns AS campaign
+            SELECT 1 FROM beacon_campaigns AS campaign
             WHERE campaign.workspace_id = beacon.workspace_id
               AND campaign.beacon_id = beacon.id
               AND campaign.last_reply_disposition <> 'none'
@@ -168,7 +168,7 @@ const DUAL_ROLE_CORE: &str = r#"
         FLOOR(EXTRACT(EPOCH FROM ($2 - governor.last_outbound_at)) / 86400)::bigint
             AS days_since_last_contact,
         COALESCE(governor.last_context = 'latarnik_invite', false) AS already_invited
-    FROM viryaos_beacons AS beacon
+    FROM beacons AS beacon
     LEFT JOIN cities AS city ON city.id = beacon.city_id
     -- The join that did not exist: the same address wearing the other role.
     LEFT JOIN LATERAL (
@@ -179,7 +179,7 @@ const DUAL_ROLE_CORE: &str = r#"
         ORDER BY (f.status = 'active') DESC, (f.status = 'pending') DESC, f.id
         LIMIT 1
     ) AS fan ON true
-    LEFT JOIN viryaos_contact_governor AS governor
+    LEFT JOIN contact_governor AS governor
       ON governor.workspace_id = beacon.workspace_id
      AND governor.normalized_contact = lower(btrim(beacon.contact_email))
     WHERE beacon.workspace_id = $1

@@ -1,8 +1,8 @@
 """Contract tests for outreach kind learning — the wave learning loop.
 
-The per-kind learning table (viryaos_outreach_kind_learning) holds standings
+The per-kind learning table (outreach_kind_learning) holds standings
 that scale wave sizing for each target kind. The wave outcome table
-(viryaos_outreach_wave_outcomes) schedules settlement for each approved wave
+(outreach_wave_outcomes) schedules settlement for each approved wave
 and folds the verdict into the learning record.
 
 Pinned here:
@@ -77,11 +77,11 @@ class OutreachKindLearningContract(unittest.TestCase):
 
     def test_retirement_is_stated_not_decayed(self) -> None:
         self.assertIn(
-            "viryaos_outreach_kind_learning_retirement_is_stated",
+            "outreach_kind_learning_retirement_is_stated",
             self.sql_0117,
         )
         self.assertIn(
-            "viryaos_outreach_kind_learning_weight_matches_retirement",
+            "outreach_kind_learning_weight_matches_retirement",
             self.sql_0117,
         )
 
@@ -98,7 +98,7 @@ class OutreachKindLearningContract(unittest.TestCase):
         self.assertIn("UNIQUE (workspace_id, wave_id)", self.sql_0119)
 
     def test_the_wave_outcome_has_a_due_index(self) -> None:
-        self.assertIn("viryaos_outreach_wave_outcomes_due_idx", self.sql_0119)
+        self.assertIn("outreach_wave_outcomes_due_idx", self.sql_0119)
 
     def test_evidence_and_assessment_are_consistent(self) -> None:
         self.assertIn("evidence <> 'insufficient' OR effect_assessment IS NULL", self.sql_0119)

@@ -52,7 +52,7 @@ impl PostgresAutopilotRepository {
         self.bounded(async move {
             let settled = sqlx::query(
                 r#"
-                UPDATE viryaos_autopilot_execution_claims AS claim
+                UPDATE autopilot_execution_claims AS claim
                 SET status = CASE action.status
                         WHEN 'succeeded' THEN 'succeeded'
                         ELSE 'failed'
@@ -63,7 +63,7 @@ impl PostgresAutopilotRepository {
                     END,
                     completed_at = COALESCE(action.finished_at, $2),
                     updated_at = $2
-                FROM viryaos_autopilot_actions AS action
+                FROM autopilot_actions AS action
                 WHERE claim.workspace_id = $1
                   AND action.workspace_id = claim.workspace_id
                   AND action.id = claim.action_id
@@ -103,7 +103,7 @@ impl PostgresAutopilotRepository {
         self.bounded(async move {
             let stale: Vec<(Uuid, serde_json::Value)> = sqlx::query_as(
                 r#"
-                SELECT id, payload FROM viryaos_autopilot_actions
+                SELECT id, payload FROM autopilot_actions
                 WHERE workspace_id = $1 AND status = 'queued'
                   AND approved_at IS NOT NULL AND approved_at <= $2 - $3
                 LIMIT 200
@@ -118,7 +118,7 @@ impl PostgresAutopilotRepository {
 
             let live: Vec<String> = sqlx::query_scalar(
                 r#"
-                SELECT DISTINCT capability FROM viryaos_executor_capabilities
+                SELECT DISTINCT capability FROM executor_capabilities
                 WHERE workspace_id = $1 AND expires_at > $2
                 "#,
             )
@@ -159,7 +159,7 @@ impl PostgresAutopilotRepository {
                 );
                 cancelled += sqlx::query(
                     r#"
-                    UPDATE viryaos_autopilot_actions
+                    UPDATE autopilot_actions
                     SET status = 'cancelled', finished_at = $3,
                         last_error_kind = 'no_executor'
                     WHERE workspace_id = $1 AND id = $2 AND status = 'queued'
@@ -245,7 +245,7 @@ impl PostgresAutopilotRepository {
             sqlx::query(
                 r#"
                 WITH reaped AS (
-                    UPDATE viryaos_autopilot_actions
+                    UPDATE autopilot_actions
                     SET status = 'failed',
                         finished_at = $2,
                         last_error_kind = 'stale_retry_exhausted'
@@ -262,7 +262,7 @@ impl PostgresAutopilotRepository {
                       AND attempt_count >= 5
                     RETURNING id, attempt_count
                 )
-                INSERT INTO viryaos_autopilot_action_attempts (
+                INSERT INTO autopilot_action_attempts (
                     workspace_id, action_id, attempt_number, outcome, error_kind, occurred_at
                 )
                 SELECT $1, reaped.id, reaped.attempt_count, 'failed',
@@ -302,12 +302,12 @@ impl PostgresAutopilotRepository {
             // transaction.
             sqlx::query(
                 r#"
-                UPDATE viryaos_arcs AS arc
+                UPDATE arcs AS arc
                 SET status = 'retired', updated_at = $2
                 WHERE arc.workspace_id = $1
                   AND arc.status = 'proposed'
                   AND EXISTS (
-                      SELECT 1 FROM viryaos_autopilot_actions AS action
+                      SELECT 1 FROM autopilot_actions AS action
                       WHERE action.workspace_id = arc.workspace_id
                         AND action.subject_kind = 'content_arc'
                         AND action.subject_id = arc.id
@@ -330,13 +330,13 @@ impl PostgresAutopilotRepository {
             // it.
             sqlx::query(
                 r#"
-                UPDATE viryaos_autopilot_actions AS action
+                UPDATE autopilot_actions AS action
                 SET status = 'cancelled', finished_at = $2
                 WHERE action.workspace_id = $1
                   AND action.status = 'queued'
                   AND action.approved_by = 'operator:show_ladder'
                   AND NOT EXISTS (
-                      SELECT 1 FROM viryaos_show_ladder_approvals AS ladder
+                      SELECT 1 FROM show_ladder_approvals AS ladder
                       WHERE ladder.workspace_id = action.workspace_id
                         AND ladder.event_id = action.subject_id
                         AND ladder.revoked_at IS NULL
@@ -352,7 +352,7 @@ impl PostgresAutopilotRepository {
             let candidates = sqlx::query_as::<_, ClaimedActionRow>(
                 r#"
                 SELECT id, payload, attempt_count AS attempt_number
-                FROM viryaos_autopilot_actions
+                FROM autopilot_actions
                 WHERE workspace_id = $1
                   AND attempt_count < 5
                   AND ($4::text IS NULL OR action_kind = $4)
@@ -396,7 +396,7 @@ impl PostgresAutopilotRepository {
                 sqlx::query_as::<_, ClaimedActionRow>(
                     r#"
                     WITH claimed AS (
-                        UPDATE viryaos_autopilot_actions AS action
+                        UPDATE autopilot_actions AS action
                         SET status = 'processing',
                             attempt_count = action.attempt_count + 1,
                             started_at = $2,
@@ -405,7 +405,7 @@ impl PostgresAutopilotRepository {
                           AND action.id = ANY($3)
                         RETURNING action.id, action.payload, action.attempt_count
                     ), attempts AS (
-                        INSERT INTO viryaos_autopilot_action_attempts (
+                        INSERT INTO autopilot_action_attempts (
                             workspace_id, action_id, attempt_number, outcome, occurred_at
                         )
                         SELECT $1, claimed.id, claimed.attempt_count, 'started', $2
@@ -514,7 +514,7 @@ async fn park_gated_actions(
     let ids: Vec<Uuid> = parked.iter().map(|(id, _)| *id).collect();
     sqlx::query(&format!(
         r#"
-        UPDATE viryaos_autopilot_actions
+        UPDATE autopilot_actions
         SET status = 'queued',
             started_at = NULL,
             available_at = $2 + INTERVAL '{GATED_ACTION_PARK}',
@@ -580,7 +580,7 @@ impl AutopilotActionRepository for PostgresAutopilotRepository {
             let mut transaction = self.pool.begin().await.map_err(map_sqlx)?;
             let attempt = sqlx::query_scalar::<_, i32>(
                 r#"
-                UPDATE viryaos_autopilot_actions
+                UPDATE autopilot_actions
                 SET status = CASE
                         WHEN $5 AND attempt_count < 5 THEN 'queued'
                         ELSE 'failed'
@@ -613,7 +613,7 @@ impl AutopilotActionRepository for PostgresAutopilotRepository {
             if let Some(attempt) = attempt {
                 sqlx::query(
                     r#"
-                    INSERT INTO viryaos_autopilot_action_attempts (
+                    INSERT INTO autopilot_action_attempts (
                         workspace_id, action_id, attempt_number, outcome, error_kind, occurred_at
                     ) VALUES ($1,$2,$3,'failed',$4,$5)
                     "#,

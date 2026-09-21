@@ -20,7 +20,7 @@
 //!   - For Reddit: calls the public about.json endpoint for subreddit
 //!     subscriber counts. No auth needed. Recorded under platform='social'
 //!     in the growth metric series (Reddit feeds the "social" coverage bucket).
-//!   - Records the point into viryaos_growth_metric_series, declaring the
+//!   - Records the point into growth_metric_series, declaring the
 //!     series on first sight (same pattern as the Bandsintown tracker).
 //!
 //! Crash safety: each point insert is idempotent via ON CONFLICT DO NOTHING
@@ -398,8 +398,8 @@ impl GrowthMetricSyncWorker {
               AND fc.provider_account_id IS NOT NULL
               AND NOT EXISTS (
                   SELECT 1
-                  FROM viryaos_growth_metric_points p
-                  JOIN viryaos_growth_metric_series s ON s.id = p.series_id
+                  FROM growth_metric_points p
+                  JOIN growth_metric_series s ON s.id = p.series_id
                   WHERE s.workspace_id = fc.workspace_id
                     AND s.subject_kind = 'fanbase_connection'
                     AND s.subject_id = fc.id
@@ -488,8 +488,8 @@ impl GrowthMetricSyncWorker {
                 FROM fanbase_connections fc
                 LEFT JOIN LATERAL (
                     SELECT max(p.captured_at) AS captured_at
-                    FROM viryaos_growth_metric_points p
-                    JOIN viryaos_growth_metric_series s ON s.id = p.series_id
+                    FROM growth_metric_points p
+                    JOIN growth_metric_series s ON s.id = p.series_id
                     WHERE s.workspace_id = fc.workspace_id
                       AND s.subject_kind = 'fanbase_connection'
                       AND s.subject_id = fc.id
@@ -1762,7 +1762,7 @@ async fn record_subject_metric_point(
     sqlx::query(
         r#"
         WITH series AS (
-            INSERT INTO viryaos_growth_metric_series (
+            INSERT INTO growth_metric_series (
                 workspace_id, platform, metric_key, subject_kind, subject_id,
                 display_name, direction, value_tier, expected_interval_hours, active
             )
@@ -1777,7 +1777,7 @@ async fn record_subject_metric_point(
                 active = true
             RETURNING id
         )
-        INSERT INTO viryaos_growth_metric_points (
+        INSERT INTO growth_metric_points (
             workspace_id, series_id, captured_at, value, source
         )
         SELECT $1, series.id, date_trunc('hour', $7::timestamptz), $8, 'growth_metric_sync'

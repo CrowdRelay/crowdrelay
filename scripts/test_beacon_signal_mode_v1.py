@@ -24,11 +24,11 @@ INFRA_SIGNAL = (ROOT / "crates/crowdrelay-infra/src/beacon_signal/signal.rs").re
 class BeaconSignalModeV1Contract(unittest.TestCase):
     def test_migration_keeps_beacon_as_relationship_source_of_truth(self) -> None:
         for table in (
-            "viryaos_beacon_signal_profiles",
-            "viryaos_beacon_signal_sessions",
-            "viryaos_beacon_press_requests",
+            "beacon_signal_profiles",
+            "beacon_signal_sessions",
+            "beacon_press_requests",
         ):
-            self.assertIn(f"CREATE TABLE {table}", MIGRATION)
+            self.assertIn(f"CREATE TABLE viryaos_{table}", MIGRATION)
         self.assertIn("REFERENCES viryaos_beacons (workspace_id, id) ON DELETE CASCADE", MIGRATION)
         self.assertIn("invite_token_hash bytea", MIGRATION)
         self.assertIn("token_hash bytea NOT NULL", MIGRATION)
@@ -71,7 +71,7 @@ class BeaconSignalModeV1Contract(unittest.TestCase):
         self.assertIn("disable_beacon_endpoint", PUSH)
         self.assertIn("audience_kind = 'beacon'", PUSH)
         self.assertIn("beacon_session_ineligible", WORKER)
-        for table in ("viryaos_beacon_signal_sessions", "viryaos_beacon_signal_profiles", "viryaos_beacons"):
+        for table in ("beacon_signal_sessions", "beacon_signal_profiles", "beacons"):
             self.assertIn(table, WORKER)
         self.assertIn("session.revoked_at IS NULL", WORKER)
         self.assertIn("session.expires_at > now()", WORKER)

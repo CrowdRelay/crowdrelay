@@ -2,7 +2,7 @@
 //!
 //! Two pools of researched contacts exist and neither was reachable from the
 //! beacon console. `agent_outreach_targets` holds what the agents proposed;
-//! `viryaos_outreach_candidates` holds routes read out of published pages and
+//! `outreach_candidates` holds routes read out of published pages and
 //! screened. Between them production carries dozens of named stations,
 //! curators and writers — while the roster itself had three rows.
 //!
@@ -124,7 +124,7 @@ pub async fn import_researched_beacons(
         r#"
         SELECT id, target_kind, display_name, route_kind, route_value,
                source_reference, route_is_published
-        FROM viryaos_outreach_candidates
+        FROM outreach_candidates
         WHERE workspace_id = $1 AND status IN ('admitted', 'promoted')
         ORDER BY created_at
         "#,
@@ -159,7 +159,7 @@ pub async fn import_researched_beacons(
             _ => (None, None),
         };
         contacts.push(ResearchedContact {
-            source_table: "viryaos_outreach_candidates",
+            source_table: "outreach_candidates",
             source_id: id,
             target_kind,
             display_name,
@@ -187,7 +187,7 @@ pub async fn import_researched_beacons(
     let already_imported: std::collections::HashSet<String> = sqlx::query_scalar::<_, String>(
         r#"
         SELECT metadata -> 'imported_from' ->> 'source_id'
-        FROM viryaos_beacons
+        FROM beacons
         WHERE workspace_id = $1
           AND metadata -> 'imported_from' ->> 'source_id' IS NOT NULL
         "#,
@@ -238,7 +238,7 @@ pub async fn import_researched_beacons(
         let inserted = if contact.contact_email.is_some() {
             sqlx::query_scalar::<_, Uuid>(
                 r#"
-                INSERT INTO viryaos_beacons (
+                INSERT INTO beacons (
                   id, workspace_id, beacon_kind, display_name, contact_email,
                   destination_url, source_url, active, verified, accepts_outreach,
                   metadata
@@ -262,7 +262,7 @@ pub async fn import_researched_beacons(
         } else {
             sqlx::query_scalar::<_, Uuid>(
                 r#"
-                INSERT INTO viryaos_beacons (
+                INSERT INTO beacons (
                   id, workspace_id, beacon_kind, display_name, contact_email,
                   destination_url, source_url, active, verified, accepts_outreach,
                   metadata
@@ -378,7 +378,7 @@ pub async fn import_submithub_beacons(
     let already_imported: std::collections::HashSet<String> = sqlx::query_scalar::<_, String>(
         r#"
         SELECT display_name
-        FROM viryaos_beacons
+        FROM beacons
         WHERE workspace_id = $1
           AND metadata -> 'imported_from' ->> 'source' = 'submithub'
         "#,
@@ -430,7 +430,7 @@ pub async fn import_submithub_beacons(
 
         let inserted = sqlx::query_scalar::<_, Uuid>(
             r#"
-            INSERT INTO viryaos_beacons (
+            INSERT INTO beacons (
               id, workspace_id, beacon_kind, display_name, contact_email,
               destination_url, source_url, active, verified, accepts_outreach,
               metadata
@@ -510,7 +510,7 @@ mod tests {
 
     #[test]
     fn every_mapped_kind_is_a_kind_the_roster_accepts() {
-        // viryaos_beacons.beacon_kind has a CHECK constraint. A mapping to a
+        // beacons.beacon_kind has a CHECK constraint. A mapping to a
         // value outside it compiles, lints and tests clean under runtime SQL,
         // then fails on the first import against a real database.
         const ROSTER_KINDS: [&str; 9] = [
@@ -537,7 +537,7 @@ mod tests {
                 .unwrap_or_else(|| panic!("{research_kind} should map to a roster kind"));
             assert!(
                 ROSTER_KINDS.contains(&mapped),
-                "{research_kind} maps to {mapped}, which viryaos_beacons.beacon_kind rejects",
+                "{research_kind} maps to {mapped}, which beacons.beacon_kind rejects",
             );
         }
     }
@@ -617,7 +617,7 @@ mod tests {
                 .unwrap_or_else(|| panic!("{outlet_type} should map to a roster kind"));
             assert!(
                 ROSTER_KINDS.contains(&mapped),
-                "{outlet_type} maps to {mapped}, which viryaos_beacons.beacon_kind rejects",
+                "{outlet_type} maps to {mapped}, which beacons.beacon_kind rejects",
             );
         }
     }

@@ -1,7 +1,7 @@
 //! Terminal outbox events that a durable record still names are not garbage.
 //!
-//! `viryaos_autopilot_action_emissions`, `show_notification_emissions`,
-//! `viryaos_calendar_requests` and `communication_campaigns` all hold RESTRICT
+//! `autopilot_action_emissions`, `show_notification_emissions`,
+//! `calendar_requests` and `communication_campaigns` all hold RESTRICT
 //! foreign keys into `outbox_events`: the row may not vanish while the ledger
 //! or campaign still points at it. The retention step never accounted for
 //! them, so the first emitted action that aged past the terminal window turned
@@ -57,7 +57,7 @@ async fn action_emission(pool: &PgPool, workspace_id: Uuid, event_id: Uuid) -> R
     let trace_id = Uuid::now_v7();
     sqlx::query(
         r#"
-        INSERT INTO viryaos_autopilot_decisions (
+        INSERT INTO autopilot_decisions (
             id, workspace_id, decision_key, context, subject_kind, subject_id,
             decision_kind, confidence_basis_points, disposition, reason,
             input_snapshot, policy_snapshot, recommendation, trace_id
@@ -76,7 +76,7 @@ async fn action_emission(pool: &PgPool, workspace_id: Uuid, event_id: Uuid) -> R
     .context("insert decision")?;
     sqlx::query(
         r#"
-        INSERT INTO viryaos_autopilot_actions (
+        INSERT INTO autopilot_actions (
             id, workspace_id, decision_id, context, action_kind, subject_kind,
             subject_id, idempotency_key, payload, status, finished_at, trace_id
         ) VALUES ($1,$2,$3,'outreach','contact.attempt','workspace',
@@ -95,7 +95,7 @@ async fn action_emission(pool: &PgPool, workspace_id: Uuid, event_id: Uuid) -> R
     .context("insert action")?;
     sqlx::query(
         r#"
-        INSERT INTO viryaos_autopilot_action_emissions (
+        INSERT INTO autopilot_action_emissions (
             workspace_id, action_id, emission_key, outbox_event_id
         ) VALUES ($1, $2, $3, $4)
         "#,

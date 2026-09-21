@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Rust and SQL must read `viryaos_autopilot_actions.status` the same way.
+"""Rust and SQL must read `autopilot_actions.status` the same way.
 
 Two layers decide what an action's operational state is, in two languages:
 
 - `ActionState::from_action_status` in `crowdrelay-domain/src/action_ledger.rs`,
   which the execution-report resolver uses.
-- The `CASE NEW.status` in the `viryaos_action_ledger_sync` trigger
+- The `CASE NEW.status` in the `action_ledger_sync` trigger
   (migration 0190), which maintains the ledger projection.
 
 They read the same column and must agree. Nothing made them, and the cost of
@@ -38,14 +38,14 @@ STATUS_CHECK = ROOT / "migrations/0189_autopilot_action_unknown_status.sql"
 
 
 def check_vocabulary() -> set[str]:
-    """The statuses the `viryaos_autopilot_actions` status CHECK admits.
+    """The statuses the `autopilot_actions` status CHECK admits.
 
     This is the column's real alphabet. Rust and the trigger agreeing with
     each other proves only that they drifted together; both can be missing a
     status the database happily stores.
     """
     source = STATUS_CHECK.read_text()
-    start = source.index("viryaos_autopilot_actions_status_check\n    CHECK (status IN (")
+    start = source.index("autopilot_actions_status_check\n    CHECK (status IN (")
     body = source[start : source.index("));", start)]
     values = set(re.findall(r"'([a-z_]+)'", body))
     if not values:

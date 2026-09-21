@@ -25,7 +25,7 @@ pub(in crate::autopilot) async fn replace_portfolio_pool(
     now: OffsetDateTime,
 ) -> Result<(), RepositoryError> {
     let mut transaction = pool.begin().await.map_err(map_sqlx)?;
-    sqlx::query("DELETE FROM viryaos_portfolio_pool WHERE workspace_id = $1")
+    sqlx::query("DELETE FROM portfolio_pool WHERE workspace_id = $1")
         .bind(workspace_id.into_uuid())
         .execute(&mut *transaction)
         .await
@@ -33,7 +33,7 @@ pub(in crate::autopilot) async fn replace_portfolio_pool(
     for entry in entries {
         sqlx::query(
             r#"
-            INSERT INTO viryaos_portfolio_pool (
+            INSERT INTO portfolio_pool (
                 workspace_id, opportunity_key, opportunity_id, audience_key,
                 source_context, action_key, decision_value, is_experimental,
                 selected, rejection_reason, refreshed_at

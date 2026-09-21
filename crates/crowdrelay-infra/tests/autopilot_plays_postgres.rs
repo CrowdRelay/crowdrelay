@@ -208,13 +208,11 @@ async fn a_play_starts_once_reaches_a_fan_once_and_only_finishes_when_every_step
     // The completion guard, before the second step is settled.
     repository.complete_play(workspace_id, play_id, now).await?;
     assert_eq!(
-        sqlx::query_scalar::<_, String>(
-            "SELECT state FROM viryaos_plays WHERE workspace_id=$1 AND id=$2"
-        )
-        .bind(workspace_id.into_uuid())
-        .bind(play_id.into_uuid())
-        .fetch_one(&pool)
-        .await?,
+        sqlx::query_scalar::<_, String>("SELECT state FROM plays WHERE workspace_id=$1 AND id=$2")
+            .bind(workspace_id.into_uuid())
+            .bind(play_id.into_uuid())
+            .fetch_one(&pool)
+            .await?,
         "running",
         "completing a play with an open step would strand that step for ever"
     );
@@ -248,7 +246,7 @@ async fn a_play_starts_once_reaches_a_fan_once_and_only_finishes_when_every_step
     let decision_id = Uuid::now_v7();
     sqlx::query(
         r#"
-        INSERT INTO viryaos_autopilot_decisions (
+        INSERT INTO autopilot_decisions (
             id, workspace_id, decision_key, context, subject_kind, subject_id,
             decision_kind, confidence_basis_points, disposition, reason,
             input_snapshot, policy_snapshot, recommendation
@@ -269,7 +267,7 @@ async fn a_play_starts_once_reaches_a_fan_once_and_only_finishes_when_every_step
     let action_id = Uuid::now_v7();
     sqlx::query(
         r#"
-        INSERT INTO viryaos_autopilot_actions (
+        INSERT INTO autopilot_actions (
             id, workspace_id, decision_id, context, action_kind, subject_kind, subject_id,
             idempotency_key, payload, status, action_class
         )
@@ -315,7 +313,7 @@ async fn a_play_starts_once_reaches_a_fan_once_and_only_finishes_when_every_step
     // The action ledger state machine requires AUTHORIZED → QUEUED → RUNNING,
     // so we set status to 'queued' first, then 'processing'.
     sqlx::query(
-        "UPDATE viryaos_autopilot_actions
+        "UPDATE autopilot_actions
          SET status='queued'
          WHERE workspace_id=$1 AND id=$2",
     )
@@ -324,7 +322,7 @@ async fn a_play_starts_once_reaches_a_fan_once_and_only_finishes_when_every_step
     .execute(&pool)
     .await?;
     sqlx::query(
-        "UPDATE viryaos_autopilot_actions
+        "UPDATE autopilot_actions
          SET status='processing', attempt_count=1, started_at=now()
          WHERE workspace_id=$1 AND id=$2",
     )
@@ -345,7 +343,7 @@ async fn a_play_starts_once_reaches_a_fan_once_and_only_finishes_when_every_step
         .await?;
     assert_eq!(
         sqlx::query_scalar::<_, String>(
-            "SELECT status FROM viryaos_autopilot_actions WHERE workspace_id=$1 AND id=$2"
+            "SELECT status FROM autopilot_actions WHERE workspace_id=$1 AND id=$2"
         )
         .bind(workspace_id.into_uuid())
         .bind(action_id)
@@ -355,8 +353,8 @@ async fn a_play_starts_once_reaches_a_fan_once_and_only_finishes_when_every_step
     );
     assert_eq!(
         sqlx::query_scalar::<_, i64>(
-            "SELECT count(*) FROM viryaos_play_step_recipients AS recipient
-             JOIN viryaos_play_steps AS step
+            "SELECT count(*) FROM play_step_recipients AS recipient
+             JOIN play_steps AS step
                ON step.workspace_id = recipient.workspace_id AND step.id = recipient.step_id
              WHERE recipient.workspace_id=$1 AND step.play_id=$2 AND step.step_index=1
                AND recipient.fan_id=$3"
@@ -394,7 +392,7 @@ async fn a_play_starts_once_reaches_a_fan_once_and_only_finishes_when_every_step
     );
     assert_eq!(
         sqlx::query_scalar::<_, serde_json::Value>(
-            "SELECT step.result FROM viryaos_play_steps AS step
+            "SELECT step.result FROM play_steps AS step
              WHERE step.workspace_id=$1 AND step.play_id=$2 AND step.step_index=1"
         )
         .bind(workspace_id.into_uuid())
@@ -420,13 +418,11 @@ async fn a_play_starts_once_reaches_a_fan_once_and_only_finishes_when_every_step
         .await?;
     repository.complete_play(workspace_id, play_id, now).await?;
     assert_eq!(
-        sqlx::query_scalar::<_, String>(
-            "SELECT state FROM viryaos_plays WHERE workspace_id=$1 AND id=$2"
-        )
-        .bind(workspace_id.into_uuid())
-        .bind(play_id.into_uuid())
-        .fetch_one(&pool)
-        .await?,
+        sqlx::query_scalar::<_, String>("SELECT state FROM plays WHERE workspace_id=$1 AND id=$2")
+            .bind(workspace_id.into_uuid())
+            .bind(play_id.into_uuid())
+            .fetch_one(&pool)
+            .await?,
         "completed"
     );
     assert!(
@@ -718,7 +714,7 @@ async fn a_sweep_play_runs_once_for_its_show_and_reaches_nobody()
     let decision_id = Uuid::now_v7();
     sqlx::query(
         r#"
-        INSERT INTO viryaos_autopilot_decisions (
+        INSERT INTO autopilot_decisions (
             id, workspace_id, decision_key, context, subject_kind, subject_id,
             decision_kind, confidence_basis_points, disposition, reason,
             input_snapshot, policy_snapshot, recommendation
@@ -737,7 +733,7 @@ async fn a_sweep_play_runs_once_for_its_show_and_reaches_nobody()
     let action_id = Uuid::now_v7();
     sqlx::query(
         r#"
-        INSERT INTO viryaos_autopilot_actions (
+        INSERT INTO autopilot_actions (
             id, workspace_id, decision_id, context, action_kind, subject_kind, subject_id,
             idempotency_key, payload, status, action_class, attempt_count, started_at
         )
@@ -777,7 +773,7 @@ async fn a_sweep_play_runs_once_for_its_show_and_reaches_nobody()
     );
     assert_eq!(
         sqlx::query_scalar::<_, i64>(
-            "SELECT count(*) FROM viryaos_play_step_recipients WHERE workspace_id=$1"
+            "SELECT count(*) FROM play_step_recipients WHERE workspace_id=$1"
         )
         .bind(workspace_id.into_uuid())
         .fetch_one(&pool)
@@ -786,7 +782,7 @@ async fn a_sweep_play_runs_once_for_its_show_and_reaches_nobody()
         "a sweep reaches nobody, and recording a recipient would be a contact that never happened"
     );
     let result = sqlx::query_scalar::<_, serde_json::Value>(
-        "SELECT result FROM viryaos_play_steps WHERE workspace_id=$1 AND play_id=$2 AND step_index=0",
+        "SELECT result FROM play_steps WHERE workspace_id=$1 AND play_id=$2 AND step_index=0",
     )
     .bind(workspace_id.into_uuid())
     .bind(play.play_id.into_uuid())
@@ -997,7 +993,7 @@ async fn a_ladder_is_anchored_on_one_engaged_fan_and_needs_a_tracked_link()
     let decision_id = Uuid::now_v7();
     sqlx::query(
         r#"
-        INSERT INTO viryaos_autopilot_decisions (
+        INSERT INTO autopilot_decisions (
             id, workspace_id, decision_key, context, subject_kind, subject_id,
             decision_kind, confidence_basis_points, disposition, reason,
             input_snapshot, policy_snapshot, recommendation
@@ -1019,7 +1015,7 @@ async fn a_ladder_is_anchored_on_one_engaged_fan_and_needs_a_tracked_link()
     let action_id = Uuid::now_v7();
     sqlx::query(
         r#"
-        INSERT INTO viryaos_autopilot_actions (
+        INSERT INTO autopilot_actions (
             id, workspace_id, decision_id, context, action_kind, subject_kind, subject_id,
             idempotency_key, payload, status, action_class, attempt_count, started_at
         )
@@ -1148,7 +1144,7 @@ async fn run_listing_sweep(
     let decision_id = Uuid::now_v7();
     sqlx::query(
         r#"
-        INSERT INTO viryaos_autopilot_decisions (
+        INSERT INTO autopilot_decisions (
             id, workspace_id, decision_key, context, subject_kind, subject_id,
             decision_kind, confidence_basis_points, disposition, reason,
             input_snapshot, policy_snapshot, recommendation, trace_id)
@@ -1170,7 +1166,7 @@ async fn run_listing_sweep(
     let action_id = Uuid::now_v7();
     sqlx::query(
         r#"
-        INSERT INTO viryaos_autopilot_actions (
+        INSERT INTO autopilot_actions (
             id, workspace_id, decision_id, context, action_kind, subject_kind, subject_id,
             idempotency_key, payload, status, action_class, attempt_count, started_at
         )
@@ -1198,7 +1194,7 @@ async fn run_listing_sweep(
         )
         .await?;
     let result = sqlx::query_scalar::<_, serde_json::Value>(
-        "SELECT result FROM viryaos_play_steps WHERE workspace_id=$1 AND play_id=$2 AND step_index=0",
+        "SELECT result FROM play_steps WHERE workspace_id=$1 AND play_id=$2 AND step_index=0",
     )
     .bind(workspace_id.into_uuid())
     .bind(play.play_id.into_uuid())
@@ -1265,22 +1261,20 @@ async fn approve_and_run_fix(
     now: OffsetDateTime,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (fix_id, fix_payload) = sqlx::query_as::<_, (Uuid, serde_json::Value)>(
-        "SELECT id, payload FROM viryaos_autopilot_actions
+        "SELECT id, payload FROM autopilot_actions
          WHERE workspace_id=$1 AND action_kind='event.ticket_url.set' AND subject_id=$2",
     )
     .bind(workspace_id.into_uuid())
     .bind(event_id.into_uuid())
     .fetch_one(pool)
     .await?;
+    sqlx::query("UPDATE autopilot_actions SET status='queued' WHERE workspace_id=$1 AND id=$2")
+        .bind(workspace_id.into_uuid())
+        .bind(fix_id)
+        .execute(pool)
+        .await?;
     sqlx::query(
-        "UPDATE viryaos_autopilot_actions SET status='queued' WHERE workspace_id=$1 AND id=$2",
-    )
-    .bind(workspace_id.into_uuid())
-    .bind(fix_id)
-    .execute(pool)
-    .await?;
-    sqlx::query(
-        "UPDATE viryaos_autopilot_actions SET status='processing', attempt_count=1, started_at=now()
+        "UPDATE autopilot_actions SET status='processing', attempt_count=1, started_at=now()
          WHERE workspace_id=$1 AND id=$2",
     )
     .bind(workspace_id.into_uuid())
@@ -1351,7 +1345,7 @@ async fn a_sweep_proposes_the_ticket_fix_in_ask_mode_and_applies_it_in_alone_mod
     );
     assert_eq!(
         sqlx::query_scalar::<_, String>(
-            "SELECT status FROM viryaos_autopilot_actions
+            "SELECT status FROM autopilot_actions
              WHERE workspace_id=$1 AND action_kind='event.ticket_url.set'"
         )
         .bind(workspace_id.into_uuid())
@@ -1389,7 +1383,7 @@ async fn a_sweep_proposes_the_ticket_fix_in_ask_mode_and_applies_it_in_alone_mod
     // Alone mode: the same finding queues the fix itself, and applying it is
     // the dispatcher's next pass — the sweep never writes `events` itself.
     sqlx::query(
-        "UPDATE viryaos_autopilot_policies SET autonomy_level='bounded_auto'
+        "UPDATE autopilot_policies SET autonomy_level='bounded_auto'
          WHERE workspace_id=$1 AND context='plays'",
     )
     .bind(workspace_id.into_uuid())
@@ -1474,7 +1468,7 @@ async fn a_third_party_step_parks_behind_its_own_capability()
         let decision_id = Uuid::now_v7();
         sqlx::query(
             r#"
-            INSERT INTO viryaos_autopilot_decisions (
+            INSERT INTO autopilot_decisions (
                 id, workspace_id, decision_key, context, subject_kind, subject_id,
                 decision_kind, confidence_basis_points, disposition, reason,
                 input_snapshot, policy_snapshot, recommendation, trace_id)
@@ -1491,7 +1485,7 @@ async fn a_third_party_step_parks_behind_its_own_capability()
         .await?;
         sqlx::query(
             r#"
-            INSERT INTO viryaos_autopilot_actions (
+            INSERT INTO autopilot_actions (
                 id, workspace_id, decision_id, context, action_kind, subject_kind, subject_id,
                 idempotency_key, payload, status, action_class, last_error_kind
             )

@@ -19,12 +19,12 @@ pub(in crate::autopilot) async fn approve_content_arc(
     // the operator signed — not the moment the executor got around to it.
     let changed = sqlx::query(
         r#"
-        UPDATE viryaos_arcs AS arc
+        UPDATE arcs AS arc
         SET status = 'approved',
             approved_at = COALESCE(action.approved_at, now()),
             approved_by = action.approved_by,
             updated_at = now()
-        FROM viryaos_autopilot_actions AS action
+        FROM autopilot_actions AS action
         WHERE action.workspace_id = $1 AND action.id = $3
           AND arc.workspace_id = $1 AND arc.id = $2 AND arc.status = 'proposed'
         "#,
@@ -42,7 +42,7 @@ pub(in crate::autopilot) async fn approve_content_arc(
         // outlived its question: a retired arc must not be resurrected by
         // a stale approval.
         let status = sqlx::query_scalar::<_, String>(
-            "SELECT status FROM viryaos_arcs WHERE workspace_id = $1 AND id = $2",
+            "SELECT status FROM arcs WHERE workspace_id = $1 AND id = $2",
         )
         .bind(workspace_id.into_uuid())
         .bind(arc_id.into_uuid())

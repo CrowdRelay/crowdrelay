@@ -100,7 +100,7 @@ async fn a_declined_format_stays_out_until_the_verdict_ages_out()
     // Past the cooldown the verdict ages out — evidence can argue the
     // format back and the same deterministic raise returns.
     sqlx::query(
-        "UPDATE viryaos_suggestion_outcomes
+        "UPDATE suggestion_outcomes
          SET resolved_at = now() - interval '43 days'
          WHERE workspace_id = $1",
     )
@@ -135,7 +135,7 @@ async fn seed_band(
     .fetch_one(pool)
     .await?;
     sqlx::query(
-        "INSERT INTO viryaos_team_profiles
+        "INSERT INTO team_profiles
                      (workspace_id, member_id, member_key, active, skills)
                  VALUES ($1, $2, 'crew', true,
                          ARRAY['general','operations','booking','approval','technical',
@@ -147,7 +147,7 @@ async fn seed_band(
     .execute(pool)
     .await?;
     sqlx::query(
-        "INSERT INTO viryaos_release_plans (workspace_id, source_key, title, release_at, active)
+        "INSERT INTO release_plans (workspace_id, source_key, title, release_at, active)
                  VALUES ($1, $2, 'Taste Release', now() + interval '14 days', true)",
     )
     .bind(workspace_id.into_uuid())
@@ -179,7 +179,7 @@ async fn seed_band(
     .execute(pool)
     .await?;
     sqlx::query(
-        "INSERT INTO viryaos_arcs (id, workspace_id, title, spine, status,
+        "INSERT INTO arcs (id, workspace_id, title, spine, status,
                                           horizon_start, horizon_end)
                  VALUES ($1, $2, 'Taste arc', $3, 'active',
                          current_date, current_date + interval '60 days')",
@@ -225,7 +225,7 @@ async fn an_unreported_commitment_expires_when_its_day_passes()
             },
         )
         .await?;
-    sqlx::query("UPDATE viryaos_content_suggestions SET status = 'approved' WHERE id = $1")
+    sqlx::query("UPDATE content_suggestions SET status = 'approved' WHERE id = $1")
         .bind(suggestion.id.into_uuid())
         .execute(&pool)
         .await?;
@@ -234,10 +234,10 @@ async fn an_unreported_commitment_expires_when_its_day_passes()
 
     let (status, outcomes): (String, i64) = sqlx::query_as(
         "SELECT s.status,
-                (SELECT count(*) FROM viryaos_suggestion_outcomes o
+                (SELECT count(*) FROM suggestion_outcomes o
                   WHERE o.workspace_id = s.workspace_id AND o.suggestion_id = s.id
                     AND o.outcome = 'expired')
-         FROM viryaos_content_suggestions s WHERE s.id = $1",
+         FROM content_suggestions s WHERE s.id = $1",
     )
     .bind(suggestion.id.into_uuid())
     .fetch_one(&pool)
@@ -248,7 +248,7 @@ async fn an_unreported_commitment_expires_when_its_day_passes()
         "an unreported commitment must resolve to an outcome, not hold a queue slot forever"
     );
     let (decided_by, reason): (Option<String>, Option<String>) = sqlx::query_as(
-        "SELECT decided_by, reason FROM viryaos_suggestion_outcomes
+        "SELECT decided_by, reason FROM suggestion_outcomes
          WHERE workspace_id = $1 AND suggestion_id = $2",
     )
     .bind(workspace_id.into_uuid())
@@ -281,13 +281,13 @@ async fn an_unreported_commitment_expires_when_its_day_passes()
             },
         )
         .await?;
-    sqlx::query("UPDATE viryaos_content_suggestions SET status = 'approved' WHERE id = $1")
+    sqlx::query("UPDATE content_suggestions SET status = 'approved' WHERE id = $1")
         .bind(timeless.id.into_uuid())
         .execute(&pool)
         .await?;
     repo.refresh_suggestions(workspace_id, today).await?;
     let still_open: String =
-        sqlx::query_scalar("SELECT status FROM viryaos_content_suggestions WHERE id = $1")
+        sqlx::query_scalar("SELECT status FROM content_suggestions WHERE id = $1")
             .bind(timeless.id.into_uuid())
             .fetch_one(&pool)
             .await?;
@@ -333,7 +333,7 @@ async fn a_concept_that_never_produced_retires_and_the_tail_is_named()
     // the concept has had its chances.
     for _ in 0..6 {
         let suggestion_id: Uuid = sqlx::query_scalar(
-            "INSERT INTO viryaos_content_suggestions
+            "INSERT INTO content_suggestions
                  (id, workspace_id, format_key, concept, status)
              VALUES ($1, $2, 'playthrough', 'stale playthrough beat', 'expired')
              RETURNING id",
@@ -343,7 +343,7 @@ async fn a_concept_that_never_produced_retires_and_the_tail_is_named()
         .fetch_one(&pool)
         .await?;
         sqlx::query(
-            "INSERT INTO viryaos_suggestion_outcomes
+            "INSERT INTO suggestion_outcomes
                  (workspace_id, suggestion_id, outcome, resolved_at)
              VALUES ($1, $2, 'expired', now() - interval '50 days')",
         )
@@ -411,7 +411,7 @@ async fn a_concept_that_never_produced_retires_and_the_tail_is_named()
     for index in 0..6 {
         let produced = index == 0;
         let suggestion_id: Uuid = sqlx::query_scalar(
-            "INSERT INTO viryaos_content_suggestions
+            "INSERT INTO content_suggestions
                  (id, workspace_id, format_key, concept, status)
              VALUES ($1, $2, 'playthrough', 'playthrough beat', $3)
              RETURNING id",
@@ -422,7 +422,7 @@ async fn a_concept_that_never_produced_retires_and_the_tail_is_named()
         .fetch_one(&pool)
         .await?;
         sqlx::query(
-            "INSERT INTO viryaos_suggestion_outcomes
+            "INSERT INTO suggestion_outcomes
                  (workspace_id, suggestion_id, outcome, resolved_at)
              VALUES ($1, $2, $3, now() - interval '50 days')",
         )
@@ -495,7 +495,7 @@ async fn a_same_style_siblings_productions_lift_the_format()
     ) -> Result<(), Box<dyn std::error::Error>> {
         for _ in 0..2 {
             let suggestion_id: Uuid = sqlx::query_scalar(
-                "INSERT INTO viryaos_content_suggestions
+                "INSERT INTO content_suggestions
                      (id, workspace_id, format_key, concept, status)
                  VALUES ($1, $2, $3, 'sibling beat', 'done')
                  RETURNING id",
@@ -506,7 +506,7 @@ async fn a_same_style_siblings_productions_lift_the_format()
             .fetch_one(pool)
             .await?;
             sqlx::query(
-                "INSERT INTO viryaos_suggestion_outcomes
+                "INSERT INTO suggestion_outcomes
                      (workspace_id, suggestion_id, outcome, resolved_at)
                  VALUES ($1, $2, 'done', now() - interval '10 days')",
             )

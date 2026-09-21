@@ -4,7 +4,7 @@
 //! A production event is a day where material physically exists: the
 //! shoot, the studio session, the show. The plan is the shot list issued
 //! to the member holding the camera before the day, and the harvest is
-//! the count afterwards — `viryaos_content_sources` logged inside the
+//! the count afterwards — `content_sources` logged inside the
 //! harvest window. The pure logic lives here so the sweep that runs it
 //! stays mechanical: build the list, read the verdict, apply it.
 

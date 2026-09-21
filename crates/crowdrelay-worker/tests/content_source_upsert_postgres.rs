@@ -57,7 +57,7 @@ async fn release_upsert_writes_and_repeats_idempotently() -> Result<()> {
         .map_err(|error| anyhow::anyhow!("repeat upsert: {error}"))?;
 
     let (count, max_version): (i64, i64) = sqlx::query_as(
-        "SELECT count(*), max(version) FROM viryaos_content_sources
+        "SELECT count(*), max(version) FROM content_sources
          WHERE workspace_id = $1 AND source_kind = 'release'",
     )
     .bind(workspace_id)
@@ -71,7 +71,7 @@ async fn release_upsert_writes_and_repeats_idempotently() -> Result<()> {
     );
 
     let stored: serde_json::Value =
-        sqlx::query_scalar("SELECT metadata FROM viryaos_content_sources WHERE workspace_id = $1")
+        sqlx::query_scalar("SELECT metadata FROM content_sources WHERE workspace_id = $1")
             .bind(workspace_id)
             .fetch_one(&db)
             .await
@@ -112,7 +112,7 @@ async fn post_upsert_writes_and_repeats_idempotently() -> Result<()> {
         .map_err(|error| anyhow::anyhow!("repeat upsert: {error}"))?;
 
     let (count, max_version): (i64, i64) = sqlx::query_as(
-        "SELECT count(*), max(version) FROM viryaos_content_sources
+        "SELECT count(*), max(version) FROM content_sources
          WHERE workspace_id = $1 AND source_kind = 'social_post'",
     )
     .bind(workspace_id)

@@ -57,7 +57,7 @@ async fn dispatched_action(
     let subject_id = Uuid::now_v7();
     sqlx::query(
         r#"
-        INSERT INTO viryaos_autopilot_decisions (
+        INSERT INTO autopilot_decisions (
             id, workspace_id, decision_key, context, subject_kind, subject_id,
             decision_kind, confidence_basis_points, disposition, reason,
             input_snapshot, policy_snapshot, recommendation, evaluated_at, trace_id
@@ -75,7 +75,7 @@ async fn dispatched_action(
     let action_id = Uuid::now_v7();
     sqlx::query(
         r#"
-        INSERT INTO viryaos_autopilot_actions (
+        INSERT INTO autopilot_actions (
             id, workspace_id, decision_id, context, action_kind, subject_kind, subject_id,
             idempotency_key, payload, status, available_at, finished_at
         ) VALUES ($1,$2,$3,'booking_opportunity','outreach.target.request','content_suggestion',$4,
@@ -102,7 +102,7 @@ async fn touch(
     touched_at: OffsetDateTime,
 ) -> Result<(), Box<dyn std::error::Error>> {
     sqlx::query(
-        "INSERT INTO viryaos_contact_touches (workspace_id, normalized_contact, action_id, touched_at)
+        "INSERT INTO contact_touches (workspace_id, normalized_contact, action_id, touched_at)
          VALUES ($1, $2, $3, $4)",
     )
     .bind(workspace_id)
@@ -125,7 +125,7 @@ async fn governor(
 ) -> Result<(), Box<dyn std::error::Error>> {
     sqlx::query(
         r#"
-        INSERT INTO viryaos_contact_governor (
+        INSERT INTO contact_governor (
             workspace_id, normalized_contact, last_context, last_outbound_at,
             next_contact_after, do_not_contact
         ) VALUES ($1, $2, 'booking_outreach', now() - INTERVAL '10 days', $3, $4)
@@ -245,7 +245,7 @@ async fn every_acts_attention_pipeline_and_gaps_land_under_that_act()
         let subject_id = Uuid::now_v7();
         sqlx::query(
             r#"
-            INSERT INTO viryaos_autopilot_decisions (
+            INSERT INTO autopilot_decisions (
                 id, workspace_id, decision_key, context, subject_kind, subject_id,
                 decision_kind, confidence_basis_points, disposition, reason,
                 input_snapshot, policy_snapshot, recommendation, evaluated_at, trace_id
@@ -262,7 +262,7 @@ async fn every_acts_attention_pipeline_and_gaps_land_under_that_act()
         .await?;
         sqlx::query(
             r#"
-            INSERT INTO viryaos_autopilot_actions (
+            INSERT INTO autopilot_actions (
                 id, workspace_id, decision_id, context, action_kind, subject_kind, subject_id,
                 idempotency_key, payload, status, available_at, approval_expires_at
             ) VALUES ($1,$2,$3,'booking_opportunity','outreach.target.request',
@@ -281,7 +281,7 @@ async fn every_acts_attention_pipeline_and_gaps_land_under_that_act()
         upcoming_show(pool, busy, "busy-next", 5).await?;
         upcoming_show(pool, busy, "busy-later", 40).await?;
         sqlx::query(
-            "INSERT INTO viryaos_daily_briefings (workspace_id, local_date, title, body)
+            "INSERT INTO daily_briefings (workspace_id, local_date, title, body)
              VALUES ($1, $2, 'briefing', 'body')",
         )
         .bind(busy)
@@ -299,7 +299,7 @@ async fn every_acts_attention_pipeline_and_gaps_land_under_that_act()
         upcoming_show(pool, outsider, "outsider-show", 3).await?;
         fan(pool, outsider, "outsider@example.test", true).await?;
         sqlx::query(
-            "INSERT INTO viryaos_daily_briefings (workspace_id, local_date, title, body)
+            "INSERT INTO daily_briefings (workspace_id, local_date, title, body)
              VALUES ($1, $2, 'briefing', 'body')",
         )
         .bind(outsider)
