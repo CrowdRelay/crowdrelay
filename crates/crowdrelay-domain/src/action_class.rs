@@ -124,6 +124,19 @@ impl ActionClass {
         matches!(self, Self::OwnedAudience)
     }
 
+    /// True when an operator may grant this class a standing approval for one
+    /// named target — see [`crate::standing_approval`].
+    ///
+    /// Money never. The `viryaos_standing_approvals` CHECK is the guarantee;
+    /// this says the same thing in Rust so a caller learns it from a type
+    /// rather than from a constraint violation. Every posture already keeps
+    /// `paid` behind approval, and no row may be the first thing that does
+    /// otherwise.
+    #[must_use]
+    pub const fn may_carry_standing_approval(self) -> bool {
+        !matches!(self, Self::Paid)
+    }
+
     /// Why this class is capped where it is. Shown to an operator changing a
     /// ceiling, so the decision is made with the reason in view.
     #[must_use]

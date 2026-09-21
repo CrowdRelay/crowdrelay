@@ -79,6 +79,7 @@ pub mod sensitive_response;
 pub mod sent_record;
 pub mod show_helpers;
 pub mod signal_installations;
+pub mod standing_approvals;
 pub mod tenant_settings;
 pub mod venue_directory;
 pub mod venue_seed;

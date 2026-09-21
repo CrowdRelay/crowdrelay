@@ -34,6 +34,7 @@ use crowdrelay_application::agent_outcomes::{
 use crowdrelay_domain::WorkspaceId;
 use crowdrelay_domain::action_class::{ActionClass, effective_authority};
 use crowdrelay_domain::autonomy::AutonomyLevel;
+use crowdrelay_domain::standing_approval::{StandingGrant, may_act_unattended};
 use crowdrelay_domain::target_discovery::{
     ScreeningVerdict, TargetDiscoveryPolicy, screen_community_candidate,
 };
@@ -942,8 +943,19 @@ impl AgentOutcomeWorker {
                 let auto_execute = if channel_pre_approved {
                     true
                 } else if is_community_post || is_signal_push {
-                    self.may_auto_execute(&mut tx, effective_context, class)
-                        .await?
+                    // The community is the target an operator can judge once.
+                    // A push has no single target to have judged, so it looks
+                    // for no grant and answers to the two axes alone.
+                    let target_key = community_target_id.map(|id| id.to_string());
+                    self.may_auto_execute(
+                        &mut tx,
+                        effective_context,
+                        class,
+                        action_kind,
+                        target_key.as_deref(),
+                        OffsetDateTime::now_utc(),
+                    )
+                    .await?
                 } else {
                     // Press pitches and everything unrecognised: a person
                     // decides. An outcome kind nobody has classified is

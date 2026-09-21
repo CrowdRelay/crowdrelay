@@ -270,3 +270,4 @@ include!("autopilot/decision_evidence.rs");
 include!("autopilot/learning_proof.rs");
 include!("autopilot/cycle.rs");
 include!("autopilot/validation.rs");
+include!("autopilot/standing_approvals.rs");

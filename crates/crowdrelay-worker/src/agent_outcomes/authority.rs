@@ -20,11 +20,19 @@ impl AgentOutcomeWorker {
     /// A row that is missing, or whose level this build cannot parse, is the
     /// safest value on that axis and never an absent limit. A row a newer
     /// deploy wrote is not a grant of authority to an older one.
+    ///
+    /// `target_key` names the one target a standing approval could cover.
+    /// `None` means no grant is even looked for, which is the right default
+    /// for an action whose reach is not one nameable thing: an operator
+    /// cannot have judged "this target" when there is no this.
     async fn may_auto_execute(
         &self,
         tx: &mut Transaction<'_, Postgres>,
         context: &str,
         class: ActionClass,
+        action_kind: &str,
+        target_key: Option<&str>,
+        now: OffsetDateTime,
     ) -> Result<bool, AgentOutcomeError> {
         let context_level: Option<String> = sqlx::query_scalar(
             r#"
@@ -60,7 +68,54 @@ impl AgentOutcomeWorker {
             .as_deref()
             .and_then(AutonomyLevel::parse)
             .unwrap_or_else(|| class.safest_ceiling());
-        Ok(effective_authority(context_level, ceiling).may_auto_execute())
+        let authority = effective_authority(context_level, ceiling);
+        // The two axes have agreed. What is left is the question they cannot
+        // ask: has the operator already judged *this target* and said not to
+        // be asked again. `standing_approval::may_act_unattended` owns the
+        // rule, including the three things a grant may not do.
+        let grant = match target_key {
+            Some(target_key) => self.standing_grant(tx, action_kind, target_key).await?,
+            None => None,
+        };
+        Ok(may_act_unattended(authority, grant, now))
+    }
+
+    /// The live standing grant for one target, if the operator wrote one.
+    ///
+    /// Revoked rows are read rather than filtered out in SQL: `is_live` owns
+    /// what "live" means, and a second copy of that rule in a WHERE clause is
+    /// a second place for it to drift. The class comes back from the row, so
+    /// a grant written while an action kind carried one class cannot license
+    /// that kind after it has been reclassified into another.
+    async fn standing_grant(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        action_kind: &str,
+        target_key: &str,
+    ) -> Result<Option<StandingGrant>, AgentOutcomeError> {
+        let row: Option<(String, OffsetDateTime, Option<OffsetDateTime>)> = sqlx::query_as(
+            r#"
+            SELECT action_class, expires_at, revoked_at
+            FROM viryaos_standing_approvals
+            WHERE workspace_id = $1
+              AND action_kind = $2
+              AND target_key = $3
+            "#,
+        )
+        .bind(self.workspace_id.into_uuid())
+        .bind(action_kind)
+        .bind(target_key)
+        .fetch_optional(&mut **tx)
+        .await?;
+        Ok(row.and_then(|(class, expires_at, revoked_at)| {
+            Some(StandingGrant {
+                // A class this build cannot parse is not a grant. Same rule as
+                // the authority rows above: unreadable is never permissive.
+                class: ActionClass::parse(&class)?,
+                expires_at,
+                revoked_at,
+            })
+        }))
     }
 }
 

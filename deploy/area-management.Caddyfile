@@ -14,6 +14,8 @@
         /v1/control-plane/autopilot/objectives \
         /v1/control-plane/autopilot/objectives/* \
         /v1/control-plane/autopilot/posture \
+        /v1/control-plane/autopilot/standing-approvals \
+        /v1/control-plane/autopilot/standing-approvals/* \
         /v1/control-plane/autopilot/capabilities \
         /v1/control-plane/autopilot/acquisition-channels \
         /v1/control-plane/autopilot/tour-economics \
