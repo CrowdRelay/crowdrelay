@@ -357,13 +357,28 @@ fn release_candidate(
         }));
     }
     let disposition = disposition(policy.autonomy_level, confidence, policy.minimum_confidence);
+    // The tier's own outcome ledger answers before the budget does: two or
+    // more consecutive releases at this tier that showed no lift turn the
+    // next outward rung from an automatic send into a decision a human looks
+    // at. Internal rungs keep running — parking the pitch costs no audience
+    // attention — and a lesser autonomy than RequireApproval is untouched.
+    let tier_missing = snapshot.tier_release_miss_streak >= 2
+        && action.action_class() == ActionClass::OwnedAudience;
+    let (disposition, reason) = if tier_missing && disposition == PolicyDisposition::AutoExecute {
+        (
+            PolicyDisposition::RequireApproval,
+            "release tier's last R+14 reports showed no lift; a human looks before the next send",
+        )
+    } else {
+        (disposition, "release timeline has a deterministic milestone due")
+    };
     Ok(Some(DecisionCandidate {
         context: policy.context,
         subject: ActionSubject::ReleasePlan(snapshot.release_id),
         decision_kind: "execute_release_milestone",
         confidence,
         disposition,
-        reason: "release timeline has a deterministic milestone due",
+        reason,
         input_snapshot: serde_json::to_value(&snapshot)?,
         policy_snapshot: policy_evidence(policy, domain_policy)?,
         action,

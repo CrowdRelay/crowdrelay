@@ -33,6 +33,7 @@ use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use crowdrelay_infra::sensitive_response::{SensitiveResponseKey, decrypt_value, encrypt_value};
 
 mod connection_health;
+mod release_videos;
 mod simple_platforms;
 mod spotify_cities;
 
@@ -338,13 +339,12 @@ impl GrowthMetricSyncWorker {
         let cycle_timeout = Duration::from_secs(self.operation_timeout.as_secs() * 3);
         let result = timeout(cycle_timeout, async {
             let connections = self.find_due_connections().await?;
-            if connections.is_empty() {
-                return Ok::<_, GrowthMetricSyncError>(());
+            if !connections.is_empty() {
+                tracing::info!(
+                    connections = connections.len(),
+                    "growth metric sync cycle: syncing due connections"
+                );
             }
-            tracing::info!(
-                connections = connections.len(),
-                "growth metric sync cycle: syncing due connections"
-            );
             for conn in connections {
                 // Per-connection timeout prevents one slow provider
                 // (e.g. Reddit proxy testing) from starving the cycle.
@@ -356,7 +356,14 @@ impl GrowthMetricSyncWorker {
                 // connection_health.rs.
                 self.record_sync_outcome(&conn, &result).await;
             }
-            Ok(())
+            // Release video stats run on the same cadence but owe nothing to
+            // the connection lease: a release plan's YouTube link is due on
+            // its own series' staleness, so the sweep must run even when no
+            // connection is due.
+            if let Err(error) = self.sync_release_video_stats().await {
+                tracing::warn!(error = %error, "release video stats sweep failed");
+            }
+            Ok::<_, GrowthMetricSyncError>(())
         })
         .await;
 

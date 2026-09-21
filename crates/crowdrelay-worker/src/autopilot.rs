@@ -1015,6 +1015,15 @@ fn repository_error_kind(error: RepositoryError) -> &'static str {
         {
             AutopilotMeasurementKind::NO_ISSUED_PASSES
         }
+        // Release abandonments read the same way: "the release had no
+        // tracked link" and "no series anchored the window" are why there is
+        // no outcome, not a stale write.
+        RepositoryError::ConflictBecause(reason)
+            if reason == AutopilotMeasurementKind::NO_RELEASE_LINK
+                || reason == AutopilotMeasurementKind::NO_RELEASE_SERIES_DATA =>
+        {
+            reason
+        }
         // Same shape as the measurement kind above: the contact governor
         // raises the roster's spent monthly attention share as a named
         // conflict, and "of the four things this roster wanted to tell this

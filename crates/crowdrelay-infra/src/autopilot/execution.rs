@@ -299,6 +299,62 @@ pub(super) async fn schedule_effect_measurement(
             )
             .await?;
         }
+        // A milestone that talks to an audience answers for what the audience
+        // did next. Calendar seeding and the parked editorial pitch reach
+        // nobody, so they schedule nothing; every outward rung gets the
+        // release's own three counters — acquisitions bound to its campaign,
+        // clicks on the tracked link the executor guaranteed exists, and the
+        // release-acquired fans who converted to a paid order. The channel
+        // lift joins only when a series on the release exists to read; a
+        // release with no declared series measures its audience effects and
+        // records no channel claim at all.
+        AutopilotActionPayload::ExecuteReleaseMilestone {
+            release_id,
+            milestone,
+            ..
+        } => {
+            use crowdrelay_domain::release_autopilot::ReleaseMilestone;
+
+            if !matches!(
+                milestone,
+                ReleaseMilestone::SeedCalendar | ReleaseMilestone::EditorialPitch
+            ) {
+                for kind in [
+                    AutopilotMeasurementKind::ReleaseBoundAcquisition14d,
+                    AutopilotMeasurementKind::ReleaseLinkClicks14d,
+                    AutopilotMeasurementKind::ReleaseFanConversion14d,
+                ] {
+                    plans.push((
+                        kind,
+                        release_id.into_uuid(),
+                        0.0,
+                        now + time::Duration::days(14),
+                    ));
+                }
+                let series_declared = sqlx::query_scalar::<_, bool>(
+                    r#"
+                    SELECT EXISTS(
+                        SELECT 1 FROM viryaos_growth_metric_series
+                        WHERE workspace_id=$1 AND subject_kind='release_plan'
+                          AND subject_id=$2 AND active
+                    )
+                    "#,
+                )
+                .bind(workspace_id.into_uuid())
+                .bind(release_id.into_uuid())
+                .fetch_one(&mut **transaction)
+                .await
+                .map_err(map_sqlx)?;
+                if series_declared {
+                    plans.push((
+                        AutopilotMeasurementKind::ReleaseChannelLift14d,
+                        release_id.into_uuid(),
+                        0.0,
+                        now + time::Duration::days(14),
+                    ));
+                }
+            }
+        }
         // A produced artifact is content the brain asked for and an audience
         // now sees — the request half of the loop closed at the receipt, and
         // the answer half is whether fans moved afterward. It sat in the
@@ -346,7 +402,6 @@ pub(super) async fn schedule_effect_measurement(
         | AutopilotActionPayload::AdjustExperiment { .. }
         | AutopilotActionPayload::CompleteShowTask { .. }
         | AutopilotActionPayload::EscalateShowTask { .. }
-        | AutopilotActionPayload::ExecuteReleaseMilestone { .. }
         | AutopilotActionPayload::ApplyLiveOpportunity { .. }
         // A verification measures nothing; it decides whether anything may be
         // counted at all. Its result lands on the placement row.

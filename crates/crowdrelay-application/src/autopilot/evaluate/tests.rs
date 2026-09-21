@@ -273,6 +273,7 @@ mod tests {
                 press_enabled: true,
                 editorial_pitch_completed_at: Some(now),
                 editorial_pitch_escalated_at: None,
+                tier_release_miss_streak: 0,
                 history: ReleaseMilestoneHistory {
                     calendar_seeded: true,
                     ..ReleaseMilestoneHistory::default()
@@ -400,6 +401,41 @@ mod tests {
         snapshot.history.fan_warmup_sent = true;
         let shows = [show_this_week(now, "Klub Hybrydy")];
         assert!(release_candidate(snapshot, &release_policy(), now, &shows)?.is_none());
+        Ok(())
+    }
+
+    /// The tier's own R+14 ledger answering for itself: two releases in a row
+    /// that showed no lift means the next outward send at this tier earns a
+    /// human look rather than another automatic spend of audience attention.
+    /// Internal rungs keep running — they cost nobody's attention.
+    #[test]
+    fn a_tier_that_keeps_missing_demotes_outward_sends_to_approval()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut auto = release_policy();
+        auto.autonomy_level = AutonomyLevel::BoundedAuto;
+
+        let (mut snapshot, now) = warmup_due();
+        snapshot.tier_release_miss_streak = 2;
+        let warmup = release_candidate(snapshot.clone(), &auto, now, &[])?
+            .ok_or_else(|| std::io::Error::other("warmup candidate expected"))?;
+        assert_eq!(warmup.disposition, PolicyDisposition::RequireApproval);
+        assert!(warmup.reason.contains("no lift"));
+
+        // The same policy without the streak stays automatic — the demotion
+        // is earned by the tier's outcomes, not assumed.
+        snapshot.tier_release_miss_streak = 0;
+        let clean = release_candidate(snapshot.clone(), &auto, now, &[])?
+            .ok_or_else(|| std::io::Error::other("warmup candidate expected"))?;
+        assert_eq!(clean.disposition, PolicyDisposition::AutoExecute);
+
+        // And the calendar seed is internal — a miss streak parks no
+        // workspace bookkeeping.
+        snapshot.tier_release_miss_streak = 2;
+        snapshot.release_at = now + time::Duration::days(30);
+        snapshot.history.calendar_seeded = false;
+        let calendar = release_candidate(snapshot, &auto, now, &[])?
+            .ok_or_else(|| std::io::Error::other("calendar candidate expected"))?;
+        assert_eq!(calendar.disposition, PolicyDisposition::AutoExecute);
         Ok(())
     }
 

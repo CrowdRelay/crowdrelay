@@ -596,3 +596,314 @@ async fn show_attendance_rate_and_cancelled_event_guards() {
 
     let _ = workspace;
 }
+
+/// Phase 5: a release milestone's own outcomes reach the evidence row.
+///
+/// The milestone executor guarantees the campaign link exists before it
+/// sends, and these kinds read back through exactly that binding:
+/// acquisitions and clicks join `campaigns.release_plan_id`, conversions
+/// join the release-acquired fan to a paid order by address, and the
+/// channel lift reads the release's own metric series against the fourteen
+/// days before the milestone ran. A release nobody heard reads zeros — a
+/// release that never had a campaign row reads zeros too, because the
+/// tracked link is the attribution boundary.
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn release_milestone_metrics_reach_the_evidence_row() {
+    let f = setup().await.expect("fixture");
+    let workspace = f.workspace_id.into_uuid();
+    let anchor = f.now - time::Duration::days(14);
+    let release_id = uuid::Uuid::now_v7();
+
+    sqlx::query(
+        r#"INSERT INTO viryaos_release_plans
+           (id, workspace_id, source_key, title, release_at, tier)
+           VALUES ($1,$2,$3,'Signal Lost',$4,'single')"#,
+    )
+    .bind(release_id)
+    .bind(workspace)
+    .bind(format!("release-{release_id}"))
+    .bind(anchor)
+    .execute(&f.pool)
+    .await
+    .expect("release plan");
+
+    let campaign_id = uuid::Uuid::now_v7();
+    sqlx::query(
+        r#"INSERT INTO campaigns (id, workspace_id, name, release_plan_id)
+           VALUES ($1,$2,'release-campaign',$3)"#,
+    )
+    .bind(campaign_id)
+    .bind(workspace)
+    .bind(release_id)
+    .execute(&f.pool)
+    .await
+    .expect("campaign");
+
+    // Two fans acquired through the release's campaign inside the window —
+    // one of whom bought a ticket in it — plus a click on the tracked link.
+    let buyer_fan = uuid::Uuid::now_v7();
+    for (fan_id, email) in [
+        (buyer_fan, "release-buyer@x.test"),
+        (uuid::Uuid::now_v7(), "release-lurker@x.test"),
+    ] {
+        sqlx::query(
+            r#"INSERT INTO fans (id, workspace_id, normalized_email, status)
+               VALUES ($1,$2,$3,'active')"#,
+        )
+        .bind(fan_id)
+        .bind(workspace)
+        .bind(email)
+        .execute(&f.pool)
+        .await
+        .expect("fan");
+        sqlx::query(
+            r#"INSERT INTO fan_acquisition_events
+               (workspace_id, fan_id, campaign_id, source, request_id, occurred_at)
+               VALUES ($1,$2,$3,'release_link',$4,$5)"#,
+        )
+        .bind(workspace)
+        .bind(fan_id)
+        .bind(campaign_id)
+        .bind(format!("req-{fan_id}"))
+        .bind(anchor + time::Duration::days(2))
+        .execute(&f.pool)
+        .await
+        .expect("acquisition");
+    }
+
+    let smart_link_id = uuid::Uuid::now_v7();
+    sqlx::query(
+        r#"INSERT INTO smart_links (id, workspace_id, campaign_id, slug, destination_url)
+           VALUES ($1,$2,$3,$4,'https://example.test/listen')"#,
+    )
+    .bind(smart_link_id)
+    .bind(workspace)
+    .bind(campaign_id)
+    .bind(format!("rel-{}", release_id.simple()))
+    .execute(&f.pool)
+    .await
+    .expect("smart link");
+    sqlx::query(
+        r#"INSERT INTO click_events (workspace_id, smart_link_id, campaign_id, occurred_at)
+           VALUES ($1,$2,$3,$4),($1,$2,$3,$4)"#,
+    )
+    .bind(workspace)
+    .bind(smart_link_id)
+    .bind(campaign_id)
+    .bind(anchor + time::Duration::days(3))
+    .execute(&f.pool)
+    .await
+    .expect("clicks");
+
+    // The buyer's paid order inside the window — sale rows need the event
+    // and pool they sell from.
+    let event_id = uuid::Uuid::now_v7();
+    sqlx::query(
+        r#"INSERT INTO events (id, workspace_id, slug, title, starts_at, status, published_at)
+           VALUES ($1,$2,$3,'Album show',$4,'published',$5)"#,
+    )
+    .bind(event_id)
+    .bind(workspace)
+    .bind(format!("show-{}", event_id.simple()))
+    .bind(f.now + time::Duration::days(30))
+    .bind(anchor - time::Duration::days(40))
+    .execute(&f.pool)
+    .await
+    .expect("event");
+    let pool_id = uuid::Uuid::now_v7();
+    sqlx::query(
+        r#"INSERT INTO admission_pools (id, workspace_id, event_id, name, capacity, slug)
+           VALUES ($1,$2,$3,'GA',100,$4)"#,
+    )
+    .bind(pool_id)
+    .bind(workspace)
+    .bind(event_id)
+    .bind(format!("ga-{}", pool_id.simple()))
+    .execute(&f.pool)
+    .await
+    .expect("pool");
+    let sale_id = uuid::Uuid::now_v7();
+    sqlx::query(
+        r#"INSERT INTO ticket_sales
+           (id, workspace_id, event_id, admission_pool_id, capacity,
+            sales_open_at, sales_close_at)
+           VALUES ($1,$2,$3,$4,100,$5,$6)"#,
+    )
+    .bind(sale_id)
+    .bind(workspace)
+    .bind(event_id)
+    .bind(pool_id)
+    .bind(anchor - time::Duration::days(30))
+    .bind(f.now + time::Duration::days(60))
+    .execute(&f.pool)
+    .await
+    .expect("sale");
+    sqlx::query(
+        r#"INSERT INTO ticket_orders
+           (workspace_id, ticket_sale_id, public_reference, buyer_email, status,
+            currency, amount_gross_minor, amount_net_minor, amount_vat_minor,
+            vat_rate_basis_points, reservation_key, request_hash,
+            checkout_token_hash, expires_at, paid_at)
+           VALUES ($1,$2,$3,'release-buyer@x.test','paid','PLN',
+                   5000,4630,370,800,$4,gen_random_bytes(32),gen_random_bytes(32),
+                   now() + interval '1 day',$5)"#,
+    )
+    .bind(workspace)
+    .bind(sale_id)
+    .bind(format!("VRY-ORD-{:016X}", f.now.unix_timestamp() as u64))
+    .bind(format!("res-{}", sale_id.simple()))
+    .bind(anchor + time::Duration::days(5))
+    .execute(&f.pool)
+    .await
+    .expect("order");
+
+    // The release's own channel series: flat-ish before the milestone
+    // (100 → 110), a real bump after (110 → 160). Lift = 50 − 10 = 40.
+    let series_id = uuid::Uuid::now_v7();
+    sqlx::query(
+        r#"INSERT INTO viryaos_growth_metric_series
+           (id, workspace_id, platform, metric_key, subject_kind, subject_id,
+            display_name)
+           VALUES ($1,$2,'youtube','views','release_plan',$3,'Signal Lost views')"#,
+    )
+    .bind(series_id)
+    .bind(workspace)
+    .bind(release_id)
+    .execute(&f.pool)
+    .await
+    .expect("series");
+    for (days, value) in [(-20_i64, 100_i64), (-1, 110), (12, 160)] {
+        sqlx::query(
+            r#"INSERT INTO viryaos_growth_metric_points
+               (workspace_id, series_id, captured_at, value, source)
+               VALUES ($1,$2,$3,$4,'test')"#,
+        )
+        .bind(workspace)
+        .bind(series_id)
+        .bind(anchor + time::Duration::days(days))
+        .bind(value)
+        .execute(&f.pool)
+        .await
+        .expect("point");
+    }
+
+    let action_id = insert_dispatch(&f, "opp-release", anchor).await;
+    let claim = |kind: AutopilotMeasurementKind| ClaimedAutopilotMeasurement {
+        id: AutopilotMeasurementId::from(uuid::Uuid::now_v7()),
+        action_id: AutopilotActionId::from(action_id),
+        kind,
+        subject_id: release_id,
+        baseline_value: 0.0,
+        action_finished_at: anchor,
+        attempt_number: 1,
+    };
+
+    // Observe through the real queries, then complete so the write-back
+    // lands on the evidence row.
+    for (kind, expected) in [
+        (AutopilotMeasurementKind::ReleaseBoundAcquisition14d, 2.0),
+        (AutopilotMeasurementKind::ReleaseLinkClicks14d, 2.0),
+        (AutopilotMeasurementKind::ReleaseFanConversion14d, 1.0),
+        (AutopilotMeasurementKind::ReleaseChannelLift14d, 40.0),
+    ] {
+        let claim = claim(kind);
+        let observed = f
+            .repository
+            .observe_measurement(f.workspace_id, &claim, f.now)
+            .await
+            .expect("release observation");
+        assert!(
+            (observed - expected).abs() < 1e-9,
+            "{} observed {observed}, expected {expected}",
+            kind.as_str()
+        );
+        sqlx::query(
+            r#"INSERT INTO viryaos_autopilot_measurements
+               (id, workspace_id, action_id, measurement_kind, subject_id,
+                action_finished_at, baseline_value, due_at, available_at)
+               VALUES ($1,$2,$3,$4,$5,$6,0.0,$7,$7)"#,
+        )
+        .bind(claim.id.into_uuid())
+        .bind(workspace)
+        .bind(action_id)
+        .bind(kind.as_str())
+        .bind(release_id)
+        .bind(anchor)
+        .bind(f.now)
+        .execute(&f.pool)
+        .await
+        .expect("measurement row");
+        resolve(&f, &claim, observed).await;
+    }
+
+    let metrics: serde_json::Value = sqlx::query_scalar(
+        "SELECT observed_metrics FROM viryaos_growth_evidence \
+         WHERE workspace_id=$1 AND action_id=$2",
+    )
+    .bind(workspace)
+    .bind(action_id)
+    .fetch_one(&f.pool)
+    .await
+    .expect("evidence metrics");
+    assert_eq!(metrics["release_acquisitions"].as_f64(), Some(2.0));
+    assert_eq!(metrics["release_link_clicks"].as_f64(), Some(2.0));
+    assert_eq!(metrics["release_fan_conversions"].as_f64(), Some(1.0));
+    assert_eq!(metrics["release_channel_lift"].as_f64(), Some(40.0));
+}
+
+/// A release plan with no listenable URL never gets a campaign, so its
+/// funnel measurements observe a funnel that was never instrumented. Each
+/// counter must abandon with `no_release_link` rather than record a
+/// fabricated zero — missing evidence is not a measured failure.
+#[tokio::test]
+#[ignore = "postgres"]
+async fn release_funnel_abandons_when_no_link_was_tracked() {
+    let f = setup().await.expect("fixture");
+    let workspace = f.workspace_id.into_uuid();
+    let anchor = f.now - time::Duration::days(14);
+    let release_id = uuid::Uuid::now_v7();
+
+    sqlx::query(
+        r#"INSERT INTO viryaos_release_plans
+           (id, workspace_id, source_key, title, release_at, tier)
+           VALUES ($1,$2,$3,'Unlinked Single',$4,'single')"#,
+    )
+    .bind(release_id)
+    .bind(workspace)
+    .bind(format!("release-{release_id}"))
+    .bind(anchor)
+    .execute(&f.pool)
+    .await
+    .expect("release plan");
+
+    let action_id = insert_dispatch(&f, "opp-release-nolink", anchor).await;
+    for kind in [
+        AutopilotMeasurementKind::ReleaseBoundAcquisition14d,
+        AutopilotMeasurementKind::ReleaseLinkClicks14d,
+        AutopilotMeasurementKind::ReleaseFanConversion14d,
+    ] {
+        let claim = ClaimedAutopilotMeasurement {
+            id: AutopilotMeasurementId::from(uuid::Uuid::now_v7()),
+            action_id: AutopilotActionId::from(action_id),
+            kind,
+            subject_id: release_id,
+            baseline_value: 0.0,
+            action_finished_at: anchor,
+            attempt_number: 1,
+        };
+        let outcome = f
+            .repository
+            .observe_measurement(f.workspace_id, &claim, f.now)
+            .await;
+        match outcome {
+            Err(crowdrelay_application::RepositoryError::ConflictBecause(reason)) => {
+                assert_eq!(reason, AutopilotMeasurementKind::NO_RELEASE_LINK);
+            }
+            other => panic!(
+                "expected no_release_link abandon for {}, got {other:?}",
+                kind.as_str()
+            ),
+        }
+    }
+}

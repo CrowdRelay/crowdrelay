@@ -52,6 +52,19 @@ pub(super) async fn observe(
             AutopilotMeasurementKind::EVENT_CANCELLED,
         ));
     }
+    // The release funnel reads through the campaign the milestone executor
+    // ensured — and it only ensures one when the plan carries a listenable
+    // link. Without a campaign every funnel arm returns a real zero for a
+    // funnel that was never instrumented, which the posterior would learn as
+    // the milestone failing. "Nothing was instrumented" is not "nobody came";
+    // failed terminal, like never-published.
+    if measurement.kind.measures_release_funnel()
+        && !release_link_is_tracked(pool, workspace_id, measurement.subject_id).await?
+    {
+        return Err(RepositoryError::ConflictBecause(
+            AutopilotMeasurementKind::NO_RELEASE_LINK,
+        ));
+    }
     let observed = match measurement.kind {
             AutopilotMeasurementKind::TicketRevenue72h => sqlx::query_scalar::<_, f64>(
                 r#"
@@ -336,6 +349,133 @@ pub(super) async fn observe(
                     ));
                 }
                 redeemed / valid
+            }
+            // Fans the release's own campaign acquired in the milestone's
+            // window — the acquisition row joins to the campaign the
+            // milestone executor ensured before it sent, and the campaign
+            // joins back to the release plan. A milestone that reached
+            // nobody reads its own zero rather than the workspace's.
+            AutopilotMeasurementKind::ReleaseBoundAcquisition14d => {
+                sqlx::query_scalar::<_, f64>(
+                    r#"
+                    SELECT COUNT(*)::double precision
+                    FROM fan_acquisition_events AS event
+                    JOIN campaigns AS campaign
+                      ON campaign.workspace_id=event.workspace_id
+                     AND campaign.id=event.campaign_id
+                    WHERE event.workspace_id=$1 AND campaign.release_plan_id=$2
+                      AND event.occurred_at >= $3
+                      AND event.occurred_at < $3 + INTERVAL '14 days'
+                    "#,
+                )
+                .bind(workspace_id.into_uuid())
+                .bind(measurement.subject_id)
+                .bind(measurement.action_finished_at)
+                .fetch_one(pool)
+                .await
+                .map_err(map_sqlx)?
+            }
+            AutopilotMeasurementKind::ReleaseLinkClicks14d => {
+                sqlx::query_scalar::<_, f64>(
+                    r#"
+                    SELECT COUNT(*)::double precision
+                    FROM click_events AS click
+                    JOIN campaigns AS campaign
+                      ON campaign.workspace_id=click.workspace_id
+                     AND campaign.id=click.campaign_id
+                    WHERE click.workspace_id=$1 AND campaign.release_plan_id=$2
+                      AND click.occurred_at >= $3
+                      AND click.occurred_at < $3 + INTERVAL '14 days'
+                    "#,
+                )
+                .bind(workspace_id.into_uuid())
+                .bind(measurement.subject_id)
+                .bind(measurement.action_finished_at)
+                .fetch_one(pool)
+                .await
+                .map_err(map_sqlx)?
+            }
+            // Release-acquired fans who bought a ticket in the window —
+            // joined by address because orders know the buyer's email, not
+            // the fan row. Paid orders only; a reserved one that lapsed is
+            // not a conversion.
+            AutopilotMeasurementKind::ReleaseFanConversion14d => {
+                sqlx::query_scalar::<_, f64>(
+                    r#"
+                    SELECT COUNT(DISTINCT event.fan_id)::double precision
+                    FROM fan_acquisition_events AS event
+                    JOIN campaigns AS campaign
+                      ON campaign.workspace_id=event.workspace_id
+                     AND campaign.id=event.campaign_id
+                    JOIN fans AS fan
+                      ON fan.workspace_id=event.workspace_id
+                     AND fan.id=event.fan_id
+                    JOIN ticket_orders AS ticket_order
+                      ON ticket_order.workspace_id=fan.workspace_id
+                     AND ticket_order.buyer_email=fan.normalized_email
+                    WHERE event.workspace_id=$1 AND campaign.release_plan_id=$2
+                      AND event.occurred_at >= $3
+                      AND event.occurred_at < $3 + INTERVAL '14 days'
+                      AND ticket_order.status IN ('paid','partially_refunded')
+                      AND ticket_order.paid_at >= $3
+                      AND ticket_order.paid_at < $3 + INTERVAL '14 days'
+                    "#,
+                )
+                .bind(workspace_id.into_uuid())
+                .bind(measurement.subject_id)
+                .bind(measurement.action_finished_at)
+                .fetch_one(pool)
+                .await
+                .map_err(map_sqlx)?
+            }
+            // The release's own series lifted over the fourteen days before
+            // the milestone ran: per series, the increase across the post
+            // window minus the increase across the pre window. Both windows
+            // are bounded — the pre start must sit inside the month before
+            // the anchor or the baseline is months-stale, and the post end
+            // must reach the last third of the window or a feed that stalled
+            // at anchor+1h reports a one-hour wobble as the fourteen-day
+            // lift. A series that cannot anchor both windows contributes
+            // nothing — a partial baseline is not a zero.
+            AutopilotMeasurementKind::ReleaseChannelLift14d => {
+                // No COALESCE here: when no series anchored both windows the
+                // SUM is NULL, and a fabricated 0.0 would read as "the release
+                // moved nothing" when the truth is "nothing was measurable".
+                sqlx::query_scalar::<_, Option<f64>>(
+                    r#"
+                    SELECT SUM(post_end - 2 * pre_end + pre_start)::double precision
+                    FROM (
+                        SELECT
+                            (SELECT p.value FROM viryaos_growth_metric_points p
+                             WHERE p.series_id = s.id
+                               AND p.captured_at >= $3 - INTERVAL '28 days'
+                               AND p.captured_at < $3 - INTERVAL '14 days'
+                             ORDER BY p.captured_at DESC LIMIT 1) AS pre_start,
+                            (SELECT p.value FROM viryaos_growth_metric_points p
+                             WHERE p.series_id = s.id AND p.captured_at < $3
+                             ORDER BY p.captured_at DESC LIMIT 1) AS pre_end,
+                            (SELECT p.value FROM viryaos_growth_metric_points p
+                             WHERE p.series_id = s.id
+                               AND p.captured_at >= $3 + INTERVAL '10 days'
+                               AND p.captured_at < $3 + INTERVAL '14 days'
+                             ORDER BY p.captured_at DESC LIMIT 1) AS post_end
+                        FROM viryaos_growth_metric_series AS s
+                        WHERE s.workspace_id=$1 AND s.subject_kind='release_plan'
+                          AND s.subject_id=$2 AND s.active
+                    ) AS lifts
+                    WHERE pre_start IS NOT NULL AND pre_end IS NOT NULL
+                      AND post_end IS NOT NULL
+                    "#,
+                )
+                .bind(workspace_id.into_uuid())
+                .bind(measurement.subject_id)
+                .bind(measurement.action_finished_at)
+                .fetch_one(pool)
+                .await
+                .map_err(map_sqlx)?
+                .ok_or(RepositoryError::ConflictBecause(
+                    AutopilotMeasurementKind::NO_RELEASE_SERIES_DATA,
+                ))?
             }
             // Fan growth after an agent dispatch: count new fans created
             // in the 14-day window after the action finished. The
@@ -916,6 +1056,30 @@ async fn event_is_cancelled(
     )
     .bind(workspace_id.into_uuid())
     .bind(event_id)
+    .fetch_one(pool)
+    .await
+    .map_err(map_sqlx)
+}
+
+/// Whether the release plan has a campaign — the tracked link the milestone
+/// executor ensures before it sends. The funnel measurements all join through
+/// `campaigns.release_plan_id`, so when no campaign exists they observe a
+/// funnel that was never instrumented.
+async fn release_link_is_tracked(
+    pool: &sqlx::PgPool,
+    workspace_id: WorkspaceId,
+    release_id: uuid::Uuid,
+) -> Result<bool, RepositoryError> {
+    sqlx::query_scalar::<_, bool>(
+        r#"
+        SELECT EXISTS(
+            SELECT 1 FROM campaigns
+            WHERE workspace_id = $1 AND release_plan_id = $2
+        )
+        "#,
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(release_id)
     .fetch_one(pool)
     .await
     .map_err(map_sqlx)

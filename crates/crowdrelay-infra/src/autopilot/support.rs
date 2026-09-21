@@ -436,6 +436,14 @@ fn parse_measurement_kind(value: &str) -> Result<AutopilotMeasurementKind, Repos
         "signal_installs_1d" => Ok(AutopilotMeasurementKind::SignalInstalls1d),
         "booking_agent_reply_30d" => Ok(AutopilotMeasurementKind::BookingAgentReply30d),
         "show_attendance_rate_14d" => Ok(AutopilotMeasurementKind::ShowAttendanceRate14d),
+        "release_bound_acquisition_14d" => {
+            Ok(AutopilotMeasurementKind::ReleaseBoundAcquisition14d)
+        }
+        "release_link_clicks_14d" => Ok(AutopilotMeasurementKind::ReleaseLinkClicks14d),
+        "release_fan_conversion_14d" => {
+            Ok(AutopilotMeasurementKind::ReleaseFanConversion14d)
+        }
+        "release_channel_lift_14d" => Ok(AutopilotMeasurementKind::ReleaseChannelLift14d),
         _ => Err(RepositoryError::Unexpected),
     }
 }

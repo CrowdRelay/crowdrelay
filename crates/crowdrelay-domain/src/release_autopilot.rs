@@ -80,6 +80,13 @@ pub struct ReleasePlanSnapshot {
     /// When the agent last nudged about it, so a reminder is a reminder rather
     /// than a stream.
     pub editorial_pitch_escalated_at: Option<OffsetDateTime>,
+    /// Consecutive most-recent R+14 outcome reports at this tier that showed
+    /// no lift — `within_noise` or `insufficient_evidence`, broken only by an
+    /// `above_trend`. The release's own ledger answering for the tier: two
+    /// misses in a row means the next outward rung at this tier earns a
+    /// human look before it spends audience attention again. R+3 reports are
+    /// deliberately excluded — the shallow read is a pulse, not a verdict.
+    pub tier_release_miss_streak: u32,
     pub history: ReleaseMilestoneHistory,
 }
 
@@ -599,6 +606,9 @@ mod tests {
             // it on its own.
             editorial_pitch_completed_at: Some(now()),
             editorial_pitch_escalated_at: None,
+            // No outcome history in the ladder tests — a tier that has never
+            // reported has never missed.
+            tier_release_miss_streak: 0,
             history: ReleaseMilestoneHistory::default(),
         }
     }
