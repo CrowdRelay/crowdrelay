@@ -86,6 +86,9 @@ jobs:
       CROWDRELAY_TENANT_DATE_FORMAT: dmy
       CROWDRELAY_TENANT_NUMBER_FORMAT: comma_decimal
       CROWDRELAY_TENANT_DATA_REGION: eu
+      # community_executor builds a non-Virya worker in tests and refuses
+      # without a public origin — ci.yml sets the same value for its lane.
+      CROWDRELAY_PUBLIC_ORIGIN: http://localhost:4321
       CROWDRELAY_RANDOM_DRAWS_ENABLED: "false"
       CROWDRELAY_BOOTSTRAP_JSON: >-
         {"workspace_name":"CrowdRelay CI","cities":[{"slug":"wroclaw","name":"Wroclaw","country":"PL","region":"Dolnoslaskie","lat":51.1079,"lng":17.0385}],"campaigns":[{"name":"CI launch","active":true,"smart_links":[{"slug":"ci-launch","destination_url":"http://localhost:4321/join","active":true}]}],"webhook_endpoints":[]}
