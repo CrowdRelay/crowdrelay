@@ -33,7 +33,7 @@ RETURN regexp_replace(lower(btrim(raw)), '^/?r/', '');
 --    only ever writes its own variants and never parses the column back, so
 --    extending the check cannot break a reader.
 ALTER TABLE agent_outreach_targets
-    DROP CONSTRAINT agent_outreach_targets_refusal_reason_check;
+    DROP CONSTRAINT IF EXISTS agent_outreach_targets_refusal_reason_check;
 ALTER TABLE agent_outreach_targets
     ADD CONSTRAINT agent_outreach_targets_refusal_reason_check
     CHECK (refusal_reason IS NULL OR refusal_reason = ANY (ARRAY[
