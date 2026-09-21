@@ -232,6 +232,13 @@ pub(crate) fn router(state: crate::AppState) -> Router {
             "/v1/control-plane/autopilot/actions/{action_id}/approve",
             post(crate::autopilot::approve_action),
         )
+        // The same decision, several at a time. Approvals expire at 72 hours
+        // and the queue refills every cycle; answering them one at a time is
+        // a race the operator loses.
+        .route(
+            "/v1/control-plane/autopilot/actions/approve",
+            post(crate::autopilot::approve_actions),
+        )
         .route(
             "/v1/control-plane/autopilot/actions/{action_id}/cancel",
             post(crate::autopilot::cancel_action),

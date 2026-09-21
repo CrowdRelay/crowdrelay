@@ -162,6 +162,49 @@ pub async fn revoke(
     Ok(())
 }
 
+/// What a standing approval for this action would be recorded against.
+///
+/// Reads the action's own payload rather than trusting anything the caller
+/// supplies, so "approve this and stop asking about it" cannot become a grant
+/// over some other target. `None` means this action has no target a standing
+/// approval could sensibly cover — see
+/// `AutopilotActionPayload::standing_approval_target`.
+///
+/// # Errors
+/// [`StandingApprovalError::NotFound`] when no such action exists in this
+/// workspace; [`StandingApprovalError::Database`] when the read fails.
+pub async fn grant_target_for_action(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    action_id: Uuid,
+) -> Result<Option<(String, String, ActionClass)>, StandingApprovalError> {
+    let row: Option<(String, serde_json::Value)> = sqlx::query_as(
+        r#"
+        SELECT action_kind, payload
+        FROM viryaos_autopilot_actions
+        WHERE workspace_id = $1 AND id = $2
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(action_id)
+    .fetch_optional(pool)
+    .await?;
+    let Some((action_kind, payload)) = row else {
+        return Err(StandingApprovalError::NotFound);
+    };
+    // A payload this build cannot parse has no target it can name. Guessing
+    // one would be the opposite of what reading the payload is for.
+    let Ok(parsed) = serde_json::from_value::<
+        crowdrelay_application::autopilot::AutopilotActionPayload,
+    >(payload) else {
+        return Ok(None);
+    };
+    let Some(target_key) = parsed.standing_approval_target() else {
+        return Ok(None);
+    };
+    Ok(Some((action_kind, target_key, parsed.action_class())))
+}
+
 /// Every grant the workspace has ever written, newest first.
 ///
 /// Revoked and expired rows are included on purpose. "Which of these did we

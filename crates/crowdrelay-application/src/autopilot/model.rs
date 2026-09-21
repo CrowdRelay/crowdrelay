@@ -1052,6 +1052,32 @@ pub enum AutopilotActionPayload {
 }
 
 impl AutopilotActionPayload {
+    /// The target a standing approval for this action would cover, if there is
+    /// one a person could sensibly judge once.
+    ///
+    /// `None` is the honest answer for most actions and the safe one for all
+    /// of them: a standing approval is the operator saying "this *target* is
+    /// fine, stop asking", and that sentence only means something where the
+    /// action has a target that recurs. A push to the whole audience, a price
+    /// change and a budget request each happen to one thing once; granting a
+    /// standing approval over them would be granting it over the action kind,
+    /// which is the wildcard `standing_approval` deliberately cannot express.
+    ///
+    /// A community is the case that does recur. The band posts to the same
+    /// subreddit again next month, and by then the operator has read three
+    /// drafts from it and knows the answer.
+    ///
+    /// The key is the target's own id rather than the action's `subject_id`:
+    /// an agent-outcome action carries the outcome id there, so a grant keyed
+    /// on the subject would cover one draft and never the next.
+    #[must_use]
+    pub fn standing_approval_target(&self) -> Option<String> {
+        match self {
+            Self::RequestCommunityEngagement { target_id, .. } => Some(target_id.to_string()),
+            _ => None,
+        }
+    }
+
     /// What this action costs and how far its effects reach.
     ///
     /// Exhaustive on purpose: a new payload variant must not compile until

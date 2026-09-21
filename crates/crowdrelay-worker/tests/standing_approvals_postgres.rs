@@ -302,3 +302,116 @@ async fn money_cannot_be_granted_a_standing_approval() -> Result<()> {
     );
     Ok(())
 }
+
+/// "Approve this and stop asking me about it" reads its target from the
+/// action's own payload.
+///
+/// The piece that could silently do nothing. The action row's `subject_id` is
+/// the agent outcome, not the community, so a grant keyed on the subject would
+/// cover one draft and never the next — and would look like it worked.
+#[tokio::test]
+#[ignore = "requires PostgreSQL"]
+async fn remembering_an_approval_keys_the_grant_on_the_community() -> Result<()> {
+    let database = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
+        .await
+        .expect("connect to the migrated suite database");
+    let ws = workspace(&database).await?;
+    let (target_id, source_id) = admitted_community(&database, ws).await?;
+    insert_community_post(&database, ws, target_id, source_id).await?;
+    ensure!(worker(&database, ws).run_once().await? == 1, "one outcome");
+
+    let action_id: Uuid =
+        sqlx::query_scalar("SELECT id FROM viryaos_autopilot_actions WHERE workspace_id = $1")
+            .bind(ws.into_uuid())
+            .fetch_one(&database)
+            .await?;
+    let subject_id: Uuid =
+        sqlx::query_scalar("SELECT subject_id FROM viryaos_autopilot_actions WHERE id = $1")
+            .bind(action_id)
+            .fetch_one(&database)
+            .await?;
+    ensure!(
+        subject_id != target_id,
+        "this test is only meaningful while the subject is not the community"
+    );
+
+    let target = crowdrelay_infra::standing_approvals::grant_target_for_action(
+        &database,
+        ws.into_uuid(),
+        action_id,
+    )
+    .await?
+    .expect("a community post has a target a grant can cover");
+    ensure!(
+        target.0 == ACTION_KIND,
+        "the grant is recorded against the action kind, got {}",
+        target.0
+    );
+    ensure!(
+        target.1 == target_id.to_string(),
+        "the grant must name the community, not the outcome: got {}",
+        target.1
+    );
+    ensure!(
+        target.2 == ActionClass::ThirdParty,
+        "a forum post spends a relationship, got {:?}",
+        target.2
+    );
+
+    // And the grant it produces is the one the worker then honours: the next
+    // post to the same community goes without asking.
+    crowdrelay_infra::standing_approvals::grant(
+        &database,
+        ws.into_uuid(),
+        crowdrelay_infra::standing_approvals::GrantRequest {
+            action_kind: &target.0,
+            target_key: &target.1,
+            class: target.2,
+            granted_by: "operator:test",
+            days: 90,
+            note: None,
+        },
+        OffsetDateTime::now_utc(),
+    )
+    .await?;
+    insert_community_post(&database, ws, target_id, source_id).await?;
+    ensure!(worker(&database, ws).run_once().await? == 1, "one outcome");
+
+    let queued: i64 = sqlx::query_scalar(
+        "SELECT count(*)::bigint FROM viryaos_autopilot_actions \
+         WHERE workspace_id = $1 AND status = 'queued'",
+    )
+    .bind(ws.into_uuid())
+    .fetch_one(&database)
+    .await?;
+    ensure!(
+        queued == 1,
+        "the grant the approval wrote must license the next post, got {queued} queued"
+    );
+    Ok(())
+}
+
+/// An action with no recurring target cannot be remembered. The operator asked
+/// for two things and is told they got one, rather than being handed a grant
+/// over an action kind.
+#[tokio::test]
+#[ignore = "requires PostgreSQL"]
+async fn an_action_with_no_target_has_nothing_to_remember() -> Result<()> {
+    use crowdrelay_application::autopilot::AutopilotActionPayload;
+
+    let push = AutopilotActionPayload::RequestSignalPush {
+        task_id: Uuid::now_v7(),
+        title: "new track".to_owned(),
+        body: "out now".to_owned(),
+        target_path: None,
+        event_id: None,
+        segment: None,
+        audience_size: None,
+        audience_basis: String::new(),
+    };
+    ensure!(
+        push.standing_approval_target().is_none(),
+        "a push to the whole audience has no target a standing grant could cover"
+    );
+    Ok(())
+}

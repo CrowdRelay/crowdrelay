@@ -174,11 +174,11 @@ pub async fn approve_action(
 ) -> Response {
     // Raw bytes rather than `Option<Json<_>>`: a malformed revision body must
     // fail loudly, not silently degrade into an approve of the original draft.
-    let revision = if body.is_empty() {
-        None
+    let (revision, remember) = if body.is_empty() {
+        (None, None)
     } else {
         match serde_json::from_slice::<ApproveActionRequest>(&body) {
-            Ok(request) => request.revision,
+            Ok(request) => (request.revision, request.remember),
             Err(_) => {
                 return Problem::bad_request(request_id(&headers))
                     .private()
@@ -217,7 +217,7 @@ pub async fn approve_action(
             }
         }
     }
-    mutate_action(state, headers, action_id, true, revision).await
+    mutate_action(state, headers, action_id, true, revision, remember).await
 }
 
 /// `GET /v1/control-plane/autopilot/actions/{action_id}/sent`
@@ -256,12 +256,122 @@ pub async fn action_sent_record(
     }
 }
 
+/// Most actions one call may approve.
+///
+/// Bounded because the batch runs one approval per id and each is a write.
+/// Fifty is comfortably more than a week's queue at the attention budget's
+/// twenty, so the cap never stands between an operator and a clear board.
+const MAX_APPROVAL_BATCH: usize = 50;
+
+/// `POST /v1/control-plane/autopilot/actions/approve`
+///
+/// Approve several parked actions in one call.
+///
+/// # Why this exists
+///
+/// Approvals expire at 72 hours and the only way to answer one was to answer
+/// it alone. Against a queue the agent refills every cycle that is a race the
+/// operator loses: measured in production, seven drafts, four approvals, four
+/// hundred and twelve opportunities, zero posts published.
+///
+/// # Why it takes ids and not a filter
+///
+/// "Approve everything in this context" is the shape that makes an approval
+/// meaningless — the operator would be granting authority over work they have
+/// not read, which is what the queue exists to prevent. Naming the ids means
+/// they saw them.
+///
+/// # Why it is not atomic
+///
+/// Partial success is the honest result. Ten approvals where two have already
+/// expired should approve eight and say which two did not; refusing all ten
+/// because of the two would make the batch less useful than the single call
+/// it replaces. Each id carries its own outcome and its own idempotency key
+/// derived from the caller's, so a retry re-approves nothing.
+pub async fn approve_actions(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    let Ok(request) = serde_json::from_slice::<ApproveActionsRequest>(&body) else {
+        return Problem::bad_request(request_id(&headers))
+            .private()
+            .into_response();
+    };
+    if request.action_ids.is_empty() || request.action_ids.len() > MAX_APPROVAL_BATCH {
+        return Problem::bad_request(request_id(&headers))
+            .private()
+            .into_response();
+    }
+    let idempotency_key = match parse_idempotency_key(&headers) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let request_id_value = parsed_request_id(&headers);
+
+    let mut results = Vec::with_capacity(request.action_ids.len());
+    for action_id in request.action_ids {
+        // One key per action, derived from the caller's. A shared key would
+        // make the second approval in the batch a replay of the first.
+        let Ok(key) =
+            IdempotencyKey::parse(format!("{}:{action_id}", idempotency_key.as_str()).as_str())
+        else {
+            return Problem::bad_request(request_id(&headers))
+                .private()
+                .into_response();
+        };
+        let approved = state
+            .autopilot
+            .approve_action(
+                state.ops.workspace_id(),
+                AutopilotActionId::from_uuid(action_id),
+                &key,
+                request_id_value.as_ref(),
+                None,
+            )
+            .await;
+        match approved {
+            Ok(mutation) => {
+                let remembered = match &request.remember {
+                    Some(remember) => {
+                        match remember_action_target(
+                            &state,
+                            AutopilotActionId::from_uuid(action_id),
+                            remember,
+                        )
+                        .await
+                        {
+                            Ok(outcome) => Some(outcome),
+                            Err(problem) => return *problem,
+                        }
+                    }
+                    None => None,
+                };
+                results.push(serde_json::json!({
+                    "action_id": action_id,
+                    "approved": true,
+                    "mutation": mutation,
+                    "remembered": remembered,
+                }));
+            }
+            // A refusal is reported beside its id rather than ending the
+            // batch: the operator needs to know which ones did not go.
+            Err(error) => results.push(serde_json::json!({
+                "action_id": action_id,
+                "approved": false,
+                "reason": error.to_string(),
+            })),
+        }
+    }
+    private_json(StatusCode::OK, serde_json::json!({ "results": results }))
+}
+
 pub async fn cancel_action(
     State(state): State<AppState>,
     Path(action_id): Path<String>,
     headers: HeaderMap,
 ) -> Response {
-    mutate_action(state, headers, action_id, false, None).await
+    mutate_action(state, headers, action_id, false, None, None).await
 }
 
 /// Records that a human handled this finding outside the system.
@@ -472,6 +582,7 @@ async fn mutate_action(
     action_id: String,
     approve: bool,
     revision: Option<std::collections::BTreeMap<String, String>>,
+    remember: Option<RememberRequest>,
 ) -> Response {
     let action_id = match Uuid::parse_str(&action_id) {
         Ok(value) => AutopilotActionId::from_uuid(value),
@@ -509,7 +620,82 @@ async fn mutate_action(
             .await
     };
     match result {
-        Ok(result) => private_json(StatusCode::OK, result),
+        Ok(result) => {
+            // Only after the approval itself succeeded. A grant written
+            // beside a refused approval would be authority the operator
+            // never actually gave, and it would outlive the mistake by
+            // ninety days.
+            let remembered = match remember {
+                Some(remember) => {
+                    match remember_action_target(&state, action_id, &remember).await {
+                        Ok(outcome) => Some(outcome),
+                        Err(problem) => return *problem,
+                    }
+                }
+                None => None,
+            };
+            private_json(
+                StatusCode::OK,
+                serde_json::json!({ "mutation": result, "remembered": remembered }),
+            )
+        }
         Err(error) => repository_problem(error, request_id(&headers)),
+    }
+}
+
+/// Writes the standing approval an operator asked for with `remember`.
+///
+/// The target comes from the action's own payload, never from the request:
+/// "approve this and stop asking about it" must not be able to become a grant
+/// over something else. An action with no target a grant could cover is
+/// reported as such rather than silently approved-without-remembering — the
+/// operator asked for two things and got one.
+async fn remember_action_target(
+    state: &AppState,
+    action_id: AutopilotActionId,
+    remember: &RememberRequest,
+) -> Result<serde_json::Value, Box<Response>> {
+    let workspace_id = state.ops.workspace_id().into_uuid();
+    let target = crowdrelay_infra::standing_approvals::grant_target_for_action(
+        &state.database,
+        workspace_id,
+        action_id.into_uuid(),
+    )
+    .await;
+    let Ok(target) = target else {
+        return Err(Box::new(Problem::service_unavailable(None).into_response()));
+    };
+    let Some((action_kind, target_key, class)) = target else {
+        return Ok(serde_json::json!({
+            "granted": false,
+            "reason": "this action has no target a standing approval could cover",
+        }));
+    };
+    match crowdrelay_infra::standing_approvals::grant(
+        &state.database,
+        workspace_id,
+        crowdrelay_infra::standing_approvals::GrantRequest {
+            action_kind: &action_kind,
+            target_key: &target_key,
+            class,
+            granted_by: "operator:control_plane",
+            days: remember
+                .days
+                .unwrap_or(crowdrelay_domain::standing_approval::DEFAULT_GRANT_DAYS),
+            note: remember
+                .note
+                .as_deref()
+                .map(str::trim)
+                .filter(|note| !note.is_empty()),
+        },
+        OffsetDateTime::now_utc(),
+    )
+    .await
+    {
+        Ok(view) => Ok(serde_json::json!({ "granted": true, "approval": view })),
+        Err(error) => Ok(serde_json::json!({
+            "granted": false,
+            "reason": error.to_string(),
+        })),
     }
 }
