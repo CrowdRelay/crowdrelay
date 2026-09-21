@@ -231,10 +231,11 @@ pub(in crate::autopilot) async fn load_community_relays(
                     .map(|delivery| CommunityRelayDelivery {
                         subreddit: delivery.subreddit.unwrap_or_default(),
                         language: delivery.language,
-                        // The ledger's word wins once a post row exists — the
-                        // action can only say "queued"; the post can say
-                        // "posted" with a permalink.
-                        status: delivery.post_status.unwrap_or(delivery.action_status),
+                        status: delivery_status(
+                            delivery.post_status.as_deref(),
+                            &delivery.action_status,
+                        )
+                        .to_owned(),
                         posted_at: delivery.posted_at,
                         post_url: delivery.post_url,
                     })
@@ -246,4 +247,60 @@ pub(in crate::autopilot) async fn load_community_relays(
             }
         })
         .collect())
+}
+
+/// The delivery vocabulary the card speaks — `awaiting_approval`, `queued`,
+/// `posted`, `failed`, `cancelled` — translated from the two ledgers the
+/// delivery lives on. The post ledger's word wins once its row exists; the
+/// action's internal statuses (`processing`, `succeeded`, …) never leak —
+/// a `succeeded` action with no seeded post is a delivery that will never
+/// land (the seed guard declined it), which the card reads as `cancelled`,
+/// not as a post that went out.
+fn delivery_status(post_status: Option<&str>, action_status: &str) -> &'static str {
+    match post_status {
+        Some("posted") => "posted",
+        Some("failed") => "failed",
+        Some("cancelled") => "cancelled",
+        // pending, posting, rate_limited, awaiting_manual_post — in flight.
+        Some(_) => "queued",
+        None => match action_status {
+            "awaiting_approval" => "awaiting_approval",
+            "failed" => "failed",
+            "cancelled" | "succeeded" => "cancelled",
+            // queued, processing — still on its way to the executor.
+            _ => "queued",
+        },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The card speaks its own vocabulary — the ledgers' internal words
+    /// never reach it. The row that must not lie: an action `succeeded`
+    /// whose seed declined to plant (target demoted, subreddit mismatch)
+    /// reads `cancelled`, never a post that went out.
+    #[test]
+    fn delivery_status_speaks_the_cards_vocabulary() {
+        // The post ledger's word wins once its row exists.
+        assert_eq!(delivery_status(Some("posted"), "succeeded"), "posted");
+        assert_eq!(delivery_status(Some("failed"), "succeeded"), "failed");
+        assert_eq!(delivery_status(Some("cancelled"), "queued"), "cancelled");
+        for in_flight in ["pending", "posting", "rate_limited", "awaiting_manual_post"] {
+            assert_eq!(delivery_status(Some(in_flight), "processing"), "queued");
+        }
+        // No post row — the action's state, normalized.
+        assert_eq!(
+            delivery_status(None, "awaiting_approval"),
+            "awaiting_approval"
+        );
+        assert_eq!(delivery_status(None, "failed"), "failed");
+        assert_eq!(delivery_status(None, "cancelled"), "cancelled");
+        for in_flight in ["queued", "processing"] {
+            assert_eq!(delivery_status(None, in_flight), "queued");
+        }
+        // The lie the card must not tell: succeeded, nothing planted.
+        assert_eq!(delivery_status(None, "succeeded"), "cancelled");
+    }
 }

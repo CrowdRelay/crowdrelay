@@ -97,10 +97,17 @@ impl CommunityExecutorWorker {
     }
 
     /// Whether a live standing grant covers this delivery's community —
-    /// "the operator already judged this target, stop asking". The row is
-    /// read and `StandingGrant::is_live` applied rather than duplicating
-    /// liveness in a WHERE clause; a class this build cannot parse is not a
-    /// grant, the same reading the ingest path gives the authority rows.
+    /// "the operator already judged this target, stop asking".
+    ///
+    /// The row is read and the full `unattended_authority` rule applied —
+    /// the same rule the ingest path uses. A grant is an answer only while
+    /// the question it answered still stands: the `outreach` context must
+    /// still be `require_approval` and the grant's own class ceiling no
+    /// stricter. An operator who dialled outreach down to `observe` did not
+    /// mean "keep posting where a grant exists" — the axes are re-read here
+    /// rather than trusted from the claim's snapshot. A class this build
+    /// cannot parse is not a grant, the same reading the ingest path gives
+    /// the authority rows.
     async fn live_standing_grant(
         &self,
         target_id: Option<Uuid>,
@@ -122,15 +129,45 @@ impl CommunityExecutorWorker {
             .bind(target_id.to_string())
             .fetch_optional(&self.pool)
             .await?;
-        Ok(row
-            .and_then(|(class, expires_at, revoked_at)| {
-                ActionClass::parse(&class).map(|class| StandingGrant {
-                    class,
-                    expires_at,
-                    revoked_at,
-                })
+        let Some(grant) = row.and_then(|(class, expires_at, revoked_at)| {
+            ActionClass::parse(&class).map(|class| StandingGrant {
+                class,
+                expires_at,
+                revoked_at,
             })
-            .is_some_and(|grant| grant.is_live(time::OffsetDateTime::now_utc())))
+        }) else {
+            return Ok(false);
+        };
+        // A community post answers to `outreach` — the effective_context
+        // rule the ingest path applies. A missing or unreadable policy row
+        // is the safest level on that axis, never an absent limit.
+        let context_level: Option<String> = sqlx::query_scalar(
+            "SELECT autonomy_level FROM viryaos_autopilot_policies \
+             WHERE workspace_id = $1 AND context = 'outreach' LIMIT 1",
+        )
+        .bind(self.workspace_id.into_uuid())
+        .fetch_optional(&self.pool)
+        .await?;
+        let Some(context_level) = context_level.as_deref().and_then(AutonomyLevel::parse) else {
+            return Ok(false);
+        };
+        let ceiling: Option<String> = sqlx::query_scalar(
+            "SELECT ceiling FROM viryaos_growth_autonomy \
+             WHERE workspace_id = $1 AND action_class = $2 LIMIT 1",
+        )
+        .bind(self.workspace_id.into_uuid())
+        .bind(grant.class.as_str())
+        .fetch_optional(&self.pool)
+        .await?;
+        let ceiling = ceiling
+            .as_deref()
+            .and_then(AutonomyLevel::parse)
+            .unwrap_or_else(|| grant.class.safest_ceiling());
+        let authority = effective_authority(context_level, ceiling);
+        Ok(
+            unattended_authority(authority, Some(grant), time::OffsetDateTime::now_utc())
+                == UnattendedAuthority::Grant,
+        )
     }
     /// Marks approved relay batches whose observation window closed as
     /// `done`, and emits one summary event per batch — "the week answered:
