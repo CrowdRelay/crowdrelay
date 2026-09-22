@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import json
+import re
 from pathlib import Path
 from rust_source_tree import read_rust_module
 
@@ -51,9 +52,25 @@ if signal.is_dir() and virya.is_dir() and synesthesia.is_dir():
         "--virya-signal-deep: #26655d",
         "--virya-warning: #f3c51a",
     )
+    # Virya aliases the V2 tokens through a `--color-virya-*` layer
+    # (`--virya-bg: var(--color-virya-bg)`); resolve one hop so the gate
+    # verifies the value a property actually computes to, not the spelling.
+    def css_value(css: str, name: str, _depth: int = 0) -> str | None:
+        if _depth > 4:  # a var() cycle is a malformed sheet, not a hang
+            return None
+        match = re.search(rf"{re.escape(name)}:\s*([^;]+);", css)
+        if match is None:
+            return None
+        value = match.group(1).strip()
+        nested = re.fullmatch(r"var\((--[a-z0-9-]+)\)", value)
+        return css_value(css, nested.group(1), _depth + 1) if nested else value
+
     checks.update({
         "signal V2 token adoption": all(token in signal_css for token in signal_v2_tokens),
-        "virya V2 token adoption": all(token in virya_css for token in virya_v2_tokens),
+        "virya V2 token adoption": all(
+            css_value(virya_css, name.strip()) == value.strip()
+            for name, value in (token.split(":", 1) for token in virya_v2_tokens)
+        ),
         "legacy yellow is not Signal primary": "--signal: #f3c51a" not in signal_css and "--virya-signal: #f3c51a" not in virya_css,
         "synesthesia art-first HUD": all(token in syn_hud for token in ("enter_completion_beat", "subtitle_label.visible = false", "palette_row.visible = false", "brush_label.visible = false")),
         "participation without XP": "synesthesia-home-card" in fan_home_overview and "completed_runs" in fan_formatters and all(word not in (fan_home + fan_home_overview + fan_formatters).lower() for word in ("experience points", " xp ", "level-up", "streak")),

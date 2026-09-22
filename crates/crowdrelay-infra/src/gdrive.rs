@@ -191,9 +191,10 @@ impl PostgresGDriveRepository {
         &self.pool
     }
 
-    /// The recorded Drive modifiedTime for a file, if scanned before.
-    /// Matching mtime means the export is byte-identical to last cycle's
-    /// and the whole file can be skipped.
+    /// The recorded freshness marker for a file, if scanned before —
+    /// a Drive modifiedTime or a GitHub `<sha>#<rev>` marker depending on
+    /// the transport. A match means the export is byte-identical to last
+    /// cycle's and the whole file can be skipped.
     pub async fn file_mtime(
         &self,
         workspace_id: Uuid,
@@ -274,7 +275,8 @@ impl PostgresGDriveRepository {
     }
 
     /// Upserts one source-item's extracted contacts in a single
-    /// transaction. `source` is the intake origin (`gdrive` | `gmail`);
+    /// transaction. `source` is the intake origin (`gdrive` | `gmail` |
+    /// `upload` | `github`);
     /// `ref_id`/`ref_name` are provenance (a Drive file id/name or a Gmail
     /// message id/subject line).
     ///
@@ -329,16 +331,17 @@ impl PostgresGDriveRepository {
                     -- the mark_disappeared sweep matches rows by the file
                     -- that last saw them. A sighting from a source that
                     -- never marks (gmail, upload) must not steal the anchor
-                    -- from a gdrive file that still tracks it.
+                    -- from a re-listed file (gdrive, github) that still
+                    -- tracks it.
                     source_file_id = CASE
-                        WHEN $12 = 'gdrive'
-                             OR NOT 'gdrive' = ANY(drive_contacts.sources)
+                        WHEN $12 = ANY('{gdrive,github}'::text[])
+                             OR NOT drive_contacts.sources && '{gdrive,github}'::text[]
                         THEN EXCLUDED.source_file_id
                         ELSE drive_contacts.source_file_id
                     END,
                     source_file_name = CASE
-                        WHEN $12 = 'gdrive'
-                             OR NOT 'gdrive' = ANY(drive_contacts.sources)
+                        WHEN $12 = ANY('{gdrive,github}'::text[])
+                             OR NOT drive_contacts.sources && '{gdrive,github}'::text[]
                         THEN EXCLUDED.source_file_name
                         ELSE drive_contacts.source_file_name
                     END,
