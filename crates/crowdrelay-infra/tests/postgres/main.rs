@@ -1,7 +1,7 @@
-// Postgres-backed integration suites. One binary per crate: each test
-// provisions its own cloned database through common::test_pool, so suites
-// share a target without sharing state. CI and the just recipe run this
-// target with --ignored; every test below stays #[ignore]d.
+// Postgres-backed integration suites. One binary per crate: every test gets
+// a fresh pool on the shared suite database through common::test_pool, so a
+// leak or a close inside one test stays inside it. CI and the just recipe
+// run this target with --ignored; every test below stays #[ignore]d.
 
 mod acquisition;
 mod admission;
@@ -25,6 +25,7 @@ mod autopilot_decline_advisories;
 mod autopilot_dispatch_envelope;
 mod autopilot_dormant_revival;
 mod autopilot_experiment_integrity;
+mod autopilot_fan_source_snapshots;
 mod autopilot_gated_claim;
 mod autopilot_harm;
 mod autopilot_insight_routing;

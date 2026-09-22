@@ -16,6 +16,7 @@ pub(crate) fn router() -> Router<crate::AppState> {
         )
         .route("/v1/admin/ops/actions", get(crate::ops::list_actions))
         .route("/v1/admin/ops/cycles", get(crate::ops::list_cycles))
+        .route("/v1/admin/ops/fan-sources", get(crate::ops::fan_sources))
         .route(
             "/v1/admin/ops/connections",
             get(crate::ops::list_connection_health),
