@@ -43,21 +43,11 @@ if netlify.exists():
     if "netlify-cli" in deploy_workflows and "--no-build" not in deploy_workflows:
         failures.append("Netlify deploy workflow must pass --no-build")
 
-# Per-change dependency security is a reusable-workflow call inside CI, so
-# image publication cannot observe CI=PASS while RustSec is red. The called
-# security.yml owns the single copy of the audit and the weekly/manual
-# freshness triggers.
 ci_workflow = workflow_dir / "ci.yml"
 if not ci_workflow.exists():
     failures.append(".github/workflows/ci.yml: canonical CI workflow is required")
 else:
     ci_text = ci_workflow.read_text()
-    for contract in (
-        "dependency-security:",
-        "uses: ./.github/workflows/security.yml",
-    ):
-        if contract not in ci_text:
-            failures.append(f".github/workflows/ci.yml: dependency-security contract missing: {contract}")
     # The container build gate lives in publish-images.yml, not ci.yml: image
     # publication on a green main run is what proves the Dockerfile builds on
     # the production architecture, before any deploy can consume it. A second

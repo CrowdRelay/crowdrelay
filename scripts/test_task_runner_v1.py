@@ -100,9 +100,11 @@ class TaskRunnerContract(unittest.TestCase):
         # job left on 2026-09-22 — publish-images.yml builds the same images
         # on every green main run, so the in-CI copy paid a full job setup to
         # compile the same artifacts. On a single self-hosted runner every
-        # extra job buys another checkout and toolchain setup.
+        # extra job buys another checkout and toolchain setup. The per-push
+        # RustSec call left the same day for the feature-freeze stage —
+        # security.yml remains dispatchable, it just stopped taxing each push.
         self.assertIn(
-            "needs: [rust-tests, dependency-security]",
+            "needs: [rust-tests]",
             ci,
         )
         self.assertIn("All checks passed", ci)

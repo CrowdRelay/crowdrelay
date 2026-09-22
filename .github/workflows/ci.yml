@@ -381,17 +381,14 @@ jobs:
         continue-on-error: true
         run: docker volume prune -f 2>/dev/null || true
 
-  dependency-security:
-    name: Dependency security
-    # Single definition lives in security.yml; calling it here keeps image
-    # publication unable to observe CI=PASS while RustSec is red, without
-    # maintaining a second copy of the audit job.
-    uses: ./.github/workflows/security.yml
+  # The per-push RustSec audit left the gate set for the feature-freeze
+  # stage: dependencies barely move, and a `cargo audit` + SBOM job on every
+  # push bought nothing. security.yml remains dispatchable by hand.
 
   summary:
     # Single green check for branch protection.
     name: All checks passed
-    needs: [rust-tests, dependency-security]
+    needs: [rust-tests]
     if: always()
     runs-on: [self-hosted, arm64]
     timeout-minutes: 5
