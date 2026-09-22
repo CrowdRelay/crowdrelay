@@ -339,3 +339,134 @@ async fn run_cases(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
 
     Ok(())
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn a_shared_slug_resolves_to_the_sheet_rows_own_country()
+-> Result<(), Box<dyn std::error::Error>> {
+    let database = DisposableDatabase::create().await?;
+    let result = run_country_scoped_case(&database.pool).await;
+    database.drop_database().await;
+    result
+}
+
+/// `cities.slug` is unique per country, not globally — a "Neustadt" cell in
+/// a Czechia row must land on the Czech city even when Germany's catalogue
+/// carries the same slug, and the name-match must never pick one by
+/// accident.
+async fn run_country_scoped_case(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
+    let workspace = seed_workspace(pool).await?;
+    let repo = PostgresPeerActSeedRepository::new(pool.clone());
+
+    let de_neustadt = Uuid::now_v7();
+    let cz_neustadt = Uuid::now_v7();
+    for (id, country) in [(de_neustadt, "DE"), (cz_neustadt, "CZ")] {
+        sqlx::query("INSERT INTO cities (id, slug, name, country_code) VALUES ($1, $2, $3, $4)")
+            .bind(id)
+            .bind("neustadt")
+            .bind("Neustadt")
+            .bind(country)
+            .execute(pool)
+            .await?;
+    }
+
+    let report = PeerActSeedReport {
+        acts: vec![
+            act(
+                "Czech Act",
+                |act| {
+                    act.city = Some("Neustadt".to_owned());
+                    act.country = Some("Czechia".to_owned());
+                },
+                |_| {},
+            ),
+            // Same city cell, no country the resolver knows: two cities
+            // answer, so the honest outcome is no pointer at all.
+            act(
+                "Ambiguous Act",
+                |act| act.city = Some("Neustadt".to_owned()),
+                |_| {},
+            ),
+        ],
+        refusals: Vec::new(),
+    };
+    let summary = repo.import_sheet(workspace, &report).await?;
+    assert_eq!(summary.imported, 2);
+    assert_eq!(summary.unresolved_city, 1);
+
+    let resolved = sqlx::query_scalar::<_, Option<Uuid>>(
+        "SELECT home_city_id FROM place_peer_acts WHERE name_key = 'czech act'",
+    )
+    .fetch_one(pool)
+    .await?;
+    assert_eq!(
+        resolved,
+        Some(cz_neustadt),
+        "the sheet's own country did not scope the city resolution"
+    );
+    let ambiguous = sqlx::query_scalar::<_, Option<Uuid>>(
+        "SELECT home_city_id FROM place_peer_acts WHERE name_key = 'ambiguous act'",
+    )
+    .fetch_one(pool)
+    .await?;
+    assert_eq!(ambiguous, None, "an ambiguous name picked a city at random");
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn one_bad_row_does_not_abort_the_sheet() -> Result<(), Box<dyn std::error::Error>> {
+    let database = DisposableDatabase::create().await?;
+    let result = run_failure_isolation_case(&database.pool).await;
+    database.drop_database().await;
+    result
+}
+
+/// A row whose own transaction fails is counted, not propagated: the
+/// sheet's other bands still land. The failing row here is a
+/// whitespace-only name — `place_venue_key` normalizes it to NULL and the
+/// NOT NULL constraint refuses it — and a 600-char name exercises the
+/// name_key bound: it must import on a digested key rather than violate the
+/// 500-char CHECK or silently merge with another long name.
+async fn run_failure_isolation_case(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
+    let workspace = seed_workspace(pool).await?;
+    let repo = PostgresPeerActSeedRepository::new(pool.clone());
+
+    let long_name = format!("{}{}", "The ".repeat(150), "Band"); // 604 chars
+    let report = PeerActSeedReport {
+        acts: vec![
+            act("Fine Act", |_| {}, |_| {}),
+            act("   ", |_| {}, |_| {}),
+            act(&long_name, |_| {}, |_| {}),
+        ],
+        refusals: Vec::new(),
+    };
+    let summary = repo.import_sheet(workspace, &report).await?;
+    assert_eq!(summary.imported, 2, "a bad row took the sheet down with it");
+    assert_eq!(summary.failed, 1);
+
+    let key = sqlx::query_scalar::<_, String>(
+        "SELECT name_key FROM place_peer_acts WHERE display_name = $1",
+    )
+    .bind(&long_name[..500])
+    .fetch_one(pool)
+    .await?;
+    assert!(
+        key.len() <= 500,
+        "name_key {} chars violates the CHECK bound",
+        key.len()
+    );
+    // The digested key is deterministic: a re-scan of the same over-long
+    // name upserts the same identity rather than minting a twin.
+    let rescan = PeerActSeedReport {
+        acts: vec![act(&long_name, |_| {}, |_| {})],
+        refusals: Vec::new(),
+    };
+    repo.import_sheet(workspace, &rescan).await?;
+    let ids = sqlx::query_scalar::<_, Uuid>("SELECT id FROM place_peer_acts WHERE name_key = $1")
+        .bind(&key)
+        .fetch_all(pool)
+        .await?;
+    assert_eq!(ids.len(), 1);
+    Ok(())
+}

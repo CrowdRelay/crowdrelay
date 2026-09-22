@@ -350,7 +350,11 @@ impl TelegramExecutorWorker {
                 COALESCE(a.payload->'draft'->>'channel', ''),
                 'pending'
             FROM autopilot_actions a
-            JOIN agent_service_tasks t ON t.id = (a.payload->>'task_id')::uuid
+            -- A malformed task_id in a payload must not abort the claim:
+            -- the regex gate keeps the ::uuid cast from ever seeing one.
+            JOIN agent_service_tasks t
+              ON a.payload->>'task_id' ~ '^[0-9a-fA-F-]{36}$'
+             AND t.id = (a.payload->>'task_id')::uuid
             WHERE a.workspace_id = $1
               AND a.action_kind = 'agent.content.request'
               AND a.status = 'succeeded'

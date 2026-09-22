@@ -48,6 +48,9 @@ pub struct PeerActSeedSummary {
     pub imported: u64,
     /// Imported rows whose City cell named no catalogue city.
     pub unresolved_city: u64,
+    /// Rows whose own transaction failed — a bad row is counted and logged,
+    /// never allowed to take the sheet's other bands down with it.
+    pub failed: u64,
 }
 
 /// One attributed claim about an act, as `write_fact` takes it — a struct
@@ -156,11 +159,19 @@ impl PostgresPeerActSeedRepository {
     ) -> Result<PeerActSeedSummary, sqlx::Error> {
         let mut summary = PeerActSeedSummary::default();
         for act in &report.acts {
-            match self.import_act(workspace_id, act).await? {
-                PeerSeedOutcome::Imported => summary.imported += 1,
-                PeerSeedOutcome::ImportedWithoutCity => {
+            match self.import_act(workspace_id, act).await {
+                Ok(PeerSeedOutcome::Imported) => summary.imported += 1,
+                Ok(PeerSeedOutcome::ImportedWithoutCity) => {
                     summary.imported += 1;
                     summary.unresolved_city += 1;
+                }
+                Err(error) => {
+                    summary.failed += 1;
+                    tracing::warn!(
+                        act = %act.act.name,
+                        error = %error,
+                        "peer act row failed to import; the rest of the sheet continues"
+                    );
                 }
             }
         }
@@ -170,12 +181,13 @@ impl PostgresPeerActSeedRepository {
     /// One act: resolve the city when the sheet stated one, upsert the
     /// identity row, write its genres and facts.
     ///
-    /// The city resolves the way `import_venue` resolves it — slug first,
-    /// then a name match only when exactly one city answers, because a name
-    /// two cities share picks nothing rather than picking wrong. When the
-    /// row also names a country, the match is constrained to it: a
-    /// "Neustadt" inside a Czechia row must not resolve to the German
-    /// catalogue entry.
+    /// The city resolves the way `import_venue` resolves it — a name match
+    /// only when exactly one city answers, because a name two cities share
+    /// picks nothing rather than picking wrong. `cities.slug` is unique per
+    /// country, not globally, so the id resolves in the same query the
+    /// country constraint ran in: a "Neustadt" inside a Czechia row must
+    /// not resolve to the German catalogue entry, and a slug shared across
+    /// two countries must not pick one by accident.
     async fn import_act(
         &self,
         workspace_id: Uuid,
@@ -185,8 +197,8 @@ impl PostgresPeerActSeedRepository {
         let country_code = act.country.as_deref().and_then(resolve_country_code);
         let city_id = match &act.city {
             Some(city) => {
-                let slugs = sqlx::query_scalar::<_, String>(
-                    "SELECT DISTINCT slug FROM cities \
+                let ids = sqlx::query_scalar::<_, Uuid>(
+                    "SELECT id FROM cities \
                      WHERE (slug = lower(btrim($1)) \
                         OR lower(btrim(name)) = lower(btrim($1))) \
                        AND ($2::text IS NULL OR country_code = $2)",
@@ -195,13 +207,8 @@ impl PostgresPeerActSeedRepository {
                 .bind(country_code)
                 .fetch_all(&self.pool)
                 .await?;
-                match slugs.as_slice() {
-                    [only] => {
-                        sqlx::query_scalar::<_, Uuid>("SELECT id FROM cities WHERE slug = $1")
-                            .bind(only)
-                            .fetch_optional(&self.pool)
-                            .await?
-                    }
+                match ids.as_slice() {
+                    [only] => Some(*only),
                     _ => None,
                 }
             }
@@ -230,10 +237,18 @@ impl PostgresPeerActSeedRepository {
             .unwrap_or("sheet");
 
         let mut tx = self.pool.begin().await?;
+        // name_key's CHECK caps it at 500 chars; a longer key would fail the
+        // row outright. Truncating alone could merge two distinct acts onto
+        // one identity, so an over-length key keeps a bounded prefix plus a
+        // digest of the whole key — still deterministic, still one act.
         let peer_act_id = sqlx::query_scalar::<_, Uuid>(
             r#"
+            WITH key AS (SELECT place_venue_key($1) AS k)
             INSERT INTO place_peer_acts (name_key, display_name, home_city_id)
-            VALUES (place_venue_key($1), left(btrim($2), 500), $3)
+            SELECT CASE WHEN k IS NULL OR char_length(k) <= 500 THEN k
+                        ELSE left(k, 475) || '-' || left(md5(k), 24) END,
+                   left(btrim($2), 500), $3
+            FROM key
             ON CONFLICT (name_key)
             DO UPDATE SET display_name = EXCLUDED.display_name,
                           home_city_id = COALESCE(EXCLUDED.home_city_id,

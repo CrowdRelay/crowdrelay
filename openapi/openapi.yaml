@@ -11009,6 +11009,41 @@ paths:
         '404': { $ref: '#/components/responses/PrivateProblem' }
         '409': { $ref: '#/components/responses/PrivateProblem' }
         '503': { $ref: '#/components/responses/PrivateProblem' }
+  /control-plane/events:
+    post:
+      operationId: createControlPlaneEvent
+      summary: Enter one show by hand — the operator's own row, not a provider sync
+      description: 'Manual show entry for a label that never ran a sync source. Idempotent on Idempotency-Key: a retried submit returns the show it already created. publish=false stores a draft off the public list.'
+      security:
+      - controlPlaneBearer: []
+      parameters:
+      - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ManualEventCreateRequest'
+      responses:
+        '201':
+          description: Show created.
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/PrivateNoStore'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CreatedEvent'
+        '400':
+          $ref: '#/components/responses/PrivateProblem'
+        '401':
+          $ref: '#/components/responses/PrivateProblem'
+        '409':
+          $ref: '#/components/responses/PrivateProblem'
+        '413':
+          $ref: '#/components/responses/PrivateProblem'
+        '503':
+          $ref: '#/components/responses/PrivateProblem'
   /control-plane/events/{event_slug}/who-can-help:
     get:
       operationId: getControlPlaneEventHelpers

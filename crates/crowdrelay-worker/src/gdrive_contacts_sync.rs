@@ -122,11 +122,13 @@ struct CycleCounts {
     venue_refusals: usize,
     venues_unknown_city: u64,
     /// The same accounting for a band seed sheet: acts that imported into
-    /// the peer registry, rows refused, and acts whose city named no
-    /// catalogue city.
+    /// the peer registry, rows refused, acts whose city named no catalogue
+    /// city, and acts whose own write failed — a bad row is counted, never
+    /// allowed to abort the rest of the sheet.
     peer_acts_imported: u64,
     peer_act_refusals: usize,
     peer_acts_unresolved_city: u64,
+    peer_acts_failed: u64,
 }
 
 impl GDriveContactsSyncWorker {
@@ -281,6 +283,7 @@ impl GDriveContactsSyncWorker {
                     counts.peer_acts_imported += file_counts.peer_acts_imported;
                     counts.peer_act_refusals += file_counts.peer_act_refusals;
                     counts.peer_acts_unresolved_city += file_counts.peer_acts_unresolved_city;
+                    counts.peer_acts_failed += file_counts.peer_acts_failed;
                 }
                 Err(error) => {
                     counts.files_failed += 1;
@@ -307,6 +310,7 @@ impl GDriveContactsSyncWorker {
             peer_acts_imported = counts.peer_acts_imported,
             peer_act_refusals = counts.peer_act_refusals,
             peer_acts_unresolved_city = counts.peer_acts_unresolved_city,
+            peer_acts_failed = counts.peer_acts_failed,
             "gdrive contacts sync cycle complete"
         );
         Ok(())
@@ -590,6 +594,7 @@ impl GDriveContactsSyncWorker {
                 counts.peer_acts_imported += summary.imported;
                 counts.peer_act_refusals += report.refusals.len();
                 counts.peer_acts_unresolved_city += summary.unresolved_city;
+                counts.peer_acts_failed += summary.failed;
                 continue;
             }
 
