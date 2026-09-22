@@ -190,7 +190,6 @@ async fn pending_fan_confirms_once_and_unsubscribes_idempotently()
     )
     .await?;
 
-    pool.close().await;
     Ok(())
 }
 

@@ -547,7 +547,6 @@ async fn post_show_report_escalation_emits_labelled_artifact_and_closes_task()
         "an unticketed festival slot must not read as a zero-draw room"
     );
 
-    f.pool.close().await;
     Ok(())
 }
 
@@ -630,7 +629,6 @@ async fn a_failed_report_escalation_advances_the_retry_epoch()
         "a dead escalation must move the epoch so the retry gets a fresh key"
     );
 
-    f.pool.close().await;
     Ok(())
 }
 
@@ -887,7 +885,6 @@ async fn festival_post_show_follow_up_labels_acts_and_room()
         .collect();
     assert_eq!(report_acts, ["virya", "scene-local", "quiet-riot"]);
 
-    f.pool.close().await;
     Ok(())
 }
 
@@ -989,6 +986,5 @@ async fn the_qr_announce_beat_follows_the_campaign_not_the_calendar()
         "a revoked campaign retires the beat with it"
     );
 
-    f.pool.close().await;
     Ok(())
 }

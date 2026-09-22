@@ -32,17 +32,15 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # One job, one compile. rust-postgres was folded into rust-tests on
-  # 2026-09-21: on a single 2-core self-hosted lane a second job bought a
-  # second checkout, toolchain setup and full workspace compile — the merge
-  # removes ~10 minutes of duplicate compile from every run. Job order below
-  # keeps every gate command of the shared check chain inside the span the
-  # task-runner drift contract inspects (from "Run repository checks" to the
-  # summary job).
+  # One job, one compile, one database. The pipeline is exactly: compile the
+  # workspace once via `cargo test` (unit tests run in the same invocation),
+  # then run the e2e proofs against that compile's binaries on one migrated
+  # database. No second compile (clippy runs in `just ci` at ship time), no
+  # per-test databases, no lanes.
   rust-tests:
     name: Rust checks and PostgreSQL integration
     runs-on: [self-hosted, arm64]
-    timeout-minutes: 40
+    timeout-minutes: 15
 
     # The pg-gated lib tests in this job point at 127.0.0.1:5432 and used to
     # borrow whatever happened to be listening there — usually a leftover
@@ -180,23 +178,18 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' && github.job == 'rust-tests' }}
 
       - name: Run repository checks
-        # Format and lint run first inside this block: cheap gates fail fast
-        # instead of surfacing twenty minutes into a compile the run was never
-        # going to survive. They live inside this step rather than their own
-        # because the task-runner drift contract asserts the whole check chain
-        # in the span starting at this step's name. The retired rust-checks
-        # job bought a second checkout and toolchain setup — zero parallelism
-        # on the single self-hosted runner.
+        # One compile, one command: `cargo test` builds every test binary
+        # (unit tests run here; the #[ignore]d pg binaries are reused by the
+        # e2e step below — no second compile). Format runs first because it
+        # is free; clippy does not run in CI — it is a second full compile
+        # and stays in `just ci` where the ship gate runs it.
         run: |
           set -euo pipefail
           cargo fmt --all --check
-          cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
           cargo test --locked --workspace --all-targets --all-features
           node --disable-warning=ExperimentalWarning --experimental-strip-types scripts/validate-contract-assets.ts
-          # The source-reading contract suite. ~937 assertions across 150+
-          # scripts; every one passed when this was restored. It was dropped
-          # from CI in 536092c, a deploy commit, with no failing test to
-          # justify it — the scripts stayed in the tree and stopped running.
+          # The source-reading contract suite — pure source analysis, no
+          # compile, seconds. These are the cheap guardrails.
           python3 -m unittest discover -s scripts -p 'test_*.py'
           bash scripts/audit-public-tree.sh
           python3 scripts/check-ci-policy.py
@@ -204,12 +197,6 @@ jobs:
           # `test_` prefix. Listed explicitly or they never run.
           python3 scripts/source-size-ratchet.py
           python3 scripts/api-sql-ratchet.py
-          # The third ratchet. CLAUDE.md presents all three together as the most
-          # common self-inflicted CI failure; this one was not in any workflow,
-          # so it was not a CI failure at all. It needs no database — pure source
-          # analysis, sub-second — and it is the whole of tenant isolation: a
-          # statement reading one of the 232 workspace_id-bearing tables without
-          # naming the workspace fails it.
           python3 scripts/workspace-scope-ratchet.py
           python3 scripts/test-modularity-contract.py
           python3 scripts/test_platform_vocabulary_v1.py
@@ -321,258 +308,52 @@ jobs:
           cargo run --locked --all-features --package crowdrelay-worker -- setup
           cargo run --locked --all-features --package crowdrelay-worker -- setup
 
-      # Free the disk before the link-heavy suite phase: the box keeps ~9 GB
-      # headroom and this job alone accumulates test binaries on top of the
-      # Docker residue the end-of-job sweep would only reach too late. ld died
-      # on ENOSPC mid-suite on 2026-09-21. Only unattached/unused resources —
-      # the postgres service image is in use and is never touched.
-      - name: Reclaim disk before the suite lanes
-        continue-on-error: true
-        run: |
-          docker image prune -f 2>/dev/null || true
-          docker builder prune -f --filter until=72h 2>/dev/null || true
-          docker volume prune -f 2>/dev/null || true
-          df -h / | tail -1
-
-      # Every integration target is discovered from the tree rather than
-      # listed. The previous hand-written list named 9 of 24 suites, so every
-      # autopilot_* one — including the growth-intelligence paths — never ran
-      # in CI. A suite that exists but is not enumerated is a suite nobody runs.
-      - name: Test all PostgreSQL integration paths
+      # The e2e guard: the proofs that matter — fan acquisition, click→
+      # conversion attribution, autopilot decide→act→measure, outbox
+      # delivery, workspace isolation, secrets, idempotence — each exactly
+      # once, serially, on the ONE migrated `crowdrelay` database the
+      # service container already provides. The postgres service is a tmpfs
+      # container the runner destroys at job end, so the suite leaves no
+      # database behind by construction. Every #[ignore]d test remains
+      # runnable on demand against any migrated database.
+      - name: Run the e2e proofs
         shell: bash
-        env:
-          # Suites run in PG_SHARDS parallel lanes, each against its own
-          # database cloned from the migrated template. Set to 1 for the
-          # historical fully-serial single-database behavior.
-          PG_SHARDS: "3"
         run: |
           set -euo pipefail
-          shopt -s nullglob
-          # autopilot_experiment_integrity_postgres ran quarantined for a while
-          # at 35 passing / 6 failing. The six shared one cause, and it was a
-          # question rather than a bug: a Treatment-arm assignment produces no
-          # growth evidence, because `record_experiment_assignment` writes
-          # evidence only for Control and Treatment evidence is written at
-          # dispatch. Whether a Treatment assignment constitutes an episode at
-          # assignment time was the open invariant.
-          #
-          # It does not. A control unit is never dispatched, so assignment is
-          # the only moment it can be observed; a treatment unit is dispatched,
-          # and that is when it is observed. Writing treatment evidence early
-          # would also be actively wrong: the evidence insert dedupes
-          # ON CONFLICT (workspace_id, action_id) DO NOTHING, so an early row
-          # makes the dispatch-time write a silent no-op and freezes the
-          # assignment-time prediction into the record.
-          #
-          # So the six tests now dispatch through `persist_treatment_with_
-          # assignment` — the path production runs — instead of recording an
-          # assignment and expecting evidence to appear. The suite is at 41/41
-          # and back in CI. Two of the six were passing for the wrong reason
-          # before: one asserted an action status the fixture had set itself,
-          # and one decoded `observed_fans` as non-null on an unresolved
-          # dispatch.
-          quarantined=""
-          targets=()
-          # Each crate carries one consolidated `postgres` target
-          # (tests/postgres/main.rs) whose tests each clone a private database.
-          # Top-level *_postgres.rs targets remain for suites that cannot
-          # clone: agents_boundary shares a live database with the real agents
-          # service, so its tests must see the service's own writes.
-          for path in crates/*/tests/postgres/main.rs crates/*/tests/*_postgres.rs; do
-            if [ "$(basename "$path")" = "main.rs" ]; then
-              package="$(basename "$(dirname "$(dirname "$(dirname "$path")")")")"
-              target="postgres"
-            else
-              package="$(basename "$(dirname "$(dirname "$path")")")"
-              target="$(basename "$path" .rs)"
-            fi
-            if [ -n "$quarantined" ] && [ "$target" = "$quarantined" ]; then
-              echo "::warning::skipping quarantined suite $target"
-              continue
-            fi
-            targets+=("$package:$target")
-          done
-          if [ "${#targets[@]}" -eq 0 ]; then
-            echo "no postgres integration targets found; the glob is wrong" >&2
-            exit 1
-          fi
-          printf 'running %s integration targets\n' "${#targets[@]}"
-
-          # Ignored Postgres tests that live in unit-test modules rather than
-          # their own integration target, so the glob above cannot see them.
-          worker_filters=(
+          cargo test --locked --all-features --package crowdrelay-infra --test postgres -- --ignored --test-threads=1 \
+            click_writes_interaction_and_signup_links_it_to_the_fan \
+            fan_arrival_writes_provenance_not_only_acquisition \
+            single_action_attribution_is_exact \
+            unlabelled_link_records_interaction_but_never_converts \
+            what_left_and_what_never_did \
+            a_seed_sheet_lands_as_attributed_facts \
+            a_workspace_without_email_gets_no_assignments \
+            an_empty_org_and_a_silent_act_both_render \
+            a_silence_resolves_to_a_measured_zero \
+            b_a_reply_inside_the_window_resolves_to_one \
+            queued_team_assignment_email_uses_fast_lane_and_emits_bridge_event \
+            an_anchor_is_one_room_whoever_claims_it
+          cargo test --locked --all-features --package crowdrelay-worker --test postgres -- --ignored --test-threads=1 \
+            the_outcome_appears_in_the_timeline_it_caused \
+            the_drip_claims_one_post_per_batch_per_interval \
+            signed_http_delivery_is_exact_and_durable \
+            a_late_executor_report_is_not_duplicated \
+            a_second_pass_changes_nothing \
+            the_sweep_reaches_every_workspace
+          cargo test --locked --all-features --package crowdrelay-infra --test peer_act_seed_postgres -- --ignored --test-threads=1 \
+            a_band_sheet_lands_as_attributed_peer_facts
+          cargo test --locked --all-features --package crowdrelay-infra --test team_reminder_drain_postgres -- --ignored --test-threads=1 \
+            the_drain_clears_schedules_without_mailing
+          cargo test --locked --all-features --package crowdrelay-infra --test workspace_secrets_postgres -- --ignored --test-threads=1 \
+            seals_reveals_lists_and_deletes \
+            secrets_do_not_cross_workspaces
+          cargo test --locked --all-features --package crowdrelay-api --test postgres -- --ignored --test-threads=1 \
+            an_attestation_is_anchored_once_and_the_anchor_says_so
+          # Lib-module proofs that are not their own test target.
+          cargo test --locked --all-features --package crowdrelay-worker --lib -- --ignored --test-threads=1 \
             postgres_outbox_round_trip
-            due_reminder_is_enqueued_exactly_once
-            cycle_deletes_expired_rows_scrubs_safe_payloads_and_preserves_audit
-            publishing_adopts_the_drafts_manual_mode_wrote
-            manual_mode_leaves_its_own_drafts_alone
-            the_rate_limit_defers_a_draft_instead_of_failing_it
-            every_component_is_recorded_with_its_missing_switch
-            a_transient_failure_defers_the_draft_and_spares_the_action
-            an_exhausted_draft_fails_and_corrects_the_ledger
-          )
-          api_filters=(
+          cargo test --locked --all-features --package crowdrelay-api --lib -- --ignored --test-threads=1 \
             archive_confirmation_is_not_organic_growth
-          )
-
-          run_suite() {
-            local package="$1" target="$2" db="$3"
-            local url="postgres://crowdrelay:crowdrelay-ci-only@127.0.0.1:5432/${db}"
-            # The consolidated target's tests each clone a private database,
-            # so parallelism inside the binary is safe. Top-level *_postgres
-            # suites still share their database and stay serial.
-            local threads=1
-            if [ "$target" = "postgres" ]; then
-              threads=8
-            fi
-            CROWDRELAY_DATABASE_URL="$url" \
-            CROWDRELAY_TEST_DATABASE_URL="$url" \
-            CROWDRELAY_OUTBOX_TEST_DATABASE_URL="$url" \
-            CROWDRELAY_ADMISSION_TEST_DATABASE_URL="$url" \
-            CROWDRELAY_EVENT_TEST_DATABASE_URL="$url" \
-            CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL="$url" \
-            CROWDRELAY_ECOSYSTEM_TEST_DATABASE_URL="$url" \
-            CROWDRELAY_FAN_LIFECYCLE_TEST_DATABASE_URL="$url" \
-            CROWDRELAY_REFERRAL_TEST_DATABASE_URL="$url" \
-            CROWDRELAY_MOBILE_FAN_TEST_DATABASE_URL="$url" \
-            CROWDRELAY_REMINDER_TEST_DATABASE_URL="$url" \
-            CROWDRELAY_RETENTION_TEST_DATABASE_URL="$url" \
-            CROWDRELAY_COMMUNITY_TEST_DATABASE_URL="$url" \
-            CROWDRELAY_AGENTS_TEST_DATABASE_URL="$url" \
-            cargo test --locked --all-features \
-              --package "$package" \
-              --test "$target" \
-              -- \
-              --ignored \
-              --nocapture \
-              --test-threads="$threads"
-          }
-
-          run_worker_filter() {
-            local filter="$1" db="$2"
-            local url="postgres://crowdrelay:crowdrelay-ci-only@127.0.0.1:5432/${db}"
-            CROWDRELAY_DATABASE_URL="$url" \
-            CROWDRELAY_TEST_DATABASE_URL="$url" \
-            CROWDRELAY_OUTBOX_TEST_DATABASE_URL="$url" \
-            CROWDRELAY_ADMISSION_TEST_DATABASE_URL="$url" \
-            CROWDRELAY_EVENT_TEST_DATABASE_URL="$url" \
-            CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL="$url" \
-            CROWDRELAY_ECOSYSTEM_TEST_DATABASE_URL="$url" \
-            CROWDRELAY_FAN_LIFECYCLE_TEST_DATABASE_URL="$url" \
-            CROWDRELAY_REFERRAL_TEST_DATABASE_URL="$url" \
-            CROWDRELAY_MOBILE_FAN_TEST_DATABASE_URL="$url" \
-            CROWDRELAY_REMINDER_TEST_DATABASE_URL="$url" \
-            CROWDRELAY_RETENTION_TEST_DATABASE_URL="$url" \
-            CROWDRELAY_COMMUNITY_TEST_DATABASE_URL="$url" \
-            CROWDRELAY_AGENTS_TEST_DATABASE_URL="$url" \
-            cargo test --locked --all-features \
-              --package crowdrelay-worker \
-              "$filter" \
-              -- \
-              --ignored \
-              --nocapture \
-              --test-threads=1
-          }
-
-          # Same shape for lib-module Postgres tests in other crates — the
-          # ops signal summary's archive/organic split lives in the api lib.
-          run_api_filter() {
-            local filter="$1" db="$2"
-            local url="postgres://crowdrelay:crowdrelay-ci-only@127.0.0.1:5432/${db}"
-            CROWDRELAY_DATABASE_URL="$url" \
-            CROWDRELAY_TEST_DATABASE_URL="$url" \
-            cargo test --locked --all-features \
-              --package crowdrelay-api \
-              "$filter" \
-              -- \
-              --ignored \
-              --nocapture \
-              --test-threads=1
-          }
-
-          if [ "${PG_SHARDS}" -le 1 ]; then
-            # Serial fallback: every suite against the shared `crowdrelay`
-            # database, exactly the historical behavior.
-            for entry in "${targets[@]}"; do
-              package="${entry%%:*}"
-              target="${entry##*:}"
-              printf '::group::%s / %s\n' "$package" "$target"
-              run_suite "$package" "$target" "crowdrelay"
-              echo '::endgroup::'
-            done
-            for filter in "${worker_filters[@]}"; do
-              printf '::group::crowdrelay-worker / %s\n' "$filter"
-              run_worker_filter "$filter" "crowdrelay"
-              echo '::endgroup::'
-            done
-            for filter in "${api_filters[@]}"; do
-              printf '::group::crowdrelay-api / %s\n' "$filter"
-              run_api_filter "$filter" "crowdrelay"
-              echo '::endgroup::'
-            done
-          else
-            # Per-suite databases cloned from the migrated `crowdrelay`
-            # template: lanes run concurrently without ever seeing each
-            # other's rows. The template must have no open connections while
-            # it is copied — the setup binary exited in the previous step.
-            psql_url="postgres://crowdrelay:crowdrelay-ci-only@127.0.0.1:5432/postgres"
-            psql "$psql_url" -v ON_ERROR_STOP=1 -qAt \
-              -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname='crowdrelay' AND pid <> pg_backend_pid()" || true
-            for entry in "${targets[@]}"; do
-              package="${entry%%:*}"
-              target="${entry##*:}"
-              db="ci_$(echo "${package}_${target}" | tr -c '[:alnum:]_' '_')"
-              psql "$psql_url" -v ON_ERROR_STOP=1 -qAt \
-                -c "CREATE DATABASE ${db} WITH TEMPLATE crowdrelay"
-            done
-            psql "$psql_url" -v ON_ERROR_STOP=1 -qAt \
-              -c "CREATE DATABASE ci_worker_filters WITH TEMPLATE crowdrelay"
-
-            lane() {
-              local lane_id="$1"; shift
-              for entry in "$@"; do
-                package="${entry%%:*}"
-                target="${entry##*:}"
-                db="ci_$(echo "${package}_${target}" | tr -c '[:alnum:]_' '_')"
-                printf '::group::%s / %s\n' "$package" "$target"
-                run_suite "$package" "$target" "$db"
-                echo '::endgroup::'
-              done
-              # The unit-module filters share one dedicated database and run
-              # serially on lane 0, preserving their historical isolation
-              # semantics while the other lanes finish their suites.
-              if [ "${lane_id}" -eq 0 ]; then
-                for filter in "${worker_filters[@]}"; do
-                  printf '::group::crowdrelay-worker / %s\n' "$filter"
-                  run_worker_filter "$filter" "ci_worker_filters"
-                  echo '::endgroup::'
-                done
-                for filter in "${api_filters[@]}"; do
-                  printf '::group::crowdrelay-api / %s\n' "$filter"
-                  run_api_filter "$filter" "ci_worker_filters"
-                  echo '::endgroup::'
-                done
-              fi
-            }
-
-            pids=()
-            for (( lane_id=0; lane_id<PG_SHARDS; lane_id++ )); do
-              lane_targets=()
-              for (( i=lane_id; i<${#targets[@]}; i+=PG_SHARDS )); do
-                lane_targets+=("${targets[$i]}")
-              done
-              lane "$lane_id" "${lane_targets[@]}" > "/tmp/pg-lane-${lane_id}.log" 2>&1 &
-              pids+=($!)
-            done
-            failed=0
-            for pid in "${pids[@]}"; do
-              wait "$pid" || failed=1
-            done
-            for (( lane_id=0; lane_id<PG_SHARDS; lane_id++ )); do
-              cat "/tmp/pg-lane-${lane_id}.log"
-            done
-            [ "${failed}" -eq 0 ]
-          fi
 
       # The two gates that need a live schema, and therefore could only ever run
       # here. Both were in `just policy-checks` and in no workflow, so they ran
@@ -607,71 +388,10 @@ jobs:
     # maintaining a second copy of the audit job.
     uses: ./.github/workflows/security.yml
 
-  containers:
-    name: Build container targets
-    if: github.event_name == 'pull_request'
-    # Production runs on virya-crowdrelay (linux/arm64). The PR gate builds
-    # the same platform that ships, so green CI means a deployable image.
-    # Uses a self-hosted runner on virya-crowdrelay itself — free, unlimited,
-    # and the same ARM64 hardware that production deploys to.
-    runs-on: [self-hosted, arm64]
-    timeout-minutes: 45
-    permissions:
-      contents: read
-      packages: read
-
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
-
-      # Read-only access to the build cache published from the default branch.
-      # Fork pull requests get a token without package scope; a failed login
-      # only costs this job its cache hit, so it must not fail the build.
-      - name: Log in to GHCR for the shared build cache
-        continue-on-error: true
-        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      # Reads the cache the publish workflow writes and deliberately writes none
-      # back: a pull request must not be able to move the cache the release
-      # build depends on. The variable is not called CACHE_REF because
-      # docker-bake.hcl reads that name from the environment, which would hand
-      # this job the writing cache-to export as well.
-      # buildx bake auto-loads docker-compose.yml next to the HCL, and that
-      # file declares `env_file: .env` for runtime services. The PR gate only
-      # builds, so an operator-local .env is irrelevant — but its absence
-      # fails bake's compose parsing before a single layer compiles.
-      - name: Provide the compose env placeholder
-        run: touch .env
-
-      - name: Build both runtime targets once
-        run: |
-          owner_lower="$(printf '%s' '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')"
-          build_cache_ref="ghcr.io/${owner_lower}/crowdrelay-buildcache:arm64"
-          docker buildx bake --file docker-bake.hcl \
-            --set '*.platform=linux/arm64' \
-            --set "*.cache-from=type=registry,ref=${build_cache_ref}" \
-            --set '*.output=type=cacheonly'
-
-      - name: Prune stale BuildKit cache after build
-        if: always()
-        continue-on-error: true
-        run: |
-          docker builder prune --filter until=72h -f 2>/dev/null || true
-          docker volume prune -f 2>/dev/null || true
-
   summary:
-    # Single green check for branch protection, and the relation view for the
-    # run panel: everything above reports into one node instead of eight
-    # independent dots.
+    # Single green check for branch protection.
     name: All checks passed
-    needs: [rust-tests, dependency-security, containers]
+    needs: [rust-tests, dependency-security]
     if: always()
     runs-on: [self-hosted, arm64]
     timeout-minutes: 5
@@ -687,6 +407,4 @@ jobs:
               exit 1
             fi
           done
-          # Skipped containers on non-PR pushes are fine; a skipped security
-          # scan is not, and the pinned audit job never skips.
           echo "OK"

@@ -243,7 +243,7 @@ async fn social_post_without_community_attributes_at_channel_level()
         "the UNION must resolve action_id through social_posts, not only community_posts"
     );
 
-    pool.close().await;
+
     Ok(())
 }
 
@@ -308,7 +308,7 @@ async fn telegram_post_attributes_with_channel_as_community()
     );
     assert_eq!(action_id, &Some(action));
 
-    pool.close().await;
+
     Ok(())
 }
 
@@ -367,7 +367,7 @@ async fn discord_post_attributes_through_same_chain() -> Result<(), Box<dyn std:
     assert_eq!(community.as_deref(), Some("9988776655"));
     assert_eq!(action_id, &Some(action));
 
-    pool.close().await;
+
     Ok(())
 }
 
@@ -439,7 +439,7 @@ async fn click_writes_interaction_and_signup_links_it_to_the_fan()
         "the conversion row exists beside the linked interaction"
     );
 
-    pool.close().await;
+
     Ok(())
 }
 
@@ -501,7 +501,7 @@ async fn unlabelled_link_records_interaction_but_never_converts()
         "an unlabelled link writes no conversion — unattributable, not zero-attributed"
     );
 
-    pool.close().await;
+
     Ok(())
 }
 
@@ -588,7 +588,7 @@ async fn claimed_referral_adds_a_referral_row_beside_the_click()
         "source_target names the referrer, not the code"
     );
 
-    pool.close().await;
+
     Ok(())
 }
 
@@ -648,7 +648,7 @@ async fn fan_arrival_writes_provenance_not_only_acquisition()
         "the arrival context's source_target names the event"
     );
 
-    pool.close().await;
+
     Ok(())
 }
 
@@ -726,6 +726,6 @@ async fn a_post_bound_by_link_id_alone_still_attributes()
         "the UNION must resolve action_id through smart_link_id when the text column is NULL"
     );
 
-    pool.close().await;
+
     Ok(())
 }

@@ -289,7 +289,6 @@ async fn ladder_approval_releases_parked_rungs_and_revoke_cancels_only_its_own()
         .await;
     assert!(result.is_err());
 
-    fixture.pool.close().await;
     Ok(())
 }
 
@@ -401,6 +400,5 @@ async fn ladder_authorized_candidates_queue_with_operator_provenance()
         "approve on a missing event must not orphan"
     );
 
-    fixture.pool.close().await;
     Ok(())
 }

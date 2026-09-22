@@ -271,7 +271,6 @@ async fn qualifies_referrals_grants_one_coupon_and_redeems_idempotently()
     .await?;
     assert_eq!(redeemed_event_count, 1);
 
-    pool.close().await;
     Ok(())
 }
 

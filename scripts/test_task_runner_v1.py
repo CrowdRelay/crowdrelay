@@ -29,6 +29,9 @@ FALLBACK = ROOT / ".github/workflows/fallback-gates.yml"
 
 # Commands that constitute the canonical check chain, extracted from the
 # justfile's own recipes. Ordered: fmt, clippy, test, then contract layers.
+# CI deliberately runs the subset without clippy — a second full compile —
+# which stays in `just ci`, the gate the ship path runs. The fallback
+# workflow stands in for `just ci` wholesale, so it keeps the full chain.
 CHAIN = [
     "cargo fmt --all",
     "cargo clippy --locked --workspace --all-targets --all-features",
@@ -37,6 +40,7 @@ CHAIN = [
     "unittest discover -s scripts -p 'test_*.py'",
     "audit-public-tree.sh",
 ]
+CI_CHAIN = [c for c in CHAIN if "cargo clippy" not in c]
 
 
 def read(path: Path) -> str:
@@ -55,7 +59,7 @@ class TaskRunnerContract(unittest.TestCase):
     def test_ci_inline_block_matches_the_check_chain(self) -> None:
         ci = read(CI)
         block = ci.split("Run repository checks", 1)[1].split("  summary:", 1)[0]
-        for command in CHAIN:
+        for command in CI_CHAIN:
             self.assertIn(command, block, command)
         self.assertNotIn("make ", block)
 
@@ -92,11 +96,13 @@ class TaskRunnerContract(unittest.TestCase):
     def test_the_summary_job_gives_the_panel_one_node(self) -> None:
         ci = read(CI)
         # rust-checks and deploy-config were folded into rust-tests on
-        # 2026-09-15, and rust-postgres followed on 2026-09-21: on a single
-        # self-hosted runner every extra job buys another checkout, toolchain
-        # setup and full workspace compile — zero parallelism for pure cost.
+        # 2026-09-15, rust-postgres followed on 2026-09-21, and the containers
+        # job left on 2026-09-22 — publish-images.yml builds the same images
+        # on every green main run, so the in-CI copy paid a full job setup to
+        # compile the same artifacts. On a single self-hosted runner every
+        # extra job buys another checkout and toolchain setup.
         self.assertIn(
-            "needs: [rust-tests, dependency-security, containers]",
+            "needs: [rust-tests, dependency-security]",
             ci,
         )
         self.assertIn("All checks passed", ci)

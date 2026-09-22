@@ -15,51 +15,18 @@ use crowdrelay_domain::peer_act_seed::{
     PeerActSeedReport, SeededPeer, SeededPeerAct, SeededPeerActView,
 };
 use crowdrelay_infra::peer_act_seed::PostgresPeerActSeedRepository;
-use sqlx::{Connection, PgConnection, PgPool, Row, postgres::PgPoolOptions};
+use sqlx::{PgPool, Row, postgres::PgPoolOptions};
 use uuid::Uuid;
 
-struct DisposableDatabase {
-    pool: PgPool,
-    admin_url: String,
-    name: String,
-}
-
-impl DisposableDatabase {
-    async fn create() -> Result<Self, Box<dyn std::error::Error>> {
-        let base = std::env::var("CROWDRELAY_TEST_DATABASE_URL")
-            .map_err(|_| "CROWDRELAY_TEST_DATABASE_URL must target a disposable database")?;
-        let name = format!("crowdrelay_peerseed_{}", Uuid::now_v7().simple());
-        let mut admin = PgConnection::connect(&base).await?;
-        sqlx::query(&format!("CREATE DATABASE {name}"))
-            .execute(&mut admin)
-            .await?;
-        drop(admin);
-        let (head, _) = base.rsplit_once('/').ok_or("database url has no path")?;
-        let pool = PgPoolOptions::new()
-            .max_connections(2)
-            .connect(&format!("{head}/{name}"))
-            .await?;
-        crowdrelay_infra::database::MIGRATOR.run(&pool).await?;
-        Ok(Self {
-            pool,
-            admin_url: base,
-            name,
-        })
-    }
-
-    async fn drop_database(self) {
-        let Self {
-            pool,
-            admin_url,
-            name,
-        } = self;
-        pool.close().await;
-        if let Ok(mut admin) = PgConnection::connect(&admin_url).await {
-            let _ = sqlx::query(&format!("DROP DATABASE IF EXISTS {name} WITH (FORCE)"))
-                .execute(&mut admin)
-                .await;
-        }
-    }
+/// The suite is one migrated database shared by every test; each test scopes
+/// itself by workspace.
+async fn suite_pool() -> Result<PgPool, Box<dyn std::error::Error>> {
+    let url = std::env::var("CROWDRELAY_TEST_DATABASE_URL")
+        .map_err(|_| "CROWDRELAY_TEST_DATABASE_URL must target the migrated suite database")?;
+    Ok(PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&url)
+        .await?)
 }
 
 async fn seed_workspace(pool: &PgPool) -> Result<Uuid, Box<dyn std::error::Error>> {
@@ -128,10 +95,7 @@ async fn facts(
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn a_band_sheet_lands_as_attributed_peer_facts() -> Result<(), Box<dyn std::error::Error>> {
-    let database = DisposableDatabase::create().await?;
-    let result = run_cases(&database.pool).await;
-    database.drop_database().await;
-    result
+    run_cases(&suite_pool().await?).await
 }
 
 async fn run_cases(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
@@ -344,10 +308,7 @@ async fn run_cases(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
 #[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn a_shared_slug_resolves_to_the_sheet_rows_own_country()
 -> Result<(), Box<dyn std::error::Error>> {
-    let database = DisposableDatabase::create().await?;
-    let result = run_country_scoped_case(&database.pool).await;
-    database.drop_database().await;
-    result
+    run_country_scoped_case(&suite_pool().await?).await
 }
 
 /// `cities.slug` is unique per country, not globally — a "Neustadt" cell in
@@ -416,10 +377,7 @@ async fn run_country_scoped_case(pool: &PgPool) -> Result<(), Box<dyn std::error
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn one_bad_row_does_not_abort_the_sheet() -> Result<(), Box<dyn std::error::Error>> {
-    let database = DisposableDatabase::create().await?;
-    let result = run_failure_isolation_case(&database.pool).await;
-    database.drop_database().await;
-    result
+    run_failure_isolation_case(&suite_pool().await?).await
 }
 
 /// A row whose own transaction fails is counted, not propagated: the

@@ -13,66 +13,28 @@ use std::time::Duration;
 
 use crowdrelay_domain::WorkspaceId;
 use crowdrelay_infra::{autopilot::PostgresAutopilotRepository, config::DatabaseConfig};
-use sqlx::{Connection, PgConnection, PgPool, postgres::PgPoolOptions};
+use sqlx::{PgPool, postgres::PgPoolOptions};
 use time::OffsetDateTime;
 use uuid::Uuid;
 
-struct DisposableDatabase {
-    pool: PgPool,
-    url: String,
-    admin_url: String,
-    name: String,
-}
-
-impl DisposableDatabase {
-    async fn create() -> Result<Self, Box<dyn std::error::Error>> {
-        let base = std::env::var("CROWDRELAY_TEST_DATABASE_URL")
-            .map_err(|_| "CROWDRELAY_TEST_DATABASE_URL must target a disposable database")?;
-        let name = format!("crowdrelay_remindrain_{}", Uuid::now_v7().simple());
-        let mut admin = PgConnection::connect(&base).await?;
-        sqlx::query(&format!("CREATE DATABASE {name}"))
-            .execute(&mut admin)
-            .await?;
-        drop(admin);
-        let (head, _) = base.rsplit_once('/').ok_or("database url has no path")?;
-        let url = format!("{head}/{name}");
-        let pool = PgPoolOptions::new()
-            .max_connections(4)
-            .acquire_timeout(Duration::from_secs(10))
-            .connect(&url)
-            .await?;
-        crowdrelay_infra::database::MIGRATOR.run(&pool).await?;
-        Ok(Self {
-            pool,
-            url,
-            admin_url: base,
-            name,
-        })
-    }
-
-    async fn drop_database(self) {
-        let Self {
-            pool,
-            admin_url,
-            name,
-            ..
-        } = self;
-        pool.close().await;
-        if let Ok(mut admin) = PgConnection::connect(&admin_url).await {
-            let _ = sqlx::query(&format!("DROP DATABASE IF EXISTS {name} WITH (FORCE)"))
-                .execute(&mut admin)
-                .await;
-        }
-    }
+/// The suite database URL and a pool on it — the suite is one migrated
+/// database shared by every test, scoped per test by workspace.
+async fn suite_db() -> Result<(PgPool, String), Box<dyn std::error::Error>> {
+    let url = std::env::var("CROWDRELAY_TEST_DATABASE_URL")
+        .map_err(|_| "CROWDRELAY_TEST_DATABASE_URL must target the migrated suite database")?;
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .acquire_timeout(Duration::from_secs(10))
+        .connect(&url)
+        .await?;
+    Ok((pool, url))
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+#[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and the migrated suite database"]
 async fn the_drain_clears_schedules_without_mailing() -> Result<(), Box<dyn std::error::Error>> {
-    let database = DisposableDatabase::create().await?;
-    let result = run(&database.pool, &database.url).await;
-    database.drop_database().await;
-    result
+    let (pool, url) = suite_db().await?;
+    run(&pool, &url).await
 }
 
 async fn run(pool: &PgPool, url: &str) -> Result<(), Box<dyn std::error::Error>> {

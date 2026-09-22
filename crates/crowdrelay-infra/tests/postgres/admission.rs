@@ -226,7 +226,6 @@ async fn limited_pass_claims_and_redeems_exactly_once() -> Result<(), Box<dyn st
     .await?;
     assert_eq!(issued_count, 1);
 
-    pool.close().await;
     Ok(())
 }
 
