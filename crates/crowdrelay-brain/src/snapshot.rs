@@ -108,6 +108,17 @@ pub struct UnengagedTarget {
     /// working community on a missing column.
     #[serde(default)]
     pub joined: Option<bool>,
+    /// Fans this community's tracked links produced in the last 90 days —
+    /// the community's own conversion record, read from the provenance
+    /// ledger rather than estimated from member counts. Zero is a real
+    /// measurement, not missing data: a community that never converted is
+    /// different from one nobody measured.
+    #[serde(default)]
+    pub converted_fans_90d: u32,
+    /// Distinct visitors who clicked this community's tracked links in the
+    /// last 90 days — the early signal a conversion takes weeks to become.
+    #[serde(default)]
+    pub interactions_90d: u32,
 }
 
 impl UnengagedTarget {

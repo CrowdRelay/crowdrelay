@@ -25,6 +25,9 @@ mod tests {
             active_fans_30d: 60,
             months_since_show: Some(14),
             has_upcoming_show: false,
+            converted_fans_90d: 0,
+            top_conversion_channel: None,
+            top_conversion_channel_fans: 0,
             venue: Some(venue()),
             promoters: vec![PromoterRef {
                 key: "anna".to_owned(),
@@ -347,6 +350,41 @@ mod tests {
         }));
     }
 
+    /// Attributed arrivals are a reason the room hears: a city whose people
+    /// already came through a tracked channel is warmer ground than one that
+    /// only counts followers. And the reason names the channel, because "our
+    /// marketing works here" is a claim a promoter cannot check.
+    #[test]
+    fn a_city_that_converted_fans_says_so_with_the_channel() {
+        let mut converting = opportunity();
+        // Eleven fans arrived in the city across every channel; six of them
+        // came through the top one. The reason must claim the six — pairing
+        // the all-channel total with one channel's name would assert fans
+        // that channel never made.
+        converting.converted_fans_90d = 11;
+        converting.top_conversion_channel = Some("concert_qr".to_owned());
+        converting.top_conversion_channel_fans = 6;
+        let plan = plan_gig(&converting, TenantIntent::BookingShows).expect("proposes");
+        assert!(
+            plan.reasons.contains(&Reason::FansConvertedHere {
+                count: 6,
+                channel: "concert_qr".to_owned()
+            }),
+            "the attributed arrivals were measured and never said: {:?}",
+            plan.reasons
+        );
+
+        // A city nobody converted through is a city with no such reason —
+        // zero is a measurement, not a missing field.
+        let quiet = plan_gig(&opportunity(), TenantIntent::BookingShows).expect("proposes");
+        assert!(
+            !quiet
+                .reasons
+                .iter()
+                .any(|reason| matches!(reason, Reason::FansConvertedHere { .. }))
+        );
+    }
+
     /// A release-focused tenant still gets the proposal, framed as serving the
     /// release rather than competing with it.
     #[test]
@@ -507,6 +545,10 @@ mod tests {
             },
             Reason::RoomIsActive {
                 days_since_last_event: 12,
+            },
+            Reason::FansConvertedHere {
+                count: 9,
+                channel: "concert_qr".to_owned(),
             },
         ];
         let base = plan_gig(&opportunity(), TenantIntent::BookingShows).expect("proposes");

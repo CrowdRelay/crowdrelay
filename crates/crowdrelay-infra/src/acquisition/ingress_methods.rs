@@ -158,6 +158,94 @@ impl PostgresAcquisitionRepository {
                     AND smart_links.id = candidates.smart_link_id
                     AND candidates.campaign_id
                         IS NOT DISTINCT FROM smart_links.campaign_id
+            ),
+            -- The interaction half of the provenance ledger. A click is the
+            -- cheapest honest signal a channel produces — weeks before a
+            -- conversion exists to count — and until now it landed in
+            -- click_events only, where the ranking reads never look.
+            -- fan_id stays NULL by design (anonymous until signup links it);
+            -- the same post-table UNION the conversion path uses resolves
+            -- action_id and format_key, so a channel can be ranked on what
+            -- it made people do, not just on followers it accumulated.
+            -- Rows repeat honestly per click; readers dedupe on
+            -- DISTINCT anonymous_visitor_id.
+            provenance AS (
+                INSERT INTO fan_provenance_events (
+                    workspace_id, fan_id, event_kind, channel, source_target,
+                    community, campaign_id, action_id, anonymous_visitor_id,
+                    attribution_method, attribution_confidence, occurred_at,
+                    format_key
+                )
+                SELECT click.workspace_id, arrival.fan_id, 'interaction',
+                       -- An unlabelled link still earns an interaction — the
+                       -- click happened — under the generic 'smart_link'
+                       -- channel. Only the conversion gate is strict.
+                       COALESCE(link.channel_source, 'smart_link'),
+                       link.slug, link.channel_community, click.campaign_id,
+                       post.action_id, click.anonymous_visitor_id,
+                       'tracked_click', 1.0, click.occurred_at,
+                       post.format_key
+                FROM valid_candidates AS click
+                JOIN smart_links AS link
+                  ON link.workspace_id = click.workspace_id
+                 AND link.id = click.smart_link_id
+                -- A fan who already signed up keeps clicking: resolve the
+                -- visitor back to their fan row so the yield ledger counts
+                -- one person once instead of a fan and a stranger twice.
+                LEFT JOIN LATERAL (
+                    SELECT acq.fan_id
+                    FROM fan_acquisition_events AS acq
+                    WHERE acq.workspace_id = click.workspace_id
+                      AND acq.anonymous_visitor_id = click.anonymous_visitor_id
+                      AND acq.fan_id IS NOT NULL
+                    ORDER BY acq.occurred_at
+                    LIMIT 1
+                ) AS arrival ON true
+                LEFT JOIN LATERAL (
+                    SELECT post.action_id, source.format_key
+                    FROM (
+                        SELECT action_id, posted_at, created_at
+                        FROM community_posts
+                        WHERE workspace_id = click.workspace_id
+                          AND smart_link = '/l/' || link.slug
+                          AND posted_at IS NOT NULL
+                          AND posted_at <= click.occurred_at
+                        UNION ALL
+                        SELECT action_id, posted_at, created_at
+                        FROM social_posts
+                        WHERE workspace_id = click.workspace_id
+                          AND (smart_link = '/l/' || link.slug OR smart_link_id = link.id)
+                          AND posted_at IS NOT NULL
+                          AND posted_at <= click.occurred_at
+                        UNION ALL
+                        SELECT action_id, posted_at, created_at
+                        FROM telegram_posts
+                        WHERE workspace_id = click.workspace_id
+                          AND (smart_link = '/l/' || link.slug OR smart_link_id = link.id)
+                          AND posted_at IS NOT NULL
+                          AND posted_at <= click.occurred_at
+                        UNION ALL
+                        SELECT action_id, posted_at, created_at
+                        FROM discord_posts
+                        WHERE workspace_id = click.workspace_id
+                          AND (smart_link = '/l/' || link.slug OR smart_link_id = link.id)
+                          AND posted_at IS NOT NULL
+                          AND posted_at <= click.occurred_at
+                    ) AS post
+                    LEFT JOIN viryaos_autopilot_actions AS act
+                      ON act.workspace_id = click.workspace_id
+                     AND act.id = post.action_id
+                    LEFT JOIN viryaos_content_sources AS source
+                      ON source.workspace_id = click.workspace_id
+                     AND source.id::text = lower(act.payload->>'source_id')
+                    ORDER BY post.posted_at DESC NULLS LAST,
+                             post.created_at DESC, post.action_id
+                    LIMIT 1
+                ) AS post ON true
+                -- All-or-nothing: if any click in the batch is invalid the
+                -- whole statement rolls back before a single row lands.
+                WHERE (SELECT count(*) FROM valid_candidates)
+                    = (SELECT count(*) FROM candidates)
             )
             INSERT INTO click_events (
                 workspace_id,
@@ -431,15 +519,21 @@ impl PostgresAcquisitionRepository {
         let claimed_referral = self
             .resolve_claimed_referral(&mut transaction, workspace_id, fan_upsert.fan.id, signup)
             .await?;
-        self.insert_acquisition_event(
-            &mut transaction,
-            workspace_id,
-            fan_upsert.fan.id,
-            signup,
-            command.request_id().as_str(),
-            claimed_referral.as_ref(),
-        )
-        .await?;
+        // Arrival rows assert how the fan *arrived* — only a transaction that
+        // created the fan row may write one. A re-signup or a pending→active
+        // transition replays this path without arriving, and a second
+        // conversion row would double-credit the fan across channels.
+        if fan_upsert.created {
+            self.insert_acquisition_event(
+                &mut transaction,
+                workspace_id,
+                fan_upsert.fan.id,
+                signup,
+                command.request_id().as_str(),
+                claimed_referral.as_ref(),
+            )
+            .await?;
+        }
         record_pending_signup_referral(
             &mut transaction,
             workspace_id,

@@ -216,6 +216,33 @@ async fn signup_fan(
     visitor_id: VisitorId,
     suffix: &str,
 ) -> Result<FanId, Box<dyn std::error::Error>> {
+    signup_fan_opts(
+        pool,
+        database_config,
+        workspace_id,
+        workspace_slug,
+        city_slug,
+        campaign_id,
+        visitor_id,
+        suffix,
+        None,
+    )
+    .await
+}
+
+/// The signup helper with a claimed referral code, when the test needs one.
+#[allow(clippy::too_many_arguments)]
+async fn signup_fan_opts(
+    pool: &PgPool,
+    database_config: &DatabaseConfig,
+    workspace_id: WorkspaceId,
+    workspace_slug: &WorkspaceSlug,
+    city_slug: &CitySlug,
+    campaign_id: CampaignId,
+    visitor_id: VisitorId,
+    suffix: &str,
+    claimed_referral_code: Option<ReferralCode>,
+) -> Result<FanId, Box<dyn std::error::Error>> {
     let repo = PostgresAcquisitionRepository::new(
         pool.clone(),
         workspace_slug.clone(),
@@ -233,7 +260,7 @@ async fn signup_fan(
         locale: Some("pl-PL".to_owned()),
         campaign_id: Some(campaign_id),
         visitor_id: Some(visitor_id),
-        claimed_referral_code: None,
+        claimed_referral_code,
         consent: MarketingConsent::new(true, "privacy-v1", "attr-test")?,
     })?;
     let command = SignupFanCommand::new(
@@ -344,8 +371,8 @@ async fn overlapping_actions_attribution_proves_action_identity_boundary()
         "last-click attribution must recover action_b's action_id, got {action_id:?} (action_a={action_a}, action_b={action_b})"
     );
     assert_eq!(
-        method, "last_community_click",
-        "attribution method must be last_community_click (heuristic, not exact)"
+        method, "last_tracked_click",
+        "attribution method must be last_tracked_click (heuristic, not exact)"
     );
     assert_eq!(
         community.as_deref(),
@@ -411,7 +438,7 @@ async fn single_action_attribution_is_exact() -> Result<(), Box<dyn std::error::
         Some(action_a),
         "single-action attribution must be exact: action_id must match the only action"
     );
-    assert_eq!(method, "last_community_click");
+    assert_eq!(method, "last_tracked_click");
 
     pool.close().await;
     Ok(())
@@ -462,7 +489,7 @@ async fn no_community_post_means_action_id_is_null() -> Result<(), Box<dyn std::
         action_id, None,
         "action_id must be NULL when no community_posts row exists — unattributable, not fabricated"
     );
-    assert_eq!(method, "last_community_click");
+    assert_eq!(method, "last_tracked_click");
 
     pool.close().await;
     Ok(())

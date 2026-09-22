@@ -287,6 +287,10 @@ async fn enter_reward_draw_inner(
                 crowdrelay_domain::FanId::from_uuid(fan_id),
                 "synesthesia_claim",
                 &format!("synesthesia_run:{run_id}"),
+                &crowdrelay_infra::acquisition::ArrivalContext {
+                    source_target: Some(format!("synesthesia_run:{run_id}")),
+                    campaign_id: None,
+                },
             )
             .await
             .map_err(SynesthesiaError::sqlx)?;

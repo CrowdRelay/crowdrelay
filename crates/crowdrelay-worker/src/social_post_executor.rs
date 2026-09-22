@@ -62,6 +62,7 @@
 use std::time::Duration;
 
 use crowdrelay_domain::WorkspaceId;
+use crowdrelay_domain::growth_metrics::MetricPlatform;
 use crowdrelay_domain::publish_guard::{
     PublishChannel, PublishContext, content_hash, review_outbound_post,
 };
@@ -73,7 +74,8 @@ use tokio::{
 };
 use uuid::Uuid;
 
-mod tracked_links;
+pub(crate) mod reach;
+pub(crate) mod tracked_links;
 
 /// How often to poll for unprocessed social post actions.
 const POLL_INTERVAL: Duration = Duration::from_secs(60);
@@ -93,6 +95,11 @@ const PLATFORM_COOLDOWN_HOURS: i32 = 12;
 const CYCLE_WATCHDOG_TIMEOUT: Duration = Duration::from_secs(120);
 /// Maximum posts to claim in a single cycle.
 const CLAIM_BATCH: i64 = 10;
+
+/// The reach filed when no metric sync has measured the audience yet — the
+/// same conservative constant the telegram and discord paths use, because a
+/// guessed denominator is worse than an honest small one.
+const UNMEASURED_AUDIENCE_REACH: i32 = 10;
 
 /// Graph API request timeout. A Page post is a small write; anything slower
 /// than this is the API being unavailable, not the post being large.
@@ -398,7 +405,12 @@ impl SocialPostExecutorWorker {
                 link.id,
                 'pending'
             FROM viryaos_autopilot_actions a
-            JOIN agent_service_tasks t ON t.id = (a.payload->>'task_id')::uuid
+            -- The regex guard precedes the cast: one action whose payload
+            -- carries a non-uuid task_id would otherwise abort the whole
+            -- claim statement every sweep and stall the executor.
+            JOIN agent_service_tasks t
+              ON a.payload->>'task_id' ~ '^[0-9a-fA-F-]{36}$'
+             AND t.id = (a.payload->>'task_id')::uuid
             LEFT JOIN smart_links link
               ON link.workspace_id = a.workspace_id
              AND link.slug = substring(a.payload->'draft'->>'cta_url' from '/l/([a-zA-Z0-9][a-zA-Z0-9_-]*)$')
@@ -606,6 +618,9 @@ impl SocialPostExecutorWorker {
                 channel: PublishChannel::Instagram,
                 approved_origins: &[self.public_origin.as_str()],
                 recent_content_hashes: &recent,
+                // Stored hashes cover the raw draft text; the reviewed
+                // caption carries the appended tracked link.
+                dedupe_text: action.text.as_deref(),
             },
         );
         if let Some(reason) = verdict.hold_reason() {
@@ -627,6 +642,13 @@ impl SocialPostExecutorWorker {
                 // starts when the audience could see the post, not at
                 // dispatch — a deferred draft must not be observed across
                 // dead pre-exposure time.
+                // Read before the transaction: the audience snapshot is an
+                // input, not part of the commit's invariant, and a mid-tx
+                // pool acquire is a needless second connection held open.
+                let estimated_reach = self
+                    .measured_audience(MetricPlatform::Instagram)
+                    .await
+                    .unwrap_or(UNMEASURED_AUDIENCE_REACH);
                 let mut posted_tx = self.pool.begin().await?;
                 sqlx::query(
                     r#"
@@ -651,6 +673,15 @@ impl SocialPostExecutorWorker {
                     self.workspace_id.into_uuid(),
                     "social_posts",
                     action.id,
+                )
+                .await?;
+                self.file_reach_and_execute_assignment(
+                    &mut posted_tx,
+                    action,
+                    MetricPlatform::Instagram,
+                    &account_id,
+                    &media_id,
+                    estimated_reach,
                 )
                 .await?;
                 posted_tx.commit().await?;
@@ -813,6 +844,9 @@ impl SocialPostExecutorWorker {
                 channel: PublishChannel::Social,
                 approved_origins: &[self.public_origin.as_str()],
                 recent_content_hashes: &recent,
+                // Stored hashes cover the raw draft text; the reviewed body
+                // carries the appended tracked link.
+                dedupe_text: action.text.as_deref(),
             },
         );
         if let Some(reason) = verdict.hold_reason() {
@@ -829,6 +863,10 @@ impl SocialPostExecutorWorker {
             Ok(post_id) => {
                 // Same one-commit shape as the Instagram arm: post +
                 // re-anchored measurement windows land or neither does.
+                let estimated_reach = self
+                    .measured_audience(MetricPlatform::Facebook)
+                    .await
+                    .unwrap_or(UNMEASURED_AUDIENCE_REACH);
                 let mut posted_tx = self.pool.begin().await?;
                 sqlx::query(
                     r#"
@@ -851,6 +889,15 @@ impl SocialPostExecutorWorker {
                     self.workspace_id.into_uuid(),
                     "social_posts",
                     action.id,
+                )
+                .await?;
+                self.file_reach_and_execute_assignment(
+                    &mut posted_tx,
+                    action,
+                    MetricPlatform::Facebook,
+                    &page_id,
+                    &format!("https://www.facebook.com/{post_id}"),
+                    estimated_reach,
                 )
                 .await?;
                 posted_tx.commit().await?;

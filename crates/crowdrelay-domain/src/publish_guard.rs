@@ -94,14 +94,12 @@ impl PublishChannel {
 
     /// The most links a post may carry on this channel.
     ///
-    /// A community repost legitimately carries two: the band's own permalink
-    /// (attribution) and the tracked smart link appended at dispatch. Every
-    /// other channel gets one.
+    /// Two, everywhere: every channel's dispatch appends the tracked smart
+    /// link the click ledger counts through, so one link belongs to the
+    /// transport and one to the draft. A draft carrying two of its own links
+    /// still publishes nothing — it becomes three on the wire and holds.
     const fn maximum_links(self) -> usize {
-        match self {
-            Self::Community => 2,
-            _ => 1,
-        }
+        2
     }
 }
 
@@ -208,6 +206,12 @@ pub struct PublishContext<'a> {
     /// Content hashes of what this channel published recently. A draft whose
     /// hash is in here is a repeat.
     pub recent_content_hashes: &'a BTreeSet<String>,
+    /// The text the duplicate check should hash — what the model wrote,
+    /// before transport additions like the tracked link appended at
+    /// dispatch. Those additions carry a per-action slug, so hashing the
+    /// reviewed body can never equal a stored draft hash and the check would
+    /// silently never fire. `None` hashes the body as reviewed.
+    pub dedupe_text: Option<&'a str>,
 }
 
 /// The share of letters that may be capitals before a post reads as shouting.
@@ -273,10 +277,17 @@ pub fn review_outbound_post(body: &str, context: &PublishContext<'_>) -> Publish
         return PublishVerdict::HoldForHuman(HoldReason::TooManyLinks);
     }
     for link in &links {
-        let approved = context
-            .approved_origins
-            .iter()
-            .any(|origin| !origin.is_empty() && link.starts_with(origin));
+        // Origin equality must end at a host boundary: a bare starts_with
+        // passes `https://virya.music.evil.example/x` as `virya.music`. The
+        // match must be the whole origin followed by `/`, `?` or `#` (or the
+        // link is exactly the origin).
+        let approved = context.approved_origins.iter().any(|origin| {
+            let origin = origin.trim_end_matches('/');
+            !origin.is_empty()
+                && link
+                    .strip_prefix(origin)
+                    .is_some_and(|rest| rest.is_empty() || rest.starts_with(['/', '?', '#']))
+        });
         if !approved {
             return PublishVerdict::HoldForHuman(HoldReason::UnapprovedLink);
         }
@@ -293,7 +304,7 @@ pub fn review_outbound_post(body: &str, context: &PublishContext<'_>) -> Publish
     }
     if context
         .recent_content_hashes
-        .contains(&content_hash(trimmed))
+        .contains(&content_hash(context.dedupe_text.unwrap_or(trimmed)))
     {
         return PublishVerdict::HoldForHuman(HoldReason::DuplicateOfRecentPost);
     }
@@ -461,6 +472,7 @@ mod tests {
             channel,
             approved_origins: ORIGINS,
             recent_content_hashes: &EMPTY,
+            dedupe_text: None,
         }
     }
 
@@ -499,6 +511,37 @@ mod tests {
             review_outbound_post(&body, &context(PublishChannel::Telegram)),
             PublishVerdict::HoldForHuman(HoldReason::UnapprovedLink)
         );
+    }
+
+    /// `virya.music.evil.example` shares the origin as a string prefix while
+    /// being a different host entirely — the approval must compare at a host
+    /// boundary, not a byte prefix.
+    #[test]
+    fn a_lookalike_host_is_held() {
+        for link in [
+            "https://virya.music.evil.example/track",
+            "https://virya.musicx.example/track",
+        ] {
+            let body = good_post().replace(LINK, link);
+            assert_eq!(
+                review_outbound_post(&body, &context(PublishChannel::Telegram)),
+                PublishVerdict::HoldForHuman(HoldReason::UnapprovedLink),
+                "a lookalike host must not inherit the origin: {link}"
+            );
+        }
+        for link in [
+            "https://virya.music/l/abc",
+            "https://virya.music?x=1",
+            "https://virya.music#frag",
+            "https://virya.music",
+        ] {
+            let body = good_post().replace(LINK, link);
+            assert_eq!(
+                review_outbound_post(&body, &context(PublishChannel::Telegram)),
+                PublishVerdict::Publish,
+                "the real origin must still publish: {link}"
+            );
+        }
     }
 
     /// The ways a link is written that are not "scheme at a word boundary".
@@ -649,9 +692,33 @@ mod tests {
             channel: PublishChannel::Telegram,
             approved_origins: ORIGINS,
             recent_content_hashes: &recent,
+            dedupe_text: None,
         };
         assert_eq!(
             review_outbound_post(&body, &context),
+            PublishVerdict::HoldForHuman(HoldReason::DuplicateOfRecentPost)
+        );
+    }
+
+    #[test]
+    fn a_tracked_link_appended_at_dispatch_does_not_hide_a_repeat() {
+        // The executors review the transport body — the draft plus the
+        // per-action smart link appended at dispatch — while the stored
+        // recent hashes cover the draft alone. Hashing the reviewed body
+        // could never equal a stored hash, so the check silently never
+        // fired. `dedupe_text` keeps the comparison on the draft.
+        let draft = good_post();
+        let mut recent = BTreeSet::new();
+        recent.insert(content_hash(&draft));
+        let reviewed = format!("{draft}\n\nhttps://virya.music/l/tg-7f3a");
+        let context = PublishContext {
+            channel: PublishChannel::Telegram,
+            approved_origins: ORIGINS,
+            recent_content_hashes: &recent,
+            dedupe_text: Some(&draft),
+        };
+        assert_eq!(
+            review_outbound_post(&reviewed, &context),
             PublishVerdict::HoldForHuman(HoldReason::DuplicateOfRecentPost)
         );
     }
@@ -666,6 +733,7 @@ mod tests {
             channel: PublishChannel::Telegram,
             approved_origins: ORIGINS,
             recent_content_hashes: &recent,
+            dedupe_text: None,
         };
         assert_eq!(
             content_hash(&reformatted),
@@ -696,6 +764,7 @@ mod tests {
             channel: PublishChannel::Telegram,
             approved_origins: &[],
             recent_content_hashes: &BTreeSet::new(),
+            dedupe_text: None,
         };
         let plain = "New single out this Friday. We recorded it live in one take \
                      at the old cinema in Wroclaw."

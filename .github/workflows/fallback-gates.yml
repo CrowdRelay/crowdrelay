@@ -92,7 +92,7 @@ jobs:
       CROWDRELAY_TENANT_DATA_REGION: eu
       CROWDRELAY_RANDOM_DRAWS_ENABLED: "false"
       CROWDRELAY_BOOTSTRAP_JSON: >-
-        {"workspace_name":"CrowdRelay CI","cities":[{"slug":"wroclaw","name":"Wroclaw","country":"PL","region":"Dolnoslaskie","lat":51.1079,"lng":17.0385}],"campaigns":[{"name":"CI launch","active":true,"smart_links":[{"slug":"ci-launch","destination_url":"http://localhost:4321/join","active":true}]}],"webhook_endpoints":[]}
+        {"workspace_name":"CrowdRelay CI","cities":[{"slug":"wroclaw","name":"Wrocław","country":"PL","region":"Dolnoslaskie","lat":51.1079,"lng":17.0385}],"campaigns":[{"name":"CI launch","active":true,"smart_links":[{"slug":"ci-launch","destination_url":"http://localhost:4321/join","active":true}]}],"webhook_endpoints":[]}
       RUST_LOG: info
 
     steps:

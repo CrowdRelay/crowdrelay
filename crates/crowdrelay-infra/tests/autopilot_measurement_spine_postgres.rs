@@ -566,7 +566,7 @@ async fn d_community_outcome_is_read_from_the_community_ledger() {
                (workspace_id, fan_id, event_kind, channel, community,
                 attribution_method, attribution_confidence, occurred_at)
                VALUES ($1,$2,'conversion','reddit','r/spinetest',
-                       'last_community_click',1.0,$3)"#,
+                       'last_tracked_click',1.0,$3)"#,
         )
         .bind(f.workspace_id.into_uuid())
         .bind(fan_id)
@@ -1413,7 +1413,7 @@ async fn h_a_community_outcome_is_tenant_scoped_and_counts_each_fan_once() {
                (workspace_id, fan_id, event_kind, channel, community,
                 attribution_method, attribution_confidence, occurred_at)
                VALUES ($1,$2,'conversion','reddit','r/spinetest',
-                       'last_community_click',1.0,$3)"#,
+                       'last_tracked_click',1.0,$3)"#,
         )
         .bind(workspace)
         .bind(fan)
@@ -1584,3 +1584,5 @@ async fn i_a_processed_outcome_counts_toward_its_dispatching_run() {
         "a run with no processed outcome reports 0, got {observed}"
     );
 }
+
+include!("autopilot_measurement_spine_postgres/manual_registration.rs");

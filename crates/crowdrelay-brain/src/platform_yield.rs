@@ -157,6 +157,76 @@ pub fn template_platform(template: &str) -> Option<&'static str> {
     }
 }
 
+/// What a channel actually returned, measured at the fan rather than the
+/// follower: attributed conversions and the distinct visitors whose clicks
+/// preceded them, read from `fan_provenance_events`.
+///
+/// This is the other half of the evidence `PlatformGrowth` never saw. The
+/// metric series counts followers going up on a platform — correlational,
+/// and blind to whether anyone arrived. The provenance ledger records the
+/// arrivals themselves, labelled by channel: a conversion under `instagram`
+/// is a fan who exists because that channel's post was clicked.
+///
+/// The two sources are deliberately different in kind, and the rank keeps
+/// them that way rather than averaging them into one number. See
+/// [`ChannelYield::rank_key`] for how each is weighted.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChannelYield {
+    /// The channel label on the smart link — `reddit`, `telegram`,
+    /// `instagram`, `discord`, or an owned-arrival path like `concert_qr`.
+    pub channel: String,
+    /// Fans attributed to this channel's tracked links in the last 30 days.
+    pub conversions_30d: u32,
+    /// Distinct visitors who clicked this channel's tracked links in the
+    /// last 30 days — the early signal a conversion takes weeks to become.
+    pub unique_clickers_30d: u32,
+}
+
+impl ChannelYield {
+    /// What this channel is ranked on. There is no rate term: clicks and
+    /// conversions have no honest denominator — posts sent is not one, since
+    /// reach varies by three orders of magnitude between channels — so the
+    /// key carries an absolute only, in the same slot
+    /// [`PlatformGrowth::rank_key`] fills with weighted followers.
+    ///
+    /// A conversion is an addressable fan, weighted like a Signal install for
+    /// the same reason `SIGNAL_VALUE_MULTIPLE` exists: it is the North Star
+    /// unit itself. A clicker is the weak signal worth one — enough to rank
+    /// a channel that is being *tried* above one that is not, not enough to
+    /// impersonate a conversion.
+    ///
+    /// `None` only when the channel produced nothing at all, so it ranks
+    /// with the unmeasured templates rather than ahead of them.
+    #[must_use]
+    pub fn rank_key(&self) -> RankKey {
+        let absolute = self
+            .conversions_30d
+            .saturating_mul(SIGNAL_VALUE_MULTIPLE)
+            .saturating_add(self.unique_clickers_30d);
+        (absolute > 0).then_some((0, absolute))
+    }
+}
+
+/// The provenance channels a template posts or scans on, in the vocabulary
+/// `smart_links.channel_source` writes.
+///
+/// Templates with no outbound channel — a strategist that thinks, a press
+/// pitch that targets outlets, a scanner for a platform nobody posts to —
+/// return an empty list and keep their position from the strategy's order.
+/// Scanners share their channel's poster evidence on purpose: a channel that
+/// converts is worth scouting harder, the same rule platform growth already
+/// applies.
+#[must_use]
+pub fn template_channels(template: &str) -> &'static [&'static str] {
+    match template {
+        "community-engager" | "reddit-scanner" => &["reddit"],
+        "telegram-poster" | "telegram-scanner" => &["telegram"],
+        "social-post" => &["instagram", "facebook", "x"],
+        "discord-poster" => &["discord"],
+        _ => &[],
+    }
+}
+
 /// What a platform is ranked on: trustworthy rate in basis points, then the
 /// absolute weighted gain. `None` when the platform is unmeasured.
 ///
@@ -167,20 +237,57 @@ type RankKey = Option<(u32, u32)>;
 /// One template's position in the prior, its name, and what it ranks on.
 type RankedTemplate = (usize, &'static str, RankKey);
 
-/// Reorders a strategy's template list by measured platform yield.
+/// Reorders a strategy's template list by measured platform yield and by the
+/// attributed fan yield of the channel each template posts on.
 ///
-/// Stable: templates whose platform has no trustworthy measurement keep their
-/// relative position, and ties are broken by the prior order. The returned list
-/// always contains exactly the input templates — this reranks, it never adds or
-/// drops one.
+/// Two evidence sources, different in kind, combined deliberately simply:
+/// each template's key is the *better* of its platform-growth key and its
+/// channel-yield key. Follower growth says a platform is compounding;
+/// attributed conversions say a channel delivers fans. Whichever a template
+/// honestly earned is what it ranks on — a channel with real fans and flat
+/// follower counts is not demoted for the followers it never asked for, and
+/// a platform compounding on followers is not demoted for conversions the
+/// ledger has not seen yet.
+///
+/// The asymmetry that matters: growth evidence can carry a trustworthy
+/// *rate* while yield evidence is absolute-only. A platform above the
+/// evidence floor keeps the rate-led ordering — sustained machinery still
+/// outranks an early trickle, which is the right answer at scale. Where this
+/// change bites is exactly the regime it was written for: below every floor,
+/// where the only honest difference between channels is which one a real
+/// fan arrived through.
+///
+/// Stable: templates with no evidence on either axis keep their relative
+/// position, and ties are broken by the prior order. The returned list
+/// always contains exactly the input templates — this reranks, it never
+/// adds or drops one.
 #[must_use]
-pub fn rank_templates(prior: &[&'static str], growth: &[PlatformGrowth]) -> Vec<&'static str> {
+pub fn rank_templates(
+    prior: &[&'static str],
+    growth: &[PlatformGrowth],
+    channel_yield: &[ChannelYield],
+) -> Vec<&'static str> {
     let score_for = |template: &str| -> RankKey {
-        let platform = template_platform(template)?;
-        growth
+        let growth_key = template_platform(template).and_then(|platform| {
+            growth
+                .iter()
+                .find(|entry| entry.platform == platform)
+                .and_then(PlatformGrowth::rank_key)
+        });
+        let yield_key = template_channels(template)
             .iter()
-            .find(|entry| entry.platform == platform)
-            .and_then(PlatformGrowth::rank_key)
+            .filter_map(|channel| {
+                channel_yield
+                    .iter()
+                    .find(|entry| entry.channel == *channel)
+                    .and_then(ChannelYield::rank_key)
+            })
+            .max();
+        // The better of the two evidences, not the sum: summing would let a
+        // mediocre platform mask a channel that is actually converting, and
+        // the tuple's rate-first ordering already says which kind of
+        // evidence leads when both are strong.
+        growth_key.max(yield_key)
     };
 
     let mut ranked: Vec<RankedTemplate> = prior
@@ -228,14 +335,14 @@ mod tests {
 
     #[test]
     fn no_evidence_leaves_the_strategy_order_untouched() {
-        assert_eq!(rank_templates(PRIOR, &[]), PRIOR.to_vec());
+        assert_eq!(rank_templates(PRIOR, &[], &[]), PRIOR.to_vec());
     }
 
     #[test]
     fn a_platform_that_actually_grows_is_tried_first() {
         // Telegram grows 10% of a real audience; Reddit is flat.
         let measured = [growth("social", 5_000, 0), growth("telegram", 2_000, 200)];
-        let ranked = rank_templates(PRIOR, &measured);
+        let ranked = rank_templates(PRIOR, &measured, &[]);
         assert_eq!(
             ranked.first(),
             Some(&"telegram-scanner"),
@@ -247,7 +354,7 @@ mod tests {
     fn a_tiny_audience_cannot_win_on_a_percentage() {
         // 2 followers becoming 4 is 100% growth and is meaningless.
         let measured = [growth("telegram", 4, 2), growth("social", 5_000, 250)];
-        let ranked = rank_templates(PRIOR, &measured);
+        let ranked = rank_templates(PRIOR, &measured, &[]);
         assert_eq!(
             ranked.first(),
             Some(&"reddit-scanner"),
@@ -260,7 +367,7 @@ mod tests {
         // Equal audience, equal raw gain. Signal should still win, because an
         // addressable fan is worth more than a follower.
         let measured = [growth("telegram", 1_000, 50), growth("signal", 1_000, 50)];
-        let ranked = rank_templates(PRIOR, &measured);
+        let ranked = rank_templates(PRIOR, &measured, &[]);
         assert_eq!(
             ranked.first(),
             Some(&"signal-inviter"),
@@ -271,7 +378,7 @@ mod tests {
     #[test]
     fn reranking_never_adds_or_drops_a_template() {
         let measured = [growth("signal", 900, 90), growth("telegram", 4, 4)];
-        let mut ranked = rank_templates(PRIOR, &measured);
+        let mut ranked = rank_templates(PRIOR, &measured, &[]);
         ranked.sort_unstable();
         let mut expected = PRIOR.to_vec();
         expected.sort_unstable();
@@ -296,7 +403,7 @@ mod tests {
     #[test]
     fn unmeasured_templates_keep_their_relative_order() {
         let measured = [growth("signal", 1_000, 100)];
-        let ranked = rank_templates(PRIOR, &measured);
+        let ranked = rank_templates(PRIOR, &measured, &[]);
         let strategist = ranked.iter().position(|t| *t == "growth-strategist");
         let bandcamp = ranked.iter().position(|t| *t == "bandcamp-scanner");
         assert!(
@@ -313,7 +420,7 @@ mod tests {
     #[test]
     fn the_only_platform_that_gained_anyone_is_tried_first() {
         let measured = [growth("social", 5_000, 0), growth("signal", 1, 1)];
-        let ranked = rank_templates(PRIOR, &measured);
+        let ranked = rank_templates(PRIOR, &measured, &[]);
         assert_eq!(
             ranked.first(),
             Some(&"signal-inviter"),
@@ -325,7 +432,7 @@ mod tests {
     #[test]
     fn a_below_floor_gain_outranks_a_flat_platform() {
         let measured = [growth("telegram", 2_000, 0), growth("bandcamp", 10, 3)];
-        let ranked = rank_templates(PRIOR, &measured);
+        let ranked = rank_templates(PRIOR, &measured, &[]);
         assert_eq!(
             ranked.first(),
             Some(&"bandcamp-scanner"),
@@ -340,7 +447,7 @@ mod tests {
     #[test]
     fn the_absolute_gain_does_not_let_a_rate_jump_the_floor() {
         let measured = [growth("telegram", 2, 2), growth("social", 5_000, 250)];
-        let ranked = rank_templates(PRIOR, &measured);
+        let ranked = rank_templates(PRIOR, &measured, &[]);
         assert_eq!(
             ranked.first(),
             Some(&"reddit-scanner"),
@@ -364,7 +471,7 @@ mod tests {
             growth("telegram", 1_000, 300),
             growth("social", 10_000, 500),
         ];
-        let ranked = rank_templates(PRIOR, &measured);
+        let ranked = rank_templates(PRIOR, &measured, &[]);
         assert_eq!(
             ranked.first(),
             Some(&"telegram-scanner"),
@@ -380,6 +487,84 @@ mod tests {
             growth("telegram", 5_000, 0).rank_key(),
             None,
             "no rate and no gain is no evidence, however large the audience"
+        );
+    }
+
+    fn yielded(channel: &str, conversions: u32, clickers: u32) -> ChannelYield {
+        ChannelYield {
+            channel: channel.to_owned(),
+            conversions_30d: conversions,
+            unique_clickers_30d: clickers,
+        }
+    }
+
+    #[test]
+    fn a_channel_that_converted_fans_leads_without_follower_data() {
+        // No follower series anywhere; telegram produced two fans.
+        let ranked = rank_templates(PRIOR, &[], &[yielded("telegram", 2, 0)]);
+        assert_eq!(
+            ranked.first(),
+            Some(&"telegram-scanner"),
+            "the channel a real fan arrived through should be tried first"
+        );
+    }
+
+    #[test]
+    fn click_evidence_alone_ranks_a_channel_being_tried() {
+        // Telegram produced clicks but no fans yet — the early signal.
+        let ranked = rank_templates(PRIOR, &[], &[yielded("telegram", 0, 12)]);
+        assert_eq!(
+            ranked.first(),
+            Some(&"telegram-scanner"),
+            "a channel with measured clicks outranks channels nobody measured"
+        );
+    }
+
+    #[test]
+    fn a_conversion_outweighs_a_handful_of_clicks_but_not_a_crowd() {
+        // One conversion weighs 5; four clickers do not beat it, ten do.
+        let close = rank_templates(
+            PRIOR,
+            &[],
+            &[yielded("reddit", 1, 0), yielded("telegram", 0, 4)],
+        );
+        assert_eq!(
+            close.first(),
+            Some(&"reddit-scanner"),
+            "a fan is worth more than a handful of clicks"
+        );
+        let crowd = rank_templates(
+            PRIOR,
+            &[],
+            &[yielded("reddit", 1, 0), yielded("telegram", 0, 10)],
+        );
+        assert_eq!(
+            crowd.first(),
+            Some(&"telegram-scanner"),
+            "enough clickers is the stronger honest signal"
+        );
+    }
+
+    #[test]
+    fn a_trustworthy_growth_rate_still_leads_attributed_yield() {
+        // Social compounds at a measured rate; telegram has early fans.
+        // The rate-first tuple keeps sustained machinery ahead of the
+        // absolute-only yield key — early fans do not impersonate a rate.
+        let measured = [growth("social", 5_000, 250)];
+        let ranked = rank_templates(PRIOR, &measured, &[yielded("telegram", 3, 0)]);
+        assert_eq!(
+            ranked.first(),
+            Some(&"reddit-scanner"),
+            "a measured rate outranks an absolute-only channel yield"
+        );
+    }
+
+    #[test]
+    fn a_channel_that_produced_nothing_ranks_with_the_unmeasured() {
+        assert_eq!(
+            yielded("telegram", 0, 0).rank_key(),
+            None,
+            "a channel with no fans and no clickers is unmeasured, not zero"
         );
     }
 }

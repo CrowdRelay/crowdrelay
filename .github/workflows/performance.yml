@@ -66,7 +66,7 @@ jobs:
       CROWDRELAY_RATE_LIMIT_GENERAL_PER_MINUTE: "100000"
       CROWDRELAY_RATE_LIMIT_PRIVILEGED_PER_MINUTE: "100000"
       CROWDRELAY_BOOTSTRAP_JSON: >-
-        {"workspace_name":"CrowdRelay Performance","cities":[{"slug":"wroclaw","name":"Wroclaw","country":"PL","region":"Dolnoslaskie","lat":51.1079,"lng":17.0385}],"campaigns":[{"name":"Performance","active":true,"smart_links":[{"slug":"perf","destination_url":"http://localhost:4321/join","active":true}]}],"webhook_endpoints":[]}
+        {"workspace_name":"CrowdRelay Performance","cities":[{"slug":"wroclaw","name":"Wrocław","country":"PL","region":"Dolnoslaskie","lat":51.1079,"lng":17.0385}],"campaigns":[{"name":"Performance","active":true,"smart_links":[{"slug":"perf","destination_url":"http://localhost:4321/join","active":true}]}],"webhook_endpoints":[]}
       RUST_LOG: warn
       REQUESTS: ${{ inputs.requests || '600' }}
       CONCURRENCY: ${{ inputs.concurrency || '24' }}

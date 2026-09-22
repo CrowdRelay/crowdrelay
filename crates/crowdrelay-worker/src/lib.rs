@@ -60,5 +60,6 @@ pub mod social_post_executor;
 pub mod social_post_source_sync;
 pub mod telegram_executor;
 pub mod ticketmaster_sweep;
+pub(crate) mod tracked_link_text;
 pub mod venue_fact_expiry;
 pub mod video_source_sync;

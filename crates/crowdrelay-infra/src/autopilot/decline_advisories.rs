@@ -81,6 +81,7 @@ pub(in crate::autopilot) async fn raise_decline_advisories(
         SELECT normalize_subreddit(community) AS key, COUNT(*) AS fans
         FROM fan_provenance_events
         WHERE workspace_id = $1 AND event_kind = 'conversion'
+          AND channel = 'reddit' AND community IS NOT NULL
           AND occurred_at >= now() - make_interval(days => $2)
         GROUP BY normalize_subreddit(community)
         "#,
@@ -127,6 +128,7 @@ pub(in crate::autopilot) async fn raise_decline_advisories(
           AND NOT EXISTS (
               SELECT 1 FROM fan_provenance_events fpe
               WHERE fpe.workspace_id = $1
+                AND fpe.channel = 'reddit'
                 AND normalize_subreddit(fpe.community) = normalize_subreddit(t.subreddit)
                 AND fpe.event_kind = 'conversion'
                 AND fpe.occurred_at >= now() - make_interval(days => $2)
