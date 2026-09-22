@@ -45,25 +45,26 @@ class TeamEmailDispatchLaneContract(unittest.TestCase):
         self.assertIn("payload_requires_executor", actions)
 
     def test_postgres_regression_is_in_canonical_ci(self):
-        integration = text("crates/crowdrelay-infra/tests/autopilot_team_email_postgres.rs")
+        integration = text("crates/crowdrelay-infra/tests/postgres/autopilot_team_email.rs")
         ci = text(".github/workflows/ci.yml")
         self.assertIn("claim_due_team_email_actions", integration)
         self.assertIn("crowdrelay.team.assignment_email_requested", integration)
         self.assertIn('assert_eq!(action_status, "succeeded")', integration)
         # CI used to name each Postgres target by hand, and that list covered
         # 9 of 24 suites — this one only ran because someone remembered it.
-        # It now enumerates `crates/*/tests/*_postgres.rs`, so the guarantee is
-        # "the glob reaches this file", which is stronger than a literal match.
-        self.assertIn("crates/*/tests/*_postgres.rs", ci)
+        # It now enumerates `crates/*/tests/postgres/main.rs`, so the guarantee
+        # is "the glob reaches this crate's consolidated target", which is
+        # stronger than a literal match.
+        self.assertIn("crates/*/tests/postgres/main.rs", ci)
         self.assertTrue(
-            (ROOT / "crates/crowdrelay-infra/tests/autopilot_team_email_postgres.rs").exists(),
+            (ROOT / "crates/crowdrelay-infra/tests/postgres/autopilot_team_email.rs").exists(),
             "the suite the CI glob is supposed to pick up no longer exists",
         )
         self.assertIn("CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL", ci)
 
     def test_provider_success_is_monotonic_under_delayed_failure_receipts(self):
         runtime = text("crates/crowdrelay-infra/src/autopilot/runtime.rs")
-        integration = text("crates/crowdrelay-infra/tests/autopilot_team_email_postgres.rs")
+        integration = text("crates/crowdrelay-infra/tests/postgres/autopilot_team_email.rs")
         self.assertIn("preserve_succeeded_claim", runtime)
         self.assertIn('claim_status == "succeeded"', runtime)
         self.assertIn("delayed-failure-", integration)

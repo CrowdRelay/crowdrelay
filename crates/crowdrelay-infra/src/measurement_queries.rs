@@ -1,6 +1,6 @@
 //! The measurement ledger's queries, kept here so both the API read model
 //! (`crowdrelay-api`'s `autopilot/measurement.rs`) and the disposable-database
-//! test (`tests/measurement_postgres.rs`) run the same string.
+//! test (`tests/tests/postgres/measurement.rs`) run the same string.
 //!
 //! These are the sprint-M spec's queries verbatim — every one is
 //! workspace-scoped and read-only, `$1 = workspace_id uuid`,

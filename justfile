@@ -135,6 +135,9 @@ test-postgres-env:
     export CROWDRELAY_BIND_ADDR=127.0.0.1:8080
     export CROWDRELAY_ALLOWED_ORIGINS=http://localhost:4321
     export CROWDRELAY_PUBLIC_SITE_BASE_URL=http://localhost:4321
+    # WORKSPACE_SLUG is `example` here, and a non-Virya workspace has no
+    # built-in public origin, so the community executor refuses to construct
+    # without one. CI exports the same value.
     export CROWDRELAY_PUBLIC_ORIGIN=http://localhost:4321
     export CROWDRELAY_WORKSPACE_SLUG=example
     export CROWDRELAY_DEFAULT_COUNTRY_CODE=PL
@@ -149,28 +152,34 @@ test-postgres-env:
     export CROWDRELAY_DATABASE_MAX_CONNECTIONS=5
     export CROWDRELAY_BOOTSTRAP_JSON='{"workspace_name":"CrowdRelay local test","cities":[{"slug":"wroclaw","name":"Wrocław","country":"PL","region":"Dolnoslaskie","lat":51.1079,"lng":17.0385}],"campaigns":[],"webhook_endpoints":[]}'
     {{CARGO}} run --locked --all-features --package crowdrelay-worker -- setup
-    # Every crate, not just crowdrelay-infra. This recipe ran
-    # `-p crowdrelay-infra` alone while CI globs `crates/*/tests/*_postgres.rs`
-    # across the workspace, so it reported green while CI ran tests it had never
-    # executed -- crowdrelay-worker's postgres targets (outbox, city geocoding,
-    # metric sync schedule, agent decision trace) were all invisible here. A
-    # local gate narrower than CI is worse than none: it teaches you to trust it.
+    # Every crate, exactly as CI does: one consolidated `postgres` target per
+    # crate (tests/postgres/main.rs) plus any top-level `*_postgres.rs` suite
+    # that keeps its own database semantics — agents_boundary shares a live
+    # database with the real agents service, so it cannot use the per-test
+    # clone the consolidated target gives every test.
     #
-    # One invocation per target, exactly as CI does — and per-target databases,
-    # exactly as CI does. Several suites connect to their URL directly instead
-    # of cloning it through `test_pool`, so on one shared database their writes
-    # (events -> venue marks, workspaces, consents) land in the template every
-    # later suite clones. A venue mark for 'Test Club' left by events_postgres
-    # once beat the gig-outreach fixture's own room on `best_venue`'s id
-    # tiebreak and the approval refused the room as dormant. Per-target clones
-    # keep that pollution inside the suite that wrote it.
+    # The consolidated `postgres` target runs parallel: every test clones a
+    # private database off the migrated template, so no two tests share state.
+    # Standalone `*_postgres.rs` suites connect to their URL directly instead
+    # of cloning through `test_pool`, so each one gets a per-target clone —
+    # otherwise their writes (events -> venue marks, workspaces, consents)
+    # land in the template every later clone inherits. A venue mark for
+    # 'Test Club' left by events_postgres once beat the gig-outreach
+    # fixture's own room on `best_venue`'s id tiebreak and the approval
+    # refused the room as dormant.
     targets=()
-    for path in crates/*/tests/*_postgres.rs; do
-      package="$(basename "$(dirname "$(dirname "$path")")")"
-      targets+=("${package}:$(basename "$path" .rs)")
+    for path in crates/*/tests/postgres/main.rs crates/*/tests/*_postgres.rs; do
+      if [ "$(basename "$path")" = "main.rs" ]; then
+        package="$(basename "$(dirname "$(dirname "$(dirname "$path")")")")"
+        target="postgres"
+      else
+        package="$(basename "$(dirname "$(dirname "$path")")")"
+        target="$(basename "$path" .rs)"
+      fi
+      targets+=("${package}:${target}")
     done
     if [ "${#targets[@]}" -eq 0 ]; then
-      echo "no *_postgres.rs integration targets found; the glob is wrong" >&2
+      echo "no postgres integration targets found; the glob is wrong" >&2
       exit 1
     fi
     printf 'running %s integration targets\n' "${#targets[@]}"
@@ -207,8 +216,12 @@ test-postgres-env:
       export CROWDRELAY_RETENTION_TEST_DATABASE_URL="$url"
       export CROWDRELAY_COMMUNITY_TEST_DATABASE_URL="$url"
       export CROWDRELAY_AGENTS_TEST_DATABASE_URL="$url"
+      threads=1
+      if [ "${entry##*:}" = "postgres" ]; then
+        threads=8
+      fi
       {{CARGO}} test --locked --package "${entry%%:*}" --test "${entry##*:}" \
-        -- --ignored --test-threads=1
+        -- --ignored --test-threads="$threads"
     done
     # The outbox, reminder and retention suites live in unit-test modules rather
     # than their own integration target, so the glob above cannot see them.
