@@ -281,6 +281,30 @@ async fn best_venue(
                    AND edge.venue_id = venue.id
              )
          )
+        -- A room reported shut is not a proposal — but only the *resolved*
+        -- status may disqualify: a stale 'closed' must lose to a newer
+        -- 'active', or a reopened room would stay excluded forever. The
+        -- ladder is the registry's own — provenance trust order, then the
+        -- newest claim — applied to the global facts and this tenant's
+        -- private marks alike. No status fact at all is the common case and
+        -- carries no verdict.
+        WHERE COALESCE((
+            SELECT lower(btrim(closed_fact.value))
+            FROM place_venue_facts AS closed_fact
+            WHERE closed_fact.venue_id = venue.id
+              AND closed_fact.attribute = 'status'
+              AND (closed_fact.workspace_id IS NULL
+                   OR closed_fact.workspace_id = $1)
+              AND (closed_fact.expires_at IS NULL
+                   OR closed_fact.expires_at > $3)
+            ORDER BY CASE closed_fact.provenance
+                         WHEN 'played' THEN 0 WHEN 'researched' THEN 1
+                         WHEN 'event_evidence' THEN 2
+                         WHEN 'open_directory' THEN 3
+                         ELSE 4 END,
+                     closed_fact.observed_at DESC
+            LIMIT 1
+        ), '') <> 'closed'
         GROUP BY venue.id, venue.display_name
         -- DISTINCT here is load-bearing, not cosmetic: the target join can
         -- fan a venue's marks out, and a raw count would let a room win on
@@ -386,6 +410,42 @@ pub async fn promoter_targets_in_city(
           AND target.target_kind IN ('promoter', 'venue')
           AND target.active
           AND target.accepts_booking
+          -- A venue-kind target whose room is on record as closed is not a
+          -- proposal recipient — the resolved status decides, so a newer
+          -- 'active' claim lifts the exclusion (same ladder `best_venue`
+          -- uses). A promoter linked to a dead room stays: the room is
+          -- dead, the booker is not.
+          AND NOT (
+              target.target_kind = 'venue'
+              AND EXISTS (
+                  SELECT 1
+                  FROM (
+                      SELECT target.venue_id AS linked_venue_id
+                      UNION
+                      SELECT edge.venue_id
+                      FROM booking_target_venues AS edge
+                      WHERE edge.workspace_id = target.workspace_id
+                        AND edge.target_id = target.id
+                  ) AS linked
+                  WHERE COALESCE((
+                      SELECT lower(btrim(status_fact.value))
+                      FROM place_venue_facts AS status_fact
+                      WHERE status_fact.venue_id = linked.linked_venue_id
+                        AND status_fact.attribute = 'status'
+                        AND (status_fact.workspace_id IS NULL
+                             OR status_fact.workspace_id = $1)
+                        AND (status_fact.expires_at IS NULL
+                             OR status_fact.expires_at > now())
+                      ORDER BY CASE status_fact.provenance
+                                   WHEN 'played' THEN 0 WHEN 'researched' THEN 1
+                                   WHEN 'event_evidence' THEN 2
+                                   WHEN 'open_directory' THEN 3
+                                   ELSE 4 END,
+                               status_fact.observed_at DESC
+                      LIMIT 1
+                  ), '') = 'closed'
+              )
+          )
         ORDER BY target.relationship_score DESC, target.display_name
         LIMIT 8
         "#,
@@ -731,11 +791,31 @@ async fn local_peer_acts(
             ) AS mine ON mine.genre = their.genre
         ) AS shared
         CROSS JOIN LATERAL (
+            -- Reachability is about rooms that can still be played: a room
+            -- on record as closed is not one the act can be reached through
+            -- now, so it does not count. The resolved status decides — a
+            -- newer 'active' claim lifts the exclusion.
             SELECT count(DISTINCT mark.venue_id) AS billed_rooms
             FROM event_acts AS billed
             JOIN place_venue_marks AS mark
                 ON mark.event_id = billed.event_id
             WHERE billed.peer_act_id = act.id
+              AND COALESCE((
+                  SELECT lower(btrim(status_fact.value))
+                  FROM place_venue_facts AS status_fact
+                  WHERE status_fact.venue_id = mark.venue_id
+                    AND status_fact.attribute = 'status'
+                    AND (status_fact.workspace_id IS NULL
+                         OR status_fact.workspace_id = $3)
+                    AND (status_fact.expires_at IS NULL
+                         OR status_fact.expires_at > now())
+                  ORDER BY CASE status_fact.provenance
+                               WHEN 'played' THEN 0 WHEN 'researched' THEN 1
+                               WHEN 'event_evidence' THEN 2
+                               WHEN 'open_directory' THEN 3 ELSE 4 END,
+                           status_fact.observed_at DESC
+                  LIMIT 1
+              ), '') <> 'closed'
         ) AS billing
         LEFT JOIN LATERAL (
             SELECT fact.value
@@ -769,6 +849,27 @@ async fn local_peer_acts(
                      AND fact.workspace_id IS NULL
                      AND fact.attribute IN ('link:social', 'link:website')
                ))
+          -- A band reported dead is not a suggestion — the same resolved-
+          -- status rule rooms follow: the winning claim decides, so a stale
+          -- 'inactive' loses to a newer 'active' and a re-formed band comes
+          -- back. Peer facts have no 'played' provenance; the ladder is the
+          -- registry's own order minus it.
+          AND COALESCE((
+              SELECT lower(btrim(status_fact.value))
+              FROM place_peer_act_facts AS status_fact
+              WHERE status_fact.peer_act_id = act.id
+                AND status_fact.attribute = 'status'
+                AND (status_fact.workspace_id IS NULL
+                     OR status_fact.workspace_id = $3)
+                AND (status_fact.expires_at IS NULL
+                     OR status_fact.expires_at > now())
+              ORDER BY CASE status_fact.provenance
+                           WHEN 'researched' THEN 0
+                           WHEN 'event_evidence' THEN 1
+                           WHEN 'open_directory' THEN 2 ELSE 3 END,
+                       status_fact.observed_at DESC
+              LIMIT 1
+          ), '') <> 'inactive'
         ORDER BY COALESCE(array_length(shared.shared_genres, 1), 0) DESC,
                  billing.billed_rooms DESC,
                  act.name_key

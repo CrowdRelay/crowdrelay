@@ -1278,6 +1278,119 @@ async fn local_acts_only_surface_when_they_can_be_asked() -> Result<(), Box<dyn 
     }
 }
 
+/// The Łykend case, driven: a room marked played and then reported closed
+/// must leave the proposal — a dead room is not a booking lead, however many
+/// shows it hosted.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn a_closed_room_is_not_proposed() -> Result<(), Box<dyn std::error::Error>> {
+    let pool = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
+        .await
+        .expect("connect to the migrated suite database");
+    let act = workspace(&pool).await?;
+    // A private city: `place_venues` is global, so a shared city would let a
+    // sibling test's rooms outrank this one's and the assertion would measure
+    // somebody else's fixture.
+    let wroclaw = city(&pool, "shutville").await?;
+    let now = OffsetDateTime::now_utc();
+    for index in 0..60 {
+        reachable_fan(
+            &pool,
+            act,
+            wroclaw,
+            &format!("closed-fan{index}@example.com"),
+        )
+        .await?;
+    }
+    played_show(&pool, act, wroclaw, "Klub Shut", "closed-show-1", 40).await?;
+    played_show(&pool, act, wroclaw, "Klub Shut", "closed-show-2", 45).await?;
+    played_show(&pool, act, wroclaw, "Klub Open", "open-show-1", 41).await?;
+
+    // Klub Shut leads on the room record (two shows to Open's one — the
+    // count decides before the id tiebreak, so the pick is deterministic);
+    // the report that it closed must remove it.
+    // The source_ref carries a fresh id so a re-run on a reused database is
+    // a new claim, not a unique-index collision with the last run's.
+    sqlx::query(
+        "INSERT INTO place_venue_facts
+            (venue_id, attribute, value, provenance, source_ref, observed_at, workspace_id)
+         SELECT venue.id, 'status', 'closed', 'researched',
+                'https://example.com/closed/' || gen_random_uuid(), now(), NULL
+         FROM place_venues AS venue
+         JOIN cities ON cities.id = venue.city_id
+         WHERE cities.slug = 'shutville' AND venue.name_key = 'klub shut'",
+    )
+    .execute(&pool)
+    .await?;
+
+    let opportunities = city_opportunities(&pool, act, now).await?;
+    let wro = opportunities
+        .iter()
+        .find(|city| city.city == "shutville")
+        .ok_or("the city was not considered")?;
+    let venue = wro
+        .venue
+        .as_ref()
+        .ok_or("a city holding an open room produced no venue evidence")?;
+    assert_eq!(
+        venue.name, "Klub Open",
+        "the closed room still anchored the proposal"
+    );
+
+    // And when the only room in town is closed, the answer is "no room on
+    // record" — the refusal that asks for research, not a dead lead.
+    let empty = city(&pool, "emptytown").await?;
+    played_show(&pool, act, empty, "Dead Room", "dead-show-1", 30).await?;
+    sqlx::query(
+        "INSERT INTO place_venue_facts
+            (venue_id, attribute, value, provenance, source_ref, observed_at, workspace_id)
+         SELECT venue.id, 'status', 'closed', 'researched',
+                'https://example.com/closed/' || gen_random_uuid(), now(), NULL
+         FROM place_venues AS venue
+         JOIN cities ON cities.id = venue.city_id
+         WHERE cities.slug = 'emptytown' AND venue.name_key = 'dead room'",
+    )
+    .execute(&pool)
+    .await?;
+    let opportunities = city_opportunities(&pool, act, now).await?;
+    let empty_city = opportunities
+        .iter()
+        .find(|city| city.city == "emptytown")
+        .ok_or("the city was not considered")?;
+    assert!(
+        empty_city.venue.is_none(),
+        "a closed-only city still proposed a room: {:?}",
+        empty_city.venue
+    );
+
+    // The reopen path: a fresh `active` claim outranks the stale `closed` on
+    // recency within the same provenance — the resolved status, not the mere
+    // existence of a closed row, decides. Klub Shut comes back, and with the
+    // deeper record (two shows to Open's one) it is the proposal again.
+    sqlx::query(
+        "INSERT INTO place_venue_facts
+            (venue_id, attribute, value, provenance, source_ref, observed_at, workspace_id)
+         SELECT venue.id, 'status', 'active', 'researched',
+                'https://example.com/reopen/' || gen_random_uuid(), now() + interval '1 second', NULL
+         FROM place_venues AS venue
+         JOIN cities ON cities.id = venue.city_id
+         WHERE cities.slug = 'shutville' AND venue.name_key = 'klub shut'",
+    )
+    .execute(&pool)
+    .await?;
+    let opportunities = city_opportunities(&pool, act, now).await?;
+    let reopened = opportunities
+        .iter()
+        .find(|city| city.city == "shutville")
+        .and_then(|city| city.venue.as_ref())
+        .ok_or("a reopened room produced no venue evidence")?;
+    assert_eq!(
+        reopened.name, "Klub Shut",
+        "a fresh 'active' fact did not lift the closure"
+    );
+    Ok(())
+}
+
 /// A peer act whose researched home town resolves to a catalogue city —
 /// the fixture shape the seed importer produces.
 async fn named_peer_act(
@@ -1325,5 +1438,80 @@ async fn peer_fact(
     .bind(workspace)
     .execute(pool)
     .await?;
+    Ok(())
+}
+
+/// The band-side mirror of the closed-room rule: a peer act whose resolved
+/// status is `inactive` is not a support suggestion, even with a lead on
+/// file — and a fresher `active` claim brings it back, the same ladder
+/// rooms follow.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn a_dead_band_is_not_a_local_suggestion() -> Result<(), Box<dyn std::error::Error>> {
+    let pool = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
+        .await
+        .expect("connect to the migrated suite database");
+    let act = workspace(&pool).await?;
+    let wroclaw = city(&pool, "wroclaw-dead-act").await?;
+    let now = OffsetDateTime::now_utc();
+
+    sqlx::query(
+        "INSERT INTO band_listings (workspace_id, act_name, genre_tags)
+         VALUES ($1, 'Test Act', '{doom metal}')",
+    )
+    .bind(act)
+    .execute(&pool)
+    .await?;
+    for index in 0..60 {
+        reachable_fan(&pool, act, wroclaw, &format!("dead{index}@example.com")).await?;
+    }
+
+    // Two otherwise-identical hometown acts with leads on file — one the
+    // sheet calls dead, one it confirms live.
+    let dead = named_peer_act(&pool, "Dead Act", wroclaw, "doom metal").await?;
+    peer_fact(&pool, dead, "contact_email", "dead@example.com", Some(act)).await?;
+    peer_fact(&pool, dead, "status", "inactive", None).await?;
+    let live = named_peer_act(&pool, "Live Act", wroclaw, "doom metal").await?;
+    peer_fact(&pool, live, "contact_email", "live@example.com", Some(act)).await?;
+    peer_fact(&pool, live, "status", "active", None).await?;
+
+    let names = |rows: &[crowdrelay_domain::gig_plan::LocalAct]| {
+        rows.iter().map(|act| act.name.clone()).collect::<Vec<_>>()
+    };
+    let wro = city_opportunities(&pool, act, now)
+        .await?
+        .into_iter()
+        .find(|city| city.city == "wroclaw-dead-act")
+        .ok_or("a city with sixty fans was not considered")?;
+    let found = names(&wro.local_acts);
+    assert!(
+        found.iter().any(|name| name == "Live Act"),
+        "the live act did not surface: {found:?}"
+    );
+    assert!(
+        !found.iter().any(|name| name == "Dead Act"),
+        "a band marked inactive still proposed: {found:?}"
+    );
+
+    // The reopen: a newer `active` claim wins the ladder and the band is a
+    // suggestion again.
+    sqlx::query(
+        "INSERT INTO place_peer_act_facts
+            (peer_act_id, attribute, value, provenance, source_ref, observed_at)
+         VALUES ($1, 'status', 'active', 'researched', 'reunion-post', now() + interval '1 minute')",
+    )
+    .bind(dead)
+    .execute(&pool)
+    .await?;
+    let wro = city_opportunities(&pool, act, now)
+        .await?
+        .into_iter()
+        .find(|city| city.city == "wroclaw-dead-act")
+        .ok_or("the city dropped out")?;
+    let found = names(&wro.local_acts);
+    assert!(
+        found.iter().any(|name| name == "Dead Act"),
+        "a re-formed act stayed excluded: {found:?}"
+    );
     Ok(())
 }

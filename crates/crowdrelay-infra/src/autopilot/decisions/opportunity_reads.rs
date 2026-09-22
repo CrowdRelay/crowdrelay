@@ -592,6 +592,42 @@ macro_rules! decision_opportunity_reads {
                                FROM booking_targets target
                                WHERE target.workspace_id=opportunity.workspace_id
                                  AND target.active
+                                 -- A venue-kind target on a room on record
+                                 -- as closed is not live pipeline — the
+                                 -- resolved status decides, over the primary
+                                 -- link plus the venue edges.
+                                 AND NOT (
+                                     target.target_kind = 'venue'
+                                     AND EXISTS (
+                                         SELECT 1
+                                         FROM (
+                                             SELECT target.venue_id AS linked_venue_id
+                                             UNION
+                                             SELECT edge.venue_id
+                                             FROM booking_target_venues AS edge
+                                             WHERE edge.workspace_id = target.workspace_id
+                                               AND edge.target_id = target.id
+                                         ) AS linked
+                                         WHERE COALESCE((
+                                             SELECT lower(btrim(f.value))
+                                             FROM place_venue_facts AS f
+                                             WHERE f.venue_id = linked.linked_venue_id
+                                               AND f.attribute = 'status'
+                                               AND (f.workspace_id IS NULL
+                                                    OR f.workspace_id = opportunity.workspace_id)
+                                               AND (f.expires_at IS NULL
+                                                    OR f.expires_at > now())
+                                             ORDER BY CASE f.provenance
+                                                          WHEN 'played' THEN 0
+                                                          WHEN 'researched' THEN 1
+                                                          WHEN 'event_evidence' THEN 2
+                                                          WHEN 'open_directory' THEN 3
+                                                          ELSE 4 END,
+                                                      f.observed_at DESC
+                                             LIMIT 1
+                                         ), '') = 'closed'
+                                     )
+                                 )
                                  AND (
                                      SELECT interaction.disposition
                                      FROM booking_interactions interaction

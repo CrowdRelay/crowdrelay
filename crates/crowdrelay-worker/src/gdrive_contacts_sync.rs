@@ -51,7 +51,7 @@ const MAX_ROWS_PER_FILE: usize = 5000;
 /// as "unchanged" under rules it predates. The revision rides inside the
 /// stored mtime marker (`<mtime>#<rev>`); content changes still invalidate
 /// on their own because the mtime half differs.
-const FILE_SCANNER_REVISION: u32 = 2;
+const FILE_SCANNER_REVISION: u32 = 3;
 /// Drive page size.
 const DRIVE_PAGE_SIZE: usize = 100;
 const HTTP_TIMEOUT: Duration = Duration::from_secs(30);
@@ -113,6 +113,8 @@ struct CycleCounts {
     files_skipped_unchanged: usize,
     files_failed: usize,
     contacts_upserted: u64,
+    /// Booking agents whose `active` flag this file's verdict rows flipped.
+    agents_resolved: u64,
     rows_without_email: usize,
     marked_disappeared: u64,
     /// A venue seed sheet is not a contact list: rows that imported into
@@ -128,6 +130,10 @@ struct CycleCounts {
     peer_acts_imported: u64,
     peer_act_refusals: usize,
     peer_acts_unresolved_city: u64,
+    /// The verification sheet's findings: acts a dead-band claim retired,
+    /// and dead-band claims naming acts the registry never held.
+    peer_acts_deactivated: u64,
+    peer_acts_skipped_inactive: u64,
     peer_acts_failed: u64,
 }
 
@@ -275,6 +281,7 @@ impl GDriveContactsSyncWorker {
                     counts.files_scanned += file_counts.files_scanned;
                     counts.files_skipped_unchanged += file_counts.files_skipped_unchanged;
                     counts.contacts_upserted += file_counts.contacts_upserted;
+                    counts.agents_resolved += file_counts.agents_resolved;
                     counts.rows_without_email += file_counts.rows_without_email;
                     counts.marked_disappeared += file_counts.marked_disappeared;
                     counts.venues_imported += file_counts.venues_imported;
@@ -283,6 +290,8 @@ impl GDriveContactsSyncWorker {
                     counts.peer_acts_imported += file_counts.peer_acts_imported;
                     counts.peer_act_refusals += file_counts.peer_act_refusals;
                     counts.peer_acts_unresolved_city += file_counts.peer_acts_unresolved_city;
+                    counts.peer_acts_deactivated += file_counts.peer_acts_deactivated;
+                    counts.peer_acts_skipped_inactive += file_counts.peer_acts_skipped_inactive;
                     counts.peer_acts_failed += file_counts.peer_acts_failed;
                 }
                 Err(error) => {
@@ -302,6 +311,7 @@ impl GDriveContactsSyncWorker {
             files_skipped_unchanged = counts.files_skipped_unchanged,
             files_failed = counts.files_failed,
             contacts_upserted = counts.contacts_upserted,
+            agents_resolved = counts.agents_resolved,
             rows_without_email = counts.rows_without_email,
             marked_disappeared = counts.marked_disappeared,
             venues_imported = counts.venues_imported,
@@ -310,6 +320,8 @@ impl GDriveContactsSyncWorker {
             peer_acts_imported = counts.peer_acts_imported,
             peer_act_refusals = counts.peer_act_refusals,
             peer_acts_unresolved_city = counts.peer_acts_unresolved_city,
+            peer_acts_deactivated = counts.peer_acts_deactivated,
+            peer_acts_skipped_inactive = counts.peer_acts_skipped_inactive,
             peer_acts_failed = counts.peer_acts_failed,
             "gdrive contacts sync cycle complete"
         );
@@ -594,6 +606,8 @@ impl GDriveContactsSyncWorker {
                 counts.peer_acts_imported += summary.imported;
                 counts.peer_act_refusals += report.refusals.len();
                 counts.peer_acts_unresolved_city += summary.unresolved_city;
+                counts.peer_acts_deactivated += summary.deactivated;
+                counts.peer_acts_skipped_inactive += summary.skipped_inactive;
                 counts.peer_acts_failed += summary.failed;
                 continue;
             }
@@ -679,6 +693,7 @@ impl GDriveContactsSyncWorker {
             .map_err(|e| e.to_string())?;
         counts.files_scanned = 1;
         counts.contacts_upserted = summary.upserted;
+        counts.agents_resolved = summary.agents_resolved;
         counts.marked_disappeared = summary.marked_disappeared;
         Ok(counts)
     }

@@ -479,13 +479,53 @@ impl PostgresContentEngineRepository {
                     JOIN mine ON mine.genre = their.genre
                 ) AS shared
                 CROSS JOIN LATERAL (
+                    -- A room on record as closed is not one the act can be
+                    -- reached through — the resolved status decides, so a
+                    -- reopened room counts again.
                     SELECT count(DISTINCT mark.venue_id) AS tracked_rooms
                     FROM event_acts AS billed
                     JOIN place_venue_marks AS mark
                         ON mark.event_id = billed.event_id
                     WHERE billed.peer_act_id = act.id
+                      AND COALESCE((
+                          SELECT lower(btrim(room_status.value))
+                          FROM place_venue_facts AS room_status
+                          WHERE room_status.venue_id = mark.venue_id
+                            AND room_status.attribute = 'status'
+                            AND (room_status.workspace_id IS NULL
+                                 OR room_status.workspace_id = $1)
+                            AND (room_status.expires_at IS NULL
+                                 OR room_status.expires_at > now())
+                          ORDER BY CASE room_status.provenance
+                                       WHEN 'played' THEN 0
+                                       WHEN 'researched' THEN 1
+                                       WHEN 'event_evidence' THEN 2
+                                       WHEN 'open_directory' THEN 3 ELSE 4 END,
+                                   room_status.observed_at DESC
+                          LIMIT 1
+                      ), '') <> 'closed'
                 ) AS billing
                 WHERE shared.shared_genres IS NOT NULL
+                  -- A band reported dead is not a match candidate — the
+                  -- resolved-status rule venues follow, so a stale
+                  -- 'inactive' loses to a newer 'active' and a re-formed
+                  -- act comes back on its own.
+                  AND COALESCE((
+                      SELECT lower(btrim(act_status.value))
+                      FROM place_peer_act_facts AS act_status
+                      WHERE act_status.peer_act_id = act.id
+                        AND act_status.attribute = 'status'
+                        AND (act_status.workspace_id IS NULL
+                             OR act_status.workspace_id = $1)
+                        AND (act_status.expires_at IS NULL
+                             OR act_status.expires_at > now())
+                      ORDER BY CASE act_status.provenance
+                                   WHEN 'researched' THEN 0
+                                   WHEN 'event_evidence' THEN 1
+                                   WHEN 'open_directory' THEN 2 ELSE 3 END,
+                               act_status.observed_at DESC
+                      LIMIT 1
+                  ), '') <> 'inactive'
                   AND NOT EXISTS (
                       SELECT 1 FROM peers AS existing
                       WHERE existing.workspace_id = $1

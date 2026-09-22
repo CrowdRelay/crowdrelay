@@ -24,6 +24,10 @@ pub struct ExtractedContact {
     /// catalogue, and a name that matches nothing still travels so the
     /// operator sees what the file said.
     pub city: Option<String>,
+    /// The verification sheet's liveness verdict — `active` or `inactive`,
+    /// normalised. `None` means the sheet made no claim; an unrecognised
+    /// verdict claims nothing either way.
+    pub staged_status: Option<String>,
     pub notes: Option<String>,
 }
 
@@ -88,6 +92,10 @@ const ORG_HEADERS: &[&str] = &[
     "festival",
 ];
 const TYPE_HEADERS: &[&str] = &["type", "kind", "role", "category"];
+/// The verification verdict a researched sheet carries. Exact match only —
+/// a contains-fallback would file a "delivery_status" column as a liveness
+/// claim on somebody's newsletter export.
+const STATUS_HEADERS: &[&str] = &["status", "stan"];
 const PHONE_HEADERS: &[&str] = &["phone", "tel", "mobile"];
 const NOTES_HEADERS: &[&str] = &["note", "notes", "comment", "comments"];
 // "location" rides the contains-fallback: a column literally named
@@ -101,6 +109,20 @@ const CITY_HEADERS: &[&str] = &[
     "miejscowość",
     "miejscowosc",
 ];
+
+/// Maps a Status cell onto the staging vocabulary — the same verdicts the
+/// venue and band sheets carry. Unknown values claim nothing: "pending"
+/// and "unclear" are not findings.
+fn status_for(raw: &str) -> Option<&'static str> {
+    let v = raw.trim().to_ascii_lowercase();
+    let v = v.replace([' ', '-'], "_");
+    match v.as_str() {
+        "active" | "operating" | "live" | "aktywny" => Some("active"),
+        "inactive" | "dead" | "closed" | "gone" | "left" | "retired" | "nieaktywny"
+        | "zawieszony" => Some("inactive"),
+        _ => None,
+    }
+}
 
 /// Maps a free-form type/role value onto the staging vocabulary. Unknown
 /// values yield None — the operator decides on promote rather than the
@@ -245,6 +267,8 @@ pub fn extract_contacts(grid: &[Vec<String>]) -> ExtractionReport {
         &claimed,
     );
     claimed.extend(type_col);
+    let status_col = find_column(headers, rows, STATUS_HEADERS, header_is, false, &claimed);
+    claimed.extend(status_col);
     let phone_col = find_column(
         headers,
         rows,
@@ -303,6 +327,8 @@ pub fn extract_contacts(grid: &[Vec<String>]) -> ExtractionReport {
                 phone: capped(cell(row, phone_col), 40),
                 suggested_kind: cell(row, type_col).and_then(|v| kind_for(&v).map(str::to_owned)),
                 city: capped(cell(row, city_col), 120),
+                staged_status: cell(row, status_col)
+                    .and_then(|v| status_for(&v).map(str::to_owned)),
                 notes: capped(cell(row, notes_col), 2000),
             },
         );
@@ -491,6 +517,34 @@ mod tests {
             &["promoter@agency.pl", "Warszawa"],
         ]));
         assert_eq!(report.contacts[0].city.as_deref(), Some("Warszawa"));
+    }
+
+    #[test]
+    fn a_status_column_stages_the_liveness_verdict() {
+        // The verification sheet's claim travels with the contact — the
+        // sync retires a dead agent on it. Only the two verdicts land; an
+        // unrecognised word claims nothing, and a contacts sheet with no
+        // Status column stages nothing either.
+        for (typed, expected) in [
+            ("Active", Some("active")),
+            ("inactive", Some("inactive")),
+            ("left the agency", None),
+        ] {
+            let report = extract_contacts(&grid(&[
+                &["Email", "Type", "Status"],
+                &["route@agency.example", "agent", typed],
+            ]));
+            assert_eq!(
+                report.contacts[0].staged_status.as_deref(),
+                expected,
+                "status {typed:?}"
+            );
+        }
+        let report = extract_contacts(&grid(&[
+            &["Email", "Type"],
+            &["route@agency.example", "agent"],
+        ]));
+        assert_eq!(report.contacts[0].staged_status, None);
     }
 
     #[test]

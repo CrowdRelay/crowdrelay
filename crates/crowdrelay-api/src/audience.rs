@@ -348,6 +348,41 @@ pub async fn city_funnel(
              AND target.city_id = agg.city_id
              AND target.active
              AND target.accepts_booking
+             -- "What we could write to this week" excludes a venue-kind
+             -- target whose room is on record as closed — the resolved
+             -- status decides, so a newer 'active' claim lifts it.
+             AND NOT (
+                 target.target_kind = 'venue'
+                 AND EXISTS (
+                     SELECT 1
+                     FROM (
+                         SELECT target.venue_id AS linked_venue_id
+                         UNION
+                         SELECT edge.venue_id
+                         FROM booking_target_venues AS edge
+                         WHERE edge.workspace_id = target.workspace_id
+                           AND edge.target_id = target.id
+                     ) AS linked
+                     WHERE COALESCE((
+                         SELECT lower(btrim(status_fact.value))
+                         FROM place_venue_facts AS status_fact
+                         WHERE status_fact.venue_id = linked.linked_venue_id
+                           AND status_fact.attribute = 'status'
+                           AND (status_fact.workspace_id IS NULL
+                                OR status_fact.workspace_id = $1)
+                           AND (status_fact.expires_at IS NULL
+                                OR status_fact.expires_at > now())
+                         ORDER BY CASE status_fact.provenance
+                                      WHEN 'played' THEN 0
+                                      WHEN 'researched' THEN 1
+                                      WHEN 'event_evidence' THEN 2
+                                      WHEN 'open_directory' THEN 3
+                                      ELSE 4 END,
+                                  status_fact.observed_at DESC
+                         LIMIT 1
+                     ), '') = 'closed'
+                 )
+             )
             GROUP BY agg.city_id
         ),
         shows AS (
@@ -668,6 +703,101 @@ pub async fn city_venues(State(state): State<crate::AppState>, headers: HeaderMa
         assess_venue_rows(&state, rows).await;
     }
     private_json(result, &headers)
+}
+
+/// The standing verification brief — one paste-able prompt covering all
+/// three registries the research loop feeds: rooms, bands, booking agents.
+/// The worker's sheet answers on its own header and the Drive sync files
+/// each back through its own reader — `status` facts retire dead rooms and
+/// bands, the staged-status verdict flips `booking_agents.active`, and
+/// discovered rows mint through their normal intakes.
+///
+/// `brief` is `null` only when all three registries are empty. The venue
+/// and act lists are capped at 500 — a prompt is a paste target, not a
+/// dump, and the registries are nowhere near that bound.
+pub async fn registry_verification_brief(
+    State(state): State<crate::AppState>,
+    headers: HeaderMap,
+) -> Response {
+    let workspace_id = state.ticketing.workspace_id().into_uuid();
+    let venues = sqlx::query_as::<_, (String, String)>(
+        r#"
+        SELECT venue.display_name, city.name
+        FROM place_venues AS venue
+        JOIN cities AS city ON city.id = venue.city_id
+        ORDER BY city.name, venue.display_name
+        LIMIT 500
+        "#,
+    )
+    .fetch_all(&state.database)
+    .await;
+    let Ok(venues) = venues else {
+        return Problem::service_unavailable(request_id(&headers))
+            .private()
+            .into_response();
+    };
+    // Acts and agents ride the same brief — a band's home town resolves to
+    // its catalogue city when one exists, so the worker can aim its checks.
+    let acts = sqlx::query_as::<_, (String, Option<String>)>(
+        r#"
+        SELECT act.display_name, city.name
+        FROM place_peer_acts AS act
+        LEFT JOIN cities AS city ON city.id = act.home_city_id
+        ORDER BY act.display_name
+        LIMIT 500
+        "#,
+    )
+    .fetch_all(&state.database)
+    .await;
+    let Ok(acts) = acts else {
+        return Problem::service_unavailable(request_id(&headers))
+            .private()
+            .into_response();
+    };
+    // Only live agents are asked to verify — a retired one is already
+    // resolved, and `active` is the flag the sync's verdict pass drives.
+    let agents = sqlx::query_as::<_, (String, Option<String>, String)>(
+        r#"
+        SELECT name, agency, contact_email
+        FROM booking_agents
+        WHERE workspace_id = $1
+          AND active
+        ORDER BY name
+        "#,
+    )
+    .bind(workspace_id)
+    .fetch_all(&state.database)
+    .await;
+    let Ok(agents) = agents else {
+        return Problem::service_unavailable(request_id(&headers))
+            .private()
+            .into_response();
+    };
+    // The tenant's genre narrows the discovery half — same read city_venues
+    // runs, degrading to "no genre named" rather than failing the brief.
+    let my_genres = sqlx::query_scalar::<_, Vec<String>>(
+        r#"
+        SELECT COALESCE(array_agg(DISTINCT lower(btrim(g))), '{}')
+        FROM band_listings AS bl, unnest(bl.genre_tags) AS g
+        WHERE bl.workspace_id = $1
+        "#,
+    )
+    .bind(workspace_id)
+    .fetch_one(&state.database)
+    .await
+    .unwrap_or_default();
+    let genre = (!my_genres.is_empty()).then(|| my_genres.join(", "));
+    private_json(
+        Ok::<serde_json::Value, sqlx::Error>(serde_json::json!({
+            "brief": crowdrelay_domain::venue_seed::verification_brief(
+                &venues,
+                &acts,
+                &agents,
+                genre.as_deref(),
+            ),
+        })),
+        &headers,
+    )
 }
 
 include!("audience/venue_assessment.rs");

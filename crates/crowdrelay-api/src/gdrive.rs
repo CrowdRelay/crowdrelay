@@ -51,7 +51,10 @@ const BOOKING_KINDS: &[&str] = &["venue", "promoter", "festival"];
 // kind has its own table (booking_agents) rather than a chair in the
 // city-scoped candidate queue. The extractor files `talent_buyer` as
 // `booking_agent`, but the promote accepts the sheet's own word too.
-const AGENT_KINDS: &[&str] = &["booking_agent", "talent_buyer"];
+// The extractor's `kind_for` maps the sheet's "agent" spelling onto
+// `booking_agent` — the explicit promote accepts the same spelling so the
+// vocabulary does not fork between the sheet and the console.
+const AGENT_KINDS: &[&str] = &["booking_agent", "talent_buyer", "agent"];
 // Agents and labels the band already dealt with file onto the
 // representation list — a different home from the press kinds because the
 // consent they carry is different: not "published a route", but "the band
@@ -70,6 +73,10 @@ pub struct DriveContact {
     /// a display name never goes out as an explicit slug and 409s. The
     /// backend resolves the staged value itself when no slug is sent.
     city: Option<String>,
+    /// The verification sheet's liveness verdict on this row —
+    /// `active`/`inactive`, `null` when no sheet claimed one. Shown so an
+    /// operator sees "marked inactive" before they promote.
+    staged_status: Option<String>,
     notes: Option<String>,
     source_file_name: String,
     sources: Vec<String>,
@@ -141,6 +148,7 @@ fn contact_json(view: crowdrelay_infra::gdrive::DriveContactView) -> DriveContac
         organization: row.organization,
         suggested_kind: row.suggested_kind,
         city: row.city,
+        staged_status: row.staged_status,
         notes: row.notes,
         source_file_name: row.source_file_name,
         sources: row.sources,

@@ -731,6 +731,8 @@ impl GmailContactsSyncWorker {
                 // fact and a Gmail sighting never overwrites it
                 // (COALESCE in the upsert).
                 city: None,
+                // Mail headers carry no verification verdict either.
+                staged_status: None,
                 notes: None,
             })
             .collect();

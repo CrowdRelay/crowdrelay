@@ -539,6 +539,39 @@ pub async fn who_can_help(
                contact_email, venue_id
         FROM booking_targets
         WHERE workspace_id = $1 AND city_id = $2 AND active
+          -- A venue-kind target IS its room; a room on record as closed is
+          -- not somebody who can help. The resolved status decides — a newer
+          -- 'active' claim lifts the exclusion.
+          AND NOT (
+              target_kind = 'venue'
+              AND EXISTS (
+                  SELECT 1
+                  FROM (
+                      SELECT booking_targets.venue_id AS linked_venue_id
+                      UNION
+                      SELECT edge.venue_id
+                      FROM booking_target_venues AS edge
+                      WHERE edge.workspace_id = booking_targets.workspace_id
+                        AND edge.target_id = booking_targets.id
+                  ) AS linked
+                  WHERE COALESCE((
+                      SELECT lower(btrim(status_fact.value))
+                      FROM place_venue_facts AS status_fact
+                      WHERE status_fact.venue_id = linked.linked_venue_id
+                        AND status_fact.attribute = 'status'
+                        AND (status_fact.workspace_id IS NULL
+                             OR status_fact.workspace_id = $1)
+                        AND (status_fact.expires_at IS NULL
+                             OR status_fact.expires_at > now())
+                      ORDER BY CASE status_fact.provenance
+                                   WHEN 'played' THEN 0 WHEN 'researched' THEN 1
+                                   WHEN 'event_evidence' THEN 2
+                                   WHEN 'open_directory' THEN 3 ELSE 4 END,
+                               status_fact.observed_at DESC
+                      LIMIT 1
+                  ), '') = 'closed'
+              )
+          )
         ORDER BY relationship_score DESC, display_name
         LIMIT $3
         "#,
@@ -697,6 +730,26 @@ pub async fn who_can_help(
               FROM place_venue_marks AS mark
               WHERE mark.venue_id = venue.id AND mark.workspace_id = $2
           )
+          -- A room on record as closed is not a cold room — it is a dead
+          -- one, and "who can help" must not suggest writing to it. The
+          -- resolved status decides: a newer 'active' claim lifts the
+          -- exclusion, so a reopened room is suggested again.
+          AND COALESCE((
+              SELECT lower(btrim(status_fact.value))
+              FROM place_venue_facts AS status_fact
+              WHERE status_fact.venue_id = venue.id
+                AND status_fact.attribute = 'status'
+                AND (status_fact.workspace_id IS NULL
+                     OR status_fact.workspace_id = $2)
+                AND (status_fact.expires_at IS NULL
+                     OR status_fact.expires_at > now())
+              ORDER BY CASE status_fact.provenance
+                           WHEN 'played' THEN 0 WHEN 'researched' THEN 1
+                           WHEN 'event_evidence' THEN 2
+                           WHEN 'open_directory' THEN 3 ELSE 4 END,
+                       status_fact.observed_at DESC
+              LIMIT 1
+          ), '') <> 'closed'
         ORDER BY (cap.value IS NULL), venue.display_name
         LIMIT $3
         "#,

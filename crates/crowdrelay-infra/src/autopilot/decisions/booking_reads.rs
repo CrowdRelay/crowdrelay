@@ -188,6 +188,46 @@ macro_rules! decision_booking_reads {
                       AND fact.attribute = 'booking_email'
                 ) AS contact_age ON target.venue_id IS NOT NULL
                 WHERE target.workspace_id = $1
+                  -- A venue-kind target IS its room: when the room's
+                  -- *resolved* status fact is 'closed', the target is dead
+                  -- and pitching it is the dead-venue mistake this filter
+                  -- exists to prevent. Resolved, not merely present — a
+                  -- newer 'active' claim lifts the exclusion, the same
+                  -- ladder `best_venue` applies. Promoter/agent targets keep
+                  -- their venue links as evidence: the room may be dead, the
+                  -- booker is not.
+                  AND NOT (
+                      target.target_kind = 'venue'
+                      AND EXISTS (
+                          SELECT 1
+                          FROM (
+                              SELECT target.venue_id AS linked_venue_id
+                              UNION
+                              SELECT edge.venue_id
+                              FROM booking_target_venues AS edge
+                              WHERE edge.workspace_id = target.workspace_id
+                                AND edge.target_id = target.id
+                          ) AS linked
+                          WHERE COALESCE((
+                              SELECT lower(btrim(status_fact.value))
+                              FROM place_venue_facts AS status_fact
+                              WHERE status_fact.venue_id = linked.linked_venue_id
+                                AND status_fact.attribute = 'status'
+                                AND (status_fact.workspace_id IS NULL
+                                     OR status_fact.workspace_id = $1)
+                                AND (status_fact.expires_at IS NULL
+                                     OR status_fact.expires_at > now())
+                              ORDER BY CASE status_fact.provenance
+                                           WHEN 'played' THEN 0
+                                           WHEN 'researched' THEN 1
+                                           WHEN 'event_evidence' THEN 2
+                                           WHEN 'open_directory' THEN 3
+                                           ELSE 4 END,
+                                       status_fact.observed_at DESC
+                              LIMIT 1
+                          ), '') = 'closed'
+                      )
+                  )
                 ORDER BY target.city_id, target.priority DESC,
                          target.relationship_score DESC, target.id
                 LIMIT 2000

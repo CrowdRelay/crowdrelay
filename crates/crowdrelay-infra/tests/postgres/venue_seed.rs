@@ -49,7 +49,7 @@ fn venue(
         public_terms: PublicTerms::NotSearched,
         source_url: format!("https://source.example/{name}"),
         researched_on: Some("2026-09-20".to_owned()),
-        closed: false,
+        status: None,
     };
     room(&mut seeded);
     let mut seeded_view = SeededRoomView::default();
@@ -137,7 +137,7 @@ async fn run_cases(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
                 "poznan",
                 |room| {
                     room.public_terms = PublicTerms::SearchedNoneFound;
-                    room.closed = true;
+                    room.status = Some("closed".to_owned());
                 },
                 |_| {},
             ),

@@ -848,6 +848,7 @@ async fn a_beacon_agent_lands_on_the_registry_and_the_approach_list()
         phone: None,
         suggested_kind: Some("booking_agent".to_owned()),
         city: None,
+        staged_status: None,
         notes: None,
         source_file_id: "file-1".to_owned(),
         source_file_name: "contacts.csv".to_owned(),

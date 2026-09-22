@@ -505,8 +505,9 @@ pub struct CityVenueRow {
     address_provenance: Option<String>,
     #[serde(with = "time::serde::rfc3339::option")]
     address_observed_at: Option<OffsetDateTime>,
-    /// Only ever "closed" — the absence of a status fact IS the active
-    /// claim, so this row never carries "active" as a value.
+    /// The resolved liveness claim — "closed" or "active" (a seed sheet
+    /// writes both verbatim so a reopened room's newer claim can outrank
+    /// its stale closed record); absent when nobody has claimed either.
     status_fact: Option<String>,
     status_provenance: Option<String>,
     #[serde(with = "time::serde::rfc3339::option")]
@@ -533,9 +534,10 @@ pub struct CityVenueRow {
 }
 
 /// One tenant-private resolved venue fact. `private_venue_facts` reads the
-/// caller's own `booking_email`/`target_fit`/`contact_quality` claims for
-/// the listed rooms so the sentence can count a fresh contact as evidence —
-/// the private *value* never appears on the shared row, only its age does.
+/// caller's own `booking_email`/`target_fit`/`contact_quality`/`status`
+/// claims for the listed rooms so the sentence can count a fresh contact as
+/// evidence — the private *value* never appears on the shared row, only its
+/// age does (and a private `status` only reaches the verdict, not the row).
 #[derive(Debug, FromRow)]
 pub struct PrivateVenueFactRow {
     venue_id: Uuid,

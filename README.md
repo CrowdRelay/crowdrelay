@@ -75,8 +75,8 @@ Blue-green with zero-downtime Caddy cutover. The deploy waits for CI, pulls immu
 
 | Repository | Role |
 |-----------|------|
-| [crowdrelay-control-plane](https://github.com/CrowdRelay/crowdrelay-control-plane) | Operator plane — 19 pages, tenant provisioning, runtime health, automation events, notifiers, growth steering |
-| [crowdrelay-agents](https://github.com/CrowdRelay/crowdrelay-agents) | LLM worker service — 10 templates, 10 providers, Reddit authenticated scraping |
+| [crowdrelay-control-plane](https://github.com/CrowdRelay/crowdrelay-control-plane) | Operator plane — process-oriented Today view served by one-call read models, tenant provisioning, runtime health, automation events, notifiers, growth steering |
+| [crowdrelay-agents](https://github.com/CrowdRelay/crowdrelay-agents) | LLM worker service — 11 templates, 18 providers, Reddit authenticated scraping |
 | [virya](https://github.com/CrowdRelay/virya) | Public website — tickets, merch, AREA game, staff panel, EPK |
 | [virya-signal](https://github.com/CrowdRelay/virya-signal) | Mobile client — fan wallet, ticket scanning, staff operations, Android Play Store |
 | [synesthesia](https://github.com/CrowdRelay/synesthesia) | Interactive album — 11 rooms, Godot + Rust, web and Android |

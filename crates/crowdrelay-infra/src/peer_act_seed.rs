@@ -27,7 +27,7 @@
 //! previous sheet knew — `COALESCE(EXCLUDED, existing)` is the difference
 //! between "not stated this time" and "moved".
 
-use crowdrelay_domain::peer_act_seed::{PeerActSeedReport, SeededPeer};
+use crowdrelay_domain::peer_act_seed::{PeerActSeedReport, PeerLiveness, SeededPeer};
 use sqlx::PgPool;
 use time::{Date, OffsetDateTime};
 use uuid::Uuid;
@@ -40,6 +40,11 @@ pub enum PeerSeedOutcome {
     Imported,
     /// The City cell named no catalogue city; the act imported without one.
     ImportedWithoutCity,
+    /// The sheet called a known act dead — its `status` fact was written.
+    Deactivated,
+    /// The sheet called an act nobody tracks dead. Never minted — a dead
+    /// band claim is not how an act enters the registry.
+    SkippedInactive,
 }
 
 /// What one sheet's import did, in counts the worker can report.
@@ -48,6 +53,12 @@ pub struct PeerActSeedSummary {
     pub imported: u64,
     /// Imported rows whose City cell named no catalogue city.
     pub unresolved_city: u64,
+    /// Rows that retired a known act — the verification sheet's dead-band
+    /// findings landing on the registry.
+    pub deactivated: u64,
+    /// Dead-band claims naming an act the registry does not hold — logged,
+    /// never minted.
+    pub skipped_inactive: u64,
     /// Rows whose own transaction failed — a bad row is counted and logged,
     /// never allowed to take the sheet's other bands down with it.
     pub failed: u64,
@@ -165,6 +176,14 @@ impl PostgresPeerActSeedRepository {
                     summary.imported += 1;
                     summary.unresolved_city += 1;
                 }
+                Ok(PeerSeedOutcome::Deactivated) => summary.deactivated += 1,
+                Ok(PeerSeedOutcome::SkippedInactive) => {
+                    summary.skipped_inactive += 1;
+                    tracing::info!(
+                        act = %act.act.name,
+                        "the sheet marks an untracked band inactive; nothing to retire"
+                    );
+                }
                 Err(error) => {
                     summary.failed += 1;
                     tracing::warn!(
@@ -194,6 +213,65 @@ impl PostgresPeerActSeedRepository {
         peer: &SeededPeer,
     ) -> Result<PeerSeedOutcome, sqlx::Error> {
         let act = &peer.act;
+
+        // The fact's clock is the sheet's own Research_Date at midnight UTC;
+        // a missing or unparsable one means "seen now".
+        let date_format = time::macros::format_description!("[year]-[month]-[day]");
+        let observed_at: Option<OffsetDateTime> = act
+            .researched_on
+            .as_deref()
+            .map(str::trim)
+            .and_then(|raw| Date::parse(raw, &date_format).ok())
+            .map(|date| date.midnight().assume_utc());
+
+        // Where a claim can be checked: the sheet's own source, falling back
+        // to the band's public page — the parser has already refused a row
+        // carrying none of the three.
+        let source_ref = act
+            .source_url
+            .as_deref()
+            .or(act.social.as_deref())
+            .or(act.website.as_deref())
+            .unwrap_or("sheet");
+
+        // A dead-band claim is an update, never an insert: it retires an
+        // act the registry already holds, and a name nobody holds is
+        // skipped — the registry must not accumulate bands that entered
+        // the world already dead. The key resolves the way the upsert
+        // below derives it, truncation CASE included, so a long name
+        // lands on the same act either direction.
+        if matches!(act.status, Some(PeerLiveness::Inactive)) {
+            let act_id = sqlx::query_scalar::<_, Uuid>(
+                r#"
+                WITH key AS (SELECT place_venue_key($1) AS k)
+                SELECT id FROM place_peer_acts, key
+                WHERE name_key = CASE WHEN k IS NULL OR char_length(k) <= 500 THEN k
+                                      ELSE left(k, 475) || '-' || left(md5(k), 24) END
+                "#,
+            )
+            .bind(&act.name)
+            .fetch_optional(&self.pool)
+            .await?;
+            let Some(act_id) = act_id else {
+                return Ok(PeerSeedOutcome::SkippedInactive);
+            };
+            let mut tx = self.pool.begin().await?;
+            researched_fact(
+                &mut tx,
+                act_id,
+                "status",
+                "inactive",
+                source_ref,
+                observed_at,
+                None,
+            )
+            .await?;
+            tx.commit().await?;
+            return Ok(PeerSeedOutcome::Deactivated);
+        }
+
+        // The city resolves only for a live row — a dead-band claim spends
+        // no lookup it never uses.
         let country_code = act.country.as_deref().and_then(resolve_country_code);
         let city_id = match &act.city {
             Some(city) => {
@@ -215,26 +293,6 @@ impl PostgresPeerActSeedRepository {
             None => None,
         };
         let city_unresolved = act.city.is_some() && city_id.is_none();
-
-        // The fact's clock is the sheet's own Research_Date at midnight UTC;
-        // a missing or unparsable one means "seen now".
-        let date_format = time::macros::format_description!("[year]-[month]-[day]");
-        let observed_at: Option<OffsetDateTime> = act
-            .researched_on
-            .as_deref()
-            .map(str::trim)
-            .and_then(|raw| Date::parse(raw, &date_format).ok())
-            .map(|date| date.midnight().assume_utc());
-
-        // Where a claim can be checked: the sheet's own source, falling back
-        // to the band's public page — the parser has already refused a row
-        // carrying none of the three.
-        let source_ref = act
-            .source_url
-            .as_deref()
-            .or(act.social.as_deref())
-            .or(act.website.as_deref())
-            .unwrap_or("sheet");
 
         let mut tx = self.pool.begin().await?;
         // name_key's CHECK caps it at 500 chars; a longer key would fail the
@@ -300,6 +358,21 @@ impl PostgresPeerActSeedRepository {
                 peer_act_id,
                 "activity",
                 activity,
+                source_ref,
+                observed_at,
+                None,
+            )
+            .await?;
+        }
+        // The sheet's own liveness verdict — the claim that re-opens a
+        // stale inactive, because the read side resolves status by newest
+        // `observed_at`. `Inactive` never reaches this point.
+        if matches!(act.status, Some(PeerLiveness::Active)) {
+            researched_fact(
+                &mut tx,
+                peer_act_id,
+                "status",
+                "active",
                 source_ref,
                 observed_at,
                 None,

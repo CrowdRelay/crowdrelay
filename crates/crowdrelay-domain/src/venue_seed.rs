@@ -130,9 +130,12 @@ pub struct SeededRoom {
     /// is a rumour with an address.
     pub source_url: String,
     pub researched_on: Option<String>,
-    /// Kept and marked rather than dropped, so the next sweep does not spend
-    /// its budget rediscovering a room that shut.
-    pub closed: bool,
+    /// The sheet's liveness claim, normalised: `closed` marks a dead room so
+    /// the next sweep does not research it again; `active` is written too —
+    /// a reopened room's fresh `active` fact outranks its stale `closed` on
+    /// `observed_at` within the same provenance. Any other word is not a
+    /// status claim and parses as `None`.
+    pub status: Option<String>,
 }
 
 /// One tenant's opinion of a room. Never shared, never global.
@@ -259,9 +262,13 @@ pub fn parse_seed_row(row: &SeedRow<'_>) -> Result<SeededVenue, SeedRefusal> {
     // better than pitching nobody.
     let booking_email = get(columns::BOOKING_CONTACT).or_else(|| get(columns::EMAIL));
 
-    let closed = get(columns::STATUS)
-        .map(|status| status.eq_ignore_ascii_case("closed"))
-        .unwrap_or(false);
+    // The Status vocabulary is two words — "closed" and "active" — and the
+    // intake writes whichever the sheet claims. Anything else ("unknown",
+    // "seasonal", a note) is no claim at all rather than a parsed guess.
+    let status = get(columns::STATUS).and_then(|status| {
+        let lowered = status.to_ascii_lowercase();
+        (lowered == "closed" || lowered == "active").then_some(lowered)
+    });
 
     Ok(SeededVenue {
         room: SeededRoom {
@@ -276,7 +283,7 @@ pub fn parse_seed_row(row: &SeedRow<'_>) -> Result<SeededVenue, SeedRefusal> {
             public_terms: public_terms(row.get(columns::PUBLIC_FINANCIAL_INFO).copied()),
             source_url,
             researched_on: get(columns::RESEARCH_DATE),
-            closed,
+            status,
         },
         view: SeededRoomView {
             target_fit: get(columns::TARGET_FIT),
@@ -295,6 +302,14 @@ pub fn parse_seed_row(row: &SeedRow<'_>) -> Result<SeededVenue, SeedRefusal> {
 /// never has a `Source_URL` column, and a venue sheet that *also* has an
 /// `Email` column is still a venue sheet (the seed's own rows prove a room
 /// needs no email to be real).
+///
+/// The one collision is the band sheet: its pinned header also carries
+/// `Name`, `City` and `Source_URL`, so the venue pin alone would swallow it
+/// and mint bands as rooms. The disambiguation runs both ways — a band
+/// sheet always carries an identity column (`Social`, `Links`, `Genre`)
+/// and never a venue-only one (`Address`, `Capacity`, `Audience_Genre`,
+/// `Booking_Contact`, `Target_Fit`…), so a header matching both predicates
+/// is a venue sheet with a stray column, not a band sheet.
 #[must_use]
 pub fn is_seed_sheet(header: &[String]) -> bool {
     let has = |name: &str| {
@@ -302,7 +317,20 @@ pub fn is_seed_sheet(header: &[String]) -> bool {
             .iter()
             .any(|cell| canonical_column(cell) == Some(name))
     };
-    has(columns::NAME) && has(columns::CITY) && has(columns::SOURCE_URL)
+    let venue_pin = has(columns::NAME) && has(columns::CITY) && has(columns::SOURCE_URL);
+    let venue_specific = [
+        columns::ADDRESS,
+        columns::CAPACITY,
+        columns::AUDIENCE_GENRE,
+        columns::BOOKING_CONTACT,
+        columns::PUBLIC_FINANCIAL_INFO,
+        columns::TARGET_FIT,
+        columns::CONTACT_QUALITY,
+        columns::OUTREACH_ANGLE,
+    ]
+    .iter()
+    .any(|name| has(name));
+    venue_pin && (venue_specific || !crate::peer_act_seed::is_seed_sheet(header))
 }
 
 /// The column this header cell names, if it names one.
@@ -462,6 +490,157 @@ pub fn research_brief(
     )
 }
 
+/// The registry-verification brief — the delegation loop's other direction.
+///
+/// `research_brief` asks for rooms in a city; this asks the model to check
+/// the rooms the registry already holds and to name the ones it misses. The
+/// venue list is embedded in the prompt because the AI's job is to *verify*
+/// — a prompt that asks for "venues in Poland" rediscovers from scratch and
+/// never reconciles against what we already believe.
+///
+/// `venues` is `(display_name, city_name)` per row — the pair a person would
+/// type into a search box, not the ids. An empty registry produces no brief:
+/// there is nothing to verify, and discovery is `research_brief`'s job.
+///
+/// The rules the prompt states are the intake's contract: `Status` says
+/// "Closed" or "Active" and nothing else, `Source_URL` carries the *evidence*
+/// for the claim (the closure post, the listing page — not the venue's
+/// homepage by default), and new rooms the registry does not hold are simply
+/// appended rows.
+#[must_use]
+pub fn verification_brief(
+    venues: &[(String, String)],
+    acts: &[(String, Option<String>)],
+    agents: &[(String, Option<String>, String)],
+    genre: Option<&str>,
+) -> Option<String> {
+    if venues.is_empty() && acts.is_empty() && agents.is_empty() {
+        return None;
+    }
+    let genre_clause = match genre {
+        Some(genre) => format!(" that book {genre} acts"),
+        None => String::new(),
+    };
+    let act_genre_clause = match genre {
+        Some(genre) => format!(" in the {genre} scene"),
+        None => String::new(),
+    };
+    let mut venue_list = String::new();
+    for (name, city) in venues {
+        venue_list.push_str(&format!("- {name} ({city})\n"));
+    }
+    let mut act_list = String::new();
+    for (name, city) in acts {
+        match city {
+            Some(city) => act_list.push_str(&format!("- {name} ({city})\n")),
+            None => act_list.push_str(&format!("- {name}\n")),
+        }
+    }
+    let mut agent_list = String::new();
+    for (name, agency, email) in agents {
+        match agency {
+            Some(agency) => {
+                agent_list.push_str(&format!("- {name} ({agency}) <{email}>\n"));
+            }
+            None => agent_list.push_str(&format!("- {name} <{email}>\n")),
+        }
+    }
+    let cities = venues
+        .iter()
+        .map(|(_, city)| city.as_str())
+        .collect::<std::collections::BTreeSet<_>>()
+        .len();
+    let venue_block = if venues.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "## Sheet \"venues\" — {count} rooms across {cities} cities:\n\n\
+             {venue_list}\n\
+             Verify each room still operates: a live website or social profile, \
+             a post or event listing within the last ~3 months, upcoming shows on \
+             a listings page (goout.net, Resident Advisor, Bandsintown, Facebook \
+             events). Status is exactly \"Active\" or \"Closed\"; a Closed row's \
+             Source_URL carries the closure evidence (a closure post, a \
+             \"permanently closed\" listing), an Active row's a current events \
+             page or recent post. Then append active live-music venues{genre_clause} \
+             missing from the list. Header:\n{venue_header}\n\n",
+            count = venues.len(),
+            cities = cities,
+            venue_list = venue_list,
+            genre_clause = genre_clause,
+            venue_header = columns::ALL.join(", ")
+        )
+    };
+    let act_block = if acts.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "## Sheet \"bands\" — {count} acts:\n\n\
+             {act_list}\n\
+             Verify each act is still a working band: a release, show or post \
+             within the last ~12 months on its own page or a listings site. Status \
+             is exactly \"Active\" or \"Inactive\"; an Inactive row's Source_URL \
+             carries the evidence (a farewell post, a disbanded listing). Inactive \
+             retires an act we already track — never a reason to add a new row. \
+             Then append active bands{act_genre_clause} the list misses. Header:\n\
+             {act_header}\n\n",
+            count = acts.len(),
+            act_list = act_list,
+            act_genre_clause = act_genre_clause,
+            act_header = crate::peer_act_seed::columns::ALL.join(", ")
+        )
+    };
+    let agent_block = if agents.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "## Sheet \"agents\" — {count} booking agents:\n\n\
+             {agent_list}\n\
+             Verify each agent still represents artists: a live agency site, a \
+             roster page that still names them, recent show announcements they \
+             booked. Status is exactly \"Active\" or \"Inactive\"; an Inactive \
+             row's Notes names the evidence (a dead roster link, a farewell \
+             announcement, a moved-to note). Inactive retires the agent — it is \
+             never a reason to add a row. Then append working booking \
+             agents{act_genre_clause} the list misses — a new agent needs a real \
+             Email to enter the registry at all. Every row's Contact_Type is \
+             exactly \"booking_agent\" — anything else and the intake cannot \
+             file it to the agent list. Header:\n{agent_header}\n\n",
+            count = agents.len(),
+            agent_list = agent_list,
+            act_genre_clause = act_genre_clause,
+            agent_header = AGENT_SHEET_HEADER.join(", ")
+        )
+    };
+    Some(format!(
+        "This is the standing registry — venues, bands and booking agents. \
+         Verify every listed entry and write the results back into the matching \
+         Google Sheet in Drive; the intake reads each sheet back on its own \
+         header.\n\n\
+         {venue_block}{act_block}{agent_block}\
+         Rules for every sheet: Research_Date is today. A row with no checkable \
+         link is a rumour and the intake drops it. Never mark an entry dead on \
+         absence of evidence alone — a quiet page is not a closure. Keep every \
+         existing row; do not duplicate an entry that is already listed."
+    ))
+}
+
+/// The agents sheet rides the generic contacts intake — its header is that
+/// reader's own vocabulary: `Contact_Type` marks the row a booking agent
+/// (the extractor's `role`/`type` contains-match finds it), `Status` is the
+/// verification verdict, `Organization` is the agency, and `Notes` carries
+/// the evidence link.
+const AGENT_SHEET_HEADER: &[&str] = &[
+    "Email",
+    "Name",
+    "Organization",
+    "Contact_Type",
+    "Status",
+    "City",
+    "Notes",
+    "Research_Date",
+];
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -614,7 +793,25 @@ mod tests {
         let mut row = progresja();
         row.insert("Status", "Closed");
         let parsed = parse_seed_row(&row).expect("closed rooms are kept");
-        assert!(parsed.room.closed);
+        assert_eq!(parsed.room.status.as_deref(), Some("closed"));
+    }
+
+    /// The reopen path: "active" is a claim worth writing — it outranks a
+    /// stale `closed` on `observed_at` — while a word outside the vocabulary
+    /// is no claim at all.
+    #[test]
+    fn status_parses_the_two_word_vocabulary_only() {
+        for (written, expected) in [
+            ("Active", Some("active")),
+            ("closed", Some("closed")),
+            ("reopened", None),
+            ("seasonal", None),
+        ] {
+            let mut row = progresja();
+            row.insert("Status", written);
+            let parsed = parse_seed_row(&row).expect("a status word never refuses");
+            assert_eq!(parsed.room.status.as_deref(), expected, "Status={written}");
+        }
     }
 
     #[test]
@@ -674,6 +871,69 @@ mod tests {
         row.insert(columns::CAPACITY, "600");
         let parsed = parse_seed_row(&row).expect("the brief's own sheet parses");
         assert_eq!(parsed.room.name, "Progresja");
+    }
+
+    /// The verification brief embeds the registry rather than asking for
+    /// cities from scratch — verify-then-discover, on the same sheet
+    /// contracts the intake parses: rooms, bands and agents each get their
+    /// own sheet section.
+    #[test]
+    fn a_verification_brief_embeds_the_registry() {
+        let venues = vec![
+            ("Łykend".to_owned(), "Wrocław".to_owned()),
+            ("Stodoła".to_owned(), "Warsaw".to_owned()),
+            ("Klub B".to_owned(), "Wrocław".to_owned()),
+        ];
+        let acts = vec![
+            ("Hortus".to_owned(), Some("Świdnica".to_owned())),
+            ("Alkaloid".to_owned(), None),
+        ];
+        let agents = vec![(
+            "Anna Nowak".to_owned(),
+            Some("Mystic".to_owned()),
+            "anna@mystic.example.com".to_owned(),
+        )];
+        let brief = verification_brief(&venues, &acts, &agents, Some("metal"))
+            .expect("a held registry yields a brief");
+        for (name, city) in &venues {
+            assert!(brief.contains(name), "the brief names {name}");
+            assert!(brief.contains(city), "the brief names {city}");
+        }
+        assert!(brief.contains("3 rooms across 2 cities"));
+        assert!(brief.contains("\"Closed\"") && brief.contains("\"Active\""));
+        assert!(brief.contains("metal"));
+        for (name, _) in &acts {
+            assert!(brief.contains(name), "the brief names {name}");
+        }
+        assert!(brief.contains("2 acts"));
+        assert!(brief.contains("\"Inactive\""));
+        assert!(brief.contains("Anna Nowak (Mystic) <anna@mystic.example.com>"));
+        // Same header-parity proof as the research brief — one per sheet.
+        let venue_header = brief
+            .lines()
+            .find(|line| line.contains("Audience_Genre"))
+            .expect("the brief carries the venue header");
+        let names: Vec<&str> = venue_header.split(',').map(str::trim).collect();
+        assert_eq!(names, columns::ALL, "the venue header drifted");
+        let band_header = brief
+            .lines()
+            .find(|line| line.contains("Outreach_Readiness"))
+            .expect("the brief carries the band header");
+        let names: Vec<&str> = band_header.split(',').map(str::trim).collect();
+        assert_eq!(
+            names,
+            crate::peer_act_seed::columns::ALL,
+            "the band header drifted"
+        );
+        assert!(brief.contains("Contact_Type"));
+        // An empty registry is nothing to verify.
+        assert_eq!(verification_brief(&[], &[], &[], None), None);
+        // A registry holding only bands still briefs.
+        assert!(
+            verification_brief(&[], &acts, &[], None)
+                .expect("bands alone yield a brief")
+                .contains("2 acts")
+        );
     }
 
     /// The other refusal shape: the room is known, the route is not. The
@@ -799,6 +1059,33 @@ mod tests {
         assert_eq!(report.venues.len(), 1);
         assert_eq!(report.venues[0].room.name, "Progresja");
         assert!(report.refusals.is_empty());
+    }
+
+    /// The pinned band header also carries `Name`, `City` and `Source_URL`
+    /// — the venue pin alone would claim it and mint bands as rooms. The
+    /// band-identity columns are the tell the venue check defers to.
+    #[test]
+    fn a_band_sheet_is_not_a_venue_sheet() {
+        let band_header: Vec<String> = crate::peer_act_seed::columns::ALL
+            .iter()
+            .map(|s| (*s).to_owned())
+            .collect();
+        assert!(!is_seed_sheet(&band_header));
+        assert!(crate::peer_act_seed::is_seed_sheet(&band_header));
+
+        // The same guard holds under the deep-scan spelling.
+        let deep_scan: Vec<String> = [
+            "Country",
+            "Band",
+            "City / Region",
+            "Genre",
+            "Activity evidence",
+            "Activity source",
+        ]
+        .iter()
+        .map(|s| (*s).to_owned())
+        .collect();
+        assert!(!is_seed_sheet(&deep_scan));
     }
 
     /// A full seed grid: good rows become venues, bad rows keep the sheet's
