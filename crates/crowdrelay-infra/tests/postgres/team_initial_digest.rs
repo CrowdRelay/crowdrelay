@@ -2,11 +2,9 @@
 //!
 //! Reported from a real inbox: fifteen emails inside one minute, all first
 //! notices, because a batch of approvals landing in a single cycle queued a
-//! mail per new assignment. The reminder path already digests; the initial
-//! send did not, and the initial send is the louder half — reminders arrive
-//! on a ladder, approvals land in bursts. A mailbox trained on fifteen-at-once
-//! learns to ignore VIRYA entirely, which costs more than every one of those
-//! approvals was worth.
+//! mail per new assignment. A mailbox trained on fifteen-at-once learns to
+//! ignore VIRYA entirely, which costs more than every one of those approvals
+//! was worth.
 //!
 //! The property is the sweep's, not a formatter's: it comes from holding the
 //! notices inside one transaction until every producer has offered its asks,
@@ -66,7 +64,7 @@ async fn run(pool: &PgPool, url: &str) -> Result<(), Box<dyn std::error::Error>>
     let assignments = sqlx::query_scalar::<_, i64>(
         "SELECT count(*)::bigint FROM viryaos_team_assignments
          WHERE workspace_id = $1 AND source_kind = 'autopilot_action'
-           AND status = 'open' AND next_reminder_at IS NOT NULL
+           AND status = 'open'
            AND assignee_member_id = $2",
     )
     .bind(workspace)
@@ -269,9 +267,8 @@ async fn awaiting_approval(
         "body": "seeded",
         "smart_link": null,
     }))
-    // Seven hours out on the nearest one: inside six the ask is already on
-    // its last rung, and `first_reminder_at` honestly schedules nothing —
-    // this fixture wants ladders, not the boundary.
+    // Seven hours out on the nearest one, then half-day steps — staggered
+    // expiries so the digest has an order to pick.
     .bind(now + time::Duration::hours(7 + index * 12))
     .execute(pool)
     .await?;

@@ -95,6 +95,5 @@ mod show_helpers;
 mod signal_activation_funnel;
 mod support_slot_ask;
 mod team_initial_digest;
-mod team_reminder_digest;
 mod venue_directory;
 mod venue_seed;

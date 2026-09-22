@@ -19,21 +19,22 @@ use crate::common;
 
 use anyhow::{Context, Result, ensure};
 use crowdrelay_domain::WorkspaceSlug;
-use crowdrelay_infra::config::{DatabaseConfig, TeamOperationsConfig};
+use crowdrelay_infra::config::{DatabaseConfig, TeamMemberSpec, TeamOperationsConfig};
 use crowdrelay_worker::bootstrap::bootstrap_team_operations;
 use sqlx::{PgPool, Row};
 use std::time::Duration;
 use uuid::Uuid;
 
-/// One configured contact. The slot key is what maps to a source-controlled
-/// profile, so it has to be one the code knows.
+/// One configured contact. The member key has to satisfy the
+/// `viryaos_team_profiles.member_key` CHECK constraint.
 fn one_member(email: &str) -> TeamOperationsConfig {
     TeamOperationsConfig {
-        member_1_email: Some(email.to_owned()),
-        member_2_email: None,
-        member_3_email: None,
-        member_4_email: None,
-        member_5_email: None,
+        members: vec![TeamMemberSpec {
+            member_key: "member_1".to_owned(),
+            email: email.to_owned(),
+            display_name: "Team Member 1".to_owned(),
+            skills: vec!["general".to_owned(), "operations".to_owned()],
+        }],
     }
 }
 
@@ -194,6 +195,152 @@ async fn invitation_is_confirmed(database: &PgPool, url: &str) -> Result<()> {
         after.status == "active",
         "an invited contact must still be promoted, not left pending: status is {}",
         after.status
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn an_elastic_roster_bootstraps_member_keys_beyond_the_legacy_slots() -> Result<()> {
+    // `CROWDRELAY_TEAM_MEMBERS_JSON` members carry their own key, name and
+    // skills — a crew is however many people the tenant has, not five slots.
+    let (database, url) = common::test_pool_with_url("CROWDRELAY_TEST_DATABASE_URL")
+        .await
+        .expect("connect to the migrated suite database");
+    let pool = &database;
+    let slug = WorkspaceSlug::parse("team-elastic")?;
+    sqlx::query("INSERT INTO workspaces (id, slug, name) VALUES ($1, $2, 'Elastic roster test')")
+        .bind(Uuid::now_v7())
+        .bind(slug.as_str())
+        .execute(pool)
+        .await
+        .context("insert workspace")?;
+
+    let config = TeamOperationsConfig {
+        members: vec![
+            TeamMemberSpec {
+                member_key: "ops_lead".to_owned(),
+                email: "ops@team-elastic.test".to_owned(),
+                display_name: "Ops Lead".to_owned(),
+                skills: vec!["operations".to_owned(), "booking".to_owned()],
+            },
+            TeamMemberSpec {
+                member_key: "social_1".to_owned(),
+                email: "social@team-elastic.test".to_owned(),
+                display_name: "Social One".to_owned(),
+                skills: vec!["social".to_owned(), "visual".to_owned()],
+            },
+            TeamMemberSpec {
+                member_key: "social_2".to_owned(),
+                email: "social2@team-elastic.test".to_owned(),
+                display_name: "Social Two".to_owned(),
+                skills: vec!["social".to_owned()],
+            },
+        ],
+    };
+
+    bootstrap_team_operations(pool, &slug, &db_config(&url), &config).await?;
+
+    let rows = sqlx::query(
+        "SELECT member.normalized_email, member.display_name, member.status, \
+                profile.member_key, profile.skills, profile.active \
+         FROM viryaos_team_profiles AS profile \
+         JOIN workspace_members AS member ON member.id = profile.member_id \
+         ORDER BY profile.member_key",
+    )
+    .fetch_all(pool)
+    .await
+    .context("read roster")?;
+    ensure!(
+        rows.len() == 3,
+        "all three members bootstrap: {}",
+        rows.len()
+    );
+    let ops = &rows[0];
+    ensure!(ops.try_get::<String, _>("member_key")? == "ops_lead");
+    ensure!(ops.try_get::<String, _>("display_name")? == "Ops Lead");
+    ensure!(ops.try_get::<String, _>("status")? == "active");
+    ensure!(ops.try_get::<bool, _>("active")?);
+    ensure!(
+        ops.try_get::<Vec<String>, _>("skills")? == ["operations".to_owned(), "booking".to_owned()],
+        "JSON-declared skills land verbatim"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn a_member_key_repointed_at_a_new_email_rebinds_its_profile() -> Result<()> {
+    // Crews churn: an elastic roster makes it normal for `ops_lead` to stop
+    // being Ada and start being Ben. The member_key is the routing identity,
+    // so the profile follows the key to the new member row — a UNIQUE
+    // (workspace_id, member_key) violation on every deploy would be the bug.
+    let (database, url) = common::test_pool_with_url("CROWDRELAY_TEST_DATABASE_URL")
+        .await
+        .expect("connect to the migrated suite database");
+    let pool = &database;
+    let slug = WorkspaceSlug::parse("team-repoint")?;
+    sqlx::query("INSERT INTO workspaces (id, slug, name) VALUES ($1, $2, 'Key repoint test')")
+        .bind(Uuid::now_v7())
+        .bind(slug.as_str())
+        .execute(pool)
+        .await
+        .context("insert workspace")?;
+
+    let db_config = db_config(&url);
+    let ada = TeamOperationsConfig {
+        members: vec![TeamMemberSpec {
+            member_key: "ops_lead".to_owned(),
+            email: "ada@team-repoint.test".to_owned(),
+            display_name: "Ada Ops".to_owned(),
+            skills: vec!["operations".to_owned()],
+        }],
+    };
+    bootstrap_team_operations(pool, &slug, &db_config, &ada).await?;
+    let ada_member_id = sqlx::query_scalar::<_, Uuid>(
+        "SELECT member_id FROM viryaos_team_profiles WHERE member_key = 'ops_lead'",
+    )
+    .fetch_one(pool)
+    .await
+    .context("read first member_id")?;
+
+    let ben = TeamOperationsConfig {
+        members: vec![TeamMemberSpec {
+            member_key: "ops_lead".to_owned(),
+            email: "ben@team-repoint.test".to_owned(),
+            display_name: "Ben Ops".to_owned(),
+            skills: vec!["operations".to_owned(), "booking".to_owned()],
+        }],
+    };
+    bootstrap_team_operations(pool, &slug, &db_config, &ben).await?;
+
+    let row = sqlx::query(
+        "SELECT profile.member_id, profile.skills, member.normalized_email \
+         FROM viryaos_team_profiles AS profile \
+         JOIN workspace_members AS member ON member.id = profile.member_id \
+         WHERE profile.member_key = 'ops_lead'",
+    )
+    .fetch_one(pool)
+    .await
+    .context("read repointed profile")?;
+    let ben_member_id = row.try_get::<Uuid, _>("member_id")?;
+    ensure!(
+        ben_member_id != ada_member_id,
+        "the profile re-binds to the new member row"
+    );
+    ensure!(
+        row.try_get::<String, _>("normalized_email")? == "ben@team-repoint.test",
+        "the routing identity now reaches Ben"
+    );
+    ensure!(
+        row.try_get::<Vec<String>, _>("skills")? == ["operations".to_owned(), "booking".to_owned()],
+        "skills refresh on the re-bind"
+    );
+    ensure!(
+        member_state(pool, "ada@team-repoint.test").await.is_err(),
+        "Ada's member row keeps no routing profile"
     );
 
     Ok(())

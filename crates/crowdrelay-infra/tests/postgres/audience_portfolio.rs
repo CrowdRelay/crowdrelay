@@ -497,6 +497,27 @@ async fn fan_import_lands_pending_and_respects_opt_outs() -> Result<(), Box<dyn 
         arrivals[0].1
     );
 
+    // The same arrival lands in the ledger the brain ranks by — the coarse
+    // acquisition row alone would leave import-driven growth invisible to
+    // the channel ranking.
+    let provenance: Vec<(String, String, Option<String>)> = sqlx::query_as(
+        "SELECT event_kind, channel, source_target FROM fan_provenance_events \
+         WHERE workspace_id=$1 AND attribution_method='direct_arrival'",
+    )
+    .bind(workspace)
+    .fetch_all(&pool)
+    .await?;
+    assert_eq!(
+        provenance.as_slice(),
+        &[(
+            "conversion".to_owned(),
+            "fan_import".to_owned(),
+            Some(format!("fan_import:{source}"))
+        )],
+        "one provenance row for the created fan — and the re-import above \
+         must not have fabricated a second"
+    );
+
     // One audit row names the source.
     let audited: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM audit_events WHERE action='fans.imported' AND metadata->>'source'=$1 AND metadata->>'imported_pending'='1'",
@@ -620,6 +641,22 @@ async fn fanbase_ingestion_is_consent_safe_idempotent_and_attributed()
     .fetch_one(&pool)
     .await?;
     assert_eq!(member_fan, same_member);
+
+    // The ingest's arrival is in the provenance ledger — one row for the one
+    // created fan, idempotent across the re-ingest above.
+    let provenance: Vec<(String, String)> = sqlx::query_as(
+        "SELECT event_kind, channel FROM fan_provenance_events \
+         WHERE workspace_id=$1 AND fan_id=$2",
+    )
+    .bind(workspace)
+    .bind(member_fan)
+    .fetch_all(&pool)
+    .await?;
+    assert_eq!(
+        provenance.as_slice(),
+        &[("conversion".to_owned(), "fanbase_ingest".to_owned())],
+        "the ingested fan's arrival names the ingest channel exactly once"
+    );
     Ok(())
 }
 
@@ -908,6 +945,7 @@ async fn upsert_conflict_marks_only_the_created_fan_as_new() -> Result<(), sqlx:
         crowdrelay_domain::FanId::from_uuid(fan_id),
         "ticket_purchase",
         &format!("ticket_order:{}", Uuid::now_v7()),
+        &crowdrelay_infra::acquisition::ArrivalContext::default(),
     )
     .await?;
     transaction.commit().await?;

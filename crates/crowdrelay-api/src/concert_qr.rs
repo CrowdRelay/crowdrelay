@@ -481,6 +481,7 @@ struct ControlPlaneEventRow {
     ends_at: Option<OffsetDateTime>,
     scan_count: i64,
     upcoming: bool,
+    status: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -495,6 +496,10 @@ struct ControlPlaneEventView {
     /// `true` while the show is ahead of or inside the staff surface's
     /// now-36h window — the "next up" block the gig page leads with.
     upcoming: bool,
+    /// `draft`/`published`/`completed` — a hand-entered show can sit on the
+    /// list unannounced, and a list that hid the difference would let an
+    /// operator believe a draft is live.
+    status: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -537,6 +542,7 @@ pub async fn control_plane_events(
             ends_at: row.ends_at.map(format_time),
             scan_count: u64::try_from(row.scan_count).unwrap_or_default(),
             upcoming: row.upcoming,
+            status: row.status,
         })
         .collect();
     (
@@ -555,7 +561,8 @@ async fn load_control_plane_events(
         SELECT event.id, event.slug, event.title, event.venue, event.starts_at,
                event.ends_at,
                count(checkin.id)::bigint AS scan_count,
-               (event.starts_at >= now() - interval '36 hours') AS upcoming
+               (event.starts_at >= now() - interval '36 hours') AS upcoming,
+               event.status::text AS status
         FROM events AS event
         LEFT JOIN concert_checkins AS checkin
           ON checkin.workspace_id = event.workspace_id

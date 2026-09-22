@@ -902,3 +902,5 @@ async fn one_fan_with_three_devices_is_one_signal_install() -> Result<(), Box<dy
     );
     Ok(())
 }
+
+include!("autopilot_world_model_postgres/community_targets.rs");

@@ -13,6 +13,7 @@ use axum::{
     http::{HeaderMap, StatusCode, header::CACHE_CONTROL},
     response::{IntoResponse, Response},
 };
+use crowdrelay_application::autopilot::AutopilotControlRepository;
 use crowdrelay_domain::WorkspaceId;
 use crowdrelay_infra::lapsed_approvals::LapsedApprovals;
 use crowdrelay_infra::sent_record::FailedSends;
@@ -44,6 +45,7 @@ use crowdrelay_application::self_assessment::{DailyNorthStar, assess};
 include!("ops_action_ledger.rs");
 include!("ops/handlers.rs");
 include!("ops/attention.rs");
+include!("ops/intelligence.rs");
 include!("ops/processes.rs");
 
 include!("ops/fan_out.rs");

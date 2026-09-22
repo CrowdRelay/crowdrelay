@@ -195,12 +195,28 @@ impl PostgresFanImportRepository {
                     FROM unnest($2::text[], $3::text[], $4::text[])
                         AS candidate(email, display_name, locale)
                     ON CONFLICT (workspace_id, normalized_email) DO NOTHING
-                    RETURNING id
+                    RETURNING id, created_at
+                ),
+                acquired AS (
+                    INSERT INTO fan_acquisition_events (
+                        workspace_id, fan_id, source, request_id, occurred_at
+                    )
+                    SELECT $1, id, $5, $6, now() FROM created
                 )
-                INSERT INTO fan_acquisition_events (
-                    workspace_id, fan_id, source, request_id, occurred_at
+                -- The coarse ledger above feeds channel ROI reads; this one
+                -- is what the brain ranks channels by. `created` yields only
+                -- newly-made fans, so a re-imported address keeps its first
+                -- arrival instead of gaining a fabricated second one. The
+                -- provenance insert reads `created`'s own output — a JOIN on
+                -- `fans` here would see the statement snapshot, where these
+                -- rows do not yet exist.
+                INSERT INTO fan_provenance_events (
+                    workspace_id, fan_id, event_kind, channel, source_target,
+                    attribution_method, attribution_confidence, occurred_at
                 )
-                SELECT $1, id, $5, $6, now() FROM created
+                SELECT $1, created.id, 'conversion', 'fan_import', $5,
+                       'direct_arrival', 1.0, created.created_at
+                FROM created
                 "#,
             )
             .bind(workspace_id)

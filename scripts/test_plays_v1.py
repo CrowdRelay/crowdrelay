@@ -245,7 +245,8 @@ class PlaysContract(unittest.TestCase):
     def test_the_send_is_external_work_behind_a_named_capability(self) -> None:
         execution = read(EXECUTION) + "\n" + read(EXECUTION_CAPS)
         self.assertIn("AutopilotActionPayload::RunPlayStep { .. }", execution)
-        self.assertIn('AutopilotActionPayload::RunPlayStep { .. } => "play.step"', execution)
+        self.assertIn('AutopilotActionPayload::RunPlayStep { step_kind, .. }', execution)
+        self.assertIn('"play.step.third_party"', execution)
         self.assertIn('"crowdrelay.play.step_requested" => "play.step"', execution)
         requires = execution.split("fn payload_requires_executor", 1)[1].split("\n}", 1)[0]
         self.assertIn("RunPlayStep", requires)

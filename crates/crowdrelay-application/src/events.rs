@@ -12,11 +12,12 @@ use std::{
 
 use async_trait::async_trait;
 use crowdrelay_domain::{
-    CampaignId, EventAction, EventInterestResult, EventSlug, FanEventInterest, FanSessionToken,
-    PublicEvent, VisitorId, WorkspaceId,
+    CampaignId, EventAction, EventId, EventInterestResult, EventSlug, FanEventInterest,
+    FanSessionToken, PublicEvent, VisitorId, WorkspaceId,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use time::OffsetDateTime;
 
 use crate::{IdempotencyKey, RepositoryError, RequestId};
 
@@ -351,9 +352,61 @@ pub struct SetEventFestivalCommand {
     pub festival_name: Option<String>,
 }
 
+/// Command: creates one show by hand — the path for a tenant whose label
+/// never ran Bandsintown, where waiting for a sync source means the calendar
+/// stays empty forever.
+///
+/// `slug_base` is the caller's derived stem (usually `slugify(title)`); the
+/// repository owns making it unique inside the workspace, so a retried or
+/// colliding submit cannot take another show's URL.
+///
+/// `publish` splits "the system knows about the night" from "the public site
+/// shows it": a draft rides every internal read (checklists, gig planning,
+/// reports) while announcing stays the deliberate act it is everywhere else.
+pub struct CreateEventCommand {
+    pub workspace_id: WorkspaceId,
+    pub slug_base: String,
+    pub title: String,
+    /// `None` resolves to the workspace's `crew_timezone` setting, then the
+    /// column default — the venue's own clock, not the server's.
+    pub timezone: Option<String>,
+    pub starts_at: OffsetDateTime,
+    pub doors_at: Option<OffsetDateTime>,
+    pub ends_at: Option<OffsetDateTime>,
+    pub venue: Option<String>,
+    pub venue_address: Option<String>,
+    /// City is find-or-create against the shared (workspace-less) city
+    /// registry: `city_name` + `city_country_code` arrive together or not at
+    /// all. `city_region` and coordinates are optional colour.
+    pub city_name: Option<String>,
+    pub city_country_code: Option<String>,
+    pub city_region: Option<String>,
+    pub ticket_url: Option<String>,
+    pub publish: bool,
+    pub idempotency_key: IdempotencyKey,
+    pub request_id: RequestId,
+}
+
+/// What a created show came back as — enough for the caller to link straight
+/// to it without a second read.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct CreatedEvent {
+    pub event_id: EventId,
+    pub slug: String,
+    pub status: String,
+}
+
 /// Repository port for event discovery, interest registration, and action tracking.
 #[async_trait]
 pub trait EventRepository: Send + Sync {
+    /// Creates one event row (plus its city, when named) inside the workspace.
+    /// Idempotent on `command.idempotency_key`: a replayed submit returns the
+    /// originally created row instead of booking the night twice.
+    /// `RepositoryError::Conflict` signals a validation-level refusal.
+    async fn create_event(
+        &self,
+        command: &CreateEventCommand,
+    ) -> Result<CreatedEvent, RepositoryError>;
     /// Loads all published events for cache refresh.
     async fn load_published_events(&self) -> Result<Vec<PublicEvent>, RepositoryError>;
     /// Persists a batch of conversion actions.
@@ -599,6 +652,37 @@ impl SetEventCounterparty {
         command: &SetEventCounterpartyCommand,
     ) -> Result<(), RepositoryError> {
         self.repository.set_event_counterparty(command).await
+    }
+}
+
+/// Use case: creates one show from operator input.
+///
+/// Until this existed, the only way a gig reached `events` was a sync source
+/// — Bandsintown, Ticketmaster, an OSM sweep. A label that runs its own
+/// calendar (or never connected one) had no show to point the whole show-day
+/// surface at, so this is the front door they were missing.
+#[derive(Clone)]
+pub struct CreateEvent {
+    repository: Arc<dyn EventRepository>,
+}
+
+impl CreateEvent {
+    /// Creates the show-entry use case.
+    #[must_use]
+    pub fn new(repository: Arc<dyn EventRepository>) -> Self {
+        Self { repository }
+    }
+
+    /// Writes the show; idempotent on the command's key.
+    ///
+    /// # Errors
+    ///
+    /// Propagates the repository error.
+    pub async fn execute(
+        &self,
+        command: &CreateEventCommand,
+    ) -> Result<CreatedEvent, RepositoryError> {
+        self.repository.create_event(command).await
     }
 }
 

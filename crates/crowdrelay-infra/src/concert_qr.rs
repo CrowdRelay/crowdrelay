@@ -654,6 +654,10 @@ impl PostgresConcertQrRepository {
                     FanId::from_uuid(id),
                     "concert_qr",
                     &request_id,
+                    &crate::acquisition::ArrivalContext {
+                        source_target: Some(command.event_slug.clone()),
+                        campaign_id: Some(command.campaign_id),
+                    },
                 )
                 .await
                 .map_err(|error| {

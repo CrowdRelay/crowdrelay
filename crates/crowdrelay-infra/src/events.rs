@@ -14,12 +14,14 @@ use std::{
 
 use async_trait::async_trait;
 use crowdrelay_application::{
-    EventRepository, RegisterEventInterestCommand, ReplaceEventActsCommand, RepositoryError,
-    SetEventCounterpartyCommand, SetEventFestivalCommand, SetEventSupportSlotsCommand,
+    CreateEventCommand, CreatedEvent, EventRepository, RegisterEventInterestCommand,
+    ReplaceEventActsCommand, RepositoryError, SetEventCounterpartyCommand, SetEventFestivalCommand,
+    SetEventSupportSlotsCommand,
 };
 use crowdrelay_domain::{
     CampaignId, CityId, EventAction, EventCity, EventId, EventInterestResult, EventSlug,
     FanEventInterest, FanId, PublicEvent, PublicEventAct, VisitorId, WorkspaceId, WorkspaceSlug,
+    slugify, stable_slug,
 };
 use serde::Serialize;
 use serde_json::json;
@@ -36,6 +38,10 @@ use crate::config::{ClickBufferConfig, DatabaseConfig};
 use crate::database::{SqlxErrorClass, classify_sqlx_error};
 
 const INTEREST_IDEMPOTENCY_SCOPE: &str = "event_interest";
+const CREATE_IDEMPOTENCY_SCOPE: &str = "event_create";
+/// How many suffixed slugs a create tries before refusing — the stem plus
+/// `-2` through `-33` is a lifetime of same-titled nights in one workspace.
+const MAX_EVENT_SLUG_ATTEMPTS: u32 = 33;
 const IDEMPOTENCY_RETENTION_MILLISECONDS: i64 = 86_400_000;
 const MAX_EVENT_ACTION_BATCH_ROWS: usize = 1_000;
 const MAX_FAN_INTEREST_ROWS: u32 = 100;
@@ -288,13 +294,21 @@ impl PostgresEventRepository {
         let inserted = start_idempotency(
             &mut transaction,
             workspace_id,
-            command,
+            INTEREST_IDEMPOTENCY_SCOPE,
+            command.idempotency_key().as_str(),
+            command.request_id().as_str(),
             &request_hash,
             self.operation_timeout,
         )
         .await?;
         if !inserted {
-            let row = lock_idempotency(&mut transaction, workspace_id, command).await?;
+            let row = lock_idempotency(
+                &mut transaction,
+                workspace_id,
+                INTEREST_IDEMPOTENCY_SCOPE,
+                command.idempotency_key().as_str(),
+            )
+            .await?;
             if row.request_hash != request_hash {
                 return Err(EventStoreError::Conflict);
             }
@@ -314,7 +328,9 @@ impl PostgresEventRepository {
             reclaim_idempotency(
                 &mut transaction,
                 workspace_id,
-                command,
+                INTEREST_IDEMPOTENCY_SCOPE,
+                command.idempotency_key().as_str(),
+                command.request_id().as_str(),
                 self.operation_timeout,
             )
             .await?;
@@ -442,7 +458,8 @@ impl PostgresEventRepository {
         complete_idempotency(
             &mut transaction,
             workspace_id,
-            command,
+            INTEREST_IDEMPOTENCY_SCOPE,
+            command.idempotency_key().as_str(),
             &request_hash,
             &result,
         )
@@ -889,6 +906,15 @@ impl EventRepository for PostgresEventRepository {
             .map_err(Into::into)
     }
 
+    async fn create_event(
+        &self,
+        command: &CreateEventCommand,
+    ) -> Result<CreatedEvent, RepositoryError> {
+        self.bounded(self.create_event_inner(command))
+            .await
+            .map_err(Into::into)
+    }
+
     async fn replace_event_acts(
         &self,
         command: &ReplaceEventActsCommand,
@@ -937,6 +963,7 @@ impl EventRepository for PostgresEventRepository {
     }
 }
 
+include!("events/create.rs");
 include!("events/festival.rs");
 include!("events/buffer.rs");
 include!("events/support.rs");

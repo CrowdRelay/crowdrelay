@@ -310,6 +310,19 @@ fn bearer_token(headers: &HeaderMap) -> Option<&str> {
         .strip_prefix("Bearer ")
 }
 
+/// The tenant's own ticketing opt-in — the flag beside the platform-wide
+/// `ticket_sales_enabled` ecosystem flag. A tenant that never asked for a
+/// Stripe checkout gets no reservation and no public sale. A failed read
+/// reports `false`: the reserve could not write to that database anyway, and
+/// a 60-second settings cache keeps the warm path a memory read.
+async fn ticketing_opted_in(state: &crate::AppState) -> bool {
+    crowdrelay_infra::tenant_settings::TenantSettingsRepository::new(state.database.clone())
+        .brand_settings(state.ticketing.workspace_id().into_uuid())
+        .await
+        .map(|brand| brand.ticketing_enabled)
+        .unwrap_or(false)
+}
+
 fn ticket_qr_not_before(order: &OrderRow) -> OffsetDateTime {
     order
         .doors_at

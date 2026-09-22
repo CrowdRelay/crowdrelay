@@ -12,10 +12,10 @@
 //! - **Issue**: days landing today or tomorrow get a shot list built
 //!   from the formats the open suggestions and the active arc still
 //!   need, routed to the member who holds the camera through the same
-//!   assignment + reminder machinery every human handoff uses.
+//!   assignment + notice machinery every human handoff uses.
 
 use super::{
-    team::{PendingInitialNotice, first_reminder_at},
+    team::PendingInitialNotice,
     team_routing::{TeamRoutingRow, parse_team_skill, select_member_index},
     *,
 };
@@ -125,22 +125,13 @@ pub(in crate::autopilot) async fn project_shows_to_production_events(
     .map_err(map_sqlx)?;
 
     // A moved day moves the member's deadline with it — the plan row
-    // follows the new date through the join, but the assignment's
-    // stamped due_at and reminder schedule were computed against the
-    // old one. The CASE mirrors `first_reminder_at` in team.rs; keep
-    // them in step.
+    // follows the new date through the join, but the assignment's stamped
+    // due_at was computed against the old one. The chase bookkeeping resets
+    // with it: a deadline that moved cannot owe anybody a stale count.
     sqlx::query(
         r#"
         UPDATE viryaos_team_assignments assignment
         SET due_at = (day.scheduled_for + 1)::timestamp AT TIME ZONE 'UTC',
-            next_reminder_at = CASE
-                WHEN now() + INTERVAL '24 hours'
-                     < (day.scheduled_for + 1)::timestamp AT TIME ZONE 'UTC' - INTERVAL '6 hours'
-                    THEN now() + INTERVAL '24 hours'
-                WHEN (day.scheduled_for + 1)::timestamp AT TIME ZONE 'UTC' - INTERVAL '6 hours' > now()
-                    THEN (day.scheduled_for + 1)::timestamp AT TIME ZONE 'UTC' - INTERVAL '6 hours'
-                ELSE NULL
-            END,
             last_reminded_at = NULL,
             first_overdue_reminder_at = NULL,
             reminder_count = 0
@@ -571,7 +562,6 @@ pub(in crate::autopilot) async fn issue_capture_plans(
                 day.scheduled_for,
                 day.event_id,
                 &shots,
-                now,
                 mutable_team,
                 crew_locale,
                 pending_notices,
@@ -645,7 +635,6 @@ pub(in crate::autopilot) async fn issue_capture_plans(
                 draft.scheduled_for,
                 draft.event_id,
                 &shots,
-                now,
                 mutable_team,
                 crew_locale,
                 pending_notices,
@@ -690,7 +679,6 @@ async fn route_capture_plan(
     scheduled_for: time::Date,
     event_id: Option<Uuid>,
     shots: &[CaptureShot],
-    now: OffsetDateTime,
     mutable_team: &mut [TeamRoutingRow],
     crew_locale: crowdrelay_application::autopilot::BriefingLocale,
     pending_notices: &mut Vec<PendingInitialNotice>,
@@ -706,8 +694,8 @@ async fn route_capture_plan(
         r#"
         INSERT INTO viryaos_team_assignments (
             id, workspace_id, action_id, source_kind, source_id, source_ref,
-            assignee_member_id, required_skill, due_at, next_reminder_at
-        ) VALUES ($1,$2,NULL,'capture_plan',$3,NULL,$4,$5,$6,$7)
+            assignee_member_id, required_skill, due_at
+        ) VALUES ($1,$2,NULL,'capture_plan',$3,NULL,$4,$5,$6)
         ON CONFLICT DO NOTHING
         RETURNING id
         "#,
@@ -718,7 +706,6 @@ async fn route_capture_plan(
     .bind(member.member_id)
     .bind(capture_need(kind).primary_skill.as_str())
     .bind(due_at)
-    .bind(first_reminder_at(now, Some(due_at)))
     .fetch_optional(&mut **tx)
     .await
     .map_err(map_sqlx)?;

@@ -1,8 +1,10 @@
-/// Refreshes the team-routing identities from deploy-secret contacts.
+/// Refreshes the team-routing identities from the configured roster.
 ///
-/// Emails remain secret-backed runtime configuration. This function only writes
-/// them into CrowdRelay's existing member identity store, while stable member
-/// keys and skills stay reviewable in source control.
+/// Emails remain secret-backed runtime configuration. The roster itself is
+/// elastic — `CROWDRELAY_TEAM_MEMBERS_JSON` carries however many members the
+/// tenant onboarded with, while the legacy `VIRYA_TEAM_MEMBER_N_EMAIL` slots
+/// keep their source-controlled member keys and skills. This function only
+/// writes resolved specs into CrowdRelay's existing member identity store.
 ///
 /// It runs inside `setup`, which `scripts/deploy.sh` runs on every release
 /// before either long-running service starts. That makes it an unattended
@@ -29,9 +31,7 @@ pub async fn bootstrap_team_operations(
                 .ok_or(BootstrapError::Database)?;
 
         let mut changed = 0_u64;
-        for (member_key, email) in config.configured_members() {
-            let (display_name, skills) = team_member_profile(member_key)
-                .ok_or(BootstrapError::Database)?;
+        for member in config.configured_members() {
             let member_id = sqlx::query_scalar::<_, Uuid>(
                 r#"
                 INSERT INTO workspace_members (
@@ -65,35 +65,59 @@ pub async fn bootstrap_team_operations(
                 "#,
             )
             .bind(workspace_id)
-            .bind(email)
-            .bind(display_name)
+            .bind(member.email.as_str())
+            .bind(member.display_name.as_str())
             .fetch_one(&mut *transaction)
             .await
             .map_err(|_| BootstrapError::Database)?;
 
+            // The member_key is the routing identity, so it owns the profile
+            // row: re-pointing a key at a new email re-binds the profile to the
+            // new member row. A single INSERT ... ON CONFLICT cannot cover both
+            // UNIQUE constraints ((workspace_id, member_id) and
+            // (workspace_id, member_key)), so the re-bind runs first and the
+            // member-keyed upsert only fires for a key nobody holds.
             let result = sqlx::query(
                 r#"
-                INSERT INTO viryaos_team_profiles (
-                    workspace_id, member_id, member_key, active, skills, capacity_basis_points
-                ) VALUES ($1, $2, $3, true, $4, 10000)
-                ON CONFLICT (workspace_id, member_id) DO UPDATE SET
-                    member_key = EXCLUDED.member_key,
-                    -- `active` is deliberately absent, for the same reason as
-                    -- the status above: a profile turned off is somebody's
-                    -- decision about capacity, and a deploy is not a decision
-                    -- about capacity. `skills` and `member_key` are
-                    -- source-controlled facts, so those do refresh.
-                    skills = EXCLUDED.skills
+                UPDATE viryaos_team_profiles SET
+                    member_id = $2,
+                    -- `active` is deliberately absent here and below: a profile
+                    -- turned off is somebody's decision about capacity, and a
+                    -- deploy is not a decision about capacity. `skills` and the
+                    -- member binding are source-controlled facts, so those do
+                    -- refresh.
+                    skills = $4
+                WHERE workspace_id = $1 AND member_key = $3
                 "#,
             )
             .bind(workspace_id)
             .bind(member_id)
-            .bind(member_key)
-            .bind(skills)
+            .bind(member.member_key.as_str())
+            .bind(member.skills.as_slice())
             .execute(&mut *transaction)
             .await
             .map_err(|_| BootstrapError::Database)?;
             changed = changed.saturating_add(result.rows_affected());
+            if result.rows_affected() == 0 {
+                let result = sqlx::query(
+                    r#"
+                    INSERT INTO viryaos_team_profiles (
+                        workspace_id, member_id, member_key, active, skills, capacity_basis_points
+                    ) VALUES ($1, $2, $3, true, $4, 10000)
+                    ON CONFLICT (workspace_id, member_id) DO UPDATE SET
+                        member_key = EXCLUDED.member_key,
+                        skills = EXCLUDED.skills
+                    "#,
+                )
+                .bind(workspace_id)
+                .bind(member_id)
+                .bind(member.member_key.as_str())
+                .bind(member.skills.as_slice())
+                .execute(&mut *transaction)
+                .await
+                .map_err(|_| BootstrapError::Database)?;
+                changed = changed.saturating_add(result.rows_affected());
+            }
         }
 
         transaction
@@ -104,35 +128,4 @@ pub async fn bootstrap_team_operations(
     })
     .await
     .map_err(|_| BootstrapError::TimedOut)?
-}
-
-fn team_member_profile(member_key: &str) -> Option<(&'static str, Vec<String>)> {
-    // Stable slot-to-skill mapping only. Human names stay in runtime member data.
-    match member_key {
-        "member_1" => Some((
-            "Team Member 1",
-            ["general", "operations", "booking", "approval", "technical", "people"]
-                .into_iter().map(str::to_owned).collect(),
-        )),
-        "member_2" => Some((
-            "Team Member 2",
-            ["visual", "video", "photography", "social"]
-                .into_iter().map(str::to_owned).collect(),
-        )),
-        "member_3" => Some((
-            "Team Member 3",
-            ["english_copy", "polish_copy"].into_iter().map(str::to_owned).collect(),
-        )),
-        "member_4" => Some((
-            "Team Member 4",
-            ["operations", "booking", "approval", "people"]
-                .into_iter().map(str::to_owned).collect(),
-        )),
-        "member_5" => Some((
-            "Team Member 5",
-            ["operations", "approval", "people", "polish_copy"]
-                .into_iter().map(str::to_owned).collect(),
-        )),
-        _ => None,
-    }
 }
