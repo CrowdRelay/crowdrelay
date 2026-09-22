@@ -1327,7 +1327,20 @@ impl AgentOutcomeWorker {
                 processed_decision_id = $2,
                 processed_action_id = $3,
                 processed_at = now(),
-                trace_id = COALESCE(trace_id, $4)
+                trace_id = COALESCE(trace_id, $4),
+                -- The live content-hash dedup window ends at adjudication:
+                -- agents/outcomes.ts documents that a topic re-emits the
+                -- moment consumed_at is set, and mark_insights_consumed owns
+                -- the stamp for the three insight kinds the brain reads
+                -- back. For every other kind nothing ever set it, so an
+                -- identical re-emission — e.g. a scout re-proposing a
+                -- community that has since grown — was silently dropped
+                -- forever and the readmission path could never fire.
+                consumed_at = CASE
+                    WHEN kind IN ('campaign_insight', 'release_plan_note', 'generic_insight')
+                    THEN consumed_at
+                    ELSE now()
+                END
             WHERE id = $1
             "#,
         )
@@ -1512,10 +1525,14 @@ impl AgentOutcomeWorker {
             .unwrap_or(json!([]));
         // Non-community kinds keep the field as-is — it is not their
         // identity and nothing reads it there. Community rows store the
-        // normalized slug from `identity`. Bounded to the column's CHECK.
+        // normalized slug from `identity`. Bounded to the column's CHECK,
+        // and a whitespace-only value is NULL — `btrim(subreddit) <> ''`
+        // would sink the whole outcome on a blank string.
         let subreddit_field = item
             .get("subreddit")
             .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
             .map(|s| s.chars().take(100).collect::<String>());
         // The discovering agent scraped the subreddit — it knows the
         // language its posts are written in, and the repost drafter writes
@@ -1714,7 +1731,11 @@ impl AgentOutcomeWorker {
         sqlx::query(
             r#"
             UPDATE agent_outcomes
-            SET status = 'rejected', rejection_reason = $3
+            SET status = 'rejected', rejection_reason = $3,
+                -- Rejected is terminal too: nothing reads it back, so its
+                -- content hash releases here rather than suppressing an
+                -- identical re-emission forever (see the processed UPDATE).
+                consumed_at = now()
             WHERE id = $1 AND workspace_id = $2
             "#,
         )
