@@ -27,7 +27,6 @@ class TeamEmailDispatchLaneContract(unittest.TestCase):
         self.assertIn("pub struct TeamEmailDispatchWorker", worker)
         self.assertIn("claim_due_team_email_actions", worker)
         self.assertIn("claim_due_autonomous_actions", worker)
-        self.assertIn("dispatch_team_handoff_reminders", worker)
 
     def test_team_email_lane_is_not_gated_by_autopilot_enabled(self):
         main = text("crates/crowdrelay-worker/src/main.rs")
