@@ -344,6 +344,19 @@ pub(crate) fn router(state: crate::AppState) -> Router {
             "/v1/control-plane/tenant-settings/{key}",
             post(crate::tenant_settings_http::upsert_setting),
         )
+        // Tenant-held credentials (Stripe keys first): the masked list, the
+        // write-only set, and the unset. A stored value can be replaced or
+        // removed here but never read back — the reveal is the internal
+        // route's, over the commerce credential.
+        .route(
+            "/v1/control-plane/secrets",
+            get(crate::workspace_secrets_http::list_secrets),
+        )
+        .route(
+            "/v1/control-plane/secrets/{name}",
+            put(crate::workspace_secrets_http::put_secret)
+                .delete(crate::workspace_secrets_http::delete_secret),
+        )
         .route(
             "/v1/control-plane/fanbases",
             get(crate::fanbase::list_fanbases).post(crate::fanbase::create_fanbase),

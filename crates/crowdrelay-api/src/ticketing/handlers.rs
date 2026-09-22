@@ -13,6 +13,13 @@ pub async fn public_sale(
             .into_response();
     }
     let request_id_value = request_id(&headers);
+    // The tenant opt-in beside the platform flag: a tenant that never asked
+    // for ticketing has no sale to show, so its events answer "not found"
+    // rather than "you may not see this". A failed read fails closed — the
+    // sale view is not worth more than the tenant's choice.
+    if !ticketing_opted_in(&state).await {
+        return Problem::not_found(request_id_value).private().into_response();
+    }
     let event_slug = match EventSlug::parse(event_slug) {
         Ok(value) => value,
         Err(_) => return TicketingError::Invalid.response(request_id_value),
@@ -127,6 +134,14 @@ pub async fn reserve_order(
         Ok(true)
     ) {
         return Problem::service_unavailable(request_id(&headers))
+            .private()
+            .into_response();
+    }
+    // Same opt-in as `public_sale` — a refusal here is the enforcement, not
+    // a hidden sale. A failed read fails closed: the reservation could not
+    // be written to that database anyway.
+    if !ticketing_opted_in(&state).await {
+        return Problem::forbidden(request_id(&headers))
             .private()
             .into_response();
     }
