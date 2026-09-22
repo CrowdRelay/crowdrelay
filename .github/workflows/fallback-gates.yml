@@ -42,11 +42,6 @@ jobs:
     if: github.event.repository.private == false
     runs-on: ubuntu-latest
     timeout-minutes: 60
-    # Hosted minutes are only free while the repo is public. In the private
-    # state this job dies at provisioning (no runner is ever assigned), so
-    # every PR carries a red X for a check that could never have run. Skip
-    # it outright there — the self-hosted lanes carry the real gates.
-    if: github.event.repository.private == false
 
     # The same service the self-hosted unit-test job runs: a handful of
     # pg-gated lib tests connect to 127.0.0.1:5432 and fail with PoolTimedOut

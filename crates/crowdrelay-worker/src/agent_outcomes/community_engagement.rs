@@ -75,13 +75,16 @@ impl AgentOutcomeWorker {
         // run's evidence row, keyed through the task that dispatched it.
         // Carrying it onto the engage action lets the published post's own
         // measurement teach the family posterior — the run-level row only
-        // saw a workspace-wide number, published or not.
+        // saw a workspace-wide number, published or not. The lookup runs on
+        // the pool, outside this transaction: `agent_service_tasks` is the
+        // agents service's schema and may not exist here.
         let creative_family = creative_family_for_task(
-            tx,
+            &self.pool,
+            outcome.id,
             outcome.workspace_id,
             outcome.task_id,
         )
-        .await?;
+        .await;
         Ok((
             json!({
                 "kind": "request_community_engagement",

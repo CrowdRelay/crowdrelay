@@ -1,0 +1,1127 @@
+//! Live-Postgres coverage for the Audience Graph, Label Portfolio,
+//! tenant settings and the pilot fan import.
+//!
+//! These repositories encode the commercial promises of the product — fans
+//! never leave home, refusals reopen only through research, caps bind, an
+//! empty settings table changes nothing — so they are pinned against a real
+//! database rather than mocks. Run via `just test-postgres`.
+
+use crate::common;
+use crowdrelay_domain::audience_graph::{OutreachStage, PlaceKind};
+use crowdrelay_domain::fanbase::SourceKind;
+use crowdrelay_domain::portfolio::ConsentStatus;
+use crowdrelay_infra::audience_graph::{
+    AudienceGraphError, PostgresAudienceGraphRepository, UpsertPlaceInput,
+};
+use crowdrelay_infra::fan_import::{ImportEntry, PostgresFanImportRepository};
+use crowdrelay_infra::portfolio::{PortfolioError, PostgresPortfolioRepository};
+use crowdrelay_infra::tenant_settings::{TenantBrandSettings, TenantSettingsRepository};
+use sqlx::PgPool;
+use uuid::Uuid;
+
+const TEST_DATABASE_URL_KEY: &str = "CROWDRELAY_TEST_DATABASE_URL";
+
+async fn pool() -> PgPool {
+    common::test_pool(TEST_DATABASE_URL_KEY)
+        .await
+        .expect("clone the migrated suite database")
+}
+
+/// Workspace deletion cascades through every table the tests touch, so each
+/// run starts from a clean slate even against a reused database.
+async fn cleanup(pool: &PgPool, workspace_ids: &[Uuid]) {
+    // Outbox rows are RESTRICT-deliberately durable, so they go first; every
+    // other table cascades with the workspace.
+    sqlx::query("DELETE FROM outbox_events WHERE workspace_id = ANY($1)")
+        .bind(workspace_ids)
+        .execute(pool)
+        .await
+        .expect("cascade outbox");
+    sqlx::query("DELETE FROM audit_events WHERE workspace_id = ANY($1)")
+        .bind(workspace_ids)
+        .execute(pool)
+        .await
+        .expect("cascade audit");
+    sqlx::query("DELETE FROM workspaces WHERE id = ANY($1)")
+        .bind(workspace_ids)
+        .execute(pool)
+        .await
+        .expect("cascade workspaces");
+}
+
+async fn seed_workspace(pool: &PgPool, tag: &str) -> Uuid {
+    let id = Uuid::now_v7();
+    let slug = format!("{tag}-{}", id.simple());
+    sqlx::query("INSERT INTO workspaces (id, slug, name) VALUES ($1, $2, $3)")
+        .bind(id)
+        .bind(&slug)
+        .bind(format!("Test {tag}"))
+        .execute(pool)
+        .await
+        .expect("seed workspace");
+    id
+}
+
+fn place_input<'a>(
+    workspace_id: Uuid,
+    platform: &'a str,
+    url: &'a str,
+    name: &'a str,
+) -> UpsertPlaceInput<'a> {
+    UpsertPlaceInput {
+        workspace_id,
+        place_kind: PlaceKind::Subreddit,
+        platform,
+        name,
+        url,
+        country_code: Some("PL"),
+        language: Some("pl"),
+        genres: &[],
+        member_count: Some(1_000),
+        activity_bp: Some(7_000),
+        notes: None,
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires an explicit CROWDRELAY_TEST_DATABASE_URL PostgreSQL database"]
+async fn audience_graph_upsert_advances_and_decays() -> Result<(), Box<dyn std::error::Error>> {
+    let pool = pool().await;
+    crowdrelay_infra::database::MIGRATOR.run(&pool).await?;
+    let repo = PostgresAudienceGraphRepository::new(pool.clone());
+    let workspace = seed_workspace(&pool, "ag").await;
+    let url = format!("https://reddit.com/r/ag-{}", workspace.simple());
+
+    // Upsert is idempotent per (workspace, platform, url) and seeds the pipeline.
+    let first = repo
+        .upsert_place(&place_input(workspace, "reddit", &url, "r/AG"))
+        .await?;
+    let second = repo
+        .upsert_place(&place_input(workspace, "reddit", &url, "r/AG renamed"))
+        .await?;
+    assert_eq!(first, second);
+    let seeded = repo.place_detail(workspace, first).await?;
+    assert_eq!(seeded.stage.as_deref(), Some("discovered"));
+
+    // Domain policy blocks the tempting shortcut straight to contact.
+    let illegal = PostgresAudienceGraphRepository::advance_outreach_in_tx(
+        &mut pool.begin().await?,
+        workspace,
+        first,
+        OutreachStage::Discovered,
+        OutreachStage::Contacted,
+        None,
+    )
+    .await;
+    assert!(matches!(
+        illegal,
+        Err(AudienceGraphError::InvalidTransition { .. })
+    ));
+
+    // The legal move lands, and rules re-arm the cooldown on the edge.
+    repo.attach_rules(
+        workspace,
+        first,
+        &crowdrelay_infra::audience_graph::PlaceRulesInput {
+            self_promo_ratio_percent: Some(10),
+            contact_channel: Some("modmail"),
+            contact_target: Some("mods"),
+            requires_approval: false,
+            cooldown_days: 30,
+            rules_summary: None,
+        },
+        true,
+    )
+    .await?;
+    let mut tx = pool.begin().await?;
+    PostgresAudienceGraphRepository::advance_outreach_in_tx(
+        &mut tx,
+        workspace,
+        first,
+        OutreachStage::Discovered,
+        OutreachStage::Researched,
+        None,
+    )
+    .await?;
+    tx.commit().await?;
+    let researched = repo.place_detail(workspace, first).await?;
+    assert_eq!(researched.stage.as_deref(), Some("researched"));
+    let next_eligible = researched.next_eligible_at.expect("cooldown armed");
+    assert!(next_eligible > time::OffsetDateTime::now_utc() + time::Duration::days(20));
+
+    // Decay retires a relationship whose last action is older than the window.
+    sqlx::query(
+        "UPDATE discovery_outreach SET last_action_at = now() - interval '90 days' WHERE place_id = $1",
+    )
+    .bind(first)
+    .execute(&pool)
+    .await?;
+    let decayed = repo
+        .decay_dormant(workspace, time::Duration::days(45), 100)
+        .await?;
+    assert_eq!(decayed, 1);
+    let dormant = repo.place_detail(workspace, first).await?;
+    assert_eq!(dormant.stage.as_deref(), Some("dormant"));
+    cleanup(&pool, &[workspace]).await;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires an explicit CROWDRELAY_TEST_DATABASE_URL PostgreSQL database"]
+async fn portfolio_edges_route_only_within_an_organization_and_cap_deliveries()
+-> Result<(), Box<dyn std::error::Error>> {
+    let pool = pool().await;
+    crowdrelay_infra::database::MIGRATOR.run(&pool).await?;
+    let repo = PostgresPortfolioRepository::new(pool.clone());
+    let owner = seed_workspace(&pool, "pf-owner").await;
+    let beneficiary = seed_workspace(&pool, "pf-benefit").await;
+    let outsider = seed_workspace(&pool, "pf-outsider").await;
+
+    let org = repo
+        .create_organization_for_workspace(owner, &format!("pf-{}", owner.simple()), "PF Label")
+        .await?;
+
+    // The second roster member joins the same organization...
+    sqlx::query("UPDATE workspaces SET organization_id = $2 WHERE id = $1")
+        .bind(beneficiary)
+        .bind(org)
+        .execute(&pool)
+        .await?;
+
+    // ...so the edge between them is allowed; an outsider is not.
+    let consent = repo
+        .propose_amplification(
+            owner,
+            beneficiary,
+            crowdrelay_domain::portfolio::AmplificationPurpose::ReleaseFeature,
+            "all_active",
+            1,
+            21,
+        )
+        .await?;
+    let cross_org = repo
+        .propose_amplification(
+            owner,
+            outsider,
+            crowdrelay_domain::portfolio::AmplificationPurpose::CrossPromote,
+            "all_active",
+            1,
+            21,
+        )
+        .await;
+    assert!(matches!(
+        cross_org,
+        Err(PortfolioError::NotInSameOrganization)
+    ));
+
+    repo.decide_amplification(owner, consent, ConsentStatus::Active, Some("op"), None)
+        .await?;
+
+    // Two active owner fans; one suppressed address must never be reached.
+    for (index, status) in [("a", "active"), ("b", "active"), ("c", "suppressed")] {
+        sqlx::query(
+            "INSERT INTO fans (id, workspace_id, normalized_email, status) VALUES ($1,$2,$3,$4)",
+        )
+        .bind(Uuid::now_v7())
+        .bind(owner)
+        .bind(format!("fan-{index}-{}@pf.test", owner.simple()))
+        .bind(status)
+        .execute(&pool)
+        .await?;
+    }
+
+    let preview = repo.preview_audience(owner, consent).await?;
+    assert_eq!(preview, 2, "suppressed fans never count as reach");
+
+    let queued_first = repo
+        .run_amplification_campaign(
+            owner,
+            consent,
+            "pf-camp-1",
+            "Hello",
+            "Body",
+            100,
+            serde_json::json!({}),
+        )
+        .await?;
+    assert_eq!(queued_first, 2);
+
+    // Monthly cap of one campaign: a second distinct reference is refused even
+    // though fans exist.
+    let capped = repo
+        .run_amplification_campaign(
+            owner,
+            consent,
+            "pf-camp-2",
+            "Hello",
+            "Body",
+            100,
+            serde_json::json!({}),
+        )
+        .await;
+    assert!(matches!(capped, Err(PortfolioError::CapReached)));
+    cleanup(&pool, &[owner, beneficiary, outsider]).await;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires an explicit CROWDRELAY_TEST_DATABASE_URL PostgreSQL database"]
+async fn crossbill_edges_carry_only_once_reciprocated() -> Result<(), Box<dyn std::error::Error>> {
+    let pool = pool().await;
+    crowdrelay_infra::database::MIGRATOR.run(&pool).await?;
+    let repo = PostgresPortfolioRepository::new(pool.clone());
+    let owner = seed_workspace(&pool, "cb-owner").await;
+    let beneficiary = seed_workspace(&pool, "cb-benefit").await;
+
+    let org = repo
+        .create_organization_for_workspace(owner, &format!("cb-{}", owner.simple()), "CB Label")
+        .await?;
+    sqlx::query("UPDATE workspaces SET organization_id = $2 WHERE id = $1")
+        .bind(beneficiary)
+        .bind(org)
+        .execute(&pool)
+        .await?;
+
+    let edge = repo
+        .propose_amplification(
+            owner,
+            beneficiary,
+            crowdrelay_domain::portfolio::AmplificationPurpose::EventCrossbill,
+            "all_active",
+            3,
+            1,
+        )
+        .await?;
+    repo.decide_amplification(owner, edge, ConsentStatus::Active, Some("op"), None)
+        .await?;
+
+    for index in ["a", "b"] {
+        sqlx::query(
+            "INSERT INTO fans (id, workspace_id, normalized_email, status) VALUES ($1,$2,$3,'active')",
+        )
+        .bind(Uuid::now_v7())
+        .bind(owner)
+        .bind(format!("fan-{index}-{}@cb.test", owner.simple()))
+        .execute(&pool)
+        .await?;
+    }
+
+    // The beneficiary's crowd has never carried the owner's announcement:
+    // the edge refuses before any campaign can queue — and writes nothing.
+    let refused = repo
+        .run_amplification_campaign(
+            owner,
+            edge,
+            "cb-camp-1",
+            "Hello",
+            "Body",
+            100,
+            serde_json::json!({}),
+        )
+        .await;
+    assert!(matches!(refused, Err(PortfolioError::Unreciprocated)));
+    let queued: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM outbox_events WHERE workspace_id = $1")
+            .bind(owner)
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(queued, 0, "a refused edge must not queue deliveries");
+
+    // An active reverse edge alone is consent, not proof — zero deliveries
+    // still refuses. Any reverse purpose counts: a delivered cross-promote
+    // is how a fresh pair bootstraps its first carry.
+    let reverse = repo
+        .propose_amplification(
+            beneficiary,
+            owner,
+            crowdrelay_domain::portfolio::AmplificationPurpose::CrossPromote,
+            "all_active",
+            1,
+            1,
+        )
+        .await?;
+    repo.decide_amplification(
+        beneficiary,
+        reverse,
+        ConsentStatus::Active,
+        Some("op"),
+        None,
+    )
+    .await?;
+    let undelivered = repo
+        .run_amplification_campaign(
+            owner,
+            edge,
+            "cb-camp-1",
+            "Hello",
+            "Body",
+            100,
+            serde_json::json!({}),
+        )
+        .await;
+    assert!(matches!(undelivered, Err(PortfolioError::Unreciprocated)));
+
+    sqlx::query(
+        "INSERT INTO amplification_deliveries
+             (consent_id, from_workspace_id, to_workspace_id, fan_id, campaign_reference)
+         VALUES ($1, $2, $3, $4, 'cb-reverse-1')",
+    )
+    .bind(reverse)
+    .bind(beneficiary)
+    .bind(owner)
+    .bind(Uuid::now_v7())
+    .execute(&pool)
+    .await?;
+
+    let carried = repo
+        .run_amplification_campaign(
+            owner,
+            edge,
+            "cb-camp-1",
+            "Hello",
+            "Body",
+            100,
+            serde_json::json!({}),
+        )
+        .await?;
+    assert_eq!(carried, 2);
+
+    // Revoking the reverse edge does not erase its history — the
+    // beneficiary already carried, so the forward edge stays eligible.
+    // Every fan is inside the one-day cooldown now, so zero queue, but the
+    // run must not refuse.
+    repo.decide_amplification(
+        beneficiary,
+        reverse,
+        ConsentStatus::Revoked,
+        None,
+        Some("ended"),
+    )
+    .await?;
+    let still_carried = repo
+        .run_amplification_campaign(
+            owner,
+            edge,
+            "cb-camp-2",
+            "Hello",
+            "Body",
+            100,
+            serde_json::json!({}),
+        )
+        .await;
+    assert!(
+        matches!(still_carried, Ok(0)),
+        "a revoked reverse edge still counts as reciprocation"
+    );
+
+    cleanup(&pool, &[owner, beneficiary]).await;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires an explicit CROWDRELAY_TEST_DATABASE_URL PostgreSQL database"]
+async fn fan_import_lands_pending_and_respects_opt_outs() -> Result<(), Box<dyn std::error::Error>>
+{
+    let pool = pool().await;
+    crowdrelay_infra::database::MIGRATOR.run(&pool).await?;
+    let repo = PostgresFanImportRepository::new(pool.clone());
+    let workspace = seed_workspace(&pool, "import").await;
+
+    // A pre-existing suppressed address must stay untouched by the import.
+    sqlx::query("INSERT INTO fans (workspace_id, normalized_email, status) VALUES ($1,'gone@x.test','unsubscribed')")
+        .bind(workspace)
+        .execute(&pool)
+        .await?;
+
+    let entries = vec![
+        ImportEntry {
+            email: "new@x.test".into(),
+            display_name: Some("New".into()),
+            locale: Some("pl".into()),
+        },
+        ImportEntry {
+            email: "gone@x.test".into(),
+            display_name: None,
+            locale: None,
+        },
+    ];
+    let source = format!("pilot-batch-{}", workspace.simple());
+    let counts = repo
+        .import_batch(workspace, &source, &entries, 2, 60)
+        .await?;
+    assert_eq!(counts.imported_pending, 1);
+    assert_eq!(counts.skipped_suppressed, 1);
+
+    let status: String = sqlx::query_scalar(
+        "SELECT status FROM fans WHERE workspace_id=$1 AND normalized_email='new@x.test'",
+    )
+    .bind(workspace)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(status, "pending");
+
+    // The confirmation email is queued with a real token row behind it.
+    let payload: serde_json::Value = sqlx::query_scalar(
+        r#"
+        SELECT payload FROM outbox_events
+        WHERE workspace_id=$1 AND event_type='fan.confirmation_requested'
+          AND payload->>'email' = 'new@x.test'
+        "#,
+    )
+    .bind(workspace)
+    .fetch_one(&pool)
+    .await?;
+    assert!(payload.get("confirmation_token").is_some());
+
+    // An immediate re-import hits the resend cooldown instead of double-sending.
+    // The retry keeps the SAME source label: it is a re-run of one import.
+    let again = repo
+        .import_batch(workspace, &source, &entries, 2, 60)
+        .await?;
+    assert_eq!(again.cooldown_skipped, 1);
+
+    // The import is how the fan arrived — one provenance row naming the
+    // batch's declared origin, and the re-import above must not have
+    // fabricated a second one.
+    let arrivals: Vec<(String, String)> = sqlx::query_as(
+        "SELECT source, request_id FROM fan_acquisition_events WHERE workspace_id=$1 AND source LIKE 'fan_import:%'",
+    )
+    .bind(workspace)
+    .fetch_all(&pool)
+    .await?;
+    assert_eq!(arrivals.len(), 1);
+    assert_eq!(arrivals[0].0, format!("fan_import:{source}"));
+    assert!(
+        arrivals[0].1.starts_with("fan-import-"),
+        "request_id correlates to the batch, got {}",
+        arrivals[0].1
+    );
+
+    // The same arrival lands in the ledger the brain ranks by — the coarse
+    // acquisition row alone would leave import-driven growth invisible to
+    // the channel ranking.
+    let provenance: Vec<(String, String, Option<String>)> = sqlx::query_as(
+        "SELECT event_kind, channel, source_target FROM fan_provenance_events \
+         WHERE workspace_id=$1 AND attribution_method='direct_arrival'",
+    )
+    .bind(workspace)
+    .fetch_all(&pool)
+    .await?;
+    assert_eq!(
+        provenance.as_slice(),
+        &[(
+            "conversion".to_owned(),
+            "fan_import".to_owned(),
+            Some(format!("fan_import:{source}"))
+        )],
+        "one provenance row for the created fan — and the re-import above \
+         must not have fabricated a second"
+    );
+
+    // One audit row names the source.
+    let audited: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM audit_events WHERE action='fans.imported' AND metadata->>'source'=$1 AND metadata->>'imported_pending'='1'",
+    )
+    .bind(&source)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(audited, 1);
+    // No cleanup here on purpose: audit_events is append-only by trigger, so
+    // this test leaves its single-workspace footprint behind. Assertions are
+    // scoped to the per-run unique source label instead.
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires an explicit CROWDRELAY_TEST_DATABASE_URL PostgreSQL database"]
+async fn tenant_settings_default_to_the_shipped_constants_then_follow_overrides()
+-> Result<(), Box<dyn std::error::Error>> {
+    let pool = pool().await;
+    crowdrelay_infra::database::MIGRATOR.run(&pool).await?;
+    let repo = TenantSettingsRepository::new(pool.clone());
+    let workspace = seed_workspace(&pool, "ts").await;
+
+    // Empty table: byte-equal defaults, exactly like before the extraction.
+    let before = repo.brand_settings(workspace).await?;
+    assert_eq!(*before, TenantBrandSettings::default());
+
+    repo.set_setting(
+        workspace,
+        "member_site_base_url",
+        "https://fans.example.org",
+    )
+    .await?;
+    let after = repo.brand_settings(workspace).await?;
+    assert_eq!(after.member_site_base_url, "https://fans.example.org");
+    // Untouched keys keep their defaults; overrides are per-key data.
+    assert_eq!(after.member_area_path, "pl/latarnik");
+    cleanup(&pool, &[workspace]).await;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires an explicit CROWDRELAY_TEST_DATABASE_URL PostgreSQL database"]
+async fn fanbase_ingestion_is_consent_safe_idempotent_and_attributed()
+-> Result<(), Box<dyn std::error::Error>> {
+    use crowdrelay_infra::fanbase::{FanbaseEntry, PostgresFanbaseRepository};
+
+    let pool = pool().await;
+    crowdrelay_infra::database::MIGRATOR.run(&pool).await?;
+    let repo = PostgresFanbaseRepository::new(pool.clone());
+    let workspace = seed_workspace(&pool, "fb").await;
+
+    // A suppressed address from an earlier era must never be resurrected.
+    sqlx::query("INSERT INTO fans (workspace_id, normalized_email, status) VALUES ($1,'old@x.test','unsubscribed')")
+        .bind(workspace)
+        .execute(&pool)
+        .await?;
+
+    let fanbase = repo
+        .create_fanbase(
+            workspace,
+            "Metal Hammer promo",
+            SourceKind::CsvInline,
+            None,
+            Some("operator@label"),
+        )
+        .await?;
+
+    let entries = vec![
+        FanbaseEntry {
+            external_id: "mh-1".into(),
+            email: Some("fresh@x.test".into()),
+            display_name: Some("Fresh".into()),
+            locale: Some("pl".into()),
+        },
+        FanbaseEntry {
+            external_id: "mh-2".into(),
+            email: Some("old@x.test".into()),
+            display_name: None,
+            locale: None,
+        },
+    ];
+    let counts = repo
+        .ingest_candidates(workspace, fanbase, &entries, 2, 60)
+        .await?;
+    assert_eq!(counts.imported_pending, 1);
+    assert_eq!(counts.skipped_suppressed, 1);
+
+    let status: String = sqlx::query_scalar(
+        "SELECT status FROM fans WHERE workspace_id=$1 AND normalized_email='fresh@x.test'",
+    )
+    .bind(workspace)
+    .fetch_one(&pool)
+    .await?;
+    eprintln!("step: status ok");
+    assert_eq!(status, "pending");
+
+    // Membership attribution is keyed by external id.
+    eprintln!("step: before member_fan");
+    let member_fan: Uuid = sqlx::query_scalar(
+        "SELECT fan_id FROM fanbase_members WHERE fanbase_id=$1 AND external_id='mh-1'",
+    )
+    .bind(fanbase)
+    .fetch_one(&pool)
+    .await?;
+
+    eprintln!("step: before re-ingest");
+    // Re-ingesting the same external id is idempotent and refreshes the
+    // member; the fresh address sits in its confirmation cooldown.
+    let again = repo
+        .ingest_candidates(workspace, fanbase, &entries, 2, 60)
+        .await?;
+    // Retry outcome: the fresh address sits in its confirmation cooldown, the
+    // suppressed one stays skipped.
+    assert_eq!(again.cooldown_skipped, 1);
+    assert_eq!(again.skipped_suppressed, 1);
+    let same_member: Uuid = sqlx::query_scalar(
+        "SELECT fan_id FROM fanbase_members WHERE fanbase_id=$1 AND external_id='mh-1'",
+    )
+    .bind(fanbase)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(member_fan, same_member);
+
+    // The ingest's arrival is in the provenance ledger — one row for the one
+    // created fan, idempotent across the re-ingest above.
+    let provenance: Vec<(String, String)> = sqlx::query_as(
+        "SELECT event_kind, channel FROM fan_provenance_events \
+         WHERE workspace_id=$1 AND fan_id=$2",
+    )
+    .bind(workspace)
+    .bind(member_fan)
+    .fetch_all(&pool)
+    .await?;
+    assert_eq!(
+        provenance.as_slice(),
+        &[("conversion".to_owned(), "fanbase_ingest".to_owned())],
+        "the ingested fan's arrival names the ingest channel exactly once"
+    );
+    Ok(())
+}
+
+/// Pins the batch semantics `ingest_candidates` has to preserve.
+///
+/// Written before the loop was made set-based, and kept because it is the
+/// only thing that says what "the same result" means. Three properties, each
+/// of which a naive batching rewrite gets wrong:
+///
+/// * every confirmation event carries its own `request_id`. That string is
+///   sent on the wire as `X-CrowdRelay-Request-Id`, and the delivery contract
+///   is at-least-once with consumer-side dedupe -- so a batch that reuses one
+///   id is a batch where a deduping consumer keeps one email and drops the
+///   rest.
+/// * an address repeated inside one batch gets exactly one confirmation. The
+///   first occurrence sends; the rest land in the cooldown the first one
+///   opened. Both occurrences are still attributed as members, because
+///   membership is keyed by external id, not by address.
+/// * the counters partition the batch: they sum to `received`, so an operator
+///   reading the ingestion row can tell that every entry was accounted for.
+#[tokio::test]
+#[ignore = "requires an explicit CROWDRELAY_TEST_DATABASE_URL PostgreSQL database"]
+async fn fanbase_ingestion_accounts_for_every_entry_exactly_once()
+-> Result<(), Box<dyn std::error::Error>> {
+    use crowdrelay_infra::fanbase::{FanbaseEntry, PostgresFanbaseRepository};
+
+    let pool = pool().await;
+    crowdrelay_infra::database::MIGRATOR.run(&pool).await?;
+    let repo = PostgresFanbaseRepository::new(pool.clone());
+    let workspace = seed_workspace(&pool, "fb-batch").await;
+
+    sqlx::query(
+        "INSERT INTO fans (workspace_id, normalized_email, status) \
+         VALUES ($1,'live@x.test','active'), ($1,'gone@x.test','unsubscribed')",
+    )
+    .bind(workspace)
+    .execute(&pool)
+    .await?;
+
+    let fanbase = repo
+        .create_fanbase(
+            workspace,
+            "Batch semantics",
+            SourceKind::CsvInline,
+            None,
+            Some("operator@label"),
+        )
+        .await?;
+
+    let entry = |external: &str, email: Option<&str>| FanbaseEntry {
+        external_id: external.to_owned(),
+        email: email.map(str::to_owned),
+        display_name: None,
+        locale: None,
+    };
+    let entries = vec![
+        entry("b-1", Some("one@x.test")),
+        entry("b-2", Some("two@x.test")),
+        // The same address twice, under two external ids: two members, one
+        // confirmation.
+        entry("b-3", Some("one@x.test")),
+        entry("b-4", Some("live@x.test")),
+        entry("b-5", Some("gone@x.test")),
+        entry("b-6", None),
+        entry("b-7", Some("   ")),
+    ];
+
+    let counts = repo
+        .ingest_candidates(workspace, fanbase, &entries, 2, 600)
+        .await?;
+
+    assert_eq!(counts.received, 7);
+    assert_eq!(counts.imported_pending, 2, "one@ and two@ are new");
+    assert_eq!(counts.already_active, 1, "live@ is already active");
+    assert_eq!(counts.skipped_suppressed, 1, "gone@ stays gone");
+    assert_eq!(counts.invalid, 2, "a missing address and a blank one");
+    assert_eq!(
+        counts.cooldown_skipped, 1,
+        "the repeated address sits in the cooldown its first occurrence opened"
+    );
+    assert_eq!(
+        counts.confirmation_resent, 2,
+        "one confirmation each for one@ and two@, and none for the repeat"
+    );
+
+    let accounted = counts.imported_pending
+        + counts.already_active
+        + counts.skipped_suppressed
+        + counts.invalid
+        + counts.cooldown_skipped;
+    assert_eq!(
+        accounted, counts.received,
+        "the counters must partition the batch, got {counts:?}"
+    );
+
+    // Membership is keyed by external id, so the repeated address is two
+    // members pointing at one fan.
+    let members: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM fanbase_members WHERE workspace_id=$1 AND fanbase_id=$2",
+    )
+    .bind(workspace)
+    .bind(fanbase)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(members, 5, "every entry with an address becomes a member");
+
+    let shared: i64 = sqlx::query_scalar(
+        "SELECT count(DISTINCT fan_id) FROM fanbase_members \
+         WHERE workspace_id=$1 AND fanbase_id=$2 AND external_id IN ('b-1','b-3')",
+    )
+    .bind(workspace)
+    .bind(fanbase)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(shared, 1, "both external ids resolve to the same fan");
+
+    // One confirmation per address that got one, and every event distinct on
+    // the wire.
+    let events: Vec<(String,)> = sqlx::query_as(
+        "SELECT request_id FROM outbox_events \
+         WHERE workspace_id=$1 AND event_type='fan.confirmation_requested' \
+         ORDER BY request_id",
+    )
+    .bind(workspace)
+    .fetch_all(&pool)
+    .await?;
+    assert_eq!(events.len(), 2, "two confirmations for two new addresses");
+    let distinct: std::collections::HashSet<&str> =
+        events.iter().map(|row| row.0.as_str()).collect();
+    assert_eq!(
+        distinct.len(),
+        events.len(),
+        "every confirmation needs its own request id -- a shared one is a \
+         batch a deduping consumer collapses to a single email, got {events:?}"
+    );
+
+    // Exactly one live confirmation token per address; the repeat must not
+    // have consumed and reminted one.
+    let tokens: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM fan_action_tokens t JOIN fans f ON f.id = t.fan_id \
+         WHERE t.workspace_id=$1 AND t.purpose='confirm' AND t.consumed_at IS NULL \
+           AND f.normalized_email = 'one@x.test'",
+    )
+    .bind(workspace)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(tokens, 1, "the repeated address holds one live token");
+
+    cleanup(&pool, &[workspace]).await;
+    Ok(())
+}
+
+/// The batch semantics `import_batch` has to preserve, same shape as the
+/// fanbase suite above.
+///
+/// The counters are the API's whole response, so they have to describe the
+/// batch exactly: an address repeated inside one import is admitted once and
+/// confirmed once, and every confirmation event carries its own `request_id`,
+/// which ships on the wire as `X-CrowdRelay-Request-Id` under an
+/// at-least-once contract with consumer-side dedupe.
+#[tokio::test]
+#[ignore = "requires an explicit CROWDRELAY_TEST_DATABASE_URL PostgreSQL database"]
+async fn fan_import_admits_a_repeated_address_once() -> Result<(), Box<dyn std::error::Error>> {
+    let pool = pool().await;
+    crowdrelay_infra::database::MIGRATOR.run(&pool).await?;
+    let repo = PostgresFanImportRepository::new(pool.clone());
+    let workspace = seed_workspace(&pool, "fi-batch").await;
+
+    sqlx::query(
+        "INSERT INTO fans (workspace_id, normalized_email, status) \
+         VALUES ($1,'live@x.test','active'), ($1,'gone@x.test','suppressed')",
+    )
+    .bind(workspace)
+    .execute(&pool)
+    .await?;
+
+    let entry = |email: &str| ImportEntry {
+        email: email.to_owned(),
+        display_name: None,
+        locale: None,
+    };
+    let counts = repo
+        .import_batch(
+            workspace,
+            "csv",
+            &[
+                entry("one@x.test"),
+                entry("two@x.test"),
+                entry("one@x.test"),
+                entry("live@x.test"),
+                entry("gone@x.test"),
+            ],
+            2,
+            600,
+        )
+        .await?;
+
+    assert_eq!(counts.imported_pending, 2, "one@ and two@ are new");
+    assert_eq!(counts.already_active, 1);
+    assert_eq!(counts.skipped_suppressed, 1);
+    assert_eq!(
+        counts.cooldown_skipped, 1,
+        "the repeat sits in the cooldown its first occurrence opened"
+    );
+    assert_eq!(counts.confirmation_resent, 2, "one email per new address");
+
+    let events: Vec<(String,)> = sqlx::query_as(
+        "SELECT request_id FROM outbox_events \
+         WHERE workspace_id=$1 AND event_type='fan.confirmation_requested'",
+    )
+    .bind(workspace)
+    .fetch_all(&pool)
+    .await?;
+    assert_eq!(events.len(), 2);
+    let distinct: std::collections::HashSet<&str> =
+        events.iter().map(|row| row.0.as_str()).collect();
+    assert_eq!(
+        distinct.len(),
+        events.len(),
+        "each confirmation needs its own request id, got {events:?}"
+    );
+
+    let live_tokens: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM fan_action_tokens t JOIN fans f ON f.id = t.fan_id \
+         WHERE t.workspace_id=$1 AND t.purpose='confirm' AND t.consumed_at IS NULL \
+           AND f.normalized_email='one@x.test'",
+    )
+    .bind(workspace)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(live_tokens, 1, "the repeated address holds one live token");
+
+    // A second import inside the cooldown resends nothing and says so.
+    let again = repo
+        .import_batch(workspace, "csv", &[entry("one@x.test")], 2, 600)
+        .await?;
+    assert_eq!(again.cooldown_skipped, 1);
+    assert_eq!(again.confirmation_resent, 0);
+    assert_eq!(again.imported_pending, 0);
+
+    // No `cleanup` here: importing writes an `audit_events` row, and that
+    // table is append-only by trigger, so the helper's DELETE is refused.
+    // Each run seeds its own workspace, so leaving the rows is harmless.
+    Ok(())
+}
+
+/// The ticket-purchase path in `crowdrelay-api/src/ticketing/payments.rs`
+/// resolves the buyer's fan row with `INSERT ... ON CONFLICT DO UPDATE`, and
+/// `RETURNING` hands back the row either way — so it reads `xmax = 0` to tell
+/// a created fan (new arrival, write provenance) from a returning buyer
+/// (existing fan, keep their original provenance). This pins that contract
+/// against a real engine: if `xmax` semantics ever change, the payment path
+/// would silently fabricate a second arrival on every repeat purchase.
+#[tokio::test]
+#[ignore = "requires an explicit CROWDRELAY_TEST_DATABASE_URL PostgreSQL database"]
+async fn upsert_conflict_marks_only_the_created_fan_as_new() -> Result<(), sqlx::Error> {
+    let pool = pool().await;
+    crowdrelay_infra::database::MIGRATOR
+        .run(&pool)
+        .await
+        .expect("migrate");
+    let workspace = seed_workspace(&pool, "xmax").await;
+
+    let mut transaction = pool.begin().await?;
+
+    // The same statement `payments.rs` runs for a buyer — verbatim so the
+    // pin fails when the production shape changes, not just the idiom.
+    const BUYER_UPSERT: &str = r#"
+        INSERT INTO fans (workspace_id, normalized_email, display_name, status)
+        VALUES ($1, $2, $3, 'active')
+        ON CONFLICT (workspace_id, normalized_email) DO UPDATE
+        SET display_name = COALESCE(fans.display_name, EXCLUDED.display_name)
+        RETURNING id, (xmax = 0) AS is_new
+        "#;
+
+    let (fan_id, is_new): (Uuid, bool) = sqlx::query_as(BUYER_UPSERT)
+        .bind(workspace)
+        .bind("buyer@x.test")
+        .bind("Buyer")
+        .fetch_one(&mut *transaction)
+        .await?;
+    assert!(is_new, "the first purchase creates the fan");
+    crowdrelay_infra::acquisition::record_fan_arrival(
+        &mut transaction,
+        crowdrelay_domain::WorkspaceId::from_uuid(workspace),
+        crowdrelay_domain::FanId::from_uuid(fan_id),
+        "ticket_purchase",
+        &format!("ticket_order:{}", Uuid::now_v7()),
+        &crowdrelay_infra::acquisition::ArrivalContext::default(),
+    )
+    .await?;
+    transaction.commit().await?;
+
+    // A repeat purchase is a *later* transaction — the committed row is
+    // what `ON CONFLICT` hits in production.
+    let mut repeat = pool.begin().await?;
+    let (same_fan, is_new_again): (Uuid, bool) = sqlx::query_as(BUYER_UPSERT)
+        .bind(workspace)
+        .bind("buyer@x.test")
+        .bind("Buyer")
+        .fetch_one(&mut *repeat)
+        .await?;
+    assert_eq!(same_fan, fan_id);
+    assert!(
+        !is_new_again,
+        "a repeat purchase must not read as an arrival"
+    );
+    repeat.commit().await?;
+
+    let arrivals: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM fan_acquisition_events \
+         WHERE workspace_id = $1 AND fan_id = $2",
+    )
+    .bind(workspace)
+    .bind(fan_id)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(arrivals, 1, "one purchase, one provenance row");
+    Ok(())
+}
+
+/// 1A.6 — the scan boundary on a connection is tenant-chosen, stored, and a
+/// scope change clears the incremental cursor so the new boundary sweeps
+/// fresh instead of resuming inside the old one.
+#[tokio::test]
+#[ignore = "requires an explicit CROWDRELAY_TEST_DATABASE_URL PostgreSQL database"]
+async fn connection_scan_scope_is_stored_and_a_change_resets_the_cursor()
+-> Result<(), Box<dyn std::error::Error>> {
+    use crowdrelay_infra::fanbase::PostgresFanbaseRepository;
+    use crowdrelay_infra::gdrive::PostgresGDriveRepository;
+
+    let pool = pool().await;
+    crowdrelay_infra::database::MIGRATOR.run(&pool).await?;
+    let workspace = seed_workspace(&pool, "scope").await;
+    let repo = PostgresFanbaseRepository::new(pool.clone());
+    let gdrive = PostgresGDriveRepository::new(pool.clone());
+
+    let connection_id = repo
+        .create_connection(workspace, "gmail", "band@x.test", "cred", "Band mailbox")
+        .await?;
+
+    // A brand-new connection has never answered the scope question — the
+    // worker reads `None` and scans nothing.
+    let due = gdrive.due_connections(workspace, "gmail").await?;
+    let (_, _, stored) = due
+        .iter()
+        .find(|(id, _, _)| *id == connection_id)
+        .expect("connection is due");
+    assert!(stored.is_none(), "a new connection stores no scope");
+
+    // Platform comes back so the API can validate before it writes.
+    let platform = repo.connection_platform(workspace, connection_id).await?;
+    assert_eq!(platform.as_deref(), Some("gmail"));
+
+    // Writing a scope stores it and clears any incremental cursor — the new
+    // boundary is a new read, not a resumption of the old one.
+    sqlx::query("UPDATE fanbase_connections SET sync_cursor = '99999' WHERE id = $1")
+        .bind(connection_id)
+        .execute(&pool)
+        .await?;
+    repo.update_scan_scope(
+        workspace,
+        connection_id,
+        Some(&serde_json::json!({"kind": "sent_only"})),
+    )
+    .await?;
+    let cursor: Option<String> =
+        sqlx::query_scalar("SELECT sync_cursor FROM fanbase_connections WHERE id = $1")
+            .bind(connection_id)
+            .fetch_one(&pool)
+            .await?;
+    assert!(cursor.is_none(), "scope change clears the cursor");
+
+    // A cycle that read the cursor *before* the scope change must not
+    // resurrect it: the compare-and-swap drops the stale write so the new
+    // boundary keeps its fresh sweep. A fresh cycle (expected = NULL)
+    // still lands its cursor.
+    gdrive
+        .set_sync_cursor(workspace, connection_id, "11111", Some("99999"))
+        .await?;
+    let cursor: Option<String> =
+        sqlx::query_scalar("SELECT sync_cursor FROM fanbase_connections WHERE id = $1")
+            .bind(connection_id)
+            .fetch_one(&pool)
+            .await?;
+    assert!(
+        cursor.is_none(),
+        "a stale cycle must not undo the scope change"
+    );
+    gdrive
+        .set_sync_cursor(workspace, connection_id, "22222", None)
+        .await?;
+    let cursor: Option<String> =
+        sqlx::query_scalar("SELECT sync_cursor FROM fanbase_connections WHERE id = $1")
+            .bind(connection_id)
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(cursor.as_deref(), Some("22222"), "a fresh cycle advances");
+
+    // Re-saving the identical scope keeps the cursor — nothing about the
+    // read changed.
+    repo.update_scan_scope(
+        workspace,
+        connection_id,
+        Some(&serde_json::json!({"kind": "sent_only"})),
+    )
+    .await?;
+    let cursor: Option<String> =
+        sqlx::query_scalar("SELECT sync_cursor FROM fanbase_connections WHERE id = $1")
+            .bind(connection_id)
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(
+        cursor.as_deref(),
+        Some("22222"),
+        "same scope keeps the cursor"
+    );
+
+    // The stored scope comes back through both read paths.
+    let due = gdrive.due_connections(workspace, "gmail").await?;
+    let (_, _, stored) = due
+        .iter()
+        .find(|(id, _, _)| *id == connection_id)
+        .expect("connection is due");
+    assert_eq!(
+        stored
+            .as_ref()
+            .and_then(|v| v.get("kind"))
+            .and_then(|k| k.as_str()),
+        Some("sent_only")
+    );
+    let listed = repo.list_connections(workspace).await?;
+    let row = listed
+        .iter()
+        .find(|c| c.id == connection_id)
+        .expect("listed");
+    assert_eq!(
+        row.scan_scope
+            .as_ref()
+            .and_then(|v| v.get("kind"))
+            .and_then(|k| k.as_str()),
+        Some("sent_only")
+    );
+
+    // The scope CHECK refuses a vocabulary the platform does not have — a
+    // Drive folder on a Gmail row is a bug caught at the column, not in the
+    // worker mid-cycle.
+    let bad = sqlx::query(
+        "UPDATE fanbase_connections SET scan_scope = '{\"kind\":\"folder\",\"folder_ids\":[\"x\"]}' WHERE id = $1",
+    )
+    .bind(connection_id)
+    .execute(&pool)
+    .await;
+    assert!(bad.is_err(), "platform-foreign scope must fail the CHECK");
+
+    // Clearing the scope is legal and means "scans nothing".
+    repo.update_scan_scope(workspace, connection_id, None)
+        .await?;
+    let listed = repo.list_connections(workspace).await?;
+    let row = listed
+        .iter()
+        .find(|c| c.id == connection_id)
+        .expect("listed");
+    assert!(row.scan_scope.is_none());
+
+    cleanup(&pool, &[workspace]).await;
+    Ok(())
+}
