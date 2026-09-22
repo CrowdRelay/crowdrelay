@@ -84,3 +84,4 @@ pub mod standing_approvals;
 pub mod tenant_settings;
 pub mod venue_directory;
 pub mod venue_seed;
+pub mod workspace_secrets;

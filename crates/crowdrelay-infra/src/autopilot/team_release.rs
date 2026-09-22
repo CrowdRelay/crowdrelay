@@ -3,7 +3,7 @@
 //! exists (§4i-6).
 
 use super::{
-    team::{PendingInitialNotice, first_reminder_at},
+    team::PendingInitialNotice,
     team_routing::{TeamRoutingRow, select_member_index_explained},
     *,
 };
@@ -102,8 +102,8 @@ pub(super) async fn issue_release_making_of_asks(
             r#"
             INSERT INTO team_assignments (
                 id, workspace_id, action_id, source_kind, source_id, source_ref,
-                assignee_member_id, required_skill, due_at, next_reminder_at
-            ) VALUES ($1,$2,NULL,'release_making_of',$3,$4,$5,$6,$7,$8)
+                assignee_member_id, required_skill, due_at
+            ) VALUES ($1,$2,NULL,'release_making_of',$3,$4,$5,$6,$7)
             ON CONFLICT DO NOTHING
             RETURNING id
             "#,
@@ -115,7 +115,6 @@ pub(super) async fn issue_release_making_of_asks(
         .bind(member.member_id)
         .bind(need.primary_skill.as_str())
         .bind(release_at)
-        .bind(first_reminder_at(now, Some(release_at)))
         .fetch_optional(&mut **tx)
         .await
         .map_err(map_sqlx)?;

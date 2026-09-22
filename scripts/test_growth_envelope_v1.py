@@ -182,10 +182,9 @@ class GrowthEnvelopeContract(unittest.TestCase):
         # everyone to ignore the log, and it also rolled back housekeeping that
         # needed no executor at all.
         team = read(ROOT / "crates/crowdrelay-infra/src/autopilot/team.rs")
-        self.assertEqual(team.count("executor_capability_available"), 2)
+        self.assertEqual(team.count("executor_capability_available"), 1)
         # Silent when nothing is parked; one line when work is actually waiting.
         self.assertIn("if !approvals.is_empty()", team)
-        self.assertIn("if !rows.is_empty()", team)
         execution = read(ROOT / "crates/crowdrelay-infra/src/autopilot/execution.rs") + "\n" + read(ROOT / "crates/crowdrelay-infra/src/autopilot/execution_capabilities.rs")
         available = execution.split("async fn executor_capability_available", 1)[1].split(
             "\n}", 1

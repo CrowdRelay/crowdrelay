@@ -536,6 +536,13 @@ pub(super) fn application_routes(state: AppState) -> Router {
             "/v1/internal/ticket-orders/stripe-events",
             post(ticketing::stripe_event),
         )
+        // The tenant site's checkout asks for the Stripe pair it runs
+        // against — the one route that opens the workspace-secrets store,
+        // commerce-credentialed like the ticket-order internals beside it.
+        .route(
+            "/v1/internal/stripe-credentials",
+            get(crate::workspace_secrets_http::stripe_credentials),
+        )
         .route(
             "/v1/internal/events/{event_id}/copy-enrichment",
             post(event_copy::apply_event_copy),

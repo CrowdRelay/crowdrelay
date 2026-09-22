@@ -386,6 +386,11 @@ fn app_state(
         crowdrelay_infra::sensitive_response::SensitiveResponseKey::derive_from_secret(
             b"test-encryption-key",
         ),
+        crowdrelay_infra::sensitive_response::SensitiveResponseKey::derive_for_domain(
+            crowdrelay_infra::workspace_secrets::KEY_DERIVATION_DOMAIN,
+            b"test-encryption-key",
+        ),
+        None,
         AttestationSigningKey::derive_from_secret(SIGNING_SECRET),
         crowdrelay_infra::provider_verification::ProviderVerifiers::new(
             None,
