@@ -1002,6 +1002,8 @@ fn key_window_for_template(policy: &GrowthIntelligencePolicy, template_id: &str)
         }
         WorkerTemplate::SignalInviter => policy.signal_inviter_cooldown_hours,
         WorkerTemplate::GrowthStrategist => policy.growth_strategist_cooldown_hours,
+        WorkerTemplate::FanbaseScout => policy.fanbase_scout_cooldown_hours,
+        WorkerTemplate::StrategyConsult => policy.strategy_consult_cooldown_hours,
     }
 }
 

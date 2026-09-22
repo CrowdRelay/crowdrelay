@@ -418,6 +418,17 @@ impl CommunityJoinExecutorWorker {
                       AND place.membership_state = 'not_joined'
                       AND place.status = 'active'
                       AND (place.member_count IS NULL OR place.member_count >= $2)
+                      -- A community screening refused is not joinable,
+                      -- whatever the place row says: the fanbase scout
+                      -- files places before the verdict exists, and the
+                      -- demand lateral above only orders — it does not
+                      -- gate. This NOT EXISTS is the gate.
+                      AND NOT EXISTS (
+                          SELECT 1 FROM agent_outreach_targets AS refused
+                          WHERE refused.workspace_id = place.workspace_id
+                            AND refused.place_id = place.id
+                            AND refused.screening_verdict = 'refused'
+                      )
                     -- Wanted first, then the previous order within each group.
                     -- Size still decides among communities the brain has no
                     -- plans for, so this reorders rather than replaces.

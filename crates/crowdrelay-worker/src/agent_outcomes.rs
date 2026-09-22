@@ -24,7 +24,9 @@
 //! retries and task re-runs can never double-create decisions.
 
 use crate::auto_post_platforms::AutoPostPlatforms;
-use crate::community_vetting::{community_place, community_snapshot};
+use crate::community_vetting::{
+    community_place, community_place_by_url, community_snapshot, ensure_community_place,
+};
 use std::time::Duration;
 
 use crowdrelay_application::agent_outcomes::{
@@ -33,6 +35,7 @@ use crowdrelay_application::agent_outcomes::{
 };
 use crowdrelay_domain::WorkspaceId;
 use crowdrelay_domain::action_class::{ActionClass, effective_authority};
+use crowdrelay_domain::audience_graph::canonical_place_url;
 use crowdrelay_domain::autonomy::AutonomyLevel;
 use crowdrelay_domain::standing_approval::{
     StandingGrant, UnattendedAuthority, unattended_authority,
@@ -40,6 +43,7 @@ use crowdrelay_domain::standing_approval::{
 use crowdrelay_domain::target_discovery::{
     ScreeningVerdict, TargetDiscoveryPolicy, screen_community_candidate,
 };
+use crowdrelay_domain::worker_template::{TemplateAudience, WorkerTemplate};
 use serde_json::{Value, json};
 use sqlx::{PgPool, Postgres, Transaction};
 use thiserror::Error;
@@ -98,8 +102,10 @@ pub enum AgentOutcomeError {
 
 include!("agent_outcomes/rejections.rs");
 
+include!("agent_outcomes/community_ingestion.rs");
 include!("agent_outcomes/quality_guard.rs");
 include!("agent_outcomes/opportunity_findings.rs");
+include!("agent_outcomes/strategy_proposals.rs");
 include!("agent_outcomes/creative_family.rs");
 include!("agent_outcomes/community_engagement.rs");
 
@@ -571,20 +577,29 @@ impl AgentOutcomeWorker {
             OutcomeKind::OutreachTargets => {
                 if let Some(item) = &outcome.payload.item {
                     outreach_target_auto_promoted =
-                        self.insert_outreach_target(&mut tx, outcome, item).await?;
+                        self.insert_outreach_target(&mut tx, outcome, item).await?.0;
+                }
+            }
+            OutcomeKind::StrategyProposals => {
+                if let Some(item) = &outcome.payload.item {
+                    self.evaluate_strategy_proposals(&mut tx, outcome, item)
+                        .await?;
                 }
             }
             _ => {}
         }
 
-        // Action row only for require_approval kinds — except scout findings.
-        // A finding's review act is on the opportunity row itself (the
-        // shortlist's own controls progress or dismiss it), and an approved
-        // action that no executor claims would sit in `queued` forever,
-        // polluting every in-flight index. The decision's require_approval
-        // disposition still routes it through the provenance gate.
+        // Action row only for require_approval kinds — except scout findings
+        // and strategy proposals. A finding's review act is on the
+        // opportunity row itself (the shortlist's own controls progress or
+        // dismiss it), and a proposal's record is its verdict row — an
+        // approved action that no executor claims would sit in `queued`
+        // forever, polluting every in-flight index. The decision's
+        // require_approval disposition still routes both through the
+        // provenance gate.
         let action_id = if outcome.kind.disposition() == "require_approval"
             && outcome.kind != OutcomeKind::OpportunityFindings
+            && outcome.kind != OutcomeKind::StrategyProposals
         {
             let action_id = Uuid::now_v7();
 
@@ -1472,7 +1487,7 @@ impl AgentOutcomeWorker {
         tx: &mut Transaction<'_, Postgres>,
         outcome: &ValidatedOutcome,
         item: &Value,
-    ) -> Result<bool, AgentOutcomeError> {
+    ) -> Result<(bool, Uuid), AgentOutcomeError> {
         let target_kind = item
             .get("target_kind")
             .and_then(Value::as_str)
@@ -1487,8 +1502,21 @@ impl AgentOutcomeWorker {
         let contact_email = item.get("contact_email").and_then(Value::as_str);
         let contact_domain = item.get("contact_domain").and_then(Value::as_str);
         let why_fit = item.get("why_fit").and_then(Value::as_str).unwrap_or("");
-        let evidence = item.get("evidence_urls").cloned().unwrap_or(json!([]));
-        let subreddit = item.get("subreddit").and_then(Value::as_str);
+        // The column CHECK requires a JSON array — a scalar or object in the
+        // payload is replaced by the empty array rather than sinking the
+        // outcome on a constraint violation.
+        let evidence = item
+            .get("evidence_urls")
+            .cloned()
+            .filter(|e| e.is_array())
+            .unwrap_or(json!([]));
+        // Non-community kinds keep the field as-is — it is not their
+        // identity and nothing reads it there. Community rows store the
+        // normalized slug from `identity`. Bounded to the column's CHECK.
+        let subreddit_field = item
+            .get("subreddit")
+            .and_then(Value::as_str)
+            .map(|s| s.chars().take(100).collect::<String>());
         // The discovering agent scraped the subreddit — it knows the
         // language its posts are written in, and the repost drafter writes
         // in it. Bounded to the column's shape; garbage truncates to NULL
@@ -1510,97 +1538,149 @@ impl AgentOutcomeWorker {
         // judgement about it — before the growth loop will post there.
         // The verdict is recorded so a refusal survives the next scan
         // instead of being rediscovered and re-proposed every week.
+        // Every free-text field below has a column CHECK; the payload is
+        // agent-controlled, so each is bounded to its column's shape here —
+        // a violation would roll back the whole outcome, taking sibling
+        // targets down with it. Truncation beats rejection for names and
+        // contacts: the dedup keys are what they are.
+        let display_name: String = display_name.chars().take(200).collect();
+        let contact_email = contact_email.map(|e| e.chars().take(320).collect::<String>());
+        let contact_domain = contact_domain.map(|d| d.chars().take(200).collect::<String>());
         let is_community = target_kind == "community";
-        let initial_status = if is_community { "promoted" } else { "proposed" };
+        // A community's identity is its subreddit or, off Reddit, its URL —
+        // normalized in community_ingestion.rs into the exact triple the row
+        // stores (one dedup index per community, platform 'reddit' whenever
+        // a subreddit won). Non-community kinds carry none of these fields.
+        let identity = community_identity(item);
         let (place_id, verdict, refusal) = if is_community {
-            let place = community_place(tx, outcome.workspace_id, subreddit).await?;
-            let snapshot = community_snapshot(&evidence, place.as_ref());
-            match screen_community_candidate(&snapshot, TargetDiscoveryPolicy::default()) {
-                ScreeningVerdict::Admit { .. } => (place.map(|p| p.id), Some("admitted"), None),
-                ScreeningVerdict::Refuse(reason) => {
-                    (place.map(|p| p.id), Some("refused"), Some(reason.as_str()))
-                }
-            }
+            self.screen_community_target(
+                tx,
+                outcome.workspace_id,
+                &display_name,
+                &identity,
+                &evidence,
+                language.as_deref(),
+            )
+            .await?
         } else {
             (None, None, None)
         };
-        // A community's identity is its subreddit, not its display name —
-        // the scanner may name the same sub "r/deathcore" one week and
-        // "Deathcore — news & discussion" the next, and display-name dedup
-        // let both live as separate promoted targets (eleven subreddits sat
-        // doubled in production, each drafted and posted to twice per wave).
-        // The subreddit-arbiter upsert keeps one row per community: a
-        // re-proposal lands on the existing row and is re-screened there,
-        // with status sticky so a discarded community does not resurrect.
-        // Personal-contact kinds keep display-name dedup — a person and a
-        // place do not share an identity.
-        let community_identity = is_community && subreddit.is_some_and(|s| !s.trim().is_empty());
-        let sql = if community_identity {
-            r#"
+        // A refused community is not promoted: 'proposed' + 'refused' is the
+        // shape community_promotion writes for the same verdict, and the
+        // growth loop's promoted+admitted filter never sees it either way.
+        let initial_status = if is_community && verdict == Some("admitted") {
+            "promoted"
+        } else {
+            "proposed"
+        };
+        let subreddit = if is_community {
+            identity.subreddit.as_deref()
+        } else {
+            subreddit_field.as_deref()
+        };
+        // Platform and community_url only mean something on a community
+        // row — a stray field on a personal contact stores nothing (and an
+        // oversized one would otherwise meet the 512-char CHECK).
+        let community_url = if is_community {
+            identity.community_url.as_deref()
+        } else {
+            None
+        };
+        let platform = if is_community {
+            identity.platform.as_deref()
+        } else {
+            None
+        };
+        // A community's identity is its subreddit or, off Reddit, its URL —
+        // not its display name. The scanner may name the same sub
+        // "r/deathcore" one week and "Deathcore — news & discussion" the
+        // next, and display-name dedup let both live as separate promoted
+        // targets (eleven subreddits sat doubled in production, each drafted
+        // and posted to twice per wave). The identity upserts keep one row
+        // per community: a re-proposal lands on the existing row and is
+        // re-screened there, with status sticky so a discarded community
+        // does not resurrect. Personal-contact kinds keep display-name
+        // dedup — a person and a place do not share an identity.
+        let subreddit_identity = is_community && subreddit.is_some();
+        let url_identity = is_community && !subreddit_identity && community_url.is_some();
+        // The three statements share one SET-list: identity is the only
+        // thing that differs.
+        let shared_update = r#"
+            DO UPDATE SET
+                subreddit = COALESCE(EXCLUDED.subreddit, agent_outreach_targets.subreddit),
+                platform = COALESCE(EXCLUDED.platform, agent_outreach_targets.platform),
+                community_url = COALESCE(EXCLUDED.community_url, agent_outreach_targets.community_url),
+                language = COALESCE(EXCLUDED.language, agent_outreach_targets.language),
+                status = CASE
+                    WHEN agent_outreach_targets.status = 'discarded' THEN agent_outreach_targets.status
+                    WHEN EXCLUDED.status = 'promoted' THEN 'promoted'
+                    ELSE agent_outreach_targets.status
+                END,
+                place_id = COALESCE(EXCLUDED.place_id, agent_outreach_targets.place_id),
+                -- A re-proposal is re-screened against whatever the audience
+                -- graph knows now, which is how a community that was refused
+                -- for being too small gets readmitted once it has grown. The
+                -- verdict is only overwritten when this pass produced one.
+                screening_verdict = COALESCE(EXCLUDED.screening_verdict, agent_outreach_targets.screening_verdict),
+                refusal_reason = CASE
+                    WHEN EXCLUDED.screening_verdict IS NULL THEN agent_outreach_targets.refusal_reason
+                    ELSE EXCLUDED.refusal_reason
+                END,
+                screened_at = COALESCE(EXCLUDED.screened_at, agent_outreach_targets.screened_at),
+                updated_at = now()
+            "#;
+        // The community_url a row stores is the same normalized form the
+        // dedup index sees — both sides of the upsert agree on identity.
+        let columns = r#"
             INSERT INTO agent_outreach_targets
                 (workspace_id, target_kind, display_name, contact_email, contact_domain,
                  why_fit, evidence, source_task_id, subreddit, status,
-                 place_id, screening_verdict, refusal_reason, screened_at, language)
+                 place_id, screening_verdict, refusal_reason, screened_at, language,
+                 platform, community_url)
             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,
                     CASE WHEN $2::text = 'community' THEN normalize_subreddit($9) ELSE $9 END,
                     $10,$11,$12,$13,
-                    CASE WHEN $12::text IS NULL THEN NULL ELSE now() END, $14)
-            ON CONFLICT (workspace_id, normalize_subreddit(subreddit))
-                WHERE target_kind = 'community'
-                  AND subreddit IS NOT NULL
-                  AND normalize_subreddit(subreddit) <> ''
-            DO UPDATE SET
-                subreddit = COALESCE(EXCLUDED.subreddit, agent_outreach_targets.subreddit),
-                language = COALESCE(EXCLUDED.language, agent_outreach_targets.language),
-                status = CASE
-                    WHEN agent_outreach_targets.status = 'discarded' THEN agent_outreach_targets.status
-                    WHEN EXCLUDED.status = 'promoted' THEN 'promoted'
-                    ELSE agent_outreach_targets.status
-                END,
-                place_id = COALESCE(EXCLUDED.place_id, agent_outreach_targets.place_id),
-                -- A re-proposal is re-screened against whatever the audience
-                -- graph knows now, which is how a community that was refused
-                -- for being too small gets readmitted once it has grown. The
-                -- verdict is only overwritten when this pass produced one.
-                screening_verdict = COALESCE(EXCLUDED.screening_verdict, agent_outreach_targets.screening_verdict),
-                refusal_reason = CASE
-                    WHEN EXCLUDED.screening_verdict IS NULL THEN agent_outreach_targets.refusal_reason
-                    ELSE EXCLUDED.refusal_reason
-                END,
-                screened_at = COALESCE(EXCLUDED.screened_at, agent_outreach_targets.screened_at),
-                updated_at = now()
-            "#
+                    CASE WHEN $12::text IS NULL THEN NULL ELSE now() END, $14,
+                    $15,
+                    CASE WHEN $16::text IS NULL THEN NULL
+                         ELSE normalize_community_url($16) END)
+            "#;
+        let sql = if subreddit_identity {
+            format!(
+                "{columns}
+                ON CONFLICT (workspace_id, normalize_subreddit(subreddit))
+                    WHERE target_kind = 'community'
+                      AND subreddit IS NOT NULL
+                      AND normalize_subreddit(subreddit) <> ''
+                {shared_update}
+                RETURNING id"
+            )
+        } else if url_identity {
+            format!(
+                "{columns}
+                ON CONFLICT (workspace_id, normalize_community_url(community_url))
+                    WHERE target_kind = 'community'
+                      AND community_url IS NOT NULL
+                      AND btrim(community_url) <> ''
+                {shared_update}
+                RETURNING id"
+            )
         } else {
-            r#"
-            INSERT INTO agent_outreach_targets
-                (workspace_id, target_kind, display_name, contact_email, contact_domain,
-                 why_fit, evidence, source_task_id, subreddit, status,
-                 place_id, screening_verdict, refusal_reason, screened_at, language)
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,
-                    CASE WHEN $12::text IS NULL THEN NULL ELSE now() END, $14)
-            ON CONFLICT (workspace_id, display_name, target_kind) DO UPDATE SET
-                subreddit = COALESCE(EXCLUDED.subreddit, agent_outreach_targets.subreddit),
-                language = COALESCE(EXCLUDED.language, agent_outreach_targets.language),
-                status = CASE
-                    WHEN agent_outreach_targets.status = 'discarded' THEN agent_outreach_targets.status
-                    WHEN EXCLUDED.status = 'promoted' THEN 'promoted'
-                    ELSE agent_outreach_targets.status
-                END,
-                place_id = COALESCE(EXCLUDED.place_id, agent_outreach_targets.place_id),
-                -- A re-proposal is re-screened against whatever the audience
-                -- graph knows now, which is how a community that was refused
-                -- for being too small gets readmitted once it has grown. The
-                -- verdict is only overwritten when this pass produced one.
-                screening_verdict = COALESCE(EXCLUDED.screening_verdict, agent_outreach_targets.screening_verdict),
-                refusal_reason = CASE
-                    WHEN EXCLUDED.screening_verdict IS NULL THEN agent_outreach_targets.refusal_reason
-                    ELSE EXCLUDED.refusal_reason
-                END,
-                screened_at = COALESCE(EXCLUDED.screened_at, agent_outreach_targets.screened_at),
-                updated_at = now()
-            "#
+            // The name key is partial since 0350: identity-carrying
+            // communities left it for the subreddit/URL indexes, so the
+            // arbiter predicate must match the index's — personal contacts
+            // and identity-less communities still dedupe on the name.
+            format!(
+                "{columns}
+                ON CONFLICT (workspace_id, display_name, target_kind)
+                    WHERE target_kind <> 'community'
+                       OR (COALESCE(normalize_subreddit(subreddit), '') = ''
+                           AND COALESCE(normalize_community_url(community_url), '') = '')
+                {shared_update}
+                RETURNING id"
+            )
         };
-        sqlx::query(sql)
+        let target_id = sqlx::query_scalar::<_, Uuid>(&sql)
             .bind(outcome.workspace_id)
             .bind(target_kind)
             .bind(display_name)
@@ -1615,12 +1695,15 @@ impl AgentOutcomeWorker {
             .bind(verdict)
             .bind(refusal)
             .bind(language)
-            .execute(&mut **tx)
+            .bind(platform)
+            .bind(community_url)
+            .fetch_one(&mut **tx)
             .await?;
         // Community targets are auto-promoted — the operator does not need
         // to approve them. Personal-contact kinds keep the proposed → promoted
-        // operator-approval flow and need an action row.
-        Ok(is_community)
+        // operator-approval flow and need an action row. The row id goes back
+        // so a strategy proposal's verdict can name what it created.
+        Ok((is_community, target_id))
     }
 
     async fn reject_outcome(

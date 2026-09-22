@@ -73,6 +73,7 @@ mod fan_lifecycle;
 mod gdrive_contacts;
 mod gig_outreach;
 mod gig_planning;
+mod gig_planning_peers;
 mod lapsed_approvals;
 mod latarnik;
 mod measurement;

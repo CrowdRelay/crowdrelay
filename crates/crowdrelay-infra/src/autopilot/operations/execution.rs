@@ -1128,5 +1128,31 @@ pub(in crate::autopilot) async fn execute_agent_run(
     .execute(&mut **tx)
     .await
     .map_err(map_sqlx)?;
+
+    // A rescan request is one-shot: the dispatch it enabled is this task row,
+    // so the request consumes here, inside the same transaction — a crash
+    // between the two cannot leave a request that re-fires forever, and a
+    // natural cadence dispatch also satisfies a pending ask (the scan ran;
+    // the reason it was requested is answered). The table predates nothing —
+    // it is created by the same migration that writes requests, but a mixed
+    // deploy can run this code before the migration lands, so a missing
+    // table degrades to no consumption rather than a failed dispatch.
+    let rescan_table_exists = sqlx::query_scalar::<_, bool>(
+        "SELECT to_regclass('agent_template_rescan_requests') IS NOT NULL",
+    )
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(map_sqlx)?;
+    if rescan_table_exists {
+        sqlx::query(
+            "UPDATE agent_template_rescan_requests SET consumed_at = now()
+             WHERE workspace_id = $1 AND template_id = $2 AND consumed_at IS NULL",
+        )
+        .bind(workspace_id.into_uuid())
+        .bind(template_id)
+        .execute(&mut **tx)
+        .await
+        .map_err(map_sqlx)?;
+    }
     Ok(())
 }

@@ -25,4 +25,5 @@ mod receipt_reconciliation;
 mod retention_approvals;
 mod retention_outbox;
 mod standing_approvals;
+mod strategy_proposals;
 mod ticketmaster_sweep;

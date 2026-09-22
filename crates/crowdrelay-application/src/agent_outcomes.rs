@@ -29,6 +29,11 @@ pub enum OutcomeKind {
     /// Scout discoveries: each item lands as a `team_opportunities`
     /// row and a review decision, never as an application.
     OpportunityFindings,
+    /// The strategy consultant's typed proposals. Each proposal inside an
+    /// item is evaluated by the brain and lands a verdict row — accepted
+    /// and implemented within bounded authority, or rejected with the
+    /// reason the next consultation reads back.
+    StrategyProposals,
 }
 
 impl OutcomeKind {
@@ -44,6 +49,7 @@ impl OutcomeKind {
             Self::ReleasePlanNote => "release_plan_note",
             Self::GenericInsight => "generic_insight",
             Self::OpportunityFindings => "opportunity_findings",
+            Self::StrategyProposals => "strategy_proposals",
         }
     }
 
@@ -54,14 +60,21 @@ impl OutcomeKind {
             Self::PressPitch | Self::SocialPost => "promotion_budget",
             Self::SignalPush | Self::AudienceSegments => "fan_lifecycle",
             Self::OutreachTargets | Self::OpportunityFindings => "booking_opportunity",
-            Self::CampaignInsight | Self::ReleasePlanNote | Self::GenericInsight => {
-                "growth_intelligence"
-            }
+            Self::CampaignInsight
+            | Self::ReleasePlanNote
+            | Self::GenericInsight
+            | Self::StrategyProposals => "growth_intelligence",
         }
     }
 
     /// `require_approval` kinds produce an `awaiting_approval` action;
     /// `recommend_only` kinds surface on the board without an action.
+    ///
+    /// `StrategyProposals` is `require_approval` for the gate, not the queue:
+    /// the disposition routes it through `provenance_admission` (advice the
+    /// brain implements must have been grounding-checked against a context
+    /// that loaded), while the worker skips the action row — the verdicts
+    /// table is the record, not an approval card nobody would answer.
     #[must_use]
     pub const fn disposition(self) -> &'static str {
         match self {
@@ -69,7 +82,8 @@ impl OutcomeKind {
             | Self::SocialPost
             | Self::SignalPush
             | Self::OutreachTargets
-            | Self::OpportunityFindings => "require_approval",
+            | Self::OpportunityFindings
+            | Self::StrategyProposals => "require_approval",
             Self::AudienceSegments
             | Self::CampaignInsight
             | Self::ReleasePlanNote
@@ -86,6 +100,7 @@ impl OutcomeKind {
             Self::AudienceSegments => "agent_segment_proposal",
             Self::OutreachTargets => "agent_target_proposal",
             Self::OpportunityFindings => "agent_opportunity_finding",
+            Self::StrategyProposals => "agent_strategy_consult",
             Self::CampaignInsight | Self::ReleasePlanNote | Self::GenericInsight => "agent_insight",
         }
     }
@@ -377,6 +392,7 @@ pub fn validate(
         "release_plan_note" => OutcomeKind::ReleasePlanNote,
         "generic_insight" => OutcomeKind::GenericInsight,
         "opportunity_findings" => OutcomeKind::OpportunityFindings,
+        "strategy_proposals" => OutcomeKind::StrategyProposals,
         other => return Err(OutcomeValidationError::UnknownKind(other.to_owned())),
     };
     let self_reported_confidence = ModelSelfReportedConfidence::parse(confidence_basis_points)?;

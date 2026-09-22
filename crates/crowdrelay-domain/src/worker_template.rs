@@ -43,6 +43,14 @@ pub enum WorkerTemplate {
     CommunityRepost,
     SignalInviter,
     GrowthStrategist,
+    /// Answers "where are my future fans?" — finds communities across every
+    /// platform where the act's likely fans already gather, emitting screened
+    /// `community` outreach targets.
+    FanbaseScout,
+    /// Advises the brain: typed proposals (community, rescan, cadence, scan
+    /// queries, operator surfacing) the deterministic evaluator accepts or
+    /// rejects with reasons.
+    StrategyConsult,
 }
 
 /// What audience a template's dispatch reaches, which is what decides whether
@@ -78,7 +86,7 @@ pub enum TemplateAudience {
 
 impl WorkerTemplate {
     /// Every template, in the order the evaluator checks them.
-    pub const ALL: [Self; 12] = [
+    pub const ALL: [Self; 14] = [
         Self::RedditScanner,
         Self::TelegramScanner,
         Self::MetalArchivesScanner,
@@ -91,6 +99,8 @@ impl WorkerTemplate {
         Self::CommunityRepost,
         Self::SignalInviter,
         Self::GrowthStrategist,
+        Self::FanbaseScout,
+        Self::StrategyConsult,
     ];
 
     #[must_use]
@@ -108,6 +118,8 @@ impl WorkerTemplate {
             Self::CommunityRepost => "community-repost",
             Self::SignalInviter => "signal-inviter",
             Self::GrowthStrategist => "growth-strategist",
+            Self::FanbaseScout => "fanbase-scout",
+            Self::StrategyConsult => "strategy-consult",
         }
     }
 
@@ -132,7 +144,9 @@ impl WorkerTemplate {
             | Self::TelegramScanner
             | Self::MetalArchivesScanner
             | Self::BandcampScanner
-            | Self::GrowthStrategist => TemplateAudience::Intelligence,
+            | Self::GrowthStrategist
+            | Self::FanbaseScout
+            | Self::StrategyConsult => TemplateAudience::Intelligence,
             // Write to the band's own audience.
             Self::PressPitch
             | Self::SocialPost
@@ -149,20 +163,49 @@ impl WorkerTemplate {
     /// in the enum so that historical data, experiment designs, and match
     /// arms stay valid — but `evaluate_growth_intelligence` skips them.
     ///
+    /// `telegram-scanner` and `metal-archives-scanner` re-enabled when the
+    /// agent service gained `web_fetch` — their catalogs are prefetched and
+    /// the model reads real rows. `bandcamp-scanner` stays disabled: its
+    /// contract needs multi-hop browsing (search → album page → collectors
+    /// blob), and the prefetch-only dataScope model cannot express a second
+    /// fetch decided mid-reasoning.
+    ///
     /// When the agent service gains the required tools, remove the template
     /// from this list.
     #[must_use]
     pub const fn is_disabled(self) -> bool {
-        matches!(
-            self,
-            Self::TelegramScanner | Self::MetalArchivesScanner | Self::BandcampScanner
-        )
+        matches!(self, Self::BandcampScanner)
     }
 
     /// Every template that is not disabled, in the order the evaluator checks.
     #[must_use]
     pub fn active() -> Vec<Self> {
         Self::ALL.into_iter().filter(|t| !t.is_disabled()).collect()
+    }
+
+    /// The `GrowthIntelligencePolicy` config key holding this template's
+    /// cooldown — the field an `adjust_cadence` strategy proposal writes.
+    ///
+    /// `CommunityRepost` shares the engager's cooldown: the two draft for the
+    /// same channel on the same cadence, so an adjustment to either is an
+    /// adjustment to the shared one.
+    #[must_use]
+    pub const fn cooldown_policy_field(self) -> &'static str {
+        match self {
+            Self::RedditScanner => "reddit_scanner_cooldown_hours",
+            Self::TelegramScanner => "telegram_scanner_cooldown_hours",
+            Self::MetalArchivesScanner => "metal_archives_scanner_cooldown_hours",
+            Self::BandcampScanner => "bandcamp_scanner_cooldown_hours",
+            Self::PressPitch => "press_pitch_cooldown_hours",
+            Self::SocialPost => "social_post_cooldown_hours",
+            Self::TelegramPoster => "telegram_poster_cooldown_hours",
+            Self::DiscordPoster => "discord_poster_cooldown_hours",
+            Self::CommunityEngager | Self::CommunityRepost => "community_engager_cooldown_hours",
+            Self::SignalInviter => "signal_inviter_cooldown_hours",
+            Self::GrowthStrategist => "growth_strategist_cooldown_hours",
+            Self::FanbaseScout => "fanbase_scout_cooldown_hours",
+            Self::StrategyConsult => "strategy_consult_cooldown_hours",
+        }
     }
 }
 
@@ -220,6 +263,8 @@ mod tests {
             WorkerTemplate::MetalArchivesScanner,
             WorkerTemplate::BandcampScanner,
             WorkerTemplate::GrowthStrategist,
+            WorkerTemplate::FanbaseScout,
+            WorkerTemplate::StrategyConsult,
         ] {
             assert_eq!(
                 template.audience(),
@@ -272,17 +317,29 @@ mod tests {
     }
 
     #[test]
-    fn web_scanners_are_disabled() {
-        // These templates require web access the agent service does not
-        // provide. They must not be dispatched until the tools are added.
-        assert!(WorkerTemplate::TelegramScanner.is_disabled());
-        assert!(WorkerTemplate::MetalArchivesScanner.is_disabled());
+    fn only_bandcamp_stays_disabled() {
+        // Bandcamp needs multi-hop browsing (search → album page → collectors
+        // blob); the agent service prefetches fixed dataScope URLs only.
+        // Telegram and Metal Archives re-enabled once web_fetch landed —
+        // their catalogs are single-shot prefetches.
         assert!(WorkerTemplate::BandcampScanner.is_disabled());
+        assert!(!WorkerTemplate::TelegramScanner.is_disabled());
+        assert!(!WorkerTemplate::MetalArchivesScanner.is_disabled());
+        assert!(!WorkerTemplate::RedditScanner.is_disabled());
     }
 
     #[test]
-    fn reddit_scanner_is_not_disabled() {
-        // Reddit scanner uses the Reddit API, not web scraping.
-        assert!(!WorkerTemplate::RedditScanner.is_disabled());
+    fn every_template_names_a_real_policy_cooldown_field() {
+        // adjust_cadence writes the field this returns into the policy
+        // config — a field that does not parse back would be a silently
+        // dead knob. Deserialize a policy built from exactly these keys
+        // and check the map survives a round trip.
+        for template in WorkerTemplate::ALL {
+            let field = template.cooldown_policy_field();
+            assert!(
+                field.ends_with("_cooldown_hours"),
+                "{template:?} cooldown field {field} breaks the naming contract"
+            );
+        }
     }
 }
