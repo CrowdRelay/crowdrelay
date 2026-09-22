@@ -69,35 +69,40 @@ fn evaluate_outcome_quality(outcome: &ValidatedOutcome) -> Result<(), OutcomeRej
     }
 
     // Outreach targets need a real identity and evidence URLs.
-    if outcome.kind == OutcomeKind::OutreachTargets {
-        if let Some(item) = &outcome.payload.item {
-            let display_name = item
-                .get("display_name")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .trim();
-            if display_name.is_empty() || display_name.eq_ignore_ascii_case("Unnamed target") {
-                return Err(OutcomeRejection::MissingTargetIdentity);
-            }
-            let evidence = item.get("evidence_urls").cloned().unwrap_or(json!([]));
-            let has_evidence = evidence.as_array().is_some_and(|items| {
-                items.iter().any(|item| {
-                    // Evidence must be a non-empty string — not just a
-                    // non-null JSON value. A fabricated number or boolean
-                    // must not count as evidence.
-                    item.as_str().is_some_and(|s| !s.trim().is_empty())
-                })
-            });
-            if !has_evidence {
-                return Err(OutcomeRejection::InsufficientEvidence {
-                    reason: "no evidence URLs provided".to_owned(),
-                });
-            }
-        } else {
-            // No item at all — an outreach_targets outcome with no target.
+    if outcome.kind == OutcomeKind::OutreachTargets
+        && let Some(item) = &outcome.payload.item
+    {
+        let display_name = item
+            .get("display_name")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .trim();
+        if display_name.is_empty() || display_name.eq_ignore_ascii_case("Unnamed target") {
             return Err(OutcomeRejection::MissingTargetIdentity);
         }
+        let evidence = item.get("evidence_urls").cloned().unwrap_or(json!([]));
+        let has_evidence = evidence.as_array().is_some_and(|items| {
+            items.iter().any(|item| {
+                // Evidence must be a non-empty string — not just a
+                // non-null JSON value. A fabricated number or boolean
+                // must not count as evidence.
+                item.as_str().is_some_and(|s| !s.trim().is_empty())
+            })
+        });
+        if !has_evidence {
+            return Err(OutcomeRejection::InsufficientEvidence {
+                reason: "no evidence URLs provided".to_owned(),
+            });
+        }
     }
+    // No item at all is the honest empty: the emit side writes a single
+    // item-less row when the model's items array came back empty — "I
+    // looked, and nothing in the data was worth filing". That is a valid
+    // observation, not a malformed one, and rejecting it counted a
+    // correctly-behaving task as a failure in the execution-health
+    // window (a misclassified honest answer drags dispatch budget down).
+    // The malformed case — an item present but identity-less — still
+    // rejects above.
 
     // Scout findings: the link is the finding and the kind is the contract.
     // A model that cannot supply both was not looking at a source.

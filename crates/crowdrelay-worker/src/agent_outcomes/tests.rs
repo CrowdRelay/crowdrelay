@@ -170,13 +170,13 @@ fn missing_evidence_urls_is_rejected() {
 }
 
 #[test]
-fn no_item_outreach_target_is_rejected() {
+fn no_item_outreach_target_is_the_honest_empty() {
+    // The emit side writes a single item-less row when the model's items
+    // array came back empty — "looked, found nothing worth filing". That is
+    // a valid observation, not a malformed one; rejecting it counts a
+    // correctly-behaving task as a failure in the execution-health window.
     let outcome = make_outcome(OutcomeKind::OutreachTargets, 5000, None);
-    let err = evaluate_outcome_quality(&outcome).expect_err("must reject");
-    assert!(
-        matches!(err, OutcomeRejection::MissingTargetIdentity),
-        "expected MissingTargetIdentity, got {err:?}"
-    );
+    evaluate_outcome_quality(&outcome).expect("honest empty must pass");
 }
 
 #[test]

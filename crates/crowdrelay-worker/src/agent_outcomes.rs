@@ -597,9 +597,14 @@ impl AgentOutcomeWorker {
         // forever, polluting every in-flight index. The decision's
         // require_approval disposition still routes both through the
         // provenance gate.
+        // An item-less outreach_targets outcome is the emit side's honest
+        // empty — "looked, found nothing". It records a decision (the audit
+        // trail that the scan ran) but there is no target to approve, so an
+        // awaiting_approval row would be a phantom.
         let action_id = if outcome.kind.disposition() == "require_approval"
             && outcome.kind != OutcomeKind::OpportunityFindings
             && outcome.kind != OutcomeKind::StrategyProposals
+            && (outcome.kind != OutcomeKind::OutreachTargets || outcome.payload.item.is_some())
         {
             let action_id = Uuid::now_v7();
 
