@@ -33,6 +33,7 @@ mod channel_yield;
 mod community_targets;
 mod evidence_replay;
 mod exchange;
+mod rescans;
 use evidence_replay::{
     PosteriorReplay, apply_evidence_to_model, apply_evidence_to_model_with_contrast,
     apply_evidence_to_stored_strategy_posterior,
@@ -1001,6 +1002,9 @@ pub(in crate::autopilot) async fn load_growth_intelligence_snapshots(
         10.0, // threshold: 10 fans cumulative deviation
         2.0,  // drift: 2 fans of noise tolerated
     );
+
+    // Accepted `rescan` strategy proposals wait as unconsumed rows.
+    let rescan_pending = rescans::load_pending_rescans(pool, workspace_id).await?;
     if let Some(last) = shifts.last() {
         tracing::info!(
             workspace_id = %workspace_id.into_uuid(),
@@ -1102,6 +1106,7 @@ pub(in crate::autopilot) async fn load_growth_intelligence_snapshots(
             agent_execution_health,
             // One state per tenant — see where it is assessed, above the loop.
             metacognition: metacognition.clone(),
+            rescan_requested: rescan_pending.contains(*template_id),
         });
     }
 

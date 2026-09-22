@@ -26,9 +26,15 @@ ignore_parts = {"node_modules", "target", "dist", ".git", ".baseline", "vendor",
 errors: list[str] = []
 large: dict[str, int] = {}
 for path in root.rglob("*"):
-    if not path.is_file() or path.suffix not in extensions or any(part in ignore_parts for part in path.parts):
+    if not path.is_file() or path.suffix not in extensions:
         continue
-    rel = path.relative_to(root).as_posix()
+    # Check the path relative to root: the checkout itself may live under a
+    # `.worktrees/` directory, and matching the absolute parts would skip
+    # every file in it — a ratchet that cannot see the code cannot fail.
+    rel_path = path.relative_to(root)
+    if any(part in ignore_parts for part in rel_path.parts):
+        continue
+    rel = rel_path.as_posix()
     lines = sum(1 for _ in path.open("r", encoding="utf-8", errors="ignore"))
     if lines > 1200:
         large[rel] = lines

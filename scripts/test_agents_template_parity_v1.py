@@ -36,10 +36,14 @@ WORKER_TEMPLATE = ROOT / "crates/crowdrelay-domain/src/worker_template.rs"
 # Templates CrowdRelay still ranks that the agent service refuses to run.
 # Disabled there because they need browsing or scraping tools it does not provide.
 # Shrink this. Never grow it.
+#
+# telegram-scanner and metal-archives-scanner left the list when the agent
+# service gained `web_fetch` — their catalogs are fixed endpoints the
+# prefetch dataScope can load. bandcamp-scanner stays: its contract needs a
+# second fetch chosen mid-reasoning (search → album page → collectors),
+# which prefetch-only tools cannot express.
 KNOWN_DISABLED = {
     "bandcamp-scanner",
-    "metal-archives-scanner",
-    "telegram-scanner",
 }
 
 

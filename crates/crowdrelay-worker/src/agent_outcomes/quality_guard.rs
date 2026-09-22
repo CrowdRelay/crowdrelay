@@ -142,5 +142,23 @@ fn evaluate_outcome_quality(outcome: &ValidatedOutcome) -> Result<(), OutcomeRej
         parse_finding_timestamp(item.get("observed_at"))?;
     }
 
+    // Strategy proposals: the item must carry a proposals array with at
+    // least one element — a consultation that proposes nothing is not
+    // advice. Per-proposal validity (unknown action, missing params,
+    // out-of-bounds cadence) is NOT checked here: a bad proposal is a
+    // rejected verdict the consultant learns from, not a poisoned outcome.
+    if outcome.kind == OutcomeKind::StrategyProposals {
+        let proposals_ok = outcome
+            .payload
+            .item
+            .as_ref()
+            .and_then(|item| item.get("proposals"))
+            .and_then(Value::as_array)
+            .is_some_and(|proposals| !proposals.is_empty());
+        if !proposals_ok {
+            return Err(OutcomeRejection::MissingProposalContent);
+        }
+    }
+
     Ok(())
 }

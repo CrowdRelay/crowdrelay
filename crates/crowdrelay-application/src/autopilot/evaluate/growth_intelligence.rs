@@ -33,8 +33,13 @@ use time::OffsetDateTime;
 
 use super::{policy_evidence, *};
 
+mod candidates;
 mod community_engager;
+mod scout_consult;
 use community_engager::community_engager_candidates;
+use scout_consult::{rescan_bypass_active, scout_consult_dispatch};
+
+pub(super) use candidates::growth_intelligence_candidate;
 
 /// The deterministic decision: should the brain dispatch this worker now?
 #[derive(Clone, Debug)]
@@ -98,6 +103,41 @@ fn insights_block(insights: &[RecentInsight]) -> String {
         ));
     }
     lines.join("\n")
+}
+
+/// Builds the prediction recorded beside a workspace-wide dispatch —
+/// shared by every rule in `evaluate_growth_intelligence` and by the
+/// scout/consult dispatch in `scout_consult.rs` so all of them record
+/// the same shape the calibration loop reads back.
+fn make_prediction(
+    template_id: &str,
+    expected_new_fans: f64,
+    expected_signal_installs: f64,
+    context: &DispatchContext,
+    secondary: &std::collections::BTreeMap<String, (f64, f64, u32)>,
+) -> DispatchPrediction {
+    DispatchPrediction {
+        template_id: template_id.to_owned(),
+        expected_new_fans,
+        expected_signal_installs,
+        context: context.clone(),
+        // Every template handled here is workspace-wide. The community
+        // engager, which is the one with a target, is handled by
+        // `community_engager_candidates`.
+        target_key: None,
+        // Creative families are a community-post vocabulary. Posting to
+        // the band's own channels and pitching press have different
+        // angles, and labelling them with this enum would pool families
+        // that are not comparable.
+        creative_family: None,
+        // The metric predictions the model made at decision time, keyed
+        // the way `observed_metrics` will be keyed — prediction error is
+        // the calibration signal later phases read.
+        expected_metrics: secondary
+            .iter()
+            .map(|(key, (mean, _, _))| (key.clone(), *mean))
+            .collect(),
+    }
 }
 
 /// Builds the enriched dispatch context from a snapshot and the current
@@ -404,12 +444,20 @@ pub fn evaluate_growth_intelligence(
         policy.growth_strategist_cooldown_hours,
         snapshot.standing,
     ));
+    // An accepted `rescan` proposal pulls this template's next run forward
+    // once — the dispatch it enables consumes the request row in the same
+    // transaction, so the bypass cannot loop.
+    let rescan = rescan_bypass_active(snapshot);
 
     // Layered cooldown: the effective cooldown only counts runs that produced
     // items (outreach targets, social posts, etc.). A failed/empty run does
     // NOT reset the cooldown, but the retry delay prevents 5-minute retry
     // storms on the autopilot cycle.
-    let effective_hours = snapshot.hours_since_last_effective_run.unwrap_or(u32::MAX);
+    let effective_hours = if rescan {
+        u32::MAX
+    } else {
+        snapshot.hours_since_last_effective_run.unwrap_or(u32::MAX)
+    };
     let any_hours = snapshot.hours_since_last_run.unwrap_or(u32::MAX);
     let retry_ready = any_hours >= policy.failed_run_retry_hours;
     let insights = insights_block(&snapshot.recent_insights);
@@ -417,40 +465,11 @@ pub fn evaluate_growth_intelligence(
     // When the last run was not effective (no items produced), use the retry
     // delay as the idempotency key window so the key changes each hour and
     // allows retry. When the last run was effective, use the full cooldown.
-    let is_retry = snapshot.hours_since_last_effective_run.is_none();
+    // A rescan shares the rotating window: the previous dispatch's key may
+    // still cover the current bucket inside its cooldown, and a rescan that
+    // deduped on it would be a request that silently never ran.
+    let is_retry = snapshot.hours_since_last_effective_run.is_none() || rescan;
     let retry_window = policy.failed_run_retry_hours.max(1);
-
-    /// Builds a DispatchPrediction for the given template.
-    fn make_prediction(
-        template_id: &str,
-        expected_new_fans: f64,
-        expected_signal_installs: f64,
-        context: &DispatchContext,
-        secondary: &std::collections::BTreeMap<String, (f64, f64, u32)>,
-    ) -> DispatchPrediction {
-        DispatchPrediction {
-            template_id: template_id.to_owned(),
-            expected_new_fans,
-            expected_signal_installs,
-            context: context.clone(),
-            // Every template handled here is workspace-wide. The community
-            // engager, which is the one with a target, is handled by
-            // `community_engager_candidates`.
-            target_key: None,
-            // Creative families are a community-post vocabulary. Posting to
-            // the band's own channels and pitching press have different
-            // angles, and labelling them with this enum would pool families
-            // that are not comparable.
-            creative_family: None,
-            // The metric predictions the model made at decision time, keyed
-            // the way `observed_metrics` will be keyed — prediction error is
-            // the calibration signal later phases read.
-            expected_metrics: secondary
-                .iter()
-                .map(|(key, (mean, _, _))| (key.clone(), *mean))
-                .collect(),
-        }
-    }
 
     // Rule 1: Scan Reddit communities on a 7-day cadence.
     if snapshot.template_id == "reddit-scanner"
@@ -875,6 +894,28 @@ pub fn evaluate_growth_intelligence(
         });
     }
 
+    // Rules 8 and 9 — fanbase scout and strategy consult — live in
+    // `scout_consult.rs`; its header says what each is for.
+    if let Some(request) = scout_consult_dispatch(
+        snapshot,
+        policy,
+        effective_hours,
+        retry_ready,
+        is_retry,
+        retry_window,
+        &insights,
+        expected_new_fans,
+        expected_signal_installs,
+        &dispatch_context,
+        treatment_stats,
+        efe_score,
+        strategy_rank,
+        info_gain,
+        exploration_novelty,
+    ) {
+        return Some(request);
+    }
+
     None
 }
 
@@ -901,135 +942,6 @@ pub(super) struct ScoredCandidate {
     pub(super) information_gain: f64,
     /// How unexplored this (template, context) pair is.
     pub(super) novelty: f64,
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(super) fn growth_intelligence_candidate(
-    blocked_on_membership: &mut Vec<(String, u32)>,
-    snapshot: &GrowthIntelligenceSnapshot,
-    policy: &AutopilotPolicy,
-    evidence: ContextEvidence,
-    workspace_id: WorkspaceId,
-    now: OffsetDateTime,
-    causal_model: &CausalModel,
-    strategy: GrowthStrategy,
-    exploration_novelty: f64,
-) -> Result<Vec<ScoredCandidate>, serde_json::Error> {
-    let AutopilotPolicyConfig::GrowthIntelligence(ref domain_policy) = policy.config else {
-        return Ok(Vec::new());
-    };
-    // community-engager produces one candidate per target community.
-    // Each community is a distinct experimental unit (TargetCommunity),
-    // with its own decision_key, idempotency key, and prediction context.
-    // This enables per-community randomized holdout: "does engaging r/djent
-    // produce incremental durable fans versus not engaging r/djent?"
-    if snapshot.template_id == "community-engager" {
-        return community_engager_candidates(
-            snapshot,
-            policy,
-            domain_policy,
-            evidence,
-            workspace_id,
-            now,
-            causal_model,
-            strategy,
-            exploration_novelty,
-            blocked_on_membership,
-        );
-    }
-    // All other templates: 0 or 1 workspace-wide candidate.
-    let Some(request) = evaluate_growth_intelligence(
-        snapshot,
-        domain_policy,
-        causal_model,
-        strategy,
-        exploration_novelty,
-        now,
-    ) else {
-        return Ok(Vec::new());
-    };
-    Ok(vec![candidate_from_request(
-        &request,
-        snapshot,
-        policy,
-        domain_policy,
-        evidence,
-        workspace_id,
-        now,
-    )?])
-}
-
-/// Builds a `ScoredCandidate` from an `IntelligenceRequest` for non-community
-/// templates. The decision_key and idempotency key are workspace-wide
-/// (template + cooldown window).
-fn candidate_from_request(
-    request: &IntelligenceRequest,
-    snapshot: &GrowthIntelligenceSnapshot,
-    policy: &AutopilotPolicy,
-    domain_policy: &GrowthIntelligencePolicy,
-    evidence: ContextEvidence,
-    workspace_id: WorkspaceId,
-    now: OffsetDateTime,
-) -> Result<ScoredCandidate, serde_json::Error> {
-    let prediction = request.prediction.clone();
-    let efe_score = request.efe_score;
-    let strategy_rank = request.strategy_rank;
-    let treatment_stats = request.treatment_stats.clone();
-    // `Confidence::MAX` is asserted, not measured: this context always
-    // believes its own request is worth making. The evidence gate is the only
-    // thing standing between that constant and unattended execution.
-    //
-    // The dispatch itself is internal work — its outcomes re-gate on their
-    // own rows — so `require_approval` upgrades to auto-execution rather than
-    // parking an unreviewable "approve this prompt" card in front of the
-    // operator. `Deny`/`Observe`/`Recommend` still apply unchanged.
-    let disposition =
-        crowdrelay_domain::autonomy::internal_work_disposition(disposition_with_evidence(
-            policy.autonomy_level,
-            Confidence::MAX,
-            policy.minimum_confidence,
-            evidence,
-            RATE_FLOOR,
-        ));
-    let action = AutopilotActionPayload::RequestAgentRun {
-        template_id: request.template_id.to_owned(),
-        prompt: request.prompt.clone(),
-        priority: request.priority,
-        tier: request.tier,
-    };
-    Ok(ScoredCandidate {
-        candidate: DecisionCandidate {
-            context: policy.context,
-            subject: ActionSubject::Workspace(workspace_id),
-            decision_kind: "request_agent_run",
-            confidence: Confidence::MAX,
-            disposition,
-            reason: request.reason,
-            input_snapshot: serde_json::json!({
-                "snapshot": snapshot,
-                "prediction": &request.prediction,
-            }),
-            policy_snapshot: policy_evidence(policy, domain_policy)?,
-            action,
-            decision_key: format!(
-                "decision:growth-intelligence:v{}:{}:{}",
-                policy.version,
-                request.template_id,
-                cooldown_window(now, request.key_window_hours),
-            ),
-            action_idempotency_key: format!(
-                "action:agent-run:{}:{}",
-                request.template_id,
-                cooldown_window(now, request.key_window_hours),
-            ),
-        },
-        prediction,
-        efe_score,
-        strategy_rank,
-        treatment_stats,
-        information_gain: request.information_gain,
-        novelty: request.novelty,
-    })
 }
 
 /// Index of the cooldown window `now` falls in. Gives the action key a coarse
@@ -1153,6 +1065,8 @@ fn template_post_format(template_id: &str) -> Option<String> {
         "signal-inviter" => Some("direct_message".to_owned()),
         "growth-strategist" => Some("text_report".to_owned()),
         "bandcamp-scanner" => Some("text_report".to_owned()),
+        "fanbase-scout" | "strategy-consult" => Some("text_report".to_owned()),
+        "telegram-scanner" | "metal-archives-scanner" => Some("text_report".to_owned()),
         _ => None,
     }
 }

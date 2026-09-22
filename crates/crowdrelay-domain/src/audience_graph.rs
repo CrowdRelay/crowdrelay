@@ -24,6 +24,8 @@ use serde::{Deserialize, Serialize};
 pub enum PlaceKind {
     Subreddit,
     Discord,
+    Telegram,
+    Lemmy,
     Forum,
     FacebookGroup,
     Instagram,
@@ -37,9 +39,11 @@ pub enum PlaceKind {
 }
 
 impl PlaceKind {
-    pub const ALL: [PlaceKind; 12] = [
+    pub const ALL: [PlaceKind; 14] = [
         PlaceKind::Subreddit,
         PlaceKind::Discord,
+        PlaceKind::Telegram,
+        PlaceKind::Lemmy,
         PlaceKind::Forum,
         PlaceKind::FacebookGroup,
         PlaceKind::Instagram,
@@ -56,6 +60,8 @@ impl PlaceKind {
         match self {
             PlaceKind::Subreddit => "subreddit",
             PlaceKind::Discord => "discord",
+            PlaceKind::Telegram => "telegram",
+            PlaceKind::Lemmy => "lemmy",
             PlaceKind::Forum => "forum",
             PlaceKind::FacebookGroup => "facebook_group",
             PlaceKind::Instagram => "instagram",

@@ -68,6 +68,13 @@ pub struct GrowthIntelligenceSnapshot {
     /// wired the query yet.
     #[serde(default)]
     pub agent_execution_health: AgentExecutionHealth,
+    /// An accepted `rescan` strategy proposal asks for this template's next
+    /// run now rather than at its cooldown. One-shot: the request row is
+    /// consumed by the dispatch it enabled, so the bypass cannot loop.
+    /// Defaults false — a snapshot built without the queue is a snapshot
+    /// with no pending rescan.
+    #[serde(default)]
+    pub rescan_requested: bool,
 }
 
 /// One community the brain may engage, with what is known about it.
@@ -177,6 +184,14 @@ pub struct GrowthIntelligencePolicy {
     pub discord_poster_cooldown_hours: u32,
     pub signal_inviter_cooldown_hours: u32,
     pub growth_strategist_cooldown_hours: u32,
+    /// Deep community research — "where are my future fans". Weekly: the
+    /// discovery space does not turn over faster, and each run spends real
+    /// web-search budget.
+    pub fanbase_scout_cooldown_hours: u32,
+    /// The strategy consultation — proposals the brain evaluates. Weekly:
+    /// a cadence shorter than the workers it steers would consult on data
+    /// that has not had time to change.
+    pub strategy_consult_cooldown_hours: u32,
     pub press_pitch_event_lead_days: u32,
     pub fan_growth_stagnant_days: u32,
     pub failed_run_retry_hours: u32,
@@ -274,6 +289,11 @@ fn default_template_costs() -> HashMap<String, f64> {
     m.insert("signal-inviter".to_string(), 1.5);
     m.insert("social-post".to_string(), 1.5);
     m.insert("growth-strategist".to_string(), 4.0);
+    // Premium-tier research/consult workers — real model spend per run,
+    // which is why they sit above the free scanners but below nothing
+    // that reaches a human.
+    m.insert("fanbase-scout".to_string(), 3.0);
+    m.insert("strategy-consult".to_string(), 3.0);
     m
 }
 
@@ -291,6 +311,8 @@ impl Default for GrowthIntelligencePolicy {
             discord_poster_cooldown_hours: 48,
             signal_inviter_cooldown_hours: 48,
             growth_strategist_cooldown_hours: 12,
+            fanbase_scout_cooldown_hours: 168,
+            strategy_consult_cooldown_hours: 168,
             press_pitch_event_lead_days: 30,
             fan_growth_stagnant_days: 14,
             failed_run_retry_hours: 1,

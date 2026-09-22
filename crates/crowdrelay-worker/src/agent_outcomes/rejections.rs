@@ -66,6 +66,10 @@ pub enum OutcomeRejection {
     /// shortlist marks it stale — but a date that cannot be parsed or claims
     /// tomorrow is a broken finding.
     InvalidFindingTimestamp,
+    /// A strategy_proposals outcome whose item carries no `proposals` array,
+    /// or an empty one. A consultation that proposes nothing is not advice —
+    /// there is nothing to evaluate and nothing to record verdicts for.
+    MissingProposalContent,
 }
 
 impl std::fmt::Display for OutcomeRejection {
@@ -112,6 +116,10 @@ impl std::fmt::Display for OutcomeRejection {
             Self::InvalidFindingTimestamp => write!(
                 f,
                 "INVALID_FINDING_TIMESTAMP: observed_at must be an RFC3339 timestamp no more than a day ahead"
+            ),
+            Self::MissingProposalContent => write!(
+                f,
+                "MISSING_PROPOSAL_CONTENT: a strategy_consult outcome needs a non-empty proposals array to evaluate"
             ),
         }
     }

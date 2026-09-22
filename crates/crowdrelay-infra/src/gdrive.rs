@@ -733,7 +733,11 @@ impl PostgresGDriveRepository {
                 (workspace_id, target_kind, display_name, contact_email,
                  contact_domain, why_fit, evidence, status, city_id)
             VALUES ($1,$2,$3,$4,$5,$6,$7,'proposed',$8)
-            ON CONFLICT (workspace_id, display_name, target_kind) DO UPDATE SET
+            ON CONFLICT (workspace_id, display_name, target_kind)
+                WHERE target_kind <> 'community'
+                   OR (COALESCE(normalize_subreddit(subreddit), '') = ''
+                       AND COALESCE(normalize_community_url(community_url), '') = '')
+            DO UPDATE SET
                 contact_email = COALESCE(EXCLUDED.contact_email, agent_outreach_targets.contact_email),
                 contact_domain = COALESCE(EXCLUDED.contact_domain, agent_outreach_targets.contact_domain),
                 -- A city already on file wins: it was resolved once and may
