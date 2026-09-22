@@ -18,6 +18,7 @@ mod import_outreach;
 mod ops_watchdog;
 mod osm_venue_sweep;
 mod outbox_http;
+mod outbox_materialization;
 mod peer_observation;
 mod publication_artifact;
 mod receipt_reconciliation;

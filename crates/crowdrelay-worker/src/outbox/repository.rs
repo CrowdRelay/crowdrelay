@@ -191,6 +191,12 @@ impl PgOutboxStore {
         u64::try_from(inserted).map_err(|_| StoreError::InvalidValue)
     }
 
+    /// `refund_attempt` undoes the attempt the claim burned, for failures that
+    /// are infrastructure rather than the event's fault — materialization never
+    /// reads the payload, so a batch materialization error means the database or
+    /// the lease was broken, not the event. Without the refund a persistent
+    /// store outage silently dead-letters every claimed event after
+    /// `max_attempts` cycles.
     pub async fn fail_outbox_event(
         &self,
         claim: &OutboxEventClaim,
@@ -198,17 +204,19 @@ impl PgOutboxStore {
         retryable: bool,
         retry_delay: Duration,
         error_kind: &'static str,
+        refund_attempt: bool,
     ) -> Result<(), StoreError> {
         let updated = sqlx::query(
             r#"
             UPDATE outbox_events
             SET
+                attempts = GREATEST(attempts - CASE WHEN $7 THEN 1 ELSE 0 END, 0),
                 status = CASE
-                    WHEN $4 AND attempts < max_attempts THEN 'pending'
+                    WHEN $4 AND ($7 OR attempts < max_attempts) THEN 'pending'
                     ELSE 'dead'
                 END,
                 available_at = CASE
-                    WHEN $4 AND attempts < max_attempts
+                    WHEN $4 AND ($7 OR attempts < max_attempts)
                         THEN now() + ($5 * INTERVAL '1 millisecond')
                     ELSE available_at
                 END,
@@ -218,7 +226,7 @@ impl PgOutboxStore {
                 last_error_kind = $6,
                 delivered_at = NULL,
                 dead_at = CASE
-                    WHEN $4 AND attempts < max_attempts THEN NULL
+                    WHEN $4 AND ($7 OR attempts < max_attempts) THEN NULL
                     ELSE now()
                 END
             WHERE workspace_id = $1
@@ -233,6 +241,7 @@ impl PgOutboxStore {
         .bind(retryable)
         .bind(duration_millis(retry_delay))
         .bind(error_kind)
+        .bind(refund_attempt)
         .execute(&self.pool)
         .await
         .map_err(StoreError::Database)?
