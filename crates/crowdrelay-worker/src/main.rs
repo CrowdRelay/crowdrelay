@@ -45,6 +45,7 @@ use crowdrelay_worker::{
     draws::{WeightedDrawWorker, WeightedDrawWorkerConfig},
     event_sync::{EventSyncWorker, EventSyncWorkerConfig},
     gdrive_contacts_sync::GDriveContactsSyncWorker,
+    github_registry_sync::GithubRegistrySyncWorker,
     gmail_contacts_sync::GmailContactsSyncWorker,
     growth_metric_sync::GrowthMetricSyncWorker,
     growth_readiness::{GrowthReadiness, GrowthReadinessHealth},
@@ -876,6 +877,7 @@ async fn run(database: PgPool, config: &Config, standby: bool) -> Result<()> {
     let release_source_sync_shutdown = shutdown_receiver.clone();
     let social_post_source_sync_shutdown = shutdown_receiver.clone();
     let gdrive_contacts_sync_shutdown = shutdown_receiver.clone();
+    let github_registry_sync_shutdown = shutdown_receiver.clone();
     let gmail_contacts_sync_shutdown = shutdown_receiver.clone();
     let attribution_shutdown = shutdown_receiver.clone();
     let community_intel_shutdown = shutdown_receiver.clone();
@@ -923,102 +925,92 @@ async fn run(database: PgPool, config: &Config, standby: bool) -> Result<()> {
     health.log();
 
     let mut runtime_tasks = JoinSet::new();
-    runtime_tasks.spawn(async move {
+    spawn_named(&mut runtime_tasks, "outbox worker", async move {
         outbox_worker.run(shutdown_receiver).await;
-        "outbox worker"
     });
-    runtime_tasks.spawn(async move {
+    spawn_named(&mut runtime_tasks, "event reminder scheduler", async move {
         reminder_scheduler.run(reminder_shutdown).await;
-        "event reminder scheduler"
     });
-    runtime_tasks.spawn(async move {
+    spawn_named(&mut runtime_tasks, "nearby gig scheduler", async move {
         nearby_gig_scheduler.run(nearby_gig_shutdown).await;
-        "nearby gig scheduler"
     });
-    runtime_tasks.spawn(async move {
+    spawn_named(&mut runtime_tasks, "city geocoding worker", async move {
         match city_geocode_worker {
             Some(worker) => worker.run(city_geocode_shutdown).await,
             None => wait_for_shutdown(city_geocode_shutdown).await,
         }
-        "city geocoding worker"
     });
-    runtime_tasks.spawn(async move {
+    spawn_named(&mut runtime_tasks, "retention worker", async move {
         retention_worker.run(retention_shutdown).await;
-        "retention worker"
     });
-    runtime_tasks.spawn(async move {
+    spawn_named(&mut runtime_tasks, "event sync worker", async move {
         event_sync_worker.run(event_sync_shutdown).await;
-        "event sync worker"
     });
-    runtime_tasks.spawn(async move {
+    spawn_named(&mut runtime_tasks, "weighted draw worker", async move {
         match weighted_draw_worker {
             Some(worker) => worker.run(draw_shutdown).await,
             None => wait_for_shutdown(draw_shutdown).await,
         }
-        "weighted draw worker"
     });
-    runtime_tasks.spawn(async move {
-        match autopilot_worker {
-            Some(worker) => worker.run(autopilot_shutdown).await,
-            None => wait_for_shutdown(autopilot_shutdown).await,
-        }
-        "CrowdRelay Autopilot worker"
-    });
-    runtime_tasks.spawn(async move {
-        team_email_worker.run(team_email_shutdown).await;
-        "CrowdRelay team-email worker"
-    });
-    runtime_tasks.spawn(async move {
+    spawn_named(
+        &mut runtime_tasks,
+        "CrowdRelay Autopilot worker",
+        async move {
+            match autopilot_worker {
+                Some(worker) => worker.run(autopilot_shutdown).await,
+                None => wait_for_shutdown(autopilot_shutdown).await,
+            }
+        },
+    );
+    spawn_named(
+        &mut runtime_tasks,
+        "CrowdRelay team-email worker",
+        async move {
+            team_email_worker.run(team_email_shutdown).await;
+        },
+    );
+    spawn_named(&mut runtime_tasks, "fan push delivery worker", async move {
         match push_delivery_worker {
             Some(worker) => worker.run(push_delivery_shutdown).await,
             None => wait_for_shutdown(push_delivery_shutdown).await,
         }
-        "fan push delivery worker"
     });
-    runtime_tasks.spawn(async move {
+    spawn_named(&mut runtime_tasks, "CrowdRelay ops watchdog", async move {
         ops_watchdog.run(ops_watchdog_shutdown).await;
-        "CrowdRelay ops watchdog"
     });
-    runtime_tasks.spawn(async move {
+    spawn_named(&mut runtime_tasks, "receipt reconciliation", async move {
         receipt_reconciliation
             .run(receipt_reconciliation_shutdown)
             .await;
-        "receipt reconciliation"
     });
-    runtime_tasks.spawn(async move {
+    spawn_named(&mut runtime_tasks, "audience graph sweeper", async move {
         audience_graph_sweeper.run(audience_graph_shutdown).await;
-        "audience graph sweeper"
     });
     if let Some(worker) = peer_observation {
-        runtime_tasks.spawn(async move {
+        spawn_named(&mut runtime_tasks, "peer observation worker", async move {
             worker.run(peer_observation_shutdown).await;
-            "peer observation worker"
         });
     }
     if let Some(worker) = reddit_discovery {
-        runtime_tasks.spawn(async move {
+        spawn_named(&mut runtime_tasks, "reddit discovery", async move {
             worker.run(discovery_shutdown).await;
-            "reddit discovery"
         });
     }
     if let Some(worker) = x_discovery {
-        runtime_tasks.spawn(async move {
+        spawn_named(&mut runtime_tasks, "x discovery", async move {
             worker.run(x_discovery_shutdown).await;
-            "x discovery"
         });
     }
     if let Some(worker) = ad_conversion_worker {
-        runtime_tasks.spawn(async move {
+        spawn_named(&mut runtime_tasks, "ad conversion worker", async move {
             worker.run(ad_conversion_shutdown).await;
-            "ad conversion worker"
         });
     }
-    runtime_tasks.spawn(async move {
+    spawn_named(&mut runtime_tasks, "agent outcome worker", async move {
         match agent_outcome_worker {
             Some(worker) => worker.run(agent_outcome_shutdown).await,
             None => wait_for_shutdown(agent_outcome_shutdown).await,
         }
-        "agent outcome worker"
     });
     // Advertise what this process executes in-process, so the action
     // dispatcher stops parking work the executors a few threads away are
@@ -1068,9 +1060,8 @@ async fn run(database: PgPool, config: &Config, standby: bool) -> Result<()> {
             capabilities = ?in_process_capabilities,
             "advertising in-process executor capabilities"
         );
-        runtime_tasks.spawn(async move {
+        spawn_named(&mut runtime_tasks, "executor registrar", async move {
             registrar.run(executor_registrar_shutdown).await;
-            "executor registrar"
         });
     } else {
         tracing::info!(
@@ -1078,87 +1069,82 @@ async fn run(database: PgPool, config: &Config, standby: bool) -> Result<()> {
         );
     }
     if let Some(worker) = community_executor {
-        runtime_tasks.spawn(async move {
+        spawn_named(&mut runtime_tasks, "community executor", async move {
             worker.run(community_executor_shutdown).await;
-            "community executor"
         });
     }
     if let Some(worker) = telegram_executor {
-        runtime_tasks.spawn(async move {
+        spawn_named(&mut runtime_tasks, "telegram executor", async move {
             worker.run(telegram_executor_shutdown).await;
-            "telegram executor"
         });
     }
     if let Some(worker) = discord_executor {
-        runtime_tasks.spawn(async move {
+        spawn_named(&mut runtime_tasks, "discord executor", async move {
             worker.run(discord_executor_shutdown).await;
-            "discord executor"
         });
     }
     if let Some(worker) = social_post_executor {
-        runtime_tasks.spawn(async move {
+        spawn_named(&mut runtime_tasks, "social post executor", async move {
             worker.run(social_post_executor_shutdown).await;
-            "social post executor"
         });
     }
     if let Some(worker) = community_join_executor {
-        runtime_tasks.spawn(async move {
+        spawn_named(&mut runtime_tasks, "community join executor", async move {
             worker.run(community_join_executor_shutdown).await;
-            "community join executor"
         });
     }
     if let Some(worker) = growth_metric_sync {
-        runtime_tasks.spawn(async move {
+        spawn_named(&mut runtime_tasks, "growth metric sync", async move {
             let _ = worker.run(growth_metric_sync_shutdown).await;
-            "growth metric sync"
         });
     }
-    runtime_tasks.spawn(async move {
+    spawn_named(&mut runtime_tasks, "video source sync", async move {
         let _ = video_source_sync.run(video_source_sync_shutdown).await;
-        "video source sync"
     });
-    runtime_tasks.spawn(async move {
+    spawn_named(&mut runtime_tasks, "release source sync", async move {
         let _ = release_source_sync.run(release_source_sync_shutdown).await;
-        "release source sync"
     });
-    runtime_tasks.spawn(async move {
+    spawn_named(&mut runtime_tasks, "social post source sync", async move {
         let _ = social_post_source_sync
             .run(social_post_source_sync_shutdown)
             .await;
-        "social post source sync"
     });
-    runtime_tasks.spawn(async move {
+    spawn_named(&mut runtime_tasks, "gdrive contacts sync", async move {
         let _ = gdrive_contacts_sync
             .run(gdrive_contacts_sync_shutdown)
             .await;
-        "gdrive contacts sync"
     });
-    runtime_tasks.spawn(async move {
+    GithubRegistrySyncWorker::spawn_if_configured(
+        &mut runtime_tasks,
+        database.clone(),
+        workspace_id.into_uuid(),
+        github_registry_sync_shutdown,
+    )
+    .context("invalid github registry sync worker configuration")?;
+    spawn_named(&mut runtime_tasks, "gmail contacts sync", async move {
         let _ = gmail_contacts_sync.run(gmail_contacts_sync_shutdown).await;
-        "gmail contacts sync"
     });
-    runtime_tasks.spawn(async move {
+    spawn_named(&mut runtime_tasks, "attribution worker", async move {
         attribution_worker.run(attribution_shutdown).await;
-        "attribution worker"
     });
-    runtime_tasks.spawn(async move {
-        community_intel_worker.run(community_intel_shutdown).await;
-        "community intelligence worker"
-    });
-    runtime_tasks.spawn(async move {
+    spawn_named(
+        &mut runtime_tasks,
+        "community intelligence worker",
+        async move {
+            community_intel_worker.run(community_intel_shutdown).await;
+        },
+    );
+    spawn_named(&mut runtime_tasks, "venue fact expiry sweep", async move {
         venue_fact_expiry.run(venue_fact_expiry_shutdown).await;
-        "venue fact expiry sweep"
     });
     if let Some(worker) = osm_venue_sweep {
-        runtime_tasks.spawn(async move {
+        spawn_named(&mut runtime_tasks, "OSM venue sweep", async move {
             worker.run(osm_venue_sweep_shutdown).await;
-            "OSM venue sweep"
         });
     }
     if let Some(worker) = ticketmaster_sweep {
-        runtime_tasks.spawn(async move {
+        spawn_named(&mut runtime_tasks, "Ticketmaster sweep", async move {
             worker.run(ticketmaster_sweep_shutdown).await;
-            "Ticketmaster sweep"
         });
     }
 
@@ -1236,6 +1222,20 @@ async fn wait_for_shutdown(mut shutdown: watch::Receiver<bool>) {
             break;
         }
     }
+}
+
+/// Every runtime task is the same shape — run one future, yield its name for
+/// the join log — so one helper replaces forty copies. The future's output is
+/// discarded: a worker's own error is already logged inside its `run`.
+fn spawn_named<F>(tasks: &mut JoinSet<&'static str>, name: &'static str, fut: F)
+where
+    F: std::future::Future + Send + 'static,
+    F::Output: Send,
+{
+    tasks.spawn(async move {
+        let _ = fut.await;
+        name
+    });
 }
 
 fn unexpected_worker_exit(

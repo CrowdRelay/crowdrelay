@@ -17,17 +17,15 @@
 
 use std::time::Duration;
 
-use crowdrelay_domain::drive_contacts::{extract_contacts, parse_delimited};
+use crowdrelay_domain::drive_contacts::parse_delimited;
 use crowdrelay_domain::scan_scope::ScanScope;
-use crowdrelay_domain::venue_seed::extract_seed_sheet;
 use crowdrelay_infra::{
     gdrive::{GDriveError, PostgresGDriveRepository},
-    peer_act_seed::PostgresPeerActSeedRepository,
     sensitive_response::SensitiveResponseKey,
-    venue_seed::PostgresVenueSeedRepository,
 };
 
 use crate::google_oauth::{access_token_for_connection, resolve_google_access_token};
+use crate::sheet_intake::SHEET_INTAKE_REVISION;
 use sqlx::{PgPool, postgres::PgListener};
 use thiserror::Error;
 use tokio::{sync::watch, time::interval};
@@ -42,16 +40,7 @@ const MAX_FILES_PER_CYCLE: usize = 200;
 const MAX_FOLDER_DEPTH: usize = 8;
 const MAX_FOLDER_IDS: usize = 64;
 const FOLDER_MIME: &str = "application/vnd.google-apps.folder";
-/// Bound on rows read per file — a contact list beyond that is not a
-/// contact list.
-const MAX_ROWS_PER_FILE: usize = 5000;
 
-/// Bumped when what a scan *does* with a file changes — a new seed reader,
-/// a new sheet shape — so a file the old parser already saw is not skipped
-/// as "unchanged" under rules it predates. The revision rides inside the
-/// stored mtime marker (`<mtime>#<rev>`); content changes still invalidate
-/// on their own because the mtime half differs.
-const FILE_SCANNER_REVISION: u32 = 3;
 /// Drive page size.
 const DRIVE_PAGE_SIZE: usize = 100;
 const HTTP_TIMEOUT: Duration = Duration::from_secs(30);
@@ -135,6 +124,10 @@ struct CycleCounts {
     peer_acts_deactivated: u64,
     peer_acts_skipped_inactive: u64,
     peer_acts_failed: u64,
+    /// Sheets a registry readout claimed — context, not intake — and
+    /// sheets that fed the booking-agent registry.
+    registry_dump_sheets: usize,
+    agent_sheets: usize,
 }
 
 impl GDriveContactsSyncWorker {
@@ -528,7 +521,7 @@ impl GDriveContactsSyncWorker {
         // every file once instead of leaving a file the old parser
         // misfiled — say, the 716-band workbook the single-sheet reader
         // counted as a 17-row contact sheet — skipped-unchanged forever.
-        let state_marker = format!("{mtime}#{FILE_SCANNER_REVISION}");
+        let state_marker = format!("{mtime}#{SHEET_INTAKE_REVISION}");
         if !mtime.is_empty()
             && self
                 .repo
@@ -546,93 +539,33 @@ impl GDriveContactsSyncWorker {
         // Workbook reality: a .xlsx can be a dashboard over a data tab —
         // the deep-scan feed keeps its 716-band table on "Master" behind a
         // "Summary" cover sheet. Seed readers therefore inspect EVERY sheet;
-        // only sheets neither claims fall through to the contact reader,
-        // which judges each sheet on its own header.
-        let mut seed_rows_read = 0usize;
-        let mut contact_sheets: Vec<Vec<Vec<String>>> = Vec::new();
-        for raw in sheets {
-            let grid: Vec<Vec<String>> = raw.into_iter().take(MAX_ROWS_PER_FILE + 1).collect();
+        // only sheets none claims reach the contact reader, which judges
+        // each sheet on its own header. The dispatch — agent sheet, registry
+        // dump, venue, band, contacts — is shared with the GitHub registry
+        // mirror so both transports route a sheet the same way.
+        let harvest = crate::sheet_intake::harvest_grids(
+            self.repo.pool(),
+            self.workspace_id,
+            &file.name,
+            sheets,
+        )
+        .await?;
+        let rows_read = harvest.rows_read;
+        counts.rows_without_email += harvest.rows_without_email;
+        counts.venues_imported += harvest.venues_imported;
+        counts.venue_refusals += harvest.venue_refusals;
+        counts.venues_unknown_city += harvest.venues_unknown_city;
+        counts.peer_acts_imported += harvest.peer_acts_imported;
+        counts.peer_act_refusals += harvest.peer_act_refusals;
+        counts.peer_acts_unresolved_city += harvest.peer_acts_unresolved_city;
+        counts.peer_acts_deactivated += harvest.peer_acts_deactivated;
+        counts.peer_acts_skipped_inactive += harvest.peer_acts_skipped_inactive;
+        counts.peer_acts_failed += harvest.peer_acts_failed;
+        counts.registry_dump_sheets += harvest.registry_dump_sheets;
+        counts.agent_sheets += harvest.agent_sheets;
+        let contacts = harvest.contacts;
 
-            // A researched venue sheet is not a contact list: the venue
-            // check runs first and never falls through to extract_contacts
-            // — a seed row may carry an Email column and must not stage the
-            // room as a contact for it. Its rows import into the shared
-            // venue registry as attributed facts instead.
-            if let Some(report) = extract_seed_sheet(&grid) {
-                let summary = PostgresVenueSeedRepository::new(self.repo.pool().clone())
-                    .import_sheet(self.workspace_id, &report)
-                    .await
-                    .map_err(|e: sqlx::Error| e.to_string())?;
-                if !report.refusals.is_empty() {
-                    tracing::info!(
-                        file = %file.name,
-                        refusals = ?report
-                            .refusals
-                            .iter()
-                            .map(|(row, refusal)| (*row, refusal.message()))
-                            .collect::<Vec<_>>(),
-                        "venue seed rows refused"
-                    );
-                }
-                seed_rows_read += report.venues.len() + report.refusals.len();
-                counts.venues_imported += summary.imported;
-                counts.venue_refusals += report.refusals.len();
-                counts.venues_unknown_city += summary.unknown_city;
-                continue;
-            }
-
-            // A researched band sheet is not a contact list either: it
-            // feeds the shared peer-act registry — comparable acts, local
-            // support candidates, the watch list's proposals — under the
-            // same screening rules. A band row that carries an Email column
-            // must not stage the band as a press contact for it.
-            if let Some(report) = crowdrelay_domain::peer_act_seed::extract_seed_sheet(&grid) {
-                let summary = PostgresPeerActSeedRepository::new(self.repo.pool().clone())
-                    .import_sheet(self.workspace_id, &report)
-                    .await
-                    .map_err(|e: sqlx::Error| e.to_string())?;
-                if !report.refusals.is_empty() {
-                    tracing::info!(
-                        file = %file.name,
-                        refusals = ?report
-                            .refusals
-                            .iter()
-                            .map(|(row, refusal)| (*row, refusal.message()))
-                            .collect::<Vec<_>>(),
-                        "peer act seed rows refused"
-                    );
-                }
-                seed_rows_read += report.acts.len() + report.refusals.len();
-                counts.peer_acts_imported += summary.imported;
-                counts.peer_act_refusals += report.refusals.len();
-                counts.peer_acts_unresolved_city += summary.unresolved_city;
-                counts.peer_acts_deactivated += summary.deactivated;
-                counts.peer_acts_skipped_inactive += summary.skipped_inactive;
-                counts.peer_acts_failed += summary.failed;
-                continue;
-            }
-
-            contact_sheets.push(grid);
-        }
-
-        // Contact extraction across the sheets neither seed reader claimed,
-        // merged into one source upsert — the file, not the tab, is the
-        // contact source, and one tab's rows must never mark another's
-        // disappeared.
-        let mut contacts = Vec::new();
-        let mut rows_read = seed_rows_read;
-        let mut saw_email_column = false;
-        for grid in &contact_sheets {
-            let report = extract_contacts(grid);
-            rows_read += report.rows_read;
-            if !report.no_email_column {
-                saw_email_column = true;
-                counts.rows_without_email += report.rows_without_email;
-                contacts.extend(report.contacts);
-            }
-        }
-
-        if !saw_email_column {
+        if !harvest.saw_email_column {
             // Not a contact list — record the mtime so we do not re-export
             // it every hour, and never count it as a failure. This also
             // fires when every sheet was a seed sheet: if the file *used
@@ -732,7 +665,7 @@ impl GDriveContactsSyncWorker {
             }
             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" => {
                 let bytes = self.download_media_bytes(connection_id, &file.id).await?;
-                parse_xlsx_sheets(&bytes)
+                crate::sheet_intake::parse_xlsx_sheets(&bytes)
             }
             other => Err(format!("unsupported mime {other}")),
         }
@@ -812,50 +745,4 @@ impl GDriveContactsSyncWorker {
         )
         .await
     }
-}
-
-/// xlsx → one grid per non-empty worksheet via calamine. A workbook whose
-/// cover sheet is a dashboard must not hide its data tabs — the seed
-/// readers run per sheet. (The Drive CSV export of a Google Sheet still
-/// carries only the first tab — exporting a chosen tab would need the
-/// gid-aware export URL, which is a deliberate non-goal here.)
-fn parse_xlsx_sheets(bytes: &[u8]) -> Result<Vec<Vec<Vec<String>>>, String> {
-    use calamine::{Data, Reader, Xlsx, open_workbook_from_rs};
-    let mut workbook: Xlsx<std::io::Cursor<&[u8]>> =
-        open_workbook_from_rs(std::io::Cursor::new(bytes))
-            .map_err(|e| format!("xlsx open failed: {e}"))?;
-    let names = workbook.sheet_names().to_owned();
-    let mut sheets = Vec::new();
-    for name in names {
-        let Ok(range) = workbook.worksheet_range(&name) else {
-            continue;
-        };
-        if range.is_empty() {
-            continue;
-        }
-        let grid: Vec<Vec<String>> = range
-            .rows()
-            .map(|row| {
-                row.iter()
-                    .map(|cell| match cell {
-                        Data::String(s) => s.clone(),
-                        Data::Float(f) => {
-                            if f.fract() == 0.0 {
-                                format!("{f:.0}")
-                            } else {
-                                f.to_string()
-                            }
-                        }
-                        Data::Int(i) => i.to_string(),
-                        Data::Bool(b) => b.to_string(),
-                        Data::DateTime(dt) => dt.to_string(),
-                        Data::DateTimeIso(s) | Data::DurationIso(s) => s.clone(),
-                        Data::Error(_) | Data::Empty => String::new(),
-                    })
-                    .collect()
-            })
-            .collect();
-        sheets.push(grid);
-    }
-    Ok(sheets)
 }

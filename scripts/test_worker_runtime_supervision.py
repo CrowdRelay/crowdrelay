@@ -9,7 +9,12 @@ WORKER = (ROOT / "crates/crowdrelay-worker/src/main.rs").read_text()
 class WorkerRuntimeSupervisionContract(unittest.TestCase):
     def test_all_long_lived_workers_share_one_joinset_supervisor(self):
         self.assertIn("let mut runtime_tasks = JoinSet::new();", WORKER)
-        self.assertGreaterEqual(WORKER.count("runtime_tasks.spawn(async move"), 9)
+        # Workers join the supervisor through `spawn_named`, which holds the
+        # only raw `tasks.spawn` — a direct `runtime_tasks.spawn(` at a call
+        # site would bypass the name-for-the-join-log convention.
+        self.assertGreaterEqual(WORKER.count("spawn_named(&mut runtime_tasks"), 9)
+        self.assertIn("tasks.spawn(async move", WORKER)
+        self.assertNotIn("runtime_tasks.spawn(", WORKER)
         self.assertIn("first_exit = runtime_tasks.join_next()", WORKER)
         self.assertIn("unexpected_worker_exit(first_exit)", WORKER)
         for name in (

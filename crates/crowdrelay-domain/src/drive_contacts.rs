@@ -76,6 +76,48 @@ fn header_names_city(header: &str, patterns: &[&str]) -> bool {
     normalized.split('_').any(|token| patterns.contains(&token))
 }
 
+/// Columns that only exist on rows exported *from* the staging registries
+/// — `last_seen`, `disappeared`, `refused_until` and friends name the
+/// database's own bookkeeping, so a sheet carrying them is a readout kept
+/// for context, never an intake list. The list deliberately excludes
+/// headers intake sheets legitimately carry (`Source_URL`, `Status`,
+/// `Research_Date`, outreach angles) so a seed sheet can never trip it.
+const REGISTRY_STATE_HEADERS: &[&str] = &[
+    "last_seen",
+    "disappeared",
+    "disappeared_at",
+    "approached_at",
+    "refused_until",
+    "do_not_contact",
+    "relationship_score",
+    "verified",
+    "accepts_outreach",
+    "relevance_pct",
+    "confidence_pct",
+    "roster_url",
+];
+
+/// Whether a header row is a registry readout rather than an intake list.
+/// Two registry-state columns are required: a real export always carries
+/// several, while a hand-kept outreach list may legitimately name one
+/// `do_not_contact` column and must still import.
+#[must_use]
+pub fn is_registry_dump(header: &[String]) -> bool {
+    header
+        .iter()
+        .filter(|cell| header_is(cell, REGISTRY_STATE_HEADERS))
+        .count()
+        >= 2
+}
+
+/// Whether one cell names the email column — the dispatcher asks this to
+/// tell a lone `Email` header (a real one-column list) from a lone banner
+/// note (a title row to strip).
+#[must_use]
+pub fn is_email_header(cell: &str) -> bool {
+    header_is(cell, EMAIL_HEADERS)
+}
+
 const EMAIL_HEADERS: &[&str] = &["email", "e_mail", "mail"];
 const NAME_HEADERS: &[&str] = &["name", "full_name", "contact", "display_name"];
 const ORG_HEADERS: &[&str] = &[
@@ -113,7 +155,7 @@ const CITY_HEADERS: &[&str] = &[
 /// Maps a Status cell onto the staging vocabulary — the same verdicts the
 /// venue and band sheets carry. Unknown values claim nothing: "pending"
 /// and "unclear" are not findings.
-fn status_for(raw: &str) -> Option<&'static str> {
+pub(crate) fn status_for(raw: &str) -> Option<&'static str> {
     let v = raw.trim().to_ascii_lowercase();
     let v = v.replace([' ', '-'], "_");
     match v.as_str() {
@@ -237,6 +279,14 @@ pub fn extract_contacts(grid: &[Vec<String>]) -> ExtractionReport {
         report.no_email_column = true;
         return report;
     };
+    // A registry readout reached the contact reader — dispatch normally
+    // turns it away first, but the guard is intrinsic so no path (upload,
+    // a future transport) can stage the database's own rows back.
+    if is_registry_dump(headers) {
+        report.no_email_column = true;
+        report.rows_read = rows.len();
+        return report;
+    }
     let Some(email_col) = find_column(headers, rows, EMAIL_HEADERS, header_contains, true, &[])
     else {
         report.no_email_column = true;
@@ -569,6 +619,33 @@ mod tests {
     }
 
     #[test]
+    fn a_registry_readout_is_not_a_contact_list() {
+        // The workbook's mirror tabs carry the staging table's own
+        // bookkeeping columns — `Last_Seen`, `Disappeared`, `Do_Not_Contact`
+        // — so their rows must never re-stage no matter how the grid
+        // arrives.
+        for internals in [
+            ["Last_Seen", "Disappeared"],
+            ["Do_Not_Contact", "approached_at"],
+            ["refused_until", "Verified"],
+        ] {
+            let report = extract_contacts(&grid(&[
+                &["Email", "Name", internals[0], internals[1]],
+                &["someone@x.com", "A Row", "2026-09-22", "t"],
+            ]));
+            assert!(
+                report.no_email_column,
+                "a sheet carrying {internals:?} staged anyway"
+            );
+            assert!(report.contacts.is_empty());
+        }
+        // And an ordinary contact list still reads fine.
+        let report = extract_contacts(&grid(&[&["Email", "Name"], &["someone@x.com", "A Row"]]));
+        assert!(!report.no_email_column);
+        assert_eq!(report.contacts.len(), 1);
+    }
+
+    #[test]
     fn email_column_detected_without_header() {
         let report = extract_contacts(&grid(&[
             &["col a", "col b"],
@@ -622,6 +699,23 @@ mod tests {
         // Self and noreply are out.
         assert!(!contacts.iter().any(|c| c.email.contains("tenant@")));
         assert!(!contacts.iter().any(|c| c.email.contains("noreply")));
+    }
+
+    #[test]
+    fn a_single_state_column_does_not_make_a_dump() {
+        // A hand-kept outreach list may name a `do_not_contact` column —
+        // one registry-state header alone must not refuse the sheet.
+        let header: Vec<String> = ["Name", "Email", "Do_Not_Contact"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert!(!is_registry_dump(&header));
+        // Two is the export's signature — a contacts registry readout.
+        let dump: Vec<String> = ["Email", "Name", "Last_Seen", "Disappeared"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert!(is_registry_dump(&dump));
     }
 
     #[test]

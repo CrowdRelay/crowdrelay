@@ -65,6 +65,7 @@ pub mod beacon_release;
 pub mod beacons;
 pub mod booking;
 pub mod booking_agent;
+pub mod booking_agent_seed;
 pub mod booking_discovery;
 pub mod booking_letter;
 pub mod booking_window;
