@@ -631,19 +631,22 @@ async fn community_conversion_does_not_write_when_fan_is_missing()
 
     // We verify the invariant by running the same INSERT ... SELECT that
     // record_community_conversion uses, with a non-existent fan_id. The JOIN
-    // to fans produces no rows, so no conversion is written.
+    // to fans produces no rows, so no conversion is written. The query mirrors
+    // the production shape: the gate is a labelled channel, the post must have
+    // been live at click time, and the click must precede the signup.
     let insert_result = sqlx::query(
         r#"
         INSERT INTO fan_provenance_events (
             workspace_id, fan_id, event_kind, channel, source_target,
             community, campaign_id, action_id, attribution_method,
-            attribution_confidence, occurred_at
+            attribution_confidence, occurred_at, format_key
         )
         SELECT $1, $2, 'conversion',
-               COALESCE(link.channel_source, 'smart_link'),
+               link.channel_source,
                link.slug, link.channel_community, click.campaign_id,
                post.action_id,
-               'last_community_click', 1.0, fan.created_at
+               'last_tracked_click', 1.0, fan.created_at,
+               post.format_key
         FROM click_events AS click
         JOIN smart_links AS link
           ON link.workspace_id = click.workspace_id
@@ -652,19 +655,51 @@ async fn community_conversion_does_not_write_when_fan_is_missing()
           ON fan.workspace_id = $1
          AND fan.id = $2
         LEFT JOIN LATERAL (
-            SELECT post.action_id
-            FROM community_posts AS post
-            WHERE post.workspace_id = $1
-              AND post.smart_link = '/l/' || link.slug
+            SELECT post.action_id, source.format_key
+            FROM (
+                SELECT action_id, posted_at, created_at
+                FROM community_posts
+                WHERE workspace_id = $1 AND smart_link = '/l/' || link.slug
+                  AND posted_at IS NOT NULL
+                  AND posted_at <= click.occurred_at
+                UNION ALL
+                SELECT action_id, posted_at, created_at
+                FROM social_posts
+                WHERE workspace_id = $1
+                  AND (smart_link = '/l/' || link.slug OR smart_link_id = link.id)
+                  AND posted_at IS NOT NULL
+                  AND posted_at <= click.occurred_at
+                UNION ALL
+                SELECT action_id, posted_at, created_at
+                FROM telegram_posts
+                WHERE workspace_id = $1
+                  AND (smart_link = '/l/' || link.slug OR smart_link_id = link.id)
+                  AND posted_at IS NOT NULL
+                  AND posted_at <= click.occurred_at
+                UNION ALL
+                SELECT action_id, posted_at, created_at
+                FROM discord_posts
+                WHERE workspace_id = $1
+                  AND (smart_link = '/l/' || link.slug OR smart_link_id = link.id)
+                  AND posted_at IS NOT NULL
+                  AND posted_at <= click.occurred_at
+            ) AS post
+            LEFT JOIN viryaos_autopilot_actions AS act
+              ON act.workspace_id = $1
+             AND act.id = post.action_id
+            LEFT JOIN viryaos_content_sources AS source
+              ON source.workspace_id = $1
+             AND source.id::text = lower(act.payload->>'source_id')
             ORDER BY post.posted_at DESC NULLS LAST,
-                     post.created_at DESC
+                     post.created_at DESC, post.action_id
             LIMIT 1
         ) AS post ON true
         WHERE click.workspace_id = $1
           AND click.anonymous_visitor_id = $3
-          AND link.channel_community IS NOT NULL
+          AND link.channel_source IS NOT NULL
           AND click.occurred_at >= now() - INTERVAL '30 days'
-        ORDER BY click.occurred_at DESC
+          AND click.occurred_at <= fan.created_at
+        ORDER BY click.occurred_at DESC, click.id
         LIMIT 1
         "#,
     )
@@ -699,3 +734,4 @@ async fn community_conversion_does_not_write_when_fan_is_missing()
 
 include!("acquisition_postgres/helpers.rs");
 include!("acquisition_postgres/attribution.rs");
+include!("acquisition_postgres/attribution_channels.rs");

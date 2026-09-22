@@ -11,6 +11,8 @@
 
 use uuid::Uuid;
 
+use crate::tracked_link_text::link_is_inlined;
+
 use super::{ClaimedAction, SocialPostExecutorError, SocialPostExecutorWorker};
 
 impl SocialPostExecutorWorker {
@@ -132,7 +134,7 @@ impl SocialPostExecutorWorker {
     /// that already inlined the link path is not handed it twice.
     pub(super) fn publish_body(&self, action: &ClaimedAction, base: &str) -> String {
         match (&action.smart_link, action.smart_link_id) {
-            (Some(link), Some(_)) if link.starts_with("/l/") && !base.contains(link.as_str()) => {
+            (Some(link), Some(_)) if link.starts_with("/l/") && !link_is_inlined(base, link) => {
                 format!(
                     "{base}\n\n{}{link}",
                     self.public_origin.trim_end_matches('/')
@@ -149,7 +151,7 @@ impl SocialPostExecutorWorker {
 /// tenant's own public origin. Anything else — a foreign host's `/l/` path,
 /// a URL that merely contains the marker — is a destination to validate, not
 /// a link to inherit.
-fn slug_in_cta<'a>(cta_url: &'a str, public_origin: &str) -> Option<&'a str> {
+pub(crate) fn slug_in_cta<'a>(cta_url: &'a str, public_origin: &str) -> Option<&'a str> {
     let path = cta_url.strip_prefix(public_origin).unwrap_or(cta_url);
     let slug = path.strip_prefix("/l/")?;
     let valid = !slug.is_empty()

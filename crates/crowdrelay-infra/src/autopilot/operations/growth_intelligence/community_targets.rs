@@ -33,6 +33,7 @@ use super::{RepositoryError, map_sqlx};
 const MAX_COMMUNITY_CANDIDATES: i64 = 50;
 
 /// Row shape of the community candidate query.
+#[allow(clippy::type_complexity)]
 type CommunityTargetRow = (
     uuid::Uuid,
     String,
@@ -44,6 +45,8 @@ type CommunityTargetRow = (
     Option<i16>,
     Option<i32>,
     Option<String>,
+    i64,
+    i64,
 );
 
 /// Loads the communities the growth loop may engage this cycle.
@@ -68,7 +71,9 @@ pub(super) async fn load_community_targets(
                rules.self_promo_ratio_percent,
                rules.cooldown_days,
                last_post.days_since,
-               place.membership_state
+               place.membership_state,
+               provenance.converted_fans,
+               provenance.interactions
         FROM agent_outreach_targets AS t
         LEFT JOIN discovery_places AS place
                ON place.id = t.place_id
@@ -82,6 +87,29 @@ pub(super) async fn load_community_targets(
               AND normalize_subreddit(cp.subreddit) = normalize_subreddit(t.subreddit)
               AND cp.posted_at IS NOT NULL
         ) AS last_post ON true
+        -- The community's own conversion record: fans this community's
+        -- tracked links produced, and the distinct visitors clicking them.
+        -- This is the edge member_count never had — a community that made a
+        -- fan is evidence about where this band's fans come from, and it
+        -- outranks a bigger community that only ever produced reach.
+        LEFT JOIN LATERAL (
+            SELECT COUNT(DISTINCT pe.fan_id)
+                       FILTER (WHERE pe.event_kind = 'conversion')::bigint
+                       AS converted_fans,
+                   COUNT(DISTINCT COALESCE(pe.fan_id::text,
+                                           pe.anonymous_visitor_id::text))
+                       FILTER (WHERE pe.event_kind = 'interaction')::bigint
+                       AS interactions
+            FROM fan_provenance_events pe
+            WHERE pe.workspace_id = t.workspace_id
+              -- Only Reddit-channel evidence names a subreddit. Telegram and
+              -- Discord links write their own `channel_community` — a chat
+              -- named 'deathcore' would otherwise credit r/deathcore with
+              -- conversions a chat room made.
+              AND pe.channel = 'reddit'
+              AND normalize_subreddit(pe.community) = normalize_subreddit(t.subreddit)
+              AND pe.occurred_at >= now() - interval '90 days'
+        ) AS provenance ON true
         WHERE t.workspace_id = $1
           AND t.status = 'promoted'
           AND t.target_kind = 'community'
@@ -96,10 +124,19 @@ pub(super) async fn load_community_targets(
           AND (place.id IS NULL
                OR (place.status = 'active'
                    AND place.membership_state NOT IN ('rejected', 'not_a_fit')))
-        -- Biggest measured audience first. An unmeasured community sorts last
-        -- rather than first: it may be excellent, but the cap has to fall on
-        -- the least evidenced candidates, not the most recent ones.
-        ORDER BY place.member_count DESC NULLS LAST, t.created_at DESC
+        -- Evidence before audience: a community whose links produced a fan
+        -- or a clicker leads the pool, then biggest measured audience as the
+        -- tiebreak. An unmeasured community sorts last rather than first: it
+        -- may be excellent, but the cap has to fall on the least evidenced
+        -- candidates, not the most recent ones.
+        ORDER BY provenance.converted_fans DESC,
+                 provenance.interactions DESC,
+                 place.member_count DESC NULLS LAST,
+                 t.created_at DESC,
+                 -- Full tie-break: two targets admitted in the same second
+                 -- with identical evidence still need a stable order or the
+                 -- LIMIT cut lands on a coin flip between cycles.
+                 t.id
         LIMIT $2
         "#,
     )
@@ -123,6 +160,8 @@ pub(super) async fn load_community_targets(
                 cooldown_days,
                 days_since_last_engagement,
                 membership_state,
+                converted_fans,
+                interactions,
             )| UnengagedTarget {
                 target_id,
                 display_name,
@@ -140,6 +179,8 @@ pub(super) async fn load_community_targets(
                 // as not joined, and the candidate gate treats the two
                 // differently on purpose.
                 joined: membership_state.map(|state| state == "joined"),
+                converted_fans_90d: u32::try_from(converted_fans.max(0)).unwrap_or(u32::MAX),
+                interactions_90d: u32::try_from(interactions.max(0)).unwrap_or(u32::MAX),
             },
         )
         .collect())
