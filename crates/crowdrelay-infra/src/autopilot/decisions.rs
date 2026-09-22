@@ -798,6 +798,23 @@ impl AutopilotDecisionRepository for PostgresAutopilotRepository {
         self.load_outward_touch_ages_impl(workspace_id, now).await
     }
 
+    async fn existing_decision_keys(
+        &self,
+        workspace_id: WorkspaceId,
+        decision_keys: &[String],
+    ) -> Result<std::collections::HashSet<String>, RepositoryError> {
+        sqlx::query_scalar::<_, String>(
+            "SELECT decision_key FROM autopilot_decisions \
+             WHERE workspace_id = $1 AND decision_key = ANY($2)",
+        )
+        .bind(workspace_id.into_uuid())
+        .bind(decision_keys)
+        .fetch_all(&self.pool)
+        .await
+        .map(|keys| keys.into_iter().collect())
+        .map_err(map_sqlx)
+    }
+
     async fn persist_candidate(
         &self,
         workspace_id: WorkspaceId,

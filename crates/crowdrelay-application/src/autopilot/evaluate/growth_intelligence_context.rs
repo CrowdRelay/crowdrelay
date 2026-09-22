@@ -523,10 +523,29 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
         }
         // Build the portfolio pool: non-experiment candidates + treatment-
         // assigned candidates (control candidates are excluded).
+        // Drop candidates whose dedup key a previous cycle already wrote.
+        // They can only conflict at persist — a guaranteed no-op that still
+        // occupies a portfolio slot, which under a health-scaled budget is
+        // the whole budget. A template due on stale intelligence whose
+        // dispatch this window already committed (and produced nothing
+        // usable) is exactly this case; the retry path uses hourly keys and
+        // is unaffected. The read propagates like every other repository
+        // read in this cycle: a failed read is not a reading of zero.
+        let existing_keys = self
+            .repository
+            .existing_decision_keys(
+                self.workspace_id,
+                &scored_candidates
+                    .iter()
+                    .map(|scored| scored.candidate.decision_key.clone())
+                    .collect::<Vec<_>>(),
+            )
+            .await?;
         let portfolio_candidates: Vec<ScoredCandidate> = scored_candidates
             .iter()
             .enumerate()
             .filter(|(i, _)| !control_indices.contains(i))
+            .filter(|(_, c)| !existing_keys.contains(&c.candidate.decision_key))
             .map(|(_, c)| c.clone())
             .collect();
         // Build the per-candidate evidence quality for treatment-assigned
