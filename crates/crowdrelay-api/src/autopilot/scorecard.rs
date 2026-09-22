@@ -410,6 +410,8 @@ async fn load_agent_scorecard(
                 WHEN action_kind = 'opportunity.counterparty_report.issue' THEN 'show.escalation'
                 WHEN action_kind = 'release.editorial_pitch.escalate' THEN 'show.escalation'
                 WHEN action_kind = 'fan.lifecycle.message.request' THEN 'fan.lifecycle.message'
+                WHEN action_kind = 'play.step.run' AND payload->>'step_kind' = 'release_curator_wave'
+                    THEN 'play.step.third_party'
                 WHEN action_kind = 'play.step.run' THEN 'play.step'
                 WHEN action_kind = 'funding.package.prepare' THEN 'funding.package'
                 WHEN action_kind LIKE 'funding.%' THEN 'funding.submit'

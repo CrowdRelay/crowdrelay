@@ -1,14 +1,13 @@
 //! Thin human-handoff index for work that genuinely needs a band member.
 //!
 //! Domain actions and show checklist rows remain authoritative. This adapter
-//! only assigns an owner, schedules bounded reminders, and queues provider-
-//! confirmed email actions through the existing Autopilot execution plane.
+//! only assigns an owner and queues provider-confirmed email actions through
+//! the existing Autopilot execution plane.
 
 use super::team_routing::{load_team_routing, select_member_index_explained};
 use super::*;
 use crowdrelay_application::autopilot::BriefingLocale;
 use crowdrelay_domain::team_operations::{TeamAssignmentNeed, TeamSkill};
-use time::Duration as TimeDuration;
 
 #[derive(Debug, FromRow)]
 struct UnassignedApprovalRow {
@@ -29,35 +28,14 @@ struct UnassignedShowTaskRow {
     due_at: OffsetDateTime,
 }
 
-#[derive(Debug, FromRow)]
-struct ReminderRow {
-    assignment_id: Uuid,
-    action_id: Option<Uuid>,
-    action_kind: Option<String>,
-    context: Option<String>,
-    source_kind: String,
-    source_ref: Option<String>,
-    event_title: Option<String>,
-    plan_title: Option<String>,
-    release_title: Option<String>,
-    plan_scheduled_for: Option<time::Date>,
-    plan_items: Option<serde_json::Value>,
-    display_name: String,
-    normalized_email: String,
-    due_at: Option<OffsetDateTime>,
-    reminder_count: i32,
-    payload: Option<serde_json::Value>,
-}
-
 /// A first-notice held for per-member batching.
 ///
-/// The reminder sweep already sends one e-mail per person per pass; first
-/// notices used to go one-per-assignment, so a batch of approvals landing in
-/// a single cycle put a dozen same-minute mails in one inbox — twenty-one to
-/// two people on 2026-09-20. Holding them until every producer has run lets
-/// one e-mail carry the most urgent task and name the rest, the same digest
-/// the reminder path composes. Every assignment still keeps its own reminder
-/// ladder — batching changes interruptions, not bookkeeping.
+/// First notices used to go one-per-assignment, so a batch of approvals
+/// landing in a single cycle put a dozen same-minute mails in one inbox —
+/// twenty-one to two people on 2026-09-20. Holding them until every producer
+/// has run lets one e-mail carry the most urgent task and name the rest.
+/// Batching changes interruptions, not the work index: every approval still
+/// owns its own assignment row.
 pub(super) struct PendingInitialNotice {
     pub assignment_id: Uuid,
     pub context: String,
@@ -171,7 +149,7 @@ impl PostgresAutopilotRepository {
                         workspace_id = %workspace_id.into_uuid(),
                         capability = "team.email",
                         parked = approvals.len(),
-                        "team handoff reminders are parked: no executor advertises this capability"
+                        "team handoff notices are parked: no executor advertises this capability"
                     );
                 }
                 tx.commit().await.map_err(map_sqlx)?;
@@ -265,8 +243,8 @@ impl PostgresAutopilotRepository {
                     r#"
                     INSERT INTO viryaos_team_assignments (
                         id, workspace_id, action_id, source_kind, source_id, source_ref,
-                        assignee_member_id, required_skill, due_at, next_reminder_at
-                    ) VALUES ($1,$2,$3,'autopilot_action',$4,NULL,$5,$6,$7,$8)
+                        assignee_member_id, required_skill, due_at
+                    ) VALUES ($1,$2,$3,'autopilot_action',$4,NULL,$5,$6,$7)
                     ON CONFLICT (workspace_id, action_id) DO NOTHING
                     RETURNING id
                     "#,
@@ -278,7 +256,6 @@ impl PostgresAutopilotRepository {
                 .bind(member.member_id)
                 .bind(need.primary_skill.as_str())
                 .bind(action.approval_expires_at)
-                .bind(first_reminder_at(now, action.approval_expires_at))
                 .fetch_optional(&mut *tx)
                 .await
                 .map_err(map_sqlx)?;
@@ -347,8 +324,8 @@ impl PostgresAutopilotRepository {
                     r#"
                     INSERT INTO viryaos_team_assignments (
                         id, workspace_id, action_id, source_kind, source_id, source_ref,
-                        assignee_member_id, required_skill, due_at, next_reminder_at
-                    ) VALUES ($1,$2,NULL,'show_task',$3,$4,$5,$6,$7,$8)
+                        assignee_member_id, required_skill, due_at
+                    ) VALUES ($1,$2,NULL,'show_task',$3,$4,$5,$6,$7)
                     ON CONFLICT DO NOTHING
                     RETURNING id
                     "#,
@@ -360,7 +337,6 @@ impl PostgresAutopilotRepository {
                 .bind(member.member_id)
                 .bind(need.primary_skill.as_str())
                 .bind(task.due_at)
-                .bind(first_reminder_at(now, Some(task.due_at)))
                 .fetch_optional(&mut *tx)
                 .await
                 .map_err(map_sqlx)?;
@@ -404,193 +380,33 @@ impl PostgresAutopilotRepository {
         .await
     }
 
-    /// Queues friendly reminders only after their durable schedule becomes due.
-    /// The actual email is still an Autopilot action and is only complete after
-    /// a provider-confirmed Gmail receipt.
-    pub async fn dispatch_team_handoff_reminders(
+    /// Retires the per-assignment reminder lane without mailing anyone.
+    ///
+    /// Reminder e-mails are gone: the daily briefing already names every open
+    /// ask each morning, so a "VIRYA — przypomnienie" chase repeated a
+    /// notification the briefing had already aggregated — two copies of the
+    /// same fact in one inbox, which is what the crew reported. Nothing here
+    /// schedules `next_reminder_at` anymore; this sweep exists to drain the
+    /// schedules written before the lane retired (and any a missed writer
+    /// still stamps), so an old row can never fire a mail that no longer
+    /// exists. Returns the rows cleared — the first sweep after deploy is the
+    /// backlog, every later one should be zero.
+    pub async fn drain_team_reminder_schedule(
         &self,
         workspace_id: WorkspaceId,
-        now: OffsetDateTime,
     ) -> Result<u32, RepositoryError> {
         self.bounded(async {
-            let mut tx = self.pool.begin().await.map_err(map_sqlx)?;
-            let crew_locale = crew_locale_in_tx(&mut tx, workspace_id).await;
-
-            // Quiet hours on the tenant's own clock. A reminder due at 03:00
-            // is not more urgent for arriving then — nobody reads it, and a
-            // mailbox trained to expect overnight mail learns to ignore the
-            // morning ones. The rows stay due rather than being rescheduled,
-            // so the first sweep after the window ends sends them unchanged.
-            let crew_timezone = crew_timezone_in_tx(&mut tx, workspace_id).await?;
-            let local_hour: i32 = sqlx::query_scalar(
-                "SELECT EXTRACT(HOUR FROM $1::timestamptz AT TIME ZONE $2)::int",
-            )
-            .bind(now)
-            .bind(&crew_timezone)
-            .fetch_one(&mut *tx)
-            .await
-            .map_err(map_sqlx)?;
-            // The window wraps midnight, so the check is "not within the
-            // waking span" — [08:00, 21:00) local is when crew mail may go.
-            if !(CREW_QUIET_END_LOCAL_HOUR..CREW_QUIET_START_LOCAL_HOUR).contains(&local_hour) {
-                tx.commit().await.map_err(map_sqlx)?;
-                return Ok(0);
-            }
-
-            // Same reasoning as the handoff sweep: a gated capability is an
-            // operator's decision, not a fault, and reporting it as a failed
-            // cycle every sixty seconds trains everyone to ignore the log.
-            let can_email =
-                super::executor_capability_available(&mut tx, workspace_id, "team.email").await?;
-            let rows = sqlx::query_as::<_, ReminderRow>(
-                r#"
-                SELECT assignment.id assignment_id,
-                       action.id action_id,
-                       action.action_kind, action.context, assignment.source_kind,
-                       assignment.source_ref, event.title event_title,
-                       release.title release_title,
-                       day.title plan_title, day.scheduled_for plan_scheduled_for,
-                       plan.items plan_items,
-                       member.display_name, member.normalized_email,
-                       assignment.due_at, assignment.reminder_count,
-                       action.payload
-                FROM viryaos_team_assignments assignment
-                JOIN workspace_members member
-                  ON member.workspace_id=assignment.workspace_id
-                 AND member.id=assignment.assignee_member_id
-                LEFT JOIN viryaos_autopilot_actions action
-                  ON action.workspace_id=assignment.workspace_id
-                 AND action.id=assignment.action_id
-                LEFT JOIN events event
-                  ON assignment.source_kind='show_task'
-                 AND event.workspace_id=assignment.workspace_id
-                 AND event.id=assignment.source_id
-                LEFT JOIN viryaos_capture_plans plan
-                  ON assignment.source_kind='capture_plan'
-                 AND plan.workspace_id=assignment.workspace_id
-                 AND plan.id=assignment.source_id
-                LEFT JOIN viryaos_release_plans release
-                  ON assignment.source_kind='release_making_of'
-                 AND release.workspace_id=assignment.workspace_id
-                 AND release.id=assignment.source_id
-                LEFT JOIN viryaos_production_events day
-                  ON day.workspace_id=assignment.workspace_id
-                 AND day.id=plan.production_event_id
-                WHERE assignment.workspace_id=$1
-                  AND assignment.status='open'
-                  AND assignment.next_reminder_at IS NOT NULL
-                  AND assignment.next_reminder_at <= $2
-                  AND (assignment.due_at IS NULL OR assignment.due_at>$2)
-                  AND (assignment.action_id IS NULL OR action.status='awaiting_approval')
-                ORDER BY assignment.next_reminder_at, assignment.id
-                FOR UPDATE OF assignment SKIP LOCKED
-                LIMIT 24
-                "#,
+            let cleared = sqlx::query(
+                r#"UPDATE viryaos_team_assignments
+                   SET next_reminder_at = NULL
+                   WHERE workspace_id = $1 AND next_reminder_at IS NOT NULL"#,
             )
             .bind(workspace_id.into_uuid())
-            .bind(now)
-            .fetch_all(&mut *tx)
+            .execute(&self.pool)
             .await
-            .map_err(map_sqlx)?;
-
-            if !can_email {
-                if !rows.is_empty() {
-                    tracing::warn!(
-                        workspace_id = %workspace_id.into_uuid(),
-                        capability = "team.email",
-                        due = rows.len(),
-                        "team reminders are due but no executor advertises this capability"
-                    );
-                }
-                tx.commit().await.map_err(map_sqlx)?;
-                return Ok(0);
-            }
-
-            let mut queued = 0_u32;
-            // One email per person per sweep, not one per assignment.
-            //
-            // The sweep reads up to 24 due assignments at a time and used to
-            // queue an email for every one of them, all stamped the same
-            // minute. With four content approvals open, the crew member got
-            // four emails with identical subjects — the subject is composed
-            // from the action kind, so tasks of one kind are indistinguishable
-            // — and no way to tell four tasks from one task sent four times.
-            //
-            // Grouping by recipient keeps every fact and removes three
-            // interruptions: the most urgent assignment supplies the subject
-            // and body, and the rest are named underneath it. Each of them
-            // still advances its own reminder bookkeeping, because each of them
-            // was in fact reminded about.
-            let mut by_recipient: Vec<(String, Vec<ReminderRow>)> = Vec::new();
-            for row in rows {
-                match by_recipient
-                    .iter_mut()
-                    .find(|(email, _)| *email == row.normalized_email)
-                {
-                    Some((_, group)) => group.push(row),
-                    None => by_recipient.push((row.normalized_email.clone(), vec![row])),
-                }
-            }
-
-            for (_, group) in by_recipient {
-                let Some(primary) = group.first() else {
-                    continue;
-                };
-                let reminder_number = primary.reminder_count.saturating_add(1);
-                let title = reminder_title(primary, crew_locale);
-                let others: Vec<String> = group
-                    .iter()
-                    .skip(1)
-                    .map(|row| reminder_title(row, crew_locale))
-                    .collect();
-                let detail = format!(
-                    "{}{}",
-                    reminder_detail(primary, crew_locale),
-                    digest_tail(&others, crew_locale)
-                );
-                queue_team_email_action(
-                    &mut tx,
-                    workspace_id,
-                    primary.assignment_id,
-                    primary.context.as_deref().unwrap_or("show_operations"),
-                    &primary.normalized_email,
-                    &primary.display_name,
-                    title,
-                    detail,
-                    primary.due_at,
-                    // Clamped to the ladder's length so the frame can tell the
-                    // recipient which reminder is the last one. It was clamped
-                    // at 12 when the cadence had no ceiling.
-                    u8::try_from(reminder_number.clamp(1, MAX_REMINDERS_PER_ASSIGNMENT))
-                        .unwrap_or(MAX_REMINDERS_PER_ASSIGNMENT as u8),
-                    primary.action_id,
-                    now,
-                )
-                .await?;
-                // Every assignment in the digest, not only the one that gave
-                // the email its subject: each was named in the body, so each
-                // has been reminded about and each owes its own next rung.
-                for row in &group {
-                    let row_next = next_reminder_at(now, row.due_at, row.reminder_count);
-                    sqlx::query(
-                        r#"UPDATE viryaos_team_assignments
-                           SET last_reminded_at=$3, next_reminder_at=$4,
-                               reminder_count=reminder_count+1,
-                               first_overdue_reminder_at = COALESCE(first_overdue_reminder_at, CASE WHEN due_at IS NOT NULL AND $3 > due_at THEN $3 END)
-                           WHERE workspace_id=$1 AND id=$2 AND status='open'"#,
-                    )
-                    .bind(workspace_id.into_uuid())
-                    .bind(row.assignment_id)
-                    .bind(now)
-                    .bind(row_next)
-                    .execute(&mut *tx)
-                    .await
-                    .map_err(map_sqlx)?;
-                }
-                queued = queued.saturating_add(1);
-            }
-            tx.commit().await.map_err(map_sqlx)?;
-            Ok(queued)
+            .map_err(map_sqlx)?
+            .rows_affected();
+            Ok(u32::try_from(cleared).unwrap_or(u32::MAX))
         })
         .await
     }
@@ -734,8 +550,7 @@ pub(super) async fn queue_team_email_action(
     // Crew mail keeps the tenant's night quiet — `available_at` holds the
     // notice to the window's end instead of a 03:00 inbox. The row exists,
     // audits and says exactly what was composed; it is simply not claimable
-    // until morning. The dispatch sweep's own gate covers the reminder half;
-    // this covers every first notice, whichever producer queued it.
+    // until morning. This covers every notice, whichever producer queued it.
     let crew_timezone = crew_timezone_in_tx(tx, workspace_id).await?;
     let available_at: OffsetDateTime = sqlx::query_scalar(
         r#"
@@ -805,16 +620,14 @@ pub(super) async fn queue_team_email_action(
 
 /// Sends every held first-notice as one e-mail per member: the earliest-due
 /// task supplies the subject and body, and the rest are named underneath it
-/// through the same digest tail the reminder sweep composes.
+/// through the digest tail.
 ///
 /// A batch of approvals landing in one cycle used to mail one notice per
 /// assignment, all stamped the same minute — the inbox learned to ignore
-/// VIRYA mail entirely, which is what the reminder digest was built to undo.
-/// The initial send had the same shape and the same cost; it gets the same
-/// fix. The e-mail is still one durable action row per member, idempotent on
-/// the primary assignment — a notice folded into somebody else's e-mail is
-/// never mailed on its own, and its assignment still keeps its own reminder
-/// ladder, so nothing named here can go silent.
+/// VIRYA mail entirely, which is what the digest tail was built to undo.
+/// The e-mail is still one durable action row per member, idempotent on the
+/// primary assignment — a notice folded into somebody else's e-mail is never
+/// mailed on its own.
 async fn flush_initial_notices(
     tx: &mut Transaction<'_, Postgres>,
     workspace_id: WorkspaceId,
@@ -1094,7 +907,7 @@ pub(super) async fn crew_locale_in_tx(
 }
 
 /// The tenant's own clock (`crew_timezone`), read inside the caller's
-/// transaction so the briefing's day boundary and a reminder's quiet window
+/// transaction so the briefing's day boundary and a notice's quiet window
 /// cannot disagree mid-sweep.
 ///
 /// Same rules as `crew_locale`: trimmed, IANA-validated, and UTC when the row
@@ -1118,73 +931,23 @@ pub(super) async fn crew_timezone_in_tx(
         .unwrap_or_else(|| "UTC".to_owned()))
 }
 
-pub(super) fn first_reminder_at(
-    now: OffsetDateTime,
-    due: Option<OffsetDateTime>,
-) -> Option<OffsetDateTime> {
-    let normal = now + TimeDuration::hours(24);
-    due.map_or(Some(normal), |due_at| {
-        let urgent = due_at - TimeDuration::hours(6);
-        (normal < urgent)
-            .then_some(normal)
-            .or_else(|| (urgent > now).then_some(urgent))
-    })
-}
-
-/// Reminders one assignment may ever produce, after the first email.
+/// The reminder ceiling the e-mail frame still renders for.
 ///
-/// Three, and then the machine stops asking. A fourth reminder has never once
-/// been the thing that made somebody do a task: if three did not move it, the
-/// task is mis-assigned, mis-scoped or not actually wanted, and that is a
-/// staffing question for the operator rather than another line in a crew
-/// member's inbox. Silence after three is information too — the follow-through
-/// score already records how many reminders each completion needed.
+/// The reminder lane is retired — nothing schedules `next_reminder_at` and the
+/// drain sweep clears whatever is left — but the payload contract still
+/// carries `reminder_number`, and a row written before the retirement (or a
+/// rolled-back build) can still arrive with a nonzero one. The frame keeps
+/// answering "which reminder is this" for those rows; three was the ladder's
+/// length when it existed.
 const MAX_REMINDERS_PER_ASSIGNMENT: i32 = 3;
 
 /// Crew mail's quiet window, in the tenant's local hour — 21:00 to the
 /// briefing's own 08:00, so the first mail of the day lands with the morning
 /// briefing rather than ahead of it. Overnight is not an emergency channel:
-/// a task whose 6-hour rung falls at 03:00 waits three hours and loses
-/// nothing, because nobody should have been reading mail at 03:00.
+/// a first notice composed at 03:00 waits three hours and loses nothing,
+/// because nobody should have been reading mail at 03:00.
 const CREW_QUIET_START_LOCAL_HOUR: i32 = 21;
 const CREW_QUIET_END_LOCAL_HOUR: i32 = 8;
-
-/// Hours before the due time at which each reminder lands.
-///
-/// Anchored to the deadline rather than to the previous send, which is the
-/// whole fix. The old rule spaced reminders 24h, then 12h, then every 6 hours
-/// from *now* until the due time, so a task due in a week produced somewhere
-/// near thirty emails and every one of them said the same thing. Anchoring to
-/// the deadline means each reminder arrives when it changes what the recipient
-/// would do: two days out is still plannable, a day out is today's problem,
-/// six hours out is now or never.
-const REMINDER_LADDER_HOURS: [i64; MAX_REMINDERS_PER_ASSIGNMENT as usize] = [48, 24, 6];
-
-/// When the next reminder for this assignment is due, if there should be one.
-///
-/// `None` means never again: the ladder is spent, the deadline is too close for
-/// another rung to fall before it, or the assignment has no due time at all —
-/// in which case the single nudge `first_reminder_at` scheduled is the whole of
-/// the chasing, because there is no deadline to count down to.
-fn next_reminder_at(
-    now: OffsetDateTime,
-    due: Option<OffsetDateTime>,
-    reminder_count: i32,
-) -> Option<OffsetDateTime> {
-    let due_at = due?;
-    if reminder_count >= MAX_REMINDERS_PER_ASSIGNMENT {
-        return None;
-    }
-    // Start at the rung matching how many reminders this assignment has had,
-    // then walk down: a task assigned 30 hours before it is due skips the
-    // 48-hour rung, because that moment is already behind us.
-    let start = usize::try_from(reminder_count.max(0)).unwrap_or(0);
-    REMINDER_LADDER_HOURS
-        .get(start..)?
-        .iter()
-        .map(|hours| due_at - TimeDuration::hours(*hours))
-        .find(|candidate| *candidate > now)
-}
 
 include!("team/task_copy.rs");
 include!("team/reminder_copy.rs");

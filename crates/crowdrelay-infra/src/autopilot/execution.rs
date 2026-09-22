@@ -505,6 +505,9 @@ pub(super) async fn schedule_effect_measurement(
         // happened to be last would be a number that reads as attribution and
         // is not. Phase 14 measures the play against its own pre-play baseline.
         | AutopilotActionPayload::RunPlayStep { .. }
+        // The fix's effect is the listing it completes — measured at the play
+        // level with the sweep that found the gap, not as a send to anybody.
+        | AutopilotActionPayload::SetEventTicketUrl { .. }
         | AutopilotActionPayload::SendTeamAssignmentEmail { .. }
         | AutopilotActionPayload::RequestOutreachTarget { .. } => {}
         // A fan lifecycle message (welcome, re-engagement, referral invite)

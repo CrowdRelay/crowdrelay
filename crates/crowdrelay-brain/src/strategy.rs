@@ -300,7 +300,11 @@ impl GrowthStrategy {
     /// compounding stops being sent to Reddit first merely because the list was
     /// written that way. With no evidence it returns the prior unchanged.
     pub fn template_priority_for(self, world: &WorldModel) -> Vec<&'static str> {
-        crate::platform_yield::rank_templates(self.template_priority(), &world.platform_growth)
+        crate::platform_yield::rank_templates(
+            self.template_priority(),
+            &world.platform_growth,
+            &world.channel_yield,
+        )
     }
 
     pub fn template_priority(self) -> &'static [&'static str] {

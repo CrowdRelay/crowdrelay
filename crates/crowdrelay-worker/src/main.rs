@@ -1049,6 +1049,16 @@ async fn run(database: PgPool, config: &Config, standby: bool) -> Result<()> {
     // brain queued parked with `awaiting_executor` while the worker that
     // would send it polled an empty claim.
     in_process_capabilities.push("team.email");
+    // `play.step` for `RunPlayStep`: the generic dispatcher claims the action
+    // and `execute_play_step` does the real work in the action's own
+    // transaction — the recipient ledger, the push delivery rows, the listing
+    // or pre-save check result, and the outbox intent. No credential, no
+    // external provider: everything this capability owes lives in this
+    // process, so it is advertised unconditionally. Third-party steps route
+    // to `play.step.third_party`, which nobody here advertises on purpose —
+    // a curator wave contacts people outside the workspace and stays parked
+    // until an executor that actually sends that outreach registers it.
+    in_process_capabilities.push("play.step");
     if let Some(registrar) = crowdrelay_worker::executor_registry::ExecutorRegistrar::new(
         database.clone(),
         workspace_id,

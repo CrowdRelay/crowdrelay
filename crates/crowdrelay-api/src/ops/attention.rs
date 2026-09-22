@@ -13,14 +13,25 @@ struct AttentionEcosystemOverview {
 /// `PendingAutopilotAction` (which includes payload, briefing, assignee,
 /// executor readiness, etc.) — the attention snapshot is a summary view,
 /// not a detail modal.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, sqlx::FromRow)]
 struct PendingActionSummary {
     id: uuid::Uuid,
     context: String,
     action_kind: String,
     subject_kind: String,
+    /// The community the action targets, when the payload names one.
+    subreddit: Option<String>,
+    /// What the content is called, when the payload names one.
+    title: Option<String>,
+    /// Which workflow template the action runs, when the payload names one.
+    template_id: Option<String>,
     #[serde(with = "time::serde::rfc3339::option")]
     approval_expires_at: Option<OffsetDateTime>,
+    /// Total matching rows across the whole query, not just this page.
+    /// Carried on every row by the window function; not part of the wire
+    /// shape.
+    #[serde(skip)]
+    total_count: i64,
 }
 
 /// One channel's backlog of drafted-but-unpublished posts.
@@ -126,6 +137,17 @@ struct OperatorAttentionSnapshot {
     /// which promoter never heard from the band, which is the only version of
     /// that fact an operator can act on.
     failed_sends: FailedSends,
+    /// Escalations the brain raised for the band, newest per subject.
+    ///
+    /// Every `show.escalation` emission is a durable outbox row — the emit is
+    /// the record that a task needed a person or a report came due, and an
+    /// email that never left does not un-happen it. Until now that record was
+    /// only visible to the outbox machinery: a parked `show.escalation` lane
+    /// meant the band never heard about the thing the brain flagged, and the
+    /// attention board — the view that exists to answer "what needs me?" —
+    /// said nothing. This reads the source directly, deduplicated per
+    /// subject so a re-raised task shows once at its latest raise.
+    band_notices: Vec<BandNotice>,
 }
 
 /// The brain's own verdict, and whether it is asking for a person.
@@ -189,7 +211,7 @@ pub(crate) struct CalibrationReadout {
 
 pub async fn attention(State(state): State<crate::AppState>, headers: HeaderMap) -> Response {
     let timeout_duration = state.ops.operation_timeout;
-    // Eleven reads, each paying one permit of the process-wide control-plane
+    // Fourteen reads, each paying one permit of the process-wide control-plane
     // budget — the ecosystem arm pays its leaves individually inside
     // `load_attention_ecosystem`. Without a shared bound this page asks for
     // more connections than the pool has and holds every one of them, so any
@@ -212,15 +234,16 @@ pub async fn attention(State(state): State<crate::AppState>, headers: HeaderMap)
         run_limited(budget, timeout_duration, load_blocked_communities(&state.ops));
     let lapsed = run_limited(budget, timeout_duration, load_lapsed_approvals(&state.ops));
     let failed = run_limited(budget, timeout_duration, load_failed_sends(&state.ops));
+    let notices = run_limited(budget, timeout_duration, load_band_notices(&state.ops));
 
     let (
         summary, alerts, dead_outbox, dead_deliveries, dead_push,
         ecosystem, findings, needs_you, brain, unpublished_drafts,
-        blocked_communities, lapsed, failed,
+        blocked_communities, lapsed, failed, notices,
     ) = tokio::join!(
         summary, alerts, dead_outbox, dead_deliveries, dead_push,
         ecosystem, findings, needs_you, brain, unpublished_drafts,
-        blocked_communities, lapsed, failed,
+        blocked_communities, lapsed, failed, notices,
     );
 
     let request_id_value = request_id(&headers);
@@ -276,6 +299,10 @@ pub async fn attention(State(state): State<crate::AppState>, headers: HeaderMap)
         Ok(value) => value,
         Err(error) => return error.into_response(request_id(&headers)),
     };
+    let band_notices = match notices {
+        Ok(value) => value,
+        Err(error) => return error.into_response(request_id(&headers)),
+    };
 
     let (needs_you, awaiting_approval) = needs_you;
 
@@ -296,6 +323,7 @@ pub async fn attention(State(state): State<crate::AppState>, headers: HeaderMap)
             brain,
             lapsed_approvals,
             failed_sends,
+            band_notices,
         },
     )
 }
@@ -553,6 +581,57 @@ async fn load_dead_push(state: &OpsState) -> Result<Vec<PushDeliveryItem>, OpsEr
     .map_err(OpsError::sqlx)
 }
 
+async fn load_band_notices(state: &OpsState) -> Result<Vec<BandNotice>, OpsError> {
+    // The `show.escalation` event set — every kind the capability map routes
+    // to the band-facing lane — kept as a literal list because this surface
+    // reads the durable record, not the map that emitted it. A kind added to
+    // the lane without an entry here is an escalation that happened and no
+    // screen shows; the contract test pins the two together.
+    sqlx::query_as::<_, BandNotice>(
+        r#"
+        SELECT deduped.id, deduped.kind, deduped.detail, deduped.delivered,
+               deduped.created_at
+        FROM (
+            SELECT DISTINCT ON (scoped.event_type, scoped.subject_key)
+                   scoped.id,
+                   substring(scoped.event_type from 'crowdrelay\.(.*)') AS kind,
+                   scoped.payload AS detail,
+                   (scoped.status = 'delivered') AS delivered,
+                   scoped.created_at
+            FROM (
+                SELECT id, event_type, payload, status, created_at,
+                       COALESCE(
+                           NULLIF(payload->>'event_id', ''),
+                           NULLIF(payload->>'release_id', ''),
+                           NULLIF(payload->>'opportunity_id', ''),
+                           id::text
+                       ) || ':' || COALESCE(payload->>'task', '') AS subject_key
+                FROM outbox_events
+                WHERE workspace_id = $1
+                  AND event_type IN (
+                      'crowdrelay.show.task_attention_required',
+                      'crowdrelay.show.post_show_report_due',
+                      'crowdrelay.release.r3_report_due',
+                      'crowdrelay.release.r14_report_due',
+                      'crowdrelay.release.likely_listeners',
+                      'crowdrelay.release.editorial_pitch_parked',
+                      'crowdrelay.release.editorial_pitch_escalated',
+                      'crowdrelay.opportunity.counterparty_report_issued'
+                  )
+                  AND created_at > now() - INTERVAL '14 days'
+            ) AS scoped
+            ORDER BY scoped.event_type, scoped.subject_key, scoped.created_at DESC
+        ) AS deduped
+        ORDER BY deduped.created_at DESC
+        LIMIT 50
+        "#,
+    )
+    .bind(state.workspace_id.into_uuid())
+    .fetch_all(&state.pool)
+    .await
+    .map_err(OpsError::sqlx)
+}
+
 async fn load_attention_ecosystem(
     state: &crate::AppState,
 ) -> Result<AttentionEcosystemOverview, OpsError> {
@@ -662,47 +741,39 @@ async fn load_open_findings(
 async fn load_needs_you(
     state: &OpsState,
 ) -> Result<(Vec<PendingActionSummary>, i64), OpsError> {
-    let rows: Vec<(uuid::Uuid, String, String, String, Option<OffsetDateTime>, i64)> =
-        sqlx::query_as(
-            r#"
-            SELECT
-                id,
-                context,
-                action_kind,
-                subject_kind,
-                approval_expires_at,
-                count(*) OVER ()::bigint AS total_count
-            FROM viryaos_autopilot_actions
-            WHERE workspace_id = $1
-              AND status = 'awaiting_approval'
-              AND (approval_expires_at IS NULL OR approval_expires_at > now())
-              -- A delivery inside a community relay batch asks through the
-              -- batch card, not this list — one card for the spread, not one
-              -- per community it lands in.
-              AND NOT (
-                  action_kind = 'community.engage.request'
-                  AND payload ->> 'source_id' IS NOT NULL
-              )
-            ORDER BY created_at, id
-            LIMIT 50
-            "#,
-        )
-        .bind(state.workspace_id.into_uuid())
-        .fetch_all(&state.pool)
-        .await
-        .map_err(OpsError::sqlx)?;
-    let total = rows.first().map_or(0, |r| r.5);
-    let summaries = rows
-        .into_iter()
-        .map(|r| PendingActionSummary {
-            id: r.0,
-            context: r.1,
-            action_kind: r.2,
-            subject_kind: r.3,
-            approval_expires_at: r.4,
-        })
-        .collect();
-    Ok((summaries, total))
+    let rows = sqlx::query_as::<_, PendingActionSummary>(
+        r#"
+        SELECT
+            id,
+            context,
+            action_kind,
+            subject_kind,
+            payload ->> 'subreddit' AS subreddit,
+            payload ->> 'title' AS title,
+            payload ->> 'template_id' AS template_id,
+            approval_expires_at,
+            count(*) OVER ()::bigint AS total_count
+        FROM viryaos_autopilot_actions
+        WHERE workspace_id = $1
+          AND status = 'awaiting_approval'
+          AND (approval_expires_at IS NULL OR approval_expires_at > now())
+          -- A delivery inside a community relay batch asks through the
+          -- batch card, not this list — one card for the spread, not one
+          -- per community it lands in.
+          AND NOT (
+              action_kind = 'community.engage.request'
+              AND payload ->> 'source_id' IS NOT NULL
+          )
+        ORDER BY created_at, id
+        LIMIT 50
+        "#,
+    )
+    .bind(state.workspace_id.into_uuid())
+    .fetch_all(&state.pool)
+    .await
+    .map_err(OpsError::sqlx)?;
+    let total = rows.first().map_or(0, |r| r.total_count);
+    Ok((rows, total))
 }
 
 /// What the approval queue already lost, and what it loses next.

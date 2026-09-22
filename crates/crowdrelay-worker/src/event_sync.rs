@@ -543,59 +543,12 @@ fn country_code(country: Option<&str>, fallback: &str) -> String {
     code.to_owned()
 }
 
+// The fold grammar lives in `crowdrelay_domain::stable_slug` — the manual
+// event-create path mints city slugs through the same function, so a name
+// an operator types lands on the city row sync already registered rather
+// than splitting the registry.
 fn stable_slug(value: &str, fallback: &str) -> String {
-    let mut slug = String::with_capacity(value.len());
-    let mut previous_dash = false;
-    for character in value.chars().map(ascii_fold) {
-        if character.is_ascii_alphanumeric() {
-            slug.push(character.to_ascii_lowercase());
-            previous_dash = false;
-        } else if !previous_dash && !slug.is_empty() {
-            slug.push('-');
-            previous_dash = true;
-        }
-    }
-    while slug.ends_with('-') {
-        slug.pop();
-    }
-    if slug.is_empty() {
-        slug.push_str(fallback);
-    }
-    if slug.len() > 80 {
-        slug.truncate(67);
-        while slug.ends_with('-') {
-            slug.pop();
-        }
-        let hash = Sha256::digest(value.as_bytes());
-        let suffix = hash
-            .get(..6)
-            .map(hex::encode)
-            .unwrap_or_else(|| "000000000000".to_owned());
-        slug.push('-');
-        slug.push_str(&suffix);
-    }
-    slug
-}
-
-fn ascii_fold(character: char) -> char {
-    match character {
-        'ą' | 'Ą' => 'a',
-        'ć' | 'Ć' | 'č' | 'Č' => 'c',
-        'ď' | 'Ď' => 'd',
-        'ę' | 'Ę' | 'é' | 'É' | 'ě' | 'Ě' => 'e',
-        'í' | 'Í' => 'i',
-        'ł' | 'Ł' => 'l',
-        'ń' | 'Ń' | 'ň' | 'Ň' => 'n',
-        'ó' | 'Ó' | 'ö' | 'Ö' => 'o',
-        'ř' | 'Ř' => 'r',
-        'ś' | 'Ś' | 'š' | 'Š' => 's',
-        'ť' | 'Ť' => 't',
-        'ü' | 'Ü' | 'ú' | 'Ú' | 'ů' | 'Ů' => 'u',
-        'ý' | 'Ý' => 'y',
-        'ź' | 'Ź' | 'ż' | 'Ż' | 'ž' | 'Ž' => 'z',
-        'ä' | 'Ä' | 'á' | 'Á' | 'à' | 'À' | 'â' | 'Â' => 'a',
-        other => other,
-    }
+    crowdrelay_domain::stable_slug(value, fallback)
 }
 
 fn encode_path_segment(value: &str) -> String {

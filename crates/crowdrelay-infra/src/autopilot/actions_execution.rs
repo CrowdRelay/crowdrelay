@@ -1065,6 +1065,23 @@ impl PostgresAutopilotRepository {
                     )
                     .await?;
                 }
+                AutopilotActionPayload::SetEventTicketUrl {
+                    event_id,
+                    ticket_url,
+                    ..
+                } => {
+                    // The apply re-verifies what the sweep verified — the gap
+                    // is still a gap and the sale is still open — inside this
+                    // action's own attempt, so an approved stale proposal
+                    // cannot write.
+                    plays::apply_event_ticket_url(
+                        &mut transaction,
+                        workspace_id,
+                        *event_id,
+                        ticket_url,
+                    )
+                    .await?;
+                }
                 AutopilotActionPayload::SendTeamAssignmentEmail {
                     assignment_id, recipient_email, recipient_name, task_title, task_detail,
                     due_at, action_url_path, reminder_number,

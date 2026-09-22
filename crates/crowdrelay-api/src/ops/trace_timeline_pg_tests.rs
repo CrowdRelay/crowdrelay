@@ -142,4 +142,104 @@ mod trace_timeline_postgres_tests {
         assert_eq!(fan_metric.certainty, "FACT");
         assert_eq!(fan_metric.action_id.as_deref(), Some(action_id.to_string().as_str()));
     }
+
+    /// The attention board's band notices read the escalation lane's durable
+    /// record — deduplicated per subject, prefix stripped, delivery state
+    /// reported rather than trusted.
+    #[tokio::test]
+    async fn band_notices_dedupe_per_subject_and_report_delivery() {
+        let Ok(database_url) = std::env::var("CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL") else {
+            return;
+        };
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&database_url)
+            .await
+            .expect("connect");
+        crowdrelay_infra::database::MIGRATOR
+            .run(&pool)
+            .await
+            .expect("migrate");
+
+        let workspace_id = WorkspaceId::new();
+        sqlx::query("INSERT INTO workspaces (id, slug, name) VALUES ($1,$2,$3)")
+            .bind(workspace_id.into_uuid())
+            .bind(format!("notices-{}", workspace_id.into_uuid().simple()))
+            .bind("Notice Tests")
+            .execute(&pool)
+            .await
+            .expect("workspace");
+
+        let event_id = Uuid::now_v7();
+        // The same task escalation raised twice for one show is one notice —
+        // the newer raise wins, and a second row would only ever say "still
+        // owed" about the same thing.
+        for _ in 0..2 {
+            sqlx::query(
+                "INSERT INTO outbox_events (workspace_id, event_type, payload, status, delivered_at)
+                 VALUES ($1,'crowdrelay.show.task_attention_required',$2,'delivered',now())",
+            )
+            .bind(workspace_id.into_uuid())
+            .bind(serde_json::json!({
+                "event_id": event_id,
+                "task": "post_show_report",
+                "action_id": Uuid::now_v7(),
+            }))
+            .execute(&pool)
+            .await
+            .expect("task notice");
+        }
+        sqlx::query(
+            "INSERT INTO outbox_events (workspace_id, event_type, payload, status)
+             VALUES ($1,'crowdrelay.release.r3_report_due',$2,'pending')",
+        )
+        .bind(workspace_id.into_uuid())
+        .bind(serde_json::json!({
+            "release_id": Uuid::now_v7(),
+            "title": "Demo EP",
+            "action_id": Uuid::now_v7(),
+        }))
+        .execute(&pool)
+        .await
+        .expect("release notice");
+        // A lane that is not the band-facing one must not surface here.
+        sqlx::query(
+            "INSERT INTO outbox_events (workspace_id, event_type, payload, status)
+             VALUES ($1,'crowdrelay.play.step_requested',$2,'pending')",
+        )
+        .bind(workspace_id.into_uuid())
+        .bind(serde_json::json!({"action_id": Uuid::now_v7()}))
+        .execute(&pool)
+        .await
+        .expect("non-escalation event");
+
+        let ops = OpsState::new(workspace_id, pool, Duration::from_secs(10));
+        let notices = load_band_notices(&ops)
+            .await
+            .expect("notices query must execute against a real schema");
+
+        assert_eq!(
+            notices.len(),
+            2,
+            "two subjects, not three rows: {notices:?}"
+        );
+        let task = notices
+            .iter()
+            .find(|n| n.kind == "show.task_attention_required")
+            .expect("task notice");
+        assert!(task.delivered, "a delivered emit reports delivered");
+        assert_eq!(
+            task.detail["task"].as_str(),
+            Some("post_show_report"),
+            "the notice carries what the escalation was about"
+        );
+        let release = notices
+            .iter()
+            .find(|n| n.kind == "release.r3_report_due")
+            .expect("release notice");
+        assert!(
+            !release.delivered,
+            "an undelivered escalation is the one the board exists for"
+        );
+    }
 }

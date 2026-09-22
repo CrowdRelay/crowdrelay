@@ -325,11 +325,12 @@ impl PostgresAcquisitionRepository {
         .map_err(StoreError::from_sqlx)?;
 
         let fan: StoredFan = row.try_into()?;
-        let became_active = existing.status != FanStatus::Active && fan.status == FanStatus::Active;
+        // The UPDATE above pins status to 'pending', so this arm can never
+        // produce an active fan — became_active is false by construction.
         Ok(FanUpsert {
             fan,
             created: false,
-            became_active,
+            became_active: false,
             already_active: false,
             already_pending: false,
         })

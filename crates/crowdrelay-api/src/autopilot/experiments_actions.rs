@@ -263,6 +263,13 @@ pub async fn action_sent_record(
 /// twenty, so the cap never stands between an operator and a clear board.
 const MAX_APPROVAL_BATCH: usize = 50;
 
+/// Most deliveries one relay approval may carry revisions for.
+///
+/// A batch's deliveries are bounded by its community list — hundreds is
+/// already a large spread — so a map past this is a client bug, not an
+/// approval to wade through.
+const MAX_RELAY_REVISIONS: usize = 500;
+
 /// `POST /v1/control-plane/autopilot/actions/approve`
 ///
 /// Approve several parked actions in one call.
@@ -739,11 +746,11 @@ pub async fn approve_community_relay(
     };
     // Raw bytes rather than `Option<Json<_>>`: a malformed override must fail
     // loudly, not silently approve at the default cadence.
-    let interval_seconds = if body.is_empty() {
-        None
+    let (interval_seconds, mut revisions) = if body.is_empty() {
+        (None, None)
     } else {
         match serde_json::from_slice::<CommunityRelayApproveRequest>(&body) {
-            Ok(request) => request.interval_seconds,
+            Ok(request) => (request.interval_seconds, request.revisions),
             Err(_) => {
                 return Problem::bad_request(request_id(&headers))
                     .private()
@@ -751,6 +758,12 @@ pub async fn approve_community_relay(
             }
         }
     };
+    // A delivery left untouched is an absent edit, not an empty one — a
+    // client that submits a map per card row must not kill the approval
+    // with a `NoChange` refusal for the rows nobody edited.
+    if let Some(map) = &mut revisions {
+        map.retain(|_, fields| !fields.is_empty());
+    }
     // The same floor the table's CHECK enforces — rejected here so an
     // out-of-range override reads as a bad request, not a 500.
     if let Some(seconds) = interval_seconds
@@ -759,6 +772,47 @@ pub async fn approve_community_relay(
         return Problem::bad_request(request_id(&headers))
             .private()
             .into_response();
+    }
+    if let Some(revisions) = &revisions {
+        // A batch never has more deliveries than its card shows; a map past
+        // that bound is a client bug, not an approval.
+        if revisions.len() > MAX_RELAY_REVISIONS {
+            return Problem::bad_request(request_id(&headers))
+                .private()
+                .into_response();
+        }
+        // Same boundary check `approve_action` runs: name the field while
+        // the refusal can still be specific.
+        for fields in revisions.values() {
+            for (field, text) in fields {
+                if !crowdrelay_domain::draft_revision::RELAY_REVISABLE_FIELDS
+                    .contains(&field.as_str())
+                {
+                    return Problem::conflict_owned(
+                        crowdrelay_domain::draft_revision::RevisionRefusal::FieldNotRevisable {
+                            field: field.clone(),
+                        }
+                        .message()
+                        .into(),
+                        request_id(&headers),
+                    )
+                    .private()
+                    .into_response();
+                }
+                if text.trim().is_empty() {
+                    return Problem::conflict_owned(
+                        crowdrelay_domain::draft_revision::RevisionRefusal::FieldEmptied {
+                            field: field.clone(),
+                        }
+                        .message()
+                        .into(),
+                        request_id(&headers),
+                    )
+                    .private()
+                    .into_response();
+                }
+            }
+        }
     }
     let idempotency_key = match parse_idempotency_key(&headers) {
         Ok(value) => value,
@@ -771,6 +825,7 @@ pub async fn approve_community_relay(
             state.ops.workspace_id(),
             source_id,
             interval_seconds,
+            revisions.as_ref(),
             &idempotency_key,
             request_id_value.as_ref(),
         )

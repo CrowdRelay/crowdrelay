@@ -518,6 +518,10 @@ async fn process_paid_order(
                     crowdrelay_domain::FanId::from_uuid(fan_id),
                     "ticket_purchase",
                     &format!("ticket_order:{}", order.id),
+                    &crowdrelay_infra::acquisition::ArrivalContext {
+                        source_target: Some(format!("ticket_order:{}", order.id)),
+                        campaign_id: None,
+                    },
                 )
                 .await
                 .map_err(TicketingError::sqlx)?;

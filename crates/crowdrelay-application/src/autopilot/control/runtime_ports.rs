@@ -304,11 +304,19 @@ pub trait AutopilotControlRepository: Send + Sync {
     /// approval queues under it instead of parking a second ask. Deliveries
     /// drip out at `interval_seconds` on the community executor; the card the
     /// operator approved said exactly that cadence.
+    ///
+    /// `revisions` maps a delivery's `action_id` to the operator's corrected
+    /// fields — the card's edit boxes. Each entry goes through the same
+    /// draft-revision gate a single-action approval applies, and a refused
+    /// edit refuses the whole approval rather than approving around it.
     async fn approve_community_relay(
         &self,
         workspace_id: WorkspaceId,
         source_id: uuid::Uuid,
         interval_seconds: Option<i32>,
+        revisions: Option<
+            &std::collections::BTreeMap<uuid::Uuid, std::collections::BTreeMap<String, String>>,
+        >,
         idempotency_key: &crate::IdempotencyKey,
         request_id: Option<&crate::RequestId>,
     ) -> Result<AutopilotControlMutation, RepositoryError>;

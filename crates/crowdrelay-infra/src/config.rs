@@ -30,7 +30,7 @@ mod team;
 use click::parse_click_buffer_config;
 pub use meta::{AdConversionConfig, BandsintownConversionConfig, GoogleAdsConfig, MetaCapiConfig};
 pub use push::PushPublicConfig;
-pub use team::TeamOperationsConfig;
+pub use team::{TEAM_MEMBERS_JSON_KEY, TeamMemberSpec, TeamOperationsConfig};
 use team::{
     VIRYA_TEAM_MEMBER_1_EMAIL_KEY, VIRYA_TEAM_MEMBER_2_EMAIL_KEY, VIRYA_TEAM_MEMBER_3_EMAIL_KEY,
     VIRYA_TEAM_MEMBER_4_EMAIL_KEY, VIRYA_TEAM_MEMBER_5_EMAIL_KEY, parse_team_operations,
@@ -192,6 +192,7 @@ const KNOWN_KEYS: &[&str] = &[
     QR_SIGNING_SECRET_KEY,
     ADMIN_MEMBER_EMAIL_KEY,
     STAFF_MEMBER_EMAIL_KEY,
+    TEAM_MEMBERS_JSON_KEY,
     VIRYA_TEAM_MEMBER_1_EMAIL_KEY,
     VIRYA_TEAM_MEMBER_2_EMAIL_KEY,
     VIRYA_TEAM_MEMBER_3_EMAIL_KEY,
@@ -296,6 +297,13 @@ pub struct Config {
     pub attestation_signing_key: AttestationSigningKey,
     /// Optional immediately preceding AEAD key used during bounded rotation.
     pub previous_response_encryption_key: Option<SensitiveResponseKey>,
+    /// Derived AEAD key for the workspace-secrets store (tenant-configured
+    /// credentials — Stripe keys first). Same configured secret, its own
+    /// domain separator, same reasoning as `attestation_signing_key`.
+    pub workspace_secrets_key: SensitiveResponseKey,
+    /// Optional immediately preceding secrets key, derived from the previous
+    /// configured secret so a rotation can still read rows it wrote.
+    pub previous_workspace_secrets_key: Option<SensitiveResponseKey>,
     /// Requires inbox ownership confirmation before a fan becomes active.
     pub require_double_opt_in: bool,
     /// Public/runtime push-delivery controls. Provider secrets remain worker-only.
@@ -503,6 +511,11 @@ impl Config {
             values.get(PREVIOUS_RESPONSE_ENCRYPTION_SECRET_KEY),
             environment.is_production(),
         )?;
+        let workspace_secrets_key =
+            derive_workspace_secrets_key(values.get(RESPONSE_ENCRYPTION_SECRET_KEY));
+        let previous_workspace_secrets_key = derive_previous_workspace_secrets_key(
+            values.get(PREVIOUS_RESPONSE_ENCRYPTION_SECRET_KEY),
+        );
         if previous_response_encryption_key.as_ref() == Some(&response_encryption_key) {
             return Err(ConfigError::InvalidSecret {
                 name: PREVIOUS_RESPONSE_ENCRYPTION_SECRET_KEY,
@@ -550,6 +563,8 @@ impl Config {
             response_encryption_key,
             attestation_signing_key,
             previous_response_encryption_key,
+            workspace_secrets_key,
+            previous_workspace_secrets_key,
             require_double_opt_in,
             push_delivery: PushPublicConfig::parse(&values)?,
             rate_limit,
@@ -772,9 +787,13 @@ pub enum ConfigError {
     #[error("production admission API requires {name}")]
     MissingProductionAdmissionSecret { name: &'static str },
 
-    /// Production Autopilot needs every configured team owner to have a secret-backed contact.
+    /// Production Autopilot needs at least one reachable team owner contact.
     #[error("production Autopilot team routing requires {name}")]
     MissingProductionTeamContact { name: &'static str },
+
+    /// `CROWDRELAY_TEAM_MEMBERS_JSON` could not be parsed into a valid roster.
+    #[error("environment variable CROWDRELAY_TEAM_MEMBERS_JSON is invalid: {detail}")]
+    InvalidTeamMembersJson { detail: String },
 
     /// A member email address failed validation.
     #[error("environment variable {name} must contain a valid normalized email address")]

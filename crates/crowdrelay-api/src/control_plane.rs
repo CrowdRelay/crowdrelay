@@ -45,6 +45,13 @@ pub(crate) fn router(state: crate::AppState) -> Router {
             "/v1/control-plane/ops/attention",
             get(crate::ops::attention),
         )
+        // The intelligence brief: one read composing the brain's verdict,
+        // its posture, its plan, what it found, what it did, and what needs
+        // the operator — the "are we getting anywhere" answer.
+        .route(
+            "/v1/control-plane/ops/intelligence",
+            get(crate::ops::intelligence),
+        )
         .route("/v1/control-plane/ops/outbox", get(crate::ops::list_outbox))
         .route(
             "/v1/control-plane/ops/outbox/{event_id}/retry",
@@ -90,6 +97,17 @@ pub(crate) fn router(state: crate::AppState) -> Router {
             "/v1/control-plane/ops/delivery-results",
             get(crate::ops::list_delivery_results),
         )
+        // Process-run read models: one pass of a pipeline over one subject,
+        // joined into the step shape the process pages render. The community
+        // relay is the first kind.
+        .route(
+            "/v1/control-plane/processes/relays",
+            get(crate::ops::process_relays),
+        )
+        .route(
+            "/v1/control-plane/processes/relays/{source_id}",
+            get(crate::ops::process_relay_run),
+        )
         .route(
             "/v1/control-plane/ecosystem/overview",
             get(crate::ecosystem::overview),
@@ -110,9 +128,16 @@ pub(crate) fn router(state: crate::AppState) -> Router {
             "/v1/control-plane/ecosystem/flags/{key}",
             post(crate::ecosystem::update_flag),
         )
+        // The operator's third show write: a label that never ran a
+        // sync source types the night in by hand. Same handler
+        // staff/admin mount. (The comment sits above the route because a
+        // line comment inside the verb chain breaks the reachability
+        // contract's verb regex.)
         .route(
             "/v1/control-plane/events",
-            get(crate::concert_qr::control_plane_events),
+            get(crate::concert_qr::control_plane_events)
+                .post(crate::events::create_event)
+                .layer(DefaultBodyLimit::max(MAX_EVENT_BILL_BODY_BYTES)),
         )
         .route(
             "/v1/control-plane/events/{event_slug}/timeline",
@@ -318,6 +343,19 @@ pub(crate) fn router(state: crate::AppState) -> Router {
         .route(
             "/v1/control-plane/tenant-settings/{key}",
             post(crate::tenant_settings_http::upsert_setting),
+        )
+        // Tenant-held credentials (Stripe keys first): the masked list, the
+        // write-only set, and the unset. A stored value can be replaced or
+        // removed here but never read back — the reveal is the internal
+        // route's, over the commerce credential.
+        .route(
+            "/v1/control-plane/secrets",
+            get(crate::workspace_secrets_http::list_secrets),
+        )
+        .route(
+            "/v1/control-plane/secrets/{name}",
+            put(crate::workspace_secrets_http::put_secret)
+                .delete(crate::workspace_secrets_http::delete_secret),
         )
         .route(
             "/v1/control-plane/fanbases",

@@ -881,6 +881,31 @@ pub(super) struct PlayStepDispatch<'a> {
     pub template_key: &'a str,
 }
 
+/// The show an event-anchored step locks onto, with the listing fields a
+/// `listing_sweep` step is there to check.
+#[derive(sqlx::FromRow)]
+struct PlayStepEventRow {
+    step_id: Uuid,
+    title: String,
+    slug: String,
+    starts_at: OffsetDateTime,
+    venue: Option<String>,
+    ticket_url: Option<String>,
+    external_event_url: Option<String>,
+    source_provider: Option<String>,
+    city_id: Option<Uuid>,
+}
+
+/// The release a release-anchored step locks onto, with the tracked link its
+/// fan-facing steps point at.
+#[derive(sqlx::FromRow)]
+struct PlayStepReleaseRow {
+    title: String,
+    release_at: OffsetDateTime,
+    listen_url: Option<String>,
+    link_slug: Option<String>,
+}
+
 /// Dispatches one step of a play to one fan.
 ///
 /// Consent is re-checked here and not taken from the decision. Time passes
@@ -915,11 +940,13 @@ pub(super) async fn execute_play_step(
     // Two statements rather than an outer join, because Postgres will not take
     // `FOR SHARE` on the nullable side of one: merging them would quietly drop
     // the lock that keeps a show from being unpublished mid-dispatch.
-    let (step_id, event_facts) = match event_id {
+    let (step_id, anchor_kind, anchor_id, event_row) = match event_id {
         Some(event_id) => {
-            let row = sqlx::query_as::<_, (Uuid, String, String, OffsetDateTime, Option<String>)>(
+            let row = sqlx::query_as::<_, PlayStepEventRow>(
                 r#"
-                    SELECT step.id, event.title, event.slug, event.starts_at, event.venue
+                    SELECT step.id AS step_id, event.title, event.slug, event.starts_at,
+                           event.venue, event.ticket_url, event.external_event_url,
+                           event.source_provider, event.city_id
                     FROM viryaos_play_steps AS step
                     JOIN viryaos_plays AS play
                       ON play.workspace_id = step.workspace_id
@@ -944,20 +971,16 @@ pub(super) async fn execute_play_step(
             .map_err(map_sqlx)?
             .ok_or(RepositoryError::Conflict)?;
             (
-                row.0,
-                Some(json!({
-                    "id": event_id,
-                    "title": row.1,
-                    "slug": row.2,
-                    "starts_at": row.3,
-                    "venue": row.4,
-                })),
+                row.step_id,
+                "event".to_owned(),
+                event_id.into_uuid(),
+                Some(row),
             )
         }
         None => {
-            let row = sqlx::query_as::<_, (Uuid,)>(
+            let row = sqlx::query_as::<_, (Uuid, String, Uuid)>(
                 r#"
-                SELECT step.id
+                SELECT step.id, play.anchor_kind, play.anchor_id
                 FROM viryaos_play_steps AS step
                 JOIN viryaos_plays AS play
                   ON play.workspace_id = step.workspace_id
@@ -977,8 +1000,44 @@ pub(super) async fn execute_play_step(
             .await
             .map_err(map_sqlx)?
             .ok_or(RepositoryError::Conflict)?;
-            (row.0, None)
+            (row.0, row.1, row.2, None)
         }
+    };
+
+    // A release-anchored play's anchor is the plan, and it must still be live
+    // the way a show must still be on: a plan deactivated while its sends sat
+    // in the queue is the same promotion-after-cancellation failure with a
+    // different anchor type.
+    let release_row = if anchor_kind == "release" {
+        let row = sqlx::query_as::<_, PlayStepReleaseRow>(
+            r#"
+            SELECT plan.title, plan.release_at, plan.listen_url,
+                   link.slug AS link_slug
+            FROM viryaos_release_plans AS plan
+            LEFT JOIN campaigns AS campaign
+              ON campaign.workspace_id = plan.workspace_id
+             AND campaign.release_plan_id = plan.id
+            LEFT JOIN smart_links AS link
+              ON link.workspace_id = campaign.workspace_id
+             AND link.campaign_id = campaign.id
+             AND link.active
+            WHERE plan.workspace_id = $1
+              AND plan.id = $2
+              AND plan.active
+            ORDER BY link.slug
+            LIMIT 1
+            FOR SHARE OF plan
+            "#,
+        )
+        .bind(workspace_id.into_uuid())
+        .bind(anchor_id)
+        .fetch_optional(&mut **transaction)
+        .await
+        .map_err(map_sqlx)?
+        .ok_or(RepositoryError::Conflict)?;
+        Some(row)
+    } else {
+        None
     };
 
     let fan = match fan_id {
@@ -1026,6 +1085,136 @@ pub(super) async fn execute_play_step(
         | PlayKind::ReleaseRunway => None,
     };
 
+    // The in-process delivery leg. A fan-facing step writes the push delivery
+    // itself, in the same transaction as the recipient ledger row, so the
+    // record of who was reached and the queue that reaches them cannot
+    // disagree. A step with no audience records what it checked on the step
+    // row instead — the listing sweep's findings are the work, not a side
+    // effect of it.
+    let polish = fan
+        .as_ref()
+        .and_then(|fan| fan.2.as_deref())
+        .is_none_or(|locale| locale.to_lowercase().starts_with("pl"));
+    let event_date = event_row
+        .as_ref()
+        .map(|event| event.starts_at.date().to_string());
+    let event_path = event_row.as_ref().map(|event| {
+        if polish {
+            format!("/pl/my-signal/?event={}", event.slug)
+        } else {
+            format!("/my-signal/?event={}", event.slug)
+        }
+    });
+    let release_date = release_row
+        .as_ref()
+        .map(|release| release.release_at.date().to_string());
+    let release_link = release_row.as_ref().and_then(|release| {
+        release
+            .link_slug
+            .as_deref()
+            .map(|slug| format!("/l/{slug}"))
+    });
+    let mut push_deliveries = 0_i64;
+    let mut step_result = match step_kind {
+        PlayStepKind::ListingSweep => {
+            match event_row.as_ref() {
+                Some(event) => {
+                    let mut report = listing_report(event);
+                    // The one gap a sweep can close on its own: the event's
+                    // own sale is live and the listing carries no ticket link,
+                    // so the link is a fact we already hold, not an invention.
+                    // What the workspace's posture decides is whether it is
+                    // applied or proposed — the fix is its own action either
+                    // way, so the ledger records who let it through.
+                    if event.ticket_url.is_none()
+                        && let Some(ticket_url) =
+                            live_sale_url(transaction, workspace_id, anchor_id, &event.slug).await?
+                    {
+                        let status = propose_ticket_url_fix(
+                            transaction,
+                            workspace_id,
+                            action_id,
+                            play_id,
+                            step_index,
+                            anchor_id,
+                            &ticket_url,
+                        )
+                        .await?;
+                        if let Some(object) = report.as_object_mut() {
+                            object.insert(
+                                "proposed_fix".to_owned(),
+                                json!({
+                                    "action_kind": "event.ticket_url.set",
+                                    "ticket_url": ticket_url,
+                                    "status": status,
+                                }),
+                            );
+                        }
+                    }
+                    Some(report)
+                }
+                None => None,
+            }
+        }
+        PlayStepKind::ReleasePresaveLive => release_row.as_ref().map(presave_report),
+        _ => None,
+    };
+    if let Some(fan_id) = fan_id
+        && let Some(copy) = step_kind.push_copy(&PlayStepPushFacts {
+            polish,
+            event_title: event_row.as_ref().map(|event| event.title.as_str()),
+            event_date: event_date.as_deref(),
+            event_venue: event_row.as_ref().and_then(|event| event.venue.as_deref()),
+            event_path: event_path.as_deref(),
+            follow_link: follow_link.as_deref(),
+            release_title: release_row.as_ref().map(|release| release.title.as_str()),
+            release_date: release_date.as_deref(),
+            release_link: release_link.as_deref(),
+        })
+    {
+        // One row per endpoint the fan holds, deduped on the action: a retried
+        // claim re-runs this insert and the conflict target makes it a no-op,
+        // which is what lets a crashed attempt resume without double-sending.
+        push_deliveries = sqlx::query(
+            r#"
+            INSERT INTO fan_push_deliveries
+                (workspace_id, fan_id, endpoint_id, source_kind, source_id,
+                 category, title, body, target_path, collapse_key)
+            SELECT $1, $2, endpoint.id, 'play_step', $3, $4, $5, $6, $7, $8
+            FROM fan_push_endpoints AS endpoint
+            WHERE endpoint.workspace_id = $1
+              AND endpoint.fan_id = $2
+              AND endpoint.active
+              AND endpoint.invalidated_at IS NULL
+            ON CONFLICT (workspace_id, source_kind, source_id, endpoint_id) DO NOTHING
+            "#,
+        )
+        .bind(workspace_id.into_uuid())
+        .bind(fan_id.into_uuid())
+        .bind(action_id.into_uuid())
+        .bind(copy.category)
+        .bind(&copy.title)
+        .bind(&copy.body)
+        .bind(&copy.target_path)
+        .bind(format!("play:{play_id}:step:{step_index}"))
+        .execute(&mut **transaction)
+        .await
+        .map_err(map_sqlx)?
+        .rows_affected() as i64;
+        step_result = Some(json!({ "push_deliveries": push_deliveries }));
+    }
+    if let Some(result) = &step_result {
+        sqlx::query(
+            "UPDATE viryaos_play_steps SET result = $3 WHERE workspace_id = $1 AND id = $2 AND settled_at IS NULL",
+        )
+        .bind(workspace_id.into_uuid())
+        .bind(step_id)
+        .bind(result)
+        .execute(&mut **transaction)
+        .await
+        .map_err(map_sqlx)?;
+    }
+
     // The step's own class decides whether this emit is an outward send — a
     // follow ask to a fan carries evidence, a listing sweep of our own pages
     // does not.
@@ -1037,15 +1226,34 @@ pub(super) async fn execute_play_step(
         "step_kind": step_kind.as_str(),
         "template_key": template_key,
         "fan_id": fan_id,
-        "fan": fan.map(|fan| {
+        "fan": fan.as_ref().map(|fan| {
             json!({
                 "email": fan.0,
                 "display_name": fan.1,
                 "locale": fan.2,
             })
         }),
-        "event": event_facts,
+        "event": event_row.as_ref().map(|event| {
+            json!({
+                "id": event_id,
+                "title": event.title,
+                "slug": event.slug,
+                "starts_at": event.starts_at,
+                "venue": event.venue,
+            })
+        }),
+        "release": release_row.as_ref().map(|release| {
+            json!({
+                "id": anchor_id,
+                "title": release.title,
+                "release_at": release.release_at,
+                "listen_url": release.listen_url,
+                "link": release_link,
+            })
+        }),
         "call_to_action_url": follow_link,
+        "push_deliveries": push_deliveries,
+        "report": step_result,
     });
     if step_kind.action_class().is_outward()
         && let Some(map) = step_payload.as_object_mut()
@@ -1092,4 +1300,254 @@ async fn follow_ask_link(
     .map_err(map_sqlx)?
     .map(|slug| format!("/l/{slug}"))
     .ok_or(RepositoryError::Conflict)
+}
+
+/// What a listing sweep found on the anchor's own record.
+///
+/// The sweep verifies what our own database can prove — the show is published
+/// (the anchor lock already guarantees it), it has a ticket link, it carries
+/// an external listing reference, the venue and city are named. Everything it
+/// cannot fix becomes a manual step, because inventing a Bandsintown listing
+/// is work only a human logged into Bandsintown can do.
+fn listing_report(event: &PlayStepEventRow) -> Value {
+    let mut missing = Vec::new();
+    let mut manual_steps = Vec::new();
+    if event.ticket_url.is_none() {
+        missing.push("ticket_url");
+        manual_steps.push("add the ticket link so the listing can sell");
+    }
+    // A synced listing (`source_provider`) or a recorded listing URL both mean
+    // the date exists somewhere outside our page; neither does not prove it is
+    // unlisted, but it proves nothing says it is.
+    if event.external_event_url.is_none() && event.source_provider.is_none() {
+        missing.push("external_listing");
+        manual_steps.push("list the date where fans look for it — Bandsintown first");
+    }
+    if event.venue.is_none() {
+        missing.push("venue");
+        manual_steps.push("name the venue");
+    }
+    if event.city_id.is_none() {
+        missing.push("city");
+        manual_steps.push("pin the city so nearby fans can find the show");
+    }
+    json!({
+        "checked": ["published", "slug", "ticket_url", "external_listing", "venue", "city"],
+        "missing": missing,
+        "manual_steps": manual_steps,
+    })
+}
+
+/// What the pre-save check found: the release's tracked link, or the fact
+/// that there is none to point the announce step at.
+fn presave_report(release: &PlayStepReleaseRow) -> Value {
+    match release.link_slug.as_deref() {
+        Some(slug) => json!({
+            "checked": ["release_active", "presave_link"],
+            "missing": [],
+            "presave_link": format!("/l/{slug}"),
+        }),
+        None => json!({
+            "checked": ["release_active", "presave_link"],
+            "missing": ["presave_link"],
+            "manual_steps": ["create the release's tracked link before the announce step points at it"],
+        }),
+    }
+}
+
+/// The canonical ticket link for an event whose own sale is live.
+///
+/// `None` when no sale is open — a link to a closed sale is a worse listing
+/// than the gap it would fill. The URL is the workspace's own site base plus
+/// the event's public path, both read rather than invented.
+async fn live_sale_url(
+    transaction: &mut Transaction<'_, Postgres>,
+    workspace_id: WorkspaceId,
+    event_id: Uuid,
+    event_slug: &str,
+) -> Result<Option<String>, RepositoryError> {
+    let sale_open = sqlx::query_scalar::<_, bool>(
+        r#"
+        SELECT EXISTS (
+            SELECT 1 FROM ticket_sales
+            WHERE workspace_id = $1
+              AND event_id = $2
+              AND active
+              AND sales_open_at <= now()
+              AND sales_close_at > now()
+        )
+        "#,
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(event_id)
+    .fetch_one(&mut **transaction)
+    .await
+    .map_err(map_sqlx)?;
+    if !sale_open {
+        return Ok(None);
+    }
+    let base = sqlx::query_scalar::<_, Option<String>>(
+        "SELECT value FROM tenant_settings WHERE workspace_id = $1 AND key = 'member_site_base_url'",
+    )
+    .bind(workspace_id.into_uuid())
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(map_sqlx)?
+    .flatten()
+    .unwrap_or_else(|| crate::tenant_settings::DEFAULT_MEMBER_SITE_BASE_URL.to_owned());
+    Ok(Some(format!(
+        "{}/live/{event_slug}",
+        base.trim_end_matches('/')
+    )))
+}
+
+/// Turns the sweep's one safe finding into its own action.
+///
+/// The fix is proposed, never applied here: under `bounded_auto` the row
+/// queues and the dispatcher applies it next pass; under anything weaker it
+/// waits for the operator's click like every other approval. Either way the
+/// write to `events` happens inside an action's own attempt, so the ledger —
+/// not the sweep's result blob — is the record that it happened.
+///
+/// The idempotency key names the finding, not the run: one ticket-link fix
+/// per event, so a second sweep of the same listing never queues a second
+/// proposal. The returned status is what the sweep's report records.
+async fn propose_ticket_url_fix(
+    transaction: &mut Transaction<'_, Postgres>,
+    workspace_id: WorkspaceId,
+    action_id: AutopilotActionId,
+    play_id: PlayId,
+    step_index: u16,
+    event_id: Uuid,
+    ticket_url: &str,
+) -> Result<&'static str, RepositoryError> {
+    let autonomy = sqlx::query_scalar::<_, Option<String>>(
+        "SELECT autonomy_level FROM viryaos_autopilot_policies WHERE workspace_id = $1 AND context = 'plays'",
+    )
+    .bind(workspace_id.into_uuid())
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(map_sqlx)?
+    .flatten();
+    // A missing policy row is the safer read — ask — never the looser one.
+    let status = if autonomy.as_deref() == Some("bounded_auto") {
+        "queued"
+    } else {
+        "awaiting_approval"
+    };
+    let (decision_id, trace_id) = sqlx::query_as::<_, (Uuid, Option<Uuid>)>(
+        "SELECT decision_id, trace_id FROM viryaos_autopilot_actions WHERE workspace_id = $1 AND id = $2",
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(action_id.into_uuid())
+    .fetch_one(&mut **transaction)
+    .await
+    .map_err(map_sqlx)?;
+    let payload = serde_json::to_value(AutopilotActionPayload::SetEventTicketUrl {
+        event_id: EventId::from_uuid(event_id),
+        ticket_url: ticket_url.to_owned(),
+        play_id,
+        step_index,
+    })
+    .map_err(|_| RepositoryError::Unexpected)?;
+    let inserted = sqlx::query_scalar::<_, Uuid>(
+        r#"
+        INSERT INTO viryaos_autopilot_actions (
+            workspace_id, decision_id, context, action_kind, subject_kind,
+            subject_id, idempotency_key, payload, status, action_class,
+            approved_at, approved_by, approval_expires_at,
+            trace_id, causation_id
+        )
+        VALUES (
+            $1, $2, 'plays', 'event.ticket_url.set', 'event', $3, $4, $5, $6,
+            'first_party_reversible',
+            CASE WHEN $6 = 'queued' THEN now() END,
+            CASE WHEN $6 = 'queued' THEN 'policy:bounded_auto' END,
+            CASE WHEN $6 = 'awaiting_approval' THEN now() + INTERVAL '72 hours' END,
+            $7, $8
+        )
+        ON CONFLICT DO NOTHING
+        RETURNING id
+        "#,
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(decision_id)
+    .bind(event_id)
+    .bind(format!("action:listing-fix:{event_id}:ticket_url"))
+    .bind(payload)
+    .bind(status)
+    .bind(trace_id)
+    // The causation is the sweep action itself — the trace shows the fix
+    // hanging off the run that found the gap.
+    .bind(action_id.into_uuid())
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(map_sqlx)?;
+    Ok(if inserted.is_some() {
+        status
+    } else {
+        // The inflight index or the idempotency key already holds this
+        // proposal — a second row would be a second promise to do it.
+        "already_proposed"
+    })
+}
+
+/// Applies the one listing fix a sweep may propose: the ticket link that is
+/// the show's own sale page.
+///
+/// The world is re-checked rather than the proposal trusted — a sale that
+/// closed while the fix waited for approval would leave the link pointing at
+/// a page that can no longer sell, which is worse than the gap it filled.
+/// `Ok` when the field already holds exactly this URL: a retried execution
+/// of a fix that already landed is a no-op, not a conflict.
+pub(super) async fn apply_event_ticket_url(
+    transaction: &mut Transaction<'_, Postgres>,
+    workspace_id: WorkspaceId,
+    event_id: EventId,
+    ticket_url: &str,
+) -> Result<(), RepositoryError> {
+    let applied = sqlx::query(
+        r#"
+        UPDATE events
+        SET ticket_url = $3
+        WHERE workspace_id = $1
+          AND id = $2
+          AND status = 'published'
+          AND ticket_url IS NULL
+          AND EXISTS (
+              SELECT 1 FROM ticket_sales AS sale
+              WHERE sale.workspace_id = events.workspace_id
+                AND sale.event_id = events.id
+                AND sale.active
+                AND sale.sales_open_at <= now()
+                AND sale.sales_close_at > now()
+          )
+        "#,
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(event_id.into_uuid())
+    .bind(ticket_url)
+    .execute(&mut **transaction)
+    .await
+    .map_err(map_sqlx)?;
+    if applied.rows_affected() == 1 {
+        return Ok(());
+    }
+    // The re-check separates "already done" from "no longer true": the same
+    // URL already sitting on the row is a retried execution, anything else —
+    // a link somebody else wrote, a sale that closed, a show unpublished — is
+    // a world that changed since the proposal and the action fails on it.
+    let already = sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS (SELECT 1 FROM events WHERE workspace_id = $1 AND id = $2 AND ticket_url = $3)",
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(event_id.into_uuid())
+    .bind(ticket_url)
+    .fetch_one(&mut **transaction)
+    .await
+    .map_err(map_sqlx)?;
+    if already {
+        return Ok(());
+    }
+    Err(RepositoryError::Conflict)
 }

@@ -1,7 +1,10 @@
 #[cfg(test)]
 mod tests {
     use async_trait::async_trait;
-    use crowdrelay_application::{EventRepository, RegisterEventInterestCommand, RepositoryError};
+    use crowdrelay_application::{
+        CreateEventCommand, CreatedEvent, EventRepository, RegisterEventInterestCommand,
+        RepositoryError,
+    };
     use crowdrelay_domain::{
         EventAction, EventActionKind, EventId, EventInterestResult, FanEventInterest,
         FanSessionToken, PublicEvent, WorkspaceId,
@@ -14,6 +17,13 @@ mod tests {
 
     #[async_trait]
     impl EventRepository for FailingEventRepository {
+        async fn create_event(
+            &self,
+            _command: &CreateEventCommand,
+        ) -> Result<CreatedEvent, RepositoryError> {
+            Err(RepositoryError::Unavailable)
+        }
+
         async fn load_published_events(&self) -> Result<Vec<PublicEvent>, RepositoryError> {
             Err(RepositoryError::Unavailable)
         }

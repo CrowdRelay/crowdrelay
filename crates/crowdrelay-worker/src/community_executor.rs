@@ -1091,7 +1091,7 @@ impl CommunityExecutorWorker {
         let post_body = self.build_post_body(&action.body, action.smart_link.as_deref());
         // The guard reads what a reader sees: the title is the message on
         // every rung of the format ladder (the drafted body may be empty on
-        // an image post), so the review and the duplicate hash cover both.
+        // an image post), so the review covers both.
         let post_text = format!("{}\n\n{}", action.title, post_body);
         let recent_hashes = self.recent_posted_hashes().await?;
         let approved_origins = self.community_approved_origins();
@@ -1102,6 +1102,10 @@ impl CommunityExecutorWorker {
                 channel: PublishChannel::Community,
                 approved_origins: &approved_origin_refs,
                 recent_content_hashes: &recent_hashes,
+                // Stored hashes cover `community_posts.body` — the raw draft
+                // body. The reviewed text adds the title and the smart link
+                // the dispatch appended, so it could never match them.
+                dedupe_text: Some(&action.body),
             },
         );
         if let Some(reason) = verdict.hold_reason() {
@@ -1440,11 +1444,12 @@ impl CommunityExecutorWorker {
             r#"
             UPDATE community_posts
             SET status = 'awaiting_manual_post',
-                error_message = $2,
+                error_message = $3,
                 updated_at = now()
-            WHERE id = $1
+            WHERE workspace_id = $1 AND id = $2
             "#,
         )
+        .bind(self.workspace_id.into_uuid())
         .bind(post_id)
         .bind(reason)
         .execute(&self.pool)

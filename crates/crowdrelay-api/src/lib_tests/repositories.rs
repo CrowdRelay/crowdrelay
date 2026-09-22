@@ -155,6 +155,13 @@
 
     #[async_trait]
     impl EventRepository for TestEventRepository {
+        async fn create_event(
+            &self,
+            _command: &CreateEventCommand,
+        ) -> Result<CreatedEvent, RepositoryError> {
+            Err(RepositoryError::Unavailable)
+        }
+
         async fn load_published_events(&self) -> Result<Vec<PublicEvent>, RepositoryError> {
             Ok(Vec::new())
         }
@@ -307,6 +314,7 @@
             Arc::new(EventCache::new()),
             RegisterEventInterest::new(Arc::clone(&repository)),
             ListFanEventInterests::new(Arc::clone(&repository)),
+            crowdrelay_application::CreateEvent::new(Arc::clone(&repository)),
             ReplaceEventActs::new(Arc::clone(&repository)),
             SetEventCounterparty::new(Arc::clone(&repository)),
             crowdrelay_application::SetEventSupportSlots::new(Arc::clone(&repository)),

@@ -203,6 +203,15 @@ pub async fn get_brand_settings(
                 }
                 .to_owned(),
             );
+            settings.insert(
+                "ticketing_enabled".to_owned(),
+                if effective.ticketing_enabled {
+                    "true"
+                } else {
+                    "false"
+                }
+                .to_owned(),
+            );
             settings.insert("crew_locale".to_owned(), crew_locale.clone());
             settings.insert(
                 "growth_cadence_moments_per_month".to_owned(),
@@ -267,6 +276,7 @@ fn validate_value(key: &str, value: &str) -> bool {
         || key == "synesthesia_enabled"
         || key == "social_auto_post"
         || key == "growth_cadence_fillers_enabled"
+        || key == "ticketing_enabled"
     {
         return value == "true" || value == "false";
     }
@@ -374,6 +384,12 @@ pub async fn upsert_setting(
                             .to_owned(),
                             "north_star_metric" => effective.north_star_metric.clone(),
                             "social_auto_post" => if effective.social_auto_post {
+                                "true"
+                            } else {
+                                "false"
+                            }
+                            .to_owned(),
+                            "ticketing_enabled" => if effective.ticketing_enabled {
                                 "true"
                             } else {
                                 "false"

@@ -220,7 +220,18 @@ pub(in crate::autopilot) fn executor_capability_for_payload(
         AutopilotActionPayload::AcceptLiveOpportunityTerms { .. } => "opportunity.terms",
         AutopilotActionPayload::PrepareFundingPackage { .. } => "funding.package",
         AutopilotActionPayload::SubmitFundingApplication { .. } => "funding.submit",
-        AutopilotActionPayload::RunPlayStep { .. } => "play.step",
+        // A play step splits on its own class: the in-process executor serves
+        // the owned-audience and first-party kinds (push delivery, the listing
+        // and pre-save checks), and a curator wave — the one step that reaches
+        // outside the workspace — parks behind its own name until an executor
+        // that actually sends third-party outreach registers it.
+        AutopilotActionPayload::RunPlayStep { step_kind, .. } => {
+            if step_kind.action_class() == ActionClass::ThirdParty {
+                "play.step.third_party"
+            } else {
+                "play.step"
+            }
+        }
         AutopilotActionPayload::SendTeamAssignmentEmail { .. } => "team.email",
         // `payload_requires_executor` is the authority on which variants reach
         // this point; anything else executes without one.

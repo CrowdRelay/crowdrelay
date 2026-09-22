@@ -106,7 +106,7 @@ jobs:
       CROWDRELAY_TENANT_DATA_REGION: eu
       CROWDRELAY_RANDOM_DRAWS_ENABLED: "false"
       CROWDRELAY_BOOTSTRAP_JSON: >-
-        {"workspace_name":"CrowdRelay CI","cities":[{"slug":"wroclaw","name":"Wroclaw","country":"PL","region":"Dolnoslaskie","lat":51.1079,"lng":17.0385}],"campaigns":[{"name":"CI launch","active":true,"smart_links":[{"slug":"ci-launch","destination_url":"http://localhost:4321/join","active":true}]}],"webhook_endpoints":[]}
+        {"workspace_name":"CrowdRelay CI","cities":[{"slug":"wroclaw","name":"Wrocław","country":"PL","region":"Dolnoslaskie","lat":51.1079,"lng":17.0385}],"campaigns":[{"name":"CI launch","active":true,"smart_links":[{"slug":"ci-launch","destination_url":"http://localhost:4321/join","active":true}]}],"webhook_endpoints":[]}
       RUST_LOG: info
       # sccache wraps rustc on the runner (installed at ~/.cargo/bin/sccache):
       # compilations cache by content hash, so a run only pays codegen for the
@@ -136,6 +136,15 @@ jobs:
           echo "${HOME}/.cargo/bin" >> "$GITHUB_PATH"
           echo "RUSTUP_HOME=${HOME}/.rustup" >> "$GITHUB_ENV"
           echo "CARGO_HOME=${HOME}/.cargo" >> "$GITHUB_ENV"
+          # The workspace wipe between jobs used to force a full ~16 GB
+          # rebuild every run — the recurring ENOSPC root cause on this 45
+          # GB host. A target dir outside _work survives the wipe, so a run
+          # only rebuilds what the push changed. Keyed by runner.name (the
+          # runner context is only visible to steps, not job env): one dir
+          # per lane keeps the four runner services off each other's
+          # package-cache lock. On a hosted runner it is just a throwaway
+          # dir inside the ephemeral VM.
+          echo "CARGO_TARGET_DIR=${HOME}/.cargo-target/${{ runner.name }}" >> "$GITHUB_ENV"
       - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
         with:
           toolchain: 1.98.0

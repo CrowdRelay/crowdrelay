@@ -452,6 +452,33 @@ fn derive_attestation_signing_key(value: Option<&String>) -> AttestationSigningK
     AttestationSigningKey::derive_from_secret(secret.as_bytes())
 }
 
+/// Derives the workspace-secrets key from the same configured secret.
+///
+/// Deliberately not its own environment variable, for the reason documented
+/// on `derive_attestation_signing_key`. Validation belongs to
+/// `parse_response_encryption_key`, which the caller runs against the same
+/// value and which rejects anything this would accept.
+fn derive_workspace_secrets_key(value: Option<&String>) -> SensitiveResponseKey {
+    let secret = value.map_or(LOCAL_RESPONSE_ENCRYPTION_SECRET, String::as_str);
+    SensitiveResponseKey::derive_for_domain(
+        crate::workspace_secrets::KEY_DERIVATION_DOMAIN,
+        secret.as_bytes(),
+    )
+}
+
+/// The previous secrets key, derived from the previous configured secret so
+/// a rotation can still decrypt rows the outgoing key wrote. An unset or
+/// empty previous secret means there is nothing to rotate from.
+fn derive_previous_workspace_secrets_key(
+    value: Option<&String>,
+) -> Option<SensitiveResponseKey> {
+    let secret = value.map(String::as_str).filter(|value| !value.is_empty())?;
+    Some(SensitiveResponseKey::derive_for_domain(
+        crate::workspace_secrets::KEY_DERIVATION_DOMAIN,
+        secret.as_bytes(),
+    ))
+}
+
 fn parse_response_encryption_key(
     value: Option<&String>,
     production: bool,
