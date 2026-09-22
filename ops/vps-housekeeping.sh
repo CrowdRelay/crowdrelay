@@ -25,11 +25,19 @@
 #   PRESSURE disk >= PRESSURE_PCT even when a job is in-flight: regeneratable
 #            caches ONLY — the documented 2026-09-17 exception ("a restarted
 #            build beats a dead disk"). Never _work, never the workspace.
+#            Two caches are exempt from the pressure tier while a job runs:
+#            they are live source trees, not pure caches (see below).
 #
 # Hard rules encoded from incidents:
 #   - Never wipe a runner _work while ANY job is active (2026-09-13 ENOSPC).
 #   - Cargo registry cache and src go together or not at all — wiping cache
 #     mid-extract left 550 empty src/ husks cargo trusted (2026-09-17).
+#   - Cargo registry is never wiped while a job is active: registry src/
+#     dirs are rustc's spawn cwd, so a wipe mid-compile fails every spawn
+#     with ENOENT (libsodium-sys-stable, virya-signal smoke 2026-09-22).
+#     npm _cacache is the same class — a wipe mid-`npm ci` breaks the
+#     running install. Under pressure+busy they stay; an ENOSPC the build
+#     can report beats a corrupted-cwd failure it can't.
 #   - Volumes: docker's own unattached check is the only authority.
 #   - Images: keep the KEEP_IMAGES_PER_REPO newest tags per repository;
 #     docker itself refuses to remove anything a container references —
@@ -265,9 +273,11 @@ fi
 clear_caches() {
   for home in /root /home/*; do
     [[ -d "$home" ]] || continue
-    # npm
+    # npm: live source tree during `npm ci` — busy runs keep it (see header).
     if [[ -d "$home/.npm/_cacache" ]]; then
-      if [[ "$REPORT" -eq 1 ]]; then
+      if runner_busy; then
+        log "  kept npm cache $home (job active)"
+      elif [[ "$REPORT" -eq 1 ]]; then
         log "  [dry] npm cache $home: $(mb "$(du -sb "$home/.npm/_cacache" 2>/dev/null | cut -f1)")"
       else
         rm -rf "$home/.npm/_cacache" && log "  cleared npm cache $home"
@@ -279,8 +289,11 @@ clear_caches() {
       log "  cleared pip cache $home"
     fi
     # cargo registry: cache+src together or never — see header (2026-09-17).
+    # Busy runs keep it entirely: src/ dirs are rustc's spawn cwd (2026-09-22).
     if [[ -d "$home/.cargo/registry/src" ]]; then
-      if [[ "$REPORT" -eq 1 ]]; then
+      if runner_busy; then
+        log "  kept cargo registry $home (job active)"
+      elif [[ "$REPORT" -eq 1 ]]; then
         log "  [dry] cargo registry $home: $(mb "$(du -sb "$home/.cargo/registry" 2>/dev/null | cut -f1)")"
       else
         rm -rf "$home/.cargo/registry/cache" "$home/.cargo/registry/src" \
