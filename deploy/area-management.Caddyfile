@@ -61,6 +61,7 @@
         /v1/control-plane/audience/acquisition-sources \
         /v1/control-plane/audience/city-funnel \
         /v1/control-plane/audience/city-venues \
+        /v1/control-plane/audience/registry-verification-brief \
         /v1/control-plane/gig-plan \
         /v1/control-plane/gig-plan/approve \
         /v1/control-plane/attestations \
