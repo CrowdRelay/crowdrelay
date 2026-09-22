@@ -17,10 +17,12 @@
 //! and money are never global, because that is exactly what a competitor
 //! would like to read.
 //!
-//! A `"closed"` status is written only when the sheet marks the room
-//! closed — "active" is never a fact, because the absence of a closed
-//! record already IS the active claim, and writing both would let a stale
-//! "active" outlive a newer "closed".
+//! A `"closed"` or `"active"` status is written verbatim when the sheet
+//! carries it — the active claim exists so a *reopened* room can outrank
+//! its stale closed record: same provenance, newer `observed_at`, and the
+//! resolved-status read lifts the exclusion. Anything else in the column
+//! writes nothing, because an unrecognized liveness claim must not become
+//! a fact.
 //!
 //! # What a re-scan does and does not do
 //!
@@ -300,13 +302,16 @@ impl PostgresVenueSeedRepository {
             )
             .await?;
         }
-        // Only "closed" is ever written — see the module header.
-        if room.closed {
+        // The sheet's liveness claim, verbatim: "closed" marks the room so
+        // it is not researched twice, and "active" is written too — a fresh
+        // `active` is how a reopened room's claim outranks its stale
+        // `closed` on `observed_at` within the same `researched` provenance.
+        if let Some(status) = &room.status {
             researched_fact(
                 &mut tx,
                 venue_id,
                 "status",
-                "closed",
+                status,
                 &room.source_url,
                 observed_at,
                 None,

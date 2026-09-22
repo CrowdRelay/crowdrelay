@@ -93,6 +93,52 @@ pub(in crate::autopilot) async fn execute_gig_outreach(
         }));
     }
 
+    // The room's status is re-resolved at send time, not trusted from the
+    // decision: a closure announced between approval and send — the
+    // registry learns it through the next sweep or seed sheet — must take
+    // the letter down rather than let a promoter read a proposal for a
+    // night at a dead room. Only the winning claim decides, so a newer
+    // 'active' lifts a stale 'closed' exactly as `best_venue` reads it.
+    // A name that is not a registry row carries no verdict and passes —
+    // support-slot asks name an event's venue, which the registry may
+    // never have seen.
+    let named_room_closed = sqlx::query_scalar::<_, bool>(
+        r#"
+        SELECT COALESCE((
+            SELECT lower(btrim(status_fact.value))
+            FROM place_venue_facts AS status_fact
+            WHERE status_fact.venue_id = venue.id
+              AND status_fact.attribute = 'status'
+              AND (status_fact.workspace_id IS NULL
+                   OR status_fact.workspace_id = $1)
+              AND (status_fact.expires_at IS NULL
+                   OR status_fact.expires_at > now())
+            ORDER BY CASE status_fact.provenance
+                         WHEN 'played' THEN 0 WHEN 'researched' THEN 1
+                         WHEN 'event_evidence' THEN 2
+                         WHEN 'open_directory' THEN 3
+                         ELSE 4 END,
+                     status_fact.observed_at DESC
+            LIMIT 1
+        ), '') = 'closed'
+        FROM place_venues AS venue
+        WHERE venue.city_id = $2
+          AND venue.name_key = place_venue_key($3)
+        "#,
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(city_id.into_uuid())
+    .bind(venue)
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(map_sqlx)?
+    .unwrap_or(false);
+    if named_room_closed {
+        return Err(RepositoryError::ConflictBecause(
+            "gig outreach refused: the room this letter names is on record as closed —              a closure reported after the proposal was made must take the letter down              rather than let a promoter read a pitch for a night at a dead room.",
+        ));
+    }
+
     // The template key is part of which letter this is — a support-slot ask
     // must not leave wearing `gig.proposal.v1`, because the executor renders
     // the named template verbatim and a proposal letter would announce a night

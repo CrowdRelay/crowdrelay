@@ -1219,3 +1219,107 @@ async fn block_contact(
     .await?;
     Ok(())
 }
+
+/// A closure announced between approval and send takes the letter down.
+///
+/// The band approved a night at the room; the registry learned the room
+/// died while the letter waited out its hold window. The send-time recheck
+/// exists so a promoter never reads a pitch for a dead room — the action
+/// fails whole, and nothing is emitted or reserved.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn a_room_closed_after_approval_never_gets_its_letter()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (pool, url) = common::test_pool_with_url("CROWDRELAY_TEST_DATABASE_URL")
+        .await
+        .expect("connect to the migrated suite database");
+    let now = OffsetDateTime::now_utc();
+    let act = workspace(&pool).await?;
+    // A private city — `place_venues` is global, so a shared city's rooms
+    // could outrank this fixture's and the letter would name somebody
+    // else's room.
+    let sendtown = city(&pool, "sendtown").await?;
+    for index in 0..60 {
+        reachable_fan(
+            &pool,
+            act,
+            sendtown,
+            &format!("send-fan{index}@example.com"),
+        )
+        .await?;
+    }
+    played_show(&pool, act, sendtown, "Klub Send", "send-show-1", 40).await?;
+    promoter(
+        &pool,
+        act,
+        sendtown,
+        "Send Anna",
+        "send-anna@example.com",
+        70,
+    )
+    .await?;
+    advertise(&pool, act, "gig.outreach", now).await?;
+
+    let key = IdempotencyKey::parse("gig-approve-closed").expect("valid key");
+    let outcome = approve_gig_proposal(&pool, act, sendtown, &key, now, None).await?;
+    let action_id = match outcome {
+        GigOutreachOutcome::Queued { action_id, .. } => action_id,
+        other => return Err(format!("expected a queued outreach, got {other:?}").into()),
+    };
+
+    // The TOCTOU window: the closure report lands between the approval and
+    // the send — exactly how Łykend's announcement would have arrived.
+    sqlx::query(
+        "INSERT INTO place_venue_facts
+            (venue_id, attribute, value, provenance, source_ref, observed_at, workspace_id)
+         SELECT venue.id, 'status', 'closed', 'researched',
+                'https://example.com/closed/' || gen_random_uuid(), now(), NULL
+         FROM place_venues AS venue
+         JOIN cities ON cities.id = venue.city_id
+         WHERE cities.slug = 'sendtown' AND venue.name_key = 'klub send'",
+    )
+    .execute(&pool)
+    .await?;
+
+    // Past the hold window the letter is claimable — and must then die.
+    let send_time = now + time::Duration::minutes(6);
+    let repository = repository(&pool, &url);
+    let claimed = repository
+        .claim_due_autonomous_actions(WorkspaceId::from_uuid(act), 8, send_time)
+        .await?;
+    let action = claimed
+        .iter()
+        .find(|candidate| candidate.id.into_uuid() == action_id)
+        .ok_or("the queued outreach was not claimable")?;
+    match repository
+        .execute_action(WorkspaceId::from_uuid(act), action, send_time)
+        .await
+    {
+        Err(error) => assert!(
+            error.to_string().contains("on record as closed"),
+            "the refusal did not name the closure: {error}"
+        ),
+        Ok(()) => {
+            return Err("a letter naming a closed room was sent anyway".into());
+        }
+    }
+    let emitted = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM autopilot_action_emissions
+         WHERE workspace_id = $1 AND action_id = $2",
+    )
+    .bind(act)
+    .bind(action_id)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(emitted, 0, "a dead room's letter reached the outbox");
+    let reserved = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM contact_governor
+         WHERE workspace_id = $1 AND last_action_id = $2",
+    )
+    .bind(act)
+    .bind(action_id)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(reserved, 0, "a dead letter kept its contact reservation");
+    Ok(())
+}

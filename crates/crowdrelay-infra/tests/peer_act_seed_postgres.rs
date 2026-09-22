@@ -55,6 +55,7 @@ fn act(
         website: None,
         source_url: Some(format!("https://source.example/{name}")),
         activity: Some("2026 activity verified".to_owned()),
+        status: Some(crowdrelay_domain::peer_act_seed::PeerLiveness::Active),
         researched_on: Some("2026-09-19".to_owned()),
     };
     fill(&mut seeded);
@@ -228,6 +229,9 @@ async fn run_cases(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
                 "https://facebook.com/30zeta".to_owned(),
                 None
             ),
+            // The sheet's own liveness verdict lands verbatim — the claim
+            // a later 'inactive' must out-date to retire the act.
+            ("status".to_owned(), "active".to_owned(), None),
         ]
     );
 
@@ -426,5 +430,113 @@ async fn run_failure_isolation_case(pool: &PgPool) -> Result<(), Box<dyn std::er
         .fetch_all(pool)
         .await?;
     assert_eq!(ids.len(), 1);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn a_dead_band_retires_a_known_act_and_an_active_reopens_it()
+-> Result<(), Box<dyn std::error::Error>> {
+    run_lifecycle_case(&suite_pool().await?).await
+}
+
+/// The verification sheet's dead-band claims are updates, never inserts:
+/// a name the registry holds gets a `status=inactive` fact, a name nobody
+/// holds is skipped rather than minted already-dead — and a later `active`
+/// verdict writes the claim that re-opens the act on the read side.
+async fn run_lifecycle_case(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
+    let workspace = seed_workspace(pool).await?;
+    let repo = PostgresPeerActSeedRepository::new(pool.clone());
+
+    // One act on record, marked live by its import.
+    let report = PeerActSeedReport {
+        acts: vec![act("Veteran Act", |_| {}, |_| {})],
+        refusals: Vec::new(),
+    };
+    let summary = repo.import_sheet(workspace, &report).await?;
+    assert_eq!(summary.imported, 1);
+
+    // The next sheet calls it dead — the known act gets the status fact,
+    // the unknown name counts as skipped, and neither mints a row.
+    let dead = PeerActSeedReport {
+        acts: vec![
+            act(
+                "Veteran Act",
+                |act| {
+                    act.status = Some(crowdrelay_domain::peer_act_seed::PeerLiveness::Inactive);
+                    act.source_url = Some("https://source.example/farewell-post".to_owned());
+                },
+                |_| {},
+            ),
+            act(
+                "Never Known",
+                |act| {
+                    act.status = Some(crowdrelay_domain::peer_act_seed::PeerLiveness::Inactive);
+                },
+                |_| {},
+            ),
+        ],
+        refusals: Vec::new(),
+    };
+    let summary = repo.import_sheet(workspace, &dead).await?;
+    assert_eq!(summary.deactivated, 1);
+    assert_eq!(summary.skipped_inactive, 1);
+    assert_eq!(summary.imported, 0, "a dead-band claim minted an act");
+    let never = sqlx::query_scalar::<_, i64>(
+        "SELECT count(*) FROM place_peer_acts WHERE name_key = 'never known'",
+    )
+    .fetch_one(pool)
+    .await?;
+    assert_eq!(never, 0);
+
+    let veteran = sqlx::query_scalar::<_, Uuid>(
+        "SELECT id FROM place_peer_acts WHERE name_key = 'veteran act'",
+    )
+    .fetch_one(pool)
+    .await?;
+    let veteran_facts = facts(pool, veteran).await?;
+    assert!(
+        veteran_facts.contains(&("status".to_owned(), "inactive".to_owned(), None)),
+        "the dead-band claim did not land: {veteran_facts:?}"
+    );
+    // And the evidence is the sheet's source — the farewell post, not a
+    // bare "sheet" fallback.
+    let source = sqlx::query_scalar::<_, String>(
+        "SELECT source_ref FROM place_peer_act_facts \
+         WHERE peer_act_id = $1 AND attribute = 'status' AND value = 'inactive'",
+    )
+    .bind(veteran)
+    .fetch_one(pool)
+    .await?;
+    assert_eq!(source, "https://source.example/farewell-post");
+
+    // A band that re-forms: the next sheet's `active` verdict writes the
+    // newer claim the read side resolves over the stale inactive.
+    let back = PeerActSeedReport {
+        acts: vec![act(
+            "Veteran Act",
+            |act| {
+                act.researched_on = Some("2026-10-01".to_owned());
+            },
+            |_| {},
+        )],
+        refusals: Vec::new(),
+    };
+    let summary = repo.import_sheet(workspace, &back).await?;
+    assert_eq!(summary.imported, 1);
+    let resolved = sqlx::query_scalar::<_, String>(
+        "SELECT value FROM place_peer_act_facts \
+         WHERE peer_act_id = $1 AND attribute = 'status' \
+         ORDER BY CASE provenance WHEN 'researched' THEN 0 \
+              WHEN 'event_evidence' THEN 1 WHEN 'open_directory' THEN 2 \
+              ELSE 3 END, observed_at DESC LIMIT 1",
+    )
+    .bind(veteran)
+    .fetch_one(pool)
+    .await?;
+    assert_eq!(
+        resolved, "active",
+        "a fresh active claim must lift the stale inactive"
+    );
     Ok(())
 }

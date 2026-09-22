@@ -166,6 +166,11 @@ pub enum VenueAssessment {
     },
     /// Exists-only — the honest refusal, itself a full sentence.
     InsufficientEvidence { sentence: String },
+    /// The room is on record as shut. A known state, not a missing one: no
+    /// amount of remaining evidence may talk a dead room back into "worth
+    /// contacting" — pitching it is the confident wrong answer the resolved
+    /// `status` fact exists to prevent.
+    Closed { sentence: String },
 }
 
 /// Turns what the graph knows about one room into the venue answer.
@@ -180,6 +185,17 @@ pub fn assess(
     now: OffsetDateTime,
     locale: EvidenceLocale,
 ) -> VenueAssessment {
+    // A reported closure outranks every clause — but only the *winning*
+    // status claim counts. The caller resolves each fact attribute per
+    // scope, so 'closed' and 'active' arrive as separate rows rather than
+    // one resolved value; a tenant's fresh private 'active' must lift a
+    // stale global 'closed' the same way the proposal reads resolve it,
+    // or the assessment and the proposals would disagree about one room.
+    if resolved_status(evidence).is_some_and(|status| status.eq_ignore_ascii_case("closed")) {
+        return VenueAssessment::Closed {
+            sentence: closed_sentence(&evidence.display_name, locale),
+        };
+    }
     let clauses = clauses_in_strength_order(evidence, now);
     if clauses.is_empty() {
         return VenueAssessment::InsufficientEvidence {
@@ -191,6 +207,33 @@ pub fn assess(
         sentence: worth_sentence(&evidence.display_name, &chosen, locale),
         clauses: chosen,
     }
+}
+
+/// The winning `status` claim across the global and private fact sets, in
+/// the registry's trust order — provenance first, then the newest
+/// observation. `None` means nobody has claimed anything about the room's
+/// liveness, which is the common case.
+fn resolved_status(evidence: &VenueEvidence) -> Option<&str> {
+    fn rank(provenance: &str) -> u8 {
+        match provenance {
+            "played" => 0,
+            "researched" => 1,
+            "event_evidence" => 2,
+            "open_directory" => 3,
+            _ => 4,
+        }
+    }
+    evidence
+        .facts
+        .iter()
+        .chain(evidence.private_facts.iter())
+        .filter(|fact| fact.attribute == "status" && !fact.value.trim().is_empty())
+        .min_by(|a, b| {
+            rank(&a.provenance)
+                .cmp(&rank(&b.provenance))
+                .then(b.observed_at.cmp(&a.observed_at))
+        })
+        .map(|fact| fact.value.trim())
 }
 
 /// The candidate clauses, strongest first — the ordering documented on
@@ -484,6 +527,21 @@ pub fn unchecked_sentence(name: &str, locale: EvidenceLocale) -> String {
     }
 }
 
+/// A room on record as shut — stated as a claim, because what the registry
+/// holds is a source's report, not a door somebody checked today.
+fn closed_sentence(name: &str, locale: EvidenceLocale) -> String {
+    match locale {
+        EvidenceLocale::En => format!(
+            "{name} is reported closed. It stays on the record so nobody pitches \
+             a dead room again — a closed venue is not a booking lead."
+        ),
+        EvidenceLocale::Pl => format!(
+            "{name} — zgłoszone jako zamknięte. Zostaje w rejestrze, żeby nikt \
+             więcej nie pisał do martwego miejsca — zamknięty klub to nie lead."
+        ),
+    }
+}
+
 fn refusal_sentence(name: &str, locale: EvidenceLocale) -> String {
     match locale {
         EvidenceLocale::En => format!(
@@ -695,6 +753,55 @@ mod tests {
              czym oprzeć kontaktu. Sprawdzimy go, kiedy pojawi się pierwszy \
              dowód, że ktoś tam grał."
         );
+    }
+
+    #[test]
+    fn a_reported_closure_outranks_every_other_clause() {
+        // The Łykend case: rich researched evidence (genres, fit, fresh
+        // research date) on a room that announced it is not reopening.
+        let mut room = rich_room();
+        room.facts.push(fact("status", "closed", 3));
+        let VenueAssessment::Closed { sentence } = assess(&room, now(), EvidenceLocale::En) else {
+            panic!("a closed room must never read as worth contacting")
+        };
+        assert_eq!(
+            sentence,
+            "Klub X is reported closed. It stays on the record so nobody pitches \
+             a dead room again — a closed venue is not a booking lead."
+        );
+    }
+
+    #[test]
+    fn closure_reads_polish_for_a_polish_crew() {
+        let mut room = rich_room();
+        room.facts.push(fact("status", "closed", 3));
+        let VenueAssessment::Closed { sentence } = assess(&room, now(), EvidenceLocale::Pl) else {
+            panic!("a closed room must never read as worth contacting")
+        };
+        assert!(sentence.starts_with("Klub X — zgłoszone jako zamknięte"));
+    }
+
+    #[test]
+    fn only_closed_disqualifies_other_statuses_do_not() {
+        for status in ["active", "reopened", "temporarily_closed"] {
+            let mut room = rich_room();
+            room.facts.push(fact("status", status, 3));
+            assert!(
+                matches!(
+                    assess(&room, now(), EvidenceLocale::En),
+                    VenueAssessment::WorthContact { .. }
+                ),
+                "status {status:?} must not read as closed"
+            );
+        }
+        // A bare exists-only room with a closed claim is closed, not
+        // "insufficient evidence" — the registry knows something decisive.
+        let mut room = exists_only_room();
+        room.facts.push(fact("status", "Closed", 3));
+        assert!(matches!(
+            assess(&room, now(), EvidenceLocale::En),
+            VenueAssessment::Closed { .. }
+        ));
     }
 
     #[test]

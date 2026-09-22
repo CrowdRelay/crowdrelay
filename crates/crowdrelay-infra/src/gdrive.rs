@@ -51,6 +51,9 @@ pub struct DriveContactRow {
     /// The city the sheet placed this contact in — free text, resolved
     /// against `cities` only when a booking promote needs it.
     pub city: Option<String>,
+    /// The verification sheet's liveness verdict — `active` or `inactive`,
+    /// `None` when the sheet made no claim.
+    pub staged_status: Option<String>,
     pub notes: Option<String>,
     pub source_file_id: String,
     pub source_file_name: String,
@@ -117,7 +120,8 @@ pub struct RegistrySummary {
 /// lateral makes a same-named room the band already played win the tie.
 const CONTACT_SELECT: &str = r#"
     SELECT c.id, c.normalized_email, c.display_name, c.organization, c.phone,
-           c.suggested_kind, c.city, c.notes, c.source_file_id, c.source_file_name,
+           c.suggested_kind, c.city, c.staged_status, c.notes,
+           c.source_file_id, c.source_file_name,
            c.sources, c.last_seen_at, c.disappeared_at, c.fan_outcome, c.beacon_outcome,
            venue.display_name AS matched_venue,
            venue.venue_id AS matched_venue_id,
@@ -163,6 +167,10 @@ const CONTACT_SELECT: &str = r#"
 pub struct ContactUpsertSummary {
     pub upserted: u64,
     pub marked_disappeared: u64,
+    /// Booking agents whose `active` flag this batch's verdict rows
+    /// flipped — the verification loop's findings, counted like the
+    /// bands'.
+    pub agents_resolved: u64,
 }
 
 #[derive(Clone)]
@@ -302,16 +310,20 @@ impl PostgresGDriveRepository {
                 r#"
                 INSERT INTO drive_contacts (
                     workspace_id, normalized_email, display_name, organization,
-                    phone, suggested_kind, city, notes, source_file_id, source_file_name,
+                    phone, suggested_kind, city, staged_status, notes,
+                    source_file_id, source_file_name,
                     sources, last_seen_at, disappeared_at
                 )
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, ARRAY[$11]::text[], now(), NULL)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, ARRAY[$12]::text[], now(), NULL)
                 ON CONFLICT (workspace_id, normalized_email) DO UPDATE SET
                     display_name = COALESCE(EXCLUDED.display_name, drive_contacts.display_name),
                     organization = COALESCE(EXCLUDED.organization, drive_contacts.organization),
                     phone = COALESCE(EXCLUDED.phone, drive_contacts.phone),
                     suggested_kind = COALESCE(EXCLUDED.suggested_kind, drive_contacts.suggested_kind),
                     city = COALESCE(EXCLUDED.city, drive_contacts.city),
+                    -- The latest verdict wins on a re-verified row; a sheet
+                    -- that drops the column does not erase a finding.
+                    staged_status = COALESCE(EXCLUDED.staged_status, drive_contacts.staged_status),
                     notes = COALESCE(EXCLUDED.notes, drive_contacts.notes),
                     -- source_file_id doubles as the disappearance anchor:
                     -- the mark_disappeared sweep matches rows by the file
@@ -319,13 +331,13 @@ impl PostgresGDriveRepository {
                     -- never marks (gmail, upload) must not steal the anchor
                     -- from a gdrive file that still tracks it.
                     source_file_id = CASE
-                        WHEN $11 = 'gdrive'
+                        WHEN $12 = 'gdrive'
                              OR NOT 'gdrive' = ANY(drive_contacts.sources)
                         THEN EXCLUDED.source_file_id
                         ELSE drive_contacts.source_file_id
                     END,
                     source_file_name = CASE
-                        WHEN $11 = 'gdrive'
+                        WHEN $12 = 'gdrive'
                              OR NOT 'gdrive' = ANY(drive_contacts.sources)
                         THEN EXCLUDED.source_file_name
                         ELSE drive_contacts.source_file_name
@@ -343,6 +355,7 @@ impl PostgresGDriveRepository {
             .bind(&contact.phone)
             .bind(&contact.suggested_kind)
             .bind(&contact.city)
+            .bind(&contact.staged_status)
             .bind(&contact.notes)
             .bind(&ref_id)
             .bind(&ref_name)
@@ -350,6 +363,42 @@ impl PostgresGDriveRepository {
             .execute(&mut *tx)
             .await?;
             upserted += 1;
+        }
+
+        // The verification sheet's verdict drives `active` both ways —
+        // `inactive` retires the agent, `active` re-opens one a stale
+        // verdict retired, the same ladder rooms and bands follow. What it
+        // never touches: `refused_until` and `do_not_contact`, which are
+        // the agent's and the operator's answers, not the sheet's. Scoped
+        // to the addresses *this* batch actually asserted a verdict on —
+        // a row restaged with no Status cell must not replay a stale one.
+        let verdict_emails: Vec<&str> = contacts
+            .iter()
+            .filter(|c| c.staged_status.is_some())
+            .map(|c| c.email.as_str())
+            .collect();
+        let mut agents_resolved = 0u64;
+        if !verdict_emails.is_empty() {
+            agents_resolved = sqlx::query(
+                r#"
+                UPDATE booking_agents AS ba
+                SET active = (dc.staged_status = 'active'),
+                    version = ba.version + 1
+                FROM drive_contacts AS dc
+                WHERE ba.workspace_id = dc.workspace_id
+                  AND dc.workspace_id = $1
+                  AND dc.normalized_email = ANY($2::text[])
+                  AND lower(btrim(ba.contact_email)) = dc.normalized_email
+                  AND dc.suggested_kind = 'booking_agent'
+                  AND dc.staged_status IS NOT NULL
+                  AND ba.active IS DISTINCT FROM (dc.staged_status = 'active')
+                "#,
+            )
+            .bind(workspace_id)
+            .bind(&verdict_emails)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
         }
 
         let mut marked = 0u64;
@@ -386,6 +435,7 @@ impl PostgresGDriveRepository {
         Ok(ContactUpsertSummary {
             upserted,
             marked_disappeared: marked,
+            agents_resolved,
         })
     }
 
@@ -818,11 +868,16 @@ impl PostgresGDriveRepository {
             .filter(|org| name != org.trim())
             .map(|org| org.trim().chars().take(200).collect::<String>())
             .filter(|org| !org.is_empty());
+        // A verification sheet's verdict travels with the row: promoting a
+        // contact the sheet marked inactive files the agent dead. On
+        // conflict `active` is left alone — liveness belongs to the sync's
+        // verdict pass, which already ran on this sheet's staged rows.
+        let active = contact.staged_status.as_deref() != Some("inactive");
         sqlx::query(
             r#"
             INSERT INTO booking_agents
-                (workspace_id, name, agency, contact_email, contact_verified_at)
-            VALUES ($1, $2, $3, $4, now())
+                (workspace_id, name, agency, contact_email, contact_verified_at, active)
+            VALUES ($1, $2, $3, $4, now(), $5)
             ON CONFLICT (workspace_id, contact_email) DO UPDATE SET
                 name = EXCLUDED.name,
                 agency = COALESCE(EXCLUDED.agency, booking_agents.agency),
@@ -835,6 +890,7 @@ impl PostgresGDriveRepository {
         .bind(&name)
         .bind(agency)
         .bind(&contact.normalized_email)
+        .bind(active)
         .execute(&mut *tx)
         .await?;
         // The registry row is who the agent is; the outreach row is how the

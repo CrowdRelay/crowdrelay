@@ -48,15 +48,33 @@ async fn assess_venue_rows(state: &crate::AppState, rows: &mut [CityVenueRow]) {
             next_show_at: row.next_show_at,
         };
         match assess(&evidence, now, locale) {
+            // A verdict reached without the tenant's own facts is not a
+            // verdict when that read failed: the private set carries
+            // `status` too, so a hidden private `closed` mark could turn
+            // "worth contacting" into a pitch to a dead room, and a hidden
+            // fresh contact could turn "insufficient evidence" into a wrong
+            // refusal. Either confident wrong answer is worse than admitting
+            // the gap.
             VenueAssessment::WorthContact { sentence, .. } => {
-                row.assessment = "worth_contact".to_owned();
+                if private_facts_degraded {
+                    row.assessment = "not_assessed".to_owned();
+                    row.assessment_sentence = unchecked_sentence(&row.display_name, locale);
+                } else {
+                    row.assessment = "worth_contact".to_owned();
+                    row.assessment_sentence = sentence;
+                }
+            }
+            // Closed stands even when the private read degraded: the claim
+            // it rests on was readable, and the hidden facts could only make
+            // the display *less* alarming — a private 'active' lifting a
+            // stale global 'closed' shows a room as shut that is not, which
+            // is the conservative error. Nothing sends on this display: the
+            // outbound paths re-resolve status inside their own transaction.
+            VenueAssessment::Closed { sentence } => {
+                row.assessment = "closed".to_owned();
                 row.assessment_sentence = sentence;
             }
             VenueAssessment::InsufficientEvidence { sentence } => {
-                // A refusal reached without the tenant's own facts is not a
-                // refusal: a fresh booking contact is evidence, and the read
-                // that holds it failed. Saying "no evidence" here would be a
-                // confident wrong answer produced by an outage.
                 if private_facts_degraded {
                     row.assessment = "not_assessed".to_owned();
                     row.assessment_sentence = unchecked_sentence(&row.display_name, locale);
@@ -146,7 +164,7 @@ async fn private_venue_facts(
         FROM place_venue_facts AS f
         WHERE f.workspace_id = $1
           AND f.venue_id = ANY($2)
-          AND f.attribute IN ('booking_email', 'target_fit', 'contact_quality')
+          AND f.attribute IN ('booking_email', 'target_fit', 'contact_quality', 'status')
           AND (f.expires_at IS NULL OR f.expires_at > now())
         ORDER BY f.venue_id, f.attribute,
                  CASE f.provenance

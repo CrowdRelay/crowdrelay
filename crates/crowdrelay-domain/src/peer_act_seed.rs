@@ -21,11 +21,16 @@
 //!
 //! Screening on write, as `venue_seed` does it. A row with no name cannot
 //! become an act. A row with no link at all — no social page, no website, no
-//! source — is a bare name, and a bare name is a rumour: refused. A row
-//! marked inactive is *dropped*, not stored: the operator's rule for a seed
-//! list is that a dead band pollutes proposals, and a refused row still
-//! reports its sheet number so the list can be corrected rather than
-//! silently swallowed.
+//! source — is a bare name, and a bare name is a rumour: refused, and a
+//! dead-band claim is held to the same bar because "inactive" with no
+//! evidence is gossip, not a finding.
+//!
+//! A row marked inactive parses as a `PeerLiveness::Inactive` claim rather
+//! than a refusal: the importer writes it as a `status` fact on an act the
+//! registry already holds — which is how a verification pass retires a band
+//! that has since died — while the same claim on a name nobody holds is
+//! skipped, because the registry must not accumulate acts that entered the
+//! world already dead.
 //!
 //! City is deliberately *not* required. A band whose home town is unstated
 //! still feeds the peer graph by genre — the home-city claim is a fact that
@@ -71,13 +76,13 @@ pub mod columns {
     /// The researcher's activity finding, in their words — "2026 activity
     /// verified", "Active — Metal Underground snapshot". A value that names
     /// a dead band (the [`INACTIVE_STATUS`] spellings, contained anywhere in
-    /// the prose) refuses the row; any other claim is stored as the row's
-    /// `activity` fact so the "still a working band" decision stays
-    /// auditable rather than implied.
+    /// the prose) marks the row [`PeerLiveness::Inactive`]; any other claim
+    /// is stored as the row's `activity` fact so the "still a working band"
+    /// decision stays auditable rather than implied.
     pub const ACTIVITY: &str = "Activity";
     pub const RESEARCH_DATE: &str = "Research_Date";
-    /// `active` (or empty) imports; the inactive spellings refuse the row —
-    /// see [`PeerSeedRefusal::Inactive`].
+    /// The researcher's liveness verdict: `Active`, `Inactive`, or an
+    /// inactive spelling — see [`PeerLiveness`].
     pub const STATUS: &str = "Status";
     /// The researcher's confidence in the row — their judgment, so it lands
     /// in the private half, never the shared registry.
@@ -114,6 +119,18 @@ pub mod columns {
     ];
 }
 
+/// Whether the sheet claims the act is still a working band.
+///
+/// A dead-band claim is never how an act enters the registry — the importer
+/// writes it only onto an act already known, where it retires the band from
+/// proposals. An `Active` claim is the reopen: the newest status fact wins
+/// on the read side, so a re-verified band lifts its own stale inactive.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PeerLiveness {
+    Active,
+    Inactive,
+}
+
 /// The act, as everyone sees it. Nothing here is specific to one tenant.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct SeededPeerAct {
@@ -143,6 +160,10 @@ pub struct SeededPeerAct {
     /// claim carries its evidence rather than being implied by the row's
     /// presence.
     pub activity: Option<String>,
+    /// The row's liveness verdict — `Some` only when the sheet actually
+    /// claimed one (`Status` filled, or an `Activity` finding), so a bare
+    /// name-and-social row invents no claim. `None` writes no status fact.
+    pub status: Option<PeerLiveness>,
     pub researched_on: Option<String>,
 }
 
@@ -177,12 +198,10 @@ pub struct SeededPeer {
 pub enum PeerSeedRefusal {
     MissingName,
     /// A name with no checkable link — no social page, no website, no
-    /// source — is a rumour, the same rule venue rows are held to.
+    /// source — is a rumour, the same rule venue rows are held to. A dead-
+    /// band claim is held to it too: "inactive" with no evidence is gossip,
+    /// not a finding.
     MissingLink,
-    /// The sheet said the act is done. Dropped, not stored: an inactive
-    /// band in the registry is a proposal waiting to waste an operator's
-    /// attention.
-    Inactive,
 }
 
 impl PeerSeedRefusal {
@@ -193,7 +212,6 @@ impl PeerSeedRefusal {
             Self::MissingLink => {
                 "a band with no social page, website or source link cannot be checked"
             }
-            Self::Inactive => "the sheet marks this band inactive — dropped, not stored",
         }
     }
 }
@@ -214,6 +232,11 @@ const INACTIVE_STATUS: &[&str] = &[
     "zawieszony",
 ];
 
+/// The spellings of "still a working band" a Status column may carry —
+/// English and Polish. Status matches exactly; the Activity column's prose
+/// is itself the active claim, no word list needed.
+const ACTIVE_STATUS: &[&str] = &["active", "aktywny", "reunited"];
+
 fn clean(value: Option<&str>) -> Option<String> {
     let value = value?.trim();
     if value.is_empty() || value.eq_ignore_ascii_case("n/a") {
@@ -229,8 +252,9 @@ pub type SeedRow<'a> = std::collections::BTreeMap<&'a str, &'a str>;
 ///
 /// # Errors
 ///
-/// Refuses a row missing a name, carrying no checkable link, or marked
-/// inactive.
+/// Refuses a row missing a name or carrying no checkable link. An inactive
+/// verdict is not an error — it parses as `status: Some(Inactive)` and the
+/// importer decides what it means for an act already held.
 pub fn parse_seed_row(row: &SeedRow<'_>) -> Result<SeededPeer, PeerSeedRefusal> {
     // Keys arrive as the sheet spelled them — canonicalize once here so a
     // caller that skipped the header pass still parses. `extract_seed_sheet`
@@ -254,18 +278,34 @@ pub fn parse_seed_row(row: &SeedRow<'_>) -> Result<SeededPeer, PeerSeedRefusal> 
     // inside a sentence — so activity matches on containment, status on
     // equality. A "hiatus ended" status surviving is worth more than a dead
     // band slipping through a substring hole.
-    if let Some(status) = get(columns::STATUS)
-        && INACTIVE_STATUS.contains(&status.to_lowercase().as_str())
+    //
+    // The verdict stays a claim on the row rather than a refusal: the
+    // importer retires a known act on `Inactive` and refuses to mint a dead
+    // one, while `Active` is the claim that re-opens a stale inactive.
+    // `None` means the sheet made no claim — a name-and-social row is a
+    // band, not a liveness verdict.
+    let status = get(columns::STATUS);
+    let activity = get(columns::ACTIVITY);
+    let liveness = if status
+        .as_deref()
+        .is_some_and(|s| INACTIVE_STATUS.contains(&s.to_lowercase().as_str()))
+        || activity
+            .as_deref()
+            .is_some_and(|a| INACTIVE_STATUS.iter().any(|d| a.to_lowercase().contains(d)))
     {
-        return Err(PeerSeedRefusal::Inactive);
-    }
-    if let Some(activity) = get(columns::ACTIVITY)
-        && INACTIVE_STATUS
-            .iter()
-            .any(|dead| activity.to_lowercase().contains(dead))
+        Some(PeerLiveness::Inactive)
+    } else if status
+        .as_deref()
+        .is_some_and(|s| ACTIVE_STATUS.contains(&s.to_lowercase().as_str()))
+        || activity.is_some()
     {
-        return Err(PeerSeedRefusal::Inactive);
-    }
+        // An explicit "active" verdict, or any activity finding that isn't
+        // a dead spelling — "2026 activity verified" is a working-band
+        // claim. An unrecognised Status word ("unclear") claims nothing.
+        Some(PeerLiveness::Active)
+    } else {
+        None
+    };
 
     // One social cell may hold several pasted links, and a Links column is
     // the same thing by another name — keep every link the row carries.
@@ -300,7 +340,8 @@ pub fn parse_seed_row(row: &SeedRow<'_>) -> Result<SeededPeer, PeerSeedRefusal> 
             social,
             website,
             source_url,
-            activity: get(columns::ACTIVITY),
+            activity,
+            status: liveness,
             researched_on: get(columns::RESEARCH_DATE),
         },
         view: SeededPeerActView {
@@ -403,8 +444,8 @@ pub fn canonical_column(cell: &str) -> Option<&'static str> {
 /// What one grid yielded: the acts that parsed and the rows that did not.
 ///
 /// Refusals keep their 1-based sheet row number — the number a spreadsheet
-/// shows its operator — so a refusal reads "row 17 is marked inactive", not
-/// "record 15 failed".
+/// shows its operator — so a refusal reads "row 17 has no checkable link",
+/// not "record 15 failed".
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct PeerActSeedReport {
     pub acts: Vec<SeededPeer>,
@@ -567,7 +608,7 @@ mod tests {
     }
 
     #[test]
-    fn a_dead_band_is_dropped_not_stored() {
+    fn a_dead_band_parses_as_an_inactive_claim() {
         for status in [
             "inactive",
             "hiatus",
@@ -578,24 +619,43 @@ mod tests {
             let mut row = swidnica_row();
             row.insert("Status", status);
             assert_eq!(
-                parse_seed_row(&row),
-                Err(PeerSeedRefusal::Inactive),
+                parse_seed_row(&row)
+                    .expect("a dead-band claim still parses")
+                    .act
+                    .status,
+                Some(PeerLiveness::Inactive),
                 "status {status:?}"
             );
         }
         let mut live = swidnica_row();
         live.insert("Status", "active");
-        assert!(parse_seed_row(&live).is_ok());
+        assert_eq!(
+            parse_seed_row(&live).expect("row parses").act.status,
+            Some(PeerLiveness::Active)
+        );
+        // A verdict nobody recognises claims nothing either way.
+        let mut unclear = swidnica_row();
+        unclear.insert("Status", "unclear");
+        assert_eq!(
+            parse_seed_row(&unclear).expect("row parses").act.status,
+            None
+        );
     }
 
     #[test]
-    fn an_activity_finding_of_dead_drops_the_row() {
+    fn an_activity_finding_of_dead_is_an_inactive_claim() {
         let mut row = deep_scan_row();
         row.insert(
             "Activity evidence",
             "Inactive — no shows or releases since 2022",
         );
-        assert_eq!(parse_seed_row(&row), Err(PeerSeedRefusal::Inactive));
+        assert_eq!(
+            parse_seed_row(&row)
+                .expect("a dead-band claim still parses")
+                .act
+                .status,
+            Some(PeerLiveness::Inactive)
+        );
     }
 
     #[test]
@@ -681,13 +741,8 @@ mod tests {
             vec!["Ghost".to_owned(), String::new(), String::new()],
         ];
         let report = extract_seed_sheet(&grid).expect("sheet parses");
-        assert_eq!(report.acts.len(), 1);
-        assert_eq!(
-            report.refusals,
-            vec![
-                (3, PeerSeedRefusal::Inactive),
-                (4, PeerSeedRefusal::MissingLink),
-            ]
-        );
+        assert_eq!(report.acts.len(), 2);
+        assert_eq!(report.acts[1].act.status, Some(PeerLiveness::Inactive));
+        assert_eq!(report.refusals, vec![(4, PeerSeedRefusal::MissingLink)]);
     }
 }

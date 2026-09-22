@@ -277,6 +277,7 @@ async fn upsert_keeps_the_sheet_city() -> Result<(), Box<dyn std::error::Error>>
                 phone: None,
                 suggested_kind: Some("venue".to_owned()),
                 city: Some("Wroclaw".to_owned()),
+                staged_status: None,
                 notes: None,
             }],
             true,
@@ -298,6 +299,7 @@ async fn upsert_keeps_the_sheet_city() -> Result<(), Box<dyn std::error::Error>>
                 phone: None,
                 suggested_kind: None,
                 city: None,
+                staged_status: None,
                 notes: None,
             }],
             false,
@@ -820,6 +822,7 @@ async fn uploaded_sheet_stages_through_the_upload_source() -> Result<(), Box<dyn
             phone: None,
             suggested_kind: None,
             city: Some("wroclaw".to_owned()),
+            staged_status: None,
             notes: None,
         },
         crowdrelay_domain::drive_contacts::ExtractedContact {
@@ -829,6 +832,7 @@ async fn uploaded_sheet_stages_through_the_upload_source() -> Result<(), Box<dyn
             phone: None,
             suggested_kind: Some("promoter".to_owned()),
             city: None,
+            staged_status: None,
             notes: None,
         },
     ];
@@ -877,5 +881,157 @@ async fn uploaded_sheet_stages_through_the_upload_source() -> Result<(), Box<dyn
     .await?;
     assert!(sources.contains(&"upload".to_owned()));
     assert!(sources.contains(&"gmail".to_owned()));
+    Ok(())
+}
+
+/// The verification loop's agent finding drives the registry's `active`
+/// flag: a contacts sheet whose Status column calls the agent inactive
+/// retires the row, a fresh `active` verdict re-opens it — and neither
+/// touches `refused_until`, which is the agent's own answer. A row typed
+/// for a different queue touches no agent.
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn an_inactive_agent_row_retires_the_agent() -> Result<(), Box<dyn std::error::Error>> {
+    let fixture = fixture("agent-status").await?;
+
+    // An agent on record and active.
+    sqlx::query(
+        "INSERT INTO booking_agents (workspace_id, name, agency, contact_email) \
+         VALUES ($1, 'Agent A', 'Agency X', 'agent@agency.test')",
+    )
+    .bind(fixture.workspace_id)
+    .execute(&fixture.pool)
+    .await?;
+
+    let contacts = vec![
+        crowdrelay_domain::drive_contacts::ExtractedContact {
+            email: "agent@agency.test".to_owned(),
+            display_name: Some("Agent A".to_owned()),
+            organization: Some("Agency X".to_owned()),
+            phone: None,
+            suggested_kind: Some("booking_agent".to_owned()),
+            city: None,
+            staged_status: Some("inactive".to_owned()),
+            notes: Some("roster page gone".to_owned()),
+        },
+        // Same verdict, wrong queue — a dead promoter is not an agent
+        // retirement.
+        crowdrelay_domain::drive_contacts::ExtractedContact {
+            email: "promoter@room.test".to_owned(),
+            display_name: None,
+            organization: None,
+            phone: None,
+            suggested_kind: Some("promoter".to_owned()),
+            city: None,
+            staged_status: Some("inactive".to_owned()),
+            notes: None,
+        },
+    ];
+    fixture
+        .repository
+        .upsert_contacts_for_source(
+            fixture.workspace_id,
+            "gdrive",
+            "verify-file",
+            "agents.csv",
+            &contacts,
+            true,
+        )
+        .await?;
+
+    let (active, version): (bool, i64) = sqlx::query_as(
+        "SELECT active, version FROM booking_agents \
+         WHERE workspace_id = $1 AND contact_email = 'agent@agency.test'",
+    )
+    .bind(fixture.workspace_id)
+    .fetch_one(&fixture.pool)
+    .await?;
+    assert!(!active, "the dead-agent verdict did not retire the row");
+    assert_eq!(version, 2, "a deactivation must move the version");
+
+    // The verdict landed on the staging row for the operator to see.
+    let staged: Option<String> = sqlx::query_scalar(
+        "SELECT staged_status FROM drive_contacts \
+         WHERE workspace_id = $1 AND normalized_email = 'agent@agency.test'",
+    )
+    .bind(fixture.workspace_id)
+    .fetch_one(&fixture.pool)
+    .await?;
+    assert_eq!(staged.as_deref(), Some("inactive"));
+
+    // Re-verified active: the lifecycle flag follows the newest verdict —
+    // a re-opened agency is bookable again, the same ladder rooms and bands
+    // follow. What the sheet can never touch is a refusal: that flag is the
+    // agent's own answer, not the sheet's to reopen.
+    sqlx::query(
+        "UPDATE booking_agents SET refused_until = CURRENT_DATE + 90 \
+         WHERE workspace_id = $1 AND contact_email = 'agent@agency.test'",
+    )
+    .bind(fixture.workspace_id)
+    .execute(&fixture.pool)
+    .await?;
+    let active_again = vec![crowdrelay_domain::drive_contacts::ExtractedContact {
+        email: "agent@agency.test".to_owned(),
+        display_name: Some("Agent A".to_owned()),
+        organization: Some("Agency X".to_owned()),
+        phone: None,
+        suggested_kind: Some("booking_agent".to_owned()),
+        city: None,
+        staged_status: Some("active".to_owned()),
+        notes: None,
+    }];
+    fixture
+        .repository
+        .upsert_contacts_for_source(
+            fixture.workspace_id,
+            "gdrive",
+            "verify-file",
+            "agents.csv",
+            &active_again,
+            true,
+        )
+        .await?;
+    let (live_again, refused): (bool, Option<time::Date>) = sqlx::query_as(
+        "SELECT active, refused_until FROM booking_agents \
+         WHERE workspace_id = $1 AND contact_email = 'agent@agency.test'",
+    )
+    .bind(fixture.workspace_id)
+    .fetch_one(&fixture.pool)
+    .await?;
+    assert!(live_again, "a fresh active verdict must re-open the agent");
+    assert!(refused.is_some(), "a sheet re-opened a refused door");
+
+    // And a batch carrying no verdict at all leaves the flag alone — the
+    // lifecycle flag answers to the sheet's claims, not to a contact row
+    // that happens to mention the address.
+    let bare = vec![crowdrelay_domain::drive_contacts::ExtractedContact {
+        email: "agent@agency.test".to_owned(),
+        display_name: Some("Agent A".to_owned()),
+        organization: None,
+        phone: None,
+        suggested_kind: None,
+        city: None,
+        staged_status: None,
+        notes: None,
+    }];
+    fixture
+        .repository
+        .upsert_contacts_for_source(
+            fixture.workspace_id,
+            "gmail",
+            "msg-7",
+            "Re: dates",
+            &bare,
+            false,
+        )
+        .await?;
+    let still_live: bool = sqlx::query_scalar(
+        "SELECT active FROM booking_agents \
+         WHERE workspace_id = $1 AND contact_email = 'agent@agency.test'",
+    )
+    .bind(fixture.workspace_id)
+    .fetch_one(&fixture.pool)
+    .await?;
+    assert!(still_live, "a sighting with no verdict touched the flag");
     Ok(())
 }
