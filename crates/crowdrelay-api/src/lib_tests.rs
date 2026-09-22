@@ -154,6 +154,11 @@ mod tests {
             crowdrelay_infra::sensitive_response::SensitiveResponseKey::derive_from_secret(
                 b"test-encryption-key",
             ),
+            crowdrelay_infra::sensitive_response::SensitiveResponseKey::derive_for_domain(
+                crowdrelay_infra::workspace_secrets::KEY_DERIVATION_DOMAIN,
+                b"test-encryption-key",
+            ),
+            None,
             crowdrelay_infra::attestation::AttestationSigningKey::derive_from_secret(
                 b"test-encryption-key",
             ),
@@ -554,6 +559,60 @@ mod tests {
             .await?;
         assert_ne!(internal_with_commerce.status(), StatusCode::UNAUTHORIZED);
 
+        // The secrets surface is credential-scoped in both directions: the
+        // masked list and the writes answer only the ControlPlane bearer, and
+        // the reveal answers only the commerce bearer.
+        for (uri, token) in [
+            ("/v1/control-plane/secrets", ADMIN_KEY),
+            ("/v1/control-plane/secrets", STAFF_KEY),
+            ("/v1/control-plane/secrets", COMMERCE_KEY),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(uri)
+                        .header(AUTHORIZATION, format!("Bearer {token}"))
+                        .body(Body::empty())?,
+                )
+                .await?;
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{uri}");
+        }
+        let secrets_write_with_staff = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/v1/control-plane/secrets/stripe_secret_key")
+                    .header(AUTHORIZATION, format!("Bearer {STAFF_KEY}"))
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"value":"sk_test_abcdefgh"}"#))?,
+            )
+            .await?;
+        assert_eq!(secrets_write_with_staff.status(), StatusCode::UNAUTHORIZED);
+
+        let credentials_with_admin = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/internal/stripe-credentials")
+                    .header(AUTHORIZATION, format!("Bearer {ADMIN_KEY}"))
+                    .body(Body::empty())?,
+            )
+            .await?;
+        assert_eq!(credentials_with_admin.status(), StatusCode::UNAUTHORIZED);
+
+        let credentials_with_commerce = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/internal/stripe-credentials")
+                    .header(AUTHORIZATION, format!("Bearer {COMMERCE_KEY}"))
+                    .body(Body::empty())?,
+            )
+            .await?;
+        assert_ne!(credentials_with_commerce.status(), StatusCode::UNAUTHORIZED);
+
         let control_plane_with_control_plane_key = app
             .clone()
             .oneshot(
@@ -834,6 +893,62 @@ mod tests {
         let response = app
             .oneshot(post(valid_body, Some("event-create-test-key-2"))?)
             .await?;
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        Ok(())
+    }
+
+    /// The secrets write validates name and value before the store runs: an
+    /// unknown name is a bad request, a malformed credential is
+    /// unprocessable, and neither touches the database.
+    #[tokio::test]
+    async fn secrets_write_validates_name_and_value_before_the_store()
+    -> Result<(), Box<dyn std::error::Error>> {
+        const CONTROL_PLANE_KEY: &str = "test-control-plane-key-123456789012";
+        let app = test_router()?;
+        let put = |name: &str, body: &str| {
+            app.clone().oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/v1/control-plane/secrets/{name}"))
+                    .header(AUTHORIZATION, format!("Bearer {CONTROL_PLANE_KEY}"))
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(body.to_owned()))
+                    .expect("request"),
+            )
+        };
+
+        // A name the store does not know is refused outright — this surface
+        // is not a generic secret writer.
+        assert_eq!(
+            put("database_url", r#"{"value":"postgres://x"}"#).await?.status(),
+            StatusCode::BAD_REQUEST,
+        );
+        for (name, body) in [
+            // A Stripe secret key that is not one.
+            ("stripe_secret_key", r#"{"value":"not-a-key"}"#),
+            // The webhook grammar refuses a secret key pasted into the wrong
+            // slot — the swap that would silently break signature checks.
+            ("stripe_webhook_secret", r#"{"value":"sk_live_f4ke-k3y-n0t-r34l"}"#),
+            // Whitespace inside the value is not a credential.
+            ("stripe_secret_key", r#"{"value":"sk_test_ has spaces"}"#),
+            // An empty value is not an unset — DELETE is the unset.
+            ("stripe_secret_key", r#"{"value":"   "}"#),
+        ] {
+            assert_eq!(
+                put(name, body).await?.status(),
+                StatusCode::BAD_REQUEST,
+                "{name} {body}",
+            );
+        }
+
+        // A well-formed write reaches the store — the test database is not
+        // connected, so the store's own Unavailable proves the boundary
+        // passed it through.
+        let response = put(
+            "stripe_secret_key",
+            r#"{"value":"sk_test_f4ke-k3y-n0t-r34l"}"#,
+        )
+        .await?;
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
         Ok(())
     }

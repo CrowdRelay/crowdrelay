@@ -5389,6 +5389,27 @@ paths:
           $ref: '#/components/responses/PrivateProblem'
         '503':
           $ref: '#/components/responses/PrivateProblem'
+  /internal/stripe-credentials:
+    get:
+      operationId: getInternalStripeCredentials
+      summary: Reveal the workspace's Stripe credentials to its own checkout server
+      description: 'The one route that opens the workspace secret store. Returns plaintext Stripe keys so the tenant checkout server can create sessions and verify webhooks; nulls mean no tenant credential is stored and the caller falls back to its environment. ticketing_enabled rides along so the caller can refuse before any fan-facing side effect — the flag is still enforced server-side at reservation.'
+      security:
+      - commerceBearer: []
+      responses:
+        '200':
+          description: Tenant Stripe credentials (or nulls) plus the ticketing opt-in.
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/PrivateNoStore'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InternalStripeCredentials'
+        '401':
+          $ref: '#/components/responses/PrivateProblem'
+        '503':
+          $ref: '#/components/responses/PrivateProblem'
   /internal/ticket-orders/{order_id}/stripe-checkout:
     post:
       operationId: bindTicketOrderStripeCheckout
@@ -12215,6 +12236,18 @@ components:
         active: { type: boolean }
         low_stock_threshold: { type: integer, minimum: 0 }
         sell_without_stock: { type: boolean }
+    InternalStripeCredentials:
+      type: object
+      additionalProperties: false
+      required: [ticketing_enabled, stripe_secret_key, stripe_webhook_secret]
+      properties:
+        ticketing_enabled: { type: boolean }
+        stripe_secret_key:
+          type: [string, 'null']
+          description: Plaintext secret key for the tenant's own Stripe account; null when no tenant credential is stored.
+        stripe_webhook_secret:
+          type: [string, 'null']
+          description: Webhook signing secret for the tenant's Stripe endpoint; null when absent.
     InventoryActivation:
       type: object
       additionalProperties: false

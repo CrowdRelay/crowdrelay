@@ -121,6 +121,7 @@ pub mod tenant;
 mod tenant_settings_http;
 mod ticket_qr;
 mod ticketing;
+mod workspace_secrets_http;
 
 pub use acquisition::{
     AcquisitionState, AcquisitionStateArgs, ClickMetricsReader, ClickMetricsSnapshot,
@@ -194,6 +195,11 @@ pub struct AppState {
     pub(crate) tenant: tenant::TenantProfile,
     /// Encryption key for OAuth token storage (TikTok, future providers).
     pub(crate) response_encryption_key: SensitiveResponseKey,
+    /// Sealing keys for the workspace-secrets store — the tenant-configured
+    /// credentials the control-plane secrets routes write and the internal
+    /// credentials route opens.
+    pub(crate) workspace_secrets_key: SensitiveResponseKey,
+    pub(crate) previous_workspace_secrets_key: Option<SensitiveResponseKey>,
     /// Signing key for audience attestations. A document's signature is the
     /// only part a stranger can check against us rather than against itself.
     pub(crate) attestation_signing_key: crowdrelay_infra::attestation::AttestationSigningKey,
@@ -232,6 +238,8 @@ impl AppState {
         push: push::PushPublicState,
         tenant: tenant::TenantProfile,
         response_encryption_key: SensitiveResponseKey,
+        workspace_secrets_key: SensitiveResponseKey,
+        previous_workspace_secrets_key: Option<SensitiveResponseKey>,
         attestation_signing_key: crowdrelay_infra::attestation::AttestationSigningKey,
         provider_verifiers: crowdrelay_infra::provider_verification::ProviderVerifiers,
     ) -> Self {
@@ -268,6 +276,8 @@ impl AppState {
             push,
             tenant,
             response_encryption_key,
+            workspace_secrets_key,
+            previous_workspace_secrets_key,
             attestation_signing_key,
             http_client: reqwest::Client::new(),
             provider_verifiers,
@@ -1004,6 +1014,23 @@ impl Problem {
             status: StatusCode::UNAUTHORIZED.as_u16(),
             detail: std::borrow::Cow::Borrowed(
                 "Valid authentication is required for this operation.",
+            ),
+            cache_control: "no-store",
+            retry_after_seconds: None,
+            request_id,
+        }
+    }
+
+    /// The tenant has not opted into the capability the request needs.
+    /// Distinct from `unauthorized` — the caller is authenticated fine; the
+    /// tenant it acts for has the feature off.
+    fn forbidden(request_id: Option<String>) -> Self {
+        Self {
+            r#type: "https://crowdrelay.dev/problems/forbidden",
+            title: "Not permitted for this tenant",
+            status: StatusCode::FORBIDDEN.as_u16(),
+            detail: std::borrow::Cow::Borrowed(
+                "The tenant has not enabled the capability this request needs.",
             ),
             cache_control: "no-store",
             retry_after_seconds: None,

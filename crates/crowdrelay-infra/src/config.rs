@@ -296,6 +296,13 @@ pub struct Config {
     pub attestation_signing_key: AttestationSigningKey,
     /// Optional immediately preceding AEAD key used during bounded rotation.
     pub previous_response_encryption_key: Option<SensitiveResponseKey>,
+    /// Derived AEAD key for the workspace-secrets store (tenant-configured
+    /// credentials — Stripe keys first). Same configured secret, its own
+    /// domain separator, same reasoning as `attestation_signing_key`.
+    pub workspace_secrets_key: SensitiveResponseKey,
+    /// Optional immediately preceding secrets key, derived from the previous
+    /// configured secret so a rotation can still read rows it wrote.
+    pub previous_workspace_secrets_key: Option<SensitiveResponseKey>,
     /// Requires inbox ownership confirmation before a fan becomes active.
     pub require_double_opt_in: bool,
     /// Public/runtime push-delivery controls. Provider secrets remain worker-only.
@@ -503,6 +510,11 @@ impl Config {
             values.get(PREVIOUS_RESPONSE_ENCRYPTION_SECRET_KEY),
             environment.is_production(),
         )?;
+        let workspace_secrets_key =
+            derive_workspace_secrets_key(values.get(RESPONSE_ENCRYPTION_SECRET_KEY));
+        let previous_workspace_secrets_key = derive_previous_workspace_secrets_key(
+            values.get(PREVIOUS_RESPONSE_ENCRYPTION_SECRET_KEY),
+        );
         if previous_response_encryption_key.as_ref() == Some(&response_encryption_key) {
             return Err(ConfigError::InvalidSecret {
                 name: PREVIOUS_RESPONSE_ENCRYPTION_SECRET_KEY,
@@ -550,6 +562,8 @@ impl Config {
             response_encryption_key,
             attestation_signing_key,
             previous_response_encryption_key,
+            workspace_secrets_key,
+            previous_workspace_secrets_key,
             require_double_opt_in,
             push_delivery: PushPublicConfig::parse(&values)?,
             rate_limit,

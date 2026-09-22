@@ -30,7 +30,7 @@ pub const DEFAULT_CREW_LOCALE: &str = "en";
 
 /// The keys an operator may edit. Anything else stays internal even if a row
 /// somehow appears, so the HTTP surface cannot be used to smuggle state.
-pub const EDITABLE_KEYS: [&str; 13] = [
+pub const EDITABLE_KEYS: [&str; 14] = [
     KEY_MEMBER_SITE_BASE_URL,
     KEY_MEMBER_AREA_PATH,
     KEY_SYNESTHESIA_CAMPAIGN_SLUG,
@@ -44,6 +44,7 @@ pub const EDITABLE_KEYS: [&str; 13] = [
     KEY_TEAM_WEEKLY_ASK_CEILING,
     KEY_TENANT_INTENT,
     KEY_ACT_STYLE,
+    KEY_TICKETING_ENABLED,
 ];
 
 const KEY_MEMBER_SITE_BASE_URL: &str = "member_site_base_url";
@@ -87,6 +88,13 @@ pub const KEY_TENANT_INTENT: &str = "tenant_intent";
 /// Absent means the act has not said. That is a real state and the planner
 /// reads it as unmeasured, not as "no style".
 pub const KEY_ACT_STYLE: &str = "act_style";
+/// Whether this tenant sells tickets through first-party checkout.
+///
+/// Opt-in, and absent means off: a tenant who never asked for a Stripe
+/// checkout gets no ticket-order surface at all. Migration 0343 seeded the
+/// workspaces that existed then — they were already selling, so their "yes"
+/// is recorded rather than defaulted.
+pub const KEY_TICKETING_ENABLED: &str = "ticketing_enabled";
 
 const CACHE_TTL: Duration = Duration::from_secs(60);
 
@@ -106,6 +114,10 @@ pub struct TenantBrandSettings {
     /// platforms that have credentials (Facebook Pages, Instagram) instead of
     /// drafting for manual review. Default false — the operator turns it on.
     pub social_auto_post: bool,
+    /// First-party ticket checkout opt-in. Default false: a tenant that never
+    /// asked for ticket sales gets a refusal at the reserve, not a silent
+    /// order row. Migration 0343 seeded the tenants who were already selling.
+    pub ticketing_enabled: bool,
 }
 
 impl Default for TenantBrandSettings {
@@ -118,6 +130,7 @@ impl Default for TenantBrandSettings {
             synesthesia_enabled: false,
             north_star_metric: DEFAULT_NORTH_STAR_METRIC.to_owned(),
             social_auto_post: false,
+            ticketing_enabled: false,
         }
     }
 }
@@ -215,7 +228,7 @@ impl TenantSettingsRepository {
             r#"
             SELECT key, value FROM tenant_settings
             WHERE workspace_id = $1
-              AND key IN ($2, $3, $4, $5, $6, $7, $8)
+              AND key IN ($2, $3, $4, $5, $6, $7, $8, $9)
             "#,
         )
         .bind(workspace_id)
@@ -226,6 +239,7 @@ impl TenantSettingsRepository {
         .bind(KEY_SYNESTHESIA_ENABLED)
         .bind(KEY_NORTH_STAR_METRIC)
         .bind(KEY_SOCIAL_AUTO_POST)
+        .bind(KEY_TICKETING_ENABLED)
         .fetch_all(&self.pool)
         .await?;
         let mut settings = TenantBrandSettings::default();
@@ -238,6 +252,7 @@ impl TenantSettingsRepository {
                 KEY_SYNESTHESIA_ENABLED => settings.synesthesia_enabled = value == "true",
                 KEY_NORTH_STAR_METRIC => settings.north_star_metric = value,
                 KEY_SOCIAL_AUTO_POST => settings.social_auto_post = value == "true",
+                KEY_TICKETING_ENABLED => settings.ticketing_enabled = value == "true",
                 _ => {}
             }
         }
@@ -424,11 +439,14 @@ mod tests {
             settings.synesthesia_campaign_slug,
             "virya-synesthesia-album-v1"
         );
-        // Product opt-in defaults: Signal on, Synesthesia off.
+        // Product opt-in defaults: Signal on, Synesthesia off, ticketing off —
+        // the last one is opted into per tenant, and workspaces that existed
+        // before the flag arrived were seeded on by migration 0343.
         assert!(settings.signal_enabled);
         assert!(!settings.synesthesia_enabled);
         assert_eq!(settings.north_star_metric, "activated_fans_30d");
         assert!(!settings.social_auto_post);
+        assert!(!settings.ticketing_enabled);
     }
 
     #[test]
