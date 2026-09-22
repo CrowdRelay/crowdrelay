@@ -256,6 +256,7 @@ impl OutboxWorker {
                     true,
                     delay,
                     error_kind,
+                    true,
                 ),
             )
             .await
