@@ -158,7 +158,7 @@ pub fn attribute_fan_growth(evidence: &[GrowthEvidence]) -> FanGrowthAttribution
         // would join back to the dispatch prediction's template_id.
         let template_id = ev
             .creative_family
-            .map(|f| format!("{f:?}"))
+            .map(|f| f.as_str().to_owned())
             .unwrap_or(template_key);
 
         let template_entry = by_template.entry(template_id.clone()).or_default();

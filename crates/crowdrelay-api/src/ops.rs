@@ -49,5 +49,6 @@ include!("ops/intelligence.rs");
 include!("ops/processes.rs");
 
 include!("ops/fan_out.rs");
+include!("ops/fan_sources.rs");
 include!("ops/query_support.rs");
 include!("ops/metrics_snapshot.rs");

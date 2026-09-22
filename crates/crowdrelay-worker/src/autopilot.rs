@@ -75,6 +75,10 @@ mod phase {
     /// Its failure leaves the previous tuning row in effect — a degraded
     /// cycle tunes nothing, it never untunes.
     pub const LLM_TUNING: &str = "llm_tuning";
+    /// The fan-source attribution snapshot — persisting what the brain's
+    /// evidence ledger already computed. Purely observational: a failure
+    /// here loses one operator reading, never an action or a measurement.
+    pub const FAN_SOURCE_SNAPSHOT: &str = "fan_source_snapshot";
 }
 
 /// Which phases of a cycle fell over.
@@ -854,6 +858,13 @@ impl AutopilotWorker {
                 degraded.failed(phase::LLM_TUNING);
                 tracing::warn!(error = %error, "CrowdRelay LLM call tuning failed");
             }
+        }
+
+        // The fan-source snapshot runs last so the measurement phases above
+        // land in the reading. The phase lives in its own module — `run`
+        // returns false exactly when the cycle should record it degraded.
+        if !crate::fan_source_snapshot::run(&self.repository, self.workspace_id, now).await {
+            degraded.failed(phase::FAN_SOURCE_SNAPSHOT);
         }
 
         if degraded.any() {

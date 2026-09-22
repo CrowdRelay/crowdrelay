@@ -52,6 +52,13 @@ pub(crate) fn router(state: crate::AppState) -> Router {
             "/v1/control-plane/ops/intelligence",
             get(crate::ops::intelligence),
         )
+        // Where the fans came from: the attribution snapshots the worker
+        // writes once per cycle, observed/incremental/durable per template
+        // and per strategy.
+        .route(
+            "/v1/control-plane/ops/fan-sources",
+            get(crate::ops::fan_sources),
+        )
         .route("/v1/control-plane/ops/outbox", get(crate::ops::list_outbox))
         .route(
             "/v1/control-plane/ops/outbox/{event_id}/retry",

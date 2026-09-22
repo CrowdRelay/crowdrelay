@@ -37,6 +37,7 @@ pub mod discovery;
 pub mod draws;
 pub mod event_sync;
 pub mod executor_registry;
+pub mod fan_source_snapshot;
 pub mod gdrive_contacts_sync;
 pub mod gmail_contacts_sync;
 pub mod google_oauth;

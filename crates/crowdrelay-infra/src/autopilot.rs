@@ -19,6 +19,10 @@ mod control_pipeline;
 mod decisions;
 mod deliverability;
 mod executor_circuit;
+mod fan_source_snapshots;
+pub use fan_source_snapshots::{
+    NorthStarShift, fan_source_snapshot_due, record_fan_source_snapshot, resolve_shifts,
+};
 mod growth;
 mod growth_metrics;
 mod lapsed_sweep;

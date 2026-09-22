@@ -990,7 +990,12 @@ pub(in crate::autopilot) async fn load_growth_intelligence_snapshots(
     // is stateless across cycles, so this is a batch detection over the whole
     // window rather than an incremental one. Threshold and drift are tuned for
     // daily fan counts.
-    let north_star_series: Vec<f64> = north_star_days.iter().map(|day| day.value).collect();
+    //
+    // `daily_north_star` returns newest-first, but the detector's contract is
+    // oldest-first — fed as returned it walked the series backwards and
+    // reported every upward step as a downward one, with pre/post means
+    // swapped. `.rev()` is the whole fix.
+    let north_star_series: Vec<f64> = north_star_days.iter().rev().map(|day| day.value).collect();
     let shifts = crowdrelay_brain::change_point::detect_fan_growth_shifts(
         &north_star_series,
         10.0, // threshold: 10 fans cumulative deviation
