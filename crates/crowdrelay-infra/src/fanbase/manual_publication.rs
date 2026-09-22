@@ -405,6 +405,13 @@ pub async fn register_manual_social_post(
         social_post_id,
     )
     .await?;
+    record_content_publication_reach(
+        &mut transaction,
+        workspace_id,
+        "social_posts",
+        social_post_id,
+    )
+    .await?;
     transaction.commit().await?;
     Ok(())
 }
@@ -461,6 +468,13 @@ pub async fn register_manual_telegram_post(
         );
     }
     anchor_content_measurements_to_publication(
+        &mut transaction,
+        workspace_id,
+        "telegram_posts",
+        telegram_post_id,
+    )
+    .await?;
+    record_content_publication_reach(
         &mut transaction,
         workspace_id,
         "telegram_posts",
@@ -529,6 +543,13 @@ pub async fn register_manual_discord_post(
         discord_post_id,
     )
     .await?;
+    record_content_publication_reach(
+        &mut transaction,
+        workspace_id,
+        "discord_posts",
+        discord_post_id,
+    )
+    .await?;
     transaction.commit().await?;
     Ok(())
 }
@@ -569,6 +590,103 @@ pub async fn anchor_content_measurements_to_publication(
           AND measurement.action_id = published.action_id
           AND measurement.status = 'pending'
           AND measurement.action_finished_at < published.posted_at
+        "#,
+    );
+    sqlx::query(&query)
+        .bind(workspace_id)
+        .bind(post_id)
+        .execute(&mut **transaction)
+        .await?;
+    Ok(())
+}
+
+/// Records the reach and the execution status of a manually published
+/// content post — the `record_publication_reach` sibling for the
+/// social_posts/telegram_posts/discord_posts tables.
+///
+/// The automatic paths write both inside their mark-posted commit; the
+/// manual registrations wrote neither, so a post the operator published by
+/// hand kept its assignment `dispatched` forever and left the reach ledger
+/// empty — a treated unit the model could never count as treated.
+///
+/// The same 100 the reddit sibling files: not a measurement, and identical
+/// across manual paths on purpose — a post is not worth a different amount
+/// because of who pressed publish.
+async fn record_content_publication_reach(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    workspace_id: Uuid,
+    table: &str,
+    post_id: Uuid,
+) -> Result<(), sqlx::Error> {
+    // Vocabulary per table — the reach ledger's CHECK constraints admit a
+    // fixed set, and each content table names its audience differently.
+    // `social_posts` carries `platform`; the chat tables carry `channel`.
+    let (recipient_kind, recipient_expr, channel, template_id, metadata_key) = match table {
+        "social_posts" => (
+            "platform_audience",
+            "post.platform",
+            "social_post",
+            "social-poster",
+            "platform",
+        ),
+        "telegram_posts" => (
+            "telegram_channel",
+            "post.channel",
+            "telegram_post",
+            "telegram-poster",
+            "channel",
+        ),
+        "discord_posts" => (
+            "discord_channel",
+            "post.channel_id",
+            "discord_post",
+            "discord-poster",
+            "channel_id",
+        ),
+        _ => return Ok(()),
+    };
+    // Table and column names are the compile-time match above, not user
+    // input, so interpolation is safe here.
+    let query = format!(
+        r#"
+        INSERT INTO viryaos_reach_events (
+            workspace_id, action_id, recipient_kind, recipient_id, channel,
+            template_id, estimated_reach, status, metadata, trace_id, causation_id
+        )
+        SELECT $1, post.action_id, '{recipient_kind}', {recipient_expr}, '{channel}',
+               '{template_id}', 100, 'delivered',
+               jsonb_build_object('{metadata_key}', {recipient_expr},
+                                  'published', 'manual'),
+               action.trace_id, post.action_id
+        FROM {table} AS post
+        JOIN viryaos_autopilot_actions AS action
+          ON action.workspace_id = post.workspace_id AND action.id = post.action_id
+        WHERE post.workspace_id = $1 AND post.id = $2
+        ON CONFLICT (action_id, recipient_id, channel)
+            WHERE action_id IS NOT NULL DO NOTHING
+        "#,
+    );
+    sqlx::query(&query)
+        .bind(workspace_id)
+        .bind(post_id)
+        .execute(&mut **transaction)
+        .await?;
+
+    // Monotonic, exactly as the automatic path is: only dispatched →
+    // executed, so re-registering cannot walk the status backwards.
+    let query = format!(
+        r#"
+        UPDATE viryaos_experiment_assignments AS assignment
+        SET execution_status = 'executed',
+            trace_id = COALESCE(assignment.trace_id, action.trace_id)
+        FROM {table} AS post
+        JOIN viryaos_autopilot_actions AS action
+          ON action.workspace_id = post.workspace_id AND action.id = post.action_id
+        WHERE assignment.workspace_id = $1
+          AND post.workspace_id = $1
+          AND post.id = $2
+          AND assignment.action_id = post.action_id
+          AND assignment.execution_status = 'dispatched'
         "#,
     );
     sqlx::query(&query)

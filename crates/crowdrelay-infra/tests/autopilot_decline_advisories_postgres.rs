@@ -180,7 +180,7 @@ async fn seed_conversion(
         "INSERT INTO fan_provenance_events
              (id, workspace_id, fan_id, event_kind, channel, community,
               attribution_method, attribution_confidence, occurred_at)
-         VALUES ($1,$2,$3,'conversion','smart_link',$4,'last_community_click',1.0,now())",
+         VALUES ($1,$2,$3,'conversion','smart_link',$4,'last_tracked_click',1.0,now())",
     )
     .bind(Uuid::now_v7())
     .bind(workspace_id.into_uuid())

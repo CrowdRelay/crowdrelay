@@ -935,16 +935,21 @@ impl TeamEmailDispatchWorker {
     async fn run_once(&self, now: OffsetDateTime) -> Result<(), RepositoryError> {
         let mut phase_failed = false;
 
+        // The reminder lane is retired — the daily briefing is the cadence.
+        // This sweep only clears `next_reminder_at` rows stamped before the
+        // retirement so a leftover schedule can never fire a mail.
         match self
             .repository
-            .dispatch_team_handoff_reminders(self.workspace_id, now)
+            .drain_team_reminder_schedule(self.workspace_id)
             .await
         {
-            Ok(count) if count > 0 => tracing::info!(count, "emitted ViryaOS team reminders"),
+            Ok(count) if count > 0 => {
+                tracing::info!(count, "cleared retired ViryaOS team reminder schedules")
+            }
             Ok(_) => {}
             Err(error) => {
                 phase_failed = true;
-                tracing::warn!(error = %error, "ViryaOS team reminder dispatch failed");
+                tracing::warn!(error = %error, "ViryaOS team reminder schedule drain failed");
             }
         }
 

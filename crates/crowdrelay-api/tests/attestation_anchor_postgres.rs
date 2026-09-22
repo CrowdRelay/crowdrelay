@@ -146,6 +146,12 @@ struct StubEvents;
 
 #[async_trait]
 impl EventRepository for StubEvents {
+    async fn create_event(
+        &self,
+        _command: &crowdrelay_application::CreateEventCommand,
+    ) -> Result<crowdrelay_application::CreatedEvent, RepositoryError> {
+        Err(RepositoryError::Unavailable)
+    }
     async fn load_published_events(&self) -> Result<Vec<PublicEvent>, RepositoryError> {
         Ok(Vec::new())
     }
@@ -284,6 +290,7 @@ fn app_state(
         Arc::new(EventCache::new()),
         RegisterEventInterest::new(Arc::clone(&event_repository)),
         ListFanEventInterests::new(Arc::clone(&event_repository)),
+        crowdrelay_application::CreateEvent::new(Arc::clone(&event_repository)),
         ReplaceEventActs::new(Arc::clone(&event_repository)),
         SetEventCounterparty::new(Arc::clone(&event_repository)),
         crowdrelay_application::SetEventSupportSlots::new(Arc::clone(&event_repository)),
@@ -379,6 +386,11 @@ fn app_state(
         crowdrelay_infra::sensitive_response::SensitiveResponseKey::derive_from_secret(
             b"test-encryption-key",
         ),
+        crowdrelay_infra::sensitive_response::SensitiveResponseKey::derive_for_domain(
+            crowdrelay_infra::workspace_secrets::KEY_DERIVATION_DOMAIN,
+            b"test-encryption-key",
+        ),
+        None,
         AttestationSigningKey::derive_from_secret(SIGNING_SECRET),
         crowdrelay_infra::provider_verification::ProviderVerifiers::new(
             None,

@@ -194,12 +194,27 @@ impl PostgresFanbaseRepository {
                     FROM unnest($2::text[], $3::text[], $4::text[])
                         AS candidate(email, display_name, locale)
                     ON CONFLICT (workspace_id, normalized_email) DO NOTHING
-                    RETURNING id
+                    RETURNING id, created_at
+                ),
+                acquired AS (
+                    INSERT INTO fan_acquisition_events (
+                        workspace_id, fan_id, source, request_id, occurred_at
+                    )
+                    SELECT $1, id, 'fanbase_ingest', $5, now() FROM created
                 )
-                INSERT INTO fan_acquisition_events (
-                    workspace_id, fan_id, source, request_id, occurred_at
+                -- The brain reads fan_provenance_events, not the coarse
+                -- ledger — an ingest that lands only in the first table is a
+                -- channel that taught the ranking nothing. The provenance
+                -- insert reads `created`'s own output: a JOIN on `fans` in
+                -- this statement would see the snapshot before these rows
+                -- existed and silently write nothing.
+                INSERT INTO fan_provenance_events (
+                    workspace_id, fan_id, event_kind, channel, source_target,
+                    attribution_method, attribution_confidence, occurred_at
                 )
-                SELECT $1, id, 'fanbase_ingest', $5, now() FROM created
+                SELECT $1, created.id, 'conversion', 'fanbase_ingest', $5,
+                       'direct_arrival', 1.0, created.created_at
+                FROM created
                 "#,
             )
             .bind(workspace_id)

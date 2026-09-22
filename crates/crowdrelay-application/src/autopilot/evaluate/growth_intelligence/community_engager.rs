@@ -294,6 +294,18 @@ pub(super) fn community_engager_candidates(
         if let Some(members) = target.member_count {
             prompt.push_str(&format!("\n- members: {members}"));
         }
+        // The community's own conversion record — stated to the drafter
+        // because "match what worked" means nothing when the evidence that
+        // something worked never reaches the prompt. Zero is still worth
+        // saying: a community that never converted is a different brief from
+        // one that already produced fans.
+        if target.converted_fans_90d > 0 || target.interactions_90d > 0 {
+            prompt.push_str(&format!(
+                "\n- measured record: {} fan(s) and {} click(s) arrived through this \
+                 community's tracked links in the last 90 days — match what worked",
+                target.converted_fans_90d, target.interactions_90d
+            ));
+        }
         // The community's own promotion rule is the difference between a
         // post that stays up and one that gets the band banned, so the
         // worker is told it rather than left to guess from tone.
@@ -445,6 +457,8 @@ mod tests {
             cooldown_days: Some(14),
             days_since_last_engagement: None,
             joined: Some(true),
+            converted_fans_90d: 0,
+            interactions_90d: 0,
         }
     }
 

@@ -483,6 +483,11 @@ pub(super) fn application_routes(state: AppState) -> Router {
             "/v1/staff/events/{slug}/ticketing",
             get(ticketing::admin_overview),
         )
+        // Manual show entry — a label that never ran a sync source types the
+        // night in by hand. Idempotent on `Idempotency-Key` like every other
+        // retried write.
+        .route("/v1/staff/events", post(events::create_event))
+        .route("/v1/admin/events", post(events::create_event))
         .route(
             "/v1/staff/events/{slug}/acts",
             put(events::replace_event_acts),
@@ -530,6 +535,13 @@ pub(super) fn application_routes(state: AppState) -> Router {
         .route(
             "/v1/internal/ticket-orders/stripe-events",
             post(ticketing::stripe_event),
+        )
+        // The tenant site's checkout asks for the Stripe pair it runs
+        // against — the one route that opens the workspace-secrets store,
+        // commerce-credentialed like the ticket-order internals beside it.
+        .route(
+            "/v1/internal/stripe-credentials",
+            get(crate::workspace_secrets_http::stripe_credentials),
         )
         .route(
             "/v1/internal/events/{event_id}/copy-enrichment",

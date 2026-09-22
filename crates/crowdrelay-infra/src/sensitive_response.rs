@@ -36,8 +36,17 @@ impl SensitiveResponseKey {
     /// Derives a response-encryption key from high-entropy secret material.
     #[must_use]
     pub fn derive_from_secret(secret: &[u8]) -> Self {
+        Self::derive_for_domain(KEY_DERIVATION_DOMAIN, secret)
+    }
+
+    /// Derives a key from the same secret material under a caller-chosen
+    /// domain, so one configured secret yields keys that are independent for
+    /// independent purposes — recovering the workspace-secrets key from the
+    /// response key means inverting SHA-256.
+    #[must_use]
+    pub fn derive_for_domain(domain: &[u8], secret: &[u8]) -> Self {
         let mut digest = Sha256::new();
-        digest.update(KEY_DERIVATION_DOMAIN);
+        digest.update(domain);
         digest.update(secret);
         Self(digest.finalize().into())
     }
