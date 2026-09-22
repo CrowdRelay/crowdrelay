@@ -7,21 +7,6 @@ CARGO := env_var_or_default("CARGO", "cargo")
 COMPOSE := env_var_or_default("COMPOSE", "docker compose")
 API_BASE_URL := env_var_or_default("API_BASE_URL", "http://127.0.0.1:8080/v1")
 
-PG_URL := "postgres://crowdrelay:crowdrelay-local-only@127.0.0.1:5432/crowdrelay_autopilot_test"
-
-# Every ignored Postgres integration test, against a disposable database.
-# Creates and migrates the database itself; safe to re-run at any time.
-_test_pg_env := '''
-export CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL="{{PG_URL}}"
-export CROWDRELAY_TEST_DATABASE_URL="{{PG_URL}}"
-export CROWDRELAY_ADMISSION_TEST_DATABASE_URL="{{PG_URL}}"
-export CROWDRELAY_ECOSYSTEM_TEST_DATABASE_URL="{{PG_URL}}"
-export CROWDRELAY_EVENT_TEST_DATABASE_URL="{{PG_URL}}"
-export CROWDRELAY_FAN_LIFECYCLE_TEST_DATABASE_URL="{{PG_URL}}"
-export CROWDRELAY_MOBILE_FAN_TEST_DATABASE_URL="{{PG_URL}}"
-export CROWDRELAY_REFERRAL_TEST_DATABASE_URL="{{PG_URL}}"
-'''
-
 [private]
 default:
     @just --list

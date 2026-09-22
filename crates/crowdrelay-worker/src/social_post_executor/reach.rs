@@ -69,7 +69,7 @@ impl SocialPostExecutorWorker {
     /// guessed denominator is worse than the fallback constant.
     pub(super) async fn measured_audience(&self, platform: MetricPlatform) -> Option<i32> {
         let metric_key = platform.audience_metric_key()?;
-        sqlx::query_scalar::<_, f64>(
+        let value = sqlx::query_scalar::<_, f64>(
             r#"SELECT point.value::float8
                FROM growth_metric_points AS point
                JOIN growth_metric_series AS series ON series.id = point.series_id
@@ -90,7 +90,14 @@ impl SocialPostExecutorWorker {
                 "could not read the measured social audience; filing the fallback reach"
             );
             None
+        });
+        // A measured zero is not a reach of zero — `estimated_reach` carries a
+        // `>= 1` CHECK, so a real but empty page must read as unmeasured, not
+        // as a constraint violation that rolls the posted transaction back
+        // after the post is already live.
+        value.and_then(|v| {
+            let rounded = v.round();
+            (rounded >= 1.0).then(|| rounded.min(f64::from(i32::MAX)) as i32)
         })
-        .map(|value| value.round() as i32)
     }
 }

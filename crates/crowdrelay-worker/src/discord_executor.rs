@@ -804,7 +804,7 @@ impl DiscordExecutorWorker {
         let platform = MetricPlatform::Discord;
         let metric_key = platform.audience_metric_key()?;
         let value: Option<f64> = sqlx::query_scalar(
-            r#"SELECT point.value
+            r#"SELECT point.value::float8
                FROM growth_metric_points AS point
                JOIN growth_metric_series AS series ON series.id = point.series_id
                WHERE point.workspace_id = $1
