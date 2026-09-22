@@ -361,6 +361,33 @@ else
     log "  removed buildkit builder $c"
   done
 
+  # setup-buildx-action creates a fresh builder instance per CI run and
+  # `buildx rm` keeps the state volume by default — both leak, ~2 GB each.
+  # A builder is live only while its buildkitd container runs; after the
+  # container sweep above, any builder lacking a running container is dead.
+  # Volumes first, then the instance record, so a live build can never lose
+  # state underneath it.
+  docker volume ls --format '{{.Name}}' 2>/dev/null | \
+  grep '^buildx_buildkit_.*_state$' | \
+  while read -r v; do
+    cname="${v%_state}"
+    docker ps --format '{{.Names}}' 2>/dev/null | grep -qx "$cname" && continue
+    if [[ "$REPORT" -eq 1 ]]; then
+      log "  [dry] would remove orphaned buildkit state volume $v"
+    else
+      docker volume rm "$v" >/dev/null 2>&1 && log "  removed orphaned buildkit state volume $v"
+    fi
+  done
+  docker buildx ls 2>/dev/null | awk '/^builder-[0-9a-f]/ {print $1}' | \
+  while read -r b; do
+    docker ps --format '{{.Names}}' 2>/dev/null | grep -qx "buildx_buildkit_${b}0" && continue
+    if [[ "$REPORT" -eq 1 ]]; then
+      log "  [dry] would remove inactive buildx builder $b"
+    else
+      docker buildx rm "$b" >/dev/null 2>&1 && log "  removed inactive buildx builder $b"
+    fi
+  done
+
   # Images: keep the KEEP_IMAGES_PER_REPO newest tags per repository.
   # `docker images` output is newest-first, so order is the age authority.
   # Dedup by image ID: rmi by ID removes every tag on the image, so an ID
