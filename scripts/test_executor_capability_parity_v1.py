@@ -40,9 +40,18 @@ INTERNAL_ONLY: set[str] = set()
 
 def code_capabilities() -> set[str]:
     source = CAPABILITIES.read_text()
-    found = set(re.findall(r'=>\s*"([a-z][a-z0-9_.]*)"', source))
+    found = set(re.findall(r'=>\s*"([a-z][a-z0-9._]*)"', source))
     # Capabilities referenced through a constant rather than a match arm.
-    found |= set(re.findall(r'CAPABILITY: &str = "([a-z][a-z0-9_.]*)"', source))
+    found |= set(re.findall(r'CAPABILITY: &str = "([a-z][a-z0-9._]*)"', source))
+    # Conditional arms (`=> { if ... { "cap" } }`) hide from the arm regex;
+    # every quoted literal inside the payload-capability function is a
+    # capability name, so read them there.
+    payload_fn = re.split(
+        r"\n(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?fn ",
+        source.split("fn executor_capability_for_payload", 1)[1],
+        1,
+    )[0]
+    found |= set(re.findall(r'"([a-z][a-z0-9._]*\.[a-z0-9._]+)"', payload_fn))
     found.discard("unknown")
     return found - INTERNAL_ONLY
 
@@ -50,7 +59,7 @@ def code_capabilities() -> set[str]:
 def contract_capabilities() -> set[str]:
     for line in CONTRACT.read_text().splitlines():
         if line.startswith("Capabilities:"):
-            return set(re.findall(r"`([a-z][a-z0-9_.]*)`", line))
+            return set(re.findall(r"`([a-z][a-z0-9._]*)`", line))
     raise AssertionError("the contract has no `Capabilities:` line")
 
 
