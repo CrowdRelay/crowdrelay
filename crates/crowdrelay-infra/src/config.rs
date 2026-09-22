@@ -30,7 +30,7 @@ mod team;
 use click::parse_click_buffer_config;
 pub use meta::{AdConversionConfig, BandsintownConversionConfig, GoogleAdsConfig, MetaCapiConfig};
 pub use push::PushPublicConfig;
-pub use team::TeamOperationsConfig;
+pub use team::{TEAM_MEMBERS_JSON_KEY, TeamMemberSpec, TeamOperationsConfig};
 use team::{
     VIRYA_TEAM_MEMBER_1_EMAIL_KEY, VIRYA_TEAM_MEMBER_2_EMAIL_KEY, VIRYA_TEAM_MEMBER_3_EMAIL_KEY,
     VIRYA_TEAM_MEMBER_4_EMAIL_KEY, VIRYA_TEAM_MEMBER_5_EMAIL_KEY, parse_team_operations,
@@ -192,6 +192,7 @@ const KNOWN_KEYS: &[&str] = &[
     QR_SIGNING_SECRET_KEY,
     ADMIN_MEMBER_EMAIL_KEY,
     STAFF_MEMBER_EMAIL_KEY,
+    TEAM_MEMBERS_JSON_KEY,
     VIRYA_TEAM_MEMBER_1_EMAIL_KEY,
     VIRYA_TEAM_MEMBER_2_EMAIL_KEY,
     VIRYA_TEAM_MEMBER_3_EMAIL_KEY,
@@ -772,9 +773,13 @@ pub enum ConfigError {
     #[error("production admission API requires {name}")]
     MissingProductionAdmissionSecret { name: &'static str },
 
-    /// Production Autopilot needs every configured team owner to have a secret-backed contact.
+    /// Production Autopilot needs at least one reachable team owner contact.
     #[error("production Autopilot team routing requires {name}")]
     MissingProductionTeamContact { name: &'static str },
+
+    /// `CROWDRELAY_TEAM_MEMBERS_JSON` could not be parsed into a valid roster.
+    #[error("environment variable CROWDRELAY_TEAM_MEMBERS_JSON is invalid: {detail}")]
+    InvalidTeamMembersJson { detail: String },
 
     /// A member email address failed validation.
     #[error("environment variable {name} must contain a valid normalized email address")]
