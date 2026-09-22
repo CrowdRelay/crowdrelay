@@ -282,6 +282,5 @@ async fn a_promoters_written_offer_lands_as_a_proposal_on_the_negotiation()
     .await?;
     assert_eq!(queued, 0, "a disposition-only reply has nothing to read");
 
-    fixture.pool.close().await;
     Ok(())
 }

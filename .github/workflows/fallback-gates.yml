@@ -13,18 +13,15 @@
 # on the self-hosted job that has one. So a green run here is not a full CI
 # pass, and the workflow's name says so rather than implying otherwise.
 #
-# It duplicates work when the self-hosted runner is healthy. That is the price,
-# knowingly paid: detecting whether the runner is up needs the runners API,
-# which the workflow token cannot read, and a fallback that only runs when
-# somebody remembers to press a button is not a fallback.
+# It used to duplicate the whole chain on every push — a second full compile
+# paid so the runner being down never meant zero gates. That made the common
+# case carry the cost of the rare one. It is manual now: when the self-hosted
+# runner is down, dispatch it. `just ci` runs the identical chain locally,
+# so an outage has two escape hatches and a healthy runner pays for neither.
 name: Fallback gates (no self-hosted runner)
 
 on:
   workflow_dispatch:
-  push:
-    branches: ["main"]
-  pull_request:
-    paths-ignore: ["**/*.md", "docs/**"]
 
 permissions:
   contents: read

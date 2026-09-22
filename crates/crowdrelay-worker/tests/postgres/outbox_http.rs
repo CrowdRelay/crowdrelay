@@ -37,7 +37,6 @@ async fn signed_http_delivery_is_exact_and_durable() -> Result<()> {
     let fixture = FixtureIds::new();
     let result = run_scenario(&pool, fixture).await;
     let cleanup_result = cleanup_fixture(&pool, fixture.workspace_id).await;
-    pool.close().await;
 
     result.context("signed webhook scenario must succeed")?;
     cleanup_result.context("remove signed webhook test fixture")?;

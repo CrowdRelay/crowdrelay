@@ -406,7 +406,6 @@ async fn a_content_sources_format_must_name_a_catalogue_entry()
         .expect("the undeclared source is listed");
     assert_eq!(filed.format_key, None);
 
-    pool.close().await;
     Ok(())
 }
 
@@ -660,6 +659,5 @@ async fn an_approved_suggestion_resolves_on_the_bands_report()
         "the foreign row is untouched"
     );
 
-    pool.close().await;
     Ok(())
 }

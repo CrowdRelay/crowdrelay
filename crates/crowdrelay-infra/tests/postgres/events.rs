@@ -167,7 +167,6 @@ async fn publishes_events_tracks_actions_and_registers_interest_idempotently()
     .await?;
     assert_eq!(outbox_count, 1);
 
-    pool.close().await;
     Ok(())
 }
 
@@ -351,7 +350,6 @@ async fn replaces_event_bill_and_attributes_ticket_clicks_per_act()
         Err(crowdrelay_application::RepositoryError::Conflict)
     );
 
-    pool.close().await;
     Ok(())
 }
 
@@ -425,7 +423,6 @@ async fn a_festival_slot_runs_as_an_ordinary_show() -> Result<(), Box<dyn std::e
         Err(crowdrelay_application::RepositoryError::NotFound)
     );
 
-    pool.close().await;
     Ok(())
 }
 
@@ -523,7 +520,6 @@ async fn a_festival_bill_runs_festival_scale() -> Result<(), Box<dyn std::error:
     assert_eq!(published[0].festival_name, None);
     assert_eq!(published[0].acts.len(), 32);
 
-    pool.close().await;
     Ok(())
 }
 
@@ -678,7 +674,6 @@ async fn tenant_act_count_tracks_resolved_acts_on_the_bill()
         .await?;
     assert_eq!(count(workspace_id, event_id, &pool).await?, 0);
 
-    pool.close().await;
     Ok(())
 }
 

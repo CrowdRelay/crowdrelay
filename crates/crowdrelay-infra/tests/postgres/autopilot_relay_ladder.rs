@@ -443,6 +443,5 @@ async fn approving_a_post_ladder_queues_the_whole_spread_and_revoke_stops_it()
         .await;
     assert!(matches!(result, Err(RepositoryError::NotFound)));
 
-    fixture.pool.close().await;
     Ok(())
 }

@@ -311,7 +311,6 @@ async fn queued_team_assignment_email_uses_fast_lane_and_emits_bridge_event()
     assert_eq!(claim_state.0, "succeeded");
     assert_eq!(claim_state.1.as_deref(), Some("gmail-message-123"));
 
-    pool.close().await;
     Ok(())
 }
 

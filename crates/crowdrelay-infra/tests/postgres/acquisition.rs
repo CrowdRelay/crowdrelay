@@ -215,7 +215,6 @@ async fn phase_one_acquisition_is_atomic_and_tenant_safe() -> Result<(), Box<dyn
     )
     .await?;
 
-    pool.close().await;
     Ok(())
 }
 
@@ -348,7 +347,6 @@ async fn community_conversion_occurred_at_uses_fan_created_at()
         "no community_posts row behind this link — format must stay unrecorded, not guessed"
     );
 
-    pool.close().await;
     Ok(())
 }
 
@@ -528,7 +526,6 @@ async fn community_conversion_stamps_the_promoted_sources_format()
         "the promoted source's declared format must stamp onto the conversion"
     );
 
-    pool.close().await;
     Ok(())
 }
 
@@ -712,7 +709,6 @@ async fn community_conversion_does_not_write_when_fan_is_missing()
     .await?;
     assert_eq!(count, 0, "no conversion row must exist for a phantom fan");
 
-    pool.close().await;
     Ok(())
 }
 

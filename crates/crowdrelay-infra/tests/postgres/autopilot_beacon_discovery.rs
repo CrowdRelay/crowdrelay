@@ -241,6 +241,5 @@ async fn discovery_request_seeds_non_sibling_bill_mates_and_the_venue()
         && seed["kind"] == "venue"
         && seed["role"] == "host_venue"));
 
-    pool.close().await;
     Ok(())
 }

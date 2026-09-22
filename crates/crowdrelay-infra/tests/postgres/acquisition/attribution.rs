@@ -374,7 +374,7 @@ async fn overlapping_actions_attribution_proves_action_identity_boundary()
         "community must be the smart link's channel_community"
     );
 
-    pool.close().await;
+
     Ok(())
 }
 
@@ -435,7 +435,7 @@ async fn single_action_attribution_is_exact() -> Result<(), Box<dyn std::error::
     );
     assert_eq!(method, "last_tracked_click");
 
-    pool.close().await;
+
     Ok(())
 }
 
@@ -487,7 +487,7 @@ async fn no_community_post_means_action_id_is_null() -> Result<(), Box<dyn std::
     );
     assert_eq!(method, "last_tracked_click");
 
-    pool.close().await;
+
     Ok(())
 }
 
@@ -592,7 +592,7 @@ async fn duplicate_community_posts_picks_most_recently_posted()
          Got {action_id:?} (action_a={action_a}, action_b={action_b})"
     );
 
-    pool.close().await;
+
     Ok(())
 }
 

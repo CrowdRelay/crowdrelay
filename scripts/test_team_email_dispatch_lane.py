@@ -50,12 +50,13 @@ class TeamEmailDispatchLaneContract(unittest.TestCase):
         self.assertIn("claim_due_team_email_actions", integration)
         self.assertIn("crowdrelay.team.assignment_email_requested", integration)
         self.assertIn('assert_eq!(action_status, "succeeded")', integration)
-        # CI used to name each Postgres target by hand, and that list covered
-        # 9 of 24 suites — this one only ran because someone remembered it.
-        # It now enumerates `crates/*/tests/postgres/main.rs`, so the guarantee
-        # is "the glob reaches this crate's consolidated target", which is
-        # stronger than a literal match.
-        self.assertIn("crates/*/tests/postgres/main.rs", ci)
+        # The e2e smoke list names its proofs literally — CI asserting this
+        # test's name is the strongest form of "the regression runs": it
+        # cannot be dropped without failing this contract.
+        self.assertIn(
+            "queued_team_assignment_email_uses_fast_lane_and_emits_bridge_event",
+            ci,
+        )
         self.assertTrue(
             (ROOT / "crates/crowdrelay-infra/tests/postgres/autopilot_team_email.rs").exists(),
             "the suite the CI glob is supposed to pick up no longer exists",
