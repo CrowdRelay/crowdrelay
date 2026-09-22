@@ -40,7 +40,10 @@ jobs:
   rust-tests:
     name: Rust checks and PostgreSQL integration
     runs-on: [self-hosted, arm64]
-    timeout-minutes: 15
+    # Warm-cache runs land around 6 minutes; a fully cold sccache+target
+    # compile needs ~14. 20 is headroom for the cold case, not a slower job —
+    # a timeout kill at 15 minutes once aborted a deploy's Phase 0b gate.
+    timeout-minutes: 20
 
     # The pg-gated lib tests in this job point at 127.0.0.1:5432 and used to
     # borrow whatever happened to be listening there — usually a leftover
