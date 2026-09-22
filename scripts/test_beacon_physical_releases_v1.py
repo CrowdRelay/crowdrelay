@@ -36,7 +36,7 @@ class BeaconPhysicalReleasesV1Contract(unittest.TestCase):
         self.assertIn("CREATE TABLE viryaos_beacon_release_recipients", MIGRATION)
         self.assertIn("REFERENCES viryaos_beacons (workspace_id, id)", MIGRATION)
         self.assertIn("REFERENCES merch_variants (workspace_id, id)", MIGRATION)
-        self.assertNotIn("CREATE TABLE viryaos_latarnicy", MIGRATION)
+        self.assertNotIn("CREATE TABLE latarnicy", MIGRATION)
         self.assertNotIn("CREATE TABLE beacon_inventory", MIGRATION)
 
     def test_launch_is_full_pool_fail_closed_and_reserves_real_stock(self) -> None:

@@ -9,7 +9,7 @@ class ProviderCorrelationContract(unittest.TestCase):
     def test_provider_correlation_is_backed_by_execution_ledger(self):
         runtime = (ROOT / "crates/crowdrelay-infra/src/autopilot/runtime.rs").read_text()
         self.assertIn("async fn find_provider_action", runtime)
-        self.assertIn("viryaos_autopilot_execution_reports report", runtime)
+        self.assertIn("autopilot_execution_reports report", runtime)
         self.assertIn("report.provider_reference=$3", runtime)
         self.assertIn("report.status='succeeded'", runtime)
 

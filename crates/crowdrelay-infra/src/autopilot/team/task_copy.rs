@@ -38,7 +38,7 @@ pub(super) fn team_email_frame(
         BriefingLocale::En => format!("Hi {recipient_name}!"),
     };
     let intro = match (locale, reminder, final_reminder) {
-        (BriefingLocale::Pl, false, _) => "Wpadło do Ciebie nowe zadanie od VIRYA OS.".to_owned(),
+        (BriefingLocale::Pl, false, _) => "Wpadło do Ciebie nowe zadanie od CrowdRelay.".to_owned(),
         (BriefingLocale::Pl, true, false) => {
             "To zadanie nadal czeka na Ciebie — przypominamy.".to_owned()
         }
@@ -47,7 +47,7 @@ pub(super) fn team_email_frame(
              Jeśli nie jest już potrzebne, zamknij je w panelu."
                 .to_owned()
         }
-        (BriefingLocale::En, false, _) => "A new task from VIRYA OS landed for you.".to_owned(),
+        (BriefingLocale::En, false, _) => "A new task from CrowdRelay landed for you.".to_owned(),
         (BriefingLocale::En, true, false) => "This task is still waiting for you.".to_owned(),
         (BriefingLocale::En, true, true) => {
             "This is the last reminder for this task — no more will follow. \

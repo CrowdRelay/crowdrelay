@@ -1,10 +1,10 @@
 //! The org-wide attention budget against a real Postgres (§4d-3).
 //!
-//! `viryaos_contact_governor` already binds the seven-day cooldown across an
+//! `contact_governor` already binds the seven-day cooldown across an
 //! organization — one person, one roster, one window a week. What it cannot
 //! do is count: one row per (workspace, contact), updated in place, holds no
 //! answer to "of the four things this roster wanted to tell this person this
-//! month, how many already went out". `viryaos_contact_touches` is the
+//! month, how many already went out". `contact_touches` is the
 //! append-only half — one row per action that reserved a window — and
 //! `reserve_contact_window` refuses once the trailing thirty days reach
 //! `ORG_MONTHLY_CONTACT_BUDGET`.
@@ -104,7 +104,7 @@ async fn target(
     contact_email: &str,
 ) -> Result<Uuid, Box<dyn std::error::Error>> {
     sqlx::query_scalar::<_, Uuid>(
-        "INSERT INTO viryaos_booking_targets
+        "INSERT INTO booking_targets
              (workspace_id, city_id, target_kind, display_name, contact_email, priority)
          VALUES ($1, $2, 'promoter', 'Promoter', $3, 50) RETURNING id",
     )
@@ -122,7 +122,7 @@ async fn advertise(pool: &PgPool, workspace_id: Uuid) -> Result<(), Box<dyn std:
     let now = OffsetDateTime::now_utc();
     let executor = format!("n8n-budget-{}", Uuid::now_v7().simple());
     sqlx::query(
-        "INSERT INTO viryaos_executor_instances
+        "INSERT INTO executor_instances
             (workspace_id, executor_id, version, manifest_sha, observed_at, expires_at)
          VALUES ($1,$2,'1','sha',$3,$4)
          ON CONFLICT DO NOTHING",
@@ -134,7 +134,7 @@ async fn advertise(pool: &PgPool, workspace_id: Uuid) -> Result<(), Box<dyn std:
     .execute(pool)
     .await?;
     sqlx::query(
-        "INSERT INTO viryaos_executor_capabilities
+        "INSERT INTO executor_capabilities
             (workspace_id, executor_id, capability, capability_version, observed_at, expires_at)
          VALUES ($1,$2,'booking.outreach','1',$3,$4)",
     )
@@ -157,7 +157,7 @@ async fn outreach_action(
     target_id: Uuid,
 ) -> Result<Uuid, Box<dyn std::error::Error>> {
     let decision_id: Uuid = sqlx::query_scalar(
-        "INSERT INTO viryaos_autopilot_decisions
+        "INSERT INTO autopilot_decisions
              (id, workspace_id, decision_key, context, subject_kind, subject_id,
               decision_kind, confidence_basis_points, disposition, reason,
               input_snapshot, policy_snapshot, recommendation, evaluated_at, trace_id)
@@ -191,7 +191,7 @@ async fn outreach_action(
         },
     })?;
     sqlx::query_scalar(
-        "INSERT INTO viryaos_autopilot_actions
+        "INSERT INTO autopilot_actions
              (id, workspace_id, decision_id, context, action_kind, subject_kind,
               subject_id, idempotency_key, payload, status, action_class)
          VALUES ($1,$2,$3,'booking_opportunity','booking.outreach.request','city',
@@ -239,7 +239,7 @@ async fn execute(
 /// budget reads, asserted directly rather than through a second predicate.
 async fn touches(pool: &PgPool, contact: &str) -> Result<i64, sqlx::Error> {
     sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*) FROM viryaos_contact_touches WHERE normalized_contact = $1",
+        "SELECT COUNT(*) FROM contact_touches WHERE normalized_contact = $1",
     )
     .bind(contact)
     .fetch_one(pool)
@@ -273,7 +273,7 @@ async fn action_outcome(
     action_id: Uuid,
 ) -> Result<(String, Option<String>), sqlx::Error> {
     sqlx::query_as::<_, (String, Option<String>)>(
-        "SELECT status, last_error_kind FROM viryaos_autopilot_actions
+        "SELECT status, last_error_kind FROM autopilot_actions
          WHERE workspace_id = $1 AND id = $2",
     )
     .bind(workspace_id)
@@ -355,7 +355,7 @@ async fn a_roster_shares_one_monthly_attention_budget() -> Result<(), Box<dyn st
     // acts are two rows — the ledger is the place that counts actions.
     assert_eq!(touches(pool, fan).await?, 3);
     let reserved = sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*) FROM viryaos_contact_governor
+        "SELECT COUNT(*) FROM contact_governor
          WHERE workspace_id IN ($1, $2) AND normalized_contact = $3",
     )
     .bind(act_a)

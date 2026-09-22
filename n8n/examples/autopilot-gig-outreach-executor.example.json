@@ -43,7 +43,7 @@
         "genericAuthType": "httpHeaderAuth",
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{ ({ executor_id: String($env.VIRYAOS_EXECUTOR_ID || 'virya-n8n-primary').trim(), occurred_at: new Date().toISOString() }) }}",
+        "jsonBody": "={{ ({ executor_id: String($env.CROWDRELAY_EXECUTOR_ID || 'virya-n8n-primary').trim(), occurred_at: new Date().toISOString() }) }}",
         "options": {
           "timeout": 30000
         }
@@ -93,7 +93,7 @@
         0
       ],
       "parameters": {
-        "jsCode": "const intent = $('Fail-closed claim gate').first().json;\nconst failed = Boolean($json.error);\nconst ref = $json.threadId || $json.thread_id || $json.id || null;\nreturn [{ json: {\n  action_id: intent.action_id,\n  receipt_key: 'gig_outreach:' + intent.action_id + ':email',\n  executor_id: $env.VIRYAOS_EXECUTOR_ID || 'virya-n8n-primary',\n  status: failed ? 'failed' : 'succeeded',\n  claim_token: intent.claim_token,\n  provider_reference: failed ? null : (ref ? String(ref).slice(0, 240) : null),\n  error_kind: failed ? 'gmail_send_failed' : null,\n  metadata: {\n    channel: 'email',\n    event_id: intent.event_id,\n    show_event_id: intent.show_event_id,\n    venue: intent.venue,\n    city_id: intent.city_id,\n    recipient_count: intent.recipient_count,\n    recipient_target_ids: intent.recipient_target_ids,\n    template_key: intent.template_key,\n  },\n  occurred_at: new Date().toISOString(),\n}}];"
+        "jsCode": "const intent = $('Fail-closed claim gate').first().json;\nconst failed = Boolean($json.error);\nconst ref = $json.threadId || $json.thread_id || $json.id || null;\nreturn [{ json: {\n  action_id: intent.action_id,\n  receipt_key: 'gig_outreach:' + intent.action_id + ':email',\n  executor_id: $env.CROWDRELAY_EXECUTOR_ID || 'virya-n8n-primary',\n  status: failed ? 'failed' : 'succeeded',\n  claim_token: intent.claim_token,\n  provider_reference: failed ? null : (ref ? String(ref).slice(0, 240) : null),\n  error_kind: failed ? 'gmail_send_failed' : null,\n  metadata: {\n    channel: 'email',\n    event_id: intent.event_id,\n    show_event_id: intent.show_event_id,\n    venue: intent.venue,\n    city_id: intent.city_id,\n    recipient_count: intent.recipient_count,\n    recipient_target_ids: intent.recipient_target_ids,\n    template_key: intent.template_key,\n  },\n  occurred_at: new Date().toISOString(),\n}}];"
       }
     },
     {

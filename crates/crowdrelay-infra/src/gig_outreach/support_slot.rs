@@ -545,9 +545,10 @@ async fn queue_support_slot_ask(
             },
         );
     }
-    let decision_id = match sqlx::query_scalar::<_, Uuid>(
-        r#"
-        INSERT INTO viryaos_autopilot_decisions (
+    let decision_id =
+        match sqlx::query_scalar::<_, Uuid>(
+            r#"
+        INSERT INTO autopilot_decisions (
             id, workspace_id, decision_key, context, subject_kind, subject_id,
             decision_kind, confidence_basis_points, disposition, reason,
             input_snapshot, policy_snapshot, recommendation, evaluated_at, trace_id
@@ -557,31 +558,31 @@ async fn queue_support_slot_ask(
                   $5,$6,$7,$8,$9)
         ON CONFLICT (workspace_id, decision_key) DO NOTHING RETURNING id
         "#,
-    )
-    .bind(Uuid::now_v7())
-    .bind(workspace_id)
-    .bind(&decision_key)
-    .bind(event_id)
-    .bind(&input_snapshot)
-    .bind(json!({ "approved_by_roster_operator": true, "one_letter_per_show": true }))
-    .bind(&payload_json)
-    .bind(now)
-    .bind(trace.trace_id().into_uuid())
-    .fetch_optional(&mut *tx)
-    .await?
-    {
-        Some(id) => id,
-        // A decision under this key exists and the action lookup found none:
-        // a prior attempt died between the two inserts. Reuse the decision and
-        // queue the action it was meant to carry.
-        None => sqlx::query_scalar::<_, Uuid>(
-            "SELECT id FROM viryaos_autopilot_decisions WHERE workspace_id = $1 AND decision_key = $2",
         )
+        .bind(Uuid::now_v7())
         .bind(workspace_id)
         .bind(&decision_key)
-        .fetch_one(&mut *tx)
-        .await?,
-    };
+        .bind(event_id)
+        .bind(&input_snapshot)
+        .bind(json!({ "approved_by_roster_operator": true, "one_letter_per_show": true }))
+        .bind(&payload_json)
+        .bind(now)
+        .bind(trace.trace_id().into_uuid())
+        .fetch_optional(&mut *tx)
+        .await?
+        {
+            Some(id) => id,
+            // A decision under this key exists and the action lookup found none:
+            // a prior attempt died between the two inserts. Reuse the decision and
+            // queue the action it was meant to carry.
+            None => sqlx::query_scalar::<_, Uuid>(
+                "SELECT id FROM autopilot_decisions WHERE workspace_id = $1 AND decision_key = $2",
+            )
+            .bind(workspace_id)
+            .bind(&decision_key)
+            .fetch_one(&mut *tx)
+            .await?,
+        };
 
     let action_trace = TraceContext::for_action(
         WorkspaceId::from_uuid(workspace_id),
@@ -591,7 +592,7 @@ async fn queue_support_slot_ask(
     );
     sqlx::query(
         r#"
-        INSERT INTO viryaos_autopilot_actions (
+        INSERT INTO autopilot_actions (
             id, workspace_id, decision_id, context, action_kind,
             subject_kind, subject_id, idempotency_key, payload, status,
             action_class, approved_at, approved_by, available_at,

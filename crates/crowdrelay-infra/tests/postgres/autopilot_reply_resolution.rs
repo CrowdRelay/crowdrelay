@@ -77,7 +77,7 @@ async fn insert_dispatch(
     let decision_id = Uuid::now_v7();
     let action_id = Uuid::now_v7();
     sqlx::query(
-        r#"INSERT INTO viryaos_autopilot_decisions
+        r#"INSERT INTO autopilot_decisions
            (id, workspace_id, decision_key, context, subject_kind, subject_id,
             decision_kind, confidence_basis_points, disposition, reason,
             input_snapshot, policy_snapshot, recommendation, trace_id)
@@ -92,7 +92,7 @@ async fn insert_dispatch(
     .execute(&f.pool)
     .await?;
     sqlx::query(
-        r#"INSERT INTO viryaos_autopilot_actions
+        r#"INSERT INTO autopilot_actions
            (id, workspace_id, decision_id, context, action_kind, subject_kind,
             subject_id, idempotency_key, payload, status, action_class, finished_at)
            VALUES ($1,$2,$3,'booking_opportunity','gig.outreach.send','target',
@@ -107,7 +107,7 @@ async fn insert_dispatch(
     .execute(&f.pool)
     .await?;
     sqlx::query(
-        r#"INSERT INTO viryaos_growth_evidence
+        r#"INSERT INTO growth_evidence
            (workspace_id, action_id, opportunity_id, timestamp, recipient_id,
             channel, estimated_reach, treatment, propensity, converted,
             predicted_fans, predicted_signal_installs, context, evidence_quality)
@@ -134,7 +134,7 @@ async fn queue_reply_measurement(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let due_at = letter_sent_at + time::Duration::days(7);
     sqlx::query(
-        r#"INSERT INTO viryaos_autopilot_measurements
+        r#"INSERT INTO autopilot_measurements
            (id, workspace_id, action_id, measurement_kind, subject_id,
             action_finished_at, baseline_value, due_at, available_at)
            VALUES ($1,$2,$3,$4,$5,$6,0,$7,$7)"#,
@@ -154,7 +154,7 @@ async fn queue_reply_measurement(
 async fn outreach_target(f: &Fixture, email: &str) -> Result<Uuid, Box<dyn std::error::Error>> {
     let id = Uuid::now_v7();
     sqlx::query(
-        "INSERT INTO viryaos_outreach_targets (id, workspace_id, target_kind, display_name, contact_email)
+        "INSERT INTO outreach_targets (id, workspace_id, target_kind, display_name, contact_email)
          VALUES ($1, $2, 'press', $3, $4)",
     )
     .bind(id)
@@ -178,7 +178,7 @@ async fn booking_target(f: &Fixture, email: &str) -> Result<Uuid, Box<dyn std::e
     .await?;
     let id = Uuid::now_v7();
     sqlx::query(
-        "INSERT INTO viryaos_booking_targets (id, workspace_id, city_id, target_kind, display_name, contact_email)
+        "INSERT INTO booking_targets (id, workspace_id, city_id, target_kind, display_name, contact_email)
          VALUES ($1, $2, $3, 'venue', $4, $5)",
     )
     .bind(id)
@@ -248,7 +248,7 @@ async fn run_due_measurement(
 /// The outcome row `complete_measurement` wrote for the action.
 async fn outcome_value(f: &Fixture, action_id: Uuid) -> Result<f64, Box<dyn std::error::Error>> {
     Ok(sqlx::query_scalar::<_, f64>(
-        "SELECT observed_value FROM viryaos_autopilot_outcomes
+        "SELECT observed_value FROM autopilot_outcomes
          WHERE workspace_id = $1 AND action_id = $2",
     )
     .bind(f.workspace_id.into_uuid())
@@ -278,7 +278,7 @@ async fn a_silence_resolves_to_a_measured_zero() -> Result<(), Box<dyn std::erro
     // row followed it.
     interaction(
         &f,
-        "viryaos_outreach_interactions",
+        "outreach_interactions",
         target,
         "outbound",
         "letter",
@@ -297,7 +297,7 @@ async fn a_silence_resolves_to_a_measured_zero() -> Result<(), Box<dyn std::erro
         "the outcome the learner reads is a measured zero, not a gap"
     );
     let status: String =
-        sqlx::query_scalar("SELECT status FROM viryaos_autopilot_measurements WHERE id = $1")
+        sqlx::query_scalar("SELECT status FROM autopilot_measurements WHERE id = $1")
             .bind(measurement.id.into_uuid())
             .fetch_one(&f.pool)
             .await?;
@@ -323,7 +323,7 @@ async fn b_a_reply_inside_the_window_resolves_to_one() -> Result<(), Box<dyn std
     .await?;
     interaction(
         &f,
-        "viryaos_outreach_interactions",
+        "outreach_interactions",
         target,
         "outbound",
         "letter",
@@ -332,7 +332,7 @@ async fn b_a_reply_inside_the_window_resolves_to_one() -> Result<(), Box<dyn std
     .await?;
     interaction(
         &f,
-        "viryaos_outreach_interactions",
+        "outreach_interactions",
         target,
         "inbound",
         "the-reply",
@@ -365,7 +365,7 @@ async fn c_a_reply_after_the_window_is_still_silence() -> Result<(), Box<dyn std
     .await?;
     interaction(
         &f,
-        "viryaos_outreach_interactions",
+        "outreach_interactions",
         target,
         "outbound",
         "letter",
@@ -375,7 +375,7 @@ async fn c_a_reply_after_the_window_is_still_silence() -> Result<(), Box<dyn std
     // Day 9 — outside the 7-day window the measurement covers.
     interaction(
         &f,
-        "viryaos_outreach_interactions",
+        "outreach_interactions",
         target,
         "inbound",
         "the-late-reply",
@@ -428,15 +428,7 @@ async fn d_the_reply_belongs_to_the_letter_that_preceded_it()
         ("outbound", "letter-two", second_letter),
         ("inbound", "the-reply", reply_at),
     ] {
-        interaction(
-            &f,
-            "viryaos_booking_interactions",
-            target,
-            direction,
-            key,
-            at,
-        )
-        .await?;
+        interaction(&f, "booking_interactions", target, direction, key, at).await?;
     }
 
     // Both measurements are due; claim order is due_at then id, so the first

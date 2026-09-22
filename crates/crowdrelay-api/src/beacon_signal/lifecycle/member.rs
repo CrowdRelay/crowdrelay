@@ -42,7 +42,7 @@ pub async fn press_room(
     let assets = sqlx::query_as::<_, PressAssetView>(
         r#"
         SELECT id,event_id,asset_key,asset_kind,label_pl,label_en,url,sort_order
-        FROM viryaos_beacon_press_assets
+        FROM beacon_press_assets
         WHERE workspace_id=$1 AND active
           AND (event_id IS NULL OR event_id=$2)
         ORDER BY (event_id IS NOT NULL) DESC, sort_order, asset_key, id
@@ -87,7 +87,7 @@ pub async fn my_press_requests(
         r#"
         SELECT request.id,request.event_id,event.title AS event_title,request.request_kind,
                request.details,request.status,request.resolution_note,request.created_at,request.resolved_at
-        FROM viryaos_beacon_press_requests request
+        FROM beacon_press_requests request
         LEFT JOIN events event
           ON event.workspace_id=request.workspace_id AND event.id=request.event_id
         WHERE request.workspace_id=$1 AND request.beacon_id=$2

@@ -31,7 +31,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 CANDIDATES = ROOT / "crates" / "crowdrelay-application" / "src" / "autopilot" / "evaluate" / "candidates.rs"
-CONTRACT = ROOT / "n8n" / "viryaos-executor-contract.md"
+CONTRACT = ROOT / "n8n" / "crowdrelay-executor-contract.md"
 
 
 def emitted_keys() -> set[str]:
@@ -67,7 +67,7 @@ class TheVocabularyIsPublished(unittest.TestCase):
             missing,
             [],
             "these template keys are emitted but absent from the lifecycle table in "
-            f"n8n/viryaos-executor-contract.md: {missing}. The executor renders by "
+            f"n8n/crowdrelay-executor-contract.md: {missing}. The executor renders by "
             "key; one it has never been told about is one it renders as something "
             "else.",
         )

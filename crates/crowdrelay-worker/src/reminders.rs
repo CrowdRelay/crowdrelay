@@ -223,12 +223,12 @@ async fn enqueue_due_beacon_release_activations(
                    AND btrim(beacon.contact_email) <> '',
                    FALSE
                ) AS contactable
-        FROM viryaos_beacon_release_recipients recipient
-        JOIN viryaos_beacon_release_campaigns campaign
+        FROM beacon_release_recipients recipient
+        JOIN beacon_release_campaigns campaign
           ON campaign.workspace_id=recipient.workspace_id AND campaign.id=recipient.campaign_id
-        JOIN viryaos_beacons beacon
+        JOIN beacons beacon
           ON beacon.workspace_id=recipient.workspace_id AND beacon.id=recipient.beacon_id
-        LEFT JOIN viryaos_beacon_signal_profiles profile
+        LEFT JOIN beacon_signal_profiles profile
           ON profile.workspace_id=recipient.workspace_id AND profile.beacon_id=recipient.beacon_id
         WHERE recipient.status='delivered'
           AND recipient.activation_due_at IS NOT NULL
@@ -269,7 +269,7 @@ async fn enqueue_due_beacon_release_activations(
     if !suppressed_workspaces.is_empty() {
         sqlx::query(
             r#"
-            UPDATE viryaos_beacon_release_recipients
+            UPDATE beacon_release_recipients
             SET activation_suppressed_at=now()
             WHERE (workspace_id, campaign_id, beacon_id) IN (
                 SELECT unnest($1::uuid[]), unnest($2::uuid[]), unnest($3::uuid[])
@@ -345,7 +345,7 @@ async fn enqueue_due_beacon_release_activations(
         .map_err(ReminderSchedulerError::Database)?;
         sqlx::query(
             r#"
-            UPDATE viryaos_beacon_release_recipients
+            UPDATE beacon_release_recipients
             SET activation_queued_at=now()
             WHERE (workspace_id, campaign_id, beacon_id) IN (
                 SELECT unnest($1::uuid[]), unnest($2::uuid[]), unnest($3::uuid[])

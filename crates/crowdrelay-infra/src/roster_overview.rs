@@ -86,7 +86,7 @@ pub async fn roster_overview(
     let touch_rows = sqlx::query_as::<_, (Uuid, i64)>(
         r#"
         SELECT touch.workspace_id, count(*) AS touches
-        FROM viryaos_contact_touches AS touch
+        FROM contact_touches AS touch
         WHERE touch.workspace_id = ANY($1)
           AND touch.touched_at >= $2 - ($3::int * INTERVAL '1 day')
         GROUP BY touch.workspace_id
@@ -105,7 +105,7 @@ pub async fn roster_overview(
         SELECT governor.workspace_id,
                count(*) FILTER (WHERE governor.next_contact_after > $2) AS on_hold,
                count(*) FILTER (WHERE governor.do_not_contact) AS blocked
-        FROM viryaos_contact_governor AS governor
+        FROM contact_governor AS governor
         WHERE governor.workspace_id = ANY($1)
         GROUP BY governor.workspace_id
         "#,
@@ -121,7 +121,7 @@ pub async fn roster_overview(
     let pending_rows = sqlx::query_as::<_, (Uuid, i64)>(
         r#"
         SELECT action.workspace_id, count(*) AS pending
-        FROM viryaos_autopilot_actions AS action
+        FROM autopilot_actions AS action
         WHERE action.workspace_id = ANY($1)
           AND action.status = 'awaiting_approval'
           AND (action.approval_expires_at IS NULL OR action.approval_expires_at > $2)
@@ -160,7 +160,7 @@ pub async fn roster_overview(
     let briefing_rows = sqlx::query_as::<_, (Uuid, Date)>(
         r#"
         SELECT briefing.workspace_id, max(briefing.local_date) AS latest_briefing_date
-        FROM viryaos_daily_briefings AS briefing
+        FROM daily_briefings AS briefing
         WHERE briefing.workspace_id = ANY($1)
         GROUP BY briefing.workspace_id
         "#,

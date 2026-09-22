@@ -42,7 +42,7 @@
 //! revision refuses the whole approval rather than approving the original
 //! words — and writes nothing, so the idempotency key stays unspent and the
 //! band can fix the edit and click again. An accepted revision lands in the
-//! payload the action carries, and `viryaos_draft_revisions` keeps the
+//! payload the action carries, and `draft_revisions` keeps the
 //! before/after the voice signal (§4d-3.2) is measured from.
 //!
 //! # The support-slot ask (N.5)
@@ -117,7 +117,7 @@ pub enum GigOutreachOutcome {
 /// `requested` is every field the operator asked to touch — the audit row's
 /// record of intent. `changed` is what survived review, and `before` is the
 /// draft as the machine wrote it; the two together are what each
-/// `viryaos_draft_revisions` row records.
+/// `draft_revisions` row records.
 struct AppliedRevision {
     requested: Vec<String>,
     changed: BTreeMap<String, String>,
@@ -240,7 +240,7 @@ async fn record_revision(
             crowdrelay_domain::draft_revision::revision_distance(&revision.before, &single);
         sqlx::query(
             r#"
-            INSERT INTO viryaos_draft_revisions
+            INSERT INTO draft_revisions
                 (workspace_id, action_id, operation_id, field,
                  before_text, after_text, distance_chars)
             VALUES ($1, $2, $3, $4, $5, $6, $7)
@@ -585,7 +585,7 @@ async fn recipients_for(
 /// The status of a gig letter for this subject that has not finished yet, if
 /// one exists.
 ///
-/// Mirrors `viryaos_autopilot_actions_inflight_subject_uidx` — the partial
+/// Mirrors `autopilot_actions_inflight_subject_uidx` — the partial
 /// unique index on `(workspace_id, context, action_kind, subject_id)` over the
 /// unfinished states. Reading it rather than letting the insert collide keeps
 /// the answer a sentence the band can act on. The subject is whatever the
@@ -598,7 +598,7 @@ async fn inflight_status(
 ) -> Result<Option<String>, GigOutreachError> {
     Ok(sqlx::query_scalar::<_, String>(
         r#"
-        SELECT status FROM viryaos_autopilot_actions
+        SELECT status FROM autopilot_actions
         WHERE workspace_id = $1
           AND context = 'booking_opportunity'
           AND action_kind = 'gig.outreach.request'
@@ -621,7 +621,7 @@ async fn existing_action(
 ) -> Result<Option<(Uuid, String)>, GigOutreachError> {
     Ok(sqlx::query_as::<_, (Uuid, String)>(
         r#"
-        SELECT id, status FROM viryaos_autopilot_actions
+        SELECT id, status FROM autopilot_actions
         WHERE workspace_id = $1 AND idempotency_key = $2
         "#,
     )
@@ -640,7 +640,7 @@ async fn existing_action(
 /// band's approval is the decision — recorded as `require_approval` with the
 /// approval already granted, because that is what happened. The approval
 /// itself is an operator action, and an operator's edit leaves a
-/// `viryaos_draft_revisions` row per field — all of it in this transaction,
+/// `draft_revisions` row per field — all of it in this transaction,
 /// so the letter and the record of approving it exist together or not at all.
 #[allow(clippy::too_many_arguments)]
 async fn queue_outreach(
@@ -697,9 +697,10 @@ async fn queue_outreach(
             },
         );
     }
-    let decision_id = match sqlx::query_scalar::<_, Uuid>(
-        r#"
-        INSERT INTO viryaos_autopilot_decisions (
+    let decision_id =
+        match sqlx::query_scalar::<_, Uuid>(
+            r#"
+        INSERT INTO autopilot_decisions (
             id, workspace_id, decision_key, context, subject_kind, subject_id,
             decision_kind, confidence_basis_points, disposition, reason,
             input_snapshot, policy_snapshot, recommendation, evaluated_at, trace_id
@@ -709,38 +710,38 @@ async fn queue_outreach(
                   $5,$6,$7,$8,$9)
         ON CONFLICT (workspace_id, decision_key) DO NOTHING RETURNING id
         "#,
-    )
-    .bind(Uuid::now_v7())
-    .bind(workspace_id)
-    .bind(&decision_key)
-    .bind(city_id)
-    .bind(json!({
-        "city": plan.city,
-        "venue": plan.venue,
-        "contact": plan.contact,
-        "reasons": plan.reasons,
-        "reach": plan.reach,
-        "caveats": plan.caveats,
-    }))
-    .bind(json!({ "approved_by_band": true, "one_action_per_room": true }))
-    .bind(&payload_json)
-    .bind(now)
-    .bind(trace.trace_id().into_uuid())
-    .fetch_optional(&mut *tx)
-    .await?
-    {
-        Some(id) => id,
-        // A decision under this key exists and the action lookup found none, so
-        // a prior attempt died between the two inserts. Reuse the decision and
-        // queue the action it was meant to carry.
-        None => sqlx::query_scalar::<_, Uuid>(
-            "SELECT id FROM viryaos_autopilot_decisions WHERE workspace_id = $1 AND decision_key = $2",
         )
+        .bind(Uuid::now_v7())
         .bind(workspace_id)
         .bind(&decision_key)
-        .fetch_one(&mut *tx)
-        .await?,
-    };
+        .bind(city_id)
+        .bind(json!({
+            "city": plan.city,
+            "venue": plan.venue,
+            "contact": plan.contact,
+            "reasons": plan.reasons,
+            "reach": plan.reach,
+            "caveats": plan.caveats,
+        }))
+        .bind(json!({ "approved_by_band": true, "one_action_per_room": true }))
+        .bind(&payload_json)
+        .bind(now)
+        .bind(trace.trace_id().into_uuid())
+        .fetch_optional(&mut *tx)
+        .await?
+        {
+            Some(id) => id,
+            // A decision under this key exists and the action lookup found none, so
+            // a prior attempt died between the two inserts. Reuse the decision and
+            // queue the action it was meant to carry.
+            None => sqlx::query_scalar::<_, Uuid>(
+                "SELECT id FROM autopilot_decisions WHERE workspace_id = $1 AND decision_key = $2",
+            )
+            .bind(workspace_id)
+            .bind(&decision_key)
+            .fetch_one(&mut *tx)
+            .await?,
+        };
 
     let action_trace = TraceContext::for_action(
         WorkspaceId::from_uuid(workspace_id),
@@ -750,7 +751,7 @@ async fn queue_outreach(
     );
     sqlx::query(
         r#"
-        INSERT INTO viryaos_autopilot_actions (
+        INSERT INTO autopilot_actions (
             id, workspace_id, decision_id, context, action_kind,
             subject_kind, subject_id, idempotency_key, payload, status,
             action_class, approved_at, approved_by, available_at,

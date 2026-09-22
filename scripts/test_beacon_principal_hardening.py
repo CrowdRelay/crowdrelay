@@ -39,7 +39,7 @@ class BeaconPrincipalHardening(unittest.TestCase):
     def test_discovery_is_concurrency_safe_and_provenance_is_per_run(self):
         migration = read('migrations/0060_beacon_release_and_network_hardening.sql')
         internal = read('crates/crowdrelay-api/src/beacon_signal/network/internal.rs')
-        self.assertIn('viryaos_beacon_network_discovery_observations', migration)
+        self.assertIn('beacon_network_discovery_observations', migration)
         self.assertIn('pg_advisory_xact_lock(hashtextextended($1,0))', internal)
         domain = read('crates/crowdrelay-domain/src/beacons.rs')
         self.assertIn('BeaconContactIdentity', domain)
@@ -49,7 +49,7 @@ class BeaconPrincipalHardening(unittest.TestCase):
         self.assertIn('contact_identity.value()', internal)
         self.assertIn('FROM unnest($3::uuid[],$4::text[],$5::text[],$6::int4[],$7::int4[])', internal)
         self.assertIn('SELECT count(*)::integer', internal)
-        self.assertIn('FROM viryaos_beacon_network_discovery_observations', internal)
+        self.assertIn('FROM beacon_network_discovery_observations', internal)
         self.assertIn('RETURNING discovered_count', internal)
         self.assertIn('canonical_count=discovered_count', internal)
 

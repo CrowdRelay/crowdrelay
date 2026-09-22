@@ -8,7 +8,7 @@ real relations.
 
 The gap is not theoretical. A north-star query shipped reading
 `growth_metric_series_points` and `growth_metric_series`; the real tables are
-`viryaos_growth_metric_points` and `viryaos_growth_metric_series`. It compiled,
+`growth_metric_points` and `growth_metric_series`. It compiled,
 passed clippy, passed the full test suite and passed every contract script.
 It would have failed on the first request that reached it.
 
@@ -35,7 +35,12 @@ CREATE = re.compile(
     r"(?:IF\s+NOT\s+EXISTS\s+)?(?:public\.)?\"?(\w+)\"?",
     re.IGNORECASE,
 )
-RENAME = re.compile(r"ALTER\s+TABLE\s+(?:public\.)?\"?(\w+)\"?\s+RENAME\s+TO\s+\"?(\w+)\"?", re.IGNORECASE)
+# RENAME covers TABLE, VIEW and MATERIALIZED VIEW — a rename produces a live
+# queryable relation exactly like CREATE does, whichever keyword was used.
+RENAME = re.compile(
+    r"ALTER\s+(?:TABLE|VIEW|MATERIALIZED\s+VIEW)\s+(?:public\.)?\"?(\w+)\"?\s+RENAME\s+TO\s+\"?(\w+)\"?",
+    re.IGNORECASE,
+)
 # The identifier is anchored with \b on both sides. A lookahead here would let
 # the group backtrack a character to satisfy it, silently matching
 # `outbox_event` inside `outbox_events (` — the "call, not relation" case is
@@ -211,6 +216,19 @@ def unknown_references(literal: str, relations: set[str]) -> set[str]:
 class SqlIdentifiersV1(unittest.TestCase):
     def test_migrations_declare_relations(self) -> None:
         self.assertGreater(len(known_relations()), 100, "migration parse produced too few tables")
+
+    def test_no_identifiers_in_code(self) -> None:
+        # `*` was the pre-CrowdRelay schema prefix. Migration 0345 renamed
+        # every such object and left `*` compat views only so binaries
+        # and services from the previous release survive the swap window — new
+        # code must always name the real relations.
+        offenders = [
+            path.relative_to(ROOT).as_posix()
+            for path in sorted(CRATES.rglob("*.rs"))
+            if "target" not in path.parts
+            and "viryaos" in path.read_text(encoding="utf-8", errors="ignore").lower()
+        ]
+        self.assertEqual(offenders, [], "\n".join(offenders))
 
     def test_sql_literals_were_found(self) -> None:
         self.assertGreater(len(sql_literals()), 100, "raw-string SQL scan found too little")

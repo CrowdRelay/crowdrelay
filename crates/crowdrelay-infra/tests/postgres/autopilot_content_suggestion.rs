@@ -62,7 +62,7 @@ async fn executing_an_approved_suggestion_commits_the_beat() {
     let fixture = fixture("suggestion-approve").await.expect("fixture");
     let suggestion_id = Uuid::now_v7();
     sqlx::query(
-        "INSERT INTO viryaos_content_suggestions (
+        "INSERT INTO content_suggestions (
              id, workspace_id, format_key, concept, reason, evidence,
              distribution_promise, status
          ) VALUES ($1,$2,'playthrough','Playthrough','e2e reason',
@@ -75,7 +75,7 @@ async fn executing_an_approved_suggestion_commits_the_beat() {
     .expect("suggestion");
     let decision_id = Uuid::now_v7();
     sqlx::query(
-        "INSERT INTO viryaos_autopilot_decisions (
+        "INSERT INTO autopilot_decisions (
              id, workspace_id, decision_key, context, subject_kind, subject_id,
              decision_kind, confidence_basis_points, disposition, reason,
              input_snapshot, policy_snapshot, recommendation, trace_id
@@ -98,7 +98,7 @@ async fn executing_an_approved_suggestion_commits_the_beat() {
         "distribution_promise": {"consented_fans": 12},
     });
     sqlx::query(
-        "INSERT INTO viryaos_autopilot_actions (
+        "INSERT INTO autopilot_actions (
              id, workspace_id, decision_id, context, action_kind, subject_kind, subject_id,
              idempotency_key, payload, status, approved_at
          ) VALUES ($5,$1,$2,'content_strategy','content.suggestion.raise','content_suggestion',$3,
@@ -131,12 +131,11 @@ async fn executing_an_approved_suggestion_commits_the_beat() {
         .await
         .expect("execution");
 
-    let status: String =
-        sqlx::query_scalar("SELECT status FROM viryaos_content_suggestions WHERE id = $1")
-            .bind(suggestion_id)
-            .fetch_one(&fixture.pool)
-            .await
-            .expect("suggestion status");
+    let status: String = sqlx::query_scalar("SELECT status FROM content_suggestions WHERE id = $1")
+        .bind(suggestion_id)
+        .fetch_one(&fixture.pool)
+        .await
+        .expect("suggestion status");
     assert_eq!(
         status, "approved",
         "approving the queue entry commits the band to the beat"
@@ -147,7 +146,7 @@ async fn executing_an_approved_suggestion_commits_the_beat() {
     // failure.
     let replay_id = Uuid::now_v7();
     sqlx::query(
-        "INSERT INTO viryaos_autopilot_actions (
+        "INSERT INTO autopilot_actions (
              id, workspace_id, decision_id, context, action_kind, subject_kind, subject_id,
              idempotency_key, payload, status, approved_at
          ) VALUES ($5,$1,$2,'content_strategy','content.suggestion.raise','content_suggestion',$3,
@@ -178,14 +177,14 @@ async fn executing_an_approved_suggestion_commits_the_beat() {
 
     // And a suggestion that resolved itself in the meantime cannot be
     // resurrected by a stale queue entry.
-    sqlx::query("UPDATE viryaos_content_suggestions SET status = 'declined' WHERE id = $1")
+    sqlx::query("UPDATE content_suggestions SET status = 'declined' WHERE id = $1")
         .bind(suggestion_id)
         .execute(&fixture.pool)
         .await
         .expect("resolve");
     let stale_id = Uuid::now_v7();
     sqlx::query(
-        "INSERT INTO viryaos_autopilot_actions (
+        "INSERT INTO autopilot_actions (
              id, workspace_id, decision_id, context, action_kind, subject_kind, subject_id,
              idempotency_key, payload, status, approved_at
          ) VALUES ($5,$1,$2,'content_strategy','content.suggestion.raise','content_suggestion',$3,
@@ -224,7 +223,7 @@ async fn cancelling_a_suggestion_ask_records_the_taste_signal() {
     let fixture = fixture("suggestion-cancel").await.expect("fixture");
     let suggestion_id = Uuid::now_v7();
     sqlx::query(
-        "INSERT INTO viryaos_content_suggestions (
+        "INSERT INTO content_suggestions (
              id, workspace_id, format_key, concept, reason, evidence,
              distribution_promise, status
          ) VALUES ($1,$2,'playthrough','Playthrough','e2e reason',
@@ -237,7 +236,7 @@ async fn cancelling_a_suggestion_ask_records_the_taste_signal() {
     .expect("suggestion");
     let decision_id = Uuid::now_v7();
     sqlx::query(
-        "INSERT INTO viryaos_autopilot_decisions (
+        "INSERT INTO autopilot_decisions (
              id, workspace_id, decision_key, context, subject_kind, subject_id,
              decision_kind, confidence_basis_points, disposition, reason,
              input_snapshot, policy_snapshot, recommendation, trace_id
@@ -252,7 +251,7 @@ async fn cancelling_a_suggestion_ask_records_the_taste_signal() {
     .expect("decision");
     let action_id = Uuid::now_v7();
     sqlx::query(
-        "INSERT INTO viryaos_autopilot_actions (
+        "INSERT INTO autopilot_actions (
              id, workspace_id, decision_id, context, action_kind, subject_kind, subject_id,
              idempotency_key, payload, status, approval_expires_at
          ) VALUES ($5,$1,$2,'content_strategy','content.suggestion.raise','content_suggestion',$3,
@@ -289,16 +288,15 @@ async fn cancelling_a_suggestion_ask_records_the_taste_signal() {
     // "Not for us" is a first-class signal: the suggestion resolved declined
     // and the outcome row carries it — the open queue's headroom is freed and
     // the engine can learn what the band refuses.
-    let status: String =
-        sqlx::query_scalar("SELECT status FROM viryaos_content_suggestions WHERE id = $1")
-            .bind(suggestion_id)
-            .fetch_one(&fixture.pool)
-            .await
-            .expect("suggestion status");
+    let status: String = sqlx::query_scalar("SELECT status FROM content_suggestions WHERE id = $1")
+        .bind(suggestion_id)
+        .fetch_one(&fixture.pool)
+        .await
+        .expect("suggestion status");
     assert_eq!(status, "declined");
 
     let (outcome, decided_by): (String, String) = sqlx::query_as(
-        "SELECT outcome, decided_by FROM viryaos_suggestion_outcomes
+        "SELECT outcome, decided_by FROM suggestion_outcomes
          WHERE workspace_id = $1 AND suggestion_id = $2",
     )
     .bind(fixture.workspace_id.into_uuid())
@@ -324,13 +322,12 @@ async fn cancelling_a_suggestion_ask_records_the_taste_signal() {
         matches!(second, Err(RepositoryError::ConflictBecause(_))),
         "a cancelled ask must conflict, not re-resolve, got {second:?}"
     );
-    let count: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM viryaos_suggestion_outcomes WHERE suggestion_id = $1",
-    )
-    .bind(suggestion_id)
-    .fetch_one(&fixture.pool)
-    .await
-    .expect("outcome count");
+    let count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM suggestion_outcomes WHERE suggestion_id = $1")
+            .bind(suggestion_id)
+            .fetch_one(&fixture.pool)
+            .await
+            .expect("outcome count");
     assert_eq!(count, 1);
 }
 
@@ -340,7 +337,7 @@ async fn an_unanswered_ask_expires_the_suggestion_with_it() {
     let fixture = fixture("suggestion-expire").await.expect("fixture");
     let suggestion_id = Uuid::now_v7();
     sqlx::query(
-        "INSERT INTO viryaos_content_suggestions (
+        "INSERT INTO content_suggestions (
              id, workspace_id, format_key, concept, reason, evidence,
              distribution_promise, status
          ) VALUES ($1,$2,'playthrough','Playthrough','e2e reason',
@@ -353,7 +350,7 @@ async fn an_unanswered_ask_expires_the_suggestion_with_it() {
     .expect("suggestion");
     let decision_id = Uuid::now_v7();
     sqlx::query(
-        "INSERT INTO viryaos_autopilot_decisions (
+        "INSERT INTO autopilot_decisions (
              id, workspace_id, decision_key, context, subject_kind, subject_id,
              decision_kind, confidence_basis_points, disposition, reason,
              input_snapshot, policy_snapshot, recommendation, trace_id
@@ -367,7 +364,7 @@ async fn an_unanswered_ask_expires_the_suggestion_with_it() {
     .await
     .expect("decision");
     sqlx::query(
-        "INSERT INTO viryaos_autopilot_actions (
+        "INSERT INTO autopilot_actions (
              id, workspace_id, decision_id, context, action_kind, subject_kind, subject_id,
              idempotency_key, payload, status, approval_expires_at
          ) VALUES ($5,$1,$2,'content_strategy','content.suggestion.raise','content_suggestion',$3,
@@ -400,9 +397,9 @@ async fn an_unanswered_ask_expires_the_suggestion_with_it() {
 
     let (status, outcome): (String, String) = sqlx::query_as(
         "SELECT s.status,
-                (SELECT o.outcome FROM viryaos_suggestion_outcomes o
+                (SELECT o.outcome FROM suggestion_outcomes o
                   WHERE o.suggestion_id = s.id) AS outcome
-         FROM viryaos_content_suggestions s WHERE s.id = $1",
+         FROM content_suggestions s WHERE s.id = $1",
     )
     .bind(suggestion_id)
     .fetch_one(&fixture.pool)
@@ -421,7 +418,7 @@ async fn doing_the_beat_ourselves_counts_as_done() {
     let fixture = fixture("suggestion-handled").await.expect("fixture");
     let suggestion_id = Uuid::now_v7();
     sqlx::query(
-        "INSERT INTO viryaos_content_suggestions (
+        "INSERT INTO content_suggestions (
              id, workspace_id, format_key, concept, reason, evidence,
              distribution_promise, status
          ) VALUES ($1,$2,'playthrough','Playthrough','e2e reason',
@@ -434,7 +431,7 @@ async fn doing_the_beat_ourselves_counts_as_done() {
     .expect("suggestion");
     let decision_id = Uuid::now_v7();
     sqlx::query(
-        "INSERT INTO viryaos_autopilot_decisions (
+        "INSERT INTO autopilot_decisions (
              id, workspace_id, decision_key, context, subject_kind, subject_id,
              decision_kind, confidence_basis_points, disposition, reason,
              input_snapshot, policy_snapshot, recommendation, trace_id
@@ -448,7 +445,7 @@ async fn doing_the_beat_ourselves_counts_as_done() {
     .await
     .expect("decision");
     sqlx::query(
-        "INSERT INTO viryaos_autopilot_actions (
+        "INSERT INTO autopilot_actions (
              id, workspace_id, decision_id, context, action_kind, subject_kind, subject_id,
              idempotency_key, payload, status, approval_expires_at
          ) VALUES ($5,$1,$2,'content_strategy','content.suggestion.raise','content_suggestion',$3,
@@ -485,9 +482,9 @@ async fn doing_the_beat_ourselves_counts_as_done() {
     // get. The row resolves `done` with its outcome, not cancelled-and-lost.
     let (status, outcome): (String, String) = sqlx::query_as(
         "SELECT s.status,
-                (SELECT o.outcome FROM viryaos_suggestion_outcomes o
+                (SELECT o.outcome FROM suggestion_outcomes o
                   WHERE o.suggestion_id = s.id) AS outcome
-         FROM viryaos_content_suggestions s WHERE s.id = $1",
+         FROM content_suggestions s WHERE s.id = $1",
     )
     .bind(suggestion_id)
     .fetch_one(&fixture.pool)

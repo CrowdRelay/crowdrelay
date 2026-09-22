@@ -356,7 +356,7 @@ fn conditions(snapshot: &OpsSnapshot, posture: PublishingPosture) -> Vec<Conditi
                            Resolution is what corrects it, and resolution needs a \
                            dispatch to land externally and its measurement window \
                            to close — check publishing first, then \
-                           viryaos_growth_evidence for rows with resolved_at set. \
+                           growth_evidence for rows with resolved_at set. \
                            Until then, treat the brain's rankings as assumptions.",
             }),
         },
@@ -395,7 +395,7 @@ fn conditions(snapshot: &OpsSnapshot, posture: PublishingPosture) -> Vec<Conditi
                 "remedy": "read /v1/control-plane/ops/attention for what is \
                            awaiting_approval now — that list is ordered by \
                            soonest deadline. The expired ones are in \
-                           viryaos_autopilot_actions with status 'cancelled' and \
+                           autopilot_actions with status 'cancelled' and \
                            last_error_kind 'approval_expired'; they are not \
                            retried and the brain will only propose them again if \
                            the underlying opportunity is still open. If the queue \
@@ -437,7 +437,7 @@ fn conditions(snapshot: &OpsSnapshot, posture: PublishingPosture) -> Vec<Conditi
         Condition {
             key: "executor.offline",
             severity: "critical",
-            summary: "ViryaOS executor registry has no live executor",
+            summary: "CrowdRelay executor registry has no live executor",
             active: snapshot.executor_registered > 0 && snapshot.executor_active == 0,
             details: json!({
                 "registered": snapshot.executor_registered,

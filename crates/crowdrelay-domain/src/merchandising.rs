@@ -184,7 +184,7 @@ pub enum MerchPriceHoldReason {
 
 /// Evaluates a deliberately conservative merch price step.
 ///
-/// This is not an elasticity model. Until ViryaOS has enough price/outcome
+/// This is not an elasticity model. Until CrowdRelay has enough price/outcome
 /// history, the service reacts only to strong velocity + stock-coverage signals
 /// and never crosses explicit price/margin guardrails.
 #[must_use]

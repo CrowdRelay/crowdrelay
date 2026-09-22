@@ -112,8 +112,8 @@ impl PostgresRepresentationRepository {
                    target.do_not_contact, target.active, target.verified,
                    target.version, target.last_outreach_at,
                    agent.approached_at, agent.refused_until
-            FROM viryaos_outreach_targets AS target
-            LEFT JOIN viryaos_booking_agents AS agent
+            FROM outreach_targets AS target
+            LEFT JOIN booking_agents AS agent
               ON agent.workspace_id = target.workspace_id
              AND lower(agent.contact_email) = lower(target.contact_email)
             WHERE target.workspace_id = $1 AND target.target_kind IN ('agent','label')
@@ -152,7 +152,7 @@ impl PostgresRepresentationRepository {
     ) -> Result<u32, RepresentationError> {
         let used = sqlx::query_scalar::<_, i64>(
             r#"
-            SELECT COUNT(*) FROM viryaos_outreach_interactions
+            SELECT COUNT(*) FROM outreach_interactions
             WHERE workspace_id = $1 AND phase = 'approach'
               AND occurred_at >= date_trunc('month', now())
             "#,
@@ -197,7 +197,7 @@ impl PostgresRepresentationRepository {
         // on approval returns the queued row rather than a refusal — the
         // refusal below is for a *different* approach to the same contact.
         if let Some((existing, status)) = sqlx::query_as::<_, (Uuid, String)>(
-            "SELECT id, status FROM viryaos_autopilot_actions WHERE workspace_id = $1 AND idempotency_key = $2 AND action_kind = 'representation.approach.request'",
+            "SELECT id, status FROM autopilot_actions WHERE workspace_id = $1 AND idempotency_key = $2 AND action_kind = 'representation.approach.request'",
         )
         .bind(workspace_id)
         .bind(idempotency_key.as_str())
@@ -216,7 +216,7 @@ impl PostgresRepresentationRepository {
             SELECT display_name, target_kind, accepts_outreach,
                    accepts_outreach_basis, do_not_contact, active, verified,
                    version
-            FROM viryaos_outreach_targets
+            FROM outreach_targets
             WHERE workspace_id = $1 AND id = $2
             FOR UPDATE
             "#,
@@ -234,7 +234,7 @@ impl PostgresRepresentationRepository {
         }
 
         let listing_published = sqlx::query_scalar::<_, bool>(
-            "SELECT EXISTS(SELECT 1 FROM viryaos_band_listings WHERE workspace_id = $1 AND visibility = 'admitted_readers')",
+            "SELECT EXISTS(SELECT 1 FROM band_listings WHERE workspace_id = $1 AND visibility = 'admitted_readers')",
         )
         .bind(workspace_id)
         .fetch_one(&mut *tx)
@@ -242,7 +242,7 @@ impl PostgresRepresentationRepository {
 
         let used = sqlx::query_scalar::<_, i64>(
             r#"
-            SELECT COUNT(*) FROM viryaos_outreach_interactions
+            SELECT COUNT(*) FROM outreach_interactions
             WHERE workspace_id = $1 AND phase = 'approach'
               AND occurred_at >= date_trunc('month', $2::timestamptz)
             "#,
@@ -261,7 +261,7 @@ impl PostgresRepresentationRepository {
             r#"
             SELECT COUNT(*) FILTER (WHERE subject_id = $2),
                    COUNT(*)
-            FROM viryaos_autopilot_actions
+            FROM autopilot_actions
             WHERE workspace_id = $1 AND context = 'representation'
               AND action_kind = 'representation.approach.request'
               AND status IN ('awaiting_approval','queued','processing')
@@ -361,7 +361,7 @@ impl PostgresRepresentationRepository {
         let decision_key = format!("representation.approach:{}", idempotency_key.as_str());
         let decision_id = match sqlx::query_scalar::<_, Uuid>(
             r#"
-            INSERT INTO viryaos_autopilot_decisions (
+            INSERT INTO autopilot_decisions (
                 id, workspace_id, decision_key, context, subject_kind, subject_id,
                 decision_kind, confidence_basis_points, disposition, reason,
                 input_snapshot, policy_snapshot, recommendation, evaluated_at, trace_id
@@ -400,7 +400,7 @@ impl PostgresRepresentationRepository {
             // between the two inserts. Reuse the decision and queue the
             // action it was meant to carry.
             None => sqlx::query_scalar::<_, Uuid>(
-                "SELECT id FROM viryaos_autopilot_decisions WHERE workspace_id = $1 AND decision_key = $2",
+                "SELECT id FROM autopilot_decisions WHERE workspace_id = $1 AND decision_key = $2",
             )
             .bind(workspace_id)
             .bind(&decision_key)
@@ -416,7 +416,7 @@ impl PostgresRepresentationRepository {
         );
         sqlx::query(
             r#"
-            INSERT INTO viryaos_autopilot_actions (
+            INSERT INTO autopilot_actions (
                 id, workspace_id, decision_id, context, action_kind,
                 subject_kind, subject_id, idempotency_key, payload, status,
                 action_class, approval_expires_at, trace_id, causation_id
@@ -522,7 +522,7 @@ pub(crate) async fn load_draw_evidence(
 
 /// The season-door state an agent approach answers to (§4h-10).
 ///
-/// `viryaos_booking_agents` is matched to the outreach target by address
+/// `booking_agents` is matched to the outreach target by address
 /// inside the query — the band never sees the email, and neither does this
 /// layer need it. The door is closed when `refused_until` covers today; the
 /// season is spent when the registry's `approached_at` or this target's own
@@ -537,8 +537,8 @@ async fn agent_gate_state(
     let door = sqlx::query_as::<_, (Option<time::Date>, Option<OffsetDateTime>)>(
         r#"
         SELECT agent.refused_until, agent.approached_at
-        FROM viryaos_outreach_targets AS target
-        LEFT JOIN viryaos_booking_agents AS agent
+        FROM outreach_targets AS target
+        LEFT JOIN booking_agents AS agent
           ON agent.workspace_id = target.workspace_id
          AND lower(agent.contact_email) = lower(target.contact_email)
         WHERE target.workspace_id = $1 AND target.id = $2
@@ -552,7 +552,7 @@ async fn agent_gate_state(
     let ledger_knock = sqlx::query_scalar::<_, bool>(
         r#"
         SELECT EXISTS(
-            SELECT 1 FROM viryaos_outreach_interactions
+            SELECT 1 FROM outreach_interactions
             WHERE workspace_id = $1 AND target_id = $2 AND phase = 'approach'
               AND occurred_at >= $3
         )
@@ -628,7 +628,7 @@ pub(crate) async fn lock_representation_for_execution(
         r#"
       SELECT display_name, contact_email, target_kind, accepts_outreach,
              accepts_outreach_basis, do_not_contact, active, verified
-      FROM viryaos_outreach_targets
+      FROM outreach_targets
       WHERE workspace_id=$1 AND id=$2 AND version=$3
       FOR UPDATE
     "#,
@@ -650,7 +650,7 @@ pub(crate) async fn lock_representation_for_execution(
     // FOR UPDATE so a publish/unlist racing this dispatch cannot flip the
     // answer between the gate and the emit inside the same transaction.
     let listing_visibility = sqlx::query_scalar::<_, String>(
-        "SELECT visibility FROM viryaos_band_listings WHERE workspace_id=$1 FOR UPDATE",
+        "SELECT visibility FROM band_listings WHERE workspace_id=$1 FOR UPDATE",
     )
     .bind(workspace_id.into_uuid())
     .fetch_optional(&mut **tx)
@@ -659,7 +659,7 @@ pub(crate) async fn lock_representation_for_execution(
 
     let approaches_used = sqlx::query_scalar::<_, i64>(
         r#"
-        SELECT COUNT(*) FROM viryaos_outreach_interactions
+        SELECT COUNT(*) FROM outreach_interactions
         WHERE workspace_id=$1 AND phase='approach'
           AND occurred_at >= date_trunc('month', $2::timestamptz)
         "#,
@@ -727,7 +727,7 @@ pub(crate) async fn record_approach_sent(
     target_id: OutreachTargetId,
     now: OffsetDateTime,
 ) -> Result<(), crowdrelay_application::RepositoryError> {
-    sqlx::query("UPDATE viryaos_outreach_targets SET last_outreach_at=$3,contact_verified_at=CASE WHEN contact_verified_at IS NULL OR contact_verified_at < $3 THEN $3 ELSE contact_verified_at END WHERE workspace_id=$1 AND id=$2")
+    sqlx::query("UPDATE outreach_targets SET last_outreach_at=$3,contact_verified_at=CASE WHEN contact_verified_at IS NULL OR contact_verified_at < $3 THEN $3 ELSE contact_verified_at END WHERE workspace_id=$1 AND id=$2")
       .bind(workspace_id.into_uuid()).bind(target_id.into_uuid()).bind(now).execute(&mut **tx).await.map_err(map_sqlx)?;
     // The registry row for the same address is the season's book-keeping:
     // an agent who just heard from us cannot be knocked on again until the
@@ -735,9 +735,9 @@ pub(crate) async fn record_approach_sent(
     // no-op rather than a write that invents one.
     sqlx::query(
         r#"
-        UPDATE viryaos_booking_agents AS agent
+        UPDATE booking_agents AS agent
         SET approached_at = $3
-        FROM viryaos_outreach_targets AS target
+        FROM outreach_targets AS target
         WHERE target.workspace_id = $1 AND target.id = $2
           AND target.target_kind = 'agent'
           AND agent.workspace_id = target.workspace_id
@@ -750,9 +750,9 @@ pub(crate) async fn record_approach_sent(
     .execute(&mut **tx)
     .await
     .map_err(map_sqlx)?;
-    sqlx::query(r#"INSERT INTO viryaos_outreach_interactions(workspace_id,target_id,opportunity_id,direction,phase,source_key,occurred_at) VALUES($1,$2,NULL,'outbound','approach',$3,$4) ON CONFLICT(workspace_id,target_id,source_key) DO NOTHING"#)
+    sqlx::query(r#"INSERT INTO outreach_interactions(workspace_id,target_id,opportunity_id,direction,phase,source_key,occurred_at) VALUES($1,$2,NULL,'outbound','approach',$3,$4) ON CONFLICT(workspace_id,target_id,source_key) DO NOTHING"#)
       .bind(workspace_id.into_uuid()).bind(target_id.into_uuid()).bind(format!("autopilot:{}",action_id)).bind(now).execute(&mut **tx).await.map_err(map_sqlx)?;
-    sqlx::query(r#"INSERT INTO viryaos_reach_events (workspace_id, action_id, recipient_kind, recipient_id, channel, template_id, estimated_reach, status, metadata) VALUES ($1, $2, 'outreach_target', $3::text, 'email', 'representation', 1, 'sent', jsonb_build_object('kind', 'approach')) ON CONFLICT (action_id, recipient_id, channel) WHERE action_id IS NOT NULL DO NOTHING"#)
+    sqlx::query(r#"INSERT INTO reach_events (workspace_id, action_id, recipient_kind, recipient_id, channel, template_id, estimated_reach, status, metadata) VALUES ($1, $2, 'outreach_target', $3::text, 'email', 'representation', 1, 'sent', jsonb_build_object('kind', 'approach')) ON CONFLICT (action_id, recipient_id, channel) WHERE action_id IS NOT NULL DO NOTHING"#)
       .bind(workspace_id.into_uuid()).bind(action_id.into_uuid()).bind(target_id.into_uuid()).execute(&mut **tx).await.map_err(map_sqlx)?;
     Ok(())
 }

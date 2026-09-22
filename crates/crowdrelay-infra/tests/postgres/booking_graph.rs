@@ -3,7 +3,7 @@
 //! Three objects, one property each that only a database can prove:
 //!
 //! - **The booking agent** — a `booking_agent`/`talent_buyer`-typed Drive
-//!   contact promotes into `viryaos_booking_agents`, not the city-scoped
+//!   contact promotes into `booking_agents`, not the city-scoped
 //!   candidate queue, and the same address promoted twice is still one agent.
 //! - **The festival edition** — the window CHECK refuses an inside-out
 //!   window and the composite FK refuses an edition hung on another
@@ -82,7 +82,7 @@ async fn seed_target(
     display_name: &str,
 ) -> Result<Uuid, Box<dyn std::error::Error>> {
     Ok(sqlx::query_scalar::<_, Uuid>(
-        "INSERT INTO viryaos_booking_targets
+        "INSERT INTO booking_targets
              (workspace_id, city_id, target_kind, display_name, contact_email)
          VALUES ($1, $2, $3, $4, $5) RETURNING id",
     )
@@ -104,7 +104,7 @@ async fn seed_contact(
     kind: &str,
 ) -> Result<Uuid, Box<dyn std::error::Error>> {
     Ok(sqlx::query_scalar::<_, Uuid>(
-        r#"INSERT INTO viryaos_drive_contacts
+        r#"INSERT INTO drive_contacts
             (workspace_id, normalized_email, display_name, organization,
              suggested_kind, source_file_id, source_file_name, sources)
         VALUES ($1,$2,'Wera Hroza','Roadtone Agency',$3,'file-1','agents.xlsx','{gdrive}')
@@ -154,7 +154,7 @@ async fn run_agent_case(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>>
     // The agent row: name from the sheet, agency from its organization
     // column, the address as the dedup key.
     let (name, agency, active): (String, Option<String>, bool) = sqlx::query_as(
-        "SELECT name, agency, active FROM viryaos_booking_agents
+        "SELECT name, agency, active FROM booking_agents
          WHERE workspace_id = $1 AND contact_email = 'wera@roadtone.example'",
     )
     .bind(workspace)
@@ -166,7 +166,7 @@ async fn run_agent_case(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>>
 
     // The contact is filed as promoted — a re-scan never re-suggests it.
     let outcome: String = sqlx::query_scalar(
-        "SELECT beacon_outcome FROM viryaos_drive_contacts WHERE workspace_id = $1 AND id = $2",
+        "SELECT beacon_outcome FROM drive_contacts WHERE workspace_id = $1 AND id = $2",
     )
     .bind(workspace)
     .bind(contact_id)
@@ -176,7 +176,7 @@ async fn run_agent_case(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>>
 
     // The agent went nowhere near the city-scoped candidate queue.
     let candidates: i64 = sqlx::query_scalar(
-        "SELECT count(*)::bigint FROM viryaos_booking_candidates WHERE workspace_id = $1",
+        "SELECT count(*)::bigint FROM booking_candidates WHERE workspace_id = $1",
     )
     .bind(workspace)
     .fetch_one(pool)
@@ -187,12 +187,11 @@ async fn run_agent_case(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>>
     // not a twin.
     let contact = repo.get_contact(workspace, contact_id).await?;
     repo.promote_beacon_agent(workspace, &contact).await?;
-    let count: i64 = sqlx::query_scalar(
-        "SELECT count(*)::bigint FROM viryaos_booking_agents WHERE workspace_id = $1",
-    )
-    .bind(workspace)
-    .fetch_one(pool)
-    .await?;
+    let count: i64 =
+        sqlx::query_scalar("SELECT count(*)::bigint FROM booking_agents WHERE workspace_id = $1")
+            .bind(workspace)
+            .fetch_one(pool)
+            .await?;
     assert_eq!(count, 1, "one address is one agent");
 
     // A talent_buyer lands the same way — the intake files both spellings
@@ -200,12 +199,11 @@ async fn run_agent_case(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>>
     let buyer_id = seed_contact(pool, workspace, "milan@roadtone.example", "talent_buyer").await?;
     let contact = repo.get_contact(workspace, buyer_id).await?;
     repo.promote_beacon_agent(workspace, &contact).await?;
-    let count: i64 = sqlx::query_scalar(
-        "SELECT count(*)::bigint FROM viryaos_booking_agents WHERE workspace_id = $1",
-    )
-    .bind(workspace)
-    .fetch_one(pool)
-    .await?;
+    let count: i64 =
+        sqlx::query_scalar("SELECT count(*)::bigint FROM booking_agents WHERE workspace_id = $1")
+            .bind(workspace)
+            .fetch_one(pool)
+            .await?;
     assert_eq!(count, 2, "the talent buyer is a second agent row");
 
     // Another workspace's promote cannot see this workspace's contact.
@@ -236,7 +234,7 @@ async fn run_edition_case(pool: &PgPool) -> Result<(), Box<dyn std::error::Error
 
     // A window that opens after it closes is not a window.
     let inside_out = sqlx::query(
-        "INSERT INTO viryaos_festival_editions
+        "INSERT INTO festival_editions
              (workspace_id, target_id, edition_label, application_opens_at, application_closes_at)
          VALUES ($1, $2, 'BA 2027', now() + interval '60 days', now() + interval '30 days')",
     )
@@ -253,7 +251,7 @@ async fn run_edition_case(pool: &PgPool) -> Result<(), Box<dyn std::error::Error
     // attach — the composite (workspace_id, target_id) FK refuses it
     // outright rather than trusting every writer to filter.
     let cross_tenant = sqlx::query(
-        "INSERT INTO viryaos_festival_editions (workspace_id, target_id, edition_label)
+        "INSERT INTO festival_editions (workspace_id, target_id, edition_label)
          VALUES ($1, $2, 'Stolen Edition')",
     )
     .bind(other)
@@ -268,7 +266,7 @@ async fn run_edition_case(pool: &PgPool) -> Result<(), Box<dyn std::error::Error
     // The honest edition writes, and a half-open window is legal — a
     // festival that only published its close is still schedulable.
     sqlx::query(
-        "INSERT INTO viryaos_festival_editions
+        "INSERT INTO festival_editions
              (workspace_id, target_id, edition_label, starts_at, application_closes_at, lineup_url)
          VALUES ($1, $2, 'BA 2027', now() + interval '90 days', now() + interval '11 days',
                  'https://brutalassault.cz/lineup')",
@@ -347,12 +345,10 @@ async fn run_edge_case(
     // link — the union includes primary ∪ edges together.
     let venue_target = seed_target(pool, workspace, wroclaw, "venue", "Klub X").await?;
     assert_eq!(
-        sqlx::query_scalar::<_, Option<Uuid>>(
-            "SELECT venue_id FROM viryaos_booking_targets WHERE id = $1"
-        )
-        .bind(venue_target)
-        .fetch_one(pool)
-        .await?,
+        sqlx::query_scalar::<_, Option<Uuid>>("SELECT venue_id FROM booking_targets WHERE id = $1")
+            .bind(venue_target)
+            .fetch_one(pool)
+            .await?,
         Some(klub_x),
         "the name trigger did not resolve the primary room"
     );
@@ -403,7 +399,7 @@ async fn run_edge_case(
         "workspace B attached a room to workspace A's target"
     );
     let foreign_edges: i64 = sqlx::query_scalar(
-        "SELECT count(*)::bigint FROM viryaos_booking_target_venues WHERE workspace_id = $1",
+        "SELECT count(*)::bigint FROM booking_target_venues WHERE workspace_id = $1",
     )
     .bind(other)
     .fetch_one(pool)
@@ -414,7 +410,7 @@ async fn run_edge_case(
     // eleven days reads as the snapshot's days-until-close.
     let festival = seed_target(pool, workspace, wroclaw, "festival", "Brutal Assault").await?;
     sqlx::query(
-        "INSERT INTO viryaos_festival_editions
+        "INSERT INTO festival_editions
              (workspace_id, target_id, edition_label, application_closes_at)
          VALUES ($1, $2, 'BA 2027', now() + interval '11 days')",
     )
@@ -525,7 +521,7 @@ async fn run_edition_upsert_case(
         .await?;
     assert_eq!(corrected.edition_id, first.edition_id);
     let rows = sqlx::query_scalar::<_, i64>(
-        "SELECT count(*) FROM viryaos_festival_editions WHERE workspace_id = $1",
+        "SELECT count(*) FROM festival_editions WHERE workspace_id = $1",
     )
     .bind(workspace)
     .fetch_one(pool)
@@ -535,7 +531,7 @@ async fn run_edition_upsert_case(
         "the correction must rewrite the edition, not add one"
     );
     let stored_closes = sqlx::query_scalar::<_, time::OffsetDateTime>(
-        "SELECT application_closes_at FROM viryaos_festival_editions          WHERE workspace_id = $1 AND target_id = $2",
+        "SELECT application_closes_at FROM festival_editions          WHERE workspace_id = $1 AND target_id = $2",
     )
     .bind(workspace)
     .bind(festival)

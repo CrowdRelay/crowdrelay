@@ -59,7 +59,7 @@ async fn advertise_show_escalation(
 ) -> Result<(), Box<dyn std::error::Error>> {
     sqlx::query(
         r#"
-        INSERT INTO viryaos_executor_instances (
+        INSERT INTO executor_instances (
             workspace_id, executor_id, version, manifest_sha, observed_at, expires_at
         ) VALUES ($1,'n8n-report-test','test','test-manifest',$2,$3)
         "#,
@@ -71,7 +71,7 @@ async fn advertise_show_escalation(
     .await?;
     sqlx::query(
         r#"
-        INSERT INTO viryaos_executor_capabilities (
+        INSERT INTO executor_capabilities (
             workspace_id, executor_id, capability, capability_version, observed_at, expires_at
         ) VALUES ($1,'n8n-report-test','show.escalation','1',$2,$3)
         "#,
@@ -245,7 +245,7 @@ async fn seed_show(f: &Fixture, now: OffsetDateTime) -> Result<Uuid, Box<dyn std
     let segment_id = Uuid::now_v7();
     sqlx::query(
         "INSERT INTO audience_segments (workspace_id, id, slug, name, filter, active)
-         VALUES ($1, $2, 'viryaos-krakow-live-2026-post-show-recap', 'recap', '{}', true)",
+         VALUES ($1, $2, 'crowdrelay-krakow-live-2026-post-show-recap', 'recap', '{}', true)",
     )
     .bind(f.workspace_id.into_uuid())
     .bind(segment_id)
@@ -264,7 +264,7 @@ async fn seed_show(f: &Fixture, now: OffsetDateTime) -> Result<Uuid, Box<dyn std
                status, scheduled_at, dispatch_event_id,
                recipient_count, delivered_count, failed_count, completed_at
            ) VALUES (
-               $1, $2, 'viryaos-krakow-live-2026-post-show-recap', 'recap', 'email',
+               $1, $2, 'crowdrelay-krakow-live-2026-post-show-recap', 'recap', 'email',
                'post_show_recap', $3, 'completed', $4, $5, 2, 2, 0, $4
            )"#,
     )
@@ -296,7 +296,7 @@ async fn seed_report_action(
     let decision_id = Uuid::now_v7();
     let action_id = Uuid::now_v7();
     sqlx::query(
-        r#"INSERT INTO viryaos_autopilot_decisions
+        r#"INSERT INTO autopilot_decisions
            (id, workspace_id, decision_key, context, subject_kind, subject_id,
             decision_kind, confidence_basis_points, disposition, reason,
             input_snapshot, policy_snapshot, recommendation, evaluated_at, trace_id)
@@ -311,7 +311,7 @@ async fn seed_report_action(
     .execute(&f.pool)
     .await?;
     sqlx::query(
-        r#"INSERT INTO viryaos_autopilot_actions
+        r#"INSERT INTO autopilot_actions
            (id, workspace_id, decision_id, context, action_kind, subject_kind,
             subject_id, idempotency_key, payload, status,
             approved_at, approved_by, available_at)
@@ -385,7 +385,7 @@ async fn post_show_report_escalation_emits_labelled_artifact_and_closes_task()
     // The recap the system sent is reported with its receipt, not implied.
     assert_eq!(
         payload["report"]["campaigns"][0]["slug"],
-        "viryaos-krakow-live-2026-post-show-recap"
+        "crowdrelay-krakow-live-2026-post-show-recap"
     );
     assert_eq!(payload["report"]["campaigns"][0]["delivered"], 2);
 
@@ -438,7 +438,7 @@ async fn post_show_report_escalation_emits_labelled_artifact_and_closes_task()
 
     // And the show is registered as harvestable material.
     let source_count: i64 = sqlx::query_scalar(
-        "SELECT count(*)::bigint FROM viryaos_content_sources
+        "SELECT count(*)::bigint FROM content_sources
          WHERE workspace_id = $1 AND source_kind = 'show_completed'",
     )
     .bind(f.workspace_id.into_uuid())
@@ -578,7 +578,7 @@ async fn a_failed_report_escalation_advances_the_retry_epoch()
 
     let decision_id = Uuid::now_v7();
     sqlx::query(
-        r#"INSERT INTO viryaos_autopilot_decisions
+        r#"INSERT INTO autopilot_decisions
            (id, workspace_id, decision_key, context, subject_kind, subject_id,
             decision_kind, confidence_basis_points, disposition, reason,
             input_snapshot, policy_snapshot, recommendation, evaluated_at, trace_id)
@@ -594,7 +594,7 @@ async fn a_failed_report_escalation_advances_the_retry_epoch()
     .await?;
     let failed_at = now - time::Duration::hours(2);
     sqlx::query(
-        r#"INSERT INTO viryaos_autopilot_actions
+        r#"INSERT INTO autopilot_actions
            (id, workspace_id, decision_id, context, action_kind, subject_kind,
             subject_id, idempotency_key, payload, status, finished_at,
             last_error_kind, approved_at, approved_by, available_at)
@@ -641,7 +641,7 @@ async fn advertise_show_growth(
 ) -> Result<(), Box<dyn std::error::Error>> {
     sqlx::query(
         r#"
-        INSERT INTO viryaos_executor_instances (
+        INSERT INTO executor_instances (
             workspace_id, executor_id, version, manifest_sha, observed_at, expires_at
         ) VALUES ($1,'n8n-growth-test','test','test-manifest',$2,$3)
         "#,
@@ -653,7 +653,7 @@ async fn advertise_show_growth(
     .await?;
     sqlx::query(
         r#"
-        INSERT INTO viryaos_executor_capabilities (
+        INSERT INTO executor_capabilities (
             workspace_id, executor_id, capability, capability_version, observed_at, expires_at
         ) VALUES ($1,'n8n-growth-test','show.growth','1',$2,$3)
         "#,
@@ -778,7 +778,7 @@ async fn festival_post_show_follow_up_labels_acts_and_room()
     // it — a queued owned-audience action on the show.growth capability.
     let decision_id = Uuid::now_v7();
     sqlx::query(
-        r#"INSERT INTO viryaos_autopilot_decisions
+        r#"INSERT INTO autopilot_decisions
            (id, workspace_id, decision_key, context, subject_kind, subject_id,
             decision_kind, confidence_basis_points, disposition, reason,
             input_snapshot, policy_snapshot, recommendation, evaluated_at, trace_id)
@@ -794,7 +794,7 @@ async fn festival_post_show_follow_up_labels_acts_and_room()
     .await?;
     let recap_action = Uuid::now_v7();
     sqlx::query(
-        r#"INSERT INTO viryaos_autopilot_actions
+        r#"INSERT INTO autopilot_actions
            (id, workspace_id, decision_id, context, action_kind, subject_kind,
             subject_id, idempotency_key, payload, status, action_class,
             approved_at, approved_by, available_at)
@@ -832,7 +832,7 @@ async fn festival_post_show_follow_up_labels_acts_and_room()
     // saw" is every act on the slot's bill, in play order.
     let content: Value = sqlx::query_scalar(
         "SELECT content FROM communication_campaigns
-         WHERE workspace_id = $1 AND slug = 'viryaos-off-fest-2026-post-show-recap'",
+         WHERE workspace_id = $1 AND slug = 'crowdrelay-off-fest-2026-post-show-recap'",
     )
     .bind(f.workspace_id.into_uuid())
     .fetch_one(&f.pool)

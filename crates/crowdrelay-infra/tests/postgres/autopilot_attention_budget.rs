@@ -57,7 +57,7 @@ async fn action(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let decision_id = Uuid::now_v7();
     sqlx::query(
-        "INSERT INTO viryaos_autopilot_decisions \
+        "INSERT INTO autopilot_decisions \
          (id, workspace_id, decision_key, context, subject_kind, subject_id, decision_kind, \
           confidence_basis_points, disposition, reason, input_snapshot, policy_snapshot, \
           recommendation, trace_id) \
@@ -74,7 +74,7 @@ async fn action(
 
     let action_id = Uuid::now_v7();
     sqlx::query(
-        "INSERT INTO viryaos_autopilot_actions \
+        "INSERT INTO autopilot_actions \
          (id, workspace_id, decision_id, context, action_kind, subject_kind, subject_id, \
           idempotency_key, payload, status, action_class, approval_expires_at, created_at, \
           finished_at, trace_id) \
@@ -171,12 +171,10 @@ async fn a_spent_attention_budget_stops_the_agent_asking() -> Result<(), Box<dyn
     let now = OffsetDateTime::now_utc();
     let workspace_id = workspace(&pool).await?;
 
-    sqlx::query(
-        "UPDATE viryaos_growth_envelope SET weekly_approval_requests = 2 WHERE workspace_id = $1",
-    )
-    .bind(workspace_id)
-    .execute(&pool)
-    .await?;
+    sqlx::query("UPDATE growth_envelope SET weekly_approval_requests = 2 WHERE workspace_id = $1")
+        .bind(workspace_id)
+        .execute(&pool)
+        .await?;
     for _ in 0..2 {
         action(&pool, workspace_id, true, "awaiting_approval", now).await?;
     }
@@ -204,19 +202,17 @@ async fn a_tenant_may_choose_never_to_be_asked() -> Result<(), Box<dyn std::erro
     let now = OffsetDateTime::now_utc();
     let workspace_id = workspace(&pool).await?;
 
-    sqlx::query(
-        "UPDATE viryaos_growth_envelope SET weekly_approval_requests = 0 WHERE workspace_id = $1",
-    )
-    .bind(workspace_id)
-    .execute(&pool)
-    .await?;
+    sqlx::query("UPDATE growth_envelope SET weekly_approval_requests = 0 WHERE workspace_id = $1")
+        .bind(workspace_id)
+        .execute(&pool)
+        .await?;
     let (envelope, usage) = repository(&pool, &url)
         .load_growth_envelope(WorkspaceId::from_uuid(workspace_id), now)
         .await?;
     assert!(!check_attention(&envelope, &usage).may_ask());
 
     let refused = sqlx::query(
-        "UPDATE viryaos_growth_envelope SET weekly_approval_requests = 1001 WHERE workspace_id = $1",
+        "UPDATE growth_envelope SET weekly_approval_requests = 1001 WHERE workspace_id = $1",
     )
     .bind(workspace_id)
     .execute(&pool)
@@ -257,7 +253,7 @@ async fn an_unset_crew_ceiling_stops_at_the_default_instead_of_never()
         .await?;
 
     let handed_over = sqlx::query_scalar::<_, i64>(
-        "SELECT count(*)::bigint FROM viryaos_team_assignments \
+        "SELECT count(*)::bigint FROM team_assignments \
          WHERE workspace_id = $1 AND source_kind = 'autopilot_action'",
     )
     .bind(workspace_id)
@@ -271,7 +267,7 @@ async fn an_unset_crew_ceiling_stops_at_the_default_instead_of_never()
     // The same roster one ask lighter takes it, so the refusal above is the
     // ceiling and not an empty roster, a missing skill or a parked executor.
     sqlx::query(
-        "DELETE FROM viryaos_team_assignments \
+        "DELETE FROM team_assignments \
          WHERE workspace_id = $1 AND source_ref = 'seeded-ask-0'",
     )
     .bind(workspace_id)
@@ -281,7 +277,7 @@ async fn an_unset_crew_ceiling_stops_at_the_default_instead_of_never()
         .reconcile_team_handoffs(WorkspaceId::from_uuid(workspace_id), now)
         .await?;
     let handed_over = sqlx::query_scalar::<_, i64>(
-        "SELECT count(*)::bigint FROM viryaos_team_assignments \
+        "SELECT count(*)::bigint FROM team_assignments \
          WHERE workspace_id = $1 AND source_kind = 'autopilot_action'",
     )
     .bind(workspace_id)
@@ -302,7 +298,7 @@ async fn advertise_team_email(
     now: OffsetDateTime,
 ) -> Result<(), Box<dyn std::error::Error>> {
     sqlx::query(
-        "INSERT INTO viryaos_executor_instances \
+        "INSERT INTO executor_instances \
          (workspace_id, executor_id, version, manifest_sha, observed_at, expires_at) \
          VALUES ($1,'n8n-attention-test','test','test-manifest',$2,$3)",
     )
@@ -312,7 +308,7 @@ async fn advertise_team_email(
     .execute(pool)
     .await?;
     sqlx::query(
-        "INSERT INTO viryaos_executor_capabilities \
+        "INSERT INTO executor_capabilities \
          (workspace_id, executor_id, capability, capability_version, observed_at, expires_at) \
          VALUES ($1,'n8n-attention-test','team.email','1',$2,$3)",
     )
@@ -339,7 +335,7 @@ async fn member(
     .fetch_one(pool)
     .await?;
     sqlx::query(
-        "INSERT INTO viryaos_team_profiles (workspace_id, member_id, member_key, active, skills) \
+        "INSERT INTO team_profiles (workspace_id, member_id, member_key, active, skills) \
          VALUES ($1, $2, $3, true, ARRAY['approval','operations','social']::text[])",
     )
     .bind(workspace_id)
@@ -363,7 +359,7 @@ async fn settled_ask(
     index: i64,
 ) -> Result<(), Box<dyn std::error::Error>> {
     sqlx::query(
-        "INSERT INTO viryaos_team_assignments \
+        "INSERT INTO team_assignments \
          (id, workspace_id, source_kind, source_id, source_ref, assignee_member_id, \
           required_skill, status, assigned_at, completed_at) \
          VALUES ($1,$2,'show_task',$3,$4,$5,'approval','done',$6,$6)",
@@ -391,7 +387,7 @@ async fn awaiting_approval(
     now: OffsetDateTime,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let decision_id = sqlx::query_scalar::<_, Uuid>(
-        "INSERT INTO viryaos_autopilot_decisions \
+        "INSERT INTO autopilot_decisions \
              (id, workspace_id, decision_key, context, subject_kind, subject_id, \
               decision_kind, confidence_basis_points, disposition, reason, \
               input_snapshot, policy_snapshot, recommendation, evaluated_at, trace_id) \
@@ -408,7 +404,7 @@ async fn awaiting_approval(
     .fetch_one(pool)
     .await?;
     sqlx::query(
-        "INSERT INTO viryaos_autopilot_actions \
+        "INSERT INTO autopilot_actions \
              (id, workspace_id, decision_id, context, action_kind, subject_kind, \
               subject_id, idempotency_key, payload, status, approval_expires_at) \
          VALUES ($1,$2,$3,'growth_intelligence','community.engage.request','target_community', \

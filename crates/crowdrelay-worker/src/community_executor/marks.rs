@@ -64,7 +64,7 @@ impl CommunityExecutorWorker {
             };
             sqlx::query(
                 r#"
-                UPDATE viryaos_autopilot_actions
+                UPDATE autopilot_actions
                 SET status = 'failed',
                     finished_at = now(),
                     last_error_kind = $3,
@@ -84,9 +84,9 @@ impl CommunityExecutorWorker {
             // this is a no-op.
             sqlx::query(
                 r#"
-                UPDATE viryaos_experiment_assignments
+                UPDATE experiment_assignments
                 SET execution_status = 'failed',
-                    trace_id = COALESCE(trace_id, (SELECT trace_id FROM viryaos_autopilot_actions WHERE id = $2))
+                    trace_id = COALESCE(trace_id, (SELECT trace_id FROM autopilot_actions WHERE id = $2))
                 WHERE workspace_id = $1
                   AND action_id = $2
                   AND execution_status = 'dispatched'

@@ -89,7 +89,7 @@ async fn run(pool: &PgPool, url: &str) -> Result<(), Box<dyn std::error::Error>>
     assignment(pool, workspace, bogdan, now, 9).await?;
     // A row with no schedule is untouched and uncounted.
     sqlx::query(
-        r#"INSERT INTO viryaos_team_assignments (
+        r#"INSERT INTO team_assignments (
             workspace_id, source_kind, source_id, assignee_member_id, required_skill,
             status, due_at, assigned_at
         ) VALUES ($1,'opportunity',$2,$3,'operations','open',$4,$5)"#,
@@ -117,7 +117,7 @@ async fn run(pool: &PgPool, url: &str) -> Result<(), Box<dyn std::error::Error>>
     assert_eq!(cleared, 5, "the drain did not clear every stamped schedule");
 
     let emails = sqlx::query_scalar::<_, i64>(
-        "SELECT count(*)::bigint FROM viryaos_autopilot_actions
+        "SELECT count(*)::bigint FROM autopilot_actions
          WHERE workspace_id = $1 AND action_kind = 'team.assignment.email'",
     )
     .bind(workspace)
@@ -126,7 +126,7 @@ async fn run(pool: &PgPool, url: &str) -> Result<(), Box<dyn std::error::Error>>
     assert_eq!(emails, 0, "the drain mailed somebody");
 
     let still_scheduled = sqlx::query_scalar::<_, i64>(
-        "SELECT count(*)::bigint FROM viryaos_team_assignments
+        "SELECT count(*)::bigint FROM team_assignments
          WHERE workspace_id = $1 AND next_reminder_at IS NOT NULL",
     )
     .bind(workspace)
@@ -178,7 +178,7 @@ async fn assignment(
     index: i32,
 ) -> Result<(), Box<dyn std::error::Error>> {
     sqlx::query(
-        r#"INSERT INTO viryaos_team_assignments (
+        r#"INSERT INTO team_assignments (
             workspace_id, source_kind, source_id, assignee_member_id, required_skill,
             status, due_at, assigned_at, next_reminder_at, reminder_count
         ) VALUES ($1,'opportunity',$2,$3,'operations','open',$4,$5,$6,0)"#,

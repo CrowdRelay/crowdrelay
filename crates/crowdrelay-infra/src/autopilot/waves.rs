@@ -58,7 +58,7 @@ SELECT
         -- Committed, not delivered. A pitch awaiting approval has already taken
         -- its place in the wave.
         SELECT count(*)::bigint
-        FROM viryaos_autopilot_actions AS action
+        FROM autopilot_actions AS action
         WHERE action.workspace_id = wave.workspace_id
           AND action.context = 'outreach'
           AND action.status <> 'cancelled'
@@ -67,7 +67,7 @@ SELECT
     CASE wave.anchor_kind
         WHEN 'release' THEN EXISTS (
             SELECT 1
-            FROM viryaos_release_plans AS plan
+            FROM release_plans AS plan
             WHERE plan.workspace_id = wave.workspace_id
               AND plan.id = wave.anchor_id
               AND plan.active
@@ -81,7 +81,7 @@ SELECT
     END AS anchor_active,
     (
         SELECT count(*)::bigint
-        FROM viryaos_outreach_targets AS target
+        FROM outreach_targets AS target
         WHERE target.workspace_id = wave.workspace_id
           AND target.target_kind = wave.target_kind
           AND target.active
@@ -94,7 +94,7 @@ SELECT
           AND NOT target.do_not_contact
           AND COALESCE(target.last_reply_disposition::text,'none') NOT IN ('received','positive','declined')
     ) AS eligible_targets
-FROM viryaos_outreach_waves AS wave
+FROM outreach_waves AS wave
 WHERE wave.workspace_id = $1
   AND wave.settled_at IS NULL
 ORDER BY wave.anchor_at
@@ -111,7 +111,7 @@ WITH anchors AS (
     -- Cast, because an unadorned literal in a CTE comes back as `unknown` and the
     -- decoder has nothing to turn into a string.
     SELECT 'release'::text AS anchor_kind, plan.id AS anchor_id, plan.release_at AS anchor_at
-    FROM viryaos_release_plans AS plan
+    FROM release_plans AS plan
     WHERE plan.workspace_id = $1
       AND plan.active
       -- A filler release owes no vertical — the free-reach waves are part
@@ -137,7 +137,7 @@ SELECT
     FLOOR(EXTRACT(EPOCH FROM (anchors.anchor_at - $2)) / 3600)::bigint AS hours_until,
     (
         SELECT count(*)::bigint
-        FROM viryaos_outreach_targets AS target
+        FROM outreach_targets AS target
         WHERE target.workspace_id = $1
           AND target.target_kind = kinds.target_kind
           AND target.active
@@ -154,7 +154,7 @@ FROM anchors
 CROSS JOIN kinds
 WHERE NOT EXISTS (
     SELECT 1
-    FROM viryaos_outreach_waves AS wave
+    FROM outreach_waves AS wave
     WHERE wave.workspace_id = $1
       AND wave.anchor_kind = anchors.anchor_kind
       AND wave.anchor_id = anchors.anchor_id
@@ -243,7 +243,7 @@ impl PostgresAutopilotRepository {
         self.bounded(async {
             let opened = sqlx::query_scalar::<_, Uuid>(
                 r#"
-                INSERT INTO viryaos_outreach_waves (
+                INSERT INTO outreach_waves (
                     workspace_id, anchor_kind, anchor_id, anchor_at, target_kind, capacity
                 ) VALUES ($1,$2,$3,$4,$5,$6)
                 ON CONFLICT (workspace_id, anchor_kind, anchor_id, target_kind) DO NOTHING
@@ -280,7 +280,7 @@ impl PostgresAutopilotRepository {
                 // not be reopened.
                 OutreachWaveTransition::Seal => {
                     sqlx::query(
-                        "UPDATE viryaos_outreach_waves \
+                        "UPDATE outreach_waves \
                          SET state='sealed', sealed_at=$3 \
                          WHERE workspace_id=$1 AND id=$2 AND state='drafting'",
                     )
@@ -297,7 +297,7 @@ impl PostgresAutopilotRepository {
                     // month late, one at a time, with nobody having decided to.
                     let mut transaction = self.pool.begin().await.map_err(map_sqlx)?;
                     sqlx::query(
-                        "UPDATE viryaos_autopilot_actions \
+                        "UPDATE autopilot_actions \
                          SET status='cancelled', finished_at=$3 \
                          WHERE workspace_id=$1 AND context='outreach' \
                            AND payload->>'wave_id' = $2::text \
@@ -310,7 +310,7 @@ impl PostgresAutopilotRepository {
                     .await
                     .map_err(map_sqlx)?;
                     sqlx::query(
-                        "UPDATE viryaos_outreach_waves \
+                        "UPDATE outreach_waves \
                          SET state='expired', settled_at=$3, expiry_reason=$4 \
                          WHERE workspace_id=$1 AND id=$2 AND settled_at IS NULL",
                     )
@@ -375,7 +375,7 @@ impl PostgresAutopilotRepository {
             // approving something that grows afterwards is approving something
             // nobody read.
             let sealed = sqlx::query_as::<_, WaveApprovalRow>(
-                "UPDATE viryaos_outreach_waves \
+                "UPDATE outreach_waves \
                  SET state='approved', settled_at=$3 \
                  WHERE workspace_id=$1 AND id=$2 AND state='sealed' \
                  RETURNING target_kind",
@@ -390,7 +390,7 @@ impl PostgresAutopilotRepository {
                 return Err(RepositoryError::Conflict);
             };
             let released = sqlx::query(
-                "UPDATE viryaos_autopilot_actions \
+                "UPDATE autopilot_actions \
                  SET status='queued', approved_at=$3, approved_by='operator:admin_api_key' \
                  WHERE workspace_id=$1 AND context='outreach' \
                    AND payload->>'wave_id' = $2::text \
@@ -506,7 +506,7 @@ pub(super) async fn evidence_packet(
     let positive_replies_12m = sqlx::query_scalar::<_, i64>(
         r#"
         SELECT count(*)::bigint
-        FROM viryaos_outreach_targets AS target
+        FROM outreach_targets AS target
         WHERE target.workspace_id = $1
           AND target.last_reply_disposition = 'positive'
           AND target.last_reply_at > $2 - INTERVAL '1 year'

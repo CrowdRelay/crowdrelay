@@ -65,7 +65,7 @@ fn repository(pool: &PgPool) -> PostgresAutopilotRepository {
 async fn content_source(pool: &PgPool, workspace_id: WorkspaceId) -> Result<Uuid> {
     let id = Uuid::now_v7();
     sqlx::query(
-        "INSERT INTO viryaos_content_sources (
+        "INSERT INTO content_sources (
              id, workspace_id, source_kind, source_key, title, occurred_at,
              expires_at, metadata
          ) VALUES ($1,$2,'video',$3,$4, now() - INTERVAL '2 hours',
@@ -165,7 +165,7 @@ async fn action_rows(
     Ok(
         sqlx::query_as::<_, (Uuid, String, Option<String>, Option<time::OffsetDateTime>)>(
             "SELECT id, status, approved_by, approval_expires_at \
-         FROM viryaos_autopilot_actions \
+         FROM autopilot_actions \
          WHERE workspace_id = $1 AND action_kind = 'community.engage.request' \
          ORDER BY created_at",
         )
@@ -535,7 +535,7 @@ async fn the_batch_card_reads_back_the_campaign() -> Result<()> {
     // The batched deliveries are the card's detail rows — they must not also
     // surface as fifty entries in the needs-you queue.
     let needs_you = sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*) FROM viryaos_autopilot_actions a \
+        "SELECT COUNT(*) FROM autopilot_actions a \
          WHERE a.workspace_id = $1 AND a.status = 'awaiting_approval' \
            AND a.action_kind = 'community.engage.request' \
            AND a.payload->>'source_id' IS NULL",
@@ -560,7 +560,7 @@ async fn pending_delivery(
 ) -> Result<()> {
     let decision_id = Uuid::now_v7();
     sqlx::query(
-        "INSERT INTO viryaos_autopilot_decisions (
+        "INSERT INTO autopilot_decisions (
              id, workspace_id, decision_key, context, subject_kind, subject_id,
              decision_kind, confidence_basis_points, disposition, reason,
              input_snapshot, policy_snapshot, recommendation, trace_id
@@ -576,7 +576,7 @@ async fn pending_delivery(
     .await?;
     let action_id = Uuid::now_v7();
     sqlx::query(
-        "INSERT INTO viryaos_autopilot_actions (
+        "INSERT INTO autopilot_actions (
              id, workspace_id, decision_id, context, action_kind, subject_kind,
              subject_id, idempotency_key, payload, status, action_class,
              approved_at, approved_by, finished_at
@@ -730,7 +730,7 @@ async fn delivery_state(
     target_id: Uuid,
 ) -> Result<(String, Option<String>)> {
     Ok(sqlx::query_as::<_, (String, Option<String>)>(
-        "SELECT status, approved_by FROM viryaos_autopilot_actions \
+        "SELECT status, approved_by FROM autopilot_actions \
          WHERE workspace_id=$1 AND action_kind='community.engage.request' \
            AND payload->>'target_id' = $2::text",
     )
@@ -941,7 +941,7 @@ async fn a_grant_stops_answering_once_the_axes_go_quiet() -> Result<()> {
     // unexpired — but there is no RequireApproval question left for it to
     // answer, so the delivery parks instead of posting on a dead question.
     sqlx::query(
-        "UPDATE viryaos_autopilot_policies SET autonomy_level='observe' \
+        "UPDATE autopilot_policies SET autonomy_level='observe' \
          WHERE workspace_id=$1 AND context='outreach'",
     )
     .bind(ws.into_uuid())
@@ -957,14 +957,14 @@ async fn a_grant_stops_answering_once_the_axes_go_quiet() -> Result<()> {
     // Context restored but the class ceiling tightened below the question —
     // the other axis going quiet must park the delivery just the same.
     sqlx::query(
-        "UPDATE viryaos_autopilot_policies SET autonomy_level='require_approval' \
+        "UPDATE autopilot_policies SET autonomy_level='require_approval' \
          WHERE workspace_id=$1 AND context='outreach'",
     )
     .bind(ws.into_uuid())
     .execute(&pool)
     .await?;
     sqlx::query(
-        "UPDATE viryaos_growth_autonomy SET ceiling='observe' \
+        "UPDATE growth_autonomy SET ceiling='observe' \
          WHERE workspace_id=$1 AND action_class='third_party'",
     )
     .bind(ws.into_uuid())
@@ -980,7 +980,7 @@ async fn a_grant_stops_answering_once_the_axes_go_quiet() -> Result<()> {
     // The ceiling lifts again — the grant answers once more, and the
     // refunded attempt means the parked churn cost the row nothing.
     sqlx::query(
-        "UPDATE viryaos_growth_autonomy SET ceiling='require_approval' \
+        "UPDATE growth_autonomy SET ceiling='require_approval' \
          WHERE workspace_id=$1 AND action_class='third_party'",
     )
     .bind(ws.into_uuid())
@@ -1004,7 +1004,7 @@ async fn a_grant_stops_answering_once_the_axes_go_quiet() -> Result<()> {
 
 async fn batch_action(pool: &PgPool, workspace_id: WorkspaceId, source_id: Uuid) -> Result<Uuid> {
     Ok(sqlx::query_scalar::<_, Uuid>(
-        "SELECT id FROM viryaos_autopilot_actions \
+        "SELECT id FROM autopilot_actions \
          WHERE workspace_id = $1 AND action_kind = 'community.engage.request' \
            AND payload->>'source_id' = $2::text",
     )
@@ -1016,7 +1016,7 @@ async fn batch_action(pool: &PgPool, workspace_id: WorkspaceId, source_id: Uuid)
 
 async fn action_payload(pool: &PgPool, action_id: Uuid) -> Result<serde_json::Value> {
     Ok(sqlx::query_scalar::<_, serde_json::Value>(
-        "SELECT payload FROM viryaos_autopilot_actions WHERE id = $1",
+        "SELECT payload FROM autopilot_actions WHERE id = $1",
     )
     .bind(action_id)
     .fetch_one(pool)
@@ -1107,7 +1107,7 @@ async fn approving_with_revisions_rewrites_the_draft_and_audits_the_edit() -> Re
     // the operator's, keyed to this approval's operation.
     let rows = sqlx::query_as::<_, (String, String, String, Uuid)>(
         "SELECT field, before_text, after_text, operation_id \
-         FROM viryaos_draft_revisions WHERE workspace_id = $1 AND action_id = $2 \
+         FROM draft_revisions WHERE workspace_id = $1 AND action_id = $2 \
          ORDER BY field",
     )
     .bind(ws.into_uuid())
@@ -1211,7 +1211,7 @@ async fn a_revision_for_an_action_outside_the_batch_refuses_the_whole_approval()
         );
     }
     let audit_rows = sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*) FROM viryaos_draft_revisions WHERE workspace_id = $1",
+        "SELECT COUNT(*) FROM draft_revisions WHERE workspace_id = $1",
     )
     .bind(ws.into_uuid())
     .fetch_one(&pool)
@@ -1290,7 +1290,7 @@ async fn a_seeded_post_row_takes_the_edit_but_a_post_out_the_door_refuses() -> R
         // Terminal states require finished_at — the same invariant the
         // executor's own writes satisfy.
         sqlx::query(
-            "UPDATE viryaos_autopilot_actions \
+            "UPDATE autopilot_actions \
              SET status = $2, finished_at = CASE WHEN $2 IN ('succeeded','failed','cancelled') \
                  THEN now() ELSE finished_at END \
              WHERE id = $1",

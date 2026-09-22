@@ -66,7 +66,7 @@ async fn execute_ticket_capacity_change(
         JOIN ticket_sales AS ticket_sale
           ON ticket_sale.workspace_id = ticket_type.workspace_id
          AND ticket_sale.id = ticket_type.ticket_sale_id
-        JOIN viryaos_ticket_type_allocation_guardrails AS guardrail
+        JOIN ticket_type_allocation_guardrails AS guardrail
           ON guardrail.workspace_id = ticket_type.workspace_id
          AND guardrail.ticket_type_id = ticket_type.id
         WHERE ticket_type.workspace_id = $1
@@ -148,7 +148,7 @@ async fn execute_merch_price_change(
     let guardrails = sqlx::query_as::<_, (i64, i64, i64)>(
         r#"
         SELECT minimum_price_minor, maximum_price_minor, version
-        FROM viryaos_merch_product_economics
+        FROM merch_product_economics
         WHERE workspace_id = $1 AND product_id = $2
         FOR UPDATE
         "#,

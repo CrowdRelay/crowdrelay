@@ -5,7 +5,7 @@
 //! `opening_line` at approval time, reviewed by the generic revision machinery
 //! before anything is queued — a refused edit refuses the whole approval and
 //! writes nothing, an accepted one lands in the payload and leaves a
-//! `viryaos_draft_revisions` row hung off the approval's audit row.
+//! `draft_revisions` row hung off the approval's audit row.
 
 use crate::common;
 
@@ -204,7 +204,7 @@ async fn run_support_slot_ask(pool: &PgPool, url: &str) -> Result<(), Box<dyn st
         let email = email.to_owned();
         async move {
             sqlx::query(
-                "INSERT INTO viryaos_booking_targets
+                "INSERT INTO booking_targets
                     (workspace_id, city_id, target_kind, display_name, contact_email,
                      relationship_score, capacity)
                  VALUES ($1, $2, 'promoter', $3, $4, 70, 300)",
@@ -226,7 +226,7 @@ async fn run_support_slot_ask(pool: &PgPool, url: &str) -> Result<(), Box<dyn st
         let capability = capability.to_owned();
         async move {
             sqlx::query(
-                "INSERT INTO viryaos_executor_instances
+                "INSERT INTO executor_instances
                     (workspace_id, executor_id, version, manifest_sha, observed_at, expires_at)
                  VALUES ($1,'n8n-n5-test','1','sha',now(),now() + interval '30 minutes')
                  ON CONFLICT DO NOTHING",
@@ -235,7 +235,7 @@ async fn run_support_slot_ask(pool: &PgPool, url: &str) -> Result<(), Box<dyn st
             .execute(&pool)
             .await?;
             sqlx::query(
-                "INSERT INTO viryaos_executor_capabilities
+                "INSERT INTO executor_capabilities
                     (workspace_id, executor_id, capability, capability_version,
                      observed_at, expires_at)
                  VALUES ($1,'n8n-n5-test',$2,'1',now(),now() + interval '30 minutes')",
@@ -317,7 +317,7 @@ async fn run_support_slot_ask(pool: &PgPool, url: &str) -> Result<(), Box<dyn st
     let (workspace_id, subject_kind, subject_id, status, payload) =
         sqlx::query_as::<_, (Uuid, String, Uuid, String, serde_json::Value)>(
             "SELECT workspace_id, subject_kind, subject_id, status, payload
-         FROM viryaos_autopilot_actions WHERE id = $1",
+         FROM autopilot_actions WHERE id = $1",
         )
         .bind(action_id)
         .fetch_one(pool)
@@ -380,7 +380,7 @@ async fn run_support_slot_ask(pool: &PgPool, url: &str) -> Result<(), Box<dyn st
     // one row per field, hung off the approval's own audit row by the
     // operation_id foreign key.
     let (before_text, after_text) = sqlx::query_as::<_, (String, String)>(
-        "SELECT before_text, after_text FROM viryaos_draft_revisions
+        "SELECT before_text, after_text FROM draft_revisions
          WHERE workspace_id = $1 AND action_id = $2 AND field = 'opening_line'",
     )
     .bind(head)
@@ -415,14 +415,14 @@ async fn run_support_slot_ask(pool: &PgPool, url: &str) -> Result<(), Box<dyn st
         other => return Err(format!("expected a replay, got {other:?}").into()),
     }
     let total_actions = sqlx::query_scalar::<_, i64>(
-        "SELECT count(*) FROM viryaos_autopilot_actions WHERE workspace_id = $1",
+        "SELECT count(*) FROM autopilot_actions WHERE workspace_id = $1",
     )
     .bind(head)
     .fetch_one(pool)
     .await?;
     assert_eq!(total_actions, 1, "the replay wrote a second action");
     let still = sqlx::query_scalar::<_, String>(
-        "SELECT payload ->> 'opening_line' FROM viryaos_autopilot_actions
+        "SELECT payload ->> 'opening_line' FROM autopilot_actions
          WHERE workspace_id = $1 AND id = $2",
     )
     .bind(head)
@@ -441,7 +441,7 @@ async fn run_support_slot_ask(pool: &PgPool, url: &str) -> Result<(), Box<dyn st
         other => return Err(format!("a second ask for one show was taken: {other:?}").into()),
     }
     let total_actions = sqlx::query_scalar::<_, i64>(
-        "SELECT count(*) FROM viryaos_autopilot_actions WHERE workspace_id = $1",
+        "SELECT count(*) FROM autopilot_actions WHERE workspace_id = $1",
     )
     .bind(head)
     .fetch_one(pool)
@@ -510,12 +510,11 @@ async fn run_support_slot_ask(pool: &PgPool, url: &str) -> Result<(), Box<dyn st
         emitted["recipients"][0]["contact_email"], "anna-n5@example.com",
         "the letter addressed somebody other than the headliner's promoter"
     );
-    let succeeded = sqlx::query_scalar::<_, String>(
-        "SELECT status FROM viryaos_autopilot_actions WHERE id = $1",
-    )
-    .bind(action_id)
-    .fetch_one(pool)
-    .await?;
+    let succeeded =
+        sqlx::query_scalar::<_, String>("SELECT status FROM autopilot_actions WHERE id = $1")
+            .bind(action_id)
+            .fetch_one(pool)
+            .await?;
     assert_eq!(succeeded, "succeeded");
 
     // ── Every shape of an expired offer is the same refusal. ────────────
@@ -667,7 +666,7 @@ async fn run_support_slot_ask(pool: &PgPool, url: &str) -> Result<(), Box<dyn st
         other => return Err(format!("an unsendable ask was queued: {other:?}").into()),
     }
     let silent_actions = sqlx::query_scalar::<_, i64>(
-        "SELECT count(*) FROM viryaos_autopilot_actions WHERE workspace_id = $1",
+        "SELECT count(*) FROM autopilot_actions WHERE workspace_id = $1",
     )
     .bind(head_silent)
     .fetch_one(pool)

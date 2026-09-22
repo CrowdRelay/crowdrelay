@@ -119,7 +119,7 @@ impl CommunityExecutorWorker {
             sqlx::query_as(
                 r#"
             SELECT action_class, expires_at, revoked_at
-            FROM viryaos_standing_approvals
+            FROM standing_approvals
             WHERE workspace_id = $1
               AND action_kind = 'community.engage.request'
               AND target_key = $2
@@ -142,7 +142,7 @@ impl CommunityExecutorWorker {
         // rule the ingest path applies. A missing or unreadable policy row
         // is the safest level on that axis, never an absent limit.
         let context_level: Option<String> = sqlx::query_scalar(
-            "SELECT autonomy_level FROM viryaos_autopilot_policies \
+            "SELECT autonomy_level FROM autopilot_policies \
              WHERE workspace_id = $1 AND context = 'outreach' LIMIT 1",
         )
         .bind(self.workspace_id.into_uuid())
@@ -152,7 +152,7 @@ impl CommunityExecutorWorker {
             return Ok(false);
         };
         let ceiling: Option<String> = sqlx::query_scalar(
-            "SELECT ceiling FROM viryaos_growth_autonomy \
+            "SELECT ceiling FROM growth_autonomy \
              WHERE workspace_id = $1 AND action_class = $2 LIMIT 1",
         )
         .bind(self.workspace_id.into_uuid())
@@ -211,7 +211,7 @@ impl CommunityExecutorWorker {
             .await?;
             sqlx::query(
                 r#"
-                UPDATE viryaos_autopilot_actions
+                UPDATE autopilot_actions
                 SET status = 'cancelled', finished_at = now()
                 WHERE workspace_id = $1
                   AND action_kind = 'community.engage.request'

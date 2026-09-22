@@ -546,7 +546,7 @@ pub struct CommunityRelayDelivery {
 /// it is currently actionable.
 ///
 /// A view, not a stored row: every field is read from
-/// `viryaos_team_opportunities` plus the newest autopilot decision naming the
+/// `team_opportunities` plus the newest autopilot decision naming the
 /// opportunity as its subject. Ineligible and stale rows stay on the list with
 /// their reason — a shortlist that silently drops what it rejected is a
 /// shortlist the operator has to double-check by hand.

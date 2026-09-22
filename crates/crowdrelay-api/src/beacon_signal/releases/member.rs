@@ -16,8 +16,8 @@ pub async fn my_release_campaigns(
                product.name AS product_name,variant.label AS variant_label,
                campaign.status,recipient.status AS recipient_status,campaign.claim_deadline,
                recipient.recipient_name,recipient.recipient_phone,recipient.parcel_locker_code
-        FROM viryaos_beacon_release_recipients recipient
-        JOIN viryaos_beacon_release_campaigns campaign
+        FROM beacon_release_recipients recipient
+        JOIN beacon_release_campaigns campaign
           ON campaign.workspace_id=recipient.workspace_id AND campaign.id=recipient.campaign_id
         JOIN merch_variants variant
           ON variant.workspace_id=campaign.workspace_id AND variant.id=campaign.variant_id
@@ -86,8 +86,8 @@ pub async fn confirm_release_delivery(
     let row = match sqlx::query_as::<_, (String, String, OffsetDateTime)>(
         r#"
         SELECT recipient.status,campaign.title,campaign.claim_deadline
-        FROM viryaos_beacon_release_recipients recipient
-        JOIN viryaos_beacon_release_campaigns campaign
+        FROM beacon_release_recipients recipient
+        JOIN beacon_release_campaigns campaign
           ON campaign.workspace_id=recipient.workspace_id AND campaign.id=recipient.campaign_id
         WHERE recipient.workspace_id=$1 AND recipient.campaign_id=$2 AND recipient.beacon_id=$3
           AND campaign.status='open'
@@ -111,7 +111,7 @@ pub async fn confirm_release_delivery(
     }
     if let Err(error) = sqlx::query(
         r#"
-        UPDATE viryaos_beacon_release_recipients
+        UPDATE beacon_release_recipients
         SET status='confirmed',recipient_name=$4,recipient_phone=$5,parcel_locker_code=$6,
             confirmed_at=COALESCE(confirmed_at,now()),pii_purged_at=NULL,
             delivery_details_purge_after=NULL
@@ -181,8 +181,8 @@ pub async fn decline_release_delivery(
     let row = match sqlx::query_as::<_, (String, Uuid, Uuid)>(
         r#"
         SELECT recipient.status,campaign.variant_id,campaign.reservation_id
-        FROM viryaos_beacon_release_recipients recipient
-        JOIN viryaos_beacon_release_campaigns campaign
+        FROM beacon_release_recipients recipient
+        JOIN beacon_release_campaigns campaign
           ON campaign.workspace_id=recipient.workspace_id AND campaign.id=recipient.campaign_id
         WHERE recipient.workspace_id=$1 AND recipient.campaign_id=$2 AND recipient.beacon_id=$3
           AND campaign.status='open'
@@ -237,7 +237,7 @@ pub async fn decline_release_delivery(
     }
     if let Err(error) = sqlx::query(
         r#"
-        UPDATE viryaos_beacon_release_recipients
+        UPDATE beacon_release_recipients
         SET status='declined',declined_at=now(),recipient_name=NULL,recipient_phone=NULL,
             parcel_locker_code=NULL,delivery_details_purge_after=NULL,pii_purged_at=now()
         WHERE workspace_id=$1 AND campaign_id=$2 AND beacon_id=$3

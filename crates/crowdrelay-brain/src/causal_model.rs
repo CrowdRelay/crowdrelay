@@ -33,7 +33,7 @@ use crate::world_model::GrowthTrend;
 ///
 /// # Why `serde(default)` at the container
 ///
-/// This is stored as `viryaos_growth_evidence.context` and read back months
+/// This is stored as `growth_evidence.context` and read back months
 /// later, so the row on disk is always older than the code reading it. Without
 /// a default, adding one field makes every existing row fail to deserialize —
 /// and the loader answered that failure with `DispatchContext::default()`, so

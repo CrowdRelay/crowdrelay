@@ -1,6 +1,6 @@
 //! Venue and promoter discovery — the booking pipeline's supply.
 //!
-//! The negotiation machinery is complete and starves: `viryaos_booking_targets`
+//! The negotiation machinery is complete and starves: `booking_targets`
 //! has been operator-upsert-only since 0033, which made zero venues a stable
 //! state rather than a problem the agent could notice. This module gives the
 //! booking pipeline what Phase 9 gave the pitcher: candidates arrive from an

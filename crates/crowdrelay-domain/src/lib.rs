@@ -107,6 +107,7 @@ pub mod objectives;
 pub mod outreach;
 pub mod outreach_letter;
 pub mod outward_evidence;
+pub mod peer_act_seed;
 pub mod performance;
 pub mod place;
 pub mod play_measurement;

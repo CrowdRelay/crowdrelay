@@ -104,7 +104,7 @@ async fn load_relay_runs(state: &OpsState) -> Result<Vec<ProcessRelayRun>, OpsEr
                     d.decision_key LIKE '%:signal_push'
                     AND d.disposition IN ('require_approval', 'auto_execute')
                 ) AS push_decided
-            FROM viryaos_autopilot_decisions d
+            FROM autopilot_decisions d
             WHERE d.workspace_id = $1
               AND d.decision_kind = 'relay_owned_post'
               AND d.input_snapshot->>'source_id' ~
@@ -125,7 +125,7 @@ async fn load_relay_runs(state: &OpsState) -> Result<Vec<ProcessRelayRun>, OpsEr
                 a.status,
                 a.approval_expires_at
             FROM runs r
-            JOIN viryaos_autopilot_actions a
+            JOIN autopilot_actions a
               ON a.workspace_id = $1
              AND a.action_kind = 'community.engage.request'
              AND a.payload->>'source_id' ~
@@ -166,7 +166,7 @@ async fn load_relay_runs(state: &OpsState) -> Result<Vec<ProcessRelayRun>, OpsEr
             COALESCE(conv2.conversions, 0) AS conversions,
             push.status AS push_status
         FROM runs r
-        LEFT JOIN viryaos_content_sources cs
+        LEFT JOIN content_sources cs
           ON cs.workspace_id = $1 AND cs.id = r.source_id
         -- One approval per source: the batch row is the run's ask. Left join —
         -- a run whose drafts are still landing has no batch yet.
@@ -214,7 +214,7 @@ async fn load_relay_runs(state: &OpsState) -> Result<Vec<ProcessRelayRun>, OpsEr
                 LEFT JOIN LATERAL (
                     SELECT p.id, p.status, p.posted_at
                     FROM community_posts p
-                    JOIN viryaos_autopilot_actions pa
+                    JOIN autopilot_actions pa
                       ON pa.workspace_id = p.workspace_id AND pa.id = p.action_id
                      AND pa.action_kind = 'community.engage.request'
                      AND pa.payload->>'source_id' ~
@@ -233,7 +233,7 @@ async fn load_relay_runs(state: &OpsState) -> Result<Vec<ProcessRelayRun>, OpsEr
         -- otherwise count the same community once per version.
         LEFT JOIN LATERAL (
             SELECT count(DISTINCT d.subject_id) AS n
-            FROM viryaos_autopilot_decisions d
+            FROM autopilot_decisions d
             WHERE d.workspace_id = $1
               AND d.decision_kind = 'relay_owned_post'
               AND d.subject_kind = 'target_community'
@@ -247,7 +247,7 @@ async fn load_relay_runs(state: &OpsState) -> Result<Vec<ProcessRelayRun>, OpsEr
               )
               AND (
                   SELECT dr.status
-                  FROM viryaos_autopilot_actions dr
+                  FROM autopilot_actions dr
                   WHERE dr.workspace_id = $1
                     AND dr.action_kind = 'agent.run.request'
                     AND dr.idempotency_key =
@@ -268,7 +268,7 @@ async fn load_relay_runs(state: &OpsState) -> Result<Vec<ProcessRelayRun>, OpsEr
                 JOIN LATERAL (
                     SELECT p.id
                     FROM community_posts p
-                    JOIN viryaos_autopilot_actions pa
+                    JOIN autopilot_actions pa
                       ON pa.workspace_id = p.workspace_id AND pa.id = p.action_id
                      AND pa.action_kind = 'community.engage.request'
                      AND pa.payload->>'source_id' ~
@@ -290,7 +290,7 @@ async fn load_relay_runs(state: &OpsState) -> Result<Vec<ProcessRelayRun>, OpsEr
         LEFT JOIN LATERAL (
             SELECT count(*) FILTER (WHERE re.status IN ('replied', 'positive_reply')) AS replies
             FROM latest_engage le
-            JOIN viryaos_reach_events re
+            JOIN reach_events re
               ON re.workspace_id = $1 AND re.action_id = le.action_id
              AND re.channel = 'reddit_post'
             WHERE le.source_id = r.source_id
@@ -298,13 +298,13 @@ async fn load_relay_runs(state: &OpsState) -> Result<Vec<ProcessRelayRun>, OpsEr
         LEFT JOIN LATERAL (
             SELECT count(*) FILTER (WHERE ge.converted) AS conversions
             FROM latest_engage le
-            JOIN viryaos_growth_episodes ge
+            JOIN growth_episodes ge
               ON ge.workspace_id = $1 AND ge.action_id = le.action_id
             WHERE le.source_id = r.source_id
         ) conv2 ON true
         LEFT JOIN LATERAL (
             SELECT a.status
-            FROM viryaos_autopilot_actions a
+            FROM autopilot_actions a
             WHERE a.workspace_id = $1
               AND a.action_kind = 'signal.push.request'
               AND a.payload->>'task_id' = r.source_id::text
@@ -514,8 +514,8 @@ async fn load_relay_run(
             b.approved_at,
             b.revoked_at,
             b.observe_until
-        FROM viryaos_autopilot_decisions d
-        LEFT JOIN viryaos_content_sources cs
+        FROM autopilot_decisions d
+        LEFT JOIN content_sources cs
           ON cs.workspace_id = d.workspace_id AND cs.id = $2
         LEFT JOIN community_relay_batches b
           ON b.workspace_id = d.workspace_id AND b.source_id = $2
@@ -547,7 +547,7 @@ async fn load_relay_run(
             SELECT
                 d.subject_id AS target_id,
                 max(d.confidence_basis_points) AS confidence_bp
-            FROM viryaos_autopilot_decisions d
+            FROM autopilot_decisions d
             WHERE d.workspace_id = $1
               AND d.decision_kind = 'relay_owned_post'
               AND d.subject_kind = 'target_community'
@@ -572,7 +572,7 @@ async fn load_relay_run(
                 a.payload->>'title' AS draft_title,
                 a.payload->>'body' AS draft_body,
                 a.payload->>'image_url' AS image_url
-            FROM viryaos_autopilot_actions a
+            FROM autopilot_actions a
             WHERE a.workspace_id = $1
               AND a.action_kind = 'community.engage.request'
               AND a.payload->>'source_id' ~
@@ -625,7 +625,7 @@ async fn load_relay_run(
         -- no approval ask at all.
         LEFT JOIN LATERAL (
             SELECT dr.status, dr.last_error_kind
-            FROM viryaos_autopilot_actions dr
+            FROM autopilot_actions dr
             WHERE dr.workspace_id = $1
               AND dr.action_kind = 'agent.run.request'
               AND dr.idempotency_key =
@@ -640,7 +640,7 @@ async fn load_relay_run(
         LEFT JOIN LATERAL (
             SELECT p.id, p.status, p.reddit_post_url, p.posted_at, p.error_message
             FROM community_posts p
-            JOIN viryaos_autopilot_actions pa
+            JOIN autopilot_actions pa
               ON pa.workspace_id = p.workspace_id AND pa.id = p.action_id
              AND pa.action_kind = 'community.engage.request'
              AND pa.payload->>'source_id' ~
@@ -662,7 +662,7 @@ async fn load_relay_run(
         -- advanced row so a second recipient can never fork the target.
         LEFT JOIN LATERAL (
             SELECT re.status
-            FROM viryaos_reach_events re
+            FROM reach_events re
             WHERE re.workspace_id = $1 AND re.action_id = e.action_id
               AND re.channel = 'reddit_post'
             ORDER BY CASE re.status
@@ -679,7 +679,7 @@ async fn load_relay_run(
                      re.status_updated_at DESC
             LIMIT 1
         ) re ON true
-        LEFT JOIN viryaos_growth_episodes ge
+        LEFT JOIN growth_episodes ge
           ON ge.workspace_id = $1 AND ge.action_id = e.action_id
         ORDER BY
             CASE WHEN e.action_status = 'awaiting_approval'
@@ -704,7 +704,7 @@ async fn load_relay_run(
             a.approval_expires_at,
             CASE WHEN a.payload->>'audience_size' ~ '^[0-9]+$'
                  THEN (a.payload->>'audience_size')::bigint END AS audience_size
-        FROM viryaos_autopilot_actions a
+        FROM autopilot_actions a
         WHERE a.workspace_id = $1
           AND a.action_kind = 'signal.push.request'
           AND a.payload->>'task_id' = $2::text

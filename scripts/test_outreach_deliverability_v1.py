@@ -79,13 +79,13 @@ class DeliverabilityContract(unittest.TestCase):
         block = self.actions.split("if action.payload.action_class() == ActionClass::ThirdParty", 1)[1]
         block = block.split("transaction.commit()", 1)[0]
         self.assertIn("first_third_party_send_at = COALESCE(first_third_party_send_at, $2)", block)
-        self.assertIn("UPDATE viryaos_autopilot_actions\n                SET status = 'succeeded'", self.actions)
+        self.assertIn("UPDATE autopilot_actions\n                SET status = 'succeeded'", self.actions)
 
     def test_only_a_hard_bounce_suppresses_and_through_the_existing_flag(self) -> None:
         domain = self.domain.split("pub const fn suppresses_target", 1)[1].split("\n    }", 1)[0]
         self.assertNotIn("Complaint", domain, "a complaint is about the message, not the address")
         infra = self.infra.split("if command.fault.suppresses_target()", 1)[1].split("\n            transaction.commit()", 1)[0]
-        self.assertIn("UPDATE viryaos_outreach_targets", infra)
+        self.assertIn("UPDATE outreach_targets", infra)
         self.assertIn("accepts_outreach = false", infra)
         # No second suppression mechanism is invented here.
         self.assertNotIn("do_not_contact = true", infra)

@@ -8,7 +8,7 @@ class ViryaOsClosedLoopRuntime(unittest.TestCase):
     def test_runtime_migration_and_ports_exist(self):
         migration = (ROOT / 'migrations/0040_viryaos_closed_loop_runtime.sql').read_text()
         app = read_rust_module(ROOT, 'crates/crowdrelay-application/src/autopilot/control.rs')
-        for token in ('viryaos_executor_instances','viryaos_executor_circuit_breakers','viryaos_autopilot_execution_reports','viryaos_contact_governor','viryaos_release_components','viryaos_rum_samples','approval_expires_at','guarded_until'):
+        for token in ('executor_instances','executor_circuit_breakers','autopilot_execution_reports','contact_governor','release_components','rum_samples','approval_expires_at','guarded_until'):
             self.assertIn(token, migration)
         self.assertIn('trait AutopilotRuntimeRepository', app)
         self.assertIn('ReleaseLedgerOverview', app)
@@ -22,11 +22,11 @@ class ViryaOsClosedLoopRuntime(unittest.TestCase):
         # are unchanged and are asserted there. Same statements, one file over.
         circuit = (ROOT / 'crates/crowdrelay-infra/src/autopilot/executor_circuit.rs').read_text()
         self.assertIn('ensure_executor_capability', infra_caps)
-        self.assertIn('viryaos_executor_instances', runtime)
+        self.assertIn('executor_instances', runtime)
         self.assertIn('RepositoryError::Unavailable', infra_caps)
         self.assertIn('heartbeat_write.rows_affected() != 1', runtime)
         self.assertIn("'n8n','production'", runtime)
-        self.assertIn('viryaos_executor_circuit_breakers', circuit)
+        self.assertIn('executor_circuit_breakers', circuit)
         # The window is one named constant now, interpolated into both the
         # consecutive-failure test and the guard extension.
         self.assertIn("WINDOW: &str = \"15 minutes\"", circuit)
@@ -109,10 +109,10 @@ class ViryaOsClosedLoopRuntime(unittest.TestCase):
     def test_worker_phases_fail_independently(self):
         worker = (ROOT / 'crates/crowdrelay-worker/src/autopilot.rs').read_text()
         self.assertIn('let mut phase_failed = false', worker)
-        self.assertIn('ViryaOS Autopilot evaluation failed', worker)
-        self.assertIn('ViryaOS Autopilot action claim failed', worker)
-        self.assertIn('ViryaOS Autopilot measurement claim failed', worker)
-        evaluation_failure = worker[worker.index('ViryaOS Autopilot evaluation failed'):worker.index('claim_due_autonomous_actions')]
+        self.assertIn('CrowdRelay Autopilot evaluation failed', worker)
+        self.assertIn('CrowdRelay Autopilot action claim failed', worker)
+        self.assertIn('CrowdRelay Autopilot measurement claim failed', worker)
+        evaluation_failure = worker[worker.index('CrowdRelay Autopilot evaluation failed'):worker.index('claim_due_autonomous_actions')]
         self.assertNotIn('return Err', evaluation_failure)
 
     def test_optional_deadline_calendar_never_blocks_primary_provider_action(self):
@@ -144,7 +144,7 @@ class ViryaOsClosedLoopRuntime(unittest.TestCase):
         # must still be the only way the arm learns the current state.
         self.assertIn('locked_action_state(', failed_arm)
         self.assertIn('LockedActionState::Unreadable', failed_arm)
-        self.assertIn('SELECT status FROM viryaos_autopilot_actions', evidence)
+        self.assertIn('SELECT status FROM autopilot_actions', evidence)
         self.assertIn('FOR UPDATE', evidence)
         self.assertIn('legal_transition(', failed_arm)
         self.assertIn('resolve_observation(', failed_arm)

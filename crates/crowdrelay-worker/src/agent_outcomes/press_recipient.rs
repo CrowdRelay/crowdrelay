@@ -42,7 +42,7 @@ async fn press_recipient(
             CASE target.status WHEN 'promoted' THEN 0 ELSE 1 END,
             (
                 SELECT max(a.created_at)
-                FROM viryaos_autopilot_actions a
+                FROM autopilot_actions a
                 WHERE a.workspace_id = target.workspace_id
                   AND a.action_kind = 'agent.content.request'
                   AND (a.payload->>'recipient_target_id')::uuid = target.id

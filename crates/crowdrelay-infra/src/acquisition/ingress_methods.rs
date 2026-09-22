@@ -232,10 +232,10 @@ impl PostgresAcquisitionRepository {
                           AND posted_at IS NOT NULL
                           AND posted_at <= click.occurred_at
                     ) AS post
-                    LEFT JOIN viryaos_autopilot_actions AS act
+                    LEFT JOIN autopilot_actions AS act
                       ON act.workspace_id = click.workspace_id
                      AND act.id = post.action_id
-                    LEFT JOIN viryaos_content_sources AS source
+                    LEFT JOIN content_sources AS source
                       ON source.workspace_id = click.workspace_id
                      AND source.id::text = lower(act.payload->>'source_id')
                     ORDER BY post.posted_at DESC NULLS LAST,

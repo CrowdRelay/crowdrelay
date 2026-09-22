@@ -111,7 +111,7 @@ async fn seed_target(
     priority: i32,
 ) -> Result<Uuid, Box<dyn std::error::Error>> {
     sqlx::query_scalar::<_, Uuid>(
-        "INSERT INTO viryaos_booking_targets
+        "INSERT INTO booking_targets
              (workspace_id, city_id, target_kind, display_name, contact_email, priority)
          VALUES ($1, $2, $3, $4, $5, $6) RETURNING id",
     )
@@ -133,7 +133,7 @@ async fn band_listing(
     genres: &[&str],
 ) -> Result<(), Box<dyn std::error::Error>> {
     sqlx::query(
-        "INSERT INTO viryaos_band_listings (workspace_id, act_name, genre_tags)
+        "INSERT INTO band_listings (workspace_id, act_name, genre_tags)
          VALUES ($1, 'Test Act', $2)
          ON CONFLICT (workspace_id) DO UPDATE SET genre_tags = $2",
     )
@@ -187,7 +187,7 @@ async fn advertise(
     now: OffsetDateTime,
 ) -> Result<(), Box<dyn std::error::Error>> {
     sqlx::query(
-        "INSERT INTO viryaos_executor_instances
+        "INSERT INTO executor_instances
             (workspace_id, executor_id, version, manifest_sha, observed_at, expires_at)
          VALUES ($1,'n8n-booking-test','1','sha',$2,$3)
          ON CONFLICT DO NOTHING",
@@ -198,7 +198,7 @@ async fn advertise(
     .execute(pool)
     .await?;
     sqlx::query(
-        "INSERT INTO viryaos_executor_capabilities
+        "INSERT INTO executor_capabilities
             (workspace_id, executor_id, capability, capability_version, observed_at, expires_at)
          VALUES ($1,'n8n-booking-test',$2,'1',$3,$4)",
     )
@@ -221,7 +221,7 @@ async fn seed_booking_action(
     payload: serde_json::Value,
 ) -> Result<Uuid, Box<dyn std::error::Error>> {
     let decision_id: Uuid = sqlx::query_scalar(
-        "INSERT INTO viryaos_autopilot_decisions
+        "INSERT INTO autopilot_decisions
              (id, workspace_id, decision_key, context, subject_kind, subject_id,
               decision_kind, confidence_basis_points, disposition, reason,
               input_snapshot, policy_snapshot, recommendation, evaluated_at, trace_id)
@@ -237,7 +237,7 @@ async fn seed_booking_action(
     .fetch_one(pool)
     .await?;
     sqlx::query_scalar(
-        "INSERT INTO viryaos_autopilot_actions
+        "INSERT INTO autopilot_actions
              (id, workspace_id, decision_id, context, action_kind, subject_kind,
               subject_id, idempotency_key, payload, status, action_class)
          VALUES ($1,$2,$3,'booking_opportunity','booking.outreach.request','city',
@@ -552,7 +552,7 @@ async fn run_execution_case(pool: &PgPool) -> Result<(), Box<dyn std::error::Err
     // Both contacts are reserved under this action — the anchor's and the
     // copied recipient's.
     let reserved = sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*) FROM viryaos_contact_governor
+        "SELECT COUNT(*) FROM contact_governor
          WHERE workspace_id = $1 AND last_action_id = $2",
     )
     .bind(act)
@@ -593,7 +593,7 @@ async fn run_execution_case(pool: &PgPool) -> Result<(), Box<dyn std::error::Err
 
     // And every recipient's clock moved — one touch per person.
     let touched = sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*) FROM viryaos_booking_targets
+        "SELECT COUNT(*) FROM booking_targets
          WHERE workspace_id = $1 AND last_outreach_at IS NOT NULL",
     )
     .bind(act)
@@ -685,7 +685,7 @@ async fn run_stale_recipient_case(pool: &PgPool) -> Result<(), Box<dyn std::erro
     // Nothing reserved, nothing emitted, nobody's clock touched — the
     // transaction took the anchor's reservation down with the refusal.
     let reserved = sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*) FROM viryaos_contact_governor
+        "SELECT COUNT(*) FROM contact_governor
          WHERE workspace_id = $1 AND last_action_id = $2",
     )
     .bind(act)
@@ -705,7 +705,7 @@ async fn run_stale_recipient_case(pool: &PgPool) -> Result<(), Box<dyn std::erro
     .await?;
     assert_eq!(emitted, 0, "a partial letter reached the outbox");
     let touched = sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*) FROM viryaos_booking_targets
+        "SELECT COUNT(*) FROM booking_targets
          WHERE workspace_id = $1 AND last_outreach_at IS NOT NULL",
     )
     .bind(act)
@@ -758,7 +758,7 @@ async fn run_reply_after_approval_case(pool: &PgPool) -> Result<(), Box<dyn std:
     // prospect: the dispatch lock must refuse the wave the way the evaluator's
     // `last_reply` hold already refused the proposal.
     sqlx::query(
-        "INSERT INTO viryaos_booking_interactions
+        "INSERT INTO booking_interactions
              (workspace_id, target_id, direction, phase, disposition, source_key, occurred_at)
          VALUES ($1, $2, 'inbound', 'reply', 'positive', $3, now())",
     )
@@ -810,7 +810,7 @@ async fn run_reply_after_approval_case(pool: &PgPool) -> Result<(), Box<dyn std:
     // The whole wave dies together — no reservation on the anchor, no outward
     // intent in the outbox, nobody's outreach clock moved.
     let reserved = sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*) FROM viryaos_contact_governor
+        "SELECT COUNT(*) FROM contact_governor
          WHERE workspace_id = $1 AND last_action_id = $2",
     )
     .bind(act)
@@ -833,7 +833,7 @@ async fn run_reply_after_approval_case(pool: &PgPool) -> Result<(), Box<dyn std:
         "a replied lead may not receive the approved pitch"
     );
     let touched = sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*) FROM viryaos_booking_targets
+        "SELECT COUNT(*) FROM booking_targets
          WHERE workspace_id = $1 AND last_outreach_at IS NOT NULL",
     )
     .bind(act)

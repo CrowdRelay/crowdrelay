@@ -11,7 +11,7 @@
 //! * **The same ledger decides who is still eligible.** Without it the play
 //!   re-offers the fan whose action is still pending every cycle, makes no
 //!   progress, and stalls completely the moment a step needs approval.
-//! * **`viryaos_play_step_recipients` still means *reached*.** It is written
+//! * **`play_step_recipients` still means *reached*.** It is written
 //!   when the send is dispatched, so it stays the honest record of who actually
 //!   heard from the band — which is what a later measurement has to read.
 
@@ -75,7 +75,7 @@ WHERE event.workspace_id = $1
   AND event.starts_at > $3
   AND NOT EXISTS (
       SELECT 1
-      FROM viryaos_plays AS play
+      FROM plays AS play
       WHERE play.workspace_id = event.workspace_id
         AND play.play_kind = $2
         AND play.anchor_kind = 'event'
@@ -142,7 +142,7 @@ WHERE fan.workspace_id = $1
   )
   AND NOT EXISTS (
       SELECT 1
-      FROM viryaos_plays AS play
+      FROM plays AS play
       WHERE play.workspace_id = fan.workspace_id
         AND play.play_kind = $2
         AND play.anchor_kind = 'fan'
@@ -227,14 +227,14 @@ WHERE fan.workspace_id = $1
   )
   AND NOT EXISTS (
       SELECT 1
-      FROM viryaos_play_step_recipients AS reached
+      FROM play_step_recipients AS reached
       WHERE reached.workspace_id = fan.workspace_id
         AND reached.fan_id = fan.id
         AND reached.created_at > $3 - INTERVAL '6 months'
   )
   AND NOT EXISTS (
       SELECT 1
-      FROM viryaos_plays AS play
+      FROM plays AS play
       WHERE play.workspace_id = fan.workspace_id
         AND play.play_kind = $2
         AND play.anchor_kind = 'fan'
@@ -256,7 +256,7 @@ SELECT
     plan.release_at AS anchor_at,
     plan.active AS active,
     FLOOR(EXTRACT(EPOCH FROM (plan.release_at - $3)) / 3600)::bigint AS hours_until
-FROM viryaos_release_plans AS plan
+FROM release_plans AS plan
 WHERE plan.workspace_id = $1
   AND plan.active
   -- A filler release is posted into a quiet week, not run through the
@@ -265,7 +265,7 @@ WHERE plan.workspace_id = $1
   AND plan.release_at > $3
   AND NOT EXISTS (
       SELECT 1
-      FROM viryaos_plays AS play
+      FROM plays AS play
       WHERE play.workspace_id = plan.workspace_id
         AND play.play_kind = $2
         AND play.anchor_kind = 'release'
@@ -301,7 +301,7 @@ const fn anchor_statement(kind: PlayKind) -> (&'static str, bool) {
 const PLAY_AUDIENCE_SQL: &str = r#"
 WITH open_step AS (
     SELECT step.id, step.step_index, step.step_kind
-    FROM viryaos_play_steps AS step
+    FROM play_steps AS step
     WHERE step.workspace_id = $1
       AND step.play_id = $2
       AND step.settled_at IS NULL
@@ -355,7 +355,7 @@ eligible AS (
       -- fan every cycle and never finish.
       AND NOT EXISTS (
           SELECT 1
-          FROM viryaos_autopilot_actions AS action
+          FROM autopilot_actions AS action
           WHERE action.workspace_id = fan.workspace_id
             AND action.context = 'plays'
             AND action.action_kind = 'play.step.run'
@@ -380,7 +380,7 @@ LIMIT 1
 const PLAY_FAN_AUDIENCE_SQL: &str = r#"
 WITH open_step AS (
     SELECT step.id, step.step_index
-    FROM viryaos_play_steps AS step
+    FROM play_steps AS step
     WHERE step.workspace_id = $1
       AND step.play_id = $2
       AND step.settled_at IS NULL
@@ -407,7 +407,7 @@ eligible AS (
       -- rung re-offers the same fan every cycle and the ladder never climbs.
       AND NOT EXISTS (
           SELECT 1
-          FROM viryaos_autopilot_actions AS action
+          FROM autopilot_actions AS action
           WHERE action.workspace_id = fan.workspace_id
             AND action.context = 'plays'
             AND action.action_kind = 'play.step.run'
@@ -432,7 +432,7 @@ LIMIT 1
 const PLAY_RELEASE_AUDIENCE_SQL: &str = r#"
 WITH open_step AS (
     SELECT step.id, step.step_index
-    FROM viryaos_play_steps AS step
+    FROM play_steps AS step
     WHERE step.workspace_id = $1
       AND step.play_id = $2
       AND step.settled_at IS NULL
@@ -456,7 +456,7 @@ eligible AS (
       AND fan.status = 'active'
       AND NOT EXISTS (
           SELECT 1
-          FROM viryaos_autopilot_actions AS action
+          FROM autopilot_actions AS action
           WHERE action.workspace_id = fan.workspace_id
             AND action.context = 'plays'
             AND action.action_kind = 'play.step.run'
@@ -518,7 +518,7 @@ impl PostgresAutopilotRepository {
             let mut transaction = self.pool.begin().await.map_err(map_sqlx)?;
             let play_id = sqlx::query_scalar::<_, Uuid>(
                 r#"
-                INSERT INTO viryaos_plays (
+                INSERT INTO plays (
                     id, workspace_id, play_kind, anchor_kind, anchor_id, anchor_at,
                     hypothesis, success_metric_platform, success_metric_key
                 )
@@ -563,7 +563,7 @@ impl PostgresAutopilotRepository {
             // silently skips a moment nobody could see it was meant to have.
             sqlx::query(
                 r#"
-                INSERT INTO viryaos_play_steps (
+                INSERT INTO play_steps (
                     workspace_id, play_id, step_index, step_kind, action_class, due_at, expires_at
                 )
                 SELECT $1, $2, step_index, step_kind, action_class, due_at, expires_at
@@ -639,7 +639,7 @@ impl PostgresAutopilotRepository {
                                  LIMIT 1
                              ), false)
                     END AS anchor_active
-                FROM viryaos_plays AS play
+                FROM plays AS play
                 LEFT JOIN events AS event
                   ON play.anchor_kind = 'event'
                  AND event.workspace_id = play.workspace_id
@@ -675,7 +675,7 @@ impl PostgresAutopilotRepository {
                     (step.settled_at IS NOT NULL) AS settled,
                     (
                         SELECT count(*)::bigint
-                        FROM viryaos_autopilot_actions AS action
+                        FROM autopilot_actions AS action
                         WHERE action.workspace_id = step.workspace_id
                           AND action.context = 'plays'
                           AND action.action_kind = 'play.step.run'
@@ -683,7 +683,7 @@ impl PostgresAutopilotRepository {
                           AND action.payload->>'play_id' = step.play_id::text
                           AND (action.payload->>'step_index')::integer = step.step_index
                     ) AS recipients_emitted
-                FROM viryaos_play_steps AS step
+                FROM play_steps AS step
                 WHERE step.workspace_id = $1
                   AND step.play_id = ANY($2)
                 ORDER BY step.play_id, step.step_index
@@ -791,7 +791,7 @@ impl PostgresAutopilotRepository {
             // reason, and the first one written is the true one.
             sqlx::query(
                 r#"
-                UPDATE viryaos_play_steps
+                UPDATE play_steps
                 SET settled_at = $4, skip_reason = $5
                 WHERE workspace_id = $1
                   AND play_id = $2
@@ -824,14 +824,14 @@ impl PostgresAutopilotRepository {
             // is not the only thing that can settle one.
             sqlx::query(
                 r#"
-                UPDATE viryaos_plays AS play
+                UPDATE plays AS play
                 SET state = 'completed', completed_at = $3
                 WHERE play.workspace_id = $1
                   AND play.id = $2
                   AND play.state = 'running'
                   AND NOT EXISTS (
                       SELECT 1
-                      FROM viryaos_play_steps AS step
+                      FROM play_steps AS step
                       WHERE step.workspace_id = play.workspace_id
                         AND step.play_id = play.id
                         AND step.settled_at IS NULL
@@ -947,8 +947,8 @@ pub(super) async fn execute_play_step(
                     SELECT step.id AS step_id, event.title, event.slug, event.starts_at,
                            event.venue, event.ticket_url, event.external_event_url,
                            event.source_provider, event.city_id
-                    FROM viryaos_play_steps AS step
-                    JOIN viryaos_plays AS play
+                    FROM play_steps AS step
+                    JOIN plays AS play
                       ON play.workspace_id = step.workspace_id
                      AND play.id = step.play_id
                     JOIN events AS event
@@ -981,8 +981,8 @@ pub(super) async fn execute_play_step(
             let row = sqlx::query_as::<_, (Uuid, String, Uuid)>(
                 r#"
                 SELECT step.id, play.anchor_kind, play.anchor_id
-                FROM viryaos_play_steps AS step
-                JOIN viryaos_plays AS play
+                FROM play_steps AS step
+                JOIN plays AS play
                   ON play.workspace_id = step.workspace_id
                  AND play.id = step.play_id
                 WHERE step.workspace_id = $1
@@ -1013,7 +1013,7 @@ pub(super) async fn execute_play_step(
             r#"
             SELECT plan.title, plan.release_at, plan.listen_url,
                    link.slug AS link_slug
-            FROM viryaos_release_plans AS plan
+            FROM release_plans AS plan
             LEFT JOIN campaigns AS campaign
               ON campaign.workspace_id = plan.workspace_id
              AND campaign.release_plan_id = plan.id
@@ -1056,7 +1056,7 @@ pub(super) async fn execute_play_step(
             // reached.
             sqlx::query(
                 r#"
-                INSERT INTO viryaos_play_step_recipients (workspace_id, step_id, fan_id, action_id)
+                INSERT INTO play_step_recipients (workspace_id, step_id, fan_id, action_id)
                 VALUES ($1,$2,$3,$4)
                 ON CONFLICT (workspace_id, step_id, fan_id) DO NOTHING
                 "#,
@@ -1205,7 +1205,7 @@ pub(super) async fn execute_play_step(
     }
     if let Some(result) = &step_result {
         sqlx::query(
-            "UPDATE viryaos_play_steps SET result = $3 WHERE workspace_id = $1 AND id = $2 AND settled_at IS NULL",
+            "UPDATE play_steps SET result = $3 WHERE workspace_id = $1 AND id = $2 AND settled_at IS NULL",
         )
         .bind(workspace_id.into_uuid())
         .bind(step_id)
@@ -1422,7 +1422,7 @@ async fn propose_ticket_url_fix(
     ticket_url: &str,
 ) -> Result<&'static str, RepositoryError> {
     let autonomy = sqlx::query_scalar::<_, Option<String>>(
-        "SELECT autonomy_level FROM viryaos_autopilot_policies WHERE workspace_id = $1 AND context = 'plays'",
+        "SELECT autonomy_level FROM autopilot_policies WHERE workspace_id = $1 AND context = 'plays'",
     )
     .bind(workspace_id.into_uuid())
     .fetch_optional(&mut **transaction)
@@ -1436,7 +1436,7 @@ async fn propose_ticket_url_fix(
         "awaiting_approval"
     };
     let (decision_id, trace_id) = sqlx::query_as::<_, (Uuid, Option<Uuid>)>(
-        "SELECT decision_id, trace_id FROM viryaos_autopilot_actions WHERE workspace_id = $1 AND id = $2",
+        "SELECT decision_id, trace_id FROM autopilot_actions WHERE workspace_id = $1 AND id = $2",
     )
     .bind(workspace_id.into_uuid())
     .bind(action_id.into_uuid())
@@ -1452,7 +1452,7 @@ async fn propose_ticket_url_fix(
     .map_err(|_| RepositoryError::Unexpected)?;
     let inserted = sqlx::query_scalar::<_, Uuid>(
         r#"
-        INSERT INTO viryaos_autopilot_actions (
+        INSERT INTO autopilot_actions (
             workspace_id, decision_id, context, action_kind, subject_kind,
             subject_id, idempotency_key, payload, status, action_class,
             approved_at, approved_by, approval_expires_at,

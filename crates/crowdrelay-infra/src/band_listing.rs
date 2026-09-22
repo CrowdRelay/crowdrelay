@@ -103,7 +103,7 @@ impl PostgresBandListingRepository {
 
         sqlx::query(
             r#"
-            INSERT INTO viryaos_band_listings
+            INSERT INTO band_listings
                 (workspace_id, act_name, genre_tags, cities, published_dates, seeking)
             VALUES ($1, $2, $3, $4, $5, $6)
             ON CONFLICT (workspace_id) DO UPDATE
@@ -127,7 +127,7 @@ impl PostgresBandListingRepository {
         // Claims are replaced wholesale: they are an ordered list the band
         // edits as one thing, and merging them by label would silently keep a
         // claim the band deleted.
-        sqlx::query("DELETE FROM viryaos_band_listing_claims WHERE workspace_id = $1")
+        sqlx::query("DELETE FROM band_listing_claims WHERE workspace_id = $1")
             .bind(workspace_id)
             .execute(&mut *transaction)
             .await?;
@@ -135,7 +135,7 @@ impl PostgresBandListingRepository {
         for (position, claim) in listing.claims.iter().enumerate() {
             sqlx::query(
                 r#"
-                INSERT INTO viryaos_band_listing_claims
+                INSERT INTO band_listing_claims
                     (workspace_id, position, label, value, tier, basis)
                 VALUES ($1, $2, $3, $4, $5, $6)
                 "#,
@@ -159,7 +159,7 @@ impl PostgresBandListingRepository {
         let Some(row) = sqlx::query(
             r#"
             SELECT act_name, genre_tags, cities, published_dates, seeking, visibility
-            FROM viryaos_band_listings WHERE workspace_id = $1
+            FROM band_listings WHERE workspace_id = $1
             "#,
         )
         .bind(workspace_id)
@@ -172,7 +172,7 @@ impl PostgresBandListingRepository {
         let claims = sqlx::query(
             r#"
             SELECT label, value, tier, basis
-            FROM viryaos_band_listing_claims
+            FROM band_listing_claims
             WHERE workspace_id = $1
             ORDER BY position
             "#,
@@ -215,7 +215,7 @@ impl PostgresBandListingRepository {
         let row = sqlx::query(
             r#"
             SELECT share_token, published_at, updated_at
-            FROM viryaos_band_listings WHERE workspace_id = $1
+            FROM band_listings WHERE workspace_id = $1
             "#,
         )
         .bind(workspace_id)
@@ -242,7 +242,7 @@ impl PostgresBandListingRepository {
         share_token: Uuid,
     ) -> Result<Option<BandListing>, BandListingError> {
         let Some(workspace_id) = sqlx::query_scalar::<_, Uuid>(
-            "SELECT workspace_id FROM viryaos_band_listings WHERE share_token = $1",
+            "SELECT workspace_id FROM band_listings WHERE share_token = $1",
         )
         .bind(share_token)
         .fetch_optional(&self.pool)
@@ -261,7 +261,7 @@ impl PostgresBandListingRepository {
     pub async fn rotate_share_token(&self, workspace_id: Uuid) -> Result<Uuid, BandListingError> {
         let token = sqlx::query_scalar::<_, Uuid>(
             r#"
-            UPDATE viryaos_band_listings
+            UPDATE band_listings
             SET share_token = gen_random_uuid(), updated_at = now()
             WHERE workspace_id = $1
             RETURNING share_token
@@ -291,7 +291,7 @@ impl PostgresBandListingRepository {
 
         sqlx::query(
             r#"
-            UPDATE viryaos_band_listings
+            UPDATE band_listings
             SET visibility = 'admitted_readers', published_at = now(), updated_at = now()
             WHERE workspace_id = $1
             "#,
@@ -307,7 +307,7 @@ impl PostgresBandListingRepository {
     pub async fn unlist(&self, workspace_id: Uuid) -> Result<(), BandListingError> {
         let changed = sqlx::query(
             r#"
-            UPDATE viryaos_band_listings
+            UPDATE band_listings
             SET visibility = 'unlisted', published_at = NULL, updated_at = now()
             WHERE workspace_id = $1
             "#,

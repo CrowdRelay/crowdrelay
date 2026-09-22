@@ -99,7 +99,7 @@ async fn apply_success_side_effects(
     command: &RecordExecutionReport,
 ) -> Result<(), RepositoryError> {
     let payload_value = sqlx::query_scalar::<_, Value>(
-        "SELECT payload FROM viryaos_autopilot_actions WHERE workspace_id=$1 AND id=$2",
+        "SELECT payload FROM autopilot_actions WHERE workspace_id=$1 AND id=$2",
     )
     .bind(workspace_id.into_uuid())
     .bind(command.action_id.into_uuid())
@@ -165,7 +165,7 @@ async fn apply_success_side_effects(
         AutopilotActionPayload::ApplyLiveOpportunity { opportunity_id, .. }
         | AutopilotActionPayload::SubmitFundingApplication { opportunity_id } => {
             sqlx::query(
-                "UPDATE viryaos_team_opportunities \
+                "UPDATE team_opportunities \
                  SET status='submitted', version=version+1 \
                  WHERE workspace_id=$1 AND id=$2 AND status='submission_requested'",
             )
@@ -177,7 +177,7 @@ async fn apply_success_side_effects(
         }
         AutopilotActionPayload::PrepareFundingPackage { opportunity_id } => {
             sqlx::query(
-                "UPDATE viryaos_team_opportunities \
+                "UPDATE team_opportunities \
                  SET package_status='ready', status='prepared', version=version+1 \
                  WHERE workspace_id=$1 AND id=$2 AND opportunity_kind='funding' \
                    AND package_status='requested'",
@@ -226,7 +226,7 @@ async fn record_show_growth_receipt(
                 .and_then(|value| i32::try_from(value).ok());
             sqlx::query(
                 r#"
-                INSERT INTO viryaos_show_growth_surfaces(
+                INSERT INTO show_growth_surfaces(
                     workspace_id,event_id,surface_key,provider,surface_kind,status,
                     public_url,attribution_url,free_quota_remaining,attributable_reach,
                     attributed_clicks,attributed_rsvps,attributed_ticket_orders,
@@ -237,16 +237,16 @@ async fn record_show_growth_receipt(
                     provider=EXCLUDED.provider,
                     surface_kind=EXCLUDED.surface_kind,
                     status=EXCLUDED.status,
-                    public_url=COALESCE(EXCLUDED.public_url,viryaos_show_growth_surfaces.public_url),
-                    attribution_url=COALESCE(EXCLUDED.attribution_url,viryaos_show_growth_surfaces.attribution_url),
-                    free_quota_remaining=COALESCE(EXCLUDED.free_quota_remaining,viryaos_show_growth_surfaces.free_quota_remaining),
-                    attributable_reach=GREATEST(viryaos_show_growth_surfaces.attributable_reach,EXCLUDED.attributable_reach),
-                    attributed_clicks=GREATEST(viryaos_show_growth_surfaces.attributed_clicks,EXCLUDED.attributed_clicks),
-                    attributed_rsvps=GREATEST(viryaos_show_growth_surfaces.attributed_rsvps,EXCLUDED.attributed_rsvps),
-                    attributed_ticket_orders=GREATEST(viryaos_show_growth_surfaces.attributed_ticket_orders,EXCLUDED.attributed_ticket_orders),
+                    public_url=COALESCE(EXCLUDED.public_url,show_growth_surfaces.public_url),
+                    attribution_url=COALESCE(EXCLUDED.attribution_url,show_growth_surfaces.attribution_url),
+                    free_quota_remaining=COALESCE(EXCLUDED.free_quota_remaining,show_growth_surfaces.free_quota_remaining),
+                    attributable_reach=GREATEST(show_growth_surfaces.attributable_reach,EXCLUDED.attributable_reach),
+                    attributed_clicks=GREATEST(show_growth_surfaces.attributed_clicks,EXCLUDED.attributed_clicks),
+                    attributed_rsvps=GREATEST(show_growth_surfaces.attributed_rsvps,EXCLUDED.attributed_rsvps),
+                    attributed_ticket_orders=GREATEST(show_growth_surfaces.attributed_ticket_orders,EXCLUDED.attributed_ticket_orders),
                     last_checked_at=EXCLUDED.last_checked_at,
-                    last_published_at=COALESCE(EXCLUDED.last_published_at,viryaos_show_growth_surfaces.last_published_at),
-                    metadata=viryaos_show_growth_surfaces.metadata || EXCLUDED.metadata
+                    last_published_at=COALESCE(EXCLUDED.last_published_at,show_growth_surfaces.last_published_at),
+                    metadata=show_growth_surfaces.metadata || EXCLUDED.metadata
                 "#,
             )
             .bind(workspace_id.into_uuid())
@@ -293,23 +293,23 @@ async fn record_show_growth_receipt(
                 .map(|_| occurred_at);
             sqlx::query(
                 r#"
-                INSERT INTO viryaos_grassroots_activations(
+                INSERT INTO grassroots_activations(
                     workspace_id,event_id,beacon_id,activation_kind,destination_key,status,
                     canonical_url,public_receipt_url,attributable_reach,attributed_clicks,
                     attributed_rsvps,attributed_ticket_orders,reply_recorded_at,receipt,
                     created_at,updated_at
                 ) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$15)
                 ON CONFLICT(workspace_id,event_id,activation_kind,destination_key) DO UPDATE SET
-                    beacon_id=COALESCE(EXCLUDED.beacon_id,viryaos_grassroots_activations.beacon_id),
+                    beacon_id=COALESCE(EXCLUDED.beacon_id,grassroots_activations.beacon_id),
                     status=EXCLUDED.status,
-                    canonical_url=COALESCE(EXCLUDED.canonical_url,viryaos_grassroots_activations.canonical_url),
-                    public_receipt_url=COALESCE(EXCLUDED.public_receipt_url,viryaos_grassroots_activations.public_receipt_url),
-                    attributable_reach=GREATEST(viryaos_grassroots_activations.attributable_reach,EXCLUDED.attributable_reach),
-                    attributed_clicks=GREATEST(viryaos_grassroots_activations.attributed_clicks,EXCLUDED.attributed_clicks),
-                    attributed_rsvps=GREATEST(viryaos_grassroots_activations.attributed_rsvps,EXCLUDED.attributed_rsvps),
-                    attributed_ticket_orders=GREATEST(viryaos_grassroots_activations.attributed_ticket_orders,EXCLUDED.attributed_ticket_orders),
-                    reply_recorded_at=COALESCE(viryaos_grassroots_activations.reply_recorded_at,EXCLUDED.reply_recorded_at),
-                    receipt=viryaos_grassroots_activations.receipt || EXCLUDED.receipt,
+                    canonical_url=COALESCE(EXCLUDED.canonical_url,grassroots_activations.canonical_url),
+                    public_receipt_url=COALESCE(EXCLUDED.public_receipt_url,grassroots_activations.public_receipt_url),
+                    attributable_reach=GREATEST(grassroots_activations.attributable_reach,EXCLUDED.attributable_reach),
+                    attributed_clicks=GREATEST(grassroots_activations.attributed_clicks,EXCLUDED.attributed_clicks),
+                    attributed_rsvps=GREATEST(grassroots_activations.attributed_rsvps,EXCLUDED.attributed_rsvps),
+                    attributed_ticket_orders=GREATEST(grassroots_activations.attributed_ticket_orders,EXCLUDED.attributed_ticket_orders),
+                    reply_recorded_at=COALESCE(grassroots_activations.reply_recorded_at,EXCLUDED.reply_recorded_at),
+                    receipt=grassroots_activations.receipt || EXCLUDED.receipt,
                     updated_at=EXCLUDED.updated_at
                 "#,
             )
@@ -356,7 +356,7 @@ impl AutopilotRuntimeRepository for PostgresAutopilotRepository {
             let mut transaction = self.pool.begin().await.map_err(map_sqlx)?;
             let emitted = sqlx::query_scalar::<_, bool>(
                 r#"SELECT EXISTS (
-                    SELECT 1 FROM viryaos_autopilot_action_emissions
+                    SELECT 1 FROM autopilot_action_emissions
                     WHERE workspace_id=$1 AND action_id=$2 AND outbox_event_id IS NOT NULL
                 )"#,
             )
@@ -372,7 +372,7 @@ impl AutopilotRuntimeRepository for PostgresAutopilotRepository {
             let existing =
                 sqlx::query_as::<_, (String, Uuid, i32, Option<String>, OffsetDateTime)>(
                     r#"SELECT status, claim_token, attempt_number, provider_reference, claimed_at
-                   FROM viryaos_autopilot_execution_claims
+                   FROM autopilot_execution_claims
                    WHERE workspace_id=$1 AND action_id=$2 AND executor_id=$3
                    FOR UPDATE"#,
                 )
@@ -387,7 +387,7 @@ impl AutopilotRuntimeRepository for PostgresAutopilotRepository {
                 None => {
                     let token = Uuid::now_v7();
                     sqlx::query(
-                        r#"INSERT INTO viryaos_autopilot_execution_claims (
+                        r#"INSERT INTO autopilot_execution_claims (
                             workspace_id, action_id, executor_id, claim_token, status,
                             attempt_number, claimed_at
                         ) VALUES ($1,$2,$3,$4,'claimed',1,$5)"#,
@@ -443,7 +443,7 @@ impl AutopilotRuntimeRepository for PostgresAutopilotRepository {
                     let token = Uuid::now_v7();
                     let next_attempt = attempt.saturating_add(1);
                     sqlx::query(
-                        r#"UPDATE viryaos_autopilot_execution_claims
+                        r#"UPDATE autopilot_execution_claims
                            SET claim_token=$4, status='claimed', attempt_number=$5,
                                provider_reference=NULL, error_kind=NULL,
                                claimed_at=$6, completed_at=NULL
@@ -484,7 +484,7 @@ impl AutopilotRuntimeRepository for PostgresAutopilotRepository {
             let mut preserve_succeeded_claim = false;
             if matches!(command.status, ExecutorReportStatus::Succeeded | ExecutorReportStatus::Failed) {
                 let claim = sqlx::query_as::<_, (Uuid, String)>(
-                    "SELECT claim_token, status FROM viryaos_autopilot_execution_claims \
+                    "SELECT claim_token, status FROM autopilot_execution_claims \
                      WHERE workspace_id=$1 AND action_id=$2 AND executor_id=$3 FOR UPDATE",
                 )
                 .bind(workspace_id.into_uuid())
@@ -507,14 +507,14 @@ impl AutopilotRuntimeRepository for PostgresAutopilotRepository {
             let report_id = Uuid::now_v7();
             let inserted = sqlx::query_scalar::<_, Uuid>(
                 r#"
-                INSERT INTO viryaos_autopilot_execution_reports (
+                INSERT INTO autopilot_execution_reports (
                     id, workspace_id, action_id, receipt_key, executor_id, status,
                     provider_reference, error_kind, metadata, occurred_at
                 )
                 SELECT $1,$2,$3,$4,$5,$6,$7,$8,$9,$10
                 WHERE EXISTS (
                     SELECT 1
-                    FROM viryaos_autopilot_action_emissions emission
+                    FROM autopilot_action_emissions emission
                     WHERE emission.workspace_id=$2 AND emission.action_id=$3
                 )
                 ON CONFLICT (workspace_id, receipt_key) DO NOTHING
@@ -541,7 +541,7 @@ impl AutopilotRuntimeRepository for PostgresAutopilotRepository {
                 {
                     let terminal_status = command.status.as_str();
                     sqlx::query(
-                        r#"UPDATE viryaos_autopilot_execution_claims
+                        r#"UPDATE autopilot_execution_claims
                            SET status=$5, provider_reference=$6, error_kind=$7, completed_at=$8
                            WHERE workspace_id=$1 AND action_id=$2 AND executor_id=$3 AND claim_token=$4"#,
                     )
@@ -652,7 +652,7 @@ impl AutopilotRuntimeRepository for PostgresAutopilotRepository {
                         // here would put the decision in two places, and they
                         // would drift.
                         sqlx::query(
-                            r#"UPDATE viryaos_autopilot_actions
+                            r#"UPDATE autopilot_actions
                                SET status = 'failed',
                                    finished_at = COALESCE(finished_at, now()),
                                    last_error_kind = $3,
@@ -676,7 +676,7 @@ impl AutopilotRuntimeRepository for PostgresAutopilotRepository {
                         // covers both dispatched → failed and unknown →
                         // failed (late receipt after gap detection).
                         sqlx::query(
-                            r#"UPDATE viryaos_experiment_assignments
+                            r#"UPDATE experiment_assignments
                                SET execution_status = 'failed'
                                WHERE workspace_id = $1
                                  AND action_id = $2
@@ -764,7 +764,7 @@ impl AutopilotRuntimeRepository for PostgresAutopilotRepository {
                             // ordinary path, and from a premature Succeeded
                             // when this receipt is the confirming one.
                             sqlx::query(
-                                r#"UPDATE viryaos_autopilot_actions
+                                r#"UPDATE autopilot_actions
                                    SET status = 'succeeded',
                                        finished_at = COALESCE(finished_at, now()),
                                        updated_at = now()
@@ -783,7 +783,7 @@ impl AutopilotRuntimeRepository for PostgresAutopilotRepository {
                             // detection), so the causal learner sees the
                             // treatment realized.
                             sqlx::query(
-                                r#"UPDATE viryaos_experiment_assignments
+                                r#"UPDATE experiment_assignments
                                    SET execution_status = 'executed'
                                    WHERE workspace_id = $1
                                      AND action_id = $2
@@ -813,7 +813,7 @@ impl AutopilotRuntimeRepository for PostgresAutopilotRepository {
             let existing = sqlx::query_as::<_, (Uuid, Uuid, String, String)>(
                 r#"
                 SELECT id, action_id, executor_id, status
-                FROM viryaos_autopilot_execution_reports
+                FROM autopilot_execution_reports
                 WHERE workspace_id=$1 AND receipt_key=$2
                 "#,
             )
@@ -852,8 +852,8 @@ impl AutopilotRuntimeRepository for PostgresAutopilotRepository {
                 r#"
                 SELECT action.id, action.context, action.action_kind, action.subject_kind,
                        action.subject_id, report.executor_id, report.provider_reference, report.occurred_at
-                FROM viryaos_autopilot_execution_reports report
-                JOIN viryaos_autopilot_actions action
+                FROM autopilot_execution_reports report
+                JOIN autopilot_actions action
                   ON action.workspace_id=report.workspace_id AND action.id=report.action_id
                 WHERE report.workspace_id=$1
                   AND report.executor_id=$2
@@ -895,7 +895,7 @@ impl AutopilotRuntimeRepository for PostgresAutopilotRepository {
             let mut transaction = self.pool.begin().await.map_err(map_sqlx)?;
             let heartbeat_write = sqlx::query(
                 r#"
-                INSERT INTO viryaos_executor_instances (
+                INSERT INTO executor_instances (
                     workspace_id, executor_id, version, manifest_sha,
                     observed_at, expires_at, metadata
                 ) VALUES ($1,$2,$3,$4,$5,$6,$7)
@@ -905,7 +905,7 @@ impl AutopilotRuntimeRepository for PostgresAutopilotRepository {
                     observed_at=EXCLUDED.observed_at,
                     expires_at=EXCLUDED.expires_at,
                     metadata=EXCLUDED.metadata
-                WHERE viryaos_executor_instances.observed_at <= EXCLUDED.observed_at
+                WHERE executor_instances.observed_at <= EXCLUDED.observed_at
                 "#,
             )
             .bind(workspace_id.into_uuid())
@@ -923,7 +923,7 @@ impl AutopilotRuntimeRepository for PostgresAutopilotRepository {
             }
 
             sqlx::query(
-                "DELETE FROM viryaos_executor_capabilities WHERE workspace_id=$1 AND executor_id=$2",
+                "DELETE FROM executor_capabilities WHERE workspace_id=$1 AND executor_id=$2",
             )
             .bind(workspace_id.into_uuid())
             .bind(&command.executor_id)
@@ -933,7 +933,7 @@ impl AutopilotRuntimeRepository for PostgresAutopilotRepository {
             for capability in &command.capabilities {
                 sqlx::query(
                     r#"
-                    INSERT INTO viryaos_executor_capabilities (
+                    INSERT INTO executor_capabilities (
                         workspace_id, executor_id, capability, capability_version,
                         observed_at, expires_at
                     ) VALUES ($1,$2,$3,$4,$5,$6)
@@ -958,7 +958,7 @@ impl AutopilotRuntimeRepository for PostgresAutopilotRepository {
             }
             sqlx::query(
                 r#"
-                INSERT INTO viryaos_release_components (
+                INSERT INTO release_components (
                     workspace_id, component_key, environment, source_sha, version,
                     manifest_sha, observed_at, metadata
                 ) VALUES ($1,'n8n','production',$2,$3,$2,$4,$5)
@@ -968,11 +968,11 @@ impl AutopilotRuntimeRepository for PostgresAutopilotRepository {
                     manifest_sha=EXCLUDED.manifest_sha,
                     observed_at=EXCLUDED.observed_at,
                     metadata=CASE
-                        WHEN viryaos_release_components.manifest_sha = EXCLUDED.manifest_sha
-                        THEN COALESCE(viryaos_release_components.metadata, '{}'::jsonb) || EXCLUDED.metadata
+                        WHEN release_components.manifest_sha = EXCLUDED.manifest_sha
+                        THEN COALESCE(release_components.metadata, '{}'::jsonb) || EXCLUDED.metadata
                         ELSE EXCLUDED.metadata
                     END
-                WHERE viryaos_release_components.observed_at <= EXCLUDED.observed_at
+                WHERE release_components.observed_at <= EXCLUDED.observed_at
                 "#,
             )
             .bind(workspace_id.into_uuid())
@@ -1001,7 +1001,7 @@ impl AutopilotRuntimeRepository for PostgresAutopilotRepository {
         self.bounded(async {
             sqlx::query(
                 r#"
-                INSERT INTO viryaos_release_components (
+                INSERT INTO release_components (
                     workspace_id, component_key, environment, source_sha, artifact_digest,
                     deploy_ref, version, manifest_sha, observed_at, metadata
                 ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
@@ -1014,11 +1014,11 @@ impl AutopilotRuntimeRepository for PostgresAutopilotRepository {
                     observed_at=EXCLUDED.observed_at,
                     metadata=CASE
                         WHEN EXCLUDED.component_key = 'n8n'
-                         AND viryaos_release_components.manifest_sha = EXCLUDED.manifest_sha
-                        THEN COALESCE(viryaos_release_components.metadata, '{}'::jsonb) || EXCLUDED.metadata
+                         AND release_components.manifest_sha = EXCLUDED.manifest_sha
+                        THEN COALESCE(release_components.metadata, '{}'::jsonb) || EXCLUDED.metadata
                         ELSE EXCLUDED.metadata
                     END
-                WHERE viryaos_release_components.observed_at <= EXCLUDED.observed_at
+                WHERE release_components.observed_at <= EXCLUDED.observed_at
                 "#,
             )
             .bind(workspace_id.into_uuid())
@@ -1053,7 +1053,7 @@ impl AutopilotRuntimeRepository for PostgresAutopilotRepository {
                 r#"
                 SELECT component_key, environment, source_sha, artifact_digest,
                        deploy_ref, version, manifest_sha, observed_at, metadata
-                FROM viryaos_release_components
+                FROM release_components
                 WHERE workspace_id=$1 AND environment='production'
                 ORDER BY component_key
                 "#,
@@ -1115,8 +1115,8 @@ impl AutopilotRuntimeRepository for PostgresAutopilotRepository {
             let backend_sha_drift = matches!((api_sha, worker_sha), (Some(api), Some(worker)) if api != worker);
             let active_executor_count = sqlx::query_scalar::<_, i64>(
                 r#"SELECT count(*)::bigint
-                   FROM viryaos_executor_instances executor
-                   LEFT JOIN viryaos_executor_circuit_breakers breaker
+                   FROM executor_instances executor
+                   LEFT JOIN executor_circuit_breakers breaker
                      ON breaker.workspace_id=executor.workspace_id AND breaker.executor_id=executor.executor_id
                    WHERE executor.workspace_id=$1 AND executor.expires_at>$2
                      AND (breaker.guarded_until IS NULL OR breaker.guarded_until<=$2)"#,
@@ -1127,7 +1127,7 @@ impl AutopilotRuntimeRepository for PostgresAutopilotRepository {
             .await
             .map_err(map_sqlx)?;
             let guarded_executor_count = sqlx::query_scalar::<_, i64>(
-                "SELECT count(*)::bigint FROM viryaos_executor_circuit_breakers WHERE workspace_id=$1 AND guarded_until>$2",
+                "SELECT count(*)::bigint FROM executor_circuit_breakers WHERE workspace_id=$1 AND guarded_until>$2",
             )
             .bind(workspace_id.into_uuid())
             .bind(now)
@@ -1141,8 +1141,8 @@ impl AutopilotRuntimeRepository for PostgresAutopilotRepository {
                 .map(str::to_owned);
             let active_executor_manifest_shas = sqlx::query_scalar::<_, String>(
                 r#"SELECT DISTINCT executor.manifest_sha
-                   FROM viryaos_executor_instances executor
-                   LEFT JOIN viryaos_executor_circuit_breakers breaker
+                   FROM executor_instances executor
+                   LEFT JOIN executor_circuit_breakers breaker
                      ON breaker.workspace_id=executor.workspace_id AND breaker.executor_id=executor.executor_id
                    WHERE executor.workspace_id=$1 AND executor.expires_at>$2
                      AND (breaker.guarded_until IS NULL OR breaker.guarded_until<=$2)
@@ -1166,11 +1166,11 @@ impl AutopilotRuntimeRepository for PostgresAutopilotRepository {
                 });
             let active_team_email_executor_count = sqlx::query_scalar::<_, i64>(
                 r#"SELECT count(DISTINCT executor.executor_id)::bigint
-                   FROM viryaos_executor_instances executor
-                   JOIN viryaos_executor_capabilities capability
+                   FROM executor_instances executor
+                   JOIN executor_capabilities capability
                      ON capability.workspace_id=executor.workspace_id
                     AND capability.executor_id=executor.executor_id
-                   LEFT JOIN viryaos_executor_circuit_breakers breaker
+                   LEFT JOIN executor_circuit_breakers breaker
                      ON breaker.workspace_id=executor.workspace_id
                     AND breaker.executor_id=executor.executor_id
                    WHERE executor.workspace_id=$1
@@ -1210,7 +1210,7 @@ impl AutopilotRuntimeRepository for PostgresAutopilotRepository {
     ) -> Result<(), RepositoryError> {
         self.bounded(async {
             sqlx::query(
-                "DELETE FROM viryaos_rum_samples WHERE workspace_id=$1 AND received_at < now() - INTERVAL '30 days'",
+                "DELETE FROM rum_samples WHERE workspace_id=$1 AND received_at < now() - INTERVAL '30 days'",
             )
             .bind(workspace_id.into_uuid())
             .execute(&self.pool)
@@ -1218,14 +1218,14 @@ impl AutopilotRuntimeRepository for PostgresAutopilotRepository {
             .map_err(map_sqlx)?;
             sqlx::query(
                 r#"
-                INSERT INTO viryaos_rum_samples (
+                INSERT INTO rum_samples (
                     workspace_id, surface, metric_key, value, route,
                     device_class, release, metadata, observed_at
                 )
                 SELECT $1,$2,$3,$4,$5,$6,$7,$8,$9
                 WHERE (
                     SELECT count(*)
-                    FROM viryaos_rum_samples
+                    FROM rum_samples
                     WHERE workspace_id=$1 AND received_at >= now() - INTERVAL '1 minute'
                 ) < 600
                 "#,
@@ -1257,7 +1257,7 @@ impl AutopilotRuntimeRepository for PostgresAutopilotRepository {
                 SELECT surface, metric_key, count(*)::bigint,
                        (percentile_cont(0.75) WITHIN GROUP (ORDER BY value))::double precision AS p75,
                        (percentile_cont(0.95) WITHIN GROUP (ORDER BY value))::double precision AS p95
-                FROM viryaos_rum_samples
+                FROM rum_samples
                 WHERE workspace_id=$1 AND received_at >= $2 - INTERVAL '24 hours'
                 GROUP BY surface, metric_key
                 HAVING count(*) >= 3

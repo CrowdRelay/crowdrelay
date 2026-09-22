@@ -273,7 +273,7 @@ validated policy and a <code>SecretProvider</code>. Internals live in
     add(f"""
 <h2>6 · The autopilot: {len(facts['contexts'])} contexts</h2>
 <p>A <b>context</b> is one domain the autopilot can act in. Each has its own
-policy row in <code>viryaos_autopilot_policies</code>: enabled or not, an
+policy row in <code>autopilot_policies</code>: enabled or not, an
 autonomy level, a confidence floor, and a 24-hour action cap. The contexts are
 defined by a CHECK constraint, which is what makes the list authoritative rather
 than a convention.</p>""")
@@ -294,7 +294,7 @@ than a convention.</p>""")
     add("""
 <h3>The cycle</h3>
 <p>One cycle runs every five minutes by default and is recorded in
-<code>viryaos_autopilot_cycle_runs</code>. Its phases are <b>isolated on
+<code>autopilot_cycle_runs</code>. Its phases are <b>isolated on
 purpose</b>: one failing must not stop already-authorized work, which is why a
 cycle records <code>degraded</code> rather than <code>failed</code>.</p>
 <div class="flow">
@@ -309,7 +309,7 @@ twelve consecutive cycles — the reading that separates isolation absorbing a
 transient error from a phase that has stopped.</p>
 
 <h3>The decision ledger</h3>
-<p>Every decision is a row in <code>viryaos_autopilot_decisions</code> carrying
+<p>Every decision is a row in <code>autopilot_decisions</code> carrying
 <code>decision_key</code>, <code>context</code>,
 <code>confidence_basis_points</code>, <code>disposition</code>,
 <code>reason</code>, <code>input_snapshot</code>, <code>policy_snapshot</code>,
@@ -380,22 +380,22 @@ snapshot  ›  <b>decision</b>  ›  action  ›  dispatch  ›  <b>external eff
     add(table(
         ["Link", "Table", "What must be true for the next link to happen"],
         [
-            ["Decision", "<code>viryaos_autopilot_decisions</code>",
+            ["Decision", "<code>autopilot_decisions</code>",
              "A disposition other than <code>deny</code>"],
-            ["Action", "<code>viryaos_autopilot_actions</code>",
+            ["Action", "<code>autopilot_actions</code>",
              "Approved, or auto-executed inside policy"],
             ["Dispatch", "outbox + executor",
              "An executor exists that advertises the needed capability"],
             ["External effect", "the platform itself",
              "<b>The post actually lands.</b> This is the link that has never "
              "completed."],
-            ["Receipt", "<code>viryaos_execution_receipts</code>",
+            ["Receipt", "<code>execution_receipts</code>",
              "The executor reports back, or reconciliation infers it"],
-            ["Reach", "<code>viryaos_reach_events</code>",
+            ["Reach", "<code>reach_events</code>",
              "A row exists — it is the denominator credit allocation divides by"],
-            ["Evidence", "<code>viryaos_growth_evidence</code>",
+            ["Evidence", "<code>growth_evidence</code>",
              "<code>resolved_at</code> becomes non-null when the window closes"],
-            ["Belief", "<code>viryaos_brain_belief_revisions</code>",
+            ["Belief", "<code>brain_belief_revisions</code>",
              "Enough resolved evidence to move a posterior off its prior"],
         ],
     ))
@@ -449,7 +449,7 @@ running during a blue-green cutover do not both act.</p>""")
              "Subscribe to screened subreddits. Max 10 per 24 h, 1 per 5 min."],
             ["<code>ops_watchdog</code>", "5 min",
              "Evaluate every alarm condition; write "
-             "<code>viryaos_ops_alert_state</code>."],
+             "<code>ops_alert_state</code>."],
             ["<code>receipt_reconciliation</code>", "slow",
              "Resolve actions whose executor receipt never arrived."],
             ["<code>event_sync</code>", "scheduled",

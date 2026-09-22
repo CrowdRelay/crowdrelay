@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """`degraded` has to say which phase.
 
-`viryaos_autopilot_cycle_runs.outcome` is `succeeded` or `degraded`, and
+`autopilot_cycle_runs.outcome` is `succeeded` or `degraded`, and
 `degraded` came from one boolean that eighteen call sites in the autopilot cycle
 could set. The row recorded that a phase fell over and never which one.
 
@@ -126,8 +126,8 @@ class CycleDegradedPhases(unittest.TestCase):
             "/v1/admin/ops/cycles must return the phases; a recorded value "
             "nobody can read is the situation this replaced",
         )
-        query = ledger[ledger.index("FROM viryaos_autopilot_cycle_runs") - 800 :]
-        query = query[: query.index("FROM viryaos_autopilot_cycle_runs")]
+        query = ledger[ledger.index("FROM autopilot_cycle_runs") - 800 :]
+        query = query[: query.index("FROM autopilot_cycle_runs")]
         self.assertIn(
             "degraded_phases",
             query,

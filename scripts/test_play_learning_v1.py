@@ -89,9 +89,9 @@ class PlayLearningContract(unittest.TestCase):
         for authority in ("ActionClass", "AutonomyLevel", "GrowthEnvelope", "clamp_disposition"):
             self.assertNotIn(authority, self.domain)
         for table in (
-            "viryaos_autopilot_authority",
-            "viryaos_growth_envelope",
-            "viryaos_autopilot_policies",
+            "autopilot_authority",
+            "growth_envelope",
+            "autopilot_policies",
         ):
             self.assertNotIn(f"UPDATE {table}", self.infra)
 

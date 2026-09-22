@@ -173,7 +173,7 @@ async fn invite_reason(
     let upcoming = sqlx::query_as::<_, (String, OffsetDateTime)>(
         r#"
         SELECT city.name, event.starts_at
-        FROM viryaos_beacons AS beacon
+        FROM beacons AS beacon
         JOIN events AS event
           ON event.workspace_id = beacon.workspace_id
          AND event.city_id = beacon.city_id
@@ -203,7 +203,7 @@ async fn invite_reason(
     let shared = sqlx::query_as::<_, (Option<String>, OffsetDateTime)>(
         r#"
         SELECT event.venue, event.starts_at
-        FROM viryaos_beacon_campaigns AS campaign
+        FROM beacon_campaigns AS campaign
         JOIN events AS event
           ON event.workspace_id = campaign.workspace_id
          AND event.id = campaign.event_id
@@ -235,7 +235,7 @@ async fn invite_reason(
     let release = sqlx::query_scalar::<_, String>(
         r#"
         SELECT title
-        FROM viryaos_release_plans
+        FROM release_plans
         WHERE workspace_id = $1
           AND active
           AND release_at < $2
@@ -287,7 +287,7 @@ async fn beacon_pin(
     beacon_id: Uuid,
 ) -> Result<Option<(i64, String)>, sqlx::Error> {
     sqlx::query_as::<_, (i64, String)>(
-        "SELECT version, contact_email FROM viryaos_beacons
+        "SELECT version, contact_email FROM beacons
          WHERE workspace_id = $1 AND id = $2 AND contact_email IS NOT NULL",
     )
     .bind(workspace_id)
@@ -308,7 +308,7 @@ async fn contact_language(
     let country = sqlx::query_scalar::<_, Option<String>>(
         r#"
         SELECT city.country_code
-        FROM viryaos_beacons AS beacon
+        FROM beacons AS beacon
         LEFT JOIN cities AS city ON city.id = beacon.city_id
         WHERE beacon.workspace_id = $1 AND beacon.id = $2
         "#,
@@ -363,7 +363,7 @@ async fn existing_invite_action(
     idempotency_key: &IdempotencyKey,
 ) -> Result<Option<(Uuid, String)>, sqlx::Error> {
     sqlx::query_as::<_, (Uuid, String)>(
-        "SELECT id, status FROM viryaos_autopilot_actions
+        "SELECT id, status FROM autopilot_actions
          WHERE workspace_id = $1 AND idempotency_key = $2",
     )
     .bind(workspace_id)
@@ -411,7 +411,7 @@ async fn queue_invite(
     let action_id = Uuid::now_v7();
     let decision_id = match sqlx::query_scalar::<_, Uuid>(
         r#"
-        INSERT INTO viryaos_autopilot_decisions (
+        INSERT INTO autopilot_decisions (
             id, workspace_id, decision_key, context, subject_kind, subject_id,
             decision_kind, confidence_basis_points, disposition, reason,
             input_snapshot, policy_snapshot, recommendation, evaluated_at, trace_id
@@ -440,7 +440,7 @@ async fn queue_invite(
     {
         Some(id) => id,
         None => sqlx::query_scalar::<_, Uuid>(
-            "SELECT id FROM viryaos_autopilot_decisions
+            "SELECT id FROM autopilot_decisions
              WHERE workspace_id = $1 AND decision_key = $2",
         )
         .bind(workspace_id)
@@ -457,7 +457,7 @@ async fn queue_invite(
     );
     sqlx::query(
         r#"
-        INSERT INTO viryaos_autopilot_actions (
+        INSERT INTO autopilot_actions (
             id, workspace_id, decision_id, context, action_kind,
             subject_kind, subject_id, idempotency_key, payload, status,
             action_class, approved_at, approved_by, available_at,
@@ -513,7 +513,7 @@ async fn inflight_invite(
 ) -> Result<Option<String>, sqlx::Error> {
     sqlx::query_scalar::<_, String>(
         r#"
-        SELECT status FROM viryaos_autopilot_actions
+        SELECT status FROM autopilot_actions
         WHERE workspace_id = $1
           AND context = 'fan_lifecycle'
           AND action_kind = 'latarnik.invite.request'

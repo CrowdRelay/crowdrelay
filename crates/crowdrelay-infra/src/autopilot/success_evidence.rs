@@ -7,7 +7,7 @@
 
 use super::*;
 
-/// What the locked `viryaos_autopilot_actions` row says about execution.
+/// What the locked `autopilot_actions` row says about execution.
 ///
 /// `Unreadable` is not a state — it is the absence of one, kept separate so a
 /// caller cannot spend it as if it were `Running`.
@@ -44,7 +44,7 @@ pub(super) async fn locked_action_state(
     action_id: AutopilotActionId,
 ) -> Result<LockedActionState, RepositoryError> {
     let status: Option<String> = sqlx::query_scalar(
-        "SELECT status FROM viryaos_autopilot_actions \
+        "SELECT status FROM autopilot_actions \
          WHERE workspace_id=$1 AND id=$2 FOR UPDATE",
     )
     .bind(workspace_id.into_uuid())
@@ -81,7 +81,7 @@ pub(super) async fn success_evidence_for(
     command: &RecordExecutionReport,
 ) -> Result<SuccessEvidence, RepositoryError> {
     let payload_value = sqlx::query_scalar::<_, Value>(
-        "SELECT payload FROM viryaos_autopilot_actions WHERE workspace_id=$1 AND id=$2",
+        "SELECT payload FROM autopilot_actions WHERE workspace_id=$1 AND id=$2",
     )
     .bind(workspace_id.into_uuid())
     .bind(command.action_id.into_uuid())
@@ -115,7 +115,7 @@ pub(super) async fn success_evidence_for(
     // confirmed — collapsing the distinction this function exists to draw.
     let confirmed = sqlx::query_scalar::<_, bool>(
         "SELECT EXISTS ( \
-           SELECT 1 FROM viryaos_autopilot_execution_reports \
+           SELECT 1 FROM autopilot_execution_reports \
            WHERE workspace_id=$1 AND action_id=$2 AND status='succeeded' \
              AND provider_reference IS NOT NULL \
              AND receipt_key <> $3 \

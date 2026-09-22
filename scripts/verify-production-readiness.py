@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify production ViryaOS readiness and emit a secretless release receipt.
+"""Verify production CrowdRelay readiness and emit a secretless release receipt.
 
 Desired state is never treated as deployment proof. The PASS condition binds
 operational n8n health to immutable build provenance for every deployable
@@ -37,7 +37,7 @@ def fetch_release_ledger(base_url: str, admin_key: str, timeout: float) -> dict[
         headers={
             "Authorization": f"Bearer {admin_key}",
             "Accept": "application/json",
-            "User-Agent": "viryaos-production-readiness/2",
+            "User-Agent": "crowdrelay-production-readiness/2",
         },
     )
     with urllib.request.urlopen(request, timeout=timeout) as response:
@@ -179,7 +179,7 @@ def main() -> int:
     parser.add_argument("--admin-key-env", default="CROWDRELAY_PRODUCTION_ADMIN_API_KEY")
     parser.add_argument("--input", type=Path, help="offline ledger fixture for tests")
     parser.add_argument("--output", type=Path, default=Path("artifacts/operational-readiness.json"))
-    parser.add_argument("--release-output", type=Path, default=Path("artifacts/virya-os-release-receipt.json"))
+    parser.add_argument("--release-output", type=Path, default=Path("artifacts/crowdrelay-release-receipt.json"))
     parser.add_argument("--timeout-seconds", type=float, default=10.0)
     args = parser.parse_args()
 

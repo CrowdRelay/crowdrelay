@@ -116,7 +116,7 @@ async fn screening_is_durable_dedupe_is_identity_and_promotion_never_resets() {
 
     // The refusal is stored with its reason, so no sweep rediscovers it.
     let refused_reason: Option<String> = sqlx::query_scalar(
-        "SELECT refusal_reason FROM viryaos_booking_candidates \
+        "SELECT refusal_reason FROM booking_candidates \
          WHERE workspace_id=$1 AND display_name='festival-pl'",
     )
     .bind(fixture.workspace_id.into_uuid())
@@ -127,7 +127,7 @@ async fn screening_is_durable_dedupe_is_identity_and_promotion_never_resets() {
 
     // Confirm promotes the admitted email route into a city-scoped target.
     let candidate_id: Uuid = sqlx::query_scalar(
-        "SELECT id FROM viryaos_booking_candidates \
+        "SELECT id FROM booking_candidates \
          WHERE workspace_id=$1 AND status='admitted'",
     )
     .bind(fixture.workspace_id.into_uuid())
@@ -149,7 +149,7 @@ async fn screening_is_durable_dedupe_is_identity_and_promotion_never_resets() {
 
     let target_id = mutation.target_id;
     let (active, accepts): (bool, bool) = sqlx::query_as(
-        "SELECT active, accepts_booking FROM viryaos_booking_targets \
+        "SELECT active, accepts_booking FROM booking_targets \
          WHERE workspace_id=$1 AND id=$2",
     )
     .bind(fixture.workspace_id.into_uuid())
@@ -173,7 +173,7 @@ async fn screening_is_durable_dedupe_is_identity_and_promotion_never_resets() {
     assert!(replay.replayed);
 
     let targets: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM viryaos_booking_targets WHERE workspace_id=$1")
+        sqlx::query_scalar("SELECT count(*) FROM booking_targets WHERE workspace_id=$1")
             .bind(fixture.workspace_id.into_uuid())
             .fetch_one(&fixture.pool)
             .await
@@ -219,7 +219,7 @@ async fn an_unresolved_city_mints_a_pending_row_on_confirm() {
         .expect("second ingest");
 
     let ids: Vec<Uuid> = sqlx::query_scalar(
-        "SELECT id FROM viryaos_booking_candidates \
+        "SELECT id FROM booking_candidates \
          WHERE workspace_id=$1 AND status='admitted' ORDER BY display_name",
     )
     .bind(fixture.workspace_id.into_uuid())
@@ -241,7 +241,7 @@ async fn an_unresolved_city_mints_a_pending_row_on_confirm() {
 
     let (slug, status, country): (String, String, String) = sqlx::query_as(
         "SELECT slug, moderation_status, country_code FROM cities \
-         WHERE id = (SELECT city_id FROM viryaos_booking_targets WHERE id = $1)",
+         WHERE id = (SELECT city_id FROM booking_targets WHERE id = $1)",
     )
     .bind(first.target_id)
     .fetch_one(&fixture.pool)
@@ -268,8 +268,8 @@ async fn an_unresolved_city_mints_a_pending_row_on_confirm() {
         .expect("second confirm");
     let (city_a, city_b): (Uuid, Uuid) = sqlx::query_as(
         "SELECT \
-           (SELECT city_id FROM viryaos_booking_targets WHERE id = $1), \
-           (SELECT city_id FROM viryaos_booking_targets WHERE id = $2)",
+           (SELECT city_id FROM booking_targets WHERE id = $1), \
+           (SELECT city_id FROM booking_targets WHERE id = $2)",
     )
     .bind(first.target_id)
     .bind(second.target_id)
@@ -289,7 +289,7 @@ async fn an_unresolved_city_mints_a_pending_row_on_confirm() {
         .await
         .expect("noise ingest");
     let noise_id: Uuid = sqlx::query_scalar(
-        "SELECT id FROM viryaos_booking_candidates \
+        "SELECT id FROM booking_candidates \
          WHERE workspace_id=$1 AND city_slug='---' AND status='admitted'",
     )
     .bind(fixture.workspace_id.into_uuid())
@@ -308,7 +308,7 @@ async fn an_unresolved_city_mints_a_pending_row_on_confirm() {
         .expect("separator-only slug must still promote");
     let noise_slug: String = sqlx::query_scalar(
         "SELECT slug FROM cities WHERE id = \
-         (SELECT city_id FROM viryaos_booking_targets WHERE id = $1)",
+         (SELECT city_id FROM booking_targets WHERE id = $1)",
     )
     .bind(noise_confirm.target_id)
     .fetch_one(&fixture.pool)
@@ -333,7 +333,7 @@ async fn a_starved_booking_pipeline_requests_target_discovery() {
     let fixture = fixture("supply").await.expect("fixture");
 
     sqlx::query(
-        "INSERT INTO viryaos_growth_envelope (workspace_id, agent_enabled, dry_run) \
+        "INSERT INTO growth_envelope (workspace_id, agent_enabled, dry_run) \
          VALUES ($1, true, false) \
          ON CONFLICT (workspace_id) DO UPDATE SET agent_enabled = true, dry_run = false",
     )
@@ -342,7 +342,7 @@ async fn a_starved_booking_pipeline_requests_target_discovery() {
     .await
     .expect("envelope");
     sqlx::query(
-        "INSERT INTO viryaos_autopilot_policies \
+        "INSERT INTO autopilot_policies \
          (workspace_id, context, enabled, autonomy_level, \
           minimum_confidence_basis_points, max_actions_24h) \
          VALUES ($1, 'booking_opportunity', true, 'require_approval', 8000, 10) \
@@ -361,7 +361,7 @@ async fn a_starved_booking_pipeline_requests_target_discovery() {
         .expect("evaluate");
 
     let decisions: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM viryaos_autopilot_decisions \
+        "SELECT count(*) FROM autopilot_decisions \
          WHERE workspace_id=$1 AND decision_kind='request_booking_target_discovery'",
     )
     .bind(fixture.workspace_id.into_uuid())
@@ -374,7 +374,7 @@ async fn a_starved_booking_pipeline_requests_target_discovery() {
          (report: {report:?})"
     );
     let actions: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM viryaos_autopilot_actions \
+        "SELECT count(*) FROM autopilot_actions \
          WHERE workspace_id=$1 AND action_kind='booking.target_discovery.request'",
     )
     .bind(fixture.workspace_id.into_uuid())

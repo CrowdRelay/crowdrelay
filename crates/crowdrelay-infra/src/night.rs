@@ -585,7 +585,7 @@ impl PostgresNightRepository {
             JOIN events AS event
               ON event.workspace_id = act.workspace_id
              AND event.id = act.event_id
-            LEFT JOIN viryaos_band_listings AS listing
+            LEFT JOIN band_listings AS listing
               ON listing.workspace_id = act.act_workspace_id
             LEFT JOIN place_peer_acts AS peer
               ON peer.id = act.peer_act_id

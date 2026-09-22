@@ -300,7 +300,7 @@ mod tests {
         // Fixed u128s rather than new_v4 — infra's uuid feature set does not
         // include v4 when the lib test builds alone, and distinct constants
         // are the more deterministic binding check anyway.
-        let workspace = Uuid::from_u128(0x5ec4e75_57ac_4f3c_9a1d_2b8e6f01a2c3);
+        let workspace = Uuid::from_u128(0x05ec_4e75_57ac_4f3c_9a1d_2b8e_6f01_a2c3);
         let first = WorkspaceSecretsRepository::associated_data(workspace, "stripe_secret_key");
         let second = WorkspaceSecretsRepository::associated_data(workspace, "stripe_secret_key");
         assert_eq!(first, second);

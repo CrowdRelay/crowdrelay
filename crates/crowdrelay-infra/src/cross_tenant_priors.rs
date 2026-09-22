@@ -93,7 +93,7 @@ pub async fn counterparty_priors(
             SELECT lower(btrim(opp.contact_email)) AS email_key, opp.workspace_id,
                    opp.status IN ('replied','won','lost') AS replied,
                    opp.status = 'won' AS won
-            FROM viryaos_team_opportunities AS opp
+            FROM team_opportunities AS opp
             WHERE opp.contact_email IS NOT NULL
               AND opp.status IN ('submission_requested','submitted','replied','won','lost')
               AND lower(btrim(opp.contact_email)) IN (SELECT lower(btrim(k)) FROM unnest($1) AS k)
@@ -103,19 +103,19 @@ pub async fn counterparty_priors(
             -- a suppression stamp writes that column without a reply.
             SELECT lower(btrim(target.contact_email)), target.workspace_id,
                    EXISTS (
-                       SELECT 1 FROM viryaos_outreach_interactions i
+                       SELECT 1 FROM outreach_interactions i
                        WHERE i.workspace_id = target.workspace_id
                          AND i.target_id = target.id
                          AND i.direction = 'inbound'
                    ),
                    EXISTS (
-                       SELECT 1 FROM viryaos_outreach_interactions i
+                       SELECT 1 FROM outreach_interactions i
                        WHERE i.workspace_id = target.workspace_id
                          AND i.target_id = target.id
                          AND i.direction = 'inbound'
                          AND i.disposition = 'positive'
                    )
-            FROM viryaos_outreach_targets AS target
+            FROM outreach_targets AS target
             WHERE target.last_outreach_at IS NOT NULL
               AND lower(btrim(target.contact_email)) IN (SELECT lower(btrim(k)) FROM unnest($1) AS k)
             UNION ALL
@@ -123,19 +123,19 @@ pub async fn counterparty_priors(
             -- the interaction ledger — the target row has no reply columns.
             SELECT lower(btrim(booking.contact_email)), booking.workspace_id,
                    EXISTS (
-                       SELECT 1 FROM viryaos_booking_interactions i
+                       SELECT 1 FROM booking_interactions i
                        WHERE i.workspace_id = booking.workspace_id
                          AND i.target_id = booking.id
                          AND i.direction = 'inbound'
                    ),
                    EXISTS (
-                       SELECT 1 FROM viryaos_booking_interactions i
+                       SELECT 1 FROM booking_interactions i
                        WHERE i.workspace_id = booking.workspace_id
                          AND i.target_id = booking.id
                          AND i.direction = 'inbound'
                          AND i.disposition IN ('positive','booked')
                    )
-            FROM viryaos_booking_targets AS booking
+            FROM booking_targets AS booking
             WHERE booking.last_outreach_at IS NOT NULL
               AND lower(btrim(booking.contact_email)) IN (SELECT lower(btrim(k)) FROM unnest($1) AS k)
             UNION ALL
@@ -143,21 +143,21 @@ pub async fn counterparty_priors(
             -- replies are inbound rows of the same ledger.
             SELECT lower(btrim(agent.contact_email)), agent.workspace_id,
                    EXISTS (
-                       SELECT 1 FROM viryaos_booking_agent_interactions i
+                       SELECT 1 FROM booking_agent_interactions i
                        WHERE i.workspace_id = agent.workspace_id
                          AND i.agent_id = agent.id
                          AND i.direction = 'inbound'
                    ),
                    EXISTS (
-                       SELECT 1 FROM viryaos_booking_agent_interactions i
+                       SELECT 1 FROM booking_agent_interactions i
                        WHERE i.workspace_id = agent.workspace_id
                          AND i.agent_id = agent.id
                          AND i.direction = 'inbound'
                          AND i.disposition IN ('positive','signed')
                    )
-            FROM viryaos_booking_agents AS agent
+            FROM booking_agents AS agent
             WHERE EXISTS (
-                SELECT 1 FROM viryaos_booking_agent_interactions o
+                SELECT 1 FROM booking_agent_interactions o
                 WHERE o.workspace_id = agent.workspace_id
                   AND o.agent_id = agent.id
                   AND o.direction = 'outbound'
@@ -170,8 +170,8 @@ pub async fn counterparty_priors(
             SELECT lower(btrim(beacon.contact_email)), campaign.workspace_id,
                    campaign.last_reply_disposition <> 'none',
                    campaign.last_reply_disposition IN ('interested','partner')
-            FROM viryaos_beacon_campaigns AS campaign
-            JOIN viryaos_beacons AS beacon
+            FROM beacon_campaigns AS campaign
+            JOIN beacons AS beacon
               ON beacon.workspace_id = campaign.workspace_id
              AND beacon.id = campaign.beacon_id
             WHERE campaign.last_outreach_at IS NOT NULL
@@ -184,7 +184,7 @@ pub async fn counterparty_priors(
             -- writes a touch.
             SELECT lower(btrim(touch.normalized_contact)), touch.workspace_id,
                    false, false
-            FROM viryaos_contact_touches AS touch
+            FROM contact_touches AS touch
             WHERE lower(btrim(touch.normalized_contact)) IN (SELECT lower(btrim(k)) FROM unnest($1) AS k)
         ) attempts
         GROUP BY email_key

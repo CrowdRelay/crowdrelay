@@ -54,7 +54,7 @@ impl BeaconReleaseAdminRepository for PostgresBeaconReleaseRepository {
         let campaign_id = Uuid::now_v7();
         if let Err(error) = sqlx::query(
             r#"
-            INSERT INTO viryaos_beacon_release_campaigns
+            INSERT INTO beacon_release_campaigns
               (id,workspace_id,slug,title,variant_id,status,claim_deadline)
             VALUES ($1,$2,$3,$4,$5,'draft',$6)
             "#,
@@ -144,7 +144,7 @@ impl BeaconReleaseAdminRepository for PostgresBeaconReleaseRepository {
         let campaign = match sqlx::query_as::<_, (Uuid, String, String, OffsetDateTime, String)>(
             r#"
             SELECT variant_id,slug,title,claim_deadline,status
-            FROM viryaos_beacon_release_campaigns
+            FROM beacon_release_campaigns
             WHERE workspace_id=$1 AND id=$2
             FOR UPDATE
             "#,
@@ -180,8 +180,8 @@ impl BeaconReleaseAdminRepository for PostgresBeaconReleaseRepository {
         let eligible = match sqlx::query_as::<_, (Uuid, String, String, String)>(
             r#"
             SELECT beacon.id,beacon.display_name,beacon.contact_email,profile.locale
-            FROM viryaos_beacon_signal_profiles profile
-            JOIN viryaos_beacons beacon
+            FROM beacon_signal_profiles profile
+            JOIN beacons beacon
               ON beacon.workspace_id=profile.workspace_id AND beacon.id=profile.beacon_id
             WHERE profile.workspace_id=$1 AND profile.status='active'
               AND 'releases'=ANY(profile.topics)
@@ -205,8 +205,8 @@ impl BeaconReleaseAdminRepository for PostgresBeaconReleaseRepository {
         let active_release_count = match sqlx::query_scalar::<_, i64>(
             r#"
             SELECT count(*)::bigint
-            FROM viryaos_beacon_signal_profiles profile
-            JOIN viryaos_beacons beacon
+            FROM beacon_signal_profiles profile
+            JOIN beacons beacon
               ON beacon.workspace_id=profile.workspace_id AND beacon.id=profile.beacon_id
             WHERE profile.workspace_id=$1 AND profile.status='active'
               AND 'releases'=ANY(profile.topics)
@@ -281,7 +281,7 @@ impl BeaconReleaseAdminRepository for PostgresBeaconReleaseRepository {
         let eligible_ids = eligible.iter().map(|row| row.0).collect::<Vec<_>>();
         if let Err(error) = sqlx::query(
             r#"
-            INSERT INTO viryaos_beacon_release_recipients
+            INSERT INTO beacon_release_recipients
               (workspace_id,campaign_id,beacon_id,status)
             SELECT $1,$2,beacon_id,'eligible'
             FROM unnest($3::uuid[]) AS beacon_id
@@ -357,7 +357,7 @@ impl BeaconReleaseAdminRepository for PostgresBeaconReleaseRepository {
         // Set campaign status to open.
         if let Err(error) = sqlx::query(
             r#"
-            UPDATE viryaos_beacon_release_campaigns
+            UPDATE beacon_release_campaigns
             SET status='open',reservation_id=$3,eligible_count=$4,reserved_quantity=$4,launched_at=now()
             WHERE workspace_id=$1 AND id=$2 AND status='draft'
             "#,
@@ -441,7 +441,7 @@ impl BeaconReleaseAdminRepository for PostgresBeaconReleaseRepository {
         }
         // Campaign lookup.
         let row = match sqlx::query_as::<_, (String, Option<Uuid>)>(
-            "SELECT status,reservation_id FROM viryaos_beacon_release_campaigns WHERE workspace_id=$1 AND id=$2 FOR UPDATE",
+            "SELECT status,reservation_id FROM beacon_release_campaigns WHERE workspace_id=$1 AND id=$2 FOR UPDATE",
         )
         .bind(workspace_id)
         .bind(campaign_id)
@@ -465,7 +465,7 @@ impl BeaconReleaseAdminRepository for PostgresBeaconReleaseRepository {
             return Err(BeaconReleaseAdminError::Conflict);
         }
         let pending_fulfillment = sqlx::query_scalar::<_, i64>(
-            "SELECT count(*)::bigint FROM viryaos_beacon_release_recipients WHERE workspace_id=$1 AND campaign_id=$2 AND status IN ('confirmed','prepared')",
+            "SELECT count(*)::bigint FROM beacon_release_recipients WHERE workspace_id=$1 AND campaign_id=$2 AND status IN ('confirmed','prepared')",
         )
         .bind(workspace_id)
         .bind(campaign_id)
@@ -491,7 +491,7 @@ impl BeaconReleaseAdminRepository for PostgresBeaconReleaseRepository {
         // Expire eligible/notified recipients.
         if let Err(error) = sqlx::query(
             r#"
-            UPDATE viryaos_beacon_release_recipients
+            UPDATE beacon_release_recipients
             SET status='expired',expired_at=now(),recipient_name=NULL,recipient_phone=NULL,
                 parcel_locker_code=NULL,pii_purged_at=COALESCE(pii_purged_at,now())
             WHERE workspace_id=$1 AND campaign_id=$2 AND status IN ('eligible','notified')
@@ -507,7 +507,7 @@ impl BeaconReleaseAdminRepository for PostgresBeaconReleaseRepository {
         }
         // Close campaign.
         if let Err(error) = sqlx::query(
-            "UPDATE viryaos_beacon_release_campaigns SET status='closed',closed_at=now() WHERE workspace_id=$1 AND id=$2 AND status='open'",
+            "UPDATE beacon_release_campaigns SET status='closed',closed_at=now() WHERE workspace_id=$1 AND id=$2 AND status='open'",
         )
         .bind(workspace_id)
         .bind(campaign_id)
@@ -580,8 +580,8 @@ impl BeaconReleaseAdminRepository for PostgresBeaconReleaseRepository {
         let row = match sqlx::query_as::<_, (String, Uuid, Uuid, String)>(
             r#"
             SELECT recipient.status,campaign.variant_id,campaign.reservation_id,campaign.status
-            FROM viryaos_beacon_release_recipients recipient
-            JOIN viryaos_beacon_release_campaigns campaign
+            FROM beacon_release_recipients recipient
+            JOIN beacon_release_campaigns campaign
               ON campaign.workspace_id=recipient.workspace_id AND campaign.id=recipient.campaign_id
             WHERE recipient.workspace_id=$1 AND recipient.campaign_id=$2 AND recipient.beacon_id=$3
               AND campaign.status IN ('open','closed')
@@ -704,7 +704,7 @@ impl BeaconReleaseAdminRepository for PostgresBeaconReleaseRepository {
             _ => return Err(BeaconReleaseAdminError::BadRequest),
         };
         let sql = format!(
-            "UPDATE viryaos_beacon_release_recipients SET status=$4,{timestamp_column}=now(),delivery_details_purge_after=CASE WHEN $4='delivered' THEN now()+interval '30 days' ELSE delivery_details_purge_after END,recipient_name=CASE WHEN $5 THEN NULL ELSE recipient_name END,recipient_phone=CASE WHEN $5 THEN NULL ELSE recipient_phone END,parcel_locker_code=CASE WHEN $5 THEN NULL ELSE parcel_locker_code END,pii_purged_at=CASE WHEN $5 THEN now() ELSE pii_purged_at END,activation_due_at=COALESCE($6,activation_due_at) WHERE workspace_id=$1 AND campaign_id=$2 AND beacon_id=$3"
+            "UPDATE beacon_release_recipients SET status=$4,{timestamp_column}=now(),delivery_details_purge_after=CASE WHEN $4='delivered' THEN now()+interval '30 days' ELSE delivery_details_purge_after END,recipient_name=CASE WHEN $5 THEN NULL ELSE recipient_name END,recipient_phone=CASE WHEN $5 THEN NULL ELSE recipient_phone END,parcel_locker_code=CASE WHEN $5 THEN NULL ELSE parcel_locker_code END,pii_purged_at=CASE WHEN $5 THEN now() ELSE pii_purged_at END,activation_due_at=COALESCE($6,activation_due_at) WHERE workspace_id=$1 AND campaign_id=$2 AND beacon_id=$3"
         );
         if let Err(error) = sqlx::query(&sql)
             .bind(workspace_id)

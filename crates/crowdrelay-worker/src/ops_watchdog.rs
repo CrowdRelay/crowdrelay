@@ -1,7 +1,7 @@
 //! Low-frequency operational health watchdog for CrowdRelay's own control plane.
 //!
 //! Detection, cooldown and recovery state are first-party and durable. Alert
-//! state is tracked in `viryaos_ops_alert_state` and exposed via the ops API
+//! state is tracked in `ops_alert_state` and exposed via the ops API
 //! and control plane UI — but no longer emitted to the outbox. The previous
 //! outbox events were forwarded to Discord and produced alert spam that was
 //! not actionable from there. FakAP remains the external health probe for
@@ -264,7 +264,7 @@ impl OpsWatchdogWorker {
         let now = OffsetDateTime::now_utc();
         let mut transaction = self.pool.begin().await?;
         sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
-            .bind(format!("{}:viryaos-ops-watchdog", self.workspace_id))
+            .bind(format!("{}:crowdrelay-ops-watchdog", self.workspace_id))
             .execute(&mut *transaction)
             .await?;
         let snapshot = load_snapshot(&mut transaction, self.workspace_id).await?;
@@ -526,7 +526,7 @@ struct OpsSnapshot {
     reddit_credential_error: Option<String>,
     /// Lifetime decisions, and how many observations the causal posterior has.
     ///
-    /// The brain checkpoints its causal model to `viryaos_brain_state`, and that
+    /// The brain checkpoints its causal model to `brain_state`, and that
     /// model carries its own observation count. Reading it answers "has any
     /// evidence ever corrected this belief" directly, rather than inferring it
     /// from a proxy like the resolved-evidence count.
@@ -577,14 +577,14 @@ async fn load_snapshot(
         SELECT
             count(*)::bigint AS executor_registered,
             count(*) FILTER (WHERE expires_at>now())::bigint AS executor_active,
-            (SELECT count(*) FROM viryaos_autopilot_actions a
+            (SELECT count(*) FROM autopilot_actions a
              WHERE a.workspace_id=$1 AND a.status='unknown')::bigint AS unknown_actions,
             -- stale_unknown_actions: unknown actions whose unknown_age
             -- (from the action ledger's state_entered_at) exceeds the
             -- alert threshold. This avoids alerting on transient unknowns
             -- that the reconciliation sweep is actively resolving.
-            (SELECT count(*) FROM viryaos_autopilot_actions a
-             JOIN viryaos_action_ledger al ON al.action_id = a.id
+            (SELECT count(*) FROM autopilot_actions a
+             JOIN action_ledger al ON al.action_id = a.id
              WHERE a.workspace_id=$1 AND a.status='unknown'
                AND al.state='UNKNOWN'
                AND al.state_entered_at < now() - make_interval(secs => $2::double precision)
@@ -595,10 +595,10 @@ async fn load_snapshot(
             -- not a contradiction. Both directions count: a failure receipt
             -- refused against a provider-confirmed success, and a success
             -- receipt refused against a persisted failure.
-            (SELECT count(*) FROM viryaos_autopilot_actions a
+            (SELECT count(*) FROM autopilot_actions a
              JOIN LATERAL (
                  SELECT r.status
-                 FROM viryaos_autopilot_execution_reports r
+                 FROM autopilot_execution_reports r
                  WHERE r.workspace_id = a.workspace_id AND r.action_id = a.id
                    AND r.status IN ('succeeded', 'failed')
                  ORDER BY r.occurred_at DESC, r.id DESC
@@ -694,7 +694,7 @@ async fn load_snapshot(
             -- existed. An alarm that can never clear is one an operator learns
             -- to ignore. The all-time count still travels in the details, so
             -- the history is reported, just not alarmed on forever.
-            (SELECT count(*) FROM viryaos_autopilot_actions a
+            (SELECT count(*) FROM autopilot_actions a
              WHERE a.workspace_id=$1
                AND a.status='succeeded'
                AND a.action_kind IN ('agent.content.request',
@@ -710,7 +710,7 @@ async fn load_snapshot(
                AND NOT EXISTS (SELECT 1 FROM social_posts p
                                WHERE p.workspace_id=$1 AND p.action_id=a.id)
             )::bigint AS orphaned_publishing_actions,
-            (SELECT count(*) FROM viryaos_autopilot_actions a
+            (SELECT count(*) FROM autopilot_actions a
              WHERE a.workspace_id=$1
                AND a.status='succeeded'
                AND a.action_kind IN ('agent.content.request',
@@ -791,7 +791,7 @@ async fn load_snapshot(
             -- so a `minimum_confidence` of 8000 makes the effective floor five
             -- points above the score floor an operator set. 65 in the policy is 70
             -- in practice, and nothing said so.
-            (SELECT count(*) FROM viryaos_autopilot_decisions d
+            (SELECT count(*) FROM autopilot_decisions d
              WHERE d.workspace_id=$1
                AND d.decision_kind='apply_live_opportunity'
                AND d.disposition='deny'
@@ -832,7 +832,7 @@ async fn load_snapshot(
              FROM (
                 WITH recent AS (
                     SELECT degraded_phases
-                    FROM viryaos_autopilot_cycle_runs
+                    FROM autopilot_cycle_runs
                     WHERE workspace_id=$1
                       AND finished_at IS NOT NULL
                       AND degraded_phases IS NOT NULL
@@ -896,7 +896,7 @@ async fn load_snapshot(
             -- Approvals the operator never answered. `last_error_kind` is the
             -- only thing distinguishing these from an operator's own rejection,
             -- and the claim sweep is the only writer of that value.
-            (SELECT count(*) FROM viryaos_autopilot_actions a
+            (SELECT count(*) FROM autopilot_actions a
              WHERE a.workspace_id=$1
                AND a.status='cancelled'
                AND a.last_error_kind='approval_expired'
@@ -906,12 +906,12 @@ async fn load_snapshot(
             -- returns numeric on PostgreSQL 14+ and sqlx cannot decode that
             -- into an integer; `sql-result-types.py` refuses an uncast one.
             (SELECT floor(EXTRACT(EPOCH FROM (min(a.approval_expires_at) - now())) / 3600)::bigint
-             FROM viryaos_autopilot_actions a
+             FROM autopilot_actions a
              WHERE a.workspace_id=$1
                AND a.status='awaiting_approval'
                AND a.approval_expires_at IS NOT NULL
             ) AS hours_to_next_approval_expiry,
-            (SELECT count(*) FROM viryaos_autopilot_actions a
+            (SELECT count(*) FROM autopilot_actions a
              WHERE a.workspace_id=$1 AND a.status='awaiting_approval'
                -- Batched relay deliveries ask through the batch card, so
                -- they are one outstanding ask, not one per community.
@@ -922,7 +922,7 @@ async fn load_snapshot(
             -- `awaiting_approval`: neither the per-cycle claim sweep nor the
             -- hourly retention pass has reached this workspace. Two hours is
             -- two retention intervals, so a nonzero count cannot be jitter.
-            (SELECT count(*) FROM viryaos_autopilot_actions a
+            (SELECT count(*) FROM autopilot_actions a
              WHERE a.workspace_id=$1 AND a.status='awaiting_approval'
                AND a.approval_expires_at IS NOT NULL
                AND a.approval_expires_at <= now() - interval '2 hours'
@@ -931,7 +931,7 @@ async fn load_snapshot(
             -- park sweep writes `last_error_kind='awaiting_executor'` and
             -- re-parks every cycle, so the row is current demand, not a
             -- snapshot of a moment ago.
-            (SELECT count(*) FROM viryaos_autopilot_actions a
+            (SELECT count(*) FROM autopilot_actions a
              WHERE a.workspace_id=$1
                AND a.status='queued'
                AND a.last_error_kind='awaiting_executor'
@@ -940,7 +940,7 @@ async fn load_snapshot(
             -- cancelled with `no_executor`. Bounded at a week for the same
             -- reason the orphaned-draft count is — an alarm that can never
             -- clear is one an operator learns to ignore.
-            (SELECT count(*) FROM viryaos_autopilot_actions a
+            (SELECT count(*) FROM autopilot_actions a
              WHERE a.workspace_id=$1
                AND a.status='cancelled'
                AND a.last_error_kind='no_executor'
@@ -951,7 +951,7 @@ async fn load_snapshot(
             -- (`executor_capability_for_payload`) and must not be re-mapped
             -- here as a second copy.
             (SELECT string_agg(DISTINCT a.action_kind, ',' ORDER BY a.action_kind)
-             FROM viryaos_autopilot_actions a
+             FROM autopilot_actions a
              WHERE a.workspace_id=$1
                AND ((a.status='queued' AND a.last_error_kind='awaiting_executor')
                  OR (a.status='cancelled' AND a.last_error_kind='no_executor'
@@ -966,7 +966,7 @@ async fn load_snapshot(
             0::bigint AS reddit_session_usable,
             NULL::text AS reddit_credential_status,
             NULL::text AS reddit_credential_error,
-            (SELECT count(*) FROM viryaos_autopilot_decisions d
+            (SELECT count(*) FROM autopilot_decisions d
              WHERE d.workspace_id=$1)::bigint AS decisions_total,
             -- The brain's own count, read out of its checkpoint. `fans.global.n`
             -- is the observation count on the pooled posterior; it is zero until
@@ -974,10 +974,10 @@ async fn load_snapshot(
             -- checkpoint written before this level existed has no such key and
             -- must read NULL rather than fail the whole snapshot.
             (SELECT (bs.state #>> '{fans,global,n}')::bigint
-             FROM viryaos_brain_state bs
+             FROM brain_state bs
              WHERE bs.workspace_id=$1 AND bs.module='causal_model'
             ) AS causal_observations
-        FROM viryaos_executor_instances WHERE workspace_id=$1
+        FROM executor_instances WHERE workspace_id=$1
         "#,
     )
     .bind(workspace_id.into_uuid())
@@ -1038,7 +1038,7 @@ async fn load_states(
     let rows = sqlx::query_as::<_, AlertState>(
         r#"
         SELECT alert_key, active, last_alerted_at
-        FROM viryaos_ops_alert_state
+        FROM ops_alert_state
         WHERE workspace_id=$1
         FOR UPDATE
         "#,
@@ -1061,7 +1061,7 @@ async fn upsert_active(
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
         r#"
-        INSERT INTO viryaos_ops_alert_state (
+        INSERT INTO ops_alert_state (
             workspace_id, alert_key, severity, summary, active,
             first_seen_at, last_seen_at, last_alerted_at, details
         ) VALUES ($1,$2,$3,$4,true,$5,$5,CASE WHEN $7 THEN $5 ELSE NULL END,$6)
@@ -1070,13 +1070,13 @@ async fn upsert_active(
             summary=EXCLUDED.summary,
             active=true,
             first_seen_at=CASE
-                WHEN viryaos_ops_alert_state.active THEN viryaos_ops_alert_state.first_seen_at
+                WHEN ops_alert_state.active THEN ops_alert_state.first_seen_at
                 ELSE EXCLUDED.first_seen_at
             END,
             last_seen_at=EXCLUDED.last_seen_at,
             last_alerted_at=CASE
                 WHEN $7 THEN EXCLUDED.last_alerted_at
-                ELSE viryaos_ops_alert_state.last_alerted_at
+                ELSE ops_alert_state.last_alerted_at
             END,
             recovered_at=NULL,
             details=EXCLUDED.details
@@ -1102,7 +1102,7 @@ async fn mark_recovered(
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
         r#"
-        UPDATE viryaos_ops_alert_state
+        UPDATE ops_alert_state
         SET active=false, last_seen_at=$3, recovered_at=$3, last_alerted_at=$3
         WHERE workspace_id=$1 AND alert_key=$2 AND active
         "#,

@@ -2,7 +2,7 @@
 
 This context exists because Phase 9 built a screening pipeline that nothing
 ever fed. Candidate ingestion, dedupe, refusal and promotion all worked, and
-`viryaos_outreach_targets` still held zero rows in production, because
+`outreach_targets` still held zero rows in production, because
 discovery was inbound only: something outside the agent had to decide to look.
 That made an empty pitcher a stable state rather than a problem, which is the
 difference between an autonomous system and a well-tested set of rules.

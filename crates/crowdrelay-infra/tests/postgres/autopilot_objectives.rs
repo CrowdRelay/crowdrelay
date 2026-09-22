@@ -41,7 +41,7 @@ async fn a_target_freezes_its_baseline_declares_once_and_is_read_back_from_the_s
         .await?;
     let series_id = Uuid::now_v7();
     sqlx::query(
-        "INSERT INTO viryaos_growth_metric_series (id, workspace_id, platform, metric_key, display_name)
+        "INSERT INTO growth_metric_series (id, workspace_id, platform, metric_key, display_name)
          VALUES ($1,$2,'bandsintown','trackers','Bandsintown trackers')",
     )
     .bind(series_id)
@@ -51,7 +51,7 @@ async fn a_target_freezes_its_baseline_declares_once_and_is_read_back_from_the_s
     let now = OffsetDateTime::now_utc();
     for (day, value) in [(-10_i64, 100_i64), (-1, 130)] {
         sqlx::query(
-            "INSERT INTO viryaos_growth_metric_points (workspace_id, series_id, captured_at, value, source)
+            "INSERT INTO growth_metric_points (workspace_id, series_id, captured_at, value, source)
              VALUES ($1,$2,$3,$4,'test')",
         )
         .bind(workspace_id.into_uuid())
@@ -120,7 +120,7 @@ async fn a_target_freezes_its_baseline_declares_once_and_is_read_back_from_the_s
     );
     assert_eq!(
         sqlx::query_scalar::<_, i64>(
-            "SELECT count(*) FROM viryaos_growth_objectives WHERE workspace_id=$1"
+            "SELECT count(*) FROM growth_objectives WHERE workspace_id=$1"
         )
         .bind(workspace_id.into_uuid())
         .fetch_one(&pool)
@@ -152,7 +152,7 @@ async fn a_community_size_cannot_be_declared_as_an_objective()
         .await?;
     let series_id = Uuid::now_v7();
     sqlx::query(
-        "INSERT INTO viryaos_growth_metric_series (id, workspace_id, platform, metric_key, display_name)
+        "INSERT INTO growth_metric_series (id, workspace_id, platform, metric_key, display_name)
          VALUES ($1,$2,'social','members','r/Metal members')",
     )
     .bind(series_id)
@@ -160,7 +160,7 @@ async fn a_community_size_cannot_be_declared_as_an_objective()
     .execute(&pool)
     .await?;
     sqlx::query(
-        "INSERT INTO viryaos_growth_metric_points (workspace_id, series_id, captured_at, value, source)
+        "INSERT INTO growth_metric_points (workspace_id, series_id, captured_at, value, source)
          VALUES ($1,$2,$3,$4,'test')",
     )
     .bind(workspace_id.into_uuid())
@@ -202,7 +202,7 @@ async fn a_community_size_cannot_be_declared_as_an_objective()
     );
     assert_eq!(
         sqlx::query_scalar::<_, i64>(
-            "SELECT count(*) FROM viryaos_growth_objectives WHERE workspace_id=$1"
+            "SELECT count(*) FROM growth_objectives WHERE workspace_id=$1"
         )
         .bind(workspace_id.into_uuid())
         .fetch_one(&pool)

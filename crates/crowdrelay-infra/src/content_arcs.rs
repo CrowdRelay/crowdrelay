@@ -36,7 +36,7 @@ impl PostgresContentEngineRepository {
         let mut anchors: Vec<ArcAnchor> = sqlx::query_as::<_, (Uuid, String, Date)>(
             r#"
             SELECT id, title, release_at::date AS date
-            FROM viryaos_release_plans
+            FROM release_plans
             WHERE workspace_id = $1 AND active AND release_at::date >= $2
               AND release_at::date <= $3
             "#,
@@ -80,7 +80,7 @@ impl PostgresContentEngineRepository {
             sqlx::query_as::<_, (Uuid, String, Date)>(
                 r#"
                 SELECT id, title, scheduled_for AS date
-                FROM viryaos_production_events
+                FROM production_events
                 WHERE workspace_id = $1 AND status = 'scheduled'
                   AND scheduled_for >= $2 AND scheduled_for <= $3
                 "#,
@@ -115,19 +115,19 @@ impl PostgresContentEngineRepository {
             r#"
             WITH declined AS (
                 SELECT evidence->'anchor'->>'id' AS anchor_id
-                FROM viryaos_arcs
+                FROM arcs
                 WHERE workspace_id = $1 AND status = 'retired'
                   AND updated_at >= now() - make_interval(days => $2)
             )
             SELECT anchor_id FROM declined
             UNION
             SELECT pe.id::text
-            FROM viryaos_production_events AS pe
+            FROM production_events AS pe
             JOIN declined ON declined.anchor_id = pe.event_id::text
             WHERE pe.workspace_id = $1
             UNION
             SELECT pe.event_id::text
-            FROM viryaos_production_events AS pe
+            FROM production_events AS pe
             JOIN declined ON declined.anchor_id = pe.id::text
             WHERE pe.workspace_id = $1 AND pe.event_id IS NOT NULL
             "#,
@@ -188,7 +188,7 @@ impl PostgresContentEngineRepository {
         // the band approved goes live when its horizon opens, and an
         // active one closes when it ends.
         sqlx::query(
-            "UPDATE viryaos_arcs SET status = 'active', updated_at = now() \
+            "UPDATE arcs SET status = 'active', updated_at = now() \
              WHERE workspace_id = $1 AND status = 'approved' \
                AND horizon_start IS NOT NULL AND horizon_start <= $2",
         )
@@ -197,7 +197,7 @@ impl PostgresContentEngineRepository {
         .execute(&mut *tx)
         .await?;
         sqlx::query(
-            "UPDATE viryaos_arcs SET status = 'completed', updated_at = now() \
+            "UPDATE arcs SET status = 'completed', updated_at = now() \
              WHERE workspace_id = $1 AND status = 'active' \
                AND horizon_end IS NOT NULL AND horizon_end < $2",
         )
@@ -211,7 +211,7 @@ impl PostgresContentEngineRepository {
         // looking at. Its window closing is the honest answer: the season
         // it argued for is gone, so it retires rather than lingers.
         sqlx::query(
-            "UPDATE viryaos_arcs SET status = 'retired', updated_at = now() \
+            "UPDATE arcs SET status = 'retired', updated_at = now() \
              WHERE workspace_id = $1 AND status = 'proposed' \
                AND horizon_end IS NOT NULL AND horizon_end < $2",
         )
@@ -221,7 +221,7 @@ impl PostgresContentEngineRepository {
         .await?;
 
         let open = sqlx::query_scalar::<_, bool>(
-            "SELECT EXISTS (SELECT 1 FROM viryaos_arcs \
+            "SELECT EXISTS (SELECT 1 FROM arcs \
              WHERE workspace_id = $1 AND status IN ('proposed','approved','active'))",
         )
         .bind(ws)
@@ -291,7 +291,7 @@ impl PostgresContentEngineRepository {
     ) -> Result<Arc> {
         let row = sqlx::query_as::<_, ArcRow>(
             r#"
-            INSERT INTO viryaos_arcs (
+            INSERT INTO arcs (
                 id, workspace_id, title, summary, horizon_start, horizon_end,
                 spine, evidence
             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)

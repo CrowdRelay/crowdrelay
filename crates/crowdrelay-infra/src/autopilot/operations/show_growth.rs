@@ -121,7 +121,7 @@ pub(in crate::autopilot) async fn load_show_growth_snapshots(
             -- stops applying in the same read.
             EXISTS (
                 SELECT 1
-                FROM viryaos_show_ladder_approvals AS ladder
+                FROM show_ladder_approvals AS ladder
                 WHERE ladder.workspace_id = event.workspace_id
                   AND ladder.event_id = event.id
                   AND ladder.revoked_at IS NULL
@@ -192,7 +192,7 @@ pub(in crate::autopilot) async fn load_show_growth_snapshots(
         ) AS referrers ON true
         LEFT JOIN LATERAL (
             SELECT COUNT(*)::bigint AS beacon_partners
-            FROM viryaos_beacon_campaigns AS campaign
+            FROM beacon_campaigns AS campaign
             WHERE campaign.workspace_id = event.workspace_id
               AND campaign.event_id = event.id
               AND campaign.status = 'partner'
@@ -230,7 +230,7 @@ pub(in crate::autopilot) async fn load_show_growth_snapshots(
                 BOOL_OR(action.payload ->> 'lever' = 'post_show_merch_follow_up') AS post_show_merch_requested,
                 BOOL_OR(action.payload ->> 'lever' = 'post_show_follow_ask') AS post_show_follow_ask_requested,
                 BOOL_OR(action.payload ->> 'lever' = 'post_show_recap') AS post_show_recap_requested
-            FROM viryaos_autopilot_actions AS action
+            FROM autopilot_actions AS action
             WHERE action.workspace_id = event.workspace_id
               AND action.context = 'show_growth'
               AND action.subject_id = event.id

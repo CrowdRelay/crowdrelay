@@ -237,6 +237,34 @@ pub struct CoBillAct {
     pub consented_to_share_bills: bool,
 }
 
+/// A non-tenant act tied to the city — based there, or billed at one of its
+/// rooms — that shares genre with the tenant or shares only the city.
+///
+/// Names and evidence only. The registry knows where an act is based and
+/// what it has been billed on; it does not know whether the act is free,
+/// willing or priced, so naming one is a suggestion of who to *ask* — never
+/// a claim that they said yes. That distinction is why this list is not
+/// `co_bill`: a sibling's numbers are measured and consented, a peer's are
+/// not, and mixing the two would let a stranger's name borrow a measured
+/// act's claim.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct LocalAct {
+    pub name: String,
+    /// Genre tags the act and the tenant share, canonicalised. Empty means
+    /// the tie is the city alone — the act is local evidence, not a genre
+    /// claim.
+    pub shared_genres: Vec<String>,
+    /// Registry rooms the act has billed, platform-wide. Evidence of a
+    /// working band, not of availability.
+    pub billed_rooms: u16,
+    /// How the act can actually be asked — the strongest reach-out route
+    /// the registry holds (`email on file`, `billed in tracked rooms`,
+    /// `public page`). The planner only surfaces acts that have one; a
+    /// famous name with no route is a directory entry, not a suggestion.
+    #[serde(default)]
+    pub reachable_via: String,
+}
+
 /// What the planner knows about one city.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct CityOpportunity {
@@ -285,6 +313,10 @@ pub struct CityOpportunity {
     pub venue: Option<VenueEvidence>,
     pub promoters: Vec<PromoterRef>,
     pub co_bill: Vec<CoBillAct>,
+    /// Non-tenant acts tied to this city — see [`LocalAct`] for why these
+    /// are suggestions to ask, never measured candidates.
+    #[serde(default)]
+    pub local_acts: Vec<LocalAct>,
 }
 
 /// One fact that contributed to the proposal, in words a promoter would use.
@@ -437,6 +469,13 @@ pub struct GigPlan {
     pub contact: Vec<PromoterContact>,
     /// Acts worth asking onto the bill. Asking, never announcing.
     pub invite_to_bill: Vec<String>,
+    /// Local non-tenant acts in this city worth knowing about when the bill
+    /// is assembled — the support-slot answer the peer registry can give.
+    /// Carried alongside `invite_to_bill`, not inside it: these names come
+    /// with no consent and no measured audience, so they can inform an ask
+    /// but cannot state what they add.
+    #[serde(default)]
+    pub local_acts: Vec<LocalAct>,
     /// Ordered strongest first. Never empty — a plan with no reasons is not
     /// produced at all.
     pub reasons: Vec<Reason>,
@@ -808,6 +847,7 @@ pub fn plan_gig(
         venue: venue.name.clone(),
         contact,
         invite_to_bill,
+        local_acts: opportunity.local_acts.clone(),
         reasons,
         reach: ReachEstimate {
             reachable: reachable_fans,

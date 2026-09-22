@@ -64,7 +64,7 @@ async fn seed_arc_ask(
 ) -> Result<(Uuid, Uuid, Uuid), Box<dyn std::error::Error>> {
     let arc_id = Uuid::now_v7();
     sqlx::query(
-        "INSERT INTO viryaos_arcs (
+        "INSERT INTO arcs (
              id, workspace_id, title, summary, horizon_start, horizon_end,
              spine, evidence, status
          ) VALUES ($1,$2,'Arc Single: release','a 3-beat run',
@@ -79,7 +79,7 @@ async fn seed_arc_ask(
     .await?;
     let decision_id = Uuid::now_v7();
     sqlx::query(
-        "INSERT INTO viryaos_autopilot_decisions (
+        "INSERT INTO autopilot_decisions (
              id, workspace_id, decision_key, context, subject_kind, subject_id,
              decision_kind, confidence_basis_points, disposition, reason,
              input_snapshot, policy_snapshot, recommendation, trace_id
@@ -94,7 +94,7 @@ async fn seed_arc_ask(
     .await?;
     let action_id = Uuid::now_v7();
     sqlx::query(
-        "INSERT INTO viryaos_autopilot_actions (
+        "INSERT INTO autopilot_actions (
              id, workspace_id, decision_id, context, action_kind, subject_kind, subject_id,
              idempotency_key, payload, status, approved_at, approved_by, approval_expires_at
          ) VALUES ($1,$2,$3,'content_strategy','content.arc.raise','content_arc',$4,
@@ -145,7 +145,7 @@ async fn executing_an_approved_arc_commits_the_season() {
         .expect("execution");
 
     let (status, approved_by): (String, Option<String>) =
-        sqlx::query_as("SELECT status, approved_by FROM viryaos_arcs WHERE id = $1")
+        sqlx::query_as("SELECT status, approved_by FROM arcs WHERE id = $1")
             .bind(arc_id)
             .fetch_one(&fixture.pool)
             .await
@@ -161,7 +161,7 @@ async fn executing_an_approved_arc_commits_the_season() {
     // row already approved: the same answer, not a failure.
     let replay_id = Uuid::now_v7();
     sqlx::query(
-        "INSERT INTO viryaos_autopilot_actions (
+        "INSERT INTO autopilot_actions (
              id, workspace_id, decision_id, context, action_kind, subject_kind, subject_id,
              idempotency_key, payload, status, approved_at
          ) VALUES ($1,$2,$3,'content_strategy','content.arc.raise','content_arc',$4,
@@ -170,13 +170,11 @@ async fn executing_an_approved_arc_commits_the_season() {
     .bind(replay_id)
     .bind(fixture.workspace_id.into_uuid())
     .bind(
-        sqlx::query_scalar::<_, Uuid>(
-            "SELECT decision_id FROM viryaos_autopilot_actions WHERE id = $1",
-        )
-        .bind(action_id)
-        .fetch_one(&fixture.pool)
-        .await
-        .expect("decision id"),
+        sqlx::query_scalar::<_, Uuid>("SELECT decision_id FROM autopilot_actions WHERE id = $1")
+            .bind(action_id)
+            .fetch_one(&fixture.pool)
+            .await
+            .expect("decision id"),
     )
     .bind(arc_id)
     .bind(serde_json::json!({
@@ -205,7 +203,7 @@ async fn executing_an_approved_arc_commits_the_season() {
         .execute_action(fixture.workspace_id, replay, fixture.now)
         .await
         .expect("replay execution answers the same yes");
-    let status: String = sqlx::query_scalar("SELECT status FROM viryaos_arcs WHERE id = $1")
+    let status: String = sqlx::query_scalar("SELECT status FROM arcs WHERE id = $1")
         .bind(arc_id)
         .fetch_one(&fixture.pool)
         .await
@@ -240,7 +238,7 @@ async fn cancelling_an_arc_ask_retires_the_season() {
 
     // "Not this season" retires the proposal — the open-arc slot frees and
     // the anchor's cooldown remembers the answer.
-    let status: String = sqlx::query_scalar("SELECT status FROM viryaos_arcs WHERE id = $1")
+    let status: String = sqlx::query_scalar("SELECT status FROM arcs WHERE id = $1")
         .bind(arc_id)
         .fetch_one(&fixture.pool)
         .await
@@ -276,7 +274,7 @@ async fn an_unanswered_arc_ask_retires_the_proposal_with_it() {
     .expect("arc ask");
     // The approval window already closed.
     sqlx::query(
-        "UPDATE viryaos_autopilot_actions
+        "UPDATE autopilot_actions
          SET approval_expires_at = now() - interval '1 hour'
          WHERE subject_id = $1 AND subject_kind = 'content_arc'",
     )
@@ -291,7 +289,7 @@ async fn an_unanswered_arc_ask_retires_the_proposal_with_it() {
         .claim_due_autonomous_actions(fixture.workspace_id, 8, OffsetDateTime::now_utc())
         .await
         .expect("claim");
-    let status: String = sqlx::query_scalar("SELECT status FROM viryaos_arcs WHERE id = $1")
+    let status: String = sqlx::query_scalar("SELECT status FROM arcs WHERE id = $1")
         .bind(arc_id)
         .fetch_one(&fixture.pool)
         .await
@@ -314,7 +312,7 @@ async fn a_failed_arc_ask_retires_the_proposal_with_it() {
             .await
             .expect("arc ask");
     sqlx::query(
-        "UPDATE viryaos_autopilot_actions
+        "UPDATE autopilot_actions
          SET status = 'failed', finished_at = now(),
              last_error_kind = 'stale_retry_exhausted', attempt_count = 5
          WHERE subject_id = $1 AND subject_kind = 'content_arc'",
@@ -329,7 +327,7 @@ async fn a_failed_arc_ask_retires_the_proposal_with_it() {
         .claim_due_autonomous_actions(fixture.workspace_id, 8, OffsetDateTime::now_utc())
         .await
         .expect("claim");
-    let status: String = sqlx::query_scalar("SELECT status FROM viryaos_arcs WHERE id = $1")
+    let status: String = sqlx::query_scalar("SELECT status FROM arcs WHERE id = $1")
         .bind(arc_id)
         .fetch_one(&fixture.pool)
         .await

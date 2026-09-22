@@ -2,7 +2,7 @@
 """The worker health fields must measure what their names say.
 
 `crash_looping` read its cycle age from `MAX(evaluated_at)` on
-`viryaos_autopilot_decisions` — the last *decision*, not the last *cycle*. A
+`autopilot_decisions` — the last *decision*, not the last *cycle*. A
 cycle that runs correctly and finds nothing worth deciding writes no decision
 row, so thirty minutes of healthy empty cycles raised a crash-loop alarm.
 
@@ -11,7 +11,7 @@ Measured in production 2026-09-13: `crash_looping: true` against a worker with
 finishing in 300-1700ms. `ops/attention` is the operator's exception-first view
 and this was its loudest field, pointing at nothing.
 
-`viryaos_autopilot_cycle_runs` (migration 0233) records cycle completion, and
+`autopilot_cycle_runs` (migration 0233) records cycle completion, and
 its own schema comment names the case the signal wants: "NULL means the cycle
 never finished: the process died mid-cycle, which is otherwise
 indistinguishable from a cycle that ran and decided nothing."
@@ -34,7 +34,7 @@ class WorkerHealthSignalContract(unittest.TestCase):
     def test_cycle_age_comes_from_finished_cycles(self):
         sql = statement_for("let (cycle_age_seconds, decision_age_seconds)")
         self.assertIn("MAX(finished_at)", sql)
-        self.assertIn("FROM viryaos_autopilot_cycle_runs", sql)
+        self.assertIn("FROM autopilot_cycle_runs", sql)
 
     def test_decision_age_is_reported_separately_rather_than_conflated(self):
         # Keeping it is the point: "cycles run but decide nothing" is a real
@@ -42,7 +42,7 @@ class WorkerHealthSignalContract(unittest.TestCase):
         # as one sent an operator looking for a process fault that did not exist.
         sql = statement_for("let (cycle_age_seconds, decision_age_seconds)")
         self.assertIn("MAX(evaluated_at)", sql)
-        self.assertIn("FROM viryaos_autopilot_decisions", sql)
+        self.assertIn("FROM autopilot_decisions", sql)
         self.assertIn("pub(crate) decision_age_seconds: i64", SUMMARY)
 
     def test_crash_looping_is_derived_from_the_cycle_age_and_the_lease(self):

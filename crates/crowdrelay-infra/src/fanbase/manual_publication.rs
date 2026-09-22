@@ -155,7 +155,7 @@ pub async fn register_manual_reddit_post(
 ///
 /// What that cost:
 ///
-/// - **Reach.** `viryaos_reach_events` is the denominator the credit allocator
+/// - **Reach.** `reach_events` is the denominator the credit allocator
 ///   divides fan outcomes by. A post with no reach row is a post that reached
 ///   nobody as far as attribution is concerned, so a community that genuinely
 ///   converted someone could not be credited for it.
@@ -179,7 +179,7 @@ async fn record_publication_reach(
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
         r#"
-        INSERT INTO viryaos_reach_events (
+        INSERT INTO reach_events (
             workspace_id, action_id, recipient_kind, recipient_id, channel,
             template_id, estimated_reach, status, metadata, trace_id, causation_id
         )
@@ -190,7 +190,7 @@ async fn record_publication_reach(
                                   'published', 'manual'),
                action.trace_id, post.action_id
         FROM community_posts AS post
-        JOIN viryaos_autopilot_actions AS action
+        JOIN autopilot_actions AS action
           ON action.workspace_id = post.workspace_id AND action.id = post.action_id
         WHERE post.workspace_id = $1 AND post.id = $2
         ON CONFLICT (action_id, recipient_id, channel)
@@ -206,11 +206,11 @@ async fn record_publication_reach(
     // so re-registering a URL cannot walk the status backwards.
     sqlx::query(
         r#"
-        UPDATE viryaos_experiment_assignments AS assignment
+        UPDATE experiment_assignments AS assignment
         SET execution_status = 'executed',
             trace_id = COALESCE(assignment.trace_id, action.trace_id)
         FROM community_posts AS post
-        JOIN viryaos_autopilot_actions AS action
+        JOIN autopilot_actions AS action
           ON action.workspace_id = post.workspace_id AND action.id = post.action_id
         WHERE assignment.workspace_id = $1
           AND post.workspace_id = $1
@@ -272,7 +272,7 @@ where
             FROM published
             JOIN LATERAL (
                 SELECT candidate.action_id
-                FROM viryaos_experiment_assignments AS candidate
+                FROM experiment_assignments AS candidate
                 WHERE candidate.workspace_id = $1
                   AND candidate.unit_kind = 'target_community'
                   AND candidate.unit_id = published.target_id::text
@@ -283,7 +283,7 @@ where
             ) AS assignment ON true
             WHERE published.target_id IS NOT NULL
         )
-        UPDATE viryaos_autopilot_measurements AS measurement
+        UPDATE autopilot_measurements AS measurement
         SET action_finished_at = owning_actions.posted_at,
             due_at = owning_actions.posted_at
                      + (measurement.due_at - measurement.action_finished_at),
@@ -579,7 +579,7 @@ pub async fn anchor_content_measurements_to_publication(
             FROM {table} AS post
             WHERE post.workspace_id = $1 AND post.id = $2
         )
-        UPDATE viryaos_autopilot_measurements AS measurement
+        UPDATE autopilot_measurements AS measurement
         SET action_finished_at = published.posted_at,
             due_at = published.posted_at
                      + (measurement.due_at - measurement.action_finished_at),
@@ -649,7 +649,7 @@ async fn record_content_publication_reach(
     // input, so interpolation is safe here.
     let query = format!(
         r#"
-        INSERT INTO viryaos_reach_events (
+        INSERT INTO reach_events (
             workspace_id, action_id, recipient_kind, recipient_id, channel,
             template_id, estimated_reach, status, metadata, trace_id, causation_id
         )
@@ -659,7 +659,7 @@ async fn record_content_publication_reach(
                                   'published', 'manual'),
                action.trace_id, post.action_id
         FROM {table} AS post
-        JOIN viryaos_autopilot_actions AS action
+        JOIN autopilot_actions AS action
           ON action.workspace_id = post.workspace_id AND action.id = post.action_id
         WHERE post.workspace_id = $1 AND post.id = $2
         ON CONFLICT (action_id, recipient_id, channel)
@@ -676,11 +676,11 @@ async fn record_content_publication_reach(
     // executed, so re-registering cannot walk the status backwards.
     let query = format!(
         r#"
-        UPDATE viryaos_experiment_assignments AS assignment
+        UPDATE experiment_assignments AS assignment
         SET execution_status = 'executed',
             trace_id = COALESCE(assignment.trace_id, action.trace_id)
         FROM {table} AS post
-        JOIN viryaos_autopilot_actions AS action
+        JOIN autopilot_actions AS action
           ON action.workspace_id = post.workspace_id AND action.id = post.action_id
         WHERE assignment.workspace_id = $1
           AND post.workspace_id = $1

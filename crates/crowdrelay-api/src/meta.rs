@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 const API_VERSION: &str = "1";
 /// Auto-discovered by `build.rs` from the latest migration file prefix.
 /// Never edit this manually — add a migration and the value updates automatically.
-/// Contract marker: SCHEMA_VERSION: u32 = 344
+/// Contract marker: SCHEMA_VERSION: u32 = 346
 pub(crate) const SCHEMA_VERSION: u32 = parse_schema_version(env!("CROWDRELAY_SCHEMA_VERSION"));
 const CACHE: &str = "public, max-age=30, s-maxage=30, stale-while-revalidate=60";
 
@@ -75,15 +75,15 @@ pub async fn get() -> impl IntoResponse {
         ("synesthesia_recovery_v1", true),
         ("ticketing_v1", true),
         ("staff_device_sessions_v2", true),
-        ("viryaos_ops_v1", true),
-        ("viryaos_beacons_v1", true),
+        ("ops_v1", true),
+        ("beacons_v1", true),
         ("beacon_signal_v1", true),
         ("beacon_signal_v2", true),
         ("beacon_native_signal_v1", true),
         ("beacon_physical_releases_v1", true),
         ("beacon_network_acquisition_v1", true),
-        ("viryaos_team_handoffs_v1", true),
-        ("viryaos_show_growth_v1", true),
+        ("team_handoffs_v1", true),
+        ("show_growth_v1", true),
         ("communication_delivery_ledger_v1", true),
         ("fan_push_delivery_v1", true),
         ("fan_push_preferences_v1", true),

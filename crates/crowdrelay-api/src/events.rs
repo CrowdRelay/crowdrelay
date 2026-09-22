@@ -682,7 +682,7 @@ fn render_ics(event: &PublicEvent, tenant: &crate::tenant::TenantProfile) -> Str
         .collect::<Vec<_>>()
         .join(", ");
     format!(
-        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//CrowdRelay//Signal//EN\r\nCALSCALE:GREGORIAN\r\nBEGIN:VEVENT\r\nUID:{}@crowdrelay.com\r\nDTSTAMP:{}\r\nDTSTART:{}\r\nDTEND:{}\r\nSUMMARY:{}\r\nDESCRIPTION:{}\r\nLOCATION:{}\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n",
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//CrowdRelay//Signal//EN\r\nCALSCALE:GREGORIAN\r\nBEGIN:VEVENT\r\nUID:{}@crowdrelay.music\r\nDTSTAMP:{}\r\nDTSTART:{}\r\nDTEND:{}\r\nSUMMARY:{}\r\nDESCRIPTION:{}\r\nLOCATION:{}\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n",
         event.id,
         format_ics_time(OffsetDateTime::now_utc()),
         starts_at,
@@ -1184,7 +1184,7 @@ mod tests {
         assert!(calendar.contains("LOCATION:Club\\; Main"));
         assert!(calendar.contains("DTSTART:19700101T000000Z"));
         assert!(calendar.contains("UID:"));
-        assert!(calendar.contains("@crowdrelay.com"));
+        assert!(calendar.contains("@crowdrelay.music"));
         assert!(!calendar.contains("virya.music"));
         Ok(())
     }

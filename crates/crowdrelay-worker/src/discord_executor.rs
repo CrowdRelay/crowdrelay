@@ -279,7 +279,7 @@ impl DiscordExecutorWorker {
         if !action_ids.is_empty() {
             sqlx::query(
                 r#"
-                UPDATE viryaos_autopilot_actions
+                UPDATE autopilot_actions
                 SET status = 'unknown',
                     finished_at = NULL,
                     updated_at = now()
@@ -295,9 +295,9 @@ impl DiscordExecutorWorker {
 
             sqlx::query(
                 r#"
-                UPDATE viryaos_experiment_assignments AS ea
+                UPDATE experiment_assignments AS ea
                 SET execution_status = 'unknown',
-                    trace_id = COALESCE(ea.trace_id, (SELECT trace_id FROM viryaos_autopilot_actions WHERE id = ea.action_id))
+                    trace_id = COALESCE(ea.trace_id, (SELECT trace_id FROM autopilot_actions WHERE id = ea.action_id))
                 WHERE ea.workspace_id = $1
                   AND ea.action_id = ANY($2)
                   AND ea.execution_status = 'dispatched'
@@ -341,8 +341,12 @@ impl DiscordExecutorWorker {
                 a.id,
                 COALESCE(a.payload->>'channel_id', ''),
                 'pending'
-            FROM viryaos_autopilot_actions a
-            JOIN agent_service_tasks t ON t.id = (a.payload->>'task_id')::uuid
+            FROM autopilot_actions a
+            -- A malformed task_id in a payload must not abort the claim:
+            -- the regex gate keeps the ::uuid cast from ever seeing one.
+            JOIN agent_service_tasks t
+              ON a.payload->>'task_id' ~ '^[0-9a-fA-F-]{36}$'
+             AND t.id = (a.payload->>'task_id')::uuid
             WHERE a.workspace_id = $1
               AND a.action_kind = 'agent.content.request'
               AND a.status = 'succeeded'
@@ -383,7 +387,7 @@ impl DiscordExecutorWorker {
                    a.payload->'draft'->>'cta_url' AS cta_url,
                    a.trace_id
             FROM claimed c
-            LEFT JOIN viryaos_autopilot_actions a ON a.id = c.action_id
+            LEFT JOIN autopilot_actions a ON a.id = c.action_id
             "#,
         )
         .bind(ws)
@@ -574,7 +578,7 @@ impl DiscordExecutorWorker {
 
         // Reach ledger.
         sqlx::query(
-            r#"INSERT INTO viryaos_reach_events
+            r#"INSERT INTO reach_events
                  (workspace_id, action_id, recipient_kind, recipient_id, channel,
                   template_id, estimated_reach, status, metadata, trace_id, causation_id)
                VALUES ($1, $2, 'discord_channel', $3, 'discord_post',
@@ -595,9 +599,9 @@ impl DiscordExecutorWorker {
         // Transition the experiment assignment execution_status.
         sqlx::query(
             r#"
-            UPDATE viryaos_experiment_assignments
+            UPDATE experiment_assignments
             SET execution_status = 'executed',
-                trace_id = COALESCE(trace_id, (SELECT trace_id FROM viryaos_autopilot_actions WHERE id = $2))
+                trace_id = COALESCE(trace_id, (SELECT trace_id FROM autopilot_actions WHERE id = $2))
             WHERE workspace_id = $1
               AND action_id = $2
               AND execution_status = 'dispatched'
@@ -805,8 +809,8 @@ impl DiscordExecutorWorker {
         let metric_key = platform.audience_metric_key()?;
         let value: Option<f64> = sqlx::query_scalar(
             r#"SELECT point.value::float8
-               FROM viryaos_growth_metric_points AS point
-               JOIN viryaos_growth_metric_series AS series ON series.id = point.series_id
+               FROM growth_metric_points AS point
+               JOIN growth_metric_series AS series ON series.id = point.series_id
                WHERE point.workspace_id = $1
                  AND series.platform = $2
                  AND series.metric_key = $3
@@ -975,7 +979,7 @@ impl DiscordExecutorWorker {
             r#"
             SELECT a.payload->'draft'->>'text'
             FROM discord_posts AS post
-            JOIN viryaos_autopilot_actions AS a
+            JOIN autopilot_actions AS a
               ON a.id = post.action_id AND a.workspace_id = $1
             WHERE post.workspace_id = $1
               AND post.status = 'posted'

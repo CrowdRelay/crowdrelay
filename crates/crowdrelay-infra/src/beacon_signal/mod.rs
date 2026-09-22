@@ -76,11 +76,11 @@ pub(super) async fn executor_capability_available_tx(
         r#"
         SELECT EXISTS (
             SELECT 1
-            FROM viryaos_executor_capabilities capability_row
-            JOIN viryaos_executor_instances executor
+            FROM executor_capabilities capability_row
+            JOIN executor_instances executor
               ON executor.workspace_id=capability_row.workspace_id
              AND executor.executor_id=capability_row.executor_id
-            LEFT JOIN viryaos_executor_circuit_breakers breaker
+            LEFT JOIN executor_circuit_breakers breaker
               ON breaker.workspace_id=executor.workspace_id
              AND breaker.executor_id=executor.executor_id
             WHERE capability_row.workspace_id=$1

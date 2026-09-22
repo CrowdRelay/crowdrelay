@@ -52,7 +52,7 @@ pub async fn internal_ingest_discovered_beacons(
     let run = match sqlx::query_as::<_, (String, String)>(
         r#"
         SELECT status,country_code
-        FROM viryaos_beacon_network_discovery_runs
+        FROM beacon_network_discovery_runs
         WHERE workspace_id=$1 AND id=$2
         FOR UPDATE
         "#,
@@ -130,7 +130,7 @@ pub async fn internal_ingest_discovered_beacons(
         let found = match sqlx::query_scalar::<_, Uuid>(
             r#"
             SELECT id
-            FROM viryaos_beacons
+            FROM beacons
             WHERE workspace_id=$1 AND beacon_kind=$2 AND city_id IS NOT DISTINCT FROM $3
               AND (
                 ($4::text IS NOT NULL AND contact_email=$4)
@@ -159,7 +159,7 @@ pub async fn internal_ingest_discovered_beacons(
         let beacon_id = if let Some(beacon_id) = found {
             if let Err(error) = sqlx::query(
                 r#"
-                UPDATE viryaos_beacons
+                UPDATE beacons
                 SET source_url=COALESCE(source_url,$3),
                     metadata=metadata || $4::jsonb,
                     relevance_basis_points=GREATEST(relevance_basis_points,$5),
@@ -186,7 +186,7 @@ pub async fn internal_ingest_discovered_beacons(
             let beacon_id = Uuid::now_v7();
             if let Err(error) = sqlx::query(
                 r#"
-                INSERT INTO viryaos_beacons (
+                INSERT INTO beacons (
                     id,workspace_id,city_id,beacon_kind,display_name,contact_email,destination_url,
                     source_url,active,verified,accepts_outreach,do_not_contact,
                     relationship_score,relevance_basis_points,confidence_basis_points,metadata
@@ -245,7 +245,7 @@ pub async fn internal_ingest_discovered_beacons(
             .collect();
         if let Err(error) = sqlx::query(
             r#"
-            INSERT INTO viryaos_beacon_network_discovery_observations
+            INSERT INTO beacon_network_discovery_observations
               (workspace_id,run_id,beacon_id,source_url,source_note,relevance_basis_points,confidence_basis_points)
             SELECT $1,$2,candidate.beacon_id,candidate.source_url,
                    NULLIF(candidate.source_note,''),candidate.relevance,candidate.confidence
@@ -254,8 +254,8 @@ pub async fn internal_ingest_discovered_beacons(
             ON CONFLICT (workspace_id,run_id,beacon_id) DO UPDATE SET
               source_url=EXCLUDED.source_url,
               source_note=EXCLUDED.source_note,
-              relevance_basis_points=GREATEST(viryaos_beacon_network_discovery_observations.relevance_basis_points,EXCLUDED.relevance_basis_points),
-              confidence_basis_points=GREATEST(viryaos_beacon_network_discovery_observations.confidence_basis_points,EXCLUDED.confidence_basis_points)
+              relevance_basis_points=GREATEST(beacon_network_discovery_observations.relevance_basis_points,EXCLUDED.relevance_basis_points),
+              confidence_basis_points=GREATEST(beacon_network_discovery_observations.confidence_basis_points,EXCLUDED.confidence_basis_points)
             "#,
         )
         .bind(workspace_id)
@@ -275,11 +275,11 @@ pub async fn internal_ingest_discovered_beacons(
 
     let discovered_count = match sqlx::query_scalar::<_, i32>(
         r#"
-        UPDATE viryaos_beacon_network_discovery_runs AS run
+        UPDATE beacon_network_discovery_runs AS run
         SET status='running',started_at=COALESCE(started_at,now()),
             discovered_count=(
               SELECT count(*)::int
-              FROM viryaos_beacon_network_discovery_observations observation
+              FROM beacon_network_discovery_observations observation
               WHERE observation.workspace_id=run.workspace_id AND observation.run_id=run.id
             )
         WHERE run.workspace_id=$1 AND run.id=$2
@@ -349,11 +349,11 @@ pub async fn internal_report_discovery_run(
     // report overwrite the cumulative observations recorded by earlier batches.
     let result = sqlx::query_scalar::<_, i32>(
         r#"
-        UPDATE viryaos_beacon_network_discovery_runs AS run
+        UPDATE beacon_network_discovery_runs AS run
         SET status=$3,
             discovered_count=(
               SELECT count(*)::integer
-              FROM viryaos_beacon_network_discovery_observations AS observation
+              FROM beacon_network_discovery_observations AS observation
               WHERE observation.workspace_id=run.workspace_id AND observation.run_id=run.id
             ),
             report_filename=$4,report_sha256=$5,
@@ -416,7 +416,7 @@ pub async fn internal_claim_invite_delivery_job(
     let job = match sqlx::query_as::<_, (Vec<Uuid>, i32, i32, String, String)>(
         r#"
         SELECT beacon_ids,ttl_days,radius_km,locale,status
-        FROM viryaos_beacon_invite_delivery_jobs
+        FROM beacon_invite_delivery_jobs
         WHERE workspace_id=$1 AND id=$2
         FOR UPDATE
         "#,
@@ -487,7 +487,7 @@ pub async fn internal_claim_invite_delivery_job(
     // long after the mail had gone.
     let claimed = match sqlx::query(
         r#"
-        UPDATE viryaos_beacon_invite_delivery_jobs
+        UPDATE beacon_invite_delivery_jobs
         SET status='claimed',claim_token_hash=$3,claimed_by=$4,claimed_at=now(),
             claim_expires_at=now()+interval '60 minutes'
         WHERE workspace_id=$1 AND id=$2 AND status='queued'
@@ -557,7 +557,7 @@ pub async fn internal_report_invite_delivery_job(
     let current = match sqlx::query_as::<_, (String, Option<Vec<u8>>, serde_json::Value)>(
         r#"
         SELECT status,claim_token_hash,provider_summary
-        FROM viryaos_beacon_invite_delivery_jobs
+        FROM beacon_invite_delivery_jobs
         WHERE workspace_id=$1 AND id=$2
         FOR UPDATE
         "#,
@@ -592,7 +592,7 @@ pub async fn internal_report_invite_delivery_job(
     }
     if let Err(error) = sqlx::query(
         r#"
-        UPDATE viryaos_beacon_invite_delivery_jobs
+        UPDATE beacon_invite_delivery_jobs
         SET status=$3,provider_summary=$4,reported_at=now()
         WHERE workspace_id=$1 AND id=$2 AND status='claimed'
         "#,

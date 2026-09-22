@@ -8,7 +8,7 @@
 //! Everything here is read through the same tables the consent ledger and
 //! each act's own release ladder keep: `amplification_consents` for the
 //! grant, `amplification_deliveries` for what the edge already carried,
-//! `viryaos_release_plans` for the catalogue. The dispatch itself is the
+//! `release_plans` for the catalogue. The dispatch itself is the
 //! existing `run_amplification_campaign` — the monthly cap, the per-fan
 //! cooldown and the dedupe all apply unchanged, which is the point: the
 //! rotation spends from the attention budget rather than adding to it.
@@ -96,7 +96,7 @@ pub async fn catalogue_rotation_plan(
         let catalogue = sqlx::query_as::<_, ReleaseRow>(
             r#"
             SELECT id, title, release_at, listen_url
-            FROM viryaos_release_plans
+            FROM release_plans
             WHERE workspace_id = $1
               AND active
               AND communication_enabled

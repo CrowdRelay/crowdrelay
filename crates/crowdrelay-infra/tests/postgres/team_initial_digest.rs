@@ -62,7 +62,7 @@ async fn run(pool: &PgPool, url: &str) -> Result<(), Box<dyn std::error::Error>>
     // Every approval got its own assignment — batching the mail changes
     // interruptions, not the work index.
     let assignments = sqlx::query_scalar::<_, i64>(
-        "SELECT count(*)::bigint FROM viryaos_team_assignments
+        "SELECT count(*)::bigint FROM team_assignments
          WHERE workspace_id = $1 AND source_kind = 'autopilot_action'
            AND status = 'open'
            AND assignee_member_id = $2",
@@ -76,8 +76,8 @@ async fn run(pool: &PgPool, url: &str) -> Result<(), Box<dyn std::error::Error>>
     // One email action for the handoffs — the digest — not five.
     let emails = sqlx::query_as::<_, (String, String)>(
         "SELECT payload->>'task_title', payload->>'task_detail'
-         FROM viryaos_autopilot_actions action
-         JOIN viryaos_team_assignments assignment
+         FROM autopilot_actions action
+         JOIN team_assignments assignment
            ON assignment.workspace_id = action.workspace_id
           AND assignment.id = (action.payload->>'assignment_id')::uuid
          WHERE action.workspace_id = $1
@@ -121,8 +121,8 @@ async fn run(pool: &PgPool, url: &str) -> Result<(), Box<dyn std::error::Error>>
         .reconcile_team_handoffs(WorkspaceId::from_uuid(workspace), now)
         .await?;
     let email_count = sqlx::query_scalar::<_, i64>(
-        "SELECT count(*)::bigint FROM viryaos_autopilot_actions action
-         JOIN viryaos_team_assignments assignment
+        "SELECT count(*)::bigint FROM autopilot_actions action
+         JOIN team_assignments assignment
            ON assignment.workspace_id = action.workspace_id
           AND assignment.id = (action.payload->>'assignment_id')::uuid
          WHERE action.workspace_id = $1
@@ -178,7 +178,7 @@ async fn member(
     .fetch_one(pool)
     .await?;
     sqlx::query(
-        "INSERT INTO viryaos_team_profiles
+        "INSERT INTO team_profiles
              (workspace_id, member_id, member_key, active, skills)
          VALUES ($1, $2, $3, true, ARRAY['approval','operations','social']::text[])",
     )
@@ -198,7 +198,7 @@ async fn advertise_team_email(
     now: OffsetDateTime,
 ) -> Result<(), Box<dyn std::error::Error>> {
     sqlx::query(
-        r#"INSERT INTO viryaos_executor_instances (
+        r#"INSERT INTO executor_instances (
             workspace_id, executor_id, version, manifest_sha, observed_at, expires_at
         ) VALUES ($1,'n8n-crew-test','test','test-manifest',$2,$3)"#,
     )
@@ -208,7 +208,7 @@ async fn advertise_team_email(
     .execute(pool)
     .await?;
     sqlx::query(
-        r#"INSERT INTO viryaos_executor_capabilities (
+        r#"INSERT INTO executor_capabilities (
             workspace_id, executor_id, capability, capability_version, observed_at, expires_at
         ) VALUES ($1,'n8n-crew-test','team.email','1',$2,$3)"#,
     )
@@ -230,7 +230,7 @@ async fn awaiting_approval(
     index: i64,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let decision_id = sqlx::query_scalar::<_, Uuid>(
-        "INSERT INTO viryaos_autopilot_decisions
+        "INSERT INTO autopilot_decisions
              (id, workspace_id, decision_key, context, subject_kind, subject_id,
               decision_kind, confidence_basis_points, disposition, reason,
               input_snapshot, policy_snapshot, recommendation, evaluated_at, trace_id)
@@ -247,7 +247,7 @@ async fn awaiting_approval(
     .fetch_one(pool)
     .await?;
     sqlx::query(
-        "INSERT INTO viryaos_autopilot_actions
+        "INSERT INTO autopilot_actions
              (id, workspace_id, decision_id, context, action_kind, subject_kind,
               subject_id, idempotency_key, payload, status, approval_expires_at)
          VALUES ($1,$2,$3,'growth_intelligence','community.engage.request','target_community',

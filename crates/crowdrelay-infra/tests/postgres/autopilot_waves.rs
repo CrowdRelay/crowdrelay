@@ -62,7 +62,7 @@ async fn fixture(label: &str) -> Result<Fixture, Box<dyn std::error::Error>> {
     // Four verified press targets, so the anchor clears the minimum wave size.
     for index in 0..4 {
         sqlx::query(
-            "INSERT INTO viryaos_outreach_targets (
+            "INSERT INTO outreach_targets (
                  workspace_id, target_kind, display_name, contact_email,
                  active, verified, accepts_outreach
              ) VALUES ($1,'press',$2,$3,true,true,true)",
@@ -139,7 +139,7 @@ async fn open_press_wave(fixture: &Fixture) -> Result<Uuid, Box<dyn std::error::
         "one wave per kind per anchor, whatever the cycle does"
     );
     Ok(sqlx::query_scalar::<_, Uuid>(
-        "SELECT id FROM viryaos_outreach_waves WHERE workspace_id=$1 AND anchor_id=$2",
+        "SELECT id FROM outreach_waves WHERE workspace_id=$1 AND anchor_id=$2",
     )
     .bind(fixture.workspace_id.into_uuid())
     .bind(fixture.event_id)
@@ -169,7 +169,7 @@ async fn queue_pitch(
     let decision_id = Uuid::now_v7();
     sqlx::query(
         r#"
-        INSERT INTO viryaos_autopilot_decisions (
+        INSERT INTO autopilot_decisions (
             id, workspace_id, decision_key, context, subject_kind, subject_id,
             decision_kind, confidence_basis_points, disposition, reason,
             input_snapshot, policy_snapshot, recommendation
@@ -189,7 +189,7 @@ async fn queue_pitch(
     let action_id = Uuid::now_v7();
     sqlx::query(
         r#"
-        INSERT INTO viryaos_autopilot_actions (
+        INSERT INTO autopilot_actions (
             id, workspace_id, decision_id, context, action_kind, subject_kind, subject_id,
             idempotency_key, payload, status, action_class
         )
@@ -210,7 +210,7 @@ async fn queue_pitch(
 
 async fn statuses(fixture: &Fixture) -> Result<Vec<String>, Box<dyn std::error::Error>> {
     Ok(sqlx::query_scalar::<_, String>(
-        "SELECT status FROM viryaos_autopilot_actions WHERE workspace_id=$1 ORDER BY id",
+        "SELECT status FROM autopilot_actions WHERE workspace_id=$1 ORDER BY id",
     )
     .bind(fixture.workspace_id.into_uuid())
     .fetch_all(&fixture.pool)
@@ -285,7 +285,7 @@ async fn a_sealed_wave_is_approved_whole_and_a_drafting_one_is_not()
         "the whole batch moved together"
     );
     let outsider_status =
-        sqlx::query_scalar::<_, String>("SELECT status FROM viryaos_autopilot_actions WHERE id=$1")
+        sqlx::query_scalar::<_, String>("SELECT status FROM autopilot_actions WHERE id=$1")
             .bind(outsider)
             .fetch_one(&fixture.pool)
             .await?;
@@ -321,7 +321,7 @@ async fn only_active_non_filler_releases_anchor_waves() -> Result<(), Box<dyn st
     let release_at = fixture.now + time::Duration::days(30);
     let single_id = Uuid::now_v7();
     sqlx::query(
-        "INSERT INTO viryaos_release_plans (id, workspace_id, source_key, title, release_at, tier)
+        "INSERT INTO release_plans (id, workspace_id, source_key, title, release_at, tier)
          VALUES ($1,$2,$3,$4,$5,'single')",
     )
     .bind(single_id)
@@ -333,7 +333,7 @@ async fn only_active_non_filler_releases_anchor_waves() -> Result<(), Box<dyn st
     .await?;
     for (tier, active) in [("filler", true), ("single", false)] {
         sqlx::query(
-            "INSERT INTO viryaos_release_plans (
+            "INSERT INTO release_plans (
                  id, workspace_id, source_key, title, release_at, tier, active
              ) VALUES ($1,$2,$3,$4,$5,$6,$7)",
         )
@@ -394,7 +394,7 @@ async fn a_served_lead_cannot_be_re_pitched() -> Result<(), Box<dyn std::error::
         ("Press 2", "received"),
     ] {
         sqlx::query(
-            "UPDATE viryaos_outreach_targets
+            "UPDATE outreach_targets
              SET last_reply_at=now(), last_reply_disposition=$3
              WHERE workspace_id=$1 AND display_name=$2",
         )
@@ -424,13 +424,13 @@ async fn a_served_lead_cannot_be_re_pitched() -> Result<(), Box<dyn std::error::
     // And the dispatch lock refuses the served lead even though a stale
     // opportunity row points at it — the gate is the last word.
     let served_target = sqlx::query_scalar::<_, Uuid>(
-        "SELECT id FROM viryaos_outreach_targets WHERE workspace_id=$1 AND display_name='Press 0'",
+        "SELECT id FROM outreach_targets WHERE workspace_id=$1 AND display_name='Press 0'",
     )
     .bind(fixture.workspace_id.into_uuid())
     .fetch_one(&fixture.pool)
     .await?;
     let opportunity_id = sqlx::query_scalar::<_, Uuid>(
-        "INSERT INTO viryaos_outreach_opportunities (
+        "INSERT INTO outreach_opportunities (
              workspace_id, target_id, source, subject_kind, subject_key, template_key,
              relevance_basis_points, confidence_basis_points, observed_at, expires_at
          ) VALUES ($1,$2,'manual','event',$3,'event.press.v1',9000,9000,$4,$5)
@@ -459,7 +459,7 @@ async fn a_served_lead_cannot_be_re_pitched() -> Result<(), Box<dyn std::error::
     let decision_id = Uuid::now_v7();
     sqlx::query(
         r#"
-        INSERT INTO viryaos_autopilot_decisions (
+        INSERT INTO autopilot_decisions (
             id, workspace_id, decision_key, context, subject_kind, subject_id,
             decision_kind, confidence_basis_points, disposition, reason,
             input_snapshot, policy_snapshot, recommendation, trace_id)
@@ -477,7 +477,7 @@ async fn a_served_lead_cannot_be_re_pitched() -> Result<(), Box<dyn std::error::
     .await?;
     let action_id = Uuid::now_v7();
     sqlx::query(
-        "INSERT INTO viryaos_autopilot_actions (
+        "INSERT INTO autopilot_actions (
              id, workspace_id, decision_id, context, action_kind, subject_kind, subject_id,
              idempotency_key, payload, status, action_class
          ) VALUES ($1,$2,$3,'outreach','outreach.request','outreach_opportunity',$4,$5,$6,
@@ -496,7 +496,7 @@ async fn a_served_lead_cannot_be_re_pitched() -> Result<(), Box<dyn std::error::
     // claim parks the pitch as `awaiting_executor` and the dispatch gate under
     // test is never reached.
     sqlx::query(
-        "INSERT INTO viryaos_executor_instances (
+        "INSERT INTO executor_instances (
              workspace_id, executor_id, version, manifest_sha, observed_at, expires_at
          ) VALUES ($1,'n8n-served-test','test','test-manifest',$2,$3)",
     )
@@ -506,7 +506,7 @@ async fn a_served_lead_cannot_be_re_pitched() -> Result<(), Box<dyn std::error::
     .execute(&fixture.pool)
     .await?;
     sqlx::query(
-        "INSERT INTO viryaos_executor_capabilities (
+        "INSERT INTO executor_capabilities (
              workspace_id, executor_id, capability, capability_version, observed_at, expires_at
          ) VALUES ($1,'n8n-served-test','outreach.send','1',$2,$3)",
     )
@@ -573,7 +573,7 @@ async fn an_expiring_wave_takes_its_unapproved_pitches_with_it()
         )
         .await?;
     let settled = sqlx::query_as::<_, (String, Option<String>)>(
-        "SELECT state, expiry_reason FROM viryaos_outreach_waves WHERE id=$1",
+        "SELECT state, expiry_reason FROM outreach_waves WHERE id=$1",
     )
     .bind(wave_id)
     .fetch_one(&fixture.pool)
@@ -583,7 +583,7 @@ async fn an_expiring_wave_takes_its_unapproved_pitches_with_it()
         ("expired".to_owned(), Some("too_few_pitches".to_owned()))
     );
     let cancelled = sqlx::query_scalar::<_, i64>(
-        "SELECT count(*) FROM viryaos_autopilot_actions
+        "SELECT count(*) FROM autopilot_actions
          WHERE workspace_id=$1 AND status='cancelled'",
     )
     .bind(fixture.workspace_id.into_uuid())
@@ -591,7 +591,7 @@ async fn an_expiring_wave_takes_its_unapproved_pitches_with_it()
     .await?;
     assert_eq!(cancelled, 2);
     let outsider_status =
-        sqlx::query_scalar::<_, String>("SELECT status FROM viryaos_autopilot_actions WHERE id=$1")
+        sqlx::query_scalar::<_, String>("SELECT status FROM autopilot_actions WHERE id=$1")
             .bind(outsider)
             .fetch_one(&fixture.pool)
             .await?;
@@ -627,13 +627,13 @@ async fn a_dispatched_pitch_carries_the_approved_letter() -> Result<(), Box<dyn 
 {
     let fixture = fixture("wave-draft").await?;
     let target = sqlx::query_scalar::<_, Uuid>(
-        "SELECT id FROM viryaos_outreach_targets WHERE workspace_id=$1 AND display_name='Press 0'",
+        "SELECT id FROM outreach_targets WHERE workspace_id=$1 AND display_name='Press 0'",
     )
     .bind(fixture.workspace_id.into_uuid())
     .fetch_one(&fixture.pool)
     .await?;
     let opportunity_id = sqlx::query_scalar::<_, Uuid>(
-        "INSERT INTO viryaos_outreach_opportunities (
+        "INSERT INTO outreach_opportunities (
              workspace_id, target_id, source, subject_kind, subject_key, template_key,
              relevance_basis_points, confidence_basis_points, observed_at, expires_at
          ) VALUES ($1,$2,'manual','event',$3,'event.press.v1',9000,9000,$4,$5)
@@ -663,7 +663,7 @@ async fn a_dispatched_pitch_carries_the_approved_letter() -> Result<(), Box<dyn 
     let decision_id = Uuid::now_v7();
     sqlx::query(
         r#"
-        INSERT INTO viryaos_autopilot_decisions (
+        INSERT INTO autopilot_decisions (
             id, workspace_id, decision_key, context, subject_kind, subject_id,
             decision_kind, confidence_basis_points, disposition, reason,
             input_snapshot, policy_snapshot, recommendation, trace_id)
@@ -681,7 +681,7 @@ async fn a_dispatched_pitch_carries_the_approved_letter() -> Result<(), Box<dyn 
     .await?;
     let action_id = Uuid::now_v7();
     sqlx::query(
-        "INSERT INTO viryaos_autopilot_actions (
+        "INSERT INTO autopilot_actions (
              id, workspace_id, decision_id, context, action_kind, subject_kind, subject_id,
              idempotency_key, payload, status, action_class
          ) VALUES ($1,$2,$3,'outreach','outreach.request','outreach_opportunity',$4,$5,$6,
@@ -697,7 +697,7 @@ async fn a_dispatched_pitch_carries_the_approved_letter() -> Result<(), Box<dyn 
     .await?;
 
     sqlx::query(
-        "INSERT INTO viryaos_executor_instances (
+        "INSERT INTO executor_instances (
              workspace_id, executor_id, version, manifest_sha, observed_at, expires_at
          ) VALUES ($1,'n8n-draft-test','test','test-manifest',$2,$3)",
     )
@@ -707,7 +707,7 @@ async fn a_dispatched_pitch_carries_the_approved_letter() -> Result<(), Box<dyn 
     .execute(&fixture.pool)
     .await?;
     sqlx::query(
-        "INSERT INTO viryaos_executor_capabilities (
+        "INSERT INTO executor_capabilities (
              workspace_id, executor_id, capability, capability_version, observed_at, expires_at
          ) VALUES ($1,'n8n-draft-test','outreach.send','1',$2,$3)",
     )
@@ -765,7 +765,7 @@ async fn a_dispatched_application_carries_the_approved_letter()
     let fixture = fixture("apply-draft").await?;
     let suffix = fixture.workspace_id.into_uuid().simple().to_string();
     let opportunity_id = sqlx::query_scalar::<_, Uuid>(
-        "INSERT INTO viryaos_team_opportunities (
+        "INSERT INTO team_opportunities (
              workspace_id, opportunity_kind, source, external_key, title,
              organization, contact_email, verified_destination, eligible,
              fit_basis_points, reputation_basis_points,
@@ -794,7 +794,7 @@ async fn a_dispatched_application_carries_the_approved_letter()
     let decision_id = Uuid::now_v7();
     sqlx::query(
         r#"
-        INSERT INTO viryaos_autopilot_decisions (
+        INSERT INTO autopilot_decisions (
             id, workspace_id, decision_key, context, subject_kind, subject_id,
             decision_kind, confidence_basis_points, disposition, reason,
             input_snapshot, policy_snapshot, recommendation, trace_id)
@@ -812,7 +812,7 @@ async fn a_dispatched_application_carries_the_approved_letter()
     .await?;
     let action_id = Uuid::now_v7();
     sqlx::query(
-        "INSERT INTO viryaos_autopilot_actions (
+        "INSERT INTO autopilot_actions (
              id, workspace_id, decision_id, context, action_kind, subject_kind, subject_id,
              idempotency_key, payload, status, action_class
          ) VALUES ($1,$2,$3,'live_opportunity','apply_live_opportunity','team_opportunity',$4,$5,$6,
@@ -828,7 +828,7 @@ async fn a_dispatched_application_carries_the_approved_letter()
     .await?;
 
     sqlx::query(
-        "INSERT INTO viryaos_executor_instances (
+        "INSERT INTO executor_instances (
              workspace_id, executor_id, version, manifest_sha, observed_at, expires_at
          ) VALUES ($1,'n8n-draft-test','test','test-manifest',$2,$3)",
     )
@@ -838,7 +838,7 @@ async fn a_dispatched_application_carries_the_approved_letter()
     .execute(&fixture.pool)
     .await?;
     sqlx::query(
-        "INSERT INTO viryaos_executor_capabilities (
+        "INSERT INTO executor_capabilities (
              workspace_id, executor_id, capability, capability_version, observed_at, expires_at
          ) VALUES ($1,'n8n-draft-test','opportunity.application','1',$2,$3)",
     )
@@ -901,7 +901,7 @@ async fn an_application_speaks_the_organisers_language() -> Result<(), Box<dyn s
         country_code: Option<&str>,
     ) -> Result<Uuid, Box<dyn std::error::Error>> {
         sqlx::query_scalar::<_, Uuid>(
-            "INSERT INTO viryaos_team_opportunities (
+            "INSERT INTO team_opportunities (
                  workspace_id, opportunity_kind, source, external_key, title,
                  organization, contact_email, verified_destination, eligible,
                  fit_basis_points, reputation_basis_points,
@@ -953,7 +953,7 @@ async fn an_application_speaks_the_organisers_language() -> Result<(), Box<dyn s
             "the candidate must persist an action"
         );
         sqlx::query_scalar::<_, String>(
-            "SELECT payload->'draft'->>'subject' FROM viryaos_autopilot_actions
+            "SELECT payload->'draft'->>'subject' FROM autopilot_actions
              WHERE workspace_id=$1 AND payload->>'opportunity_id'=$2",
         )
         .bind(fixture.workspace_id.into_uuid())

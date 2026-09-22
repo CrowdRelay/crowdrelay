@@ -131,7 +131,7 @@ async fn supply_counts_the_run_of_barren_sweeps_not_the_total()
         ("retired@example.test", false, false),
     ] {
         sqlx::query(
-            "INSERT INTO viryaos_outreach_targets
+            "INSERT INTO outreach_targets
              (workspace_id, target_kind, display_name, contact_email, active, do_not_contact)
              VALUES ($1, 'playlist', $2, $2, $3, $4)",
         )
@@ -231,7 +231,7 @@ async fn seed_sweep(
 ) -> Result<OffsetDateTime, Box<dyn std::error::Error>> {
     let decision_id = Uuid::now_v7();
     sqlx::query(
-        "INSERT INTO viryaos_autopilot_decisions
+        "INSERT INTO autopilot_decisions
          (id, workspace_id, context, subject_kind, subject_id, decision_kind,
           confidence_basis_points, disposition, reason, input_snapshot,
           policy_snapshot, recommendation, decision_key, trace_id)
@@ -244,7 +244,7 @@ async fn seed_sweep(
     .execute(pool)
     .await?;
     sqlx::query(
-        "INSERT INTO viryaos_autopilot_actions
+        "INSERT INTO autopilot_actions
          (workspace_id, decision_id, context, action_kind, subject_kind, subject_id,
           idempotency_key, payload, status, action_class, created_at, finished_at)
          VALUES ($1, $2, 'outreach_supply', 'outreach.discovery.request', 'workspace', $1,
@@ -293,7 +293,7 @@ async fn seed_candidate(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let route = format!("curator-{}@example.test", Uuid::now_v7().simple());
     sqlx::query(
-        "INSERT INTO viryaos_outreach_candidates
+        "INSERT INTO outreach_candidates
          (workspace_id, target_kind, display_name, source, source_reference, evidence,
           route_kind, route_value, route_is_published, fit_basis_points, status,
           refusal_reason, pitch_class, screened_at, created_at)

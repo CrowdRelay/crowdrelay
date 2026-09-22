@@ -2,10 +2,10 @@
 //! from the outbox and writes credited entries to the credit ledger.
 //!
 //! When a measurement completes, an attribution request is enqueued in
-//! `viryaos_attribution_requests`. This module provides the logic to
+//! `attribution_requests`. This module provides the logic to
 //! claim pending requests, discover competing actions, run the
 //! `ProportionalCreditAllocator`, and write the result to
-//! `viryaos_fan_credit_ledger`. The write is idempotent on
+//! `fan_credit_ledger`. The write is idempotent on
 //! (measurement_id, attribution_version).
 
 use crowdrelay_brain::{CreditAllocator, FanOutcome, ProportionalCreditAllocator};
@@ -37,11 +37,11 @@ pub(in crate::autopilot) async fn process_attribution_batch(
     // table carries no `updated_at`.
     let rows = sqlx::query(
         r#"
-        UPDATE viryaos_attribution_requests
+        UPDATE attribution_requests
         SET status = 'processing',
             attempt_count = attempt_count + 1
         WHERE id IN (
-            SELECT id FROM viryaos_attribution_requests
+            SELECT id FROM attribution_requests
             WHERE workspace_id = $1
               AND (status = 'pending'
                    OR (status = 'processing'
@@ -103,7 +103,7 @@ pub(in crate::autopilot) async fn process_attribution_batch(
                 );
                 let writeback = sqlx::query(
                     r#"
-                    UPDATE viryaos_attribution_requests
+                    UPDATE attribution_requests
                     SET status = $3, last_error = $2
                     WHERE id = $1 AND status = 'processing'
                     "#,
@@ -169,7 +169,7 @@ async fn process_one(
             durable_fans_30d,
             timestamp,
             resolved_at
-        FROM viryaos_growth_evidence
+        FROM growth_evidence
         WHERE workspace_id = $1
           AND action_id = $2
           AND resolved_at IS NOT NULL
@@ -269,7 +269,7 @@ async fn mark_causal_credits(
     let causal: Vec<uuid::Uuid> = sqlx::query_scalar(
         r#"
         SELECT action_id
-        FROM viryaos_experiment_assignments
+        FROM experiment_assignments
         WHERE workspace_id = $1
           AND action_id = ANY($2)
           AND arm = 'treatment'
@@ -303,7 +303,7 @@ async fn mark_causal_credits(
 async fn mark_done(pool: &sqlx::PgPool, request_id: uuid::Uuid) {
     let result = sqlx::query(
         r#"
-        UPDATE viryaos_attribution_requests
+        UPDATE attribution_requests
         SET status = 'done', processed_at = now()
         WHERE id = $1 AND status = 'processing'
         "#,

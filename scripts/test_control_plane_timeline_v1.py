@@ -19,7 +19,7 @@ relies on:
   timeline must render it; `cancelled` still never resolves;
 - the nine steps exist in time order with their anchors — reordering them
   is exactly the regression the page is built to prevent;
-- owners resolve through `viryaos_team_assignments.source_id` (both
+- owners resolve through `team_assignments.source_id` (both
   assignment shapes key the event there) joined to `workspace_members` —
   a step's owner is a display name, never an id the page cannot render,
   and the column is nullable so the row type must be `Option`;
@@ -139,7 +139,7 @@ class ControlPlaneTimelineContract(unittest.TestCase):
             self.assertIn(f'"{anchor}"', self.source)
 
     def test_owner_join_uses_the_handoff_index(self) -> None:
-        self.assertIn("viryaos_team_assignments", self.source)
+        self.assertIn("team_assignments", self.source)
         self.assertIn("assignment.source_id = $2", self.source)
         self.assertIn("assignment.action_id", self.source)
         self.assertIn("workspace_members", self.source)
@@ -151,7 +151,7 @@ class ControlPlaneTimelineContract(unittest.TestCase):
         self.assertIn(
             "COALESCE(ticket_sale.capacity, admission.capacity)", self.source
         )
-        self.assertIn("viryaos_autopilot_action_emissions", self.source)
+        self.assertIn("autopilot_action_emissions", self.source)
         self.assertIn("report.status IN ('succeeded','failed')", self.source)
         self.assertIn("phase = 'announcement'", self.source)
 
@@ -165,7 +165,7 @@ class ControlPlaneTimelineContract(unittest.TestCase):
         self.assertIn("to_workspace_id", self.source)
         self.assertIn('"campaign"', self.source)
         self.assertIn("content->>'lever' = 'post_show_recap'", self.source)
-        self.assertIn("viryaos_beacon_campaigns", self.source)
+        self.assertIn("beacon_campaigns", self.source)
         self.assertIn("venue_knowledge", self.source)
         self.assertIn("venue_address", self.source)
 

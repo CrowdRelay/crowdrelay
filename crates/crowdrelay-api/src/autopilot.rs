@@ -1,4 +1,4 @@
-//! ViryaOS Autopilot operator control plane.
+//! CrowdRelay Autopilot operator control plane.
 //!
 //! HTTP handlers only validate transport input and delegate to the application
 //! control port implemented by PostgreSQL infrastructure. Decision rules remain

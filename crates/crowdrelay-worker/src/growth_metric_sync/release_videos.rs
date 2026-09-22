@@ -29,7 +29,7 @@ impl GrowthMetricSyncWorker {
         let plans = sqlx::query_as::<_, (Uuid, Uuid, String, Option<String>)>(
             r#"
             SELECT plan.id, plan.workspace_id, plan.title, plan.listen_url
-            FROM viryaos_release_plans AS plan
+            FROM release_plans AS plan
             WHERE plan.active AND plan.listen_url IS NOT NULL
               -- Only YouTube destinations carry a video the Data API can
               -- read; a Spotify or storefront URL would stay due forever
@@ -39,8 +39,8 @@ impl GrowthMetricSyncWorker {
                                       AND now() + INTERVAL '180 days'
               AND NOT EXISTS (
                   SELECT 1
-                  FROM viryaos_growth_metric_points p
-                  JOIN viryaos_growth_metric_series s ON s.id = p.series_id
+                  FROM growth_metric_points p
+                  JOIN growth_metric_series s ON s.id = p.series_id
                   WHERE s.workspace_id = plan.workspace_id
                     AND s.subject_kind = 'release_plan'
                     AND s.subject_id = plan.id

@@ -2,13 +2,13 @@
 //!
 //! The brain records a `GrowthEvidence` row at dispatch time and loads
 //! resolved evidence for learning. This module provides the SQL functions
-//! to read and write the `viryaos_growth_evidence` table.
+//! to read and write the `growth_evidence` table.
 //!
-//! `viryaos_growth_evidence` is the primary read path for learning. The
-//! `viryaos_growth_episodes` table (migration 0155) is a derived write-only
+//! `growth_evidence` is the primary read path for learning. The
+//! `growth_episodes` table (migration 0155) is a derived write-only
 //! projection that is kept up to date as an audit trail; it is not read by
 //! production learning code today despite the migration comment claiming
-//! otherwise. `viryaos_evidence_events` is the immutable append-only event
+//! otherwise. `evidence_events` is the immutable append-only event
 //! log from which episodes can be rebuilt.
 //!
 //! See `crates/crowdrelay-brain/src/evidence.rs` for the domain types.
@@ -22,8 +22,8 @@ use crowdrelay_application::RepositoryError;
 use crowdrelay_application::autopilot::{AutopilotContext, EvidenceLedger};
 
 /// Records the best-effort audit trail for a growth evidence row:
-/// the immutable `action_dispatched` event in `viryaos_evidence_events`
-/// and the derived episode upsert in `viryaos_growth_episodes`.
+/// the immutable `action_dispatched` event in `evidence_events`
+/// and the derived episode upsert in `growth_episodes`.
 ///
 /// This is NOT transactional with the evidence row — the evidence table
 /// is the source of truth, and the event log / episode table are the
@@ -97,7 +97,7 @@ pub(in crate::autopilot) async fn record_growth_evidence_in_tx(
     let context_json = serde_json::to_value(&evidence.context).unwrap_or(serde_json::json!({}));
     sqlx::query(
         r#"
-        INSERT INTO viryaos_growth_evidence (
+        INSERT INTO growth_evidence (
             workspace_id, action_id, opportunity_id, timestamp,
             audience, target_key, creative_family, recipient_id, channel,
             estimated_reach, actual_reach,
@@ -196,8 +196,8 @@ pub(in crate::autopilot) async fn load_resolved_evidence_counts(
     let rows: Vec<(String, i64)> = sqlx::query_as(
         r#"
         SELECT a.context, COUNT(*)
-        FROM viryaos_growth_evidence e
-        JOIN viryaos_autopilot_actions a
+        FROM growth_evidence e
+        JOIN autopilot_actions a
           ON a.id = e.action_id
          AND a.workspace_id = e.workspace_id
         WHERE e.workspace_id = $1
@@ -271,7 +271,7 @@ async fn load_evidence(
     let has_duplicates: bool = sqlx::query_scalar(
         r#"SELECT EXISTS(
             SELECT 1
-            FROM viryaos_experiment_assignments
+            FROM experiment_assignments
             WHERE workspace_id = $1 AND action_id IS NOT NULL
             GROUP BY workspace_id, action_id
             HAVING COUNT(*) > 1
@@ -350,7 +350,7 @@ async fn load_evidence(
                COALESCE(ge.partial_resolution_count, 0) AS partial_resolution_count,
                ge.replayed_3d_at, ge.replayed_14d_at, ge.replayed_30d_at,
                ge.observed_metrics
-        FROM viryaos_growth_evidence ge
+        FROM growth_evidence ge
         -- Belt-and-suspenders fallback: if the 3d measurement wrote to
         -- dispatch_predictions.observed_new_fans but not to
         -- growth_evidence.observed_fans (legacy rows, or a future code
@@ -358,7 +358,7 @@ async fn load_evidence(
         -- in. The COALESCE above prefers the evidence row's own value
         -- when it exists. The join is on (workspace_id, action_id) which
         -- has a partial unique index — no fan-out risk.
-        LEFT JOIN viryaos_dispatch_predictions dp
+        LEFT JOIN dispatch_predictions dp
           ON dp.workspace_id = ge.workspace_id
          AND dp.action_id = ge.action_id
         -- LATERAL subquery: pick at most ONE assignment row per evidence
@@ -383,7 +383,7 @@ async fn load_evidence(
         LEFT JOIN LATERAL (
             SELECT assignment.execution_status, assignment.experiment_uuid,
                    assignment.final_contamination
-            FROM viryaos_experiment_assignments assignment
+            FROM experiment_assignments assignment
             WHERE assignment.workspace_id = ge.workspace_id
               AND (
                   (ge.experiment_assignment_id IS NOT NULL
@@ -632,7 +632,7 @@ pub(in crate::autopilot) async fn save_brain_state(
     let pool = &repo.pool;
     sqlx::query(
         r#"
-        INSERT INTO viryaos_brain_state (workspace_id, module, state, updated_at)
+        INSERT INTO brain_state (workspace_id, module, state, updated_at)
         VALUES ($1, $2, $3, now())
         ON CONFLICT (workspace_id, module)
         DO UPDATE SET state = $3, updated_at = now()
@@ -657,7 +657,7 @@ pub(in crate::autopilot) async fn load_brain_state(
     let pool = &repo.pool;
     let row: Option<(serde_json::Value, OffsetDateTime)> = sqlx::query_as(
         r#"
-        SELECT state, updated_at FROM viryaos_brain_state
+        SELECT state, updated_at FROM brain_state
         WHERE workspace_id = $1 AND module = $2
         "#,
     )
@@ -669,10 +669,10 @@ pub(in crate::autopilot) async fn load_brain_state(
     Ok(row)
 }
 
-/// Records an immutable evidence event to the `viryaos_evidence_events` table.
+/// Records an immutable evidence event to the `evidence_events` table.
 ///
 /// This is the append-only event log. Each call inserts a new row — no
-/// updates, no deletes. The derived `viryaos_growth_episodes` table is
+/// updates, no deletes. The derived `growth_episodes` table is
 /// rebuilt from these events.
 pub(in crate::autopilot) async fn record_evidence_event(
     repo: &PostgresAutopilotRepository,
@@ -681,11 +681,11 @@ pub(in crate::autopilot) async fn record_evidence_event(
 ) -> Result<(), RepositoryError> {
     sqlx::query(
         r#"
-        INSERT INTO viryaos_evidence_events
+        INSERT INTO evidence_events
             (workspace_id, action_id, opportunity_id, episode_id,
              event_type, payload, occurred_at, trace_id)
         VALUES ($1, $2, $3, $4, $5, $6, $7,
-            (SELECT trace_id FROM viryaos_autopilot_actions WHERE id = $2)
+            (SELECT trace_id FROM autopilot_actions WHERE id = $2)
         )
         "#,
     )
@@ -714,7 +714,7 @@ pub(in crate::autopilot) async fn upsert_growth_episode(
     let context_json = serde_json::to_value(&evidence.context).unwrap_or(serde_json::json!({}));
     sqlx::query(
         r#"
-        INSERT INTO viryaos_growth_episodes (
+        INSERT INTO growth_episodes (
             workspace_id, action_id, opportunity_id, episode_id,
             channel, estimated_reach, treatment, propensity,
             predicted_fans, predicted_signal_installs, context,
@@ -755,7 +755,7 @@ pub(in crate::autopilot) async fn upsert_growth_episode(
     Ok(())
 }
 
-/// Records a credit allocation in the `viryaos_fan_credit_ledger` table.
+/// Records a credit allocation in the `fan_credit_ledger` table.
 ///
 /// CRITICAL INVARIANT: the raw observation in the evidence table is
 /// immutable. This stores attributed credit in a SEPARATE table. The
@@ -782,7 +782,7 @@ pub(in crate::autopilot) async fn record_credit_allocation(
     for credit in &result.credits {
         sqlx::query(
             r#"
-            INSERT INTO viryaos_fan_credit_ledger
+            INSERT INTO fan_credit_ledger
                 (workspace_id, action_id, credited_incremental_y14,
                  credited_incremental_y30, credit_weight,
                  attribution_confidence, attribution_method,
@@ -827,7 +827,7 @@ pub(in crate::autopilot) async fn record_credit_allocation(
 /// precisely when outcomes are still coming.
 ///
 /// Counted from the measurement queue rather than from
-/// `viryaos_growth_evidence.resolved_at`. Four measurements resolve against
+/// `growth_evidence.resolved_at`. Four measurements resolve against
 /// one evidence row and the first to land stamps `resolved_at`, so a
 /// dispatch with three outcomes still outstanding read as fully observed and
 /// dropped out of the count. VOI was undercounted by roughly the ratio of
@@ -841,7 +841,7 @@ pub(in crate::autopilot) async fn count_pending_measurements(
         let count: i64 = sqlx::query_scalar(
             r#"
             SELECT COUNT(*)
-            FROM viryaos_autopilot_measurements
+            FROM autopilot_measurements
             WHERE workspace_id = $1
               AND status = 'pending'
             "#,
@@ -888,7 +888,7 @@ pub(in crate::autopilot) async fn discover_competing_actions(
             predicted_fans,
             recipient_id,
             opportunity_id
-        FROM viryaos_growth_evidence
+        FROM growth_evidence
         WHERE workspace_id = $1
           AND action_id IS NOT NULL
           AND action_id != $2

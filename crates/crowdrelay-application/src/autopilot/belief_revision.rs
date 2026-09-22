@@ -4,8 +4,8 @@
 //! from resolved growth evidence during the causal model load, and the
 //! hypothesis lifecycle, which degrades a template that fails walk-forward
 //! validation. Both are read back by the next cycle, and neither left a
-//! record of *why* it moved: `viryaos_brain_state` and
-//! `viryaos_growth_hypotheses` are updated in place.
+//! record of *why* it moved: `brain_state` and
+//! `growth_hypotheses` are updated in place.
 //!
 //! A [`BeliefRevision`] is that record. It names the belief, what it was,
 //! what it became, and the evidence rows that moved it — which carry the

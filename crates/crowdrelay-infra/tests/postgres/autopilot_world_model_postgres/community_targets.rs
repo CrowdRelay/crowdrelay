@@ -1,4 +1,3 @@
-use sqlx::postgres::PgPoolOptions;
 
 /// The community pool must rank by what a community produced, not by how
 /// big it is.
@@ -13,12 +12,8 @@ use sqlx::postgres::PgPoolOptions;
 #[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn a_community_that_converted_outranks_a_bigger_quiet_one()
 -> Result<(), Box<dyn std::error::Error>> {
-    let database_url = std::env::var("CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL")?;
-    let pool = PgPoolOptions::new()
-        .max_connections(4)
-        .connect(&database_url)
-        .await?;
-    crowdrelay_infra::database::MIGRATOR.run(&pool).await?;
+    let (pool, database_url) =
+        common::test_pool_with_url("CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL").await?;
 
     let workspace_id = WorkspaceId::new();
     let suffix = workspace_id.into_uuid().simple().to_string();
@@ -152,12 +147,8 @@ async fn a_community_that_converted_outranks_a_bigger_quiet_one()
 #[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn a_telegram_channel_named_like_a_subreddit_credits_nothing()
 -> Result<(), Box<dyn std::error::Error>> {
-    let database_url = std::env::var("CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL")?;
-    let pool = PgPoolOptions::new()
-        .max_connections(4)
-        .connect(&database_url)
-        .await?;
-    crowdrelay_infra::database::MIGRATOR.run(&pool).await?;
+    let (pool, database_url) =
+        common::test_pool_with_url("CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL").await?;
 
     let workspace_id = WorkspaceId::new();
     let suffix = workspace_id.into_uuid().simple().to_string();

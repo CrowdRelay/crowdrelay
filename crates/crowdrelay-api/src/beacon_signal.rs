@@ -1,6 +1,6 @@
-//! Signal "Latarnik" access for existing Virya OS Beacons.
+//! Signal "Latarnik" access for existing CrowdRelay Beacons.
 //!
-//! The relationship record remains `viryaos_beacons`; this module only owns
+//! The relationship record remains `beacons`; this module only owns
 //! invitation/session auth, self-service preferences, the press-room read model
 //! and a bounded nearby-show push wave. This keeps Beacon outreach cadence in
 //! Autopilot and avoids creating a second CRM or treating media contacts as fans.
@@ -350,11 +350,11 @@ pub(crate) async fn authorize_beacon(
                profile.locale,
                profile.topics,
                profile.nearby_gigs_enabled
-        FROM viryaos_beacon_signal_sessions session
-        JOIN viryaos_beacon_signal_profiles profile
+        FROM beacon_signal_sessions session
+        JOIN beacon_signal_profiles profile
           ON profile.workspace_id = session.workspace_id
          AND profile.beacon_id = session.beacon_id
-        JOIN viryaos_beacons beacon
+        JOIN beacons beacon
           ON beacon.workspace_id = session.workspace_id
          AND beacon.id = session.beacon_id
         WHERE session.workspace_id = $1
@@ -551,13 +551,13 @@ pub async fn me(State(state): State<crate::AppState>, headers: HeaderMap) -> Res
                    )::integer) AS distance_km,
                    engagement.status AS engagement_status, engagement.help_kind,
                    engagement.last_notified_at
-            FROM viryaos_beacons beacon
+            FROM beacons beacon
             JOIN cities home_city ON home_city.id = beacon.city_id
             JOIN events event ON event.workspace_id = beacon.workspace_id
                 AND event.status='published' AND event.starts_at > now()
                 AND event.starts_at < now() + interval '365 days'
             JOIN cities event_city ON event_city.id = event.city_id
-            LEFT JOIN viryaos_beacon_signal_event_engagements engagement
+            LEFT JOIN beacon_signal_event_engagements engagement
               ON engagement.workspace_id=event.workspace_id
              AND engagement.beacon_id=beacon.id AND engagement.event_id=event.id
             WHERE beacon.workspace_id=$1 AND beacon.id=$2
@@ -586,7 +586,7 @@ pub async fn me(State(state): State<crate::AppState>, headers: HeaderMap) -> Res
         }
     };
     let open_press_requests = sqlx::query_scalar::<_, i64>(
-        "SELECT count(*)::bigint FROM viryaos_beacon_press_requests WHERE workspace_id=$1 AND beacon_id=$2 AND status='open'",
+        "SELECT count(*)::bigint FROM beacon_press_requests WHERE workspace_id=$1 AND beacon_id=$2 AND status='open'",
     )
     .bind(workspace_id)
     .bind(principal.beacon_id)

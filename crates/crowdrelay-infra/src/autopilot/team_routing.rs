@@ -109,7 +109,7 @@ pub(in crate::autopilot) async fn load_team_routing(
                                ELSE 0
                           END
                       )::integer
-                      FROM viryaos_team_assignments history
+                      FROM team_assignments history
                       WHERE history.workspace_id = profile.workspace_id
                         AND history.assignee_member_id = profile.member_id
                         AND history.status <> 'open'
@@ -123,10 +123,10 @@ pub(in crate::autopilot) async fn load_team_routing(
                   -- first to edit a video, and averaging the two hides both.
                   COALESCE(per_skill.skills, ARRAY[]::text[]) AS skill_follow_through_skills,
                   COALESCE(per_skill.scores, ARRAY[]::integer[]) AS skill_follow_through
-           FROM viryaos_team_profiles profile
+           FROM team_profiles profile
            JOIN workspace_members member
              ON member.workspace_id=profile.workspace_id AND member.id=profile.member_id
-           LEFT JOIN viryaos_team_assignments assignment
+           LEFT JOIN team_assignments assignment
              ON assignment.workspace_id=profile.workspace_id AND assignment.assignee_member_id=profile.member_id
            LEFT JOIN LATERAL (
                SELECT array_agg(skill.required_skill ORDER BY skill.required_skill) AS skills,
@@ -139,7 +139,7 @@ pub(in crate::autopilot) async fn load_team_routing(
                                    ELSE 0
                               END
                           )::integer AS score
-                   FROM viryaos_team_assignments history
+                   FROM team_assignments history
                    WHERE history.workspace_id = profile.workspace_id
                      AND history.assignee_member_id = profile.member_id
                      AND history.status <> 'open'

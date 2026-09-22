@@ -20,7 +20,7 @@ pub(in crate::autopilot) async fn approve_content_suggestion(
     // band to it now would be a lie.
     let changed = sqlx::query(
         r#"
-        UPDATE viryaos_content_suggestions
+        UPDATE content_suggestions
         SET status = 'approved', updated_at = now()
         WHERE workspace_id = $1 AND id = $2 AND status = 'raised'
           AND (expires_at IS NULL OR expires_at > now())
@@ -41,7 +41,7 @@ pub(in crate::autopilot) async fn approve_content_suggestion(
             r#"
             SELECT status,
                    expires_at IS NOT NULL AND expires_at <= now() AS lapsed
-            FROM viryaos_content_suggestions
+            FROM content_suggestions
             WHERE workspace_id = $1 AND id = $2
             "#,
         )

@@ -295,7 +295,7 @@ impl GrowthReadinessHealth {
         // others. The `unwrap_or(false)` ensures a query error is logged by
         // sqlx but does not propagate.
         let autopilot_producing = sqlx::query_scalar::<_, bool>(
-            "SELECT EXISTS(SELECT 1 FROM viryaos_autopilot_cycle_runs WHERE started_at >= $1)",
+            "SELECT EXISTS(SELECT 1 FROM autopilot_cycle_runs WHERE started_at >= $1)",
         )
         .bind(cutoff)
         .fetch_optional(pool)

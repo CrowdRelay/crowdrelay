@@ -1,4 +1,4 @@
-//! Human handoff routing for ViryaOS.
+//! Human handoff routing for CrowdRelay.
 //!
 //! This is intentionally not a second task-management product. Bounded contexts
 //! remain authoritative for approvals, show checklists and opportunities; this
@@ -16,7 +16,7 @@ use crate::WorkspaceMemberId;
 ///
 /// The ceiling has always been the member's own number, and an unset one read
 /// as uncapped. Nothing else about crew mail is uncapped by accident, and this
-/// one was: `viryaos_autopilot_policies.max_actions_24h` defaults to 50 across
+/// one was: `autopilot_policies.max_actions_24h` defaults to 50 across
 /// 26 contexts, every `awaiting_approval` action becomes an assignment, and
 /// every assignment owes a first notice plus up to three reminders. So the
 /// only quantity with no ceiling was the one measured in a person's attention,

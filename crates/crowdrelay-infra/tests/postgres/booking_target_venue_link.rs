@@ -79,7 +79,7 @@ async fn seed_target(
     display_name: &str,
 ) -> Result<Uuid, Box<dyn std::error::Error>> {
     let id = sqlx::query_scalar::<_, Uuid>(
-        "INSERT INTO viryaos_booking_targets
+        "INSERT INTO booking_targets
              (workspace_id, city_id, target_kind, display_name, contact_email)
          VALUES ($1, $2, $3, $4, $5) RETURNING id",
     )
@@ -94,12 +94,10 @@ async fn seed_target(
 }
 
 async fn venue_link(pool: &PgPool, target_id: Uuid) -> Result<Option<Uuid>, sqlx::Error> {
-    sqlx::query_scalar::<_, Option<Uuid>>(
-        "SELECT venue_id FROM viryaos_booking_targets WHERE id = $1",
-    )
-    .bind(target_id)
-    .fetch_one(pool)
-    .await
+    sqlx::query_scalar::<_, Option<Uuid>>("SELECT venue_id FROM booking_targets WHERE id = $1")
+        .bind(target_id)
+        .fetch_one(pool)
+        .await
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -167,7 +165,7 @@ async fn run_cases(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
     );
 
     // ── A rename out of a match retracts, rather than keeping a stale claim.
-    sqlx::query("UPDATE viryaos_booking_targets SET display_name = 'Klub Z' WHERE id = $1")
+    sqlx::query("UPDATE booking_targets SET display_name = 'Klub Z' WHERE id = $1")
         .bind(unknown)
         .execute(pool)
         .await?;
@@ -192,7 +190,7 @@ async fn run_cases(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
     // And the CHECK holds even against a direct write that bypasses the
     // trigger's intent — the constraint is the guarantee, the trigger is the
     // convenience.
-    let forced = sqlx::query("UPDATE viryaos_booking_targets SET venue_id = $2 WHERE id = $1")
+    let forced = sqlx::query("UPDATE booking_targets SET venue_id = $2 WHERE id = $1")
         .bind(promoter)
         .bind(klub_x)
         .execute(pool)
@@ -211,7 +209,7 @@ async fn run_cases(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
         .execute(pool)
         .await?;
     let surviving =
-        sqlx::query("SELECT venue_id, contact_email FROM viryaos_booking_targets WHERE id = $1")
+        sqlx::query("SELECT venue_id, contact_email FROM booking_targets WHERE id = $1")
             .bind(target)
             .fetch_optional(pool)
             .await?
@@ -240,16 +238,14 @@ async fn the_backfill_links_targets_that_predate_the_migration()
         let workspace = seed_workspace(pool).await?;
         let wroclaw = seed_city(pool, "wroclaw").await?;
 
-        sqlx::query(
-            "DROP TRIGGER viryaos_booking_targets_resolve_venue ON viryaos_booking_targets",
-        )
-        .execute(pool)
-        .await?;
+        sqlx::query("DROP TRIGGER booking_targets_resolve_venue ON booking_targets")
+            .execute(pool)
+            .await?;
         let target = seed_target(pool, workspace, wroclaw, "venue", "Klub X").await?;
         let klub_x = seed_venue(pool, wroclaw, "klub x").await?;
         // The place_venues trigger is still live, so clear its work to model a
         // pair of rows that genuinely never met.
-        sqlx::query("UPDATE viryaos_booking_targets SET venue_id = NULL WHERE id = $1")
+        sqlx::query("UPDATE booking_targets SET venue_id = NULL WHERE id = $1")
             .bind(target)
             .execute(pool)
             .await?;
@@ -261,7 +257,7 @@ async fn the_backfill_links_targets_that_predate_the_migration()
 
         sqlx::query(
             r#"
-            UPDATE viryaos_booking_targets AS target
+            UPDATE booking_targets AS target
             SET venue_id = venue.id
             FROM place_venues AS venue
             WHERE target.target_kind = 'venue'

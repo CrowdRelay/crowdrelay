@@ -1,7 +1,7 @@
 //! Persistence for the brain's belief-revision ledger.
 //!
 //! Append-only. Nothing updates or deletes a revision, and nothing in the
-//! brain reads one back — see `viryaos_brain_belief_revisions` in migration
+//! brain reads one back — see `brain_belief_revisions` in migration
 //! 0252 for why the ledger exists at all.
 
 use crowdrelay_application::{RepositoryError, autopilot::BeliefRevision};
@@ -24,7 +24,7 @@ pub(in crate::autopilot) async fn record_belief_revisions(
     for revision in revisions.iter().filter(|r| r.is_attributable()) {
         sqlx::query(
             r#"
-            INSERT INTO viryaos_brain_belief_revisions (
+            INSERT INTO brain_belief_revisions (
                 id, workspace_id, module, belief_key,
                 previous_value, current_value, change_summary,
                 caused_by_action_ids

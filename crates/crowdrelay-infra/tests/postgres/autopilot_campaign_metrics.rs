@@ -68,7 +68,7 @@ async fn insert_dispatch(
     let decision_id = uuid::Uuid::now_v7();
     let action_id = uuid::Uuid::now_v7();
     sqlx::query(
-        r#"INSERT INTO viryaos_autopilot_decisions
+        r#"INSERT INTO autopilot_decisions
            (id, workspace_id, decision_key, context, subject_kind, subject_id,
             decision_kind, confidence_basis_points, disposition, reason,
             input_snapshot, policy_snapshot, recommendation, trace_id)
@@ -84,7 +84,7 @@ async fn insert_dispatch(
     .await
     .expect("decision");
     sqlx::query(
-        r#"INSERT INTO viryaos_autopilot_actions
+        r#"INSERT INTO autopilot_actions
            (id, workspace_id, decision_id, context, action_kind, subject_kind,
             subject_id, idempotency_key, payload, status, action_class, finished_at)
            VALUES ($1,$2,$3,'growth_metrics','agent.run.request','target_community',
@@ -100,7 +100,7 @@ async fn insert_dispatch(
     .await
     .expect("action");
     sqlx::query(
-        r#"INSERT INTO viryaos_growth_evidence
+        r#"INSERT INTO growth_evidence
            (workspace_id, action_id, opportunity_id, timestamp, recipient_id,
             channel, estimated_reach, treatment, propensity, converted,
             predicted_fans, predicted_signal_installs, context, evidence_quality)
@@ -129,7 +129,7 @@ async fn run_release_milestone(
     let decision_id = uuid::Uuid::now_v7();
     let action_id = uuid::Uuid::now_v7();
     sqlx::query(
-        r#"INSERT INTO viryaos_autopilot_decisions
+        r#"INSERT INTO autopilot_decisions
            (id, workspace_id, decision_key, context, subject_kind, subject_id,
             decision_kind, confidence_basis_points, disposition, reason,
             input_snapshot, policy_snapshot, recommendation, evaluated_at, trace_id)
@@ -145,7 +145,7 @@ async fn run_release_milestone(
     .await
     .expect("decision");
     sqlx::query(
-        r#"INSERT INTO viryaos_autopilot_actions
+        r#"INSERT INTO autopilot_actions
            (id, workspace_id, decision_id, context, action_kind, subject_kind,
             subject_id, idempotency_key, payload, status,
             approved_at, approved_by, available_at)
@@ -596,7 +596,7 @@ async fn the_press_milestone_schedules_funnel_metrics_without_a_send()
     // The funnel measurements land on the release; nothing campaign-bound
     // can exist for a milestone that never sent.
     let kinds = sqlx::query_scalar::<_, String>(
-        "SELECT measurement_kind FROM viryaos_autopilot_measurements \
+        "SELECT measurement_kind FROM autopilot_measurements \
          WHERE workspace_id = $1 AND subject_id = $2 ORDER BY measurement_kind",
     )
     .bind(f.workspace_id.into_uuid())
@@ -617,7 +617,7 @@ async fn the_press_milestone_schedules_funnel_metrics_without_a_send()
     // leave the milestone due and the release ladder stalled at press.
     let marked = sqlx::query_scalar::<_, bool>(
         "SELECT EXISTS(
-             SELECT 1 FROM viryaos_release_milestones
+             SELECT 1 FROM release_milestones
              WHERE workspace_id = $1 AND release_id = $2 AND milestone = 'start_press'
          )",
     )

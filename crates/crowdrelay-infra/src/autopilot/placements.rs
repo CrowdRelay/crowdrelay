@@ -37,7 +37,7 @@ impl PostgresAutopilotRepository {
                 r#"
                 SELECT opportunity_id, state, claimed_at, last_observation, last_checked_at,
                        checks_completed, playlist_external_id, track_external_id
-                FROM viryaos_playlist_placements
+                FROM playlist_placements
                 WHERE workspace_id = $1
                   AND settled_at IS NULL
                 ORDER BY claimed_at
@@ -96,9 +96,9 @@ impl PostgresAutopilotRepository {
             let mut transaction = self.pool.begin().await.map_err(map_sqlx)?;
             let target_id = sqlx::query_scalar::<_, Uuid>(
                 r#"
-                UPDATE viryaos_playlist_placements AS placement
+                UPDATE playlist_placements AS placement
                 SET state = $3, settled_at = $4, version = version + 1
-                FROM viryaos_outreach_opportunities AS opportunity
+                FROM outreach_opportunities AS opportunity
                 WHERE placement.workspace_id = $1
                   AND placement.opportunity_id = $2
                   AND placement.settled_at IS NULL
@@ -128,7 +128,7 @@ impl PostgresAutopilotRepository {
                 // identity from suppressing everybody with a NULL.
                 sqlx::query(
                     r#"
-                    UPDATE viryaos_outreach_targets AS target
+                    UPDATE outreach_targets AS target
                     SET do_not_contact = true,
                         accepts_outreach = false,
                         last_reply_disposition = 'do_not_contact',
@@ -141,7 +141,7 @@ impl PostgresAutopilotRepository {
                               target.curator_identity IS NOT NULL
                               AND target.curator_identity = (
                                   SELECT owner.curator_identity
-                                  FROM viryaos_outreach_targets AS owner
+                                  FROM outreach_targets AS owner
                                   WHERE owner.workspace_id = $1 AND owner.id = $2
                               )
                           )
@@ -158,9 +158,9 @@ impl PostgresAutopilotRepository {
                 // would pitch a suppressed curator on the next cycle.
                 sqlx::query(
                     r#"
-                    UPDATE viryaos_outreach_opportunities AS opportunity
+                    UPDATE outreach_opportunities AS opportunity
                     SET active = false
-                    FROM viryaos_outreach_targets AS target
+                    FROM outreach_targets AS target
                     WHERE opportunity.workspace_id = $1
                       AND target.workspace_id = opportunity.workspace_id
                       AND target.id = opportunity.target_id
@@ -229,7 +229,7 @@ impl PostgresAutopilotRepository {
                 // The claim. It opens the row and counts toward nothing.
                 let inserted = sqlx::query(
                     r#"
-                    INSERT INTO viryaos_playlist_placements (
+                    INSERT INTO playlist_placements (
                         workspace_id, opportunity_id, playlist_external_id, track_external_id
                     ) VALUES ($1,$2,$3,$4)
                     ON CONFLICT (workspace_id, opportunity_id) DO NOTHING
@@ -258,7 +258,7 @@ impl PostgresAutopilotRepository {
             };
 
             let row = sqlx::query_as::<_, (String, i16)>(
-                "SELECT state, checks_completed FROM viryaos_playlist_placements \
+                "SELECT state, checks_completed FROM playlist_placements \
                  WHERE workspace_id=$1 AND opportunity_id=$2 AND settled_at IS NULL \
                  FOR UPDATE",
             )
@@ -286,7 +286,7 @@ impl PostgresAutopilotRepository {
             // that writes both, because it is also what suppresses the curator.
             sqlx::query(
                 r#"
-                UPDATE viryaos_playlist_placements
+                UPDATE playlist_placements
                 SET state = CASE WHEN $7 THEN state ELSE $3 END,
                     last_observation = CASE WHEN $4 THEN $5 ELSE last_observation END,
                     last_checked_at = CASE WHEN $4 THEN $6 ELSE last_checked_at END,

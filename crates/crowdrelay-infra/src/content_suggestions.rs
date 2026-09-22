@@ -75,14 +75,14 @@ impl PostgresContentEngineRepository {
                      WHERE workspace_id = $1 AND status = 'active'),
                     ARRAY[]::text[]
                 ) AS communities,
-                (SELECT count(*) FROM viryaos_outreach_candidates
+                (SELECT count(*) FROM outreach_candidates
                  WHERE workspace_id = $1
                    AND status IN ('admitted','promoted')
                    AND target_kind IN ('press','radio','media_patronage')
                 ) AS press_contacts,
                 COALESCE(
                     (SELECT array_agg(name ORDER BY name)
-                     FROM viryaos_peers
+                     FROM peers
                      WHERE workspace_id = $1 AND status = 'confirmed'),
                     ARRAY[]::text[]
                 ) AS peers,
@@ -132,7 +132,7 @@ impl PostgresContentEngineRepository {
             SELECT DISTINCT ON (beat->>'format_key')
                    beat->>'format_key' AS format_key,
                    id AS arc_id
-            FROM viryaos_arcs,
+            FROM arcs,
                  jsonb_array_elements(spine) AS beat
             WHERE workspace_id = $1
               AND status IN ('approved','active')
@@ -173,8 +173,8 @@ impl PostgresContentEngineRepository {
                    count(o.id) AS outcomes,
                    count(o.id) FILTER (WHERE o.outcome IN ('done', 'done_differently'))
                        AS produced
-            FROM viryaos_content_suggestions s
-            LEFT JOIN viryaos_suggestion_outcomes o
+            FROM content_suggestions s
+            LEFT JOIN suggestion_outcomes o
               ON o.workspace_id = s.workspace_id
              AND o.suggestion_id = s.id
             WHERE s.workspace_id = $1 AND s.format_key IS NOT NULL
@@ -225,8 +225,8 @@ impl PostgresContentEngineRepository {
             r#"
             SELECT s.format_key,
                    (o.results->>'new_fans')::double precision AS new_fans
-            FROM viryaos_content_suggestions s
-            JOIN viryaos_suggestion_outcomes o
+            FROM content_suggestions s
+            JOIN suggestion_outcomes o
               ON o.workspace_id = s.workspace_id
              AND o.suggestion_id = s.id
             WHERE s.workspace_id = $1 AND s.format_key IS NOT NULL
@@ -323,8 +323,8 @@ impl PostgresContentEngineRepository {
         let rows = sqlx::query_as::<_, (String, i64)>(
             r#"
             SELECT s.format_key, count(o.id) AS produced
-            FROM viryaos_content_suggestions AS s
-            JOIN viryaos_suggestion_outcomes AS o
+            FROM content_suggestions AS s
+            JOIN suggestion_outcomes AS o
               ON o.workspace_id = s.workspace_id AND o.suggestion_id = s.id
             WHERE s.workspace_id = ANY($1)
               AND s.format_key IS NOT NULL
@@ -360,8 +360,8 @@ impl PostgresContentEngineRepository {
         let keys = sqlx::query_scalar::<_, String>(
             r#"
             SELECT DISTINCT s.format_key
-            FROM viryaos_suggestion_outcomes AS o
-            JOIN viryaos_content_suggestions AS s
+            FROM suggestion_outcomes AS o
+            JOIN content_suggestions AS s
               ON s.workspace_id = o.workspace_id AND s.id = o.suggestion_id
             WHERE o.workspace_id = $1 AND o.outcome = 'declined'
               AND o.resolved_at >= now() - make_interval(days => $2)
@@ -382,7 +382,7 @@ impl PostgresContentEngineRepository {
     /// open — runs *inside* the transaction under the advisory lock, so
     /// two concurrent passes cannot interleave into a double-raise. The
     /// lock key differs from the trend refresh's on purpose: a suggestion
-    /// pass only reads `viryaos_content_trends` after that writer commits,
+    /// pass only reads `content_trends` after that writer commits,
     /// so serializing the two would buy nothing.
     pub async fn refresh_suggestions(
         &self,
@@ -444,7 +444,7 @@ impl PostgresContentEngineRepository {
         // reason says so rather than guess a done.
         let lapsed = sqlx::query_scalar::<_, Uuid>(
             r#"
-            UPDATE viryaos_content_suggestions
+            UPDATE content_suggestions
             SET status = 'expired', updated_at = now()
             WHERE workspace_id = $1 AND status = 'raised'
               AND expires_at IS NOT NULL AND expires_at <= now()
@@ -457,7 +457,7 @@ impl PostgresContentEngineRepository {
         for suggestion_id in lapsed {
             sqlx::query(
                 r#"
-                INSERT INTO viryaos_suggestion_outcomes (
+                INSERT INTO suggestion_outcomes (
                     workspace_id, suggestion_id, outcome, decided_by, reason
                 ) VALUES ($1, $2, 'expired', 'system', 'the window this beat was for has passed')
                 "#,
@@ -469,7 +469,7 @@ impl PostgresContentEngineRepository {
         }
         let unreported = sqlx::query_scalar::<_, Uuid>(
             r#"
-            UPDATE viryaos_content_suggestions
+            UPDATE content_suggestions
             SET status = 'expired', updated_at = now()
             WHERE workspace_id = $1 AND status = 'approved'
               AND suggested_before IS NOT NULL AND suggested_before < $2
@@ -483,7 +483,7 @@ impl PostgresContentEngineRepository {
         for suggestion_id in unreported {
             sqlx::query(
                 r#"
-                INSERT INTO viryaos_suggestion_outcomes (
+                INSERT INTO suggestion_outcomes (
                     workspace_id, suggestion_id, outcome, decided_by, reason
                 ) VALUES ($1, $2, 'expired', 'system', 'committed, but the beat''s day passed without a report — unmeasured')
                 "#,
@@ -500,7 +500,7 @@ impl PostgresContentEngineRepository {
         // counts bespoke keyless rows too) is the headroom.
         let open_rows = sqlx::query_as::<_, OpenSuggestionKeyRow>(
             r#"
-            SELECT format_key FROM viryaos_content_suggestions
+            SELECT format_key FROM content_suggestions
             WHERE workspace_id = $1 AND status IN ('raised','approved')
             "#,
         )
@@ -583,7 +583,7 @@ impl PostgresContentEngineRepository {
                 .map(|day| day.midnight().assume_utc() + time::Duration::days(1));
             let row = sqlx::query_as::<_, SuggestionRow>(
                 r#"
-                INSERT INTO viryaos_content_suggestions (
+                INSERT INTO content_suggestions (
                     id, workspace_id, arc_id, format_key, concept, reason,
                     evidence, suggested_after, suggested_before, effort,
                     proposed_assignee_member_id, distribution_promise,

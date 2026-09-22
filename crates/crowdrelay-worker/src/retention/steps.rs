@@ -273,8 +273,8 @@ async fn reconcile_expired_beacon_release_claims(
         WITH candidates AS (
             SELECT recipient.workspace_id,recipient.campaign_id,recipient.beacon_id,
                    campaign.reservation_id,campaign.variant_id
-            FROM viryaos_beacon_release_recipients AS recipient
-            JOIN viryaos_beacon_release_campaigns AS campaign
+            FROM beacon_release_recipients AS recipient
+            JOIN beacon_release_campaigns AS campaign
               ON campaign.workspace_id=recipient.workspace_id
              AND campaign.id=recipient.campaign_id
             WHERE campaign.status='open'
@@ -285,7 +285,7 @@ async fn reconcile_expired_beacon_release_claims(
             LIMIT $1
         ),
         expired AS (
-            UPDATE viryaos_beacon_release_recipients AS recipient
+            UPDATE beacon_release_recipients AS recipient
             SET status='expired',expired_at=now(),recipient_name=NULL,recipient_phone=NULL,
                 parcel_locker_code=NULL,delivery_details_purge_after=NULL,
                 pii_purged_at=COALESCE(pii_purged_at,now())
@@ -338,12 +338,12 @@ async fn reconcile_expired_beacon_release_claims(
             RETURNING reservation.id
         ),
         closed_campaigns AS (
-            UPDATE viryaos_beacon_release_campaigns AS campaign
+            UPDATE beacon_release_campaigns AS campaign
             SET status='closed',closed_at=COALESCE(closed_at,now())
             WHERE campaign.status='open'
               AND campaign.claim_deadline <= now()
               AND NOT EXISTS (
-                SELECT 1 FROM viryaos_beacon_release_recipients AS recipient
+                SELECT 1 FROM beacon_release_recipients AS recipient
                 WHERE recipient.workspace_id=campaign.workspace_id
                   AND recipient.campaign_id=campaign.id
                   AND recipient.status IN ('eligible','notified','confirmed','prepared','sent')
@@ -374,13 +374,13 @@ async fn mark_stale_beacon_invite_claims_ambiguous(
         r#"
         WITH candidates AS (
             SELECT job.workspace_id,job.id
-            FROM viryaos_beacon_invite_delivery_jobs AS job
+            FROM beacon_invite_delivery_jobs AS job
             WHERE job.status='claimed' AND job.claim_expires_at <= now()
             ORDER BY job.claim_expires_at,job.id
             FOR UPDATE OF job SKIP LOCKED
             LIMIT $1
         )
-        UPDATE viryaos_beacon_invite_delivery_jobs AS job
+        UPDATE beacon_invite_delivery_jobs AS job
         SET status='ambiguous',reported_at=COALESCE(reported_at,now()),
             provider_summary=jsonb_build_object(
                 'automatic',true,
@@ -468,7 +468,7 @@ async fn delete_old_terminal_outbox_events(
                 )
                 AND NOT EXISTS (
                     SELECT 1
-                    FROM viryaos_autopilot_action_emissions AS emission
+                    FROM autopilot_action_emissions AS emission
                     WHERE emission.workspace_id = event.workspace_id
                         AND emission.outbox_event_id = event.id
                 )
@@ -480,7 +480,7 @@ async fn delete_old_terminal_outbox_events(
                 )
                 AND NOT EXISTS (
                     SELECT 1
-                    FROM viryaos_calendar_requests AS request
+                    FROM calendar_requests AS request
                     WHERE request.workspace_id = event.workspace_id
                         AND request.outbox_event_id = event.id
                 )
@@ -562,7 +562,7 @@ async fn scrub_beacon_release_delivery_pii(
         r#"
         WITH candidates AS (
             SELECT recipient.workspace_id,recipient.campaign_id,recipient.beacon_id
-            FROM viryaos_beacon_release_recipients AS recipient
+            FROM beacon_release_recipients AS recipient
             WHERE recipient.status='delivered'
               AND recipient.pii_purged_at IS NULL
               AND recipient.delivery_details_purge_after IS NOT NULL
@@ -571,7 +571,7 @@ async fn scrub_beacon_release_delivery_pii(
             FOR UPDATE OF recipient SKIP LOCKED
             LIMIT $1
         )
-        UPDATE viryaos_beacon_release_recipients AS recipient
+        UPDATE beacon_release_recipients AS recipient
         SET recipient_name=NULL,recipient_phone=NULL,parcel_locker_code=NULL,
             pii_purged_at=now(),delivery_details_purge_after=NULL
         FROM candidates
@@ -601,10 +601,10 @@ async fn delete_expired_growth_metric_points(
 ) -> Result<u64, RetentionRunError> {
     let result = sqlx::query(
         r#"
-        DELETE FROM viryaos_growth_metric_points AS point
+        DELETE FROM growth_metric_points AS point
         WHERE point.id IN (
             SELECT candidate.id
-            FROM viryaos_growth_metric_points AS candidate
+            FROM growth_metric_points AS candidate
             WHERE candidate.captured_at < now() - interval '90 days'
             ORDER BY candidate.captured_at, candidate.id
             FOR UPDATE OF candidate SKIP LOCKED
@@ -814,18 +814,18 @@ async fn delete_orphan_autopilot_decisions(
         r#"
         WITH candidates AS (
             SELECT decision.workspace_id, decision.id
-            FROM viryaos_autopilot_decisions AS decision
+            FROM autopilot_decisions AS decision
             WHERE decision.evaluated_at <=
                     now() - ($2::bigint * interval '1 millisecond')
                 AND NOT EXISTS (
                     SELECT 1
-                    FROM viryaos_autopilot_actions AS action
+                    FROM autopilot_actions AS action
                     WHERE action.workspace_id = decision.workspace_id
                         AND action.decision_id = decision.id
                 )
                 AND NOT EXISTS (
                     SELECT 1
-                    FROM viryaos_autopilot_outcomes AS outcome
+                    FROM autopilot_outcomes AS outcome
                     WHERE outcome.workspace_id = decision.workspace_id
                         AND outcome.decision_id = decision.id
                 )
@@ -833,7 +833,7 @@ async fn delete_orphan_autopilot_decisions(
             FOR UPDATE OF decision SKIP LOCKED
             LIMIT $1
         )
-        DELETE FROM viryaos_autopilot_decisions AS decision
+        DELETE FROM autopilot_decisions AS decision
         USING candidates
         WHERE decision.workspace_id = candidates.workspace_id
             AND decision.id = candidates.id

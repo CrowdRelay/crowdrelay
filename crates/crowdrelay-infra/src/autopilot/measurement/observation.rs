@@ -136,7 +136,7 @@ pub(super) async fn observe(
                 let to_minor = sqlx::query_scalar::<_, i64>(
                     r#"
                     SELECT (payload ->> 'to_minor')::bigint
-                    FROM viryaos_autopilot_actions
+                    FROM autopilot_actions
                     WHERE workspace_id = $1 AND id = $2
                       AND action_kind = 'merch.price.change'
                     "#,
@@ -156,7 +156,7 @@ pub(super) async fn observe(
                 let values = sqlx::query_as::<_, (i64, i64)>(
                     r#"
                     SELECT spend_last_7d_minor, attributed_revenue_last_7d_minor
-                    FROM viryaos_promotion_campaign_states
+                    FROM promotion_campaign_states
                     WHERE workspace_id = $1
                       AND id = $2
                       AND observed_at >= $3 + INTERVAL '7 days'
@@ -190,13 +190,13 @@ pub(super) async fn observe(
             AutopilotMeasurementKind::BookingReply7d => sqlx::query_scalar::<_, f64>(
                 r#"
                 SELECT CASE WHEN EXISTS (
-                    SELECT 1 FROM viryaos_booking_interactions AS reply
+                    SELECT 1 FROM booking_interactions AS reply
                     WHERE reply.workspace_id=$1 AND reply.target_id=$2
                       AND reply.direction='inbound'
                       AND reply.occurred_at >= $3
                       AND reply.occurred_at < $3 + INTERVAL '7 days'
                       AND NOT EXISTS (
-                          SELECT 1 FROM viryaos_booking_interactions AS newer
+                          SELECT 1 FROM booking_interactions AS newer
                           WHERE newer.workspace_id=reply.workspace_id
                             AND newer.target_id=reply.target_id
                             AND newer.direction='outbound'
@@ -215,7 +215,7 @@ pub(super) async fn observe(
             AutopilotMeasurementKind::OutreachReply7d => sqlx::query_scalar::<_, f64>(
                 r#"
                 SELECT CASE WHEN EXISTS (
-                    SELECT 1 FROM viryaos_outreach_interactions
+                    SELECT 1 FROM outreach_interactions
                     WHERE workspace_id=$1 AND target_id=$2 AND direction='inbound'
                       AND occurred_at >= $3 AND occurred_at < $3 + INTERVAL '7 days'
                 ) THEN 1.0::double precision ELSE 0.0::double precision END
@@ -235,13 +235,13 @@ pub(super) async fn observe(
             AutopilotMeasurementKind::BookingAgentReply30d => sqlx::query_scalar::<_, f64>(
                 r#"
                 SELECT CASE WHEN EXISTS (
-                    SELECT 1 FROM viryaos_booking_agent_interactions AS reply
+                    SELECT 1 FROM booking_agent_interactions AS reply
                     WHERE reply.workspace_id=$1 AND reply.agent_id=$2
                       AND reply.direction='inbound'
                       AND reply.occurred_at >= $3
                       AND reply.occurred_at < $3 + INTERVAL '30 days'
                       AND NOT EXISTS (
-                          SELECT 1 FROM viryaos_booking_agent_interactions AS newer
+                          SELECT 1 FROM booking_agent_interactions AS newer
                           WHERE newer.workspace_id=reply.workspace_id
                             AND newer.agent_id=reply.agent_id
                             AND newer.direction='outbound'
@@ -298,7 +298,7 @@ pub(super) async fn observe(
                 sqlx::query_scalar::<_, f64>(
                     r#"
                     SELECT COALESCE(SUM(attributed_clicks),0)::double precision
-                    FROM viryaos_show_growth_surfaces
+                    FROM show_growth_surfaces
                     WHERE workspace_id=$1 AND event_id=$2
                       AND updated_at >= $3
                       AND updated_at < $3 + INTERVAL '7 days'
@@ -315,7 +315,7 @@ pub(super) async fn observe(
                 sqlx::query_scalar::<_, f64>(
                     r#"
                     SELECT COALESCE(SUM(attributed_ticket_orders),0)::double precision
-                    FROM viryaos_show_growth_surfaces
+                    FROM show_growth_surfaces
                     WHERE workspace_id=$1 AND event_id=$2
                       AND updated_at >= $3
                       AND updated_at < $3 + INTERVAL '7 days'
@@ -332,7 +332,7 @@ pub(super) async fn observe(
                 sqlx::query_scalar::<_, f64>(
                     r#"
                     SELECT COUNT(*)::double precision
-                    FROM viryaos_grassroots_activations
+                    FROM grassroots_activations
                     WHERE workspace_id=$1 AND event_id=$2
                       AND reply_recorded_at >= $3
                       AND reply_recorded_at < $3 + INTERVAL '14 days'
@@ -471,20 +471,20 @@ pub(super) async fn observe(
                     SELECT SUM(post_end - 2 * pre_end + pre_start)::double precision
                     FROM (
                         SELECT
-                            (SELECT p.value FROM viryaos_growth_metric_points p
+                            (SELECT p.value FROM growth_metric_points p
                              WHERE p.series_id = s.id
                                AND p.captured_at >= $3 - INTERVAL '28 days'
                                AND p.captured_at < $3 - INTERVAL '14 days'
                              ORDER BY p.captured_at DESC LIMIT 1) AS pre_start,
-                            (SELECT p.value FROM viryaos_growth_metric_points p
+                            (SELECT p.value FROM growth_metric_points p
                              WHERE p.series_id = s.id AND p.captured_at < $3
                              ORDER BY p.captured_at DESC LIMIT 1) AS pre_end,
-                            (SELECT p.value FROM viryaos_growth_metric_points p
+                            (SELECT p.value FROM growth_metric_points p
                              WHERE p.series_id = s.id
                                AND p.captured_at >= $3 + INTERVAL '10 days'
                                AND p.captured_at < $3 + INTERVAL '14 days'
                              ORDER BY p.captured_at DESC LIMIT 1) AS post_end
-                        FROM viryaos_growth_metric_series AS s
+                        FROM growth_metric_series AS s
                         WHERE s.workspace_id=$1 AND s.subject_kind='release_plan'
                           AND s.subject_id=$2 AND s.active
                     ) AS lifts

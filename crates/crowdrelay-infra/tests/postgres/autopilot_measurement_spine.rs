@@ -87,7 +87,7 @@ async fn insert_dispatch(
     let decision_id = uuid::Uuid::now_v7();
     let action_id = uuid::Uuid::now_v7();
     sqlx::query(
-        r#"INSERT INTO viryaos_autopilot_decisions
+        r#"INSERT INTO autopilot_decisions
            (id, workspace_id, decision_key, context, subject_kind, subject_id,
             decision_kind, confidence_basis_points, disposition, reason,
             input_snapshot, policy_snapshot, recommendation, trace_id)
@@ -103,7 +103,7 @@ async fn insert_dispatch(
     .await
     .expect("decision");
     sqlx::query(
-        r#"INSERT INTO viryaos_autopilot_actions
+        r#"INSERT INTO autopilot_actions
            (id, workspace_id, decision_id, context, action_kind, subject_kind,
             subject_id, idempotency_key, payload, status, action_class, finished_at)
            VALUES ($1,$2,$3,'growth_metrics','agent.run.request','target_community',
@@ -119,7 +119,7 @@ async fn insert_dispatch(
     .await
     .expect("action");
     sqlx::query(
-        r#"INSERT INTO viryaos_growth_evidence
+        r#"INSERT INTO growth_evidence
            (workspace_id, action_id, opportunity_id, timestamp, recipient_id,
             channel, estimated_reach, treatment, propensity, converted,
             predicted_fans, predicted_signal_installs, context, evidence_quality)
@@ -146,7 +146,7 @@ async fn queue_measurement(
 ) -> ClaimedAutopilotMeasurement {
     let id = uuid::Uuid::now_v7();
     sqlx::query(
-        r#"INSERT INTO viryaos_autopilot_measurements
+        r#"INSERT INTO autopilot_measurements
            (id, workspace_id, action_id, measurement_kind, subject_id,
             action_finished_at, baseline_value, due_at, available_at)
            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$8)"#,
@@ -177,7 +177,7 @@ async fn queue_measurement(
 /// Puts a queued measurement into the state `complete_measurement` requires.
 async fn mark_processing(f: &Fixture, measurement: &ClaimedAutopilotMeasurement) {
     sqlx::query(
-        "UPDATE viryaos_autopilot_measurements SET status='processing', started_at=now() \
+        "UPDATE autopilot_measurements SET status='processing', started_at=now() \
          WHERE workspace_id=$1 AND id=$2",
     )
     .bind(f.workspace_id.into_uuid())
@@ -253,7 +253,7 @@ async fn evidence_state(
         ),
     >(
         "SELECT observed_fans, observed_incremental_fans, durable_fans_30d, resolved_at \
-         FROM viryaos_growth_evidence WHERE workspace_id=$1 AND action_id=$2",
+         FROM growth_evidence WHERE workspace_id=$1 AND action_id=$2",
     )
     .bind(f.workspace_id.into_uuid())
     .bind(action_id)
@@ -479,7 +479,7 @@ async fn d_community_outcome_is_read_from_the_community_ledger() {
     .expect("target");
     let experiment_uuid = uuid::Uuid::now_v7();
     sqlx::query(
-        r#"INSERT INTO viryaos_experiment_designs
+        r#"INSERT INTO experiment_designs
            (experiment_uuid, workspace_id, intervention_key, logical_cycle_key,
             unit_kind, holdout_probability, interference_policy, experiment_status)
            VALUES ($1,$2,'community-engager',$3,'target_community',0.1,'none','active')"#,
@@ -491,7 +491,7 @@ async fn d_community_outcome_is_read_from_the_community_ledger() {
     .await
     .expect("design");
     sqlx::query(
-        r#"INSERT INTO viryaos_experiment_assignments
+        r#"INSERT INTO experiment_assignments
            (id, workspace_id, experiment_uuid, unit_id, unit_kind, arm,
             intended_template_id, propensity, context, prediction,
             contamination_estimate, is_interference_controllable, experiment_status,
@@ -628,7 +628,7 @@ async fn f_manual_publication_moves_the_measurement_window() {
     .expect("registration");
 
     let (anchored_at, due_at) = sqlx::query_as::<_, (OffsetDateTime, OffsetDateTime)>(
-        "SELECT action_finished_at, due_at FROM viryaos_autopilot_measurements \
+        "SELECT action_finished_at, due_at FROM autopilot_measurements \
              WHERE workspace_id=$1 AND id=$2",
     )
     .bind(f.workspace_id.into_uuid())
@@ -654,7 +654,7 @@ async fn f_manual_publication_moves_the_measurement_window() {
     // this is the path every real Reddit post takes — and it wrote neither of
     // the two rows the automatic path writes on publication.
     let (reach_rows, estimated_reach) = sqlx::query_as::<_, (i64, Option<i32>)>(
-        "SELECT count(*), max(estimated_reach) FROM viryaos_reach_events \
+        "SELECT count(*), max(estimated_reach) FROM reach_events \
          WHERE workspace_id = $1 AND action_id = $2 AND channel = 'reddit_post'",
     )
     .bind(f.workspace_id.into_uuid())
@@ -714,7 +714,7 @@ async fn f_manual_publication_moves_the_measurement_window() {
         "an unknown post id must be NotFound, not a status conflict"
     );
     let reach_rows_after: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM viryaos_reach_events \
+        "SELECT count(*) FROM reach_events \
          WHERE workspace_id = $1 AND action_id = $2 AND channel = 'reddit_post'",
     )
     .bind(f.workspace_id.into_uuid())
@@ -777,7 +777,7 @@ async fn h_automatic_publication_moves_the_measurement_window() {
     let (anchored_at, due_at, stored_posted_at) =
         sqlx::query_as::<_, (OffsetDateTime, OffsetDateTime, OffsetDateTime)>(
             "SELECT m.action_finished_at, m.due_at, p.posted_at \
-             FROM viryaos_autopilot_measurements m \
+             FROM autopilot_measurements m \
              JOIN community_posts p ON p.id = $2 \
              WHERE m.workspace_id=$1 AND m.id=$3",
         )
@@ -941,7 +941,7 @@ async fn i_control_units_produce_an_outcome_and_itt_uses_it() {
 
     let experiment_uuid = uuid::Uuid::now_v7();
     sqlx::query(
-        r#"INSERT INTO viryaos_experiment_designs
+        r#"INSERT INTO experiment_designs
            (experiment_uuid, workspace_id, intervention_key, logical_cycle_key,
             unit_kind, holdout_probability, interference_policy, experiment_status)
            VALUES ($1,$2,'community-engager',$3,'target_community',0.1,'none','active')"#,
@@ -956,7 +956,7 @@ async fn i_control_units_produce_an_outcome_and_itt_uses_it() {
     // The control assignment, and the evidence row that names it.
     let control_assignment = uuid::Uuid::now_v7().to_string();
     sqlx::query(
-        r#"INSERT INTO viryaos_experiment_assignments
+        r#"INSERT INTO experiment_assignments
            (id, workspace_id, experiment_uuid, unit_id, unit_kind, arm, assigned_at,
             intended_template_id, propensity, context, prediction,
             contamination_estimate, is_interference_controllable, experiment_status,
@@ -973,7 +973,7 @@ async fn i_control_units_produce_an_outcome_and_itt_uses_it() {
     .await
     .expect("control assignment");
     sqlx::query(
-        r#"INSERT INTO viryaos_growth_evidence
+        r#"INSERT INTO growth_evidence
            (workspace_id, action_id, opportunity_id, timestamp, recipient_id,
             channel, estimated_reach, treatment, propensity, converted,
             predicted_fans, predicted_signal_installs, context, evidence_quality,
@@ -992,7 +992,7 @@ async fn i_control_units_produce_an_outcome_and_itt_uses_it() {
     // the control sweep.
     let action_id = insert_dispatch(&f, "community-engager:i", assigned_at).await;
     sqlx::query(
-        r#"INSERT INTO viryaos_experiment_assignments
+        r#"INSERT INTO experiment_assignments
            (id, workspace_id, experiment_uuid, unit_id, unit_kind, arm, assigned_at,
             intended_template_id, propensity, context, prediction,
             contamination_estimate, is_interference_controllable, experiment_status,
@@ -1011,8 +1011,8 @@ async fn i_control_units_produce_an_outcome_and_itt_uses_it() {
     .await
     .expect("treatment assignment");
     sqlx::query(
-        "UPDATE viryaos_growth_evidence SET experiment_assignment_id = \
-         (SELECT id FROM viryaos_experiment_assignments WHERE action_id = $2) \
+        "UPDATE growth_evidence SET experiment_assignment_id = \
+         (SELECT id FROM experiment_assignments WHERE action_id = $2) \
          WHERE workspace_id = $1 AND action_id = $2",
     )
     .bind(f.workspace_id.into_uuid())
@@ -1034,7 +1034,7 @@ async fn i_control_units_produce_an_outcome_and_itt_uses_it() {
     // The control row now has an outcome it could never have had before.
     let (control_y14, control_resolved) =
         sqlx::query_as::<_, (Option<f64>, Option<OffsetDateTime>)>(
-            "SELECT observed_incremental_fans, resolved_at FROM viryaos_growth_evidence \
+            "SELECT observed_incremental_fans, resolved_at FROM growth_evidence \
              WHERE workspace_id=$1 AND experiment_assignment_id=$2",
         )
         .bind(f.workspace_id.into_uuid())
@@ -1055,7 +1055,7 @@ async fn i_control_units_produce_an_outcome_and_itt_uses_it() {
     // And contamination was established inside the measurement transaction, so
     // the treated row can be causal evidence at all.
     let final_contamination = sqlx::query_scalar::<_, Option<f64>>(
-        "SELECT final_contamination FROM viryaos_experiment_assignments \
+        "SELECT final_contamination FROM experiment_assignments \
          WHERE workspace_id=$1 AND action_id=$2",
     )
     .bind(f.workspace_id.into_uuid())
@@ -1110,7 +1110,7 @@ async fn j_treated_rows_wait_for_their_control_arm() {
     let assigned_at = f.now - time::Duration::days(50);
     let experiment_uuid = uuid::Uuid::now_v7();
     sqlx::query(
-        r#"INSERT INTO viryaos_experiment_designs
+        r#"INSERT INTO experiment_designs
            (experiment_uuid, workspace_id, intervention_key, logical_cycle_key,
             unit_kind, holdout_probability, interference_policy, experiment_status)
            VALUES ($1,$2,'community-engager',$3,'target_community',0.1,'none','active')"#,
@@ -1136,7 +1136,7 @@ async fn j_treated_rows_wait_for_their_control_arm() {
     .expect("control target");
     let control_assignment = uuid::Uuid::now_v7().to_string();
     sqlx::query(
-        r#"INSERT INTO viryaos_experiment_assignments
+        r#"INSERT INTO experiment_assignments
            (id, workspace_id, experiment_uuid, unit_id, unit_kind, arm, assigned_at,
             intended_template_id, propensity, context, prediction,
             contamination_estimate, is_interference_controllable, experiment_status,
@@ -1153,7 +1153,7 @@ async fn j_treated_rows_wait_for_their_control_arm() {
     .await
     .expect("control assignment");
     sqlx::query(
-        r#"INSERT INTO viryaos_growth_evidence
+        r#"INSERT INTO growth_evidence
            (workspace_id, action_id, opportunity_id, timestamp, recipient_id,
             channel, estimated_reach, treatment, propensity, converted,
             predicted_fans, predicted_signal_installs, context, evidence_quality,
@@ -1176,7 +1176,7 @@ async fn j_treated_rows_wait_for_their_control_arm() {
             insert_dispatch(&f, &format!("community-engager:{label}"), assigned_at).await;
         let assignment_id = uuid::Uuid::now_v7().to_string();
         sqlx::query(
-            r#"INSERT INTO viryaos_experiment_assignments
+            r#"INSERT INTO experiment_assignments
                (id, workspace_id, experiment_uuid, unit_id, unit_kind, arm, assigned_at,
                 intended_template_id, propensity, context, prediction,
                 contamination_estimate, is_interference_controllable, experiment_status,
@@ -1195,7 +1195,7 @@ async fn j_treated_rows_wait_for_their_control_arm() {
         .await
         .expect("treatment assignment");
         sqlx::query(
-            "UPDATE viryaos_growth_evidence SET experiment_assignment_id = $3 \
+            "UPDATE growth_evidence SET experiment_assignment_id = $3 \
              WHERE workspace_id = $1 AND action_id = $2",
         )
         .bind(f.workspace_id.into_uuid())
@@ -1254,7 +1254,7 @@ async fn j_treated_rows_wait_for_their_control_arm() {
     let (_, _, _, early_resolved) = evidence_state(&f, early).await;
     let (_, _, _, late_resolved) = evidence_state(&f, late).await;
     let control_resolved = sqlx::query_scalar::<_, Option<OffsetDateTime>>(
-        "SELECT resolved_at FROM viryaos_growth_evidence \
+        "SELECT resolved_at FROM growth_evidence \
          WHERE workspace_id=$1 AND experiment_assignment_id=$2",
     )
     .bind(f.workspace_id.into_uuid())
@@ -1353,7 +1353,7 @@ async fn h_a_community_outcome_is_tenant_scoped_and_counts_each_fan_once() {
     .expect("target");
     let experiment_uuid = uuid::Uuid::now_v7();
     sqlx::query(
-        r#"INSERT INTO viryaos_experiment_designs
+        r#"INSERT INTO experiment_designs
            (experiment_uuid, workspace_id, intervention_key, logical_cycle_key,
             unit_kind, holdout_probability, interference_policy, experiment_status)
            VALUES ($1,$2,'community-engager',$3,'target_community',0.1,'none','active')"#,
@@ -1365,7 +1365,7 @@ async fn h_a_community_outcome_is_tenant_scoped_and_counts_each_fan_once() {
     .await
     .expect("design");
     sqlx::query(
-        r#"INSERT INTO viryaos_experiment_assignments
+        r#"INSERT INTO experiment_assignments
            (id, workspace_id, experiment_uuid, unit_id, unit_kind, arm,
             intended_template_id, propensity, context, prediction,
             contamination_estimate, is_interference_controllable, experiment_status,

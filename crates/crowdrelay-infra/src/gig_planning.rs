@@ -251,7 +251,7 @@ async fn best_venue(
                                       lower(btrim(their_genre.genre))) AS genre
                       FROM (
                           SELECT unnest(listing.genre_tags) AS genre
-                          FROM viryaos_band_listings AS listing
+                          FROM band_listings AS listing
                           WHERE listing.workspace_id = act.act_workspace_id
                           UNION ALL
                           SELECT peer_genre.genre_tag
@@ -269,13 +269,13 @@ async fn best_venue(
         -- link names another room (§12-5 entity 6).
         -- Scoped to the workspace: capacity is shared knowledge, but whether
         -- *we* can write to the room is ours.
-        LEFT JOIN viryaos_booking_targets AS target
+        LEFT JOIN booking_targets AS target
           ON target.workspace_id = $1
          AND (
              target.venue_id = venue.id
              OR EXISTS (
                  SELECT 1
-                 FROM viryaos_booking_target_venues AS edge
+                 FROM booking_target_venues AS edge
                  WHERE edge.workspace_id = target.workspace_id
                    AND edge.target_id = target.id
                    AND edge.venue_id = venue.id
@@ -375,12 +375,12 @@ pub async fn promoter_targets_in_city(
                target.display_name,
                target.relationship_score,
                EXISTS (
-                   SELECT 1 FROM viryaos_booking_interactions AS interaction
+                   SELECT 1 FROM booking_interactions AS interaction
                    WHERE interaction.workspace_id = target.workspace_id
                      AND interaction.target_id = target.id
                      AND interaction.direction = 'inbound'
                ) AS answered_last_time
-        FROM viryaos_booking_targets AS target
+        FROM booking_targets AS target
         WHERE target.workspace_id = $1
           AND target.city_id = $2
           AND target.target_kind IN ('promoter', 'venue')
@@ -522,7 +522,7 @@ async fn city_opportunities_inner(
     let my_genres = sqlx::query_scalar::<_, Vec<String>>(
         r#"
         SELECT COALESCE(array_agg(DISTINCT lower(btrim(tag))), '{}')
-        FROM viryaos_band_listings AS listing, unnest(listing.genre_tags) AS tag
+        FROM band_listings AS listing, unnest(listing.genre_tags) AS tag
         WHERE listing.workspace_id = $1
         "#,
     )
@@ -602,6 +602,7 @@ async fn city_opportunities_inner(
         // record. Handed through as `None` so the planner refuses it as
         // unmeasurable rather than inventing a zero it never counted.
         let reachable = reachable_in_city(pool, workspace_id, city.city_id).await?;
+        let local_acts = local_peer_acts(pool, workspace_id, city.city_id, &my_genres).await?;
         let co_bill = siblings
             .iter()
             .filter_map(|(sibling_id, sibling_name)| {
@@ -660,9 +661,145 @@ async fn city_opportunities_inner(
             venue: best_venue(pool, workspace_id, city.city_id, now, &my_genres).await?,
             promoters: promoters_in_city(pool, workspace_id, city.city_id).await?,
             co_bill,
+            local_acts,
         });
     }
     Ok(opportunities)
+}
+
+/// Non-tenant acts tied to a city — the "who could we ask onto this bill"
+/// half of the peer registry.
+///
+/// An act qualifies on either tie: its researched home town is this city
+/// (`home_city_id`), or it has billed at one of the city's rooms
+/// (`event_acts` → `place_venue_marks` → the room's city). Genre is a
+/// ranking signal, not a gate: an act whose genres intersect the tenant's —
+/// both sides canonicalised through `place_genre_aliases`, the same shape
+/// the comparable-acts count uses — outranks one whose genre nobody has
+/// stated, but a local act with no genre on record still answers the
+/// support-slot question, because "who is based here" is the part the sheet
+/// seed exists to answer.
+///
+/// `billed_rooms` counts the whole registry, not this tenant's view — the
+/// same shared-knowledge rule `propose_peers` applies to tracked rooms.
+///
+/// The gate that keeps a suggestion realistic is reachability: an act joins
+/// the list only when there is a way to actually ask — this workspace holds
+/// its `contact_email` lead, the act has billed a tracked room (the venue
+/// or promoter on that billing is the intro route), or a public page is on
+/// record (`link:social`/`link:website` facts). A name in a directory with
+/// none of the three — however famous, however genre-fitting — is research
+/// debt, not a support suggestion, which is the whole difference between
+/// "ask the opener from last month's bill" and "ask Rammstein".
+///
+/// # Errors
+///
+/// Propagates the database error.
+async fn local_peer_acts(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    city_id: Uuid,
+    my_genres: &[String],
+) -> Result<Vec<crowdrelay_domain::gig_plan::LocalAct>, sqlx::Error> {
+    let rows = sqlx::query_as::<_, LocalActRow>(
+        r#"
+        SELECT act.display_name,
+               COALESCE(shared.shared_genres, '{}') AS shared_genres,
+               billing.billed_rooms,
+               CASE
+                   WHEN lead.value IS NOT NULL THEN 'email on file'
+                   WHEN billing.billed_rooms > 0 THEN 'billed in tracked rooms'
+                   ELSE 'public page'
+               END AS reachable_via
+        FROM place_peer_acts AS act
+        CROSS JOIN LATERAL (
+            SELECT array_agg(DISTINCT their.genre ORDER BY their.genre)
+                AS shared_genres
+            FROM (
+                SELECT COALESCE(their_alias.canonical,
+                                lower(btrim(their_genre.genre_tag))) AS genre
+                FROM place_peer_act_genres AS their_genre
+                LEFT JOIN place_genre_aliases AS their_alias
+                    ON their_alias.alias = lower(btrim(their_genre.genre_tag))
+                WHERE their_genre.peer_act_id = act.id
+            ) AS their
+            JOIN (
+                SELECT COALESCE(mine_alias.canonical, mine_tag.genre) AS genre
+                FROM unnest($2::text[]) AS mine_tag(genre)
+                LEFT JOIN place_genre_aliases AS mine_alias
+                    ON mine_alias.alias = mine_tag.genre
+            ) AS mine ON mine.genre = their.genre
+        ) AS shared
+        CROSS JOIN LATERAL (
+            SELECT count(DISTINCT mark.venue_id) AS billed_rooms
+            FROM event_acts AS billed
+            JOIN place_venue_marks AS mark
+                ON mark.event_id = billed.event_id
+            WHERE billed.peer_act_id = act.id
+        ) AS billing
+        LEFT JOIN LATERAL (
+            SELECT fact.value
+            FROM place_peer_act_facts AS fact
+            WHERE fact.peer_act_id = act.id
+              AND fact.workspace_id = $3
+              AND fact.attribute = 'contact_email'
+            ORDER BY fact.observed_at DESC
+            LIMIT 1
+        ) AS lead ON true
+        WHERE (act.home_city_id = $1
+               OR EXISTS (
+                   SELECT 1
+                   FROM event_acts AS billed
+                   JOIN place_venue_marks AS mark
+                       ON mark.event_id = billed.event_id
+                   JOIN place_venues AS venue ON venue.id = mark.venue_id
+                   WHERE billed.peer_act_id = act.id
+                     AND venue.city_id = $1
+               ))
+          -- Reachability: a suggestion the tenant cannot act on is the
+          -- absurd case this gate exists to kill. The private lead is this
+          -- tenant's alone; the link facts and the billing are the shared
+          -- half of the registry.
+          AND (lead.value IS NOT NULL
+               OR billing.billed_rooms > 0
+               OR EXISTS (
+                   SELECT 1
+                   FROM place_peer_act_facts AS fact
+                   WHERE fact.peer_act_id = act.id
+                     AND fact.workspace_id IS NULL
+                     AND fact.attribute IN ('link:social', 'link:website')
+               ))
+        ORDER BY COALESCE(array_length(shared.shared_genres, 1), 0) DESC,
+                 billing.billed_rooms DESC,
+                 act.name_key
+        -- A proposal can hold a handful of names; a longer list is a
+        -- directory dump, and the room it decorates is the same.
+        LIMIT 8
+        "#,
+    )
+    .bind(city_id)
+    .bind(my_genres)
+    .bind(workspace_id)
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(|row| crowdrelay_domain::gig_plan::LocalAct {
+            name: row.display_name,
+            shared_genres: row.shared_genres,
+            billed_rooms: bounded_u16(row.billed_rooms),
+            reachable_via: row.reachable_via,
+        })
+        .collect())
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct LocalActRow {
+    display_name: String,
+    shared_genres: Vec<String>,
+    billed_rooms: i64,
+    reachable_via: String,
 }
 
 /// What one workspace has stated it is working on, or `Unstated`.

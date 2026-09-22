@@ -1,4 +1,4 @@
-//! Shared autonomy primitives used by ViryaOS bounded contexts.
+//! Shared autonomy primitives used by CrowdRelay bounded contexts.
 //!
 //! This module is deliberately tiny. It contains only stable domain vocabulary
 //! shared by bounded contexts; orchestration, persistence and transport stay in

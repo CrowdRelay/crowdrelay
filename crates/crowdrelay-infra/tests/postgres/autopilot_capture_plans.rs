@@ -65,7 +65,7 @@ async fn seed_member(
         .collect::<Vec<_>>()
         .join(",");
     sqlx::query(&format!(
-        "INSERT INTO viryaos_team_profiles
+        "INSERT INTO team_profiles
              (workspace_id, member_id, member_key, active, skills)
          VALUES ($1, $2, '{member_key}', true, ARRAY[{skills_csv}]::text[])"
     ))
@@ -82,7 +82,7 @@ async fn seed_team_email_executor(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let now = OffsetDateTime::now_utc();
     sqlx::query(
-        r#"INSERT INTO viryaos_executor_instances (
+        r#"INSERT INTO executor_instances (
             workspace_id, executor_id, version, manifest_sha, observed_at, expires_at
         ) VALUES ($1,'n8n-capture-plan-test','test','test-manifest',$2,$3)"#,
     )
@@ -92,7 +92,7 @@ async fn seed_team_email_executor(
     .execute(pool)
     .await?;
     sqlx::query(
-        r#"INSERT INTO viryaos_executor_capabilities (
+        r#"INSERT INTO executor_capabilities (
             workspace_id, executor_id, capability, capability_version, observed_at, expires_at
         ) VALUES ($1,'n8n-capture-plan-test','team.email','1',$2,$3)"#,
     )
@@ -113,7 +113,7 @@ async fn seed_production_event(
     event_id: Option<Uuid>,
 ) -> Result<Uuid, Box<dyn std::error::Error>> {
     Ok(sqlx::query_scalar(
-        "INSERT INTO viryaos_production_events
+        "INSERT INTO production_events
              (id, workspace_id, kind, title, scheduled_for, status, event_id)
          VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id",
     )
@@ -136,7 +136,7 @@ async fn seed_plan(
     assignee: Option<Uuid>,
 ) -> Result<Uuid, Box<dyn std::error::Error>> {
     Ok(sqlx::query_scalar(
-        "INSERT INTO viryaos_capture_plans
+        "INSERT INTO capture_plans
              (id, workspace_id, production_event_id, items, assignee_member_id, status, issued_at)
          VALUES ($1,$2,$3,$4,$5,$6,CASE WHEN $6='issued' THEN now() END) RETURNING id",
     )
@@ -157,7 +157,7 @@ async fn seed_assignment(
     member_id: Uuid,
 ) -> Result<(), Box<dyn std::error::Error>> {
     sqlx::query(
-        "INSERT INTO viryaos_team_assignments
+        "INSERT INTO team_assignments
              (id, workspace_id, source_kind, source_id, assignee_member_id, required_skill)
          VALUES ($1,$2,'capture_plan',$3,$4,'video')",
     )
@@ -177,7 +177,7 @@ async fn seed_source(
     occurred_at: OffsetDateTime,
 ) -> Result<(), Box<dyn std::error::Error>> {
     sqlx::query(
-        "INSERT INTO viryaos_content_sources
+        "INSERT INTO content_sources
              (workspace_id, source_kind, source_key, title, occurred_at, expires_at)
          VALUES ($1,'video',$2,$3,$4,$5)",
     )
@@ -224,7 +224,7 @@ async fn a_show_becomes_a_production_day_and_the_plan_reaches_the_camera_holder(
 
     // The gig projected into a production day.
     let day: Option<(Uuid, String)> = sqlx::query_as(
-        "SELECT id, kind FROM viryaos_production_events
+        "SELECT id, kind FROM production_events
          WHERE workspace_id=$1 AND event_id=$2",
     )
     .bind(workspace_id.into_uuid())
@@ -237,7 +237,7 @@ async fn a_show_becomes_a_production_day_and_the_plan_reaches_the_camera_holder(
     // The day carries an issued plan with a real shot list and an
     // assignee — the baseline coverage shot exists even with no needs.
     let plan: Option<(Uuid, String, Option<Uuid>, serde_json::Value)> = sqlx::query_as(
-        "SELECT id, status, assignee_member_id, items FROM viryaos_capture_plans
+        "SELECT id, status, assignee_member_id, items FROM capture_plans
          WHERE workspace_id=$1 AND production_event_id=$2",
     )
     .bind(workspace_id.into_uuid())
@@ -255,7 +255,7 @@ async fn a_show_becomes_a_production_day_and_the_plan_reaches_the_camera_holder(
 
     // The assignment points at the plan and the email is queued.
     let assignment: Option<(String, Uuid)> = sqlx::query_as(
-        "SELECT status, id FROM viryaos_team_assignments
+        "SELECT status, id FROM team_assignments
          WHERE workspace_id=$1 AND source_kind='capture_plan' AND source_id=$2",
     )
     .bind(workspace_id.into_uuid())
@@ -265,7 +265,7 @@ async fn a_show_becomes_a_production_day_and_the_plan_reaches_the_camera_holder(
     let (assignment_status, assignment_id) = assignment.expect("the plan routed to a member");
     assert_eq!(assignment_status, "open");
     let email_actions: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM viryaos_autopilot_actions
+        "SELECT COUNT(*) FROM autopilot_actions
          WHERE workspace_id=$1 AND action_kind='team.assignment.email' AND subject_id=$2",
     )
     .bind(workspace_id.into_uuid())
@@ -286,7 +286,7 @@ async fn a_show_becomes_a_production_day_and_the_plan_reaches_the_camera_holder(
     .await?;
     assert_eq!(checklist.as_deref(), Some("done"));
     let bare_tasks: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM viryaos_team_assignments
+        "SELECT COUNT(*) FROM team_assignments
          WHERE workspace_id=$1 AND source_kind='show_task' AND source_ref='capture_plan'",
     )
     .bind(workspace_id.into_uuid())
@@ -306,7 +306,7 @@ async fn a_show_becomes_a_production_day_and_the_plan_reaches_the_camera_holder(
     repo.reconcile_team_handoffs(workspace_id, OffsetDateTime::now_utc())
         .await?;
     let plans: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM viryaos_capture_plans
+        "SELECT COUNT(*) FROM capture_plans
          WHERE workspace_id=$1 AND production_event_id=$2",
     )
     .bind(workspace_id.into_uuid())
@@ -315,7 +315,7 @@ async fn a_show_becomes_a_production_day_and_the_plan_reaches_the_camera_holder(
     .await?;
     assert_eq!(plans, 1, "the open plan dedups the next sweep");
     let retried: Option<(String, Option<Uuid>)> =
-        sqlx::query_as("SELECT status, assignee_member_id FROM viryaos_capture_plans WHERE id=$1")
+        sqlx::query_as("SELECT status, assignee_member_id FROM capture_plans WHERE id=$1")
             .bind(draft_plan)
             .fetch_optional(&pool)
             .await?;
@@ -323,7 +323,7 @@ async fn a_show_becomes_a_production_day_and_the_plan_reaches_the_camera_holder(
     assert_eq!(retried_status, "issued", "the draft was offered again");
     assert!(retried_assignee.is_some());
     let draft_assignment: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM viryaos_team_assignments
+        "SELECT COUNT(*) FROM team_assignments
          WHERE workspace_id=$1 AND source_kind='capture_plan' AND source_id=$2 AND status='open'",
     )
     .bind(workspace_id.into_uuid())
@@ -346,7 +346,7 @@ async fn the_harvest_counts_sources_and_settles_plans() -> Result<(), Box<dyn st
     // No team profile: the member exists for the FK, but the routing
     // roster stays empty and the sweep still settles — the point of
     // running housekeeping before the team check.
-    sqlx::query("DELETE FROM viryaos_team_profiles WHERE workspace_id=$1")
+    sqlx::query("DELETE FROM team_profiles WHERE workspace_id=$1")
         .bind(workspace_id.into_uuid())
         .execute(&pool)
         .await?;
@@ -403,7 +403,7 @@ async fn the_harvest_counts_sources_and_settles_plans() -> Result<(), Box<dyn st
     let plan_b = seed_plan(&pool, workspace_id, day_b, "issued", Some(member_id)).await?;
     seed_assignment(&pool, workspace_id, plan_b, member_id).await?;
     sqlx::query(
-        "INSERT INTO viryaos_content_sources
+        "INSERT INTO content_sources
              (workspace_id, source_kind, source_key, title, occurred_at, expires_at)
          VALUES ($1,'show_completed',$2,'The gig itself',$3,$4)",
     )
@@ -414,7 +414,7 @@ async fn the_harvest_counts_sources_and_settles_plans() -> Result<(), Box<dyn st
     .execute(&pool)
     .await?;
     sqlx::query(
-        "INSERT INTO viryaos_content_sources
+        "INSERT INTO content_sources
              (workspace_id, source_kind, source_key, title, occurred_at, expires_at)
          VALUES ($1,'release',$2,'An album drop, not footage',$3,$4)",
     )
@@ -468,7 +468,7 @@ async fn the_harvest_counts_sources_and_settles_plans() -> Result<(), Box<dyn st
         .await?;
 
     let statuses: Vec<(Uuid, String)> =
-        sqlx::query_as("SELECT id, status FROM viryaos_capture_plans WHERE workspace_id=$1")
+        sqlx::query_as("SELECT id, status FROM capture_plans WHERE workspace_id=$1")
             .bind(workspace_id.into_uuid())
             .fetch_all(&pool)
             .await?;
@@ -503,7 +503,7 @@ async fn the_harvest_counts_sources_and_settles_plans() -> Result<(), Box<dyn st
     // Assignments follow their plans: done for the filmed day, cancelled
     // for the lost ones, still open for the one inside its window.
     let assignments: Vec<(Uuid, String)> = sqlx::query_as(
-        "SELECT source_id, status FROM viryaos_team_assignments
+        "SELECT source_id, status FROM team_assignments
          WHERE workspace_id=$1 AND source_kind='capture_plan'",
     )
     .bind(workspace_id.into_uuid())
@@ -522,12 +522,11 @@ async fn the_harvest_counts_sources_and_settles_plans() -> Result<(), Box<dyn st
 
     // The yield persists on the plan — the operator reads what a day
     // produced, and an unmeasured draft is NULL, never a guessed zero.
-    let yields: Vec<(Uuid, Option<i32>)> = sqlx::query_as(
-        "SELECT id, sources_landed FROM viryaos_capture_plans WHERE workspace_id=$1",
-    )
-    .bind(workspace_id.into_uuid())
-    .fetch_all(&pool)
-    .await?;
+    let yields: Vec<(Uuid, Option<i32>)> =
+        sqlx::query_as("SELECT id, sources_landed FROM capture_plans WHERE workspace_id=$1")
+            .bind(workspace_id.into_uuid())
+            .fetch_all(&pool)
+            .await?;
     let yield_of = |plan: Uuid| {
         yields
             .iter()
@@ -579,7 +578,7 @@ async fn a_moved_or_cancelled_gig_carries_its_production_day_with_it()
         .await?;
 
     let day: Option<(Uuid, time::Date)> = sqlx::query_as(
-        "SELECT id, scheduled_for FROM viryaos_production_events
+        "SELECT id, scheduled_for FROM production_events
          WHERE workspace_id=$1 AND event_id=$2",
     )
     .bind(workspace_id.into_uuid())
@@ -601,7 +600,7 @@ async fn a_moved_or_cancelled_gig_carries_its_production_day_with_it()
     repo.reconcile_team_handoffs(workspace_id, OffsetDateTime::now_utc())
         .await?;
     let moved: Option<(time::Date, String)> =
-        sqlx::query_as("SELECT scheduled_for, title FROM viryaos_production_events WHERE id=$1")
+        sqlx::query_as("SELECT scheduled_for, title FROM production_events WHERE id=$1")
             .bind(day_id)
             .fetch_optional(&pool)
             .await?;
@@ -609,8 +608,8 @@ async fn a_moved_or_cancelled_gig_carries_its_production_day_with_it()
     assert_eq!(moved_day, first_day + time::Duration::days(7));
     assert_eq!(moved_title, "The moved gig");
     let moved_due: Option<OffsetDateTime> = sqlx::query_scalar(
-        "SELECT assignment.due_at FROM viryaos_team_assignments assignment
-         JOIN viryaos_capture_plans plan ON plan.id = assignment.source_id
+        "SELECT assignment.due_at FROM team_assignments assignment
+         JOIN capture_plans plan ON plan.id = assignment.source_id
          WHERE assignment.workspace_id=$1 AND plan.production_event_id=$2
            AND assignment.source_kind='capture_plan'",
     )
@@ -634,20 +633,20 @@ async fn a_moved_or_cancelled_gig_carries_its_production_day_with_it()
     repo.reconcile_team_handoffs(workspace_id, OffsetDateTime::now_utc())
         .await?;
     let day_status: Option<String> =
-        sqlx::query_scalar("SELECT status FROM viryaos_production_events WHERE id=$1")
+        sqlx::query_scalar("SELECT status FROM production_events WHERE id=$1")
             .bind(day_id)
             .fetch_optional(&pool)
             .await?;
     assert_eq!(day_status.as_deref(), Some("cancelled"));
     let plan_status: Option<String> =
-        sqlx::query_scalar("SELECT status FROM viryaos_capture_plans WHERE production_event_id=$1")
+        sqlx::query_scalar("SELECT status FROM capture_plans WHERE production_event_id=$1")
             .bind(day_id)
             .fetch_optional(&pool)
             .await?;
     assert_eq!(plan_status.as_deref(), Some("abandoned"));
     let assignment_status: Option<String> = sqlx::query_scalar(
-        "SELECT assignment.status FROM viryaos_team_assignments assignment
-         JOIN viryaos_capture_plans plan ON plan.id = assignment.source_id
+        "SELECT assignment.status FROM team_assignments assignment
+         JOIN capture_plans plan ON plan.id = assignment.source_id
          WHERE assignment.workspace_id=$1 AND plan.production_event_id=$2
            AND assignment.source_kind='capture_plan'",
     )
@@ -686,7 +685,7 @@ async fn a_festival_slot_projects_a_festival_production_day()
     repo.reconcile_team_handoffs(workspace_id, OffsetDateTime::now_utc())
         .await?;
     let kind: Option<String> = sqlx::query_scalar(
-        "SELECT kind FROM viryaos_production_events
+        "SELECT kind FROM production_events
          WHERE workspace_id=$1 AND event_id=$2",
     )
     .bind(workspace_id.into_uuid())
@@ -703,7 +702,7 @@ async fn a_festival_slot_projects_a_festival_production_day()
     repo.reconcile_team_handoffs(workspace_id, OffsetDateTime::now_utc())
         .await?;
     let kind: Option<String> =
-        sqlx::query_scalar("SELECT kind FROM viryaos_production_events WHERE event_id=$1")
+        sqlx::query_scalar("SELECT kind FROM production_events WHERE event_id=$1")
             .bind(event_id)
             .fetch_one(&pool)
             .await?;
@@ -724,7 +723,7 @@ async fn a_festival_slot_projects_a_festival_production_day()
     repo.reconcile_team_handoffs(workspace_id, OffsetDateTime::now_utc())
         .await?;
     let kind: Option<String> =
-        sqlx::query_scalar("SELECT kind FROM viryaos_production_events WHERE event_id=$1")
+        sqlx::query_scalar("SELECT kind FROM production_events WHERE event_id=$1")
             .bind(marked_id)
             .fetch_one(&pool)
             .await?;
@@ -738,7 +737,7 @@ async fn a_festival_slot_projects_a_festival_production_day()
     repo.reconcile_team_handoffs(workspace_id, OffsetDateTime::now_utc())
         .await?;
     let kind: Option<String> =
-        sqlx::query_scalar("SELECT kind FROM viryaos_production_events WHERE event_id=$1")
+        sqlx::query_scalar("SELECT kind FROM production_events WHERE event_id=$1")
             .bind(event_id)
             .fetch_one(&pool)
             .await?;
@@ -1069,7 +1068,7 @@ async fn a_keyless_action_on_a_source_does_not_break_the_supply_read()
     )
     .await?;
     let source_id: Uuid = sqlx::query_scalar(
-        "SELECT id FROM viryaos_content_sources WHERE workspace_id=$1 AND source_key='src-keyless'",
+        "SELECT id FROM content_sources WHERE workspace_id=$1 AND source_key='src-keyless'",
     )
     .bind(workspace_id.into_uuid())
     .fetch_one(&pool)
@@ -1081,7 +1080,7 @@ async fn a_keyless_action_on_a_source_does_not_break_the_supply_read()
     let decision_id = Uuid::now_v7();
     let action_id = Uuid::now_v7();
     sqlx::query(
-        "INSERT INTO viryaos_autopilot_decisions (
+        "INSERT INTO autopilot_decisions (
              id, workspace_id, decision_key, context, subject_kind, subject_id,
              decision_kind, confidence_basis_points, disposition, reason,
              input_snapshot, policy_snapshot, recommendation, trace_id
@@ -1097,7 +1096,7 @@ async fn a_keyless_action_on_a_source_does_not_break_the_supply_read()
     .execute(&pool)
     .await?;
     sqlx::query(
-        "INSERT INTO viryaos_autopilot_actions (
+        "INSERT INTO autopilot_actions (
              id, workspace_id, decision_id, context, action_kind, subject_kind,
              subject_id, idempotency_key, payload, status, finished_at, trace_id
          ) VALUES ($1,$2,$3,'content_supply','team.assignment.email','content_source',
@@ -1113,7 +1112,7 @@ async fn a_keyless_action_on_a_source_does_not_break_the_supply_read()
     .execute(&pool)
     .await?;
     sqlx::query(
-        "INSERT INTO viryaos_autopilot_action_emissions
+        "INSERT INTO autopilot_action_emissions
              (workspace_id, action_id, emission_key, outbox_event_id)
          VALUES ($1,$2,$3,NULL)",
     )

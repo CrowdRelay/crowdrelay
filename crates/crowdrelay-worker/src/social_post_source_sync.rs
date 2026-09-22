@@ -51,7 +51,7 @@ const SOURCE_LIFETIME_DAYS: i64 = 45;
 /// The longest caption kept as a voice sample — same bound the video watcher
 /// applies to descriptions.
 const MAX_CAPTION_CHARS: usize = 1_000;
-/// Column limit on `viryaos_content_sources.title` is 240; truncate hard.
+/// Column limit on `content_sources.title` is 240; truncate hard.
 const MAX_TITLE_CHARS: usize = 230;
 /// How much of a caption becomes the row title — the first line, short.
 const TITLE_HEAD_CHARS: usize = 80;
@@ -407,7 +407,7 @@ impl SocialPostSourceSyncWorker {
         let mut tx = self.pool.begin().await.map_err(|e| format!("begin: {e}"))?;
         let upserted: Option<(Uuid, i64)> = sqlx::query_as(
             r#"
-            INSERT INTO viryaos_content_sources (
+            INSERT INTO content_sources (
                 id, workspace_id, source_kind, source_key, title,
                 occurred_at, expires_at, metadata
             ) VALUES (
@@ -418,17 +418,17 @@ impl SocialPostSourceSyncWorker {
             )
             ON CONFLICT (workspace_id, source_kind, source_key) DO UPDATE SET
                 title = EXCLUDED.title,
-                occurred_at = COALESCE($5, viryaos_content_sources.occurred_at),
+                occurred_at = COALESCE($5, content_sources.occurred_at),
                 expires_at = GREATEST(
-                    viryaos_content_sources.expires_at,
-                    COALESCE($5, viryaos_content_sources.occurred_at) + make_interval(days => $7)
+                    content_sources.expires_at,
+                    COALESCE($5, content_sources.occurred_at) + make_interval(days => $7)
                 ),
-                metadata = viryaos_content_sources.metadata || EXCLUDED.metadata,
-                version = viryaos_content_sources.version + 1
-            WHERE viryaos_content_sources.title IS DISTINCT FROM EXCLUDED.title
-               OR viryaos_content_sources.occurred_at IS DISTINCT FROM EXCLUDED.occurred_at
-               OR viryaos_content_sources.expires_at IS DISTINCT FROM EXCLUDED.expires_at
-               OR viryaos_content_sources.metadata IS DISTINCT FROM EXCLUDED.metadata
+                metadata = content_sources.metadata || EXCLUDED.metadata,
+                version = content_sources.version + 1
+            WHERE content_sources.title IS DISTINCT FROM EXCLUDED.title
+               OR content_sources.occurred_at IS DISTINCT FROM EXCLUDED.occurred_at
+               OR content_sources.expires_at IS DISTINCT FROM EXCLUDED.expires_at
+               OR content_sources.metadata IS DISTINCT FROM EXCLUDED.metadata
             RETURNING id, version
             "#,
         )
@@ -446,7 +446,7 @@ impl SocialPostSourceSyncWorker {
         if let Some((source_id, version)) = upserted {
             sqlx::query(
                 r#"
-                INSERT INTO viryaos_content_source_history (
+                INSERT INTO content_source_history (
                     workspace_id, source_id, version, snapshot
                 )
                 SELECT workspace_id, id, version, jsonb_build_object(
@@ -459,7 +459,7 @@ impl SocialPostSourceSyncWorker {
                     'active', active,
                     'format_key', format_key
                 )
-                FROM viryaos_content_sources
+                FROM content_sources
                 WHERE workspace_id = $1 AND id = $2 AND version = $3
                 "#,
             )

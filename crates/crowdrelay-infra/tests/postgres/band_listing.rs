@@ -69,7 +69,7 @@ async fn insert_target(
 ) -> Result<Uuid, sqlx::Error> {
     sqlx::query_scalar(
         r#"
-        INSERT INTO viryaos_outreach_targets (
+        INSERT INTO outreach_targets (
             workspace_id, target_kind, display_name, contact_email,
             accepts_outreach, accepts_outreach_basis, active, verified,
             do_not_contact
@@ -384,7 +384,7 @@ async fn approach_gate_and_allowance_hold_at_request_time() -> Result<(), Box<dy
     for index in 0..MONTHLY_APPROACH_ALLOWANCE {
         sqlx::query(
             r#"
-            INSERT INTO viryaos_outreach_interactions (
+            INSERT INTO outreach_interactions (
                 workspace_id, target_id, direction, phase, source_key, occurred_at
             ) VALUES ($1,$2,'outbound','approach',$3, now())
             "#,
@@ -532,7 +532,7 @@ async fn idempotent_approach_replay_returns_the_same_action()
 
     // One decision, one action — the retry did not double-queue.
     let count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM viryaos_autopilot_actions WHERE workspace_id = $1 AND context = 'representation'",
+        "SELECT COUNT(*) FROM autopilot_actions WHERE workspace_id = $1 AND context = 'representation'",
     )
     .bind(workspace_id)
     .fetch_one(&pool)
@@ -576,12 +576,11 @@ async fn the_agent_approach_rides_the_season_and_the_draw() -> Result<(), Box<dy
         ),
         other => panic!("expected a draw refusal, got {other:?}"),
     }
-    let queued: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM viryaos_autopilot_actions WHERE workspace_id = $1",
-    )
-    .bind(workspace_id)
-    .fetch_one(&pool)
-    .await?;
+    let queued: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM autopilot_actions WHERE workspace_id = $1")
+            .bind(workspace_id)
+            .fetch_one(&pool)
+            .await?;
     assert_eq!(queued, 0, "a thin pitch queued an approach anyway");
 
     seed_draw(&pool, workspace_id).await?;
@@ -615,7 +614,7 @@ async fn the_agent_approach_rides_the_season_and_the_draw() -> Result<(), Box<dy
     )
     .await?;
     sqlx::query(
-        "INSERT INTO viryaos_booking_agents (workspace_id, name, contact_email) \
+        "INSERT INTO booking_agents (workspace_id, name, contact_email) \
          VALUES ($1, 'Registry Agent', $2)",
     )
     .bind(workspace_id)
@@ -637,7 +636,7 @@ async fn the_agent_approach_rides_the_season_and_the_draw() -> Result<(), Box<dy
     // the season window. `cancelled`, not `DELETE` — the action ledger is
     // append-only and a delete cascades into a wall.
     sqlx::query(
-        "UPDATE viryaos_autopilot_actions SET status = 'cancelled', finished_at = now() \
+        "UPDATE autopilot_actions SET status = 'cancelled', finished_at = now() \
          WHERE workspace_id = $1 AND subject_id = $2",
     )
     .bind(workspace_id)
@@ -645,7 +644,7 @@ async fn the_agent_approach_rides_the_season_and_the_draw() -> Result<(), Box<dy
     .execute(&pool)
     .await?;
     sqlx::query(
-        "INSERT INTO viryaos_outreach_interactions \
+        "INSERT INTO outreach_interactions \
             (workspace_id, target_id, direction, phase, source_key, occurred_at) \
          VALUES ($1,$2,'outbound','approach',$3, now() - interval '30 days')",
     )
@@ -677,7 +676,7 @@ async fn the_agent_approach_rides_the_season_and_the_draw() -> Result<(), Box<dy
     )
     .await?;
     sqlx::query(
-        "INSERT INTO viryaos_booking_agents \
+        "INSERT INTO booking_agents \
             (workspace_id, name, contact_email, approached_at) \
          VALUES ($1, 'Recent Agent', $2, now() - interval '60 days')",
     )
@@ -697,7 +696,7 @@ async fn the_agent_approach_rides_the_season_and_the_draw() -> Result<(), Box<dy
 
     // An old approach is outside the window — the season reopened.
     sqlx::query(
-        "UPDATE viryaos_booking_agents SET approached_at = now() - interval '200 days' \
+        "UPDATE booking_agents SET approached_at = now() - interval '200 days' \
          WHERE workspace_id = $1 AND contact_email = $2",
     )
     .bind(workspace_id)
@@ -725,7 +724,7 @@ async fn the_agent_approach_rides_the_season_and_the_draw() -> Result<(), Box<dy
     )
     .await?;
     sqlx::query(
-        "INSERT INTO viryaos_booking_agents \
+        "INSERT INTO booking_agents \
             (workspace_id, name, contact_email, refused_until) \
          VALUES ($1, 'Refused Agent', $2, CURRENT_DATE + 60)",
     )
@@ -756,7 +755,7 @@ async fn the_agent_approach_rides_the_season_and_the_draw() -> Result<(), Box<dy
     )
     .await?;
     sqlx::query(
-        "INSERT INTO viryaos_booking_agents (workspace_id, name, contact_email) \
+        "INSERT INTO booking_agents (workspace_id, name, contact_email) \
          VALUES ($1, 'Declining Agent', $2)",
     )
     .bind(workspace_id)
@@ -789,7 +788,7 @@ async fn the_agent_approach_rides_the_season_and_the_draw() -> Result<(), Box<dy
         )
         .await?;
     let days: i32 = sqlx::query_scalar(
-        "SELECT (refused_until - CURRENT_DATE)::int FROM viryaos_booking_agents \
+        "SELECT (refused_until - CURRENT_DATE)::int FROM booking_agents \
          WHERE workspace_id = $1 AND contact_email = $2",
     )
     .bind(workspace_id)
@@ -866,7 +865,7 @@ async fn a_beacon_agent_lands_on_the_registry_and_the_approach_list()
     // The promote marks the drive contact promoted — the staging row must
     // exist for that update to land.
     sqlx::query(
-        "INSERT INTO viryaos_drive_contacts \
+        "INSERT INTO drive_contacts \
             (id, workspace_id, normalized_email, suggested_kind, source_file_id, \
              source_file_name, fan_outcome, beacon_outcome) \
          VALUES ($1,$2,$3,'booking_agent','file-1','contacts.csv','staged','staged')",
@@ -880,9 +879,9 @@ async fn a_beacon_agent_lands_on_the_registry_and_the_approach_list()
 
     let (registry, list): (i64, i64) = sqlx::query_as(
         "SELECT \
-            (SELECT count(*) FROM viryaos_booking_agents \
+            (SELECT count(*) FROM booking_agents \
               WHERE workspace_id = $1 AND contact_email = $2), \
-            (SELECT count(*) FROM viryaos_outreach_targets \
+            (SELECT count(*) FROM outreach_targets \
               WHERE workspace_id = $1 AND contact_email = $2 AND target_kind = 'agent')",
     )
     .bind(workspace_id)
@@ -894,7 +893,7 @@ async fn a_beacon_agent_lands_on_the_registry_and_the_approach_list()
     // A re-import refreshes rather than duplicating — and never reopens a
     // door the agent closed.
     sqlx::query(
-        "UPDATE viryaos_booking_agents SET refused_until = CURRENT_DATE + 90 \
+        "UPDATE booking_agents SET refused_until = CURRENT_DATE + 90 \
          WHERE workspace_id = $1 AND contact_email = $2",
     )
     .bind(workspace_id)
@@ -903,7 +902,7 @@ async fn a_beacon_agent_lands_on_the_registry_and_the_approach_list()
     .await?;
     gdrive.promote_beacon_agent(workspace_id, &contact).await?;
     let kept: Option<time::Date> = sqlx::query_scalar(
-        "SELECT refused_until FROM viryaos_booking_agents \
+        "SELECT refused_until FROM booking_agents \
          WHERE workspace_id = $1 AND contact_email = $2",
     )
     .bind(workspace_id)

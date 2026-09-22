@@ -1,6 +1,6 @@
 //! An agent-produced decision must join to whatever caused it.
 //!
-//! `viryaos_autopilot_decisions` is the ledger an operator reads to answer "why
+//! `autopilot_decisions` is the ledger an operator reads to answer "why
 //! did the system do this?", and `trace_id` is the only column that joins a
 //! decision to the event that produced it. The agents service is the only
 //! writer of `agent_outcomes` and has never populated `trace_id`: all 67 rows in
@@ -45,7 +45,7 @@ async fn traced_action(pool: &PgPool, workspace_id: WorkspaceId, trace_id: Uuid)
     let action_id = Uuid::now_v7();
     sqlx::query(
         r#"
-        INSERT INTO viryaos_autopilot_decisions (
+        INSERT INTO autopilot_decisions (
             id, workspace_id, decision_key, context, subject_kind, subject_id,
             decision_kind, confidence_basis_points, disposition, reason,
             input_snapshot, policy_snapshot, recommendation, trace_id
@@ -64,7 +64,7 @@ async fn traced_action(pool: &PgPool, workspace_id: WorkspaceId, trace_id: Uuid)
     .context("insert dispatching decision")?;
     sqlx::query(
         r#"
-        INSERT INTO viryaos_autopilot_actions (
+        INSERT INTO autopilot_actions (
             id, workspace_id, decision_id, context, action_kind, subject_kind,
             subject_id, idempotency_key, payload, status, finished_at, trace_id
         ) VALUES ($1,$2,$3,'growth_intelligence','agent.run','workspace',
@@ -182,7 +182,7 @@ fn worker(pool: &PgPool, workspace_id: WorkspaceId) -> AgentOutcomeWorker {
 /// The trace of every decision written for this workspace.
 async fn decision_traces(pool: &PgPool, workspace_id: WorkspaceId) -> Result<Vec<Uuid>> {
     sqlx::query_scalar::<_, Uuid>(
-        "SELECT trace_id FROM viryaos_autopilot_decisions \
+        "SELECT trace_id FROM autopilot_decisions \
          WHERE workspace_id = $1 AND subject_kind = 'agent_outcome'",
     )
     .bind(workspace_id.into_uuid())

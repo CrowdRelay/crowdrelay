@@ -44,7 +44,7 @@ impl AutopilotReplyTriageRepository for PostgresAutopilotRepository {
                     c.target_kind,
                     c.reply_text,
                     c.previous_disposition
-                FROM viryaos_reply_classifications c
+                FROM reply_classifications c
                 WHERE c.workspace_id = $1
                   AND c.classification_result = 'auto'
                   AND c.classified_disposition IS NULL
@@ -103,7 +103,7 @@ impl AutopilotReplyTriageRepository for PostgresAutopilotRepository {
             // not an error and must not fail the autopilot cycle.
             let (target_id, reply_text, target_kind): (uuid::Uuid, String, String) =
                 match sqlx::query_as::<_, (uuid::Uuid, String, String)>(
-                    "SELECT target_id, reply_text, target_kind FROM viryaos_reply_classifications
+                    "SELECT target_id, reply_text, target_kind FROM reply_classifications
                      WHERE workspace_id = $1 AND id = $2
                        AND classified_disposition IS NULL
                        AND classification_result = 'auto'",
@@ -161,7 +161,7 @@ impl AutopilotReplyTriageRepository for PostgresAutopilotRepository {
             // double-counting of the relationship delta.
             let updated = sqlx::query(
                 r#"
-                UPDATE viryaos_reply_classifications
+                UPDATE reply_classifications
                 SET classification_result = $3,
                     classified_disposition = $4,
                     human_review_reason = $5,
@@ -208,8 +208,8 @@ impl AutopilotReplyTriageRepository for PostgresAutopilotRepository {
                     // match wins the tie.
                     let opportunity_id = sqlx::query_scalar::<_, uuid::Uuid>(
                         "SELECT opportunity.id \
-                         FROM viryaos_team_opportunities AS opportunity \
-                         JOIN viryaos_booking_targets AS target \
+                         FROM team_opportunities AS opportunity \
+                         JOIN booking_targets AS target \
                            ON target.workspace_id = opportunity.workspace_id \
                           AND target.id = $2 \
                          WHERE opportunity.workspace_id = $1 \
@@ -232,7 +232,7 @@ impl AutopilotReplyTriageRepository for PostgresAutopilotRepository {
                     .await
                     .map_err(map_sqlx)?;
                     sqlx::query(
-                        "UPDATE viryaos_reply_classifications \
+                        "UPDATE reply_classifications \
                          SET proposed_fee_minor = $3, proposed_currency = $4, \
                              proposed_opportunity_id = $5 \
                          WHERE workspace_id = $1 AND id = $2",
@@ -270,7 +270,7 @@ impl AutopilotReplyTriageRepository for PostgresAutopilotRepository {
                 };
                 let new_version = sqlx::query_scalar::<_, i64>(
                     r#"
-                    UPDATE viryaos_outreach_targets
+                    UPDATE outreach_targets
                     SET last_reply_disposition = $3,
                         do_not_contact = CASE WHEN $3 = 'do_not_contact' THEN true ELSE do_not_contact END,
                         accepts_outreach = CASE WHEN $3 = 'do_not_contact' THEN false ELSE accepts_outreach END,
@@ -293,7 +293,7 @@ impl AutopilotReplyTriageRepository for PostgresAutopilotRepository {
                 // gaps at versions created by the worker.
                 sqlx::query(
                     r#"
-                    INSERT INTO viryaos_outreach_target_history (
+                    INSERT INTO outreach_target_history (
                         workspace_id, target_id, version, snapshot
                     )
                     SELECT workspace_id, id, version, jsonb_build_object(
@@ -309,7 +309,7 @@ impl AutopilotReplyTriageRepository for PostgresAutopilotRepository {
                         'last_reply_at', last_reply_at,
                         'last_reply_disposition', last_reply_disposition
                     )
-                    FROM viryaos_outreach_targets
+                    FROM outreach_targets
                     WHERE workspace_id = $1 AND id = $2 AND version = $3
                     "#,
                 )
@@ -328,13 +328,13 @@ impl AutopilotReplyTriageRepository for PostgresAutopilotRepository {
                 if disp_str == "declined" {
                     sqlx::query(
                         r#"
-                        UPDATE viryaos_booking_agents AS agent
+                        UPDATE booking_agents AS agent
                         SET refused_until = GREATEST(
                             agent.refused_until,
                             COALESCE(target.last_reply_at::date, CURRENT_DATE) + $3
                         ),
                             version = agent.version + 1
-                        FROM viryaos_outreach_targets AS target
+                        FROM outreach_targets AS target
                         WHERE target.workspace_id = $1 AND target.id = $2
                           AND target.target_kind = 'agent'
                           AND agent.workspace_id = target.workspace_id
@@ -357,18 +357,18 @@ impl AutopilotReplyTriageRepository for PostgresAutopilotRepository {
                 if disp_str == "do_not_contact" {
                     sqlx::query(
                         r#"
-                        INSERT INTO viryaos_contact_governor (
+                        INSERT INTO contact_governor (
                             workspace_id, normalized_contact, last_context, last_action_id,
                             last_outbound_at, next_contact_after, do_not_contact
                         )
                         SELECT $1, lower(btrim(contact_email)), 'outreach', NULL, $3, $3, true
-                        FROM viryaos_outreach_targets
+                        FROM outreach_targets
                         WHERE workspace_id = $1 AND id = $2
                         ON CONFLICT (workspace_id, normalized_contact) DO UPDATE
                         SET do_not_contact = true,
                             last_context = EXCLUDED.last_context,
                             next_contact_after = GREATEST(
-                                viryaos_contact_governor.next_contact_after,
+                                contact_governor.next_contact_after,
                                 EXCLUDED.next_contact_after
                             ),
                             updated_at = now()
@@ -383,12 +383,12 @@ impl AutopilotReplyTriageRepository for PostgresAutopilotRepository {
 
                     // The registry's own wall beside the governor's — same
                     // reason as the operator path: the booking-agent gate
-                    // reads `viryaos_booking_agents.do_not_contact`.
+                    // reads `booking_agents.do_not_contact`.
                     sqlx::query(
                         r#"
-                        UPDATE viryaos_booking_agents AS agent
+                        UPDATE booking_agents AS agent
                         SET do_not_contact = true, version = agent.version + 1
-                        FROM viryaos_outreach_targets AS target
+                        FROM outreach_targets AS target
                         WHERE target.workspace_id = $1 AND target.id = $2
                           AND target.target_kind = 'agent'
                           AND agent.workspace_id = target.workspace_id

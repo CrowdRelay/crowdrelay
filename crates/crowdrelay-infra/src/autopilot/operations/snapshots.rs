@@ -74,7 +74,7 @@ pub(in crate::autopilot) async fn load_event_campaign_snapshots(
         LEFT JOIN ecosystem_feature_flags AS flag
           ON flag.workspace_id = event.workspace_id
          AND flag.key = 'communication_campaigns_enabled'
-        LEFT JOIN viryaos_campaign_lifecycle_emissions AS emission
+        LEFT JOIN campaign_lifecycle_emissions AS emission
           ON emission.workspace_id = event.workspace_id
          AND emission.event_id = event.id
         WHERE event.workspace_id = $1
@@ -183,7 +183,7 @@ pub(in crate::autopilot) async fn load_merch_bundle_snapshots(
             pairs.joint_orders,
             EXISTS (
                 SELECT 1
-                FROM viryaos_autopilot_actions AS action
+                FROM autopilot_actions AS action
                 WHERE action.workspace_id = $1
                   AND action.context = 'merch_bundle'
                   AND action.status IN ('awaiting_approval','queued','processing')
@@ -199,9 +199,9 @@ pub(in crate::autopilot) async fn load_merch_bundle_snapshots(
           ON pa.workspace_id = $1 AND pa.id = pairs.product_a AND pa.active
         JOIN merch_products AS pb
           ON pb.workspace_id = $1 AND pb.id = pairs.product_b AND pb.active
-        LEFT JOIN viryaos_merch_product_economics AS ea
+        LEFT JOIN merch_product_economics AS ea
           ON ea.workspace_id = $1 AND ea.product_id = pairs.product_a
-        LEFT JOIN viryaos_merch_product_economics AS eb
+        LEFT JOIN merch_product_economics AS eb
           ON eb.workspace_id = $1 AND eb.product_id = pairs.product_b
         ORDER BY pairs.joint_orders DESC, pairs.product_a, pairs.product_b
         LIMIT $3
@@ -275,13 +275,13 @@ pub(in crate::autopilot) async fn load_outreach_snapshots(
             opportunity.observed_at,
             opportunity.expires_at,
             (SELECT max(interaction.occurred_at)
-             FROM viryaos_outreach_interactions AS interaction
+             FROM outreach_interactions AS interaction
              WHERE interaction.workspace_id = opportunity.workspace_id
                AND interaction.opportunity_id = opportunity.id
                AND interaction.direction = 'outbound') AS last_outreach_at,
             target.last_outreach_at AS target_last_outreach_at,
             (SELECT count(*)::integer
-             FROM viryaos_outreach_interactions AS interaction
+             FROM outreach_interactions AS interaction
              WHERE interaction.workspace_id = opportunity.workspace_id
                AND interaction.opportunity_id = opportunity.id
                AND interaction.direction = 'outbound'
@@ -289,20 +289,20 @@ pub(in crate::autopilot) async fn load_outreach_snapshots(
             -- Scoped to the target, not the opportunity: this is the count the
             -- person on the other end experiences.
             (SELECT count(*)::integer
-             FROM viryaos_outreach_interactions AS interaction
+             FROM outreach_interactions AS interaction
              WHERE interaction.workspace_id = opportunity.workspace_id
                AND interaction.target_id = target.id
                AND interaction.direction = 'outbound') AS lifetime_outbound,
             EXISTS (
                 SELECT 1
-                FROM viryaos_outreach_interactions AS interaction
+                FROM outreach_interactions AS interaction
                 WHERE interaction.workspace_id = opportunity.workspace_id
                   AND interaction.target_id = target.id
                   AND interaction.direction = 'inbound'
             ) AS target_ever_replied,
             COALESCE((
                 SELECT interaction.disposition
-                FROM viryaos_outreach_interactions AS interaction
+                FROM outreach_interactions AS interaction
                 WHERE interaction.workspace_id = opportunity.workspace_id
                   AND interaction.opportunity_id = opportunity.id
                   AND interaction.direction = 'inbound'
@@ -312,14 +312,14 @@ pub(in crate::autopilot) async fn load_outreach_snapshots(
             ), 'none') AS last_reply_disposition,
             EXISTS (
                 SELECT 1
-                FROM viryaos_autopilot_actions AS action
+                FROM autopilot_actions AS action
                 WHERE action.workspace_id = $1
                   AND action.context = 'outreach'
                   AND action.subject_id = opportunity.id
                   AND action.status IN ('awaiting_approval','queued','processing')
             ) AS in_flight
-        FROM viryaos_outreach_opportunities AS opportunity
-        JOIN viryaos_outreach_targets AS target
+        FROM outreach_opportunities AS opportunity
+        JOIN outreach_targets AS target
           ON target.workspace_id = opportunity.workspace_id
          AND target.id = opportunity.target_id
         WHERE opportunity.workspace_id = $1
@@ -385,14 +385,14 @@ pub(in crate::autopilot) async fn load_beacon_discovery_snapshots(
         r#"
         SELECT event.id AS event_id, event.starts_at AS event_starts_at,
                (SELECT count(*)::bigint
-                FROM viryaos_beacons beacon
+                FROM beacons beacon
                 WHERE beacon.workspace_id=event.workspace_id
                   AND beacon.city_id=event.city_id
                   AND beacon.active AND beacon.verified AND beacon.accepts_outreach
                   AND NOT beacon.do_not_contact
                   AND beacon.contact_email IS NOT NULL) AS known_local_beacons,
                (SELECT max(action.finished_at)
-                FROM viryaos_autopilot_actions action
+                FROM autopilot_actions action
                 WHERE action.workspace_id=event.workspace_id
                   AND action.context='beacon'
                   AND action.subject_kind='event'
@@ -400,7 +400,7 @@ pub(in crate::autopilot) async fn load_beacon_discovery_snapshots(
                   AND action.action_kind='beacon.discovery.request'
                   AND action.status='succeeded') AS last_discovery_at,
                EXISTS (
-                   SELECT 1 FROM viryaos_autopilot_actions action
+                   SELECT 1 FROM autopilot_actions action
                    WHERE action.workspace_id=event.workspace_id
                      AND action.context='beacon'
                      AND action.subject_kind='event'
@@ -483,13 +483,13 @@ pub(in crate::autopilot) async fn load_beacon_campaign_snapshots(
             COALESCE(campaign.last_reply_disposition, 'none') AS last_reply_disposition,
             EXISTS (
                 SELECT 1
-                FROM viryaos_autopilot_actions AS action
+                FROM autopilot_actions AS action
                 WHERE action.workspace_id = beacon.workspace_id
                   AND action.context = 'beacon'
                   AND action.subject_id = beacon.id
                   AND action.status IN ('awaiting_approval','queued','processing')
             ) AS in_flight
-        FROM viryaos_beacons AS beacon
+        FROM beacons AS beacon
         JOIN events AS event
           ON event.workspace_id = beacon.workspace_id
          AND event.status IN ('published','completed')
@@ -498,7 +498,7 @@ pub(in crate::autopilot) async fn load_beacon_campaign_snapshots(
              beacon.city_id IS NULL
              OR beacon.city_id = event.city_id
          )
-        LEFT JOIN viryaos_beacon_campaigns AS campaign
+        LEFT JOIN beacon_campaigns AS campaign
           ON campaign.workspace_id = beacon.workspace_id
          AND campaign.beacon_id = beacon.id
          AND campaign.event_id = event.id
@@ -618,7 +618,7 @@ pub(in crate::autopilot) async fn load_content_supply_snapshots(
             END AS release_tier,
             COALESCE(ARRAY(
                 SELECT DISTINCT action.payload->>'artifact'
-                FROM viryaos_autopilot_actions AS action
+                FROM autopilot_actions AS action
                 WHERE action.workspace_id = source.workspace_id
                   AND action.context = 'content_supply'
                   AND action.subject_id = source.id
@@ -631,7 +631,7 @@ pub(in crate::autopilot) async fn load_content_supply_snapshots(
                   AND action.status = 'succeeded'
                   AND EXISTS (
                       SELECT 1
-                      FROM viryaos_autopilot_execution_reports AS report
+                      FROM autopilot_execution_reports AS report
                       WHERE report.workspace_id = action.workspace_id
                         AND report.action_id = action.id
                         AND report.status = 'succeeded'
@@ -639,7 +639,7 @@ pub(in crate::autopilot) async fn load_content_supply_snapshots(
             ), ARRAY[]::text[]) AS completed_artifacts,
             COALESCE(ARRAY(
                 SELECT DISTINCT action.payload->>'artifact'
-                FROM viryaos_autopilot_actions AS action
+                FROM autopilot_actions AS action
                 WHERE action.workspace_id = source.workspace_id
                   AND action.context = 'content_supply'
                   AND action.subject_id = source.id
@@ -650,13 +650,13 @@ pub(in crate::autopilot) async fn load_content_supply_snapshots(
                           action.status = 'succeeded'
                           AND EXISTS (
                               SELECT 1
-                              FROM viryaos_autopilot_action_emissions AS emission
+                              FROM autopilot_action_emissions AS emission
                               WHERE emission.workspace_id = action.workspace_id
                                 AND emission.action_id = action.id
                           )
                           AND NOT EXISTS (
                               SELECT 1
-                              FROM viryaos_autopilot_execution_reports AS report
+                              FROM autopilot_execution_reports AS report
                               WHERE report.workspace_id = action.workspace_id
                                 AND report.action_id = action.id
                                 AND report.status IN ('succeeded','failed')
@@ -664,7 +664,7 @@ pub(in crate::autopilot) async fn load_content_supply_snapshots(
                       )
                   )
             ), ARRAY[]::text[]) AS inflight_artifacts
-        FROM viryaos_content_sources AS source
+        FROM content_sources AS source
         WHERE source.workspace_id = $1
           AND source.active
         ORDER BY source.occurred_at DESC, source.id
@@ -824,8 +824,8 @@ pub(in crate::autopilot) async fn load_experiment_snapshots(
             variant.conversions,
             variant.value_minor,
             variant.active
-        FROM viryaos_experiments AS experiment
-        JOIN viryaos_experiment_variants AS variant
+        FROM experiments AS experiment
+        JOIN experiment_variants AS variant
           ON variant.workspace_id = experiment.workspace_id
          AND variant.experiment_id = experiment.id
         WHERE experiment.workspace_id = $1
@@ -946,7 +946,7 @@ pub(in crate::autopilot) async fn load_show_task_snapshots(
             -- failure, which regenerated the same action key forever and
             -- suppressed every retry of a task that still needed doing.
             (SELECT max(action.finished_at)
-             FROM viryaos_autopilot_actions AS action
+             FROM autopilot_actions AS action
              WHERE action.workspace_id = event.workspace_id
                AND action.context = 'show_operations'
                AND action.action_kind = 'show.task.escalate'
@@ -1149,7 +1149,7 @@ pub(in crate::autopilot) async fn load_beacon_invite_snapshots(
                     FLOOR(EXTRACT(EPOCH FROM ($2 - last_ask.asked_at)) / 3600)
                 )::bigint
             END AS hours_since_last_invite_batch
-        FROM viryaos_beacons AS beacon
+        FROM beacons AS beacon
         JOIN events AS event
           ON event.workspace_id = beacon.workspace_id
          AND event.status = 'published'
@@ -1157,7 +1157,7 @@ pub(in crate::autopilot) async fn load_beacon_invite_snapshots(
          AND (beacon.city_id IS NULL OR beacon.city_id = event.city_id)
         LEFT JOIN LATERAL (
             SELECT max(action.created_at) AS asked_at
-            FROM viryaos_autopilot_actions AS action
+            FROM autopilot_actions AS action
             WHERE action.workspace_id = beacon.workspace_id
               AND action.context = 'beacon'
               AND action.subject_id = beacon.id
@@ -1217,7 +1217,7 @@ pub(in crate::autopilot) async fn load_booking_supply_snapshot(
             SELECT
                 (
                     SELECT count(*)::bigint
-                    FROM viryaos_booking_targets AS target
+                    FROM booking_targets AS target
                     WHERE target.workspace_id = $1
                       AND target.active
                       AND target.accepts_booking
@@ -1230,7 +1230,7 @@ pub(in crate::autopilot) async fn load_booking_supply_snapshot(
                             FLOOR(EXTRACT(EPOCH FROM ($2 - max(d.evaluated_at))) / 3600)
                         )::bigint
                     END
-                    FROM viryaos_autopilot_decisions AS d
+                    FROM autopilot_decisions AS d
                     WHERE d.workspace_id = $1
                       AND d.context = 'booking_opportunity'
                       AND d.decision_kind = 'request_booking_target_discovery'

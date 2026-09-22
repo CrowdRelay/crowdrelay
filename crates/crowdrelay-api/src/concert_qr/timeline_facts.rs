@@ -223,7 +223,7 @@ async fn load_timeline_facts(
     let emissions = sqlx::query_as::<_, LifecycleEmissionRow>(
         r#"
         SELECT phase, emitted_at
-        FROM viryaos_campaign_lifecycle_emissions
+        FROM campaign_lifecycle_emissions
         WHERE workspace_id = $1 AND event_id = $2
           AND phase = 'announcement'
         ORDER BY emitted_at
@@ -237,7 +237,7 @@ async fn load_timeline_facts(
     let surfaces = sqlx::query_as::<_, TimelineSurfaceRow>(
         r#"
         SELECT surface_key, status
-        FROM viryaos_show_growth_surfaces
+        FROM show_growth_surfaces
         WHERE workspace_id = $1 AND event_id = $2
         ORDER BY surface_key
         "#,
@@ -302,7 +302,7 @@ async fn load_timeline_facts(
     let latest_decision = sqlx::query_as::<_, TimelineDecisionRow>(
         r#"
         SELECT reason, evaluated_at
-        FROM viryaos_autopilot_decisions
+        FROM autopilot_decisions
         WHERE workspace_id = $1 AND context = 'show_growth' AND subject_id = $2
         ORDER BY evaluated_at DESC
         LIMIT 1
@@ -317,7 +317,7 @@ async fn load_timeline_facts(
         r#"
         SELECT id, status, payload ->> 'lever' AS lever,
                available_at, finished_at
-        FROM viryaos_autopilot_actions
+        FROM autopilot_actions
         WHERE workspace_id = $1 AND context = 'show_growth' AND subject_id = $2
         ORDER BY created_at
         "#,
@@ -340,7 +340,7 @@ async fn load_timeline_facts(
                assignment.action_id,
                assignment.status, assignment.due_at,
                member.display_name
-        FROM viryaos_team_assignments AS assignment
+        FROM team_assignments AS assignment
         JOIN workspace_members AS member
           ON member.workspace_id = assignment.workspace_id
          AND member.id = assignment.assignee_member_id
@@ -350,11 +350,11 @@ async fn load_timeline_facts(
                assignment.action_id,
                assignment.status, assignment.due_at,
                member.display_name
-        FROM viryaos_team_assignments AS assignment
-        JOIN viryaos_capture_plans AS plan
+        FROM team_assignments AS assignment
+        JOIN capture_plans AS plan
           ON plan.workspace_id = assignment.workspace_id
          AND plan.id = assignment.source_id
-        JOIN viryaos_production_events AS day
+        JOIN production_events AS day
           ON day.workspace_id = plan.workspace_id
          AND day.id = plan.production_event_id
         JOIN workspace_members AS member
@@ -374,8 +374,8 @@ async fn load_timeline_facts(
     let play_steps = sqlx::query_as::<_, TimelinePlayStepRow>(
         r#"
         SELECT step.step_kind, step.due_at, step.settled_at, step.skip_reason
-        FROM viryaos_play_steps AS step
-        JOIN viryaos_plays AS play
+        FROM play_steps AS step
+        JOIN plays AS play
           ON play.workspace_id = step.workspace_id
          AND play.id = step.play_id
         WHERE step.workspace_id = $1
@@ -433,15 +433,15 @@ async fn load_timeline_facts(
         r#"
         SELECT
             (SELECT MAX(source.occurred_at)
-             FROM viryaos_content_sources AS source
+             FROM content_sources AS source
              WHERE source.workspace_id = $1
                AND source.source_kind = 'show_completed'
                AND source.source_key = 'show_completed:' || $2::text
                AND source.active
             ) AS occurred_at,
             (SELECT count(*)::bigint
-             FROM viryaos_autopilot_actions AS action
-             JOIN viryaos_content_sources AS source
+             FROM autopilot_actions AS action
+             JOIN content_sources AS source
                ON source.workspace_id = action.workspace_id
               AND source.id = action.subject_id
              WHERE action.workspace_id = $1
@@ -454,13 +454,13 @@ async fn load_timeline_facts(
                        action.status = 'succeeded'
                        AND EXISTS (
                            SELECT 1
-                           FROM viryaos_autopilot_action_emissions AS emission
+                           FROM autopilot_action_emissions AS emission
                            WHERE emission.workspace_id = action.workspace_id
                              AND emission.action_id = action.id
                        )
                        AND NOT EXISTS (
                            SELECT 1
-                           FROM viryaos_autopilot_execution_reports AS report
+                           FROM autopilot_execution_reports AS report
                            WHERE report.workspace_id = action.workspace_id
                              AND report.action_id = action.id
                              AND report.status IN ('succeeded','failed')
@@ -469,8 +469,8 @@ async fn load_timeline_facts(
                )
             ) AS pending_requests,
             (SELECT count(*)::bigint
-             FROM viryaos_autopilot_actions AS action
-             JOIN viryaos_content_sources AS source
+             FROM autopilot_actions AS action
+             JOIN content_sources AS source
                ON source.workspace_id = action.workspace_id
               AND source.id = action.subject_id
              WHERE action.workspace_id = $1
@@ -480,7 +480,7 @@ async fn load_timeline_facts(
                AND action.status = 'succeeded'
                AND EXISTS (
                    SELECT 1
-                   FROM viryaos_autopilot_execution_reports AS report
+                   FROM autopilot_execution_reports AS report
                    WHERE report.workspace_id = action.workspace_id
                      AND report.action_id = action.id
                      AND report.status = 'succeeded'
@@ -497,7 +497,7 @@ async fn load_timeline_facts(
         r#"
         SELECT predicted_total_cost_minor, settled_total_cost_minor,
                fee_received_minor, accuracy, prediction_missing_input
-        FROM viryaos_show_cost_ledger
+        FROM show_cost_ledger
         WHERE workspace_id = $1 AND event_id = $2
         ORDER BY predicted_at DESC
         LIMIT 1
@@ -522,8 +522,8 @@ async fn load_timeline_facts(
                        terms.settled_at,
                        terms.counter_rounds,
                        terms.currency
-                FROM viryaos_team_opportunities AS opportunity
-                LEFT JOIN viryaos_team_opportunity_terms AS terms
+                FROM team_opportunities AS opportunity
+                LEFT JOIN team_opportunity_terms AS terms
                   ON terms.workspace_id = opportunity.workspace_id
                  AND terms.opportunity_id = opportunity.id
                 WHERE opportunity.workspace_id = $1 AND opportunity.id = $2
@@ -601,8 +601,8 @@ async fn load_timeline_facts(
         SELECT beacon.display_name, beacon.beacon_kind,
                campaign.status, campaign.last_reply_disposition,
                campaign.last_outreach_at, campaign.notes
-        FROM viryaos_beacon_campaigns AS campaign
-        JOIN viryaos_beacons AS beacon
+        FROM beacon_campaigns AS campaign
+        JOIN beacons AS beacon
           ON beacon.workspace_id = campaign.workspace_id
          AND beacon.id = campaign.beacon_id
         WHERE campaign.workspace_id = $1 AND campaign.event_id = $2

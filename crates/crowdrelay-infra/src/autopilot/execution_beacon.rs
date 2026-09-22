@@ -21,7 +21,7 @@ pub(super) async fn execute_beacon_outreach(
         r#"
         SELECT beacon.beacon_kind, beacon.display_name, beacon.contact_email,
                event.title, event.venue, event.starts_at, event.slug, event.ticket_url
-        FROM viryaos_beacons AS beacon
+        FROM beacons AS beacon
         JOIN events AS event
           ON event.workspace_id = beacon.workspace_id AND event.id = $3
         WHERE beacon.workspace_id = $1 AND beacon.id = $2
@@ -106,19 +106,19 @@ pub(super) async fn execute_beacon_outreach(
     .await?;
     sqlx::query(
         r#"
-        INSERT INTO viryaos_beacon_campaigns (
+        INSERT INTO beacon_campaigns (
             workspace_id, beacon_id, event_id, status, last_phase,
             last_outreach_at, followup_count
         ) VALUES ($1,$2,$3,'contacted',$4,$5,1)
         ON CONFLICT (workspace_id, beacon_id, event_id) DO UPDATE
         SET status = CASE
-                WHEN viryaos_beacon_campaigns.status IN ('interested','partner')
-                THEN viryaos_beacon_campaigns.status
+                WHEN beacon_campaigns.status IN ('interested','partner')
+                THEN beacon_campaigns.status
                 ELSE 'contacted'
             END,
             last_phase = EXCLUDED.last_phase,
             last_outreach_at = EXCLUDED.last_outreach_at,
-            followup_count = viryaos_beacon_campaigns.followup_count + 1
+            followup_count = beacon_campaigns.followup_count + 1
         "#,
     )
     .bind(workspace_id.into_uuid())

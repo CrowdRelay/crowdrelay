@@ -76,7 +76,7 @@ async fn team_email_executor(
     let now = OffsetDateTime::now_utc();
     let executor = format!("n8n-roster-{workspace_id}");
     sqlx::query(
-        r#"INSERT INTO viryaos_executor_instances (
+        r#"INSERT INTO executor_instances (
             workspace_id, executor_id, version, manifest_sha, observed_at, expires_at
         ) VALUES ($1,$2,'test','test-manifest',$3,$4)"#,
     )
@@ -87,7 +87,7 @@ async fn team_email_executor(
     .execute(pool)
     .await?;
     sqlx::query(
-        r#"INSERT INTO viryaos_executor_capabilities (
+        r#"INSERT INTO executor_capabilities (
             workspace_id, executor_id, capability, capability_version, observed_at, expires_at
         ) VALUES ($1,$2,'team.email','1',$3,$4)"#,
     )
@@ -114,7 +114,7 @@ async fn pending_action(
     let subject_id = Uuid::now_v7();
     sqlx::query(
         r#"
-        INSERT INTO viryaos_autopilot_decisions (
+        INSERT INTO autopilot_decisions (
             id, workspace_id, decision_key, context, subject_kind, subject_id,
             decision_kind, confidence_basis_points, disposition, reason,
             input_snapshot, policy_snapshot, recommendation, evaluated_at, trace_id
@@ -131,7 +131,7 @@ async fn pending_action(
     .await?;
     sqlx::query(
         r#"
-        INSERT INTO viryaos_autopilot_actions (
+        INSERT INTO autopilot_actions (
             id, workspace_id, decision_id, context, action_kind, subject_kind, subject_id,
             idempotency_key, payload, status, available_at, approval_expires_at
         ) VALUES ($1,$2,$3,'booking_opportunity','outreach.target.request',
@@ -155,7 +155,7 @@ async fn brief_rows(
     organization_id: Uuid,
 ) -> Result<Vec<(Uuid, time::Date, String)>, Box<dyn std::error::Error>> {
     Ok(sqlx::query_as(
-        "SELECT id, local_date, body FROM viryaos_roster_briefs
+        "SELECT id, local_date, body FROM roster_briefs
          WHERE organization_id = $1 ORDER BY local_date",
     )
     .bind(organization_id)
@@ -168,7 +168,7 @@ async fn roster_assignments(
     workspace_id: Uuid,
 ) -> Result<Vec<(Uuid, String)>, Box<dyn std::error::Error>> {
     Ok(sqlx::query_as(
-        "SELECT assignee_member_id, status FROM viryaos_team_assignments
+        "SELECT assignee_member_id, status FROM team_assignments
          WHERE workspace_id = $1 AND source_kind = 'roster_weekly_brief'
          ORDER BY assignee_member_id",
     )
@@ -182,7 +182,7 @@ async fn roster_emails(
     workspace_id: Uuid,
 ) -> Result<Vec<String>, Box<dyn std::error::Error>> {
     Ok(sqlx::query_scalar(
-        "SELECT payload->>'recipient_email' FROM viryaos_autopilot_actions
+        "SELECT payload->>'recipient_email' FROM autopilot_actions
          WHERE workspace_id = $1 AND action_kind = 'team.assignment.email'
            AND context = 'roster'
          ORDER BY id",

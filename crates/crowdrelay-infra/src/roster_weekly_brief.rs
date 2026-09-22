@@ -119,7 +119,7 @@ pub async fn act_briefs(
                        ORDER BY action.approval_expires_at NULLS LAST,
                                 action.created_at, action.id
                    ) AS shown
-            FROM viryaos_autopilot_actions AS action
+            FROM autopilot_actions AS action
             WHERE action.workspace_id = ANY($1)
               AND action.status = 'awaiting_approval'
               AND (action.approval_expires_at IS NULL OR action.approval_expires_at > $2)
@@ -154,7 +154,7 @@ pub async fn act_briefs(
                        PARTITION BY action.workspace_id
                        ORDER BY action.finished_at DESC, action.id
                    ) AS shown
-            FROM viryaos_autopilot_actions AS action
+            FROM autopilot_actions AS action
             WHERE action.workspace_id = ANY($1)
               AND action.status = 'cancelled'
               AND action.last_error_kind IN ('approval_expired', 'insufficient_evidence')
@@ -178,7 +178,7 @@ pub async fn act_briefs(
     let briefing_dates = sqlx::query_as::<_, (Uuid, Date)>(
         r#"
         SELECT briefing.workspace_id, max(briefing.local_date) AS latest_briefing_date
-        FROM viryaos_daily_briefings AS briefing
+        FROM daily_briefings AS briefing
         WHERE briefing.workspace_id = ANY($1)
         GROUP BY briefing.workspace_id
         "#,

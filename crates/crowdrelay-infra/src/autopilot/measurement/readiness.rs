@@ -78,7 +78,7 @@ pub(in crate::autopilot) async fn dispatch_reached_an_audience(
         SELECT COALESCE(
                    bool_or(published),
                    NOT EXISTS (
-                       SELECT 1 FROM viryaos_autopilot_actions a
+                       SELECT 1 FROM autopilot_actions a
                        WHERE a.workspace_id = $1 AND a.id = $2
                          AND a.action_kind IN ('agent.content.request',
                                                'community.engage.request')
@@ -135,7 +135,7 @@ pub(super) async fn observable_community(
     let unit: Option<(String, String)> = sqlx::query_as::<_, (String, String)>(
         r#"
         SELECT unit_id, unit_kind
-        FROM viryaos_experiment_assignments
+        FROM experiment_assignments
         WHERE workspace_id = $1
           AND action_id = $2
           AND experiment_uuid IS NOT NULL
@@ -263,7 +263,7 @@ pub(super) async fn refresh_evidence_readiness(
         };
         let partial_result = sqlx::query(&format!(
             r#"
-            UPDATE viryaos_growth_evidence AS evidence
+            UPDATE growth_evidence AS evidence
             SET {horizon_column} = $3,
                 partial_resolution_count = evidence.partial_resolution_count + 1{legacy_cursor}
             WHERE evidence.workspace_id = $1
@@ -298,14 +298,14 @@ pub(super) async fn refresh_evidence_readiness(
     // entirely.
     let evidence_result = sqlx::query(
         r#"
-        UPDATE viryaos_growth_evidence AS evidence
+        UPDATE growth_evidence AS evidence
         SET resolved_at = $3
         WHERE evidence.workspace_id = $1
           AND evidence.action_id = $2
           AND evidence.resolved_at IS NULL
           AND NOT EXISTS (
               SELECT 1
-              FROM viryaos_autopilot_measurements AS outstanding
+              FROM autopilot_measurements AS outstanding
               WHERE outstanding.workspace_id = evidence.workspace_id
                 AND outstanding.action_id = evidence.action_id
                 AND outstanding.status IN ('pending', 'processing')
@@ -324,12 +324,12 @@ pub(super) async fn refresh_evidence_readiness(
           -- open on an outcome that will never arrive.
           AND NOT EXISTS (
               SELECT 1
-              FROM viryaos_experiment_assignments AS treated
-              JOIN viryaos_experiment_assignments AS control
+              FROM experiment_assignments AS treated
+              JOIN experiment_assignments AS control
                 ON control.workspace_id = treated.workspace_id
                AND control.experiment_uuid = treated.experiment_uuid
                AND control.arm = 'control'
-              JOIN viryaos_growth_evidence AS control_evidence
+              JOIN growth_evidence AS control_evidence
                 ON control_evidence.workspace_id = control.workspace_id
                AND control_evidence.experiment_assignment_id = control.id
               WHERE treated.workspace_id = evidence.workspace_id
@@ -357,14 +357,14 @@ pub(super) async fn refresh_evidence_readiness(
     }
     let prediction_result = sqlx::query(
         r#"
-        UPDATE viryaos_dispatch_predictions AS prediction
+        UPDATE dispatch_predictions AS prediction
         SET resolved_at = $3
         WHERE prediction.workspace_id = $1
           AND prediction.action_id = $2
           AND prediction.resolved_at IS NULL
           AND NOT EXISTS (
               SELECT 1
-              FROM viryaos_autopilot_measurements AS outstanding
+              FROM autopilot_measurements AS outstanding
               WHERE outstanding.workspace_id = prediction.workspace_id
                 AND outstanding.action_id = prediction.action_id
                 AND outstanding.status IN ('pending', 'processing')
@@ -407,7 +407,7 @@ pub(super) async fn measured_evidence_quality(
     let experiment_kind: Option<String> = sqlx::query_scalar::<_, String>(
         r#"
         SELECT experiment_kind
-        FROM viryaos_experiment_assignments
+        FROM experiment_assignments
         WHERE workspace_id = $1
           AND action_id = $2
           AND experiment_uuid IS NOT NULL
@@ -448,8 +448,8 @@ pub(super) async fn refresh_experiment_readiness(
     let treated: Vec<uuid::Uuid> = sqlx::query_scalar::<_, uuid::Uuid>(
         r#"
         SELECT assignment.action_id
-        FROM viryaos_experiment_assignments AS assignment
-        JOIN viryaos_growth_evidence AS evidence
+        FROM experiment_assignments AS assignment
+        JOIN growth_evidence AS evidence
           ON evidence.workspace_id = assignment.workspace_id
          AND evidence.action_id = assignment.action_id
         WHERE assignment.workspace_id = $1

@@ -1,4 +1,4 @@
-# ViryaOS n8n executor contract
+# CrowdRelay n8n executor contract
 
 n8n is an executor, not the policy engine. CrowdRelay remains authoritative for decisions, quotas, idempotency, domain state and audit. Provider adapters should stay thin: validate the canonical event, perform one external side effect, then report what the provider actually did.
 

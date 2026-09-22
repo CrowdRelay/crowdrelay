@@ -9,7 +9,7 @@
 /// It runs inside `setup`, which `scripts/deploy.sh` runs on every release
 /// before either long-running service starts. That makes it an unattended
 /// periodic writer, so it refreshes facts and never overrides a decision:
-/// `workspace_members.status = 'disabled'` and `viryaos_team_profiles.active =
+/// `workspace_members.status = 'disabled'` and `team_profiles.active =
 /// false` both survive it. Turning either back on is a deliberate act, not a
 /// side effect of deploying.
 pub async fn bootstrap_team_operations(
@@ -79,7 +79,7 @@ pub async fn bootstrap_team_operations(
             // member-keyed upsert only fires for a key nobody holds.
             let result = sqlx::query(
                 r#"
-                UPDATE viryaos_team_profiles SET
+                UPDATE team_profiles SET
                     member_id = $2,
                     -- `active` is deliberately absent here and below: a profile
                     -- turned off is somebody's decision about capacity, and a
@@ -101,7 +101,7 @@ pub async fn bootstrap_team_operations(
             if result.rows_affected() == 0 {
                 let result = sqlx::query(
                     r#"
-                    INSERT INTO viryaos_team_profiles (
+                    INSERT INTO team_profiles (
                         workspace_id, member_id, member_key, active, skills, capacity_basis_points
                     ) VALUES ($1, $2, $3, true, $4, 10000)
                     ON CONFLICT (workspace_id, member_id) DO UPDATE SET

@@ -72,7 +72,7 @@ class GrowthEnvelopeContract(unittest.TestCase):
         self.assertEqual(schema.count("CREATE TABLE"), 1)
         self.assertIn("CREATE TABLE viryaos_growth_envelope", schema)
         loader = read(LOADER)
-        self.assertIn("FROM viryaos_autopilot_actions", loader)
+        self.assertIn("FROM autopilot_actions", loader)
 
     def test_spend_is_recorded_when_the_action_is_created(self) -> None:
         # Deriving the class at read time would mean reimplementing the Rust

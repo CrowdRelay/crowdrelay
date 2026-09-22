@@ -44,7 +44,7 @@ struct MoveSpec {
 
 /// Per-table move policy. Tables absent here are never re-pointed:
 /// `fan_consents`, `fan_acquisition_events`, `referral_attributions`,
-/// `operator_actions`, `reward_draw_proofs`, `viryaos_action_ledger`,
+/// `operator_actions`, `reward_draw_proofs`, `action_ledger`,
 /// `audit_events`, `external_proof_items` are append-only or pinned
 /// history — they keep describing the record they were written against.
 /// `fan_provenance_events` has no mutation trigger and describes the
@@ -232,16 +232,16 @@ const MOVE_SPECS: &[MoveSpec] = &[
              AND s.qualification_key = t.qualification_key) RETURNING id::text",
     },
     MoveSpec {
-        table: "viryaos_play_step_recipients",
-        move_sql: "UPDATE viryaos_play_step_recipients t SET fan_id = $2 WHERE workspace_id = $1 AND fan_id = $3 \
-         AND NOT EXISTS (SELECT 1 FROM viryaos_play_step_recipients s \
+        table: "play_step_recipients",
+        move_sql: "UPDATE play_step_recipients t SET fan_id = $2 WHERE workspace_id = $1 AND fan_id = $3 \
+         AND NOT EXISTS (SELECT 1 FROM play_step_recipients s \
              WHERE s.workspace_id = $1 AND s.fan_id = $2 AND s.step_id = t.step_id) \
          RETURNING id::text",
     },
     MoveSpec {
-        table: "viryaos_reach_conversions",
-        move_sql: "UPDATE viryaos_reach_conversions t SET fan_id = $2 WHERE workspace_id = $1 AND fan_id = $3 \
-         AND NOT EXISTS (SELECT 1 FROM viryaos_reach_conversions s \
+        table: "reach_conversions",
+        move_sql: "UPDATE reach_conversions t SET fan_id = $2 WHERE workspace_id = $1 AND fan_id = $3 \
+         AND NOT EXISTS (SELECT 1 FROM reach_conversions s \
              WHERE s.reach_event_id = t.reach_event_id AND s.fan_id = $2) RETURNING id::text",
     },
 ];
@@ -591,8 +591,8 @@ impl FanIdentityRepository for PgFanIdentityRepository {
         for (table, column) in [
             ("referral_attributions", "referrer_fan_id"),
             ("referral_attributions", "referred_fan_id"),
-            ("viryaos_growth_evidence", "converted_fan_id"),
-            ("viryaos_reach_events", "converted_fan_id"),
+            ("growth_evidence", "converted_fan_id"),
+            ("reach_events", "converted_fan_id"),
         ] {
             let remaining = sqlx::query_scalar::<_, i64>(&format!(
                 "SELECT count(*) FROM {table} WHERE workspace_id = $1 AND {column} = $2"

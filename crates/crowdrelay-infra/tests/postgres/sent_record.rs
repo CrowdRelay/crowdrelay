@@ -2,7 +2,7 @@
 //!
 //! Both reads answer from rows written by other code paths: the emitted
 //! payload in `outbox_events`, tied to its action by
-//! `viryaos_autopilot_action_emissions`. Nothing read them back until now, so
+//! `autopilot_action_emissions`. Nothing read them back until now, so
 //! the console could say a send failed and never say who did not hear from the
 //! tenant. Only a database can show that the join works.
 
@@ -208,7 +208,7 @@ async fn action(
     let decision_id = Uuid::now_v7();
     sqlx::query(
         r#"
-        INSERT INTO viryaos_autopilot_decisions (
+        INSERT INTO autopilot_decisions (
             id, workspace_id, decision_key, context, subject_kind, subject_id,
             decision_kind, confidence_basis_points, disposition, reason,
             input_snapshot, policy_snapshot, recommendation, evaluated_at, trace_id
@@ -229,7 +229,7 @@ async fn action(
     let action_id = Uuid::now_v7();
     sqlx::query(
         r#"
-        INSERT INTO viryaos_autopilot_actions (
+        INSERT INTO autopilot_actions (
             id, workspace_id, decision_id, context, action_kind, subject_kind,
             subject_id, idempotency_key, payload, status, action_class,
             finished_at, last_error_kind, created_at
@@ -276,7 +276,7 @@ async fn emit(
     .await?;
     sqlx::query(
         r#"
-        INSERT INTO viryaos_autopilot_action_emissions
+        INSERT INTO autopilot_action_emissions
             (workspace_id, action_id, emission_key, outbox_event_id, emitted_at)
         VALUES ($1, $2, $3, $4, $5)
         "#,
@@ -303,7 +303,7 @@ async fn report(
 ) -> Result<(), Box<dyn std::error::Error>> {
     sqlx::query(
         r#"
-        INSERT INTO viryaos_autopilot_execution_reports
+        INSERT INTO autopilot_execution_reports
             (workspace_id, action_id, receipt_key, executor_id, status,
              provider_reference, occurred_at)
         VALUES ($1, $2, $3, 'n8n-test', $4, $5, $6)

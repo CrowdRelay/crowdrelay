@@ -7,7 +7,7 @@
 //!
 //! Both have been on disk the whole time. `emit_outward_action` writes the
 //! emitted payload into `outbox_events`, and
-//! `viryaos_autopilot_action_emissions` ties it to the action. Nothing read it
+//! `autopilot_action_emissions` ties it to the action. Nothing read it
 //! back. Trust in the next click is built by being able to see the last one.
 //!
 //! Two reads live here:
@@ -178,20 +178,20 @@ pub async fn sent_record(
             outbound.event_type,
             emission.emitted_at,
             outbound.payload
-        FROM viryaos_autopilot_actions AS action
-        LEFT JOIN viryaos_autopilot_action_emissions AS emission
+        FROM autopilot_actions AS action
+        LEFT JOIN autopilot_action_emissions AS emission
           ON emission.workspace_id = action.workspace_id
          AND emission.action_id = action.id
         LEFT JOIN outbox_events AS outbound
           ON outbound.workspace_id = emission.workspace_id
          AND outbound.id = emission.outbox_event_id
-        -- The executor's own last word. `viryaos_autopilot_execution_reports`
+        -- The executor's own last word. `autopilot_execution_reports`
         -- is provider-confirmed evidence and is deliberately separate from the
         -- action's status: `succeeded` there means the provider did it, not
         -- that CrowdRelay committed an intent.
         LEFT JOIN LATERAL (
             SELECT report.status AS executor_status, report.provider_reference
-            FROM viryaos_autopilot_execution_reports AS report
+            FROM autopilot_execution_reports AS report
             WHERE report.workspace_id = action.workspace_id
               AND report.action_id = action.id
             ORDER BY report.occurred_at DESC, report.id DESC
@@ -264,8 +264,8 @@ pub async fn failed_sends(
             action.attempt_count,
             outbound.payload,
             count(*) OVER ()::bigint AS total_count
-        FROM viryaos_autopilot_actions AS action
-        LEFT JOIN viryaos_autopilot_action_emissions AS emission
+        FROM autopilot_actions AS action
+        LEFT JOIN autopilot_action_emissions AS emission
           ON emission.workspace_id = action.workspace_id
          AND emission.action_id = action.id
         LEFT JOIN outbox_events AS outbound

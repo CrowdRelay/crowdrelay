@@ -75,7 +75,7 @@ pub(super) async fn artifact_outcome(
         FROM (
             SELECT post.posted_at
             FROM community_posts AS post
-            JOIN viryaos_autopilot_actions AS act
+            JOIN autopilot_actions AS act
               ON act.workspace_id = post.workspace_id
              AND act.id = post.action_id
             WHERE post.workspace_id = $1
@@ -85,7 +85,7 @@ pub(super) async fn artifact_outcome(
             UNION ALL
             SELECT post.posted_at
             FROM social_posts AS post
-            JOIN viryaos_autopilot_actions AS act
+            JOIN autopilot_actions AS act
               ON act.workspace_id = post.workspace_id
              AND act.id = post.action_id
             WHERE post.workspace_id = $1
@@ -95,7 +95,7 @@ pub(super) async fn artifact_outcome(
             UNION ALL
             SELECT post.posted_at
             FROM telegram_posts AS post
-            JOIN viryaos_autopilot_actions AS act
+            JOIN autopilot_actions AS act
               ON act.workspace_id = post.workspace_id
              AND act.id = post.action_id
             WHERE post.workspace_id = $1
@@ -105,7 +105,7 @@ pub(super) async fn artifact_outcome(
             UNION ALL
             SELECT post.posted_at
             FROM discord_posts AS post
-            JOIN viryaos_autopilot_actions AS act
+            JOIN autopilot_actions AS act
               ON act.workspace_id = post.workspace_id
              AND act.id = post.action_id
             WHERE post.workspace_id = $1

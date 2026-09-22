@@ -64,7 +64,7 @@ async fn load_action_ledger(
                 previous_state,
                 reconciliation_count,
                 last_reconciliation_error
-            FROM viryaos_action_ledger
+            FROM action_ledger
             WHERE workspace_id = $1 AND state = $2
             ORDER BY state_entered_at DESC
             LIMIT $3
@@ -90,7 +90,7 @@ async fn load_action_ledger(
                 previous_state,
                 reconciliation_count,
                 last_reconciliation_error
-            FROM viryaos_action_ledger
+            FROM action_ledger
             WHERE workspace_id = $1
             ORDER BY state_entered_at DESC
             LIMIT $2
@@ -144,7 +144,7 @@ async fn load_single_action(
             previous_state,
             reconciliation_count,
             last_reconciliation_error
-        FROM viryaos_action_ledger
+        FROM action_ledger
         WHERE workspace_id = $1 AND action_id = $2
         "#,
     )
@@ -298,7 +298,7 @@ async fn load_cycle_runs(
                north_star_value,
                degraded_phases,
                wait_reason
-        FROM viryaos_autopilot_cycle_runs
+        FROM autopilot_cycle_runs
         WHERE workspace_id = $1
           AND ($2::text IS NULL OR outcome IS NOT DISTINCT FROM $2)
         ORDER BY started_at DESC

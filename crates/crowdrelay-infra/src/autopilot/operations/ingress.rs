@@ -79,7 +79,7 @@ impl AutopilotOutreachStateRepository for PostgresAutopilotRepository {
             }
             let version = if command.expected_version == 0 {
                 sqlx::query_scalar::<_, i64>(r#"
-                    INSERT INTO viryaos_outreach_targets(
+                    INSERT INTO outreach_targets(
                         id,workspace_id,target_kind,display_name,contact_email,priority,
                         relationship_score,active,verified,accepts_outreach,accepts_outreach_basis,do_not_contact
                     ) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
@@ -94,7 +94,7 @@ impl AutopilotOutreachStateRepository for PostgresAutopilotRepository {
                 .fetch_one(&mut *tx).await.map_err(map_sqlx)?
             } else {
                 sqlx::query_scalar::<_, i64>(r#"
-                    UPDATE viryaos_outreach_targets
+                    UPDATE outreach_targets
                     SET target_kind=$3,display_name=$4,contact_email=$5,priority=$6,
                         relationship_score=$7,active=$8,verified=$9,accepts_outreach=$10,
                         accepts_outreach_basis=$11,do_not_contact=$12,version=version+1
@@ -110,13 +110,13 @@ impl AutopilotOutreachStateRepository for PostgresAutopilotRepository {
                 .fetch_optional(&mut *tx).await.map_err(map_sqlx)?.ok_or(RepositoryError::Conflict)?
             };
             sqlx::query(r#"
-                INSERT INTO viryaos_outreach_target_history(workspace_id,target_id,version,snapshot)
+                INSERT INTO outreach_target_history(workspace_id,target_id,version,snapshot)
                 SELECT workspace_id,id,version,jsonb_build_object(
                     'target_kind',target_kind,'display_name',display_name,'contact_email',contact_email,
                     'priority',priority,'relationship_score',relationship_score,'active',active,
                     'verified',verified,'accepts_outreach',accepts_outreach,
                     'accepts_outreach_basis',accepts_outreach_basis,'do_not_contact',do_not_contact)
-                FROM viryaos_outreach_targets WHERE workspace_id=$1 AND id=$2 AND version=$3
+                FROM outreach_targets WHERE workspace_id=$1 AND id=$2 AND version=$3
             "#).bind(workspace_id.into_uuid()).bind(target_id.into_uuid()).bind(version)
               .execute(&mut *tx).await.map_err(map_sqlx)?;
             tx.commit().await.map_err(map_sqlx)?;
@@ -156,7 +156,7 @@ impl AutopilotOutreachStateRepository for PostgresAutopilotRepository {
             let natural_row = sqlx::query_as::<_, (Uuid, OffsetDateTime)>(
                 r#"
                 SELECT id, observed_at
-                FROM viryaos_outreach_opportunities
+                FROM outreach_opportunities
                 WHERE workspace_id = $1
                   AND source = $2
                   AND target_id = $3
@@ -228,7 +228,7 @@ impl AutopilotOutreachStateRepository for PostgresAutopilotRepository {
                 // Representation kinds never enter the auto-pitch pipeline: an
                 // agent or label is approached only by the band's own request,
                 // not by an opportunity the evaluator dispatches.
-                "SELECT EXISTS(SELECT 1 FROM viryaos_outreach_targets WHERE workspace_id=$1 AND id=$2 AND active AND verified AND NOT do_not_contact AND COALESCE(last_reply_disposition::text,'none') NOT IN ('received','positive','declined') AND target_kind IN ('playlist','radio','press','creator','support_slot','endorsement','media_patronage'))",
+                "SELECT EXISTS(SELECT 1 FROM outreach_targets WHERE workspace_id=$1 AND id=$2 AND active AND verified AND NOT do_not_contact AND COALESCE(last_reply_disposition::text,'none') NOT IN ('received','positive','declined') AND target_kind IN ('playlist','radio','press','creator','support_slot','endorsement','media_patronage'))",
             )
             .bind(workspace_id.into_uuid())
             .bind(command.target_id.into_uuid())
@@ -241,7 +241,7 @@ impl AutopilotOutreachStateRepository for PostgresAutopilotRepository {
 
             let persisted_id = sqlx::query_scalar::<_, Uuid>(
                 r#"
-                INSERT INTO viryaos_outreach_opportunities(
+                INSERT INTO outreach_opportunities(
                     id,workspace_id,target_id,source,subject_kind,subject_key,template_key,
                     relevance_basis_points,confidence_basis_points,active,observed_at,expires_at)
                 VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
@@ -252,7 +252,7 @@ impl AutopilotOutreachStateRepository for PostgresAutopilotRepository {
                     active=EXCLUDED.active,
                     observed_at=EXCLUDED.observed_at,
                     expires_at=EXCLUDED.expires_at
-                WHERE EXCLUDED.observed_at >= viryaos_outreach_opportunities.observed_at
+                WHERE EXCLUDED.observed_at >= outreach_opportunities.observed_at
                 RETURNING id
                 "#,
             )
@@ -332,7 +332,7 @@ impl AutopilotOutreachStateRepository for PostgresAutopilotRepository {
                     r#"
                     SELECT EXISTS (
                         SELECT 1
-                        FROM viryaos_outreach_opportunities
+                        FROM outreach_opportunities
                         WHERE workspace_id = $1 AND id = $2 AND target_id = $3
                     )
                     "#,
@@ -355,7 +355,7 @@ impl AutopilotOutreachStateRepository for PostgresAutopilotRepository {
                 sqlx::query_as::<_, (String, Option<String>)>(
                     r#"
                     SELECT target_kind::text, last_reply_disposition::text
-                    FROM viryaos_outreach_targets
+                    FROM outreach_targets
                     WHERE workspace_id = $1 AND id = $2
                     "#,
                 )
@@ -394,7 +394,7 @@ impl AutopilotOutreachStateRepository for PostgresAutopilotRepository {
             };
             let new_version = sqlx::query_scalar::<_, i64>(
                 r#"
-                UPDATE viryaos_outreach_targets
+                UPDATE outreach_targets
                 SET last_reply_at = $3,
                     last_reply_disposition = $4,
                     do_not_contact = CASE WHEN $4 = 'do_not_contact' THEN true ELSE do_not_contact END,
@@ -418,7 +418,7 @@ impl AutopilotOutreachStateRepository for PostgresAutopilotRepository {
 
             sqlx::query(
                 r#"
-                INSERT INTO viryaos_outreach_target_history (
+                INSERT INTO outreach_target_history (
                     workspace_id, target_id, version, snapshot
                 )
                 SELECT workspace_id, id, version, jsonb_build_object(
@@ -434,7 +434,7 @@ impl AutopilotOutreachStateRepository for PostgresAutopilotRepository {
                     'last_reply_at', last_reply_at,
                     'last_reply_disposition', last_reply_disposition
                 )
-                FROM viryaos_outreach_targets
+                FROM outreach_targets
                 WHERE workspace_id = $1 AND id = $2 AND version = $3
                 "#,
             )
@@ -447,18 +447,18 @@ impl AutopilotOutreachStateRepository for PostgresAutopilotRepository {
 
             // A reply from a registry agent re-proves the registry's route
             // too — an agent who wrote back is an agent whose address was
-            // real. `viryaos_booking_agents` predating the verified column
+            // real. `booking_agents` predating the verified column
             // otherwise stay unverified forever on this path.
             sqlx::query(
                 r#"
-                UPDATE viryaos_booking_agents AS agent
+                UPDATE booking_agents AS agent
                 SET contact_verified_at = CASE
                         WHEN agent.contact_verified_at IS NULL
                           OR agent.contact_verified_at < $3
                         THEN $3 ELSE agent.contact_verified_at
                     END,
                     version = agent.version + 1
-                FROM viryaos_outreach_targets AS target
+                FROM outreach_targets AS target
                 WHERE target.workspace_id = $1 AND target.id = $2
                   AND target.target_kind = 'agent'
                   AND agent.workspace_id = target.workspace_id
@@ -480,10 +480,10 @@ impl AutopilotOutreachStateRepository for PostgresAutopilotRepository {
             if applied_disposition_str == "declined" {
                 sqlx::query(
                     r#"
-                    UPDATE viryaos_booking_agents AS agent
+                    UPDATE booking_agents AS agent
                     SET refused_until = GREATEST(agent.refused_until, $3::date + $4),
                         version = agent.version + 1
-                    FROM viryaos_outreach_targets AS target
+                    FROM outreach_targets AS target
                     WHERE target.workspace_id = $1 AND target.id = $2
                       AND target.target_kind = 'agent'
                       AND agent.workspace_id = target.workspace_id
@@ -502,17 +502,17 @@ impl AutopilotOutreachStateRepository for PostgresAutopilotRepository {
             if applied_disposition_str == "do_not_contact" {
                 sqlx::query(
                     r#"
-                    INSERT INTO viryaos_contact_governor (
+                    INSERT INTO contact_governor (
                     workspace_id, normalized_contact, last_context, last_action_id,
                     last_outbound_at, next_contact_after, do_not_contact
                 )
                 SELECT $1, lower(btrim(contact_email)), 'outreach', NULL, $3, $3, true
-                FROM viryaos_outreach_targets
+                FROM outreach_targets
                 WHERE workspace_id=$1 AND id=$2
                 ON CONFLICT (workspace_id, normalized_contact) DO UPDATE
                 SET do_not_contact=true,
                     last_context=EXCLUDED.last_context,
-                    next_contact_after=GREATEST(viryaos_contact_governor.next_contact_after, EXCLUDED.next_contact_after),
+                    next_contact_after=GREATEST(contact_governor.next_contact_after, EXCLUDED.next_contact_after),
                     updated_at=now()
                 "#,
                 )
@@ -529,9 +529,9 @@ impl AutopilotOutreachStateRepository for PostgresAutopilotRepository {
                 // agent as someone a season's letter could reach.
                 sqlx::query(
                     r#"
-                    UPDATE viryaos_booking_agents AS agent
+                    UPDATE booking_agents AS agent
                     SET do_not_contact = true, version = agent.version + 1
-                    FROM viryaos_outreach_targets AS target
+                    FROM outreach_targets AS target
                     WHERE target.workspace_id = $1 AND target.id = $2
                       AND target.target_kind = 'agent'
                       AND agent.workspace_id = target.workspace_id
@@ -547,7 +547,7 @@ impl AutopilotOutreachStateRepository for PostgresAutopilotRepository {
 
             sqlx::query(
                 r#"
-                INSERT INTO viryaos_outreach_interactions (
+                INSERT INTO outreach_interactions (
                     workspace_id, target_id, opportunity_id, direction, phase,
                     disposition, source_key, occurred_at
                 ) VALUES ($1,$2,$3,'inbound','reply',$4,$5,$6)
@@ -575,7 +575,7 @@ impl AutopilotOutreachStateRepository for PostgresAutopilotRepository {
                 let trimmed = command.reply_text.as_deref().map(str::trim).unwrap_or("");
                 sqlx::query(
                     r#"
-                    INSERT INTO viryaos_reply_classifications (
+                    INSERT INTO reply_classifications (
                         workspace_id, target_id, target_kind,
                         reply_text, previous_disposition,
                         classification_result, classified_disposition,
@@ -639,7 +639,7 @@ impl AutopilotContentStateRepository for PostgresAutopilotRepository {
             // two cannot turn it into one anyway.
             if let Some(format_key) = command.format_key.as_deref() {
                 let known = sqlx::query_scalar::<_, bool>(
-                    "SELECT EXISTS(SELECT 1 FROM viryaos_content_format_entries WHERE key = $1)",
+                    "SELECT EXISTS(SELECT 1 FROM content_format_entries WHERE key = $1)",
                 )
                 .bind(format_key)
                 .fetch_one(&mut *transaction)
@@ -647,7 +647,7 @@ impl AutopilotContentStateRepository for PostgresAutopilotRepository {
                 .map_err(map_sqlx)?;
                 if !known {
                     return Err(RepositoryError::ConflictBecause(
-                        "format_key must name a viryaos_content_format_entries key",
+                        "format_key must name a content_format_entries key",
                     ));
                 }
             }
@@ -694,7 +694,7 @@ impl AutopilotContentStateRepository for PostgresAutopilotRepository {
             let version = if command.expected_version == 0 {
                 sqlx::query_scalar::<_, i64>(
                     r#"
-                    INSERT INTO viryaos_content_sources (
+                    INSERT INTO content_sources (
                         id, workspace_id, source_kind, source_key, title,
                         occurred_at, expires_at, metadata, active, format_key
                     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,COALESCE($9, true),$10)
@@ -717,7 +717,7 @@ impl AutopilotContentStateRepository for PostgresAutopilotRepository {
             } else {
                 sqlx::query_scalar::<_, i64>(
                     r#"
-                    UPDATE viryaos_content_sources
+                    UPDATE content_sources
                     SET source_kind = $3,
                         source_key = $4,
                         title = $5,
@@ -750,7 +750,7 @@ impl AutopilotContentStateRepository for PostgresAutopilotRepository {
 
             sqlx::query(
                 r#"
-                INSERT INTO viryaos_content_source_history (
+                INSERT INTO content_source_history (
                     workspace_id, source_id, version, snapshot
                 )
                 SELECT workspace_id, id, version, jsonb_build_object(
@@ -763,7 +763,7 @@ impl AutopilotContentStateRepository for PostgresAutopilotRepository {
                     'active', active,
                     'format_key', format_key
                 )
-                FROM viryaos_content_sources
+                FROM content_sources
                 WHERE workspace_id = $1 AND id = $2 AND version = $3
                 "#,
             )
@@ -808,7 +808,7 @@ impl AutopilotContentStateRepository for PostgresAutopilotRepository {
                 r#"
                 SELECT id, source_kind, source_key, title, occurred_at,
                        expires_at, metadata, version, active, format_key
-                FROM viryaos_content_sources
+                FROM content_sources
                 WHERE workspace_id = $1
                 ORDER BY occurred_at DESC
                 LIMIT 200
@@ -839,8 +839,8 @@ impl AutopilotContentStateRepository for PostgresAutopilotRepository {
                 SELECT action.subject_id, action.id,
                        action.payload->>'artifact', action.status,
                        action.created_at, emission.emitted_at
-                FROM viryaos_autopilot_actions AS action
-                LEFT JOIN viryaos_autopilot_action_emissions AS emission
+                FROM autopilot_actions AS action
+                LEFT JOIN autopilot_action_emissions AS emission
                   ON emission.workspace_id = action.workspace_id
                  AND emission.action_id = action.id
                 WHERE action.workspace_id = $1
@@ -948,7 +948,7 @@ impl AutopilotContentStateRepository for PostgresAutopilotRepository {
             // which report lands — the outcome row carries the distinction.
             let resolved = sqlx::query_scalar::<_, Uuid>(
                 r#"
-                UPDATE viryaos_content_suggestions
+                UPDATE content_suggestions
                 SET status = 'done', updated_at = now()
                 WHERE workspace_id = $1 AND id = $2 AND status = 'approved'
                 RETURNING id
@@ -961,7 +961,7 @@ impl AutopilotContentStateRepository for PostgresAutopilotRepository {
             .map_err(map_sqlx)?;
             let Some(suggestion_id) = resolved else {
                 let status = sqlx::query_scalar::<_, String>(
-                    "SELECT status FROM viryaos_content_suggestions
+                    "SELECT status FROM content_suggestions
                      WHERE workspace_id = $1 AND id = $2",
                 )
                 .bind(workspace_id.into_uuid())
@@ -982,7 +982,7 @@ impl AutopilotContentStateRepository for PostgresAutopilotRepository {
 
             sqlx::query(
                 r#"
-                INSERT INTO viryaos_suggestion_outcomes
+                INSERT INTO suggestion_outcomes
                     (workspace_id, suggestion_id, outcome, decided_by, reason, results)
                 VALUES ($1, $2, $3, 'operator:admin_api_key', $4, $5)
                 "#,
@@ -1080,7 +1080,7 @@ impl AutopilotExperimentStateRepository for PostgresAutopilotRepository {
 
             sqlx::query(
                 r#"
-                INSERT INTO viryaos_experiments (
+                INSERT INTO experiments (
                     id, workspace_id, slug, metric_kind, status
                 ) VALUES ($1,$2,$3,$4,$5)
                 "#,
@@ -1097,7 +1097,7 @@ impl AutopilotExperimentStateRepository for PostgresAutopilotRepository {
             for variant in command.variants {
                 sqlx::query(
                     r#"
-                    INSERT INTO viryaos_experiment_variants (
+                    INSERT INTO experiment_variants (
                         id, workspace_id, experiment_id, variant_key, allocation_basis_points
                     ) VALUES ($1,$2,$3,$4,$5)
                     "#,
@@ -1171,7 +1171,7 @@ impl AutopilotExperimentStateRepository for PostgresAutopilotRepository {
             let variant = sqlx::query_as::<_, (i64, i64)>(
                 r#"
                 SELECT exposures, conversions
-                FROM viryaos_experiment_variants
+                FROM experiment_variants
                 WHERE workspace_id = $1 AND experiment_id = $2 AND id = $3 AND active
                 FOR UPDATE
                 "#,
@@ -1197,7 +1197,7 @@ impl AutopilotExperimentStateRepository for PostgresAutopilotRepository {
 
             sqlx::query(
                 r#"
-                UPDATE viryaos_experiment_variants
+                UPDATE experiment_variants
                 SET exposures = $4,
                     conversions = $5,
                     value_minor = value_minor + $6
@@ -1215,7 +1215,7 @@ impl AutopilotExperimentStateRepository for PostgresAutopilotRepository {
             .map_err(map_sqlx)?;
             sqlx::query(
                 r#"
-                INSERT INTO viryaos_experiment_observations (
+                INSERT INTO experiment_observations (
                     workspace_id, experiment_id, variant_id, observation_key,
                     exposures_delta, conversions_delta, value_minor_delta, observed_at
                 ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
@@ -1270,8 +1270,8 @@ impl AutopilotExperimentStateRepository for PostgresAutopilotRepository {
                     variant.variant_key,
                     variant.allocation_basis_points,
                     variant.active
-                FROM viryaos_experiments AS experiment
-                JOIN viryaos_experiment_variants AS variant
+                FROM experiments AS experiment
+                JOIN experiment_variants AS variant
                   ON variant.workspace_id = experiment.workspace_id
                  AND variant.experiment_id = experiment.id
                 WHERE experiment.workspace_id = $1

@@ -44,7 +44,7 @@ async fn persist_decision_and_action_tx(
         let max_actions_24h = sqlx::query_scalar::<_, i32>(
             r#"
             SELECT max_actions_24h
-            FROM viryaos_autopilot_policies
+            FROM autopilot_policies
             WHERE workspace_id = $1 AND context = $2 AND enabled
             FOR UPDATE
             "#,
@@ -58,7 +58,7 @@ async fn persist_decision_and_action_tx(
         let actions_24h = sqlx::query_scalar::<_, i64>(
             r#"
             SELECT COUNT(*)::bigint
-            FROM viryaos_autopilot_actions
+            FROM autopilot_actions
             WHERE workspace_id = $1
               AND context = $2
               AND created_at >= now() - INTERVAL '24 hours'
@@ -97,7 +97,7 @@ async fn persist_decision_and_action_tx(
         serde_json::to_value(&action).map_err(|_| RepositoryError::Unexpected)?;
     let inserted_decision = sqlx::query_scalar::<_, Uuid>(
         r#"
-        INSERT INTO viryaos_autopilot_decisions (
+        INSERT INTO autopilot_decisions (
             id, workspace_id, decision_key, context, subject_kind, subject_id,
             decision_kind, confidence_basis_points, disposition, reason,
             input_snapshot, policy_snapshot, recommendation, trace_id
@@ -138,7 +138,7 @@ async fn persist_decision_and_action_tx(
             sqlx::query_scalar::<_, Uuid>(
                 r#"
                 SELECT id
-                FROM viryaos_autopilot_decisions
+                FROM autopilot_decisions
                 WHERE workspace_id = $1 AND decision_key = $2
                 "#,
             )
@@ -169,7 +169,7 @@ async fn persist_decision_and_action_tx(
         // so the honest fallback is the parked state the disposition asked
         // for.
         ladder_authorized = sqlx::query_scalar::<_, bool>(
-            "SELECT EXISTS (SELECT 1 FROM viryaos_show_ladder_approvals \
+            "SELECT EXISTS (SELECT 1 FROM show_ladder_approvals \
              WHERE workspace_id=$1 AND event_id=$2 AND revoked_at IS NULL)",
         )
         .bind(workspace_id.into_uuid())
@@ -200,7 +200,7 @@ async fn persist_decision_and_action_tx(
     );
     let inserted = sqlx::query_scalar::<_, Uuid>(
         r#"
-        INSERT INTO viryaos_autopilot_actions (
+        INSERT INTO autopilot_actions (
             id, workspace_id, decision_id, context, action_kind,
             subject_kind, subject_id, idempotency_key, payload, status,
             action_class,
@@ -262,13 +262,13 @@ async fn persist_decision_and_action_tx(
     // When ON CONFLICT DO NOTHING fires, the generated action_id was NOT
     // inserted. Using it for downstream writes (prediction, evidence,
     // assignment) causes a FK violation because that UUID does not exist in
-    // viryaos_autopilot_actions. Fetch the real id of the existing action so
+    // autopilot_actions. Fetch the real id of the existing action so
     // downstream writes reference the correct row.
     //
     // ON CONFLICT DO NOTHING (without a conflict target) catches ALL unique
     // constraint violations on the table. There are two that can fire here:
     //   1. UNIQUE (workspace_id, idempotency_key) — same action re-evaluated
-    //   2. viryaos_autopilot_actions_inflight_subject_uidx — a partial unique
+    //   2. autopilot_actions_inflight_subject_uidx — a partial unique
     //      index on (workspace_id, context, action_kind, subject_id) WHERE
     //      status IN ('awaiting_approval', 'queued', 'processing'). This fires
     //      when a different action for the same subject is already inflight.
@@ -283,7 +283,7 @@ async fn persist_decision_and_action_tx(
             // Try 1: idempotency_key conflict
             let existing_id = sqlx::query_scalar::<_, Uuid>(
                 r#"
-                SELECT id FROM viryaos_autopilot_actions
+                SELECT id FROM autopilot_actions
                 WHERE workspace_id = $1 AND idempotency_key = $2
                 "#,
             )
@@ -299,7 +299,7 @@ async fn persist_decision_and_action_tx(
                 None => {
                     sqlx::query_scalar::<_, Uuid>(
                         r#"
-                        SELECT id FROM viryaos_autopilot_actions
+                        SELECT id FROM autopilot_actions
                         WHERE workspace_id = $1
                           AND context = $2
                           AND action_kind = $3
@@ -405,7 +405,7 @@ async fn record_prediction_and_evidence_tx(
         .unwrap_or(serde_json::json!({}));
     sqlx::query(
         r#"
-        INSERT INTO viryaos_dispatch_predictions
+        INSERT INTO dispatch_predictions
             (workspace_id, action_id, template_id,
              expected_new_fans, expected_signal_installs, context,
              expected_metrics)
@@ -642,7 +642,7 @@ macro_rules! decision_persist {
             };
             sqlx::query(
                 r#"
-                INSERT INTO viryaos_experiment_assignments
+                INSERT INTO experiment_assignments
                     (id, workspace_id, unit_id, unit_kind, arm, assigned_at,
                      propensity, intended_holdout_probability, intended_template_id,
                      context, prediction, action_id, strategy, experiment_kind,

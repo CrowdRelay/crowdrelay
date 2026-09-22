@@ -151,7 +151,7 @@ pub(in crate::autopilot) async fn execute_gig_outreach(
     for recipient in recipients {
         let changed = sqlx::query(
             r#"
-            UPDATE viryaos_booking_targets
+            UPDATE booking_targets
             SET last_outreach_at = $4
             WHERE workspace_id = $1 AND id = $2 AND version = $3
             "#,
@@ -172,7 +172,7 @@ pub(in crate::autopilot) async fn execute_gig_outreach(
         // silence arrives as one row.
         sqlx::query(
             r#"
-            INSERT INTO viryaos_booking_interactions(
+            INSERT INTO booking_interactions(
                 workspace_id,target_id,direction,phase,source_key,occurred_at,metadata
             ) VALUES($1,$2,'outbound','initial',$3,$4,
                      jsonb_build_object('action_id',$5::uuid,'gig_outreach',true))

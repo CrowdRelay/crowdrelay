@@ -24,7 +24,7 @@ impl SocialPostExecutorWorker {
         estimated_reach: i32,
     ) -> Result<(), SocialPostExecutorError> {
         sqlx::query(
-            r#"INSERT INTO viryaos_reach_events
+            r#"INSERT INTO reach_events
                  (workspace_id, action_id, recipient_kind, recipient_id, channel,
                   template_id, estimated_reach, status, metadata, trace_id, causation_id)
                VALUES ($1, $2, 'platform_audience', $3, 'social_post',
@@ -48,9 +48,9 @@ impl SocialPostExecutorWorker {
         // walk the assignment backwards.
         sqlx::query(
             r#"
-            UPDATE viryaos_experiment_assignments
+            UPDATE experiment_assignments
             SET execution_status = 'executed',
-                trace_id = COALESCE(trace_id, (SELECT trace_id FROM viryaos_autopilot_actions WHERE id = $2))
+                trace_id = COALESCE(trace_id, (SELECT trace_id FROM autopilot_actions WHERE id = $2))
             WHERE workspace_id = $1
               AND action_id = $2
               AND execution_status = 'dispatched'
@@ -71,8 +71,8 @@ impl SocialPostExecutorWorker {
         let metric_key = platform.audience_metric_key()?;
         let value = sqlx::query_scalar::<_, f64>(
             r#"SELECT point.value::float8
-               FROM viryaos_growth_metric_points AS point
-               JOIN viryaos_growth_metric_series AS series ON series.id = point.series_id
+               FROM growth_metric_points AS point
+               JOIN growth_metric_series AS series ON series.id = point.series_id
                WHERE point.workspace_id = $1
                  AND series.platform = $2
                  AND series.metric_key = $3

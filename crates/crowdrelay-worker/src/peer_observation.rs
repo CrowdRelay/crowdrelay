@@ -2,14 +2,14 @@
 //!
 //! Each sweep opens with one proposal pass: `place_peer_acts` whose
 //! canonicalised genres intersect the workspace's band-listing genres land
-//! `proposed` in `viryaos_peers` for the operator to confirm or refuse —
+//! `proposed` in `peers` for the operator to confirm or refuse —
 //! the peer-act graph keeps the watch list fed, and a refused name is never
 //! asked again. Only then does the observing half run.
 //!
-//! Deterministic, no LLM: confirmed peers in `viryaos_peers` carry `handles`
+//! Deterministic, no LLM: confirmed peers in `peers` carry `handles`
 //! like `{"youtube": "@handle" | "UC...", "rss": "https://..."}`. Each sweep
 //! resolves the handle to a feed, fetches it, and records one dated fact per
-//! entry — `viryaos_peer_observations` rows where `fact` is the entry title
+//! entry — `peer_observations` rows where `fact` is the entry title
 //! and `observed_at` is the entry's own publish date, so the dedup index
 //! makes repeated sweeps idempotent even while view counts grow underneath.
 //!

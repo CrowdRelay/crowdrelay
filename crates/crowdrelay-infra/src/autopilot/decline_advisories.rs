@@ -177,7 +177,7 @@ pub(in crate::autopilot) async fn raise_decline_advisories(
         // inside the cooldown means the band already answered "keep it".
         let disagreed: bool = sqlx::query_scalar(
             "SELECT EXISTS(
-                 SELECT 1 FROM viryaos_autopilot_actions
+                 SELECT 1 FROM autopilot_actions
                  WHERE workspace_id = $1 AND action_kind = 'community.decline.advisory'
                    AND subject_id = $2 AND status = 'cancelled'
                    AND updated_at >= now() - make_interval(days => $3))",
@@ -197,7 +197,7 @@ pub(in crate::autopilot) async fn raise_decline_advisories(
         let trace = TraceContext::root(workspace_id);
         let trace_id = trace.trace_id().into_uuid();
         let decision_id = if let Some(id) = sqlx::query_scalar::<_, Uuid>(
-            r#"INSERT INTO viryaos_autopilot_decisions (
+            r#"INSERT INTO autopilot_decisions (
                    id, workspace_id, decision_key, context, subject_kind, subject_id,
                    decision_kind, confidence_basis_points, disposition, reason,
                    input_snapshot, policy_snapshot, recommendation, evaluated_at, trace_id
@@ -229,7 +229,7 @@ pub(in crate::autopilot) async fn raise_decline_advisories(
             id
         } else {
             sqlx::query_scalar::<_, Uuid>(
-                "SELECT id FROM viryaos_autopilot_decisions WHERE workspace_id=$1 AND decision_key=$2",
+                "SELECT id FROM autopilot_decisions WHERE workspace_id=$1 AND decision_key=$2",
             )
             .bind(ws)
             .bind(&decision_key)
@@ -253,7 +253,7 @@ pub(in crate::autopilot) async fn raise_decline_advisories(
         })
         .map_err(|_| RepositoryError::Unexpected)?;
         let inserted = sqlx::query(
-            r#"INSERT INTO viryaos_autopilot_actions (
+            r#"INSERT INTO autopilot_actions (
                    id, workspace_id, decision_id, context, action_kind, subject_kind,
                    subject_id, idempotency_key, payload, status, approval_expires_at,
                    trace_id, causation_id
@@ -310,7 +310,7 @@ async fn alternative_room(
           AND fpe.occurred_at >= now() - make_interval(days => $2)
           AND normalize_subreddit(fpe.community) <> normalize_subreddit($3)
           AND NOT EXISTS (
-              SELECT 1 FROM viryaos_autopilot_actions a
+              SELECT 1 FROM autopilot_actions a
               WHERE a.workspace_id = $1
                 AND a.action_kind = 'community.decline.advisory'
                 AND a.subject_id = t.id
@@ -372,7 +372,7 @@ async fn alternative_room(
           AND normalize_subreddit(t.subreddit) <> ALL($5)
           AND t.screening_verdict IS DISTINCT FROM 'refused'
           AND NOT EXISTS (
-              SELECT 1 FROM viryaos_autopilot_actions a
+              SELECT 1 FROM autopilot_actions a
               WHERE a.workspace_id = $1
                 AND a.action_kind = 'community.decline.advisory'
                 AND a.subject_id = t.id

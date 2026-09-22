@@ -36,7 +36,7 @@ pub const MONTHLY_APPROACH_ALLOWANCE: u32 = 4;
 /// A room gets a pitch per show and a promoter per night, but an agent is
 /// asked to carry the band's year — a second knock inside the season is not
 /// persistence, it is the sound of a band that does not know what an
-/// application is. `viryaos_booking_agents.approached_at` and the `approach`
+/// application is. `booking_agents.approached_at` and the `approach`
 /// ledger both count: whichever says we knocked inside the window, the door
 /// stays shut. A refusal keeps it shut until `refused_until` passes.
 pub const AGENT_APPROACH_SEASON_DAYS: i64 = 120;
@@ -77,7 +77,7 @@ impl DrawEvidence {
 /// three facts; the gate does not fetch its own evidence.
 #[derive(Clone, Debug)]
 pub struct AgentGate {
-    /// `viryaos_booking_agents.refused_until` covers today — the agent's own
+    /// `booking_agents.refused_until` covers today — the agent's own
     /// answer closed the door until then.
     pub door_closed: bool,
     /// The registry's `approached_at`, or an `approach` interaction on this

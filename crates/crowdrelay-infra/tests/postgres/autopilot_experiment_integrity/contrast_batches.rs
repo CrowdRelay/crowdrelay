@@ -18,7 +18,7 @@ async fn insert_resolved_control_arm(
 ) {
     let assignment_id = uuid::Uuid::now_v7().to_string();
     sqlx::query(
-        r#"INSERT INTO viryaos_experiment_assignments
+        r#"INSERT INTO experiment_assignments
            (workspace_id, id, experiment_uuid, unit_id, unit_kind,
             arm, intended_template_id, propensity, prediction, context, strategy,
             eligibility_criteria, selection_context, interference_policy,
@@ -37,7 +37,7 @@ async fn insert_resolved_control_arm(
     .expect("insert control assignment");
 
     sqlx::query(
-        r#"INSERT INTO viryaos_growth_evidence
+        r#"INSERT INTO growth_evidence
            (workspace_id, action_id, opportunity_id, timestamp, audience,
             recipient_id, channel, estimated_reach, treatment, propensity,
             observed_fans, observed_incremental_fans, durable_fans_30d,
@@ -68,7 +68,7 @@ async fn insert_resolved_treated_unit(
 ) {
     let assignment_id = uuid::Uuid::now_v7().to_string();
     sqlx::query(
-        r#"INSERT INTO viryaos_experiment_assignments
+        r#"INSERT INTO experiment_assignments
            (workspace_id, id, experiment_uuid, unit_id, unit_kind,
             arm, intended_template_id, propensity, prediction, context, strategy,
             eligibility_criteria, selection_context, interference_policy,
@@ -88,7 +88,7 @@ async fn insert_resolved_treated_unit(
     .expect("insert treated assignment");
 
     sqlx::query(
-        r#"INSERT INTO viryaos_growth_evidence
+        r#"INSERT INTO growth_evidence
            (workspace_id, action_id, opportunity_id, timestamp, audience,
             recipient_id, channel, estimated_reach, treatment, propensity,
             observed_fans, observed_incremental_fans, durable_fans_30d,
@@ -190,7 +190,7 @@ async fn t29_delta_replay_reaches_a_control_arm_resolved_before_the_checkpoint()
         .await
         .expect("save checkpoint");
     sqlx::query(
-        "UPDATE viryaos_brain_state SET updated_at = $2 \
+        "UPDATE brain_state SET updated_at = $2 \
          WHERE workspace_id = $1 AND module = 'causal_model'",
     )
     .bind(f.workspace_id.into_uuid())
@@ -226,7 +226,7 @@ async fn t29_delta_replay_reaches_a_control_arm_resolved_before_the_checkpoint()
 /// back with SQL. Everything asserted is read out of that row — no optimizer is
 /// re-run, no policy is consulted, no configuration is read.
 ///
-/// That last part is the point. `viryaos_autopilot_policies` is updated in
+/// That last part is the point. `autopilot_policies` is updated in
 /// place with no history table, and the causal posteriors move every cycle, so
 /// anything reconstructed from current state answers "what would the brain
 /// decide now". This proves the other question is answerable: what it decided,
@@ -282,10 +282,10 @@ async fn t30_a_persisted_decision_explains_itself_without_current_state() {
         },
     });
     sqlx::query(
-        "UPDATE viryaos_autopilot_decisions \
+        "UPDATE autopilot_decisions \
          SET input_snapshot = jsonb_set(input_snapshot, '{decision_value}', $3) \
          WHERE workspace_id = $1 \
-           AND id = (SELECT decision_id FROM viryaos_autopilot_actions \
+           AND id = (SELECT decision_id FROM autopilot_actions \
                      WHERE workspace_id = $1 AND id = $2)",
     )
     .bind(f.workspace_id.into_uuid())
@@ -295,12 +295,12 @@ async fn t30_a_persisted_decision_explains_itself_without_current_state() {
     .await
     .expect("attach the decision-time record");
 
-    // The belief state moves on. `viryaos_brain_state` keeps one row per
+    // The belief state moves on. `brain_state` keeps one row per
     // module and updates it in place, so after this the checkpoint that
     // produced the estimate is gone — which is exactly why the decision had to
     // record its identity rather than a way to fetch it.
     sqlx::query(
-        "INSERT INTO viryaos_brain_state (workspace_id, module, state) \
+        "INSERT INTO brain_state (workspace_id, module, state) \
          VALUES ($1, 'causal_model', $2) \
          ON CONFLICT (workspace_id, module) DO UPDATE SET state = $2, updated_at = now()",
     )
@@ -313,7 +313,7 @@ async fn t30_a_persisted_decision_explains_itself_without_current_state() {
     // The world moves on: the policy row is edited after the decision. A
     // record that reads current state would now answer a different question.
     sqlx::query(
-        "UPDATE viryaos_autopilot_policies \
+        "UPDATE autopilot_policies \
          SET autonomy_level = 'observe', enabled = false, version = version + 99 \
          WHERE workspace_id = $1",
     )
@@ -324,9 +324,9 @@ async fn t30_a_persisted_decision_explains_itself_without_current_state() {
 
     // Months later: one SELECT, nothing else.
     let stored: serde_json::Value = sqlx::query_scalar(
-        "SELECT input_snapshot -> 'decision_value' FROM viryaos_autopilot_decisions \
+        "SELECT input_snapshot -> 'decision_value' FROM autopilot_decisions \
          WHERE workspace_id = $1 \
-           AND id = (SELECT decision_id FROM viryaos_autopilot_actions \
+           AND id = (SELECT decision_id FROM autopilot_actions \
                      WHERE workspace_id = $1 AND id = $2)",
     )
     .bind(f.workspace_id.into_uuid())
@@ -410,7 +410,7 @@ async fn t30_a_persisted_decision_explains_itself_without_current_state() {
 
     // The current belief row says something else, which is the point.
     let current_state: serde_json::Value = sqlx::query_scalar(
-        "SELECT state FROM viryaos_brain_state \
+        "SELECT state FROM brain_state \
          WHERE workspace_id = $1 AND module = 'causal_model'",
     )
     .bind(f.workspace_id.into_uuid())
@@ -426,7 +426,7 @@ async fn t30_a_persisted_decision_explains_itself_without_current_state() {
     // The current policy row now says something else entirely, which is the
     // point: none of the above read it.
     let current: (String, i64) = sqlx::query_as(
-        "SELECT autonomy_level, version FROM viryaos_autopilot_policies \
+        "SELECT autonomy_level, version FROM autopilot_policies \
          WHERE workspace_id = $1 LIMIT 1",
     )
     .bind(f.workspace_id.into_uuid())

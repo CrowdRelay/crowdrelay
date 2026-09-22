@@ -26,10 +26,10 @@ pub(super) const VIRYA_TEAM_MEMBER_5_EMAIL_KEY: &str = "VIRYA_TEAM_MEMBER_5_EMAI
 const MAX_TEAM_MEMBERS: usize = 32;
 
 /// One resolved team member: stable routing identity, contact, and the
-/// name/skills the bootstrap writes into `viryaos_team_profiles`.
+/// name/skills the bootstrap writes into `team_profiles`.
 #[derive(Clone, PartialEq, Eq)]
 pub struct TeamMemberSpec {
-    /// Written to `viryaos_team_profiles.member_key`, which requires
+    /// Written to `team_profiles.member_key`, which requires
     /// `^[a-z0-9_-]{2,48}$` — the config layer checks the same grammar so a
     /// bad key fails at boot, not mid-bootstrap.
     pub member_key: String,
@@ -291,7 +291,7 @@ fn parse_team_members_json(value: Option<&String>) -> Result<Vec<TeamMemberSpec>
     Ok(members)
 }
 
-/// Same grammar as the `viryaos_team_profiles.member_key` CHECK constraint.
+/// Same grammar as the `team_profiles.member_key` CHECK constraint.
 fn member_key_ok(key: &str) -> bool {
     (2..=48).contains(&key.len())
         && key

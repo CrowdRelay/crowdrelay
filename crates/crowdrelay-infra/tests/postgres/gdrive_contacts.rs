@@ -47,7 +47,7 @@ async fn seed_contact(
     let id = Uuid::now_v7();
     sqlx::query(
         r#"
-        INSERT INTO viryaos_drive_contacts
+        INSERT INTO drive_contacts
             (id, workspace_id, normalized_email, display_name, organization,
              suggested_kind, source_file_id, source_file_name, sources)
         VALUES ($1,$2,$3,$4,$5,'promoter','msg-1','From: Klub X <bookings@klubx.pl> — Re: show','{gmail}')
@@ -75,7 +75,7 @@ async fn seed_contact_city(
     let id = Uuid::now_v7();
     sqlx::query(
         r#"
-        INSERT INTO viryaos_drive_contacts
+        INSERT INTO drive_contacts
             (id, workspace_id, normalized_email, display_name,
              suggested_kind, city, source_file_id, source_file_name, sources)
         VALUES ($1,$2,$3,$4,'venue',$5,'file-1','rooms.xlsx','{gdrive}')
@@ -110,7 +110,7 @@ async fn staged_city_resolves_on_booking_promote() -> Result<(), Box<dyn std::er
         crowdrelay_infra::gdrive::BookingPromoteOutcome::Done
     );
     let city: String = sqlx::query_scalar(
-        "SELECT city_slug FROM viryaos_booking_candidates \
+        "SELECT city_slug FROM booking_candidates \
          WHERE workspace_id = $1 AND route_value = 'room@kluby.pl'",
     )
     .bind(fixture.workspace_id)
@@ -136,7 +136,7 @@ async fn staged_city_name_resolves_on_booking_promote() -> Result<(), Box<dyn st
         crowdrelay_infra::gdrive::BookingPromoteOutcome::Done
     );
     let city: String = sqlx::query_scalar(
-        "SELECT city_slug FROM viryaos_booking_candidates \
+        "SELECT city_slug FROM booking_candidates \
          WHERE workspace_id = $1 AND route_value = 'room@klubz.pl'",
     )
     .bind(fixture.workspace_id)
@@ -195,7 +195,7 @@ async fn explicit_city_beats_the_staged_one() -> Result<(), Box<dyn std::error::
         crowdrelay_infra::gdrive::BookingPromoteOutcome::Done
     );
     let city: String = sqlx::query_scalar(
-        "SELECT city_slug FROM viryaos_booking_candidates \
+        "SELECT city_slug FROM booking_candidates \
          WHERE workspace_id = $1 AND route_value = 'room@klubw.pl'",
     )
     .bind(fixture.workspace_id)
@@ -249,7 +249,7 @@ async fn unmatched_staged_city_still_falls_back_to_the_venue_registry()
         crowdrelay_infra::gdrive::BookingPromoteOutcome::Done
     );
     let city: String = sqlx::query_scalar(
-        "SELECT city_slug FROM viryaos_booking_candidates \
+        "SELECT city_slug FROM booking_candidates \
          WHERE workspace_id = $1 AND route_value = 'booking@klubv.pl'",
     )
     .bind(fixture.workspace_id)
@@ -304,7 +304,7 @@ async fn upsert_keeps_the_sheet_city() -> Result<(), Box<dyn std::error::Error>>
         )
         .await?;
     let row = sqlx::query_as::<_, (Option<String>, Vec<String>)>(
-        "SELECT city, sources FROM viryaos_drive_contacts \
+        "SELECT city, sources FROM drive_contacts \
          WHERE workspace_id = $1 AND normalized_email = 'venue@klubq.pl'",
     )
     .bind(fixture.workspace_id)
@@ -342,7 +342,7 @@ async fn booking_promote_files_admitted_candidate_with_thread()
     let row = sqlx::query_as::<_, (String, String, String, String, String, Option<String>)>(
         r#"
         SELECT target_kind, display_name, city_slug, route_value, source, source_reference
-        FROM viryaos_booking_candidates
+        FROM booking_candidates
         WHERE workspace_id = $1 AND route_value = 'bookings@klubx.pl'
         "#,
     )
@@ -357,7 +357,7 @@ async fn booking_promote_files_admitted_candidate_with_thread()
     assert!(row.5.unwrap().contains("Klub X"));
 
     let outcome: String =
-        sqlx::query_scalar("SELECT beacon_outcome FROM viryaos_drive_contacts WHERE id = $1")
+        sqlx::query_scalar("SELECT beacon_outcome FROM drive_contacts WHERE id = $1")
             .bind(contact.id)
             .fetch_one(&fixture.pool)
             .await?;
@@ -382,8 +382,8 @@ async fn booking_promote_without_city_or_match_stays_staged()
     );
     // Nothing filed, nothing marked — the decision is still the operator's.
     let (candidates, outcome): (i64, String) = sqlx::query_as(
-        "SELECT (SELECT count(*) FROM viryaos_booking_candidates WHERE workspace_id = $1), \
-         (SELECT beacon_outcome FROM viryaos_drive_contacts WHERE id = $2)",
+        "SELECT (SELECT count(*) FROM booking_candidates WHERE workspace_id = $1), \
+         (SELECT beacon_outcome FROM drive_contacts WHERE id = $2)",
     )
     .bind(fixture.workspace_id)
     .bind(contact.id)
@@ -432,7 +432,7 @@ async fn booking_promote_resolves_city_from_venue_registry()
         crowdrelay_infra::gdrive::BookingPromoteOutcome::Done
     );
     let (kind, city): (String, String) = sqlx::query_as(
-        "SELECT target_kind, city_slug FROM viryaos_booking_candidates \
+        "SELECT target_kind, city_slug FROM booking_candidates \
          WHERE workspace_id = $1 AND route_value = 'booking@klubx.pl'",
     )
     .bind(fixture.workspace_id)
@@ -450,7 +450,7 @@ async fn booking_promote_dedupes_on_route_identity() -> Result<(), Box<dyn std::
     // must not file a second row or reset the first one's evidence.
     sqlx::query(
         r#"
-        INSERT INTO viryaos_booking_candidates (
+        INSERT INTO booking_candidates (
             workspace_id, target_kind, display_name, city_slug,
             route_kind, route_value, source, source_reference,
             evidence, fit_basis_points, status
@@ -472,9 +472,9 @@ async fn booking_promote_dedupes_on_route_identity() -> Result<(), Box<dyn std::
         crowdrelay_infra::gdrive::BookingPromoteOutcome::Done
     );
     let (count, existing_name): (i64, String) = sqlx::query_as(
-        "SELECT count(*) OVER (), (SELECT display_name FROM viryaos_booking_candidates \
+        "SELECT count(*) OVER (), (SELECT display_name FROM booking_candidates \
          WHERE workspace_id = $1 AND route_value = 'dup@room.pl') \
-         FROM viryaos_booking_candidates WHERE workspace_id = $1 AND route_value = 'dup@room.pl'",
+         FROM booking_candidates WHERE workspace_id = $1 AND route_value = 'dup@room.pl'",
     )
     .bind(fixture.workspace_id)
     .fetch_one(&fixture.pool)
@@ -503,7 +503,7 @@ async fn booking_promote_rejects_unknown_city_slug() -> Result<(), Box<dyn std::
         crowdrelay_infra::gdrive::BookingPromoteOutcome::UnknownCity
     );
     let staged: String =
-        sqlx::query_scalar("SELECT beacon_outcome FROM viryaos_drive_contacts WHERE id = $1")
+        sqlx::query_scalar("SELECT beacon_outcome FROM drive_contacts WHERE id = $1")
             .bind(contact.id)
             .fetch_one(&fixture.pool)
             .await?;
@@ -519,7 +519,7 @@ async fn booking_promote_fills_city_on_existing_candidate() -> Result<(), Box<dy
     // Discovery filed the route without a city — the contact promote proves it.
     sqlx::query(
         r#"
-        INSERT INTO viryaos_booking_candidates (
+        INSERT INTO booking_candidates (
             workspace_id, target_kind, display_name, city_slug,
             route_kind, route_value, source, source_reference,
             evidence, fit_basis_points, status
@@ -540,7 +540,7 @@ async fn booking_promote_fills_city_on_existing_candidate() -> Result<(), Box<dy
         crowdrelay_infra::gdrive::BookingPromoteOutcome::Done
     );
     let city: Option<String> = sqlx::query_scalar(
-        "SELECT city_slug FROM viryaos_booking_candidates          WHERE workspace_id = $1 AND route_value = 'fill@promo.pl'",
+        "SELECT city_slug FROM booking_candidates          WHERE workspace_id = $1 AND route_value = 'fill@promo.pl'",
     )
     .bind(fixture.workspace_id)
     .fetch_one(&fixture.pool)
@@ -556,7 +556,7 @@ async fn booking_promote_does_not_overturn_refused_route() -> Result<(), Box<dyn
     let fixture = fixture("bookrefused").await?;
     sqlx::query(
         r#"
-        INSERT INTO viryaos_booking_candidates (
+        INSERT INTO booking_candidates (
             workspace_id, target_kind, display_name, city_slug,
             route_kind, route_value, source, source_reference,
             evidence, fit_basis_points, status, refusal_reason
@@ -578,7 +578,7 @@ async fn booking_promote_does_not_overturn_refused_route() -> Result<(), Box<dyn
     );
     // Contact stays staged — the operator sees the promote did not land.
     let staged: String =
-        sqlx::query_scalar("SELECT beacon_outcome FROM viryaos_drive_contacts WHERE id = $1")
+        sqlx::query_scalar("SELECT beacon_outcome FROM drive_contacts WHERE id = $1")
             .bind(contact.id)
             .fetch_one(&fixture.pool)
             .await?;
@@ -662,7 +662,7 @@ async fn staged_rows_resolve_against_the_shared_registries()
         .execute(&fixture.pool)
         .await?;
     sqlx::query(
-        "INSERT INTO viryaos_outreach_targets
+        "INSERT INTO outreach_targets
             (workspace_id, target_kind, display_name, contact_email,
              last_outreach_at, last_reply_at, last_reply_disposition)
          VALUES ($1, 'support_slot', 'Aga Nowak', 'aga@agency.pl',
@@ -672,11 +672,11 @@ async fn staged_rows_resolve_against_the_shared_registries()
     .execute(&fixture.pool)
     .await?;
     sqlx::query(
-        "INSERT INTO viryaos_outreach_interactions
+        "INSERT INTO outreach_interactions
             (workspace_id, target_id, direction, phase, disposition, source_key, occurred_at)
          SELECT workspace_id, id, 'inbound', 'reply', 'positive',
                 'seed-aga-reply', now() - interval '39 days'
-         FROM viryaos_outreach_targets
+         FROM outreach_targets
          WHERE workspace_id = $1 AND contact_email = 'aga@agency.pl'",
     )
     .bind(other_tenant)
@@ -692,7 +692,7 @@ async fn staged_rows_resolve_against_the_shared_registries()
         Some("wroclaw"),
     )
     .await?;
-    sqlx::query("UPDATE viryaos_drive_contacts SET organization = 'Klub Stodola' WHERE id = $1")
+    sqlx::query("UPDATE drive_contacts SET organization = 'Klub Stodola' WHERE id = $1")
         .bind(own_room.id)
         .execute(&fixture.pool)
         .await?;
@@ -708,7 +708,7 @@ async fn staged_rows_resolve_against_the_shared_registries()
     // The ambiguous name, no city — must not guess.
     let ambiguous =
         seed_contact_city(&fixture, "info@stodola.pl", Some("Klub Stodola"), None).await?;
-    sqlx::query("UPDATE viryaos_drive_contacts SET organization = 'Klub Stodola' WHERE id = $1")
+    sqlx::query("UPDATE drive_contacts SET organization = 'Klub Stodola' WHERE id = $1")
         .bind(ambiguous.id)
         .execute(&fixture.pool)
         .await?;
@@ -805,7 +805,7 @@ async fn uploaded_sheet_stages_through_the_upload_source() -> Result<(), Box<dyn
     // The address the sheet will carry was already sighted over Gmail —
     // the upload must converge to one row carrying both sources.
     sqlx::query(
-        "INSERT INTO viryaos_drive_contacts \
+        "INSERT INTO drive_contacts \
             (workspace_id, normalized_email, source_file_id, source_file_name, sources) \
          VALUES ($1, 'first@sheet.test', 'msg-9', 'Re: hello', '{gmail}')",
     )
@@ -847,7 +847,7 @@ async fn uploaded_sheet_stages_through_the_upload_source() -> Result<(), Box<dyn
 
     // The widened CHECK accepts 'upload', and the rows land staged.
     let staged: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM viryaos_drive_contacts \
+        "SELECT count(*) FROM drive_contacts \
          WHERE workspace_id = $1 AND 'upload' = ANY(sources)",
     )
     .bind(fixture.workspace_id)
@@ -869,7 +869,7 @@ async fn uploaded_sheet_stages_through_the_upload_source() -> Result<(), Box<dyn
         )
         .await?;
     let sources: Vec<String> = sqlx::query_scalar(
-        "SELECT sources FROM viryaos_drive_contacts \
+        "SELECT sources FROM drive_contacts \
          WHERE workspace_id = $1 AND normalized_email = 'first@sheet.test'",
     )
     .bind(fixture.workspace_id)

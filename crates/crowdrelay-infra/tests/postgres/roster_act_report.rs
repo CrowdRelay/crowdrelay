@@ -67,7 +67,7 @@ async fn action(
     let decision_id = Uuid::now_v7();
     sqlx::query(
         r#"
-        INSERT INTO viryaos_autopilot_decisions (
+        INSERT INTO autopilot_decisions (
             id, workspace_id, decision_key, context, subject_kind, subject_id,
             decision_kind, confidence_basis_points, disposition, reason,
             input_snapshot, policy_snapshot, recommendation, trace_id
@@ -85,7 +85,7 @@ async fn action(
     .await?;
     sqlx::query(
         r#"
-        INSERT INTO viryaos_autopilot_actions (
+        INSERT INTO autopilot_actions (
             id, workspace_id, decision_id, context, action_kind, subject_kind,
             subject_id, idempotency_key, payload, status, finished_at, trace_id
         ) VALUES ($1,$2,$3,'growth_intelligence',$4,'workspace',
@@ -397,7 +397,7 @@ async fn release_plan(
 ) -> Result<(), Box<dyn std::error::Error>> {
     sqlx::query(
         r#"
-        INSERT INTO viryaos_release_plans
+        INSERT INTO release_plans
             (workspace_id, source_key, title, release_at, tier, assets_ready, active)
         VALUES ($1, $2, $3, $4, $5, true, true)
         "#,

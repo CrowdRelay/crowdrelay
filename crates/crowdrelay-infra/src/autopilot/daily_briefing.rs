@@ -71,7 +71,7 @@ struct BriefingFrame {
 const fn briefing_frame(locale: BriefingLocale) -> BriefingFrame {
     match locale {
         BriefingLocale::Pl => BriefingFrame {
-            title: "ViryaOS — poranne podsumowanie",
+            title: "CrowdRelay — poranne podsumowanie",
             arc: "Łuk treści",
             no_arc: "brak aktywnego łuku",
             pending: "Czeka na decyzję",
@@ -96,7 +96,7 @@ const fn briefing_frame(locale: BriefingLocale) -> BriefingFrame {
             ceiling_label: "limit",
         },
         BriefingLocale::En => BriefingFrame {
-            title: "ViryaOS — morning briefing",
+            title: "CrowdRelay — morning briefing",
             arc: "Content arc",
             no_arc: "no active arc",
             pending: "Awaiting your decision",
@@ -208,9 +208,9 @@ pub(in crate::autopilot) async fn issue_daily_briefings(
     // exists — cancelled, not done, because nobody read it.
     sqlx::query(
         r#"
-        UPDATE viryaos_team_assignments assignment
+        UPDATE team_assignments assignment
         SET status = 'cancelled', updated_at = now()
-        FROM viryaos_daily_briefings briefing
+        FROM daily_briefings briefing
         WHERE assignment.workspace_id = $1
           AND assignment.source_kind = 'daily_briefing'
           AND assignment.status = 'open'
@@ -229,7 +229,7 @@ pub(in crate::autopilot) async fn issue_daily_briefings(
     // INSERT's ON CONFLICT still guards the two-sweeps-racing case.
     let already_issued: bool = sqlx::query_scalar(
         "SELECT EXISTS(
-             SELECT 1 FROM viryaos_daily_briefings
+             SELECT 1 FROM daily_briefings
              WHERE workspace_id = $1 AND local_date = $2)",
     )
     .bind(ws)
@@ -247,7 +247,7 @@ pub(in crate::autopilot) async fn issue_daily_briefings(
 
     let briefing_id = sqlx::query_scalar::<_, Uuid>(
         r#"
-        INSERT INTO viryaos_daily_briefings
+        INSERT INTO daily_briefings
             (workspace_id, local_date, title, body, sections)
         VALUES ($1,$2,$3,$4,$5)
         ON CONFLICT (workspace_id, local_date) DO NOTHING
@@ -298,7 +298,7 @@ pub(in crate::autopilot) async fn issue_daily_briefings(
         let assignment_id = Uuid::now_v7();
         let inserted = sqlx::query_scalar::<_, Uuid>(
             r#"
-            INSERT INTO viryaos_team_assignments (
+            INSERT INTO team_assignments (
                 id, workspace_id, action_id, source_kind, source_id, source_ref,
                 assignee_member_id, required_skill, due_at, next_reminder_at
             ) VALUES ($1,$2,NULL,'daily_briefing',$3,NULL,$4,'briefing',$5,NULL)
@@ -359,7 +359,7 @@ async fn compose_briefing(
     let arc = sqlx::query_as::<_, (String, serde_json::Value, Option<time::Date>)>(
         r#"
         SELECT title, spine, horizon_end
-        FROM viryaos_arcs
+        FROM arcs
         WHERE workspace_id = $1 AND status = 'active'
         ORDER BY created_at DESC LIMIT 1
         "#,
@@ -386,7 +386,7 @@ async fn compose_briefing(
         SELECT action_kind,
                (approval_expires_at AT TIME ZONE $3)::date AS expires_local,
                payload
-        FROM viryaos_autopilot_actions
+        FROM autopilot_actions
         WHERE workspace_id = $1 AND status = 'awaiting_approval'
           AND (approval_expires_at IS NULL OR approval_expires_at > $2)
           -- Batched relay deliveries ask through the batch card, not here.
@@ -403,7 +403,7 @@ async fn compose_briefing(
     .await
     .map_err(map_sqlx)?;
     let pending_total: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM viryaos_autopilot_actions
+        "SELECT COUNT(*) FROM autopilot_actions
          WHERE workspace_id = $1 AND status = 'awaiting_approval'
            AND (approval_expires_at IS NULL OR approval_expires_at > $2)
            AND NOT (action_kind = 'community.engage.request'
@@ -424,7 +424,7 @@ async fn compose_briefing(
     let awaiting_report = sqlx::query_as::<_, AwaitingReportRow>(
         r#"
         SELECT concept, suggested_before
-        FROM viryaos_content_suggestions
+        FROM content_suggestions
         WHERE workspace_id = $1 AND status = 'approved'
         ORDER BY suggested_before NULLS LAST, created_at
         LIMIT 3
@@ -435,7 +435,7 @@ async fn compose_briefing(
     .await
     .map_err(map_sqlx)?;
     let awaiting_report_total: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM viryaos_content_suggestions
+        "SELECT COUNT(*) FROM content_suggestions
          WHERE workspace_id = $1 AND status = 'approved'",
     )
     .bind(ws)
@@ -449,7 +449,7 @@ async fn compose_briefing(
         SELECT COALESCE(member.display_name, member.normalized_email) AS display_name,
                COUNT(*) AS open_count,
                (MIN(assignment.due_at) AT TIME ZONE $2)::date AS nearest_due_local
-        FROM viryaos_team_assignments assignment
+        FROM team_assignments assignment
         JOIN workspace_members member
           ON member.workspace_id = assignment.workspace_id
          AND member.id = assignment.assignee_member_id
@@ -467,7 +467,7 @@ async fn compose_briefing(
     .await
     .map_err(map_sqlx)?;
     let open_tasks_total: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM viryaos_team_assignments
+        "SELECT COUNT(*) FROM team_assignments
          WHERE workspace_id = $1 AND status = 'open'
            AND source_kind NOT IN ('daily_briefing','roster_weekly_brief')",
     )
@@ -484,12 +484,12 @@ async fn compose_briefing(
     let production_days = sqlx::query_as::<_, ProductionDayRow>(
         r#"
         SELECT day.title, day.scheduled_for,
-               (SELECT plan.status FROM viryaos_capture_plans plan
+               (SELECT plan.status FROM capture_plans plan
                 WHERE plan.workspace_id = day.workspace_id
                   AND plan.production_event_id = day.id
                 ORDER BY (plan.status IN ('draft','issued')) DESC,
                          plan.issued_at DESC NULLS LAST LIMIT 1) AS plan_status
-        FROM viryaos_production_events day
+        FROM production_events day
         WHERE day.workspace_id = $1
           AND day.status IN ('scheduled','in_progress')
           AND day.scheduled_for >= $2
@@ -510,11 +510,11 @@ async fn compose_briefing(
         r#"
         SELECT day.title, day.scheduled_for, plan.status AS plan_status,
                plan.sources_landed, plan.planned
-        FROM viryaos_production_events day
+        FROM production_events day
         JOIN LATERAL (
             SELECT p.status, p.sources_landed,
                    jsonb_array_length(p.items)::int AS planned, p.issued_at
-            FROM viryaos_capture_plans p
+            FROM capture_plans p
             WHERE p.workspace_id = day.workspace_id
               AND p.production_event_id = day.id
               AND p.status IN ('done','abandoned')
@@ -536,7 +536,7 @@ async fn compose_briefing(
 
     // ── What changed in the last 24h ──────────────────────────────────
     let material_landed: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM viryaos_content_sources
+        "SELECT COUNT(*) FROM content_sources
          WHERE workspace_id = $1
            AND source_kind IN ('video','story','release','social_post')
            AND created_at > $2 - INTERVAL '24 hours'",
@@ -547,7 +547,7 @@ async fn compose_briefing(
     .await
     .map_err(map_sqlx)?;
     let observations: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM viryaos_peer_observations
+        "SELECT COUNT(*) FROM peer_observations
          WHERE workspace_id = $1 AND created_at > $2 - INTERVAL '24 hours'",
     )
     .bind(ws)
@@ -556,7 +556,7 @@ async fn compose_briefing(
     .await
     .map_err(map_sqlx)?;
     let expired: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM viryaos_suggestion_outcomes
+        "SELECT COUNT(*) FROM suggestion_outcomes
          WHERE workspace_id = $1 AND outcome = 'expired'
            AND resolved_at > $2 - INTERVAL '24 hours'",
     )
@@ -757,11 +757,11 @@ async fn compose_briefing(
         r#"
         SELECT COALESCE(member.display_name, member.normalized_email) AS display_name,
                COUNT(assignment.id) AS asks
-        FROM viryaos_team_profiles profile
+        FROM team_profiles profile
         JOIN workspace_members member
           ON member.workspace_id = profile.workspace_id
          AND member.id = profile.member_id
-        LEFT JOIN viryaos_team_assignments assignment
+        LEFT JOIN team_assignments assignment
           ON assignment.workspace_id = profile.workspace_id
          AND assignment.assignee_member_id = profile.member_id
          AND assignment.assigned_at >= $2 - INTERVAL '7 days'
@@ -780,13 +780,13 @@ async fn compose_briefing(
     .await
     .map_err(map_sqlx)?;
     let dropped_asks: i64 = sqlx::query_scalar(
-        r#"SELECT COUNT(*) FROM viryaos_autopilot_actions action
+        r#"SELECT COUNT(*) FROM autopilot_actions action
            WHERE action.workspace_id = $1
              AND action.status = 'cancelled'
              AND action.last_error_kind = 'approval_expired'
              AND action.finished_at >= $2 - INTERVAL '7 days'
              AND NOT EXISTS (
-                 SELECT 1 FROM viryaos_team_assignments assignment
+                 SELECT 1 FROM team_assignments assignment
                  WHERE assignment.workspace_id = action.workspace_id
                    AND assignment.action_id = action.id)"#,
     )
@@ -807,7 +807,7 @@ async fn compose_briefing(
                AND audit.action = 'team.ask_deferred'
                AND audit.occurred_at >= $2 - INTERVAL '7 days'
                AND NOT EXISTS (
-                   SELECT 1 FROM viryaos_team_assignments assignment
+                   SELECT 1 FROM team_assignments assignment
                    WHERE assignment.workspace_id = audit.workspace_id
                      AND (
                          (assignment.action_id IS NOT NULL
@@ -817,7 +817,7 @@ async fn compose_briefing(
                              AND assignment.source_ref IS NOT DISTINCT FROM audit.metadata->>'source_ref')
                      ))
                AND (audit.metadata->>'action_id' IS NULL OR EXISTS (
-                   SELECT 1 FROM viryaos_autopilot_actions act
+                   SELECT 1 FROM autopilot_actions act
                    WHERE act.workspace_id = audit.workspace_id
                      AND act.id::text = audit.metadata->>'action_id'
                      AND act.status = 'awaiting_approval'))
@@ -843,7 +843,7 @@ async fn compose_briefing(
                AND audit.metadata->>'deadline_at' IS NOT NULL
                AND (audit.metadata->>'deadline_at')::timestamptz <= $2
                AND NOT EXISTS (
-                   SELECT 1 FROM viryaos_team_assignments assignment
+                   SELECT 1 FROM team_assignments assignment
                    WHERE assignment.workspace_id = audit.workspace_id
                      AND assignment.source_kind = audit.metadata->>'source_kind'
                      AND assignment.source_id::text = audit.metadata->>'source_id'

@@ -183,7 +183,7 @@ pub(super) async fn schedule_effect_measurement(
             let campaign_id = sqlx::query_scalar::<_, Uuid>(
                 r#"
                 SELECT communication_campaign_id
-                FROM viryaos_campaign_lifecycle_emissions
+                FROM campaign_lifecycle_emissions
                 WHERE workspace_id=$1 AND action_id=$2
                 "#,
             )
@@ -284,7 +284,7 @@ pub(super) async fn schedule_effect_measurement(
                     SELECT
                         COALESCE(SUM(attributed_clicks),0)::double precision,
                         COALESCE(SUM(attributed_ticket_orders),0)::double precision
-                    FROM viryaos_show_growth_surfaces
+                    FROM show_growth_surfaces
                     WHERE workspace_id=$1 AND event_id=$2
                     "#,
                 )
@@ -376,7 +376,7 @@ pub(super) async fn schedule_effect_measurement(
                 )
                 .bind(workspace_id.into_uuid())
                 .bind(format!(
-                    "viryaos-release-{release_id}-{}",
+                    "crowdrelay-release-{release_id}-{}",
                     operations::release_milestone_str(*milestone)
                 ))
                 .fetch_optional(&mut **transaction)
@@ -398,7 +398,7 @@ pub(super) async fn schedule_effect_measurement(
                 let series_declared = sqlx::query_scalar::<_, bool>(
                     r#"
                     SELECT EXISTS(
-                        SELECT 1 FROM viryaos_growth_metric_series
+                        SELECT 1 FROM growth_metric_series
                         WHERE workspace_id=$1 AND subject_kind='release_plan'
                           AND subject_id=$2 AND active
                     )
@@ -966,12 +966,12 @@ pub(super) async fn schedule_effect_measurement(
         }
         sqlx::query(
             r#"
-            INSERT INTO viryaos_autopilot_measurements (
+            INSERT INTO autopilot_measurements (
                 id, workspace_id, action_id, measurement_kind, subject_id,
                 action_finished_at, baseline_value, due_at, available_at,
                 trace_id
             ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$8,
-                (SELECT trace_id FROM viryaos_autopilot_actions WHERE id = $3)
+                (SELECT trace_id FROM autopilot_actions WHERE id = $3)
             )
             ON CONFLICT (workspace_id, action_id, measurement_kind, subject_id) DO NOTHING
             "#,

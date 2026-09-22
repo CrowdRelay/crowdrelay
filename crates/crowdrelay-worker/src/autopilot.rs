@@ -1,4 +1,4 @@
-//! Background evaluator/executor for deterministic ViryaOS Autopilot actions.
+//! Background evaluator/executor for deterministic CrowdRelay Autopilot actions.
 
 use std::time::Duration;
 
@@ -192,7 +192,7 @@ impl AutopilotWorker {
                         listener = None;
                         continue;
                     }
-                    tracing::info!("ViryaOS Autopilot cycle requested by operator");
+                    tracing::info!("CrowdRelay Autopilot cycle requested by operator");
                     self.run_recorded_cycle(CycleTrigger::Requested).await;
                 }
                 _ = ticks.tick() => {
@@ -333,13 +333,13 @@ impl AutopilotWorker {
                     series_tracked = report.series_tracked,
                     series_retired = report.series_retired,
                     points_recorded = report.points_recorded,
-                    "ViryaOS recorded first-party growth observations"
+                    "CrowdRelay recorded first-party growth observations"
                 );
             }
             Ok(_) => {}
             Err(error) => {
                 degraded.failed(phase::GROWTH_METRIC_CAPTURE);
-                tracing::warn!(error = %error, "ViryaOS first-party growth metric capture failed");
+                tracing::warn!(error = %error, "CrowdRelay first-party growth metric capture failed");
             }
         }
 
@@ -425,7 +425,7 @@ impl AutopilotWorker {
             }
             Err(error) => {
                 degraded.failed(phase::EVALUATION);
-                tracing::warn!(error = %error, "ViryaOS Autopilot evaluation failed");
+                tracing::warn!(error = %error, "CrowdRelay Autopilot evaluation failed");
             }
         }
 
@@ -434,11 +434,11 @@ impl AutopilotWorker {
             .reconcile_team_handoffs(self.workspace_id, now)
             .await
         {
-            Ok(count) if count > 0 => tracing::info!(count, "assigned ViryaOS human handoffs"),
+            Ok(count) if count > 0 => tracing::info!(count, "assigned CrowdRelay human handoffs"),
             Ok(_) => {}
             Err(error) => {
                 degraded.failed(phase::TEAM_HANDOFF_RECONCILIATION);
-                tracing::warn!(error = %error, "ViryaOS team handoff reconciliation failed");
+                tracing::warn!(error = %error, "CrowdRelay team handoff reconciliation failed");
             }
         }
         // The roster weekly brief rides the same handoff rail as the daily
@@ -449,11 +449,13 @@ impl AutopilotWorker {
             .issue_roster_weekly_briefs(self.workspace_id, now)
             .await
         {
-            Ok(count) if count > 0 => tracing::info!(count, "issued ViryaOS roster weekly brief"),
+            Ok(count) if count > 0 => {
+                tracing::info!(count, "issued CrowdRelay roster weekly brief")
+            }
             Ok(_) => {}
             Err(error) => {
                 degraded.failed(phase::ROSTER_BRIEF_ISSUE);
-                tracing::warn!(error = %error, "ViryaOS roster weekly brief issue failed");
+                tracing::warn!(error = %error, "CrowdRelay roster weekly brief issue failed");
             }
         }
         match self
@@ -462,12 +464,12 @@ impl AutopilotWorker {
             .await
         {
             Ok(count) if count > 0 => {
-                tracing::info!(count, "cancelled ViryaOS actions with no live executor")
+                tracing::info!(count, "cancelled CrowdRelay actions with no live executor")
             }
             Ok(_) => {}
             Err(error) => {
                 degraded.failed(phase::NO_EXECUTOR_SWEEP);
-                tracing::warn!(error = %error, "ViryaOS no-executor sweep failed");
+                tracing::warn!(error = %error, "CrowdRelay no-executor sweep failed");
             }
         }
 
@@ -483,7 +485,7 @@ impl AutopilotWorker {
             Ok(_) => {}
             Err(error) => {
                 degraded.failed(phase::ABANDONED_CLAIM_SWEEP);
-                tracing::warn!(error = %error, "ViryaOS abandoned-claim sweep failed");
+                tracing::warn!(error = %error, "CrowdRelay abandoned-claim sweep failed");
             }
         }
 
@@ -506,7 +508,7 @@ impl AutopilotWorker {
                             action_id = %action.id,
                             action_kind = action.payload.action_kind(),
                             error_kind,
-                            "ViryaOS Autopilot action failed"
+                            "CrowdRelay Autopilot action failed"
                         );
                         let _ = self
                             .repository
@@ -522,7 +524,7 @@ impl AutopilotWorker {
                                 tracing::error!(
                                     action_id = %action.id,
                                     error = %e,
-                                    "failed to mark ViryaOS action as failed — action may remain in-flight"
+                                    "failed to mark CrowdRelay action as failed — action may remain in-flight"
                                 );
                             })
                             .ok();
@@ -531,7 +533,7 @@ impl AutopilotWorker {
             }
             Err(error) => {
                 degraded.failed(phase::ACTION_CLAIM);
-                tracing::warn!(error = %error, "ViryaOS Autopilot action claim failed");
+                tracing::warn!(error = %error, "CrowdRelay Autopilot action claim failed");
             }
         }
 
@@ -564,7 +566,7 @@ impl AutopilotWorker {
                             tracing::warn!(
                                 measurement_id = %measurement.id,
                                 error = %error,
-                                "ViryaOS Autopilot harm observation failed — resolving without it"
+                                "CrowdRelay Autopilot harm observation failed — resolving without it"
                             );
                         })
                         .ok();
@@ -601,7 +603,7 @@ impl AutopilotWorker {
                                 measurement_id = %measurement.id,
                                 measurement_kind = measurement.kind.as_str(),
                                 error_kind,
-                                "ViryaOS Autopilot delayed effect measurement failed"
+                                "CrowdRelay Autopilot delayed effect measurement failed"
                             );
                             // `harm` rides along: a terminal failure merges
                             // its keys in the same transaction that resolves
@@ -622,7 +624,7 @@ impl AutopilotWorker {
                                     tracing::error!(
                                         measurement_id = %measurement.id,
                                         error = %e,
-                                        "failed to mark ViryaOS measurement as failed — measurement may remain in-flight"
+                                        "failed to mark CrowdRelay measurement as failed — measurement may remain in-flight"
                                     );
                                 })
                                 .ok();
@@ -634,13 +636,13 @@ impl AutopilotWorker {
                         claimed,
                         succeeded,
                         failed,
-                        "ViryaOS Autopilot measurement phase completed"
+                        "CrowdRelay Autopilot measurement phase completed"
                     );
                 }
             }
             Err(error) => {
                 degraded.failed(phase::MEASUREMENT_CLAIM);
-                tracing::warn!(error = %error, "ViryaOS Autopilot measurement claim failed");
+                tracing::warn!(error = %error, "CrowdRelay Autopilot measurement claim failed");
             }
         }
 
@@ -683,7 +685,7 @@ impl AutopilotWorker {
                             play_id = %outcome.play_id,
                             claim = outcome.claim.as_str(),
                             error_kind,
-                            "ViryaOS play outcome measurement failed"
+                            "CrowdRelay play outcome measurement failed"
                         );
                         let _ = self
                             .repository
@@ -699,7 +701,7 @@ impl AutopilotWorker {
                                 tracing::error!(
                                     play_id = %outcome.play_id,
                                     error = %e,
-                                    "failed to mark ViryaOS play outcome as failed — outcome may remain in-flight"
+                                    "failed to mark CrowdRelay play outcome as failed — outcome may remain in-flight"
                                 );
                             })
                             .ok();
@@ -708,7 +710,7 @@ impl AutopilotWorker {
             }
             Err(error) => {
                 degraded.failed(phase::PLAY_OUTCOME_CLAIM);
-                tracing::warn!(error = %error, "ViryaOS play outcome claim failed");
+                tracing::warn!(error = %error, "CrowdRelay play outcome claim failed");
             }
         }
 
@@ -749,7 +751,7 @@ impl AutopilotWorker {
                             wave_id = %outcome.wave_id,
                             target_kind = outcome.target_kind.as_str(),
                             error_kind,
-                            "ViryaOS wave outcome measurement failed"
+                            "CrowdRelay wave outcome measurement failed"
                         );
                         let _ = self
                             .repository
@@ -765,7 +767,7 @@ impl AutopilotWorker {
                                 tracing::error!(
                                     wave_id = %outcome.wave_id,
                                     error = %e,
-                                    "failed to mark ViryaOS wave outcome as failed — outcome may remain in-flight"
+                                    "failed to mark CrowdRelay wave outcome as failed — outcome may remain in-flight"
                                 );
                             })
                             .ok();
@@ -774,7 +776,7 @@ impl AutopilotWorker {
             }
             Err(error) => {
                 degraded.failed(phase::WAVE_OUTCOME_CLAIM);
-                tracing::warn!(error = %error, "ViryaOS wave outcome claim failed");
+                tracing::warn!(error = %error, "CrowdRelay wave outcome claim failed");
             }
         }
 
@@ -827,14 +829,14 @@ impl AutopilotWorker {
                         tracing::warn!(
                             reply_id = %reply.reply_id,
                             error = %error,
-                            "ViryaOS reply triage failed"
+                            "CrowdRelay reply triage failed"
                         );
                     }
                 }
             }
             Err(error) => {
                 degraded.failed(phase::REPLY_TRIAGE_CLAIM);
-                tracing::warn!(error = %error, "ViryaOS reply triage claim failed");
+                tracing::warn!(error = %error, "CrowdRelay reply triage claim failed");
             }
         }
 
@@ -845,12 +847,12 @@ impl AutopilotWorker {
         // and a stale tuning row is a smaller harm than a stalled one.
         match self.repository.retune_llm(self.workspace_id, now).await {
             Ok(tuning) if !tuning.reason.is_empty() => {
-                tracing::info!(reason = %tuning.reason, "ViryaOS re-tuned LLM call parameters");
+                tracing::info!(reason = %tuning.reason, "CrowdRelay re-tuned LLM call parameters");
             }
             Ok(_) => {}
             Err(error) => {
                 degraded.failed(phase::LLM_TUNING);
-                tracing::warn!(error = %error, "ViryaOS LLM call tuning failed");
+                tracing::warn!(error = %error, "CrowdRelay LLM call tuning failed");
             }
         }
 
@@ -859,7 +861,7 @@ impl AutopilotWorker {
             // cycle as a whole is degraded, which the previous one -- an
             // opaque `RepositoryError::Unexpected` raised here and logged by
             // the caller -- did not.
-            tracing::warn!("ViryaOS Autopilot cycle degraded: a phase failed");
+            tracing::warn!("CrowdRelay Autopilot cycle degraded: a phase failed");
         }
         CycleObservation {
             degraded,
@@ -925,7 +927,7 @@ impl TeamEmailDispatchWorker {
                 }
                 _ = ticks.tick() => {
                     if let Err(error) = self.run_once(OffsetDateTime::now_utc()).await {
-                        tracing::warn!(error = %error, "ViryaOS team-email dispatch cycle failed");
+                        tracing::warn!(error = %error, "CrowdRelay team-email dispatch cycle failed");
                     }
                 }
             }
@@ -944,12 +946,12 @@ impl TeamEmailDispatchWorker {
             .await
         {
             Ok(count) if count > 0 => {
-                tracing::info!(count, "cleared retired ViryaOS team reminder schedules")
+                tracing::info!(count, "cleared retired CrowdRelay team reminder schedules")
             }
             Ok(_) => {}
             Err(error) => {
                 phase_failed = true;
-                tracing::warn!(error = %error, "ViryaOS team reminder schedule drain failed");
+                tracing::warn!(error = %error, "CrowdRelay team reminder schedule drain failed");
             }
         }
 
@@ -972,7 +974,7 @@ impl TeamEmailDispatchWorker {
                             action_id = %action.id,
                             action_kind = action.payload.action_kind(),
                             error_kind,
-                            "ViryaOS team-email action failed"
+                            "CrowdRelay team-email action failed"
                         );
                         let _ = self
                             .repository
@@ -988,7 +990,7 @@ impl TeamEmailDispatchWorker {
                                 tracing::error!(
                                     action_id = %action.id,
                                     error = %e,
-                                    "failed to mark ViryaOS team-email action as failed — action may remain in-flight"
+                                    "failed to mark CrowdRelay team-email action as failed — action may remain in-flight"
                                 );
                             })
                             .ok();
@@ -997,7 +999,7 @@ impl TeamEmailDispatchWorker {
             }
             Err(error) => {
                 phase_failed = true;
-                tracing::warn!(error = %error, "ViryaOS team-email action claim failed");
+                tracing::warn!(error = %error, "CrowdRelay team-email action claim failed");
             }
         }
 

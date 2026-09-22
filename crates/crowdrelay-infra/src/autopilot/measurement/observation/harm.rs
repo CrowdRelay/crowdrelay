@@ -82,7 +82,7 @@ pub async fn observe_harm(
             -- `event_id` field on some other payload shape from aborting
             -- the cast.
             SELECT (action.payload->>'event_id')::uuid AS event_id
-            FROM viryaos_autopilot_actions AS action
+            FROM autopilot_actions AS action
             WHERE action.workspace_id = $1
               AND action.id = $2
               AND action.payload->>'event_id'
@@ -105,7 +105,7 @@ pub async fn observe_harm(
                AND consent.recorded_at >= $3
                AND consent.recorded_at < $4) AS unsubscribes,
             (SELECT COUNT(*)::double precision
-             FROM viryaos_outreach_delivery_faults AS fault
+             FROM outreach_delivery_faults AS fault
              -- Same last-touch rule the fan arms use: the complaint belongs
              -- to the action whose reach reached the target most recently
              -- before the fault, so two actions writing to one target can
@@ -113,7 +113,7 @@ pub async fn observe_harm(
              -- target entirely, a subject match is the only tie left.
              LEFT JOIN LATERAL (
                  SELECT reach.action_id
-                 FROM viryaos_reach_events AS reach
+                 FROM reach_events AS reach
                  WHERE reach.workspace_id = $1
                    AND reach.recipient_kind = 'outreach_target'
                    AND reach.recipient_id = fault.target_id::text

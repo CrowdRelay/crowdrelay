@@ -26,7 +26,7 @@ impl BeaconSignalRepository for PostgresBeaconReleaseRepository {
         let beacon = sqlx::query_as::<_, (String, Option<String>, bool, bool, bool, bool)>(
             r#"
             SELECT display_name, contact_email, active, verified, accepts_outreach, do_not_contact
-            FROM viryaos_beacons
+            FROM beacons
             WHERE workspace_id = $1 AND id = $2
             FOR UPDATE
             "#,
@@ -54,7 +54,7 @@ impl BeaconSignalRepository for PostgresBeaconReleaseRepository {
         let existing = sqlx::query_as::<_, (String, Option<OffsetDateTime>)>(
             r#"
             SELECT status, invite_expires_at
-            FROM viryaos_beacon_signal_profiles
+            FROM beacon_signal_profiles
             WHERE workspace_id=$1 AND beacon_id=$2
             FOR UPDATE
             "#,
@@ -98,8 +98,8 @@ impl BeaconSignalRepository for PostgresBeaconReleaseRepository {
                 r#"
                 SELECT EXISTS (
                     SELECT 1
-                    FROM viryaos_beacons covered
-                    JOIN viryaos_beacon_signal_profiles covered_profile
+                    FROM beacons covered
+                    JOIN beacon_signal_profiles covered_profile
                       ON covered_profile.workspace_id=covered.workspace_id
                      AND covered_profile.beacon_id=covered.id
                     WHERE covered.workspace_id=$1
@@ -130,7 +130,7 @@ impl BeaconSignalRepository for PostgresBeaconReleaseRepository {
         // Upsert profile.
         let profile_result = sqlx::query(
             r#"
-            INSERT INTO viryaos_beacon_signal_profiles (
+            INSERT INTO beacon_signal_profiles (
                 workspace_id, beacon_id, status, invite_token_hash, invite_expires_at,
                 radius_km, locale, nearby_gigs_enabled, invite_count, last_invited_at
             ) VALUES ($1, $2, 'invited', $3, $4, $5, $6, true, 1, now())
@@ -140,7 +140,7 @@ impl BeaconSignalRepository for PostgresBeaconReleaseRepository {
                 invite_expires_at = EXCLUDED.invite_expires_at,
                 radius_km = EXCLUDED.radius_km,
                 locale = EXCLUDED.locale,
-                invite_count = viryaos_beacon_signal_profiles.invite_count + 1,
+                invite_count = beacon_signal_profiles.invite_count + 1,
                 last_invited_at = now(), paused_at = NULL, revoked_at = NULL,
                 pending_invite_job_id = NULL, updated_at = now()
             "#,
@@ -160,7 +160,7 @@ impl BeaconSignalRepository for PostgresBeaconReleaseRepository {
         // Revoke old sessions.
         let revoke_result = sqlx::query(
             r#"
-            UPDATE viryaos_beacon_signal_sessions
+            UPDATE beacon_signal_sessions
             SET revoked_at=COALESCE(revoked_at, now())
             WHERE workspace_id=$1 AND beacon_id=$2 AND revoked_at IS NULL
             "#,
@@ -208,8 +208,8 @@ impl BeaconSignalRepository for PostgresBeaconReleaseRepository {
                    profile.radius_km, profile.locale, profile.topics,
                    profile.nearby_gigs_enabled, profile.invite_expires_at,
                    profile.pending_invite_job_id
-            FROM viryaos_beacon_signal_profiles profile
-            JOIN viryaos_beacons beacon
+            FROM beacon_signal_profiles profile
+            JOIN beacons beacon
               ON beacon.workspace_id = profile.workspace_id AND beacon.id = profile.beacon_id
             WHERE profile.workspace_id = $1
               AND profile.invite_token_hash = $2
@@ -247,7 +247,7 @@ impl BeaconSignalRepository for PostgresBeaconReleaseRepository {
         // Update profile to active.
         let profile_update = sqlx::query(
             r#"
-            UPDATE viryaos_beacon_signal_profiles
+            UPDATE beacon_signal_profiles
             SET status='active', invite_token_hash=NULL, invite_expires_at=NULL,
                 pending_invite_job_id=NULL, radius_km=$3, locale=$4, topics=$5,
                 joined_at=COALESCE(joined_at, now()), last_seen_at=now(), updated_at=now()
@@ -264,7 +264,7 @@ impl BeaconSignalRepository for PostgresBeaconReleaseRepository {
         // Insert session.
         let session_insert = sqlx::query(
             r#"
-            INSERT INTO viryaos_beacon_signal_sessions
+            INSERT INTO beacon_signal_sessions
                 (workspace_id, id, beacon_id, token_hash, expires_at, client_kind, source_invite_job_id)
             VALUES ($1, $2, $3, $4, $5, $6, $7)
             "#,
@@ -298,7 +298,7 @@ impl BeaconSignalRepository for PostgresBeaconReleaseRepository {
     ) -> Result<Option<BeaconPreferences>, BeaconSignalRepositoryError> {
         let result = sqlx::query_as::<_, (i32, String, Vec<String>, bool)>(
             r#"
-            UPDATE viryaos_beacon_signal_profiles
+            UPDATE beacon_signal_profiles
             SET radius_km=COALESCE($3,radius_km), locale=COALESCE($4,locale),
                 topics=COALESCE($5,topics), nearby_gigs_enabled=COALESCE($6,nearby_gigs_enabled),
                 updated_at=now()
@@ -360,7 +360,7 @@ impl BeaconSignalRepository for PostgresBeaconReleaseRepository {
         let request_id = Uuid::now_v7();
         if let Err(error) = sqlx::query(
             r#"
-            INSERT INTO viryaos_beacon_press_requests
+            INSERT INTO beacon_press_requests
                 (id,workspace_id,beacon_id,event_id,request_kind,details)
             VALUES ($1,$2,$3,$4,$5,$6)
             "#,
@@ -410,7 +410,7 @@ impl BeaconSignalRepository for PostgresBeaconReleaseRepository {
             .await
             .map_err(|_| BeaconSignalRepositoryError::Unavailable)?;
         let session = sqlx::query(
-            "UPDATE viryaos_beacon_signal_sessions SET revoked_at=now() WHERE workspace_id=$1 AND token_hash=$2 AND revoked_at IS NULL",
+            "UPDATE beacon_signal_sessions SET revoked_at=now() WHERE workspace_id=$1 AND token_hash=$2 AND revoked_at IS NULL",
         )
         .bind(command.workspace_id)
         .bind(&command.session_hash)
@@ -451,18 +451,18 @@ impl BeaconSignalRepository for PostgresBeaconReleaseRepository {
                                * POWER(SIN(RADIANS(home_city.longitude - event_city.longitude) / 2),2)
                            )))
                        )::integer) AS distance_km
-                FROM viryaos_beacon_signal_profiles profile
-                JOIN viryaos_beacons beacon
+                FROM beacon_signal_profiles profile
+                JOIN beacons beacon
                   ON beacon.workspace_id=profile.workspace_id AND beacon.id=profile.beacon_id
                 JOIN cities home_city ON home_city.id=beacon.city_id
                 JOIN events event ON event.workspace_id=profile.workspace_id
                   AND event.status='published' AND event.starts_at > now()
                   AND event.starts_at < now() + ($4::bigint * interval '1 day')
                 JOIN cities event_city ON event_city.id=event.city_id
-                LEFT JOIN viryaos_beacon_signal_event_engagements engagement
+                LEFT JOIN beacon_signal_event_engagements engagement
                   ON engagement.workspace_id=profile.workspace_id
                  AND engagement.beacon_id=beacon.id AND engagement.event_id=event.id
-                LEFT JOIN viryaos_beacon_campaigns campaign
+                LEFT JOIN beacon_campaigns campaign
                   ON campaign.workspace_id=profile.workspace_id
                  AND campaign.beacon_id=beacon.id AND campaign.event_id=event.id
                 WHERE profile.workspace_id=$1 AND profile.status='active'
@@ -481,16 +481,16 @@ impl BeaconSignalRepository for PostgresBeaconReleaseRepository {
                          distance_km,beacon_id,event_id
                 LIMIT $2
             ), campaign_seed AS (
-                INSERT INTO viryaos_beacon_campaigns (workspace_id,beacon_id,event_id,status)
+                INSERT INTO beacon_campaigns (workspace_id,beacon_id,event_id,status)
                 SELECT $1,beacon_id,event_id,'candidate' FROM ranked
                 ON CONFLICT (workspace_id,beacon_id,event_id) DO NOTHING
                 RETURNING beacon_id,event_id
             ), engagement_seed AS (
-                INSERT INTO viryaos_beacon_signal_event_engagements
+                INSERT INTO beacon_signal_event_engagements
                     (workspace_id,beacon_id,event_id,status)
                 SELECT $1,beacon_id,event_id,'eligible' FROM ranked
                 ON CONFLICT (workspace_id,beacon_id,event_id) DO UPDATE SET
-                    updated_at=viryaos_beacon_signal_event_engagements.updated_at
+                    updated_at=beacon_signal_event_engagements.updated_at
                 RETURNING beacon_id,event_id
             ), push_queued AS (
                 INSERT INTO fan_push_deliveries (
@@ -510,7 +510,7 @@ impl BeaconSignalRepository for PostgresBeaconReleaseRepository {
                 FROM ranked
                 JOIN engagement_seed seeded
                   ON seeded.beacon_id=ranked.beacon_id AND seeded.event_id=ranked.event_id
-                JOIN viryaos_beacon_signal_sessions session
+                JOIN beacon_signal_sessions session
                   ON session.workspace_id=$1 AND session.beacon_id=ranked.beacon_id
                  AND session.revoked_at IS NULL AND session.expires_at > now()
                 JOIN fan_push_endpoints endpoint
@@ -525,10 +525,10 @@ impl BeaconSignalRepository for PostgresBeaconReleaseRepository {
                 FROM push_queued
                 JOIN fan_push_endpoints endpoint
                   ON endpoint.workspace_id=$1 AND endpoint.id=push_queued.endpoint_id
-                JOIN viryaos_beacon_signal_sessions session
+                JOIN beacon_signal_sessions session
                   ON session.workspace_id=$1 AND session.token_hash=endpoint.principal_hash
             ), marked AS (
-                UPDATE viryaos_beacon_signal_event_engagements engagement
+                UPDATE beacon_signal_event_engagements engagement
                 SET status=CASE WHEN engagement.status='eligible' THEN 'notified' ELSE engagement.status END,
                     notification_count=engagement.notification_count + 1,
                     first_notified_at=COALESCE(engagement.first_notified_at,now()),
@@ -538,7 +538,7 @@ impl BeaconSignalRepository for PostgresBeaconReleaseRepository {
                   AND engagement.beacon_id=notified.beacon_id AND engagement.event_id=notified.event_id
                 RETURNING engagement.beacon_id,engagement.event_id
             ), campaign_contacted AS (
-                UPDATE viryaos_beacon_campaigns campaign
+                UPDATE beacon_campaigns campaign
                 SET status=CASE WHEN campaign.status='candidate' THEN 'contacted' ELSE campaign.status END,
                     last_phase='local_push',last_outreach_at=now(),updated_at=now()
                 FROM marked
@@ -587,7 +587,7 @@ impl BeaconSignalRepository for PostgresBeaconReleaseRepository {
                 SELECT 1
                 FROM events event
                 JOIN cities event_city ON event_city.id=event.city_id
-                JOIN viryaos_beacons beacon ON beacon.workspace_id=event.workspace_id AND beacon.id=$2
+                JOIN beacons beacon ON beacon.workspace_id=event.workspace_id AND beacon.id=$2
                 JOIN cities home_city ON home_city.id=beacon.city_id
                 WHERE event.workspace_id=$1 AND event.id=$3
                   AND event.status='published'
@@ -600,7 +600,7 @@ impl BeaconSignalRepository for PostgresBeaconReleaseRepository {
                         * POWER(SIN(RADIANS(home_city.longitude - event_city.longitude) / 2), 2)
                       )))) <= $4
                 UNION ALL
-                SELECT 1 FROM viryaos_beacon_signal_event_engagements engagement
+                SELECT 1 FROM beacon_signal_event_engagements engagement
                 WHERE engagement.workspace_id=$1 AND engagement.beacon_id=$2 AND engagement.event_id=$3
             )
             "#,
@@ -621,7 +621,7 @@ impl BeaconSignalRepository for PostgresBeaconReleaseRepository {
         }
         // Current status.
         let current = sqlx::query_scalar::<_, String>(
-            "SELECT status FROM viryaos_beacon_signal_event_engagements WHERE workspace_id=$1 AND beacon_id=$2 AND event_id=$3 FOR UPDATE",
+            "SELECT status FROM beacon_signal_event_engagements WHERE workspace_id=$1 AND beacon_id=$2 AND event_id=$3 FOR UPDATE",
         )
         .bind(workspace_id)
         .bind(beacon_id)
@@ -669,7 +669,7 @@ impl BeaconSignalRepository for PostgresBeaconReleaseRepository {
         // Upsert engagement.
         let upsert = sqlx::query(
             r#"
-            INSERT INTO viryaos_beacon_signal_event_engagements (
+            INSERT INTO beacon_signal_event_engagements (
                 workspace_id,beacon_id,event_id,status,help_kind,help_details,
                 first_opened_at,last_opened_at,interested_at,helping_at,completed_at,declined_at
             ) VALUES (
@@ -683,14 +683,14 @@ impl BeaconSignalRepository for PostgresBeaconReleaseRepository {
             )
             ON CONFLICT (workspace_id,beacon_id,event_id) DO UPDATE SET
                 status=$4,
-                help_kind=CASE WHEN $7='helping' THEN $5 ELSE viryaos_beacon_signal_event_engagements.help_kind END,
-                help_details=CASE WHEN $7='helping' THEN $6 ELSE viryaos_beacon_signal_event_engagements.help_details END,
-                first_opened_at=CASE WHEN $7='opened' THEN COALESCE(viryaos_beacon_signal_event_engagements.first_opened_at,now()) ELSE viryaos_beacon_signal_event_engagements.first_opened_at END,
-                last_opened_at=CASE WHEN $7='opened' THEN now() ELSE viryaos_beacon_signal_event_engagements.last_opened_at END,
-                interested_at=CASE WHEN $7='interested' THEN COALESCE(viryaos_beacon_signal_event_engagements.interested_at,now()) ELSE viryaos_beacon_signal_event_engagements.interested_at END,
-                helping_at=CASE WHEN $7='helping' THEN COALESCE(viryaos_beacon_signal_event_engagements.helping_at,now()) ELSE viryaos_beacon_signal_event_engagements.helping_at END,
-                completed_at=CASE WHEN $7='completed' THEN COALESCE(viryaos_beacon_signal_event_engagements.completed_at,now()) ELSE viryaos_beacon_signal_event_engagements.completed_at END,
-                declined_at=CASE WHEN $7='declined' THEN COALESCE(viryaos_beacon_signal_event_engagements.declined_at,now()) ELSE viryaos_beacon_signal_event_engagements.declined_at END,
+                help_kind=CASE WHEN $7='helping' THEN $5 ELSE beacon_signal_event_engagements.help_kind END,
+                help_details=CASE WHEN $7='helping' THEN $6 ELSE beacon_signal_event_engagements.help_details END,
+                first_opened_at=CASE WHEN $7='opened' THEN COALESCE(beacon_signal_event_engagements.first_opened_at,now()) ELSE beacon_signal_event_engagements.first_opened_at END,
+                last_opened_at=CASE WHEN $7='opened' THEN now() ELSE beacon_signal_event_engagements.last_opened_at END,
+                interested_at=CASE WHEN $7='interested' THEN COALESCE(beacon_signal_event_engagements.interested_at,now()) ELSE beacon_signal_event_engagements.interested_at END,
+                helping_at=CASE WHEN $7='helping' THEN COALESCE(beacon_signal_event_engagements.helping_at,now()) ELSE beacon_signal_event_engagements.helping_at END,
+                completed_at=CASE WHEN $7='completed' THEN COALESCE(beacon_signal_event_engagements.completed_at,now()) ELSE beacon_signal_event_engagements.completed_at END,
+                declined_at=CASE WHEN $7='declined' THEN COALESCE(beacon_signal_event_engagements.declined_at,now()) ELSE beacon_signal_event_engagements.declined_at END,
                 updated_at=now()
             "#,
         )
@@ -718,7 +718,7 @@ impl BeaconSignalRepository for PostgresBeaconReleaseRepository {
         };
         if let Err(error) = sqlx::query(
             r#"
-            INSERT INTO viryaos_beacon_campaigns (
+            INSERT INTO beacon_campaigns (
                 workspace_id,beacon_id,event_id,status,last_phase,last_reply_disposition,last_outreach_at
             ) VALUES ($1,$2,$3,$4,'local_push',$5,now())
             ON CONFLICT (workspace_id,beacon_id,event_id) DO UPDATE SET
@@ -726,23 +726,23 @@ impl BeaconSignalRepository for PostgresBeaconReleaseRepository {
                     WHEN $4='closed' THEN 'closed'
                     WHEN $4='declined' THEN 'declined'
                     WHEN $4='partner' THEN 'partner'
-                    WHEN viryaos_beacon_campaigns.status='partner' THEN 'partner'
+                    WHEN beacon_campaigns.status='partner' THEN 'partner'
                     WHEN $4='interested' THEN 'interested'
-                    WHEN viryaos_beacon_campaigns.status='interested' THEN 'interested'
-                    WHEN viryaos_beacon_campaigns.status='declined' THEN 'declined'
+                    WHEN beacon_campaigns.status='interested' THEN 'interested'
+                    WHEN beacon_campaigns.status='declined' THEN 'declined'
                     ELSE 'contacted'
                 END,
                 last_phase='local_push',
                 last_reply_disposition=CASE
                     WHEN $4 IN ('closed','declined','partner','interested') THEN $5
-                    WHEN viryaos_beacon_campaigns.status='partner' THEN 'partner'
-                    WHEN viryaos_beacon_campaigns.status='interested' THEN 'interested'
-                    WHEN viryaos_beacon_campaigns.status='declined' THEN 'declined'
+                    WHEN beacon_campaigns.status='partner' THEN 'partner'
+                    WHEN beacon_campaigns.status='interested' THEN 'interested'
+                    WHEN beacon_campaigns.status='declined' THEN 'declined'
                     ELSE 'received'
                 END,
-                last_outreach_at=COALESCE(viryaos_beacon_campaigns.last_outreach_at,now()),
+                last_outreach_at=COALESCE(beacon_campaigns.last_outreach_at,now()),
                 updated_at=now()
-            WHERE viryaos_beacon_campaigns.status NOT IN ('suppressed','closed')
+            WHERE beacon_campaigns.status NOT IN ('suppressed','closed')
             "#,
         )
         .bind(workspace_id)
@@ -800,7 +800,7 @@ impl BeaconSignalRepository for PostgresBeaconReleaseRepository {
         })?;
         // Check engagement exists and is not declined.
         let engagement_status = sqlx::query_scalar::<_, String>(
-            "SELECT status FROM viryaos_beacon_signal_event_engagements WHERE workspace_id=$1 AND beacon_id=$2 AND event_id=$3 FOR UPDATE",
+            "SELECT status FROM beacon_signal_event_engagements WHERE workspace_id=$1 AND beacon_id=$2 AND event_id=$3 FOR UPDATE",
         )
         .bind(workspace_id)
         .bind(beacon_id)
@@ -820,11 +820,11 @@ impl BeaconSignalRepository for PostgresBeaconReleaseRepository {
         let coverage_id = Uuid::now_v7();
         let coverage_id = sqlx::query_scalar::<_, Uuid>(
             r#"
-            INSERT INTO viryaos_beacon_signal_coverage
+            INSERT INTO beacon_signal_coverage
                 (id,workspace_id,beacon_id,event_id,coverage_kind,url,title)
             VALUES ($1,$2,$3,$4,$5,$6,$7)
             ON CONFLICT (workspace_id,beacon_id,event_id,url) DO UPDATE SET
-                title=COALESCE(EXCLUDED.title,viryaos_beacon_signal_coverage.title)
+                title=COALESCE(EXCLUDED.title,beacon_signal_coverage.title)
             RETURNING id
             "#,
         )
@@ -844,7 +844,7 @@ impl BeaconSignalRepository for PostgresBeaconReleaseRepository {
         // Mark engagement as completed.
         if let Err(error) = sqlx::query(
             r#"
-            UPDATE viryaos_beacon_signal_event_engagements
+            UPDATE beacon_signal_event_engagements
             SET status='completed',completed_at=COALESCE(completed_at,now()),updated_at=now()
             WHERE workspace_id=$1 AND beacon_id=$2 AND event_id=$3 AND status <> 'declined'
             "#,
@@ -861,7 +861,7 @@ impl BeaconSignalRepository for PostgresBeaconReleaseRepository {
         // Close campaign.
         if let Err(error) = sqlx::query(
             r#"
-            UPDATE viryaos_beacon_campaigns
+            UPDATE beacon_campaigns
             SET status='closed',last_reply_disposition='partner',updated_at=now()
             WHERE workspace_id=$1 AND beacon_id=$2 AND event_id=$3
               AND status <> 'suppressed'
@@ -913,14 +913,14 @@ impl BeaconSignalRepository for PostgresBeaconReleaseRepository {
         })?;
         for result in [
             sqlx::query(
-                "UPDATE viryaos_beacon_signal_profiles SET status='revoked',invite_token_hash=NULL,invite_expires_at=NULL,revoked_at=now(),paused_at=NULL,updated_at=now() WHERE workspace_id=$1 AND beacon_id=$2",
+                "UPDATE beacon_signal_profiles SET status='revoked',invite_token_hash=NULL,invite_expires_at=NULL,revoked_at=now(),paused_at=NULL,updated_at=now() WHERE workspace_id=$1 AND beacon_id=$2",
             )
             .bind(workspace_id)
             .bind(beacon_id)
             .execute(&mut *tx)
             .await,
             sqlx::query(
-                "UPDATE viryaos_beacon_signal_sessions SET revoked_at=COALESCE(revoked_at,now()) WHERE workspace_id=$1 AND beacon_id=$2 AND revoked_at IS NULL",
+                "UPDATE beacon_signal_sessions SET revoked_at=COALESCE(revoked_at,now()) WHERE workspace_id=$1 AND beacon_id=$2 AND revoked_at IS NULL",
             )
             .bind(workspace_id)
             .bind(beacon_id)
@@ -932,7 +932,7 @@ impl BeaconSignalRepository for PostgresBeaconReleaseRepository {
                 SET active=false,invalidated_at=COALESCE(invalidated_at,now()),updated_at=now()
                 WHERE endpoint.workspace_id=$1 AND endpoint.audience_kind='beacon' AND endpoint.active
                   AND endpoint.principal_hash IN (
-                      SELECT session.token_hash FROM viryaos_beacon_signal_sessions session
+                      SELECT session.token_hash FROM beacon_signal_sessions session
                       WHERE session.workspace_id=$1 AND session.beacon_id=$2
                   )
                 "#,
@@ -949,7 +949,7 @@ impl BeaconSignalRepository for PostgresBeaconReleaseRepository {
         }
         if command.do_not_contact
             && let Err(error) = sqlx::query(
-                "UPDATE viryaos_beacons SET accepts_outreach=false,do_not_contact=true,version=version+1,updated_at=now() WHERE workspace_id=$1 AND id=$2",
+                "UPDATE beacons SET accepts_outreach=false,do_not_contact=true,version=version+1,updated_at=now() WHERE workspace_id=$1 AND id=$2",
             )
             .bind(workspace_id)
             .bind(beacon_id)

@@ -47,7 +47,7 @@ impl PostgresAutopilotRepository {
             let operation_id = Uuid::now_v7();
             // The audit row records which deliveries the operator meant to
             // edit — ids only; the before/after text lives in
-            // `viryaos_draft_revisions` once each edit is accepted.
+            // `draft_revisions` once each edit is accepted.
             let details = match revisions {
                 Some(revisions) if !revisions.is_empty() => json!({
                     "requested_status": "approved",
@@ -133,7 +133,7 @@ impl PostgresAutopilotRepository {
             let now = OffsetDateTime::now_utc();
             let released: Vec<Uuid> = sqlx::query_scalar(
                 r#"
-                UPDATE viryaos_autopilot_actions
+                UPDATE autopilot_actions
                 SET status='queued', approved_at=$3, approved_by='operator:community_relay',
                     -- O.2: an outward send waits out its hold window before a
                     -- worker may claim it — the batch is the approval, not a
@@ -162,7 +162,7 @@ impl PostgresAutopilotRepository {
             // a reminder keeps asking somebody to approve what already
             // queued.
             sqlx::query(
-                "UPDATE viryaos_team_assignments \
+                "UPDATE team_assignments \
                  SET status='done', completed_at=$3, next_reminder_at=NULL \
                  WHERE workspace_id=$1 AND action_id = ANY($2) AND status='open'",
             )
@@ -255,7 +255,7 @@ impl PostgresAutopilotRepository {
             }
             let now = OffsetDateTime::now_utc();
             let cancelled: Vec<Uuid> = sqlx::query_scalar(
-                "UPDATE viryaos_autopilot_actions \
+                "UPDATE autopilot_actions \
                  SET status='cancelled', finished_at=$3 \
                  WHERE workspace_id=$1 \
                    AND action_kind='community.engage.request' \
@@ -270,7 +270,7 @@ impl PostgresAutopilotRepository {
             .await
             .map_err(map_sqlx)?;
             sqlx::query(
-                "UPDATE viryaos_team_assignments \
+                "UPDATE team_assignments \
                  SET status='cancelled', completed_at=NULL, next_reminder_at=NULL \
                  WHERE workspace_id=$1 AND action_id = ANY($2) AND status='open'",
             )
@@ -317,7 +317,7 @@ impl PostgresAutopilotRepository {
 /// on this card, and editing the wrong draft is worse than refusing. The
 /// review runs against `RELAY_REVISABLE_FIELDS` (the post's own words) and
 /// the same refusals a single-action revision applies; every accepted field
-/// lands in `viryaos_draft_revisions` with the batch's operation id.
+/// lands in `draft_revisions` with the batch's operation id.
 ///
 /// Where the words live depends on how far the delivery got: a parked or
 /// queued action's payload still feeds the post seed, while a delivered
@@ -334,7 +334,7 @@ async fn apply_relay_revision(
     operation_id: Uuid,
 ) -> Result<(), RepositoryError> {
     let Some((mut payload, action_status)) = sqlx::query_as::<_, (serde_json::Value, String)>(
-        "SELECT payload, status FROM viryaos_autopilot_actions \
+        "SELECT payload, status FROM autopilot_actions \
          WHERE workspace_id = $1 AND id = $2 \
            AND action_kind = 'community.engage.request' \
            AND payload->>'source_id' = $3::text \
@@ -403,15 +403,13 @@ async fn apply_relay_revision(
     crowdrelay_domain::draft_revision::apply_revision(&mut payload, &changed);
     // The payload keeps the words that were approved even when the action
     // already ran — the ledger row and the post row tell one story.
-    sqlx::query(
-        "UPDATE viryaos_autopilot_actions SET payload = $3 WHERE workspace_id = $1 AND id = $2",
-    )
-    .bind(workspace_id.into_uuid())
-    .bind(action_id)
-    .bind(&payload)
-    .execute(&mut **transaction)
-    .await
-    .map_err(map_sqlx)?;
+    sqlx::query("UPDATE autopilot_actions SET payload = $3 WHERE workspace_id = $1 AND id = $2")
+        .bind(workspace_id.into_uuid())
+        .bind(action_id)
+        .bind(&payload)
+        .execute(&mut **transaction)
+        .await
+        .map_err(map_sqlx)?;
     if post_editable {
         // Only the post's own columns move, and only fields that actually
         // changed — the row's link, media and target stay the batch's facts.
@@ -444,7 +442,7 @@ async fn apply_relay_revision(
         single.insert(field.clone(), after.clone());
         let distance = crowdrelay_domain::draft_revision::revision_distance(&draft, &single);
         sqlx::query(
-            "INSERT INTO viryaos_draft_revisions \
+            "INSERT INTO draft_revisions \
              (workspace_id, action_id, operation_id, field, before_text, after_text, distance_chars) \
              VALUES ($1, $2, $3, $4, $5, $6, $7)",
         )

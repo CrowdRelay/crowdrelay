@@ -10,7 +10,7 @@ macro_rules! decision_core_reads {
                 SELECT context, enabled, autonomy_level,
                        minimum_confidence_basis_points, max_actions_24h, config, version,
                        guarded_until, guardrail_reason
-                FROM viryaos_autopilot_policies
+                FROM autopilot_policies
                 WHERE workspace_id = $1
                 ORDER BY context
                 "#,
@@ -61,7 +61,7 @@ macro_rules! decision_core_reads {
                 JOIN events AS event
                   ON event.workspace_id = ticket_sale.workspace_id
                  AND event.id = ticket_sale.event_id
-                LEFT JOIN viryaos_ticket_type_allocation_guardrails AS allocation
+                LEFT JOIN ticket_type_allocation_guardrails AS allocation
                   ON allocation.workspace_id = ticket_type.workspace_id
                  AND allocation.ticket_type_id = ticket_type.id
                 LEFT JOIN ticket_order_items AS order_item
@@ -72,7 +72,7 @@ macro_rules! decision_core_reads {
                  AND ticket_order.id = order_item.ticket_order_id
                 LEFT JOIN LATERAL (
                     SELECT action.finished_at
-                    FROM viryaos_autopilot_actions AS action
+                    FROM autopilot_actions AS action
                     WHERE action.workspace_id = ticket_type.workspace_id
                       AND action.subject_id = ticket_type.id
                       AND action.action_kind = 'ticket.price.change'
@@ -82,7 +82,7 @@ macro_rules! decision_core_reads {
                 ) AS last_change ON true
                 LEFT JOIN LATERAL (
                     SELECT action.finished_at
-                    FROM viryaos_autopilot_actions AS action
+                    FROM autopilot_actions AS action
                     WHERE action.workspace_id = ticket_type.workspace_id
                       AND action.subject_id = ticket_type.id
                       AND action.action_kind = 'ticket.capacity.change'
@@ -216,7 +216,7 @@ macro_rules! decision_core_reads {
                 ) AS synesthesia ON true
                 LEFT JOIN LATERAL (
                     SELECT action.finished_at
-                    FROM viryaos_autopilot_actions AS action
+                    FROM autopilot_actions AS action
                     WHERE action.workspace_id = fan.workspace_id
                       AND action.subject_id = fan.id
                       AND action.action_kind = 'fan.lifecycle.message.request'
@@ -316,7 +316,7 @@ macro_rules! decision_core_reads {
                     GREATEST(COALESCE(stock.sold_30d, 0), 0)::bigint AS sold_last_30d,
                     EXISTS (
                         SELECT 1
-                        FROM viryaos_autopilot_actions AS action
+                        FROM autopilot_actions AS action
                         WHERE action.workspace_id = variant.workspace_id
                           AND action.subject_id = variant.id
                           AND action.action_kind = 'merch.reorder.request'
@@ -331,7 +331,7 @@ macro_rules! decision_core_reads {
                 LEFT JOIN reservations ON reservations.variant_id = variant.id
                 LEFT JOIN LATERAL (
                     SELECT action.finished_at
-                    FROM viryaos_autopilot_actions AS action
+                    FROM autopilot_actions AS action
                     WHERE action.workspace_id = variant.workspace_id
                       AND action.subject_id = variant.id
                       AND action.action_kind = 'merch.reorder.request'
@@ -415,14 +415,14 @@ macro_rules! decision_core_reads {
                     GREATEST(COALESCE(stock.sold_30d, 0), 0)::bigint AS sold_last_30d,
                     last_change.finished_at AS last_price_change_at
                 FROM merch_products AS product
-                JOIN viryaos_merch_product_economics AS economics
+                JOIN merch_product_economics AS economics
                   ON economics.workspace_id = product.workspace_id
                  AND economics.product_id = product.id
                 LEFT JOIN stock ON stock.product_id = product.id
                 LEFT JOIN reservations ON reservations.product_id = product.id
                 LEFT JOIN LATERAL (
                     SELECT action.finished_at
-                    FROM viryaos_autopilot_actions AS action
+                    FROM autopilot_actions AS action
                     WHERE action.workspace_id = product.workspace_id
                       AND action.subject_id = product.id
                       AND action.action_kind = 'merch.price.change'

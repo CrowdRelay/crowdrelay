@@ -80,7 +80,7 @@ pub enum BeliefStateOrigin {
     /// Rebuilt from a stored checkpoint, then advanced by the evidence
     /// resolved since it was written.
     ///
-    /// `checkpoint_content_hash` is the identity. `viryaos_brain_state` holds
+    /// `checkpoint_content_hash` is the identity. `brain_state` holds
     /// one row per module, updated in place, with no id and no history — so
     /// `checkpoint_updated_at` says *when* and cannot say *which*, and the
     /// state it labelled is overwritten by the next cycle. The hash is derived
@@ -588,7 +588,7 @@ pub trait AutopilotDecisionRepository: Send + Sync {
     /// Records a credit allocation — attributed credit for a fan outcome.
     /// CRITICAL: the raw observation in the evidence table is immutable.
     /// This stores attributed credit in a SEPARATE table
-    /// (`viryaos_fan_credit_ledger`). The learner consumes credited
+    /// (`fan_credit_ledger`). The learner consumes credited
     /// effects from the credit ledger, not raw observations.
     async fn record_credit_allocation(
         &self,

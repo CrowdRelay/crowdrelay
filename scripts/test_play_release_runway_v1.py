@@ -7,7 +7,7 @@ play with a third anchor kind.
 
 Pinned here:
 - The anchor kind is `release`, not `event` or `fan`.
-- The anchor query reads `viryaos_release_plans`, not `events` or `fans`.
+- The anchor query reads `release_plans`, not `events` or `fans`.
 - The audience query reaches all consented fans, not one fan or one show's fans.
 - The curator wave is the only third-party step; everything else is owned or
   first-party.
@@ -50,11 +50,11 @@ class ReleaseRunwayContract(unittest.TestCase):
 
     def test_the_play_kind_is_in_the_schema_check(self) -> None:
         self.assertIn("'release_runway'", self.sql)
-        check = self.sql.split("viryaos_plays_play_kind_check", 1)[1]
+        check = self.sql.split("plays_play_kind_check", 1)[1]
         self.assertIn("release_runway", check)
 
     def test_the_anchor_kind_is_release(self) -> None:
-        check = self.sql.split("viryaos_plays_anchor_kind_check", 1)[1]
+        check = self.sql.split("plays_anchor_kind_check", 1)[1]
         self.assertIn("'release'", check)
         # And the domain agrees.
         arm = self.domain.split("pub enum PlayAnchorKind", 1)[1].split("}", 1)[0]
@@ -62,7 +62,7 @@ class ReleaseRunwayContract(unittest.TestCase):
 
     def test_the_anchor_query_reads_release_plans(self) -> None:
         anchors = self.infra.split("const PLAY_RELEASE_ANCHORS_SQL", 1)[1].split('"#;', 1)[0]
-        self.assertIn("viryaos_release_plans", anchors)
+        self.assertIn("release_plans", anchors)
         self.assertIn("plan.release_at", anchors)
         self.assertIn("plan.active", anchors)
         self.assertIn("anchor_kind = 'release'", anchors)
@@ -106,7 +106,7 @@ class ReleaseRunwayContract(unittest.TestCase):
     # --- the curator wave is the only third-party step ------------------
 
     def test_five_step_kinds_are_in_the_schema_check(self) -> None:
-        check = self.sql.split("viryaos_play_steps_step_kind_check", 1)[1]
+        check = self.sql.split("play_steps_step_kind_check", 1)[1]
         for kind in (
             "release_presave_live",
             "release_audience_announce",
@@ -202,7 +202,7 @@ class ReleaseRunwayContract(unittest.TestCase):
     # --- the learning table accepts the new play kind -------------------
 
     def test_the_learning_table_accepts_release_runway(self) -> None:
-        check = self.sql.split("viryaos_play_learning_play_kind_check", 1)[1]
+        check = self.sql.split("play_learning_play_kind_check", 1)[1]
         self.assertIn("release_runway", check)
 
 

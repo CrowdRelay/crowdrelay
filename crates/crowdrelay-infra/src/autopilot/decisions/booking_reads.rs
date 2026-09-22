@@ -12,7 +12,7 @@ macro_rules! decision_booking_reads {
             let my_genres = sqlx::query_scalar::<_, Vec<String>>(
                 r#"
                 SELECT COALESCE(array_agg(DISTINCT lower(btrim(tag))), '{}')
-                FROM viryaos_band_listings AS listing, unnest(listing.genre_tags) AS tag
+                FROM band_listings AS listing, unnest(listing.genre_tags) AS tag
                 WHERE listing.workspace_id = $1
                 "#,
             )
@@ -27,17 +27,17 @@ macro_rules! decision_booking_reads {
                        target.relationship_score,
                        EXISTS (
                            SELECT 1
-                           FROM viryaos_autopilot_actions AS action
+                           FROM autopilot_actions AS action
                            WHERE action.workspace_id = target.workspace_id
                              AND action.action_kind = 'booking.outreach.request'
                              AND action.status IN ('awaiting_approval', 'queued', 'processing')
                              AND action.payload ->> 'target_id' = target.id::text
                        ) AS outreach_in_flight,
                        target.last_outreach_at,
-                       COALESCE((SELECT count(*)::integer FROM viryaos_booking_interactions interaction
+                       COALESCE((SELECT count(*)::integer FROM booking_interactions interaction
                          WHERE interaction.workspace_id=target.workspace_id AND interaction.target_id=target.id
                            AND interaction.direction='outbound' AND interaction.phase='followup'),0) AS followup_count,
-                       COALESCE((SELECT interaction.disposition FROM viryaos_booking_interactions interaction
+                       COALESCE((SELECT interaction.disposition FROM booking_interactions interaction
                          WHERE interaction.workspace_id=target.workspace_id AND interaction.target_id=target.id
                            AND interaction.direction='inbound' AND interaction.phase='reply'
                          ORDER BY interaction.occurred_at DESC,interaction.id DESC LIMIT 1),'none') AS last_reply_disposition,
@@ -58,7 +58,7 @@ macro_rules! decision_booking_reads {
                        -- exactly backwards.
                        (SELECT GREATEST(0, CEIL(EXTRACT(EPOCH FROM
                                (MIN(edition.application_closes_at) - now())) / 86400.0))::bigint
-                        FROM viryaos_festival_editions AS edition
+                        FROM festival_editions AS edition
                         WHERE edition.workspace_id = target.workspace_id
                           AND edition.target_id = target.id
                           AND edition.application_closes_at >= now()
@@ -69,7 +69,7 @@ macro_rules! decision_booking_reads {
                        -- decision which edition it is deciding on. Both read
                        -- the same MIN so they can never disagree.
                        (SELECT MIN(edition.application_closes_at)
-                        FROM viryaos_festival_editions AS edition
+                        FROM festival_editions AS edition
                         WHERE edition.workspace_id = target.workspace_id
                           AND edition.target_id = target.id
                           AND edition.application_closes_at >= now())
@@ -81,7 +81,7 @@ macro_rules! decision_booking_reads {
                            SELECT edge_or_primary.venue_id
                            FROM (
                                SELECT edge.venue_id
-                               FROM viryaos_booking_target_venues AS edge
+                               FROM booking_target_venues AS edge
                                WHERE edge.workspace_id = target.workspace_id
                                  AND edge.target_id = target.id
                                UNION
@@ -89,7 +89,7 @@ macro_rules! decision_booking_reads {
                            ) AS edge_or_primary
                            WHERE edge_or_primary.venue_id IS NOT NULL
                        ) AS linked_venue_ids
-                FROM viryaos_booking_targets AS target
+                FROM booking_targets AS target
                 -- §12-6 evidence: the room's own recent history. Past shows
                 -- only — a booked future night is not played yet — and the
                 -- mark/event join keys on both id and workspace, so the
@@ -134,7 +134,7 @@ macro_rules! decision_booking_reads {
                                               lower(btrim(their_genre.genre))) AS genre
                               FROM (
                                   SELECT unnest(listing.genre_tags) AS genre
-                                  FROM viryaos_band_listings AS listing
+                                  FROM band_listings AS listing
                                   WHERE listing.workspace_id = act.act_workspace_id
                                   UNION ALL
                                   SELECT peer_genre.genre_tag
@@ -265,7 +265,7 @@ macro_rules! decision_booking_reads {
                 SELECT target.id AS target_id,
                        room_shows.starts_at, room_shows.created_at,
                        city.latitude, city.longitude
-                FROM viryaos_booking_targets AS target
+                FROM booking_targets AS target
                 LEFT JOIN place_venues AS venue
                   ON venue.id = target.venue_id
                 LEFT JOIN cities AS city

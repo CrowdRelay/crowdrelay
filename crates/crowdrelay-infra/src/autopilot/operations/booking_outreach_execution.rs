@@ -164,7 +164,7 @@ pub(in crate::autopilot) async fn execute_booking_outreach(
     for (recipient_id, expected_version, _) in &recipients {
         let changed = sqlx::query(
             r#"
-            UPDATE viryaos_booking_targets
+            UPDATE booking_targets
             SET last_outreach_at = $4
             WHERE workspace_id = $1 AND id = $2 AND version = $3
             "#,
@@ -181,7 +181,7 @@ pub(in crate::autopilot) async fn execute_booking_outreach(
         }
         sqlx::query(
             r#"
-            INSERT INTO viryaos_booking_interactions(
+            INSERT INTO booking_interactions(
                 workspace_id,target_id,direction,phase,source_key,occurred_at,metadata
             ) VALUES($1,$2,'outbound',$3,$4,$5,jsonb_build_object('action_id',$6::uuid))
             ON CONFLICT(workspace_id,target_id,source_key) DO NOTHING

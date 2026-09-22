@@ -78,7 +78,7 @@ pub async fn roster_pool_rows(
                pool.opportunity_id, pool.audience_key, pool.source_context,
                pool.action_key, pool.decision_value, pool.is_experimental,
                pool.selected, pool.rejection_reason, pool.refreshed_at
-        FROM viryaos_portfolio_pool AS pool
+        FROM portfolio_pool AS pool
         JOIN workspaces AS workspace ON workspace.id = pool.workspace_id
         WHERE workspace.organization_id = $1
         ORDER BY workspace.name, pool.opportunity_key
@@ -241,7 +241,7 @@ pub async fn roster_portfolio_plan(
         ..defaults
     };
 
-    // 5.2: the fairness term's ledger half. `viryaos_autopilot_actions` is the
+    // 5.2: the fairness term's ledger half. `autopilot_actions` is the
     // record of what each act's brain actually spent this week — the trailing
     // seven days of it is the share the damp reads. A failed send still spent
     // the slot, so the count is every created action, not the successful
@@ -250,7 +250,7 @@ pub async fn roster_portfolio_plan(
         sqlx::query_as::<_, (Uuid, i64)>(
             r#"
             SELECT action.workspace_id, COUNT(*)
-            FROM viryaos_autopilot_actions AS action
+            FROM autopilot_actions AS action
             JOIN workspaces AS workspace ON workspace.id = action.workspace_id
             WHERE workspace.organization_id = $1
               AND action.created_at > now() - INTERVAL '7 days'

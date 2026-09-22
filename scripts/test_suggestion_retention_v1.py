@@ -6,7 +6,7 @@ everywhere. The sweep used to live inside the action claim path, which runs
 per autopilot cycle — so a parked tenant, a disabled autopilot or a starved
 claim loop accumulated asks that read `awaiting_approval` long past
 `approval_expires_at`, hidden from `needs_you` and counted only as
-`awaiting_sweep` by the lapsed read. And `viryaos_autopilot_decisions` grew
+`awaiting_sweep` by the lapsed read. And `autopilot_decisions` grew
 forever, because nothing ever deleted a row.
 
 These assertions pin the shape of the fix rather than re-testing its
@@ -40,9 +40,9 @@ class SuggestionRetentionV1Contract(unittest.TestCase):
         self.assertIn("pub async fn sweep_lapsed_approval_asks", sweep)
         # The cascades are part of the sweep, not of either caller: a dead
         # ask resolves its suggestion and arc whoever reaps it.
-        self.assertIn("viryaos_content_suggestions", sweep)
-        self.assertIn("viryaos_suggestion_outcomes", sweep)
-        self.assertIn("viryaos_arcs", sweep)
+        self.assertIn("content_suggestions", sweep)
+        self.assertIn("suggestion_outcomes", sweep)
+        self.assertIn("arcs", sweep)
 
     def test_the_claim_path_delegates(self):
         actions = ACTIONS.read_text()
@@ -72,9 +72,9 @@ class SuggestionRetentionV1Contract(unittest.TestCase):
         self.assertIn("RetentionStep::OldOrphanAutopilotDecisions", retention)
         self.assertIn("decision_audit_retention", retention)
         # Both RESTRICT referrers must be guarded, not just the obvious one.
-        self.assertIn("viryaos_autopilot_actions", steps)
-        self.assertIn("viryaos_autopilot_outcomes", steps)
-        self.assertIn("DELETE FROM viryaos_autopilot_decisions", steps)
+        self.assertIn("autopilot_actions", steps)
+        self.assertIn("autopilot_outcomes", steps)
+        self.assertIn("DELETE FROM autopilot_decisions", steps)
 
     def test_the_deadline_contract_has_a_watchdog(self):
         conditions = WATCHDOG.read_text()

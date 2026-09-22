@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """A decision may never be recorded without saying what caused it.
 
-`viryaos_autopilot_decisions` is the audit ledger. `trace_id` is the only thing
+`autopilot_decisions` is the audit ledger. `trace_id` is the only thing
 that joins a decision to the event that produced it, the action it emitted, the
 attempts that action made and the outcome that came back -- the timeline an
 operator reads to answer "why did the system do this?".
@@ -32,7 +32,7 @@ ROOT = Path(__file__).resolve().parents[1]
 CRATES = ROOT / "crates"
 MIGRATIONS = ROOT / "migrations"
 
-DECISION_TABLE = "viryaos_autopilot_decisions"
+DECISION_TABLE = "autopilot_decisions"
 
 # The three writers, all audited. A new one is not forbidden -- it just has to
 # be added here deliberately, which is the point: the ledger's writers are few
@@ -72,7 +72,7 @@ def is_test_module(path: Path) -> bool:
     Large modules split their `#[cfg(test)] mod tests` into
     `src/<module>/tests.rs` behind an `include!` to stay inside the
     source-size ratchet. The file is still test code, and a fixture that has to
-    insert a row — `viryaos_autopilot_actions.decision_id` is NOT NULL, so a
+    insert a row — `autopilot_actions.decision_id` is NOT NULL, so a
     community-post fixture must write a decision — is not "code that can write
     to the decision ledger" in the sense the writer-set check means.
     """
@@ -162,7 +162,7 @@ class TheColumnIsEnforced(unittest.TestCase):
     def test_a_migration_makes_the_column_not_null(self) -> None:
         found = any(
             re.search(
-                rf"ALTER TABLE\s+{DECISION_TABLE}\s+ALTER COLUMN trace_id SET NOT NULL",
+                rf"ALTER TABLE\s+viryaos_{DECISION_TABLE}\s+ALTER COLUMN trace_id SET NOT NULL",
                 path.read_text(encoding="utf-8", errors="replace"),
                 re.S,
             )
@@ -170,7 +170,7 @@ class TheColumnIsEnforced(unittest.TestCase):
         )
         self.assertTrue(
             found,
-            "no migration makes viryaos_autopilot_decisions.trace_id NOT NULL; "
+            "no migration makes autopilot_decisions.trace_id NOT NULL; "
             "without it the column is an invitation for the next writer to skip",
         )
 
@@ -180,7 +180,7 @@ class TheColumnIsEnforced(unittest.TestCase):
             path.name
             for path in sorted(MIGRATIONS.glob("*.sql"))
             if re.search(
-                rf"ALTER TABLE\s+{DECISION_TABLE}\s+ALTER COLUMN trace_id DROP NOT NULL",
+                rf"ALTER TABLE\s+viryaos_{DECISION_TABLE}\s+ALTER COLUMN trace_id DROP NOT NULL",
                 path.read_text(encoding="utf-8", errors="replace"),
                 re.S,
             )
@@ -197,7 +197,7 @@ class TheColumnIsEnforced(unittest.TestCase):
             path.name
             for path in sorted(MIGRATIONS.glob("*.sql"))
             if re.search(
-                rf"ALTER TABLE\s+{DECISION_TABLE}\s+ALTER COLUMN trace_id SET DEFAULT",
+                rf"ALTER TABLE\s+viryaos_{DECISION_TABLE}\s+ALTER COLUMN trace_id SET DEFAULT",
                 path.read_text(encoding="utf-8", errors="replace"),
                 re.S,
             )

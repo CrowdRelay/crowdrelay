@@ -2,7 +2,7 @@
 """The executor contract's capability list must match what CrowdRelay routes by.
 
 `executor_capability_for_event` maps every outbound event type to the capability
-an executor must advertise to receive it. `n8n/viryaos-executor-contract.md` is
+an executor must advertise to receive it. `n8n/crowdrelay-executor-contract.md` is
 what an executor operator reads to build that heartbeat. When the two disagree,
 the failure is silent and total: an operator cannot advertise a capability the
 contract never mentions, so CrowdRelay emits events that reach a consumer which
@@ -30,7 +30,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 CAPABILITIES = ROOT / "crates/crowdrelay-infra/src/autopilot/execution_capabilities.rs"
-CONTRACT = ROOT / "n8n/viryaos-executor-contract.md"
+CONTRACT = ROOT / "n8n/crowdrelay-executor-contract.md"
 
 # Capabilities CrowdRelay satisfies in-process and no external executor should
 # register. Empty today, and listed as a named concept so that adding one is a

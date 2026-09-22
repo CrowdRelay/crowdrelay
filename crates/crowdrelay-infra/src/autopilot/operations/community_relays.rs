@@ -87,7 +87,7 @@ pub(in crate::autopilot) async fn load_community_relays(
                 source.metadata ->> 'thumbnail_url'
             ) AS image_url
         FROM community_relay_batches batch
-        LEFT JOIN viryaos_content_sources source
+        LEFT JOIN content_sources source
           ON source.workspace_id = batch.workspace_id
          AND source.id = batch.source_id
         WHERE batch.workspace_id = $1
@@ -123,7 +123,7 @@ pub(in crate::autopilot) async fn load_community_relays(
             post.posted_at,
             post.reddit_post_url AS post_url
         FROM community_relay_batches batch
-        JOIN viryaos_autopilot_actions action
+        JOIN autopilot_actions action
           ON action.workspace_id = batch.workspace_id
          AND action.action_kind = 'community.engage.request'
          AND action.payload ->> 'source_id' = batch.source_id::text

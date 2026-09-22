@@ -903,8 +903,8 @@ pub async fn list_release_outcomes(
         SELECT outcome.release_id, plan.title, outcome.tier, outcome.release_at,
                outcome.report_kind, outcome.generated_at, outcome.window_days,
                outcome.verdict, outcome.payload
-        FROM viryaos_release_outcomes outcome
-        JOIN viryaos_release_plans plan
+        FROM release_outcomes outcome
+        JOIN release_plans plan
           ON plan.workspace_id = outcome.workspace_id
          AND plan.id = outcome.release_id
         WHERE outcome.workspace_id = $1

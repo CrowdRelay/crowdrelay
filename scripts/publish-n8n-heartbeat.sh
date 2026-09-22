@@ -6,10 +6,10 @@ set -Eeuo pipefail
 : "${N8N_EXECUTOR_VERSION:?}"
 : "${N8N_WORKFLOW_ATTESTATION:?path to final secretless attestation}"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
-payload="$(mktemp "${TMPDIR:-/tmp}/viryaos-heartbeat.XXXXXX.json")"
+payload="$(mktemp "${TMPDIR:-/tmp}/crowdrelay-heartbeat.XXXXXX.json")"
 trap 'rm -f "$payload"' EXIT
 python3 "$ROOT/scripts/build_n8n_executor_heartbeat.py" \
-  --manifest "$ROOT/n8n/viryaos-production-workflow-manifest.tsv" \
+  --manifest "$ROOT/n8n/crowdrelay-production-workflow-manifest.tsv" \
   --attestation "$N8N_WORKFLOW_ATTESTATION" \
   --executor-id "$N8N_EXECUTOR_ID" \
   --version "$N8N_EXECUTOR_VERSION" \

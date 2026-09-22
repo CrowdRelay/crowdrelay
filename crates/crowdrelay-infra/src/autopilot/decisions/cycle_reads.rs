@@ -14,7 +14,7 @@ macro_rules! decision_cycle_reads {
             let rows = sqlx::query_as::<_, (String, String)>(
                 r#"
                 SELECT action_class, ceiling
-                FROM viryaos_growth_autonomy
+                FROM growth_autonomy
                 WHERE workspace_id = $1
                 "#,
             )
@@ -55,7 +55,7 @@ macro_rules! decision_cycle_reads {
                        subject_cooldown_hours,
                        max_recipients_per_step, weekly_approval_requests,
                        weekly_bootstrap_actions, parked
-                FROM viryaos_growth_envelope
+                FROM growth_envelope
                 WHERE workspace_id = $1
                 "#,
             )
@@ -97,7 +97,7 @@ macro_rules! decision_cycle_reads {
                 r#"
                 SELECT action_class, count(*)::bigint,
                        count(*) FILTER (WHERE created_at >= $2 - INTERVAL '24 hours')::bigint
-                FROM viryaos_autopilot_actions
+                FROM autopilot_actions
                 WHERE workspace_id = $1
                   AND action_class IN ('owned_audience', 'third_party')
                   AND status <> 'cancelled'
@@ -139,7 +139,7 @@ macro_rules! decision_cycle_reads {
                 sqlx::query_scalar::<_, i64>(
                     r#"
                     SELECT count(*)
-                    FROM viryaos_autopilot_actions
+                    FROM autopilot_actions
                     WHERE workspace_id = $1
                       AND approval_expires_at IS NOT NULL
                       AND created_at >= $2::timestamptz - INTERVAL '7 days'
@@ -183,7 +183,7 @@ macro_rules! decision_cycle_reads {
             let rows = sqlx::query_as::<_, (String, i64)>(
                 r#"
                 SELECT context, count(*)
-                FROM viryaos_autopilot_actions
+                FROM autopilot_actions
                 WHERE workspace_id = $1
                   AND approved_by = 'policy:bounded_auto'
                   -- Cast so the statement can be PREPAREd standalone, which is
@@ -221,7 +221,7 @@ macro_rules! decision_cycle_reads {
             let rows = sqlx::query_as::<_, (Uuid, OffsetDateTime)>(
                 r#"
                 SELECT subject_id, max(created_at)
-                FROM viryaos_autopilot_actions
+                FROM autopilot_actions
                 WHERE workspace_id = $1
                   AND action_class IN ('owned_audience', 'third_party')
                   AND status <> 'cancelled'
@@ -298,7 +298,7 @@ macro_rules! decision_cycle_reads {
             // one is a dead question.
             let rows = sqlx::query_as::<_, crate::content_engine::SuggestionRow>(
                 r#"
-                SELECT * FROM viryaos_content_suggestions
+                SELECT * FROM content_suggestions
                 WHERE workspace_id = $1 AND status = 'raised'
                   AND (expires_at IS NULL OR expires_at > $2)
                 ORDER BY created_at
@@ -332,7 +332,7 @@ macro_rules! decision_cycle_reads {
             // that conflicts against a retired row.
             let rows = sqlx::query_as::<_, crate::content_engine::ArcRow>(
                 r#"
-                SELECT * FROM viryaos_arcs
+                SELECT * FROM arcs
                 WHERE workspace_id = $1 AND status = 'proposed'
                   AND (horizon_end IS NULL OR horizon_end >= $2::date)
                 ORDER BY created_at

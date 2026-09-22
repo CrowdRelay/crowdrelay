@@ -42,7 +42,7 @@ async fn insert_target(
     identity: Option<&str>,
 ) -> Result<Uuid, Box<dyn std::error::Error>> {
     Ok(sqlx::query_scalar::<_, Uuid>(
-        "INSERT INTO viryaos_outreach_targets (
+        "INSERT INTO outreach_targets (
              workspace_id, target_kind, display_name, contact_email,
              active, verified, accepts_outreach, curator_identity
          ) VALUES ($1,'playlist',$2,$3,true,true,true,$4)
@@ -77,7 +77,7 @@ async fn fixture(label: &str) -> Result<Fixture, Box<dyn std::error::Error>> {
     let stranger_target = insert_target(&pool, workspace_id, &format!("c-{suffix}"), None).await?;
 
     let opportunity_id = sqlx::query_scalar::<_, Uuid>(
-        "INSERT INTO viryaos_outreach_opportunities (
+        "INSERT INTO outreach_opportunities (
              workspace_id, target_id, source, subject_kind, subject_key, template_key,
              relevance_basis_points, confidence_basis_points, observed_at, expires_at
          ) VALUES ($1,$2,'manual','release',$3,'outreach.playlist.v1',9000,9000,$4,$5)
@@ -93,7 +93,7 @@ async fn fixture(label: &str) -> Result<Fixture, Box<dyn std::error::Error>> {
     // A second opportunity on the sibling playlist, so the suppression has
     // something to close that is not the one the claim was about.
     sqlx::query(
-        "INSERT INTO viryaos_outreach_opportunities (
+        "INSERT INTO outreach_opportunities (
              workspace_id, target_id, source, subject_kind, subject_key, template_key,
              relevance_basis_points, confidence_basis_points, observed_at, expires_at
          ) VALUES ($1,$2,'manual','release',$3,'outreach.playlist.v1',9000,9000,$4,$5)",
@@ -152,7 +152,7 @@ async fn stored(
     fixture: &Fixture,
 ) -> Result<(String, i16, Option<String>), Box<dyn std::error::Error>> {
     Ok(sqlx::query_as::<_, (String, i16, Option<String>)>(
-        "SELECT state, checks_completed, last_observation FROM viryaos_playlist_placements
+        "SELECT state, checks_completed, last_observation FROM playlist_placements
          WHERE workspace_id=$1 AND opportunity_id=$2",
     )
     .bind(fixture.workspace_id.into_uuid())
@@ -226,7 +226,7 @@ async fn a_withdrawal_suppresses_every_playlist_that_curator_runs()
     );
 
     let suppressed = sqlx::query_as::<_, (Uuid, bool, bool)>(
-        "SELECT id, do_not_contact, accepts_outreach FROM viryaos_outreach_targets
+        "SELECT id, do_not_contact, accepts_outreach FROM outreach_targets
          WHERE workspace_id=$1 ORDER BY id",
     )
     .bind(fixture.workspace_id.into_uuid())
@@ -246,8 +246,8 @@ async fn a_withdrawal_suppresses_every_playlist_that_curator_runs()
     }
     assert_eq!(
         sqlx::query_scalar::<_, i64>(
-            "SELECT count(*) FROM viryaos_outreach_opportunities AS opportunity
-             JOIN viryaos_outreach_targets AS target
+            "SELECT count(*) FROM outreach_opportunities AS opportunity
+             JOIN outreach_targets AS target
                ON target.workspace_id=opportunity.workspace_id AND target.id=opportunity.target_id
              WHERE opportunity.workspace_id=$1 AND opportunity.active AND target.do_not_contact"
         )

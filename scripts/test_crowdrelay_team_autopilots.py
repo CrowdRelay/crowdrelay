@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Lean source contract for team-facing VIRYA OS automations.
+"""Lean source contract for team-facing CrowdRelay automations.
 
 This intentionally checks functional safety boundaries, not query plans or
 implementation trivia.
@@ -174,11 +174,11 @@ class TeamAutopilotsContract(unittest.TestCase):
         ):
             self.assertIn(needle, execution)
         for table in (
-            "viryaos_show_growth_surfaces",
-            "viryaos_grassroots_edges",
-            "viryaos_grassroots_activations",
+            "show_growth_surfaces",
+            "grassroots_edges",
+            "grassroots_activations",
         ):
-            self.assertIn(f"CREATE TABLE {table}", migration)
+            self.assertIn(f"CREATE TABLE viryaos_{table}", migration)
         self.assertIn("consent_recorded_at", migration)
         self.assertIn("attributed_ticket_orders", migration)
         self.assertIn("show_growth_surface_clicks_7d", migration)
@@ -187,8 +187,8 @@ class TeamAutopilotsContract(unittest.TestCase):
         runtime = text("crates/crowdrelay-infra/src/autopilot/runtime.rs")
         api_runtime = text("crates/crowdrelay-api/src/autopilot/runtime.rs")
         self.assertIn("record_show_growth_receipt", runtime)
-        self.assertIn("viryaos_show_growth_surfaces", runtime)
-        self.assertIn("viryaos_grassroots_activations", runtime)
+        self.assertIn("show_growth_surfaces", runtime)
+        self.assertIn("grassroots_activations", runtime)
         self.assertIn('["surfaces", "activations"]', api_runtime)
 
     def test_beacon_identity_dedup_keeps_distinct_email_less_scene_partners(self):

@@ -64,7 +64,7 @@ pub(in crate::autopilot) async fn load_outreach_supply_snapshot(
                    lead(action.created_at) OVER (ORDER BY action.created_at)
                        AS window_ends_at,
                    row_number() OVER (ORDER BY action.created_at DESC) AS recency
-            FROM viryaos_autopilot_actions action
+            FROM autopilot_actions action
             WHERE action.workspace_id=$1
               AND action.action_kind='outreach.discovery.request'
               AND action.status IN ('queued','processing','succeeded')
@@ -87,7 +87,7 @@ pub(in crate::autopilot) async fn load_outreach_supply_snapshot(
              AND ingestion.created_at >= sweep.created_at
              AND (sweep.window_ends_at IS NULL
                   OR ingestion.created_at < sweep.window_ends_at)
-            LEFT JOIN viryaos_outreach_candidates candidate
+            LEFT JOIN outreach_candidates candidate
               ON candidate.workspace_id=$1
              AND candidate.created_at >= sweep.created_at
              AND (sweep.window_ends_at IS NULL
@@ -105,13 +105,13 @@ pub(in crate::autopilot) async fn load_outreach_supply_snapshot(
             FROM answers
         )
         SELECT
-            (SELECT count(*) FROM viryaos_outreach_targets target
+            (SELECT count(*) FROM outreach_targets target
              WHERE target.workspace_id=$1 AND target.active
                AND target.accepts_outreach AND NOT target.do_not_contact)::bigint,
-            (SELECT count(*) FROM viryaos_outreach_candidates candidate
+            (SELECT count(*) FROM outreach_candidates candidate
              WHERE candidate.workspace_id=$1 AND candidate.status='admitted')::bigint,
             (SELECT max(created_at) FROM sweeps),
-            (SELECT count(*) FROM viryaos_outreach_candidates candidate
+            (SELECT count(*) FROM outreach_candidates candidate
              WHERE candidate.workspace_id=$1
                AND candidate.created_at
                    >= coalesce((SELECT max(created_at) FROM sweeps),
@@ -129,7 +129,7 @@ pub(in crate::autopilot) async fn load_outreach_supply_snapshot(
             -- rather than the previous sweep's count, so a stale number can
             -- never be read as this sweep's evidence.
             (SELECT report.items_seen
-             FROM viryaos_outreach_discovery_sweep_reports report
+             FROM outreach_discovery_sweep_reports report
              WHERE report.workspace_id=$1
                AND report.created_at
                    >= coalesce((SELECT max(created_at) FROM sweeps),
@@ -261,7 +261,7 @@ impl AutopilotTargetDiscoveryRepository for PostgresAutopilotRepository {
                 };
                 let inserted = sqlx::query(
                     r#"
-                    INSERT INTO viryaos_outreach_candidates (
+                    INSERT INTO outreach_candidates (
                         workspace_id, target_kind, display_name, source, source_reference,
                         evidence, route_kind, route_value, route_is_published, channel_id,
                         fit_basis_points, follower_count, engagement_count, sells_placement,
@@ -308,7 +308,7 @@ impl AutopilotTargetDiscoveryRepository for PostgresAutopilotRepository {
             if let Some(sweep) = sweep_report {
                 sqlx::query(
                     r#"
-                    INSERT INTO viryaos_outreach_discovery_sweep_reports (
+                    INSERT INTO outreach_discovery_sweep_reports (
                         workspace_id, operation_id, sources_read, items_seen,
                         candidates_reported
                     )
@@ -350,7 +350,7 @@ impl AutopilotTargetDiscoveryRepository for PostgresAutopilotRepository {
                 r#"
                 SELECT id, target_kind, display_name, source, source_reference, route_kind,
                        status, refusal_reason, pitch_class, fit_basis_points, follower_count
-                FROM viryaos_outreach_candidates
+                FROM outreach_candidates
                 WHERE workspace_id = $1
                   AND ($2::text IS NULL OR status = $2)
                 ORDER BY fit_basis_points DESC, created_at DESC
@@ -414,7 +414,7 @@ impl AutopilotTargetDiscoveryRepository for PostgresAutopilotRepository {
             .await?
             {
                 let promoted = sqlx::query_scalar::<_, Option<Uuid>>(
-                    "SELECT promoted_target_id FROM viryaos_outreach_candidates WHERE workspace_id=$1 AND id=$2",
+                    "SELECT promoted_target_id FROM outreach_candidates WHERE workspace_id=$1 AND id=$2",
                 )
                 .bind(workspace_id.into_uuid())
                 .bind(candidate_id)
@@ -434,7 +434,7 @@ impl AutopilotTargetDiscoveryRepository for PostgresAutopilotRepository {
             let row = sqlx::query_as::<_, (String, String, String, String)>(
                 r#"
                 SELECT status, route_kind, route_value, display_name
-                FROM viryaos_outreach_candidates
+                FROM outreach_candidates
                 WHERE workspace_id = $1 AND id = $2
                 FOR UPDATE
                 "#,
@@ -467,7 +467,7 @@ impl AutopilotTargetDiscoveryRepository for PostgresAutopilotRepository {
             }
 
             let target_kind = sqlx::query_scalar::<_, String>(
-                "SELECT target_kind FROM viryaos_outreach_candidates WHERE workspace_id=$1 AND id=$2",
+                "SELECT target_kind FROM outreach_candidates WHERE workspace_id=$1 AND id=$2",
             )
             .bind(workspace_id.into_uuid())
             .bind(candidate_id)
@@ -480,13 +480,13 @@ impl AutopilotTargetDiscoveryRepository for PostgresAutopilotRepository {
             // relationship's history, score or do-not-contact flag.
             let target_id = sqlx::query_scalar::<_, Uuid>(
                 r#"
-                INSERT INTO viryaos_outreach_targets (
+                INSERT INTO outreach_targets (
                     workspace_id, target_kind, display_name, contact_email,
                     verified, discovered_from_candidate_id
                 ) VALUES ($1,$2,$3,$4,true,$5)
                 ON CONFLICT (workspace_id, contact_email) DO UPDATE
                 SET discovered_from_candidate_id =
-                        COALESCE(viryaos_outreach_targets.discovered_from_candidate_id, $5)
+                        COALESCE(outreach_targets.discovered_from_candidate_id, $5)
                 RETURNING id
                 "#,
             )
@@ -501,7 +501,7 @@ impl AutopilotTargetDiscoveryRepository for PostgresAutopilotRepository {
 
             sqlx::query(
                 r#"
-                UPDATE viryaos_outreach_candidates
+                UPDATE outreach_candidates
                 SET status = 'promoted', promoted_target_id = $3, promoted_at = now()
                 WHERE workspace_id = $1 AND id = $2
                 "#,
@@ -576,7 +576,7 @@ impl AutopilotTargetDiscoveryRepository for PostgresAutopilotRepository {
             // version nobody can reason about.
             let row = sqlx::query_as::<_, (Uuid, i64)>(
                 r#"
-                INSERT INTO viryaos_outreach_submission_channels (
+                INSERT INTO outreach_submission_channels (
                     workspace_id, slug, display_name, cost_model, submission_url, active
                 ) VALUES ($1,$2,$3,$4,$5,$6)
                 ON CONFLICT (workspace_id, slug) DO UPDATE
@@ -584,11 +584,11 @@ impl AutopilotTargetDiscoveryRepository for PostgresAutopilotRepository {
                     cost_model = EXCLUDED.cost_model,
                     submission_url = EXCLUDED.submission_url,
                     active = EXCLUDED.active,
-                    version = viryaos_outreach_submission_channels.version + 1
-                WHERE viryaos_outreach_submission_channels.display_name IS DISTINCT FROM EXCLUDED.display_name
-                   OR viryaos_outreach_submission_channels.cost_model IS DISTINCT FROM EXCLUDED.cost_model
-                   OR viryaos_outreach_submission_channels.submission_url IS DISTINCT FROM EXCLUDED.submission_url
-                   OR viryaos_outreach_submission_channels.active IS DISTINCT FROM EXCLUDED.active
+                    version = outreach_submission_channels.version + 1
+                WHERE outreach_submission_channels.display_name IS DISTINCT FROM EXCLUDED.display_name
+                   OR outreach_submission_channels.cost_model IS DISTINCT FROM EXCLUDED.cost_model
+                   OR outreach_submission_channels.submission_url IS DISTINCT FROM EXCLUDED.submission_url
+                   OR outreach_submission_channels.active IS DISTINCT FROM EXCLUDED.active
                 RETURNING id, version
                 "#,
             )
@@ -629,7 +629,7 @@ async fn load_channel(
     let row = sqlx::query_as::<_, (Uuid, String)>(
         r#"
         SELECT id, cost_model
-        FROM viryaos_outreach_submission_channels
+        FROM outreach_submission_channels
         WHERE workspace_id = $1 AND slug = $2 AND active
         "#,
     )
@@ -648,7 +648,7 @@ async fn load_channel_identity(
     slug: &str,
 ) -> Result<(Uuid, i64), RepositoryError> {
     sqlx::query_as::<_, (Uuid, i64)>(
-        "SELECT id, version FROM viryaos_outreach_submission_channels WHERE workspace_id=$1 AND slug=$2",
+        "SELECT id, version FROM outreach_submission_channels WHERE workspace_id=$1 AND slug=$2",
     )
     .bind(workspace_id.into_uuid())
     .bind(slug)

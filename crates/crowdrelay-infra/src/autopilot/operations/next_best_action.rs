@@ -140,11 +140,11 @@ pub(in crate::autopilot) async fn load_next_best_actions(
             action.payload,
             action.action_status,
             deadline.due_at
-        FROM viryaos_autopilot_decisions AS decision
+        FROM autopilot_decisions AS decision
         LEFT JOIN LATERAL (
             SELECT candidate.id AS action_id, candidate.payload, candidate.approval_expires_at,
                    candidate.status AS action_status
-            FROM viryaos_autopilot_actions AS candidate
+            FROM autopilot_actions AS candidate
             WHERE candidate.workspace_id = decision.workspace_id
               AND candidate.decision_id = decision.id
             ORDER BY candidate.created_at DESC, candidate.id DESC
@@ -162,13 +162,13 @@ pub(in crate::autopilot) async fn load_next_best_actions(
                   AND event.id = decision.subject_id
                 UNION ALL
                 SELECT plan.release_at
-                FROM viryaos_release_plans AS plan
+                FROM release_plans AS plan
                 WHERE decision.subject_kind = 'release_plan'
                   AND plan.workspace_id = decision.workspace_id
                   AND plan.id = decision.subject_id
                 UNION ALL
                 SELECT opportunity.deadline
-                FROM viryaos_team_opportunities AS opportunity
+                FROM team_opportunities AS opportunity
                 WHERE decision.subject_kind = 'team_opportunity'
                   AND opportunity.workspace_id = decision.workspace_id
                   AND opportunity.id = decision.subject_id
@@ -177,7 +177,7 @@ pub(in crate::autopilot) async fn load_next_best_actions(
                 -- fallback for suggestions the calendar, not a production
                 -- day, bound.
                 SELECT COALESCE(suggestion.suggested_before::timestamptz, suggestion.expires_at)
-                FROM viryaos_content_suggestions AS suggestion
+                FROM content_suggestions AS suggestion
                 WHERE decision.subject_kind = 'content_suggestion'
                   AND suggestion.workspace_id = decision.workspace_id
                   AND suggestion.id = decision.subject_id
@@ -185,7 +185,7 @@ pub(in crate::autopilot) async fn load_next_best_actions(
                 -- The season's close is the arc's real deadline — an
                 -- unanswered plan dies when its window does.
                 SELECT arc.horizon_end::timestamptz
-                FROM viryaos_arcs AS arc
+                FROM arcs AS arc
                 WHERE decision.subject_kind = 'content_arc'
                   AND arc.workspace_id = decision.workspace_id
                   AND arc.id = decision.subject_id
@@ -222,7 +222,7 @@ pub(in crate::autopilot) async fn load_next_best_actions(
           -- card, not this queue — the spread is one decision, not one card
           -- per community it lands in.
           AND NOT EXISTS (
-              SELECT 1 FROM viryaos_autopilot_actions AS batched
+              SELECT 1 FROM autopilot_actions AS batched
               WHERE batched.id = action.action_id
                 AND batched.action_kind = 'community.engage.request'
                 AND batched.payload ->> 'source_id' IS NOT NULL
@@ -231,7 +231,7 @@ pub(in crate::autopilot) async fn load_next_best_actions(
           -- writes a new decision row, and the queue must show the finding
           -- once, not once per cycle it survived.
           AND NOT EXISTS (
-              SELECT 1 FROM viryaos_autopilot_decisions AS newer
+              SELECT 1 FROM autopilot_decisions AS newer
               WHERE newer.workspace_id = decision.workspace_id
                 AND newer.subject_kind = decision.subject_kind
                 AND newer.subject_id = decision.subject_id
@@ -255,7 +255,7 @@ pub(in crate::autopilot) async fn load_next_best_actions(
     let targeted: Vec<(String, String)> = sqlx::query_as::<_, (String, String)>(
         r#"
         SELECT platform, metric_key
-        FROM viryaos_growth_objectives
+        FROM growth_objectives
         WHERE workspace_id = $1
           AND retired_at IS NULL
           -- A deadline that has passed is history. History must not keep
@@ -355,7 +355,7 @@ pub(in crate::autopilot) async fn load_next_best_actions(
         sqlx::query_as::<_, (Uuid, String)>(
             r#"
             SELECT id, contact_email
-            FROM viryaos_outreach_targets
+            FROM outreach_targets
             WHERE workspace_id = $1
               AND id = ANY($2)
               AND active

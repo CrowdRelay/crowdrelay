@@ -1,7 +1,7 @@
 //! Google Drive contacts — control-plane review surface.
 //!
 //! Every address the Drive connector extracts lands staged in
-//! `viryaos_drive_contacts`. Nothing here auto-classifies: the operator
+//! `drive_contacts`. Nothing here auto-classifies: the operator
 //! promotes or dismisses per destination, and `fan_outcome` /
 //! `beacon_outcome` stay independent because a beacon may also be a fan.
 //!
@@ -10,7 +10,7 @@
 //!   never create an `active` fan.
 //! - `promote: beacon` writes a `proposed` `agent_outreach_targets` row for
 //!   press-side kinds — the screening queue, same as the curated-CRM import —
-//!   or an admitted `viryaos_booking_candidates` row for venue/promoter/
+//!   or an admitted `booking_candidates` row for venue/promoter/
 //!   festival kinds. Booking candidates are city-scoped: the request's `city`
 //!   wins, else the sheet's own city column resolves against `cities`, else
 //!   an unambiguous `place_venues` name match resolves the room.
@@ -34,7 +34,7 @@ const ACCESS_RESEND_COOLDOWN_SECONDS: i64 = 300;
 /// Beacon/outreach target kinds — mirrors the CHECK on
 /// `agent_outreach_targets.target_kind`.
 /// Press-side kinds land in `agent_outreach_targets`; booking-side kinds are
-/// supply for `viryaos_booking_candidates` — a promoter is who books the
+/// supply for `booking_candidates` — a promoter is who books the
 /// room, not who writes about the band, and the two pipelines measure
 /// different outcomes.
 const OUTREACH_KINDS: &[&str] = &[
@@ -48,7 +48,7 @@ const OUTREACH_KINDS: &[&str] = &[
 const BOOKING_KINDS: &[&str] = &["venue", "promoter", "festival"];
 // The §12-5 booking agent: a band pitches an agent to be represented, once —
 // a different direction and cadence from a promoter's one-show pitch, so the
-// kind has its own table (viryaos_booking_agents) rather than a chair in the
+// kind has its own table (booking_agents) rather than a chair in the
 // city-scoped candidate queue. The extractor files `talent_buyer` as
 // `booking_agent`, but the promote accepts the sheet's own word too.
 const AGENT_KINDS: &[&str] = &["booking_agent", "talent_buyer"];

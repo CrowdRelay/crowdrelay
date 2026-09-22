@@ -9,7 +9,7 @@
 //! # Enforcement
 //!
 //! The state machine is enforced by SQL triggers in migrations 0185 and 0190
-//! (`viryaos_action_ledger_sync`). Migration 0185 covers the base transitions;
+//! (`action_ledger_sync`). Migration 0185 covers the base transitions;
 //! migration 0190 adds the `unknown → UNKNOWN` and `SUCCEEDED → FAILED/UNKNOWN`
 //! correction mappings. This Rust module is the domain-level documentation and
 //! test surface for the same rules. The triggers and `can_transition_to` must
@@ -214,7 +214,7 @@ impl ActionState {
         }
     }
 
-    /// Maps a `viryaos_autopilot_actions.status` value to a ledger state.
+    /// Maps a `autopilot_actions.status` value to a ledger state.
     ///
     /// [`parse`](Self::parse) reads the ledger's own vocabulary, which is
     /// uppercase (`SUCCEEDED`). The action table uses a different, lowercase
@@ -230,8 +230,8 @@ impl ActionState {
     /// on the UPDATE. The monotonicity was real but accidental, enforced in SQL
     /// while the resolver believed it was enforcing it.
     ///
-    /// The mapping mirrors `viryaos_action_ledger_sync` in migration 0190 and
-    /// covers every value the `viryaos_autopilot_actions` status CHECK allows,
+    /// The mapping mirrors `action_ledger_sync` in migration 0190 and
+    /// covers every value the `autopilot_actions` status CHECK allows,
     /// so `None` means the vocabulary has drifted, not that a status is
     /// unremarkable.
     #[must_use]
@@ -928,7 +928,7 @@ mod tests {
 
     #[test]
     fn every_legal_action_status_maps_to_a_state() {
-        // The `viryaos_autopilot_actions` status CHECK vocabulary in full. A
+        // The `autopilot_actions` status CHECK vocabulary in full. A
         // miss here is what made the resolver read every action as `Running`.
         for (status, expected) in [
             ("awaiting_approval", ActionState::Authorized),

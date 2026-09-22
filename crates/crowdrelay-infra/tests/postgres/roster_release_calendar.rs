@@ -2,7 +2,7 @@
 //!
 //! Worth a database for the usual reason: the membership boundary is a join
 //! on `workspaces.organization_id`, the collision window is a predicate on
-//! `viryaos_release_plans`, and the shared-fan citation is an intersection
+//! `release_plans`, and the shared-fan citation is an intersection
 //! over `fans.normalized_email` — none of it checked at compile time. What
 //! is asserted: the calendar lists only the organisation's active releases
 //! inside the lookahead; a same-week pair across two member acts produces a
@@ -53,7 +53,7 @@ async fn release(
 ) -> Result<(), Box<dyn std::error::Error>> {
     sqlx::query(
         r#"
-        INSERT INTO viryaos_release_plans
+        INSERT INTO release_plans
             (workspace_id, source_key, title, release_at, tier, assets_ready, active)
         VALUES ($1, $2, $3, $4, $5, $6, $7)
         "#,

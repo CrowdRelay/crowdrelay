@@ -16,8 +16,8 @@ ROUTING = (ROOT / "crates/crowdrelay-api/src/routing.rs").read_text()
 META = (ROOT / "crates/crowdrelay-api/src/meta.rs").read_text()
 OPENAPI = (ROOT / "openapi/openapi.yaml").read_text()
 README = (ROOT / "n8n/README.md").read_text()
-PRODUCTION_MANIFEST_PATH = ROOT / "n8n/viryaos-production-workflow-manifest.tsv"
-EXECUTOR_MANIFEST_PATH = ROOT / "n8n/viryaos-executor-manifest.tsv"
+PRODUCTION_MANIFEST_PATH = ROOT / "n8n/crowdrelay-production-workflow-manifest.tsv"
+EXECUTOR_MANIFEST_PATH = ROOT / "n8n/crowdrelay-executor-manifest.tsv"
 GITIGNORE = (ROOT / ".gitignore").read_text()
 EXECUTOR = (ROOT / "crates/crowdrelay-infra/src/autopilot/execution.rs").read_text() + "\n" + (ROOT / "crates/crowdrelay-infra/src/autopilot/execution_capabilities.rs").read_text()
 OPERATOR = (ROOT / "scripts/latarnik_operator.py").read_text()
@@ -27,11 +27,11 @@ class BeaconNetworkAcquisitionV1Contract(unittest.TestCase):
     def test_schema_tracks_runs_and_one_shot_jobs_without_second_crm(self) -> None:
         self.assertIn("CREATE TABLE viryaos_beacon_network_discovery_runs", MIGRATION)
         self.assertIn("CREATE TABLE viryaos_beacon_invite_delivery_jobs", MIGRATION)
-        self.assertNotIn("CREATE TABLE viryaos_beacon_network_contacts", MIGRATION)
+        self.assertNotIn("CREATE TABLE beacon_network_contacts", MIGRATION)
         self.assertIn("beacon_ids uuid[]", MIGRATION)
         self.assertIn("claim_token_hash bytea", MIGRATION)
         self.assertIn("INSERT INTO viryaos_manager_config (workspace_id, config_key, value)", MIGRATION)
-        self.assertNotIn("INSERT INTO viryaos_manager_config (workspace_id, config_key, config)", MIGRATION)
+        self.assertNotIn("INSERT INTO manager_config (workspace_id, config_key, config)", MIGRATION)
         self.assertIn("'queued','claimed','completed','failed','ambiguous','cancelled'", MIGRATION)
         self.assertIn("rawInviteCapabilitiesInOutbox', false", MIGRATION)
 

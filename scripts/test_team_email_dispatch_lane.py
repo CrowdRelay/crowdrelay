@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Regression contract for the dedicated VIRYA OS team-email dispatch lane."""
+"""Regression contract for the dedicated CrowdRelay team-email dispatch lane."""
 
 from pathlib import Path
 import unittest

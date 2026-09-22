@@ -2,8 +2,8 @@
 // real decision → action → outcome chain persisted in the autopilot tables.
 //
 // No new tables, no migrations, no fabricated data. Every field comes from an
-// existing column in viryaos_autopilot_decisions, viryaos_autopilot_actions,
-// or viryaos_autopilot_outcomes. Missing fields within a present stage are
+// existing column in autopilot_decisions, autopilot_actions,
+// or autopilot_outcomes. Missing fields within a present stage are
 // NOT fabricated — they surface as stage-specific `data_integrity` warnings
 // so the operator can see corruption rather than being given a polished but
 // false history. Action corruption does NOT imply outcome corruption.
@@ -14,7 +14,7 @@
 
 /// Structured evidence for a single decision — the "Why this decision" data.
 ///
-/// Every field is read directly from `viryaos_autopilot_decisions`.
+/// Every field is read directly from `autopilot_decisions`.
 /// `input_snapshot` and `policy_snapshot` are raw JSON passed through as-is;
 /// the frontend renders them as evidence, not as invented explanations.
 #[derive(Debug, Serialize)]
@@ -186,7 +186,7 @@ async fn load_decision_evidence(
         SELECT context, decision_kind, subject_kind, subject_id,
                confidence_basis_points, disposition, reason,
                input_snapshot, policy_snapshot, recommendation, evaluated_at
-        FROM viryaos_autopilot_decisions
+        FROM autopilot_decisions
         WHERE id = $1 AND workspace_id = $2
         "#,
     )
@@ -258,17 +258,17 @@ async fn load_learning_loop(
             o.metric_key AS outcome_metric_key,
             o.delta_basis_points AS outcome_delta_basis_points,
             o.observed_at AS outcome_observed_at
-        FROM viryaos_autopilot_decisions d
+        FROM autopilot_decisions d
         LEFT JOIN LATERAL (
             SELECT id AS action_id, action_kind, status AS action_status, finished_at AS action_finished_at
-            FROM viryaos_autopilot_actions
+            FROM autopilot_actions
             WHERE workspace_id = $1 AND decision_id = d.id
             ORDER BY created_at DESC
             LIMIT 1
         ) a ON true
         LEFT JOIN LATERAL (
             SELECT effect_assessment, metric_key, delta_basis_points, observed_at
-            FROM viryaos_autopilot_outcomes
+            FROM autopilot_outcomes
             WHERE workspace_id = $1
               AND decision_id = d.id
               AND effect_assessment IS NOT NULL

@@ -1,7 +1,7 @@
 //! Content trends — the deterministic detector over observation facts.
 //!
-//! Two tables feed it: `viryaos_peer_observations` (what comparable acts
-//! publish — the supply side) and `viryaos_fan_observations` (what the
+//! Two tables feed it: `peer_observations` (what comparable acts
+//! publish — the supply side) and `fan_observations` (what the
 //! admitted communities' fans engaged with — the demand side). Both are raw
 //! dated facts; this module groups them into patterns over the five trend
 //! dimensions and scores each pattern by *corroboration*, not volume:

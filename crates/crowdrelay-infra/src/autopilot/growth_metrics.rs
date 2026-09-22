@@ -78,7 +78,7 @@ impl PostgresAutopilotRepository {
             r#"
             SELECT id, platform, metric_key, display_name, subject_kind, subject_id,
                    direction, value_tier, expected_interval_hours
-            FROM viryaos_growth_metric_series
+            FROM growth_metric_series
             WHERE workspace_id = $1 AND active
             ORDER BY platform, metric_key, id
             "#,
@@ -94,8 +94,8 @@ impl PostgresAutopilotRepository {
         let points = sqlx::query_as::<_, PointRow>(
             r#"
             SELECT point.series_id, point.captured_at, point.value
-            FROM viryaos_growth_metric_points AS point
-            JOIN viryaos_growth_metric_series AS series
+            FROM growth_metric_points AS point
+            JOIN growth_metric_series AS series
               ON series.workspace_id = point.workspace_id
              AND series.id = point.series_id
              AND series.active
@@ -118,7 +118,7 @@ impl PostgresAutopilotRepository {
         let last_signals = sqlx::query_as::<_, LastSignalRow>(
             r#"
             SELECT subject_id, max(evaluated_at) AS evaluated_at
-            FROM viryaos_autopilot_decisions
+            FROM autopilot_decisions
             WHERE workspace_id = $1
               AND context = 'growth_metrics'
               AND subject_kind = 'growth_metric_series'
@@ -205,7 +205,7 @@ impl PostgresAutopilotRepository {
         let config = sqlx::query_scalar::<_, Value>(
             r#"
             SELECT config
-            FROM viryaos_autopilot_policies
+            FROM autopilot_policies
             WHERE workspace_id = $1 AND context = 'growth_metrics'
             "#,
         )
@@ -286,7 +286,7 @@ impl AutopilotGrowthMetricRepository for PostgresAutopilotRepository {
             let existing_id = sqlx::query_scalar::<_, Uuid>(
                 r#"
                 SELECT id
-                FROM viryaos_growth_metric_series
+                FROM growth_metric_series
                 WHERE workspace_id = $1
                   AND platform = $2
                   AND metric_key = $3
@@ -342,7 +342,7 @@ impl AutopilotGrowthMetricRepository for PostgresAutopilotRepository {
                 .map_err(|_| RepositoryError::Unexpected)?;
             sqlx::query(
                 r#"
-                INSERT INTO viryaos_growth_metric_series (
+                INSERT INTO growth_metric_series (
                     id, workspace_id, platform, metric_key, subject_kind, subject_id,
                     display_name, direction, value_tier, expected_interval_hours, active
                 ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
@@ -396,7 +396,7 @@ impl AutopilotGrowthMetricRepository for PostgresAutopilotRepository {
             let series_exists = sqlx::query_scalar::<_, bool>(
                 r#"
                 SELECT EXISTS (
-                    SELECT 1 FROM viryaos_growth_metric_series
+                    SELECT 1 FROM growth_metric_series
                     WHERE workspace_id = $1 AND id = $2
                 )
                 "#,
@@ -446,7 +446,7 @@ impl AutopilotGrowthMetricRepository for PostgresAutopilotRepository {
             // deliberate operation.
             let inserted = sqlx::query_scalar::<_, i64>(
                 r#"
-                INSERT INTO viryaos_growth_metric_points (
+                INSERT INTO growth_metric_points (
                     workspace_id, series_id, captured_at, value, source
                 ) VALUES ($1,$2,$3,$4,$5)
                 ON CONFLICT (workspace_id, series_id, captured_at) DO NOTHING
@@ -547,7 +547,7 @@ impl PostgresAutopilotRepository {
         let tracked = sqlx::query_scalar::<_, i64>(
             r#"
             WITH tracked AS (
-                INSERT INTO viryaos_growth_metric_series (
+                INSERT INTO growth_metric_series (
                     workspace_id, platform, metric_key, subject_kind, subject_id,
                     display_name, direction, value_tier, expected_interval_hours, active
                 )
@@ -590,7 +590,7 @@ impl PostgresAutopilotRepository {
         let retired = sqlx::query_scalar::<_, i64>(
             r#"
             WITH retired AS (
-                UPDATE viryaos_growth_metric_series AS series
+                UPDATE growth_metric_series AS series
                 SET active = false
                 WHERE series.workspace_id = $1
                   AND series.platform = 'ticketing'
@@ -641,7 +641,7 @@ impl PostgresAutopilotRepository {
         let tracked = sqlx::query_scalar::<_, i64>(
             r#"
             WITH tracked AS (
-                INSERT INTO viryaos_growth_metric_series (
+                INSERT INTO growth_metric_series (
                     workspace_id, platform, metric_key, subject_kind, subject_id,
                     display_name, direction, value_tier, expected_interval_hours, active
                 )
@@ -678,7 +678,7 @@ impl PostgresAutopilotRepository {
         let tracked = sqlx::query_scalar::<_, i64>(
             r#"
             WITH tracked AS (
-                INSERT INTO viryaos_growth_metric_series (
+                INSERT INTO growth_metric_series (
                     workspace_id, platform, metric_key, subject_kind, subject_id,
                     display_name, direction, value_tier, expected_interval_hours, active
                 )
@@ -736,7 +736,7 @@ impl AutopilotFirstPartyGrowthMetrics for PostgresAutopilotRepository {
             let event_points = sqlx::query_scalar::<_, i64>(
                 r#"
                 WITH recorded AS (
-                    INSERT INTO viryaos_growth_metric_points (
+                    INSERT INTO growth_metric_points (
                         workspace_id, series_id, captured_at, value, source
                     )
                     SELECT series.workspace_id, series.id, date_trunc('hour', $2::timestamptz),
@@ -745,7 +745,7 @@ impl AutopilotFirstPartyGrowthMetrics for PostgresAutopilotRepository {
                                ELSE COALESCE(sold.paid_buyers, 0)
                            END,
                            'crowdrelay'
-                    FROM viryaos_growth_metric_series AS series
+                    FROM growth_metric_series AS series
                     JOIN events AS event
                       ON event.workspace_id = series.workspace_id
                      AND event.id = series.subject_id
@@ -835,7 +835,7 @@ impl AutopilotFirstPartyGrowthMetrics for PostgresAutopilotRepository {
                           BETWEEN $2 - INTERVAL '30 days' AND $2
                     GROUP BY interest.city_id
                 ), recorded AS (
-                    INSERT INTO viryaos_growth_metric_points (
+                    INSERT INTO growth_metric_points (
                         workspace_id, series_id, captured_at, value, source
                     )
                     SELECT series.workspace_id, series.id,
@@ -845,7 +845,7 @@ impl AutopilotFirstPartyGrowthMetrics for PostgresAutopilotRepository {
                            -- as a dead feed rather than as a city that cooled.
                            COALESCE(per_city.activated, 0),
                            'crowdrelay'
-                    FROM viryaos_growth_metric_series AS series
+                    FROM growth_metric_series AS series
                     LEFT JOIN per_city ON per_city.city_id = series.subject_id
                     WHERE series.workspace_id = $1
                       AND series.platform = 'signal'
@@ -898,7 +898,7 @@ impl AutopilotFirstPartyGrowthMetrics for PostgresAutopilotRepository {
                         (SELECT count(*)::bigint FROM merch_order_facts
                           WHERE workspace_id = $1) AS paid_orders
                 ), recorded AS (
-                    INSERT INTO viryaos_growth_metric_points (
+                    INSERT INTO growth_metric_points (
                         workspace_id, series_id, captured_at, value, source
                     )
                     SELECT series.workspace_id, series.id, date_trunc('hour', $2::timestamptz),
@@ -908,7 +908,7 @@ impl AutopilotFirstPartyGrowthMetrics for PostgresAutopilotRepository {
                                ELSE totals.paid_orders
                            END,
                            'crowdrelay'
-                    FROM viryaos_growth_metric_series AS series
+                    FROM growth_metric_series AS series
                     CROSS JOIN totals
                     WHERE series.workspace_id = $1
                       AND series.subject_kind IS NULL

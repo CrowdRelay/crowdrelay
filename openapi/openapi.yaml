@@ -2742,7 +2742,7 @@ paths:
   /internal/autopilot/release-components:
     post:
       operationId: upsertReleaseComponent
-      summary: Report one deployed ViryaOS production component
+      summary: Report one deployed CrowdRelay production component
       security: [{ commerceBearer: [] }]
       requestBody:
         required: true
@@ -2955,7 +2955,7 @@ paths:
   /admin/autopilot/overview:
     get:
       operationId: getAutopilotOverview
-      summary: Read deterministic ViryaOS Autopilot policies, exceptions and recent evidence
+      summary: Read deterministic CrowdRelay Autopilot policies, exceptions and recent evidence
       security:
       - adminBearer: []
       responses:
@@ -3104,7 +3104,7 @@ paths:
       summary: Create or version-update an operator-verified booking target
       description: >
         Promotes a verified venue/promoter/festival contact into the deterministic Booking
-        bounded context. Market intelligence never chooses recipients; ViryaOS selects only
+        bounded context. Market intelligence never chooses recipients; CrowdRelay selects only
         from this allowlisted relationship state and n8n receives the selected target.
       security:
       - adminBearer: []
@@ -3136,7 +3136,7 @@ paths:
       summary: Configure bounded capacity unlocks for one explicit ticket tier
       description: >
         Stores operator-owned min/max/step capacity guardrails for a ticket type.
-        ViryaOS never infers tier semantics from names or ordering; allocation changes
+        CrowdRelay never infers tier semantics from names or ordering; allocation changes
         remain bounded by the ticket sale capacity and optimistic guardrail version.
       security:
       - adminBearer: []
@@ -3168,7 +3168,7 @@ paths:
       operationId: upsertAutopilotMerchEconomics
       summary: Configure bounded product price/cost guardrails for deterministic Merch Yield
       description: >
-        Stores operator-owned product economics. ViryaOS refuses to infer price floors or unit costs;
+        Stores operator-owned product economics. CrowdRelay refuses to infer price floors or unit costs;
         optimistic versioning and Idempotency-Key make updates safe to retry.
       security:
       - adminBearer: []
@@ -3201,7 +3201,7 @@ paths:
       summary: Ingest a provider-neutral paid-promotion performance snapshot
       description: >
         Records fresh campaign facts for the deterministic Promotion Budget bounded context.
-        The caller reports observed state only; budget decisions remain inside ViryaOS.
+        The caller reports observed state only; budget decisions remain inside CrowdRelay.
         Older snapshots are rejected so delayed integration retries cannot roll state backward.
       security:
       - adminBearer: []
@@ -3634,7 +3634,7 @@ paths:
   /admin/autopilot/chief-of-staff:
     get:
       operationId: getAutopilotChiefOfStaff
-      summary: Read the deterministic ViryaOS daily operating brief
+      summary: Read the deterministic CrowdRelay daily operating brief
       description: >
         Returns measured work performed, exception count, evidence-backed opportunities and
         due show tasks. It is a deterministic read model; no LLM-generated narrative is used.
@@ -5177,7 +5177,7 @@ paths:
 
         Both are read back from the emission the dispatch arm wrote: the payload
         in `outbox_events`, tied to the action by
-        `viryaos_autopilot_action_emissions`. Nothing read them back until this
+        `autopilot_action_emissions`. Nothing read them back until this
         route existed, so the console could report a successful send and never
         show the words that left.
 
@@ -11030,6 +11030,41 @@ paths:
         '404': { $ref: '#/components/responses/PrivateProblem' }
         '409': { $ref: '#/components/responses/PrivateProblem' }
         '503': { $ref: '#/components/responses/PrivateProblem' }
+  /control-plane/events:
+    post:
+      operationId: createControlPlaneEvent
+      summary: Enter one show by hand — the operator's own row, not a provider sync
+      description: 'Manual show entry for a label that never ran a sync source. Idempotent on Idempotency-Key: a retried submit returns the show it already created. publish=false stores a draft off the public list.'
+      security:
+      - controlPlaneBearer: []
+      parameters:
+      - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ManualEventCreateRequest'
+      responses:
+        '201':
+          description: Show created.
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/PrivateNoStore'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CreatedEvent'
+        '400':
+          $ref: '#/components/responses/PrivateProblem'
+        '401':
+          $ref: '#/components/responses/PrivateProblem'
+        '409':
+          $ref: '#/components/responses/PrivateProblem'
+        '413':
+          $ref: '#/components/responses/PrivateProblem'
+        '503':
+          $ref: '#/components/responses/PrivateProblem'
   /control-plane/events/{event_slug}/who-can-help:
     get:
       operationId: getControlPlaneEventHelpers
@@ -14158,7 +14193,7 @@ components:
         expires_at: { type: string, format: date-time }
         metadata: { type: object, additionalProperties: true }
         active: { type: [boolean, 'null'], description: Omit on create (defaults active) or to leave the flag alone on edit; send to retire or reinstate the source. }
-        format_key: { type: [string, 'null'], maxLength: 64, description: The catalogue format the artifact was produced in (a viryaos_content_format_entries key); omit to leave undeclared (create) or unchanged (edit). Conversion provenance stamps it onto fans so format concentration is measurable. }
+        format_key: { type: [string, 'null'], maxLength: 64, description: The catalogue format the artifact was produced in (a content_format_entries key); omit to leave undeclared (create) or unchanged (edit). Conversion provenance stamps it onto fans so format concentration is measurable. }
         expected_version: { type: integer, format: int64, minimum: 0 }
     ContentSourceMutation:
       type: object

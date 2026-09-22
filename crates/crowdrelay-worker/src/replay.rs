@@ -220,7 +220,7 @@ pub async fn run_replay(
             sqlx::query_as::<_, (OffsetDateTime, Uuid, String, i32, String, serde_json::Value)>(
                 r#"
             SELECT evaluated_at, id, context, confidence_basis_points, disposition, policy_snapshot
-            FROM viryaos_autopilot_decisions
+            FROM autopilot_decisions
             WHERE workspace_id = $1
               AND evaluated_at >= now() - make_interval(days => $2::int)
               AND ($3::timestamptz IS NULL OR (evaluated_at, id) > ($3, $4))
@@ -270,7 +270,7 @@ pub async fn run_replay(
     let action_rows = sqlx::query_as::<_, (String, i64)>(
         r#"
         SELECT status, count(*) AS actions
-        FROM viryaos_autopilot_actions
+        FROM autopilot_actions
         WHERE workspace_id = $1
           AND created_at >= now() - make_interval(days => $2::int)
         GROUP BY status
@@ -288,7 +288,7 @@ pub async fn run_replay(
         SELECT percentile_cont(0.5) WITHIN GROUP (
             ORDER BY EXTRACT(EPOCH FROM (approved_at - created_at)) / 60.0
         )
-        FROM viryaos_autopilot_actions
+        FROM autopilot_actions
         WHERE workspace_id = $1
           AND approved_at IS NOT NULL
           AND created_at >= now() - make_interval(days => $2::int)

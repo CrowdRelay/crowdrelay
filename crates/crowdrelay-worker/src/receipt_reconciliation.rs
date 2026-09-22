@@ -165,7 +165,7 @@ impl ReceiptReconciliationWorker {
         let mut transaction = self.pool.begin().await?;
         sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
             .bind(format!(
-                "{}:viryaos-receipt-reconciliation",
+                "{}:crowdrelay-receipt-reconciliation",
                 self.workspace_id
             ))
             .execute(&mut *transaction)
@@ -190,16 +190,16 @@ impl ReceiptReconciliationWorker {
         let candidates: Vec<(Uuid, Value)> = sqlx::query_as(
             r#"
             SELECT a.id, a.payload
-            FROM viryaos_autopilot_actions a
+            FROM autopilot_actions a
             WHERE a.workspace_id = $1
               AND a.status = 'succeeded'
               AND a.finished_at < now() - make_interval(secs => $2::double precision)
               AND EXISTS (
-                  SELECT 1 FROM viryaos_autopilot_action_emissions e
+                  SELECT 1 FROM autopilot_action_emissions e
                   WHERE e.workspace_id = a.workspace_id AND e.action_id = a.id
               )
               AND NOT EXISTS (
-                  SELECT 1 FROM viryaos_autopilot_execution_reports r
+                  SELECT 1 FROM autopilot_execution_reports r
                   WHERE r.workspace_id = a.workspace_id AND r.action_id = a.id
                     AND r.status IN ('succeeded', 'failed')
               )
@@ -236,7 +236,7 @@ impl ReceiptReconciliationWorker {
 
             let transitioned = sqlx::query(
                 r#"
-                UPDATE viryaos_autopilot_actions
+                UPDATE autopilot_actions
                 SET status = 'unknown',
                     finished_at = NULL,
                     updated_at = now()
@@ -281,18 +281,18 @@ impl ReceiptReconciliationWorker {
         let rows: Vec<(Uuid, String, bool, OffsetDateTime)> = sqlx::query_as(
             r#"
             SELECT a.id, r.status, r.prior_success, r.occurred_at
-            FROM viryaos_autopilot_actions a
+            FROM autopilot_actions a
             JOIN LATERAL (
                 SELECT status, occurred_at,
                        EXISTS (
-                           SELECT 1 FROM viryaos_autopilot_execution_reports r2
+                           SELECT 1 FROM autopilot_execution_reports r2
                            WHERE r2.workspace_id = a.workspace_id
                              AND r2.action_id = a.id
                              AND r2.executor_id = r.executor_id
                              AND r2.status = 'succeeded'
                              AND (r2.occurred_at, r2.id) < (r.occurred_at, r.id)
                        ) AS prior_success
-                FROM viryaos_autopilot_execution_reports r
+                FROM autopilot_execution_reports r
                 WHERE r.workspace_id = a.workspace_id AND r.action_id = a.id
                   AND r.status IN ('succeeded', 'failed')
                 ORDER BY r.occurred_at DESC, r.id DESC
@@ -376,7 +376,7 @@ impl ReceiptReconciliationWorker {
             r#"
             SELECT a.id, cp.status, cp.error_message,
                    COALESCE(cp.posted_at, cp.updated_at)
-            FROM viryaos_autopilot_actions a
+            FROM autopilot_actions a
             JOIN community_posts cp ON cp.action_id = a.id
             WHERE a.workspace_id = $1
               AND a.status = 'unknown'
@@ -455,7 +455,7 @@ impl ReceiptReconciliationWorker {
         let rows: Vec<(Uuid, String, Option<String>, OffsetDateTime)> = sqlx::query_as(
             r#"
             SELECT a.id, post.status, post.error_message, post.evidence_at
-            FROM viryaos_autopilot_actions a
+            FROM autopilot_actions a
             JOIN (
                 SELECT action_id, status, error_message,
                        COALESCE(posted_at, updated_at) AS evidence_at FROM social_posts
@@ -561,8 +561,8 @@ impl ReceiptReconciliationWorker {
                    (task.created_at < now() - make_interval(secs => $3::double precision))
                        AS task_stale,
                    a.status AS action_status
-            FROM viryaos_experiment_assignments ea
-            JOIN viryaos_autopilot_actions a
+            FROM experiment_assignments ea
+            JOIN autopilot_actions a
               ON a.workspace_id = ea.workspace_id
              AND a.id = ea.action_id
             LEFT JOIN LATERAL (
@@ -638,7 +638,7 @@ impl ReceiptReconciliationWorker {
             r#"
             SELECT a.id, e.status, e.last_error_kind,
                    COALESCE(e.delivered_at, e.updated_at)
-            FROM viryaos_autopilot_actions a
+            FROM autopilot_actions a
             JOIN outbox_events e
                 ON e.workspace_id = a.workspace_id
                 AND e.action_id = a.id
@@ -646,7 +646,7 @@ impl ReceiptReconciliationWorker {
               AND a.status = 'unknown'
               AND a.action_kind NOT IN ('community.engage.request', 'agent.content.request')
               AND NOT EXISTS (
-                  SELECT 1 FROM viryaos_autopilot_execution_reports r
+                  SELECT 1 FROM autopilot_execution_reports r
                   WHERE r.workspace_id = a.workspace_id AND r.action_id = a.id
                     AND r.status IN ('succeeded', 'failed')
               )
@@ -756,17 +756,17 @@ async fn transition_assignment(
 ) -> Result<u64, ReceiptReconciliationError> {
     let transitioned = sqlx::query(
         r#"
-        UPDATE viryaos_experiment_assignments
+        UPDATE experiment_assignments
         SET execution_status = $1,
             trace_id = COALESCE(
                 trace_id,
-                (SELECT trace_id FROM viryaos_autopilot_actions WHERE id = $2)
+                (SELECT trace_id FROM autopilot_actions WHERE id = $2)
             )
         WHERE action_id = $2
           AND execution_status = $3
           AND EXISTS (
-              SELECT 1 FROM viryaos_autopilot_actions a
-              WHERE a.id = $2 AND viryaos_experiment_assignments.workspace_id = a.workspace_id
+              SELECT 1 FROM autopilot_actions a
+              WHERE a.id = $2 AND experiment_assignments.workspace_id = a.workspace_id
           )
         "#,
     )
@@ -821,7 +821,7 @@ async fn resolve_action(
     };
     let transitioned = sqlx::query(
         r#"
-        UPDATE viryaos_autopilot_actions
+        UPDATE autopilot_actions
         SET status = $3,
             finished_at = now(),
             last_error_kind = $4,
@@ -868,19 +868,19 @@ async fn resolve_action(
     // twin overstates nothing it would not already have counted.
     sqlx::query(
         r#"
-        INSERT INTO viryaos_autopilot_execution_reports (
+        INSERT INTO autopilot_execution_reports (
             id, workspace_id, action_id, receipt_key, executor_id, status,
             provider_reference, error_kind, metadata, occurred_at
         )
         SELECT $5, $1, $2, $6, 'receipt_reconciliation', $3, NULL, $4, $7, $8
         WHERE EXISTS (
             SELECT 1
-            FROM viryaos_autopilot_action_emissions emission
+            FROM autopilot_action_emissions emission
             WHERE emission.workspace_id = $1 AND emission.action_id = $2
         )
           AND NOT EXISTS (
             SELECT 1
-            FROM viryaos_autopilot_execution_reports report
+            FROM autopilot_execution_reports report
             WHERE report.workspace_id = $1 AND report.action_id = $2
               AND report.status IN ('succeeded', 'failed')
         )

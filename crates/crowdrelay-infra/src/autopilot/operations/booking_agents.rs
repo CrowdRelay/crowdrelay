@@ -58,7 +58,7 @@ pub(in crate::autopilot) async fn record_booking_agent_reply(
         .then(|| crowdrelay_domain::booking_agent::refusal_until(command.occurred_at));
         let new_version = sqlx::query_scalar::<_, i64>(
             r#"
-            UPDATE viryaos_booking_agents
+            UPDATE booking_agents
             SET refused_until = CASE
                     WHEN $3::date IS NULL THEN refused_until
                     ELSE GREATEST(refused_until, $3::date)
@@ -94,18 +94,18 @@ pub(in crate::autopilot) async fn record_booking_agent_reply(
         ) {
             sqlx::query(
                 r#"
-                INSERT INTO viryaos_contact_governor (
+                INSERT INTO contact_governor (
                     workspace_id, normalized_contact, last_context, last_action_id,
                     last_outbound_at, next_contact_after, do_not_contact
                 )
                 SELECT $1, lower(btrim(contact_email)), 'booking_agent', NULL, $3, $3, true
-                FROM viryaos_booking_agents
+                FROM booking_agents
                 WHERE workspace_id = $1 AND id = $2
                 ON CONFLICT (workspace_id, normalized_contact) DO UPDATE
                 SET do_not_contact = true,
                     last_context = EXCLUDED.last_context,
                     next_contact_after = GREATEST(
-                        viryaos_contact_governor.next_contact_after,
+                        contact_governor.next_contact_after,
                         EXCLUDED.next_contact_after
                     ),
                     updated_at = now()
@@ -121,7 +121,7 @@ pub(in crate::autopilot) async fn record_booking_agent_reply(
 
         sqlx::query(
             r#"
-            INSERT INTO viryaos_booking_agent_interactions
+            INSERT INTO booking_agent_interactions
                 (workspace_id, agent_id, direction, phase, disposition, source_key,
                  occurred_at, metadata)
             VALUES ($1,$2,'inbound','reply',$3,$4,$5,$6)

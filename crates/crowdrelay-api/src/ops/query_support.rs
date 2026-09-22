@@ -161,7 +161,7 @@ async fn load_signal_summary(state: &OpsState) -> Result<SignalSummaryRow, OpsEr
                     WHERE fan.status = 'active'
                       AND consent.granted
                 ) AS archive_confirmed
-            FROM viryaos_drive_contacts AS contact
+            FROM drive_contacts AS contact
             LEFT JOIN fans AS fan
               ON fan.workspace_id = contact.workspace_id
              AND fan.normalized_email = contact.normalized_email
@@ -827,7 +827,7 @@ mod signal_tests {
             "nobody@example.com",
         ] {
             sqlx::query(
-                "INSERT INTO viryaos_drive_contacts \
+                "INSERT INTO drive_contacts \
                  (id, workspace_id, normalized_email, suggested_kind, \
                   source_file_id, source_file_name, sources) \
                  VALUES (gen_random_uuid(), $1, $2, 'press', 'file-1', 'list.xlsx', '{gdrive}')",

@@ -71,10 +71,10 @@ class GrowthPostureContract(unittest.TestCase):
             # the single-transaction contract.
             .split("\n    pub(super) async fn", 1)[0]
         )
-        self.assertIn("UPDATE viryaos_autopilot_policies", block)
-        self.assertIn("INSERT INTO viryaos_growth_autonomy", block)
-        self.assertIn("INSERT INTO viryaos_growth_envelope", block)
-        self.assertIn("viryaos_growth_posture", block)
+        self.assertIn("UPDATE autopilot_policies", block)
+        self.assertIn("INSERT INTO growth_autonomy", block)
+        self.assertIn("INSERT INTO growth_envelope", block)
+        self.assertIn("growth_posture", block)
         # Exactly one commit for the application itself — the replay path
         # above commits its own read-only transaction and returns early, so
         # count only what follows the concurrency check.
@@ -95,7 +95,7 @@ class GrowthPostureContract(unittest.TestCase):
             # the single-transaction contract.
             .split("\n    pub(super) async fn", 1)[0]
         )
-        envelope_sql = block.split("INSERT INTO viryaos_growth_envelope", 1)[1].split("#", 1)[0]
+        envelope_sql = block.split("INSERT INTO growth_envelope", 1)[1].split("#", 1)[0]
         self.assertNotIn("weekly_owned_audience_touches =", envelope_sql)
         self.assertNotIn("subject_cooldown_hours =", envelope_sql)
         self.assertIn("agent_enabled = EXCLUDED.agent_enabled", envelope_sql)

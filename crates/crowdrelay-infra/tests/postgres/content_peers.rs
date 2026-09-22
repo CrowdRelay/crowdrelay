@@ -45,7 +45,7 @@ async fn seed_listing(
     genre_tags: &[&str],
 ) -> Result<(), Box<dyn std::error::Error>> {
     sqlx::query(
-        "INSERT INTO viryaos_band_listings (workspace_id, act_name, genre_tags) \
+        "INSERT INTO band_listings (workspace_id, act_name, genre_tags) \
          VALUES ($1, $2, $3)",
     )
     .bind(workspace_id)
@@ -58,12 +58,13 @@ async fn seed_listing(
 
 /// A global peer act with its attributed genre tags — the graph the
 /// proposal pass reads. `name_key` is the lower/trim normalisation the
-/// writer applies.
+/// writer applies. Returns the act's id so a fixture can bill it or pin
+/// its home city.
 async fn seed_peer_act(
     pool: &PgPool,
     display_name: &str,
     genres: &[&str],
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<Uuid, Box<dyn std::error::Error>> {
     let act_id = Uuid::now_v7();
     sqlx::query("INSERT INTO place_peer_acts (id, name_key, display_name) VALUES ($1, $2, $3)")
         .bind(act_id)
@@ -82,7 +83,7 @@ async fn seed_peer_act(
         .execute(pool)
         .await?;
     }
-    Ok(())
+    Ok(act_id)
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -309,9 +310,45 @@ async fn run_proposals(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> 
     seed_listing(pool, workspace_id.into_uuid(), &["doom", "Deathcore"]).await?;
 
     // The matching acts — one through the alias bridge, one on a spelling
-    // the canonical fold still recognises.
-    seed_peer_act(pool, "Kindred Doom", &["doom metal"]).await?;
-    seed_peer_act(pool, "Case Fold", &["DOOM METAL"]).await?;
+    // the canonical fold still recognises. The tier each lands is not a
+    // constant: Kindred Doom bills a tracked room and is a demonstrated
+    // peer; Case Fold's home town resolves, which is scene evidence too;
+    // Directory Act matches on genre alone — a famous name on a sheet with
+    // no billing, no resolvable city and no lead is aspirational, never a
+    // near_peer (the Rammstein case: genre fit is not a level claim).
+    let kindred = seed_peer_act(pool, "Kindred Doom", &["doom metal"]).await?;
+    let case_fold = seed_peer_act(pool, "Case Fold", &["DOOM METAL"]).await?;
+    seed_peer_act(pool, "Directory Act", &["doom metal"]).await?;
+    let city_id = sqlx::query_scalar::<_, Uuid>(
+        "INSERT INTO cities (slug, name, country_code, latitude, longitude)
+         VALUES ('peer-city', 'peer-city', 'PL', 51.1, 17.0) RETURNING id",
+    )
+    .fetch_one(pool)
+    .await?;
+    let night = sqlx::query_scalar::<_, Uuid>(
+        "INSERT INTO events (workspace_id, city_id, slug, title, venue, starts_at, status)
+         VALUES ($1, $2, 'peer-night', 'peer-night', 'Klub Peer',
+                 now() - interval '20 days', 'completed')
+         RETURNING id",
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(city_id)
+    .fetch_one(pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO event_acts (workspace_id, event_id, act_slug, act_name, peer_act_id)
+         VALUES ($1, $2, 'kindred-doom', 'Kindred Doom', $3)",
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(night)
+    .bind(kindred)
+    .execute(pool)
+    .await?;
+    sqlx::query("UPDATE place_peer_acts SET home_city_id = $2 WHERE id = $1")
+        .bind(case_fold)
+        .bind(city_id)
+        .execute(pool)
+        .await?;
     // The ones the pass must leave alone.
     seed_peer_act(pool, "Polka Stars", &["polka"]).await?;
     seed_peer_act(pool, "Genreless Act", &[]).await?;
@@ -363,7 +400,11 @@ async fn run_proposals(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> 
     names.sort();
     assert_eq!(
         names,
-        vec!["Case Fold".to_owned(), "Kindred Doom".to_owned()],
+        vec![
+            "Case Fold".to_owned(),
+            "Directory Act".to_owned(),
+            "Kindred Doom".to_owned()
+        ],
         "exactly the canonical-genre matches land — no non-match, no standing name, no refused name"
     );
     for peer in &proposed {
@@ -373,11 +414,37 @@ async fn run_proposals(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> 
         assert!(peer.watch_for.is_empty());
         assert!(peer.confirmed_at.is_none());
         assert!(
-            peer.why.contains("doom metal") && peer.why.contains("tracked rooms"),
+            peer.why.contains("doom metal"),
             "the why quotes the evidence, got: {}",
             peer.why
         );
     }
+    let by_name = |name: &str| proposed.iter().find(|peer| peer.name == name);
+    let kindred = by_name("Kindred Doom").ok_or("the billed act proposed")?;
+    assert_eq!(kindred.tier, PeerTier::NearPeer);
+    assert!(
+        kindred.why.contains("billed in 1 tracked rooms"),
+        "a billing is the peer evidence, got: {}",
+        kindred.why
+    );
+    let case_fold = by_name("Case Fold").ok_or("the placed act proposed")?;
+    assert_eq!(case_fold.tier, PeerTier::NearPeer);
+    assert!(
+        case_fold.why.contains("placed in a catalogued city"),
+        "a resolved home city is the peer evidence, got: {}",
+        case_fold.why
+    );
+    let directory = by_name("Directory Act").ok_or("the bare name proposed")?;
+    assert_eq!(
+        directory.tier,
+        PeerTier::Aspirational,
+        "a genre match with no circuit evidence is a name to watch, not a peer"
+    );
+    assert!(
+        directory.why.contains("directory entry"),
+        "the why says which evidence is missing, got: {}",
+        directory.why
+    );
 
     // A rescan is a no-op: the name index plus the NOT EXISTS guard mean the
     // same sweep can run forever without re-asking.

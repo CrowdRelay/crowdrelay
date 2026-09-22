@@ -190,16 +190,16 @@ impl PushDeliveryRepository {
                     AND NOT EXISTS (
                         SELECT 1
                         FROM fan_push_endpoints beacon_endpoint
-                        JOIN viryaos_beacon_signal_sessions session
+                        JOIN beacon_signal_sessions session
                           ON session.workspace_id = beacon_endpoint.workspace_id
                          AND session.token_hash = beacon_endpoint.principal_hash
                          AND session.revoked_at IS NULL
                          AND session.expires_at > now()
-                        JOIN viryaos_beacon_signal_profiles profile
+                        JOIN beacon_signal_profiles profile
                           ON profile.workspace_id = session.workspace_id
                          AND profile.beacon_id = session.beacon_id
                          AND profile.status = 'active'
-                        JOIN viryaos_beacons beacon
+                        JOIN beacons beacon
                           ON beacon.workspace_id = session.workspace_id
                          AND beacon.id = session.beacon_id
                          AND beacon.active
@@ -399,12 +399,12 @@ impl PushDeliveryRepository {
                               delivery.audience_kind = 'beacon'
                               AND EXISTS (
                                   SELECT 1
-                                  FROM viryaos_beacon_signal_sessions session
-                                  JOIN viryaos_beacon_signal_profiles profile
+                                  FROM beacon_signal_sessions session
+                                  JOIN beacon_signal_profiles profile
                                     ON profile.workspace_id = session.workspace_id
                                    AND profile.beacon_id = session.beacon_id
                                    AND profile.status = 'active'
-                                  JOIN viryaos_beacons beacon
+                                  JOIN beacons beacon
                                     ON beacon.workspace_id = session.workspace_id
                                    AND beacon.id = session.beacon_id
                                    AND beacon.active

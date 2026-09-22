@@ -2,8 +2,8 @@
 //! evaluator-created ones.
 //!
 //! The worker outcome path (`agent_outcomes.rs`) inserts a bare
-//! `viryaos_autopilot_actions` row: no decision persist ran for it, so no
-//! `viryaos_dispatch_predictions` or `viryaos_growth_evidence` row exists.
+//! `autopilot_actions` row: no decision persist ran for it, so no
+//! `dispatch_predictions` or `growth_evidence` row exists.
 //! Production showed the result — every `community.engage.request` action had
 //! its measurements scheduled but zero evidence and zero prediction rows, so
 //! each measurement resolved into nothing and the causal model learned
@@ -81,7 +81,7 @@ async fn seed_outcome_action(
     let decision_id = Uuid::now_v7();
     let action_id = Uuid::now_v7();
     sqlx::query(
-        r#"INSERT INTO viryaos_autopilot_decisions
+        r#"INSERT INTO autopilot_decisions
            (id, workspace_id, decision_key, context, subject_kind, subject_id,
             decision_kind, confidence_basis_points, disposition, reason,
             input_snapshot, policy_snapshot, recommendation, evaluated_at, trace_id)
@@ -97,7 +97,7 @@ async fn seed_outcome_action(
     .execute(&f.pool)
     .await?;
     sqlx::query(
-        r#"INSERT INTO viryaos_autopilot_actions
+        r#"INSERT INTO autopilot_actions
            (id, workspace_id, decision_id, context, action_kind, subject_kind,
             subject_id, idempotency_key, payload, status, action_class,
             approved_at, approved_by, available_at)
@@ -166,7 +166,7 @@ async fn a_community_engagement_action_leaves_execution_with_a_learning_envelope
     // the cold prior, not an invented success.
     let prediction = sqlx::query_as::<_, (String, f64, f64)>(
         "SELECT template_id, expected_new_fans, expected_signal_installs \
-         FROM viryaos_dispatch_predictions WHERE action_id = $1",
+         FROM dispatch_predictions WHERE action_id = $1",
     )
     .bind(action_id)
     .fetch_one(&f.pool)
@@ -196,7 +196,7 @@ async fn a_community_engagement_action_leaves_execution_with_a_learning_envelope
         ),
     >(
         "SELECT channel, treatment, observed_fans, observed_incremental_fans, resolved_at \
-         FROM viryaos_growth_evidence WHERE workspace_id = $1 AND action_id = $2",
+         FROM growth_evidence WHERE workspace_id = $1 AND action_id = $2",
     )
     .bind(f.workspace_id.into_uuid())
     .bind(action_id)
@@ -212,7 +212,7 @@ async fn a_community_engagement_action_leaves_execution_with_a_learning_envelope
     // The measurements the engagement schedule owns: reception plus the
     // incremental fan-growth counterfactuals.
     let kinds = sqlx::query_scalar::<_, String>(
-        "SELECT measurement_kind FROM viryaos_autopilot_measurements \
+        "SELECT measurement_kind FROM autopilot_measurements \
          WHERE workspace_id = $1 AND action_id = $2 ORDER BY measurement_kind",
     )
     .bind(f.workspace_id.into_uuid())
@@ -230,12 +230,11 @@ async fn a_community_engagement_action_leaves_execution_with_a_learning_envelope
         );
     }
 
-    let status = sqlx::query_scalar::<_, String>(
-        "SELECT status FROM viryaos_autopilot_actions WHERE id = $1",
-    )
-    .bind(action_id)
-    .fetch_one(&f.pool)
-    .await?;
+    let status =
+        sqlx::query_scalar::<_, String>("SELECT status FROM autopilot_actions WHERE id = $1")
+            .bind(action_id)
+            .fetch_one(&f.pool)
+            .await?;
     assert_eq!(status, "succeeded");
 
     // Exactly once: a second claim finds nothing to redo, and the envelope
@@ -250,8 +249,8 @@ async fn a_community_engagement_action_leaves_execution_with_a_learning_envelope
     );
     let (prediction_rows, evidence_rows) = sqlx::query_as::<_, (i64, i64)>(
         "SELECT \
-           (SELECT COUNT(*) FROM viryaos_dispatch_predictions WHERE action_id = $1)::bigint, \
-           (SELECT COUNT(*) FROM viryaos_growth_evidence \
+           (SELECT COUNT(*) FROM dispatch_predictions WHERE action_id = $1)::bigint, \
+           (SELECT COUNT(*) FROM growth_evidence \
             WHERE workspace_id = $2 AND action_id = $1)::bigint",
     )
     .bind(action_id)
@@ -299,10 +298,10 @@ async fn an_executor_required_action_gets_no_premature_envelope()
 
     let (prediction_rows, evidence_rows, measurement_rows) = sqlx::query_as::<_, (i64, i64, i64)>(
         "SELECT \
-               (SELECT COUNT(*) FROM viryaos_dispatch_predictions WHERE action_id = $1)::bigint, \
-               (SELECT COUNT(*) FROM viryaos_growth_evidence \
+               (SELECT COUNT(*) FROM dispatch_predictions WHERE action_id = $1)::bigint, \
+               (SELECT COUNT(*) FROM growth_evidence \
                 WHERE workspace_id = $2 AND action_id = $1)::bigint, \
-               (SELECT COUNT(*) FROM viryaos_autopilot_measurements \
+               (SELECT COUNT(*) FROM autopilot_measurements \
                 WHERE workspace_id = $2 AND action_id = $1)::bigint",
     )
     .bind(action_id)
@@ -335,7 +334,7 @@ async fn a_content_artifact_receipt_writes_the_envelope_and_growth_measurements(
     // locks it before emitting the executor task.
     let source_id = Uuid::now_v7();
     sqlx::query(
-        "INSERT INTO viryaos_content_sources
+        "INSERT INTO content_sources
            (id, workspace_id, source_kind, source_key, title, occurred_at, expires_at)
          VALUES ($1,$2,'event',$3,'Envelope test event',$4,$5)",
     )
@@ -377,10 +376,10 @@ async fn a_content_artifact_receipt_writes_the_envelope_and_growth_measurements(
     // envelope and no measurements exist until the executor reports back.
     let (prediction_rows, evidence_rows, measurement_rows) = sqlx::query_as::<_, (i64, i64, i64)>(
         "SELECT \
-               (SELECT COUNT(*) FROM viryaos_dispatch_predictions WHERE action_id = $1)::bigint, \
-               (SELECT COUNT(*) FROM viryaos_growth_evidence \
+               (SELECT COUNT(*) FROM dispatch_predictions WHERE action_id = $1)::bigint, \
+               (SELECT COUNT(*) FROM growth_evidence \
                 WHERE workspace_id = $2 AND action_id = $1)::bigint, \
-               (SELECT COUNT(*) FROM viryaos_autopilot_measurements \
+               (SELECT COUNT(*) FROM autopilot_measurements \
                 WHERE workspace_id = $2 AND action_id = $1)::bigint",
     )
     .bind(action_id)
@@ -427,7 +426,7 @@ async fn a_content_artifact_receipt_writes_the_envelope_and_growth_measurements(
 
     // The cold-prior envelope the measurement trio will update on resolution.
     let prediction = sqlx::query_as::<_, (String, f64)>(
-        "SELECT template_id, expected_new_fans FROM viryaos_dispatch_predictions \
+        "SELECT template_id, expected_new_fans FROM dispatch_predictions \
          WHERE action_id = $1",
     )
     .bind(action_id)
@@ -441,7 +440,7 @@ async fn a_content_artifact_receipt_writes_the_envelope_and_growth_measurements(
     );
 
     let evidence = sqlx::query_as::<_, (String, Option<f64>, Option<OffsetDateTime>)>(
-        "SELECT channel, observed_fans, resolved_at FROM viryaos_growth_evidence \
+        "SELECT channel, observed_fans, resolved_at FROM growth_evidence \
          WHERE workspace_id = $1 AND action_id = $2",
     )
     .bind(f.workspace_id.into_uuid())
@@ -458,7 +457,7 @@ async fn a_content_artifact_receipt_writes_the_envelope_and_growth_measurements(
     // pointed at the content source the artifact was made from.
     let measurements = sqlx::query_as::<_, (String, Uuid, OffsetDateTime, OffsetDateTime)>(
         "SELECT measurement_kind, subject_id, action_finished_at, due_at \
-         FROM viryaos_autopilot_measurements \
+         FROM autopilot_measurements \
          WHERE workspace_id = $1 AND action_id = $2 ORDER BY measurement_kind",
     )
     .bind(f.workspace_id.into_uuid())
@@ -502,12 +501,11 @@ async fn a_content_artifact_receipt_writes_the_envelope_and_growth_measurements(
         );
     }
 
-    let status = sqlx::query_scalar::<_, String>(
-        "SELECT status FROM viryaos_autopilot_actions WHERE id = $1",
-    )
-    .bind(action_id)
-    .fetch_one(&f.pool)
-    .await?;
+    let status =
+        sqlx::query_scalar::<_, String>("SELECT status FROM autopilot_actions WHERE id = $1")
+            .bind(action_id)
+            .fetch_one(&f.pool)
+            .await?;
     assert_eq!(status, "succeeded");
     Ok(())
 }
@@ -527,7 +525,7 @@ async fn a_signal_push_respects_the_envelope_recipient_bound()
 
     // Five eligible fans; the operator's envelope permits two per step.
     sqlx::query(
-        "UPDATE viryaos_growth_envelope SET max_recipients_per_step = 2
+        "UPDATE growth_envelope SET max_recipients_per_step = 2
          WHERE workspace_id = $1",
     )
     .bind(f.workspace_id.into_uuid())
@@ -623,7 +621,7 @@ async fn signal_push_audience_counts_what_the_send_would_reach()
 
     // The operator's envelope permits two recipients per step.
     sqlx::query(
-        "UPDATE viryaos_growth_envelope SET max_recipients_per_step = 2
+        "UPDATE growth_envelope SET max_recipients_per_step = 2
          WHERE workspace_id = $1",
     )
     .bind(f.workspace_id.into_uuid())
@@ -903,7 +901,7 @@ async fn a_release_milestone_leaves_dispatch_with_envelope_and_measurements()
         OffsetDateTime::from_unix_timestamp((now + time::Duration::days(10)).unix_timestamp())?;
     let release_id = Uuid::now_v7();
     sqlx::query(
-        r#"INSERT INTO viryaos_release_plans
+        r#"INSERT INTO release_plans
            (id, workspace_id, source_key, title, release_at, tier, listen_url)
            VALUES ($1,$2,$3,'Signal Lost',$4,'single','https://example.test/listen')"#,
     )
@@ -945,7 +943,7 @@ async fn a_release_milestone_leaves_dispatch_with_envelope_and_measurements()
         .await?;
 
     let prediction = sqlx::query_scalar::<_, String>(
-        "SELECT template_id FROM viryaos_dispatch_predictions WHERE action_id = $1",
+        "SELECT template_id FROM dispatch_predictions WHERE action_id = $1",
     )
     .bind(action_id)
     .fetch_one(&f.pool)
@@ -956,7 +954,7 @@ async fn a_release_milestone_leaves_dispatch_with_envelope_and_measurements()
     );
 
     let evidence_rows = sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*)::bigint FROM viryaos_growth_evidence \
+        "SELECT COUNT(*)::bigint FROM growth_evidence \
          WHERE workspace_id = $1 AND action_id = $2",
     )
     .bind(f.workspace_id.into_uuid())
@@ -969,7 +967,7 @@ async fn a_release_milestone_leaves_dispatch_with_envelope_and_measurements()
     );
 
     let kinds = sqlx::query_scalar::<_, String>(
-        "SELECT measurement_kind FROM viryaos_autopilot_measurements \
+        "SELECT measurement_kind FROM autopilot_measurements \
          WHERE workspace_id = $1 AND action_id = $2 ORDER BY measurement_kind",
     )
     .bind(f.workspace_id.into_uuid())

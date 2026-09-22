@@ -34,7 +34,7 @@
         "genericAuthType": "httpHeaderAuth",
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{ ({ executor_id: String($env.VIRYAOS_EXECUTOR_ID || 'virya-n8n-primary').trim(), occurred_at: new Date().toISOString() }) }}",
+        "jsonBody": "={{ ({ executor_id: String($env.CROWDRELAY_EXECUTOR_ID || 'virya-n8n-primary').trim(), occurred_at: new Date().toISOString() }) }}",
         "options": {
           "timeout": 30000
         }
@@ -75,7 +75,7 @@
       "typeVersion": 2,
       "position": [1100, 0],
       "parameters": {
-        "jsCode": "const intent = $('Fail-closed claim gate').first().json;\nconst failed = Boolean($json.error);\nconst ref = $json.threadId || $json.thread_id || $json.id || null;\nreturn [{ json: {\n  action_id: intent.action_id,\n  receipt_key: 'latarnik_invite:' + intent.action_id + ':email',\n  executor_id: $env.VIRYAOS_EXECUTOR_ID || 'virya-n8n-primary',\n  status: failed ? 'failed' : 'succeeded',\n  claim_token: intent.claim_token,\n  provider_reference: failed ? null : (ref ? String(ref).slice(0, 240) : null),\n  error_kind: failed ? 'gmail_send_failed' : null,\n  metadata: {\n    channel: 'email',\n    event_id: intent.event_id,\n    beacon_id: intent.beacon_id,\n    recipient_name: intent.recipient_name,\n    reason: intent.reason,\n  },\n  occurred_at: new Date().toISOString(),\n}}];\n"
+        "jsCode": "const intent = $('Fail-closed claim gate').first().json;\nconst failed = Boolean($json.error);\nconst ref = $json.threadId || $json.thread_id || $json.id || null;\nreturn [{ json: {\n  action_id: intent.action_id,\n  receipt_key: 'latarnik_invite:' + intent.action_id + ':email',\n  executor_id: $env.CROWDRELAY_EXECUTOR_ID || 'virya-n8n-primary',\n  status: failed ? 'failed' : 'succeeded',\n  claim_token: intent.claim_token,\n  provider_reference: failed ? null : (ref ? String(ref).slice(0, 240) : null),\n  error_kind: failed ? 'gmail_send_failed' : null,\n  metadata: {\n    channel: 'email',\n    event_id: intent.event_id,\n    beacon_id: intent.beacon_id,\n    recipient_name: intent.recipient_name,\n    reason: intent.reason,\n  },\n  occurred_at: new Date().toISOString(),\n}}];\n"
       }
     },
     {

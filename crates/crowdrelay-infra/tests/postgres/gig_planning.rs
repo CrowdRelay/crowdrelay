@@ -237,7 +237,7 @@ async fn run(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
 
     // ── Give it a promoter, and it proposes ─────────────────────────────────
     sqlx::query(
-        "INSERT INTO viryaos_booking_targets
+        "INSERT INTO booking_targets
             (workspace_id, city_id, target_kind, display_name, contact_email,
              relationship_score, capacity)
          VALUES ($1, $2, 'promoter', 'Anna', 'anna@example.com', 70, 300)",
@@ -1056,7 +1056,7 @@ async fn comparable_acts_reach_the_planner() -> Result<(), Box<dyn std::error::E
         // The tenant declares a genre; without it "comparable" has no "mine"
         // side to intersect and every act counts as incomparable.
         sqlx::query(
-            "INSERT INTO viryaos_band_listings (workspace_id, act_name, genre_tags)
+            "INSERT INTO band_listings (workspace_id, act_name, genre_tags)
              VALUES ($1, 'Test Act', '{doom metal}')",
         )
         .bind(act)
@@ -1084,7 +1084,7 @@ async fn comparable_acts_reach_the_planner() -> Result<(), Box<dyn std::error::E
         // 'dream pop' as its own set and the count below would change.
         let other = workspace(pool).await?;
         sqlx::query(
-            "INSERT INTO viryaos_band_listings (workspace_id, act_name, genre_tags)
+            "INSERT INTO band_listings (workspace_id, act_name, genre_tags)
              VALUES ($1, 'Other Act', '{dream pop}')",
         )
         .bind(other)
@@ -1130,7 +1130,7 @@ async fn comparable_acts_reach_the_planner() -> Result<(), Box<dyn std::error::E
         // proposes, and the comparable-acts reason — strongest first — is
         // what the opening line renders.
         sqlx::query(
-            "INSERT INTO viryaos_booking_targets
+            "INSERT INTO booking_targets
                 (workspace_id, city_id, target_kind, display_name, contact_email,
                  relationship_score)
              VALUES ($1, $2, 'promoter', 'Anna', 'anna@example.com', 70)",
@@ -1166,4 +1166,164 @@ async fn comparable_acts_reach_the_planner() -> Result<(), Box<dyn std::error::E
         Ok(())
     }
     .await
+}
+
+/// The support-slot list names acts the tenant could actually ask. A peer
+/// qualifies on a city tie — researched home town or a tracked billing in
+/// the city's rooms — but only earns the slot when a reach-out route
+/// exists: this workspace's contact lead, a billing in any tracked room
+/// (the venue is the intro), or a public page on record. A genre-matching
+/// name with none of the three is a directory entry, not a suggestion —
+/// that row is the Rammstein case.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn local_acts_only_surface_when_they_can_be_asked() -> Result<(), Box<dyn std::error::Error>>
+{
+    let database = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
+        .await
+        .expect("connect to the migrated suite database");
+    let pool: &PgPool = &database;
+    {
+        let act = workspace(pool).await?;
+        let wroclaw = city(pool, "wroclaw-askable").await?;
+        let now = OffsetDateTime::now_utc();
+
+        sqlx::query(
+            "INSERT INTO band_listings (workspace_id, act_name, genre_tags)
+             VALUES ($1, 'Test Act', '{doom metal}')",
+        )
+        .bind(act)
+        .execute(pool)
+        .await?;
+        for index in 0..60 {
+            reachable_fan(pool, act, wroclaw, &format!("ask{index}@example.com")).await?;
+        }
+        // The city's venue evidence — and one billing route for the
+        // circuit act below.
+        let other = workspace(pool).await?;
+        let night = played_show(pool, other, wroclaw, "Klub Ask", "ask-night", 20).await?;
+
+        // Reachable through this tenant's own lead.
+        let lead = named_peer_act(pool, "Lead Act", wroclaw, "doom metal").await?;
+        peer_fact(pool, lead, "contact_email", "lead@example.com", Some(act)).await?;
+        // Reachable through the circuit: billed at the city's tracked room.
+        let circuit = named_peer_act(pool, "Circuit Act", wroclaw, "doom metal").await?;
+        bill_peer(pool, other, night, circuit).await?;
+        // Reachable through a public page — a global link fact.
+        let page = named_peer_act(pool, "Page Act", wroclaw, "doom metal").await?;
+        peer_fact(
+            pool,
+            page,
+            "link:social",
+            "https://example.com/pageact",
+            None,
+        )
+        .await?;
+        // The directory names that must NOT surface.
+        named_peer_act(pool, "Arena Act", wroclaw, "doom metal").await?;
+        named_peer_act(
+            pool,
+            "Far Act",
+            city(pool, "far-askable").await?,
+            "doom metal",
+        )
+        .await?;
+        let foreign = named_peer_act(pool, "Foreign Lead Act", wroclaw, "doom metal").await?;
+        peer_fact(
+            pool,
+            foreign,
+            "contact_email",
+            "theirs@example.com",
+            Some(other),
+        )
+        .await?;
+
+        let wro = city_opportunities(pool, act, now)
+            .await?
+            .into_iter()
+            .find(|city| city.city == "wroclaw-askable")
+            .ok_or("a city with sixty fans was not considered")?;
+        let mut names: Vec<String> = wro.local_acts.iter().map(|act| act.name.clone()).collect();
+        names.sort();
+        assert_eq!(
+            names,
+            vec![
+                "Circuit Act".to_owned(),
+                "Lead Act".to_owned(),
+                "Page Act".to_owned()
+            ],
+            "a name with no reach-out route — Arena Act — and a lead that is \
+             not this tenant's stay out of the bill suggestions"
+        );
+        let via = |name: &str| {
+            wro.local_acts
+                .iter()
+                .find(|act| act.name == name)
+                .map(|act| act.reachable_via.clone())
+        };
+        assert_eq!(via("Lead Act").as_deref(), Some("email on file"));
+        assert_eq!(
+            via("Circuit Act").as_deref(),
+            Some("billed in tracked rooms")
+        );
+        assert_eq!(via("Page Act").as_deref(), Some("public page"));
+        for act in &wro.local_acts {
+            assert_eq!(
+                act.shared_genres,
+                vec!["doom metal".to_owned()],
+                "the genre tie still reports"
+            );
+        }
+        Ok(())
+    }
+}
+
+/// A peer act whose researched home town resolves to a catalogue city —
+/// the fixture shape the seed importer produces.
+async fn named_peer_act(
+    pool: &PgPool,
+    display_name: &str,
+    home_city_id: Uuid,
+    genre: &str,
+) -> Result<Uuid, Box<dyn std::error::Error>> {
+    let peer = sqlx::query_scalar::<_, Uuid>(
+        "INSERT INTO place_peer_acts (name_key, display_name, home_city_id)
+         VALUES (place_venue_key($1), $1, $2) RETURNING id",
+    )
+    .bind(display_name)
+    .bind(home_city_id)
+    .fetch_one(pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO place_peer_act_genres (peer_act_id, genre_tag, provenance, source_ref)
+         VALUES ($1, $2, 'researched', 'test')",
+    )
+    .bind(peer)
+    .bind(genre)
+    .execute(pool)
+    .await?;
+    Ok(peer)
+}
+
+/// One attributed fact about a peer — `workspace` NULL is the global half,
+/// a concrete id is that tenant's private lead.
+async fn peer_fact(
+    pool: &PgPool,
+    peer_act_id: Uuid,
+    attribute: &str,
+    value: &str,
+    workspace: Option<Uuid>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    sqlx::query(
+        "INSERT INTO place_peer_act_facts
+            (peer_act_id, attribute, value, provenance, source_ref, observed_at, workspace_id)
+         VALUES ($1, $2, $3, 'researched', 'test', now(), $4)",
+    )
+    .bind(peer_act_id)
+    .bind(attribute)
+    .bind(value)
+    .bind(workspace)
+    .execute(pool)
+    .await?;
+    Ok(())
 }

@@ -19,7 +19,7 @@ async fn lock_booking_target_for_execution(
     sqlx::query_as::<_, (String, String, String)>(
         r#"
         SELECT target.target_kind, target.display_name, target.contact_email
-        FROM viryaos_booking_targets AS target
+        FROM booking_targets AS target
         WHERE target.workspace_id = $1
           AND target.id = $2
           AND target.city_id = $3
@@ -33,7 +33,7 @@ async fn lock_booking_target_for_execution(
           -- condition.
           AND NOT EXISTS (
               SELECT 1
-              FROM viryaos_booking_interactions AS interaction
+              FROM booking_interactions AS interaction
               WHERE interaction.workspace_id = target.workspace_id
                 AND interaction.target_id = target.id
                 AND interaction.direction = 'inbound'
@@ -63,7 +63,7 @@ async fn ensure_promotion_state_current(
     let current = sqlx::query_as::<_, (i64, String)>(
         r#"
         SELECT current_daily_budget_minor, currency
-        FROM viryaos_promotion_campaign_states
+        FROM promotion_campaign_states
         WHERE workspace_id = $1 AND id = $2 AND active AND expires_at > now()
         FOR UPDATE
         "#,
@@ -84,7 +84,7 @@ async fn ensure_promotion_state_current(
     let guardrail = sqlx::query_as::<_, (i64, i64)>(
         r#"
         SELECT maximum_total_daily_budget_minor, maximum_monthly_spend_minor
-        FROM viryaos_promotion_budget_guardrails
+        FROM promotion_budget_guardrails
         WHERE workspace_id = $1 AND currency = $2
         FOR UPDATE
         "#,
@@ -101,7 +101,7 @@ async fn ensure_promotion_state_current(
         SELECT
             COALESCE(SUM(current_daily_budget_minor), 0)::bigint,
             COALESCE(SUM(spend_month_to_date_minor), 0)::bigint
-        FROM viryaos_promotion_campaign_states
+        FROM promotion_campaign_states
         WHERE workspace_id = $1
           AND currency = $2
           AND active
@@ -116,7 +116,7 @@ async fn ensure_promotion_state_current(
     let reserved_delta_minor = sqlx::query_scalar::<_, i64>(
         r#"
         SELECT COALESCE(SUM(daily_delta_minor), 0)::bigint
-        FROM viryaos_promotion_budget_reservations
+        FROM promotion_budget_reservations
         WHERE workspace_id = $1 AND currency = $2 AND expires_at > now()
         "#,
     )
@@ -138,7 +138,7 @@ async fn ensure_promotion_state_current(
 
     sqlx::query(
         r#"
-        INSERT INTO viryaos_promotion_budget_reservations (
+        INSERT INTO promotion_budget_reservations (
             workspace_id, action_id, campaign_id, currency, daily_delta_minor, expires_at
         ) VALUES ($1,$2,$3,$4,$5,now() + interval '24 hours')
         ON CONFLICT (workspace_id, action_id) DO NOTHING

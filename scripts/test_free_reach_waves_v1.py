@@ -100,7 +100,7 @@ class FreeReachWavesContract(unittest.TestCase):
         # batch — the one state an operator cannot reason about, because the
         # thing they approved was the batch.
         approve = self.infra.split("async fn approve_outreach_wave_impl", 1)[1]
-        updates = re.findall(r"UPDATE viryaos_autopilot_actions", approve)
+        updates = re.findall(r"UPDATE autopilot_actions", approve)
         self.assertEqual(len(updates), 1)
         self.assertIn("status='awaiting_approval'", approve)
         self.assertIn("approval_expires_at IS NULL OR approval_expires_at > $3", approve)

@@ -85,10 +85,10 @@ async fn load_metrics_snapshot(state: &OpsState) -> Result<OpsMetricsSnapshot, O
         -- is exactly the thing worth seeing.
         brain AS (
             SELECT
-                (SELECT count(*) FROM viryaos_autopilot_cycle_runs
+                (SELECT count(*) FROM autopilot_cycle_runs
                  WHERE workspace_id = $1 AND started_at > now() - INTERVAL '24 hours'
                 )::bigint AS cycles_24h,
-                (SELECT count(*) FROM viryaos_autopilot_cycle_runs
+                (SELECT count(*) FROM autopilot_cycle_runs
                  WHERE workspace_id = $1 AND started_at > now() - INTERVAL '24 hours'
                    AND outcome <> 'succeeded'
                 )::bigint AS cycles_degraded_24h,
@@ -97,15 +97,15 @@ async fn load_metrics_snapshot(state: &OpsState) -> Result<OpsMetricsSnapshot, O
                 -- has stopped thinking even while the worker lease looks fine:
                 -- the two failures are different and this tells them apart.
                 COALESCE((SELECT EXTRACT(EPOCH FROM (now() - max(started_at)))::bigint
-                 FROM viryaos_autopilot_cycle_runs WHERE workspace_id = $1
+                 FROM autopilot_cycle_runs WHERE workspace_id = $1
                 ), 999999) AS seconds_since_cycle,
-                (SELECT count(*) FROM viryaos_autopilot_decisions
+                (SELECT count(*) FROM autopilot_decisions
                  WHERE workspace_id = $1 AND evaluated_at > now() - INTERVAL '24 hours'
                 )::bigint AS decisions_24h,
-                (SELECT count(*) FROM viryaos_autopilot_actions
+                (SELECT count(*) FROM autopilot_actions
                  WHERE workspace_id = $1 AND created_at > now() - INTERVAL '24 hours'
                 )::bigint AS actions_24h,
-                (SELECT count(*) FROM viryaos_autopilot_actions
+                (SELECT count(*) FROM autopilot_actions
                  WHERE workspace_id = $1 AND created_at > now() - INTERVAL '24 hours'
                    AND status = 'failed'
                 )::bigint AS actions_failed_24h,
@@ -115,16 +115,16 @@ async fn load_metrics_snapshot(state: &OpsState) -> Result<OpsMetricsSnapshot, O
                 -- permanently ignored queue read as empty. Production carried
                 -- eleven of these for days because nothing counted them
                 -- anywhere an operator could see without a credential.
-                (SELECT count(*) FROM viryaos_autopilot_actions
+                (SELECT count(*) FROM autopilot_actions
                  WHERE workspace_id = $1 AND status = 'awaiting_approval'
                    -- Batched relay deliveries ask through the batch card.
                    AND NOT (action_kind = 'community.engage.request'
                             AND payload ->> 'source_id' IS NOT NULL)
                 )::bigint AS approvals_awaiting,
-                (SELECT count(*) FROM viryaos_autopilot_measurements
+                (SELECT count(*) FROM autopilot_measurements
                  WHERE workspace_id = $1 AND status = 'pending'
                 )::bigint AS measurements_pending,
-                (SELECT count(*) FROM viryaos_autopilot_measurements
+                (SELECT count(*) FROM autopilot_measurements
                  WHERE workspace_id = $1 AND status = 'succeeded'
                 )::bigint AS measurements_resolved,
                 -- Age of the oldest measurement that is due and has not
@@ -133,7 +133,7 @@ async fn load_metrics_snapshot(state: &OpsState) -> Result<OpsMetricsSnapshot, O
                 -- counting it would make a healthy brain look stuck for the
                 -- fourteen days its longest window legitimately takes.
                 COALESCE((SELECT EXTRACT(EPOCH FROM (now() - min(due_at)))::bigint
-                 FROM viryaos_autopilot_measurements
+                 FROM autopilot_measurements
                  WHERE workspace_id = $1 AND status = 'pending' AND due_at <= now()
                 ), 0) AS measurement_oldest_overdue_seconds,
                 -- Agent outcomes are the LLM half of the loop. Rejected means
@@ -208,14 +208,14 @@ async fn load_metrics_snapshot(state: &OpsState) -> Result<OpsMetricsSnapshot, O
                 -- observed. Its count and its age answer "is this working"
                 -- without a credential, in days rather than in however long it
                 -- takes somebody to get suspicious.
-                (SELECT count(*) FROM viryaos_growth_evidence
+                (SELECT count(*) FROM growth_evidence
                   WHERE workspace_id = $1 AND resolved_at IS NOT NULL
                 )::bigint AS evidence_resolved,
                 -- Zero means it has never happened, deliberately rather than a
                 -- large sentinel: the count beside it already separates never
                 -- from stale, and a fake age would poison any threshold.
                 COALESCE((SELECT EXTRACT(EPOCH FROM (now() - max(resolved_at)))::bigint
-                   FROM viryaos_growth_evidence WHERE workspace_id = $1
+                   FROM growth_evidence WHERE workspace_id = $1
                 ), 0) AS seconds_since_evidence_resolved,
                 -- Throughput on the same terms. A post that reached a platform
                 -- is the input the loop above cannot run without.
@@ -252,7 +252,7 @@ async fn load_metrics_snapshot(state: &OpsState) -> Result<OpsMetricsSnapshot, O
                 -- whose KPI was never computed reports NULL, and "never
                 -- measured" must not freeze a baseline of zero.
                 (SELECT activated_30d
-                 FROM viryaos_fan_activation_kpi
+                 FROM fan_activation_kpi
                  WHERE workspace_id = $1
                 )::bigint AS north_star_fans
         )

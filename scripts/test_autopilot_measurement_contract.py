@@ -18,7 +18,7 @@ class AutopilotMeasurementContract(unittest.TestCase):
         kind_migrations = sorted(
             path
             for path in (ROOT / "migrations").glob("*.sql")
-            if "viryaos_autopilot_measurements_measurement_kind_check"
+            if "ADD CONSTRAINT viryaos_autopilot_measurements_measurement_kind_check"
             in path.read_text()
         )
         self.assertTrue(kind_migrations)

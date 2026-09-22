@@ -65,7 +65,7 @@ async fn insert_target(
 ) -> Result<OutreachTargetId, Box<dyn std::error::Error>> {
     let target_id = OutreachTargetId::from_uuid(Uuid::now_v7());
     sqlx::query(
-        "INSERT INTO viryaos_outreach_targets (
+        "INSERT INTO outreach_targets (
              id, workspace_id, target_kind, display_name, contact_email,
              active, verified, accepts_outreach
          ) VALUES ($1,$2,'playlist',$3,$4,true,true,true)",
@@ -85,7 +85,7 @@ async fn insert_opportunity(
 ) -> Result<OutreachOpportunityId, Box<dyn std::error::Error>> {
     let opportunity_id = OutreachOpportunityId::from_uuid(Uuid::now_v7());
     sqlx::query(
-        "INSERT INTO viryaos_outreach_opportunities (
+        "INSERT INTO outreach_opportunities (
              id, workspace_id, target_id, source, subject_kind, subject_key,
              template_key, relevance_basis_points, confidence_basis_points,
              active, observed_at, expires_at
@@ -133,7 +133,7 @@ async fn a_hard_bounce_finishes_the_address_and_a_retry_counts_once() {
     // The address is finished, and its open opportunities go with it, so no
     // later cycle pitches somebody who cannot receive anything.
     let (active, accepts): (bool, bool) = sqlx::query_as(
-        "SELECT active, accepts_outreach FROM viryaos_outreach_targets \
+        "SELECT active, accepts_outreach FROM outreach_targets \
          WHERE workspace_id = $1 AND id = $2",
     )
     .bind(fixture.workspace_id.into_uuid())
@@ -143,7 +143,7 @@ async fn a_hard_bounce_finishes_the_address_and_a_retry_counts_once() {
     .expect("target row");
     assert!(!active && !accepts);
     let open: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM viryaos_outreach_opportunities \
+        "SELECT count(*) FROM outreach_opportunities \
          WHERE workspace_id = $1 AND target_id = $2 AND active",
     )
     .bind(fixture.workspace_id.into_uuid())
@@ -160,13 +160,12 @@ async fn a_hard_bounce_finishes_the_address_and_a_retry_counts_once() {
         .record_delivery_fault(fixture.workspace_id, fault, &key(2), None)
         .await
         .expect("replayed report");
-    let faults: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM viryaos_outreach_delivery_faults WHERE workspace_id = $1",
-    )
-    .bind(fixture.workspace_id.into_uuid())
-    .fetch_one(&fixture.pool)
-    .await
-    .expect("fault count");
+    let faults: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM outreach_delivery_faults WHERE workspace_id = $1")
+            .bind(fixture.workspace_id.into_uuid())
+            .fetch_one(&fixture.pool)
+            .await
+            .expect("fault count");
     assert_eq!(faults, 1);
     assert!(replay_by_reference.replayed);
 
@@ -216,7 +215,7 @@ async fn a_soft_bounce_suppresses_nobody_and_the_snapshot_reads_both() {
         .await
         .expect("soft bounce");
     let active: bool = sqlx::query_scalar(
-        "SELECT active FROM viryaos_outreach_targets \
+        "SELECT active FROM outreach_targets \
          WHERE workspace_id = $1 AND id = $2",
     )
     .bind(fixture.workspace_id.into_uuid())
@@ -232,7 +231,7 @@ async fn a_soft_bounce_suppresses_nobody_and_the_snapshot_reads_both() {
     // One dispatched third-party send makes the denominator one.
     let decision_id = Uuid::now_v7();
     sqlx::query(
-        "INSERT INTO viryaos_autopilot_decisions (
+        "INSERT INTO autopilot_decisions (
              id, workspace_id, decision_key, context, subject_kind, subject_id,
              decision_kind, confidence_basis_points, disposition, reason,
              input_snapshot, policy_snapshot, recommendation, trace_id
@@ -246,7 +245,7 @@ async fn a_soft_bounce_suppresses_nobody_and_the_snapshot_reads_both() {
     .await
     .expect("decision");
     sqlx::query(
-        "INSERT INTO viryaos_autopilot_actions (
+        "INSERT INTO autopilot_actions (
              workspace_id, decision_id, context, action_kind, subject_kind, subject_id,
              idempotency_key, payload, status, action_class, started_at, finished_at
          ) VALUES ($1,$2,'growth_metrics','outreach.send','outreach_target',$3,
@@ -321,7 +320,7 @@ async fn a_complaint_rate_closes_the_ceiling_against_real_rows() {
     // over.
     let decision_id = Uuid::now_v7();
     sqlx::query(
-        "INSERT INTO viryaos_autopilot_decisions (
+        "INSERT INTO autopilot_decisions (
              id, workspace_id, decision_key, context, subject_kind, subject_id,
              decision_kind, confidence_basis_points, disposition, reason,
              input_snapshot, policy_snapshot, recommendation, trace_id
@@ -335,7 +334,7 @@ async fn a_complaint_rate_closes_the_ceiling_against_real_rows() {
     .await
     .expect("decision");
     sqlx::query(
-        "INSERT INTO viryaos_autopilot_actions (
+        "INSERT INTO autopilot_actions (
              workspace_id, decision_id, context, action_kind, subject_kind, subject_id,
              idempotency_key, payload, status, action_class, started_at, finished_at
          ) SELECT $1,$2,'growth_metrics','outreach.send','outreach_target',$3,
@@ -386,7 +385,7 @@ async fn a_failed_action_takes_its_finding_off_the_board_instead_of_parking_a_de
     let fixture = fixture("failed-off-board").await.expect("fixture");
     let decision_id = Uuid::now_v7();
     sqlx::query(
-        "INSERT INTO viryaos_autopilot_decisions (
+        "INSERT INTO autopilot_decisions (
              id, workspace_id, decision_key, context, subject_kind, subject_id,
              decision_kind, confidence_basis_points, disposition, reason,
              input_snapshot, policy_snapshot, recommendation, trace_id
@@ -400,7 +399,7 @@ async fn a_failed_action_takes_its_finding_off_the_board_instead_of_parking_a_de
     .await
     .expect("decision");
     sqlx::query(
-        "INSERT INTO viryaos_autopilot_actions (
+        "INSERT INTO autopilot_actions (
              workspace_id, decision_id, context, action_kind, subject_kind, subject_id,
              idempotency_key, payload, status, last_error_kind, finished_at
          ) VALUES ($1,$2,'content_supply','content.artifact.request','content_source',$3,
@@ -435,7 +434,7 @@ async fn an_approved_action_reads_as_executing_not_awaiting_approval() {
     let decision_id = Uuid::now_v7();
     let subject_id = Uuid::now_v7();
     sqlx::query(
-        "INSERT INTO viryaos_autopilot_decisions (
+        "INSERT INTO autopilot_decisions (
              id, workspace_id, decision_key, context, subject_kind, subject_id,
              decision_kind, confidence_basis_points, disposition, reason,
              input_snapshot, policy_snapshot, recommendation, trace_id
@@ -449,7 +448,7 @@ async fn an_approved_action_reads_as_executing_not_awaiting_approval() {
     .await
     .expect("decision");
     sqlx::query(
-        "INSERT INTO viryaos_autopilot_actions (
+        "INSERT INTO autopilot_actions (
              workspace_id, decision_id, context, action_kind, subject_kind, subject_id,
              idempotency_key, payload, status, approved_at
          ) VALUES ($1,$2,'beacon','beacon.outreach.request','beacon',$3,
@@ -485,7 +484,7 @@ async fn done_ourselves_takes_the_finding_and_its_parked_action_off_the_board() 
     let fixture = fixture("handled").await.expect("fixture");
     let decision_id = Uuid::now_v7();
     sqlx::query(
-        "INSERT INTO viryaos_autopilot_decisions (
+        "INSERT INTO autopilot_decisions (
              id, workspace_id, decision_key, context, subject_kind, subject_id,
              decision_kind, confidence_basis_points, disposition, reason,
              input_snapshot, policy_snapshot, recommendation, trace_id
@@ -499,7 +498,7 @@ async fn done_ourselves_takes_the_finding_and_its_parked_action_off_the_board() 
     .await
     .expect("decision");
     sqlx::query(
-        "INSERT INTO viryaos_autopilot_actions (
+        "INSERT INTO autopilot_actions (
              workspace_id, decision_id, context, action_kind, subject_kind, subject_id,
              idempotency_key, payload, status, approval_expires_at
          ) VALUES ($1,$2,'booking_opportunity','apply_live_opportunity','team_opportunity',$3,
@@ -537,7 +536,7 @@ async fn done_ourselves_takes_the_finding_and_its_parked_action_off_the_board() 
     assert_eq!(mutation.status, "handled_externally");
 
     let status: String = sqlx::query_scalar(
-        "SELECT status FROM viryaos_autopilot_actions \
+        "SELECT status FROM autopilot_actions \
          WHERE workspace_id = $1 AND idempotency_key = 'e2e-parked-1'",
     )
     .bind(fixture.workspace_id.into_uuid())
@@ -617,7 +616,7 @@ async fn applying_a_posture_moves_all_four_surfaces_atomically() {
     assert_eq!(mutation.status, "posture_working");
 
     let enabled: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM viryaos_autopilot_policies \
+        "SELECT count(*) FROM autopilot_policies \
          WHERE workspace_id = $1 AND enabled AND autonomy_level <> 'observe'",
     )
     .bind(fixture.workspace_id.into_uuid())
@@ -628,7 +627,7 @@ async fn applying_a_posture_moves_all_four_surfaces_atomically() {
     assert!(enabled > 0);
 
     let third_party_ceiling: String = sqlx::query_scalar(
-        "SELECT ceiling FROM viryaos_growth_autonomy \
+        "SELECT ceiling FROM growth_autonomy \
          WHERE workspace_id = $1 AND action_class = 'third_party'",
     )
     .bind(fixture.workspace_id.into_uuid())
@@ -640,7 +639,7 @@ async fn applying_a_posture_moves_all_four_surfaces_atomically() {
         "working drafts third-party contact"
     );
     let paid_ceiling: String = sqlx::query_scalar(
-        "SELECT ceiling FROM viryaos_growth_autonomy \
+        "SELECT ceiling FROM growth_autonomy \
          WHERE workspace_id = $1 AND action_class = 'paid'",
     )
     .bind(fixture.workspace_id.into_uuid())
@@ -653,7 +652,7 @@ async fn applying_a_posture_moves_all_four_surfaces_atomically() {
     );
 
     let (agent_enabled, dry_run): (bool, bool) = sqlx::query_as(
-        "SELECT agent_enabled, dry_run FROM viryaos_growth_envelope WHERE workspace_id = $1",
+        "SELECT agent_enabled, dry_run FROM growth_envelope WHERE workspace_id = $1",
     )
     .bind(fixture.workspace_id.into_uuid())
     .fetch_one(&fixture.pool)
@@ -700,7 +699,7 @@ async fn an_approved_action_without_a_live_executor_is_cancelled_after_the_grace
     let fixture = fixture("no-executor-sweep").await.expect("fixture");
     let decision_id = Uuid::now_v7();
     sqlx::query(
-        "INSERT INTO viryaos_autopilot_decisions (
+        "INSERT INTO autopilot_decisions (
              id, workspace_id, decision_key, context, subject_kind, subject_id,
              decision_kind, confidence_basis_points, disposition, reason,
              input_snapshot, policy_snapshot, recommendation, trace_id
@@ -714,7 +713,7 @@ async fn an_approved_action_without_a_live_executor_is_cancelled_after_the_grace
     .await
     .expect("decision");
     sqlx::query(
-        "INSERT INTO viryaos_autopilot_actions (
+        "INSERT INTO autopilot_actions (
              workspace_id, decision_id, context, action_kind, subject_kind, subject_id,
              idempotency_key, payload, status, approved_at
          ) VALUES ($1,$2,'beacon','beacon.outreach.request','beacon',$3,
@@ -737,7 +736,7 @@ async fn an_approved_action_without_a_live_executor_is_cancelled_after_the_grace
         .expect("sweep");
     assert_eq!(cancelled, 1);
     let status: String = sqlx::query_scalar(
-        "SELECT status FROM viryaos_autopilot_actions \
+        "SELECT status FROM autopilot_actions \
          WHERE workspace_id = $1 AND idempotency_key = 'e2e-no-executor-1'",
     )
     .bind(fixture.workspace_id.into_uuid())
@@ -749,7 +748,7 @@ async fn an_approved_action_without_a_live_executor_is_cancelled_after_the_grace
     // A capability that IS advertised protects its action from the sweep:
     // register `content.artifact` and give a content action the same age.
     sqlx::query(
-        "INSERT INTO viryaos_executor_instances (
+        "INSERT INTO executor_instances (
              workspace_id, executor_id, version, manifest_sha,
              observed_at, expires_at
          ) VALUES ($1,'e2e-executor','v1','e2e', now(), now() + interval '1 hour')",
@@ -759,7 +758,7 @@ async fn an_approved_action_without_a_live_executor_is_cancelled_after_the_grace
     .await
     .expect("executor instance");
     sqlx::query(
-        "INSERT INTO viryaos_executor_capabilities (
+        "INSERT INTO executor_capabilities (
              workspace_id, executor_id, capability, capability_version,
              observed_at, expires_at
          ) VALUES ($1,'e2e-executor','content.artifact','v1', now(), now() + interval '1 hour')",
@@ -769,7 +768,7 @@ async fn an_approved_action_without_a_live_executor_is_cancelled_after_the_grace
     .await
     .expect("capability");
     sqlx::query(
-        "INSERT INTO viryaos_autopilot_actions (
+        "INSERT INTO autopilot_actions (
              workspace_id, decision_id, context, action_kind, subject_kind, subject_id,
              idempotency_key, payload, status, approved_at
          ) VALUES ($1,$2,'content_supply','content.artifact.request','content_source',$3,
@@ -789,7 +788,7 @@ async fn an_approved_action_without_a_live_executor_is_cancelled_after_the_grace
         .expect("second sweep");
     assert_eq!(cancelled, 0);
     let status: String = sqlx::query_scalar(
-        "SELECT status FROM viryaos_autopilot_actions \
+        "SELECT status FROM autopilot_actions \
          WHERE workspace_id = $1 AND idempotency_key = 'e2e-no-executor-2'",
     )
     .bind(fixture.workspace_id.into_uuid())
@@ -826,7 +825,7 @@ async fn a_posture_change_refuses_a_policy_edit_prepared_before_it() {
 
     let read_version = || async {
         sqlx::query_scalar::<_, i64>(
-            "SELECT version FROM viryaos_autopilot_policies \
+            "SELECT version FROM autopilot_policies \
              WHERE workspace_id = $1 AND context = $2",
         )
         .bind(fixture.workspace_id.into_uuid())
@@ -887,7 +886,7 @@ async fn a_posture_change_refuses_a_policy_edit_prepared_before_it() {
 
     // And the posture's authority level is still the one in force.
     let level: String = sqlx::query_scalar(
-        "SELECT autonomy_level FROM viryaos_autopilot_policies \
+        "SELECT autonomy_level FROM autopilot_policies \
          WHERE workspace_id = $1 AND context = $2",
     )
     .bind(fixture.workspace_id.into_uuid())

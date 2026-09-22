@@ -2,10 +2,10 @@
 //! the outbox and writes credited entries to the credit ledger.
 //!
 //! When a measurement completes, an `AttributionRequested` event is
-//! enqueued in `viryaos_attribution_requests`. This worker calls
+//! enqueued in `attribution_requests`. This worker calls
 //! `process_attribution_batch` which claims pending requests, discovers
 //! competing actions, runs the `ProportionalCreditAllocator`, and writes
-//! the result to `viryaos_fan_credit_ledger`. The write is idempotent
+//! the result to `fan_credit_ledger`. The write is idempotent
 //! on (measurement_id, attribution_version).
 //!
 //! The worker is decoupled from measurement completion — if it crashes

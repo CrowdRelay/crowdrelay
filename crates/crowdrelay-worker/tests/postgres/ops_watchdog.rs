@@ -44,10 +44,10 @@ async fn workspace(pool: &PgPool) -> Result<WorkspaceId> {
         .execute(pool)
         .await
         .context("insert workspace")?;
-    // The snapshot selects from `viryaos_executor_instances` — one live
+    // The snapshot selects from `executor_instances` — one live
     // executor row, the shape a healthy workspace carries.
     sqlx::query(
-        r#"INSERT INTO viryaos_executor_instances
+        r#"INSERT INTO executor_instances
                (workspace_id, executor_id, version, manifest_sha, observed_at, expires_at)
            VALUES ($1,'worker-1','1.0.0','abc123',now(),now() + interval '1 hour')"#,
     )
@@ -63,7 +63,7 @@ async fn queued_draft(pool: &PgPool, workspace_id: WorkspaceId) -> Result<()> {
     let decision_id = Uuid::now_v7();
     sqlx::query(
         r#"
-        INSERT INTO viryaos_autopilot_decisions (
+        INSERT INTO autopilot_decisions (
             id, workspace_id, decision_key, context, subject_kind, subject_id,
             decision_kind, confidence_basis_points, disposition, reason,
             input_snapshot, policy_snapshot, recommendation, trace_id
@@ -83,7 +83,7 @@ async fn queued_draft(pool: &PgPool, workspace_id: WorkspaceId) -> Result<()> {
     let action_id = Uuid::now_v7();
     sqlx::query(
         r#"
-        INSERT INTO viryaos_autopilot_actions (
+        INSERT INTO autopilot_actions (
             id, workspace_id, decision_id, context, action_kind, subject_kind,
             subject_id, idempotency_key, payload, status, finished_at, trace_id
         ) VALUES ($1,$2,$3,'growth_intelligence','community.engage.request',
@@ -138,7 +138,7 @@ async fn create_credentials_table(pool: &PgPool) -> Result<()> {
 
 async fn active_alerts(pool: &PgPool, workspace_id: WorkspaceId) -> Result<Vec<String>> {
     sqlx::query_scalar(
-        "SELECT alert_key FROM viryaos_ops_alert_state \
+        "SELECT alert_key FROM ops_alert_state \
          WHERE workspace_id = $1 AND active ORDER BY alert_key",
     )
     .bind(workspace_id.into_uuid())
@@ -226,7 +226,7 @@ async fn a_dead_credential_raises_session_dead_and_a_live_one_clears_it() -> Res
 /// schema.
 ///
 /// The unit tests prove the condition's predicate. This proves the reading
-/// behind it: three subqueries over `viryaos_autopilot_actions`, one of them an
+/// behind it: three subqueries over `autopilot_actions`, one of them an
 /// `EXTRACT(EPOCH …)` that returns `numeric` on PostgreSQL 14+ and has to be cast
 /// before sqlx can decode it. An uncast one compiles, lints and passes every unit
 /// test, then aborts the whole snapshot — and with it all eighteen conditions —
@@ -279,7 +279,7 @@ async fn approval_action(
     let decision_id = Uuid::now_v7();
     sqlx::query(
         r#"
-        INSERT INTO viryaos_autopilot_decisions (
+        INSERT INTO autopilot_decisions (
             id, workspace_id, decision_key, context, subject_kind, subject_id,
             decision_kind, confidence_basis_points, disposition, reason,
             input_snapshot, policy_snapshot, recommendation, trace_id
@@ -299,7 +299,7 @@ async fn approval_action(
     let action_id = Uuid::now_v7();
     sqlx::query(
         r#"
-        INSERT INTO viryaos_autopilot_actions (
+        INSERT INTO autopilot_actions (
             id, workspace_id, decision_id, context, action_kind, subject_kind,
             subject_id, idempotency_key, payload, status,
             approval_expires_at, last_error_kind, finished_at, trace_id
@@ -364,7 +364,7 @@ async fn work_parked_on_a_dark_capability_reaches_the_operator() -> Result<()> {
 
         // The capability returns: the row unparks and the finding clears.
         sqlx::query(
-            "UPDATE viryaos_autopilot_actions SET last_error_kind=NULL \
+            "UPDATE autopilot_actions SET last_error_kind=NULL \
              WHERE workspace_id=$1 AND status='queued' \
                AND last_error_kind='awaiting_executor'",
         )
@@ -387,7 +387,7 @@ async fn work_parked_on_a_dark_capability_reaches_the_operator() -> Result<()> {
 async fn live_executor(pool: &PgPool, workspace_id: WorkspaceId) -> Result<()> {
     sqlx::query(
         r#"
-        INSERT INTO viryaos_executor_instances (
+        INSERT INTO executor_instances (
             workspace_id, executor_id, version, manifest_sha, observed_at, expires_at
         ) VALUES ($1,'n8n-heartbeat','1.0.0','manifest',now(),now() + interval '10 minutes')
         "#,
@@ -404,7 +404,7 @@ async fn parked_action(pool: &PgPool, workspace_id: WorkspaceId) -> Result<()> {
     let decision_id = Uuid::now_v7();
     sqlx::query(
         r#"
-        INSERT INTO viryaos_autopilot_decisions (
+        INSERT INTO autopilot_decisions (
             id, workspace_id, decision_key, context, subject_kind, subject_id,
             decision_kind, confidence_basis_points, disposition, reason,
             input_snapshot, policy_snapshot, recommendation, trace_id
@@ -423,7 +423,7 @@ async fn parked_action(pool: &PgPool, workspace_id: WorkspaceId) -> Result<()> {
     .context("insert decision")?;
     sqlx::query(
         r#"
-        INSERT INTO viryaos_autopilot_actions (
+        INSERT INTO autopilot_actions (
             id, workspace_id, decision_id, context, action_kind, subject_kind,
             subject_id, idempotency_key, payload, status, approved_at,
             last_error_kind, trace_id

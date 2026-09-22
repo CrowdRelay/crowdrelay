@@ -1,7 +1,7 @@
 //! The learning loop closing, against a real schema.
 //!
 //! The brain's learning has been real for a while and unprovable: the strategy
-//! posterior lives in `viryaos_brain_state`, one row per module, updated in
+//! posterior lives in `brain_state`, one row per module, updated in
 //! place. "The posterior says community_first is worth 4.2 fans" was
 //! answerable; "the posterior changed because of what happened to action X"
 //! was not. Migration 0252 added the belief-revision ledger to close that, and
@@ -92,7 +92,7 @@ async fn seed_resolved_dispatch_aged(
 
     sqlx::query(
         r#"
-        INSERT INTO viryaos_autopilot_decisions (
+        INSERT INTO autopilot_decisions (
             id, workspace_id, decision_key, context, subject_kind, subject_id,
             decision_kind, confidence_basis_points, disposition, reason,
             input_snapshot, policy_snapshot, recommendation, evaluated_at, trace_id
@@ -122,7 +122,7 @@ async fn seed_resolved_dispatch_aged(
 
     sqlx::query(
         r#"
-        INSERT INTO viryaos_autopilot_actions (
+        INSERT INTO autopilot_actions (
             id, workspace_id, decision_id, context, action_kind, subject_kind,
             subject_id, idempotency_key, payload, status, finished_at, trace_id
         ) VALUES ($1, $2, $3, 'growth_intelligence', 'request_agent_run', 'workspace',
@@ -146,7 +146,7 @@ async fn seed_resolved_dispatch_aged(
     let measurement_id = Uuid::now_v7();
     sqlx::query(
         r#"
-        INSERT INTO viryaos_autopilot_measurements (
+        INSERT INTO autopilot_measurements (
             id, workspace_id, action_id, measurement_kind, subject_id,
             action_finished_at, baseline_value, due_at, status, available_at,
             finished_at
@@ -165,7 +165,7 @@ async fn seed_resolved_dispatch_aged(
     // so "because of" says what happened rather than only that something did.
     sqlx::query(
         r#"
-        INSERT INTO viryaos_autopilot_outcomes (
+        INSERT INTO autopilot_outcomes (
             workspace_id, decision_id, action_id, measurement_id, metric_key,
             observed_value, baseline_value, effect_assessment,
             delta_basis_points, observed_at
@@ -183,7 +183,7 @@ async fn seed_resolved_dispatch_aged(
 
     sqlx::query(
         r#"
-        INSERT INTO viryaos_growth_evidence (
+        INSERT INTO growth_evidence (
             workspace_id, action_id, opportunity_id, timestamp, audience,
             recipient_id, channel, estimated_reach, treatment, propensity,
             observed_fans, observed_incremental_fans, predicted_fans,
@@ -261,7 +261,7 @@ async fn a_resolved_outcome_moves_a_belief_and_leaves_a_citable_record()
 
     // ── The belief moved ──
     let posterior: Option<(serde_json::Value,)> = sqlx::query_as(
-        "SELECT state FROM viryaos_brain_state
+        "SELECT state FROM brain_state
          WHERE workspace_id = $1 AND module = 'strategy_posterior'",
     )
     .bind(workspace_id.into_uuid())
@@ -292,7 +292,7 @@ async fn a_resolved_outcome_moves_a_belief_and_leaves_a_citable_record()
     let revisions = sqlx::query_as::<_, RevisionRow>(
         "SELECT belief_key, change_summary, previous_value, current_value,
                 caused_by_action_ids
-         FROM viryaos_brain_belief_revisions
+         FROM brain_belief_revisions
          WHERE workspace_id = $1 AND module = 'strategy_posterior'
          ORDER BY recorded_at DESC",
     )
@@ -349,12 +349,12 @@ async fn a_resolved_outcome_moves_a_belief_and_leaves_a_citable_record()
                d.trace_id,
                o.effect_assessment,
                d.input_snapshot -> 'learning' ->> 'strategy_applied' AS strategy_applied
-        FROM viryaos_autopilot_actions a
-        JOIN viryaos_autopilot_decisions d
+        FROM autopilot_actions a
+        JOIN autopilot_decisions d
           ON d.workspace_id = a.workspace_id AND d.id = a.decision_id
         LEFT JOIN LATERAL (
             SELECT effect_assessment
-            FROM viryaos_autopilot_outcomes
+            FROM autopilot_outcomes
             WHERE workspace_id = a.workspace_id
               AND action_id = a.id
               AND effect_assessment IS NOT NULL
@@ -402,12 +402,11 @@ async fn a_resolved_outcome_moves_a_belief_and_leaves_a_citable_record()
     // stored posterior instead, every cycle would append the same revision
     // again and the ledger would grow without anything having been learned.
     repository.load_causal_model(workspace_id).await?;
-    let revision_count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM viryaos_brain_belief_revisions WHERE workspace_id = $1",
-    )
-    .bind(workspace_id.into_uuid())
-    .fetch_one(&pool)
-    .await?;
+    let revision_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM brain_belief_revisions WHERE workspace_id = $1")
+            .bind(workspace_id.into_uuid())
+            .fetch_one(&pool)
+            .await?;
     assert_eq!(
         revision_count, 1,
         "a replay that learns nothing new must record nothing new"
@@ -466,7 +465,7 @@ async fn evidence_older_than_the_lookback_is_not_relearned()
 
     // The posterior must not carry the cell the stale evidence was in.
     let posterior: Option<(serde_json::Value,)> = sqlx::query_as(
-        "SELECT state FROM viryaos_brain_state
+        "SELECT state FROM brain_state
          WHERE workspace_id = $1 AND module = 'strategy_posterior'",
     )
     .bind(workspace_id.into_uuid())
@@ -481,12 +480,11 @@ async fn evidence_older_than_the_lookback_is_not_relearned()
 
     // And the ledger must record nothing — a replay that learns nothing
     // records nothing (the invariant the first proof test pins).
-    let revisions: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM viryaos_brain_belief_revisions WHERE workspace_id = $1",
-    )
-    .bind(workspace_id.into_uuid())
-    .fetch_one(&pool)
-    .await?;
+    let revisions: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM brain_belief_revisions WHERE workspace_id = $1")
+            .bind(workspace_id.into_uuid())
+            .fetch_one(&pool)
+            .await?;
     assert_eq!(
         revisions, 0,
         "out-of-window evidence must record no revision"
@@ -540,7 +538,7 @@ async fn a_later_horizon_reopens_evidence_the_earlier_one_already_advanced()
     // and its 3d horizon was stamped three days ago. Then the 14d horizon
     // lands an hour ago.
     sqlx::query(
-        "UPDATE viryaos_growth_evidence
+        "UPDATE growth_evidence
          SET resolved_at = NULL, replayed_3d_at = $3, replayed_14d_at = $4,
              last_partial_resolution_at = $4, partial_resolution_count = 2
          WHERE workspace_id = $1 AND action_id = $2",
@@ -737,12 +735,10 @@ async fn an_unpublished_draft_is_not_measured_as_a_zero() -> Result<(), Box<dyn 
     // Same seed, publishing kind, opposite required answer.
     let orphaned =
         seed_resolved_dispatch(&pool, workspace_id, "social-post", "community_first", 0.0).await?;
-    sqlx::query(
-        "UPDATE viryaos_autopilot_actions SET action_kind = 'agent.content.request' WHERE id = $1",
-    )
-    .bind(orphaned.action_id)
-    .execute(&pool)
-    .await?;
+    sqlx::query("UPDATE autopilot_actions SET action_kind = 'agent.content.request' WHERE id = $1")
+        .bind(orphaned.action_id)
+        .execute(&pool)
+        .await?;
     match repository
         .observe_measurement(workspace_id, &claimed(orphaned.action_id), now)
         .await

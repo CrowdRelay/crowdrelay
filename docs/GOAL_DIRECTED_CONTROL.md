@@ -11,7 +11,7 @@ other.
 | | `domain::objectives::GrowthObjective` | `brain::world_model::GrowthTarget` |
 | --- | --- | --- |
 | Declared by | an operator | nobody — derived |
-| Source | `viryaos_growth_objectives` | a hardcoded fan-count table |
+| Source | `growth_objectives` | a hardcoded fan-count table |
 | Has a deadline | yes | no; a calendar month |
 | Has a frozen baseline | yes | no |
 | Scope | workspace / city / event / release plan | workspace |
@@ -77,7 +77,7 @@ Most of it, and the parts that exist are the parts that are usually done badly.
 - **PORTFOLIO.** `PortfolioOptimizer` selects on `DecisionValue::total()`, in
   expected incremental Y30 fans, with WAIT competing. Deadline-free, but the
   unit is already the unit a goal is denominated in.
-- **ACTUAL.** `viryaos_growth_metric_points` — the same series the objective is
+- **ACTUAL.** `growth_metric_points` — the same series the objective is
   declared against. One source, no second reading.
 
 ## What is missing

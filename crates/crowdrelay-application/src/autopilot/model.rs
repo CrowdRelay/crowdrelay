@@ -1,4 +1,4 @@
-//! Stable application-boundary types for ViryaOS Autopilot.
+//! Stable application-boundary types for CrowdRelay Autopilot.
 
 use crowdrelay_brain::AgentTier;
 use crowdrelay_domain::{
@@ -191,24 +191,24 @@ pub enum ActionSubject {
     Beacon(BeaconId),
     GrowthMetricSeries(GrowthMetricSeriesId),
     BookingTarget(BookingTargetId),
-    /// A screened booking agent — `viryaos_booking_agents.id`. Distinct from
+    /// A screened booking agent — `booking_agents.id`. Distinct from
     /// `BookingTarget`: the agent is the booking graph's third entity, the
     /// one the band applies to rather than pitches a night at.
     BookingAgent(BookingAgentId),
     OutreachTarget(OutreachTargetId),
     /// P0-3: A community target discovered by the agent (e.g. a subreddit
     /// from `agent_outreach_targets`). Distinct from `OutreachTarget`
-    /// which is an operator-managed contact in `viryaos_outreach_targets`.
+    /// which is an operator-managed contact in `outreach_targets`.
     /// The UUID is `agent_outreach_targets.id`.
     TargetCommunity(uuid::Uuid),
     /// Supply is a property of the whole workspace rather than of any one row,
     /// so the sweep that replenishes it has the workspace as its subject.
     Workspace(WorkspaceId),
     /// One raised content suggestion — the queue entry that asks the band to
-    /// commit to a beat. The UUID is `viryaos_content_suggestions.id`.
+    /// commit to a beat. The UUID is `content_suggestions.id`.
     ContentSuggestion(ContentSuggestionId),
     /// One proposed arc — the queue entry that asks the band to commit to a
-    /// season's shape. The UUID is `viryaos_arcs.id`. The arc, not any beat
+    /// season's shape. The UUID is `arcs.id`. The arc, not any beat
     /// inside it, is the approval unit.
     ContentArc(ArcId),
 }

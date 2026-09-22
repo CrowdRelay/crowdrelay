@@ -93,7 +93,7 @@ pub async fn grant(
     let expires_at = expiry_for(now, days)?;
     let view = sqlx::query_as::<_, StandingApprovalView>(
         r#"
-        INSERT INTO viryaos_standing_approvals (
+        INSERT INTO standing_approvals (
             workspace_id, action_kind, target_key, action_class,
             granted_by, granted_at, expires_at, note
         )
@@ -141,7 +141,7 @@ pub async fn revoke(
 ) -> Result<(), StandingApprovalError> {
     let result = sqlx::query(
         r#"
-        UPDATE viryaos_standing_approvals
+        UPDATE standing_approvals
         SET revoked_at = $5, revoked_by = $4
         WHERE workspace_id = $1
           AND action_kind = $2
@@ -181,7 +181,7 @@ pub async fn grant_target_for_action(
     let row: Option<(String, serde_json::Value)> = sqlx::query_as(
         r#"
         SELECT action_kind, payload
-        FROM viryaos_autopilot_actions
+        FROM autopilot_actions
         WHERE workspace_id = $1 AND id = $2
         "#,
     )
@@ -221,7 +221,7 @@ pub async fn list(
         r#"
         SELECT action_kind, target_key, action_class, granted_by,
                granted_at, expires_at, revoked_at, revoked_by, note
-        FROM viryaos_standing_approvals
+        FROM standing_approvals
         WHERE workspace_id = $1
         ORDER BY granted_at DESC, action_kind, target_key
         "#,

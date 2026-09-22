@@ -100,11 +100,10 @@ async fn a_name_only_admit_dedupes_and_a_later_email_adopts_the_stub()
         second.beacon_id, first.beacon_id,
         "a re-admit of the same name minted a second beacon"
     );
-    let count: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM viryaos_beacons WHERE workspace_id = $1")
-            .bind(workspace_id.into_uuid())
-            .fetch_one(&pool)
-            .await?;
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM beacons WHERE workspace_id = $1")
+        .bind(workspace_id.into_uuid())
+        .fetch_one(&pool)
+        .await?;
     assert_eq!(count, 1, "the name-stub match must dedupe");
 
     // A different name in the same city/kind is a different band — both live.
@@ -139,7 +138,7 @@ async fn a_name_only_admit_dedupes_and_a_later_email_adopts_the_stub()
     );
     let row: (bool, bool, Option<String>) = sqlx::query_as(
         "SELECT verified, accepts_outreach, contact_email
-         FROM viryaos_beacons WHERE id = $1",
+         FROM beacons WHERE id = $1",
     )
     .bind(first.beacon_id.into_uuid())
     .fetch_one(&pool)
@@ -153,7 +152,7 @@ async fn a_name_only_admit_dedupes_and_a_later_email_adopts_the_stub()
     // A create-intent colliding with a REAL contact (email match) must not
     // re-arm a suppression the operator already recorded.
     sqlx::query(
-        "UPDATE viryaos_beacons
+        "UPDATE beacons
          SET do_not_contact = true, accepts_outreach = false, verified = false
          WHERE id = $1",
     )
@@ -175,7 +174,7 @@ async fn a_name_only_admit_dedupes_and_a_later_email_adopts_the_stub()
     assert_eq!(suppressed.beacon_id, first.beacon_id);
     let (dnc, outreach, verified): (bool, bool, bool) = sqlx::query_as(
         "SELECT do_not_contact, accepts_outreach, verified
-         FROM viryaos_beacons WHERE id = $1",
+         FROM beacons WHERE id = $1",
     )
     .bind(first.beacon_id.into_uuid())
     .fetch_one(&pool)

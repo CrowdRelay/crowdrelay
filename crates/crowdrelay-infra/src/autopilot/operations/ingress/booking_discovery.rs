@@ -91,7 +91,7 @@ impl AutopilotBookingDiscoveryRepository for PostgresAutopilotRepository {
                 };
                 let inserted = sqlx::query(
                     r#"
-                    INSERT INTO viryaos_booking_candidates (
+                    INSERT INTO booking_candidates (
                         workspace_id, target_kind, display_name, city_slug,
                         route_kind, route_value, source, source_reference,
                         evidence, fit_basis_points, capacity, status, refusal_reason
@@ -172,7 +172,7 @@ impl AutopilotBookingDiscoveryRepository for PostgresAutopilotRepository {
             let row = sqlx::query_as::<_, (String, String, Option<String>, String, String)>(
                 r#"
                 SELECT target_kind, display_name, city_slug, route_kind, route_value
-                FROM viryaos_booking_candidates
+                FROM booking_candidates
                 WHERE workspace_id = $1 AND id = $2 AND status = 'admitted'
                 FOR UPDATE
                 "#,
@@ -207,7 +207,7 @@ impl AutopilotBookingDiscoveryRepository for PostgresAutopilotRepository {
 
             let target_id_opt = sqlx::query_scalar::<_, Uuid>(
                 r#"
-                INSERT INTO viryaos_booking_targets (
+                INSERT INTO booking_targets (
                     workspace_id, city_id, target_kind, display_name, contact_email
                 ) VALUES ($1,$2,$3,$4,lower(btrim($5)))
                 ON CONFLICT (workspace_id, city_id, contact_email) DO NOTHING
@@ -227,7 +227,7 @@ impl AutopilotBookingDiscoveryRepository for PostgresAutopilotRepository {
             let target_id = match target_id_opt {
                 Some(id) => id,
                 None => sqlx::query_scalar::<_, Uuid>(
-                    "SELECT id FROM viryaos_booking_targets \
+                    "SELECT id FROM booking_targets \
                      WHERE workspace_id=$1 AND city_id=$2 AND contact_email=lower(btrim($3))",
                 )
                 .bind(workspace_id.into_uuid())
@@ -240,7 +240,7 @@ impl AutopilotBookingDiscoveryRepository for PostgresAutopilotRepository {
 
             sqlx::query(
                 r#"
-                UPDATE viryaos_booking_candidates
+                UPDATE booking_candidates
                 SET status = 'promoted', promoted_at = now(), booking_target_id = $3
                 WHERE workspace_id = $1 AND id = $2
                 "#,
@@ -280,7 +280,7 @@ impl AutopilotBookingDiscoveryRepository for PostgresAutopilotRepository {
                 SELECT id, target_kind, display_name, city_slug, route_kind,
                        route_value, source, fit_basis_points, status,
                        refusal_reason, booking_target_id
-                FROM viryaos_booking_candidates
+                FROM booking_candidates
                 WHERE workspace_id = $1
                   AND ($2::text IS NULL OR status = $2)
                 ORDER BY created_at DESC, id DESC

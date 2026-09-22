@@ -109,7 +109,7 @@ impl AuthorityState {
 }
 
 /// The measured record of one action kind, from
-/// `viryaos_autopilot_outcomes.effect_assessment`.
+/// `autopilot_outcomes.effect_assessment`.
 ///
 /// Always `None` until Phase 5 records growth outcomes. The slot exists now so
 /// Phase 7 changes the *data* feeding the comparator rather than the comparator

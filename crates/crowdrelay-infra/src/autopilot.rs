@@ -1,4 +1,4 @@
-//! PostgreSQL adapter for the deterministic ViryaOS Autopilot.
+//! PostgreSQL adapter for the deterministic CrowdRelay Autopilot.
 
 mod actions;
 mod actions_execution;
@@ -429,7 +429,7 @@ struct BookingTargetRow {
     days_until_application_close: Option<i64>,
     next_application_closes_at: Option<OffsetDateTime>,
     /// The rooms this target resolves to — primary `venue_id` union the
-    /// `viryaos_booking_target_venues` edges (§12-5 entity 6). Venue-level
+    /// `booking_target_venues` edges (§12-5 entity 6). Venue-level
     /// evidence should aggregate over this set — the unioned evidence read
     /// is the follow-up; until then the ids are exposed so a reader can
     /// never see a promoter as room-less.

@@ -28,7 +28,7 @@ impl AutopilotMeasurementRepository for PostgresAutopilotRepository {
             // row closes with whatever earlier attempts actually landed.
             let stale_failed: Vec<(uuid::Uuid, String)> = sqlx::query_as(
                 r#"
-                UPDATE viryaos_autopilot_measurements
+                UPDATE autopilot_measurements
                 SET status = 'failed', finished_at = $2, last_error_kind = 'stale_retry_exhausted'
                 WHERE workspace_id = $1
                   AND status = 'processing'
@@ -56,7 +56,7 @@ impl AutopilotMeasurementRepository for PostgresAutopilotRepository {
             }
             sqlx::query(
                 r#"
-                UPDATE viryaos_autopilot_measurements
+                UPDATE autopilot_measurements
                 SET status = 'pending', available_at = $2, started_at = NULL,
                     last_error_kind = 'stale_processing_recovered'
                 WHERE workspace_id = $1
@@ -74,7 +74,7 @@ impl AutopilotMeasurementRepository for PostgresAutopilotRepository {
                 r#"
                 WITH selected AS (
                     SELECT id
-                    FROM viryaos_autopilot_measurements
+                    FROM autopilot_measurements
                     WHERE workspace_id = $1
                       AND status = 'pending'
                       AND due_at <= $2
@@ -84,7 +84,7 @@ impl AutopilotMeasurementRepository for PostgresAutopilotRepository {
                     FOR UPDATE SKIP LOCKED
                     LIMIT $3
                 )
-                UPDATE viryaos_autopilot_measurements AS measurement
+                UPDATE autopilot_measurements AS measurement
                 SET status = 'processing',
                     attempt_count = measurement.attempt_count + 1,
                     started_at = $2,
@@ -115,7 +115,7 @@ impl AutopilotMeasurementRepository for PostgresAutopilotRepository {
                     Err(_) => {
                         let quarantined: Option<(uuid::Uuid,)> = sqlx::query_as(
                             r#"
-                            UPDATE viryaos_autopilot_measurements
+                            UPDATE autopilot_measurements
                             SET status='failed', finished_at=$3,
                                 last_error_kind='unsupported_measurement_kind'
                             WHERE workspace_id=$1 AND id=$2 AND status='processing'
@@ -228,13 +228,13 @@ impl AutopilotMeasurementRepository for PostgresAutopilotRepository {
             let assessment = effect_assessment_str(effect.assessment);
             let outcome_inserted = sqlx::query(
                 r#"
-                INSERT INTO viryaos_autopilot_outcomes (
+                INSERT INTO autopilot_outcomes (
                     workspace_id, decision_id, action_id, measurement_id, metric_key,
                     observed_value, baseline_value, effect_assessment, delta_basis_points,
                     metadata, observed_at
                 )
                 SELECT $1, action.decision_id, action.id, $3, $4, $5, $6, $7, $8, $9, $10
-                FROM viryaos_autopilot_actions AS action
+                FROM autopilot_actions AS action
                 WHERE action.workspace_id = $1 AND action.id = $2
                 ON CONFLICT (workspace_id, measurement_id)
                     WHERE measurement_id IS NOT NULL DO NOTHING
@@ -263,7 +263,7 @@ impl AutopilotMeasurementRepository for PostgresAutopilotRepository {
             }
             let updated = sqlx::query(
                 r#"
-                UPDATE viryaos_autopilot_measurements
+                UPDATE autopilot_measurements
                 SET status = 'succeeded', finished_at = $3, last_error_kind = NULL
                 WHERE workspace_id = $1 AND id = $2 AND status = 'processing'
                 "#,
@@ -279,8 +279,8 @@ impl AutopilotMeasurementRepository for PostgresAutopilotRepository {
             }
             // Bridge: resolve the dispatch prediction with the observed
             // outcome. The brain records predictions in
-            // viryaos_dispatch_predictions before dispatch; the measurement
-            // system writes outcomes to viryaos_autopilot_outcomes. Without
+            // dispatch_predictions before dispatch; the measurement
+            // system writes outcomes to autopilot_outcomes. Without
             // this bridge, the prediction's observed_new_fans /
             // resolved_at columns are never populated, and the causal model
             // learns from an empty dataset every cycle.
@@ -290,7 +290,7 @@ impl AutopilotMeasurementRepository for PostgresAutopilotRepository {
             //   incremental_fan_growth_14d    → observed_new_fans (preferred)
             //   agent_run_signal_installs_7d  → observed_signal_installs
             //
-            // The evidence view (viryaos_brain_evidence) also joins these
+            // The evidence view (brain_evidence) also joins these
             // tables, so even if this bridge misses a row, the view
             // provides the join. But updating the prediction row directly
             // is more efficient for the brain's read path.
@@ -305,7 +305,7 @@ impl AutopilotMeasurementRepository for PostgresAutopilotRepository {
                 AutopilotMeasurementKind::AgentRunCommunityEngagement7d => {
                     let _ = sqlx::query(
                         r#"
-                        UPDATE viryaos_growth_evidence
+                        UPDATE growth_evidence
                         SET observed_engagement = $3
                         WHERE workspace_id = $1
                           AND action_id = $2
@@ -321,7 +321,7 @@ impl AutopilotMeasurementRepository for PostgresAutopilotRepository {
                 AutopilotMeasurementKind::AgentRunFanGrowth14d => {
                     let _ = sqlx::query(
                         r#"
-                        UPDATE viryaos_dispatch_predictions
+                        UPDATE dispatch_predictions
                         -- Each measurement writes its own column and nothing
                         -- else. `resolved_at` is set by
                         -- `refresh_evidence_readiness` once the queue is empty,
@@ -344,7 +344,7 @@ impl AutopilotMeasurementRepository for PostgresAutopilotRepository {
                     // the 3d intermediate value unconditionally.
                     let _ = sqlx::query(
                         r#"
-                        UPDATE viryaos_growth_evidence
+                        UPDATE growth_evidence
                         SET observed_fans = $3
                         WHERE workspace_id = $1
                           AND action_id = $2
@@ -376,7 +376,7 @@ impl AutopilotMeasurementRepository for PostgresAutopilotRepository {
                 AutopilotMeasurementKind::AgentRunFanGrowth3d => {
                     let _ = sqlx::query(
                         r#"
-                        UPDATE viryaos_dispatch_predictions
+                        UPDATE dispatch_predictions
                         SET observed_new_fans = $3
                         WHERE workspace_id = $1
                           AND action_id = $2
@@ -391,7 +391,7 @@ impl AutopilotMeasurementRepository for PostgresAutopilotRepository {
                     .map_err(map_sqlx)?;
                     let _ = sqlx::query(
                         r#"
-                        UPDATE viryaos_growth_evidence
+                        UPDATE growth_evidence
                         SET observed_fans = COALESCE(observed_fans, $3)
                         WHERE workspace_id = $1
                           AND action_id = $2
@@ -420,7 +420,7 @@ impl AutopilotMeasurementRepository for PostgresAutopilotRepository {
                     .await?;
                     let _ = sqlx::query(
                         r#"
-                        UPDATE viryaos_growth_evidence
+                        UPDATE growth_evidence
                         SET observed_incremental_fans = COALESCE(observed_incremental_fans, $3),
                             evidence_quality = $4
                         WHERE workspace_id = $1
@@ -452,7 +452,7 @@ impl AutopilotMeasurementRepository for PostgresAutopilotRepository {
                 AutopilotMeasurementKind::IncrementalFanGrowth3d => {
                     let _ = sqlx::query(
                         r#"
-                        UPDATE viryaos_growth_evidence
+                        UPDATE growth_evidence
                         SET observed_incremental_fans_3d =
                                 COALESCE(observed_incremental_fans_3d, $3)
                         WHERE workspace_id = $1
@@ -471,7 +471,7 @@ impl AutopilotMeasurementRepository for PostgresAutopilotRepository {
                 | AutopilotMeasurementKind::SignalInstalls1d => {
                     let _ = sqlx::query(
                         r#"
-                        UPDATE viryaos_dispatch_predictions
+                        UPDATE dispatch_predictions
                         SET observed_signal_installs = COALESCE(observed_signal_installs, $3)
                         WHERE workspace_id = $1
                           AND action_id = $2
@@ -502,7 +502,7 @@ impl AutopilotMeasurementRepository for PostgresAutopilotRepository {
                     .await?;
                     let _ = sqlx::query(
                         r#"
-                        UPDATE viryaos_growth_evidence
+                        UPDATE growth_evidence
                         SET durable_fans_30d = COALESCE(durable_fans_30d, $3),
                             evidence_quality = $4
                         WHERE workspace_id = $1
@@ -548,7 +548,7 @@ impl AutopilotMeasurementRepository for PostgresAutopilotRepository {
             if let Some(metric_key) = measurement.kind.learnable_metric_key() {
                 let _ = sqlx::query(
                     r#"
-                    UPDATE viryaos_growth_evidence
+                    UPDATE growth_evidence
                     SET observed_metrics = observed_metrics ||
                         jsonb_build_object(
                             $3::text,
@@ -586,14 +586,14 @@ impl AutopilotMeasurementRepository for PostgresAutopilotRepository {
                     r#"
                     WITH action_context AS (
                         SELECT context
-                        FROM viryaos_autopilot_actions
+                        FROM autopilot_actions
                         WHERE workspace_id=$1 AND id=$2
                     ), latest_per_action AS (
                         SELECT DISTINCT ON (outcome.action_id)
                                outcome.action_id, outcome.effect_assessment,
                                outcome.observed_at, outcome.id
-                        FROM viryaos_autopilot_outcomes outcome
-                        JOIN viryaos_autopilot_actions action
+                        FROM autopilot_outcomes outcome
+                        JOIN autopilot_actions action
                           ON action.workspace_id=outcome.workspace_id AND action.id=outcome.action_id
                         JOIN action_context ON action.context=action_context.context
                         WHERE outcome.workspace_id=$1 AND outcome.measurement_id IS NOT NULL
@@ -607,7 +607,7 @@ impl AutopilotMeasurementRepository for PostgresAutopilotRepository {
                         SELECT count(*)=2 AND bool_and(effect_assessment='worsened') AS should_guard
                         FROM recent
                     )
-                    UPDATE viryaos_autopilot_policies policy
+                    UPDATE autopilot_policies policy
                     SET autonomy_level='require_approval',
                         guarded_until=$3 + INTERVAL '7 days',
                         guardrail_reason='two_consecutive_worsened_effects',
@@ -660,7 +660,7 @@ impl AutopilotMeasurementRepository for PostgresAutopilotRepository {
             ) {
                 let _ = sqlx::query(
                     r#"
-                    INSERT INTO viryaos_attribution_requests
+                    INSERT INTO attribution_requests
                         (workspace_id, measurement_id, action_id, attribution_version)
                     VALUES ($1, $2, $3, 1)
                     ON CONFLICT (measurement_id, attribution_version) DO NOTHING
@@ -688,7 +688,7 @@ impl AutopilotMeasurementRepository for PostgresAutopilotRepository {
                     sqlx::query_as::<_, (sqlx::types::Uuid, String, time::OffsetDateTime)>(
                         r#"
                         SELECT experiment_uuid, unit_id, assigned_at
-                        FROM viryaos_experiment_assignments
+                        FROM experiment_assignments
                         WHERE workspace_id = $1
                           AND action_id = $2
                           AND experiment_uuid IS NOT NULL
@@ -778,7 +778,7 @@ impl AutopilotMeasurementRepository for PostgresAutopilotRepository {
             let row: Option<(uuid::Uuid, String, String)> =
                 sqlx::query_as::<_, (uuid::Uuid, String, String)>(
                     r#"
-                UPDATE viryaos_autopilot_measurements
+                UPDATE autopilot_measurements
                 SET status = CASE WHEN $4 AND attempt_count < 3 THEN 'pending' ELSE 'failed' END,
                     available_at = CASE
                         WHEN $4 AND attempt_count < 3 THEN $3 + INTERVAL '30 minutes'
@@ -860,7 +860,7 @@ where
 {
     sqlx::query(
         r#"
-        UPDATE viryaos_growth_evidence
+        UPDATE growth_evidence
         SET observed_metrics = observed_metrics || $3::jsonb
         WHERE workspace_id = $1 AND action_id = $2
         "#,

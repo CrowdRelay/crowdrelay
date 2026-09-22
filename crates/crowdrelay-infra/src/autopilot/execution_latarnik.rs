@@ -39,7 +39,7 @@ pub(super) async fn execute_latarnik_invite(
     let pinned = sqlx::query_as::<_, (String, String)>(
         r#"
         SELECT beacon.display_name, beacon.contact_email
-        FROM viryaos_beacons AS beacon
+        FROM beacons AS beacon
         WHERE beacon.workspace_id = $1
           AND beacon.id = $2
           AND beacon.version = $3

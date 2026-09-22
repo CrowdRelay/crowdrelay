@@ -37,6 +37,7 @@ mod tests {
                 has_route: true,
             }],
             co_bill: Vec::new(),
+            local_acts: Vec::new(),
         }
     }
 

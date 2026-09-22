@@ -173,7 +173,7 @@ async fn load_learning_proof(
         r#"
         SELECT id, module, belief_key, previous_value, current_value,
                change_summary, caused_by_action_ids, recorded_at
-        FROM viryaos_brain_belief_revisions
+        FROM brain_belief_revisions
         WHERE workspace_id = $1
         ORDER BY recorded_at DESC
         LIMIT $2
@@ -264,15 +264,15 @@ async fn load_causes(
             o.metric_key,
             o.delta_basis_points,
             o.observed_at
-        FROM viryaos_autopilot_actions a
-        LEFT JOIN viryaos_autopilot_decisions d
+        FROM autopilot_actions a
+        LEFT JOIN autopilot_decisions d
           ON d.workspace_id = a.workspace_id AND d.id = a.decision_id
         -- The outcome the measurement assessed, newest first. An action can
         -- carry several horizons; the belief moved on the incremental one,
         -- and showing every horizon here would bury it.
         LEFT JOIN LATERAL (
             SELECT effect_assessment, metric_key, delta_basis_points, observed_at
-            FROM viryaos_autopilot_outcomes
+            FROM autopilot_outcomes
             WHERE workspace_id = a.workspace_id
               AND action_id = a.id
               AND effect_assessment IS NOT NULL
@@ -307,7 +307,7 @@ async fn load_influences(
             input_snapshot -> 'learning' ->> 'strategy_applied' AS strategy_applied,
             input_snapshot -> 'learning' ->> 'strategy_source' AS strategy_source,
             recommendation ->> 'template_id' AS template_id
-        FROM viryaos_autopilot_decisions
+        FROM autopilot_decisions
         WHERE workspace_id = $1
           AND evaluated_at >= $2
           -- Only decisions that recorded what learning did to them. A decision

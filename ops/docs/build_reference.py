@@ -97,7 +97,7 @@ def autopilot_contexts() -> list[str]:
     for path in sorted((ROOT / "migrations").glob("*.sql")):
         text = path.read_text()
         for match in re.finditer(
-            r"viryaos_autopilot_policies_context_check(.{0,600}?)\)\)", text, re.DOTALL
+            r"autopilot_policies_context_check(.{0,600}?)\)\)", text, re.DOTALL
         ):
             values.update(re.findall(r"'([a-z_]+)'", match.group(1)))
     return sorted(values)

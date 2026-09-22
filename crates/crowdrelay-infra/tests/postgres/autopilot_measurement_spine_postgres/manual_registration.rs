@@ -17,7 +17,7 @@ async fn i_manual_social_and_chat_posts_file_reach_and_execute_the_assignment() 
             // identity must exist before the arm does.
             let design_id = uuid::Uuid::now_v7();
             sqlx::query(
-                r#"INSERT INTO viryaos_experiment_designs
+                r#"INSERT INTO experiment_designs
                    (experiment_uuid, workspace_id, intervention_key,
                     logical_cycle_key, unit_kind, holdout_probability,
                     interference_policy)
@@ -30,7 +30,7 @@ async fn i_manual_social_and_chat_posts_file_reach_and_execute_the_assignment() 
             .await
             .expect("design");
             sqlx::query(
-                r#"INSERT INTO viryaos_experiment_assignments
+                r#"INSERT INTO experiment_assignments
                    (id, workspace_id, unit_id, unit_kind, arm, propensity,
                     intended_template_id, action_id, execution_status,
                     experiment_uuid)
@@ -127,7 +127,7 @@ async fn i_manual_social_and_chat_posts_file_reach_and_execute_the_assignment() 
         (dc_action, "discord_post", "discord_channel"),
     ] {
         let (reach_rows, recipient_kind) = sqlx::query_as::<_, (i64, String)>(
-            "SELECT count(*), max(recipient_kind) FROM viryaos_reach_events \
+            "SELECT count(*), max(recipient_kind) FROM reach_events \
                  WHERE workspace_id = $1 AND action_id = $2 AND channel = $3",
         )
         .bind(f.workspace_id.into_uuid())
@@ -143,7 +143,7 @@ async fn i_manual_social_and_chat_posts_file_reach_and_execute_the_assignment() 
         assert_eq!(recipient_kind, kind, "{channel} names its own audience");
 
         let status: String = sqlx::query_scalar(
-            "SELECT execution_status FROM viryaos_experiment_assignments \
+            "SELECT execution_status FROM experiment_assignments \
                  WHERE workspace_id = $1 AND action_id = $2",
         )
         .bind(f.workspace_id.into_uuid())
@@ -172,7 +172,7 @@ async fn i_manual_social_and_chat_posts_file_reach_and_execute_the_assignment() 
         Err(crowdrelay_infra::fanbase::ManualContentPostError::NotAwaitingPublication { .. })
     ));
     let reach_rows_after: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM viryaos_reach_events \
+        "SELECT count(*) FROM reach_events \
              WHERE workspace_id = $1 AND action_id = $2 AND channel = 'social_post'",
     )
     .bind(f.workspace_id.into_uuid())

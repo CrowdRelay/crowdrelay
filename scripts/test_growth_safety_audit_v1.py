@@ -110,7 +110,7 @@ class GrowthSafetyAudit(unittest.TestCase):
         writers = [
             path
             for path in INFRA.rglob("*.rs")
-            if "INSERT INTO viryaos_growth_metric_points" in read(path)
+            if "INSERT INTO growth_metric_points" in read(path)
         ]
         self.assertEqual([path.name for path in writers], ["growth_metrics.rs"])
 

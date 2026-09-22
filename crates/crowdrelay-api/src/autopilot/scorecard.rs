@@ -151,7 +151,7 @@ pub struct LearningState {
     /// improving, learning, stagnant, regressing, or initializing.
     pub metacognition: Option<String>,
     /// Days on which a belief actually moved, from
-    /// `viryaos_brain_belief_revisions`.
+    /// `brain_belief_revisions`.
     ///
     /// Previously read off the serialized metacognition snapshot, where it
     /// could only ever be 0 or 1: the loader builds a fresh monitor each cycle
@@ -280,7 +280,7 @@ struct MetacognitionPayload {
     /// The snapshot also carries `learning_cycles` and
     /// `improving_cycles_total`. They are deliberately not deserialized: the
     /// loader builds a fresh monitor every cycle, so both are always 0 or 1,
-    /// and the scorecard now counts `viryaos_brain_belief_revisions` instead.
+    /// and the scorecard now counts `brain_belief_revisions` instead.
     /// Leaving the fields here would invite someone to read them again.
     state: Option<String>,
 }
@@ -358,12 +358,12 @@ async fn load_agent_scorecard(
             envelope.agent_enabled,
             envelope.dry_run,
             posture.posture,
-            (SELECT max(evaluated_at) FROM viryaos_autopilot_decisions
+            (SELECT max(evaluated_at) FROM autopilot_decisions
              WHERE workspace_id = $1) AS last_decision_at,
-            (SELECT max(finished_at) FROM viryaos_autopilot_actions
+            (SELECT max(finished_at) FROM autopilot_actions
              WHERE workspace_id = $1 AND finished_at IS NOT NULL) AS last_action_at
-        FROM viryaos_growth_envelope AS envelope
-        LEFT JOIN viryaos_growth_posture AS posture
+        FROM growth_envelope AS envelope
+        LEFT JOIN growth_posture AS posture
           ON posture.workspace_id = envelope.workspace_id
         WHERE envelope.workspace_id = $1
         "#,
@@ -376,7 +376,7 @@ async fn load_agent_scorecard(
     let live_caps = sqlx::query_as::<_, CapabilityRow>(
         r#"
         SELECT DISTINCT capability
-        FROM viryaos_executor_capabilities
+        FROM executor_capabilities
         WHERE workspace_id = $1 AND expires_at > $2
         ORDER BY capability
         "#,
@@ -426,7 +426,7 @@ async fn load_agent_scorecard(
                 WHEN action_kind = 'agent.content.request' THEN 'agent.content'
                 ELSE action_kind
             END AS capability
-        FROM viryaos_autopilot_actions
+        FROM autopilot_actions
         WHERE workspace_id = $1
           AND status = 'queued'
           AND available_at < $2 - INTERVAL '1 hour'
@@ -466,7 +466,7 @@ async fn load_agent_scorecard(
                 WHERE status = 'unknown'
                   AND updated_at >= $2 - INTERVAL '7 days'
             )::bigint AS unknown
-        FROM viryaos_autopilot_actions
+        FROM autopilot_actions
         WHERE workspace_id = $1
         "#,
     )
@@ -493,7 +493,7 @@ async fn load_agent_scorecard(
         r#"
         WITH executed_actions AS (
             SELECT id
-            FROM viryaos_autopilot_actions
+            FROM autopilot_actions
             WHERE workspace_id = $1
               AND status IN ('succeeded', 'failed')
               AND finished_at IS NOT NULL
@@ -512,7 +512,7 @@ async fn load_agent_scorecard(
         FROM executed_actions AS action
         LEFT JOIN LATERAL (
             SELECT effect_assessment, action_id
-            FROM viryaos_autopilot_outcomes
+            FROM autopilot_outcomes
             WHERE workspace_id = $1
               AND action_id = action.id
             LIMIT 1
@@ -524,7 +524,7 @@ async fn load_agent_scorecard(
         -- one of them had a 7, 14 or 30 day measurement waiting on the clock.
         LEFT JOIN LATERAL (
             SELECT action_id, min(due_at) AS due_at
-            FROM viryaos_autopilot_measurements
+            FROM autopilot_measurements
             WHERE workspace_id = $1
               AND action_id = action.id
               AND status IN ('pending', 'processing')
@@ -575,7 +575,7 @@ async fn load_agent_scorecard(
                 WHERE status = 'queued'
                   AND available_at < $2 - INTERVAL '1 hour'
             )::bigint AS parked
-        FROM viryaos_autopilot_actions
+        FROM autopilot_actions
         WHERE workspace_id = $1
         GROUP BY context
         ORDER BY executed DESC, context
@@ -600,17 +600,17 @@ async fn load_agent_scorecard(
             outcome.delta_basis_points,
             action.finished_at AS completed_at,
             report.executor_id
-        FROM viryaos_autopilot_actions AS action
+        FROM autopilot_actions AS action
         LEFT JOIN LATERAL (
             SELECT effect_assessment, metric_key, delta_basis_points
-            FROM viryaos_autopilot_outcomes
+            FROM autopilot_outcomes
             WHERE workspace_id = $1
               AND action_id = action.id
             LIMIT 1
         ) AS outcome ON true
         LEFT JOIN LATERAL (
             SELECT executor_id
-            FROM viryaos_autopilot_execution_reports
+            FROM autopilot_execution_reports
             WHERE workspace_id = $1
               AND action_id = action.id
               AND status = 'succeeded'
@@ -635,7 +635,7 @@ async fn load_agent_scorecard(
     let meta_row = sqlx::query_as::<_, MetacognitionRow>(
         r#"
         SELECT (input_snapshot->'snapshot'->'metacognition')::text AS metacognition
-        FROM viryaos_autopilot_decisions
+        FROM autopilot_decisions
         WHERE workspace_id = $1
           AND input_snapshot ? 'snapshot'
           AND input_snapshot->'snapshot' ? 'metacognition'
@@ -668,7 +668,7 @@ async fn load_agent_scorecard(
     // read-only cycle preview, so the write would advance the brain's
     // self-history every time somebody opened the page.
     //
-    // `viryaos_brain_belief_revisions` is the record that already exists and
+    // `brain_belief_revisions` is the record that already exists and
     // already means this. A learning cycle is a day on which a belief actually
     // moved, and an improving one is a revision the module recorded as an
     // improvement. When nothing has been learned this reads 0, which is the
@@ -678,7 +678,7 @@ async fn load_agent_scorecard(
         SELECT
             count(DISTINCT recorded_at::date)::bigint AS learning_cycles,
             count(*)::bigint AS belief_revisions
-        FROM viryaos_brain_belief_revisions
+        FROM brain_belief_revisions
         WHERE workspace_id = $1
         "#,
     )
@@ -696,7 +696,7 @@ async fn load_agent_scorecard(
             count(*) FILTER (WHERE resolved_at IS NULL AND partial_resolution_count = 0)::bigint AS evidence_pending,
             max(last_partial_resolution_at) AS last_partial_resolution_at,
             max(resolved_at) AS last_full_resolution_at
-        FROM viryaos_growth_evidence
+        FROM growth_evidence
         WHERE workspace_id = $1
           AND action_id IS NOT NULL
         "#,
@@ -713,7 +713,7 @@ async fn load_agent_scorecard(
             count(*) FILTER (WHERE status = 'succeeded')::bigint AS succeeded,
             count(*) FILTER (WHERE status = 'failed')::bigint AS failed,
             min(due_at) FILTER (WHERE status = 'pending') AS next_due_at
-        FROM viryaos_autopilot_measurements
+        FROM autopilot_measurements
         WHERE workspace_id = $1
         GROUP BY measurement_kind
         ORDER BY min(due_at) FILTER (WHERE status = 'pending') NULLS LAST
@@ -733,7 +733,7 @@ async fn load_agent_scorecard(
         SELECT
             count(DISTINCT evidence.id)::bigint AS evidence_with_metrics,
             count(DISTINCT metric.key)::bigint AS metric_keys_observed
-        FROM viryaos_growth_evidence AS evidence
+        FROM growth_evidence AS evidence
         CROSS JOIN LATERAL jsonb_each(evidence.observed_metrics) AS metric
         WHERE evidence.workspace_id = $1
         "#,
@@ -749,7 +749,7 @@ async fn load_agent_scorecard(
     let exchange_row = sqlx::query_scalar::<_, Option<serde_json::Value>>(
         r#"
         SELECT state -> 'value_exchange'
-        FROM viryaos_brain_state
+        FROM brain_state
         WHERE workspace_id = $1 AND module = 'causal_model'
         "#,
     )

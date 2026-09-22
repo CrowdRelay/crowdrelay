@@ -346,7 +346,7 @@ impl GrowthMetricSyncWorker {
         let mut request = self
             .http_client
             .get(format!("https://api.discogs.com/artists/{artist_id}"))
-            .header("User-Agent", "CrowdRelay/1.0 +https://crowdrelay.com");
+            .header("User-Agent", "CrowdRelay/1.0 +https://crowdrelay.music");
         // The token is optional — the endpoint works without it at a lower
         // rate limit. When present, authenticate for the higher tier.
         if let Some(ref token) = self.discogs_token {
@@ -378,7 +378,7 @@ impl GrowthMetricSyncWorker {
             let mut rel_request = self
                 .http_client
                 .get(&releases_url)
-                .header("User-Agent", "CrowdRelay/1.0 +https://crowdrelay.com");
+                .header("User-Agent", "CrowdRelay/1.0 +https://crowdrelay.music");
             if let Some(ref token) = self.discogs_token {
                 rel_request = rel_request.header("Authorization", format!("Discogs token={token}"));
             }

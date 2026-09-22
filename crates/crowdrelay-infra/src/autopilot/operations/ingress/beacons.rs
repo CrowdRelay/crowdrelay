@@ -56,7 +56,7 @@ impl AutopilotBeaconStateRepository for PostgresAutopilotRepository {
                     WHEN $4::text IS NOT NULL AND contact_email = $4 THEN 0
                     WHEN $5::text IS NOT NULL AND destination_url = $5 THEN 1
                     ELSE 2 END AS match_kind
-                FROM viryaos_beacons
+                FROM beacons
                 WHERE workspace_id=$1 AND beacon_kind=$2
                   AND city_id IS NOT DISTINCT FROM $3
                   AND (
@@ -127,7 +127,7 @@ impl AutopilotBeaconStateRepository for PostgresAutopilotRepository {
             .await?
             {
                 let version = sqlx::query_scalar::<_, i64>(
-                    "SELECT version FROM viryaos_beacons WHERE workspace_id=$1 AND id=$2",
+                    "SELECT version FROM beacons WHERE workspace_id=$1 AND id=$2",
                 )
                 .bind(workspace_id.into_uuid())
                 .bind(beacon_id.into_uuid())
@@ -147,7 +147,7 @@ impl AutopilotBeaconStateRepository for PostgresAutopilotRepository {
             let version = if command.expected_version == 0 && natural_match.is_none() {
                 sqlx::query_scalar::<_, i64>(
                     r#"
-                    INSERT INTO viryaos_beacons(
+                    INSERT INTO beacons(
                         id,workspace_id,city_id,beacon_kind,display_name,contact_email,
                         destination_url,source_url,active,verified,accepts_outreach,
                         do_not_contact,relationship_score,relevance_basis_points,
@@ -193,7 +193,7 @@ impl AutopilotBeaconStateRepository for PostgresAutopilotRepository {
                 let preserve_flags = create_intent && !stub_adoption;
                 sqlx::query_scalar::<_, i64>(
                     r#"
-                    UPDATE viryaos_beacons
+                    UPDATE beacons
                     SET city_id=$3, beacon_kind=$4, display_name=$5, contact_email=$6,
                         destination_url=$7, source_url=$8, active=$9,
                         verified = CASE WHEN $19 THEN verified ELSE $10 END,
@@ -289,7 +289,7 @@ impl AutopilotBeaconStateRepository for PostgresAutopilotRepository {
             };
             let changed = sqlx::query(
                 r#"
-                INSERT INTO viryaos_beacon_campaigns(
+                INSERT INTO beacon_campaigns(
                     workspace_id,beacon_id,event_id,status,last_reply_disposition,updated_at
                 ) VALUES($1,$2,$3,$4,$5,$6)
                 ON CONFLICT (workspace_id,beacon_id,event_id) DO UPDATE SET
@@ -312,7 +312,7 @@ impl AutopilotBeaconStateRepository for PostgresAutopilotRepository {
             }
             if matches!(command.disposition, BeaconReplyDisposition::DoNotContact) {
                 sqlx::query(
-                    "UPDATE viryaos_beacons SET do_not_contact=true, accepts_outreach=false, version=version+1 WHERE workspace_id=$1 AND id=$2",
+                    "UPDATE beacons SET do_not_contact=true, accepts_outreach=false, version=version+1 WHERE workspace_id=$1 AND id=$2",
                 )
                 .bind(workspace_id.into_uuid())
                 .bind(command.beacon_id.into_uuid())

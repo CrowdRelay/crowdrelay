@@ -13,20 +13,20 @@ class ViryaOsExecutorManifestContract(unittest.TestCase):
             self.skipTest(f"{path.relative_to(ROOT)} is a private n8n file and is not tracked in git")
 
     def test_public_manifest_matches_rust_event_capabilities(self):
-        manifest = ROOT / "n8n/viryaos-executor-manifest.tsv"
+        manifest = ROOT / "n8n/crowdrelay-executor-manifest.tsv"
         self._skip_if_private(manifest)
         source = (ROOT / "crates/crowdrelay-infra/src/autopilot/execution_capabilities.rs").read_text()
         start = source.index("fn executor_capability_for_event")
         end = source.index("pub(in crate::autopilot) async fn ensure_executor_capability", start)
         body = source[start:end]
-        rust_pairs = dict(re.findall(r'"(viryaos\.[^"]+)"\s*=>\s*"([^"]+)"', body))
+        rust_pairs = dict(re.findall(r'"(crowdrelay\.[^"]+)"\s*=>\s*"([^"]+)"', body))
         with manifest.open(newline="") as handle:
             rows = list(csv.DictReader(handle, delimiter="\t"))
         manifest_pairs = {row["event_type"]: row["capability"] for row in rows}
         self.assertEqual(manifest_pairs, rust_pairs)
 
     def test_unsafe_provider_capabilities_default_off(self):
-        manifest = ROOT / "n8n/viryaos-executor-manifest.tsv"
+        manifest = ROOT / "n8n/crowdrelay-executor-manifest.tsv"
         self._skip_if_private(manifest)
         with manifest.open(newline="") as handle:
             rows = {row["capability"]: row for row in csv.DictReader(handle, delimiter="\t")}
@@ -38,8 +38,8 @@ class ViryaOsExecutorManifestContract(unittest.TestCase):
 
 
     def test_concrete_production_manifest_matches_capability_contract(self):
-        manifest = ROOT / "n8n/viryaos-executor-manifest.tsv"
-        production_manifest = ROOT / "n8n/viryaos-production-workflow-manifest.tsv"
+        manifest = ROOT / "n8n/crowdrelay-executor-manifest.tsv"
+        production_manifest = ROOT / "n8n/crowdrelay-production-workflow-manifest.tsv"
         self._skip_if_private(manifest)
         self._skip_if_private(production_manifest)
         with manifest.open(newline="") as handle:
@@ -58,8 +58,8 @@ class ViryaOsExecutorManifestContract(unittest.TestCase):
 
     def test_production_manifest_sha_file_is_exact(self):
         import hashlib
-        manifest = ROOT / "n8n/viryaos-production-workflow-manifest.tsv"
-        sha_file = ROOT / "n8n/viryaos-production-workflow-manifest.sha256"
+        manifest = ROOT / "n8n/crowdrelay-production-workflow-manifest.tsv"
+        sha_file = ROOT / "n8n/crowdrelay-production-workflow-manifest.sha256"
         self._skip_if_private(manifest)
         self._skip_if_private(sha_file)
         expected = sha_file.read_text().strip()

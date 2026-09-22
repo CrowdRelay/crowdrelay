@@ -29,7 +29,7 @@ pub struct TicketYieldSnapshot {
     pub allocation_guardrail: Option<TicketAllocationGuardrail>,
 }
 
-/// Operator-owned allocation bounds for one ticket tier. ViryaOS may only
+/// Operator-owned allocation bounds for one ticket tier. CrowdRelay may only
 /// unlock capacity inside these limits; it never invents tier semantics from
 /// names, slugs or ordering.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]

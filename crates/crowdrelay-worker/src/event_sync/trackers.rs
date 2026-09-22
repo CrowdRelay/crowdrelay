@@ -109,7 +109,7 @@ async fn record_bandsintown_trackers(
     sqlx::query(
         r#"
         WITH series AS (
-            INSERT INTO viryaos_growth_metric_series (
+            INSERT INTO growth_metric_series (
                 workspace_id, platform, metric_key, subject_kind, subject_id,
                 display_name, direction, value_tier, expected_interval_hours, active
             )
@@ -124,7 +124,7 @@ async fn record_bandsintown_trackers(
                 active = true
             RETURNING id
         )
-        INSERT INTO viryaos_growth_metric_points (
+        INSERT INTO growth_metric_points (
             workspace_id, series_id, captured_at, value, source
         )
         SELECT $1, series.id, date_trunc('hour', $5::timestamptz), $6, 'event_sync'

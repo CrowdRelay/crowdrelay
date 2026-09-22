@@ -88,7 +88,7 @@ async fn seed_post(
     posted_days_ago: i32,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let decision_id: Uuid = sqlx::query_scalar(
-        "INSERT INTO viryaos_autopilot_decisions
+        "INSERT INTO autopilot_decisions
              (id, workspace_id, decision_key, context, subject_kind, subject_id,
               decision_kind, confidence_basis_points, disposition, reason,
               input_snapshot, policy_snapshot, recommendation, evaluated_at, trace_id)
@@ -104,7 +104,7 @@ async fn seed_post(
     .fetch_one(pool)
     .await?;
     let action_id: Uuid = sqlx::query_scalar(
-        "INSERT INTO viryaos_autopilot_actions
+        "INSERT INTO autopilot_actions
              (id, workspace_id, decision_id, context, action_kind, subject_kind,
               subject_id, idempotency_key, payload, status, finished_at)
          VALUES ($1,$2,$3,'growth_intelligence','community.engage.request','target_community',
@@ -183,7 +183,7 @@ async fn advisory_actions(
     workspace_id: WorkspaceId,
 ) -> Result<Vec<(Uuid, String, serde_json::Value)>, Box<dyn std::error::Error>> {
     Ok(sqlx::query_as(
-        "SELECT id, status, payload FROM viryaos_autopilot_actions
+        "SELECT id, status, payload FROM autopilot_actions
          WHERE workspace_id = $1 AND action_kind = 'community.decline.advisory'
          ORDER BY created_at",
     )
@@ -250,7 +250,7 @@ async fn an_engaged_room_with_zero_fans_gets_the_uncomfortable_advice()
 
     // The converting room was never itself flagged.
     let subject_ids: Vec<Uuid> = sqlx::query_scalar(
-        "SELECT subject_id FROM viryaos_autopilot_actions
+        "SELECT subject_id FROM autopilot_actions
          WHERE workspace_id = $1 AND action_kind = 'community.decline.advisory'",
     )
     .bind(workspace_id.into_uuid())

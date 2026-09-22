@@ -4,7 +4,7 @@
 //! advertises, and only external executors ever registered — n8n posts its
 //! manifest to the registry and gets `content.artifact`, `team.email` and the
 //! rest. The executors that live inside this process never did, because they
-//! claim work by querying `viryaos_autopilot_actions` directly and nobody
+//! claim work by querying `autopilot_actions` directly and nobody
 //! noticed the dispatcher was a separate gate in front of that query.
 //!
 //! So `community.engage` actions were created, parked with
@@ -114,7 +114,7 @@ impl ExecutorRegistrar {
         let ttl_seconds = i64::try_from(ADVERTISEMENT_TTL.as_secs()).unwrap_or(300);
         sqlx::query(
             r#"
-            INSERT INTO viryaos_executor_instances
+            INSERT INTO executor_instances
                 (workspace_id, executor_id, version, manifest_sha, observed_at, expires_at, metadata)
             VALUES ($1, $2, $3, $4, now(), now() + ($5 || ' seconds')::interval,
                     jsonb_build_object('kind', 'in_process'))
@@ -140,7 +140,7 @@ impl ExecutorRegistrar {
         for capability in &self.capabilities {
             sqlx::query(
                 r#"
-                INSERT INTO viryaos_executor_capabilities
+                INSERT INTO executor_capabilities
                     (workspace_id, executor_id, capability, capability_version, observed_at, expires_at)
                 VALUES ($1, $2, $3, $4, now(), now() + ($5 || ' seconds')::interval)
                 ON CONFLICT (workspace_id, executor_id, capability) DO UPDATE SET
@@ -163,7 +163,7 @@ impl ExecutorRegistrar {
         // claim. Expiring rather than deleting keeps the history readable.
         sqlx::query(
             r#"
-            UPDATE viryaos_executor_capabilities
+            UPDATE executor_capabilities
             SET expires_at = now()
             WHERE workspace_id = $1
               AND executor_id = $2
@@ -183,7 +183,7 @@ impl ExecutorRegistrar {
     async fn withdraw(&self) {
         let result = sqlx::query(
             r#"
-            UPDATE viryaos_executor_instances
+            UPDATE executor_instances
             SET expires_at = now()
             WHERE workspace_id = $1 AND executor_id = $2
             "#,

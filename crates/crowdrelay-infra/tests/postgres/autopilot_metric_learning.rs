@@ -65,7 +65,7 @@ async fn insert_dispatch(
     let decision_id = uuid::Uuid::now_v7();
     let action_id = uuid::Uuid::now_v7();
     sqlx::query(
-        r#"INSERT INTO viryaos_autopilot_decisions
+        r#"INSERT INTO autopilot_decisions
            (id, workspace_id, decision_key, context, subject_kind, subject_id,
             decision_kind, confidence_basis_points, disposition, reason,
             input_snapshot, policy_snapshot, recommendation, trace_id)
@@ -81,7 +81,7 @@ async fn insert_dispatch(
     .await
     .expect("decision");
     sqlx::query(
-        r#"INSERT INTO viryaos_autopilot_actions
+        r#"INSERT INTO autopilot_actions
            (id, workspace_id, decision_id, context, action_kind, subject_kind,
             subject_id, idempotency_key, payload, status, action_class, finished_at)
            VALUES ($1,$2,$3,'growth_metrics','agent.run.request','target_community',
@@ -97,7 +97,7 @@ async fn insert_dispatch(
     .await
     .expect("action");
     sqlx::query(
-        r#"INSERT INTO viryaos_growth_evidence
+        r#"INSERT INTO growth_evidence
            (workspace_id, action_id, opportunity_id, timestamp, recipient_id,
             channel, estimated_reach, treatment, propensity, converted,
             predicted_fans, predicted_signal_installs, context, evidence_quality)
@@ -124,7 +124,7 @@ async fn queue_measurement(
 ) -> ClaimedAutopilotMeasurement {
     let id = uuid::Uuid::now_v7();
     sqlx::query(
-        r#"INSERT INTO viryaos_autopilot_measurements
+        r#"INSERT INTO autopilot_measurements
            (id, workspace_id, action_id, measurement_kind, subject_id,
             action_finished_at, baseline_value, due_at, available_at)
            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$8)"#,
@@ -156,7 +156,7 @@ async fn queue_measurement(
 /// tests exercise the real classification step rather than a hand-made effect.
 async fn resolve(f: &Fixture, measurement: &ClaimedAutopilotMeasurement, observed: f64) {
     sqlx::query(
-        "UPDATE viryaos_autopilot_measurements SET status='processing', started_at=now() \
+        "UPDATE autopilot_measurements SET status='processing', started_at=now() \
          WHERE workspace_id=$1 AND id=$2",
     )
     .bind(f.workspace_id.into_uuid())
@@ -182,7 +182,7 @@ async fn resolve(f: &Fixture, measurement: &ClaimedAutopilotMeasurement, observe
 /// H: a measured outcome with no typed column still reaches the evidence row.
 ///
 /// Ticket revenue, clicks, replies and friends used to resolve into
-/// `viryaos_autopilot_outcomes` and stop there — assessed, stored, and
+/// `autopilot_outcomes` and stop there — assessed, stored, and
 /// invisible to every learner. `observed_metrics` is the general write-back:
 /// each learnable kind lands under its own key, a merge preserves the keys
 /// already present, and a second measurement of the same kind cannot rewrite
@@ -195,7 +195,7 @@ async fn generic_metrics_merge_into_evidence() {
 
     async fn metrics(f: &Fixture, action_id: uuid::Uuid) -> serde_json::Value {
         sqlx::query_scalar::<_, serde_json::Value>(
-            "SELECT observed_metrics FROM viryaos_growth_evidence \
+            "SELECT observed_metrics FROM growth_evidence \
              WHERE workspace_id=$1 AND action_id=$2",
         )
         .bind(f.workspace_id.into_uuid())
@@ -278,7 +278,7 @@ async fn typed_kinds_do_not_double_write_metrics() {
 
     let (incremental, metrics): (Option<f64>, serde_json::Value) = sqlx::query_as(
         "SELECT observed_incremental_fans, observed_metrics \
-         FROM viryaos_growth_evidence WHERE workspace_id=$1 AND action_id=$2",
+         FROM growth_evidence WHERE workspace_id=$1 AND action_id=$2",
     )
     .bind(f.workspace_id.into_uuid())
     .bind(action_id)
@@ -331,7 +331,7 @@ async fn action_standings_cover_levers_and_templates_alike() {
             let action_id = uuid::Uuid::now_v7();
             let measurement_id = uuid::Uuid::now_v7();
             sqlx::query(
-                r#"INSERT INTO viryaos_autopilot_decisions
+                r#"INSERT INTO autopilot_decisions
                    (id, workspace_id, decision_key, context, subject_kind,
                     subject_id, decision_kind, confidence_basis_points,
                     disposition, reason, input_snapshot, policy_snapshot,
@@ -348,7 +348,7 @@ async fn action_standings_cover_levers_and_templates_alike() {
             .await
             .expect("decision");
             sqlx::query(
-                r#"INSERT INTO viryaos_autopilot_actions
+                r#"INSERT INTO autopilot_actions
                    (id, workspace_id, decision_id, context, action_kind,
                     subject_kind, subject_id, idempotency_key, payload, status,
                     action_class, finished_at)
@@ -367,7 +367,7 @@ async fn action_standings_cover_levers_and_templates_alike() {
             .await
             .expect("action");
             sqlx::query(
-                r#"INSERT INTO viryaos_autopilot_measurements
+                r#"INSERT INTO autopilot_measurements
                    (id, workspace_id, action_id, measurement_kind, subject_id,
                     action_finished_at, baseline_value, due_at, status,
                     available_at, finished_at)
@@ -382,7 +382,7 @@ async fn action_standings_cover_levers_and_templates_alike() {
             .await
             .expect("measurement");
             sqlx::query(
-                r#"INSERT INTO viryaos_autopilot_outcomes
+                r#"INSERT INTO autopilot_outcomes
                    (workspace_id, decision_id, action_id, measurement_id,
                     metric_key, observed_value, baseline_value,
                     effect_assessment, delta_basis_points, observed_at)
@@ -631,7 +631,7 @@ async fn release_milestone_metrics_reach_the_evidence_row() {
     let release_id = uuid::Uuid::now_v7();
 
     sqlx::query(
-        r#"INSERT INTO viryaos_release_plans
+        r#"INSERT INTO release_plans
            (id, workspace_id, source_key, title, release_at, tier)
            VALUES ($1,$2,$3,'Signal Lost',$4,'single')"#,
     )
@@ -777,7 +777,7 @@ async fn release_milestone_metrics_reach_the_evidence_row() {
     // (100 → 110), a real bump after (110 → 160). Lift = 50 − 10 = 40.
     let series_id = uuid::Uuid::now_v7();
     sqlx::query(
-        r#"INSERT INTO viryaos_growth_metric_series
+        r#"INSERT INTO growth_metric_series
            (id, workspace_id, platform, metric_key, subject_kind, subject_id,
             display_name)
            VALUES ($1,$2,'youtube','views','release_plan',$3,'Signal Lost views')"#,
@@ -790,7 +790,7 @@ async fn release_milestone_metrics_reach_the_evidence_row() {
     .expect("series");
     for (days, value) in [(-20_i64, 100_i64), (-1, 110), (12, 160)] {
         sqlx::query(
-            r#"INSERT INTO viryaos_growth_metric_points
+            r#"INSERT INTO growth_metric_points
                (workspace_id, series_id, captured_at, value, source)
                VALUES ($1,$2,$3,$4,'test')"#,
         )
@@ -835,7 +835,7 @@ async fn release_milestone_metrics_reach_the_evidence_row() {
             kind.as_str()
         );
         sqlx::query(
-            r#"INSERT INTO viryaos_autopilot_measurements
+            r#"INSERT INTO autopilot_measurements
                (id, workspace_id, action_id, measurement_kind, subject_id,
                 action_finished_at, baseline_value, due_at, available_at)
                VALUES ($1,$2,$3,$4,$5,$6,0.0,$7,$7)"#,
@@ -854,7 +854,7 @@ async fn release_milestone_metrics_reach_the_evidence_row() {
     }
 
     let metrics: serde_json::Value = sqlx::query_scalar(
-        "SELECT observed_metrics FROM viryaos_growth_evidence \
+        "SELECT observed_metrics FROM growth_evidence \
          WHERE workspace_id=$1 AND action_id=$2",
     )
     .bind(workspace)
@@ -881,7 +881,7 @@ async fn release_funnel_abandons_when_no_link_was_tracked() {
     let release_id = uuid::Uuid::now_v7();
 
     sqlx::query(
-        r#"INSERT INTO viryaos_release_plans
+        r#"INSERT INTO release_plans
            (id, workspace_id, source_key, title, release_at, tier)
            VALUES ($1,$2,$3,'Unlinked Single',$4,'single')"#,
     )

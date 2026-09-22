@@ -169,15 +169,15 @@ pub(super) async fn record_execution_outcome(
     };
     sqlx::query(
         r#"
-        INSERT INTO viryaos_autopilot_outcomes (
+        INSERT INTO autopilot_outcomes (
             workspace_id, decision_id, action_id, metric_key,
             observed_value, baseline_value, observed_at
         )
         SELECT $1, action.decision_id, action.id, $3, $4, $5, $6
-        FROM viryaos_autopilot_actions AS action
+        FROM autopilot_actions AS action
         WHERE action.workspace_id = $1 AND action.id = $2
         -- The arbiter predicate must mirror
-        -- viryaos_autopilot_outcomes_action_metric_uidx exactly; 0303 added
+        -- autopilot_outcomes_action_metric_uidx exactly; 0303 added
         -- `measurement_id IS NULL` to the index and this statement broke.
         ON CONFLICT (workspace_id, action_id, metric_key)
             WHERE action_id IS NOT NULL AND measurement_id IS NULL DO NOTHING

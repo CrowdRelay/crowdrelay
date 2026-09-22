@@ -1,4 +1,4 @@
-//! Set-oriented PostgreSQL snapshot loaders for phase-2 ViryaOS bounded contexts.
+//! Set-oriented PostgreSQL snapshot loaders for phase-2 CrowdRelay bounded contexts.
 
 use std::collections::HashMap;
 

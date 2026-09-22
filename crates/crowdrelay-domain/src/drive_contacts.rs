@@ -121,7 +121,7 @@ fn kind_for(raw: &str) -> Option<&'static str> {
         "endorsement" | "endorser" => Some("endorsement"),
         "creator" | "influencer" | "youtuber" | "streamer" | "tiktok" => Some("creator"),
         // Booking supply, not outreach: the kind names which queue the
-        // promote lands in (viryaos_booking_candidates), never the press
+        // promote lands in (booking_candidates), never the press
         // outreach vocabulary.
         // "club" stays unmapped on purpose: a fan club typed in a role
         // column must not cross into booking supply.
@@ -129,7 +129,7 @@ fn kind_for(raw: &str) -> Option<&'static str> {
         // §12-5 entity 4: an agent represents the band — the opposite
         // direction from a promoter, who books one room for one night.
         // "agent" was left unmapped while the only landing zones were
-        // promoter (wrong direction) or press; viryaos_booking_agents is the
+        // promoter (wrong direction) or press; booking_agents is the
         // home that makes the mapping safe.
         "booking_agent" | "talent_buyer" | "agent" => Some("booking_agent"),
         "venue" | "room" | "hall" | "live_venue" | "concert_venue" | "music_venue" => Some("venue"),
@@ -462,7 +462,7 @@ mod tests {
     fn agent_vocabulary_lands_as_booking_agent() {
         // §12-5 entity 4: the agent is its own entity, not a promoter — the
         // intake's three spellings must all file `booking_agent`, which the
-        // promote routes to viryaos_booking_agents. A promoter row stays a
+        // promote routes to booking_agents. A promoter row stays a
         // promoter, and a fan club still files nothing.
         for (typed, expected) in [
             ("booking_agent", Some("booking_agent")),

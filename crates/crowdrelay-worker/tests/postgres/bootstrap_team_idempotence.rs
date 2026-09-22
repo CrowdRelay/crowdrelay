@@ -3,7 +3,7 @@
 //! `bootstrap_team_operations` runs inside `setup`, and `scripts/deploy.sh` runs
 //! `setup` on every release before either long-running service starts. That
 //! makes it an unattended periodic writer over `workspace_members` and
-//! `viryaos_team_profiles`.
+//! `team_profiles`.
 //!
 //! Its conflict clauses used to set `status = 'active'` and `active = true`
 //! unconditionally, so a disablement lasted exactly until the next release.
@@ -26,7 +26,7 @@ use std::time::Duration;
 use uuid::Uuid;
 
 /// One configured contact. The member key has to satisfy the
-/// `viryaos_team_profiles.member_key` CHECK constraint.
+/// `team_profiles.member_key` CHECK constraint.
 fn one_member(email: &str) -> TeamOperationsConfig {
     TeamOperationsConfig {
         members: vec![TeamMemberSpec {
@@ -47,7 +47,7 @@ async fn member_state(pool: &PgPool, email: &str) -> Result<MemberState> {
     let row = sqlx::query(
         "SELECT member.status, profile.active \
          FROM workspace_members AS member \
-         JOIN viryaos_team_profiles AS profile ON profile.member_id = member.id \
+         JOIN team_profiles AS profile ON profile.member_id = member.id \
          WHERE member.normalized_email = $1",
     )
     .bind(email)
@@ -109,7 +109,7 @@ async fn disablement_survives(database: &PgPool, url: &str) -> Result<()> {
         .await
         .context("disable member")?;
     sqlx::query(
-        "UPDATE viryaos_team_profiles SET active = false WHERE member_id = \
+        "UPDATE team_profiles SET active = false WHERE member_id = \
          (SELECT id FROM workspace_members WHERE normalized_email = $1)",
     )
     .bind(email)
@@ -135,7 +135,7 @@ async fn disablement_survives(database: &PgPool, url: &str) -> Result<()> {
     // member key stay current, and a disabled member is still a known one.
     let refreshed = sqlx::query(
         "SELECT profile.member_key, cardinality(profile.skills) AS skill_count \
-         FROM viryaos_team_profiles AS profile \
+         FROM team_profiles AS profile \
          JOIN workspace_members AS member ON member.id = profile.member_id \
          WHERE member.normalized_email = $1",
     )
@@ -245,7 +245,7 @@ async fn an_elastic_roster_bootstraps_member_keys_beyond_the_legacy_slots() -> R
     let rows = sqlx::query(
         "SELECT member.normalized_email, member.display_name, member.status, \
                 profile.member_key, profile.skills, profile.active \
-         FROM viryaos_team_profiles AS profile \
+         FROM team_profiles AS profile \
          JOIN workspace_members AS member ON member.id = profile.member_id \
          ORDER BY profile.member_key",
     )
@@ -300,7 +300,7 @@ async fn a_member_key_repointed_at_a_new_email_rebinds_its_profile() -> Result<(
     };
     bootstrap_team_operations(pool, &slug, &db_config, &ada).await?;
     let ada_member_id = sqlx::query_scalar::<_, Uuid>(
-        "SELECT member_id FROM viryaos_team_profiles WHERE member_key = 'ops_lead'",
+        "SELECT member_id FROM team_profiles WHERE member_key = 'ops_lead'",
     )
     .fetch_one(pool)
     .await
@@ -318,7 +318,7 @@ async fn a_member_key_repointed_at_a_new_email_rebinds_its_profile() -> Result<(
 
     let row = sqlx::query(
         "SELECT profile.member_id, profile.skills, member.normalized_email \
-         FROM viryaos_team_profiles AS profile \
+         FROM team_profiles AS profile \
          JOIN workspace_members AS member ON member.id = profile.member_id \
          WHERE profile.member_key = 'ops_lead'",
     )

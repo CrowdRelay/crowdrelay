@@ -48,7 +48,7 @@ async fn dispatched_agent_run(pool: &PgPool, workspace_id: WorkspaceId) -> Resul
     let action_id = Uuid::now_v7();
     sqlx::query(
         r#"
-        INSERT INTO viryaos_autopilot_decisions (
+        INSERT INTO autopilot_decisions (
             id, workspace_id, decision_key, context, subject_kind, subject_id,
             decision_kind, confidence_basis_points, disposition, reason,
             input_snapshot, policy_snapshot, recommendation, trace_id
@@ -67,7 +67,7 @@ async fn dispatched_agent_run(pool: &PgPool, workspace_id: WorkspaceId) -> Resul
     .context("insert dispatching decision")?;
     sqlx::query(
         r#"
-        INSERT INTO viryaos_autopilot_actions (
+        INSERT INTO autopilot_actions (
             id, workspace_id, decision_id, context, action_kind, subject_kind,
             subject_id, idempotency_key, payload, status, finished_at, trace_id
         ) VALUES ($1,$2,$3,'growth_intelligence','agent.run.request','workspace',
@@ -88,7 +88,7 @@ async fn dispatched_agent_run(pool: &PgPool, workspace_id: WorkspaceId) -> Resul
     // design row.
     let experiment_uuid = Uuid::now_v7();
     sqlx::query(
-        r#"INSERT INTO viryaos_experiment_designs
+        r#"INSERT INTO experiment_designs
            (experiment_uuid, workspace_id, intervention_key, logical_cycle_key,
             unit_kind, holdout_probability, interference_policy)
            VALUES ($1,$2,'agent.run','cycle-1','target_community',0.0,'none')"#,
@@ -99,7 +99,7 @@ async fn dispatched_agent_run(pool: &PgPool, workspace_id: WorkspaceId) -> Resul
     .await
     .context("insert experiment design")?;
     sqlx::query(
-        r#"INSERT INTO viryaos_experiment_assignments
+        r#"INSERT INTO experiment_assignments
            (workspace_id, id, experiment_uuid, unit_id, unit_kind,
             arm, intended_template_id, propensity, prediction, context, strategy,
             eligibility_criteria, selection_context, interference_policy,
@@ -175,13 +175,11 @@ async fn task(
 }
 
 async fn execution_status(pool: &PgPool, action_id: Uuid) -> Result<String> {
-    sqlx::query_scalar(
-        "SELECT execution_status FROM viryaos_experiment_assignments WHERE action_id = $1",
-    )
-    .bind(action_id)
-    .fetch_one(pool)
-    .await
-    .context("read assignment execution_status")
+    sqlx::query_scalar("SELECT execution_status FROM experiment_assignments WHERE action_id = $1")
+        .bind(action_id)
+        .fetch_one(pool)
+        .await
+        .context("read assignment execution_status")
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -299,7 +297,7 @@ async fn other_action_kinds_are_untouched() -> Result<()> {
         let decision_id = Uuid::now_v7();
         sqlx::query(
             r#"
-            INSERT INTO viryaos_autopilot_decisions (
+            INSERT INTO autopilot_decisions (
                 id, workspace_id, decision_key, context, subject_kind, subject_id,
                 decision_kind, confidence_basis_points, disposition, reason,
                 input_snapshot, policy_snapshot, recommendation, trace_id
@@ -319,7 +317,7 @@ async fn other_action_kinds_are_untouched() -> Result<()> {
         let action_id = Uuid::now_v7();
         sqlx::query(
             r#"
-            INSERT INTO viryaos_autopilot_actions (
+            INSERT INTO autopilot_actions (
                 id, workspace_id, decision_id, context, action_kind, subject_kind,
                 subject_id, idempotency_key, payload, status, finished_at
             ) VALUES ($1,$2,$3,'growth_intelligence','community.engage.request',
@@ -336,7 +334,7 @@ async fn other_action_kinds_are_untouched() -> Result<()> {
         .context("insert community action")?;
         let experiment_uuid = Uuid::now_v7();
         sqlx::query(
-            r#"INSERT INTO viryaos_experiment_designs
+            r#"INSERT INTO experiment_designs
                (experiment_uuid, workspace_id, intervention_key, logical_cycle_key,
                 unit_kind, holdout_probability, interference_policy)
                VALUES ($1,$2,'community.engage','cycle-2','target_community',0.0,'none')"#,
@@ -347,7 +345,7 @@ async fn other_action_kinds_are_untouched() -> Result<()> {
         .await
         .context("insert experiment design")?;
         sqlx::query(
-            r#"INSERT INTO viryaos_experiment_assignments
+            r#"INSERT INTO experiment_assignments
                (workspace_id, id, experiment_uuid, unit_id, unit_kind,
                 arm, intended_template_id, propensity, prediction, context, strategy,
                 eligibility_criteria, selection_context, interference_policy,

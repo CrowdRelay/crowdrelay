@@ -1,4 +1,4 @@
-//! ViryaOS deterministic Autopilot application boundary.
+//! CrowdRelay deterministic Autopilot application boundary.
 //!
 //! Pure bounded contexts live in `crowdrelay-domain`; this module only exposes
 //! typed orchestration, infrastructure ports and the exception-first operator

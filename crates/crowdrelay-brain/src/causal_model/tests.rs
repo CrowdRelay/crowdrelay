@@ -751,7 +751,7 @@ fn weak_evidence_does_not_drop_a_confident_template_below_the_threshold() {
 
 // ── Checkpoint compatibility ──────────────────────────────────────────
 //
-// Old checkpoints in `viryaos_brain_state` may carry fields that were
+// Old checkpoints in `brain_state` may carry fields that were
 // removed from `CausalModel` (reach_model, funnel, rich_state_transitions).
 // Serde ignores unknown fields, so deserialization must keep working —
 // a shape change here is exactly the failure class that produced the
@@ -930,7 +930,7 @@ fn prediction_error_only_updates_belief_not_economics() {
 
 /// A stored context older than this build costs the fields it lacks, not the row.
 ///
-/// `DispatchContext` lives in `viryaos_growth_evidence.context` and is read
+/// `DispatchContext` lives in `growth_evidence.context` and is read
 /// back months later, so the row on disk is always older than the code reading
 /// it. Without a container-level `serde(default)`, adding one non-`Option`
 /// field makes every existing row fail to deserialize — and the loader answers

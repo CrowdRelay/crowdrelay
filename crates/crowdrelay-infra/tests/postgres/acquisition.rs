@@ -400,7 +400,7 @@ async fn community_conversion_stamps_the_promoted_sources_format()
     // provenance row should stamp.
     let source_id = Uuid::now_v7();
     sqlx::query(
-        "INSERT INTO viryaos_content_sources
+        "INSERT INTO content_sources
              (id, workspace_id, source_kind, source_key, title, occurred_at, expires_at, format_key)
          VALUES ($1,$2,'video',$3,'Playthrough video', now() - interval '1 day', now() + interval '30 days','playthrough')",
     )
@@ -413,7 +413,7 @@ async fn community_conversion_stamps_the_promoted_sources_format()
     // The posting action carries the promoted source in its payload — the
     // same shape the outcome-ingest gate guarantees in production.
     let decision_id: Uuid = sqlx::query_scalar(
-        "INSERT INTO viryaos_autopilot_decisions
+        "INSERT INTO autopilot_decisions
              (id, workspace_id, decision_key, context, subject_kind, subject_id,
               decision_kind, confidence_basis_points, disposition, reason,
               input_snapshot, policy_snapshot, recommendation, evaluated_at, trace_id)
@@ -429,7 +429,7 @@ async fn community_conversion_stamps_the_promoted_sources_format()
     .fetch_one(&pool)
     .await?;
     let action_id: Uuid = sqlx::query_scalar(
-        "INSERT INTO viryaos_autopilot_actions
+        "INSERT INTO autopilot_actions
              (id, workspace_id, decision_id, context, action_kind, subject_kind,
               subject_id, idempotency_key, payload, status, finished_at)
          VALUES ($1,$2,$3,'growth_intelligence','community.engage.request','target_community',
@@ -668,10 +668,10 @@ async fn community_conversion_does_not_write_when_fan_is_missing()
                   AND posted_at IS NOT NULL
                   AND posted_at <= click.occurred_at
             ) AS post
-            LEFT JOIN viryaos_autopilot_actions AS act
+            LEFT JOIN autopilot_actions AS act
               ON act.workspace_id = $1
              AND act.id = post.action_id
-            LEFT JOIN viryaos_content_sources AS source
+            LEFT JOIN content_sources AS source
               ON source.workspace_id = $1
              AND source.id::text = lower(act.payload->>'source_id')
             ORDER BY post.posted_at DESC NULLS LAST,

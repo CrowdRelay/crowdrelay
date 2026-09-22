@@ -56,7 +56,7 @@ async fn fixture(label: &str) -> Result<Fixture, Box<dyn std::error::Error>> {
     let now = OffsetDateTime::now_utc();
     let target_id = Uuid::now_v7();
     sqlx::query(
-        "INSERT INTO viryaos_booking_targets
+        "INSERT INTO booking_targets
             (id, workspace_id, city_id, target_kind, display_name, contact_email,
              relationship_score)
          VALUES ($1,$2,$3,'promoter','Anna Promoter','anna@promoter.example',70)",
@@ -72,7 +72,7 @@ async fn fixture(label: &str) -> Result<Fixture, Box<dyn std::error::Error>> {
     let opportunity_id = TeamOpportunityId::new();
     sqlx::query(
         r#"
-        INSERT INTO viryaos_team_opportunities (
+        INSERT INTO team_opportunities (
             id, workspace_id, opportunity_kind, source, external_key, title, organization,
             contact_email, verified_destination, fit_basis_points, confidence_basis_points,
             currency, expected_fee_minor, estimated_cost_minor, status
@@ -99,7 +99,7 @@ async fn fixture(label: &str) -> Result<Fixture, Box<dyn std::error::Error>> {
         .await?;
     sqlx::query(
         r#"
-        INSERT INTO viryaos_team_opportunities (
+        INSERT INTO team_opportunities (
             id, workspace_id, opportunity_kind, source, external_key, title, organization,
             contact_email, verified_destination, fit_basis_points, confidence_basis_points,
             currency, status
@@ -202,7 +202,7 @@ async fn a_promoters_written_offer_lands_as_a_proposal_on_the_negotiation()
 
     // The reply's words joined the triage queue under the target's real kind.
     let (target_kind, previous_disposition): (String, String) = sqlx::query_as(
-        "SELECT target_kind, previous_disposition FROM viryaos_reply_classifications \
+        "SELECT target_kind, previous_disposition FROM reply_classifications \
          WHERE workspace_id=$1 AND target_id=$2",
     )
     .bind(fixture.workspace_id.into_uuid())
@@ -223,7 +223,7 @@ async fn a_promoters_written_offer_lands_as_a_proposal_on_the_negotiation()
     ) = sqlx::query_as(
         "SELECT classification_result, human_review_reason, proposed_fee_minor, \
                 proposed_currency, proposed_opportunity_id \
-         FROM viryaos_reply_classifications \
+         FROM reply_classifications \
          WHERE workspace_id=$1 AND target_id=$2",
     )
     .bind(fixture.workspace_id.into_uuid())
@@ -247,7 +247,7 @@ async fn a_promoters_written_offer_lands_as_a_proposal_on_the_negotiation()
     classify_and_record(&fixture).await?;
     let (fee, currency, opportunity): (Option<i64>, Option<String>, Option<Uuid>) = sqlx::query_as(
         "SELECT proposed_fee_minor, proposed_currency, proposed_opportunity_id \
-             FROM viryaos_reply_classifications \
+             FROM reply_classifications \
              WHERE workspace_id=$1 AND target_id=$2 AND reply_text LIKE 'No fee%'",
     )
     .bind(fixture.workspace_id.into_uuid())
@@ -272,7 +272,7 @@ async fn a_promoters_written_offer_lands_as_a_proposal_on_the_negotiation()
         )
         .await?;
     let queued: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM viryaos_reply_classifications \
+        "SELECT count(*) FROM reply_classifications \
          WHERE workspace_id=$1 AND target_id=$2 AND classification_result='auto' \
            AND classified_disposition IS NULL",
     )

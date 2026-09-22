@@ -1,7 +1,7 @@
 //! Reach event repository — persistence for the unified reach ledger.
 //!
 //! This module provides the SQL functions to query reach events in
-//! `viryaos_reach_events`. The brain reads reach metrics to learn which
+//! `reach_events`. The brain reads reach metrics to learn which
 //! channels and templates produce the best reach-to-fan conversion rates.
 //!
 //! Channel-specific workers (community_executor, push delivery, outreach
@@ -49,29 +49,29 @@ pub(in crate::autopilot) async fn load_reach_metrics(
             COUNT(*) FILTER (WHERE status = 'failed')::bigint AS failed,
             COUNT(*) FILTER (WHERE status = 'ignored')::bigint AS ignored,
             COALESCE(
-                (SELECT COUNT(*)::bigint FROM viryaos_reach_conversions rc
-                 JOIN viryaos_reach_events re ON rc.reach_event_id = re.id
+                (SELECT COUNT(*)::bigint FROM reach_conversions rc
+                 JOIN reach_events re ON rc.reach_event_id = re.id
                  WHERE re.workspace_id = $1 AND re.sent_at >= $2
                    AND ($3::timestamptz IS NULL OR re.sent_at < $3)),
                 0
             ) AS total_conversions,
             COALESCE(
-                (SELECT COUNT(*)::bigint FROM viryaos_reach_conversions rc
-                 JOIN viryaos_reach_events re ON rc.reach_event_id = re.id
+                (SELECT COUNT(*)::bigint FROM reach_conversions rc
+                 JOIN reach_events re ON rc.reach_event_id = re.id
                  WHERE re.workspace_id = $1 AND re.sent_at >= $2
                    AND ($3::timestamptz IS NULL OR re.sent_at < $3)
                    AND rc.incremental = true),
                 0
             ) AS incremental_conversions,
             COALESCE(
-                (SELECT COUNT(*)::bigint FROM viryaos_reach_conversions rc
-                 JOIN viryaos_reach_events re ON rc.reach_event_id = re.id
+                (SELECT COUNT(*)::bigint FROM reach_conversions rc
+                 JOIN reach_events re ON rc.reach_event_id = re.id
                  WHERE re.workspace_id = $1 AND re.sent_at >= $2
                    AND ($3::timestamptz IS NULL OR re.sent_at < $3)
                    AND rc.durable_30d = true),
                 0
             ) AS durable_conversions
-        FROM viryaos_reach_events
+        FROM reach_events
         WHERE workspace_id = $1
           AND sent_at >= $2
           AND ($3::timestamptz IS NULL OR sent_at < $3)

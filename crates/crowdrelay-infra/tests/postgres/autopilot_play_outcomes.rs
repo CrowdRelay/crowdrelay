@@ -86,7 +86,7 @@ async fn seed_series(
 ) -> Result<(), Box<dyn std::error::Error>> {
     for day in from_days..=to_days {
         sqlx::query(
-            "INSERT INTO viryaos_growth_metric_points (workspace_id, series_id, captured_at, value, source)
+            "INSERT INTO growth_metric_points (workspace_id, series_id, captured_at, value, source)
              VALUES ($1,$2,$3,$4,'test')
              ON CONFLICT (workspace_id, series_id, captured_at) DO NOTHING",
         )
@@ -103,7 +103,7 @@ async fn seed_series(
 async fn create_series(fixture: &Fixture) -> Result<Uuid, Box<dyn std::error::Error>> {
     let series_id = Uuid::now_v7();
     sqlx::query(
-        "INSERT INTO viryaos_growth_metric_series (id, workspace_id, platform, metric_key, display_name)
+        "INSERT INTO growth_metric_series (id, workspace_id, platform, metric_key, display_name)
          VALUES ($1,$2,'bandsintown','trackers','Bandsintown trackers')",
     )
     .bind(series_id)
@@ -157,13 +157,13 @@ async fn record_reach(fixture: &Fixture) -> Result<(), Box<dyn std::error::Error
     .execute(&fixture.pool)
     .await?;
     let step_id = sqlx::query_scalar::<_, Uuid>(
-        "SELECT id FROM viryaos_play_steps WHERE workspace_id=$1 AND step_index=0 LIMIT 1",
+        "SELECT id FROM play_steps WHERE workspace_id=$1 AND step_index=0 LIMIT 1",
     )
     .bind(fixture.workspace_id.into_uuid())
     .fetch_one(&fixture.pool)
     .await?;
     sqlx::query(
-        "INSERT INTO viryaos_play_step_recipients (workspace_id, step_id, fan_id, action_id)
+        "INSERT INTO play_step_recipients (workspace_id, step_id, fan_id, action_id)
          VALUES ($1,$2,$3,$4)",
     )
     .bind(fixture.workspace_id.into_uuid())
@@ -194,7 +194,7 @@ async fn a_play_settles_one_correlational_verdict_and_refuses_the_attributed_cla
 
     let outcomes = sqlx::query_as::<_, (String, Option<i64>, Option<i64>, String)>(
         "SELECT claim, baseline_value, baseline_milli_per_day, status
-         FROM viryaos_play_outcomes WHERE workspace_id=$1 ORDER BY claim",
+         FROM play_outcomes WHERE workspace_id=$1 ORDER BY claim",
     )
     .bind(fixture.workspace_id.into_uuid())
     .fetch_all(&fixture.pool)
@@ -264,7 +264,7 @@ async fn a_play_settles_one_correlational_verdict_and_refuses_the_attributed_cla
 
     let settled = sqlx::query_as::<_, (String, String, Option<String>, Option<String>, Option<i32>, Option<i32>)>(
         "SELECT claim, evidence, evidence_reason, effect_assessment, delta_basis_points, recipients_reached
-         FROM viryaos_play_outcomes WHERE workspace_id=$1 ORDER BY claim",
+         FROM play_outcomes WHERE workspace_id=$1 ORDER BY claim",
     )
     .bind(fixture.workspace_id.into_uuid())
     .fetch_all(&fixture.pool)
@@ -350,7 +350,7 @@ async fn a_campaign_that_reached_nobody_settles_as_a_non_event()
 
     let reasons = sqlx::query_as::<_, (String, Option<String>, Option<String>)>(
         "SELECT evidence, evidence_reason, effect_assessment
-         FROM viryaos_play_outcomes WHERE workspace_id=$1",
+         FROM play_outcomes WHERE workspace_id=$1",
     )
     .bind(fixture.workspace_id.into_uuid())
     .fetch_all(&fixture.pool)
@@ -381,12 +381,11 @@ async fn the_schema_refuses_a_verdict_without_evidence() -> Result<(), Box<dyn s
     );
 
     // A verdict with no evidence behind it.
-    let orphan_verdict = sqlx::query(
-        "UPDATE viryaos_play_outcomes SET effect_assessment='improved' WHERE workspace_id=$1",
-    )
-    .bind(fixture.workspace_id.into_uuid())
-    .execute(&fixture.pool)
-    .await;
+    let orphan_verdict =
+        sqlx::query("UPDATE play_outcomes SET effect_assessment='improved' WHERE workspace_id=$1")
+            .bind(fixture.workspace_id.into_uuid())
+            .execute(&fixture.pool)
+            .await;
     assert!(
         orphan_verdict.is_err(),
         "an assessment without evidence is the shape a coincidence becomes a cause in"
@@ -394,7 +393,7 @@ async fn the_schema_refuses_a_verdict_without_evidence() -> Result<(), Box<dyn s
 
     // An insufficiency with no reason.
     let silent_gap = sqlx::query(
-        "UPDATE viryaos_play_outcomes SET status='succeeded', evidence='insufficient'
+        "UPDATE play_outcomes SET status='succeeded', evidence='insufficient'
          WHERE workspace_id=$1",
     )
     .bind(fixture.workspace_id.into_uuid())
@@ -407,7 +406,7 @@ async fn the_schema_refuses_a_verdict_without_evidence() -> Result<(), Box<dyn s
 
     // A settled row with no evidence at all.
     let settled_blank =
-        sqlx::query("UPDATE viryaos_play_outcomes SET status='succeeded' WHERE workspace_id=$1")
+        sqlx::query("UPDATE play_outcomes SET status='succeeded' WHERE workspace_id=$1")
             .bind(fixture.workspace_id.into_uuid())
             .execute(&fixture.pool)
             .await;
@@ -456,7 +455,7 @@ async fn a_settled_outcome_is_folded_into_the_record_for_its_kind()
     let record = sqlx::query_as::<_, (i32, i32, i32, i32, i32, Option<String>)>(
         "SELECT improved_count, neutral_count, worsened_count, insufficient_count,
                 consecutive_worsened, retired_reason
-         FROM viryaos_play_learning WHERE workspace_id=$1 AND play_kind='track_us_ask'",
+         FROM play_learning WHERE workspace_id=$1 AND play_kind='track_us_ask'",
     )
     .bind(fixture.workspace_id.into_uuid())
     .fetch_one(&fixture.pool)
@@ -498,7 +497,7 @@ async fn the_schema_refuses_a_silent_stop() -> Result<(), Box<dyn std::error::Er
     // A zero weight with no retirement behind it would stop a play in a way no
     // read model could explain.
     let silent = sqlx::query(
-        "INSERT INTO viryaos_play_learning (workspace_id, play_kind, weight_basis_points)
+        "INSERT INTO play_learning (workspace_id, play_kind, weight_basis_points)
          VALUES ($1,'track_us_ask',0)",
     )
     .bind(fixture.workspace_id.into_uuid())
@@ -508,7 +507,7 @@ async fn the_schema_refuses_a_silent_stop() -> Result<(), Box<dyn std::error::Er
 
     // And a retirement without a reason is not a retirement.
     let unexplained = sqlx::query(
-        "INSERT INTO viryaos_play_learning (workspace_id, play_kind, weight_basis_points, retired_at)
+        "INSERT INTO play_learning (workspace_id, play_kind, weight_basis_points, retired_at)
          VALUES ($1,'track_us_ask',0,now())",
     )
     .bind(fixture.workspace_id.into_uuid())
@@ -596,7 +595,7 @@ async fn a_workspace_level_series_wins_over_its_own_breakdown()
 
     let workspace_series = Uuid::now_v7();
     sqlx::query(
-        "INSERT INTO viryaos_growth_metric_series (id, workspace_id, platform, metric_key, display_name)
+        "INSERT INTO growth_metric_series (id, workspace_id, platform, metric_key, display_name)
          VALUES ($1,$2,'signal','activated_fans_30d','Fans active in the last 30 days')",
     )
     .bind(workspace_series)
@@ -611,7 +610,7 @@ async fn a_workspace_level_series_wins_over_its_own_breakdown()
         .execute(&fixture.pool)
         .await?;
     sqlx::query(
-        "INSERT INTO viryaos_growth_metric_series (
+        "INSERT INTO growth_metric_series (
              id, workspace_id, platform, metric_key, subject_kind, subject_id, display_name
          ) VALUES ($1,$2,'signal','activated_fans_30d','city',$3,'Active fans · Somewhere')",
     )
@@ -657,7 +656,7 @@ async fn a_workspace_level_series_wins_over_its_own_breakdown()
 
     let baselines = sqlx::query_as::<_, (Option<i64>, Option<i64>)>(
         "SELECT baseline_value, baseline_milli_per_day
-         FROM viryaos_play_outcomes WHERE workspace_id=$1",
+         FROM play_outcomes WHERE workspace_id=$1",
     )
     .bind(fixture.workspace_id.into_uuid())
     .fetch_all(&fixture.pool)
@@ -686,7 +685,7 @@ async fn the_brief_reports_metric_outcomes_alongside_play_outcomes()
     let action_id = Uuid::now_v7();
     let measurement_id = Uuid::now_v7();
     sqlx::query(
-        r#"INSERT INTO viryaos_autopilot_decisions
+        r#"INSERT INTO autopilot_decisions
            (id, workspace_id, decision_key, context, subject_kind, subject_id,
             decision_kind, confidence_basis_points, disposition, reason,
             input_snapshot, policy_snapshot, recommendation, trace_id)
@@ -702,7 +701,7 @@ async fn the_brief_reports_metric_outcomes_alongside_play_outcomes()
     .execute(&fixture.pool)
     .await?;
     sqlx::query(
-        r#"INSERT INTO viryaos_autopilot_actions
+        r#"INSERT INTO autopilot_actions
            (id, workspace_id, decision_id, context, action_kind, subject_kind,
             subject_id, idempotency_key, payload, status, action_class,
             trace_id, finished_at)
@@ -718,7 +717,7 @@ async fn the_brief_reports_metric_outcomes_alongside_play_outcomes()
     .execute(&fixture.pool)
     .await?;
     sqlx::query(
-        r#"INSERT INTO viryaos_autopilot_measurements
+        r#"INSERT INTO autopilot_measurements
            (id, workspace_id, action_id, measurement_kind, subject_id,
             action_finished_at, baseline_value, due_at, available_at, trace_id,
             status, finished_at)
@@ -732,7 +731,7 @@ async fn the_brief_reports_metric_outcomes_alongside_play_outcomes()
     .execute(&fixture.pool)
     .await?;
     sqlx::query(
-        r#"INSERT INTO viryaos_autopilot_outcomes
+        r#"INSERT INTO autopilot_outcomes
            (workspace_id, decision_id, action_id, measurement_id, metric_key,
             observed_value, baseline_value, effect_assessment, delta_basis_points)
            VALUES ($1,$2,$3,$4,'incremental_fan_growth',14.0,10.0,'improved',4000)"#,
@@ -746,7 +745,7 @@ async fn the_brief_reports_metric_outcomes_alongside_play_outcomes()
     // The claim strength comes from the evidence row's recorded quality —
     // a randomized holdout is the only quality allowed to say 'attributed'.
     sqlx::query(
-        r#"INSERT INTO viryaos_growth_evidence
+        r#"INSERT INTO growth_evidence
            (workspace_id, action_id, opportunity_id, timestamp, recipient_id,
             channel, estimated_reach, treatment, propensity, converted,
             predicted_fans, predicted_signal_installs, context, evidence_quality)
