@@ -1071,6 +1071,23 @@ pub enum AutopilotActionPayload {
         #[serde(default)]
         audience_basis: String,
     },
+    /// This week's join-ask, posted to the band's own page in the band's
+    /// own words (§5). The text is one of the operator's variants verbatim —
+    /// rotated, never rewritten — and `cta_url` is the `/signal` link the
+    /// executor wraps in a `/l/` smart link so the click is counted.
+    ///
+    /// Execution is a no-op inside the action itself: the social post
+    /// executor claims `succeeded` rows of this kind and files the
+    /// `social_posts` row that is its receipt, the same claim shape the
+    /// channel executors already use for agent drafts.
+    PublishJoinAsk {
+        platform: String,
+        /// Which of the tenant's variants this post carries — recorded so
+        /// the rotation is auditable rather than re-derivable.
+        variant_index: u32,
+        text: String,
+        cta_url: String,
+    },
 }
 
 impl AutopilotActionPayload {
@@ -1156,9 +1173,14 @@ impl AutopilotActionPayload {
             | Self::RequestCommunityEngagement { .. } => ActionClass::ThirdParty,
 
             // Fans who opted in. Free, but a sent message cannot be unsent.
+            // The join-ask is here rather than first-party because its
+            // execution *is* the send: a post on the band's own page reaches
+            // the audience already standing there, and it spends from the
+            // same weekly envelope as a push.
             Self::RequestFanLifecycleMessage { .. }
             | Self::RequestAudienceCampaign { .. }
-            | Self::RequestSignalPush { .. } => ActionClass::OwnedAudience,
+            | Self::RequestSignalPush { .. }
+            | Self::PublishJoinAsk { .. } => ActionClass::OwnedAudience,
 
             // Ours, free and undoable by doing the opposite. The team
             // assignment email is here deliberately: it reaches our own staff,

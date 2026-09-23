@@ -30,7 +30,7 @@ pub const DEFAULT_CREW_LOCALE: &str = "en";
 
 /// The keys an operator may edit. Anything else stays internal even if a row
 /// somehow appears, so the HTTP surface cannot be used to smuggle state.
-pub const EDITABLE_KEYS: [&str; 14] = [
+pub const EDITABLE_KEYS: [&str; 17] = [
     KEY_MEMBER_SITE_BASE_URL,
     KEY_MEMBER_AREA_PATH,
     KEY_SYNESTHESIA_CAMPAIGN_SLUG,
@@ -45,6 +45,9 @@ pub const EDITABLE_KEYS: [&str; 14] = [
     KEY_TENANT_INTENT,
     KEY_ACT_STYLE,
     KEY_TICKETING_ENABLED,
+    KEY_JOIN_ASK_VARIANTS,
+    KEY_JOIN_ASK_CADENCE_DAYS,
+    KEY_JOIN_ASK_PLATFORMS,
 ];
 
 const KEY_MEMBER_SITE_BASE_URL: &str = "member_site_base_url";
@@ -95,6 +98,18 @@ pub const KEY_ACT_STYLE: &str = "act_style";
 /// workspaces that existed then — they were already selling, so their "yes"
 /// is recorded rather than defaulted.
 pub const KEY_TICKETING_ENABLED: &str = "ticketing_enabled";
+
+/// §5: the weekly join-ask — the tenant's own words, rotated onto its own
+/// social pages. `join_ask_variants` is a JSON array of 1–5 strings; absent
+/// or unparseable means the feature is off, which is a state, not an error —
+/// a join-ask with no words behind it must never post a guess instead.
+pub const KEY_JOIN_ASK_VARIANTS: &str = "join_ask_variants";
+/// Days between join-ask posts on one platform, 3–30. Absent means weekly.
+pub const KEY_JOIN_ASK_CADENCE_DAYS: &str = "join_ask_cadence_days";
+/// The channels the asks may publish to, comma-separated. Absent means
+/// `facebook,instagram` — the two whose followers are already standing on
+/// the band's own pages.
+pub const KEY_JOIN_ASK_PLATFORMS: &str = "join_ask_platforms";
 
 const CACHE_TTL: Duration = Duration::from_secs(60);
 
@@ -410,6 +425,68 @@ impl TenantSettingsRepository {
             }
         }
         Ok(settings)
+    }
+
+    /// The join-ask configuration for one workspace (§5), or `None` when the
+    /// tenant never wrote a usable variants list — a feature-off read, not a
+    /// failure.
+    ///
+    /// Parsing reuses the domain's own contract (`join_ask::parse_*`), the
+    /// same one the HTTP validator refuses on: a stored value that cannot
+    /// have been written through the edge resolves to the default or to
+    /// unset rather than being trusted — a hand edit is indistinguishable
+    /// from a bug here, and "treat it as absent" is the honest read of both.
+    ///
+    /// Not cached: the evaluator reads it once per cycle.
+    ///
+    /// # Errors
+    ///
+    /// Propagates the database error.
+    pub async fn join_ask_config(
+        &self,
+        workspace_id: Uuid,
+    ) -> Result<Option<crowdrelay_domain::join_ask::JoinAskConfig>, sqlx::Error> {
+        use crowdrelay_domain::join_ask;
+        let rows: Vec<(String, String)> = sqlx::query_as(
+            r#"
+            SELECT key, value FROM tenant_settings
+            WHERE workspace_id = $1
+              AND key IN ($2, $3, $4)
+            "#,
+        )
+        .bind(workspace_id)
+        .bind(KEY_JOIN_ASK_VARIANTS)
+        .bind(KEY_JOIN_ASK_CADENCE_DAYS)
+        .bind(KEY_JOIN_ASK_PLATFORMS)
+        .fetch_all(&self.pool)
+        .await?;
+        let mut variants = None;
+        let mut cadence_days = join_ask::DEFAULT_JOIN_ASK_CADENCE_DAYS;
+        let mut platforms: Vec<String> = join_ask::DEFAULT_JOIN_ASK_PLATFORMS
+            .iter()
+            .map(|platform| (*platform).to_owned())
+            .collect();
+        for (key, value) in rows {
+            match key.as_str() {
+                KEY_JOIN_ASK_VARIANTS => variants = join_ask::parse_variants(&value),
+                KEY_JOIN_ASK_CADENCE_DAYS => {
+                    if let Some(days) = join_ask::parse_cadence_days(&value) {
+                        cadence_days = days;
+                    }
+                }
+                KEY_JOIN_ASK_PLATFORMS => {
+                    if let Some(parsed) = join_ask::parse_platforms(&value) {
+                        platforms = parsed;
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(variants.map(|variants| join_ask::JoinAskConfig {
+            variants,
+            cadence_days,
+            platforms,
+        }))
     }
 
     /// Upserts one override and drops the workspace's cache entry so the next

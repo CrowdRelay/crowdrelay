@@ -57,6 +57,7 @@ impl AutopilotActionPayload {
             Self::RequestAgentRun { .. } => "agent.run.request",
             Self::RequestCommunityEngagement { .. } => "community.engage.request",
             Self::RequestSignalPush { .. } => "signal.push.request",
+            Self::PublishJoinAsk { .. } => "social.join_ask.publish",
         }
     }
 }

@@ -122,6 +122,11 @@ fn translate_pl(source: &str) -> String {
             return format!("Znajdź {count}{pl}");
         }
     }
+    // "Join-ask post on {platform}" — the platform name is the tenant's own
+    // channel label and stays untranslated either way.
+    if let Some(platform) = source.strip_prefix("Join-ask post on ") {
+        return format!("Post „dołącz do nas” na {platform}");
+    }
     if let Some(count) = source
         .strip_prefix("Ask a Beacon for ")
         .and_then(|rest| rest.strip_suffix(" invite codes"))
@@ -660,6 +665,20 @@ const PL: &[(&str, &str)] = &[
         "Click APPROVE to publish it",
         "Kliknij ZATWIERDŹ, aby opublikować",
     ),
+    (
+        "The followers already on the page are the cheapest fans to win. This is the weekly ask — the tenant's own words, rotated, never rewritten.",
+        "Obserwujący na stronie to najtańsi fani do zdobycia. To cotygodniowe wezwanie — słowa zespołu, rotowane, nigdy nie przepisywane.",
+    ),
+    ("Read the post text", "Przeczytaj treść posta"),
+    (
+        "It is one of the variants the tenant wrote — if it no longer sounds right, the variant list is what to edit",
+        "To jeden z wariantów napisanych przez zespół — jeśli już nie brzmi dobrze, edytuj listę wariantów",
+    ),
+    (
+        "Once approved the post goes to the band's own page with its tracked link",
+        "Po zatwierdzeniu post trafia na stronę zespołu ze śledzonym linkiem",
+    ),
+    ("Post", "Treść posta"),
     (
         "Click APPROVE to run the check",
         "Kliknij ZATWIERDŹ, aby uruchomić sprawdzenie",

@@ -1303,6 +1303,14 @@ impl PostgresAutopilotRepository {
                     )
                     .await?;
                 }
+                AutopilotActionPayload::PublishJoinAsk { .. } => {
+                    // Deliberately no side effect: the payload on the
+                    // `succeeded` action row IS the instruction. The social
+                    // post executor claims these actions by kind and files
+                    // the `social_posts` row that is the publish receipt —
+                    // the same claim shape the channel executors use for
+                    // agent drafts, minus the outbox hop nobody consumes.
+                }
             }
 
             // External intents are only *dispatched* here. Their learning/outcome

@@ -89,6 +89,10 @@ MUST_BE_MEASURED = {
     "RequestAgentContent",
     "RequestCommunityEngagement",
     "RequestFanLifecycleMessage",
+    # The weekly join-ask's whole point is the tracked link it carries —
+    # clicks and signups through `content_link_clicks_7d` are the observable
+    # the action exists to move.
+    "PublishJoinAsk",
 }
 
 

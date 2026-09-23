@@ -119,6 +119,12 @@ pub struct AutopilotCycleReport {
     /// Each entry is `(community, posts_waiting)`, most-wanted first. Empty
     /// when nothing is blocked, which is the healthy case.
     pub blocked_on_membership: Vec<(String, u32)>,
+    /// Join-ask platforms the evaluator looked at and held this cycle —
+    /// `(platform, hold)`. Same reason `blocked_on_membership` exists: a
+    /// configured platform that stays quiet is work waiting on a person (no
+    /// connection, no photo, no site URL), and a silent skip is
+    /// indistinguishable from a detector that never ran.
+    pub join_ask_held: Vec<(String, crowdrelay_domain::join_ask::JoinAskHold)>,
     /// Per-context funnel: every enabled context registers on entry, so a
     /// context that ran and produced nothing is distinguishable from one
     /// whose candidates were all eaten before a row existed.

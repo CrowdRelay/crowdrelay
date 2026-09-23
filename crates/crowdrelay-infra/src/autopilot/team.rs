@@ -837,6 +837,8 @@ pub(super) fn friendly_action_title(action_kind: &str, locale: BriefingLocale) -
         ("show.task.escalate", BriefingLocale::En) => "Escalate the show task",
         ("signal.push.request", BriefingLocale::Pl) => "Zatwierdź push Signal",
         ("signal.push.request", BriefingLocale::En) => "Approve the Signal push",
+        ("social.join_ask.publish", BriefingLocale::Pl) => "Zatwierdź post „dołącz do nas”",
+        ("social.join_ask.publish", BriefingLocale::En) => "Approve the join-ask post",
         ("latarnik.invite.request", BriefingLocale::Pl) => "Zatwierdź zaproszenie do Latarnika",
         ("latarnik.invite.request", BriefingLocale::En) => "Approve the Latarnik invitation",
         ("opportunity.counterparty_report.issue", BriefingLocale::Pl) => {

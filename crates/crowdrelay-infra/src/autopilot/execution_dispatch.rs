@@ -189,6 +189,21 @@ pub(super) async fn ensure_dispatch_envelope(
             Some(format!("fan:{fan_id}")),
             DispatchContext::default(),
         ),
+        // The weekly join-ask posts through the social executor, which files
+        // no executor receipt — the envelope is filled here so the
+        // `content_link_clicks_7d` measurement scheduled below has rows to
+        // write to. The platform is the posterior's target: a Facebook ask
+        // and an Instagram ask are different levers and must not share one
+        // belief.
+        AutopilotActionPayload::PublishJoinAsk { platform, .. } => (
+            format!("join-ask:{platform}"),
+            format!("platform:{platform}"),
+            Some(format!("platform:{platform}")),
+            DispatchContext {
+                post_format: Some("join_ask".to_owned()),
+                ..DispatchContext::default()
+            },
+        ),
         // Everything left schedules no measurements — an internal mark, a
         // held escalation, a task completion — so it owes no evidence row,
         // and writing one would leave an unresolved row nothing resolves.

@@ -8,26 +8,8 @@ pub(super) async fn schedule_effect_measurement(
     let mut plans = Vec::with_capacity(4);
     match payload {
         AutopilotActionPayload::ChangeTicketPrice { ticket_type_id, .. } => {
-            let baseline = sqlx::query_scalar::<_, f64>(
-                r#"
-                SELECT COALESCE(SUM(item.total_gross_minor), 0)::double precision
-                FROM ticket_order_items AS item
-                JOIN ticket_orders AS ticket_order
-                  ON ticket_order.workspace_id = item.workspace_id
-                 AND ticket_order.id = item.ticket_order_id
-                WHERE item.workspace_id = $1
-                  AND item.ticket_type_id = $2
-                  AND ticket_order.status = 'paid'
-                  AND ticket_order.paid_at >= $3 - INTERVAL '72 hours'
-                  AND ticket_order.paid_at < $3
-                "#,
-            )
-            .bind(workspace_id.into_uuid())
-            .bind(ticket_type_id.into_uuid())
-            .bind(now)
-            .fetch_one(&mut **transaction)
-            .await
-            .map_err(map_sqlx)?;
+            let baseline =
+                ticket_revenue_baseline_72h(transaction, workspace_id, ticket_type_id, now).await?;
             plans.push((
                 AutopilotMeasurementKind::TicketRevenue72h,
                 ticket_type_id.into_uuid(),
@@ -957,6 +939,22 @@ pub(super) async fn schedule_effect_measurement(
             // No AgentRunOutcomeQuality1h here either: the drafting task's
             // outcome links to the action that requested the draft, not to
             // this content action — the join can never match.
+        }
+        // The weekly join-ask (§5): clicks on the tracked link the social
+        // executor mints for `cta_url`, seven days out. No fan-growth
+        // counterfactual — the ask targets existing followers, so a
+        // workspace-level fan delta would read archive-import windfalls as
+        // the post's doing (the mismeasurement F1's briefing split prevents).
+        // Signups surface on the briefing line instead of a measurement row.
+        AutopilotActionPayload::PublishJoinAsk { platform, .. } => {
+            if matches!(platform.as_str(), "instagram" | "facebook" | "x") {
+                plans.push((
+                    AutopilotMeasurementKind::ContentLinkClicks7d,
+                    action_id.into_uuid(),
+                    0.0,
+                    now + time::Duration::days(7),
+                ));
+            }
         }
     }
 
