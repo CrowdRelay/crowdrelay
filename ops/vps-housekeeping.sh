@@ -69,8 +69,8 @@ set -uo pipefail
 
 # ── Config ────────────────────────────────────────────────────────────────
 KEEP_IMAGES_PER_REPO="${KEEP_IMAGES_PER_REPO:-2}"
-PRESSURE_PCT="${PRESSURE_PCT:-85}"
-CRITICAL_PCT="${CRITICAL_PCT:-90}"
+PRESSURE_PCT="${PRESSURE_PCT:-80}"
+CRITICAL_PCT="${CRITICAL_PCT:-87}"
 STALE_DB_AGE_H="${STALE_DB_AGE_H:-12}"
 GHA_CONTAINER_IDLE_MAX_H="${GHA_CONTAINER_IDLE_MAX_H:-1}"
 GHA_CONTAINER_BUSY_MAX_H="${GHA_CONTAINER_BUSY_MAX_H:-4}"
@@ -486,9 +486,10 @@ else
   done
   # docker image prune already cleared dangling layers above.
 
-  # Idle pressure threshold is lower — caches are free to take when no build
-  # can be hurt.
-  if [[ "${PCT:-0}" -ge 80 ]]; then clear_caches; fi
+  # Idle floor sits below PRESSURE_PCT: between 75% and 80% an idle box
+  # still clears caches (including the busy-exempt ones) before pressure
+  # handling would even start.
+  if [[ "${PCT:-0}" -ge 75 ]]; then clear_caches; fi
 fi
 
 AVAIL1=$(avail_bytes)
