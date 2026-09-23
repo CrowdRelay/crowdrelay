@@ -58,19 +58,25 @@ impl PostgresAutopilotRepository {
         operator_action: &'static str,
         target_status: &'static str,
         revision: Option<&std::collections::BTreeMap<String, String>>,
+        approved_by: &'static str,
+        error_kind: Option<&'static str>,
     ) -> Result<AutopilotControlMutation, RepositoryError> {
         self.bounded(async {
             let mut transaction = self.pool.begin().await.map_err(map_sqlx)?;
             let operation_id = Uuid::now_v7();
             // The audit row records which fields the operator meant to edit —
             // names only; the before/after text lives in
-            // `draft_revisions` once the edit is accepted.
+            // `draft_revisions` once the edit is accepted. `actor` says which
+            // door the answer came through — the admin API key or a mailed
+            // one-click link — because `actor_type` is a credential-class
+            // vocabulary, not a channel one.
             let details = match revision {
                 Some(revision) => json!({
                     "requested_status": target_status,
+                    "actor": approved_by,
                     "revision_fields": revision.keys().collect::<Vec<_>>(),
                 }),
-                None => json!({"requested_status": target_status}),
+                None => json!({"requested_status": target_status, "actor": approved_by}),
             };
             let replay = operator_actions::insert_operator_action(
                 &mut transaction,
@@ -148,7 +154,7 @@ impl PostgresAutopilotRepository {
                         r#"
                         UPDATE autopilot_actions
                         SET status = 'queued', payload = $3,
-                            approved_at = now(), approved_by = 'operator:admin_api_key',
+                            approved_at = now(), approved_by = $5,
                             -- O.2: an outward send waits out its hold window
                             -- before a worker may claim it. `action_class` is
                             -- the same durable classification the outward gate
@@ -168,12 +174,13 @@ impl PostgresAutopilotRepository {
                     .bind(action_id.into_uuid())
                     .bind(revised.as_ref().map(|(payload, _, _)| payload.clone()))
                     .bind(OUTWARD_HOLD_SECONDS)
+                    .bind(approved_by)
                 } else {
                     sqlx::query_scalar::<_, String>(
                         r#"
                         UPDATE autopilot_actions
                         SET status = 'queued', approved_at = now(),
-                            approved_by = 'operator:admin_api_key',
+                            approved_by = $4,
                             available_at = now() + CASE
                                 WHEN action_class IN ('owned_audience', 'third_party', 'paid')
                                 THEN make_interval(secs => $3::double precision)
@@ -187,6 +194,7 @@ impl PostgresAutopilotRepository {
                     .bind(workspace_id.into_uuid())
                     .bind(action_id.into_uuid())
                     .bind(OUTWARD_HOLD_SECONDS)
+                    .bind(approved_by)
                 };
                 query
                     .fetch_optional(&mut *transaction)
@@ -196,7 +204,8 @@ impl PostgresAutopilotRepository {
                 sqlx::query_scalar::<_, String>(
                     r#"
                     UPDATE autopilot_actions
-                    SET status = 'cancelled', finished_at = now()
+                    SET status = 'cancelled', finished_at = now(),
+                        last_error_kind = COALESCE($3, last_error_kind)
                     WHERE workspace_id = $1 AND id = $2
                       AND (
                             status = 'awaiting_approval'
@@ -217,6 +226,7 @@ impl PostgresAutopilotRepository {
                 )
                 .bind(workspace_id.into_uuid())
                 .bind(action_id.into_uuid())
+                .bind(error_kind)
                 .fetch_optional(&mut *transaction)
                 .await
                 .map_err(map_sqlx)?

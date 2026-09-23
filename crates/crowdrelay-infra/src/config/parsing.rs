@@ -308,9 +308,31 @@ fn parse_public_site_base_url(
         .ok_or(ConfigError::Missing {
             name: PUBLIC_SITE_BASE_URL_KEY,
         })?;
-    let parsed = Url::parse(value).map_err(|_| ConfigError::InvalidPublicSiteBaseUrl {
-        name: PUBLIC_SITE_BASE_URL_KEY,
-    })?;
+    bare_origin(value, PUBLIC_SITE_BASE_URL_KEY, production)
+}
+
+/// The API's own public origin — optional because a deployment that never
+/// configures it simply mails no one-click links. Same shape as the site
+/// base URL: a bare http(s) origin, https-only in production.
+fn parse_public_api_origin(
+    value: Option<&String>,
+    production: bool,
+) -> Result<Option<Url>, ConfigError> {
+    let Some(value) = value
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(None);
+    };
+    bare_origin(value, PUBLIC_API_ORIGIN_KEY, production).map(Some)
+}
+
+fn bare_origin(
+    value: &str,
+    name: &'static str,
+    production: bool,
+) -> Result<Url, ConfigError> {
+    let parsed = Url::parse(value).map_err(|_| ConfigError::InvalidPublicSiteBaseUrl { name })?;
 
     let is_http = matches!(parsed.scheme(), "http" | "https");
     let is_bare_origin = parsed.host().is_some()
@@ -320,14 +342,10 @@ fn parse_public_site_base_url(
         && parsed.query().is_none()
         && parsed.fragment().is_none();
     if !is_http || !is_bare_origin {
-        return Err(ConfigError::InvalidPublicSiteBaseUrl {
-            name: PUBLIC_SITE_BASE_URL_KEY,
-        });
+        return Err(ConfigError::InvalidPublicSiteBaseUrl { name });
     }
     if production && parsed.scheme() != "https" {
-        return Err(ConfigError::InsecureProductionSiteUrl {
-            name: PUBLIC_SITE_BASE_URL_KEY,
-        });
+        return Err(ConfigError::InsecureProductionSiteUrl { name });
     }
 
     Ok(parsed)
@@ -450,6 +468,17 @@ pub(super) fn parse_optional_secret_hash(
 fn derive_attestation_signing_key(value: Option<&String>) -> AttestationSigningKey {
     let secret = value.map_or(LOCAL_RESPONSE_ENCRYPTION_SECRET, String::as_str);
     AttestationSigningKey::derive_from_secret(secret.as_bytes())
+}
+
+/// Derives the team-approval link key from the same configured secret.
+///
+/// Deliberately not its own environment variable, for the reason documented
+/// on `derive_attestation_signing_key` — same secret, its own domain
+/// separator, so a mailed approval link survives an unrelated rotation and a
+/// token minted for attestations verifies against nothing here.
+fn derive_team_approval_key(value: Option<&String>) -> TeamApprovalKey {
+    let secret = value.map_or(LOCAL_RESPONSE_ENCRYPTION_SECRET, String::as_str);
+    TeamApprovalKey::derive_from_secret(secret.as_bytes())
 }
 
 /// Derives the workspace-secrets key from the same configured secret.

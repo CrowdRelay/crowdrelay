@@ -423,6 +423,7 @@ pub(super) fn application_routes(state: AppState) -> Router {
             "/v1/public/attestations/digest/{digest}/anchor",
             get(crate::attestation::attestation_anchor),
         )
+        .merge(crate::team_approvals::public_routes())
         .route("/v1/public/events/{slug}", get(events::get_event))
         .route(
             "/v1/public/events/{slug}/tickets",

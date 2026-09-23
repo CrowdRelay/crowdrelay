@@ -117,6 +117,7 @@ pub use rate_limit::{RateLimitPolicy, RateLimiter};
 mod staff_sessions;
 mod synesthesia;
 mod synesthesia_gate;
+mod team_approvals;
 pub mod tenant;
 mod tenant_settings_http;
 mod ticket_qr;
@@ -203,6 +204,9 @@ pub struct AppState {
     /// Signing key for audience attestations. A document's signature is the
     /// only part a stranger can check against us rather than against itself.
     pub(crate) attestation_signing_key: crowdrelay_infra::attestation::AttestationSigningKey,
+    /// Signing key for the mailed one-click approval links — same configured
+    /// secret as the attestation key, its own domain separator.
+    pub(crate) team_approval_key: crowdrelay_domain::team_approval_token::TeamApprovalKey,
     /// Shared HTTP client for outbound OAuth token exchanges.
     pub(crate) http_client: reqwest::Client,
     /// Provider verifiers for connection creation probes.
@@ -241,6 +245,7 @@ impl AppState {
         workspace_secrets_key: SensitiveResponseKey,
         previous_workspace_secrets_key: Option<SensitiveResponseKey>,
         attestation_signing_key: crowdrelay_infra::attestation::AttestationSigningKey,
+        team_approval_key: crowdrelay_domain::team_approval_token::TeamApprovalKey,
         provider_verifiers: crowdrelay_infra::provider_verification::ProviderVerifiers,
     ) -> Self {
         let ecosystem = PostgresEcosystemRepository::new(database.clone());
@@ -279,6 +284,7 @@ impl AppState {
             workspace_secrets_key,
             previous_workspace_secrets_key,
             attestation_signing_key,
+            team_approval_key,
             http_client: reqwest::Client::new(),
             provider_verifiers,
             read_budget,
@@ -1046,6 +1052,20 @@ impl Problem {
             detail: std::borrow::Cow::Borrowed(
                 "The requested resource does not exist or is inactive.",
             ),
+            cache_control: "no-store",
+            retry_after_seconds: None,
+            request_id,
+        }
+    }
+
+    /// The thing existed once and its window closed — a mailed link past its
+    /// expiry is gone, not missing.
+    fn gone(request_id: Option<String>) -> Self {
+        Self {
+            r#type: "https://crowdrelay.dev/problems/gone",
+            title: "Gone",
+            status: StatusCode::GONE.as_u16(),
+            detail: std::borrow::Cow::Borrowed("The resource existed but its window has closed."),
             cache_control: "no-store",
             retry_after_seconds: None,
             request_id,

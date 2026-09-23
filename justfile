@@ -171,6 +171,7 @@ test-postgres-env:
       a_silence_resolves_to_a_measured_zero \
       b_a_reply_inside_the_window_resolves_to_one \
       queued_team_assignment_email_uses_fast_lane_and_emits_bridge_event \
+      a_far_out_approval_is_held_for_the_briefing \
       an_anchor_is_one_room_whoever_claims_it
     {{CARGO}} test --locked --all-features --package crowdrelay-worker --test postgres -- --ignored --test-threads=1 \
       the_outcome_appears_in_the_timeline_it_caused \
@@ -187,7 +188,8 @@ test-postgres-env:
       seals_reveals_lists_and_deletes \
       secrets_do_not_cross_workspaces
     {{CARGO}} test --locked --all-features --package crowdrelay-api --test postgres -- --ignored --test-threads=1 \
-      an_attestation_is_anchored_once_and_the_anchor_says_so
+      an_attestation_is_anchored_once_and_the_anchor_says_so \
+      a_mailed_link_renders_then_decides_the_ask
     {{CARGO}} test --locked --all-features --package crowdrelay-worker --lib -- --ignored --test-threads=1 \
       postgres_outbox_round_trip
     {{CARGO}} test --locked --all-features --package crowdrelay-api --lib -- --ignored --test-threads=1 \

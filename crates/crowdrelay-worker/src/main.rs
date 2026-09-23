@@ -367,7 +367,7 @@ async fn run(database: PgPool, config: &Config, standby: bool) -> Result<()> {
              and the fans in them get no nearby-show announcements."
         );
     }
-    let autopilot_repository = PostgresAutopilotRepository::new(database.clone(), &config.database);
+    let autopilot_repository = PostgresAutopilotRepository::for_runtime(database.clone(), config);
     let team_email_worker = TeamEmailDispatchWorker::new(
         autopilot_repository.clone(),
         workspace_id,

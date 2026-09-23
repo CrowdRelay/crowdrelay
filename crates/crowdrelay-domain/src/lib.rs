@@ -135,6 +135,7 @@ pub mod show_operations;
 pub mod show_settlement;
 pub mod standing_approval;
 pub mod target_discovery;
+pub mod team_approval_token;
 pub mod team_operations;
 pub mod tour_economics;
 pub mod trace;

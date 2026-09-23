@@ -1100,6 +1100,14 @@ impl AutopilotControlRepository for PostgresAutopilotRepository {
                         format!("Needs your decision in CrowdRelay: {title}.")
                     }
                 };
+                let links = super::team::EmailApprovalLinks {
+                    direct: self.mint_approval_links(
+                        action_id.into_uuid(),
+                        Some(persisted_assignment_id),
+                        due_at,
+                    ),
+                    pending: Vec::new(),
+                };
                 super::team::queue_team_email_action(
                     &mut transaction,
                     workspace_id,
@@ -1112,6 +1120,7 @@ impl AutopilotControlRepository for PostgresAutopilotRepository {
                     due_at,
                     0,
                     Some(action_id.into_uuid()),
+                    links,
                     OffsetDateTime::now_utc(),
                 )
                 .await?;
@@ -1149,6 +1158,8 @@ impl AutopilotControlRepository for PostgresAutopilotRepository {
             "approve_autopilot_action",
             "queued",
             revision,
+            "operator:admin_api_key",
+            None,
         )
         .await
     }
@@ -1167,6 +1178,8 @@ impl AutopilotControlRepository for PostgresAutopilotRepository {
             request_id,
             "cancel_autopilot_action",
             "cancelled",
+            None,
+            "operator:admin_api_key",
             None,
         )
         .await

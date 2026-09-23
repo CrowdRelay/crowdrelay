@@ -45,6 +45,10 @@ pub(super) struct PendingInitialNotice {
     pub detail: String,
     pub due_at: Option<OffsetDateTime>,
     pub source_action_id: Option<Uuid>,
+    /// The `team_assignments.source_kind` this notice came from — the flush
+    /// holds first notices for everything except show tasks unless the work
+    /// is due inside a day, letting the next morning's briefing carry them.
+    pub source_kind: &'static str,
 }
 
 impl PostgresAutopilotRepository {
@@ -95,6 +99,7 @@ impl PostgresAutopilotRepository {
                     workspace_id,
                     now,
                     crew_locale,
+                    self.approval_links.as_ref(),
                 )
                 .await?
             } else {
@@ -277,6 +282,7 @@ impl PostgresAutopilotRepository {
                     ),
                     due_at: action.approval_expires_at,
                     source_action_id: Some(action.id),
+                    source_kind: "autopilot_action",
                 });
                 member.open_assignments = member.open_assignments.saturating_add(1);
                 member.recent_assignments = member.recent_assignments.saturating_add(1);
@@ -353,6 +359,7 @@ impl PostgresAutopilotRepository {
                     detail: show_task_detail(&task, crew_locale),
                     due_at: Some(task.due_at),
                     source_action_id: None,
+                    source_kind: "show_task",
                 });
                 member.open_assignments = member.open_assignments.saturating_add(1);
                 member.recent_assignments = member.recent_assignments.saturating_add(1);
@@ -372,7 +379,15 @@ impl PostgresAutopilotRepository {
                 .await?,
             );
 
-            flush_initial_notices(&mut tx, workspace_id, pending_notices, crew_locale, now).await?;
+            flush_initial_notices(
+                &mut tx,
+                workspace_id,
+                pending_notices,
+                crew_locale,
+                self.approval_links.as_ref(),
+                now,
+            )
+            .await?;
 
             tx.commit().await.map_err(map_sqlx)?;
             Ok(assigned)
@@ -487,6 +502,16 @@ async fn close_resolved_assignments(
     Ok(())
 }
 
+/// The one-click links a team email carries. `direct` is the pair for the
+/// single pending approval a notice fronts; `pending` is the per-ask list a
+/// morning briefing mails. Both default to empty — a mail with no asks mints
+/// no links.
+#[derive(Default)]
+pub(super) struct EmailApprovalLinks {
+    pub direct: Option<(String, String)>,
+    pub pending: Vec<PendingApprovalLink>,
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn queue_team_email_action(
     tx: &mut Transaction<'_, Postgres>,
@@ -500,6 +525,7 @@ pub(super) async fn queue_team_email_action(
     due_at: Option<OffsetDateTime>,
     reminder_number: u8,
     source_action_id: Option<Uuid>,
+    links: EmailApprovalLinks,
     now: OffsetDateTime,
 ) -> Result<(), RepositoryError> {
     // `email_opt_out` marks a member whose address must never receive crew
@@ -609,6 +635,9 @@ pub(super) async fn queue_team_email_action(
             None => "/staff/?tab=overview#needs-you".to_owned(),
         },
         reminder_number,
+        approve_url: links.direct.as_ref().map(|pair| pair.0.clone()),
+        skip_url: links.direct.as_ref().map(|pair| pair.1.clone()),
+        pending_approvals: links.pending,
     })
     .map_err(|_| RepositoryError::Unexpected)?;
 
@@ -655,10 +684,23 @@ async fn flush_initial_notices(
     workspace_id: WorkspaceId,
     pending: Vec<PendingInitialNotice>,
     crew_locale: BriefingLocale,
+    approval_links: Option<&ApprovalLinkMinter>,
     now: OffsetDateTime,
 ) -> Result<(), RepositoryError> {
+    // §6: a first notice mails only when the work is due inside a day or is
+    // a genuinely manual show task; everything else stays an open assignment
+    // and reaches the member through tomorrow's briefing instead of another
+    // same-minute e-mail. Holding drops nothing — the briefing's open-tasks
+    // and pending-asks sections list every open assignment regardless.
+    let mailable = pending.into_iter().filter(|notice| {
+        notice.source_kind == "show_task"
+            || notice
+                .due_at
+                .is_some_and(|due| due < now + time::Duration::hours(24))
+    });
+
     let mut by_recipient: Vec<(String, Vec<PendingInitialNotice>)> = Vec::new();
-    for notice in pending {
+    for notice in mailable {
         match by_recipient
             .iter_mut()
             .find(|(email, _)| *email == notice.recipient_email)
@@ -695,6 +737,13 @@ async fn flush_initial_notices(
             detail.push('…');
         }
         detail.push_str(&tail);
+        // The link window is the ask's own expiry — a notice for plain work
+        // (`source_action_id` is None) mints nothing.
+        let direct = primary.source_action_id.and_then(|action_id| {
+            approval_links.and_then(|minter| {
+                minter.mint(action_id, Some(primary.assignment_id), primary.due_at)
+            })
+        });
         queue_team_email_action(
             tx,
             workspace_id,
@@ -707,6 +756,10 @@ async fn flush_initial_notices(
             primary.due_at,
             0,
             primary.source_action_id,
+            EmailApprovalLinks {
+                direct,
+                pending: Vec::new(),
+            },
             now,
         )
         .await?;
@@ -773,7 +826,9 @@ pub(super) fn assignment_need(context: &str, action_kind: &str) -> TeamAssignmen
     }
 }
 
-pub(super) fn friendly_action_title(action_kind: &str, locale: BriefingLocale) -> String {
+/// The crew-facing name for an action kind — the same wording the first
+/// notice and the mailed approval page share.
+pub fn friendly_action_title(action_kind: &str, locale: BriefingLocale) -> String {
     let title = match (action_kind, locale) {
         ("opportunity.live.apply", BriefingLocale::Pl) => {
             "Sprawdź i zatwierdź zgłoszenie koncertowe"

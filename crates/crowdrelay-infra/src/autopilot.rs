@@ -43,6 +43,9 @@ mod success_evidence;
 mod team;
 mod team_release;
 mod team_routing;
+
+// §6-C: the mailed approval page names the ask the way the first notice did.
+pub use team::friendly_action_title;
 mod terms;
 mod tuning;
 mod waves;
@@ -77,21 +80,22 @@ use crowdrelay_application::{
         ManagerBookingPolicySummary, ManagerConfigMutation, MerchProductEconomicsMutation,
         NextBestAction, ORG_ATTENTION_BUDGET_ERROR_KIND, OutreachKindStanding, OutreachWaveAnchor,
         OutreachWaveSnapshot, OutreachWaveStart, OutreachWaveTransition, PLAYLIST_TEMPLATE_KEY,
-        PendingAutopilotAction, PlacementSettlement, PlayAnchor, PlayAnchorRef, PlayAudience,
-        PlayClaimView, PlayKindStanding, PlayLedger, PlayLedgerEntry, PlayOutcomeObservation,
-        PlayRunSnapshot, PlayStart, PlayStepSettlement, PlaylistPlacementSnapshot,
-        PortfolioPoolEntry, PromotionBudgetGuardrailMutation, PromotionBudgetGuardrailSummary,
-        PromotionCampaignStateMutation, ProviderActionCorrelation, RecentAutopilotAction,
-        RecentAutopilotDecision, RecentAutopilotEffect, RecordDeliveryFault, RecordExecutionReport,
-        RecordExecutorHeartbeat, RecordGrowthMetricPoint, RecordPlaylistPlacement, RecordRumSample,
-        ReleaseComponentMutation, ReleaseComponentSummary, ReleaseLedgerOverview, RumMetricSummary,
-        SetAutopilotAuthority, SetGrowthEnvelope, SetGrowthPosture, SetManagerBookingPolicy,
-        SetTourEconomics, SettleShowCost, ShowCostLedgerEntry, ShowCostMutation,
-        TeamAssigneeSummary, TermsSettlement, TicketAllocationGuardrailMutation,
-        TourEconomicsMutation, TourEconomicsSummary, UpsertBookingTarget, UpsertCityMarketSignal,
-        UpsertFestivalEdition, UpsertGrowthMetricSeries, UpsertMerchProductEconomics,
-        UpsertPromotionBudgetGuardrail, UpsertPromotionCampaignState, UpsertReleaseComponent,
-        UpsertTicketAllocationGuardrail, WaveOutcomeObservation,
+        PendingApprovalLink, PendingAutopilotAction, PlacementSettlement, PlayAnchor,
+        PlayAnchorRef, PlayAudience, PlayClaimView, PlayKindStanding, PlayLedger, PlayLedgerEntry,
+        PlayOutcomeObservation, PlayRunSnapshot, PlayStart, PlayStepSettlement,
+        PlaylistPlacementSnapshot, PortfolioPoolEntry, PromotionBudgetGuardrailMutation,
+        PromotionBudgetGuardrailSummary, PromotionCampaignStateMutation, ProviderActionCorrelation,
+        RecentAutopilotAction, RecentAutopilotDecision, RecentAutopilotEffect, RecordDeliveryFault,
+        RecordExecutionReport, RecordExecutorHeartbeat, RecordGrowthMetricPoint,
+        RecordPlaylistPlacement, RecordRumSample, ReleaseComponentMutation,
+        ReleaseComponentSummary, ReleaseLedgerOverview, RumMetricSummary, SetAutopilotAuthority,
+        SetGrowthEnvelope, SetGrowthPosture, SetManagerBookingPolicy, SetTourEconomics,
+        SettleShowCost, ShowCostLedgerEntry, ShowCostMutation, TeamAssigneeSummary,
+        TermsSettlement, TicketAllocationGuardrailMutation, TourEconomicsMutation,
+        TourEconomicsSummary, UpsertBookingTarget, UpsertCityMarketSignal, UpsertFestivalEdition,
+        UpsertGrowthMetricSeries, UpsertMerchProductEconomics, UpsertPromotionBudgetGuardrail,
+        UpsertPromotionCampaignState, UpsertReleaseComponent, UpsertTicketAllocationGuardrail,
+        WaveOutcomeObservation,
     },
 };
 use crowdrelay_brain::GrowthIntelligenceSnapshot;
@@ -116,7 +120,9 @@ use crowdrelay_domain::{
     booking_discovery::BookingSupplySnapshot,
     booking_window::{BookingWindowInputSet, BookingWindowOwnShow, BookingWindowTargetInputs},
     campaign_lifecycle::EventCampaignSnapshot,
-    content_supply::{CommunityRelayTarget, ContentSupplySnapshot, SignalPushAudience},
+    content_supply::{
+        CommunityRelayTarget, ContentArtifactKind, ContentSupplySnapshot, SignalPushAudience,
+    },
     deliverability::DeliverabilitySnapshot,
     experimentation::ExperimentSnapshot,
     free_reach::{WaveAnchor, WaveSnapshot, WaveState},
@@ -247,10 +253,55 @@ fn tour_policy_from_columns(columns: &Value) -> TourEconomicsPolicy {
 const MAX_SNAPSHOTS_PER_CONTEXT: i64 = 500;
 const EXTERNAL_ACTION_EVENT_VERSION: i32 = 1;
 
+/// What minting a one-click approval link needs: the signing key and the
+/// public origin the link resolves against. Absent is a supported state —
+/// payloads then carry no `approve_url`/`skip_url` at all rather than a link
+/// that cannot verify.
+#[derive(Clone)]
+pub struct ApprovalLinkMinter {
+    key: crowdrelay_domain::team_approval_token::TeamApprovalKey,
+    base_url: String,
+}
+
+impl ApprovalLinkMinter {
+    /// Mints the (approve, skip) pair for one pending action, or `None` when
+    /// the action's expiry is unset — a link with no expiry is a credential
+    /// with no shelf life, so no link.
+    fn mint(
+        &self,
+        action_id: Uuid,
+        assignment_id: Option<Uuid>,
+        expires_at: Option<OffsetDateTime>,
+    ) -> Option<(String, String)> {
+        let token = crowdrelay_domain::team_approval_token::encode(
+            &crowdrelay_domain::team_approval_token::ApprovalTokenClaims {
+                action_id,
+                assignment_id,
+                expires_at: expires_at?,
+            },
+            &self.key,
+        );
+        let base = self.base_url.trim_end_matches('/');
+        let url = format!("{base}/v1/public/approvals/{token}");
+        // Both buttons post to the same URL; the verdict rides in the body.
+        Some((url.clone(), url))
+    }
+}
+
+impl std::fmt::Debug for ApprovalLinkMinter {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ApprovalLinkMinter")
+            .field("base_url", &self.base_url)
+            .finish_non_exhaustive()
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct PostgresAutopilotRepository {
     pool: PgPool,
     operation_timeout: Duration,
+    approval_links: Option<ApprovalLinkMinter>,
 }
 
 impl PostgresAutopilotRepository {
@@ -259,6 +310,7 @@ impl PostgresAutopilotRepository {
         Self {
             pool,
             operation_timeout: database.operation_timeout,
+            approval_links: None,
         }
     }
 
@@ -267,7 +319,58 @@ impl PostgresAutopilotRepository {
         Self {
             pool,
             operation_timeout,
+            approval_links: None,
         }
+    }
+
+    /// The production constructor: `new`, plus the §6-C link minter when the
+    /// deployment names its public API origin. Unset means crew e-mail goes
+    /// without one-click links rather than aimed at a host that cannot
+    /// answer them — said once at boot, not on every mailed payload.
+    #[must_use]
+    pub fn for_runtime(pool: PgPool, config: &crate::config::Config) -> Self {
+        let repository = Self::new(pool, &config.database);
+        match &config.public_api_origin {
+            Some(origin) => {
+                repository.with_approval_links(config.team_approval_key.clone(), origin.as_str())
+            }
+            None => {
+                tracing::warn!(
+                    "CROWDRELAY_PUBLIC_API_ORIGIN unset: crew e-mail carries no one-click approval links"
+                );
+                repository
+            }
+        }
+    }
+
+    /// Enables the §6-C one-click links on every payload this repository
+    /// writes that lists a pending approval. A workspace without a public
+    /// origin configured mails briefings without links rather than minting
+    /// against a guessed host.
+    #[must_use]
+    pub fn with_approval_links(
+        mut self,
+        key: crowdrelay_domain::team_approval_token::TeamApprovalKey,
+        base_url: impl Into<String>,
+    ) -> Self {
+        self.approval_links = Some(ApprovalLinkMinter {
+            key,
+            base_url: base_url.into(),
+        });
+        self
+    }
+
+    /// The (approve, skip) URL pair for one pending action — `None` where no
+    /// minter is configured or the action's window has no end.
+    fn mint_approval_links(
+        &self,
+        action_id: Uuid,
+        assignment_id: Option<Uuid>,
+        expires_at: Option<OffsetDateTime>,
+    ) -> Option<(String, String)> {
+        self.approval_links
+            .as_ref()
+            .and_then(|minter| minter.mint(action_id, assignment_id, expires_at))
     }
 
     /// Returns a reference to the underlying connection pool.
@@ -682,6 +785,7 @@ struct ExistingOperatorActionRow {
 // actions repository implementation lives in `autopilot/actions.rs`.
 include!("autopilot/mapping.rs");
 
+include!("autopilot/approval_links.rs");
 include!("autopilot/execution.rs");
 include!("autopilot/execution_beacon.rs");
 include!("autopilot/execution_latarnik.rs");
