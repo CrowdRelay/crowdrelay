@@ -31,6 +31,28 @@ pub struct ImportCounts {
     pub cooldown_skipped: u32,
 }
 
+/// The tenant's voice on a batch of confirmation mails, carried into each
+/// `fan.confirmation_requested` payload. `locale` is the crew's language
+/// tag — an entry's own `locale` still wins over it; `reason` is the
+/// operator's one line ("we are moving the list to Signal") the invitation
+/// prints verbatim.
+#[derive(Debug, Default, Clone)]
+pub struct InvitationContext {
+    pub locale: Option<String>,
+    pub reason: Option<String>,
+}
+
+/// What a batch did, plus the suppressed addresses — the bulk-promote
+/// caller needs the addresses (they stay `staged`) while the plain import
+/// only ever reported the count.
+#[derive(Debug)]
+pub struct ImportBatchOutcome {
+    pub counts: ImportCounts,
+    /// Addresses skipped because their fan row is `unsubscribed`,
+    /// `suppressed`, or `merged`. Normalized, deduplicated.
+    pub suppressed_emails: Vec<String>,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum FanImportError {
     #[error("fan import database operation failed")]
@@ -59,6 +81,23 @@ impl PostgresFanImportRepository {
     /// is admitted once and confirmed once, with the later occurrences landing
     /// in the cooldown the first one opened — which is what the sequential
     /// version produced when it re-read the row it had just written.
+    /// `source_label` on the confirmation payload is the family the import
+    /// arrived through: archive connectors (`gdrive`, `gmail`, `github`,
+    /// `csv`, `sheet` — `+`-joined when a contact was sighted in several)
+    /// read `archive`, everything else reads `web`.
+    fn source_label(source: &str) -> &'static str {
+        if source.split('+').any(|token| {
+            matches!(
+                token.trim(),
+                "gdrive" | "gmail" | "github" | "csv" | "sheet"
+            )
+        }) {
+            "archive"
+        } else {
+            "web"
+        }
+    }
+
     pub async fn import_batch(
         &self,
         workspace_id: Uuid,
@@ -68,8 +107,40 @@ impl PostgresFanImportRepository {
         resend_cooldown_seconds: i64,
     ) -> Result<ImportCounts, FanImportError> {
         let mut tx = self.pool.begin().await.map_err(FanImportError::Database)?;
+        let outcome = self
+            .import_batch_in_tx(
+                &mut tx,
+                workspace_id,
+                source,
+                entries,
+                access_token_ttl_days,
+                resend_cooldown_seconds,
+                &InvitationContext::default(),
+            )
+            .await?;
+        tx.commit().await.map_err(FanImportError::Database)?;
+        Ok(outcome.counts)
+    }
 
+    /// The batch, run inside a caller's transaction — the bulk archive
+    /// promote imports and marks the staging rows in one commit, so a mark
+    /// failure cannot leave a pending fan behind a row that still reads
+    /// `staged`. Returns the suppressed addresses alongside the counts:
+    /// that caller needs to keep those rows staged, and a count alone
+    /// cannot say which they were.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn import_batch_in_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        workspace_id: Uuid,
+        source: &str,
+        entries: &[ImportEntry],
+        access_token_ttl_days: i64,
+        resend_cooldown_seconds: i64,
+        invitation: &InvitationContext,
+    ) -> Result<ImportBatchOutcome, FanImportError> {
         let mut counts = ImportCounts::default();
+        let mut suppressed_emails: Vec<String> = Vec::new();
         let batch_request_id = format!("fan-import-{}", Uuid::now_v7().simple());
 
         // Distinct addresses in first-seen order; a repeat is every later
@@ -88,9 +159,11 @@ impl PostgresFanImportRepository {
         }
 
         if candidates.is_empty() {
-            Self::record_audit(&mut tx, workspace_id, source, &counts).await?;
-            tx.commit().await.map_err(FanImportError::Database)?;
-            return Ok(counts);
+            Self::record_audit(tx, workspace_id, source, &counts).await?;
+            return Ok(ImportBatchOutcome {
+                counts,
+                suppressed_emails,
+            });
         }
 
         // ── 1. Current status of every address, resolved through the spine ──
@@ -116,7 +189,7 @@ impl PostgresFanImportRepository {
         )
         .bind(workspace_id)
         .bind(&owned_emails)
-        .fetch_all(&mut *tx)
+        .fetch_all(&mut **tx)
         .await
         .map_err(FanImportError::Database)?;
         let resolved_ids: Vec<Uuid> = existing.iter().map(|(_, id, _)| *id).collect();
@@ -127,7 +200,7 @@ impl PostgresFanImportRepository {
             )
             .bind(workspace_id)
             .bind(&resolved_ids)
-            .fetch_all(&mut *tx)
+            .fetch_all(&mut **tx)
             .await
             .map_err(FanImportError::Database)?;
         }
@@ -225,7 +298,7 @@ impl PostgresFanImportRepository {
             .bind(&new_locales)
             .bind(arrival_source.chars().take(128).collect::<String>())
             .bind(&batch_request_id)
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await
             .map_err(FanImportError::Database)?;
         }
@@ -238,6 +311,9 @@ impl PostgresFanImportRepository {
                 Some("active") => counts.already_active += 1,
                 Some("unsubscribed" | "suppressed" | "merged") => {
                     counts.skipped_suppressed += 1;
+                    if !suppressed_emails.iter().any(|known| known == email) {
+                        suppressed_emails.push(email.to_owned());
+                    }
                 }
                 // Known pending, or freshly created by phase 2.
                 _ => {
@@ -255,9 +331,11 @@ impl PostgresFanImportRepository {
         }
 
         if senders.is_empty() {
-            Self::record_audit(&mut tx, workspace_id, source, &counts).await?;
-            tx.commit().await.map_err(FanImportError::Database)?;
-            return Ok(counts);
+            Self::record_audit(tx, workspace_id, source, &counts).await?;
+            return Ok(ImportBatchOutcome {
+                counts,
+                suppressed_emails,
+            });
         }
 
         // ── 4. Resolve the remaining addresses to their fans ──────────────
@@ -282,7 +360,7 @@ impl PostgresFanImportRepository {
             )
             .bind(workspace_id)
             .bind(&unresolved)
-            .fetch_all(&mut *tx)
+            .fetch_all(&mut **tx)
             .await
             .map_err(FanImportError::Database)?;
             let sender_key: HashMap<&str, &str> =
@@ -318,7 +396,7 @@ impl PostgresFanImportRepository {
             .bind(workspace_id)
             .bind(&cooldown_ids)
             .bind(resend_cooldown_seconds)
-            .fetch_all(&mut *tx)
+            .fetch_all(&mut **tx)
             .await
             .map_err(FanImportError::Database)?;
             in_cooldown = rows.into_iter().map(|(id,)| id).collect();
@@ -357,7 +435,7 @@ impl PostgresFanImportRepository {
             )
             .bind(workspace_id)
             .bind(&sending)
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await
             .map_err(FanImportError::Database)?;
 
@@ -390,7 +468,7 @@ impl PostgresFanImportRepository {
             .bind(workspace_id)
             .bind(&sending)
             .bind(access_token_ttl_days)
-            .fetch_all(&mut *tx)
+            .fetch_all(&mut **tx)
             .await
             .map_err(FanImportError::Database)?;
             let token_of: HashMap<Uuid, &str> = minted
@@ -401,14 +479,22 @@ impl PostgresFanImportRepository {
             let mut payloads: Vec<serde_json::Value> = Vec::with_capacity(recipients.len());
             let mut request_ids: Vec<String> = Vec::with_capacity(recipients.len());
             for (position, (fan_id, entry)) in recipients.iter().enumerate() {
+                // The entry's own locale wins; the crew locale is the
+                // fallback. `null` when neither exists — a missing
+                // measurement is null, never an invented "en".
+                let locale = entry.locale.clone().or_else(|| invitation.locale.clone());
                 payloads.push(serde_json::json!({
                     "workspace_id": workspace_id,
                     "fan_id": fan_id,
                     "email": entry.email,
                     "display_name": entry.display_name,
-                    "locale": entry.locale,
+                    "locale": locale,
                     "confirmation_token": token_of.get(fan_id).copied(),
                     "import_source": source.trim(),
+                    "invitation": {
+                        "reason": invitation.reason,
+                        "source_label": Self::source_label(source),
+                    },
                 }));
                 request_ids.push(format!("{batch_request_id}:{position}"));
                 counts.confirmation_resent += 1;
@@ -426,14 +512,16 @@ impl PostgresFanImportRepository {
             .bind(workspace_id)
             .bind(&payloads)
             .bind(&request_ids)
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await
             .map_err(FanImportError::Database)?;
         }
 
-        Self::record_audit(&mut tx, workspace_id, source, &counts).await?;
-        tx.commit().await.map_err(FanImportError::Database)?;
-        Ok(counts)
+        Self::record_audit(tx, workspace_id, source, &counts).await?;
+        Ok(ImportBatchOutcome {
+            counts,
+            suppressed_emails,
+        })
     }
 
     async fn record_audit(

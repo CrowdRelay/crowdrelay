@@ -99,6 +99,23 @@ failed execution says which key arrived.
 keys CrowdRelay can emit disagree, so a new template cannot ship without landing
 here first.
 
+### Double opt-in confirmations
+
+`fan.confirmation_requested` is the pending-fan confirmation mail every
+import path sends. `event_version` stays `1`; two payload fields were added
+and old executors may ignore them:
+
+- `data.locale` — the fan's own locale when the entry carried one, else the
+  tenant's crew locale, else `null`. An executor may branch on it for the
+  mail's language; `null` means "unmeasured", not "English".
+- `data.invitation` — `{ "reason": string|null, "source_label": string }`.
+  `reason` is the operator's one line typed at promote time ("we are moving
+  the list to Signal — confirm if you want to keep hearing from us") and is
+  meant to be printed verbatim in the mail body when present.
+  `source_label` is `archive` for addresses recovered from the Drive/Gmail/
+  GitHub/CSV/sheet connectors and `web` otherwise, so the executor can pick
+  the archive-invitation wording instead of the signup one.
+
 ## Target discovery (candidates, not targets)
 
 Executors post what they found to `POST /v1/internal/autopilot/outreach/candidates` with the commerce key and an `Idempotency-Key`, up to 100 candidates per batch; CrowdRelay screens each one on write. The admin route of the same name stays for operator imports. Discovery is executor work, so it lives on the internal surface: requiring the admin key would hand an adapter authority over every admin route in order to post a list of playlist contacts.
