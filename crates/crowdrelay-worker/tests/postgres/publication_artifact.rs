@@ -137,6 +137,10 @@ fn executor(pool: &PgPool, workspace_id: WorkspaceId) -> SocialPostExecutorWorke
         true,
         None,
         "https://virya.music".to_owned(),
+        crowdrelay_infra::sensitive_response::SensitiveResponseKey::derive_from_secret(
+            b"test-encryption-key",
+        ),
+        false,
     )
     .expect("build executor")
 }

@@ -99,6 +99,7 @@ macro_rules! decision_join_ask_reads {
                 variants: config.variants,
                 cadence_days: config.cadence_days,
                 platforms: config.platforms,
+                image_url: config.image_url,
                 member_site_base_url,
                 social_auto_post,
                 connected_platforms,

@@ -256,6 +256,15 @@ pub async fn get_brand_settings(
                         crowdrelay_domain::join_ask::DEFAULT_JOIN_ASK_PLATFORMS.join(",")
                     }),
             );
+            // Empty is the unset spelling here too — the picker shows the
+            // preview only when a real URL is stored.
+            settings.insert(
+                "join_ask_image_url".to_owned(),
+                overrides
+                    .get("join_ask_image_url")
+                    .cloned()
+                    .unwrap_or_default(),
+            );
             (
                 StatusCode::OK,
                 [(CACHE_CONTROL, PRIVATE_NO_STORE)],
@@ -296,6 +305,13 @@ fn validate_value(key: &str, value: &str) -> bool {
     if key == "join_ask_variants" {
         return value.len() <= 4_096
             && crowdrelay_domain::join_ask::parse_variants(value).is_some();
+    }
+    // The join-ask image is the one setting where empty is a statement:
+    // clearing it removes the fixed image, which is a choice, not a missing
+    // value. Present, it must be a fetchable https URL.
+    if key == "join_ask_image_url" {
+        return value.trim().is_empty()
+            || crowdrelay_domain::join_ask::parse_image_url(value).is_some();
     }
     if value.trim().is_empty() || value.len() > 512 {
         return false;

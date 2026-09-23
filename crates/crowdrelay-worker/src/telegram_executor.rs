@@ -82,7 +82,9 @@ const CLAIM_BATCH: i64 = 5;
 /// AAD for Telegram bot token encryption. Must match
 /// `simple_platforms::telegram_bot_aad` and
 /// `PostgresFanbaseRepository::token_aad` or the token will not decrypt.
-fn telegram_bot_aad(workspace_id: Uuid, channel: &str) -> Vec<u8> {
+/// `pub(crate)` so the social executor's telegram arm decrypts the same
+/// token — one AAD domain, or the value stops decrypting silently.
+pub(crate) fn telegram_bot_aad(workspace_id: Uuid, channel: &str) -> Vec<u8> {
     format!("crowdrelay.fanbase.oauth.telegram.v1\0{workspace_id}\0{channel}").into_bytes()
 }
 

@@ -171,6 +171,7 @@ mod tests {
                 None,
                 reqwest::Client::new(),
             ),
+            None,
         ))
     }
 

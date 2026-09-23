@@ -25,6 +25,7 @@ mod join_ask_tests {
             connected_platforms: vec!["facebook".to_owned()],
             posts: Vec::new(),
             instagram_photo_count: 0,
+            image_url: None,
         }
     }
 
@@ -75,6 +76,7 @@ mod join_ask_tests {
             variant_index,
             text,
             cta_url,
+            image_url,
         } = &candidate.action
         else {
             return Err(std::io::Error::other(format!(
@@ -91,6 +93,7 @@ mod join_ask_tests {
             cta_url,
             "https://virya.music/signal?utm_source=facebook&utm_medium=join_ask&utm_campaign=join_ask_w39"
         );
+        assert_eq!(*image_url, None);
         Ok(())
     }
 

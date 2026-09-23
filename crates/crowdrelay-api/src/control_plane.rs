@@ -882,6 +882,14 @@ pub(crate) fn router(state: crate::AppState) -> Router {
             post(crate::audience_graph::import_scan)
                 .layer(DefaultBodyLimit::max(MAX_IMPORT_BODY_BYTES)),
         )
+        // Tenant-uploaded media (join-ask screenshots first): the router's
+        // 8 KiB JSON default is far under an image, so the route raises it
+        // to the same ceiling Meta itself enforces on post images.
+        .route(
+            "/v1/control-plane/media",
+            post(crate::media::upload_media)
+                .layer(DefaultBodyLimit::max(crate::media::MAX_MEDIA_BODY_BYTES)),
+        )
         // Route-local authentication is intentional. The global middleware
         // still separates AREA and management credentials, but this guard
         // makes adding a route here fail closed even if the global path matcher

@@ -156,6 +156,7 @@ pub(super) fn application_routes(state: AppState) -> Router {
         .route("/v1/beacon/me/leave", post(beacon_signal::leave))
         .route("/v1/public/cities", get(acquisition::list_cities))
         .route("/v1/public/area/drops", get(area::public_drops))
+        .merge(crate::media::public_routes())
         .route("/v1/me/area", get(area::me_wallet))
         .route("/v1/me/area/challenge", post(area::me_challenge))
         .route("/v1/me/area/claim", post(area::me_claim))

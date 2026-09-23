@@ -89,6 +89,7 @@ mod gdrive;
 mod gig_planning;
 mod http_metrics;
 mod latarnik_http;
+mod media;
 mod meta;
 mod mobile_fan;
 mod night;
@@ -211,6 +212,14 @@ pub struct AppState {
     pub(crate) http_client: reqwest::Client,
     /// Provider verifiers for connection creation probes.
     pub(crate) provider_verifiers: crowdrelay_infra::provider_verification::ProviderVerifiers,
+    /// The origin outside callers (Meta's crawler, a fan's mail client)
+    /// actually reach — mints absolute `/v1/public/*` URLs such as uploaded
+    /// media. `None` means the deployment never set it; handlers degrade to
+    /// a relative path rather than guessing a host.
+    pub(crate) public_api_origin: Option<url::Url>,
+    /// Tenant-uploaded media store (`media_objects`). Built from the pool —
+    /// the api-sql ratchet keeps the write out of the handlers.
+    pub(crate) media: crowdrelay_infra::media::MediaRepository,
     /// The process-wide connection budget the operations page and every
     /// fanning control-plane read acquires from — see
     /// `ops::ControlPlaneReadBudget`. One page load firing nine endpoints at
@@ -247,6 +256,7 @@ impl AppState {
         attestation_signing_key: crowdrelay_infra::attestation::AttestationSigningKey,
         team_approval_key: crowdrelay_domain::team_approval_token::TeamApprovalKey,
         provider_verifiers: crowdrelay_infra::provider_verification::ProviderVerifiers,
+        public_api_origin: Option<url::Url>,
     ) -> Self {
         let ecosystem = PostgresEcosystemRepository::new(database.clone());
         let beacon_release = PostgresBeaconReleaseRepository::new(database.clone());
@@ -256,6 +266,7 @@ impl AppState {
             PostgresAreaAdminRepository::new(database.clone()),
         ));
         let read_budget = ops::ControlPlaneReadBudget::new(&database);
+        let media = crowdrelay_infra::media::MediaRepository::new(database.clone());
         Self {
             database,
             readiness_timeout,
@@ -287,6 +298,8 @@ impl AppState {
             team_approval_key,
             http_client: reqwest::Client::new(),
             provider_verifiers,
+            public_api_origin,
+            media,
             read_budget,
         }
     }
