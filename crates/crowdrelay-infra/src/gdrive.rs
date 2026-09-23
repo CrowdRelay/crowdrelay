@@ -311,15 +311,18 @@ impl PostgresGDriveRepository {
 
         let mut upserted = 0u64;
         for contact in ordered {
+            // Columns no role claimed ride as `metadata.intake` — kept
+            // losslessly, and `||` only ever replaces the `intake` key.
+            let metadata = contact.intake_metadata();
             sqlx::query(
                 r#"
                 INSERT INTO drive_contacts (
                     workspace_id, normalized_email, display_name, organization,
                     phone, suggested_kind, city, staged_status, notes,
                     source_file_id, source_file_name,
-                    sources, last_seen_at, disappeared_at
+                    sources, last_seen_at, disappeared_at, metadata
                 )
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, ARRAY[$12]::text[], now(), NULL)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, ARRAY[$12]::text[], now(), NULL, $13)
                 ON CONFLICT (workspace_id, normalized_email) DO UPDATE SET
                     display_name = COALESCE(EXCLUDED.display_name, drive_contacts.display_name),
                     organization = COALESCE(EXCLUDED.organization, drive_contacts.organization),
@@ -330,6 +333,7 @@ impl PostgresGDriveRepository {
                     -- that drops the column does not erase a finding.
                     staged_status = COALESCE(EXCLUDED.staged_status, drive_contacts.staged_status),
                     notes = COALESCE(EXCLUDED.notes, drive_contacts.notes),
+                    metadata = drive_contacts.metadata || EXCLUDED.metadata,
                     -- source_file_id doubles as the disappearance anchor:
                     -- the mark_disappeared sweep matches rows by the file
                     -- that last saw them. A sighting from a source that
@@ -366,6 +370,7 @@ impl PostgresGDriveRepository {
             .bind(&ref_id)
             .bind(&ref_name)
             .bind(source)
+            .bind(&metadata)
             .execute(&mut *tx)
             .await?;
             upserted += 1;

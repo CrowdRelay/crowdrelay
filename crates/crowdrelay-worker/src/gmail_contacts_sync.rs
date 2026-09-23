@@ -4,9 +4,13 @@
 //! address already found in a spreadsheet converges to one row, `sources`
 //! recording both sightings.
 //!
-//! Privacy boundary: `format=metadata` with an explicit metadataHeaders
-//! allowlist — From/To/Cc/Subject/Date only. Message bodies are never
-//! requested, never read, never stored.
+//! Privacy boundary: `format=full` under a `fields` whitelist that names
+//! headers and attachment *part metadata* only — `body.data` is never on
+//! the wire, never read, never stored. Headers arrive whole (Gmail has
+//! no narrower grant once parts are requested), and the scan reads only
+//! the address fields plus `Reply-To` from them. Tabular attachments
+//! (.xlsx/.csv/.tsv) are the one payload the connector opens — an
+//! emailed contact list runs the same shared intake a Drive file does.
 //!
 //! Incremental: the connection's `sync_cursor` holds Gmail's historyId.
 //! First run is a bounded full sweep (newest messages first); later cycles
@@ -53,8 +57,26 @@ const MAX_MESSAGES_PER_CYCLE: usize = 500;
 const MAX_HISTORY_RECORDS: usize = 2000;
 const HTTP_TIMEOUT: Duration = Duration::from_secs(30);
 const USER_AGENT: &str = "CrowdRelay/1.0 (gmail contacts sync)";
-/// Header allowlist — the only fields the API is asked for.
-const METADATA_HEADERS: &[&str] = &["From", "To", "Cc", "Subject", "Date"];
+/// Tabular attachment shapes worth opening — an emailed contact list is
+/// intake, everything else stays untouched on the server.
+const TABULAR_ATTACHMENT_EXTENSIONS: &[&str] = &[".xlsx", ".csv", ".tsv"];
+/// Same cap the GitHub registry mirror uses — a spreadsheet bigger than
+/// that is not a contact list.
+const MAX_ATTACHMENT_BYTES: i64 = 20 * 1024 * 1024;
+
+/// The fields whitelist keeps message bodies off the wire entirely: full
+/// format would return `body.data` for inline text parts, and the scan's
+/// boundary is headers plus attachment *parts* — never the body text.
+const MESSAGE_FIELDS: &str = concat!(
+    "id,internalDate,payload.headers,payload.mimeType,payload.filename,",
+    "payload.body.attachmentId,payload.body.size,",
+    "payload.parts.filename,payload.parts.mimeType,",
+    "payload.parts.body.attachmentId,payload.parts.body.size,",
+    "payload.parts.parts.filename,payload.parts.parts.mimeType,",
+    "payload.parts.parts.body.attachmentId,payload.parts.parts.body.size,",
+    "payload.parts.parts.parts.filename,payload.parts.parts.parts.mimeType,",
+    "payload.parts.parts.parts.body.attachmentId,payload.parts.parts.parts.body.size"
+);
 
 #[derive(Debug, Error)]
 pub enum GmailContactsSyncError {
@@ -142,6 +164,38 @@ struct GmailLabel {
 #[derive(Debug, serde::Deserialize)]
 struct MessagePayload {
     headers: Option<Vec<MessageHeader>>,
+    /// A single-part message carries the attachment on the payload itself
+    /// — filename/mimeType/body.attachmentId — not under `parts`.
+    filename: Option<String>,
+    #[serde(rename = "mimeType")]
+    mime_type: Option<String>,
+    body: Option<MessagePartBody>,
+    /// MIME children — attachments live three levels down at most in
+    /// practice (multipart/mixed → multipart/related → part), which is
+    /// also how deep `MESSAGE_FIELDS` reaches.
+    parts: Option<Vec<MessagePart>>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct MessagePart {
+    filename: Option<String>,
+    #[serde(rename = "mimeType")]
+    mime_type: Option<String>,
+    body: Option<MessagePartBody>,
+    parts: Option<Vec<MessagePart>>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct MessagePartBody {
+    #[serde(rename = "attachmentId")]
+    attachment_id: Option<String>,
+    size: Option<i64>,
+}
+
+/// The attachment endpoint's answer — base64url bytes, never streamed.
+#[derive(Debug, serde::Deserialize)]
+struct MessageAttachment {
+    data: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -433,14 +487,16 @@ impl GmailContactsSyncWorker {
         let mut scanned = 0usize;
         let mut failed = 0usize;
         let mut upserted = 0u64;
+        let mut attachments_failed = 0u64;
         for id in &ids {
             match self
                 .scan_message(connection_id, id, &self_email, since_ms)
                 .await
             {
-                Ok(n) => {
+                Ok((n, attachment_failures)) => {
                     scanned += 1;
                     upserted += n;
+                    attachments_failed += attachment_failures;
                 }
                 Err(error) => {
                     failed += 1;
@@ -468,6 +524,7 @@ impl GmailContactsSyncWorker {
             full_sweep,
             messages = scanned,
             failed,
+            attachments_failed,
             contacts_upserted = upserted,
             "gmail contacts sync cycle complete"
         );
@@ -654,20 +711,25 @@ impl GmailContactsSyncWorker {
         Ok(ids)
     }
 
-    /// One message → header contacts → staging upsert. Provenance is the
-    /// message id plus "From: … · Subject: …" — enough for the reviewer to
-    /// place the contact without the body ever being read.
+    /// One message → header contacts + attachment intake → staging
+    /// upserts. Provenance is the message id plus "From: … · Subject: …"
+    /// — enough for the reviewer to place the contact without the body
+    /// ever being read. Returns `(upserted, attachments_failed)` so the
+    /// cycle log can count attachment trouble it deliberately survived.
     async fn scan_message(
         &self,
         connection_id: Uuid,
         message_id: &str,
         self_email: &str,
         since_ms: Option<i64>,
-    ) -> Result<u64, String> {
-        let mut params: Vec<(&str, String)> = vec![("format", "metadata".to_string())];
-        for header in METADATA_HEADERS {
-            params.push(("metadataHeaders", (*header).to_string()));
-        }
+    ) -> Result<(u64, u64), String> {
+        // `format=full` is needed to see attachment parts, but the
+        // fields whitelist names headers and part *metadata* only — the
+        // message's own text never leaves the server.
+        let params: Vec<(&str, String)> = vec![
+            ("format", "full".to_string()),
+            ("fields", MESSAGE_FIELDS.to_string()),
+        ];
         let message: GmailMessage = self
             .get(
                 connection_id,
@@ -686,10 +748,33 @@ impl GmailContactsSyncWorker {
                 .and_then(|raw| raw.parse::<i64>().ok())
             {
                 Some(ms) if ms >= floor => {}
-                _ => return Ok(0),
+                _ => return Ok((0, 0)),
             }
         }
-        let headers = message.payload.and_then(|p| p.headers).unwrap_or_default();
+        // The payload itself is a part too: a single-part message carries
+        // its attachment directly on `payload.body`, not under `parts` —
+        // wrap it as the root so `tabular_parts` sees both cases alike.
+        let (headers, root) = match message.payload {
+            Some(p) => (
+                p.headers.unwrap_or_default(),
+                MessagePart {
+                    filename: p.filename,
+                    mime_type: p.mime_type,
+                    body: p.body,
+                    parts: p.parts,
+                },
+            ),
+            None => (
+                Vec::new(),
+                MessagePart {
+                    filename: None,
+                    mime_type: None,
+                    body: None,
+                    parts: None,
+                },
+            ),
+        };
+        let parts = vec![root];
         let values_of = |name: &str| -> Vec<String> {
             headers
                 .iter()
@@ -697,14 +782,11 @@ impl GmailContactsSyncWorker {
                 .map(|h| h.value.clone())
                 .collect()
         };
-        let address_headers: Vec<String> = ["From", "To", "Cc"]
+        let address_headers: Vec<String> = ["From", "To", "Cc", "Reply-To"]
             .iter()
             .flat_map(|name| values_of(name))
             .collect();
         let contacts = extract_header_contacts(&address_headers, self_email);
-        if contacts.is_empty() {
-            return Ok(0);
-        }
         let from = values_of("From").into_iter().next().unwrap_or_default();
         let subject = values_of("Subject").into_iter().next().unwrap_or_default();
         let provenance = format!("{} — {}", from.trim(), subject.trim())
@@ -719,35 +801,51 @@ impl GmailContactsSyncWorker {
         } else {
             provenance
         };
-        let extracted: Vec<ExtractedContact> = contacts
-            .into_iter()
-            .map(|c| ExtractedContact {
-                email: c.email,
-                display_name: c.display_name,
-                organization: None,
-                phone: None,
-                suggested_kind: None,
-                // Mail headers carry no city — the column stays a Drive
-                // fact and a Gmail sighting never overwrites it
-                // (COALESCE in the upsert).
-                city: None,
-                // Mail headers carry no verification verdict either.
-                staged_status: None,
-                notes: None,
-            })
-            .collect();
-        let summary = self
-            .repo
-            .upsert_contacts_for_source(
-                self.workspace_id,
-                "gmail",
-                &message.id,
-                &provenance,
-                &extracted,
-                false,
-            )
-            .await
-            .map_err(|e: GDriveError| e.to_string())?;
+        let mut upserted = 0u64;
+        let mut attachments_failed = 0u64;
+        if !contacts.is_empty() {
+            let extracted: Vec<ExtractedContact> = contacts
+                .into_iter()
+                .map(|c| ExtractedContact {
+                    email: c.email,
+                    display_name: c.display_name,
+                    organization: None,
+                    phone: None,
+                    suggested_kind: None,
+                    // Mail headers carry no city — the column stays a Drive
+                    // fact and a Gmail sighting never overwrites it
+                    // (COALESCE in the upsert).
+                    city: None,
+                    // Mail headers carry no verification verdict either.
+                    staged_status: None,
+                    notes: None,
+                    extras: Default::default(),
+                })
+                .collect();
+            upserted += self
+                .repo
+                .upsert_contacts_for_source(
+                    self.workspace_id,
+                    "gmail",
+                    &message.id,
+                    &provenance,
+                    &extracted,
+                    false,
+                )
+                .await
+                .map_err(|e: GDriveError| e.to_string())?
+                .upserted;
+        }
+        // A tabular attachment is a contact list that arrived by mail —
+        // it runs the same shared intake a Drive file or the GitHub
+        // registry mirror does, so a workbook attachment files venues,
+        // beacons and agents exactly like the registry copy would.
+        let (attachment_upserts, failed) = self
+            .scan_attachments(connection_id, message_id, &subject, &parts)
+            .await;
+        upserted += attachment_upserts;
+        attachments_failed += failed;
+
         // An inbound sighting is the reply side of counterparty pull: one
         // timestamp per address, recorded only after the contact row the
         // upsert just wrote exists, and only when the message's own
@@ -760,8 +858,183 @@ impl GmailContactsSyncWorker {
                 .await
                 .map_err(|e: GDriveError| e.to_string())?;
         }
+        Ok((upserted, attachments_failed))
+    }
+
+    /// Every tabular attachment of one message, parsed and staged under
+    /// the message's own identity. Returns `(upserted, failed)` — failures
+    /// are logged and counted, never fatal: a malformed attachment must
+    /// not cost the message's header contacts, and an immutable message
+    /// has nothing to retry anyway.
+    async fn scan_attachments(
+        &self,
+        connection_id: Uuid,
+        message_id: &str,
+        subject: &str,
+        parts: &[MessagePart],
+    ) -> (u64, u64) {
+        let mut upserted = 0u64;
+        let mut failed = 0u64;
+        for part in tabular_parts(parts) {
+            let Some(attachment_id) = part.body.as_ref().and_then(|b| b.attachment_id.clone())
+            else {
+                continue;
+            };
+            let filename = part.filename.clone().unwrap_or_default();
+            match self
+                .scan_attachment(
+                    connection_id,
+                    message_id,
+                    &attachment_id,
+                    &filename,
+                    part.mime_type.as_deref(),
+                    subject,
+                )
+                .await
+            {
+                Ok(n) => upserted += n,
+                Err(error) => {
+                    failed += 1;
+                    tracing::warn!(%error, %message_id, %filename, "gmail attachment scan failed")
+                }
+            }
+        }
+        (upserted, failed)
+    }
+
+    /// One attachment: fetch the bytes, parse every sheet, run the shared
+    /// intake, stage the contacts it yielded. Provenance names the message
+    /// and the file so the reviewer can place it — `From — Subject — file`.
+    async fn scan_attachment(
+        &self,
+        connection_id: Uuid,
+        message_id: &str,
+        attachment_id: &str,
+        filename: &str,
+        mime_type: Option<&str>,
+        subject: &str,
+    ) -> Result<u64, String> {
+        let attachment: MessageAttachment = self
+            .get(
+                connection_id,
+                &format!(
+                    "https://gmail.googleapis.com/gmail/v1/users/me/messages/{message_id}/attachments/{attachment_id}"
+                ),
+                &[],
+            )
+            .await?;
+        let data = attachment
+            .data
+            .ok_or_else(|| "attachment answer carried no data".to_string())?;
+        use base64::Engine;
+        // Gmail emits base64url without padding; `URL_SAFE` requires it and
+        // `URL_SAFE_NO_PAD` rejects it — try both so either dialect lands.
+        let bytes = base64::engine::general_purpose::URL_SAFE
+            .decode(&data)
+            .or_else(|_| base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(&data))
+            .map_err(|e| format!("attachment base64 decode failed: {e}"))?;
+        // `body.size` is an estimate Gmail may omit — the byte cap is only
+        // real once the payload is in hand.
+        if bytes.len() as i64 > MAX_ATTACHMENT_BYTES {
+            return Err(format!(
+                "attachment decodes past the {MAX_ATTACHMENT_BYTES} byte cap"
+            ));
+        }
+        // The MIME type decides before the filename does — `tabular_parts`
+        // claims parts on either signal, and a TSV named `export` must not
+        // parse as comma-CSV.
+        let lower = filename.to_ascii_lowercase();
+        let mime = mime_type.unwrap_or_default().to_ascii_lowercase();
+        let sheets = if mime.contains("spreadsheetml")
+            || mime == "application/vnd.ms-excel"
+            || lower.ends_with(".xlsx")
+        {
+            crate::sheet_intake::parse_xlsx_sheets(&bytes)?
+        } else if mime == "text/tab-separated-values" || lower.ends_with(".tsv") {
+            crowdrelay_domain::drive_contacts::parse_delimited(&bytes, b'\t').map(|g| vec![g])?
+        } else {
+            crowdrelay_domain::drive_contacts::parse_delimited(&bytes, b',').map(|g| vec![g])?
+        };
+        let file_label = format!("{} — {}", subject.trim(), filename)
+            .trim_matches(|c| c == '—' || c == ' ')
+            .chars()
+            .take(500)
+            .collect::<String>();
+        let file_label = if file_label.is_empty() {
+            format!("gmail attachment {filename}")
+        } else {
+            file_label
+        };
+        let harvest = crate::sheet_intake::harvest_grids(
+            self.repo.pool(),
+            self.workspace_id,
+            &file_label,
+            sheets,
+        )
+        .await?;
+        let ref_id = format!("gmail:{message_id}:{attachment_id}");
+        let summary = self
+            .repo
+            .upsert_contacts_for_source(
+                self.workspace_id,
+                "gmail",
+                ref_id.chars().take(200).collect::<String>().as_str(),
+                &file_label,
+                &harvest.contacts,
+                // A message is immutable — nothing it once carried can
+                // "disappear" from it, so the anchor never belongs here.
+                false,
+            )
+            .await
+            .map_err(|e: GDriveError| e.to_string())?;
+        tracing::info!(
+            %message_id,
+            %filename,
+            contacts = summary.upserted,
+            venues = harvest.venues_imported,
+            peer_acts = harvest.peer_acts_imported,
+            beacons = harvest.beacons_imported,
+            beacons_refreshed = harvest.beacons_refreshed,
+            agents = harvest.agents_imported,
+            "gmail attachment imported"
+        );
         Ok(summary.upserted)
     }
+}
+
+/// The tabular attachments in a part tree — a filename that ends like a
+/// spreadsheet or a MIME type that says one. Parts nest (multipart/mixed
+/// over multipart/related), so the walk recurses.
+fn tabular_parts(parts: &[MessagePart]) -> Vec<&MessagePart> {
+    let mut found = Vec::new();
+    let mut stack: Vec<&MessagePart> = parts.iter().collect();
+    while let Some(part) = stack.pop() {
+        if let Some(children) = &part.parts {
+            stack.extend(children.iter());
+        }
+        let is_tabular = part.filename.as_deref().is_some_and(|name| {
+            let name = name.to_ascii_lowercase();
+            TABULAR_ATTACHMENT_EXTENSIONS
+                .iter()
+                .any(|ext| name.ends_with(ext))
+        }) || part.mime_type.as_deref().is_some_and(|mime| {
+            matches!(
+                mime,
+                "text/csv"
+                    | "text/tab-separated-values"
+                    | "application/vnd.ms-excel"
+                    | "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
+        });
+        if is_tabular
+            && part.body.as_ref().is_some_and(|b| {
+                b.attachment_id.is_some() && b.size.unwrap_or(0) <= MAX_ATTACHMENT_BYTES
+            })
+        {
+            found.push(part);
+        }
+    }
+    found
 }
 
 /// An inbound sighting is one `From` contact that is not the tenant's own

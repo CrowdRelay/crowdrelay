@@ -22,7 +22,7 @@ async fn workspace(pool: &PgPool, label: &str) -> Result<Uuid> {
         .context("insert workspace")?;
     sqlx::query(
         "INSERT INTO cities (id, slug, name, country_code) \
-         VALUES (gen_random_uuid(), 'wroclaw', 'Wroclaw', 'PL') \
+         VALUES (gen_random_uuid(), 'wroclaw', 'Wrocław', 'PL') \
          ON CONFLICT (country_code, slug) DO NOTHING",
     )
     .execute(pool)
@@ -219,8 +219,13 @@ async fn the_registry_workbook_routes_every_tab() -> Result<()> {
         ],
     ]);
     let list = grid(&[
-        &["Email", "Name", "City"],
-        &["booker@real.test", "Real Booker", "Wrocław"],
+        &["Email", "Name", "City", "Website"],
+        &[
+            "booker@real.test",
+            "Real Booker",
+            "Wrocław",
+            "https://booker.test",
+        ],
     ]);
 
     let harvest = harvest_grids(
@@ -232,9 +237,21 @@ async fn the_registry_workbook_routes_every_tab() -> Result<()> {
     .await
     .map_err(|e| anyhow::anyhow!(e))?;
 
-    // The two registry readouts were recognised as context, never intake.
-    assert_eq!(harvest.registry_dump_sheets, 2, "dump tabs must be skipped");
+    // The contacts readout was recognised as context, never intake — the
+    // beacons tab is intake now, so only one dump remains.
+    assert_eq!(
+        harvest.registry_dump_sheets, 1,
+        "only the contacts readout is a dump"
+    );
     assert_eq!(harvest.agent_sheets, 1, "the agents tab is an intake sheet");
+    assert_eq!(
+        harvest.beacons_imported, 1,
+        "the beacons tab did not import"
+    );
+    assert_eq!(
+        harvest.agents_imported, 2,
+        "agent rows never reached the registry"
+    );
     ensure!(
         !harvest
             .contacts
@@ -283,6 +300,278 @@ async fn the_registry_workbook_routes_every_tab() -> Result<()> {
     .fetch_one(&pool)
     .await?;
     assert_eq!(act, 1, "the band row never reached the registry");
+
+    // The beacon landed with its kind, resolved city and the sheet's own
+    // flags — the operator's verdicts, not a research-importer's caution.
+    let beacon: (String, bool, bool, bool, i32, i32) = sqlx::query_as(
+        "SELECT b.beacon_kind, b.verified, b.accepts_outreach, b.do_not_contact, \
+                b.relationship_score, b.relevance_basis_points \
+         FROM beacons b \
+         JOIN cities c ON c.id = b.city_id \
+         WHERE b.workspace_id = $1 AND b.contact_email = 'm@beacon.test' AND c.slug = 'wroclaw'",
+    )
+    .bind(workspace_id)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        beacon,
+        ("promoter".to_owned(), true, true, false, 100, 10000),
+        "the beacon's kind or flags were not honoured"
+    );
+
+    // Both agents filed into the registry — live and dead — carrying the
+    // roster link and genres the review queue only saw as notes.
+    let agents: Vec<(String, bool, Option<String>, Vec<String>)> = sqlx::query_as(
+        "SELECT contact_email, active, roster_url, genres FROM booking_agents \
+         WHERE workspace_id = $1 ORDER BY contact_email",
+    )
+    .bind(workspace_id)
+    .fetch_all(&pool)
+    .await?;
+    assert_eq!(agents.len(), 2, "agent rows never reached booking_agents");
+    assert_eq!(agents[0].0, "gone@agency.test");
+    assert!(!agents[0].1, "an f verdict must file the agent inactive");
+    assert_eq!(agents[1].0, "live@agency.test");
+    assert!(agents[1].1, "a t verdict must file the agent active");
+    assert_eq!(
+        agents[1].2.as_deref(),
+        Some("https://agencyone.test/roster"),
+        "roster_url did not reach the registry"
+    );
+    assert_eq!(agents[1].3, vec!["metal".to_owned()]);
+
+    // The list row's unclaimed column rode into metadata.intake — the
+    // sheet's own words kept losslessly, not dropped.
+    let repo = PostgresGDriveRepository::new(pool.clone());
+    repo.upsert_contacts_for_source(
+        workspace_id,
+        "github",
+        "gh:test/database.xlsx",
+        "database.xlsx",
+        &harvest.contacts,
+        true,
+    )
+    .await?;
+    let metadata: serde_json::Value = sqlx::query_scalar(
+        "SELECT metadata FROM drive_contacts \
+         WHERE workspace_id = $1 AND normalized_email = 'booker@real.test'",
+    )
+    .bind(workspace_id)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        metadata["intake"]["website"].as_str(),
+        Some("https://booker.test"),
+        "the unclaimed Website column did not reach metadata.intake"
+    );
+    Ok(())
+}
+
+/// The beacon sheet is a registry mirror: re-reading it refreshes the row
+/// the unique identity already knows rather than minting a second beacon,
+/// a URL-routed row works without an email, and a kind the vocabulary does
+/// not cover refuses by name instead of guessing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn a_beacon_sheet_reimport_refreshes_rather_than_duplicates() -> Result<()> {
+    let pool = common::test_pool("CROWDRELAY_TEST_DATABASE_URL").await?;
+    let workspace_id = workspace(&pool, "beaconre").await?;
+
+    let header: &[&str] = &[
+        "Name",
+        "Kind",
+        "City",
+        "Email",
+        "Destination_URL",
+        "Source_URL",
+        "Active",
+        "Verified",
+        "Accepts_Outreach",
+        "Do_Not_Contact",
+        "Relationship_Score",
+        "Relevance_Pct",
+        "Confidence_Pct",
+    ];
+    // A city the catalogue does not know — unique per run because `cities`
+    // is a global table a sibling test may already have taught it.
+    let missing_city = format!("Miasto-{}", &Uuid::now_v7().simple().to_string()[..8]);
+    let beacons = |verified: &str, relevance: &str| {
+        grid(&[
+            header,
+            &[
+                "Marcin",
+                "promoter",
+                "Wrocław",
+                "m@beacon.test",
+                "https://beacon.test",
+                "https://evidence.test",
+                "t",
+                verified,
+                "t",
+                "f",
+                "80",
+                relevance,
+                "90.0",
+            ],
+            // No email — the destination URL is the identity route.
+            &[
+                "Calendar",
+                "event_calendar",
+                "",
+                "",
+                "https://cal.test",
+                "https://evidence.test",
+                "t",
+                "f",
+                "f",
+                "f",
+                "50",
+                "50.0",
+                "50.0",
+            ],
+            // A kind the roster does not know refuses by name.
+            &[
+                "Odd",
+                "hologram",
+                "",
+                "odd@test.test",
+                "",
+                "",
+                "t",
+                "f",
+                "f",
+                "f",
+                "",
+                "",
+                "",
+            ],
+            // A city the catalogue does not know imports global, keeping
+            // the sheet's text in metadata for later reconciliation.
+            &[
+                "Elsewhere",
+                "radio",
+                missing_city.as_str(),
+                "radio@test.test",
+                "",
+                "",
+                "t",
+                "f",
+                "f",
+                "f",
+                "",
+                "",
+                "",
+            ],
+        ])
+    };
+
+    let first = harvest_grids(
+        &pool,
+        workspace_id,
+        "database.xlsx",
+        vec![beacons("t", "80.0")],
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!(e))?;
+    assert_eq!(first.beacons_imported, 3);
+    assert_eq!(first.beacon_refusals, 1, "the unknown kind must refuse");
+    assert_eq!(
+        first.beacons_unresolved_city, 1,
+        "the invented city is not in cities"
+    );
+
+    // The operator edits a verdict and a score; the same file re-reads.
+    let second = harvest_grids(
+        &pool,
+        workspace_id,
+        "database.xlsx",
+        vec![beacons("f", "60.0")],
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!(e))?;
+    assert_eq!(
+        second.beacons_imported, 0,
+        "a re-read must not insert again"
+    );
+    assert_eq!(second.beacons_refreshed, 3);
+
+    let rows: Vec<(String, bool, i32)> = sqlx::query_as(
+        "SELECT beacon_kind, verified, relevance_basis_points FROM beacons \
+         WHERE workspace_id = $1 ORDER BY display_name",
+    )
+    .bind(workspace_id)
+    .fetch_all(&pool)
+    .await?;
+    assert_eq!(rows.len(), 3, "the re-read minted a duplicate");
+    let promoter = rows
+        .iter()
+        .find(|r| r.0 == "promoter")
+        .context("promoter lost")?;
+    assert!(!promoter.1, "the edited verdict did not refresh");
+    assert_eq!(promoter.2, 6000);
+    let calendar = rows
+        .iter()
+        .find(|r| r.0 == "community")
+        .context("url-routed beacon lost")?;
+    let _ = calendar;
+
+    // First-source provenance survives the refresh; the mapped kind kept
+    // the sheet's own vocabulary.
+    let meta: serde_json::Value = sqlx::query_scalar(
+        "SELECT metadata FROM beacons \
+         WHERE workspace_id = $1 AND destination_url = 'https://cal.test'",
+    )
+    .bind(workspace_id)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        meta["imported_from"]["source"].as_str(),
+        Some("registry_sheet")
+    );
+    assert_eq!(meta["source_kind"].as_str(), Some("event_calendar"));
+    let global: serde_json::Value = sqlx::query_scalar(
+        "SELECT metadata FROM beacons \
+         WHERE workspace_id = $1 AND contact_email = 'radio@test.test'",
+    )
+    .bind(workspace_id)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(global["sheet_city"].as_str(), Some(missing_city.as_str()));
+
+    // The catalogue learns the city; the next import must adopt the
+    // global row into the resolved identity — not mint a city-scoped
+    // duplicate beside it.
+    sqlx::query("INSERT INTO cities (id, slug, name, country_code) VALUES ($1, $2, $3, 'PL')")
+        .bind(Uuid::now_v7())
+        .bind(missing_city.to_lowercase())
+        .bind(&missing_city)
+        .execute(&pool)
+        .await?;
+    let third = harvest_grids(
+        &pool,
+        workspace_id,
+        "database.xlsx",
+        vec![beacons("t", "80.0")],
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!(e))?;
+    assert_eq!(third.beacons_imported, 0, "the adoption minted a duplicate");
+    assert_eq!(third.beacons_refreshed, 3);
+    let adopted: Option<Uuid> = sqlx::query_scalar(
+        "SELECT city_id FROM beacons \
+         WHERE workspace_id = $1 AND contact_email = 'radio@test.test'",
+    )
+    .bind(workspace_id)
+    .fetch_one(&pool)
+    .await?;
+    assert!(adopted.is_some(), "the resolved city never landed");
+    let count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM beacons WHERE workspace_id = $1 AND contact_email = 'radio@test.test'",
+    )
+    .bind(workspace_id)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(count, 1, "NULL-city and resolved-city twins coexist");
     Ok(())
 }
 
@@ -307,6 +596,7 @@ async fn a_github_file_owns_its_rows_and_verdicts() -> Result<()> {
         city: None,
         staged_status: status.map(str::to_owned),
         notes: None,
+        extras: Default::default(),
     };
     let plain = |email: &str| ExtractedContact {
         email: email.to_owned(),
@@ -317,6 +607,7 @@ async fn a_github_file_owns_its_rows_and_verdicts() -> Result<()> {
         city: None,
         staged_status: None,
         notes: None,
+        extras: Default::default(),
     };
 
     // An agent on record and active — the workbook's verdict retires it.

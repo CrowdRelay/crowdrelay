@@ -128,6 +128,19 @@ struct CycleCounts {
     /// sheets that fed the booking-agent registry.
     registry_dump_sheets: usize,
     agent_sheets: usize,
+    /// Agent rows the seed upsert filed into `booking_agents` itself —
+    /// new, refreshed, and failed-to-write.
+    agents_imported: u64,
+    agents_refreshed: u64,
+    agents_failed: u64,
+    /// Beacon-registry rows: newly inserted, refreshed in place, refused
+    /// by the parser, imported global because the city did not resolve,
+    /// and failed-to-write.
+    beacons_imported: u64,
+    beacons_refreshed: u64,
+    beacon_refusals: usize,
+    beacons_unresolved_city: u64,
+    beacons_failed: u64,
 }
 
 impl GDriveContactsSyncWorker {
@@ -286,6 +299,16 @@ impl GDriveContactsSyncWorker {
                     counts.peer_acts_deactivated += file_counts.peer_acts_deactivated;
                     counts.peer_acts_skipped_inactive += file_counts.peer_acts_skipped_inactive;
                     counts.peer_acts_failed += file_counts.peer_acts_failed;
+                    counts.registry_dump_sheets += file_counts.registry_dump_sheets;
+                    counts.agent_sheets += file_counts.agent_sheets;
+                    counts.agents_imported += file_counts.agents_imported;
+                    counts.agents_refreshed += file_counts.agents_refreshed;
+                    counts.agents_failed += file_counts.agents_failed;
+                    counts.beacons_imported += file_counts.beacons_imported;
+                    counts.beacons_refreshed += file_counts.beacons_refreshed;
+                    counts.beacon_refusals += file_counts.beacon_refusals;
+                    counts.beacons_unresolved_city += file_counts.beacons_unresolved_city;
+                    counts.beacons_failed += file_counts.beacons_failed;
                 }
                 Err(error) => {
                     counts.files_failed += 1;
@@ -316,6 +339,16 @@ impl GDriveContactsSyncWorker {
             peer_acts_deactivated = counts.peer_acts_deactivated,
             peer_acts_skipped_inactive = counts.peer_acts_skipped_inactive,
             peer_acts_failed = counts.peer_acts_failed,
+            registry_dump_sheets = counts.registry_dump_sheets,
+            agent_sheets = counts.agent_sheets,
+            agents_imported = counts.agents_imported,
+            agents_refreshed = counts.agents_refreshed,
+            agents_failed = counts.agents_failed,
+            beacons_imported = counts.beacons_imported,
+            beacons_refreshed = counts.beacons_refreshed,
+            beacon_refusals = counts.beacon_refusals,
+            beacons_unresolved_city = counts.beacons_unresolved_city,
+            beacons_failed = counts.beacons_failed,
             "gdrive contacts sync cycle complete"
         );
         Ok(())
@@ -563,6 +596,14 @@ impl GDriveContactsSyncWorker {
         counts.peer_acts_failed += harvest.peer_acts_failed;
         counts.registry_dump_sheets += harvest.registry_dump_sheets;
         counts.agent_sheets += harvest.agent_sheets;
+        counts.agents_imported += harvest.agents_imported;
+        counts.agents_refreshed += harvest.agents_refreshed;
+        counts.agents_failed += harvest.agents_failed;
+        counts.beacons_imported += harvest.beacons_imported;
+        counts.beacons_refreshed += harvest.beacons_refreshed;
+        counts.beacon_refusals += harvest.beacon_refusals;
+        counts.beacons_unresolved_city += harvest.beacons_unresolved_city;
+        counts.beacons_failed += harvest.beacons_failed;
         let contacts = harvest.contacts;
 
         if !harvest.saw_email_column {
@@ -644,16 +685,20 @@ impl GDriveContactsSyncWorker {
         let single = |grid: Vec<Vec<String>>| vec![grid];
         match file.mime_type.as_str() {
             "application/vnd.google-apps.spreadsheet" => {
-                let csv_text = self
-                    .download(
+                // The CSV export answers the first worksheet only — a
+                // multi-tab Google workbook would drop every tab but one.
+                // The xlsx export carries all of them through the same
+                // `parse_xlsx_sheets` a native .xlsx upload takes.
+                let bytes = self
+                    .download_bytes(
                         connection_id,
                         &format!(
-                            "https://www.googleapis.com/drive/v3/files/{}/export?mimeType=text/csv",
+                            "https://www.googleapis.com/drive/v3/files/{}/export?mimeType=application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                             file.id
                         ),
                     )
                     .await?;
-                parse_delimited(csv_text.as_bytes(), b',').map(single)
+                crate::sheet_intake::parse_xlsx_sheets(&bytes)
             }
             "text/csv" => {
                 let text = self.download_media(connection_id, &file.id).await?;
@@ -700,6 +745,30 @@ impl GDriveContactsSyncWorker {
             &format!("https://www.googleapis.com/drive/v3/files/{file_id}?alt=media"),
         )
         .await
+    }
+
+    /// `download` for binary responses — a native Sheets export is a zip,
+    /// not text, so `.text()` would corrupt it.
+    async fn download_bytes(&self, connection_id: Uuid, url: &str) -> Result<Vec<u8>, String> {
+        let token = self.access_token_for_connection(connection_id).await?;
+        let response = self
+            .http_client
+            .get(url)
+            .bearer_auth(token)
+            .send()
+            .await
+            .map_err(|e| format!("download failed: {e}"))?;
+        if !response.status().is_success() {
+            return Err(format!(
+                "download failed status={}",
+                response.status().as_u16()
+            ));
+        }
+        response
+            .bytes()
+            .await
+            .map(|b| b.to_vec())
+            .map_err(|e| format!("download body read failed: {e}"))
     }
 
     async fn download_media_bytes(

@@ -26,6 +26,8 @@ mod columns {
     pub const CITY: &str = "city";
     pub const PHONE: &str = "phone";
     pub const NOTES: &str = "notes";
+    pub const SOURCE_URL: &str = "source_url";
+    pub const RESEARCH_DATE: &str = "research_date";
 }
 
 /// Whether a header row is the booking-agent sheet this module parses.
@@ -61,6 +63,8 @@ pub fn canonical_column(cell: &str) -> Option<&'static str> {
         "city" | "miasto" => Some(columns::CITY),
         "phone" | "tel" | "mobile" => Some(columns::PHONE),
         "notes" | "note" | "comment" | "notatki" | "uwagi" => Some(columns::NOTES),
+        "source_url" | "source" | "evidence_url" | "zrodlo" => Some(columns::SOURCE_URL),
+        "research_date" | "researched_on" | "date" | "data" => Some(columns::RESEARCH_DATE),
         _ => None,
     }
 }
@@ -89,6 +93,44 @@ fn capped(value: Option<String>, limit: usize) -> Option<String> {
     value.map(|v| v.chars().take(limit).collect())
 }
 
+/// One agent row in the registry table's own terms — what the direct
+/// seed upsert writes. `email` is already normalised and is the upsert key.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SeededAgent {
+    pub name: String,
+    pub agency: Option<String>,
+    pub email: String,
+    pub roster_url: Option<String>,
+    pub genres: Vec<String>,
+    /// The sheet's verdict: true unless a Status/Active cell said inactive —
+    /// the same rule the staged contact carries into the verdict sync.
+    pub active: bool,
+    pub source_url: Option<String>,
+    pub research_date: Option<String>,
+    pub notes: Option<String>,
+}
+
+/// What the agent sheet yielded: contacts for the staging/review path and
+/// structured rows for the `booking_agents` registry itself.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct AgentSheetReport {
+    pub extraction: ExtractionReport,
+    pub agents: Vec<SeededAgent>,
+}
+
+/// Splits a genres cell into the `text[]` the registry stores — comma,
+/// slash and semicolon all separate a hand-written list.
+fn genre_list(raw: Option<String>) -> Vec<String> {
+    let Some(raw) = raw else {
+        return Vec::new();
+    };
+    raw.split([',', '/', ';'])
+        .map(str::trim)
+        .filter(|g| !g.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
 /// Reads one whole grid as a booking-agent sheet, or declines it.
 ///
 /// `None` means the header is not the agent sheet's — the caller tries its
@@ -97,7 +139,7 @@ fn capped(value: Option<String>, limit: usize) -> Option<String> {
 /// Read-only registry columns are ignored by construction — they never
 /// reach an [`ExtractedContact`] field.
 #[must_use]
-pub fn extract_agent_sheet(grid: &[Vec<String>]) -> Option<ExtractionReport> {
+pub fn extract_agent_sheet(grid: &[Vec<String>]) -> Option<AgentSheetReport> {
     let (header, rows) = grid.split_first()?;
     if !is_agent_sheet(header) {
         return None;
@@ -117,27 +159,41 @@ pub fn extract_agent_sheet(grid: &[Vec<String>]) -> Option<ExtractionReport> {
     let city_col = column(columns::CITY);
     let phone_col = column(columns::PHONE);
     let notes_col = column(columns::NOTES);
+    let source_col = column(columns::SOURCE_URL);
+    let research_col = column(columns::RESEARCH_DATE);
 
     let cell = |row: &[String], column: Option<usize>| {
         column.and_then(|c| row.get(c)).and_then(|v| clean(v))
     };
 
-    let mut report = ExtractionReport::default();
+    let mut report = AgentSheetReport::default();
     let mut by_email: std::collections::HashMap<String, ExtractedContact> =
         std::collections::HashMap::new();
     for row in rows {
         if row.iter().all(|v| v.trim().is_empty()) {
             continue;
         }
-        report.rows_read += 1;
+        report.extraction.rows_read += 1;
         let Some(raw_email) = cell(row, email_col) else {
-            report.rows_without_email += 1;
+            report.extraction.rows_without_email += 1;
             continue;
         };
         let Ok(email) = NormalizedEmail::parse(&raw_email) else {
-            report.rows_without_email += 1;
+            report.extraction.rows_without_email += 1;
             continue;
         };
+        // `booking_agents.contact_email`'s CHECK wants a dotted domain —
+        // `a@localhost` parses but cannot store, so it counts as absent
+        // the same way an unparseable cell does.
+        if !email
+            .as_str()
+            .rsplit('@')
+            .next()
+            .is_some_and(|domain| domain.contains('.'))
+        {
+            report.extraction.rows_without_email += 1;
+            continue;
+        }
         // `Status` uses the shared verdict vocabulary; `Active` is the
         // registry flag. A sheet carrying both lets Status win — it is the
         // human-edited one.
@@ -155,6 +211,31 @@ pub fn extract_agent_sheet(grid: &[Vec<String>]) -> Option<ExtractionReport> {
         .flatten()
         .collect::<Vec<_>>()
         .join(" · ");
+        // The registry row keeps the fields the review queue only
+        // carries as notes — roster, genres, the row's own provenance.
+        // Name falls back the way `promote_beacon_agent` does: agency,
+        // then the address itself, so the NOT NULL column never blocks.
+        let name = cell(row, name_col)
+            .or_else(|| cell(row, agency_col))
+            .unwrap_or_else(|| email.as_str().to_owned());
+        report.agents.push(SeededAgent {
+            name: name.chars().take(200).collect(),
+            agency: capped(cell(row, agency_col), 200),
+            email: email.as_str().to_owned(),
+            // `roster_url`'s CHECK admits `^https?://` only — a cell like
+            // `agency.com/roster` or `n/a` would violate it and abort the
+            // row's upsert, so the sheet's own words stay in `notes` while
+            // the column carries only what it can hold.
+            roster_url: cell(row, roster_col).filter(|v| {
+                let v = v.trim().to_ascii_lowercase();
+                v.starts_with("http://") || v.starts_with("https://")
+            }),
+            genres: genre_list(cell(row, genres_col)),
+            active: staged_status.as_deref() != Some("inactive"),
+            source_url: cell(row, source_col),
+            research_date: cell(row, research_col),
+            notes: cell(row, notes_col),
+        });
         by_email.insert(
             email.as_str().to_owned(),
             ExtractedContact {
@@ -166,10 +247,11 @@ pub fn extract_agent_sheet(grid: &[Vec<String>]) -> Option<ExtractionReport> {
                 city: capped(cell(row, city_col), 120),
                 staged_status,
                 notes: capped(clean(&notes), 2000),
+                extras: Default::default(),
             },
         );
     }
-    report.contacts = by_email.into_values().collect();
+    report.extraction.contacts = by_email.into_values().collect();
     Some(report)
 }
 
@@ -243,11 +325,12 @@ mod tests {
             &["No Address", "Agency Three", "", "", "", "t", "", "", ""],
         ]))
         .expect("the agent header must claim");
-        assert_eq!(report.rows_read, 3);
-        assert_eq!(report.rows_without_email, 1);
-        assert_eq!(report.contacts.len(), 2);
+        assert_eq!(report.extraction.rows_read, 3);
+        assert_eq!(report.extraction.rows_without_email, 1);
+        assert_eq!(report.extraction.contacts.len(), 2);
 
         let live = report
+            .extraction
             .contacts
             .iter()
             .find(|c| c.email == "live@agency.test")
@@ -264,6 +347,7 @@ mod tests {
         );
 
         let gone = report
+            .extraction
             .contacts
             .iter()
             .find(|c| c.email == "gone@agency.test")
@@ -288,7 +372,7 @@ mod tests {
         ]))
         .expect("agent sheet");
         assert_eq!(
-            report.contacts[0].staged_status.as_deref(),
+            report.extraction.contacts[0].staged_status.as_deref(),
             Some("inactive")
         );
     }
@@ -296,5 +380,52 @@ mod tests {
     #[test]
     fn other_sheets_are_declined() {
         assert!(extract_agent_sheet(&grid(&[&["Email", "Name"], &["a@b.test", "A"],])).is_none());
+    }
+
+    #[test]
+    fn a_schemeless_roster_url_stays_in_notes_only() {
+        // `roster_url`'s CHECK admits `^https?://` — a hand-typed
+        // `agency.com/roster` must degrade to NULL rather than abort the
+        // row's upsert, and the sheet's words still ride in notes.
+        let report = extract_agent_sheet(&grid(&[
+            HEADER,
+            &[
+                "A",
+                "Ag",
+                "a@agency.test",
+                "agency.com/roster",
+                "",
+                "t",
+                "",
+                "",
+                "",
+            ],
+        ]))
+        .expect("agent sheet");
+        assert_eq!(report.agents[0].roster_url, None);
+        let contact = &report.extraction.contacts[0];
+        assert!(
+            contact
+                .notes
+                .as_deref()
+                .is_some_and(|n| n.contains("agency.com/roster")),
+            "raw roster cell should ride in notes: {:?}",
+            contact.notes
+        );
+    }
+
+    #[test]
+    fn a_dotless_domain_email_counts_as_absent() {
+        // `booking_agents.contact_email`'s CHECK demands a dotted domain —
+        // `a@localhost` parses yet cannot store, so the row reads as a
+        // lead without an address, like an unparseable cell.
+        let report = extract_agent_sheet(&grid(&[
+            HEADER,
+            &["A", "Ag", "a@localhost", "", "", "t", "", "", ""],
+        ]))
+        .expect("agent sheet");
+        assert_eq!(report.extraction.rows_without_email, 1);
+        assert!(report.agents.is_empty());
+        assert!(report.extraction.contacts.is_empty());
     }
 }

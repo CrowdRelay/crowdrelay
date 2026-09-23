@@ -3,10 +3,13 @@
 //! what each sheet IS and route its rows to the right registry.
 //!
 //! Dispatch order is the whole contract:
-//!   agent seed → registry dump → venue seed → band seed → contact list
+//!   agent seed → beacon seed → registry dump → venue seed → band seed → contact list
 //! The booking-agent sheet is claimed first because its own header carries
 //! registry state columns (`Refused_Until`, `Do_Not_Contact`) that would
-//! trip the dump guard; the dump guard runs before the venue reader
+//! trip the dump guard; the beacon registry sheet is claimed next because
+//! its state columns (`Verified`, `Accepts_Outreach`, …) are the same
+//! vocabulary the guard rejects on — here they are intake, not a readout;
+//! the dump guard runs before the venue reader
 //! because a registry readout's `Name`/`City`/`Source_URL` satisfies the
 //! venue pin and must never mint its rows as rooms. Only a sheet none of
 //! the four claims reaches the contact reader.
@@ -18,16 +21,17 @@
 //! writes — so trying both views is safe, and the retry is strictly
 //! fallback: a sheet that already parses keeps its first row.
 
-use crowdrelay_domain::booking_agent_seed::extract_agent_sheet;
+use crowdrelay_domain::beacon_seed::{BeaconSeedReport, extract_beacon_sheet};
+use crowdrelay_domain::booking_agent_seed::{AgentSheetReport, extract_agent_sheet};
 use crowdrelay_domain::drive_contacts::{
-    ExtractedContact, ExtractionReport as AgentReport, extract_contacts, is_email_header,
-    is_registry_dump,
+    ExtractedContact, extract_contacts, is_email_header, is_registry_dump,
 };
 use crowdrelay_domain::peer_act_seed::{
     PeerActSeedReport, extract_seed_sheet as extract_band_sheet,
 };
 use crowdrelay_domain::venue_seed::{SeedSheetReport, extract_seed_sheet as extract_venue_sheet};
 use crowdrelay_infra::{
+    beacon_seed::PostgresBeaconSeedRepository, booking_agents::PostgresBookingAgentRepository,
     peer_act_seed::PostgresPeerActSeedRepository, venue_seed::PostgresVenueSeedRepository,
 };
 use sqlx::PgPool;
@@ -42,7 +46,7 @@ pub const MAX_ROWS_PER_FILE: usize = 5000;
 /// every transport's skip-unchanged marker (`<sha|mtime>#<rev>`). Bump it
 /// when the intake rules change or previously-scanned files stay skipped
 /// under rules they predate.
-pub const SHEET_INTAKE_REVISION: u32 = 3;
+pub const SHEET_INTAKE_REVISION: u32 = 4;
 
 /// What one file's sheets produced: the contacts to stage under the file's
 /// own source identity, plus the counts the cycle report folds in.
@@ -71,13 +75,32 @@ pub struct SheetHarvest {
     pub registry_dump_sheets: usize,
     /// Sheets carrying a booking-agent seed that staged contacts.
     pub agent_sheets: usize,
+    /// Agent rows the seed upsert filed into `booking_agents` itself —
+    /// split new/refreshed; the staging contacts remain the review
+    /// path's view of the same rows.
+    pub agents_imported: u64,
+    pub agents_refreshed: u64,
+    /// Agent rows whose own upsert failed — isolated per row.
+    pub agents_failed: u64,
+    /// Beacon rows newly inserted into `beacons`.
+    pub beacons_imported: u64,
+    /// Beacon rows the unique identity already knew — refreshed in place.
+    pub beacons_refreshed: u64,
+    /// Beacon rows the parser refused (no name, no route, unmapped kind).
+    pub beacon_refusals: usize,
+    /// Beacon rows whose city text matched no unambiguous `cities` entry —
+    /// imported global, raw text preserved in metadata.
+    pub beacons_unresolved_city: u64,
+    /// Beacon rows whose own write failed — isolated per row.
+    pub beacons_failed: u64,
 }
 
 /// Which structured reader claims a view, if one does. Extraction is
 /// parse-only — a report carries no writes — so the dispatch may probe a
 /// second view before committing. Order is the contract documented above.
 enum Claim {
-    Agent(AgentReport),
+    Agent(AgentSheetReport),
+    Beacon(BeaconSeedReport),
     Dump,
     Venue(SeedSheetReport),
     Band(PeerActSeedReport),
@@ -90,6 +113,12 @@ fn claim(view: &[Vec<String>]) -> Option<Claim> {
         // because its read-back columns (`Approached_At`, `Refused_Until`,
         // `Do_Not_Contact`) are exactly the columns the guard rejects on.
         Some(Claim::Agent(report))
+    } else if let Some(report) = extract_beacon_sheet(view) {
+        // The beacon registry's own shape — claimed ahead of the dump
+        // guard for the same reason as the agent sheet: `Verified`,
+        // `Accepts_Outreach` and friends are registry-state columns, but
+        // on this sheet they are the intake, not an export of it.
+        Some(Claim::Beacon(report))
     } else if view.first().is_some_and(|header| is_registry_dump(header)) {
         // A registry readout is context for a human, not intake — without
         // this its `Name`/`City`/`Source_URL` mints press contacts as venues.
@@ -152,10 +181,54 @@ pub async fn harvest_grids(
         match claimed {
             Claim::Agent(report) => {
                 harvest.agent_sheets += 1;
-                harvest.rows_read += report.rows_read;
-                harvest.rows_without_email += report.rows_without_email;
-                harvest.contacts.extend(report.contacts);
+                harvest.rows_read += report.extraction.rows_read;
+                harvest.rows_without_email += report.extraction.rows_without_email;
+                harvest.contacts.extend(report.extraction.contacts);
                 harvest.saw_email_column = true;
+                // The staged contacts keep the review/verdict path alive;
+                // the structured rows file the registry itself — this is
+                // the write the "EMPTY in production" gap was missing.
+                // Each row is its own write: one bad cell must not take
+                // the sheet's other agents with it.
+                let agents = PostgresBookingAgentRepository::new(pool.clone());
+                for agent in &report.agents {
+                    match agents.upsert_seed(workspace_id, agent, file_name).await {
+                        Ok(true) => harvest.agents_imported += 1,
+                        Ok(false) => harvest.agents_refreshed += 1,
+                        Err(error) => {
+                            harvest.agents_failed += 1;
+                            tracing::warn!(
+                                %error,
+                                file = %file_name,
+                                agent = %agent.name,
+                                "agent seed row failed to write"
+                            );
+                        }
+                    }
+                }
+            }
+            Claim::Beacon(report) => {
+                let summary = PostgresBeaconSeedRepository::new(pool.clone())
+                    .import_sheet(workspace_id, file_name, &report)
+                    .await
+                    .map_err(|e: sqlx::Error| e.to_string())?;
+                if !report.refusals.is_empty() {
+                    tracing::info!(
+                        file = %file_name,
+                        refusals = ?report
+                            .refusals
+                            .iter()
+                            .map(|(row, refusal)| (*row + row_shift, refusal.message()))
+                            .collect::<Vec<_>>(),
+                        "beacon seed rows refused"
+                    );
+                }
+                harvest.rows_read += report.beacons.len() + report.refusals.len();
+                harvest.beacons_imported += summary.imported;
+                harvest.beacons_refreshed += summary.refreshed;
+                harvest.beacon_refusals += report.refusals.len();
+                harvest.beacons_unresolved_city += summary.unresolved_city;
+                harvest.beacons_failed += summary.failed;
             }
             Claim::Dump => {
                 harvest.registry_dump_sheets += 1;

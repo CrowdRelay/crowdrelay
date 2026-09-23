@@ -279,6 +279,7 @@ async fn upsert_keeps_the_sheet_city() -> Result<(), Box<dyn std::error::Error>>
                 city: Some("Wroclaw".to_owned()),
                 staged_status: None,
                 notes: None,
+                extras: Default::default(),
             }],
             true,
         )
@@ -301,6 +302,7 @@ async fn upsert_keeps_the_sheet_city() -> Result<(), Box<dyn std::error::Error>>
                 city: None,
                 staged_status: None,
                 notes: None,
+                extras: Default::default(),
             }],
             false,
         )
@@ -824,6 +826,7 @@ async fn uploaded_sheet_stages_through_the_upload_source() -> Result<(), Box<dyn
             city: Some("wroclaw".to_owned()),
             staged_status: None,
             notes: None,
+            extras: Default::default(),
         },
         crowdrelay_domain::drive_contacts::ExtractedContact {
             email: "second@sheet.test".to_owned(),
@@ -834,6 +837,7 @@ async fn uploaded_sheet_stages_through_the_upload_source() -> Result<(), Box<dyn
             city: None,
             staged_status: None,
             notes: None,
+            extras: Default::default(),
         },
     ];
     let summary = fixture
@@ -913,6 +917,7 @@ async fn an_inactive_agent_row_retires_the_agent() -> Result<(), Box<dyn std::er
             city: None,
             staged_status: Some("inactive".to_owned()),
             notes: Some("roster page gone".to_owned()),
+            extras: Default::default(),
         },
         // Same verdict, wrong queue — a dead promoter is not an agent
         // retirement.
@@ -925,6 +930,7 @@ async fn an_inactive_agent_row_retires_the_agent() -> Result<(), Box<dyn std::er
             city: None,
             staged_status: Some("inactive".to_owned()),
             notes: None,
+            extras: Default::default(),
         },
     ];
     fixture
@@ -979,6 +985,7 @@ async fn an_inactive_agent_row_retires_the_agent() -> Result<(), Box<dyn std::er
         city: None,
         staged_status: Some("active".to_owned()),
         notes: None,
+        extras: Default::default(),
     }];
     fixture
         .repository
@@ -1013,6 +1020,7 @@ async fn an_inactive_agent_row_retires_the_agent() -> Result<(), Box<dyn std::er
         city: None,
         staged_status: None,
         notes: None,
+        extras: Default::default(),
     }];
     fixture
         .repository

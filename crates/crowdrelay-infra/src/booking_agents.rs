@@ -101,6 +101,76 @@ impl PostgresBookingAgentRepository {
         Self { pool }
     }
 
+    /// A registry-workbook seed row, upserted on the address.
+    ///
+    /// The sheet owns identity — name, agency, roster link, genres — and on
+    /// a fresh row its `Active` verdict too. On conflict `active` is left
+    /// alone: liveness belongs to the sync's verdict pass, which already
+    /// ran on this sheet's staged contacts — the same rule
+    /// `promote_beacon_agent` keeps. `approached_at`, `refused_until`,
+    /// `do_not_contact` and `contact_verified_at` are the agent's or the
+    /// operator's answers and a sheet never writes them.
+    ///
+    /// Returns `true` when the row was inserted, `false` when the address
+    /// was already on file and refreshed.
+    pub async fn upsert_seed(
+        &self,
+        workspace_id: Uuid,
+        agent: &crowdrelay_domain::booking_agent_seed::SeededAgent,
+        source_file: &str,
+    ) -> Result<bool, sqlx::Error> {
+        let mut metadata = json!({
+            "imported_from": {
+                "source": "registry_sheet",
+                "file": source_file,
+            },
+        });
+        if let Some(map) = metadata.as_object_mut() {
+            if let Some(source_url) = &agent.source_url {
+                map.insert("source_url".to_owned(), json!(source_url));
+            }
+            if let Some(research_date) = &agent.research_date {
+                map.insert("research_date".to_owned(), json!(research_date));
+            }
+            if let Some(notes) = &agent.notes {
+                map.insert("notes".to_owned(), json!(notes));
+            }
+        }
+        // `xmax = 0` tells an insert from a conflict-refresh — RETURNING
+        // answers the row either way, so the tag is how the caller counts
+        // "new" rather than "seen again". `imported_from` is first-source
+        // history: excluded from the merge so a refresh never rewrites it.
+        sqlx::query_scalar::<_, bool>(
+            r#"
+            INSERT INTO booking_agents (
+              id, workspace_id, name, agency, contact_email, roster_url,
+              genres, active, metadata
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            ON CONFLICT (workspace_id, contact_email) DO UPDATE SET
+                name = EXCLUDED.name,
+                agency = COALESCE(EXCLUDED.agency, booking_agents.agency),
+                roster_url = COALESCE(EXCLUDED.roster_url, booking_agents.roster_url),
+                genres = CASE WHEN cardinality(EXCLUDED.genres) > 0
+                              THEN EXCLUDED.genres
+                              ELSE booking_agents.genres END,
+                metadata = booking_agents.metadata || (EXCLUDED.metadata - 'imported_from'),
+                version = booking_agents.version + 1
+            RETURNING (xmax = 0)
+            "#,
+        )
+        .bind(Uuid::now_v7())
+        .bind(workspace_id)
+        .bind(&agent.name)
+        .bind(&agent.agency)
+        .bind(&agent.email)
+        .bind(&agent.roster_url)
+        .bind(&agent.genres)
+        .bind(agent.active)
+        .bind(&metadata)
+        .fetch_one(&self.pool)
+        .await
+    }
+
     /// The registry as the band sees it — every agent the screened intake
     /// promoted, contactable and season-open first. The address column is
     /// deliberately absent from the select list.
