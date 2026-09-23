@@ -717,7 +717,7 @@ async fn staged_rows_resolve_against_the_shared_registries()
 
     let rows = fixture
         .repository
-        .list_contacts(fixture.workspace_id, 50)
+        .list_contacts(fixture.workspace_id, None, 50)
         .await?;
     let by_email = |email: &str| {
         rows.iter()

@@ -15,6 +15,9 @@ use sqlx::PgPool;
 use thiserror::Error;
 use uuid::Uuid;
 
+mod segments;
+pub use segments::*;
+
 #[derive(Debug, Error)]
 pub enum GDriveError {
     #[error("gdrive database operation failed")]
@@ -470,18 +473,24 @@ impl PostgresGDriveRepository {
 
     /// The review queue: staged rows first, newest seen first, every row
     /// resolved against the shared registries so a sheet arrives as "412
-    /// already on record" rather than 2000 strangers (P.2).
+    /// already on record" rather than 2000 strangers (P.2). A `segment`
+    /// narrows the page to one cut of the queue; `None` lists everything.
     pub async fn list_contacts(
         &self,
         workspace_id: Uuid,
+        segment: Option<ContactSegment>,
         limit: i64,
     ) -> Result<Vec<DriveContactView>, GDriveError> {
         let sql = format!(
             r#"{CONTACT_SELECT}
             WHERE c.workspace_id = $1
+            {segment_filter}
             ORDER BY (c.fan_outcome = 'staged' OR c.beacon_outcome = 'staged') DESC,
                      c.last_seen_at DESC
-            LIMIT $2"#
+            LIMIT $2"#,
+            segment_filter = segment
+                .map(|segment| format!("AND ({})", segment.sql_predicate()))
+                .unwrap_or_default(),
         );
         let rows = sqlx::query_as::<_, DriveContactRow>(&sql)
             .bind(workspace_id)

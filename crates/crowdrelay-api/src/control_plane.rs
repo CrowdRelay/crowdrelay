@@ -452,6 +452,10 @@ pub(crate) fn router(state: crate::AppState) -> Router {
                 .layer(DefaultBodyLimit::max(MAX_UPLOAD_BODY_BYTES)),
         )
         .route(
+            "/v1/control-plane/gdrive/contacts/promote-batch",
+            post(crate::gdrive::promote_batch),
+        )
+        .route(
             "/v1/control-plane/gdrive/contacts/{contact_id}/promote",
             post(crate::gdrive::promote_contact),
         )
