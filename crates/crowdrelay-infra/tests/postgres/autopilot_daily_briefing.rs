@@ -644,3 +644,159 @@ async fn the_briefing_splits_recovered_fans_from_acquired_ones()
     );
     Ok(())
 }
+
+/// §5: the join-ask line reads clicks through the tracked link and fans
+/// through the shared anonymous visitor id — and is absent entirely when no
+/// join-ask post exists, because unmeasured is not zero.
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn the_briefing_counts_join_ask_clicks_and_the_fans_they_made()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (repository, pool) = repository().await?;
+    let workspace_id = WorkspaceId::new();
+    seed_workspace(&pool, workspace_id).await?;
+    seed_member(&pool, workspace_id, "reader").await?;
+    seed_team_email_executor(&pool, workspace_id).await?;
+    sqlx::query(
+        "INSERT INTO tenant_settings (workspace_id, key, value) VALUES ($1, 'crew_locale', 'en')",
+    )
+    .bind(workspace_id.into_uuid())
+    .execute(&pool)
+    .await?;
+
+    // No join-ask post yet → the line must not appear at all.
+    let morning = datetime!(2026-10-05 10:00 UTC);
+    assert_eq!(
+        repository
+            .reconcile_team_handoffs(workspace_id, morning)
+            .await?,
+        1
+    );
+    let briefings = briefing_rows(&pool, workspace_id).await?;
+    assert_eq!(briefings.len(), 1);
+    assert!(
+        !briefings[0].3.contains("join-ask"),
+        "no join-ask post means no join-ask line: {}",
+        briefings[0].3
+    );
+
+    // A posted join-ask: action → social_posts → smart_links, the same
+    // chain the executor writes.
+    let decision_id = Uuid::now_v7();
+    sqlx::query(
+        r#"INSERT INTO autopilot_decisions
+           (id, workspace_id, decision_key, context, subject_kind, subject_id,
+            decision_kind, confidence_basis_points, disposition, reason,
+            input_snapshot, policy_snapshot, recommendation, trace_id)
+           VALUES ($1,$2,$3,'promotion_budget','workspace',$4,
+                   'publish_join_ask',7000,'auto_execute','test',
+                   '{}'::jsonb,'{}'::jsonb,'{}'::jsonb,$5)"#,
+    )
+    .bind(decision_id)
+    .bind(workspace_id.into_uuid())
+    .bind(format!("joinask-briefing-{decision_id}"))
+    .bind(workspace_id.into_uuid())
+    .bind(Uuid::now_v7())
+    .execute(&pool)
+    .await?;
+    let action_id = Uuid::now_v7();
+    sqlx::query(
+        r#"INSERT INTO autopilot_actions
+           (id, workspace_id, decision_id, context, action_kind, subject_kind,
+            subject_id, idempotency_key, payload, status, finished_at)
+           VALUES ($1,$2,$3,'promotion_budget','social.join_ask.publish','workspace',
+                   $4,$5,$6,'succeeded',now())"#,
+    )
+    .bind(action_id)
+    .bind(workspace_id.into_uuid())
+    .bind(decision_id)
+    .bind(workspace_id.into_uuid())
+    .bind("join_ask:facebook:2026-W41")
+    .bind(json!({
+        "platform": "facebook",
+        "variant_index": 0,
+        "text": "Join us on Signal.",
+        "cta_url": "https://virya.music/signal?utm_source=facebook&utm_medium=join_ask&utm_campaign=join_ask_w41",
+    }))
+    .execute(&pool)
+    .await?;
+    let link_id = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO smart_links (id, workspace_id, slug, destination_url, channel_source)
+         VALUES ($1, $2, $3, $4, 'facebook')",
+    )
+    .bind(link_id)
+    .bind(workspace_id.into_uuid())
+    .bind(format!("social-{}", action_id.simple()))
+    .bind("https://virya.music/signal?utm_source=facebook&utm_medium=join_ask&utm_campaign=join_ask_w41")
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO social_posts (workspace_id, action_id, platform, content, smart_link, smart_link_id, status)
+         VALUES ($1, $2, 'facebook', $3, $4, $5, 'posted')",
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(action_id)
+    .bind(json!({"platform": "facebook", "text": "Join us on Signal.", "join_ask": true}))
+    .bind(format!("/l/social-{}", action_id.simple()))
+    .bind(link_id)
+    .execute(&pool)
+    .await?;
+
+    // Two clicks on the link, inside the window the Oct 6 briefing reads;
+    // only the first visitor went on to sign up.
+    let joined_visitor = Uuid::now_v7();
+    let passing_visitor = Uuid::now_v7();
+    for visitor in [joined_visitor, passing_visitor] {
+        sqlx::query(
+            "INSERT INTO click_events (workspace_id, smart_link_id, anonymous_visitor_id, occurred_at)
+             VALUES ($1, $2, $3, $4)",
+        )
+        .bind(workspace_id.into_uuid())
+        .bind(link_id)
+        .bind(visitor)
+        .bind(datetime!(2026-10-05 12:00 UTC))
+        .execute(&pool)
+        .await?;
+    }
+    let fan_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO fans (workspace_id, normalized_email, status)
+         VALUES ($1, $2, 'active') RETURNING id",
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(format!(
+        "clicked-{}@example.test",
+        workspace_id.into_uuid().simple()
+    ))
+    .fetch_one(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO fan_acquisition_events
+             (workspace_id, fan_id, source, request_id, anonymous_visitor_id, occurred_at)
+         VALUES ($1, $2, 'public_signup', $3, $4, $5)",
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(fan_id)
+    .bind(format!("signup-{}", workspace_id.into_uuid().simple()))
+    .bind(joined_visitor)
+    .bind(datetime!(2026-10-05 13:00 UTC))
+    .execute(&pool)
+    .await?;
+
+    // A new day issues a second briefing carrying the join-ask scoreboard.
+    let next_morning = datetime!(2026-10-06 10:00 UTC);
+    assert_eq!(
+        repository
+            .reconcile_team_handoffs(workspace_id, next_morning)
+            .await?,
+        1
+    );
+    let briefings = briefing_rows(&pool, workspace_id).await?;
+    assert_eq!(briefings.len(), 2);
+    let body = &briefings[1].3;
+    assert!(
+        body.contains("join-ask (7d): FB 2 clicks · 1 fans"),
+        "the line reports clicks and the fan they produced: {body}"
+    );
+    Ok(())
+}

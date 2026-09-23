@@ -6,6 +6,7 @@ include!("decisions/core_reads.rs");
 include!("decisions/opportunity_reads.rs");
 include!("decisions/booking_reads.rs");
 include!("decisions/cycle_reads.rs");
+include!("decisions/join_ask.rs");
 include!("decisions/persist.rs");
 include!("decisions/persist_letters.rs");
 
@@ -20,6 +21,7 @@ impl PostgresAutopilotRepository {
     decision_opportunity_reads!();
     decision_booking_reads!();
     decision_cycle_reads!();
+    decision_join_ask_reads!();
     decision_persist!();
 }
 
@@ -410,6 +412,14 @@ impl AutopilotDecisionRepository for PostgresAutopilotRepository {
     ) -> Result<Vec<crowdrelay_domain::content_engine::Arc>, RepositoryError> {
         self.load_proposed_content_arcs_impl(workspace_id, now)
             .await
+    }
+
+    async fn load_join_ask_snapshot(
+        &self,
+        workspace_id: WorkspaceId,
+        _now: OffsetDateTime,
+    ) -> Result<Option<crowdrelay_domain::join_ask::JoinAskSnapshot>, RepositoryError> {
+        self.load_join_ask_snapshot_impl(workspace_id).await
     }
 
     async fn mark_insights_consumed(

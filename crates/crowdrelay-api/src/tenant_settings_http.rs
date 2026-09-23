@@ -226,6 +226,36 @@ pub async fn get_brand_settings(
                 }
                 .to_owned(),
             );
+            // §5 join-ask: variants surface the stored JSON text verbatim —
+            // absent means the feature is off and the field reads empty,
+            // the same way `act_style` spells "never stated". Cadence and
+            // platforms carry their shipped defaults instead, so the panel
+            // shows the rule the evaluator will actually apply.
+            settings.insert(
+                "join_ask_variants".to_owned(),
+                overrides
+                    .get("join_ask_variants")
+                    .cloned()
+                    .unwrap_or_default(),
+            );
+            settings.insert(
+                "join_ask_cadence_days".to_owned(),
+                overrides
+                    .get("join_ask_cadence_days")
+                    .cloned()
+                    .unwrap_or_else(|| {
+                        crowdrelay_domain::join_ask::DEFAULT_JOIN_ASK_CADENCE_DAYS.to_string()
+                    }),
+            );
+            settings.insert(
+                "join_ask_platforms".to_owned(),
+                overrides
+                    .get("join_ask_platforms")
+                    .cloned()
+                    .unwrap_or_else(|| {
+                        crowdrelay_domain::join_ask::DEFAULT_JOIN_ASK_PLATFORMS.join(",")
+                    }),
+            );
             (
                 StatusCode::OK,
                 [(CACHE_CONTROL, PRIVATE_NO_STORE)],
@@ -260,8 +290,21 @@ fn validate_key(key: &str) -> bool {
 }
 
 fn validate_value(key: &str, value: &str) -> bool {
+    // §5: a variants list is JSON text, and five 500-char variants plus
+    // syntax do not fit under the generic 512 ceiling — it has its own
+    // bounds, checked by the same domain contract the reader applies.
+    if key == "join_ask_variants" {
+        return value.len() <= 4_096
+            && crowdrelay_domain::join_ask::parse_variants(value).is_some();
+    }
     if value.trim().is_empty() || value.len() > 512 {
         return false;
+    }
+    if key == "join_ask_cadence_days" {
+        return crowdrelay_domain::join_ask::parse_cadence_days(value).is_some();
+    }
+    if key == "join_ask_platforms" {
+        return crowdrelay_domain::join_ask::parse_platforms(value).is_some();
     }
     // The area path becomes a URL segment; keep it URL-safe like the defaults.
     if key == "member_area_path"
@@ -424,5 +467,65 @@ pub async fn upsert_setting(
                 .private()
                 .into_response()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{validate_key, validate_value};
+
+    #[test]
+    fn join_ask_keys_are_editable() {
+        for key in [
+            "join_ask_variants",
+            "join_ask_cadence_days",
+            "join_ask_platforms",
+        ] {
+            assert!(validate_key(key), "{key} must be an editable key");
+        }
+    }
+
+    #[test]
+    fn join_ask_variants_accept_the_contract_shape() {
+        assert!(validate_value(
+            "join_ask_variants",
+            r#"["Join us on Signal","Come along"]"#
+        ));
+        // Rejected shapes — each fails for its own reason, so a validator
+        // that accepted everything would fail these.
+        assert!(!validate_value("join_ask_variants", "not json"));
+        assert!(!validate_value("join_ask_variants", r#"{"a":1}"#));
+        assert!(!validate_value("join_ask_variants", "[]"));
+        // Six variants exceeds the 1–5 bound.
+        assert!(!validate_value(
+            "join_ask_variants",
+            r#"["a","b","c","d","e","f"]"#
+        ));
+        // A variant over 500 characters (after trim) is a blog post, not an ask.
+        let too_long = format!(r#"["{}"]"#, "x".repeat(501));
+        assert!(!validate_value("join_ask_variants", &too_long));
+        // …and an empty string is not a variant.
+        assert!(!validate_value("join_ask_variants", r#"[""]"#));
+    }
+
+    #[test]
+    fn join_ask_cadence_stays_inside_its_bounds() {
+        assert!(validate_value("join_ask_cadence_days", "7"));
+        assert!(validate_value("join_ask_cadence_days", "3"));
+        assert!(validate_value("join_ask_cadence_days", "30"));
+        assert!(!validate_value("join_ask_cadence_days", "2"));
+        assert!(!validate_value("join_ask_cadence_days", "31"));
+        assert!(!validate_value("join_ask_cadence_days", "weekly"));
+    }
+
+    #[test]
+    fn join_ask_platforms_reject_unknown_channels() {
+        assert!(validate_value("join_ask_platforms", "facebook,instagram"));
+        assert!(validate_value(
+            "join_ask_platforms",
+            "facebook,instagram,telegram,discord"
+        ));
+        assert!(!validate_value("join_ask_platforms", "facebook,tiktok"));
+        assert!(!validate_value("join_ask_platforms", ""));
     }
 }

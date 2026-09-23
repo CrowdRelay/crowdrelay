@@ -191,3 +191,33 @@ async fn schedule_attendance(
     }
     Ok(())
 }
+
+/// Paid gross across a ticket type in the 72 hours before the price change —
+/// the `TicketRevenue72h` counterfactual baseline.
+async fn ticket_revenue_baseline_72h(
+    transaction: &mut Transaction<'_, Postgres>,
+    workspace_id: WorkspaceId,
+    ticket_type_id: &TicketTypeId,
+    now: OffsetDateTime,
+) -> Result<f64, RepositoryError> {
+    sqlx::query_scalar::<_, f64>(
+        r#"
+        SELECT COALESCE(SUM(item.total_gross_minor), 0)::double precision
+        FROM ticket_order_items AS item
+        JOIN ticket_orders AS ticket_order
+          ON ticket_order.workspace_id = item.workspace_id
+         AND ticket_order.id = item.ticket_order_id
+        WHERE item.workspace_id = $1
+          AND item.ticket_type_id = $2
+          AND ticket_order.status = 'paid'
+          AND ticket_order.paid_at >= $3 - INTERVAL '72 hours'
+          AND ticket_order.paid_at < $3
+        "#,
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(ticket_type_id.into_uuid())
+    .bind(now)
+    .fetch_one(&mut **transaction)
+    .await
+    .map_err(map_sqlx)
+}

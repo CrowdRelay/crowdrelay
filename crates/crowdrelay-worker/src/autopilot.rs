@@ -426,6 +426,16 @@ impl AutopilotWorker {
                         "growth blocked: posts are waiting on communities nobody has joined"
                     );
                 }
+                // Same reason as the membership gate above: a configured
+                // join-ask platform that stays quiet is work waiting on a
+                // person (no connection, no photo, no site URL), and a
+                // silent skip reads exactly like a detector that never ran.
+                if !report.join_ask_held.is_empty() {
+                    tracing::warn!(
+                        held = ?report.join_ask_held,
+                        "join-ask platforms held this cycle"
+                    );
+                }
             }
             Err(error) => {
                 degraded.failed(phase::EVALUATION);

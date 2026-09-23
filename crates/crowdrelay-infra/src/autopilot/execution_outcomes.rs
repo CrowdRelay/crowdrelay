@@ -159,6 +159,10 @@ pub(super) async fn record_execution_outcome(
         AutopilotActionPayload::RequestSignalPush { .. } => {
             ("signal_push_requested", 1.0, None)
         }
+        // The action's own success is the post being *filed* — the social
+        // executor's `social_posts` row is the publication receipt, and its
+        // clicks land on the `content_link_clicks_7d` measurement.
+        AutopilotActionPayload::PublishJoinAsk { .. } => ("join_ask_published", 1.0, None),
         AutopilotActionPayload::RaiseContentSuggestion { .. } => {
             ("content_suggestion_raised", 1.0, None)
         }

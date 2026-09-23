@@ -1039,6 +1039,21 @@ impl AutopilotActionPayload {
                 ],
                 deadline_note: String::new(),
             },
+            Self::PublishJoinAsk { platform, variant_index, text, cta_url, .. } => ActionBriefing {
+                summary: format!("Join-ask post on {platform}"),
+                why_it_matters: "The followers already on the page are the cheapest fans to win. This is the weekly ask — the tenant's own words, rotated, never rewritten.".into(),
+                steps: vec![
+                    BriefingStep { what_to_do: "Read the post text".into(), why_it_matters: "It is one of the variants the tenant wrote — if it no longer sounds right, the variant list is what to edit".into() },
+                    BriefingStep { what_to_do: "Click APPROVE to publish it".into(), why_it_matters: "Once approved the post goes to the band's own page with its tracked link".into() },
+                ],
+                content: vec![
+                    BriefingField { label: "Platform".into(), value: platform.clone() },
+                    BriefingField { label: "Post".into(), value: truncate(text.clone(), 2000) },
+                    BriefingField { label: "Link".into(), value: cta_url.clone() },
+                    BriefingField { label: "Variant".into(), value: format!("#{}", variant_index + 1) },
+                ],
+                deadline_note: String::new(),
+            },
         }
     }
 }

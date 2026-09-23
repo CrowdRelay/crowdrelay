@@ -89,6 +89,7 @@ mod content_strategy;
 mod growth_debt;
 mod growth_intelligence;
 mod growth_metrics;
+mod join_ask;
 mod outreach_supply;
 mod placements;
 mod plays;
@@ -108,6 +109,7 @@ use growth_intelligence::{
     ScoredCandidate, build_dispatch_context, cooldown_window, growth_intelligence_candidate,
 };
 use growth_metrics::growth_metric_candidate;
+use join_ask::evaluate_join_ask_candidates;
 use outreach_supply::outreach_supply_candidate;
 use plays::{play_decision, play_start, play_step_candidate};
 use show_growth::show_growth_candidates;
@@ -757,6 +759,27 @@ where
                             self.persist(&candidate, &mut limits, &mut report).await?;
                         }
                     }
+                    // §5: the weekly join-ask rides this context — a post on
+                    // the band's own pages in the band's own words is the
+                    // strategy surface's work. `None` means the tenant never
+                    // wrote variants, which is the feature off, not an
+                    // empty cycle.
+                    if let Some(snapshot) = self
+                        .repository
+                        .load_join_ask_snapshot(self.workspace_id, now)
+                        .await?
+                    {
+                        let evaluation = evaluate_join_ask_candidates(
+                            &snapshot,
+                            &policy,
+                            self.workspace_id,
+                            now,
+                        )?;
+                        report.join_ask_held.extend(evaluation.held);
+                        for candidate in &evaluation.candidates {
+                            self.persist(candidate, &mut limits, &mut report).await?;
+                        }
+                    }
                 }
                 AutopilotContext::Representation | AutopilotContext::BookingAgent => {
                     // Approaches are band-initiated: the evaluator never
@@ -835,6 +858,7 @@ include!("evaluate/hypothesis_validation.rs");
 include!("evaluate/tests.rs");
 include!("evaluate/tests_booking.rs");
 include!("evaluate/growth_metrics_tests.rs");
+include!("evaluate/join_ask_tests.rs");
 include!("evaluate/growth_debt_tests.rs");
 include!("evaluate/content_strategy_tests.rs");
 include!("evaluate/plays_tests.rs");

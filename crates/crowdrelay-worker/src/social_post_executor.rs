@@ -74,6 +74,7 @@ use tokio::{
 };
 use uuid::Uuid;
 
+pub(crate) mod join_ask;
 pub(crate) mod reach;
 pub(crate) mod tracked_links;
 
@@ -435,6 +436,9 @@ impl SocialPostExecutorWorker {
         .execute(&mut *tx)
         .await?;
 
+        // Step 1b: the weekly join-ask (§5) — same claim shape, no task join.
+        self.file_join_ask_posts(&mut tx).await?;
+
         // Step 2: Claim pending and rate_limited (past backoff) rows.
         let mut rows = sqlx::query_as::<_, ClaimedAction>(
             r#"
@@ -456,9 +460,13 @@ impl SocialPostExecutorWorker {
                 )
                 RETURNING id, action_id, platform, smart_link, smart_link_id
             )
+            -- Two payload shapes reach this read: the agent draft nests its
+            -- fields under `draft`, the join-ask carries them flat. COALESCE
+            -- reads whichever exists — a draft payload has no top-level
+            -- `text`, a join-ask has no `draft`.
             SELECT c.id, c.action_id, c.platform,
-                   a.payload->'draft'->>'text' AS text,
-                   a.payload->'draft'->>'cta_url' AS cta_url,
+                   COALESCE(a.payload->'draft'->>'text', a.payload->>'text') AS text,
+                   COALESCE(a.payload->'draft'->>'cta_url', a.payload->>'cta_url') AS cta_url,
                    c.smart_link, c.smart_link_id,
                    a.trace_id
             FROM claimed c

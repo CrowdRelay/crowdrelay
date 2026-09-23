@@ -85,6 +85,11 @@ fn payload_signals(
             // not a kind name.
             (None, None, Some(summary))
         }
+        AutopilotActionPayload::PublishJoinAsk { platform, text, .. } => {
+            // The words are the ask — the board should read the post, not a
+            // kind name.
+            (None, None, Some(format!("post on {platform}: {text}")))
+        }
         AutopilotActionPayload::RaiseDeclineAdvisory {
             subreddit,
             alternative_label,

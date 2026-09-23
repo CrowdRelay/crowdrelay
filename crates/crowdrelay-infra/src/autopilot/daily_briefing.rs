@@ -54,6 +54,10 @@ struct BriefingFrame {
     /// acquisition only, so a bulk-promoted wave of old contacts never
     /// reads as freshly won growth.
     recovered_label: &'static str,
+    /// §5: the weekly join-ask scoreboard — clicks the tracked link earned
+    /// and the fans those clicks produced, per platform. Absent entirely
+    /// when no join-ask post exists: unmeasured is not zero.
+    join_ask_label: &'static str,
     fans_flat: &'static str,
     fans_format_unrecorded: &'static str,
     awaiting_report: &'static str,
@@ -91,6 +95,7 @@ const fn briefing_frame(locale: BriefingLocale) -> BriefingFrame {
             unmeasured: "brak pomiaru",
             fans_label: "nowi fani (30 dni)",
             recovered_label: "odzyskani z archiwum (30 dni)",
+            join_ask_label: "dołącz-do-nas (7 dni)",
             fans_flat: "brak konwersji — nic jeszcze nie działa, i to też jest wiedza",
             fans_format_unrecorded: "format niezapisany",
             awaiting_report: "Czeka na raport",
@@ -117,6 +122,7 @@ const fn briefing_frame(locale: BriefingLocale) -> BriefingFrame {
             unmeasured: "unmeasured",
             fans_label: "new fans (30d)",
             recovered_label: "recovered from archive (30d)",
+            join_ask_label: "join-ask (7d)",
             fans_flat: "no conversions — nothing is working yet, worth knowing",
             fans_format_unrecorded: "format unrecorded",
             awaiting_report: "Awaiting your report",
@@ -717,6 +723,81 @@ async fn compose_briefing(
     // the line would make the split look unmeasured.
     sections_map.insert("recovered_30d".to_owned(), recovered_30d.into());
     body.push_str(&format!("{}: {}\n", frame.recovered_label, recovered_30d));
+
+    // §5: the join-ask's own scoreboard — clicks the tracked link earned in
+    // the last 7 days and the fans those clicks produced, per platform.
+    // `fan_acquisition_events.anonymous_visitor_id` carries the same visitor
+    // id `click_events` records, so the click→signup join is expressible: a
+    // fan counts when their acquisition event names a visitor who clicked a
+    // join-ask link. The line itself is absent when no join-ask post exists
+    // at all — unmeasured is not zero.
+    let join_ask_rows = sqlx::query_as::<_, (String, i64, i64)>(
+        "SELECT post.platform,
+                COUNT(click.id) AS clicks,
+                COUNT(DISTINCT acq.fan_id) AS fans
+         FROM social_posts post
+         JOIN autopilot_actions act
+           ON act.workspace_id = post.workspace_id
+          AND act.id = post.action_id
+          AND act.action_kind = 'social.join_ask.publish'
+         JOIN smart_links link
+           ON link.workspace_id = post.workspace_id
+          AND link.id = post.smart_link_id
+         LEFT JOIN click_events click
+           ON click.workspace_id = post.workspace_id
+          AND click.smart_link_id = link.id
+          AND click.occurred_at > $2 - INTERVAL '7 days'
+         LEFT JOIN fan_acquisition_events acq
+           ON acq.workspace_id = click.workspace_id
+          AND click.anonymous_visitor_id IS NOT NULL
+          AND acq.anonymous_visitor_id = click.anonymous_visitor_id
+          AND acq.occurred_at >= click.occurred_at
+         WHERE post.workspace_id = $1
+         GROUP BY post.platform
+         ORDER BY post.platform",
+    )
+    .bind(ws)
+    .bind(now)
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(map_sqlx)?;
+    if !join_ask_rows.is_empty() {
+        let clicks_total: i64 = join_ask_rows.iter().map(|row| row.1).sum();
+        let fans_total: i64 = join_ask_rows.iter().map(|row| row.2).sum();
+        sections_map.insert(
+            "join_ask_7d".to_owned(),
+            serde_json::json!({"clicks": clicks_total, "fans": fans_total}),
+        );
+        let platform_label = |platform: &str| -> String {
+            match platform {
+                "facebook" => "FB".to_owned(),
+                "instagram" => "IG".to_owned(),
+                other => other.to_owned(),
+            }
+        };
+        let clicks_word = match locale {
+            BriefingLocale::Pl => "klik.",
+            BriefingLocale::En => "clicks",
+        };
+        let fans_word = match locale {
+            BriefingLocale::Pl => "fan",
+            BriefingLocale::En => "fans",
+        };
+        let parts: Vec<String> = join_ask_rows
+            .iter()
+            .map(|(platform, clicks, fans)| {
+                format!(
+                    "{} {clicks} {clicks_word} · {fans} {fans_word}",
+                    platform_label(platform)
+                )
+            })
+            .collect();
+        body.push_str(&format!(
+            "{}: {}\n",
+            frame.join_ask_label,
+            parts.join(" | ")
+        ));
+    }
 
     if pending_total > 0 {
         sections_map.insert("pending_asks".to_owned(), pending_total.into());
