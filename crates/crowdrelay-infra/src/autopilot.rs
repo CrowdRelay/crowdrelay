@@ -120,9 +120,7 @@ use crowdrelay_domain::{
     booking_discovery::BookingSupplySnapshot,
     booking_window::{BookingWindowInputSet, BookingWindowOwnShow, BookingWindowTargetInputs},
     campaign_lifecycle::EventCampaignSnapshot,
-    content_supply::{
-        CommunityRelayTarget, ContentSupplySnapshot, SignalPushAudience,
-    },
+    content_supply::{CommunityRelayTarget, ContentSupplySnapshot, SignalPushAudience},
     deliverability::DeliverabilitySnapshot,
     experimentation::ExperimentSnapshot,
     free_reach::{WaveAnchor, WaveSnapshot, WaveState},
