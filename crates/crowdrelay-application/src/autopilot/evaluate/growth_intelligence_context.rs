@@ -384,12 +384,24 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
                         .collect::<Vec<_>>(),
                 )
             };
-            let experiment_window_hours = if template_id == "community-engager" {
-                key_window_for_template(&gi_policy, template_id)
+            let logical_cycle_key = if template_id == "community-engager" {
+                // The engager's decision_key ends with the cooldown bucket
+                // index it was built under — and that bucket is computed
+                // after standing/preference/discovery-cap adjustment, which
+                // the raw policy field does not know about. Reading the
+                // bucket back keeps the experiment identity aligned with
+                // the idempotency identity; recomputing from the policy can
+                // disagree whenever an adjustment applies.
+                group_candidates
+                    .first()
+                    .and_then(|(_, c, _)| c.decision_key.rsplit(':').next().map(str::to_owned))
+                    .unwrap_or_else(|| {
+                        cooldown_window(now, key_window_for_template(&gi_policy, template_id))
+                            .to_string()
+                    })
             } else {
-                EXPERIMENT_WINDOW_HOURS
+                cooldown_window(now, EXPERIMENT_WINDOW_HOURS).to_string()
             };
-            let logical_cycle_key = cooldown_window(now, experiment_window_hours).to_string();
             let design = match self
                 .repository
                 .get_or_create_experiment_design(
@@ -511,10 +523,29 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
         }
         // Build the portfolio pool: non-experiment candidates + treatment-
         // assigned candidates (control candidates are excluded).
+        // Drop candidates whose dedup key a previous cycle already wrote.
+        // They can only conflict at persist — a guaranteed no-op that still
+        // occupies a portfolio slot, which under a health-scaled budget is
+        // the whole budget. A template due on stale intelligence whose
+        // dispatch this window already committed (and produced nothing
+        // usable) is exactly this case; the retry path uses hourly keys and
+        // is unaffected. The read propagates like every other repository
+        // read in this cycle: a failed read is not a reading of zero.
+        let existing_keys = self
+            .repository
+            .existing_decision_keys(
+                self.workspace_id,
+                &scored_candidates
+                    .iter()
+                    .map(|scored| scored.candidate.decision_key.clone())
+                    .collect::<Vec<_>>(),
+            )
+            .await?;
         let portfolio_candidates: Vec<ScoredCandidate> = scored_candidates
             .iter()
             .enumerate()
             .filter(|(i, _)| !control_indices.contains(i))
+            .filter(|(_, c)| !existing_keys.contains(&c.candidate.decision_key))
             .map(|(_, c)| c.clone())
             .collect();
         // Build the per-candidate evidence quality for treatment-assigned

@@ -41,9 +41,10 @@ jobs:
     name: Rust checks and PostgreSQL integration
     runs-on: [self-hosted, arm64]
     # Warm-cache runs land around 6 minutes; a fully cold sccache+target
-    # compile needs ~14. 20 is headroom for the cold case, not a slower job —
-    # a timeout kill at 15 minutes once aborted a deploy's Phase 0b gate.
-    timeout-minutes: 20
+    # compile needs ~14. 35 is headroom for the box being shared: the
+    # frontend lane now runs Tauri/Android builds alongside, and at 20 a
+    # busy-box run died mid-e2e at exactly the timeout (2026-09-22).
+    timeout-minutes: 35
 
     # The pg-gated lib tests in this job point at 127.0.0.1:5432 and used to
     # borrow whatever happened to be listening there — usually a leftover
@@ -179,6 +180,26 @@ jobs:
           # instead; only the default branch writes, and exactly one of the
           # parallel jobs writes it so they cannot thrash the cache pool.
           save-if: ${{ github.ref == 'refs/heads/main' && github.job == 'rust-tests' }}
+
+      - name: Ensure sccache
+        # rust-cache caches ~/.cargo/bin and its restore-time cleanup deletes
+        # binaries absent from .crates.toml — a host-installed sccache is
+        # exactly that, so every restore wiped the wrapper this job's
+        # RUSTC_WRAPPER needs (the 2026-09-22 ENOENT loop). Provision it here,
+        # after the restore, so nothing later in the job can remove it.
+        # A release tarball, not `cargo install` — compiling sccache would
+        # spend ~30 min on this 2-core box.
+        run: |
+          set -euo pipefail
+          if ! command -v sccache >/dev/null; then
+            t=$(mktemp -d)
+            curl -fsSL -o "$t/s.tgz" \
+              "https://github.com/mozilla/sccache/releases/download/v0.17.0/sccache-v0.17.0-$(uname -m)-unknown-linux-musl.tar.gz"
+            tar -xzf "$t/s.tgz" -C "$t"
+            install -m 0755 "$t"/sccache-*-unknown-linux-musl/sccache "${HOME}/.cargo/bin/sccache"
+            rm -rf "$t"
+          fi
+          sccache --version
 
       - name: Run repository checks
         # One compile, one command: `cargo test` builds every test binary

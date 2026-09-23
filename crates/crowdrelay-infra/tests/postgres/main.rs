@@ -21,6 +21,7 @@ mod autopilot_content_synergy;
 mod autopilot_control_plane;
 mod autopilot_cycle_north_star;
 mod autopilot_daily_briefing;
+mod autopilot_decision_prefilter;
 mod autopilot_decline_advisories;
 mod autopilot_dispatch_envelope;
 mod autopilot_dormant_revival;

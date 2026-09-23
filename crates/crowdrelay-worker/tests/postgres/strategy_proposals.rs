@@ -799,3 +799,205 @@ async fn a_refused_community_is_never_claimed_for_joining() -> Result<()> {
     );
     Ok(())
 }
+
+/// A terminally-adjudicated outcome must release its content hash — the
+/// emit-side dedup index is `consumed_at IS NULL`, and before the terminal
+/// writes set it, an identical re-emission was silently dropped forever,
+/// including the scout's documented "same community, now bigger" re-screen.
+/// Insight kinds are the exception: the brain reads them back as
+/// processed-and-unconsumed until mark_insights_consumed stamps them, so
+/// their row must keep `consumed_at IS NULL` here.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn adjudicated_outcomes_release_their_content_hash() -> Result<()> {
+    let pool = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
+        .await
+        .expect("connect to the migrated suite database");
+    let ws = workspace(&pool).await?;
+
+    async fn insert_hashed(
+        pool: &PgPool,
+        ws: WorkspaceId,
+        kind: &str,
+        hash: &str,
+        payload: serde_json::Value,
+    ) -> Result<Uuid> {
+        let mut payload = payload;
+        if let Some(obj) = payload.as_object_mut() {
+            obj.entry("provenance").or_insert(json!({
+                "verification": { "status": "grounding_check_passed" },
+                "context": { "any_source_failed": false, "any_source_truncated": false },
+                "confidence": { "basis_points": 8000, "source": "model_self_report", "is_evidence_confidence": false },
+                "model": { "actual": "test-model", "provider": "test" }
+            }));
+        }
+        let id = Uuid::now_v7();
+        sqlx::query(
+            "INSERT INTO agent_outcomes \
+             (id, workspace_id, task_id, result_id, kind, schema_version, \
+              payload, confidence_basis_points, idempotency_key, content_hash, status) \
+             VALUES ($1,$2,$3,$4,$5,1,$6,8000,$7,$8,'pending') \
+             ON CONFLICT DO NOTHING",
+        )
+        .bind(id)
+        .bind(ws.into_uuid())
+        .bind(Uuid::now_v7())
+        .bind(Uuid::now_v7())
+        .bind(kind)
+        .bind(&payload)
+        .bind(format!("hash-test-{id}"))
+        .bind(hash)
+        .execute(pool)
+        .await?;
+        Ok(id)
+    }
+
+    async fn consumed(pool: &PgPool, id: Uuid) -> Result<(String, bool)> {
+        Ok(sqlx::query_as(
+            "SELECT status, consumed_at IS NOT NULL FROM agent_outcomes WHERE id = $1",
+        )
+        .bind(id)
+        .fetch_one(pool)
+        .await?)
+    }
+
+    // Rejected arm: an empty proposals bundle is rejected, and its hash frees.
+    let rejected_id = insert_hashed(
+        &pool,
+        ws,
+        "strategy_proposals",
+        "rejected-arm-hash",
+        json!({
+            "item": { "type": "strategy_proposal", "headline": "x",
+                      "detail": "x", "proposals": [] },
+            "rationale": "r",
+        }),
+    )
+    .await?;
+    worker(&pool, ws).run_once().await?;
+    let (status, is_consumed) = consumed(&pool, rejected_id).await?;
+    ensure!(
+        status == "rejected",
+        "empty proposals must reject, got {status}"
+    );
+    ensure!(
+        is_consumed,
+        "a rejected outcome must release its content hash"
+    );
+
+    let dup: Option<Uuid> = sqlx::query_scalar(
+        "INSERT INTO agent_outcomes \
+         (id, workspace_id, task_id, result_id, kind, schema_version, \
+          payload, confidence_basis_points, idempotency_key, content_hash, status) \
+         VALUES ($1,$2,$3,$4,'strategy_proposals',1,'{}'::jsonb,8000,$5,'rejected-arm-hash','pending') \
+         ON CONFLICT DO NOTHING RETURNING id",
+    )
+    .bind(Uuid::now_v7())
+    .bind(ws.into_uuid())
+    .bind(Uuid::now_v7())
+    .bind(Uuid::now_v7())
+    .bind(format!("dup-{}", Uuid::now_v7()))
+    .fetch_optional(&pool)
+    .await?;
+    ensure!(
+        dup.is_some(),
+        "an identical re-emission after rejection must land, not be suppressed"
+    );
+
+    // Processed arm: a real proposals bundle processes, and its hash frees.
+    let processed_id = insert_hashed(
+        &pool,
+        ws,
+        "strategy_proposals",
+        "processed-arm-hash",
+        json!({
+            "item": proposal_item(json!([
+                { "action": "surface_to_operator", "rationale": "check this" },
+            ])),
+            "rationale": "weekly consult",
+        }),
+    )
+    .await?;
+    worker(&pool, ws).run_once().await?;
+    let (status, is_consumed) = consumed(&pool, processed_id).await?;
+    ensure!(
+        status == "processed",
+        "valid proposals must process, got {status}"
+    );
+    ensure!(
+        is_consumed,
+        "a processed outcome must release its content hash"
+    );
+
+    // Insight arm: processed but NOT consumed — the brain reads it back and
+    // mark_insights_consumed owns the stamp.
+    let insight_id = insert_hashed(
+        &pool,
+        ws,
+        "generic_insight",
+        "insight-arm-hash",
+        json!({ "kind": "generic_insight", "rationale": "an observation" }),
+    )
+    .await?;
+    worker(&pool, ws).run_once().await?;
+    let (status, is_consumed) = consumed(&pool, insight_id).await?;
+    ensure!(
+        status == "processed" && !is_consumed,
+        "an insight must stay processed-and-unconsumed for the brain's read-back, got {status} consumed={is_consumed}"
+    );
+    Ok(())
+}
+
+/// A whitespace-only `subreddit` on a non-community item used to violate the
+/// column's `btrim(subreddit) <> ''` CHECK and sink the whole outcome. It now
+/// normalizes to NULL — a blank string is not a subreddit.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn a_whitespace_subreddit_normalizes_to_null() -> Result<()> {
+    let pool = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
+        .await
+        .expect("connect to the migrated suite database");
+    let ws = workspace(&pool).await?;
+
+    let outcome_id = insert_outcome(
+        &pool,
+        ws,
+        "outreach_targets",
+        json!({
+            "item": {
+                "type": "outreach_target",
+                "target_kind": "press",
+                "display_name": "Metal Zine Weekly",
+                "subreddit": "   ",
+                "contact_email": "tips@metalzine.example",
+                "evidence_urls": ["https://metalzine.example/about"],
+            },
+            "rationale": "a press contact",
+        }),
+    )
+    .await?;
+
+    worker(&pool, ws).run_once().await?;
+
+    let (status, rejection): (String, Option<String>) =
+        sqlx::query_as("SELECT status, rejection_reason FROM agent_outcomes WHERE id = $1")
+            .bind(outcome_id)
+            .fetch_one(&pool)
+            .await?;
+    ensure!(
+        status == "processed",
+        "a blank subreddit must not sink the outcome — {status} {rejection:?}"
+    );
+    let stored: Option<Option<String>> = sqlx::query_scalar(
+        "SELECT subreddit FROM agent_outreach_targets \
+         WHERE workspace_id = $1 AND display_name = 'Metal Zine Weekly'",
+    )
+    .bind(ws.into_uuid())
+    .fetch_optional(&pool)
+    .await?;
+    ensure!(
+        stored.clone().flatten().is_none(),
+        "a whitespace subreddit must store NULL, got {stored:?}"
+    );
+    Ok(())
+}

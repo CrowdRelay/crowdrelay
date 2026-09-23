@@ -866,6 +866,18 @@ pub trait AutopilotDecisionRepository: Send + Sync {
         now: OffsetDateTime,
     ) -> Result<std::collections::HashMap<uuid::Uuid, u32>, RepositoryError>;
 
+    /// Which of the given decision keys already name a persisted decision.
+    ///
+    /// The evaluator uses it to keep an already-dispatched candidate out of
+    /// the portfolio pool: a candidate whose dedup key is taken can only
+    /// no-op at persist, and under a health-scaled budget that no-op still
+    /// occupies the slot a dispatchable candidate needed.
+    async fn existing_decision_keys(
+        &self,
+        workspace_id: WorkspaceId,
+        decision_keys: &[String],
+    ) -> Result<std::collections::HashSet<String>, RepositoryError>;
+
     /// Persists the decision and, for executable dispositions, creates exactly
     /// one durable action unless an equivalent action is already in flight.
     async fn persist_candidate(

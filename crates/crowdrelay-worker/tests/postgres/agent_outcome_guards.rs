@@ -361,6 +361,51 @@ async fn valid_inner(pool: &PgPool) -> Result<()> {
     Ok(())
 }
 
+// ── Honest empty: item-less outreach_targets is an observation, not spam ──
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn an_empty_outreach_scan_records_a_decision_but_no_action() -> Result<()> {
+    let database = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
+        .await
+        .expect("connect to the migrated suite database");
+
+    empty_outreach_inner(&database).await
+}
+
+async fn empty_outreach_inner(pool: &PgPool) -> Result<()> {
+    let ws = workspace(pool).await?;
+    // The emit side's honest-empty shape: one row with the run's rationale
+    // and no `item` — the model looked and found nothing worth filing.
+    let outcome_id = insert_outcome(
+        pool,
+        ws,
+        "outreach_targets",
+        5000,
+        json!({
+            "rationale": "The catalog query returned only unrelated channels; nothing worth filing.",
+        }),
+    )
+    .await?;
+
+    let processed = worker(pool, ws).run_once().await?;
+    ensure!(processed == 1, "honest empty must process, got {processed}");
+    ensure!(
+        decision_count(pool, ws).await? == 1,
+        "the scan's observation must land as a decision record"
+    );
+    ensure!(
+        action_count(pool, ws).await? == 0,
+        "no target means no approval to park — an action here is a phantom"
+    );
+    let reason = rejection_reason(pool, outcome_id).await?;
+    ensure!(
+        reason.is_none(),
+        "honest empty must not be rejected, got {reason:?}"
+    );
+    Ok(())
+}
+
 // ── Positive: zero-confidence insight still passes (recommend_only) ──
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
