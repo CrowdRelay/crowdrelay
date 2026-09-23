@@ -142,6 +142,14 @@ services:
       - ${CROWDRELAY_ENV_FILE:-deploy/.env.production}
     environment:
       TOKIO_WORKER_THREADS: ${CROWDRELAY_WORKER_TOKIO_THREADS:-1}
+      # The worker runs eight PgListener loops (gdrive, growth-metric,
+      # release, video, social-post, autopilot, ad-conversion,
+      # github-registry), each pinning a pool connection for the process
+      # lifetime. At the shared default of 8 every slot goes to a listener
+      # and every real query times out waiting for an open connection —
+      # observed 2026-09-23 post-deploy. The API runs no listeners and keeps
+      # the env-file default; postgres itself allows 40.
+      CROWDRELAY_DATABASE_MAX_CONNECTIONS: ${CROWDRELAY_WORKER_DATABASE_MAX_CONNECTIONS:-16}
       # On by default, and cheap: `Backtrace::capture` is only reached for a
       # decode failure, which is a deployment defect rather than a runtime
       # condition. Without it a mismatched column type reports which column and
