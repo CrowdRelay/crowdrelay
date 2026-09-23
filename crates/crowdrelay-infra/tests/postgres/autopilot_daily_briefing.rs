@@ -535,3 +535,112 @@ async fn the_briefing_names_approved_work_awaiting_a_report()
     );
     Ok(())
 }
+
+/// §4.5 — recovery and acquisition are different statements. A fan who
+/// arrived through the archive import (`fan_import:gdrive+csv`) counts under
+/// "recovered from archive"; one who arrived through a channel counts under
+/// "new fans". The archive windfall must not read as freshly won growth.
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn the_briefing_splits_recovered_fans_from_acquired_ones()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (repository, pool) = repository().await?;
+    let workspace_id = WorkspaceId::new();
+    seed_workspace(&pool, workspace_id).await?;
+    seed_member(&pool, workspace_id, "reader").await?;
+    seed_team_email_executor(&pool, workspace_id).await?;
+    sqlx::query(
+        "INSERT INTO tenant_settings (workspace_id, key, value) VALUES ($1, 'crew_locale', 'en')",
+    )
+    .bind(workspace_id.into_uuid())
+    .execute(&pool)
+    .await?;
+
+    // One fan won through a channel: public signup, smart-link provenance.
+    let acquired: Uuid = sqlx::query_scalar(
+        "INSERT INTO fans (workspace_id, normalized_email, status)
+         VALUES ($1, $2, 'active') RETURNING id",
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(format!(
+        "acquired-{}@example.test",
+        workspace_id.into_uuid().simple()
+    ))
+    .fetch_one(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO fan_acquisition_events
+             (workspace_id, fan_id, source, request_id, occurred_at)
+         VALUES ($1, $2, 'public_signup', $3, now())",
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(acquired)
+    .bind(format!("signup-{}", workspace_id.into_uuid().simple()))
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO fan_provenance_events
+             (workspace_id, fan_id, event_kind, channel, occurred_at)
+         VALUES ($1, $2, 'conversion', 'smart_link', now())",
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(acquired)
+    .execute(&pool)
+    .await?;
+
+    // One fan recovered from the archive: the import's `fan_import:` source
+    // carries the connector tokens.
+    let recovered: Uuid = sqlx::query_scalar(
+        "INSERT INTO fans (workspace_id, normalized_email, status)
+         VALUES ($1, $2, 'active') RETURNING id",
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(format!(
+        "recovered-{}@example.test",
+        workspace_id.into_uuid().simple()
+    ))
+    .fetch_one(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO fan_acquisition_events
+             (workspace_id, fan_id, source, request_id, occurred_at)
+         VALUES ($1, $2, 'fan_import:gdrive+csv', $3, now())",
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(recovered)
+    .bind(format!("import-{}", workspace_id.into_uuid().simple()))
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO fan_provenance_events
+             (workspace_id, fan_id, event_kind, channel, occurred_at)
+         VALUES ($1, $2, 'conversion', 'fan_import', now())",
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(recovered)
+    .execute(&pool)
+    .await?;
+
+    let morning = datetime!(2026-10-05 10:00 UTC);
+    let issued = repository
+        .reconcile_team_handoffs(workspace_id, morning)
+        .await?;
+    assert_eq!(issued, 1);
+
+    let briefings = briefing_rows(&pool, workspace_id).await?;
+    assert_eq!(briefings.len(), 1);
+    let (_, _, _, body) = &briefings[0];
+    assert!(
+        body.contains("new fans (30d): 1"),
+        "only the acquired fan counts as new: {body}"
+    );
+    assert!(
+        body.contains("recovered from archive (30d): 1"),
+        "the archive fan is recovery, not growth: {body}"
+    );
+    assert!(
+        !body.contains("new fans (30d): 2"),
+        "the windfall must not read as acquisition: {body}"
+    );
+    Ok(())
+}
