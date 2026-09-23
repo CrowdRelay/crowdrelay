@@ -121,7 +121,7 @@ use crowdrelay_domain::{
     booking_window::{BookingWindowInputSet, BookingWindowOwnShow, BookingWindowTargetInputs},
     campaign_lifecycle::EventCampaignSnapshot,
     content_supply::{
-        CommunityRelayTarget, ContentArtifactKind, ContentSupplySnapshot, SignalPushAudience,
+        CommunityRelayTarget, ContentSupplySnapshot, SignalPushAudience,
     },
     deliverability::DeliverabilitySnapshot,
     experimentation::ExperimentSnapshot,
