@@ -141,10 +141,10 @@ jobs:
       - name: Prune stale BuildKit cache after build
         # Bounded, not scorched-earth: `--all` used to delete the cargo cache
         # mounts after every build and the next build re-downloaded every
-        # crate. Keep 72h of warm cache; the host cron bounds it from there.
+        # crate. Keep 48h of warm cache; the host cron bounds it from there.
         if: always()
         continue-on-error: true
-        run: docker builder prune --filter until=72h -f 2>/dev/null || true
+        run: docker builder prune --filter until=48h -f 2>/dev/null || true
 
       # Per-architecture digests are an intermediate product. The release
       # identity is the merged manifest list, so it is recorded in `merge`.
@@ -241,7 +241,7 @@ jobs:
       - name: Prune stale BuildKit cache after build
         if: always()
         continue-on-error: true
-        run: docker builder prune --filter until=72h -f 2>/dev/null || true
+        run: docker builder prune --filter until=48h -f 2>/dev/null || true
 
       - name: Record the anchor digest
         env:
