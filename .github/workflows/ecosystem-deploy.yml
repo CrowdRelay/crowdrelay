@@ -135,7 +135,10 @@ jobs:
       - name: Run ecosystem deploy
         shell: bash
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # The script queries sibling repos (agents publish runs, control-plane
+          # ancestry) — GITHUB_TOKEN only sees this repository, so on private
+          # repos every sibling probe answers empty and the 0d gate fails.
+          GH_TOKEN: ${{ secrets.CROWDRELAY_PAT }}
           CONTROL_PLANE_CHECKOUT: ${{ github.workspace }}/.control-plane
           AGENTS_CHECKOUT: ${{ github.workspace }}/.agents
         run: |
