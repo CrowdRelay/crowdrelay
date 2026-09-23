@@ -5,6 +5,7 @@
 
 mod acquisition;
 mod admission;
+mod archive_bulk_promote;
 mod attestation;
 mod audience_portfolio;
 mod autopilot_approve_revision;

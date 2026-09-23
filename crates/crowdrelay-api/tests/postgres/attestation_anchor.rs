@@ -254,7 +254,7 @@ impl FanLifecycleRepository for StubFanLifecycle {
     }
 }
 
-fn app_state(
+pub(crate) fn app_state(
     pool: &PgPool,
     workspace_id: WorkspaceId,
 ) -> Result<AppState, Box<dyn std::error::Error>> {
@@ -403,7 +403,7 @@ fn app_state(
 
 // ── The suite ────────────────────────────────────────────────────────────────
 
-async fn seed_workspace(pool: &PgPool) -> Result<Uuid, Box<dyn std::error::Error>> {
+pub(crate) async fn seed_workspace(pool: &PgPool) -> Result<Uuid, Box<dyn std::error::Error>> {
     let id = Uuid::now_v7();
     sqlx::query("INSERT INTO workspaces (id, slug, name) VALUES ($1, $2, $3)")
         .bind(id)

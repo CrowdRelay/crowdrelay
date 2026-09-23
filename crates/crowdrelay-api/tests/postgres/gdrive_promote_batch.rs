@@ -1,0 +1,228 @@
+//! Bulk archive promote through the real router.
+//!
+//! The count check is the feature's safety catch: the operator confirms a
+//! number, and a segment that drifted between render and click must answer
+//! 409 with both numbers — never widen the send. Only the routed request can
+//! prove the endpoint reads the table at write time, and only a real
+//! transaction can prove import + marks commit together.
+//!
+//! Runs under `just test-postgres` against `CROWDRELAY_TEST_DATABASE_URL`.
+
+use crate::{attestation_anchor, common};
+
+use axum::{
+    body::{Body, to_bytes},
+    http::{
+        Request, StatusCode,
+        header::{AUTHORIZATION, CONTENT_TYPE},
+    },
+};
+use crowdrelay_domain::WorkspaceId;
+use serde_json::{Value, json};
+use sqlx::PgPool;
+use tower::ServiceExt;
+use uuid::Uuid;
+
+const CONTROL_PLANE_KEY: &str = "test-control-plane-key-123456789012";
+
+async fn post(
+    app: &axum::Router,
+    uri: &str,
+    body: Value,
+) -> Result<(StatusCode, Value), Box<dyn std::error::Error>> {
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(uri)
+                .header(AUTHORIZATION, format!("Bearer {CONTROL_PLANE_KEY}"))
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(body.to_string()))?,
+        )
+        .await?;
+    let status = response.status();
+    let bytes = to_bytes(response.into_body(), usize::MAX).await?;
+    let json = if bytes.is_empty() {
+        Value::Null
+    } else {
+        serde_json::from_slice(&bytes)?
+    };
+    Ok((status, json))
+}
+
+async fn seed_drive_contact(
+    pool: &PgPool,
+    workspace: Uuid,
+    email: &str,
+    suggested_kind: Option<&str>,
+) -> Result<Uuid, Box<dyn std::error::Error>> {
+    let id = Uuid::now_v7();
+    sqlx::query(
+        r#"
+        INSERT INTO drive_contacts
+            (id, workspace_id, normalized_email, suggested_kind,
+             source_file_id, source_file_name, sources)
+        VALUES ($1, $2, $3, $4, 'file-1', 'contacts.csv', '{gdrive}')
+        "#,
+    )
+    .bind(id)
+    .bind(workspace)
+    .bind(email)
+    .bind(suggested_kind)
+    .execute(pool)
+    .await?;
+    Ok(id)
+}
+
+/// The stale-count refusal: the number the operator confirmed is checked
+/// against the table at write time, and a drift is a 409 naming both sides.
+/// Then the same click with the true count promotes exactly the likely-fan
+/// segment — pending fan, double-opt-in outbox row, staged row marked.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn promote_batch_rejects_a_stale_count_then_promotes_the_segment()
+-> Result<(), Box<dyn std::error::Error>> {
+    let pool = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
+        .await
+        .expect("connect to the migrated suite database");
+    let workspace_uuid = attestation_anchor::seed_workspace(&pool).await?;
+    let workspace_id = WorkspaceId::from_uuid(workspace_uuid);
+    let app = crowdrelay_api::router(
+        attestation_anchor::app_state(&pool, workspace_id)?,
+        crowdrelay_api::HttpConfig::new(["http://localhost:4321".to_owned()])?,
+    );
+
+    let fan_row = seed_drive_contact(&pool, workspace_uuid, "basia@gmail.com", None).await?;
+    let _org = seed_drive_contact(&pool, workspace_uuid, "bookings@klubx.pl", None).await?;
+    let _venue =
+        seed_drive_contact(&pool, workspace_uuid, "room@stodola.pl", Some("venue")).await?;
+
+    let uri = "/v1/control-plane/gdrive/contacts/promote-batch";
+
+    // The page said 5; the table holds 1. The send must not widen.
+    let (status, body) = post(
+        &app,
+        uri,
+        json!({
+            "destination": "fan",
+            "segment": "likely_fan",
+            "expected_count": 5,
+            "reason": "Przenosimy listę do Signal",
+        }),
+    )
+    .await?;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "a stale count must 409: {body}"
+    );
+    let detail = body["detail"].as_str().unwrap_or_default();
+    assert!(
+        detail.contains("1") && detail.contains("5"),
+        "the conflict names both numbers: {detail}"
+    );
+
+    // A nonsense destination or segment is a 400, not a partial import.
+    for bad in [
+        json!({"destination": "beacon", "segment": "likely_fan", "expected_count": 1}),
+        json!({"destination": "fan", "segment": "likely_org", "expected_count": 1}),
+        json!({"destination": "fan", "segment": "likely_fan", "expected_count": -1}),
+    ] {
+        let (status, _) = post(&app, uri, bad.clone()).await?;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "bad request: {bad}");
+    }
+
+    // The confirmed click: one likely fan imported pending + marked, in one
+    // transaction; the org and the venue stay staged.
+    let (status, body) = post(
+        &app,
+        uri,
+        json!({
+            "destination": "fan",
+            "segment": "likely_fan",
+            "expected_count": 1,
+            "reason": "Przenosimy listę do Signal",
+        }),
+    )
+    .await?;
+    assert_eq!(status, StatusCode::OK, "promote-batch failed: {body}");
+    assert_eq!(body["promoted"], 1);
+    assert_eq!(body["imported_pending"], 1);
+    assert_eq!(body["skipped_suppressed"], 0);
+
+    let fan_status: String = sqlx::query_scalar(
+        "SELECT status FROM fans WHERE workspace_id = $1 AND normalized_email = 'basia@gmail.com'",
+    )
+    .bind(workspace_uuid)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(fan_status, "pending", "consent is never bypassed");
+
+    let payload: Value = sqlx::query_scalar(
+        "SELECT payload FROM outbox_events \
+         WHERE workspace_id = $1 AND event_type = 'fan.confirmation_requested'",
+    )
+    .bind(workspace_uuid)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        payload["invitation"]["reason"],
+        "Przenosimy listę do Signal"
+    );
+    assert_eq!(payload["invitation"]["source_label"], "archive");
+    assert!(
+        payload["locale"].is_null(),
+        "no crew locale set — null, not a guess: {payload}"
+    );
+
+    let outcomes: Vec<(String, String)> = sqlx::query_as(
+        "SELECT normalized_email, fan_outcome FROM drive_contacts \
+         WHERE workspace_id = $1 ORDER BY normalized_email",
+    )
+    .bind(workspace_uuid)
+    .fetch_all(&pool)
+    .await?;
+    assert_eq!(
+        outcomes,
+        vec![
+            ("basia@gmail.com".to_owned(), "promoted".to_owned()),
+            ("bookings@klubx.pl".to_owned(), "staged".to_owned()),
+            ("room@stodola.pl".to_owned(), "staged".to_owned()),
+        ],
+        "only the likely-fan row moved"
+    );
+    let marked: String = sqlx::query_scalar(
+        "SELECT fan_outcome FROM drive_contacts WHERE workspace_id = $1 AND id = $2",
+    )
+    .bind(workspace_uuid)
+    .bind(fan_row)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(marked, "promoted");
+
+    // The list endpoint answers the segment cut and its counts.
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/v1/control-plane/gdrive/contacts?segment=likely_fan")
+                .header(AUTHORIZATION, format!("Bearer {CONTROL_PLANE_KEY}"))
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = to_bytes(response.into_body(), usize::MAX).await?;
+    let listed: Value = serde_json::from_slice(&bytes)?;
+    assert_eq!(
+        listed["segment_counts"]["likely_org"], 1,
+        "the org row still counts: {listed}"
+    );
+    assert_eq!(listed["segment_counts"]["likely_fan"], 0);
+    // `decided` means closed on BOTH axes — the promoted row's beacon side
+    // is still staged, so it is not decided yet.
+    assert_eq!(listed["segment_counts"]["decided"], 0);
+    assert_eq!(listed["contacts"].as_array().map(Vec::len), Some(0));
+
+    Ok(())
+}

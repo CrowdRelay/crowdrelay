@@ -21,7 +21,7 @@ use uuid::Uuid;
 
 const TEST_DATABASE_URL_KEY: &str = "CROWDRELAY_TEST_DATABASE_URL";
 
-async fn pool() -> PgPool {
+pub(crate) async fn pool() -> PgPool {
     common::test_pool(TEST_DATABASE_URL_KEY)
         .await
         .expect("clone the migrated suite database")
@@ -29,7 +29,7 @@ async fn pool() -> PgPool {
 
 /// Workspace deletion cascades through every table the tests touch, so each
 /// run starts from a clean slate even against a reused database.
-async fn cleanup(pool: &PgPool, workspace_ids: &[Uuid]) {
+pub(crate) async fn cleanup(pool: &PgPool, workspace_ids: &[Uuid]) {
     // Outbox rows are RESTRICT-deliberately durable, so they go first; every
     // other table cascades with the workspace.
     sqlx::query("DELETE FROM outbox_events WHERE workspace_id = ANY($1)")
@@ -49,7 +49,7 @@ async fn cleanup(pool: &PgPool, workspace_ids: &[Uuid]) {
         .expect("cascade workspaces");
 }
 
-async fn seed_workspace(pool: &PgPool, tag: &str) -> Uuid {
+pub(crate) async fn seed_workspace(pool: &PgPool, tag: &str) -> Uuid {
     let id = Uuid::now_v7();
     let slug = format!("{tag}-{}", id.simple());
     sqlx::query("INSERT INTO workspaces (id, slug, name) VALUES ($1, $2, $3)")
