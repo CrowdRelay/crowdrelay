@@ -403,6 +403,16 @@ async fn load_blocked_communities(state: &OpsState) -> Result<Vec<BlockedCommuni
 /// The brain's verdict on itself, from the same daily series `/ops/cycles`
 /// reports. One query, one interpretation, so the two surfaces cannot disagree
 /// about whether the fanbase is growing.
+///
+/// §4.5 windfall risk: the series is `autopilot_cycle_runs.north_star_value`
+/// — the world model's resolved north star, not a raw fan count. When a
+/// tenant's north star is a fan level (`activated_fans_30d` or the
+/// `signal.active_fans` growth series), a bulk archive promote lands inside
+/// it as a step up that is recovery, not acquisition — the level metrics are
+/// left unchanged (they measure what is, correctly), and the split lives in
+/// the briefing's `recovered_30d` line where the number is read by a person.
+/// A tenant judging brain health on a fan-level north star should read the
+/// post-promote step against that line.
 async fn load_brain_assessment(state: &OpsState) -> Result<BrainSelfAssessment, OpsError> {
     let samples = load_north_star_days(state).await?;
     let days_observed = samples.len();

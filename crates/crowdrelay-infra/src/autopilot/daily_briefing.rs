@@ -50,6 +50,10 @@ struct BriefingFrame {
     yield_label: &'static str,
     unmeasured: &'static str,
     fans_label: &'static str,
+    /// The archive-recovery half of the scoreboard — `fans_label` is
+    /// acquisition only, so a bulk-promoted wave of old contacts never
+    /// reads as freshly won growth.
+    recovered_label: &'static str,
     fans_flat: &'static str,
     fans_format_unrecorded: &'static str,
     awaiting_report: &'static str,
@@ -85,7 +89,8 @@ const fn briefing_frame(locale: BriefingLocale) -> BriefingFrame {
             no_plan: "brak planu",
             yield_label: "zbiór",
             unmeasured: "brak pomiaru",
-            fans_label: "fani (30 dni)",
+            fans_label: "nowi fani (30 dni)",
+            recovered_label: "odzyskani z archiwum (30 dni)",
             fans_flat: "brak konwersji — nic jeszcze nie działa, i to też jest wiedza",
             fans_format_unrecorded: "format niezapisany",
             awaiting_report: "Czeka na raport",
@@ -110,7 +115,8 @@ const fn briefing_frame(locale: BriefingLocale) -> BriefingFrame {
             no_plan: "no plan",
             yield_label: "harvest",
             unmeasured: "unmeasured",
-            fans_label: "fans (30d)",
+            fans_label: "new fans (30d)",
+            recovered_label: "recovered from archive (30d)",
             fans_flat: "no conversions — nothing is working yet, worth knowing",
             fans_format_unrecorded: "format unrecorded",
             awaiting_report: "Awaiting your report",
@@ -566,58 +572,103 @@ async fn compose_briefing(
     .await
     .map_err(map_sqlx)?;
 
-    // ── Concentration (§4b-4) ─────────────────────────────────────────
+    // ── Concentration (§4b-4, §4.5) ────────────────────────────────────
     // Share of new fans carried by the top channel, city and content
     // format. A flat spread — or zero conversions — is the honest answer
     // that nothing is compounding yet; the line renders either way rather
     // than only celebrating when a leader exists. The format share only
     // counts conversions whose promoted source was filed with a declared
     // format — the rest report "unrecorded", not a guessed bucket.
-    let fans_30d: i64 = sqlx::query_scalar(
-        "SELECT COUNT(DISTINCT fan_id) FROM fan_provenance_events
-         WHERE workspace_id = $1 AND event_kind = 'conversion'
-           AND occurred_at > $2 - INTERVAL '30 days'",
-    )
+    //
+    // §4.5: acquisition and recovery are different statements and never
+    // share a line. A fan whose acquisition event carries an archive token
+    // — any `+`-separated part of `fan_import:gdrive+gmail` — was recovered
+    // from the archive the tenant already had, not won by a channel; the
+    // windfall of a bulk promote must not read as growth. Only confirmed
+    // fans count (`fans.status = 'active'`) — an imported `pending` row is
+    // an address we wrote to, not a fan.
+    const ARCHIVE_ARRIVAL: &str = "EXISTS (
+        SELECT 1
+        FROM fan_acquisition_events acq
+        CROSS JOIN LATERAL unnest(string_to_array(
+            regexp_replace(acq.source, '^fan_import:', ''), '+')) AS tok
+        WHERE acq.workspace_id = e.workspace_id
+          AND acq.fan_id = e.fan_id
+          AND tok IN ('gdrive','gmail','github','csv','sheet')
+    )";
+    let fans_30d: i64 = sqlx::query_scalar(&format!(
+        "SELECT COUNT(DISTINCT e.fan_id) FROM fan_provenance_events e
+             JOIN fans f ON f.workspace_id = e.workspace_id AND f.id = e.fan_id
+             WHERE e.workspace_id = $1 AND e.event_kind = 'conversion'
+               AND e.occurred_at > $2 - INTERVAL '30 days'
+               AND f.status = 'active'
+               AND NOT {ARCHIVE_ARRIVAL}"
+    ))
     .bind(ws)
     .bind(now)
     .fetch_one(&mut **tx)
     .await
     .map_err(map_sqlx)?;
-    let top_channel = sqlx::query_as::<_, TopShareRow>(
-        "SELECT channel AS label, COUNT(DISTINCT fan_id) AS fans
-         FROM fan_provenance_events
-         WHERE workspace_id = $1 AND event_kind = 'conversion'
-           AND occurred_at > $2 - INTERVAL '30 days'
-         GROUP BY channel ORDER BY fans DESC, label LIMIT 1",
-    )
+    let recovered_30d: i64 = sqlx::query_scalar(&format!(
+        "SELECT COUNT(DISTINCT e.fan_id) FROM fan_provenance_events e
+             JOIN fans f ON f.workspace_id = e.workspace_id AND f.id = e.fan_id
+             WHERE e.workspace_id = $1 AND e.event_kind = 'conversion'
+               AND e.occurred_at > $2 - INTERVAL '30 days'
+               AND f.status = 'active'
+               AND {ARCHIVE_ARRIVAL}"
+    ))
+    .bind(ws)
+    .bind(now)
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(map_sqlx)?;
+    // The shares describe the acquisition line they hang off, so all three
+    // tops count the same population — recovered fans belong to neither the
+    // count nor its composition.
+    let top_channel = sqlx::query_as::<_, TopShareRow>(&format!(
+        "SELECT e.channel AS label, COUNT(DISTINCT e.fan_id) AS fans
+             FROM fan_provenance_events e
+             JOIN fans f ON f.workspace_id = e.workspace_id AND f.id = e.fan_id
+             WHERE e.workspace_id = $1 AND e.event_kind = 'conversion'
+               AND e.occurred_at > $2 - INTERVAL '30 days'
+               AND f.status = 'active'
+               AND NOT {ARCHIVE_ARRIVAL}
+             GROUP BY e.channel ORDER BY fans DESC, label LIMIT 1"
+    ))
     .bind(ws)
     .bind(now)
     .fetch_optional(&mut **tx)
     .await
     .map_err(map_sqlx)?;
-    let top_city = sqlx::query_as::<_, TopShareRow>(
+    let top_city = sqlx::query_as::<_, TopShareRow>(&format!(
         "SELECT c.name AS label, COUNT(DISTINCT e.fan_id) AS fans
-         FROM fan_provenance_events e
-         JOIN fan_city_interests i
-           ON i.workspace_id = e.workspace_id AND i.fan_id = e.fan_id
-         JOIN cities c ON c.id = i.city_id
-         WHERE e.workspace_id = $1 AND e.event_kind = 'conversion'
-           AND e.occurred_at > $2 - INTERVAL '30 days'
-         GROUP BY c.name ORDER BY fans DESC, label LIMIT 1",
-    )
+             FROM fan_provenance_events e
+             JOIN fans f ON f.workspace_id = e.workspace_id AND f.id = e.fan_id
+             JOIN fan_city_interests i
+               ON i.workspace_id = e.workspace_id AND i.fan_id = e.fan_id
+             JOIN cities c ON c.id = i.city_id
+             WHERE e.workspace_id = $1 AND e.event_kind = 'conversion'
+               AND e.occurred_at > $2 - INTERVAL '30 days'
+               AND f.status = 'active'
+               AND NOT {ARCHIVE_ARRIVAL}
+             GROUP BY c.name ORDER BY fans DESC, label LIMIT 1"
+    ))
     .bind(ws)
     .bind(now)
     .fetch_optional(&mut **tx)
     .await
     .map_err(map_sqlx)?;
-    let top_format = sqlx::query_as::<_, TopShareRow>(
-        "SELECT format_key AS label, COUNT(DISTINCT fan_id) AS fans
-         FROM fan_provenance_events
-         WHERE workspace_id = $1 AND event_kind = 'conversion'
-           AND occurred_at > $2 - INTERVAL '30 days'
-           AND format_key IS NOT NULL
-         GROUP BY format_key ORDER BY fans DESC, label LIMIT 1",
-    )
+    let top_format = sqlx::query_as::<_, TopShareRow>(&format!(
+        "SELECT e.format_key AS label, COUNT(DISTINCT e.fan_id) AS fans
+             FROM fan_provenance_events e
+             JOIN fans f ON f.workspace_id = e.workspace_id AND f.id = e.fan_id
+             WHERE e.workspace_id = $1 AND e.event_kind = 'conversion'
+               AND e.occurred_at > $2 - INTERVAL '30 days'
+               AND e.format_key IS NOT NULL
+               AND f.status = 'active'
+               AND NOT {ARCHIVE_ARRIVAL}
+             GROUP BY e.format_key ORDER BY fans DESC, label LIMIT 1"
+    ))
     .bind(ws)
     .bind(now)
     .fetch_optional(&mut **tx)
@@ -660,6 +711,12 @@ async fn compose_briefing(
             shares.join(" · ")
         ));
     }
+
+    // The recovery line renders even at zero — "we recovered nobody this
+    // month" is the state the archive button exists to change, and hiding
+    // the line would make the split look unmeasured.
+    sections_map.insert("recovered_30d".to_owned(), recovered_30d.into());
+    body.push_str(&format!("{}: {}\n", frame.recovered_label, recovered_30d));
 
     if pending_total > 0 {
         sections_map.insert("pending_asks".to_owned(), pending_total.into());
@@ -945,7 +1002,7 @@ async fn compose_briefing(
     // says so under the scoreboard rather than sending an empty page.
     if sections_map
         .keys()
-        .all(|key| key == "arc_active" || key == "fans_30d")
+        .all(|key| key == "arc_active" || key == "fans_30d" || key == "recovered_30d")
     {
         body.push_str(&format!("\n{}", frame.nothing));
     }

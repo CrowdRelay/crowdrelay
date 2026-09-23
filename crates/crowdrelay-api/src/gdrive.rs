@@ -15,10 +15,17 @@
 //!   wins, else the sheet's own city column resolves against `cities`, else
 //!   an unambiguous `place_venues` name match resolves the room.
 //! - `dismiss` records the decision so a re-scan never re-suggests.
+//! - `promote-batch` promotes one whole segment in a single transaction.
+//!   The daily sync never promotes: this endpoint is the only bulk path,
+//!   and it fires only when a person clicks with the segment's live count
+//!   in front of them — a count that drifted since the page rendered is a
+//!   409, not a wider send. Consent is unchanged: every address still goes
+//!   through the pending + double-opt-in import, and a suppressed address
+//!   stays staged.
 
 use axum::{
     Json,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::{HeaderMap, HeaderValue, StatusCode, header::CACHE_CONTROL},
     response::{IntoResponse, Response},
 };
@@ -119,6 +126,15 @@ pub struct DriveContactsResponse {
     /// Null when the registry pass could not run — the contacts still
     /// render, and a summary that was never measured never reads as zero.
     registry_summary: Option<RegistrySummary>,
+    /// The whole staging table in six numbers, counted server-side — the
+    /// page is capped, so the panel's segment chips cannot come from it.
+    /// Null when the count query failed, same rule as `registry_summary`.
+    segment_counts: Option<crowdrelay_infra::gdrive::SegmentCounts>,
+}
+
+#[derive(Deserialize)]
+pub struct ListContactsQuery {
+    segment: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -172,12 +188,27 @@ fn repo(state: &crate::AppState) -> crowdrelay_infra::gdrive::PostgresGDriveRepo
     crowdrelay_infra::gdrive::PostgresGDriveRepository::new(state.database.clone())
 }
 
-/// GET — the review queue, staged-first.
-pub async fn list_contacts(State(state): State<crate::AppState>, headers: HeaderMap) -> Response {
+/// GET — the review queue, staged-first. `?segment=likely_fan` narrows the
+/// page to one cut of the queue; an unknown segment name is a 400, not a
+/// silent unfiltered list.
+pub async fn list_contacts(
+    State(state): State<crate::AppState>,
+    headers: HeaderMap,
+    Query(query): Query<ListContactsQuery>,
+) -> Response {
     let request_id_value = request_id(&headers);
     let workspace_id = state.ops.workspace_id().into_uuid();
     let repo = repo(&state);
-    let rows = match repo.list_contacts(workspace_id, LIST_LIMIT).await {
+    let segment = match query
+        .segment
+        .as_deref()
+        .map(crowdrelay_infra::gdrive::ContactSegment::parse)
+    {
+        Some(Some(segment)) => Some(segment),
+        Some(None) => return Problem::bad_request(request_id_value).into_response(),
+        None => None,
+    };
+    let rows = match repo.list_contacts(workspace_id, segment, LIST_LIMIT).await {
         Ok(rows) => rows,
         Err(error) => {
             tracing::warn!(%error, "gdrive contacts list failed");
@@ -204,12 +235,21 @@ pub async fn list_contacts(State(state): State<crate::AppState>, headers: Header
             error
         })
         .ok();
+    let segment_counts = repo
+        .segment_counts(workspace_id)
+        .await
+        .map_err(|error| {
+            tracing::warn!(%error, "gdrive segment counts failed");
+            error
+        })
+        .ok();
     (
         StatusCode::OK,
         [(CACHE_CONTROL, HeaderValue::from_static(PRIVATE_NO_STORE))],
         Json(DriveContactsResponse {
             contacts: rows.into_iter().map(contact_json).collect(),
             registry_summary,
+            segment_counts,
         }),
     )
         .into_response()
@@ -557,6 +597,219 @@ pub async fn promote_contact(
         }
         _ => Problem::bad_request(request_id_value).into_response(),
     }
+}
+
+/// POST /contacts/promote-batch — `{destination: "fan", segment:
+/// "likely_fan", expected_count, reason?}`.
+///
+/// One click promotes every staged row in the segment: the import (pending
+/// fan + double-opt-in confirmation) and the staging-row marks commit in
+/// one transaction, so a mark failure cannot leave pending fans behind
+/// rows that still read `staged`. `expected_count` is the number the
+/// operator confirmed; a segment that drifted between render and click is
+/// a 409 naming both numbers, never a wider send.
+#[derive(Deserialize)]
+pub struct PromoteBatchRequest {
+    destination: String,
+    segment: String,
+    /// The segment size the operator confirmed. Bounded so a nonsense
+    /// number is a 400, not a successful no-op.
+    expected_count: i64,
+    /// The operator's one-line invitation reason, printed in the
+    /// confirmation mail. Trimmed; empty is none.
+    reason: Option<String>,
+}
+
+const EXPECTED_COUNT_MAX: i64 = 100_000;
+const REASON_MAX_CHARS: usize = 200;
+
+pub async fn promote_batch(
+    State(state): State<crate::AppState>,
+    headers: HeaderMap,
+    payload: Result<Json<PromoteBatchRequest>, axum::extract::rejection::JsonRejection>,
+) -> Response {
+    let request_id_value = request_id(&headers);
+    let Ok(Json(request)) = payload else {
+        return Problem::bad_request(request_id_value).into_response();
+    };
+    if request.destination != "fan" {
+        return Problem::bad_request(request_id_value).into_response();
+    }
+    if crowdrelay_infra::gdrive::ContactSegment::parse(&request.segment)
+        != Some(crowdrelay_infra::gdrive::ContactSegment::LikelyFan)
+    {
+        // Bulk promote exists for the fan cut only — organisations and
+        // beacons stay per-row decisions a person makes.
+        return Problem::bad_request(request_id_value).into_response();
+    }
+    if !(0..=EXPECTED_COUNT_MAX).contains(&request.expected_count) {
+        return Problem::bad_request(request_id_value).into_response();
+    }
+    let reason = request
+        .reason
+        .as_deref()
+        .map(str::trim)
+        .filter(|line| !line.is_empty());
+    if reason.is_some_and(|line| line.chars().count() > REASON_MAX_CHARS)
+        || reason.is_some_and(|line| line.contains('\n'))
+    {
+        return Problem::bad_request(request_id_value).into_response();
+    }
+
+    let workspace_id = state.ops.workspace_id().into_uuid();
+    let repo = repo(&state);
+
+    // Counted at write time: the number the operator confirmed is checked
+    // against the table as it stands now, not the page they looked at.
+    let contacts = match repo
+        .staged_fan_contacts_in_segment(
+            workspace_id,
+            crowdrelay_infra::gdrive::ContactSegment::LikelyFan,
+        )
+        .await
+    {
+        Ok(contacts) => contacts,
+        Err(error) => {
+            tracing::warn!(%error, "gdrive segment read failed");
+            return Problem::service_unavailable(request_id_value)
+                .private()
+                .into_response();
+        }
+    };
+    let live = contacts.len() as i64;
+    if live != request.expected_count {
+        return Problem::conflict_owned(
+            std::borrow::Cow::Owned(format!(
+                "The segment holds {live} contacts now, you confirmed {expected}. Refresh and confirm again.",
+                expected = request.expected_count,
+            )),
+            request_id_value,
+        )
+        .private()
+        .into_response();
+    }
+
+    // The crew's language tag only if the tenant set one — an unmeasured
+    // locale reaches the payload as `null`, never a guessed "en".
+    let crew_locale =
+        crowdrelay_infra::tenant_settings::TenantSettingsRepository::new(state.database.clone())
+            .crew_locale_if_set(workspace_id)
+            .await
+            .map_err(|error| {
+                tracing::warn!(%error, "gdrive promote-batch locale read failed");
+                error
+            })
+            .ok()
+            .flatten();
+    let invitation = crowdrelay_infra::fan_import::InvitationContext {
+        locale: crew_locale,
+        reason: reason.map(str::to_owned),
+    };
+
+    let mut tx = match state.database.begin().await {
+        Ok(tx) => tx,
+        Err(error) => {
+            tracing::warn!(%error, "gdrive promote-batch could not begin");
+            return Problem::service_unavailable(request_id_value)
+                .private()
+                .into_response();
+        }
+    };
+
+    // `import_batch` takes one source per batch; a contact sighted in Drive
+    // and Gmail imports as "gdrive+gmail", so the batch is grouped on the
+    // joined source string. One transaction holds every group plus the
+    // marks — the whole promote commits or none of it does.
+    let mut groups: std::collections::BTreeMap<
+        String,
+        Vec<&crowdrelay_infra::gdrive::StagedFanContact>,
+    > = std::collections::BTreeMap::new();
+    for contact in &contacts {
+        groups
+            .entry(contact.sources.join("+"))
+            .or_default()
+            .push(contact);
+    }
+    let import =
+        crowdrelay_infra::fan_import::PostgresFanImportRepository::new(state.database.clone());
+    let mut totals = crowdrelay_infra::fan_import::ImportCounts::default();
+    let mut suppressed: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for (source, group) in &groups {
+        let entries: Vec<crowdrelay_infra::fan_import::ImportEntry> = group
+            .iter()
+            .map(|contact| crowdrelay_infra::fan_import::ImportEntry {
+                email: contact.normalized_email.clone(),
+                display_name: contact.display_name.clone(),
+                locale: None,
+            })
+            .collect();
+        match import
+            .import_batch_in_tx(
+                &mut tx,
+                workspace_id,
+                source,
+                &entries,
+                ACCESS_TOKEN_TTL_DAYS,
+                ACCESS_RESEND_COOLDOWN_SECONDS,
+                &invitation,
+            )
+            .await
+        {
+            Ok(outcome) => {
+                totals.imported_pending += outcome.counts.imported_pending;
+                totals.confirmation_resent += outcome.counts.confirmation_resent;
+                totals.already_active += outcome.counts.already_active;
+                totals.skipped_suppressed += outcome.counts.skipped_suppressed;
+                totals.cooldown_skipped += outcome.counts.cooldown_skipped;
+                suppressed.extend(outcome.suppressed_emails);
+            }
+            Err(error) => {
+                tracing::warn!(%error, "gdrive promote-batch import failed");
+                return Problem::service_unavailable(request_id_value)
+                    .private()
+                    .into_response();
+            }
+        }
+    }
+
+    // A suppressed address is not promoted, whatever the click said — same
+    // rule the single promote applies.
+    let promotable: Vec<uuid::Uuid> = contacts
+        .iter()
+        .filter(|contact| !suppressed.contains(contact.normalized_email.as_str()))
+        .map(|contact| contact.id)
+        .collect();
+    let promoted = match repo
+        .mark_fans_promoted_by_ids(&mut tx, workspace_id, &promotable)
+        .await
+    {
+        Ok(marked) => marked,
+        Err(error) => {
+            tracing::warn!(%error, "gdrive promote-batch mark failed");
+            return Problem::service_unavailable(request_id_value)
+                .private()
+                .into_response();
+        }
+    };
+    if let Err(error) = tx.commit().await {
+        tracing::warn!(%error, "gdrive promote-batch commit failed");
+        return Problem::service_unavailable(request_id_value)
+            .private()
+            .into_response();
+    }
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "promoted": promoted,
+            "imported_pending": totals.imported_pending,
+            "confirmation_resent": totals.confirmation_resent,
+            "already_active": totals.already_active,
+            "skipped_suppressed": totals.skipped_suppressed,
+            "cooldown_skipped": totals.cooldown_skipped,
+        })),
+    )
+        .into_response()
 }
 
 /// POST /contacts/{id}/dismiss — `{destination: "fan"|"beacon"}`. Records

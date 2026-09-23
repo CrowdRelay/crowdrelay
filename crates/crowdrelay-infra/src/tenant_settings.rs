@@ -301,6 +301,27 @@ impl TenantSettingsRepository {
             .unwrap_or_else(|| DEFAULT_CREW_LOCALE.to_owned()))
     }
 
+    /// The crew's language tag only when the tenant actually set one —
+    /// `None` stays `None` here. `crew_locale` substitutes the default for
+    /// readers that must produce text; a payload that records which locale
+    /// applied cannot substitute one, because an unmeasured locale must
+    /// serialize as `null`, not as a guessed `"en"`.
+    pub async fn crew_locale_if_set(
+        &self,
+        workspace_id: Uuid,
+    ) -> Result<Option<String>, sqlx::Error> {
+        let stored: Option<String> = sqlx::query_scalar(
+            "SELECT value FROM tenant_settings WHERE workspace_id = $1 AND key = $2",
+        )
+        .bind(workspace_id)
+        .bind(KEY_CREW_LOCALE)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(stored
+            .map(|tag| tag.trim().to_owned())
+            .filter(|tag| !tag.is_empty()))
+    }
+
     /// What the tenant last said they are working on, as stored.
     ///
     /// Returns the raw value rather than a parsed intent so this repository
