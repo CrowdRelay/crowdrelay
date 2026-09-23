@@ -296,3 +296,82 @@ async fn published_show(
     .await?;
     Ok(())
 }
+
+/// A member flagged `email_opt_out` keeps the briefing assignment — the flag
+/// suppresses the send, not the work item — while the unflagged member's
+/// mail queues normally through the same sweep.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn email_opt_out_suppresses_the_send_but_keeps_the_assignment()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (pool, url) = common::test_pool_with_url("CROWDRELAY_TEST_DATABASE_URL")
+        .await
+        .expect("connect to the migrated suite database");
+    let now = OffsetDateTime::now_utc();
+    let workspace = workspace(&pool).await?;
+    advertise_team_email(&pool, workspace, now).await?;
+    let human = member(&pool, workspace, "human").await?;
+
+    // The seeded service seat: active so admission can resolve it, opted
+    // out because no mailbox sits behind the address. No team profile —
+    // the seats never join the routing roster, exactly like production.
+    let seat_email = format!("gate-{}@example.test", workspace.simple());
+    let seat = sqlx::query_scalar::<_, Uuid>(
+        "INSERT INTO workspace_members
+             (workspace_id, normalized_email, display_name, role, status, email_opt_out)
+         VALUES ($1, $2, 'Virya Gate', 'staff', 'active', true) RETURNING id",
+    )
+    .bind(workspace)
+    .bind(&seat_email)
+    .fetch_one(&pool)
+    .await?;
+
+    let database = DatabaseConfig {
+        url: url.to_owned(),
+        max_connections: 4,
+        connect_timeout: Duration::from_secs(3),
+        ping_timeout: Duration::from_secs(2),
+        operation_timeout: Duration::from_secs(10),
+        lock_timeout: Duration::from_secs(2),
+    };
+    let repository = PostgresAutopilotRepository::new(pool.clone(), &database);
+    repository
+        .reconcile_team_handoffs(WorkspaceId::from_uuid(workspace), now)
+        .await?;
+
+    // Both members own the day's briefing item…
+    let assignments = sqlx::query_scalar::<_, i64>(
+        "SELECT count(*)::bigint FROM team_assignments
+         WHERE workspace_id = $1 AND source_kind = 'daily_briefing'
+           AND assignee_member_id = ANY($2)",
+    )
+    .bind(workspace)
+    .bind([human, seat])
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(assignments, 2, "the flag removed the work item too");
+
+    // …but the only queued mail is the unflagged member's.
+    let seat_mail = sqlx::query_scalar::<_, i64>(
+        "SELECT count(*)::bigint FROM autopilot_actions
+         WHERE workspace_id = $1 AND action_kind = 'team.assignment.email'
+           AND payload->>'recipient_email' = $2",
+    )
+    .bind(workspace)
+    .bind(&seat_email)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(seat_mail, 0, "an opted-out member was mailed");
+    let human_mail = sqlx::query_scalar::<_, i64>(
+        "SELECT count(*)::bigint FROM autopilot_actions
+         WHERE workspace_id = $1 AND action_kind = 'team.assignment.email'",
+    )
+    .bind(workspace)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        human_mail, 1,
+        "the unflagged member's briefing never queued"
+    );
+    Ok(())
+}

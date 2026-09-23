@@ -502,6 +502,25 @@ pub(super) async fn queue_team_email_action(
     source_action_id: Option<Uuid>,
     now: OffsetDateTime,
 ) -> Result<(), RepositoryError> {
+    // `email_opt_out` marks a member whose address must never receive crew
+    // mail: the seeded service seats have to stay 'active' — admission
+    // resolves them by their configured email — but no mailbox sits behind
+    // the address, so every send bounced. The check lives at this choke
+    // point so briefing, routing and reminder producers cannot bypass it;
+    // the assignment row itself is still written by the caller.
+    let opted_out = sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS(
+             SELECT 1 FROM workspace_members
+             WHERE workspace_id = $1 AND normalized_email = $2 AND email_opt_out)",
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(recipient_email)
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(map_sqlx)?;
+    if opted_out {
+        return Ok(());
+    }
     let suffix = if reminder_number == 0 {
         "initial".to_owned()
     } else {
