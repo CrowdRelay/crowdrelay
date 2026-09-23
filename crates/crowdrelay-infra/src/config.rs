@@ -13,7 +13,9 @@ use std::{
     time::Duration,
 };
 
-use crowdrelay_domain::{CountryCode, NormalizedEmail, WorkspaceSlug};
+use crowdrelay_domain::{
+    CountryCode, NormalizedEmail, WorkspaceSlug, team_approval_token::TeamApprovalKey,
+};
 use sha2::{Digest, Sha256};
 use sqlx::postgres::PgConnectOptions;
 use thiserror::Error;
@@ -49,6 +51,7 @@ const ALLOWED_ORIGINS_KEY: &str = "CROWDRELAY_ALLOWED_ORIGINS";
 const RANDOM_DRAWS_ENABLED_KEY: &str = "CROWDRELAY_RANDOM_DRAWS_ENABLED";
 const WORKSPACE_SLUG_KEY: &str = "CROWDRELAY_WORKSPACE_SLUG";
 const PUBLIC_SITE_BASE_URL_KEY: &str = "CROWDRELAY_PUBLIC_SITE_BASE_URL";
+const PUBLIC_API_ORIGIN_KEY: &str = "CROWDRELAY_PUBLIC_API_ORIGIN";
 const DEFAULT_COUNTRY_CODE_KEY: &str = "CROWDRELAY_DEFAULT_COUNTRY_CODE";
 const REDIRECT_REFRESH_INTERVAL_MS_KEY: &str = "CROWDRELAY_REDIRECT_REFRESH_INTERVAL_MS";
 const CLICK_CHANNEL_CAPACITY_KEY: &str = "CROWDRELAY_CLICK_CHANNEL_CAPACITY";
@@ -162,6 +165,7 @@ const KNOWN_KEYS: &[&str] = &[
     RANDOM_DRAWS_ENABLED_KEY,
     WORKSPACE_SLUG_KEY,
     PUBLIC_SITE_BASE_URL_KEY,
+    PUBLIC_API_ORIGIN_KEY,
     DEFAULT_COUNTRY_CODE_KEY,
     REDIRECT_REFRESH_INTERVAL_MS_KEY,
     CLICK_CHANNEL_CAPACITY_KEY,
@@ -295,6 +299,14 @@ pub struct Config {
     /// Derived HMAC key an audience attestation is signed under. Same
     /// configured secret as the response key, different domain separator.
     pub attestation_signing_key: AttestationSigningKey,
+    /// Derived HMAC key a mailed one-click team-approval link is signed
+    /// under. Same configured secret, its own domain separator.
+    pub team_approval_key: TeamApprovalKey,
+    /// The API's own public origin — where `virya.music` is the site,
+    /// `signal-api.virya.music` is the host `/v1/public/approvals/{token}`
+    /// actually answers on. Optional: unset means crew e-mails carry no
+    /// one-click links rather than links aimed at a host that 404s them.
+    pub public_api_origin: Option<Url>,
     /// Optional immediately preceding AEAD key used during bounded rotation.
     pub previous_response_encryption_key: Option<SensitiveResponseKey>,
     /// Derived AEAD key for the workspace-secrets store (tenant-configured
@@ -507,6 +519,12 @@ impl Config {
         )?;
         let attestation_signing_key =
             derive_attestation_signing_key(values.get(RESPONSE_ENCRYPTION_SECRET_KEY));
+        let team_approval_key =
+            derive_team_approval_key(values.get(RESPONSE_ENCRYPTION_SECRET_KEY));
+        let public_api_origin = parse_public_api_origin(
+            values.get(PUBLIC_API_ORIGIN_KEY),
+            environment.is_production(),
+        )?;
         let previous_response_encryption_key = parse_previous_response_encryption_key(
             values.get(PREVIOUS_RESPONSE_ENCRYPTION_SECRET_KEY),
             environment.is_production(),
@@ -562,6 +580,8 @@ impl Config {
             team_operations,
             response_encryption_key,
             attestation_signing_key,
+            team_approval_key,
+            public_api_origin,
             previous_response_encryption_key,
             workspace_secrets_key,
             previous_workspace_secrets_key,

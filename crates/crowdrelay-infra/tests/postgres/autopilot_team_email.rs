@@ -75,6 +75,9 @@ async fn queued_team_assignment_email_uses_fast_lane_and_emits_bridge_event()
             due_at: None,
             action_url_path: "/staff/?tab=overview#needs-you".to_owned(),
             reminder_number: 0,
+            approve_url: None,
+            skip_url: None,
+            pending_approvals: Vec::new(),
         })?,
         now,
     )

@@ -56,7 +56,7 @@ use url::Url;
 use uuid::Uuid;
 
 const ADMIN_KEY: &str = "test-admin-api-key-123456789012";
-const SIGNING_SECRET: &[u8] = b"attestation-anchor-test-signing-secret";
+pub(crate) const SIGNING_SECRET: &[u8] = b"attestation-anchor-test-signing-secret";
 
 // ── Disposable database, same pattern as the infra postgres suites. ──────────
 
@@ -392,6 +392,7 @@ pub(crate) fn app_state(
         ),
         None,
         AttestationSigningKey::derive_from_secret(SIGNING_SECRET),
+        crowdrelay_domain::team_approval_token::TeamApprovalKey::derive_from_secret(SIGNING_SECRET),
         crowdrelay_infra::provider_verification::ProviderVerifiers::new(
             None,
             None,

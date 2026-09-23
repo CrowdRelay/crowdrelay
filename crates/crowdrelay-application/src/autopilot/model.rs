@@ -379,6 +379,16 @@ impl GigLetterKind {
     }
 }
 
+/// One pending-approval entry in a briefing payload: the action it fronts
+/// plus both one-click links. The links are the same URL — the verdict rides
+/// in the form body, not the token.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct PendingApprovalLink {
+    pub action_id: uuid::Uuid,
+    pub approve_url: String,
+    pub skip_url: String,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum AutopilotActionPayload {
@@ -948,6 +958,17 @@ pub enum AutopilotActionPayload {
         due_at: Option<time::OffsetDateTime>,
         action_url_path: String,
         reminder_number: u8,
+        /// One-click links for the pending approval this single notice
+        /// fronts. Absent on every other team mail — a notice whose window
+        /// never ends gets no link rather than a link that cannot expire.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        approve_url: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        skip_url: Option<String>,
+        /// The morning briefing lists every open ask at once; each gets its
+        /// own link pair. Empty for a single-ask notice or a plain task mail.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pending_approvals: Vec<PendingApprovalLink>,
     },
     /// An LLM agent produced a content draft (press pitch, social post, etc.)
     /// that the operator approved. Execution materializes the draft into the

@@ -737,6 +737,7 @@ async fn route_capture_plan(
         ),
         due_at: Some(due_at),
         source_action_id: None,
+        source_kind: "capture_plan",
     });
 
     // The checklist's bare 'capture_plan' item meant "does this show

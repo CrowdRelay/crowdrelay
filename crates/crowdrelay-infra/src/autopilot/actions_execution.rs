@@ -1085,6 +1085,7 @@ impl PostgresAutopilotRepository {
                 AutopilotActionPayload::SendTeamAssignmentEmail {
                     assignment_id, recipient_email, recipient_name, task_title, task_detail,
                     due_at, action_url_path, reminder_number,
+                    approve_url, skip_url, pending_approvals,
                 } => {
                     // The frame the executor wraps around the task body is
                     // composed here, in the same transaction and the same
@@ -1114,6 +1115,9 @@ impl PostgresAutopilotRepository {
                             "due_at": due_at,
                             "action_url_path": action_url_path,
                             "reminder_number": reminder_number,
+                            "approve_url": approve_url,
+                            "skip_url": skip_url,
+                            "pending_approvals": pending_approvals,
                             "locale": locale.as_str(),
                             "email_subject": email_subject,
                             "email_greeting": email_greeting,

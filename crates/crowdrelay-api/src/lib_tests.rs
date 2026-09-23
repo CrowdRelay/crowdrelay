@@ -162,6 +162,9 @@ mod tests {
             crowdrelay_infra::attestation::AttestationSigningKey::derive_from_secret(
                 b"test-encryption-key",
             ),
+            crowdrelay_domain::team_approval_token::TeamApprovalKey::derive_from_secret(
+                b"test-encryption-key",
+            ),
             crowdrelay_infra::provider_verification::ProviderVerifiers::new(
                 None,
                 None,

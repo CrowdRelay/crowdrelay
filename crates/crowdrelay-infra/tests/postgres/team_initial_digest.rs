@@ -37,13 +37,14 @@ async fn run(pool: &PgPool, url: &str) -> Result<(), Box<dyn std::error::Error>>
     let alice = member(pool, workspace, "alice").await?;
 
     // Five approvals of one kind landing in the same cycle — the reported
-    // inbox. Different deadlines so the earliest-due one leads the digest.
+    // inbox. Different deadlines so the earliest-due one leads the digest,
+    // all inside the day so §6-A still mails them immediately.
     for index in 0..5_i64 {
-        awaiting_approval(pool, workspace, now, index).await?;
+        awaiting_approval(pool, workspace, now, index, 7 + index * 2).await?;
     }
     // A published show a day out adds its checklist asks to the same
     // member — the digest has to fold producers, not just approvals.
-    published_show(pool, workspace, now).await?;
+    published_show(pool, workspace, now + time::Duration::days(1)).await?;
 
     let database = DatabaseConfig {
         url: url.to_owned(),
@@ -228,6 +229,7 @@ async fn awaiting_approval(
     workspace_id: Uuid,
     now: OffsetDateTime,
     index: i64,
+    expires_in_hours: i64,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let decision_id = sqlx::query_scalar::<_, Uuid>(
         "INSERT INTO autopilot_decisions
@@ -267,9 +269,10 @@ async fn awaiting_approval(
         "body": "seeded",
         "smart_link": null,
     }))
-    // Seven hours out on the nearest one, then half-day steps — staggered
-    // expiries so the digest has an order to pick.
-    .bind(now + time::Duration::hours(7 + index * 12))
+    // Staggered expiries so the digest has an order to pick — the caller
+    // chooses them, since whether a notice mails at all is now the ask's
+    // distance from now.
+    .bind(now + time::Duration::hours(expires_in_hours))
     .execute(pool)
     .await?;
     Ok(())
@@ -282,7 +285,7 @@ async fn awaiting_approval(
 async fn published_show(
     pool: &PgPool,
     workspace_id: Uuid,
-    now: OffsetDateTime,
+    starts_at: OffsetDateTime,
 ) -> Result<(), Box<dyn std::error::Error>> {
     sqlx::query(
         "INSERT INTO events (id, workspace_id, slug, title, starts_at, status, published_at)
@@ -291,7 +294,7 @@ async fn published_show(
     .bind(Uuid::now_v7())
     .bind(workspace_id)
     .bind(format!("crew-digest-show-{}", Uuid::now_v7().simple()))
-    .bind(now + time::Duration::days(1))
+    .bind(starts_at)
     .execute(pool)
     .await?;
     Ok(())
@@ -372,6 +375,119 @@ async fn email_opt_out_suppresses_the_send_but_keeps_the_assignment()
     assert_eq!(
         human_mail, 1,
         "the unflagged member's briefing never queued"
+    );
+    Ok(())
+}
+
+/// §6-A: a first notice for work due past the next day mails nothing — the
+/// assignment opens and tomorrow's briefing carries it. Urgent work and
+/// genuinely manual show tasks still mail on the spot.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn a_far_out_approval_is_held_for_the_briefing() -> Result<(), Box<dyn std::error::Error>> {
+    let (pool, url) = common::test_pool_with_url("CROWDRELAY_TEST_DATABASE_URL")
+        .await
+        .expect("connect to the migrated suite database");
+    // 09:00 tenant time — the briefing only issues past its morning gate,
+    // and the held ask's delivery path IS the briefing, so the test pins the
+    // sweep's clock rather than depending on the wall clock's.
+    let now = OffsetDateTime::now_utc()
+        .replace_hour(9)
+        .expect("09:00 exists every day");
+    let workspace = workspace(&pool).await?;
+    // The advert expires against SQL now(), so it must straddle wall clock even
+    // though the sweep itself runs on the pinned briefing-hour `now`.
+    advertise_team_email(&pool, workspace, OffsetDateTime::now_utc()).await?;
+    let alice = member(&pool, workspace, "alice").await?;
+
+    // Two asks, opposite sides of the day boundary…
+    awaiting_approval(&pool, workspace, now, 0, 48).await?; // far — held
+    awaiting_approval(&pool, workspace, now, 1, 7).await?; // urgent — mailed
+    // …and a show seventy hours out whose checklist asks mint now but fall
+    // due past the day — they mail anyway because a show task is genuinely
+    // manual, not deferrable to a briefing.
+    published_show(&pool, workspace, now + time::Duration::hours(70)).await?;
+
+    let database = DatabaseConfig {
+        url: url.to_owned(),
+        max_connections: 4,
+        connect_timeout: Duration::from_secs(3),
+        ping_timeout: Duration::from_secs(2),
+        operation_timeout: Duration::from_secs(10),
+        lock_timeout: Duration::from_secs(2),
+    };
+    let repository = PostgresAutopilotRepository::new(pool.clone(), &database);
+    repository
+        .reconcile_team_handoffs(WorkspaceId::from_uuid(workspace), now)
+        .await?;
+
+    // Holding the notice never held the work index — both asks own an open
+    // assignment on the member.
+    let open = sqlx::query_scalar::<_, i64>(
+        "SELECT count(*)::bigint FROM team_assignments
+         WHERE workspace_id = $1 AND source_kind = 'autopilot_action'
+           AND status = 'open' AND assignee_member_id = $2",
+    )
+    .bind(workspace)
+    .bind(alice)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(open, 2, "a held notice lost its assignment");
+
+    // One crew mail for the handoffs, led by the urgent ask, the show tasks
+    // folded underneath it — and the far ask nowhere in it.
+    let mails = sqlx::query_as::<_, (String, String)>(
+        "SELECT payload->>'task_title', payload->>'task_detail'
+         FROM autopilot_actions action
+         JOIN team_assignments assignment
+           ON assignment.workspace_id = action.workspace_id
+          AND assignment.id = (action.payload->>'assignment_id')::uuid
+         WHERE action.workspace_id = $1
+           AND action.action_kind = 'team.assignment.email'
+           AND assignment.source_kind <> 'daily_briefing'",
+    )
+    .bind(workspace)
+    .fetch_all(&pool)
+    .await?;
+    assert_eq!(
+        mails.len(),
+        1,
+        "expected exactly the urgent mail: {mails:?}"
+    );
+    let (_, detail) = &mails[0];
+    assert!(
+        detail.contains("Post 1"),
+        "the urgent ask did not lead or fold: {detail}"
+    );
+    assert!(
+        !detail.contains("Post 0"),
+        "the held ask leaked into a mail: {detail}"
+    );
+    assert!(
+        detail.contains("• "),
+        "the show tasks did not fold in despite being past 24h: {detail}"
+    );
+
+    // Held is not silent: the day's briefing — the one mail every member
+    // gets — names the far ask in its pending list.
+    let briefing = sqlx::query_as::<_, (String,)>(
+        "SELECT payload->>'task_detail'
+         FROM autopilot_actions action
+         JOIN team_assignments assignment
+           ON assignment.workspace_id = action.workspace_id
+          AND assignment.id = (action.payload->>'assignment_id')::uuid
+         WHERE action.workspace_id = $1
+           AND action.action_kind = 'team.assignment.email'
+           AND assignment.source_kind = 'daily_briefing'",
+    )
+    .bind(workspace)
+    .fetch_all(&pool)
+    .await?;
+    assert_eq!(briefing.len(), 1, "no briefing mail went out");
+    assert!(
+        briefing[0].0.contains("Post 0"),
+        "the held ask is absent even from the briefing: {}",
+        briefing[0].0
     );
     Ok(())
 }

@@ -257,7 +257,7 @@ async fn main() -> Result<()> {
         database.clone(),
         config.database.operation_timeout,
     );
-    let autopilot = PostgresAutopilotRepository::new(database.clone(), &config.database);
+    let autopilot = PostgresAutopilotRepository::for_runtime(database.clone(), &config);
     let rate_limiter = config.rate_limit.enabled.then(|| {
         Arc::new(RateLimiter::new(RateLimitPolicy {
             enabled: true,
@@ -298,6 +298,7 @@ async fn main() -> Result<()> {
             config.workspace_secrets_key.clone(),
             config.previous_workspace_secrets_key.clone(),
             config.attestation_signing_key.clone(),
+            config.team_approval_key.clone(),
             crowdrelay_infra::provider_verification::ProviderVerifiers::new(
                 config.youtube_api_key.clone(),
                 config.facebook_page_access_token.clone(),

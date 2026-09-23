@@ -142,6 +142,7 @@ pub(super) async fn issue_release_making_of_asks(
             detail,
             due_at: Some(release_at),
             source_action_id: None,
+            source_kind: "release_making_of",
         });
         member.open_assignments = member.open_assignments.saturating_add(1);
         member.recent_assignments = member.recent_assignments.saturating_add(1);

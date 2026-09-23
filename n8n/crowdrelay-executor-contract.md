@@ -116,6 +116,30 @@ and old executors may ignore them:
   GitHub/CSV/sheet connectors and `web` otherwise, so the executor can pick
   the archive-invitation wording instead of the signup one.
 
+### Crew-mail one-click approvals
+
+`team.assignment.email` payloads — a single-ask notice and the morning
+briefing alike — carry signed one-click links when the deployment sets
+`CROWDRELAY_PUBLIC_API_ORIGIN`. Unset means the fields are simply absent;
+an executor must not synthesize a link itself.
+
+- `data.approve_url` / `data.skip_url` — present when the mail fronts one
+  pending approval. Both fields hold the same URL,
+  `{api_origin}/v1/public/approvals/{token}`: the link is the credential and
+  the verdict rides in the POST body, so the mail renders it as two buttons
+  or two named links to the same address. A notice for plain work carries
+  neither field.
+- `data.pending_approvals` — the briefing's per-ask list,
+  `[{ "action_id", "approve_url", "skip_url" }]`, parallel to the asks the
+  body enumerates. An ask whose window has no end mints no link and is
+  absent from the list — it is decided in the panel, not from a mail that
+  cannot lapse.
+
+The links die with the ask's own `approval_expires_at` — an expired one
+answers 410 and a forged one 404, so the executor never has to guard them.
+GET renders the ask; the verdict only lands on POST, so link previewers
+cannot vote.
+
 ## Target discovery (candidates, not targets)
 
 Executors post what they found to `POST /v1/internal/autopilot/outreach/candidates` with the commerce key and an `Idempotency-Key`, up to 100 candidates per batch; CrowdRelay screens each one on write. The admin route of the same name stays for operator imports. Discovery is executor work, so it lives on the internal surface: requiring the admin key would hand an adapter authority over every admin route in order to post a list of playlist contacts.

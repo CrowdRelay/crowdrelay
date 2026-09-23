@@ -420,6 +420,7 @@ impl PostgresAutopilotRepository {
                             due_at,
                             0,
                             None,
+                            super::team::EmailApprovalLinks::default(),
                             now,
                         )
                         .await?;

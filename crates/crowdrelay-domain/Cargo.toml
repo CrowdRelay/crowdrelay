@@ -5,7 +5,9 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+base64.workspace = true
 csv = "1"
+hmac.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
