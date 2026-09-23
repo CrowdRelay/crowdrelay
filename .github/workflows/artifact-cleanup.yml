@@ -70,6 +70,37 @@ jobs:
               gh api -X DELETE "/repos/$repo/actions/runs/$id" 2>/dev/null || true
             done
             echo "  runs scanned past newest $KEEP_RUNS; $kept_runs kept for live artifacts"
+
+            # Actions caches. Two shapes are pure residue:
+            #   - refs/pull/* caches: merge-ref scoped, unusable by default-
+            #     branch builds, orphaned the moment the PR lands (2026-09-23:
+            #     one dependabot PR alone held 1,121 entries / 642MB).
+            #   - sccache/* shards older than SCCACHE_MAX_AGE_D: content-
+            #     addressed per-object stores; stale shards stop hitting but
+            #     never self-expire fast (virya-signal carried ~3,000).
+            # Collect the full ID list first — paginating a list while
+            # deleting from it skips entries. Deletes are paced serially:
+            # a parallel burst tripped GitHub's secondary rate limit.
+            SCCACHE_MAX_AGE_D=14
+            cutoff=$(( $(date +%s) - SCCACHE_MAX_AGE_D * 86400 ))
+            cache_ids=$(gh api --paginate "/repos/$repo/actions/caches?per_page=100" \
+              --jq '.actions_caches[] | "\(.id)\t\(.ref)\t\(.key)\t\(.created_at)"' 2>/dev/null || true)
+            cache_del=0
+            while IFS=$'\t' read -r cid cref ckey ccreated; do
+              [ -n "$cid" ] || continue
+              drop=0
+              case "$cref" in refs/pull/*) drop=1 ;; esac
+              case "$ckey" in
+                sccache/*)
+                  cts=$(date -d "$ccreated" +%s 2>/dev/null || echo 0)
+                  [ "${cts:-0}" -lt "$cutoff" ] && drop=1 ;;
+              esac
+              [ "$drop" -eq 1 ] || continue
+              gh api -X DELETE "/repos/$repo/actions/caches/$cid" --silent 2>/dev/null \
+                && cache_del=$((cache_del + 1)) || true
+              sleep 0.3
+            done <<< "$cache_ids"
+            echo "  deleted $cache_del stale action caches"
           done
 
           # ── GHCR: retain deployed + rollback, not "newest N" ─────────────

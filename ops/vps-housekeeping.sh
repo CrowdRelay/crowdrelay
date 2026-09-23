@@ -322,6 +322,17 @@ clear_caches() {
           && log "  cleared cargo registry cache+src $home"
       fi
     fi
+    # playwright browsers: re-downloadable, but a wipe mid-e2e run fails the
+    # suite — same busy-keep class as npm/cargo-registry.
+    if [[ -d "$home/.cache/ms-playwright" ]]; then
+      if runner_busy; then
+        log "  kept playwright browsers $home (job active)"
+      elif [[ "$REPORT" -eq 1 ]]; then
+        log "  [dry] playwright browsers $home: $(mb "$(du -sb "$home/.cache/ms-playwright" 2>/dev/null | cut -f1)")"
+      else
+        rm -rf "$home/.cache/ms-playwright" && log "  cleared playwright browsers $home"
+      fi
+    fi
     # sccache: files only, by age — the dir itself survives.
     if [[ -d "$home/.cache/sccache" ]]; then
       cb=$(find "$home/.cache/sccache" -type f -mtime +4 -printf '%s\n' 2>/dev/null \
@@ -366,6 +377,38 @@ for runner in $RUNNER_GLOB; do
   [[ -n "$name" ]] && lane_names+="$name "
   lane_busy "$runner" && busy_lanes+="${name:-$(basename "$runner")} "
 done
+
+# Versioned rustup toolchains matching no rust-toolchain.toml pin under the
+# runner workspaces are re-downloadable residue (2026-09-23: a stale
+# 1.98.0 held ~800M beside the pinned 1.97.1). Pins must be read BEFORE the
+# _work wipes below delete the checkouts that carry them; toolchains are
+# shared across lanes, so pruning runs only when nothing is busy anywhere.
+# No pins found -> keep everything (fail closed).
+rust_keep=""
+for toml in /home/*/actions-runner*/_work/*/rust-toolchain.toml \
+            /home/*/actions-runner*/_work/*/*/rust-toolchain.toml; do
+  [[ -r "$toml" ]] || continue
+  v=$(sed -n 's/^\s*channel\s*=\s*"\([^"]*\)".*/\1/p' "$toml" 2>/dev/null | head -1)
+  [[ -n "$v" ]] && rust_keep="$rust_keep $v"
+done
+if [[ -n "$rust_keep" && "$busy_lanes" == " " ]]; then
+  for tc in /home/*/.rustup/toolchains/*/; do
+    [[ -d "$tc" ]] || continue
+    tname=$(basename "$tc")
+    keep=0
+    case "$tname" in stable*|nightly*|beta*) keep=1 ;; esac
+    for pin in $rust_keep; do
+      [[ "$tname" == "$pin"-* || "$tname" == "$pin" ]] && keep=1
+    done
+    if [[ "$keep" -eq 0 ]]; then
+      if [[ "$REPORT" -eq 1 ]]; then
+        log "  [dry] stale rustup toolchain $tname: $(mb "$(du -sb "$tc" 2>/dev/null | cut -f1)")"
+      else
+        rm -rf "$tc" && log "  removed stale rustup toolchain $tname (unpinned)"
+      fi
+    fi
+  done
+fi
 
 for runner in $RUNNER_GLOB; do
   [[ -d "$runner" ]] || continue
@@ -416,12 +459,17 @@ for tdir in /home/*/.cargo-target/*/; do
     *" $lane "*) ;;
     *) runner_busy && continue ;;
   esac
-  newest=$(find "$tdir" -type f -newermt '4 days ago' -print -quit 2>/dev/null)
-  [[ -n "$newest" ]] && continue
+  # Under pressure-tier disk the freshness floor lifts: a warm target dir is
+  # still pure build output and sccache keeps the compile cache — a cold
+  # build beats a dead disk.
+  if [[ "${PCT:-0}" -lt "$PRESSURE_PCT" ]]; then
+    newest=$(find "$tdir" -type f -newermt '4 days ago' -print -quit 2>/dev/null)
+    [[ -n "$newest" ]] && continue
+  fi
   if [[ "$REPORT" -eq 1 ]]; then
-    log "  [dry] cold target dir $tdir: $(mb "$(du -sb "$tdir" 2>/dev/null | cut -f1)")"
+    log "  [dry] target dir $tdir: $(mb "$(du -sb "$tdir" 2>/dev/null | cut -f1)")"
   else
-    rm -rf "$tdir" && log "  removed cold cargo target dir $tdir (lane $lane idle, no writes in 4d)"
+    rm -rf "$tdir" && log "  removed cargo target dir $tdir (lane $lane idle, cold>4d or idle-pressure)"
   fi
 done
 
