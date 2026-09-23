@@ -10,23 +10,27 @@
 # Safety model — three tiers, chosen per run:
 #
 #   ALWAYS   provably cannot break a running job or the app:
-#            dangling images, unattached volumes, build cache >72h,
-#            orphaned GitHub-Actions service containers (>6h when a job is
+#            dangling images, unattached volumes, build cache >48h,
+#            orphaned GitHub-Actions service containers (>4h when a job is
 #            in-flight, >1h when idle), journald vacuum, rotated logs, /tmp,
 #            apt clean/autoremove, snap disabled revisions, coredumps, and
 #            stale test-clone databases inside postgres containers.
 #
-#   IDLE     only when NO runner job is active anywhere on the box
-#            (`pgrep -f "Runner.Worker"`): runner _work checkout dirs,
-#            old bin.* runner versions (keep 2), per-repository image
-#            pruning beyond KEEP_IMAGES_PER_REPO, buildkit builder
-#            containers, and regeneratable caches.
+#   IDLE     two scopes. LANE-LOCAL (safe while other lanes build): each
+#            runner's _work checkouts (>10m since last write), old bin.*
+#            versions (keep 2), _diag >4d, and cold .cargo-target dirs —
+#            gated on that lane's own Runner.Worker process. GLOBAL-IDLE
+#            (no worker anywhere): per-repository image pruning beyond
+#            KEEP_IMAGES_PER_REPO, buildkit builder containers/volumes/
+#            instances, and regeneratable caches.
 #
 #   PRESSURE disk >= PRESSURE_PCT even when a job is in-flight: regeneratable
 #            caches ONLY — the documented 2026-09-17 exception ("a restarted
 #            build beats a dead disk"). Never _work, never the workspace.
 #            Two caches are exempt from the pressure tier while a job runs:
 #            they are live source trees, not pure caches (see below).
+#            At CRITICAL_PCT the same tier also takes build cache >12h —
+#            a cold build is recoverable, ENOSPC is not (2026-09-23).
 #
 # Hard rules encoded from incidents:
 #   - Never wipe a runner _work while ANY job is active (2026-09-13 ENOSPC).
@@ -65,12 +69,12 @@ set -uo pipefail
 
 # ── Config ────────────────────────────────────────────────────────────────
 KEEP_IMAGES_PER_REPO="${KEEP_IMAGES_PER_REPO:-2}"
-PRESSURE_PCT="${PRESSURE_PCT:-90}"
-CRITICAL_PCT="${CRITICAL_PCT:-95}"
-STALE_DB_AGE_H="${STALE_DB_AGE_H:-24}"
+PRESSURE_PCT="${PRESSURE_PCT:-85}"
+CRITICAL_PCT="${CRITICAL_PCT:-90}"
+STALE_DB_AGE_H="${STALE_DB_AGE_H:-12}"
 GHA_CONTAINER_IDLE_MAX_H="${GHA_CONTAINER_IDLE_MAX_H:-1}"
-GHA_CONTAINER_BUSY_MAX_H="${GHA_CONTAINER_BUSY_MAX_H:-6}"
-JOURNAL_MAX="${JOURNAL_MAX:-200M}"
+GHA_CONTAINER_BUSY_MAX_H="${GHA_CONTAINER_BUSY_MAX_H:-4}"
+JOURNAL_MAX="${JOURNAL_MAX:-150M}"
 LOG_FILE="${LOG_FILE:-/var/log/vps-housekeeping.log}"
 STALE_DB_PREFIXES="${STALE_DB_PREFIXES:-pgt_ ci_}"
 STALE_DB_UUID_RE="${STALE_DB_UUID_RE:-crowdrelay_}"
@@ -100,6 +104,23 @@ used_pct() { df --output=pcent / 2>/dev/null | tail -1 | tr -dc '0-9'; }
 avail_bytes() { df --output=avail -B1 / 2>/dev/null | tail -1 | tr -dc '0-9'; }
 
 runner_busy() { pgrep -f 'Runner\.Worker' >/dev/null 2>&1; }
+
+# Per-lane busy check: the worker's binary path contains its runner dir
+# (/home/u/actions-runner/bin.2.337.0/Runner.Worker), so a lane is live iff
+# a worker runs under that dir. Lane-local dirs (_work, bin.*, _diag) are
+# safe to clean whenever THEIR lane is idle — the old global gate starved
+# reclamation because on this box some lane is busy most of the day.
+lane_busy() {
+  local dir="${1%/}"
+  pgrep -af 'Runner\.Worker' 2>/dev/null | grep -qF -- "$dir/bin"
+}
+
+# agentName from a runner's .runner file (JSON with a BOM). Maps a runner
+# dir to its .cargo-target/<agentName> dir. Empty on parse failure.
+lane_name() {
+  tr -d '\357\273\277' <"$1/.runner" 2>/dev/null \
+    | sed -n 's/.*"agentName" *: *"\([^"]*\)".*/\1/p'
+}
 
 # run DRY-safe: $1 label, rest = command. In --report mode we skip the command.
 sweep() {
@@ -188,7 +209,7 @@ done
 # a container references, so these can run mid-job.
 sweep "dangling images"   docker image prune -f
 sweep "unattached volumes" docker volume prune -f
-sweep "build cache >72h"  docker builder prune -f --filter until=72h
+sweep "build cache >48h"  docker builder prune -f --filter until=48h
 
 # Stale test-clone databases inside postgres containers. Patterns match only
 # clone-shaped names; the uuid-v7 timestamp embedded in the name is the age
@@ -239,7 +260,7 @@ command -v journalctl >/dev/null && sweep "journald vacuum <=$JOURNAL_MAX" \
   journalctl --vacuum-size="$JOURNAL_MAX"
 if [[ "$REPORT" -eq 0 ]]; then
   find /var/log -xdev -type f \( -name '*.gz' -o -name '*.1' -o -name '*.old' \) \
-    -mtime +14 -delete 2>/dev/null
+    -mtime +10 -delete 2>/dev/null
   rm -rf /var/crash/* /var/lib/systemd/coredump/* 2>/dev/null
   for t in /tmp /var/tmp; do
     find "$t" -xdev -depth -mindepth 1 \
@@ -249,7 +270,7 @@ if [[ "$REPORT" -eq 0 ]]; then
       -mtime +1 -exec rm -rf {} + 2>/dev/null
   done
 fi
-log "  swept: rotated logs >14d, coredumps, /tmp+/var/tmp >1d"
+log "  swept: rotated logs >10d, coredumps, /tmp+/var/tmp >1d"
 
 command -v apt-get >/dev/null && {
   sweep "apt clean" apt-get clean
@@ -303,13 +324,13 @@ clear_caches() {
     fi
     # sccache: files only, by age — the dir itself survives.
     if [[ -d "$home/.cache/sccache" ]]; then
-      cb=$(find "$home/.cache/sccache" -type f -mtime +7 -printf '%s\n' 2>/dev/null \
+      cb=$(find "$home/.cache/sccache" -type f -mtime +4 -printf '%s\n' 2>/dev/null \
            | awk '{s+=$1} END {print s+0}')
       if [[ "$REPORT" -eq 1 ]]; then
-        [[ "${cb:-0}" -gt 0 ]] && log "  [dry] sccache >7d $home: $(mb "$cb")"
+        [[ "${cb:-0}" -gt 0 ]] && log "  [dry] sccache >4d $home: $(mb "$cb")"
       else
-        find "$home/.cache/sccache" -type f -mtime +7 -delete 2>/dev/null
-        [[ "${cb:-0}" -gt 0 ]] && log "  cleared sccache >7d $home: $(mb "$cb")"
+        find "$home/.cache/sccache" -type f -mtime +4 -delete 2>/dev/null
+        [[ "${cb:-0}" -gt 0 ]] && log "  cleared sccache >4d $home: $(mb "$cb")"
       fi
     fi
   done
@@ -320,53 +341,93 @@ if [[ "${PCT:-0}" -ge "$PRESSURE_PCT" ]]; then
   clear_caches
 fi
 
-# ══ TIER: IDLE-ONLY — everything a live job could trip on ═════════════════
-if runner_busy; then
-  log "  runner busy — _work, image prune, buildkit containers skipped"
-else
-  # Runner workspaces: checkout dirs only; _actions/_tool/_temp/_PipelineMapping
-  # cache CI dependencies and stay.
-  for runner in $RUNNER_GLOB; do
-    [[ -d "$runner/_work" ]] || continue
-    for d in "$runner"/_work/*/; do
-      case "$(basename "$d")" in _*) continue ;; esac
-      if [[ "$REPORT" -eq 1 ]]; then
-        log "  [dry] _work checkout $d: $(mb "$(du -sb "$d" 2>/dev/null | cut -f1)")"
-      else
-        rm -rf "$d" && log "  cleaned runner workspace $d"
-      fi
-    done
-    [[ -d "$runner/_work/_update" ]] && {
-      [[ "$REPORT" -eq 0 ]] && rm -rf "$runner/_work/_update"
-      log "  cleaned $runner/_work/_update"
-    }
-    # Self-update residue: keep the two newest bin.* (current + rollback).
-    ls -d "$runner"/bin.* 2>/dev/null | sort -V | head -n -2 | while read -r b; do
-      [[ "$REPORT" -eq 0 ]] && rm -rf "$b"
-      log "  removed stale runner version $b"
-    done
-    # _diag logs grow forever; keep the last week.
-    [[ -d "$runner/_diag" ]] && {
-      [[ "$REPORT" -eq 0 ]] && find "$runner/_diag" -type f -mtime +7 -delete 2>/dev/null
-      log "  swept $runner/_diag >7d"
-    }
-  done
+# Critical tier: same regeneratable-only rule, deeper cut. Build cache <12h
+# is the only remaining lever that cannot break a running job — buildkit
+# entries are content-addressed, a running build never re-reads old ones.
+if [[ "${PCT:-0}" -ge "$CRITICAL_PCT" ]]; then
+  log "  disk critical (${PCT}% >= ${CRITICAL_PCT}%) — pruning build cache >12h"
+  sweep "build cache >12h" docker builder prune -f --filter until=12h
+fi
 
-  # Persistent per-lane CARGO_TARGET_DIRs (~/.cargo-target/<lane>) survive
-  # _work wipes by design. They are live build output — never touch one that
-  # has been written in the last 7 days, and never run this block while a
-  # job is active (the enclosing tier already guarantees idle).
-  for tdir in /home/*/.cargo-target/*/; do
-    [[ -d "$tdir" ]] || continue
-    newest=$(find "$tdir" -type f -newermt '7 days ago' -print -quit 2>/dev/null)
-    [[ -n "$newest" ]] && continue
+# ══ TIER: IDLE — lane-local dirs first, then shared docker state ═════════
+# Two busy scopes. Docker state (images, buildkit builders and volumes) is
+# shared by every lane, so it is only touched when NO worker runs anywhere.
+# A runner's own _work/bin.*/_diag is lane-local: it is cleaned whenever
+# THAT lane is idle, even while another lane builds. The 10-minute
+# freshness floor inside the loop covers a job in setup whose Worker has
+# not spawned yet — the lane looks idle for a moment between dispatch and
+# the first write.
+
+busy_lanes=" "
+lane_names=" "
+for runner in $RUNNER_GLOB; do
+  [[ -d "$runner" ]] || continue
+  name=$(lane_name "$runner")
+  [[ -n "$name" ]] && lane_names+="$name "
+  lane_busy "$runner" && busy_lanes+="${name:-$(basename "$runner")} "
+done
+
+for runner in $RUNNER_GLOB; do
+  [[ -d "$runner" ]] || continue
+  if lane_busy "$runner"; then
+    log "  $runner busy — its workspace kept"
+    continue
+  fi
+  [[ -d "$runner/_work" ]] || continue
+  # Checkout dirs only; _actions/_tool/_temp/_PipelineMapping cache CI
+  # dependencies and stay.
+  for d in "$runner"/_work/*/; do
+    case "$(basename "$d")" in _*) continue ;; esac
+    if [[ -n $(find "$d" -type f -newermt '10 minutes ago' -print -quit 2>/dev/null) ]]; then
+      log "  kept $d (written in last 10m — job setup in flight?)"
+      continue
+    fi
     if [[ "$REPORT" -eq 1 ]]; then
-      log "  [dry] cold target dir $tdir: $(mb "$(du -sb "$tdir" 2>/dev/null | cut -f1)")"
+      log "  [dry] _work checkout $d: $(mb "$(du -sb "$d" 2>/dev/null | cut -f1)")"
     else
-      rm -rf "$tdir" && log "  removed cold cargo target dir $tdir (no writes in 7d)"
+      rm -rf "$d" && log "  cleaned runner workspace $d"
     fi
   done
+  [[ -d "$runner/_work/_update" ]] && {
+    [[ "$REPORT" -eq 0 ]] && rm -rf "$runner/_work/_update"
+    log "  cleaned $runner/_work/_update"
+  }
+  # Self-update residue: keep the two newest bin.* (current + rollback).
+  ls -d "$runner"/bin.* 2>/dev/null | sort -V | head -n -2 | while read -r b; do
+    [[ "$REPORT" -eq 0 ]] && rm -rf "$b"
+    log "  removed stale runner version $b"
+  done
+  # _diag logs grow forever; keep the last few days.
+  [[ -d "$runner/_diag" ]] && {
+    [[ "$REPORT" -eq 0 ]] && find "$runner/_diag" -type f -mtime +4 -delete 2>/dev/null
+    log "  swept $runner/_diag >4d"
+  }
+done
 
+# Persistent per-lane CARGO_TARGET_DIRs (~/.cargo-target/<agentName>) survive
+# _work wipes by design. A dir is wiped only when cold for 4 days AND its
+# owning lane is resolvable and idle. A dir whose owner can't be read while
+# any job runs is kept — fail closed, same as the old global gate.
+for tdir in /home/*/.cargo-target/*/; do
+  [[ -d "$tdir" ]] || continue
+  lane="$(basename "$tdir")"
+  case "$busy_lanes" in *" $lane "*) continue ;; esac
+  case "$lane_names" in
+    *" $lane "*) ;;
+    *) runner_busy && continue ;;
+  esac
+  newest=$(find "$tdir" -type f -newermt '4 days ago' -print -quit 2>/dev/null)
+  [[ -n "$newest" ]] && continue
+  if [[ "$REPORT" -eq 1 ]]; then
+    log "  [dry] cold target dir $tdir: $(mb "$(du -sb "$tdir" 2>/dev/null | cut -f1)")"
+  else
+    rm -rf "$tdir" && log "  removed cold cargo target dir $tdir (lane $lane idle, no writes in 4d)"
+  fi
+done
+
+if runner_busy; then
+  log "  runner busy — image prune + buildkit builder sweeps skipped"
+else
   # BuildKit builder containers are rebuild artifacts — safe when idle.
   docker ps -a --format '{{.Names}}' 2>/dev/null | grep '^buildx_buildkit' | \
   while read -r c; do
@@ -406,6 +467,10 @@ else
   # Dedup by image ID: rmi by ID removes every tag on the image, so an ID
   # already kept (or already attempted) must never be submitted again.
   # Docker refuses removal of anything a container references — fail-closed.
+  # NOTE: declare -A is load-bearing — without it the subscript is evaluated
+  # arithmetically, hex IDs fail under set -u, and the whole prune silently
+  # never ran (found 2026-09-23: 18 tags accumulated despite keep-2).
+  declare -A seen_id=() seen_repo=()
   docker images --format '{{.Repository}} {{.ID}}' 2>/dev/null | \
   while read -r repo id; do
     [[ "$repo" == "<none>" ]] && continue
@@ -423,7 +488,7 @@ else
 
   # Idle pressure threshold is lower — caches are free to take when no build
   # can be hurt.
-  if [[ "${PCT:-0}" -ge 85 ]]; then clear_caches; fi
+  if [[ "${PCT:-0}" -ge 80 ]]; then clear_caches; fi
 fi
 
 AVAIL1=$(avail_bytes)
