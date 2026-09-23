@@ -68,21 +68,22 @@ jobs:
           token: ${{ secrets.CROWDRELAY_PAT }}
           persist-credentials: false
 
-      # persist-credentials: false keeps the PAT out of the checkouts' git
-      # config, but deploy-ecosystem.sh runs `git fetch origin main` inside
-      # both siblings to prove they sit on origin/main — anonymous on a
-      # private repo is a 404. Rewrite the remote URLs with the PAT for the
-      # duration of the job so the freshness gate can authenticate.
+      # persist-credentials: false keeps the PAT out of the checkouts' remote
+      # URLs — deploy-ecosystem.sh parses those URLs to resolve the sibling
+      # repo names. But the script then runs `git fetch origin main` inside
+      # both siblings to prove they sit on origin/main, and anonymous fetch on
+      # a private repo is a 404. extraheader authenticates the fetch without
+      # touching the remote URL the script parses.
       - name: Authorize sibling fetches
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.CROWDRELAY_PAT }}
         run: |
           set -euo pipefail
+          auth="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
           for dir in .control-plane .agents; do
-            url="$(git -C "$dir" remote get-url origin)"
-            git -C "$dir" remote set-url origin \
-              "https://x-access-token:${GH_TOKEN}@${url#https://}"
+            git -C "$dir" config http.https://github.com/.extraheader \
+              "AUTHORIZATION: basic ${auth}"
           done
 
       - name: Resolve target SHA
