@@ -29,7 +29,10 @@ pub async fn public_sale(
         Ok(Ok(view)) => (
             StatusCode::OK,
             [(CACHE_CONTROL, PUBLIC_REVALIDATE)],
-            Json(view),
+            // The fan read strips the operating counts — `available` and the
+            // `availability` band answer "can I still go" without publishing
+            // how the night is selling.
+            Json(PublicTicketSaleView::from(view)),
         )
             .into_response(),
         Ok(Err(error)) => error.response(request_id_value),
