@@ -229,6 +229,37 @@ impl PostgresAutopilotRepository {
             super::sweep_lapsed_approval_asks(&mut transaction, Some(workspace_id), now, None)
                 .await
                 .map_err(map_sqlx)?;
+
+            // Send-time enforcement of `email_opt_out`: the enqueue choke
+            // point checks the flag, but a member can opt out while their
+            // notice sits queued (worker downtime, backlog) — and for a
+            // suppression flag the send-time check is the one that counts.
+            // The action is cancelled, not skipped, so it cannot linger or
+            // re-claim.
+            if include_action_kind == Some(TEAM_ASSIGNMENT_EMAIL_ACTION_KIND) {
+                sqlx::query(
+                    r#"
+                    UPDATE autopilot_actions AS action
+                    SET status = 'cancelled', finished_at = $2,
+                        last_error_kind = 'recipient_opted_out'
+                    WHERE action.workspace_id = $1
+                      AND action.status = 'queued'
+                      AND action.action_kind = 'team.assignment.email'
+                      AND EXISTS (
+                          SELECT 1 FROM workspace_members member
+                          WHERE member.workspace_id = action.workspace_id
+                            AND member.normalized_email =
+                                action.payload->>'recipient_email'
+                            AND member.email_opt_out
+                      )
+                    "#,
+                )
+                .bind(workspace_id.into_uuid())
+                .bind(now)
+                .execute(&mut *transaction)
+                .await
+                .map_err(map_sqlx)?;
+            }
             // Close the attempt too, not only the action.
             //
             // This sweep reaps an action whose worker claimed it and then died:

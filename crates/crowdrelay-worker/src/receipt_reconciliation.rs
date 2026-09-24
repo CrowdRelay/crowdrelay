@@ -706,14 +706,28 @@ impl ReceiptReconciliationWorker {
 }
 
 /// Whether this action's payload obliges an external executor to file a
-/// terminal receipt. `community.engage.request` is the exception: it is
-/// executor-required at dispatch (capability gate) but executed by the
-/// internal community worker, whose `community_posts` row is the receipt.
+/// terminal receipt. Three exceptions among the executor-required kinds:
+/// `community.engage.request` is capability-gated at dispatch but executed by
+/// the internal community worker, whose `community_posts` row is the receipt;
+/// `play.step.run` executes entirely in-process (`plays.rs` commits the step's
+/// writes in the dispatch transaction) and its outward emit is the audit of
+/// that work — nobody external ever files a report, so without the carve-out
+/// every succeeded play step was flagged "missing receipt" 24h later and
+/// patched back with a fabricated reconciliation report; `show.task.escalate`
+/// is emit-and-record — the dispatch either writes the report internally
+/// (`PostShowReport`) or emits `crowdrelay.show.task_attention_required`,
+/// and that durable outbox row *is* the escalation's record (it is what
+/// `ops/attention` reads for `band_notices`). Production proved there is no
+/// reporter on the other side: 92 synthesized reconciliations against 1 real
+/// receipt. A failed emit still resolves `failed` through the outbox sweep,
+/// so dead delivery keeps its alarm.
 fn requires_terminal_receipt(payload: &AutopilotActionPayload) -> bool {
     payload_requires_executor(payload)
         && !matches!(
             payload,
             AutopilotActionPayload::RequestCommunityEngagement { .. }
+                | AutopilotActionPayload::RunPlayStep { .. }
+                | AutopilotActionPayload::EscalateShowTask { .. }
         )
 }
 
@@ -1050,6 +1064,39 @@ mod tests {
     fn community_engagement_does_not_require_a_receipt() {
         // The community worker's community_posts row is the receipt.
         assert!(!requires_terminal_receipt(&community_payload()));
+    }
+
+    #[test]
+    fn play_step_does_not_require_a_receipt() {
+        // A play step executes in-process — the step's writes commit in the
+        // dispatch transaction and the outward emit is only the audit of that
+        // work. Requiring an executor receipt false-positives every succeeded
+        // play step into the missing-receipt sweep a day later.
+        let payload = AutopilotActionPayload::RunPlayStep {
+            play_id: crowdrelay_domain::ids::PlayId::from_uuid(Uuid::nil()),
+            play_kind: crowdrelay_domain::plays::PlayKind::FollowAskLadder,
+            step_index: 0,
+            step_kind: crowdrelay_domain::plays::PlayStepKind::FollowAskFirst,
+            event_id: None,
+            fan_id: None,
+            template_key: "k".to_owned(),
+        };
+        assert!(!requires_terminal_receipt(&payload));
+    }
+
+    #[test]
+    fn show_task_escalation_does_not_require_a_receipt() {
+        // The escalation's emit is its record: `PostShowReport` writes the
+        // report inside dispatch, every other task kind emits
+        // `crowdrelay.show.task_attention_required` — a durable outbox row
+        // that `ops/attention` reads as a band notice. Nothing external files
+        // a receipt (production: 92 synthesized vs 1 real), so the gap sweep
+        // was fabricating reconciliation reports for work that completed.
+        let payload = AutopilotActionPayload::EscalateShowTask {
+            event_id: crowdrelay_domain::ids::EventId::from_uuid(Uuid::nil()),
+            task: crowdrelay_domain::show_operations::ShowTaskKind::PostShowReport,
+        };
+        assert!(!requires_terminal_receipt(&payload));
     }
 
     #[test]

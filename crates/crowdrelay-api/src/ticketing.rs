@@ -304,6 +304,119 @@ pub struct TicketTypeView {
     active: bool,
 }
 
+/// The fan-facing sale read: everything a fan needs to choose and buy a
+/// ticket, and nothing else.
+///
+/// The admin view's `capacity`/`sold`/`reserved` are the venue's operating
+/// numbers — on a public, revalidatable route they tell a scalper exactly
+/// how the night is selling and tell a fan "nobody is coming" on a fresh
+/// show. `availability` is the honest scarcity word the public inventory
+/// bar renders instead of a raw proportion. `available` stays because
+/// checkout needs a bound and "how many tickets can I still buy" is the
+/// fan's own question, not an operating secret.
+#[derive(Clone, Debug, Serialize)]
+pub struct PublicTicketSaleView {
+    event_id: Uuid,
+    event_slug: String,
+    event_title: String,
+    event_status: String,
+    venue: Option<String>,
+    timezone: String,
+    #[serde(with = "time::serde::rfc3339")]
+    starts_at: OffsetDateTime,
+    currency: String,
+    vat_rate_basis_points: i32,
+    /// `plenty` while stock is comfortable, `low` inside the last fifth,
+    /// `sold_out` at zero — the band virya's bar renders; the exact pool
+    /// size never leaves the staff surfaces.
+    availability: &'static str,
+    available: i32,
+    max_per_order: i32,
+    #[serde(with = "time::serde::rfc3339")]
+    sales_open_at: OffsetDateTime,
+    #[serde(with = "time::serde::rfc3339")]
+    sales_close_at: OffsetDateTime,
+    active: bool,
+    sales_state: &'static str,
+    ticket_types: Vec<PublicTicketTypeView>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct PublicTicketTypeView {
+    id: Uuid,
+    slug: String,
+    name: String,
+    description: Option<String>,
+    price_gross_minor: i64,
+    /// Same band vocabulary as the sale — an uncapped tier draws from the
+    /// sale's pool, so it inherits the sale's band rather than inventing a
+    /// proportion from a denominator it does not have.
+    availability: &'static str,
+    available: i32,
+    sort_order: i32,
+    active: bool,
+}
+
+/// The scarcity word for `available` out of `capacity`. Twenty percent is
+/// the same line virya's inventory bar draws for "last tickets" — the server
+/// names the band so the page does not re-derive it from a leaked count.
+fn availability_band(available: i64, capacity: i64) -> &'static str {
+    if available <= 0 {
+        "sold_out"
+    } else if capacity > 0 && available * 5 <= capacity {
+        "low"
+    } else {
+        "plenty"
+    }
+}
+
+impl From<TicketSaleView> for PublicTicketSaleView {
+    fn from(sale: TicketSaleView) -> Self {
+        let availability = availability_band(i64::from(sale.available), i64::from(sale.capacity));
+        Self {
+            event_id: sale.event_id,
+            event_slug: sale.event_slug,
+            event_title: sale.event_title,
+            event_status: sale.event_status,
+            venue: sale.venue,
+            timezone: sale.timezone,
+            starts_at: sale.starts_at,
+            currency: sale.currency,
+            vat_rate_basis_points: sale.vat_rate_basis_points,
+            availability,
+            available: sale.available,
+            max_per_order: sale.max_per_order,
+            sales_open_at: sale.sales_open_at,
+            sales_close_at: sale.sales_close_at,
+            active: sale.active,
+            sales_state: sale.sales_state,
+            ticket_types: sale
+                .ticket_types
+                .into_iter()
+                .map(|t| {
+                    let band = match t.capacity {
+                        Some(capacity) => {
+                            availability_band(i64::from(t.available), i64::from(capacity))
+                        }
+                        None => availability,
+                    };
+                    PublicTicketTypeView {
+                        id: t.id,
+                        slug: t.slug,
+                        name: t.name,
+                        description: t.description,
+                        price_gross_minor: t.price_gross_minor,
+                        availability: band,
+                        available: t.available,
+                        sort_order: t.sort_order,
+                        active: t.active,
+                    }
+                })
+                .collect(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct TicketOrderView {
     order_id: Uuid,

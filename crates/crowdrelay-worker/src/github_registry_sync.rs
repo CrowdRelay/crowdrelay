@@ -92,6 +92,7 @@ struct CycleCounts {
     venues_imported: u64,
     venue_refusals: usize,
     venues_unknown_city: u64,
+    venues_failed: u64,
     peer_acts_imported: u64,
     peer_act_refusals: usize,
     peer_acts_unresolved_city: u64,
@@ -100,6 +101,19 @@ struct CycleCounts {
     peer_acts_failed: u64,
     registry_dump_sheets: usize,
     agent_sheets: usize,
+    /// Agent rows the seed upsert filed into `booking_agents` itself —
+    /// new, refreshed, and failed-to-write.
+    agents_imported: u64,
+    agents_refreshed: u64,
+    agents_failed: u64,
+    /// Beacon-registry rows: newly inserted, refreshed in place, refused
+    /// by the parser, imported global because the city did not resolve,
+    /// and failed-to-write.
+    beacons_imported: u64,
+    beacons_refreshed: u64,
+    beacon_refusals: usize,
+    beacons_unresolved_city: u64,
+    beacons_failed: u64,
 }
 
 impl GithubRegistrySyncWorker {
@@ -243,6 +257,7 @@ impl GithubRegistrySyncWorker {
                     counts.venues_imported += file_counts.venues_imported;
                     counts.venue_refusals += file_counts.venue_refusals;
                     counts.venues_unknown_city += file_counts.venues_unknown_city;
+                    counts.venues_failed += file_counts.venues_failed;
                     counts.peer_acts_imported += file_counts.peer_acts_imported;
                     counts.peer_act_refusals += file_counts.peer_act_refusals;
                     counts.peer_acts_unresolved_city += file_counts.peer_acts_unresolved_city;
@@ -251,6 +266,14 @@ impl GithubRegistrySyncWorker {
                     counts.peer_acts_failed += file_counts.peer_acts_failed;
                     counts.registry_dump_sheets += file_counts.registry_dump_sheets;
                     counts.agent_sheets += file_counts.agent_sheets;
+                    counts.agents_imported += file_counts.agents_imported;
+                    counts.agents_refreshed += file_counts.agents_refreshed;
+                    counts.agents_failed += file_counts.agents_failed;
+                    counts.beacons_imported += file_counts.beacons_imported;
+                    counts.beacons_refreshed += file_counts.beacons_refreshed;
+                    counts.beacon_refusals += file_counts.beacon_refusals;
+                    counts.beacons_unresolved_city += file_counts.beacons_unresolved_city;
+                    counts.beacons_failed += file_counts.beacons_failed;
                 }
                 Err(error) => {
                     counts.files_failed += 1;
@@ -269,6 +292,7 @@ impl GithubRegistrySyncWorker {
             venues = counts.venues_imported,
             venue_refusals = counts.venue_refusals,
             venues_unknown_city = counts.venues_unknown_city,
+            venues_failed = counts.venues_failed,
             peer_acts = counts.peer_acts_imported,
             peer_act_refusals = counts.peer_act_refusals,
             peer_acts_unresolved_city = counts.peer_acts_unresolved_city,
@@ -278,6 +302,14 @@ impl GithubRegistrySyncWorker {
             rows_without_email = counts.rows_without_email,
             registry_dumps = counts.registry_dump_sheets,
             agent_sheets = counts.agent_sheets,
+            agents_imported = counts.agents_imported,
+            agents_refreshed = counts.agents_refreshed,
+            agents_failed = counts.agents_failed,
+            beacons = counts.beacons_imported,
+            beacons_refreshed = counts.beacons_refreshed,
+            beacon_refusals = counts.beacon_refusals,
+            beacons_unresolved_city = counts.beacons_unresolved_city,
+            beacons_failed = counts.beacons_failed,
             "github registry sync cycle"
         );
     }
@@ -367,12 +399,21 @@ impl GithubRegistrySyncWorker {
             parse_delimited(&bytes, b',').map(|g| vec![g])?
         };
 
-        let harvest =
-            harvest_grids(self.repo.pool(), self.workspace_id, &entry.name, sheets).await?;
+        let harvest = harvest_grids(
+            self.repo.pool(),
+            self.workspace_id,
+            &entry.name,
+            sheets,
+            // The GitHub mirror is the operator's own repo — registry
+            // claims apply the same as the Drive folder's.
+            crate::sheet_intake::SheetTrust::RegistryTrusted,
+        )
+        .await?;
         counts.rows_without_email = harvest.rows_without_email;
         counts.venues_imported = harvest.venues_imported;
         counts.venue_refusals = harvest.venue_refusals;
         counts.venues_unknown_city = harvest.venues_unknown_city;
+        counts.venues_failed = harvest.venues_failed;
         counts.peer_acts_imported = harvest.peer_acts_imported;
         counts.peer_act_refusals = harvest.peer_act_refusals;
         counts.peer_acts_unresolved_city = harvest.peer_acts_unresolved_city;
@@ -381,6 +422,14 @@ impl GithubRegistrySyncWorker {
         counts.peer_acts_failed = harvest.peer_acts_failed;
         counts.registry_dump_sheets = harvest.registry_dump_sheets;
         counts.agent_sheets = harvest.agent_sheets;
+        counts.agents_imported = harvest.agents_imported;
+        counts.agents_refreshed = harvest.agents_refreshed;
+        counts.agents_failed = harvest.agents_failed;
+        counts.beacons_imported = harvest.beacons_imported;
+        counts.beacons_refreshed = harvest.beacons_refreshed;
+        counts.beacon_refusals = harvest.beacon_refusals;
+        counts.beacons_unresolved_city = harvest.beacons_unresolved_city;
+        counts.beacons_failed = harvest.beacons_failed;
         let contacts = harvest.contacts;
         let saw_email_column = harvest.saw_email_column;
         let rows_read = harvest.rows_read;
@@ -395,6 +444,7 @@ impl GithubRegistrySyncWorker {
                 &file_id,
                 &entry.name,
                 &contacts,
+                true,
                 true,
             )
             .await

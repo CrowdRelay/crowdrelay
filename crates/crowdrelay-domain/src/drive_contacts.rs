@@ -29,6 +29,26 @@ pub struct ExtractedContact {
     /// verdict claims nothing either way.
     pub staged_status: Option<String>,
     pub notes: Option<String>,
+    /// Every column no role claimed, keyed by its normalised header —
+    /// `website`, `social`, `country`, `confidence` and friends carry real
+    /// signal a contacts-sheet schema has no field for, so they ride into
+    /// `drive_contacts.metadata` rather than being silently dropped.
+    /// Empty on header-extracted contacts (mail rows carry no cells).
+    pub extras: std::collections::BTreeMap<String, String>,
+}
+
+impl ExtractedContact {
+    /// Columns no role claimed, folded into the `metadata.intake` envelope
+    /// the contact row carries. An empty extras map must produce `{}` — a
+    /// literal `{"intake":{}}` would clobber a previous file's extras on
+    /// `||` merge.
+    pub fn intake_metadata(&self) -> serde_json::Value {
+        if self.extras.is_empty() {
+            serde_json::json!({})
+        } else {
+            serde_json::json!({ "intake": self.extras })
+        }
+    }
 }
 
 /// What `extract_contacts` did, so the sync report is honest about files
@@ -174,10 +194,11 @@ fn kind_for(raw: &str) -> Option<&'static str> {
     let v = v.replace([' ', '-'], "_");
     match v.as_str() {
         "fan" | "subscriber" | "mailing_list" | "listener" | "follower" => Some("fan"),
-        "press" | "journalist" | "media" | "editor" | "writer" | "blog" | "blogger" => {
-            Some("press")
+        "press" | "journalist" | "media" | "local_media" | "editor" | "writer" | "blog"
+        | "blogger" => Some("press"),
+        "radio" | "radio_show" | "radio_station" | "independent_radio" | "dj" | "airplay" => {
+            Some("radio")
         }
-        "radio" | "radio_show" | "radio_station" | "dj" | "airplay" => Some("radio"),
         "playlist" | "curator" | "playlist_curator" | "dsp" => Some("playlist"),
         "media_patronage" | "patronage" | "patron" | "sponsor" | "partner" => {
             Some("media_patronage")
@@ -195,7 +216,9 @@ fn kind_for(raw: &str) -> Option<&'static str> {
         // "agent" was left unmapped while the only landing zones were
         // promoter (wrong direction) or press; booking_agents is the
         // home that makes the mapping safe.
-        "booking_agent" | "talent_buyer" | "agent" => Some("booking_agent"),
+        "booking_agent" | "talent_buyer" | "agent" | "booking_agency" | "agency" => {
+            Some("booking_agent")
+        }
         "venue" | "room" | "hall" | "live_venue" | "concert_venue" | "music_venue" => Some("venue"),
         "festival" | "fest" | "festival_organizer" | "festival_organiser" => Some("festival"),
         _ => None,
@@ -287,6 +310,21 @@ pub fn extract_contacts(grid: &[Vec<String>]) -> ExtractionReport {
         report.rows_read = rows.len();
         return report;
     }
+    extract_contacts_unchecked(grid)
+}
+
+/// `extract_contacts` without the registry-dump guard. The one caller that
+/// needs it is intake's untrusted path, where a registry-shaped sheet that
+/// arrived over inbound mail is deliberately defanged into a contact list —
+/// its rows still stage for review even though its registry claims are
+/// refused. Trusted transports keep the guard: a registry readout must
+/// never stage the database's own rows back as new contacts.
+pub fn extract_contacts_unchecked(grid: &[Vec<String>]) -> ExtractionReport {
+    let mut report = ExtractionReport::default();
+    let Some((headers, rows)) = grid.split_first() else {
+        report.no_email_column = true;
+        return report;
+    };
     let Some(email_col) = find_column(headers, rows, EMAIL_HEADERS, header_contains, true, &[])
     else {
         report.no_email_column = true;
@@ -345,6 +383,19 @@ pub fn extract_contacts(grid: &[Vec<String>]) -> ExtractionReport {
         false,
         &claimed,
     );
+    claimed.extend(city_col);
+
+    // Everything no role claimed, kept by normalised header name — the
+    // sheet's own words for fields the staging table does not have.
+    let extra_columns: Vec<(usize, String)> = headers
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| !claimed.contains(i))
+        .filter_map(|(i, h)| {
+            let name = h.trim().to_lowercase().replace([' ', '-'], "_");
+            (!name.is_empty()).then_some((i, name))
+        })
+        .collect();
 
     let cell = |row: &[String], column: Option<usize>| {
         column.and_then(|c| row.get(c)).and_then(|v| clean(v))
@@ -368,6 +419,13 @@ pub fn extract_contacts(grid: &[Vec<String>]) -> ExtractionReport {
             report.rows_without_email += 1;
             continue;
         };
+        let extras: std::collections::BTreeMap<String, String> = extra_columns
+            .iter()
+            .filter_map(|(i, name)| {
+                let value = row.get(*i).map(|v| v.trim()).filter(|v| !v.is_empty())?;
+                Some((name.clone(), value.chars().take(500).collect()))
+            })
+            .collect();
         by_email.insert(
             email.as_str().to_owned(),
             ExtractedContact {
@@ -380,6 +438,7 @@ pub fn extract_contacts(grid: &[Vec<String>]) -> ExtractionReport {
                 staged_status: cell(row, status_col)
                     .and_then(|v| status_for(&v).map(str::to_owned)),
                 notes: capped(cell(row, notes_col), 2000),
+                extras,
             },
         );
     }
@@ -726,5 +785,32 @@ mod tests {
         );
         assert_eq!(contacts.len(), 1);
         assert_eq!(contacts[0].display_name.as_deref(), Some("Alice"));
+    }
+
+    #[test]
+    fn unclaimed_columns_ride_into_extras() {
+        // Website, Country and Confidence name no staging field — they
+        // land in extras keyed by their normalised header rather than
+        // being silently dropped.
+        let report = extract_contacts(&grid(&[
+            &["Email", "Name", "Website", "Country", "Confidence"],
+            &["jane@press.com", "Jane", "https://jane.test", "PL", "High"],
+        ]));
+        let contact = &report.contacts[0];
+        assert_eq!(
+            contact.extras.get("website").map(String::as_str),
+            Some("https://jane.test")
+        );
+        assert_eq!(
+            contact.extras.get("country").map(String::as_str),
+            Some("PL")
+        );
+        assert_eq!(
+            contact.extras.get("confidence").map(String::as_str),
+            Some("High")
+        );
+        // Claimed columns do not double-land.
+        assert!(!contact.extras.contains_key("email"));
+        assert!(!contact.extras.contains_key("name"));
     }
 }

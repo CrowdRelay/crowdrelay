@@ -341,6 +341,9 @@ pub async fn upload_contacts(
             file_name,
             &report.contacts,
             false,
+            // The control-plane upload is operator-initiated — its agent
+            // verdicts are trusted the way the synced registry's are.
+            true,
         )
         .await
     {

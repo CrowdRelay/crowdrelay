@@ -378,6 +378,33 @@ pub struct BandNotice {
     pub created_at: OffsetDateTime,
 }
 
+/// An LLM worker's result the admission gate refused.
+///
+/// `agent_outcomes` rows are written by the agents service and judged by the
+/// deterministic worker: a `rejected` status means the output failed
+/// verification — malformed payload, confidence out of range, a task whose
+/// preconditions no longer hold. That is the brain declining bad work, which
+/// is healthy, but a sustained rejection rate is the worker and the gate
+/// disagreeing — a prompt or a contract to fix, not noise to absorb. Until
+/// this view the only surface was the watchdog's aggregate alert: something
+/// was being refused, never what or why.
+#[derive(Debug, Serialize, FromRow)]
+pub struct RejectedAgentOutcome {
+    pub id: Uuid,
+    /// Which worker produced the refused output — the CHECK-constrained
+    /// vocabulary (`press_pitch`, `audience_segments`, …).
+    pub kind: String,
+    /// The gate's own words for the refusal. NULL means the row predates
+    /// reason capture — still shown, a rejection without its reason is still
+    /// a rejection.
+    pub rejection_reason: Option<String>,
+    /// The agents-service task that produced it — the trace handle into
+    /// `ops/trace` for the full decision chain.
+    pub task_id: Uuid,
+    #[serde(with = "time::serde::rfc3339")]
+    pub created_at: OffsetDateTime,
+}
+
 #[derive(Debug, Serialize, FromRow)]
 pub struct DeliveryItem {
     id: Uuid,

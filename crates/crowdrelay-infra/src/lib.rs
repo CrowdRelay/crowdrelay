@@ -27,6 +27,7 @@ pub mod attestation;
 pub mod audience_graph;
 pub mod autopilot;
 pub mod band_listing;
+pub mod beacon_seed;
 pub mod beacon_signal;
 pub mod booking_agents;
 pub mod commerce;

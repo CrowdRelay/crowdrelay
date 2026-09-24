@@ -395,6 +395,18 @@ async fn gate_outward_emission(
         let body = payload.get("body").and_then(Value::as_str).map(str::to_owned);
         let title = payload.get("title").and_then(Value::as_str).map(str::to_owned);
         if draft.is_some() || body.is_some() {
+            // Community engagement is scoped per target: a verbatim repeat at
+            // the *same* community is the broadcast this gate exists to stop,
+            // while the same approved copy at a different community is exactly
+            // what a relay batch is. Other third-party kinds (outreach,
+            // representation) keep the workspace-wide rule — the same pitch
+            // text to many venues remains refused. A NULL bind therefore means
+            // "unscoped", not "match only targetless rows".
+            let target = if event_type == "crowdrelay.community.engagement_requested" {
+                payload.get("target_id").and_then(Value::as_str).map(str::to_owned)
+            } else {
+                None
+            };
             let duplicated = sqlx::query_scalar::<_, bool>(
                 r#"
                 SELECT EXISTS (
@@ -406,6 +418,7 @@ async fn gate_outward_emission(
                     WHERE emission.workspace_id = $1
                       AND outbound.event_type = $2
                       AND emission.action_id <> $3
+                      AND ($7::text IS NULL OR outbound.payload->>'target_id' = $7)
                       AND (
                           ($4::jsonb IS NOT NULL AND outbound.payload->'draft' = $4)
                           OR ($5::text IS NOT NULL
@@ -421,6 +434,7 @@ async fn gate_outward_emission(
             .bind(draft)
             .bind(body)
             .bind(title)
+            .bind(target)
             .fetch_one(&mut **transaction)
             .await
             .map_err(map_sqlx)?;

@@ -312,13 +312,26 @@ pub fn parse_seed_row(row: &SeedRow<'_>) -> Result<SeededVenue, SeedRefusal> {
 /// is a venue sheet with a stray column, not a band sheet.
 #[must_use]
 pub fn is_seed_sheet(header: &[String]) -> bool {
-    let has = |name: &str| {
-        header
-            .iter()
-            .any(|cell| canonical_column(cell) == Some(name))
-    };
-    let venue_pin = has(columns::NAME) && has(columns::CITY) && has(columns::SOURCE_URL);
-    let venue_specific = [
+    venue_pin(header) && (venue_specific(header) || !crate::peer_act_seed::is_seed_sheet(header))
+}
+
+/// `is_seed_sheet` without its band-fallback arm — true only when a
+/// venue-exclusive column is also present. Exported so an overlapping
+/// claim signature (the beacon sheet's) can let an unambiguous venue
+/// sheet through without being swallowed by the looser full pin.
+#[must_use]
+pub fn is_unambiguous_venue_sheet(header: &[String]) -> bool {
+    venue_pin(header) && venue_specific(header)
+}
+
+fn venue_pin(header: &[String]) -> bool {
+    has_column(header, columns::NAME)
+        && has_column(header, columns::CITY)
+        && has_column(header, columns::SOURCE_URL)
+}
+
+fn venue_specific(header: &[String]) -> bool {
+    [
         columns::ADDRESS,
         columns::CAPACITY,
         columns::AUDIENCE_GENRE,
@@ -329,8 +342,13 @@ pub fn is_seed_sheet(header: &[String]) -> bool {
         columns::OUTREACH_ANGLE,
     ]
     .iter()
-    .any(|name| has(name));
-    venue_pin && (venue_specific || !crate::peer_act_seed::is_seed_sheet(header))
+    .any(|name| has_column(header, name))
+}
+
+fn has_column(header: &[String], name: &str) -> bool {
+    header
+        .iter()
+        .any(|cell| canonical_column(cell) == Some(name))
 }
 
 /// The column this header cell names, if it names one.

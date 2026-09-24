@@ -1992,7 +1992,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/TicketSale'
+                $ref: '#/components/schemas/PublicTicketSale'
         '404':
           $ref: '#/components/responses/PrivateProblem'
         '503':
@@ -16846,6 +16846,125 @@ components:
         reserved:
           type: integer
           minimum: 0
+        available:
+          type: integer
+          minimum: 0
+        sort_order:
+          type: integer
+        active:
+          type: boolean
+    PublicTicketSale:
+      type: object
+      additionalProperties: false
+      description: >-
+        The fan-facing sale read. `capacity`, `sold` and `reserved` are the
+        venue's operating numbers and stay on the admin/staff surfaces —
+        the public route answers "can I still go" with `available` plus the
+        `availability` band, never with the night's sales velocity.
+      required:
+      - event_id
+      - event_slug
+      - event_title
+      - event_status
+      - venue
+      - timezone
+      - starts_at
+      - currency
+      - vat_rate_basis_points
+      - availability
+      - available
+      - max_per_order
+      - sales_open_at
+      - sales_close_at
+      - active
+      - sales_state
+      - ticket_types
+      properties:
+        event_id:
+          type: string
+          format: uuid
+        event_slug:
+          type: string
+        event_title:
+          type: string
+        event_status:
+          type: string
+          enum: [draft, published, cancelled, completed]
+        venue:
+          type:
+          - string
+          - 'null'
+        timezone:
+          type: string
+          example: Europe/Warsaw
+        starts_at:
+          type: string
+          format: date-time
+        currency:
+          type: string
+        vat_rate_basis_points:
+          type: integer
+        availability:
+          type: string
+          enum: [plenty, low, sold_out]
+          description: >-
+            The scarcity band a public surface renders: `plenty` while stock
+            is comfortable, `low` inside the last fifth, `sold_out` at zero.
+        available:
+          type: integer
+          minimum: 0
+          description: Tickets a new reservation can still take — the fan's own bound, not the venue's operating detail.
+        max_per_order:
+          type: integer
+        sales_open_at:
+          type: string
+          format: date-time
+        sales_close_at:
+          type: string
+          format: date-time
+        active:
+          type: boolean
+        sales_state:
+          type: string
+          enum: [event_unavailable, inactive, upcoming, closed, sold_out, open]
+        ticket_types:
+          type: array
+          items:
+            $ref: '#/components/schemas/PublicTicketType'
+    PublicTicketType:
+      type: object
+      additionalProperties: false
+      required:
+      - id
+      - slug
+      - name
+      - description
+      - price_gross_minor
+      - availability
+      - available
+      - sort_order
+      - active
+      properties:
+        id:
+          type: string
+          format: uuid
+        slug:
+          type: string
+        name:
+          type: string
+        description:
+          type:
+          - string
+          - 'null'
+        price_gross_minor:
+          type: integer
+          format: int64
+        availability:
+          type: string
+          enum: [plenty, low, sold_out]
+          description: >-
+            The tier's own band when it caps its pool; an uncapped tier
+            inherits the sale's band — it draws from the same pool.
         available:
           type: integer
           minimum: 0

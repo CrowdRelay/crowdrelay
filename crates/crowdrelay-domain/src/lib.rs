@@ -62,6 +62,7 @@ pub mod audience_graph;
 pub mod audience_lifecycle;
 pub mod autonomy;
 pub mod beacon_release;
+pub mod beacon_seed;
 pub mod beacons;
 pub mod booking;
 pub mod booking_agent;

@@ -52,6 +52,9 @@ pub struct ProcessRelayRun {
     expired: i64,
     queued: i64,
     posting: i64,
+    /// Deferred on Reddit's 429 backoff — counted apart from `posting`
+    /// because a parked delivery is a different fact from one in flight.
+    rate_limited: i64,
     posted: i64,
     manual: i64,
     failed: i64,
@@ -153,6 +156,7 @@ async fn load_relay_runs(state: &OpsState) -> Result<Vec<ProcessRelayRun>, OpsEr
             COALESCE(act.expired, 0) AS expired,
             COALESCE(act.queued, 0) AS queued,
             COALESCE(act.posting, 0) AS posting,
+            COALESCE(act.rate_limited, 0) AS rate_limited,
             COALESCE(act.posted, 0) AS posted,
             COALESCE(act.manual, 0) AS manual,
             COALESCE(act.failed, 0) + COALESCE(dfail.n, 0) AS failed,
@@ -181,6 +185,7 @@ async fn load_relay_runs(state: &OpsState) -> Result<Vec<ProcessRelayRun>, OpsEr
                 count(*) FILTER (WHERE st = 'expired') AS expired,
                 count(*) FILTER (WHERE st = 'queued') AS queued,
                 count(*) FILTER (WHERE st = 'posting') AS posting,
+                count(*) FILTER (WHERE st = 'rate_limited') AS rate_limited,
                 count(*) FILTER (WHERE st = 'posted') AS posted,
                 count(*) FILTER (WHERE st = 'manual') AS manual,
                 count(*) FILTER (WHERE st = 'failed') AS failed,
@@ -194,7 +199,8 @@ async fn load_relay_runs(state: &OpsState) -> Result<Vec<ProcessRelayRun>, OpsEr
                         WHEN p.status = 'awaiting_manual_post' THEN 'manual'
                         WHEN p.status = 'failed' THEN 'failed'
                         WHEN p.status = 'cancelled' THEN 'skipped'
-                        WHEN p.status IN ('pending', 'posting', 'rate_limited') THEN 'posting'
+                        WHEN p.status IN ('pending', 'posting') THEN 'posting'
+                        WHEN p.status = 'rate_limited' THEN 'rate_limited'
                         WHEN le.status = 'awaiting_approval'
                              AND (le.approval_expires_at IS NULL
                                   OR le.approval_expires_at > now()) THEN 'awaiting'
@@ -342,6 +348,7 @@ async fn load_relay_runs(state: &OpsState) -> Result<Vec<ProcessRelayRun>, OpsEr
             expired: row.expired,
             queued: row.queued,
             posting: row.posting,
+            rate_limited: row.rate_limited,
             posted: row.posted,
             manual: row.manual,
             failed: row.failed,
@@ -375,6 +382,7 @@ struct RelayRunRow {
     expired: i64,
     queued: i64,
     posting: i64,
+    rate_limited: i64,
     posted: i64,
     manual: i64,
     failed: i64,
@@ -401,6 +409,7 @@ pub struct ProcessRelayRunDetail {
     body: Option<String>,
     #[serde(with = "time::serde::rfc3339::option")]
     occurred_at: Option<OffsetDateTime>,
+    #[serde(with = "time::serde::rfc3339")]
     decided_at: OffsetDateTime,
     confidence_bp: i32,
     /// The batch ask — the write path is per-source, so the approval step
@@ -438,8 +447,8 @@ pub struct RelayTarget {
     display_name: Option<String>,
     confidence_bp: Option<i32>,
     /// `deciding` (draft pending/failed before an approval existed),
-    /// `awaiting_you`, `expired`, `queued`, `posting`, `posted`, `manual`,
-    /// `failed`, `skipped`.
+    /// `awaiting_you`, `expired`, `queued`, `posting`, `rate_limited`,
+    /// `posted`, `manual`, `failed`, `skipped`.
     state: String,
     action_id: Option<String>,
     community_post_id: Option<String>,
@@ -449,6 +458,10 @@ pub struct RelayTarget {
     #[serde(with = "time::serde::rfc3339::option")]
     approval_expires_at: Option<OffsetDateTime>,
     post_status: Option<String>,
+    /// When a `rate_limited` delivery retries — the answer to "why is this
+    /// still posting" that the status word alone cannot give.
+    #[serde(with = "time::serde::rfc3339::option")]
+    rate_limited_until: Option<OffsetDateTime>,
     reddit_post_url: Option<String>,
     #[serde(with = "time::serde::rfc3339::option")]
     posted_at: Option<OffsetDateTime>,
@@ -605,6 +618,7 @@ async fn load_relay_run(
             e.image_url,
             p.id::text AS community_post_id,
             p.status AS post_status,
+            p.rate_limited_until,
             p.reddit_post_url,
             p.posted_at,
             latest.score,
@@ -638,7 +652,8 @@ async fn load_relay_run(
         -- Scoped through the action's source_id so a post from an earlier
         -- run on the same community never shows as this run's receipt.
         LEFT JOIN LATERAL (
-            SELECT p.id, p.status, p.reddit_post_url, p.posted_at, p.error_message
+            SELECT p.id, p.status, p.reddit_post_url, p.posted_at, p.error_message,
+                   p.rate_limited_until
             FROM community_posts p
             JOIN autopilot_actions pa
               ON pa.workspace_id = p.workspace_id AND pa.id = p.action_id
@@ -795,6 +810,7 @@ struct RelayTargetRow {
     image_url: Option<String>,
     community_post_id: Option<String>,
     post_status: Option<String>,
+    rate_limited_until: Option<OffsetDateTime>,
     reddit_post_url: Option<String>,
     posted_at: Option<OffsetDateTime>,
     score: Option<i32>,
@@ -821,7 +837,11 @@ impl From<RelayTargetRow> for RelayTarget {
             Some("awaiting_manual_post") => "manual",
             Some("failed") => "failed",
             Some("cancelled") => "skipped",
-            Some("pending") | Some("posting") | Some("rate_limited") => "posting",
+            Some("pending") | Some("posting") => "posting",
+            // A deferred delivery is not still-posting — Reddit refused it
+            // and the retry clock is the fact the operator needs, so it gets
+            // its own word instead of reading as generic motion.
+            Some("rate_limited") => "rate_limited",
             _ => match row.action_status.as_deref() {
                 // No approval ask yet — the drafting dispatch decides whether
                 // this reads as still-moving or dead.
@@ -857,6 +877,7 @@ impl From<RelayTargetRow> for RelayTarget {
             image_url: row.image_url,
             approval_expires_at: row.approval_expires_at,
             post_status: row.post_status,
+            rate_limited_until: row.rate_limited_until,
             reddit_post_url: row.reddit_post_url,
             posted_at: row.posted_at,
             score: row.score,
@@ -895,6 +916,7 @@ mod target_state_tests {
             image_url: None,
             community_post_id: None,
             post_status: None,
+            rate_limited_until: None,
             reddit_post_url: None,
             posted_at: None,
             score: None,
@@ -967,7 +989,7 @@ mod target_state_tests {
             ("cancelled", "skipped"),
             ("pending", "posting"),
             ("posting", "posting"),
-            ("rate_limited", "posting"),
+            ("rate_limited", "rate_limited"),
         ] {
             let mut r = row();
             r.action_status = Some("succeeded".to_owned());

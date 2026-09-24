@@ -501,7 +501,7 @@ async fn researched_fact(
 /// local ones a Polish researcher writes — for the countries the catalogue
 /// can plausibly hold. `None` means "don't constrain": the city match falls
 /// back to the global unique-name rule rather than guessing a country.
-fn resolve_country_code(country: &str) -> Option<&'static str> {
+pub(crate) fn resolve_country_code(country: &str) -> Option<&'static str> {
     let code = match country.trim().to_lowercase().as_str() {
         "germany" | "deutschland" | "niemcy" | "de" => "DE",
         "poland" | "polska" | "pl" => "PL",
