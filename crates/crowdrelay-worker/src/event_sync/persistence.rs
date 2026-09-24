@@ -278,6 +278,11 @@ async fn upsert_event(
                   $4::text IS NOT NULL
                   AND event.external_event_url = $4
                   AND (event.source_id IS NULL OR event.source_id = $2)
+                  -- The URL identifies the same event, but the status rule is
+                  -- the same as the manual-row arm: adoption must not publish
+                  -- a draft, resurrect a cancelled show, or reopen a finished
+                  -- one — the UPDATE below sets status='published' regardless.
+                  AND event.status NOT IN ('draft', 'cancelled', 'completed')
               )
               OR (
                   event.source_id IS NULL
