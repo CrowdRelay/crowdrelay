@@ -71,7 +71,7 @@ pub struct AuthorizeParams {
 
 /// Redirects the operator to TikTok's OAuth consent page. Admin-authenticated.
 pub async fn authorize(
-    State(_state): State<crate::AppState>,
+    State(state): State<crate::AppState>,
     Query(params): Query<AuthorizeParams>,
     headers: HeaderMap,
 ) -> Response {
@@ -80,7 +80,8 @@ pub async fn authorize(
         Ok(v) if !v.trim().is_empty() => v,
         _ => return Problem::service_unavailable(request_id_value).into_response(),
     };
-    let redirect_uri = build_redirect_uri();
+    let redirect_uri =
+        crate::oauth_redirect::oauth_redirect_uri(state.public_api_origin.as_ref(), "tiktok");
     let state = uuid::Uuid::new_v4().to_string();
 
     // Store the post-connection redirect target in the state cookie so the
@@ -159,7 +160,8 @@ pub async fn callback(
         Ok(v) if !v.trim().is_empty() => v,
         _ => return Problem::service_unavailable(request_id_value).into_response(),
     };
-    let redirect_uri = build_redirect_uri();
+    let redirect_uri =
+        crate::oauth_redirect::oauth_redirect_uri(state.public_api_origin.as_ref(), "tiktok");
 
     // Exchange the authorization code for access + refresh tokens.
     let token_response = state
@@ -271,9 +273,4 @@ pub async fn callback(
         ],
     )
         .into_response()
-}
-
-/// Builds the redirect URI for TikTok OAuth. Uses the public API domain.
-fn build_redirect_uri() -> String {
-    "https://signal-api.virya.music/v1/public/connections/tiktok/callback".to_string()
 }
