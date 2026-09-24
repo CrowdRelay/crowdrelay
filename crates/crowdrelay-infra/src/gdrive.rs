@@ -288,6 +288,7 @@ impl PostgresGDriveRepository {
     /// with two sources. `mark_disappeared` is true only for Drive files:
     /// an edited sheet is the truth about that file, whereas mail is never
     /// re-listed after the history cursor passes it.
+    #[allow(clippy::too_many_arguments)]
     pub async fn upsert_contacts_for_source(
         &self,
         workspace_id: Uuid,
