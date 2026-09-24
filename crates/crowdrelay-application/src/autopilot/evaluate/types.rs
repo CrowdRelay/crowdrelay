@@ -50,6 +50,9 @@ pub struct AutopilotCycleReport {
     /// report: it is the agent saying what it did not do, which is the fact
     /// every other counter here would otherwise hide.
     pub play_steps_skipped: u32,
+    /// Steps settled after sending — counted apart from skips because a
+    /// delivered step is a fact the skip count must never describe.
+    pub play_steps_delivered: u32,
     pub plays_completed: u32,
     /// Claimed placements that reached an answer — confirmed and gone, or never
     /// confirmed at all. Counted apart from anything else because a placement

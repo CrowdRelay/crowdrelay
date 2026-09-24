@@ -387,6 +387,7 @@ impl AutopilotWorker {
                     actions_throttled = report.actions_throttled,
                     plays_started = report.plays_started,
                     play_steps_skipped = report.play_steps_skipped,
+                    play_steps_delivered = report.play_steps_delivered,
                     plays_completed = report.plays_completed,
                     north_star = ?report.north_star_observed,
                     gi_candidates = report.gi_candidates,

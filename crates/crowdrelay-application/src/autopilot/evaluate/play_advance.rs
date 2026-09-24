@@ -32,7 +32,7 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
                     // the next one; the following cycle reads a fresh audience.
                     return Ok(());
                 }
-                PlayDecision::SkipStep { index, reason, .. } => {
+                PlayDecision::SettleStep { index, reason, .. } => {
                     self.repository
                         .settle_play_step(
                             self.workspace_id,
@@ -44,7 +44,16 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
                             now,
                         )
                         .await?;
-                    report.play_steps_skipped = report.play_steps_skipped.saturating_add(1);
+                    // A settle with no reason is a delivered step, not a
+                    // skip — the ledger and the cycle report must not count
+                    // a step that sent among the omissions.
+                    if reason.is_some() {
+                        report.play_steps_skipped =
+                            report.play_steps_skipped.saturating_add(1);
+                    } else {
+                        report.play_steps_delivered =
+                            report.play_steps_delivered.saturating_add(1);
+                    }
                     // The same settle applied to the copy in hand. Without it
                     // the next pass reads the step as still open and settles it
                     // again, which double-counts an omission that happened once.

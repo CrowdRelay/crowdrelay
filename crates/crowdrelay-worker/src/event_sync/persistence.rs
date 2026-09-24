@@ -278,14 +278,29 @@ async fn upsert_event(
                   $4::text IS NOT NULL
                   AND event.external_event_url = $4
                   AND (event.source_id IS NULL OR event.source_id = $2)
+                  -- The URL identifies the same event, but the status rule is
+                  -- the same as the manual-row arm: adoption must not publish
+                  -- a draft, resurrect a cancelled show, or reopen a finished
+                  -- one — the UPDATE below sets status='published' regardless.
+                  AND event.status NOT IN ('draft', 'cancelled', 'completed')
               )
               OR (
                   event.source_id IS NULL
+                  -- A manual row the provider also lists. City alone is not
+                  -- corroboration — two different acts share a city and a
+                  -- night, and an adopted row takes the provider's title,
+                  -- venue and schedule on every later sync — so the venue
+                  -- must agree as well, and the event's own city must not
+                  -- contradict the provider's. Draft, cancelled and
+                  -- completed rows are excluded: adoption must not publish
+                  -- a show the operator has not decided to announce,
+                  -- resurrect a cancelled one, nor reopen a finished one
+                  -- (`status = 'published'` below is unconditional).
+                  AND event.status NOT IN ('draft', 'cancelled', 'completed')
                   AND abs(extract(epoch FROM (event.starts_at - $5))) <= 10800
-                  AND (
-                      ($6::text IS NOT NULL AND lower(btrim(event.venue)) = lower(btrim($6)))
-                      OR ($7::uuid IS NOT NULL AND event.city_id = $7)
-                  )
+                  AND $6::text IS NOT NULL
+                  AND lower(btrim(event.venue)) = lower(btrim($6))
+                  AND ($7::uuid IS NULL OR event.city_id IS NULL OR event.city_id = $7)
               )
           )
         ORDER BY

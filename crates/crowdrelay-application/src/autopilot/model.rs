@@ -1777,12 +1777,13 @@ pub struct TermsSettlement {
     pub reason: Option<TermsRefusal>,
 }
 
-/// Settling a step without delivering it, and why.
+/// Settling a step; `reason` stays `None` for a step that delivered, so
+/// `skip_reason` writes NULL and every reader reports it as delivered.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PlayStepSettlement {
     pub play_id: PlayId,
     pub step_index: u16,
-    pub reason: StepSkipReason,
+    pub reason: Option<StepSkipReason>,
 }
 
 /// One claim about one play, claimed for settlement by the worker.

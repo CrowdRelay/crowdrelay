@@ -178,7 +178,7 @@ async fn a_play_starts_once_reaches_a_fan_once_and_only_finishes_when_every_step
             &PlayStepSettlement {
                 play_id,
                 step_index: 0,
-                reason: StepSkipReason::WindowClosed,
+                reason: Some(StepSkipReason::WindowClosed),
             },
             now,
         )
@@ -401,7 +401,7 @@ async fn a_play_starts_once_reaches_a_fan_once_and_only_finishes_when_every_step
             &PlayStepSettlement {
                 play_id,
                 step_index: 1,
-                reason: StepSkipReason::NoEligibleRecipients,
+                reason: Some(StepSkipReason::NoEligibleRecipients),
             },
             now,
         )

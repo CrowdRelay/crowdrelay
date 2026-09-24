@@ -926,11 +926,13 @@ pub enum PlayDecision {
         class: ActionClass,
         confidence: Confidence,
     },
-    /// Settle this step without sending it, for a stated reason.
-    SkipStep {
+    /// Settle this step. `reason` names why it was skipped and is absent
+    /// when the step delivered — the row's `skip_reason` is NULL for a step
+    /// that sent, whatever closed it afterwards.
+    SettleStep {
         index: u16,
         kind: PlayStepKind,
-        reason: StepSkipReason,
+        reason: Option<StepSkipReason>,
     },
     /// Every step is settled. Nothing further happens under this play.
     Complete,
@@ -965,23 +967,30 @@ pub fn evaluate_play(
         return PlayDecision::Complete;
     };
 
+    // A step that already sent is delivered whatever closes it now — the
+    // sends exist, and `skip_reason` is defined as "present only on a step
+    // that was settled without being delivered". What stopped the rest of
+    // the audience is the outcome ledger's business, not a skip.
+    let delivered = step.recipients_emitted > 0;
+
     if !snapshot.anchor_active {
-        return PlayDecision::SkipStep {
+        return PlayDecision::SettleStep {
             index: step.index,
             kind: step.kind,
-            reason: StepSkipReason::AnchorWithdrawn,
+            reason: (!delivered).then_some(StepSkipReason::AnchorWithdrawn),
         };
     }
 
-    // Past its window the step is settled as skipped whatever else is true. A
-    // gated step nobody approved in time lands here, which is exactly the
-    // intent: it is recorded as skipped, not left pending for ever and not sent
+    // Past its window the step is settled whatever else is true — skipped
+    // when it never sent, delivered when it did. A gated step nobody
+    // approved in time lands here as a skip, which is exactly the intent:
+    // it is recorded as skipped, not left pending for ever and not sent
     // three weeks late.
     if now.unix_timestamp() >= step.expires_at.unix_timestamp() {
-        return PlayDecision::SkipStep {
+        return PlayDecision::SettleStep {
             index: step.index,
             kind: step.kind,
-            reason: StepSkipReason::WindowClosed,
+            reason: (!delivered).then_some(StepSkipReason::WindowClosed),
         };
     }
 
@@ -1003,12 +1012,13 @@ pub fn evaluate_play(
 
     // An audience of nobody settles the step now rather than at expiry. Holding
     // a step open against an empty segment reads as work in progress for as long
-    // as the window lasts, and it is not.
+    // as the window lasts, and it is not. A step that exhausted its audience
+    // mid-send lands here too — it delivered, so no skip reason.
     if matches!(step.kind.audience(), StepAudience::Fans) && snapshot.eligible_recipients == 0 {
-        return PlayDecision::SkipStep {
+        return PlayDecision::SettleStep {
             index: step.index,
             kind: step.kind,
-            reason: StepSkipReason::NoEligibleRecipients,
+            reason: (!delivered).then_some(StepSkipReason::NoEligibleRecipients),
         };
     }
 
@@ -1128,9 +1138,16 @@ mod tests {
 
     fn skip(decision: PlayDecision) -> StepSkipReason {
         match decision {
-            PlayDecision::SkipStep { reason, .. } => reason,
+            PlayDecision::SettleStep {
+                reason: Some(reason),
+                ..
+            } => reason,
             other => panic!("expected a skip, got {other:?}"),
         }
+    }
+
+    fn settled_delivered(decision: PlayDecision) -> bool {
+        matches!(decision, PlayDecision::SettleStep { reason: None, .. })
     }
 
     #[test]
@@ -1222,6 +1239,51 @@ mod tests {
             evaluate_play(&snapshot, PlayPolicy::default(), due),
             PlayDecision::Hold(PlayHold::StepSaturated)
         );
+    }
+
+    #[test]
+    fn a_step_that_sent_settles_delivered_when_its_window_closes() {
+        // The saturated step's sends exist; recording `window_closed` on it
+        // would tell the timeline, the play ledger and the stopped-work
+        // report that work nobody got was work that went out.
+        let mut snapshot = running();
+        snapshot.steps[0].recipients_emitted = 40;
+        let late = snapshot.steps[0].expires_at + Duration::hours(1);
+        assert!(settled_delivered(evaluate_play(
+            &snapshot,
+            PlayPolicy::default(),
+            late
+        )));
+    }
+
+    #[test]
+    fn a_step_that_sent_settles_delivered_when_the_anchor_dies() {
+        // The show was cancelled mid-flight — the sends that already went out
+        // are delivery, not a skip; the anchor's fate lives on the play.
+        let mut snapshot = running();
+        snapshot.steps[0].recipients_emitted = 3;
+        snapshot.anchor_active = false;
+        let due = snapshot.steps[0].due_at + Duration::hours(1);
+        assert!(settled_delivered(evaluate_play(
+            &snapshot,
+            PlayPolicy::default(),
+            due
+        )));
+    }
+
+    #[test]
+    fn a_step_that_exhausted_its_audience_settles_delivered() {
+        // Emitted everything the segment had: "no eligible recipients" is why
+        // it stopped, not a description of what happened — it delivered.
+        let mut snapshot = running();
+        snapshot.steps[0].recipients_emitted = 12;
+        snapshot.eligible_recipients = 0;
+        let due = snapshot.steps[0].due_at + Duration::hours(1);
+        assert!(settled_delivered(evaluate_play(
+            &snapshot,
+            PlayPolicy::default(),
+            due
+        )));
     }
 
     #[test]
@@ -1492,15 +1554,17 @@ mod tests {
             }
         ));
         // The anchor fan is the only recipient, so once they are committed to
-        // the rung has nobody left and settles rather than holding open.
+        // the rung has nobody left and settles rather than holding open — and
+        // because the send went out, the settle is a delivery, not a skip.
         snapshot.eligible_recipients = 0;
         if let Some(step) = snapshot.steps.first_mut() {
             step.recipients_emitted = 1;
         }
-        assert_eq!(
-            skip(evaluate_play(&snapshot, PlayPolicy::default(), due)),
-            StepSkipReason::NoEligibleRecipients
-        );
+        assert!(settled_delivered(evaluate_play(
+            &snapshot,
+            PlayPolicy::default(),
+            due
+        )));
     }
 
     #[test]
