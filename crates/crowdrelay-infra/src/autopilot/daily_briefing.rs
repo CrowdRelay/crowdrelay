@@ -1017,7 +1017,16 @@ async fn compose_briefing(
     .await
     .map_err(map_sqlx)?;
 
-    if !weekly_asks.is_empty() || dropped_asks + dropped_unassigned > 0 || waiting_asks > 0 {
+    // `weekly_asks` carries a row for every active profile, zero or not, so
+    // "non-empty" is true for any tenant with a crew — and a briefing only
+    // issues when someone is on the email path. Gating on it made the block
+    // (and its `capacity_asks_7d` key) permanent, which kept the quiet-day
+    // line below from ever printing. An all-zero scoreboard is not news; the
+    // block renders when there is load to show. Once it renders, the zero
+    // rows stay in — who is free is the other half of who is loaded.
+    let dropped_total = dropped_asks + dropped_unassigned;
+    let any_asks = weekly_asks.iter().any(|(_, asks)| *asks > 0);
+    if any_asks || dropped_total > 0 || waiting_asks > 0 {
         sections_map.insert(
             "capacity_asks_7d".to_owned(),
             weekly_asks
@@ -1029,7 +1038,6 @@ async fn compose_briefing(
         if waiting_asks > 0 {
             sections_map.insert("capacity_waiting".to_owned(), waiting_asks.into());
         }
-        let dropped_total = dropped_asks + dropped_unassigned;
         if dropped_total > 0 {
             sections_map.insert("capacity_dropped_7d".to_owned(), dropped_total.into());
         }

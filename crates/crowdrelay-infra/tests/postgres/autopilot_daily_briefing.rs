@@ -800,3 +800,101 @@ async fn the_briefing_counts_join_ask_clicks_and_the_fans_they_made()
     );
     Ok(())
 }
+
+const QUIET_LINE: &str = "Nothing needs you today — the system is working.";
+
+/// The quiet-day line is reachable. A crew member with an active profile
+/// and no asks this week puts a zero row in the capacity query; that row
+/// used to be enough to render the capacity block, and the block's key kept
+/// the quiet line from ever printing on any tenant that can receive a
+/// briefing at all. An idle crew is not news.
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn a_quiet_day_with_an_idle_crew_says_nothing_needs_you()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (repository, pool) = repository().await?;
+    let workspace_id = WorkspaceId::new();
+    seed_workspace(&pool, workspace_id).await?;
+    seed_member(&pool, workspace_id, "reader").await?;
+    seed_team_email_executor(&pool, workspace_id).await?;
+
+    let morning = datetime!(2026-10-05 09:00 UTC);
+    assert_eq!(
+        repository
+            .reconcile_team_handoffs(workspace_id, morning)
+            .await?,
+        1
+    );
+    let briefings = briefing_rows(&pool, workspace_id).await?;
+    assert_eq!(briefings.len(), 1);
+    let body = &briefings[0].3;
+    assert!(
+        !body.contains("Asks this week"),
+        "an all-zero capacity scoreboard is not rendered: {body}"
+    );
+    assert!(
+        body.contains(QUIET_LINE),
+        "a genuinely quiet day says so: {body}"
+    );
+    Ok(())
+}
+
+/// §4i-6: load stays visible when it exists. One ask handed out this week
+/// renders the capacity block — including the idle member's zero row,
+/// because who is free is the other half of who is loaded — and the day is
+/// no longer quiet. The assignment is already done so the open-tasks
+/// section stays empty: the capacity block alone must silence the line.
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn capacity_load_is_news_and_silences_the_quiet_line()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (repository, pool) = repository().await?;
+    let workspace_id = WorkspaceId::new();
+    seed_workspace(&pool, workspace_id).await?;
+    let busy = seed_member(&pool, workspace_id, "busy").await?;
+    seed_member(&pool, workspace_id, "idle").await?;
+    seed_team_email_executor(&pool, workspace_id).await?;
+
+    let morning = datetime!(2026-10-05 09:00 UTC);
+    let yesterday = morning - time::Duration::days(1);
+    sqlx::query(
+        "INSERT INTO team_assignments
+             (id, workspace_id, source_kind, source_id, source_ref, assignee_member_id,
+              required_skill, status, assigned_at, completed_at)
+         VALUES ($1,$2,'show_task',$3,'capacity-load',$4,'video','done',$5,$5)",
+    )
+    .bind(Uuid::now_v7())
+    .bind(workspace_id.into_uuid())
+    .bind(Uuid::now_v7())
+    .bind(busy)
+    .bind(yesterday)
+    .execute(&pool)
+    .await?;
+
+    assert_eq!(
+        repository
+            .reconcile_team_handoffs(workspace_id, morning)
+            .await?,
+        2
+    );
+    let briefings = briefing_rows(&pool, workspace_id).await?;
+    assert_eq!(briefings.len(), 1);
+    let body = &briefings[0].3;
+    assert!(
+        body.contains("Asks this week:"),
+        "real load renders the capacity block: {body}"
+    );
+    assert!(
+        body.contains("- Crew busy: 1 (ceiling"),
+        "the loaded member's count is shown: {body}"
+    );
+    assert!(
+        body.contains("- Crew idle: 0 (ceiling"),
+        "the idle member stays beside them: {body}"
+    );
+    assert!(
+        !body.contains(QUIET_LINE),
+        "a day with capacity load is not a quiet day: {body}"
+    );
+    Ok(())
+}
