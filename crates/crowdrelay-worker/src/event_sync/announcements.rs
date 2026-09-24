@@ -675,7 +675,10 @@ async fn enqueue_regional_push_deliveries(
          AND endpoint.active
          AND endpoint.invalidated_at IS NULL
         ON CONFLICT (workspace_id, source_kind, source_id, endpoint_id) DO NOTHING
-        RETURNING 1
+        -- `1` alone is int4, and the rows decode as i64: the first eligible
+        -- fan with a live push endpoint made the whole announcement fail
+        -- with 'mismatched types', rolling back the transaction it ran in.
+        RETURNING 1::bigint
         "#,
     )
     .bind(input.workspace_id)

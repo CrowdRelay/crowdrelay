@@ -281,6 +281,86 @@ class SqlRowTypes(unittest.TestCase):
         )
 
 
+POSITIONAL = re.compile(
+    r'query_(scalar|as)::<\s*_\s*,\s*(\((?:[^()]|\([^()]*\))*\)|[A-Za-z0-9_:<>]+)\s*>\s*\(\s*(?:r#"(.*?)"#|"((?:[^"\\]|\\.)*)")',
+    re.S,
+)
+
+
+def split_tuple(types: str) -> list[str]:
+    inner = types.strip()[1:-1]
+    parts, depth, current = [], 0, []
+    for char in inner:
+        if char in "<(":
+            depth += 1
+        elif char in ">)":
+            depth -= 1
+        if char == "," and depth == 0:
+            parts.append("".join(current).strip())
+            current = []
+        else:
+            current.append(char)
+    if "".join(current).strip():
+        parts.append("".join(current).strip())
+    return parts
+
+
+def positional_sites() -> list[tuple[str, int, str, list[str]]]:
+    """query_scalar::<_, T> and query_as::<_, (A, B, …)> over literal SQL."""
+    sites = []
+    for path in sorted((ROOT / "crates").rglob("*.rs")):
+        relative = path.relative_to(ROOT).as_posix()
+        if _types.is_test_source(relative):
+            continue
+        text = path.read_text(errors="ignore")
+        for match in POSITIONAL.finditer(text):
+            kind, types, raw, plain = match.groups()
+            sql = (raw if raw is not None else plain.replace('\\"', '"')).strip()
+            if _types.names_a_foreign_relation(sql):
+                continue
+            if kind == "as":
+                if not types.startswith("("):
+                    continue  # A named struct — the tests above own it.
+                rust = split_tuple(types)
+            else:
+                rust = [types]
+            line = text[: match.start()].count("\n") + 1
+            sites.append((relative, line, sql, rust))
+    return sites
+
+
+class SqlPositionalTypes(unittest.TestCase):
+    """Scalars and tuples decode by position: the n-th column must be a type
+    the n-th Rust type accepts."""
+
+    def setUp(self) -> None:
+        self.container = _types.find_container()
+        if not self.container:
+            self.skipTest("no local crowdrelay-postgres-1 container; run `just db-up`")
+
+    def test_every_position_decodes(self) -> None:
+        sites = positional_sites()
+        described = describe_typed(self.container, [(p, l, sql, None) for p, l, sql, _ in sites])
+        judged, wrong = 0, []
+        for index, (path, line, _, rust) in enumerate(sites):
+            columns = described.get(index)
+            if not columns:
+                continue
+            for position, rust_type in enumerate(rust):
+                if position >= len(columns):
+                    wrong.append(f"{path}:{line} reads {len(rust)} columns; the query returns {len(columns)}")
+                    break
+                accepted = COMPATIBLE.get(rust_base(rust_type))
+                if accepted is None:
+                    continue
+                judged += 1
+                base_type = re.sub(r"\(\d+(?:,\d+)?\)", "", columns[position][1])
+                if base_type not in accepted:
+                    wrong.append(f"{path}:{line} column {position} ({columns[position][0]}): Rust {rust_type} from SQL {columns[position][1]}")
+        self.assertGreater(judged, 300, f"only {judged} positions judged")
+        self.assertEqual(wrong, [], "these positions cannot decode:\n  " + "\n  ".join(wrong))
+
+
 if __name__ == "__main__":
     result = unittest.main(exit=False, verbosity=0).result
     container = _types.find_container()
