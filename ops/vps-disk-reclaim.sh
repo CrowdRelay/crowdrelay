@@ -23,6 +23,22 @@
 #   - mounted volumes, postgres data, the .android SDK, toolchains pinned by
 #     a rust-toolchain.toml under any runner _work or ~/dev
 #
+# Sustained target (operator, 2026-09-24): 50–60% used, 70% ceiling. This
+# script is the enforcer of last resort — it is scheduled daily at 03:30
+# UTC on the box:
+#   /etc/cron.d/vps-disk-reclaim:
+#     30 3 * * * root /usr/local/sbin/vps-disk-reclaim.sh --target 60 \
+#       >> /var/log/vps-disk-reclaim.log 2>&1
+# Reclaim alone cannot hold the number against sources that regrow every
+# job, so three caps sit upstream of it:
+#   - /etc/docker/daemon.json (ops/docker-daemon.json): BuildKit GC keeps
+#     build cache under 3 GB and self-evicts when free space drops below
+#     8 GB; container logs rotate at 20 MB x3.
+#   - SCCACHE_CACHE_SIZE=2G in each runner's .env — the default is 10 GB
+#     per the sccache docs, which is a third of the disk by itself.
+#   - vps-housekeeping.sh PRESSURE_PCT 70 / idle floor 65 — polite clearing
+#     starts before reclaim's hammer is ever needed.
+#
 # Usage:
 #   vps-disk-reclaim.sh [--target PCT] [--force] [--report]
 #     --target PCT  stop reclaiming once usage is at or below PCT (default 60)
