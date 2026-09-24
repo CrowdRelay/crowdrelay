@@ -23,6 +23,7 @@ on:
       - "Production operational readiness"
       - "Artifact Cleanup"
       - "Fallback gates (no self-hosted runner)"
+      - "Nightly PostgreSQL suite"
     types: [completed]
 
 permissions:
