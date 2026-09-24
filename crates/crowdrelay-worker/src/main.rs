@@ -890,7 +890,7 @@ async fn run(database: PgPool, config: &Config, standby: bool) -> Result<()> {
         ad_conversion_enabled: ad_conversion_worker.is_some(),
         random_draws_enabled: weighted_draw_worker.is_some(),
     };
-    growth_readiness.log();
+    growth_readiness.log(posture.reddit.missing_switch());
     // And in Postgres, so it is readable without a shell on the deploy host.
     // Never fatal: recording what the worker will do is worth less than doing it.
     if let Err(error) = growth_readiness
