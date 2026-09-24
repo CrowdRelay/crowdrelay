@@ -674,9 +674,20 @@ async fn the_briefing_counts_join_ask_clicks_and_the_fans_they_made()
     );
     let briefings = briefing_rows(&pool, workspace_id).await?;
     assert_eq!(briefings.len(), 1);
+    // The scoreboard stays absent: no post means unmeasured, not zero. This
+    // asserted on any "join-ask" substring until the brief learned to name
+    // setup gaps. The workspace here has written no ask, so it is also a
+    // cold tenant and the setup line is correctly present — the assertion
+    // now names the scoreboard's own label, and the setup line is pinned
+    // alongside it rather than left unasserted.
     assert!(
-        !briefings[0].3.contains("join-ask"),
-        "no join-ask post means no join-ask line: {}",
+        !briefings[0].3.contains("join-ask (7d)"),
+        "no join-ask post means no join-ask scoreboard: {}",
+        briefings[0].3
+    );
+    assert!(
+        briefings[0].3.contains("join-ask — setup needed"),
+        "a workspace with no ask written is told what the ask needs: {}",
         briefings[0].3
     );
 
@@ -798,5 +809,144 @@ async fn the_briefing_counts_join_ask_clicks_and_the_fans_they_made()
         body.contains("join-ask (7d): FB 2 clicks · 1 fans"),
         "the line reports clicks and the fan they produced: {body}"
     );
+    Ok(())
+}
+
+async fn seed_crew_locale_en(
+    pool: &sqlx::PgPool,
+    workspace_id: WorkspaceId,
+) -> Result<(), Box<dyn std::error::Error>> {
+    sqlx::query(
+        "INSERT INTO tenant_settings (workspace_id, key, value) VALUES ($1, 'crew_locale', 'en')",
+    )
+    .bind(workspace_id.into_uuid())
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn briefing_sections(
+    pool: &sqlx::PgPool,
+    workspace_id: WorkspaceId,
+) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+    Ok(sqlx::query_scalar(
+        "SELECT sections FROM daily_briefings WHERE workspace_id = $1
+         ORDER BY local_date DESC LIMIT 1",
+    )
+    .bind(workspace_id.into_uuid())
+    .fetch_one(pool)
+    .await?)
+}
+
+/// A new tenant is the one the brief used to fail hardest: every section
+/// measures activity it has none of, so it read "nothing needs you today"
+/// while its growth loop sat unconfigured and pointed at another band's site.
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn a_cold_tenant_briefing_names_its_setup_instead_of_calling_the_day_quiet()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (repository, pool) = repository().await?;
+    let workspace_id = WorkspaceId::new();
+    seed_workspace(&pool, workspace_id).await?;
+    seed_member(&pool, workspace_id, "reader").await?;
+    seed_team_email_executor(&pool, workspace_id).await?;
+    seed_crew_locale_en(&pool, workspace_id).await?;
+
+    let morning = datetime!(2026-10-05 10:00 UTC);
+    assert_eq!(
+        repository
+            .reconcile_team_handoffs(workspace_id, morning)
+            .await?,
+        1
+    );
+    let briefings = briefing_rows(&pool, workspace_id).await?;
+    let body = &briefings[0].3;
+    assert!(
+        body.contains(
+            "join-ask — setup needed: write the ask in your own words · \
+             set your own site URL — the link points at the default site · \
+             connect the account · add a photo"
+        ),
+        "every gap at once, deduplicated, in the crew's language: {body}"
+    );
+    // No assertion on the closing "Nothing needs you" line: with a crew
+    // member present the capacity scoreboard always renders, so that line
+    // cannot print here with or without this change and asserting its
+    // absence would prove nothing. What this change controls is the section
+    // key below — the quiet-day check keys on it.
+
+    let sections = briefing_sections(&pool, workspace_id).await?;
+    let setup = sections["join_ask_setup"]
+        .as_array()
+        .ok_or("join_ask_setup is a list")?;
+    let reasons: Vec<&str> = setup
+        .iter()
+        .filter_map(|gap| gap["reason"].as_str())
+        .collect();
+    assert_eq!(
+        reasons,
+        [
+            "no_variants",
+            "site_url_inherited",
+            "not_connected",
+            "not_connected",
+            "no_instagram_photo",
+        ]
+    );
+    Ok(())
+}
+
+/// The other half: a tenant with nothing missing gets no setup line. It must
+/// not turn into a permanent fixture that trains the crew to skip it — which
+/// also pins the inherited-URL check to "no explicit row", not "any URL".
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn a_ready_join_ask_leaves_a_quiet_day_quiet() -> Result<(), Box<dyn std::error::Error>> {
+    let (repository, pool) = repository().await?;
+    let workspace_id = WorkspaceId::new();
+    seed_workspace(&pool, workspace_id).await?;
+    seed_member(&pool, workspace_id, "reader").await?;
+    seed_team_email_executor(&pool, workspace_id).await?;
+    seed_crew_locale_en(&pool, workspace_id).await?;
+    for (key, value) in [
+        ("join_ask_variants", r#"["Join us on Signal."]"#),
+        ("member_site_base_url", "https://band.example"),
+        ("join_ask_image_url", "https://band.example/join.png"),
+    ] {
+        sqlx::query("INSERT INTO tenant_settings (workspace_id, key, value) VALUES ($1, $2, $3)")
+            .bind(workspace_id.into_uuid())
+            .bind(key)
+            .bind(value)
+            .execute(&pool)
+            .await?;
+    }
+    for platform in ["facebook", "instagram"] {
+        sqlx::query(
+            "INSERT INTO fanbase_connections
+                 (workspace_id, platform, external_account_ref, credential_ref, label)
+             VALUES ($1, $2, $3, 'test-credential', $2)",
+        )
+        .bind(workspace_id.into_uuid())
+        .bind(platform)
+        .bind(format!("{platform}-page"))
+        .execute(&pool)
+        .await?;
+    }
+
+    let morning = datetime!(2026-10-05 10:00 UTC);
+    assert_eq!(
+        repository
+            .reconcile_team_handoffs(workspace_id, morning)
+            .await?,
+        1
+    );
+    let briefings = briefing_rows(&pool, workspace_id).await?;
+    let body = &briefings[0].3;
+    assert!(
+        !body.contains("setup needed"),
+        "nothing is missing, so nothing is said: {body}"
+    );
+    let sections = briefing_sections(&pool, workspace_id).await?;
+    assert!(sections.get("join_ask_setup").is_none(), "{sections}");
     Ok(())
 }

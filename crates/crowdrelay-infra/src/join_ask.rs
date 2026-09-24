@@ -13,7 +13,7 @@ use sqlx::PgPool;
 use time::OffsetDateTime;
 use uuid::Uuid;
 
-/// Assembles one workspace's join-ask snapshot from five small scoped reads.
+/// Assembles one workspace's join-ask snapshot from six small scoped reads.
 ///
 /// A tenant that never wrote variants is **not** absent here. It resolves to
 /// [`JoinAskConfig::unconfigured`] — empty words, default platforms — so the
@@ -42,6 +42,21 @@ pub async fn load_join_ask_snapshot(
         let url = brand.member_site_base_url.trim().to_owned();
         (!url.is_empty()).then_some(url)
     };
+    // The brand seam merges the shipped default in, so it cannot say whether
+    // the URL above is this tenant's. That default is the first tenant's own
+    // site: for anyone else it is another band's signup page, and the
+    // readiness board has to be able to tell the two apart.
+    let member_site_base_url_inherited = !sqlx::query_scalar::<_, bool>(
+        r#"
+        SELECT EXISTS (
+            SELECT 1 FROM tenant_settings
+            WHERE workspace_id = $1 AND key = 'member_site_base_url' AND btrim(value) <> ''
+        )
+        "#,
+    )
+    .bind(workspace_id)
+    .fetch_one(pool)
+    .await?;
 
     let connected_platforms = sqlx::query_scalar::<_, String>(
         r#"
@@ -99,6 +114,7 @@ pub async fn load_join_ask_snapshot(
         platforms: config.platforms,
         image_url: config.image_url,
         member_site_base_url,
+        member_site_base_url_inherited,
         social_auto_post: brand.social_auto_post,
         connected_platforms,
         posts,
