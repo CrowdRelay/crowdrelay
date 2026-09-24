@@ -49,7 +49,8 @@ ROUTE_PATH = re.compile(r'\.route\(\s*"([^"]+)"')
 PARAM = re.compile(r"\{[^}]+\}")
 
 # The files that register routes — the nine CLAUDE.md names, plus
-# content_engine.rs, whose admin surface is `.merge()`d into the router.
+# content_engine.rs, whose admin surface is `.merge()`d into the router, and
+# control_plane_operator.rs, the admin handlers the console reaches.
 # `test_claude_md_counts_v1.py` keeps the count honest so an eleventh
 # cannot appear unnoticed.
 ROUTE_FILES = [
@@ -63,6 +64,7 @@ ROUTE_FILES = [
     "community_intelligence_routes.rs",
     "routing/growth.rs",
     "content_engine.rs",
+    "control_plane_operator.rs",
 ]
 
 # Contract paths are relative to a server base ending in `/v1`.

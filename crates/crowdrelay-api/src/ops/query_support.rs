@@ -545,7 +545,8 @@ impl From<sqlx::Error> for OpsError {
 
 /// Loads delivery results — what the brain actually posted, where, and what
 /// engagement it got. Queries community_posts (with latest metrics),
-/// social_posts, telegram_posts, and fan_push_deliveries, and returns a
+/// social_posts, telegram_posts, discord_posts and fan_push_deliveries, and
+/// returns a
 /// unified list sorted by created_at DESC.
 ///
 /// This is the proof-of-result surface: without it, the operator and the
@@ -614,13 +615,22 @@ async fn load_delivery_results(
 
             UNION ALL
 
-            -- Telegram posts: content, channel, status
+            -- Telegram posts. The words live on the action that drafted
+            -- them, not on the post row, so the draft text and its tracked
+            -- link are read from there. Without them an operator holding an
+            -- `awaiting_manual_post` row sees a channel and a status and has
+            -- nothing to paste.
             SELECT
                 'telegram_post'::text AS kind,
                 tp.id::text AS id,
                 tp.action_id::text AS action_id,
                 tp.channel AS channel,
-                jsonb_build_object('message_id', tp.message_id) AS content,
+                jsonb_build_object(
+                    'message_id', tp.message_id,
+                    'text', action.payload->'draft'->>'text',
+                    'cta_url', action.payload->'draft'->>'cta_url',
+                    'smart_link', tp.smart_link
+                ) AS content,
                 tp.status AS status,
                 NULL::text AS url,
                 tp.created_at,
@@ -631,7 +641,42 @@ async fn load_delivery_results(
                 NULL::double precision AS upvote_ratio,
                 tp.error_message AS error_message
             FROM telegram_posts tp
+            LEFT JOIN autopilot_actions action
+              ON action.workspace_id = tp.workspace_id
+             AND action.id = tp.action_id
             WHERE tp.workspace_id = $1
+
+            UNION ALL
+
+            -- Discord posts: the same shape as Telegram. This arm was
+            -- missing, so a Discord draft counted in the attention board's
+            -- unpublished total and appeared nowhere it could be read or
+            -- closed.
+            SELECT
+                'discord_post'::text AS kind,
+                dp.id::text AS id,
+                dp.action_id::text AS action_id,
+                dp.channel_id AS channel,
+                jsonb_build_object(
+                    'message_id', dp.message_id,
+                    'text', action.payload->'draft'->>'text',
+                    'cta_url', action.payload->'draft'->>'cta_url',
+                    'smart_link', dp.smart_link
+                ) AS content,
+                dp.status AS status,
+                NULL::text AS url,
+                dp.created_at,
+                dp.posted_at,
+                NULL::int AS score,
+                NULL::int AS upvotes,
+                NULL::int AS num_comments,
+                NULL::double precision AS upvote_ratio,
+                dp.error_message AS error_message
+            FROM discord_posts dp
+            LEFT JOIN autopilot_actions action
+              ON action.workspace_id = dp.workspace_id
+             AND action.id = dp.action_id
+            WHERE dp.workspace_id = $1
 
             UNION ALL
 

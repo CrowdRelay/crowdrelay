@@ -333,7 +333,9 @@ pub(crate) fn router(state: crate::AppState) -> Router {
         )
         .route(
             "/v1/control-plane/portfolio/amplification",
-            get(crate::portfolio::list_amplification),
+            // Proposing was admin-only, so a label could accept or decline
+            // another act's ask from the console but never make one.
+            get(crate::portfolio::list_amplification).post(crate::portfolio::propose_amplification),
         )
         .route(
             "/v1/control-plane/portfolio/amplification/{consent_id}/decide",
@@ -903,7 +905,7 @@ pub(crate) fn router(state: crate::AppState) -> Router {
         .with_state(state)
 }
 
-async fn require_control_plane(
+pub(crate) async fn require_control_plane(
     State(state): State<crate::AppState>,
     request: Request<Body>,
     next: Next,

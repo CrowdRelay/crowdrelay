@@ -495,7 +495,17 @@ pub async fn executor_capabilities(State(state): State<AppState>, headers: Heade
 }
 
 pub async fn release_ledger(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    if !state.ticketing.admin_authorized(&headers) {
+    // Belt and braces over the namespace guard, which already refuses both
+    // routes without their bearer. It accepts the control-plane bearer as well
+    // as the admin one: this read is served on both surfaces, and an
+    // admin-only check here made the console's copy answer 401 to the one
+    // credential its namespace admits.
+    let control_plane = crate::security::bearer_sha256_matches_either(
+        &headers,
+        state.control_plane_api_key_sha256,
+        state.previous_control_plane_api_key_sha256,
+    );
+    if !(state.ticketing.admin_authorized(&headers) || control_plane) {
         return Problem::unauthorized(request_id(&headers))
             .private()
             .into_response();

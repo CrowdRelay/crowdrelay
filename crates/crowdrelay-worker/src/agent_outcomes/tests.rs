@@ -271,9 +271,11 @@ fn the_ingest_path_routes_community_posts_and_pushes_through_the_model_text_rule
     // authority decision actually calls it — and the channel flag must not
     // come back as a way around it.
     let source = include_str!("../agent_outcomes.rs");
-    assert!(
-        source.contains("model_text_authority(\n                        self.may_auto_execute(")
-    );
+    // Compared with whitespace collapsed: an indentation run inside the
+    // literal is what the string-literal whitespace gate refuses, and it tied
+    // this check to rustfmt's layout rather than to the call.
+    let flat = source.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(flat.contains("model_text_authority( self.may_auto_execute("));
     assert!(!source.contains("let authority = if channel_pre_approved"));
 }
 

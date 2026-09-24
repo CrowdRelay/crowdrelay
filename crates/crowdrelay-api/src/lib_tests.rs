@@ -694,6 +694,7 @@ mod tests {
     }
 
     include!("lib_tests_attestation.rs");
+    include!("lib_tests_operator_surface.rs");
 
     #[tokio::test]
     async fn referral_redirect_progress_and_redemption_routes_are_private()

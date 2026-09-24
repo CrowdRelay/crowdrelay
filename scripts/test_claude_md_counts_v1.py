@@ -38,7 +38,7 @@ API = ROOT / "crates/crowdrelay-api/src"
 
 ROUTE_PATH = re.compile(r'\.route\(\s*"([^"]+)"')
 
-# The ten files CLAUDE.md says hold every route.
+# The eleven files CLAUDE.md says hold every route.
 ROUTE_FILES = [
     "routing.rs",
     "control_plane.rs",
@@ -52,6 +52,7 @@ ROUTE_FILES = [
     "content_engine.rs",
     "media.rs",
     "team_approvals.rs",
+    "control_plane_operator.rs",
 ]
 
 AUTHORITY_PREFIXES = [
@@ -80,8 +81,8 @@ class ClaudeMdCounts(unittest.TestCase):
     def setUp(self) -> None:
         self.doc = CLAUDE.read_text()
 
-    def test_no_eleventh_file_registers_a_route(self):
-        """The claim is that routes live in these ten and nowhere else."""
+    def test_no_unlisted_file_registers_a_route(self):
+        """The claim is that routes live in these files and nowhere else."""
         registering = sorted(
             rs.relative_to(API).as_posix()
             for rs in API.rglob("*.rs")
@@ -90,20 +91,26 @@ class ClaudeMdCounts(unittest.TestCase):
         self.assertEqual(
             registering,
             sorted(ROUTE_FILES),
-            "a file outside CLAUDE.md's ten registers routes, so its route "
+            "a file outside CLAUDE.md's list registers routes, so its route "
             "table no longer accounts for the whole surface — which is exactly "
             "the mistake the surrounding paragraph warns about",
         )
 
     def test_the_total_route_count_is_exact(self):
         total = sum(len(route_paths(name)) for name in ROUTE_FILES)
-        match = re.search(r"\*\*(\d+) routes live in \w+ files", self.doc)
+        match = re.search(r"\*\*(\d+) routes live in ([A-Z]+) files", self.doc)
         self.assertIsNotNone(match, "CLAUDE.md no longer states a route total")
         self.assertEqual(
             int(match.group(1)),
             total,
-            f"CLAUDE.md says {match.group(1)} routes; the ten files register "
+            f"CLAUDE.md says {match.group(1)} routes; the listed files register "
             f"{total}",
+        )
+        words = {10: "TEN", 11: "ELEVEN", 12: "TWELVE", 13: "THIRTEEN"}
+        self.assertEqual(
+            match.group(2),
+            words.get(len(ROUTE_FILES), str(len(ROUTE_FILES))),
+            "CLAUDE.md names the wrong number of route files",
         )
 
     def test_the_per_file_route_table_is_exact(self):

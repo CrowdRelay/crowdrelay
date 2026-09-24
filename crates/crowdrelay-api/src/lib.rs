@@ -77,6 +77,7 @@ mod connections_simple;
 mod connections_tiktok;
 mod content_engine;
 mod control_plane;
+mod control_plane_operator;
 mod ecosystem;
 mod event_copy;
 mod events;
@@ -395,6 +396,7 @@ pub fn router(state: AppState, config: HttpConfig) -> Router {
     routing::application_routes(state.clone())
         .merge(area_admin::router(state.clone()))
         .merge(control_plane::router(state.clone()))
+        .merge(control_plane_operator::router(state.clone()))
         .layer(from_fn_with_state(state.clone(), gate_signal_routes))
         .layer(from_fn_with_state(state, enforce_privileged_namespace))
         .layer(middleware)
