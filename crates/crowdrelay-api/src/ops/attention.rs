@@ -148,6 +148,16 @@ struct OperatorAttentionSnapshot {
     /// said nothing. This reads the source directly, deduplicated per
     /// subject so a re-raised task shows once at its latest raise.
     band_notices: Vec<BandNotice>,
+    /// LLM worker results the admission gate refused, newest first.
+    ///
+    /// The agents service writes `agent_outcomes`; the deterministic worker
+    /// judges each and rejects the ones that fail verification. A rejection
+    /// is the system working — the brain declining bad output — but it used
+    /// to be visible only as an aggregate inside a watchdog alert: the
+    /// operator learned that something was refused, never which worker's
+    /// output or in the gate's own words why. Newest first, bounded: this is
+    /// a prompt-quality feed to act on, not an archive.
+    rejected_agent_outcomes: Vec<RejectedAgentOutcome>,
 }
 
 /// The brain's own verdict, and whether it is asking for a person.
@@ -235,15 +245,20 @@ pub async fn attention(State(state): State<crate::AppState>, headers: HeaderMap)
     let lapsed = run_limited(budget, timeout_duration, load_lapsed_approvals(&state.ops));
     let failed = run_limited(budget, timeout_duration, load_failed_sends(&state.ops));
     let notices = run_limited(budget, timeout_duration, load_band_notices(&state.ops));
+    let rejected = run_limited(
+        budget,
+        timeout_duration,
+        load_rejected_agent_outcomes(&state.ops),
+    );
 
     let (
         summary, alerts, dead_outbox, dead_deliveries, dead_push,
         ecosystem, findings, needs_you, brain, unpublished_drafts,
-        blocked_communities, lapsed, failed, notices,
+        blocked_communities, lapsed, failed, notices, rejected,
     ) = tokio::join!(
         summary, alerts, dead_outbox, dead_deliveries, dead_push,
         ecosystem, findings, needs_you, brain, unpublished_drafts,
-        blocked_communities, lapsed, failed, notices,
+        blocked_communities, lapsed, failed, notices, rejected,
     );
 
     let request_id_value = request_id(&headers);
@@ -303,6 +318,10 @@ pub async fn attention(State(state): State<crate::AppState>, headers: HeaderMap)
         Ok(value) => value,
         Err(error) => return error.into_response(request_id(&headers)),
     };
+    let rejected_agent_outcomes = match rejected {
+        Ok(value) => value,
+        Err(error) => return error.into_response(request_id(&headers)),
+    };
 
     let (needs_you, awaiting_approval) = needs_you;
 
@@ -324,6 +343,7 @@ pub async fn attention(State(state): State<crate::AppState>, headers: HeaderMap)
             lapsed_approvals,
             failed_sends,
             band_notices,
+            rejected_agent_outcomes,
         },
     )
 }
@@ -634,6 +654,32 @@ async fn load_band_notices(state: &OpsState) -> Result<Vec<BandNotice>, OpsError
         ) AS deduped
         ORDER BY deduped.created_at DESC
         LIMIT 50
+        "#,
+    )
+    .bind(state.workspace_id.into_uuid())
+    .fetch_all(&state.pool)
+    .await
+    .map_err(OpsError::sqlx)
+}
+
+/// The worker outputs the admission gate refused, newest first.
+///
+/// A week is the window because rejection cadence matters more than history:
+/// a burst means the worker's output drifted from the contract the gate
+/// enforces, and a week catches the drift while staying an action list. The
+/// watchdog's aggregate alert already counts them; this names them.
+async fn load_rejected_agent_outcomes(
+    state: &OpsState,
+) -> Result<Vec<RejectedAgentOutcome>, OpsError> {
+    sqlx::query_as::<_, RejectedAgentOutcome>(
+        r#"
+        SELECT id, kind, rejection_reason, task_id, created_at
+        FROM agent_outcomes
+        WHERE workspace_id = $1
+          AND status = 'rejected'
+          AND created_at > now() - INTERVAL '7 days'
+        ORDER BY created_at DESC, id DESC
+        LIMIT 20
         "#,
     )
     .bind(state.workspace_id.into_uuid())
