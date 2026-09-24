@@ -297,11 +297,8 @@ impl PostgresGDriveRepository {
         ref_name: &str,
         contacts: &[ExtractedContact],
         mark_disappeared: bool,
-        // Whether staged agent verdicts may flip `booking_agents.active`.
-        // A verdict is a registry write — the caller's transport decides
-        // whether this batch may make it. Inbound mail cannot: a sender
-        // who can email the connected account must not retire or revive
-        // the operator's agents.
+        // Whether staged agent verdicts may flip `booking_agents.active` —
+        // the caller's transport decides; inbound mail never may.
         apply_agent_verdicts: bool,
     ) -> Result<ContactUpsertSummary, GDriveError> {
         let mut tx = self.pool.begin().await?;
@@ -318,8 +315,7 @@ impl PostgresGDriveRepository {
 
         let mut upserted = 0u64;
         for contact in ordered {
-            // Columns no role claimed ride as `metadata.intake` — kept
-            // losslessly, and `||` only ever replaces the `intake` key.
+            // Columns no role claimed ride as `metadata.intake`.
             let metadata = contact.intake_metadata();
             sqlx::query(
                 r#"
