@@ -15,6 +15,10 @@ pub(crate) fn router() -> Router<crate::AppState> {
             get(crate::ops::trace_timeline),
         )
         .route("/v1/admin/ops/actions", get(crate::ops::list_actions))
+        .route(
+            "/v1/admin/ops/action-states",
+            get(crate::ops::action_states),
+        )
         .route("/v1/admin/ops/cycles", get(crate::ops::list_cycles))
         .route("/v1/admin/ops/fan-sources", get(crate::ops::fan_sources))
         .route(
