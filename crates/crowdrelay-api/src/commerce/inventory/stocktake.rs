@@ -169,8 +169,24 @@ async fn mark_inventory_ready_inner(
     request_id_value: Option<&str>,
 ) -> Result<InventoryActivationView, CommerceError> {
     let workspace_id = state.ticketing.workspace_id().into_uuid();
-    let actor_id = optional_text(payload.actor_id.as_deref(), 200)?
-        .unwrap_or_else(|| "virya-staff".to_owned());
+    let actor_id = match optional_text(payload.actor_id.as_deref(), 200)? {
+        Some(actor) => actor,
+        // The fallback staff actor carries the tenant's own slug, so another
+        // tenant's ledger never reads as the first tenant's crew.
+        None => {
+            let slug = sqlx::query_scalar::<_, String>(
+                "SELECT slug FROM workspaces WHERE id = $1",
+            )
+            .bind(workspace_id)
+            .fetch_one(state.ticketing.pool())
+            .await
+            .map_err(|error| {
+                tracing::warn!(%error, "workspace slug lookup for staff actor failed");
+                CommerceError::Unavailable
+            })?;
+            format!("{slug}-staff")
+        }
+    };
 
     let command = MarkInventoryReadyCommand {
         workspace_id,

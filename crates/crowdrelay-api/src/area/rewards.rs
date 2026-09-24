@@ -211,7 +211,22 @@ pub async fn internal_create_voucher(
         }
     };
     if balance < 1 {
-        return error_response(StatusCode::CONFLICT, "INSUFFICIENT_CREDITS", "Not enough VIRYA Credits.");
+        // Only the first tenant's credits are branded VIRYA Credits — any
+        // other tenant's fans hear about credits, not another band's token.
+        let message = match crowdrelay_infra::beacon_signal::beacon_release_signature(
+            &mut *transaction,
+            workspace_id,
+        )
+        .await
+        {
+            Ok((_, true)) => "Not enough VIRYA Credits.",
+            Ok((_, false)) => "Not enough credits.",
+            Err(error) => {
+                tracing::error!(%error, "AREA voucher workspace lookup failed");
+                return temporary();
+            }
+        };
+        return error_response(StatusCode::CONFLICT, "INSUFFICIENT_CREDITS", message);
     }
 
     let issued_at = OffsetDateTime::now_utc();

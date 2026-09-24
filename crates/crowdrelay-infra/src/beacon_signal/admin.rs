@@ -665,7 +665,9 @@ impl BeaconReleaseAdminRepository for PostgresBeaconReleaseRepository {
                 r#"
                 INSERT INTO inventory_ledger
                   (workspace_id,variant_id,delta,movement_kind,idempotency_key,reservation_id,actor_kind,actor_id,reason)
-                VALUES ($1,$2,-1,'promotional_issue',$3,$4,'admin','virya-staff','Latarnik physical release')
+                VALUES ($1,$2,-1,'promotional_issue',$3,$4,'admin',
+                        (SELECT slug FROM workspaces WHERE id = $1) || '-staff',
+                        'Latarnik physical release')
                 ON CONFLICT (workspace_id,idempotency_key) DO NOTHING
                 "#,
             )

@@ -50,6 +50,8 @@ ROUTE_FILES = [
     "community_intelligence_routes.rs",
     "routing/growth.rs",
     "content_engine.rs",
+    "media.rs",
+    "team_approvals.rs",
 ]
 
 AUTHORITY_PREFIXES = [
@@ -95,7 +97,7 @@ class ClaudeMdCounts(unittest.TestCase):
 
     def test_the_total_route_count_is_exact(self):
         total = sum(len(route_paths(name)) for name in ROUTE_FILES)
-        match = re.search(r"\*\*(\d+) routes live in TEN files", self.doc)
+        match = re.search(r"\*\*(\d+) routes live in \w+ files", self.doc)
         self.assertIsNotNone(match, "CLAUDE.md no longer states a route total")
         self.assertEqual(
             int(match.group(1)),

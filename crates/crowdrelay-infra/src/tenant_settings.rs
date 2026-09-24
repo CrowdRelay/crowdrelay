@@ -195,16 +195,29 @@ impl TenantBrandSettings {
         Some(format!("{}/#wydania", self.member_area_url()?))
     }
 
+    /// The member-area path in the reader's locale: the configured path for
+    /// `pl*`, and the same path with a leading `pl/` segment dropped for
+    /// everyone else — `pl/latarnik` reads `latarnik` to an English fan.
+    #[must_use]
+    pub fn member_area_path_for(&self, locale: &str) -> String {
+        let path = self.member_area_path.trim_matches('/');
+        if locale.starts_with("pl") {
+            path.to_owned()
+        } else {
+            path.strip_prefix("pl/").unwrap_or(path).to_owned()
+        }
+    }
+
     /// Absolute invite link carrying the single-use token. Non-Polish locales
-    /// keep the un-prefixed area path exactly as before the extraction.
+    /// get the member-area path without its `pl/` segment.
     #[must_use]
     pub fn invite_url(&self, locale: &str, token: &str) -> Option<String> {
-        let area = if locale.starts_with("pl") {
-            &self.member_area_path
-        } else {
-            "latarnik"
-        };
-        Some(format!("{}/{}?invite={}", self.site_root()?, area, token))
+        Some(format!(
+            "{}/{}?invite={}",
+            self.site_root()?,
+            self.member_area_path_for(locale),
+            token
+        ))
     }
 }
 
@@ -632,12 +645,37 @@ mod tests {
         );
         assert_eq!(
             settings.invite_url("de", "tok").as_deref(),
-            Some("https://fans.mystic-coalition.example/latarnik?invite=tok")
+            Some("https://fans.mystic-coalition.example/members?invite=tok")
         );
         // The default object stays untouched — this is data, not global state.
         assert_eq!(
             TenantBrandSettings::default().member_area_path,
             "pl/latarnik"
         );
+    }
+
+    /// The member-area path follows the configured value in every locale:
+    /// `pl*` keeps it whole, everyone else drops a leading `pl/` segment.
+    /// The default `pl/latarnik` therefore still reads `latarnik` to an
+    /// English fan — the first tenant's URLs are unchanged.
+    #[test]
+    fn member_area_path_for_locale_strips_the_polish_segment() {
+        let settings = TenantBrandSettings::default();
+        assert_eq!(settings.member_area_path_for("en"), "latarnik");
+        assert_eq!(settings.member_area_path_for("pl-PL"), "pl/latarnik");
+
+        let flat = TenantBrandSettings {
+            member_area_path: "members".to_owned(),
+            ..TenantBrandSettings::default()
+        };
+        assert_eq!(flat.member_area_path_for("en"), "members");
+        assert_eq!(flat.member_area_path_for("pl"), "members");
+
+        let nested = TenantBrandSettings {
+            member_area_path: "pl/strefa".to_owned(),
+            ..TenantBrandSettings::default()
+        };
+        assert_eq!(nested.member_area_path_for("en"), "strefa");
+        assert_eq!(nested.member_area_path_for("pl-PL"), "pl/strefa");
     }
 }

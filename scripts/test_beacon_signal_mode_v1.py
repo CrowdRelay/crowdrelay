@@ -60,7 +60,7 @@ class BeaconSignalModeV1Contract(unittest.TestCase):
         self.assertRegex(INFRA_SIGNAL, r"ON CONFLICT \(workspace_id,\s*source_kind,\s*source_id,\s*endpoint_id\) DO NOTHING")
 
     def test_press_room_and_requests_are_first_class(self) -> None:
-        self.assertIn('epk_url: format!("{root}/epk")', API)
+        self.assertIn('epk_url: own(&format!("{root}/epk"))', API)
         self.assertIn("PressPhoto", API)
         self.assertIn("CleanVersion", API)
         self.assertIn("Accreditation", API)
