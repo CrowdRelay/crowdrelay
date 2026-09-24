@@ -24,6 +24,7 @@ struct ChannelPerformanceRow {
     channel_creative: Option<String>,
     signups: i64,
     activated_30d: i64,
+    departed: i64,
     /// The strongest action any fan from this channel took, as a string
     /// matching MeaningfulAction::as_str(). NULL when nobody acted.
     best_action: Option<String>,
@@ -47,10 +48,14 @@ pub(in crate::autopilot) async fn load_acquisition_channels(
                     fan.normalized_email,
                     acquisition.anonymous_visitor_id,
                     acquisition.occurred_at AS signed_up_at,
-                    fan_last_meaningful_action(
+                    fan.status = 'active' AS stayed,
+                    -- Only for people still here: nobody who left can be
+                    -- activated, and the function is the expensive part of
+                    -- this read, so it is not spent on them.
+                    CASE WHEN fan.status = 'active' THEN fan_last_meaningful_action(
                         fan.workspace_id, fan.id, fan.normalized_email
-                    ) AS last_action_at,
-                    EXISTS (
+                    ) END AS last_action_at,
+                    fan.status = 'active' AND EXISTS (
                         SELECT 1 FROM fan_consents AS consent
                         WHERE consent.workspace_id = fan.workspace_id
                           AND consent.fan_id = fan.id
@@ -76,13 +81,19 @@ pub(in crate::autopilot) async fn load_acquisition_channels(
                     ORDER BY event.occurred_at ASC, event.id ASC
                     LIMIT 1
                 ) AS acquisition ON true
+                -- Everyone who became a fan, including those who have since
+                -- gone, so a channel's departures can be counted against it.
+                -- `merged` is excluded because that person is already counted
+                -- under the identity they merged into; `pending` because they
+                -- never became a fan to leave.
                 WHERE fan.workspace_id = $1
-                  AND fan.status = 'active'
+                  AND fan.status IN ('active', 'unsubscribed', 'suppressed')
             ), attributed AS (
                 SELECT
                     arrival.fan_id,
                     arrival.workspace_id,
                     arrival.normalized_email,
+                    arrival.stayed,
                     arrival.anonymous_visitor_id IS NOT NULL AS had_visitor,
                     click.smart_link_id IS NOT NULL AS had_click,
                     link.channel_source,
@@ -116,38 +127,41 @@ pub(in crate::autopilot) async fn load_acquisition_channels(
                 channel_source,
                 channel_community,
                 channel_creative,
-                count(*)::bigint AS signups,
+                -- `signups` keeps its meaning — people who arrived and are
+                -- still here — so every existing reader of it is unchanged.
+                count(*) FILTER (WHERE stayed)::bigint AS signups,
                 count(*) FILTER (WHERE activated)::bigint AS activated_30d,
+                count(*) FILTER (WHERE NOT stayed)::bigint AS departed,
                 -- The strongest action any fan from this channel took.
                 -- Priority: ticket_purchase > merch_purchase > qualified_referral
                 -- > event_interest > synesthesia_run > signal_session.
                 -- Uses the fan_last_meaningful_action function to find the
                 -- timestamp, then maps it to the action kind.
                 CASE
-                    WHEN bool_or(EXISTS (
+                    WHEN bool_or(attributed.stayed AND EXISTS (
                         SELECT 1 FROM ticket_orders orders
                         WHERE orders.workspace_id = attributed.workspace_id
                           AND orders.buyer_email = attributed.normalized_email
                           AND orders.status IN ('paid', 'partially_refunded')
                     )) THEN 'ticket_purchase'
-                    WHEN bool_or(EXISTS (
+                    WHEN bool_or(attributed.stayed AND EXISTS (
                         SELECT 1 FROM merch_order_facts merch
                         WHERE merch.workspace_id = attributed.workspace_id
                           AND merch.fan_id = attributed.fan_id
                           AND merch.confirmed_at IS NOT NULL
                     )) THEN 'merch_purchase'
-                    WHEN bool_or(EXISTS (
+                    WHEN bool_or(attributed.stayed AND EXISTS (
                         SELECT 1 FROM referral_attributions ref
                         WHERE ref.workspace_id = attributed.workspace_id
                           AND ref.referrer_fan_id = attributed.fan_id
                           AND ref.status = 'qualified'
                     )) THEN 'qualified_referral'
-                    WHEN bool_or(EXISTS (
+                    WHEN bool_or(attributed.stayed AND EXISTS (
                         SELECT 1 FROM event_interests interest
                         WHERE interest.workspace_id = attributed.workspace_id
                           AND interest.fan_id = attributed.fan_id
                     )) THEN 'event_interest'
-                    WHEN bool_or(EXISTS (
+                    WHEN bool_or(attributed.stayed AND EXISTS (
                         SELECT 1 FROM synesthesia_reward_entries entry
                         JOIN synesthesia_runs run
                           ON run.workspace_id = entry.workspace_id
@@ -157,7 +171,7 @@ pub(in crate::autopilot) async fn load_acquisition_channels(
                           AND NOT run.synthetic
                           AND run.completed_at IS NOT NULL
                     )) THEN 'synesthesia_run'
-                    WHEN bool_or(EXISTS (
+                    WHEN bool_or(attributed.stayed AND EXISTS (
                         SELECT 1 FROM fan_sessions session
                         WHERE session.workspace_id = attributed.workspace_id
                           AND session.fan_id = attributed.fan_id
@@ -211,6 +225,7 @@ pub(in crate::autopilot) async fn load_acquisition_channels(
     for row in rows {
         let signups = bounded_u32(row.signups)?;
         let activated = bounded_u32(row.activated_30d)?;
+        let departed = bounded_u32(row.departed)?;
         total_signups = total_signups.saturating_add(signups);
         total_activated = total_activated.saturating_add(activated);
 
@@ -233,12 +248,14 @@ pub(in crate::autopilot) async fn load_acquisition_channels(
                 {
                     existing.signups = existing.signups.saturating_add(signups);
                     existing.activated_30d = existing.activated_30d.saturating_add(activated);
+                    existing.departed = existing.departed.saturating_add(departed);
                 } else {
                     unattributed.push(UnattributedGroup {
                         reason,
                         remedy: reason.remedy(),
                         signups,
                         activated_30d: activated,
+                        departed,
                     });
                 }
             }
@@ -252,6 +269,7 @@ pub(in crate::autopilot) async fn load_acquisition_channels(
                         .unwrap_or(u32::MAX)
                 }),
                 best_action: row.best_action.as_deref().and_then(MeaningfulAction::parse),
+                departed,
             }),
         }
     }
