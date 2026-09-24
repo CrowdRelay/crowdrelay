@@ -310,6 +310,21 @@ pub fn extract_contacts(grid: &[Vec<String>]) -> ExtractionReport {
         report.rows_read = rows.len();
         return report;
     }
+    extract_contacts_unchecked(grid)
+}
+
+/// `extract_contacts` without the registry-dump guard. The one caller that
+/// needs it is intake's untrusted path, where a registry-shaped sheet that
+/// arrived over inbound mail is deliberately defanged into a contact list —
+/// its rows still stage for review even though its registry claims are
+/// refused. Trusted transports keep the guard: a registry readout must
+/// never stage the database's own rows back as new contacts.
+pub fn extract_contacts_unchecked(grid: &[Vec<String>]) -> ExtractionReport {
+    let mut report = ExtractionReport::default();
+    let Some((headers, rows)) = grid.split_first() else {
+        report.no_email_column = true;
+        return report;
+    };
     let Some(email_col) = find_column(headers, rows, EMAIL_HEADERS, header_contains, true, &[])
     else {
         report.no_email_column = true;

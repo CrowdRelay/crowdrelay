@@ -197,13 +197,16 @@ pub async fn harvest_grids(
         };
 
         // An untrusted sheet keeps only its contacts: every registry
-        // claim defangs to the review path, where a person decides.
-        let claimed = match (trust, claimed) {
+        // claim defangs to the review path, where a person decides. The
+        // defanged reader must skip the registry-dump guard — a beacon or
+        // agent sheet's own headers trip it, and refusing them would turn
+        // "defanged into contacts" into "silently dropped".
+        let (claimed, defanged) = match (trust, claimed) {
             (SheetTrust::InboundUntrusted, Claim::Agent(_))
             | (SheetTrust::InboundUntrusted, Claim::Beacon(_))
             | (SheetTrust::InboundUntrusted, Claim::Venue(_))
-            | (SheetTrust::InboundUntrusted, Claim::Band(_)) => Claim::Contacts,
-            (_, claim) => claim,
+            | (SheetTrust::InboundUntrusted, Claim::Band(_)) => (Claim::Contacts, true),
+            (_, claim) => (claim, false),
         };
 
         let mut unclaimed = false;
@@ -318,8 +321,15 @@ pub async fn harvest_grids(
             }
             Claim::Contacts => {
                 // Last resort: a genuine contact list — the file's email rows
-                // stage for operator review.
-                let report = extract_contacts(view);
+                // stage for operator review. A defanged registry sheet reads
+                // through the unchecked reader: the dump guard exists to stop
+                // staging a trusted registry's own readout, not to drop the
+                // contacts an untrusted attachment carried.
+                let report = if defanged {
+                    crowdrelay_domain::drive_contacts::extract_contacts_unchecked(view)
+                } else {
+                    extract_contacts(view)
+                };
                 if !report.no_email_column {
                     harvest.rows_read += report.rows_read;
                     harvest.rows_without_email += report.rows_without_email;
