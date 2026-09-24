@@ -4,6 +4,11 @@
 //! database must actually produce — billed peers, genre intersections, a
 //! resolved room or act status — and each is driven against real rows so a
 //! folded `COALESCE` fails here rather than in a proposal a band paid for.
+//!
+//! Every test here runs on a database of its own. Peer acts are one registry
+//! across every tenant, unique on the normalized name, and the assertions
+//! name them ("Lead Act", "Dead Act") and count them per room — on the
+//! shared suite database a second run finds the first run's peers.
 
 use crate::common;
 use crate::gig_planning::{city, played_show, reachable_fan, workspace};
@@ -74,10 +79,17 @@ async fn peer_on_bill(
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn comparable_acts_reach_the_planner() -> Result<(), Box<dyn std::error::Error>> {
-    let database = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
+    let isolated = common::isolated_database("CROWDRELAY_TEST_DATABASE_URL")
         .await
-        .expect("connect to the migrated suite database");
+        .expect("create a migrated database of this test's own");
+    let outcome = comparable_acts_reach_the_planner_on(isolated.pool.clone()).await;
+    isolated.drop().await?;
+    outcome
+}
 
+async fn comparable_acts_reach_the_planner_on(
+    database: PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
     async {
         let pool = &database;
         let act = workspace(pool).await?;
@@ -210,9 +222,17 @@ async fn comparable_acts_reach_the_planner() -> Result<(), Box<dyn std::error::E
 #[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn local_acts_only_surface_when_they_can_be_asked() -> Result<(), Box<dyn std::error::Error>>
 {
-    let database = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
+    let isolated = common::isolated_database("CROWDRELAY_TEST_DATABASE_URL")
         .await
-        .expect("connect to the migrated suite database");
+        .expect("create a migrated database of this test's own");
+    let outcome = local_acts_only_surface_when_they_can_be_asked_on(isolated.pool.clone()).await;
+    isolated.drop().await?;
+    outcome
+}
+
+async fn local_acts_only_surface_when_they_can_be_asked_on(
+    database: PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
     let pool: &PgPool = &database;
     {
         let act = workspace(pool).await?;
@@ -315,9 +335,15 @@ async fn local_acts_only_surface_when_they_can_be_asked() -> Result<(), Box<dyn 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn a_closed_room_is_not_proposed() -> Result<(), Box<dyn std::error::Error>> {
-    let pool = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
+    let isolated = common::isolated_database("CROWDRELAY_TEST_DATABASE_URL")
         .await
-        .expect("connect to the migrated suite database");
+        .expect("create a migrated database of this test's own");
+    let outcome = a_closed_room_is_not_proposed_on(isolated.pool.clone()).await;
+    isolated.drop().await?;
+    outcome
+}
+
+async fn a_closed_room_is_not_proposed_on(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
     let act = workspace(&pool).await?;
     // A private city: `place_venues` is global, so a shared city would let a
     // sibling test's rooms outrank this one's and the assertion would measure
@@ -479,9 +505,17 @@ async fn peer_fact(
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn a_dead_band_is_not_a_local_suggestion() -> Result<(), Box<dyn std::error::Error>> {
-    let pool = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
+    let isolated = common::isolated_database("CROWDRELAY_TEST_DATABASE_URL")
         .await
-        .expect("connect to the migrated suite database");
+        .expect("create a migrated database of this test's own");
+    let outcome = a_dead_band_is_not_a_local_suggestion_on(isolated.pool.clone()).await;
+    isolated.drop().await?;
+    outcome
+}
+
+async fn a_dead_band_is_not_a_local_suggestion_on(
+    pool: PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
     let act = workspace(&pool).await?;
     let wroclaw = city(&pool, "wroclaw-dead-act").await?;
     let now = OffsetDateTime::now_utc();

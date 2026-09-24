@@ -18,8 +18,9 @@ use uuid::Uuid;
 
 async fn organization(pool: &PgPool, slug: &str) -> Result<Uuid, Box<dyn std::error::Error>> {
     let id = Uuid::now_v7();
-    sqlx::query("INSERT INTO organizations (id, slug, name) VALUES ($1, $2, $2)")
+    sqlx::query("INSERT INTO organizations (id, slug, name) VALUES ($1, $2, $3)")
         .bind(id)
+        .bind(crate::common::unique_slug(slug, id))
         .bind(slug)
         .execute(pool)
         .await?;
@@ -32,8 +33,9 @@ async fn workspace(
     organization_id: Option<Uuid>,
 ) -> Result<Uuid, Box<dyn std::error::Error>> {
     let id = Uuid::now_v7();
-    sqlx::query("INSERT INTO workspaces (id, slug, name, organization_id) VALUES ($1, $2, $2, $3)")
+    sqlx::query("INSERT INTO workspaces (id, slug, name, organization_id) VALUES ($1, $2, $3, $4)")
         .bind(id)
+        .bind(crate::common::unique_slug(slug, id))
         .bind(slug)
         .bind(organization_id)
         .execute(pool)
@@ -50,7 +52,7 @@ async fn city(pool: &PgPool, name: &str) -> Result<Uuid, Box<dyn std::error::Err
         .collect::<String>();
     sqlx::query("INSERT INTO cities (id, slug, name, country_code) VALUES ($1, $2, $3, 'PL')")
         .bind(id)
-        .bind(slug)
+        .bind(crate::common::unique_slug(&slug, id))
         .bind(name)
         .execute(pool)
         .await?;

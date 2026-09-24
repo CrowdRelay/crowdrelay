@@ -42,7 +42,16 @@ fn grid(rows: &[&[&str]]) -> Vec<Vec<String>> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn the_registry_workbook_routes_every_tab() -> Result<()> {
-    let pool = common::test_pool("CROWDRELAY_TEST_DATABASE_URL").await?;
+    // Its own database: the sheet resolves cities by name against the seeded
+    // catalogue, and a sibling suite's second PL "Wrocław" makes that
+    // lookup ambiguous — which the intake rightly refuses to guess through.
+    let isolated = common::isolated_database("CROWDRELAY_TEST_DATABASE_URL").await?;
+    let outcome = the_registry_workbook_routes_every_tab_on(isolated.pool.clone()).await;
+    isolated.drop().await?;
+    outcome
+}
+
+async fn the_registry_workbook_routes_every_tab_on(pool: PgPool) -> Result<()> {
     let workspace_id = workspace(&pool, "workbook").await?;
 
     let venues = grid(&[
@@ -376,7 +385,16 @@ async fn the_registry_workbook_routes_every_tab() -> Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn a_beacon_sheet_reimport_refreshes_rather_than_duplicates() -> Result<()> {
-    let pool = common::test_pool("CROWDRELAY_TEST_DATABASE_URL").await?;
+    // Its own database: the sheet resolves cities by name against the seeded
+    // catalogue, and a sibling suite's second PL "Wrocław" makes that
+    // lookup ambiguous — which the intake rightly refuses to guess through.
+    let isolated = common::isolated_database("CROWDRELAY_TEST_DATABASE_URL").await?;
+    let outcome = a_beacon_sheet_reimport_refreshes_rather_than_duplicates_on(isolated.pool.clone()).await;
+    isolated.drop().await?;
+    outcome
+}
+
+async fn a_beacon_sheet_reimport_refreshes_rather_than_duplicates_on(pool: PgPool) -> Result<()> {
     let workspace_id = workspace(&pool, "beaconre").await?;
 
     let header: &[&str] = &[
@@ -810,7 +828,16 @@ async fn a_github_file_owns_its_rows_and_verdicts() -> Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn a_multi_cell_banner_still_hides_nothing() -> Result<()> {
-    let pool = common::test_pool("CROWDRELAY_TEST_DATABASE_URL").await?;
+    // Its own database: the sheet resolves cities by name against the seeded
+    // catalogue, and a sibling suite's second PL "Wrocław" makes that
+    // lookup ambiguous — which the intake rightly refuses to guess through.
+    let isolated = common::isolated_database("CROWDRELAY_TEST_DATABASE_URL").await?;
+    let outcome = a_multi_cell_banner_still_hides_nothing_on(isolated.pool.clone()).await;
+    isolated.drop().await?;
+    outcome
+}
+
+async fn a_multi_cell_banner_still_hides_nothing_on(pool: PgPool) -> Result<()> {
     let workspace_id = workspace(&pool, "banner").await?;
 
     let dump = grid(&[

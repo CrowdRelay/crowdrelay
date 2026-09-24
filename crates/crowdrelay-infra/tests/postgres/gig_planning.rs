@@ -162,7 +162,13 @@ async fn the_evidence_handed_to_the_planner_is_what_the_database_holds()
 
 async fn run(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
     let act = workspace(pool).await?;
-    let wroclaw = city(pool, "wroclaw").await?;
+    // The room registry is shared across tenants and keyed on the city, and
+    // the suite shares one database: in the migration-seeded `wroclaw`, every
+    // other test's show at "Klub X" counts toward this room. This run's
+    // cities are its own.
+    let wroclaw_slug = common::unique_slug("wroclaw", act);
+    let praha_slug = common::unique_slug("praha", act);
+    let wroclaw = city(pool, &wroclaw_slug).await?;
     let now = OffsetDateTime::now_utc();
 
     // Sixty reachable people, above the planner's floor of fifty.
@@ -175,7 +181,7 @@ async fn run(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
     let opportunities = city_opportunities(pool, act, now).await?;
     let wro = opportunities
         .iter()
-        .find(|city| city.city == "wroclaw")
+        .find(|city| city.city == wroclaw_slug)
         .ok_or("the city with sixty fans and two shows was not considered")?;
 
     assert_eq!(
@@ -250,7 +256,7 @@ async fn run(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
     let with_promoter = city_opportunities(pool, act, now).await?;
     let wro = with_promoter
         .iter()
-        .find(|city| city.city == "wroclaw")
+        .find(|city| city.city == wroclaw_slug)
         .ok_or("city vanished after adding a promoter")?;
     assert_eq!(wro.promoters.len(), 1);
     assert_eq!(wro.promoters[0].name, "Anna");
@@ -260,7 +266,7 @@ async fn run(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
     );
 
     let plan = plan_gig(wro, TenantIntent::BookingShows).expect("proposes with a route");
-    assert_eq!(plan.city, "wroclaw");
+    assert_eq!(plan.city, wroclaw_slug);
     assert_eq!(plan.venue, "Klub X");
     assert_eq!(
         plan.contact
@@ -277,14 +283,14 @@ async fn run(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
     );
 
     // ── A city the band has never played stays absent, not zero ─────────────
-    let praha = city(pool, "praha").await?;
+    let praha = city(pool, &praha_slug).await?;
     for index in 0..60 {
         reachable_fan(pool, act, praha, &format!("praha{index}@example.com")).await?;
     }
     let never_played = city_opportunities(pool, act, now).await?;
     let pra = never_played
         .iter()
-        .find(|city| city.city == "praha")
+        .find(|city| city.city == praha_slug)
         .ok_or("a city with sixty fans and no history was not considered")?;
     assert!(
         pra.months_since_show.is_none(),
@@ -317,7 +323,7 @@ async fn run(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
     let after_booking = city_opportunities(pool, act, now).await?;
     let wro = after_booking
         .iter()
-        .find(|city| city.city == "wroclaw")
+        .find(|city| city.city == wroclaw_slug)
         .ok_or("city vanished after a booking")?;
     assert!(wro.has_upcoming_show);
     assert_eq!(
@@ -352,7 +358,7 @@ async fn shared_fans_measure_overlap_without_naming_anybody(
     let label = organization(pool, "label-overlap").await?;
     let head = org_workspace(pool, label, "headliner").await?;
     let support = org_workspace(pool, label, "support").await?;
-    let city_id = city(pool, "poznan").await?;
+    let city_id = city(pool, &common::unique_slug("poznan", Uuid::now_v7())).await?;
 
     // The headliner reaches four people; two of them also follow the support.
     for index in 0..4 {
@@ -421,7 +427,7 @@ async fn shared_fans_measure_overlap_without_naming_anybody(
     // cannibalise. Only an act with no reachable audience at all is absent,
     // and absent reads as unmeasured rather than as separate.
     let stranger = org_workspace(pool, label, "stranger").await?;
-    let own = city(pool, "gdansk").await?;
+    let own = city(pool, &common::unique_slug("gdansk", Uuid::now_v7())).await?;
     reachable_fan(pool, stranger, own, "solo@example.com").await?;
     let opportunity = roster_opportunity(pool, label, 2, OffsetDateTime::now_utc()).await?;
     let stranger_act = opportunity
@@ -476,8 +482,22 @@ async fn an_overlap_is_measured_in_each_city_separately(
     // Real coordinates, far enough apart that a fan of one is outside the
     // other's radius — every fixture city sharing one point would make every
     // fan reachable everywhere and the per-city claim untestable.
-    let home = city_in(pool, "katowice", "PL", 50.26, 19.02).await?;
-    let away = city_in(pool, "szczecin", "PL", 53.43, 14.55).await?;
+    let home = city_in(
+        pool,
+        &common::unique_slug("katowice", Uuid::now_v7()),
+        "PL",
+        50.26,
+        19.02,
+    )
+    .await?;
+    let away = city_in(
+        pool,
+        &common::unique_slug("szczecin", Uuid::now_v7()),
+        "PL",
+        53.43,
+        14.55,
+    )
+    .await?;
 
     // In their shared home city both acts reach the same two people.
     for index in 0..2 {
@@ -564,7 +584,8 @@ async fn a_declared_open_slot_reaches_the_roster_planner(
 
     let label = organization(pool, "label-slots").await?;
     let act = org_workspace(pool, label, "slot-act").await?;
-    let lodz = city(pool, "lodz").await?;
+    let lodz_slug = common::unique_slug("lodz", Uuid::now_v7());
+    let lodz = city(pool, &lodz_slug).await?;
 
     let slot_show = published_show(pool, act, lodz, "with-room", 40).await?;
     let _silent_show = published_show(pool, act, lodz, "nobody-said", 45).await?;
@@ -599,7 +620,7 @@ async fn a_declared_open_slot_reaches_the_roster_planner(
             .collect::<Vec<_>>()
     );
     let slot = &opportunity.open_slots[0];
-    assert_eq!(slot.city, "lodz");
+    assert_eq!(slot.city, lodz_slug);
     assert_eq!(slot.headliner, "slot-act");
     assert_eq!(
         slot.festival_name.as_deref(),
@@ -653,7 +674,14 @@ async fn a_citys_coordinates_reach_the_roster_planner(
 
     let label = organization(pool, "label-corridor").await?;
     let act = org_workspace(pool, label, "corridor-act").await?;
-    let krakow = city_in(pool, "krakow", "PL", 50.06, 19.94).await?;
+    let krakow = city_in(
+        pool,
+        &common::unique_slug("krakow", Uuid::now_v7()),
+        "PL",
+        50.06,
+        19.94,
+    )
+    .await?;
     reachable_fan(pool, act, krakow, "corridor@example.com").await?;
 
     let opportunity = roster_opportunity(pool, label, 2, OffsetDateTime::now_utc()).await?;
@@ -774,8 +802,9 @@ async fn a_roster_capacity_is_stated_or_absent(
 
 async fn organization(pool: &PgPool, slug: &str) -> Result<Uuid, Box<dyn std::error::Error>> {
     Ok(sqlx::query_scalar::<_, Uuid>(
-        "INSERT INTO organizations (slug, name) VALUES ($1, $1) RETURNING id",
+        "INSERT INTO organizations (slug, name) VALUES ($1, $2) RETURNING id",
     )
+    .bind(common::unique_slug(slug, Uuid::now_v7()))
     .bind(slug)
     .fetch_one(pool)
     .await?)
@@ -869,8 +898,11 @@ async fn two_cities_sharing_a_slug_do_not_share_their_evidence()
         let now = OffsetDateTime::now_utc();
         // Wrocław, Poland — and a German namesake hundreds of kilometres away.
         // Same slug, different city, different audience.
-        let wroclaw_pl = city_in(&database, "wroclaw", "PL", 51.1, 17.0).await?;
-        let wroclaw_de = city_in(&database, "wroclaw", "DE", 48.0, 7.85).await?;
+        // One slug in two countries — this run's own, so neither row is the
+        // migration-seeded Wrocław with every other test's shows on it.
+        let shared_slug = common::unique_slug("wroclaw", Uuid::now_v7());
+        let wroclaw_pl = city_in(&database, &shared_slug, "PL", 51.1, 17.0).await?;
+        let wroclaw_de = city_in(&database, &shared_slug, "DE", 48.0, 7.85).await?;
         for index in 0..60 {
             reachable_fan(
                 &database,
@@ -947,7 +979,14 @@ async fn an_unlocatable_city_is_unmeasurable_not_zero() -> Result<(), Box<dyn st
         let workspace = workspace(pool).await?;
 
         // Measured, and the measurement is nobody.
-        let empty_city = city_in(pool, "pustkow", "PL", 50.0, 20.0).await?;
+        let empty_city = city_in(
+            pool,
+            &common::unique_slug("pustkow", Uuid::now_v7()),
+            "PL",
+            50.0,
+            20.0,
+        )
+        .await?;
         assert_eq!(
             crowdrelay_infra::place_reach::reachable_in_city(pool, workspace, empty_city).await?,
             Some(0),
@@ -956,15 +995,13 @@ async fn an_unlocatable_city_is_unmeasurable_not_zero() -> Result<(), Box<dyn st
 
         // Present in the catalogue but unlocatable — nothing to anchor a
         // radius to.
-        sqlx::query(
+        let nowhere: Uuid = sqlx::query_scalar(
             "INSERT INTO cities (slug, name, country_code, latitude, longitude)
-             VALUES ('nowhere', 'Nowhere', 'PL', NULL, NULL)",
+             VALUES ($1, 'Nowhere', 'PL', NULL, NULL) RETURNING id",
         )
-        .execute(pool)
+        .bind(common::unique_slug("nowhere", Uuid::now_v7()))
+        .fetch_one(pool)
         .await?;
-        let nowhere: Uuid = sqlx::query_scalar("SELECT id FROM cities WHERE slug = 'nowhere'")
-            .fetch_one(pool)
-            .await?;
         assert_eq!(
             crowdrelay_infra::place_reach::reachable_in_city(pool, workspace, nowhere).await?,
             None,

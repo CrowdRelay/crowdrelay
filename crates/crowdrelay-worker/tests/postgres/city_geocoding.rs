@@ -10,7 +10,9 @@
 //! selection is global by design and any unresolved city left behind by another
 //! suite would land in the same batch. This test therefore creates and drops its
 //! own database rather than sharing one: batch counts only mean something when
-//! the batch is exactly what the test put there.
+//! the batch is exactly what the test put there. Emptying `cities` on the shared
+//! suite database instead cascades through every other test's venues, events
+//! and the migration-seeded catalogue they resolve against.
 
 use crate::common;
 
@@ -121,11 +123,13 @@ async fn clear_catalogue(pool: &PgPool) -> Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn the_geocoding_state_machine_resolves_backs_off_and_gives_up() -> Result<()> {
-    let database = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
+    let database = common::isolated_database("CROWDRELAY_TEST_DATABASE_URL")
         .await
-        .expect("connect to the migrated suite database");
+        .expect("create a migrated database of this test's own");
 
-    run_scenarios(&database).await
+    let outcome = run_scenarios(&database.pool).await;
+    database.drop().await?;
+    outcome
 }
 
 async fn run_scenarios(pool: &PgPool) -> Result<()> {

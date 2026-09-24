@@ -51,27 +51,24 @@ async fn workspace(pool: &PgPool, name: &str) -> Result<Uuid, Box<dyn std::error
 
 /// A city with real coordinates — the window loader reads them for
 /// `venue_coords` and own-show adjacency.
+///
+/// Each call is a fresh city. The room registry is shared across tenants and
+/// the suite shares one database, so in the migration-seeded `wroclaw` every
+/// earlier run's show at "Klub X" would count toward this room's evidence.
+/// Named by its slug too, so it never makes a real city's name ambiguous.
 async fn city_in(
     pool: &PgPool,
-    slug: &str,
+    name: &str,
     latitude: f64,
     longitude: f64,
 ) -> Result<Uuid, Box<dyn std::error::Error>> {
-    sqlx::query(
+    Ok(sqlx::query_scalar::<_, Uuid>(
         "INSERT INTO cities (slug, name, country_code, latitude, longitude)
-         VALUES ($1, $1, 'PL', $2, $3)
-         ON CONFLICT (country_code, slug)
-         DO UPDATE SET latitude = $2, longitude = $3",
+         VALUES ($1, $1, 'PL', $2, $3) RETURNING id",
     )
-    .bind(slug)
+    .bind(common::unique_slug(name, Uuid::now_v7()))
     .bind(latitude)
     .bind(longitude)
-    .execute(pool)
-    .await?;
-    Ok(sqlx::query_scalar::<_, Uuid>(
-        "SELECT id FROM cities WHERE country_code = 'PL' AND slug = $1",
-    )
-    .bind(slug)
     .fetch_one(pool)
     .await?)
 }

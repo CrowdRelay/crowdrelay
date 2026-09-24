@@ -235,6 +235,14 @@ async fn execute(
     Ok(action)
 }
 
+/// A contact address of this run's own. The ledger is keyed on the contact
+/// across every workspace — that is the point of it — and the suite shares
+/// one database, so a fixed address inherits every earlier run's touches and
+/// the budget refuses before the test's own first send.
+fn contact(label: &str) -> String {
+    format!("{}@example.com", common::unique_slug(label, Uuid::now_v7()))
+}
+
 /// The ledger count for one contact across every workspace — the figure the
 /// budget reads, asserted directly rather than through a second predicate.
 async fn touches(pool: &PgPool, contact: &str) -> Result<i64, sqlx::Error> {
@@ -290,7 +298,7 @@ async fn a_roster_shares_one_monthly_attention_budget() -> Result<(), Box<dyn st
         .expect("connect to the migrated suite database");
     let pool = &database;
     let now = OffsetDateTime::now_utc();
-    let fan = "shared-fan@example.com";
+    let fan = &contact("shared-fan");
 
     let label = organization(pool, "Test roster").await?;
     let act_a = workspace(pool, "Act A", Some(label)).await?;
@@ -386,7 +394,7 @@ async fn a_different_organization_shares_nothing() -> Result<(), Box<dyn std::er
         .expect("connect to the migrated suite database");
     let pool = &database;
     let now = OffsetDateTime::now_utc();
-    let fan = "stranger-fan@example.com";
+    let fan = &contact("stranger-fan");
 
     let label = organization(pool, "First roster").await?;
     let other_label = organization(pool, "Second roster").await?;
@@ -428,7 +436,7 @@ async fn a_lone_workspace_keeps_the_cooldown_and_gains_the_cap()
         .expect("connect to the migrated suite database");
     let pool = &database;
     let now = OffsetDateTime::now_utc();
-    let fan = "solo-fan@example.com";
+    let fan = &contact("solo-fan");
 
     // Every tenant today has no organization — the cap must hold for them too,
     // and the cooldown must keep meaning what it meant.
@@ -491,7 +499,7 @@ async fn a_replayed_action_does_not_spend_twice() -> Result<(), Box<dyn std::err
         .expect("connect to the migrated suite database");
     let pool = &database;
     let now = OffsetDateTime::now_utc();
-    let fan = "replayed-fan@example.com";
+    let fan = &contact("replayed-fan");
 
     let label = organization(pool, "Test roster").await?;
     let act = workspace(pool, "Act", Some(label)).await?;
@@ -541,7 +549,7 @@ async fn touches_older_than_thirty_days_stop_counting() -> Result<(), Box<dyn st
         .expect("connect to the migrated suite database");
     let pool = &database;
     let now = OffsetDateTime::now_utc();
-    let fan = "old-fan@example.com";
+    let fan = &contact("old-fan");
 
     let label = organization(pool, "Test roster").await?;
     let act = workspace(pool, "Act", Some(label)).await?;

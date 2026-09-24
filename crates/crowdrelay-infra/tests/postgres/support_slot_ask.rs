@@ -49,14 +49,19 @@ async fn run_support_slot_ask(pool: &PgPool, url: &str) -> Result<(), Box<dyn st
     };
 
     let now = OffsetDateTime::now_utc();
+    // Slugs are unique table-wide and the suite shares one database; each
+    // run's rows carry their own suffix so a rerun never meets its last run.
+    let run = Uuid::now_v7().simple().to_string()[20..].to_owned();
     let org = sqlx::query_scalar::<_, Uuid>(
-        "INSERT INTO organizations (slug, name) VALUES ('label-n5', 'Label N5') RETURNING id",
+        "INSERT INTO organizations (slug, name) VALUES ($1, 'Label N5') RETURNING id",
     )
+    .bind(format!("label-n5-{run}"))
     .fetch_one(pool)
     .await?;
     let member = |name: &str| {
         let pool = pool.clone();
         let name = name.to_owned();
+        let run = run.clone();
         async move {
             let id = Uuid::now_v7();
             sqlx::query(
@@ -64,7 +69,7 @@ async fn run_support_slot_ask(pool: &PgPool, url: &str) -> Result<(), Box<dyn st
                  VALUES ($1, $2, $3, $4)",
             )
             .bind(id)
-            .bind(format!("ws-{name}"))
+            .bind(format!("ws-{name}-{run}"))
             .bind(&name)
             .bind(org)
             .execute(&pool)
@@ -87,32 +92,36 @@ async fn run_support_slot_ask(pool: &PgPool, url: &str) -> Result<(), Box<dyn st
 
     // A workspace on a different roster entirely — same request, no member.
     let foreign_org = sqlx::query_scalar::<_, Uuid>(
-        "INSERT INTO organizations (slug, name) VALUES ('other-label', 'Other') RETURNING id",
+        "INSERT INTO organizations (slug, name) VALUES ($1, 'Other') RETURNING id",
     )
+    .bind(format!("other-label-{run}"))
     .fetch_one(pool)
     .await?;
     let foreign_head = Uuid::now_v7();
     sqlx::query(
         "INSERT INTO workspaces (id, slug, name, organization_id)
-         VALUES ($1, 'ws-foreign-head', 'foreign-head', $2)",
+         VALUES ($1, $3, 'foreign-head', $2)",
     )
     .bind(foreign_head)
     .bind(foreign_org)
+    .bind(format!("ws-foreign-head-{run}"))
     .execute(pool)
     .await?;
 
     let city = sqlx::query_scalar::<_, Uuid>(
         "INSERT INTO cities (slug, name, country_code, latitude, longitude)
-         VALUES ('wroclaw-n5', 'wroclaw-n5', 'PL', 51.1, 17.0) RETURNING id",
+         VALUES ($1, 'wroclaw-n5', 'PL', 51.1, 17.0) RETURNING id",
     )
+    .bind(format!("wroclaw-n5-{run}"))
     .fetch_one(pool)
     .await?;
     // A city in the catalogue with no coordinates — measurable is a property
     // of the city, and this one has none.
     let unmeasurable = sqlx::query_scalar::<_, Uuid>(
         "INSERT INTO cities (slug, name, country_code)
-         VALUES ('coordinateless', 'coordinateless', 'PL') RETURNING id",
+         VALUES ($1, 'coordinateless', 'PL') RETURNING id",
     )
+    .bind(format!("coordinateless-{run}"))
     .fetch_one(pool)
     .await?;
     let head_unmeasurable = member("head-unmeasurable").await?;

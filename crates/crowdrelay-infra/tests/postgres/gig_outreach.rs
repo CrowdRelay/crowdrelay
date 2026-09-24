@@ -42,7 +42,9 @@ async fn one_approval_writes_to_the_whole_room_or_to_nobody()
 async fn run(pool: &PgPool, url: &str) -> Result<(), Box<dyn std::error::Error>> {
     let now = OffsetDateTime::now_utc();
     let act = workspace(pool).await?;
-    let wroclaw = city(pool, "wroclaw").await?;
+    // This run's own city: the room registry is shared across tenants.
+    let wroclaw_slug = common::unique_slug("wroclaw", act);
+    let wroclaw = city(pool, &wroclaw_slug).await?;
     for index in 0..60 {
         reachable_fan(pool, act, wroclaw, &format!("fan{index}@example.com")).await?;
     }
@@ -537,7 +539,8 @@ async fn a_settled_proposal_has_its_reasons_scored() -> Result<(), Box<dyn std::
     async {
         let now = OffsetDateTime::now_utc();
         let act = workspace(pool).await?;
-        let wroclaw = city(pool, "wroclaw").await?;
+        let wroclaw_slug = common::unique_slug("wroclaw", act);
+        let wroclaw = city(pool, &wroclaw_slug).await?;
         for index in 0..60 {
             reachable_fan(pool, act, wroclaw, &format!("fan{index}@example.com")).await?;
         }
@@ -572,7 +575,7 @@ async fn a_settled_proposal_has_its_reasons_scored() -> Result<(), Box<dyn std::
         let proposal = record
             .proposals
             .iter()
-            .find(|entry| entry.city == "wroclaw")
+            .find(|entry| entry.city == wroclaw_slug)
             .ok_or("the approved proposal is absent from its own track record")?;
         assert!(
             !proposal.is_settled(),
@@ -676,7 +679,7 @@ async fn a_settled_proposal_has_its_reasons_scored() -> Result<(), Box<dyn std::
         let proposal = record
             .proposals
             .iter()
-            .find(|entry| entry.city == "wroclaw")
+            .find(|entry| entry.city == wroclaw_slug)
             .ok_or("the settled proposal vanished from the track record")?;
         assert!(proposal.is_settled(), "a finished window did not settle");
         assert_eq!(
@@ -800,7 +803,7 @@ async fn run_revision(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
 
     let now = OffsetDateTime::now_utc();
     let act = workspace(pool).await?;
-    let gdansk = city(pool, "gdansk-rev").await?;
+    let gdansk = city(pool, &common::unique_slug("gdansk-rev", Uuid::now_v7())).await?;
     for index in 0..60 {
         reachable_fan(pool, act, gdansk, &format!("rev{index}@example.com")).await?;
     }
@@ -940,7 +943,7 @@ async fn run_revision(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
     // The no-op must be the machine's own line for the fresh city, recomputed
     // the way the approval recomputes it — reach is geographic, so a second
     // seeded city changes the count a guessed sentence would miss.
-    let sopot = city(pool, "sopot-rev").await?;
+    let sopot = city(pool, &common::unique_slug("sopot-rev", Uuid::now_v7())).await?;
     for index in 0..60 {
         reachable_fan(pool, act, sopot, &format!("sopot{index}@example.com")).await?;
     }
@@ -1238,7 +1241,8 @@ async fn a_room_closed_after_approval_never_gets_its_letter()
     // A private city — `place_venues` is global, so a shared city's rooms
     // could outrank this fixture's and the letter would name somebody
     // else's room.
-    let sendtown = city(&pool, "sendtown").await?;
+    let sendtown_slug = common::unique_slug("sendtown", Uuid::now_v7());
+    let sendtown = city(&pool, &sendtown_slug).await?;
     for index in 0..60 {
         reachable_fan(
             &pool,
@@ -1276,8 +1280,9 @@ async fn a_room_closed_after_approval_never_gets_its_letter()
                 'https://example.com/closed/' || gen_random_uuid(), now(), NULL
          FROM place_venues AS venue
          JOIN cities ON cities.id = venue.city_id
-         WHERE cities.slug = 'sendtown' AND venue.name_key = 'klub send'",
+         WHERE cities.slug = $1 AND venue.name_key = 'klub send'",
     )
+    .bind(&sendtown_slug)
     .execute(&pool)
     .await?;
 

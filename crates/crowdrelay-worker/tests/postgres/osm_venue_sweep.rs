@@ -9,6 +9,10 @@
 //!
 //! The same file drives the expiry sweep: an expired fact must be *gone*,
 //! not filtered — the row is the thing the licence says we may not hold.
+//!
+//! Both sweeps select across the whole catalogue — every pinned city with a
+//! show, every expired fact — so each test runs on a database of its own:
+//! on the shared suite database the counts include every other test's rows.
 
 use crate::common;
 
@@ -130,11 +134,13 @@ async fn facts_for(
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn a_swept_room_exists_with_its_anchor_and_licensed_facts() -> Result<()> {
-    let database = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
+    let database = common::isolated_database("CROWDRELAY_TEST_DATABASE_URL")
         .await
-        .expect("connect to the migrated suite database");
+        .expect("create a migrated database of this test's own");
 
-    run_sweep_cases(&database).await
+    let outcome = run_sweep_cases(&database.pool).await;
+    database.drop().await?;
+    outcome
 }
 
 async fn run_sweep_cases(pool: &PgPool) -> Result<()> {
@@ -296,11 +302,13 @@ async fn run_sweep_cases(pool: &PgPool) -> Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn an_expired_fact_is_deleted_not_filtered() -> Result<()> {
-    let database = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
+    let database = common::isolated_database("CROWDRELAY_TEST_DATABASE_URL")
         .await
-        .expect("connect to the migrated suite database");
+        .expect("create a migrated database of this test's own");
 
-    run_expiry_case(&database).await
+    let outcome = run_expiry_case(&database.pool).await;
+    database.drop().await?;
+    outcome
 }
 
 async fn run_expiry_case(pool: &PgPool) -> Result<()> {

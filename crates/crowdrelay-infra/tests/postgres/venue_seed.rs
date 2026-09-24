@@ -89,11 +89,17 @@ async fn facts(
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn a_seed_sheet_lands_as_attributed_facts() -> Result<(), Box<dyn std::error::Error>> {
-    let database = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
+    // Its own database: the sheet resolves cities by name against the
+    // migration-seeded catalogue, and the rooms and facts it writes are one
+    // registry across every tenant — on the shared suite database a second
+    // run reads the first run's claims back as somebody else's.
+    let database = common::isolated_database("CROWDRELAY_TEST_DATABASE_URL")
         .await
-        .expect("connect to the migrated suite database");
+        .expect("create a migrated database of this test's own");
 
-    run_cases(&database).await
+    let outcome = run_cases(&database.pool).await;
+    database.drop().await?;
+    outcome
 }
 
 async fn run_cases(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {

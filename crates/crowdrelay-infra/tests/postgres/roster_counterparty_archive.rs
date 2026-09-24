@@ -19,8 +19,9 @@ use uuid::Uuid;
 
 async fn organization(pool: &PgPool, slug: &str) -> Result<Uuid, Box<dyn std::error::Error>> {
     let id = Uuid::now_v7();
-    sqlx::query("INSERT INTO organizations (id, slug, name) VALUES ($1, $2, $2)")
+    sqlx::query("INSERT INTO organizations (id, slug, name) VALUES ($1, $2, $3)")
         .bind(id)
+        .bind(crate::common::unique_slug(slug, id))
         .bind(slug)
         .execute(pool)
         .await?;
@@ -33,8 +34,9 @@ async fn workspace(
     organization_id: Option<Uuid>,
 ) -> Result<Uuid, Box<dyn std::error::Error>> {
     let id = Uuid::now_v7();
-    sqlx::query("INSERT INTO workspaces (id, slug, name, organization_id) VALUES ($1, $2, $2, $3)")
+    sqlx::query("INSERT INTO workspaces (id, slug, name, organization_id) VALUES ($1, $2, $3, $4)")
         .bind(id)
+        .bind(crate::common::unique_slug(slug, id))
         .bind(slug)
         .bind(organization_id)
         .execute(pool)
@@ -75,11 +77,15 @@ async fn event(
 #[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn the_same_promoter_across_acts_reports_the_recurrence()
 -> Result<(), Box<dyn std::error::Error>> {
-    let db = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
+    // Its own database: `place_counterparties` is one registry across every
+    // tenant, keyed on the email, and the assertions count its marks — on
+    // the shared suite database they include every earlier run's.
+    let isolated = common::isolated_database("CROWDRELAY_TEST_DATABASE_URL")
         .await
-        .expect("connect to the migrated suite database");
+        .expect("create a migrated database of this test's own");
+    let db = isolated.pool.clone();
 
-    async {
+    let outcome = async {
         let org = organization(&db, "label").await?;
         let act_a = workspace(&db, "act-a", Some(org)).await?;
         let act_b = workspace(&db, "act-b", Some(org)).await?;
@@ -210,17 +216,23 @@ async fn the_same_promoter_across_acts_reports_the_recurrence()
         );
         Ok::<(), Box<dyn std::error::Error>>(())
     }
-    .await
+    .await;
+    isolated.drop().await?;
+    outcome
 }
 
 #[tokio::test]
 #[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn a_retracted_counterparty_unmarks_the_event() -> Result<(), Box<dyn std::error::Error>> {
-    let db = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
+    // Its own database: `place_counterparties` is one registry across every
+    // tenant, keyed on the email, and the assertions count its marks — on
+    // the shared suite database they include every earlier run's.
+    let isolated = common::isolated_database("CROWDRELAY_TEST_DATABASE_URL")
         .await
-        .expect("connect to the migrated suite database");
+        .expect("create a migrated database of this test's own");
+    let db = isolated.pool.clone();
 
-    async {
+    let outcome = async {
         let org = organization(&db, "label").await?;
         let act = workspace(&db, "act", Some(org)).await?;
         let now = OffsetDateTime::now_utc();
@@ -249,5 +261,7 @@ async fn a_retracted_counterparty_unmarks_the_event() -> Result<(), Box<dyn std:
         assert!(archive.counterparties.is_empty());
         Ok::<(), Box<dyn std::error::Error>>(())
     }
-    .await
+    .await;
+    isolated.drop().await?;
+    outcome
 }

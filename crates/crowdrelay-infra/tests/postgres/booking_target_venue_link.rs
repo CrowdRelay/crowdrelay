@@ -15,48 +15,44 @@
 
 use crate::common;
 
-use sqlx::{PgPool, Row};
+use sqlx::{PgConnection, Row};
 use uuid::Uuid;
 
-async fn seed_workspace(pool: &PgPool) -> Result<Uuid, Box<dyn std::error::Error>> {
+async fn seed_workspace(conn: &mut PgConnection) -> Result<Uuid, Box<dyn std::error::Error>> {
     let id = Uuid::now_v7();
     sqlx::query("INSERT INTO workspaces (id, slug, name) VALUES ($1, $2, $3)")
         .bind(id)
         .bind(format!("ws-{}", id.simple()))
         .bind("Test Workspace")
-        .execute(pool)
+        .execute(&mut *conn)
         .await?;
     Ok(id)
 }
 
-/// Resolves a city, creating it only when the migrations did not.
+/// A city of this run's own.
 ///
-/// Two things this got wrong first. Cities are unique on
-/// `(country_code, slug)` and not on slug alone — two countries may each hold
-/// a "praha" — so that is the conflict target. And a disposable database is
-/// not empty: the migrations seed a city catalogue, so `wroclaw` and `praha`
-/// already exist by the time a test runs.
-async fn seed_city(pool: &PgPool, slug: &str) -> Result<Uuid, Box<dyn std::error::Error>> {
-    sqlx::query(
-        "INSERT INTO cities (slug, name, country_code) VALUES ($1, $2, 'PL')
-         ON CONFLICT (country_code, slug) DO NOTHING",
-    )
-    .bind(slug)
-    .bind(slug)
-    .execute(pool)
-    .await?;
+/// `place_venues` is shared across tenants and unique on `(city_id,
+/// name_key)`, and the suite shares one database. Pinning "Klub X" to the
+/// migration-seeded `wroclaw` made the second run of this file collide with
+/// the first run's room, so each run takes a fresh city.
+async fn seed_city(
+    conn: &mut PgConnection,
+    name: &str,
+) -> Result<Uuid, Box<dyn std::error::Error>> {
+    // Named by its slug too: a second PL city called "wroclaw" would make the
+    // real one ambiguous to every by-name lookup.
     let id = sqlx::query_scalar::<_, Uuid>(
-        "SELECT id FROM cities WHERE country_code = 'PL' AND slug = $1",
+        "INSERT INTO cities (slug, name, country_code) VALUES ($1, $1, 'PL') RETURNING id",
     )
-    .bind(slug)
-    .fetch_one(pool)
+    .bind(common::unique_slug(name, Uuid::now_v7()))
+    .fetch_one(&mut *conn)
     .await?;
     Ok(id)
 }
 
 /// A room in the registry, created the way the event trigger would.
 async fn seed_venue(
-    pool: &PgPool,
+    conn: &mut PgConnection,
     city_id: Uuid,
     display_name: &str,
 ) -> Result<Uuid, Box<dyn std::error::Error>> {
@@ -66,13 +62,13 @@ async fn seed_venue(
     )
     .bind(city_id)
     .bind(display_name)
-    .fetch_one(pool)
+    .fetch_one(&mut *conn)
     .await?;
     Ok(id)
 }
 
 async fn seed_target(
-    pool: &PgPool,
+    conn: &mut PgConnection,
     workspace_id: Uuid,
     city_id: Uuid,
     kind: &str,
@@ -88,15 +84,15 @@ async fn seed_target(
     .bind(kind)
     .bind(display_name)
     .bind(format!("booking+{}@example.com", Uuid::now_v7().simple()))
-    .fetch_one(pool)
+    .fetch_one(&mut *conn)
     .await?;
     Ok(id)
 }
 
-async fn venue_link(pool: &PgPool, target_id: Uuid) -> Result<Option<Uuid>, sqlx::Error> {
+async fn venue_link(conn: &mut PgConnection, target_id: Uuid) -> Result<Option<Uuid>, sqlx::Error> {
     sqlx::query_scalar::<_, Option<Uuid>>("SELECT venue_id FROM booking_targets WHERE id = $1")
         .bind(target_id)
-        .fetch_one(pool)
+        .fetch_one(&mut *conn)
         .await
 }
 
@@ -108,19 +104,20 @@ async fn a_booking_target_resolves_to_the_room_it_names() -> Result<(), Box<dyn 
         .await
         .expect("connect to the migrated suite database");
 
-    run_cases(&database).await
+    let mut conn = database.acquire().await?;
+    run_cases(&mut conn).await
 }
 
-async fn run_cases(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
-    let workspace = seed_workspace(pool).await?;
-    let wroclaw = seed_city(pool, "wroclaw").await?;
-    let praha = seed_city(pool, "praha").await?;
+async fn run_cases(conn: &mut PgConnection) -> Result<(), Box<dyn std::error::Error>> {
+    let workspace = seed_workspace(conn).await?;
+    let wroclaw = seed_city(conn, "wroclaw").await?;
+    let praha = seed_city(conn, "praha").await?;
 
     // ── The room exists first: a target naming it links on insert. ──────────
-    let klub_x = seed_venue(pool, wroclaw, "Klub X").await?;
-    let target = seed_target(pool, workspace, wroclaw, "venue", "Klub X").await?;
+    let klub_x = seed_venue(conn, wroclaw, "Klub X").await?;
+    let target = seed_target(conn, workspace, wroclaw, "venue", "Klub X").await?;
     assert_eq!(
-        venue_link(pool, target).await?,
+        venue_link(conn, target).await?,
         Some(klub_x),
         "a target naming a known room did not link to it"
     );
@@ -129,19 +126,19 @@ async fn run_cases(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
     // reason the trigger calls `place_venue_key` rather than comparing text:
     // two answers to "is this the same room" is the shape of every duplicate
     // in this codebase.
-    let sloppy = seed_target(pool, workspace, wroclaw, "venue", "  klub    X ").await?;
+    let sloppy = seed_target(conn, workspace, wroclaw, "venue", "  klub    X ").await?;
     assert_eq!(
-        venue_link(pool, sloppy).await?,
+        venue_link(conn, sloppy).await?,
         Some(klub_x),
         "casing and whitespace produced a second answer"
     );
 
     // ── Same name, different city: two rooms, and the link follows the city.
-    let klub_x_praha = seed_venue(pool, praha, "Klub X").await?;
+    let klub_x_praha = seed_venue(conn, praha, "Klub X").await?;
     assert_ne!(klub_x, klub_x_praha);
-    let praha_target = seed_target(pool, workspace, praha, "venue", "Klub X").await?;
+    let praha_target = seed_target(conn, workspace, praha, "venue", "Klub X").await?;
     assert_eq!(
-        venue_link(pool, praha_target).await?,
+        venue_link(conn, praha_target).await?,
         Some(klub_x_praha),
         "a target linked to a room of the same name in another city"
     );
@@ -151,15 +148,15 @@ async fn run_cases(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
     // Without the AFTER INSERT trigger on `place_venues`, a band that pitched
     // a room in March and first played it in June would still show no history,
     // because its target row never changed.
-    let unknown = seed_target(pool, workspace, wroclaw, "venue", "Klub Y").await?;
+    let unknown = seed_target(conn, workspace, wroclaw, "venue", "Klub Y").await?;
     assert_eq!(
-        venue_link(pool, unknown).await?,
+        venue_link(conn, unknown).await?,
         None,
         "a room nobody has played must be an absent link, never a guess"
     );
-    let klub_y = seed_venue(pool, wroclaw, "KLUB Y").await?;
+    let klub_y = seed_venue(conn, wroclaw, "KLUB Y").await?;
     assert_eq!(
-        venue_link(pool, unknown).await?,
+        venue_link(conn, unknown).await?,
         Some(klub_y),
         "a room entering the registry did not claim the target already naming it"
     );
@@ -167,10 +164,10 @@ async fn run_cases(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
     // ── A rename out of a match retracts, rather than keeping a stale claim.
     sqlx::query("UPDATE booking_targets SET display_name = 'Klub Z' WHERE id = $1")
         .bind(unknown)
-        .execute(pool)
+        .execute(&mut *conn)
         .await?;
     assert_eq!(
-        venue_link(pool, unknown).await?,
+        venue_link(conn, unknown).await?,
         None,
         "a target renamed away from its room kept the old link"
     );
@@ -180,9 +177,9 @@ async fn run_cases(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
     // A promoter books rooms and a festival is an event. Matching either by
     // name would attach a room's show history to something that is not a room,
     // and the resulting number would be nonsense nobody could trace back.
-    let promoter = seed_target(pool, workspace, wroclaw, "promoter", "Klub X").await?;
+    let promoter = seed_target(conn, workspace, wroclaw, "promoter", "Klub X").await?;
     assert_eq!(
-        venue_link(pool, promoter).await?,
+        venue_link(conn, promoter).await?,
         None,
         "a promoter sharing a room's name acquired the room's identity"
     );
@@ -193,7 +190,7 @@ async fn run_cases(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
     let forced = sqlx::query("UPDATE booking_targets SET venue_id = $2 WHERE id = $1")
         .bind(promoter)
         .bind(klub_x)
-        .execute(pool)
+        .execute(&mut *conn)
         .await;
     assert!(
         forced.is_err(),
@@ -206,12 +203,12 @@ async fn run_cases(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
     // tenant, and deleting a shared row must not take them.
     sqlx::query("DELETE FROM place_venues WHERE id = $1")
         .bind(klub_x)
-        .execute(pool)
+        .execute(&mut *conn)
         .await?;
     let surviving =
         sqlx::query("SELECT venue_id, contact_email FROM booking_targets WHERE id = $1")
             .bind(target)
-            .fetch_optional(pool)
+            .fetch_optional(&mut *conn)
             .await?
             .ok_or("the target was deleted along with the room")?;
     assert_eq!(surviving.get::<Option<Uuid>, _>("venue_id"), None);
@@ -229,28 +226,33 @@ async fn the_backfill_links_targets_that_predate_the_migration()
     // rows the way the old schema would have, and running the backfill's own
     // statement — the alternative is asserting nothing about it, which is how
     // a backfill ships broken.
+    //
+    // The trigger drop is DDL on the one database the whole suite shares, so
+    // it runs inside a transaction that is always rolled back: committed, it
+    // silently unlinked every booking target any later test wrote.
     let database = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
         .await
         .expect("connect to the migrated suite database");
+    let mut tx = database.begin().await?;
 
-    async {
-        let pool = &database;
-        let workspace = seed_workspace(pool).await?;
-        let wroclaw = seed_city(pool, "wroclaw").await?;
+    let outcome = async {
+        let conn: &mut PgConnection = &mut tx;
+        let workspace = seed_workspace(conn).await?;
+        let wroclaw = seed_city(conn, "wroclaw").await?;
 
         sqlx::query("DROP TRIGGER booking_targets_resolve_venue ON booking_targets")
-            .execute(pool)
+            .execute(&mut *conn)
             .await?;
-        let target = seed_target(pool, workspace, wroclaw, "venue", "Klub X").await?;
-        let klub_x = seed_venue(pool, wroclaw, "klub x").await?;
+        let target = seed_target(conn, workspace, wroclaw, "venue", "Klub X").await?;
+        let klub_x = seed_venue(conn, wroclaw, "klub x").await?;
         // The place_venues trigger is still live, so clear its work to model a
         // pair of rows that genuinely never met.
         sqlx::query("UPDATE booking_targets SET venue_id = NULL WHERE id = $1")
             .bind(target)
-            .execute(pool)
+            .execute(&mut *conn)
             .await?;
         assert_eq!(
-            venue_link(pool, target).await?,
+            venue_link(conn, target).await?,
             None,
             "fixture is not unlinked"
         );
@@ -266,14 +268,16 @@ async fn the_backfill_links_targets_that_predate_the_migration()
               AND target.venue_id IS NULL
             "#,
         )
-        .execute(pool)
+        .execute(&mut *conn)
         .await?;
         assert_eq!(
-            venue_link(pool, target).await?,
+            venue_link(conn, target).await?,
             Some(klub_x),
             "the backfill left a resolvable pair unlinked"
         );
         Ok::<(), Box<dyn std::error::Error>>(())
     }
-    .await
+    .await;
+    tx.rollback().await?;
+    outcome
 }

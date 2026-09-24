@@ -43,14 +43,15 @@ struct MemberState {
     profile_active: bool,
 }
 
-async fn member_state(pool: &PgPool, email: &str) -> Result<MemberState> {
+async fn member_state(pool: &PgPool, workspace_id: Uuid, email: &str) -> Result<MemberState> {
     let row = sqlx::query(
         "SELECT member.status, profile.active \
          FROM workspace_members AS member \
          JOIN team_profiles AS profile ON profile.member_id = member.id \
-         WHERE member.normalized_email = $1",
+         WHERE member.workspace_id = $2 AND member.normalized_email = $1",
     )
     .bind(email)
+    .bind(workspace_id)
     .fetch_one(pool)
     .await
     .context("read member state")?;
@@ -58,6 +59,22 @@ async fn member_state(pool: &PgPool, email: &str) -> Result<MemberState> {
         status: row.try_get("status")?,
         profile_active: row.try_get("active")?,
     })
+}
+
+/// A workspace of the test's own. The suite shares one database and slugs
+/// are unique table-wide, so a fixed slug fails the second run; every read
+/// below is scoped to this id for the same reason.
+async fn workspace(pool: &PgPool, label: &str, name: &str) -> Result<(Uuid, WorkspaceSlug)> {
+    let id = Uuid::now_v7();
+    let slug = WorkspaceSlug::parse(common::unique_slug(label, id))?;
+    sqlx::query("INSERT INTO workspaces (id, slug, name) VALUES ($1, $2, $3)")
+        .bind(id)
+        .bind(slug.as_str())
+        .bind(name)
+        .execute(pool)
+        .await
+        .context("insert workspace")?;
+    Ok((id, slug))
 }
 
 fn db_config(url: &str) -> DatabaseConfig {
@@ -83,13 +100,7 @@ async fn a_deploy_does_not_re_enable_a_disabled_member() -> Result<()> {
 
 async fn disablement_survives(database: &PgPool, url: &str) -> Result<()> {
     let pool = database;
-    let slug = WorkspaceSlug::parse("team-bootstrap")?;
-    sqlx::query("INSERT INTO workspaces (id, slug, name) VALUES ($1, $2, 'Team bootstrap test')")
-        .bind(Uuid::now_v7())
-        .bind(slug.as_str())
-        .execute(pool)
-        .await
-        .context("insert workspace")?;
+    let (workspace_id, slug) = workspace(pool, "team-bootstrap", "Team bootstrap test").await?;
 
     let email = "member-one@team-bootstrap.test";
     let config = one_member(email);
@@ -97,22 +108,27 @@ async fn disablement_survives(database: &PgPool, url: &str) -> Result<()> {
 
     // First release: the member is created and is at work.
     bootstrap_team_operations(pool, &slug, &db_config, &config).await?;
-    let created = member_state(pool, email).await?;
+    let created = member_state(pool, workspace_id, email).await?;
     ensure!(created.status == "active", "a new member starts active");
     ensure!(created.profile_active, "a new profile starts active");
 
     // Somebody turns them off. No route does this today, so it is modelled the
     // way it is actually done: by hand.
-    sqlx::query("UPDATE workspace_members SET status = 'disabled' WHERE normalized_email = $1")
-        .bind(email)
-        .execute(pool)
-        .await
-        .context("disable member")?;
     sqlx::query(
-        "UPDATE team_profiles SET active = false WHERE member_id = \
-         (SELECT id FROM workspace_members WHERE normalized_email = $1)",
+        "UPDATE workspace_members SET status = 'disabled' \
+         WHERE workspace_id = $2 AND normalized_email = $1",
     )
     .bind(email)
+    .bind(workspace_id)
+    .execute(pool)
+    .await
+    .context("disable member")?;
+    sqlx::query(
+        "UPDATE team_profiles SET active = false WHERE member_id = \
+         (SELECT id FROM workspace_members WHERE workspace_id = $2 AND normalized_email = $1)",
+    )
+    .bind(email)
+    .bind(workspace_id)
     .execute(pool)
     .await
     .context("deactivate profile")?;
@@ -120,7 +136,7 @@ async fn disablement_survives(database: &PgPool, url: &str) -> Result<()> {
     // Next release. The contact is still in the deploy secret, because being
     // disabled and being off the team are different statements.
     bootstrap_team_operations(pool, &slug, &db_config, &config).await?;
-    let after = member_state(pool, email).await?;
+    let after = member_state(pool, workspace_id, email).await?;
     ensure!(
         after.status == "disabled",
         "a deploy re-enabled a disabled member: status is {}",
@@ -137,9 +153,10 @@ async fn disablement_survives(database: &PgPool, url: &str) -> Result<()> {
         "SELECT profile.member_key, cardinality(profile.skills) AS skill_count \
          FROM team_profiles AS profile \
          JOIN workspace_members AS member ON member.id = profile.member_id \
-         WHERE member.normalized_email = $1",
+         WHERE member.workspace_id = $2 AND member.normalized_email = $1",
     )
     .bind(email)
+    .bind(workspace_id)
     .fetch_one(pool)
     .await
     .context("read refreshed profile")?;
@@ -167,13 +184,7 @@ async fn an_invited_member_is_still_promoted_by_a_deploy() -> Result<()> {
 
 async fn invitation_is_confirmed(database: &PgPool, url: &str) -> Result<()> {
     let pool = database;
-    let slug = WorkspaceSlug::parse("team-invited")?;
-    sqlx::query("INSERT INTO workspaces (id, slug, name) VALUES ($1, $2, 'Team invite test')")
-        .bind(Uuid::now_v7())
-        .bind(slug.as_str())
-        .execute(pool)
-        .await
-        .context("insert workspace")?;
+    let (workspace_id, slug) = workspace(pool, "team-invited", "Team invite test").await?;
 
     // An invitation predates the contact reaching the deploy secret. Promoting
     // it is the one activation this function should still perform: a
@@ -181,16 +192,16 @@ async fn invitation_is_confirmed(database: &PgPool, url: &str) -> Result<()> {
     let email = "invited@team-bootstrap.test";
     sqlx::query(
         "INSERT INTO workspace_members (workspace_id, normalized_email, role, status) \
-         VALUES ((SELECT id FROM workspaces WHERE slug = $1), $2, 'staff', 'invited')",
+         VALUES ($1, $2, 'staff', 'invited')",
     )
-    .bind(slug.as_str())
+    .bind(workspace_id)
     .bind(email)
     .execute(pool)
     .await
     .context("insert invited member")?;
 
     bootstrap_team_operations(pool, &slug, &db_config(url), &one_member(email)).await?;
-    let after = member_state(pool, email).await?;
+    let after = member_state(pool, workspace_id, email).await?;
     ensure!(
         after.status == "active",
         "an invited contact must still be promoted, not left pending: status is {}",
@@ -209,13 +220,7 @@ async fn an_elastic_roster_bootstraps_member_keys_beyond_the_legacy_slots() -> R
         .await
         .expect("connect to the migrated suite database");
     let pool = &database;
-    let slug = WorkspaceSlug::parse("team-elastic")?;
-    sqlx::query("INSERT INTO workspaces (id, slug, name) VALUES ($1, $2, 'Elastic roster test')")
-        .bind(Uuid::now_v7())
-        .bind(slug.as_str())
-        .execute(pool)
-        .await
-        .context("insert workspace")?;
+    let (workspace_id, slug) = workspace(pool, "team-elastic", "Elastic roster test").await?;
 
     let config = TeamOperationsConfig {
         members: vec![
@@ -247,8 +252,10 @@ async fn an_elastic_roster_bootstraps_member_keys_beyond_the_legacy_slots() -> R
                 profile.member_key, profile.skills, profile.active \
          FROM team_profiles AS profile \
          JOIN workspace_members AS member ON member.id = profile.member_id \
+         WHERE member.workspace_id = $1 \
          ORDER BY profile.member_key",
     )
+    .bind(workspace_id)
     .fetch_all(pool)
     .await
     .context("read roster")?;
@@ -281,13 +288,7 @@ async fn a_member_key_repointed_at_a_new_email_rebinds_its_profile() -> Result<(
         .await
         .expect("connect to the migrated suite database");
     let pool = &database;
-    let slug = WorkspaceSlug::parse("team-repoint")?;
-    sqlx::query("INSERT INTO workspaces (id, slug, name) VALUES ($1, $2, 'Key repoint test')")
-        .bind(Uuid::now_v7())
-        .bind(slug.as_str())
-        .execute(pool)
-        .await
-        .context("insert workspace")?;
+    let (workspace_id, slug) = workspace(pool, "team-repoint", "Key repoint test").await?;
 
     let db_config = db_config(&url);
     let ada = TeamOperationsConfig {
@@ -300,8 +301,9 @@ async fn a_member_key_repointed_at_a_new_email_rebinds_its_profile() -> Result<(
     };
     bootstrap_team_operations(pool, &slug, &db_config, &ada).await?;
     let ada_member_id = sqlx::query_scalar::<_, Uuid>(
-        "SELECT member_id FROM team_profiles WHERE member_key = 'ops_lead'",
+        "SELECT member_id FROM team_profiles WHERE workspace_id = $1 AND member_key = 'ops_lead'",
     )
+    .bind(workspace_id)
     .fetch_one(pool)
     .await
     .context("read first member_id")?;
@@ -320,8 +322,9 @@ async fn a_member_key_repointed_at_a_new_email_rebinds_its_profile() -> Result<(
         "SELECT profile.member_id, profile.skills, member.normalized_email \
          FROM team_profiles AS profile \
          JOIN workspace_members AS member ON member.id = profile.member_id \
-         WHERE profile.member_key = 'ops_lead'",
+         WHERE profile.workspace_id = $1 AND profile.member_key = 'ops_lead'",
     )
+    .bind(workspace_id)
     .fetch_one(pool)
     .await
     .context("read repointed profile")?;
@@ -339,7 +342,9 @@ async fn a_member_key_repointed_at_a_new_email_rebinds_its_profile() -> Result<(
         "skills refresh on the re-bind"
     );
     ensure!(
-        member_state(pool, "ada@team-repoint.test").await.is_err(),
+        member_state(pool, workspace_id, "ada@team-repoint.test")
+            .await
+            .is_err(),
         "Ada's member row keeps no routing profile"
     );
 

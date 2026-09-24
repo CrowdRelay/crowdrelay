@@ -156,11 +156,17 @@ async fn a_connection_that_just_failed_is_not_retried_immediately_inner(
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn spotify_top_cities_resolve_against_the_city_catalog() -> Result<()> {
-    let database = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
+    // Its own database: the assertions are about the migration's own seed,
+    // and on the shared suite database any sibling's PL city named "Wrocław"
+    // (the Latarnik suite needs one) makes the name ambiguous — which the
+    // join rightly refuses to guess through.
+    let database = common::isolated_database("CROWDRELAY_TEST_DATABASE_URL")
         .await
-        .expect("connect to the migrated suite database");
+        .expect("create a migrated database of this test's own");
 
-    spotify_city_resolution_inner(&database).await
+    let outcome = spotify_city_resolution_inner(&database.pool).await;
+    database.drop().await?;
+    outcome
 }
 
 async fn spotify_city_resolution_inner(pool: &PgPool) -> Result<()> {

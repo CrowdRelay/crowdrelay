@@ -267,11 +267,15 @@ async fn stale_queued_task_is_reaped_failed() -> Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn a_missing_agents_schema_skips_the_sweep() -> Result<()> {
-    let db = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
+    // Its own database: the sibling tests create `agent_service_tasks` on the
+    // shared suite database, so there the premise "the relation does not
+    // exist" depends on test order.
+    let isolated = common::isolated_database("CROWDRELAY_TEST_DATABASE_URL")
         .await
-        .expect("connect to the migrated suite database");
+        .expect("create a migrated database of this test's own");
+    let db = isolated.pool.clone();
 
-    async {
+    let outcome = async {
         let ws = workspace(&db).await?;
         // Deliberately NO create_foreign_task_table call.
         let action_id = dispatched_agent_run(&db, ws).await?;
@@ -279,7 +283,9 @@ async fn a_missing_agents_schema_skips_the_sweep() -> Result<()> {
         assert_eq!(execution_status(&db, action_id).await?, "dispatched");
         Ok(())
     }
-    .await
+    .await;
+    isolated.drop().await?;
+    outcome
 }
 
 /// The sweep only owns `agent.run.request` — a dispatched assignment for a
