@@ -1,3 +1,10 @@
+// A closed account is `status = 'merged'`: the row a duplicate identity was
+// folded out of, kept as a tombstone pointing at the survivor (migration
+// 0273). These queries used to test `status = 'closed'`, a value the
+// `fans_status_check` vocabulary has never contained, so the
+// `inactive_account_closed` state could not occur and every tombstone listed
+// as a second, separately classified fan. Suppressed and erased rows are
+// excluded outright by the `fan_activation` CTE.
 async fn load_fan_cards(
     state: &crate::AppState,
     workspace_id: Uuid,
@@ -60,7 +67,7 @@ async fn load_fan_cards(
             act.consented,
             act.last_activity_at,
             CASE
-                WHEN fan.status = 'closed' THEN 'inactive_account_closed'
+                WHEN fan.status = 'merged' THEN 'inactive_account_closed'
                 WHEN NOT act.consented THEN 'inactive_no_consent'
                 WHEN act.last_meaningful_action_at IS NULL THEN 'inactive_never_acted'
                 WHEN act.last_meaningful_action_at < $5 - INTERVAL '30 days' THEN 'inactive_window_expired'
@@ -86,24 +93,26 @@ async fn load_fan_cards(
                   AND act.consented
                   AND act.last_meaningful_action_at IS NOT NULL
                   AND act.last_meaningful_action_at >= $5 - INTERVAL '30 days'
-                  AND fan.status <> 'closed')
+                  AND fan.status <> 'merged')
               OR ($4 = 'inactive'
                   AND (
-                      fan.status = 'closed'
+                      fan.status = 'merged'
                       OR NOT act.consented
                       OR act.last_meaningful_action_at IS NULL
                       OR act.last_meaningful_action_at < $5 - INTERVAL '30 days'
                   ))
-              OR ($4 = 'inactive_no_consent' AND NOT act.consented)
+              OR ($4 = 'inactive_no_consent'
+                  AND NOT act.consented
+                  AND fan.status <> 'merged')
               OR ($4 = 'inactive_never_acted'
                   AND act.consented
                   AND act.last_meaningful_action_at IS NULL
-                  AND fan.status <> 'closed')
+                  AND fan.status <> 'merged')
               OR ($4 = 'inactive_window_expired'
                   AND act.consented
                   AND act.last_meaningful_action_at IS NOT NULL
                   AND act.last_meaningful_action_at < $5 - INTERVAL '30 days'
-                  AND fan.status <> 'closed')
+                  AND fan.status <> 'merged')
           )
         ORDER BY fan.updated_at DESC, fan.id DESC
         LIMIT $6
@@ -176,7 +185,7 @@ async fn load_fan_card(
             act.consented,
             act.last_activity_at,
             CASE
-                WHEN fan.status = 'closed' THEN 'inactive_account_closed'
+                WHEN fan.status = 'merged' THEN 'inactive_account_closed'
                 WHEN NOT act.consented THEN 'inactive_no_consent'
                 WHEN act.last_meaningful_action_at IS NULL THEN 'inactive_never_acted'
                 WHEN act.last_meaningful_action_at < $3 - INTERVAL '30 days' THEN 'inactive_window_expired'
@@ -279,7 +288,7 @@ async fn segment_members(
             act.consented,
             act.last_activity_at,
             CASE
-                WHEN fan.status = 'closed' THEN 'inactive_account_closed'
+                WHEN fan.status = 'merged' THEN 'inactive_account_closed'
                 WHEN NOT act.consented THEN 'inactive_no_consent'
                 WHEN act.last_meaningful_action_at IS NULL THEN 'inactive_never_acted'
                 WHEN act.last_meaningful_action_at < $3 - INTERVAL '30 days' THEN 'inactive_window_expired'

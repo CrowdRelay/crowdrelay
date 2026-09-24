@@ -14,6 +14,15 @@ that column's position, in every raw SQL literal outside tests. Composite
 constraints (`status = 'x' AND at IS NOT NULL`) are not modelled; only the pure
 vocabulary form is, and several pure constraints on one column intersect.
 
+The second test reads the same vocabularies against comparisons: `alias.column
+= 'value'`, `<>`, and `IN ('a', 'b')`. A value the CHECK forbids can never be
+stored, so a filter on it is dead — `fans.status = 'closed'` sat in three
+audience queries, where the vocabulary is pending/active/unsubscribed/
+suppressed/merged, so the "account closed" activation state could not occur
+and merged tombstones listed as live fans. An alias bound to two tables in one
+statement, or an unqualified column that more than one named table has, is
+skipped rather than guessed at.
+
 Skips without a local database container, like `sql-result-types.py`.
 """
 from __future__ import annotations
@@ -108,6 +117,73 @@ def violations(allowed: dict) -> tuple[list[str], int]:
     return found, checked
 
 
+RELATION = re.compile(r"\b(?:FROM|JOIN|UPDATE|INTO)\s+(?:ONLY\s+)?(\w+)(?:\s+(?:AS\s+)?(\w+))?", re.I)
+COMPARE = re.compile(r"(?<![\w.'])(?:(\w+)\.)?(\w+)\s*(?:=|<>|!=)\s*'([^']*)'", re.I)
+IN_LIST = re.compile(r"(?<![\w.'])(?:(\w+)\.)?(\w+)\s+(?:NOT\s+)?IN\s*\(\s*('[^)]*')\s*\)", re.I)
+KEYWORDS = {
+    "where", "on", "and", "or", "join", "left", "right", "inner", "full", "cross", "lateral",
+    "set", "select", "group", "order", "limit", "using", "natural", "outer", "returning",
+    "values", "as", "for", "union", "window", "having",
+}
+
+
+def table_columns(container: str) -> dict[str, set[str]]:
+    result = _types.psql(
+        "SELECT table_name, column_name FROM information_schema.columns "
+        "WHERE table_schema = 'public';",
+        container,
+    )
+    columns: dict[str, set[str]] = {}
+    for line in result.stdout.splitlines():
+        table, column = line.split("|", 1)
+        columns.setdefault(table, set()).add(column)
+    return columns
+
+
+def dead_filters(allowed: dict, columns: dict) -> tuple[list[str], int]:
+    found, checked = [], 0
+    for path in sorted((ROOT / "crates").rglob("*.rs")):
+        relative = path.relative_to(ROOT).as_posix()
+        if _types.is_test_source(relative):
+            continue
+        text = path.read_text(errors="ignore")
+        for literal in _types.RAW_LITERAL.finditer(text):
+            sql = re.sub(r"--[^\n]*", "", literal.group(1))
+            line = text[: literal.start()].count("\n") + 1
+            bound: dict[str, set[str]] = {}
+            tables: set[str] = set()
+            for relation in RELATION.finditer(sql):
+                table, alias = relation.group(1).lower(), (relation.group(2) or "").lower()
+                if table in KEYWORDS:
+                    continue
+                tables.add(table)
+                bound.setdefault(table, set()).add(table)
+                if alias and alias not in KEYWORDS:
+                    bound.setdefault(alias, set()).add(table)
+            comparisons = [(m.group(1), m.group(2), [m.group(3)]) for m in COMPARE.finditer(sql)]
+            comparisons += [
+                (m.group(1), m.group(2), re.findall(r"'([^']*)'", m.group(3)))
+                for m in IN_LIST.finditer(sql)
+            ]
+            for qualifier, column, values in comparisons:
+                column = column.lower()
+                if qualifier:
+                    owners = bound.get(qualifier.lower(), set())
+                else:
+                    owners = {table for table in tables if column in columns.get(table, set())}
+                if len(owners) != 1:
+                    continue
+                table = next(iter(owners))
+                vocabulary = allowed.get(table, {}).get(column)
+                if not vocabulary:
+                    continue
+                checked += 1
+                impossible = [value for value in values if value not in vocabulary]
+                if impossible:
+                    found.append(f"{relative}:{line} {table}.{column} compared with {impossible}")
+    return found, checked
+
+
 class SqlCheckVocabulary(unittest.TestCase):
     def setUp(self) -> None:
         self.container = _types.find_container()
@@ -124,6 +200,17 @@ class SqlCheckVocabulary(unittest.TestCase):
             [],
             "these writes violate the column's CHECK and roll back their "
             "transaction:\n  " + "\n  ".join(found),
+        )
+
+    def test_every_compared_literal_can_exist(self) -> None:
+        allowed = vocabularies(self.container)
+        found, checked = dead_filters(allowed, table_columns(self.container))
+        self.assertGreater(checked, 1000, f"only {checked} literal comparisons were checked")
+        self.assertEqual(
+            found,
+            [],
+            "these comparisons name a value the column's CHECK forbids, so "
+            "they can never match:\n  " + "\n  ".join(found),
         )
 
 
