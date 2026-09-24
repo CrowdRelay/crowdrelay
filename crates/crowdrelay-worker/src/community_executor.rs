@@ -900,8 +900,13 @@ impl CommunityExecutorWorker {
                           )
                         -- The oldest due delivery per batch; uncampaigned rows
                         -- each form their own group on `id`, so the lane split
-                        -- does not collapse them.
+                        -- does not collapse them. Fresh work ranks ahead of
+                        -- held drafts: a publish-guard hold re-adopts and
+                        -- re-holds deterministically, and if it also sat first
+                        -- by age the batch's one-per-sweep slot churned on it
+                        -- forever while every pending sibling starved.
                         ORDER BY COALESCE(c2.relay_source_id::text, c2.id::text),
+                                 (c2.status = 'awaiting_manual_post'),
                                  c2.created_at
                     ) pick ON pick.id = c.id
                     ORDER BY c.created_at
@@ -1042,9 +1047,10 @@ impl CommunityExecutorWorker {
                     sqlx::query(
                         "UPDATE community_posts \
                          SET status = 'cancelled', updated_at = now() \
-                         WHERE id = $1",
+                         WHERE id = $1 AND workspace_id = $2",
                     )
                     .bind(action.id)
+                    .bind(self.workspace_id.into_uuid())
                     .execute(&self.pool)
                     .await?;
                     return Ok(());
@@ -1060,10 +1066,11 @@ impl CommunityExecutorWorker {
                 UPDATE community_posts
                 SET status = 'awaiting_manual_post',
                     updated_at = now()
-                WHERE id = $1
+                WHERE id = $1 AND workspace_id = $2
                 "#,
             )
             .bind(action.id)
+            .bind(self.workspace_id.into_uuid())
             .execute(&self.pool)
             .await?;
             tracing::info!(
@@ -1154,13 +1161,14 @@ impl CommunityExecutorWorker {
                 updated_at = now(),
                 error_message = NULL,
                 rate_limited_until = NULL
-            WHERE id = $1
+            WHERE id = $1 AND workspace_id = $5
             "#,
         )
         .bind(action.id)
         .bind(&reddit_result.post_id)
         .bind(&reddit_result.post_url)
         .bind(&reddit_result.kind)
+        .bind(self.workspace_id.into_uuid())
         .execute(&mut *posted_tx)
         .await?;
         crowdrelay_infra::fanbase::anchor_measurements_to_publication(
@@ -1765,10 +1773,11 @@ impl CommunityExecutorWorker {
             UPDATE community_posts
             SET metrics_last_fetched_at = now(),
                 updated_at = now()
-            WHERE id = $1
+            WHERE id = $1 AND workspace_id = $2
             "#,
         )
         .bind(post_id)
+        .bind(ws)
         .execute(&mut *tx)
         .await?;
 
@@ -1784,10 +1793,11 @@ impl CommunityExecutorWorker {
             UPDATE community_posts
             SET metrics_last_fetched_at = now(),
                 updated_at = now()
-            WHERE id = $1
+            WHERE id = $1 AND workspace_id = $2
             "#,
         )
         .bind(post_id)
+        .bind(self.workspace_id.into_uuid())
         .execute(&self.pool)
         .await?;
         Ok(())
