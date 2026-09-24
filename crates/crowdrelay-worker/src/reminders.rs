@@ -432,8 +432,8 @@ async fn enqueue_due_show_checklists(
                    event.id,
                    'staff',
                    CASE event.payload ->> 'checklist'
-                       WHEN 'week' THEN 'VIRYA · koncert za 7 dni'
-                       ELSE 'VIRYA · koncert za 2 dni'
+                       WHEN 'week' THEN crowdrelay_workspace_wordmark(event.workspace_id) || ' · koncert za 7 dni'
+                       ELSE crowdrelay_workspace_wordmark(event.workspace_id) || ' · koncert za 2 dni'
                    END,
                    (event.payload ->> 'event_title') || ' — otwórz checklistę i odhacz przygotowania.',
                    '/staff/checklist?event=' || (event.payload ->> 'event_slug'),

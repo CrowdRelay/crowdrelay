@@ -30,7 +30,7 @@ pub const DEFAULT_CREW_LOCALE: &str = "en";
 
 /// The keys an operator may edit. Anything else stays internal even if a row
 /// somehow appears, so the HTTP surface cannot be used to smuggle state.
-pub const EDITABLE_KEYS: [&str; 18] = [
+pub const EDITABLE_KEYS: [&str; 19] = [
     KEY_MEMBER_SITE_BASE_URL,
     KEY_MEMBER_AREA_PATH,
     KEY_SYNESTHESIA_CAMPAIGN_SLUG,
@@ -49,6 +49,7 @@ pub const EDITABLE_KEYS: [&str; 18] = [
     KEY_JOIN_ASK_CADENCE_DAYS,
     KEY_JOIN_ASK_PLATFORMS,
     KEY_JOIN_ASK_IMAGE_URL,
+    KEY_BRAND_WORDMARK,
 ];
 
 const KEY_MEMBER_SITE_BASE_URL: &str = "member_site_base_url";
@@ -92,6 +93,11 @@ pub const KEY_TENANT_INTENT: &str = "tenant_intent";
 /// Absent means the act has not said. That is a real state and the planner
 /// reads it as unmeasured, not as "no style".
 pub const KEY_ACT_STYLE: &str = "act_style";
+/// The name this act signs its own messages with — push titles, play pushes,
+/// crew mail, invitations. Read through `crowdrelay_workspace_wordmark`, which
+/// falls back to the workspace's own name, so absent is the ordinary state: set
+/// it only when the act's name is styled differently (`VIRYA`, `MGŁA`).
+pub const KEY_BRAND_WORDMARK: &str = "brand_wordmark";
 /// Whether this tenant sells tickets through first-party checkout.
 ///
 /// Opt-in, and absent means off: a tenant who never asked for a Stripe

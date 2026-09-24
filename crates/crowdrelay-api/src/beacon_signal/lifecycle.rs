@@ -263,6 +263,17 @@ pub(super) async fn mint_invite_batch_tx(
     // Build the invitation payloads for the rows that actually took effect,
     // in the roster's order rather than whatever order the insert returned.
     let invited: std::collections::HashSet<Uuid> = invited_ids.iter().copied().collect();
+    let (wordmark, app_name, _) =
+        super::invite_names(&mut **tx, workspace_id)
+            .await
+            .map_err(|error| {
+                tracing::warn!(%error, "beacon invite names lookup failed");
+                BeaconSignalError::Unavailable
+            })?;
+    let names = super::invite_copy::InviteBrand {
+        wordmark: &wordmark,
+        app_name: &app_name,
+    };
     for (beacon_id, display_name, contact_email) in eligible {
         if !invited.contains(&beacon_id) {
             continue;
@@ -271,7 +282,7 @@ pub(super) async fn mint_invite_batch_tx(
             continue;
         };
         let invite_url = brand.invite_url(locale, invite_token);
-        let delivery = invite_delivery_copy(locale, &display_name, &invite_url);
+        let delivery = invite_delivery_copy(locale, &display_name, &invite_url, &names);
         invitations.push(BatchInviteItem {
             beacon_id,
             display_name,

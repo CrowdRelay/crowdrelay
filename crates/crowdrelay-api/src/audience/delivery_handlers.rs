@@ -792,31 +792,34 @@ pub async fn enqueue_push_campaign(
                    CASE
                      WHEN lower(COALESCE(recipient.locale, 'pl')) LIKE 'pl%' THEN
                        CASE $3
-                         WHEN 'event.announcement.v1' THEN 'VIRYA — nowy koncert'
-                         WHEN 'event.interest_reminder.v1' THEN 'VIRYA — przypomnienie o koncercie'
-                         WHEN 'event.last_call.v1' THEN 'VIRYA — ostatni moment'
-                         WHEN 'event.day_of.v1' THEN 'VIRYA — widzimy się dziś'
-                         WHEN 'release.release_day.v1' THEN 'Nowa premiera VIRYA — dziś'
-                         ELSE 'VIRYA — nowy sygnał'
+                         WHEN 'event.announcement.v1' THEN brand.mark || ' — nowy koncert'
+                         WHEN 'event.interest_reminder.v1' THEN brand.mark || ' — przypomnienie o koncercie'
+                         WHEN 'event.last_call.v1' THEN brand.mark || ' — ostatni moment'
+                         WHEN 'event.day_of.v1' THEN brand.mark || ' — widzimy się dziś'
+                         WHEN 'release.release_day.v1' THEN 'Nowa premiera ' || brand.mark || ' — dziś'
+                         ELSE brand.mark || ' — nowy sygnał'
                        END
                      ELSE
                        CASE $3
-                         WHEN 'event.announcement.v1' THEN 'VIRYA — new show'
-                         WHEN 'event.interest_reminder.v1' THEN 'VIRYA — show reminder'
-                         WHEN 'event.last_call.v1' THEN 'VIRYA — last call'
-                         WHEN 'event.day_of.v1' THEN 'VIRYA — see you today'
-                         WHEN 'release.release_day.v1' THEN 'New VIRYA release — today'
-                         ELSE 'VIRYA — new signal'
+                         WHEN 'event.announcement.v1' THEN brand.mark || ' — new show'
+                         WHEN 'event.interest_reminder.v1' THEN brand.mark || ' — show reminder'
+                         WHEN 'event.last_call.v1' THEN brand.mark || ' — last call'
+                         WHEN 'event.day_of.v1' THEN brand.mark || ' — see you today'
+                         WHEN 'release.release_day.v1' THEN 'New ' || brand.mark || ' release — today'
+                         ELSE brand.mark || ' — new signal'
                        END
                    END,
                    CASE WHEN lower(COALESCE(recipient.locale, 'pl')) LIKE 'pl%'
-                     THEN 'Masz nowy sygnał od VIRYA. Szczegóły znajdziesz w My Signal.'
-                     ELSE 'You have a new VIRYA signal. Open My Signal for details.'
+                     THEN 'Masz nowy sygnał od ' || brand.mark || '. Szczegóły znajdziesz w My Signal.'
+                     ELSE 'You have a new ' || brand.mark || ' signal. Open My Signal for details.'
                    END,
                    CASE WHEN lower(COALESCE(recipient.locale, 'pl')) LIKE 'pl%'
                      THEN '/pl/my-signal/' ELSE '/my-signal/' END,
                    'campaign:' || $2::text
             FROM current_recipient recipient
+            -- The workspace's own name (`crowdrelay_workspace_wordmark`), not
+            -- the first tenant's: each act's fans hear from that act.
+            CROSS JOIN (SELECT crowdrelay_workspace_wordmark($1) AS mark) AS brand
             JOIN communication_campaign_deliveries delivery
               ON delivery.workspace_id = $1 AND delivery.campaign_id = $2
              AND delivery.fan_id = recipient.fan_id AND delivery.status = 'claimed'

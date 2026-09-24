@@ -1093,9 +1093,13 @@ impl PostgresAutopilotRepository {
                     // second copy of the wording living inside n8n.
                     let locale =
                         super::team::crew_locale_in_tx(&mut transaction, workspace_id).await;
+                    // A roster's crew serves several acts; the subject says which.
+                    let wordmark =
+                        super::workspace_wordmark(&mut transaction, workspace_id).await?;
                     let (email_subject, email_greeting, email_intro) =
                         super::team::team_email_frame(
                             locale,
+                            &wordmark,
                             recipient_name,
                             task_title,
                             *reminder_number,

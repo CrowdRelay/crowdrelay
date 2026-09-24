@@ -622,6 +622,7 @@ impl PlayStepKind {
     #[must_use]
     pub fn push_copy(&self, facts: &PlayStepPushFacts<'_>) -> Option<PlayStepPush> {
         let polish = facts.polish;
+        let wordmark = facts.wordmark;
         let (category, title, body, target_path) = match self {
             Self::AnnounceAsk => {
                 let (title, date, venue) = (
@@ -631,7 +632,7 @@ impl PlayStepKind {
                 );
                 (
                     "shows",
-                    pick(polish, "VIRYA · nowy koncert", "VIRYA · new show"),
+                    pick(polish, format!("{wordmark} · nowy koncert"), format!("{wordmark} · new show")),
                     pick(
                         polish,
                         format!("{title} — {date}, {venue}. Śledź nas, żeby następna data sama Cię znalazła."),
@@ -644,7 +645,7 @@ impl PlayStepKind {
                 let title = facts.event_title.unwrap_or_default();
                 (
                     "shows",
-                    pick(polish, "VIRYA · dzięki za wczoraj", "VIRYA · thanks for being there"),
+                    pick(polish, format!("{wordmark} · dzięki za wczoraj"), format!("{wordmark} · thanks for being there")),
                     pick(
                         polish,
                         format!("{title} — dzięki, że byliście. Śledź nas, żeby wiedzieć o kolejnej dacie."),
@@ -655,7 +656,7 @@ impl PlayStepKind {
             }
             Self::FollowAskFirst => (
                 "community",
-                pick(polish, "VIRYA · zostań blisko", "VIRYA · stay close"),
+                pick(polish, format!("{wordmark} · zostań blisko"), format!("{wordmark} · stay close")),
                 pick(
                     polish,
                     "Jeden klik i dostajesz info o koncertach jako pierwszy.".to_owned(),
@@ -665,7 +666,7 @@ impl PlayStepKind {
             ),
             Self::FollowAskSecond => (
                 "community",
-                pick(polish, "VIRYA · jeszcze raz", "VIRYA · once more"),
+                pick(polish, format!("{wordmark} · jeszcze raz"), format!("{wordmark} · once more")),
                 pick(
                     polish,
                     "Pytaliśmy już raz — jeśli chcesz info o koncertach, to jeden klik.".to_owned(),
@@ -675,7 +676,7 @@ impl PlayStepKind {
             ),
             Self::FollowAskFinal => (
                 "community",
-                pick(polish, "VIRYA · ostatni raz", "VIRYA · last ask"),
+                pick(polish, format!("{wordmark} · ostatni raz"), format!("{wordmark} · last ask")),
                 pick(
                     polish,
                     "To ostatnia wiadomość w tej sprawie — jeśli chcesz nas śledzić, kliknij tutaj.".to_owned(),
@@ -685,7 +686,7 @@ impl PlayStepKind {
             ),
             Self::DormantRevivalFirst => (
                 "shows",
-                pick(polish, "VIRYA · dawno Cię nie było", "VIRYA · it has been a while"),
+                pick(polish, format!("{wordmark} · dawno Cię nie było"), format!("{wordmark} · it has been a while")),
                 pick(
                     polish,
                     "Gramy znów wkrótce — nowe daty już są, jeśli chcesz wrócić.".to_owned(),
@@ -695,7 +696,7 @@ impl PlayStepKind {
             ),
             Self::DormantRevivalFinal => (
                 "shows",
-                pick(polish, "VIRYA · ostatni sygnał", "VIRYA · last signal"),
+                pick(polish, format!("{wordmark} · ostatni sygnał"), format!("{wordmark} · last signal")),
                 pick(
                     polish,
                     "To ostatnia wiadomość w tej sprawie — daty koncertów zawsze są na stronie.".to_owned(),
@@ -710,7 +711,7 @@ impl PlayStepKind {
                 );
                 (
                     "releases",
-                    pick(polish, "VIRYA · nowy materiał", "VIRYA · new release"),
+                    pick(polish, format!("{wordmark} · nowy materiał"), format!("{wordmark} · new release")),
                     pick(
                         polish,
                         format!("{title} — premiera {date}. Pre-save już działa."),
@@ -723,7 +724,7 @@ impl PlayStepKind {
                 let title = facts.release_title.unwrap_or_default();
                 (
                     "releases",
-                    pick(polish, "VIRYA · premiera", "VIRYA · release day"),
+                    pick(polish, format!("{wordmark} · premiera"), format!("{wordmark} · release day")),
                     pick(
                         polish,
                         format!("{title} już jest — można słuchać."),
@@ -736,7 +737,7 @@ impl PlayStepKind {
                 let title = facts.release_title.unwrap_or_default();
                 (
                     "releases",
-                    pick(polish, "VIRYA · wciąż gra", "VIRYA · still playing"),
+                    pick(polish, format!("{wordmark} · wciąż gra"), format!("{wordmark} · still playing")),
                     pick(
                         polish,
                         format!("Jeśli premiera Cię ominęła — {title} wciąż gra."),
@@ -783,6 +784,11 @@ pub struct PlayStepPush {
 /// executor fills what the play's anchor row holds and leaves the rest `None`.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct PlayStepPushFacts<'a> {
+    /// The name the band goes by in its own messages — `VIRYA` for the first
+    /// tenant, each act's own name otherwise. Resolved executor-side by
+    /// `crowdrelay_workspace_wordmark`, so play pushes and campaign pushes
+    /// cannot sign with different names.
+    pub wordmark: &'a str,
     /// Polish-first copy, matching the tenant's voice everywhere else push
     /// copy is written (`fan.locale` starting `pl`).
     pub polish: bool,
@@ -1725,3 +1731,8 @@ mod tests {
         );
     }
 }
+
+// The push-copy tests live in `plays/push_copy_tests.rs`, included rather than
+// written inline for the reason `gig_plan.rs` gives: this file carries the
+// reasoning behind every step and sits at the source-size ratchet.
+include!("plays/push_copy_tests.rs");

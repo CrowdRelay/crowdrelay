@@ -226,7 +226,7 @@ struct PressRoom {
     rider_url: String,
     spotify_url: String,
     youtube_url: String,
-    contact_email: &'static str,
+    contact_email: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -379,6 +379,75 @@ pub(crate) async fn authorize_beacon(
     row.ok_or(BeaconSignalError::Unauthorized)
 }
 
+/// The act's name and its fan app's name, for invitation copy — plus whether
+/// it is the first tenant, whose press links are the only ones this build
+/// knows. Generic over the executor so the single invite (pool) and the batch
+/// invite (inside its transaction) resolve names the same way.
+async fn invite_names<'e>(
+    executor: impl sqlx::PgExecutor<'e>,
+    workspace_id: uuid::Uuid,
+) -> Result<(String, String, bool), sqlx::Error> {
+    let (wordmark, first_tenant): (String, bool) = sqlx::query_as(
+        "SELECT crowdrelay_workspace_wordmark(id), slug = 'virya' FROM workspaces WHERE id = $1",
+    )
+    .bind(workspace_id)
+    .fetch_one(executor)
+    .await?;
+    // The first tenant's app is listed as "Virya Signal"; anyone else's is
+    // their own name's.
+    let app_name = if first_tenant {
+        "Virya Signal".to_owned()
+    } else {
+        format!("{wordmark} Signal")
+    };
+    Ok((wordmark, app_name, first_tenant))
+}
+
+/// Who the beacon surfaces speak for — the act's name, its fan app, its site.
+struct BeaconBrand {
+    wordmark: String,
+    app_name: String,
+    settings: std::sync::Arc<crowdrelay_infra::tenant_settings::TenantBrandSettings>,
+    /// The tenant the press links below belong to. Its Spotify artist, its
+    /// channel and its crew inbox were constants every tenant's press room
+    /// returned, so another band's press contacts were handed this band's
+    /// music and this band's private address.
+    first_tenant: bool,
+}
+
+impl BeaconBrand {
+    /// `member_site_base_url`, no trailing slash. Empty when the tenant
+    /// blanked it — there is then nowhere to send a press contact.
+    fn site_root(&self) -> &str {
+        self.settings
+            .member_site_base_url
+            .trim()
+            .trim_end_matches('/')
+    }
+}
+
+/// The first tenant's own press links — returned for that tenant only.
+const FIRST_TENANT_SPOTIFY_URL: &str = "https://open.spotify.com/artist/6bbW0jOKAWJWm3h6CTWaAS";
+const FIRST_TENANT_YOUTUBE_URL: &str = "https://www.youtube.com/@ViryaOfficial";
+const FIRST_TENANT_CONTACT_EMAIL: &str = "virya.crew@gmail.com";
+
+async fn beacon_brand(
+    state: &crate::AppState,
+    workspace_id: uuid::Uuid,
+) -> Result<BeaconBrand, sqlx::Error> {
+    let (wordmark, app_name, first_tenant) = invite_names(&state.database, workspace_id).await?;
+    let settings =
+        crowdrelay_infra::tenant_settings::TenantSettingsRepository::new(state.database.clone())
+            .brand_settings(workspace_id)
+            .await?;
+    Ok(BeaconBrand {
+        wordmark,
+        app_name,
+        settings,
+        first_tenant,
+    })
+}
+
 pub async fn create_invite(
     State(state): State<crate::AppState>,
     Path(beacon_id): Path<Uuid>,
@@ -415,13 +484,31 @@ pub async fn create_invite(
         Err(error) => return map_repo_error(error).response(request_id_value),
     };
 
-    let path = if locale.starts_with("pl") {
-        "pl/latarnik"
-    } else {
-        "latarnik"
+    let brand = match beacon_brand(&state, state.ticketing.workspace_id().into_uuid()).await {
+        Ok(brand) => brand,
+        Err(error) => {
+            tracing::warn!(%error, "beacon brand lookup failed");
+            return BeaconSignalError::Unavailable.response(request_id_value);
+        }
     };
-    let invite_url = format!("https://virya.music/{path}?invite={invite_token}");
-    let delivery = invite_delivery_copy(&locale, &display_name, &invite_url);
+    // An invitation with no site to land on is a broken link in a stranger's
+    // inbox; refuse it rather than send it.
+    if brand.site_root().is_empty() {
+        tracing::warn!("beacon invite refused: member_site_base_url is blank");
+        return BeaconSignalError::Conflict.response(request_id_value);
+    }
+    // The same builder the batch invites use: the tenant's site and its own
+    // member-area path, rather than a second, hardcoded copy of both.
+    let invite_url = brand.settings.invite_url(&locale, &invite_token);
+    let delivery = invite_delivery_copy(
+        &locale,
+        &display_name,
+        &invite_url,
+        &invite_copy::InviteBrand {
+            wordmark: &brand.wordmark,
+            app_name: &brand.app_name,
+        },
+    );
     (
         StatusCode::CREATED,
         [(CACHE_CONTROL, PRIVATE_NO_STORE)],
@@ -593,11 +680,27 @@ pub async fn me(State(state): State<crate::AppState>, headers: HeaderMap) -> Res
     .fetch_one(state.ticketing.pool())
     .await
     .unwrap_or(0);
+    let brand = match beacon_brand(&state, workspace_id).await {
+        Ok(brand) => brand,
+        Err(error) => {
+            tracing::warn!(%error, "beacon brand lookup failed");
+            return BeaconSignalError::Unavailable.response(request_id_value);
+        }
+    };
     let pl = principal.locale.starts_with("pl");
     let root = if pl {
-        "https://virya.music/pl"
+        format!("{}/pl", brand.site_root())
     } else {
-        "https://virya.music"
+        brand.site_root().to_owned()
+    };
+    // Only the first tenant's links are known to this build; anyone else gets
+    // nothing rather than another band's music and inbox.
+    let own = |value: &str| {
+        if brand.first_tenant {
+            value.to_owned()
+        } else {
+            String::new()
+        }
     };
     (
         StatusCode::OK,
@@ -620,10 +723,10 @@ pub async fn me(State(state): State<crate::AppState>, headers: HeaderMap) -> Res
                 home_url: format!("{root}/latarnik"),
                 epk_url: format!("{root}/epk"),
                 gallery_url: format!("{root}/gallery"),
-                rider_url: "https://virya.music/techrider.pdf".to_owned(),
-                spotify_url: "https://open.spotify.com/artist/6bbW0jOKAWJWm3h6CTWaAS".to_owned(),
-                youtube_url: "https://www.youtube.com/@ViryaOfficial".to_owned(),
-                contact_email: "virya.crew@gmail.com",
+                rider_url: format!("{}/techrider.pdf", brand.site_root()),
+                spotify_url: own(FIRST_TENANT_SPOTIFY_URL),
+                youtube_url: own(FIRST_TENANT_YOUTUBE_URL),
+                contact_email: own(FIRST_TENANT_CONTACT_EMAIL),
             },
             open_press_requests,
         }),

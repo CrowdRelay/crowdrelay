@@ -5,13 +5,14 @@ mod tests {
     #[test]
     fn the_email_frame_follows_the_crew_locale() {
         let (subject, greeting, intro) =
-            team_email_frame(BriefingLocale::Pl, "Wojtek", "Zatwierdź artefakt treści", 0);
+            team_email_frame(BriefingLocale::Pl, "VIRYA", "Wojtek", "Zatwierdź artefakt treści", 0);
         assert_eq!(subject, "VIRYA — nowe zadanie: Zatwierdź artefakt treści");
         assert_eq!(greeting, "Cześć Wojtek!");
         assert!(intro.contains("nowe zadanie"));
 
         let (subject, greeting, _) = team_email_frame(
             BriefingLocale::En,
+            "VIRYA",
             "Wojtek",
             "Approve the content artifact",
             0,
@@ -28,6 +29,7 @@ mod tests {
     fn the_last_reminder_says_it_is_the_last() {
         let (subject, _, intro) = team_email_frame(
             BriefingLocale::En,
+            "VIRYA",
             "Wojtek",
             "Approve the content artifact",
             MAX_REMINDERS_PER_ASSIGNMENT as u8,
@@ -35,8 +37,16 @@ mod tests {
         assert!(subject.starts_with("VIRYA — last reminder:"), "{subject}");
         assert!(intro.contains("no more will follow"), "{intro}");
 
-        let (subject, _, _) = team_email_frame(BriefingLocale::En, "Wojtek", "Approve it", 1);
+        let (subject, _, _) = team_email_frame(BriefingLocale::En, "VIRYA", "Wojtek", "Approve it", 1);
         assert!(subject.starts_with("VIRYA — reminder:"), "{subject}");
+    }
+
+    /// A roster's crew serves several acts; each task says whose it is.
+    #[test]
+    fn a_task_names_the_act_it_belongs_to() {
+        let (subject, _, _) = team_email_frame(BriefingLocale::Pl, "Mgła", "Ola", "Zatwierdź post", 0);
+        assert_eq!(subject, "Mgła — nowe zadanie: Zatwierdź post");
+        assert!(!subject.contains("VIRYA"), "{subject}");
     }
 
     /// The inbox this was reported from: four approvals of one kind, four
@@ -74,7 +84,7 @@ mod tests {
     #[test]
     fn a_reminder_frame_is_not_the_first_send() {
         let (subject, _, intro) =
-            team_email_frame(BriefingLocale::Pl, "Wojtek", "Domknij zadanie", 2);
+            team_email_frame(BriefingLocale::Pl, "VIRYA", "Wojtek", "Domknij zadanie", 2);
         assert!(subject.starts_with("VIRYA — przypomnienie:"));
         assert!(intro.contains("przypominamy"));
     }

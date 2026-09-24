@@ -558,7 +558,7 @@ async fn process_paid_order(
             )
             SELECT
                 gen_random_uuid(), $1, $3, $4, $5, 'paid',
-                'VIRYA-' || upper(encode(gen_random_bytes(16), 'hex')),
+                crowdrelay_workspace_reference_prefix($1) || '-' || upper(encode(gen_random_bytes(16), 'hex')),
                 NULL, $6, now(), 'claimed', now(), expanded.order_item_id,
                 expanded.sequence, $7, $8
             FROM expanded

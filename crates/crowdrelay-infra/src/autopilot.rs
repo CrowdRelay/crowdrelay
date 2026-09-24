@@ -791,6 +791,7 @@ include!("autopilot/execution_dispatch.rs");
 include!("autopilot/execution_outcomes.rs");
 include!("autopilot/execution_preflight.rs");
 include!("autopilot/execution_capabilities.rs");
+include!("autopilot/wordmark.rs");
 include!("autopilot/execution_mutations.rs");
 include!("autopilot/execution_measurement.rs");
 include!("autopilot/support.rs");

@@ -160,6 +160,12 @@ pub async fn get_brand_settings(
                 "act_style".to_owned(),
                 overrides.get("act_style").cloned().unwrap_or_default(),
             );
+            // Empty means "use the workspace's own name" — the resolver's
+            // ordinary path, not a missing value.
+            settings.insert(
+                "brand_wordmark".to_owned(),
+                overrides.get("brand_wordmark").cloned().unwrap_or_default(),
+            );
             settings.insert(
                 "member_site_base_url".to_owned(),
                 effective.member_site_base_url.clone(),
@@ -362,6 +368,12 @@ fn validate_value(key: &str, value: &str) -> bool {
     if key == "act_style" {
         return value.chars().count() <= 120;
     }
+    // It opens every push title an act's fans get ("{name} — new show"), so it
+    // is a name, not a sentence: short, one line, no control characters that a
+    // lock screen would render as boxes or break on.
+    if key == "brand_wordmark" {
+        return value.trim().chars().count() <= 40 && !value.chars().any(char::is_control);
+    }
     // §4G.2: the gig planner reads this and refuses outright on `heads_down`.
     // A value it cannot parse would be stored and then ignored, which is the
     // worst of both — the band believes it said something and the planner never
@@ -543,5 +555,15 @@ mod tests {
         ));
         assert!(!validate_value("join_ask_platforms", "facebook,tiktok"));
         assert!(!validate_value("join_ask_platforms", ""));
+    }
+
+    #[test]
+    fn a_wordmark_is_a_short_single_line_name() {
+        assert!(validate_key("brand_wordmark"));
+        assert!(validate_value("brand_wordmark", "VIRYA"));
+        assert!(validate_value("brand_wordmark", "MGŁA"));
+        assert!(!validate_value("brand_wordmark", "The Band\nNew show"));
+        assert!(!validate_value("brand_wordmark", &"x".repeat(41)));
+        assert!(!validate_value("brand_wordmark", "   "));
     }
 }

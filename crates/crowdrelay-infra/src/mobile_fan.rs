@@ -556,8 +556,8 @@ impl PostgresMobileFanRepository {
                         candidates.event_id,
                         'shows',
                         CASE WHEN lower(COALESCE(candidates.locale, 'pl')) LIKE 'pl%'
-                            THEN 'VIRYA blisko Ciebie'
-                            ELSE 'VIRYA near you'
+                            THEN crowdrelay_workspace_wordmark($1) || ' blisko Ciebie'
+                            ELSE crowdrelay_workspace_wordmark($1) || ' near you'
                         END,
                         CASE WHEN lower(COALESCE(candidates.locale, 'pl')) LIKE 'pl%'
                             THEN candidates.event_title || ' — koncert około ' || inserted.distance_km || ' km od Twojego miasta.'
