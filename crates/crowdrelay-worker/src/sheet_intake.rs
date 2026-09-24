@@ -64,6 +64,9 @@ pub struct SheetHarvest {
     pub venues_imported: u64,
     pub venue_refusals: usize,
     pub venues_unknown_city: u64,
+    /// Venue rows whose write failed — isolated per row so one bad cell
+    /// does not abort the sheet.
+    pub venues_failed: u64,
     pub peer_acts_imported: u64,
     pub peer_act_refusals: usize,
     pub peer_acts_unresolved_city: u64,
@@ -145,6 +148,21 @@ fn contacts_view<'a>(full: &'a [Vec<String>], stripped: &'a [Vec<String>]) -> &'
     }
 }
 
+/// How far a sheet's structure may be trusted. The registry claims —
+/// Beacon flags, agent seeds, venue and band rows — are honoured verbatim
+/// for transports the operator owns (their Drive folder, their GitHub
+/// mirror). A sheet that arrives attached to inbound mail is not the
+/// operator's registry no matter how perfectly it is shaped: anyone who
+/// can email the mailbox could otherwise mint `verified`+
+/// `accepts_outreach` beacons, flip `booking_agents.active`, or mark real
+/// venues closed. Untrusted sheets still stage their contact rows for
+/// review — that path exists to be the defang.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SheetTrust {
+    RegistryTrusted,
+    InboundUntrusted,
+}
+
 /// Routes every sheet of one file to its reader and returns what to stage.
 /// `file_name` labels refusal logs only — writes carry no file identity.
 pub async fn harvest_grids(
@@ -152,6 +170,7 @@ pub async fn harvest_grids(
     workspace_id: Uuid,
     file_name: &str,
     sheets: Vec<Vec<Vec<String>>>,
+    trust: SheetTrust,
 ) -> Result<SheetHarvest, String> {
     let mut harvest = SheetHarvest::default();
     for raw in sheets {
@@ -175,6 +194,16 @@ pub async fn harvest_grids(
                     (view, Claim::Contacts, grid.len() - view.len())
                 }
             },
+        };
+
+        // An untrusted sheet keeps only its contacts: every registry
+        // claim defangs to the review path, where a person decides.
+        let claimed = match (trust, claimed) {
+            (SheetTrust::InboundUntrusted, Claim::Agent(_))
+            | (SheetTrust::InboundUntrusted, Claim::Beacon(_))
+            | (SheetTrust::InboundUntrusted, Claim::Venue(_))
+            | (SheetTrust::InboundUntrusted, Claim::Band(_)) => Claim::Contacts,
+            (_, claim) => claim,
         };
 
         let mut unclaimed = false;
@@ -258,6 +287,7 @@ pub async fn harvest_grids(
                 harvest.venues_imported += summary.imported;
                 harvest.venue_refusals += report.refusals.len();
                 harvest.venues_unknown_city += summary.unknown_city;
+                harvest.venues_failed += summary.failed;
             }
             Claim::Band(report) => {
                 // A researched band sheet feeds the shared peer-act registry
@@ -344,7 +374,15 @@ pub fn parse_xlsx_sheets(bytes: &[u8]) -> Result<Vec<Vec<Vec<String>>>, String> 
                         }
                         Data::Int(i) => i.to_string(),
                         Data::Bool(b) => b.to_string(),
-                        Data::DateTime(dt) => dt.to_string(),
+                        // calamine's `Display` renders the raw serial
+                        // ("45943"), which no downstream date parse can
+                        // read — every Research_Date silently collapsed to
+                        // `now()`. Render the date part as ISO instead so
+                        // the sheet's own clock survives to `observed_at`.
+                        Data::DateTime(dt) => {
+                            let (y, m, d, _, _, _, _) = dt.to_ymd_hms_milli();
+                            format!("{y:04}-{m:02}-{d:02}")
+                        }
                         Data::DateTimeIso(s) | Data::DurationIso(s) => s.clone(),
                         Data::Error(_) | Data::Empty => String::new(),
                     })

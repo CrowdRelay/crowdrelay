@@ -282,6 +282,7 @@ async fn upsert_keeps_the_sheet_city() -> Result<(), Box<dyn std::error::Error>>
                 extras: Default::default(),
             }],
             true,
+            true,
         )
         .await?;
     // A second file sighting the same address without the column keeps it —
@@ -304,6 +305,7 @@ async fn upsert_keeps_the_sheet_city() -> Result<(), Box<dyn std::error::Error>>
                 notes: None,
                 extras: Default::default(),
             }],
+            false,
             false,
         )
         .await?;
@@ -849,6 +851,7 @@ async fn uploaded_sheet_stages_through_the_upload_source() -> Result<(), Box<dyn
             "sheet.csv",
             &contacts,
             false,
+            true,
         )
         .await?;
     assert_eq!(summary.upserted, 2);
@@ -874,6 +877,7 @@ async fn uploaded_sheet_stages_through_the_upload_source() -> Result<(), Box<dyn
             "sheet.csv",
             &contacts,
             false,
+            true,
         )
         .await?;
     let sources: Vec<String> = sqlx::query_scalar(
@@ -942,6 +946,7 @@ async fn an_inactive_agent_row_retires_the_agent() -> Result<(), Box<dyn std::er
             "agents.csv",
             &contacts,
             true,
+            true,
         )
         .await?;
 
@@ -996,6 +1001,7 @@ async fn an_inactive_agent_row_retires_the_agent() -> Result<(), Box<dyn std::er
             "agents.csv",
             &active_again,
             true,
+            true,
         )
         .await?;
     let (live_again, refused): (bool, Option<time::Date>) = sqlx::query_as(
@@ -1030,6 +1036,7 @@ async fn an_inactive_agent_row_retires_the_agent() -> Result<(), Box<dyn std::er
             "msg-7",
             "Re: dates",
             &bare,
+            false,
             false,
         )
         .await?;

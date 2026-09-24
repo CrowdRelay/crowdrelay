@@ -237,6 +237,36 @@ const INACTIVE_STATUS: &[&str] = &[
 /// is itself the active claim, no word list needed.
 const ACTIVE_STATUS: &[&str] = &["active", "aktywny", "reunited"];
 
+/// Phrases that flip a leading dead spelling back to a live claim —
+/// "hiatus ended", "split — over it now". Containment is fine here: the
+/// cue is veto-shaped, not verdict-shaped, so a false veto only ever keeps
+/// a band listed, never kills one.
+const ACTIVITY_REVERSALS: &[&str] = &[
+    "ended", "over", "lifted", "resumed", "back", "reunit", "wznow",
+];
+
+/// Whether an Activity cell makes a dead-band claim. The column is prose,
+/// and a dead spelling inside a sentence is a band name or a lyric, not a
+/// verdict — "Split 7\" with Dead Wolves out now" must not retire the act.
+/// A spelling counts only when it *leads* the cell and is followed by the
+/// end of the cell or punctuation — "inactive", "inactive — no shows since
+/// 2022", "hiatus (since 2024)" are verdicts; "inactive since 2022" reads
+/// the same way to a person but is let through rather than risk the next
+/// prose shape the rule did not foresee, because the standing call is that
+/// a live band surviving beats a dead band slipping through. A reversal
+/// cue anywhere in the cell vetoes the verdict outright.
+fn activity_claims_inactive(activity: &str) -> bool {
+    let lower = activity.trim().to_lowercase();
+    let leads_with_verdict = INACTIVE_STATUS.iter().any(|term| {
+        lower.as_str() == *term
+            || lower
+                .strip_prefix(term)
+                .and_then(|rest| rest.trim_start().chars().next())
+                .is_some_and(|c| !c.is_alphanumeric())
+    });
+    leads_with_verdict && !ACTIVITY_REVERSALS.iter().any(|cue| lower.contains(cue))
+}
+
 fn clean(value: Option<&str>) -> Option<String> {
     let value = value?.trim();
     if value.is_empty() || value.eq_ignore_ascii_case("n/a") {
@@ -289,9 +319,7 @@ pub fn parse_seed_row(row: &SeedRow<'_>) -> Result<SeededPeer, PeerSeedRefusal> 
     let liveness = if status
         .as_deref()
         .is_some_and(|s| INACTIVE_STATUS.contains(&s.to_lowercase().as_str()))
-        || activity
-            .as_deref()
-            .is_some_and(|a| INACTIVE_STATUS.iter().any(|d| a.to_lowercase().contains(d)))
+        || activity.as_deref().is_some_and(activity_claims_inactive)
     {
         Some(PeerLiveness::Inactive)
     } else if status

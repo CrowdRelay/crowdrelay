@@ -54,6 +54,9 @@ pub struct VenueSeedSummary {
     /// Rows whose city could not be resolved against `cities`. Not an
     /// error — the sheet is fixable and the venues stay out, not misfiled.
     pub unknown_city: u64,
+    /// Rows whose write failed — the row is counted and skipped so one bad
+    /// cell does not take the sheet's other rooms with it.
+    pub failed: u64,
 }
 
 /// One attributed claim about a room, as `write_fact` takes it — a struct
@@ -172,56 +175,54 @@ impl PostgresVenueSeedRepository {
     ) -> Result<VenueSeedSummary, sqlx::Error> {
         let mut summary = VenueSeedSummary::default();
         for venue in &report.venues {
-            match self.import_venue(workspace_id, venue).await? {
-                SeedOutcome::Imported => summary.imported += 1,
-                SeedOutcome::UnknownCity => summary.unknown_city += 1,
+            match self.import_venue(workspace_id, venue).await {
+                Ok(SeedOutcome::Imported) => summary.imported += 1,
+                Ok(SeedOutcome::UnknownCity) => summary.unknown_city += 1,
+                Err(error) => {
+                    summary.failed += 1;
+                    tracing::warn!(
+                        %error,
+                        venue = %venue.room.name,
+                        "venue seed row refused"
+                    );
+                }
             }
         }
         Ok(summary)
     }
 
     /// One venue: resolve the city, upsert the room, write its facts. The
-    /// city is resolved the way `gdrive::promote_beacon_booking` resolves
-    /// it — slug first, then a name match only when exactly one city
-    /// answers, because a name two cities share picks nothing rather than
-    /// picking wrong.
+    /// city resolves the way `peer_act_seed::import_act` resolves it — a
+    /// name or slug match constrained by the sheet's country when it maps,
+    /// accepted only when exactly one city answers, because a city two
+    /// countries share picks nothing rather than picking wrong.
     async fn import_venue(
         &self,
         workspace_id: Uuid,
         venue: &SeededVenue,
     ) -> Result<SeedOutcome, sqlx::Error> {
         let room = &venue.room;
-        let slug = match sqlx::query_scalar::<_, String>(
-            "SELECT slug FROM cities WHERE slug = lower(btrim($1))",
+        // `cities.slug` is unique per country, not globally — the id resolves
+        // in the same query the sheet's country constraint ran in, and the
+        // match must be exactly one: a "Neustadt" inside a Czechia row must
+        // not resolve to the German catalogue entry, and a slug two countries
+        // share must not pick one by accident. A country the map does not
+        // know constrains nothing — the exactly-one rule still stands.
+        let country_code = crate::peer_act_seed::resolve_country_code(room.country.trim());
+        let ids = sqlx::query_scalar::<_, Uuid>(
+            "SELECT id FROM cities \
+             WHERE (slug = lower(btrim($1)) \
+                OR lower(btrim(name)) = lower(btrim($1))) \
+               AND ($2::text IS NULL OR country_code = $2)",
         )
         .bind(&room.city)
-        .fetch_optional(&self.pool)
-        .await?
-        {
-            Some(slug) => Some(slug),
-            None => {
-                let slugs = sqlx::query_scalar::<_, String>(
-                    "SELECT DISTINCT slug FROM cities \
-                     WHERE slug = lower(btrim($1)) \
-                        OR lower(btrim(name)) = lower(btrim($1))",
-                )
-                .bind(&room.city)
-                .fetch_all(&self.pool)
-                .await?;
-                match slugs.as_slice() {
-                    [only] => Some(only.clone()),
-                    _ => None,
-                }
-            }
-        };
-        let Some(slug) = slug else {
-            return Ok(SeedOutcome::UnknownCity);
-        };
-        let Some(city_id) = sqlx::query_scalar::<_, Uuid>("SELECT id FROM cities WHERE slug = $1")
-            .bind(&slug)
-            .fetch_optional(&self.pool)
-            .await?
-        else {
+        .bind(country_code)
+        .fetch_all(&self.pool)
+        .await?;
+        let Some(city_id) = (match ids.as_slice() {
+            [only] => Some(*only),
+            _ => None,
+        }) else {
             return Ok(SeedOutcome::UnknownCity);
         };
 

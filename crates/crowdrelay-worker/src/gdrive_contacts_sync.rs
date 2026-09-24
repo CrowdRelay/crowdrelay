@@ -112,6 +112,7 @@ struct CycleCounts {
     venues_imported: u64,
     venue_refusals: usize,
     venues_unknown_city: u64,
+    venues_failed: u64,
     /// The same accounting for a band seed sheet: acts that imported into
     /// the peer registry, rows refused, acts whose city named no catalogue
     /// city, and acts whose own write failed — a bad row is counted, never
@@ -293,6 +294,7 @@ impl GDriveContactsSyncWorker {
                     counts.venues_imported += file_counts.venues_imported;
                     counts.venue_refusals += file_counts.venue_refusals;
                     counts.venues_unknown_city += file_counts.venues_unknown_city;
+                    counts.venues_failed += file_counts.venues_failed;
                     counts.peer_acts_imported += file_counts.peer_acts_imported;
                     counts.peer_act_refusals += file_counts.peer_act_refusals;
                     counts.peer_acts_unresolved_city += file_counts.peer_acts_unresolved_city;
@@ -333,6 +335,7 @@ impl GDriveContactsSyncWorker {
             venues_imported = counts.venues_imported,
             venue_refusals = counts.venue_refusals,
             venues_unknown_city = counts.venues_unknown_city,
+            venues_failed = counts.venues_failed,
             peer_acts_imported = counts.peer_acts_imported,
             peer_act_refusals = counts.peer_act_refusals,
             peer_acts_unresolved_city = counts.peer_acts_unresolved_city,
@@ -581,6 +584,10 @@ impl GDriveContactsSyncWorker {
             self.workspace_id,
             &file.name,
             sheets,
+            // The synced Drive folder is the operator's registry — its
+            // beacon flags, agent seeds and venue/band rows are trusted
+            // the way the workbook that fed them was.
+            crate::sheet_intake::SheetTrust::RegistryTrusted,
         )
         .await?;
         let rows_read = harvest.rows_read;
@@ -588,6 +595,7 @@ impl GDriveContactsSyncWorker {
         counts.venues_imported += harvest.venues_imported;
         counts.venue_refusals += harvest.venue_refusals;
         counts.venues_unknown_city += harvest.venues_unknown_city;
+        counts.venues_failed += harvest.venues_failed;
         counts.peer_acts_imported += harvest.peer_acts_imported;
         counts.peer_act_refusals += harvest.peer_act_refusals;
         counts.peer_acts_unresolved_city += harvest.peer_acts_unresolved_city;
@@ -621,6 +629,7 @@ impl GDriveContactsSyncWorker {
                     &file.name,
                     &[],
                     true,
+                    true,
                 )
                 .await
                 .map_err(|e: GDriveError| e.to_string())?;
@@ -648,6 +657,7 @@ impl GDriveContactsSyncWorker {
                 &file.id,
                 &file.name,
                 &contacts,
+                true,
                 true,
             )
             .await

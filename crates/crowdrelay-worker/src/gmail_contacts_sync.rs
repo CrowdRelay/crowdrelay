@@ -831,6 +831,7 @@ impl GmailContactsSyncWorker {
                     &provenance,
                     &extracted,
                     false,
+                    false,
                 )
                 .await
                 .map_err(|e: GDriveError| e.to_string())?
@@ -970,6 +971,10 @@ impl GmailContactsSyncWorker {
             self.workspace_id,
             &file_label,
             sheets,
+            // Inbound mail is not the operator's registry — a mailed
+            // beacon/agent/venue/band shape stages contacts for review
+            // only, never its flags or registry rows.
+            crate::sheet_intake::SheetTrust::InboundUntrusted,
         )
         .await?;
         let ref_id = format!("gmail:{message_id}:{attachment_id}");
@@ -984,6 +989,9 @@ impl GmailContactsSyncWorker {
                 // A message is immutable — nothing it once carried can
                 // "disappear" from it, so the anchor never belongs here.
                 false,
+                // Verdict cells in a mailed sheet must not touch
+                // `booking_agents.active` — the review path decides.
+                false,
             )
             .await
             .map_err(|e: GDriveError| e.to_string())?;
@@ -992,6 +1000,7 @@ impl GmailContactsSyncWorker {
             %filename,
             contacts = summary.upserted,
             venues = harvest.venues_imported,
+            venues_failed = harvest.venues_failed,
             peer_acts = harvest.peer_acts_imported,
             beacons = harvest.beacons_imported,
             beacons_refreshed = harvest.beacons_refreshed,

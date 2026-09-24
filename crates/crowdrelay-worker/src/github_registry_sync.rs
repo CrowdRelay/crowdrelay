@@ -92,6 +92,7 @@ struct CycleCounts {
     venues_imported: u64,
     venue_refusals: usize,
     venues_unknown_city: u64,
+    venues_failed: u64,
     peer_acts_imported: u64,
     peer_act_refusals: usize,
     peer_acts_unresolved_city: u64,
@@ -256,6 +257,7 @@ impl GithubRegistrySyncWorker {
                     counts.venues_imported += file_counts.venues_imported;
                     counts.venue_refusals += file_counts.venue_refusals;
                     counts.venues_unknown_city += file_counts.venues_unknown_city;
+                    counts.venues_failed += file_counts.venues_failed;
                     counts.peer_acts_imported += file_counts.peer_acts_imported;
                     counts.peer_act_refusals += file_counts.peer_act_refusals;
                     counts.peer_acts_unresolved_city += file_counts.peer_acts_unresolved_city;
@@ -290,6 +292,7 @@ impl GithubRegistrySyncWorker {
             venues = counts.venues_imported,
             venue_refusals = counts.venue_refusals,
             venues_unknown_city = counts.venues_unknown_city,
+            venues_failed = counts.venues_failed,
             peer_acts = counts.peer_acts_imported,
             peer_act_refusals = counts.peer_act_refusals,
             peer_acts_unresolved_city = counts.peer_acts_unresolved_city,
@@ -396,12 +399,21 @@ impl GithubRegistrySyncWorker {
             parse_delimited(&bytes, b',').map(|g| vec![g])?
         };
 
-        let harvest =
-            harvest_grids(self.repo.pool(), self.workspace_id, &entry.name, sheets).await?;
+        let harvest = harvest_grids(
+            self.repo.pool(),
+            self.workspace_id,
+            &entry.name,
+            sheets,
+            // The GitHub mirror is the operator's own repo — registry
+            // claims apply the same as the Drive folder's.
+            crate::sheet_intake::SheetTrust::RegistryTrusted,
+        )
+        .await?;
         counts.rows_without_email = harvest.rows_without_email;
         counts.venues_imported = harvest.venues_imported;
         counts.venue_refusals = harvest.venue_refusals;
         counts.venues_unknown_city = harvest.venues_unknown_city;
+        counts.venues_failed = harvest.venues_failed;
         counts.peer_acts_imported = harvest.peer_acts_imported;
         counts.peer_act_refusals = harvest.peer_act_refusals;
         counts.peer_acts_unresolved_city = harvest.peer_acts_unresolved_city;
@@ -432,6 +444,7 @@ impl GithubRegistrySyncWorker {
                 &file_id,
                 &entry.name,
                 &contacts,
+                true,
                 true,
             )
             .await

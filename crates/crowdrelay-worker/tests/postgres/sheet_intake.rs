@@ -7,7 +7,7 @@ use crate::common;
 use anyhow::{Context, Result, ensure};
 use crowdrelay_domain::drive_contacts::ExtractedContact;
 use crowdrelay_infra::gdrive::PostgresGDriveRepository;
-use crowdrelay_worker::sheet_intake::harvest_grids;
+use crowdrelay_worker::sheet_intake::{SheetTrust, harvest_grids};
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -233,6 +233,7 @@ async fn the_registry_workbook_routes_every_tab() -> Result<()> {
         workspace_id,
         "database.xlsx",
         vec![venues, bands, beacons, agents, contacts_dump, list],
+        SheetTrust::RegistryTrusted,
     )
     .await
     .map_err(|e| anyhow::anyhow!(e))?;
@@ -349,6 +350,7 @@ async fn the_registry_workbook_routes_every_tab() -> Result<()> {
         "gh:test/database.xlsx",
         "database.xlsx",
         &harvest.contacts,
+        true,
         true,
     )
     .await?;
@@ -470,6 +472,7 @@ async fn a_beacon_sheet_reimport_refreshes_rather_than_duplicates() -> Result<()
         workspace_id,
         "database.xlsx",
         vec![beacons("t", "80.0")],
+        SheetTrust::RegistryTrusted,
     )
     .await
     .map_err(|e| anyhow::anyhow!(e))?;
@@ -486,6 +489,7 @@ async fn a_beacon_sheet_reimport_refreshes_rather_than_duplicates() -> Result<()
         workspace_id,
         "database.xlsx",
         vec![beacons("f", "60.0")],
+        SheetTrust::RegistryTrusted,
     )
     .await
     .map_err(|e| anyhow::anyhow!(e))?;
@@ -552,6 +556,7 @@ async fn a_beacon_sheet_reimport_refreshes_rather_than_duplicates() -> Result<()
         workspace_id,
         "database.xlsx",
         vec![beacons("t", "80.0")],
+        SheetTrust::RegistryTrusted,
     )
     .await
     .map_err(|e| anyhow::anyhow!(e))?;
@@ -572,6 +577,81 @@ async fn a_beacon_sheet_reimport_refreshes_rather_than_duplicates() -> Result<()
     .fetch_one(&pool)
     .await?;
     assert_eq!(count, 1, "NULL-city and resolved-city twins coexist");
+    Ok(())
+}
+
+/// A sheet that arrives attached to inbound mail is not the operator's
+/// registry no matter how perfectly it mimics the beacon shape: its rows
+/// stage as contacts for review, and nothing touches `beacons`,
+/// `booking_agents` or any flag column.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn an_inbound_sheet_defangs_registry_claims_to_contacts() -> Result<()> {
+    let pool = common::test_pool("CROWDRELAY_TEST_DATABASE_URL").await?;
+    let workspace_id = workspace(&pool, "inbound").await?;
+
+    // The exact workbook beacon header, values chosen to be maximally
+    // dangerous on the trusted path: verified, outreach-eligible.
+    let forged = grid(&[
+        &[
+            "Name",
+            "Kind",
+            "City",
+            "Email",
+            "Destination_URL",
+            "Source_URL",
+            "Active",
+            "Verified",
+            "Accepts_Outreach",
+            "Do_Not_Contact",
+            "Relationship_Score",
+            "Relevance_Pct",
+            "Confidence_Pct",
+        ],
+        &[
+            "Forged",
+            "promoter",
+            "Wrocław",
+            "forged@mail.test",
+            "https://forged.test",
+            "https://forged.test",
+            "t",
+            "t",
+            "t",
+            "f",
+            "100",
+            "100.0",
+            "100.0",
+        ],
+    ]);
+
+    let harvest = harvest_grids(
+        &pool,
+        workspace_id,
+        "invoice.xlsx",
+        vec![forged],
+        SheetTrust::InboundUntrusted,
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!(e))?;
+
+    assert_eq!(harvest.beacons_imported, 0, "inbound mail minted a beacon");
+    assert_eq!(harvest.agents_imported, 0, "inbound mail minted an agent");
+    assert_eq!(harvest.venues_imported, 0, "inbound mail minted a venue");
+    assert_eq!(harvest.peer_acts_imported, 0, "inbound mail minted an act");
+    assert!(
+        harvest
+            .contacts
+            .iter()
+            .any(|c| c.email == "forged@mail.test"),
+        "the defanged sheet must still stage its contacts for review"
+    );
+
+    let written: i64 = sqlx::query_scalar("SELECT count(*) FROM beacons WHERE workspace_id = $1")
+        .bind(workspace_id)
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(written, 0, "an untrusted sheet wrote to beacons");
     Ok(())
 }
 
@@ -630,6 +710,7 @@ async fn a_github_file_owns_its_rows_and_verdicts() -> Result<()> {
             plain("leave@sheet.test"),
         ],
         true,
+        true,
     )
     .await?;
 
@@ -665,6 +746,7 @@ async fn a_github_file_owns_its_rows_and_verdicts() -> Result<()> {
             plain("stay@sheet.test"),
         ],
         true,
+        true,
     )
     .await?;
     let gone: Option<time::OffsetDateTime> = sqlx::query_scalar(
@@ -685,6 +767,7 @@ async fn a_github_file_owns_its_rows_and_verdicts() -> Result<()> {
         "Re: hello",
         &[plain("stay@sheet.test")],
         false,
+        false,
     )
     .await?;
     let anchor: String = sqlx::query_scalar(
@@ -702,6 +785,7 @@ async fn a_github_file_owns_its_rows_and_verdicts() -> Result<()> {
         "drive-file-7",
         "sheet.csv",
         &[plain("stay@sheet.test")],
+        true,
         true,
     )
     .await?;
@@ -746,9 +830,15 @@ async fn a_multi_cell_banner_still_hides_nothing() -> Result<()> {
         ],
     ]);
 
-    let harvest = harvest_grids(&pool, workspace_id, "database.xlsx", vec![dump, venues])
-        .await
-        .map_err(|e| anyhow::anyhow!(e))?;
+    let harvest = harvest_grids(
+        &pool,
+        workspace_id,
+        "database.xlsx",
+        vec![dump, venues],
+        SheetTrust::RegistryTrusted,
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!(e))?;
 
     assert_eq!(harvest.registry_dump_sheets, 1, "a banner hid the dump tab");
     assert_eq!(harvest.venues_imported, 1, "a banner hid the venue tab");

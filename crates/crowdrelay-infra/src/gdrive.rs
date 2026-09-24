@@ -296,6 +296,12 @@ impl PostgresGDriveRepository {
         ref_name: &str,
         contacts: &[ExtractedContact],
         mark_disappeared: bool,
+        // Whether staged agent verdicts may flip `booking_agents.active`.
+        // A verdict is a registry write — the caller's transport decides
+        // whether this batch may make it. Inbound mail cannot: a sender
+        // who can email the connected account must not retire or revive
+        // the operator's agents.
+        apply_agent_verdicts: bool,
     ) -> Result<ContactUpsertSummary, GDriveError> {
         let mut tx = self.pool.begin().await?;
 
@@ -389,7 +395,7 @@ impl PostgresGDriveRepository {
             .map(|c| c.email.as_str())
             .collect();
         let mut agents_resolved = 0u64;
-        if !verdict_emails.is_empty() {
+        if apply_agent_verdicts && !verdict_emails.is_empty() {
             agents_resolved = sqlx::query(
                 r#"
                 UPDATE booking_agents AS ba
