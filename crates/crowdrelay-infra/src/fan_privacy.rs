@@ -280,13 +280,17 @@ impl PostgresFanPrivacyRepository {
         let changed = result.rows_affected() > 0;
 
         if changed {
+            // `actor_kind` is 'service' like the erasure audit above: the
+            // column's CHECK allows member, system and service, and the 'fan'
+            // this used to write violated it — rolling back the unpublish, so
+            // a fan asking to take their name off the leaderboard never could.
             sqlx::query(
                 r#"
                 INSERT INTO audit_events (
                     workspace_id, actor_kind, action, target_type, target_id, request_id, metadata
                 )
                 VALUES (
-                    $1, 'fan', 'synesthesia.leaderboard_unpublished', 'fan', $2, $3,
+                    $1, 'service', 'synesthesia.leaderboard_unpublished', 'fan', $2, $3,
                     jsonb_build_object('campaign_slug', 'virya-synesthesia-album-v1')
                 )
                 "#,
