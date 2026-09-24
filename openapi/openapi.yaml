@@ -14290,10 +14290,13 @@ components:
     ChannelPerformance:
       type: object
       additionalProperties: false
-      required: [attribution, signups, activated_30d]
+      required: [attribution, signups, activated_30d, departed]
       properties:
         attribution: { $ref: '#/components/schemas/ChannelAttribution' }
-        signups: { type: integer, minimum: 0 }
+        signups:
+          type: integer
+          minimum: 0
+          description: People who arrived through this channel and are still here.
         activated_30d:
           type: integer
           minimum: 0
@@ -14307,10 +14310,17 @@ components:
           type: string
           nullable: true
           enum: [ticket_purchase, merch_purchase, qualified_referral, event_interest, synesthesia_run, signal_session]
+        departed:
+          type: integer
+          minimum: 0
+          description: >
+            People who arrived through this channel and have since gone
+            (unsubscribed or suppressed). The rate above is over those who
+            stayed, so read it beside this.
     UnattributedGroup:
       type: object
       additionalProperties: false
-      required: [reason, remedy, signups, activated_30d]
+      required: [reason, remedy, signups, activated_30d, departed]
       properties:
         reason:
           type: string
@@ -14318,6 +14328,7 @@ components:
         remedy: { type: string, maxLength: 240 }
         signups: { type: integer, minimum: 0 }
         activated_30d: { type: integer, minimum: 0 }
+        departed: { type: integer, minimum: 0 }
     AcquisitionChannels:
       type: object
       additionalProperties: false

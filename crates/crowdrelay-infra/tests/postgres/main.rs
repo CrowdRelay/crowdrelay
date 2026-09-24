@@ -4,6 +4,7 @@
 // run this target with --ignored; every test below stays #[ignore]d.
 
 mod acquisition;
+mod acquisition_channels;
 mod admission;
 mod archive_bulk_promote;
 mod attestation;

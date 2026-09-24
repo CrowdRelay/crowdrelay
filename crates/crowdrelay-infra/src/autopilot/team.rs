@@ -96,6 +96,7 @@ impl PostgresAutopilotRepository {
             let mut assigned = if can_email {
                 super::daily_briefing::issue_daily_briefings(
                     &mut tx,
+                    &self.pool,
                     workspace_id,
                     now,
                     crew_locale,

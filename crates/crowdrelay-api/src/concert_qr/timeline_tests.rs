@@ -80,6 +80,7 @@ mod timeline_tests {
                 qr_campaigns: 0,
                 checkins: 0,
             },
+            room: crowdrelay_infra::concert_room::RoomSplit::default(),
             harvest: TimelineHarvestRow {
                 occurred_at: None,
                 pending_requests: 0,
@@ -206,6 +207,29 @@ mod timeline_tests {
         let steps = build_steps(&facts, now);
         assert_eq!(state_of(&steps, "the_scan"), "done");
         assert_eq!(at(&steps, "the_scan").detail["checkins"], 17);
+    }
+
+    #[test]
+    fn the_scan_says_what_the_room_produced_not_only_how_many_scanned() {
+        // Seventeen scans, of which five were new to the band, three of those
+        // already reachable and two still unconfirmed — the other twelve
+        // were fans the band already had. Only the five are aggregation.
+        let now = OffsetDateTime::now_utc();
+        let mut facts = facts(now);
+        facts.event.starts_at = now - Duration::hours(2);
+        facts.counts.checkins = 17;
+        facts.counts.qr_campaigns = 1;
+        facts.room = crowdrelay_infra::concert_room::RoomSplit {
+            new_fans: 5,
+            new_reachable: 3,
+            new_unconfirmed: 2,
+        };
+        let steps = build_steps(&facts, now);
+        let detail = &at(&steps, "the_scan").detail;
+        assert_eq!(detail["checkins"], 17);
+        assert_eq!(detail["new_fans"], 5);
+        assert_eq!(detail["new_reachable"], 3);
+        assert_eq!(detail["new_unconfirmed"], 2);
     }
 
     #[test]

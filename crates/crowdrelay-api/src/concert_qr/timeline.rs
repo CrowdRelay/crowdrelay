@@ -502,6 +502,12 @@ fn build_steps(facts: &TimelineFacts, now: OffsetDateTime) -> Vec<TimelineStepVi
         serde_json::json!({
             "checkins": facts.counts.checkins,
             "campaign_ready": facts.counts.qr_campaigns > 0,
+            // What the room produced, not how many phones pointed at the
+            // door: `checkins` counts fans the band already had scanning
+            // again. §4e-6 judges the first quarter on these, not totals.
+            "new_fans": facts.room.new_fans,
+            "new_reachable": facts.room.new_reachable,
+            "new_unconfirmed": facts.room.new_unconfirmed,
         }),
     ));
 

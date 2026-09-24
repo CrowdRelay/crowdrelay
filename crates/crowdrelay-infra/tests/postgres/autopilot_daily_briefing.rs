@@ -674,9 +674,20 @@ async fn the_briefing_counts_join_ask_clicks_and_the_fans_they_made()
     );
     let briefings = briefing_rows(&pool, workspace_id).await?;
     assert_eq!(briefings.len(), 1);
+    // The scoreboard stays absent: no post means unmeasured, not zero. This
+    // asserted on any "join-ask" substring until the brief learned to name
+    // setup gaps. The workspace here has written no ask, so it is also a
+    // cold tenant and the setup line is correctly present — the assertion
+    // now names the scoreboard's own label, and the setup line is pinned
+    // alongside it rather than left unasserted.
     assert!(
-        !briefings[0].3.contains("join-ask"),
-        "no join-ask post means no join-ask line: {}",
+        !briefings[0].3.contains("join-ask (7d)"),
+        "no join-ask post means no join-ask scoreboard: {}",
+        briefings[0].3
+    );
+    assert!(
+        briefings[0].3.contains("join-ask — setup needed"),
+        "a workspace with no ask written is told what the ask needs: {}",
         briefings[0].3
     );
 
@@ -801,24 +812,82 @@ async fn the_briefing_counts_join_ask_clicks_and_the_fans_they_made()
     Ok(())
 }
 
+async fn seed_crew_locale_en(
+    pool: &sqlx::PgPool,
+    workspace_id: WorkspaceId,
+) -> Result<(), Box<dyn std::error::Error>> {
+    sqlx::query(
+        "INSERT INTO tenant_settings (workspace_id, key, value) VALUES ($1, 'crew_locale', 'en')",
+    )
+    .bind(workspace_id.into_uuid())
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 const QUIET_LINE: &str = "Nothing needs you today — the system is working.";
 
-/// The quiet-day line is reachable. A crew member with an active profile
-/// and no asks this week puts a zero row in the capacity query; that row
-/// used to be enough to render the capacity block, and the block's key kept
-/// the quiet line from ever printing on any tenant that can receive a
-/// briefing at all. An idle crew is not news.
+async fn briefing_sections(
+    pool: &sqlx::PgPool,
+    workspace_id: WorkspaceId,
+) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+    Ok(sqlx::query_scalar(
+        "SELECT sections FROM daily_briefings WHERE workspace_id = $1
+         ORDER BY local_date DESC LIMIT 1",
+    )
+    .bind(workspace_id.into_uuid())
+    .fetch_one(pool)
+    .await?)
+}
+
+/// Everything the join-ask needs, so its setup line stays silent and any
+/// other section is the only thing that can speak.
+async fn seed_ready_join_ask(
+    pool: &sqlx::PgPool,
+    workspace_id: WorkspaceId,
+) -> Result<(), Box<dyn std::error::Error>> {
+    for (key, value) in [
+        ("join_ask_variants", r#"["Join us on Signal."]"#),
+        ("member_site_base_url", "https://band.example"),
+        ("join_ask_image_url", "https://band.example/join.png"),
+    ] {
+        sqlx::query("INSERT INTO tenant_settings (workspace_id, key, value) VALUES ($1, $2, $3)")
+            .bind(workspace_id.into_uuid())
+            .bind(key)
+            .bind(value)
+            .execute(pool)
+            .await?;
+    }
+    for platform in ["facebook", "instagram"] {
+        sqlx::query(
+            "INSERT INTO fanbase_connections
+                 (workspace_id, platform, external_account_ref, credential_ref, label)
+             VALUES ($1, $2, $3, 'test-credential', $2)",
+        )
+        .bind(workspace_id.into_uuid())
+        .bind(platform)
+        .bind(format!("{platform}-page"))
+        .execute(pool)
+        .await?;
+    }
+    Ok(())
+}
+
+/// A new tenant is the one the brief used to fail hardest: every section
+/// measures activity it has none of, so it read "nothing needs you today"
+/// while its growth loop sat unconfigured and pointed at another band's site.
 #[tokio::test]
 #[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
-async fn a_quiet_day_with_an_idle_crew_says_nothing_needs_you()
+async fn a_cold_tenant_briefing_names_its_setup_instead_of_calling_the_day_quiet()
 -> Result<(), Box<dyn std::error::Error>> {
     let (repository, pool) = repository().await?;
     let workspace_id = WorkspaceId::new();
     seed_workspace(&pool, workspace_id).await?;
     seed_member(&pool, workspace_id, "reader").await?;
     seed_team_email_executor(&pool, workspace_id).await?;
+    seed_crew_locale_en(&pool, workspace_id).await?;
 
-    let morning = datetime!(2026-10-05 09:00 UTC);
+    let morning = datetime!(2026-10-05 10:00 UTC);
     assert_eq!(
         repository
             .reconcile_team_handoffs(workspace_id, morning)
@@ -826,8 +895,75 @@ async fn a_quiet_day_with_an_idle_crew_says_nothing_needs_you()
         1
     );
     let briefings = briefing_rows(&pool, workspace_id).await?;
-    assert_eq!(briefings.len(), 1);
     let body = &briefings[0].3;
+    assert!(
+        body.contains(
+            "join-ask — setup needed: write the ask in your own words · \
+             set your own site URL — the link points at the default site · \
+             connect the account · add a photo"
+        ),
+        "every gap at once, deduplicated, in the crew's language: {body}"
+    );
+    // An idle crew no longer renders the capacity scoreboard, so the setup
+    // gap is the only thing standing between this tenant and the quiet-day
+    // line. Its absence is therefore the setup section's doing.
+    assert!(
+        !body.contains(QUIET_LINE),
+        "a cold tenant is not told its day is quiet: {body}"
+    );
+
+    let sections = briefing_sections(&pool, workspace_id).await?;
+    let setup = sections["join_ask_setup"]
+        .as_array()
+        .ok_or("join_ask_setup is a list")?;
+    let reasons: Vec<&str> = setup
+        .iter()
+        .filter_map(|gap| gap["reason"].as_str())
+        .collect();
+    assert_eq!(
+        reasons,
+        [
+            "no_variants",
+            "site_url_inherited",
+            "not_connected",
+            "not_connected",
+            "no_instagram_photo",
+        ]
+    );
+    Ok(())
+}
+
+/// The other half: a tenant with nothing missing gets no setup line. It must
+/// not turn into a permanent fixture that trains the crew to skip it — which
+/// also pins the inherited-URL check to "no explicit row", not "any URL".
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn a_ready_join_ask_leaves_a_quiet_day_quiet() -> Result<(), Box<dyn std::error::Error>> {
+    let (repository, pool) = repository().await?;
+    let workspace_id = WorkspaceId::new();
+    seed_workspace(&pool, workspace_id).await?;
+    seed_member(&pool, workspace_id, "reader").await?;
+    seed_team_email_executor(&pool, workspace_id).await?;
+    seed_crew_locale_en(&pool, workspace_id).await?;
+    seed_ready_join_ask(&pool, workspace_id).await?;
+
+    let morning = datetime!(2026-10-05 10:00 UTC);
+    assert_eq!(
+        repository
+            .reconcile_team_handoffs(workspace_id, morning)
+            .await?,
+        1
+    );
+    let briefings = briefing_rows(&pool, workspace_id).await?;
+    let body = &briefings[0].3;
+    assert!(
+        !body.contains("setup needed"),
+        "nothing is missing, so nothing is said: {body}"
+    );
+    // Member present, no asks, loop configured: a genuinely quiet day. The
+    // crew member's zero row in the capacity query used to render the
+    // scoreboard anyway, which kept this line unreachable on every tenant
+    // able to receive a briefing.
     assert!(
         !body.contains("Asks this week"),
         "an all-zero capacity scoreboard is not rendered: {body}"
@@ -836,14 +972,18 @@ async fn a_quiet_day_with_an_idle_crew_says_nothing_needs_you()
         body.contains(QUIET_LINE),
         "a genuinely quiet day says so: {body}"
     );
+    let sections = briefing_sections(&pool, workspace_id).await?;
+    assert!(sections.get("join_ask_setup").is_none(), "{sections}");
+    assert!(sections.get("capacity_asks_7d").is_none(), "{sections}");
     Ok(())
 }
 
 /// §4i-6: load stays visible when it exists. One ask handed out this week
 /// renders the capacity block — including the idle member's zero row,
 /// because who is free is the other half of who is loaded — and the day is
-/// no longer quiet. The assignment is already done so the open-tasks
-/// section stays empty: the capacity block alone must silence the line.
+/// no longer quiet. The join-ask is ready and the assignment already done,
+/// so neither the setup line nor the open-tasks section can speak: the
+/// capacity block alone must silence the quiet line.
 #[tokio::test]
 #[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn capacity_load_is_news_and_silences_the_quiet_line()
@@ -854,6 +994,8 @@ async fn capacity_load_is_news_and_silences_the_quiet_line()
     let busy = seed_member(&pool, workspace_id, "busy").await?;
     seed_member(&pool, workspace_id, "idle").await?;
     seed_team_email_executor(&pool, workspace_id).await?;
+    seed_crew_locale_en(&pool, workspace_id).await?;
+    seed_ready_join_ask(&pool, workspace_id).await?;
 
     let morning = datetime!(2026-10-05 09:00 UTC);
     let yesterday = morning - time::Duration::days(1);
@@ -880,6 +1022,10 @@ async fn capacity_load_is_news_and_silences_the_quiet_line()
     let briefings = briefing_rows(&pool, workspace_id).await?;
     assert_eq!(briefings.len(), 1);
     let body = &briefings[0].3;
+    assert!(
+        !body.contains("setup needed"),
+        "the join-ask is ready, so only capacity is speaking: {body}"
+    );
     assert!(
         body.contains("Asks this week:"),
         "real load renders the capacity block: {body}"
