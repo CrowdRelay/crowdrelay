@@ -8,14 +8,16 @@
 
 mod admin;
 pub mod import;
+mod release_copy;
 mod signal;
+
+pub use release_copy::beacon_release_signature;
+use release_copy::{ReleaseSigner, release_delivery_copy};
 
 use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use time::OffsetDateTime;
 use uuid::Uuid;
-
-pub(super) const RELEASE_MEMBER_URL: &str = "https://virya.music/pl/latarnik/#wydania";
 
 #[derive(Clone)]
 pub struct PostgresBeaconReleaseRepository {
@@ -137,38 +139,4 @@ pub(super) fn request_hash(campaign_id: Uuid, variant_id: Uuid, quantity: i32) -
     hasher.update(variant_id.as_bytes());
     hasher.update(quantity.to_be_bytes());
     hasher.finalize().to_vec()
-}
-
-pub(super) struct ReleaseDeliveryCopy {
-    pub subject: String,
-    pub text: String,
-}
-
-pub(super) fn release_delivery_copy(
-    locale: &str,
-    display_name: &str,
-    title: &str,
-    deadline: OffsetDateTime,
-) -> ReleaseDeliveryCopy {
-    let deadline_str = format!(
-        "{:02}-{:02}-{:02}",
-        deadline.year(),
-        deadline.month() as u8,
-        deadline.day()
-    );
-    if locale.starts_with("pl") {
-        ReleaseDeliveryCopy {
-            subject: format!("Dziękujemy Latarniku, {display_name}! Nowe wydanie: {title}"),
-            text: format!(
-                "Dziękujemy Latarniku, {display_name}!\n\nMamy nowe fizyczne wydanie Viryi: {title}. Twój egzemplarz jest zarezerwowany w puli Latarników. Żebyśmy faktycznie mogli go wysłać, wejdź do swojego panelu i potwierdź dla tej premiery imię i nazwisko odbiorcy, telefon oraz Paczkomat przed {deadline_str}.\n\n{RELEASE_MEMBER_URL}\n\nJeśli chcesz pomóc przy tej premierze, w Press Roomie masz gotowe materiały. Najbardziej pomagają nam: recenzja lub artykuł, radio/podcast/wywiad, zdjęcia albo wideo, udostępnienie premiery oraz kontakt do sensownego medium, promotora lub klubu. Nic z tego nie jest obowiązkiem — płyta jest naszym podziękowaniem za bycie częścią Latarnika.\n\nMasz pytanie? Wojtek: 784947481.\n\nVirya",
-            ),
-        }
-    } else {
-        ReleaseDeliveryCopy {
-            subject: format!("Thank you, Beacon, {display_name}! New release: {title}"),
-            text: format!(
-                "Thank you, Beacon, {display_name}!\n\nWe have a new physical Virya release: {title}. Your copy is reserved in the Beacon pool. To receive it, open your Beacon panel and confirm the recipient name, phone number and parcel-locker destination for this release before {deadline_str}.\n\n{RELEASE_MEMBER_URL}\n\nThe Press Room contains ready-to-use material if you want to help with the release. Reviews/articles, radio/podcasts/interviews, live photos/video, sharing the release, and relevant media/promoter/venue introductions are especially useful. None of this is an obligation — the record is our thank-you for being part of Beacon.\n\nQuestions? Wojtek: +48 784947481.\n\nVirya",
-            ),
-        }
-    }
 }

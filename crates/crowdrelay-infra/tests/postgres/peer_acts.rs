@@ -123,11 +123,17 @@ async fn act_links(
 #[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn a_bill_write_resolves_acts_to_tenants_and_peers() -> Result<(), Box<dyn std::error::Error>>
 {
-    let database = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
+    // Its own database: `place_peer_acts` is one registry across every
+    // tenant, and the case below counts it table-wide — the only way to say
+    // "a resolved tenant act minted nothing" — so on the shared suite
+    // database it counts every other test's peers too.
+    let database = common::isolated_database("CROWDRELAY_TEST_DATABASE_URL")
         .await
-        .expect("connect to the migrated suite database");
+        .expect("create a migrated database of this test's own");
 
-    run_cases(&database).await
+    let outcome = run_cases(&database.pool).await;
+    database.drop().await?;
+    outcome
 }
 
 async fn run_cases(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
@@ -351,11 +357,16 @@ async fn genre_alias_seed_resolves_spellings() -> Result<(), Box<dyn std::error:
 #[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn a_consented_sibling_is_named_on_the_bill_with_its_arithmetic()
 -> Result<(), Box<dyn std::error::Error>> {
-    let database = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
+    // Its own database, for the same reason as the bill test above: the peer
+    // registry is global and this fixture names its organisation, city and
+    // peers outright.
+    let database = common::isolated_database("CROWDRELAY_TEST_DATABASE_URL")
         .await
-        .expect("connect to the migrated suite database");
+        .expect("create a migrated database of this test's own");
 
-    run_package(&database).await
+    let outcome = run_package(&database.pool).await;
+    database.drop().await?;
+    outcome
 }
 
 async fn run_package(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {

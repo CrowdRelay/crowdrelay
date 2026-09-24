@@ -26,6 +26,7 @@ RETENTION_STEPS = (ROOT / "crates/crowdrelay-worker/src/retention/steps.rs").rea
 # The infra adapter now owns every INSERT/UPDATE/DELETE the tests guard.
 INFRA_ADMIN = (ROOT / "crates/crowdrelay-infra/src/beacon_signal/admin.rs").read_text()
 INFRA_MOD = (ROOT / "crates/crowdrelay-infra/src/beacon_signal/mod.rs").read_text()
+INFRA_RELEASE_COPY = (ROOT / "crates/crowdrelay-infra/src/beacon_signal/release_copy.rs").read_text()
 
 
 class BeaconPhysicalReleasesV1Contract(unittest.TestCase):
@@ -58,9 +59,14 @@ class BeaconPhysicalReleasesV1Contract(unittest.TestCase):
         self.assertNotIn("join_all", launch)
 
     def test_release_mail_is_server_owned_and_shipping_pii_never_enters_outbox(self) -> None:
-        self.assertIn("Dziękujemy Latarniku", INFRA_MOD)
-        self.assertIn("Paczkomat", INFRA_MOD)
-        self.assertIn("784947481", INFRA_MOD)
+        self.assertIn("Dziękujemy Latarniku", INFRA_RELEASE_COPY)
+        self.assertIn("Paczkomat", INFRA_RELEASE_COPY)
+        # The first tenant's crew phone stays in its own letter, and only
+        # there: every arm that carries it is a first-tenant arm.
+        for arm in INFRA_RELEASE_COPY.split("=> format!(")[1:]:
+            if "784947481" in arm:
+                self.assertIn("Viry", arm)
+        self.assertIn("784947481", INFRA_RELEASE_COPY)
         launch = INFRA_ADMIN.split("crowdrelay.beacon.release_delivery_confirmation_requested", 1)[1].split(
             ".execute(&mut *tx)", 1
         )[0]

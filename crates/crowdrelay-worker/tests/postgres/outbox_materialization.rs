@@ -20,13 +20,27 @@ use uuid::Uuid;
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires CROWDRELAY_OUTBOX_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn materialization_failure_refunds_the_attempt() -> Result<()> {
-    let pool = common::test_pool("CROWDRELAY_OUTBOX_TEST_DATABASE_URL").await?;
+    // Its own database, for two reasons: the outbox worker claims pending
+    // events database-wide, so on the shared suite database it claims other
+    // tests' leftovers; and the poisoned constraint below is DDL that would
+    // break every concurrent test's deliveries while it stands.
+    let database = common::isolated_database("CROWDRELAY_OUTBOX_TEST_DATABASE_URL").await?;
+    let outcome = run(&database.pool).await;
+    database
+        .drop()
+        .await
+        .context("drop the isolated database")?;
+    outcome
+}
+
+async fn run(pool: &PgPool) -> Result<()> {
+    let pool = pool.clone();
 
     let workspace_id = seed_workspace(&pool).await?;
     seed_endpoint(&pool, workspace_id).await?;
     let event_id = seed_event(&pool, workspace_id).await?;
 
-    // Break the delivery insert in this clone only: a CHECK(false) NOT VALID
+    // Break the delivery insert in this database only: a CHECK(false) NOT VALID
     // constraint is enforced for new writes without validating existing rows,
     // so it stands even when the cloned template already holds deliveries.
     // The release path writes a different table, so it still works.
@@ -119,7 +133,6 @@ async fn materialization_failure_refunds_the_attempt() -> Result<()> {
         .bind(workspace_id)
         .execute(&pool)
         .await?;
-    pool.close().await;
     Ok(())
 }
 

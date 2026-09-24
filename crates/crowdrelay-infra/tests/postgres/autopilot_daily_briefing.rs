@@ -899,7 +899,7 @@ async fn a_cold_tenant_briefing_names_its_setup_instead_of_calling_the_day_quiet
     assert!(
         body.contains(
             "join-ask — setup needed: write the ask in your own words · \
-             set your own site URL — the link points at the default site · \
+             set the member site URL · \
              connect the account · add a photo"
         ),
         "every gap at once, deduplicated, in the crew's language: {body}"
@@ -924,7 +924,7 @@ async fn a_cold_tenant_briefing_names_its_setup_instead_of_calling_the_day_quiet
         reasons,
         [
             "no_variants",
-            "site_url_inherited",
+            "no_site_url",
             "not_connected",
             "not_connected",
             "no_instagram_photo",
@@ -934,8 +934,7 @@ async fn a_cold_tenant_briefing_names_its_setup_instead_of_calling_the_day_quiet
 }
 
 /// The other half: a tenant with nothing missing gets no setup line. It must
-/// not turn into a permanent fixture that trains the crew to skip it — which
-/// also pins the inherited-URL check to "no explicit row", not "any URL".
+/// not turn into a permanent fixture that trains the crew to skip it.
 #[tokio::test]
 #[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn a_ready_join_ask_leaves_a_quiet_day_quiet() -> Result<(), Box<dyn std::error::Error>> {

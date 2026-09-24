@@ -699,7 +699,10 @@ async fn preview_invites(
             return BeaconSignalError::Unavailable.response(request_id_value);
         }
     };
-    let placeholder_url = brand.invite_url(&locale, "<jednorazowy-link>");
+    let Some(placeholder_url) = brand.invite_url(&locale, "<jednorazowy-link>") else {
+        tracing::warn!("beacon invite preview refused: member_site_base_url is blank");
+        return BeaconSignalError::Conflict.response(request_id_value);
+    };
     let (wordmark, app_name, _) = match super::super::invite_names(
         &state.database,
         state.ticketing.workspace_id().into_uuid(),

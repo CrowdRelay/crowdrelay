@@ -23,26 +23,26 @@ async fn seed_workspace(pool: &PgPool, slug: &str) -> Result<Uuid, Box<dyn std::
     let id = Uuid::now_v7();
     sqlx::query("INSERT INTO workspaces (id, slug, name) VALUES ($1, $2, $3)")
         .bind(id)
-        .bind(slug)
+        .bind(crate::common::unique_slug(slug, id))
         .bind("Night Test")
         .execute(pool)
         .await?;
     Ok(id)
 }
 
-/// One Wrocław room, shared by every event this test seeds.
+/// A Wrocław of the test's own, shared by every event that test seeds.
+///
+/// A night is keyed on (room, date) in a registry shared across tenants, and
+/// the suite shares one database: in the migration-seeded `wroclaw`, every
+/// other run's show at "Klub Ucho" two weeks out lands on the same night.
 async fn seed_city(pool: &PgPool) -> Result<Uuid, Box<dyn std::error::Error>> {
-    sqlx::query(
-        "INSERT INTO cities (id, slug, name, country_code) \
-         VALUES ($1, 'wroclaw', 'Wrocław', 'PL') \
-         ON CONFLICT (country_code, slug) DO UPDATE SET name = EXCLUDED.name",
-    )
-    .bind(Uuid::now_v7())
-    .execute(pool)
-    .await?;
+    // Named by its slug too: a second PL city called "Wrocław" makes the real
+    // one ambiguous to every by-name lookup (the Spotify city join refuses to
+    // guess between two).
     Ok(sqlx::query_scalar::<_, Uuid>(
-        "SELECT id FROM cities WHERE country_code = 'PL' AND slug = 'wroclaw'",
+        "INSERT INTO cities (slug, name, country_code) VALUES ($1, $1, 'PL') RETURNING id",
     )
+    .bind(crate::common::unique_slug("wroclaw", Uuid::now_v7()))
     .fetch_one(pool)
     .await?)
 }
@@ -137,9 +137,14 @@ async fn two_workspaces_share_one_night() -> Result<(), Box<dyn std::error::Erro
         let night_b = place_event_of(pool, event_b).await?.ok_or("no night")?;
         assert_eq!(night_a, night_b, "one venue + one date is one night");
         assert_eq!(
-            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM place_events")
-                .fetch_one(pool)
-                .await?,
+            sqlx::query_scalar::<_, i64>(
+                "SELECT count(*) FROM place_events AS night \
+                 JOIN place_venues AS venue ON venue.id = night.venue_id \
+                 WHERE venue.city_id = $1",
+            )
+            .bind(city_id)
+            .fetch_one(pool)
+            .await?,
             1
         );
         Ok::<(), Box<dyn std::error::Error>>(())

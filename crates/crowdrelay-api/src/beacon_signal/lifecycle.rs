@@ -68,6 +68,13 @@ pub(super) async fn mint_invite_batch_tx(
     locale: &str,
     source_invite_job_id: Option<Uuid>,
 ) -> Result<BatchInviteResponse, BeaconSignalError> {
+    // An invitation with no site of the tenant's own to land on is a broken
+    // link — or, while the site URL defaulted to the first tenant's, another
+    // band's signup page — in a stranger's inbox. Refuse before minting.
+    if brand.site_root().is_none() {
+        tracing::warn!("beacon batch invite refused: member_site_base_url is blank");
+        return Err(BeaconSignalError::Conflict);
+    }
     // Batch eligibility is new outreach only: an unverified beacon (no profile
     // row yet) or one whose invite has lapsed. `paused`/`revoked` are
     // operator-set states a bulk click must not undo — the per-beacon invite
@@ -281,7 +288,9 @@ pub(super) async fn mint_invite_batch_tx(
         let Some(invite_token) = tokens.get(&beacon_id) else {
             continue;
         };
-        let invite_url = brand.invite_url(locale, invite_token);
+        let Some(invite_url) = brand.invite_url(locale, invite_token) else {
+            return Err(BeaconSignalError::Conflict);
+        };
         let delivery = invite_delivery_copy(locale, &display_name, &invite_url, &names);
         invitations.push(BatchInviteItem {
             beacon_id,

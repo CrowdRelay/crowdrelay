@@ -33,30 +33,12 @@ pub async fn load_join_ask_snapshot(
         .unwrap_or_else(JoinAskConfig::unconfigured);
 
     // The site URL and the standing publish approval ride the brand seam, not
-    // a raw row read: `member_site_base_url` carries the tenant's configured
-    // default, and every other consumer builds links the same way. An emptied
-    // value still maps to `None` — the domain's `NoSiteUrl` hold rather than a
-    // link with no destination.
+    // a raw row read, so every consumer builds links the same way. A tenant
+    // that never set a site URL, or blanked it, maps to `None` — the domain's
+    // `NoSiteUrl` hold rather than a link with no destination (or, while the
+    // default was the first tenant's site, another band's).
     let brand = settings.brand_settings(workspace_id).await?;
-    let member_site_base_url = {
-        let url = brand.member_site_base_url.trim().to_owned();
-        (!url.is_empty()).then_some(url)
-    };
-    // The brand seam merges the shipped default in, so it cannot say whether
-    // the URL above is this tenant's. That default is the first tenant's own
-    // site: for anyone else it is another band's signup page, and the
-    // readiness board has to be able to tell the two apart.
-    let member_site_base_url_inherited = !sqlx::query_scalar::<_, bool>(
-        r#"
-        SELECT EXISTS (
-            SELECT 1 FROM tenant_settings
-            WHERE workspace_id = $1 AND key = 'member_site_base_url' AND btrim(value) <> ''
-        )
-        "#,
-    )
-    .bind(workspace_id)
-    .fetch_one(pool)
-    .await?;
+    let member_site_base_url = brand.site_root().map(str::to_owned);
 
     let connected_platforms = sqlx::query_scalar::<_, String>(
         r#"
@@ -114,7 +96,6 @@ pub async fn load_join_ask_snapshot(
         platforms: config.platforms,
         image_url: config.image_url,
         member_site_base_url,
-        member_site_base_url_inherited,
         social_auto_post: brand.social_auto_post,
         connected_platforms,
         posts,

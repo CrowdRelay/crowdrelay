@@ -296,7 +296,36 @@ impl BeaconReleaseAdminRepository for PostgresBeaconReleaseRepository {
             tracing::warn!(%error, "beacon release recipient snapshot failed");
             return Err(BeaconReleaseAdminError::Unavailable);
         }
-        // Queue notification emails via outbox.
+        // Queue notification emails via outbox — from this tenant, to its own
+        // releases page. A tenant with no site of its own has nowhere to send
+        // the recipient to confirm, so the launch is refused (and everything
+        // above rolls back) rather than mailed with somebody else's link.
+        let brand = match crate::tenant_settings::TenantSettingsRepository::new(self.pool.clone())
+            .brand_settings(workspace_id)
+            .await
+        {
+            Ok(brand) => brand,
+            Err(error) => {
+                tracing::warn!(%error, "beacon release brand lookup failed");
+                return Err(BeaconReleaseAdminError::Unavailable);
+            }
+        };
+        let Some(member_url) = brand.member_releases_url() else {
+            tracing::warn!(campaign_id=%campaign_id, "beacon release launch refused: member_site_base_url is blank");
+            return Err(BeaconReleaseAdminError::Conflict);
+        };
+        let (signature, first_tenant) = match beacon_release_signature(&mut *tx, workspace_id).await
+        {
+            Ok(signer) => signer,
+            Err(error) => {
+                tracing::warn!(%error, "beacon release signature lookup failed");
+                return Err(BeaconReleaseAdminError::Unavailable);
+            }
+        };
+        let signer = ReleaseSigner {
+            signature: &signature,
+            first_tenant,
+        };
         let mut mail_beacon_ids = Vec::with_capacity(eligible.len());
         let mut mail_display_names = Vec::with_capacity(eligible.len());
         let mut mail_contact_emails = Vec::with_capacity(eligible.len());
@@ -304,7 +333,14 @@ impl BeaconReleaseAdminRepository for PostgresBeaconReleaseRepository {
         let mut mail_texts = Vec::with_capacity(eligible.len());
         let mut mail_request_ids = Vec::with_capacity(eligible.len());
         for (beacon_id, display_name, contact_email, locale) in &eligible {
-            let delivery = release_delivery_copy(locale, display_name, &campaign.2, campaign.3);
+            let delivery = release_delivery_copy(
+                locale,
+                display_name,
+                &campaign.2,
+                campaign.3,
+                &member_url,
+                &signer,
+            );
             mail_beacon_ids.push(*beacon_id);
             mail_display_names.push(display_name.clone());
             mail_contact_emails.push(contact_email.clone());
@@ -341,7 +377,7 @@ impl BeaconReleaseAdminRepository for PostgresBeaconReleaseRepository {
         .bind(&campaign.1)
         .bind(&campaign.2)
         .bind(campaign.3)
-        .bind(RELEASE_MEMBER_URL)
+        .bind(&member_url)
         .bind(&mail_beacon_ids)
         .bind(&mail_display_names)
         .bind(&mail_contact_emails)

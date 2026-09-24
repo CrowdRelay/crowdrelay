@@ -14,7 +14,7 @@
 use crate::common;
 
 use crowdrelay_domain::audience_graph::canonical_place_url;
-use sqlx::PgPool;
+use sqlx::{PgConnection, PgPool};
 use uuid::Uuid;
 
 /// Every spelling worth pinning, including the ones production actually held.
@@ -154,16 +154,22 @@ async fn the_merge_collapses_duplicates_that_share_unique_children()
         .await
         .expect("connect to the migrated suite database");
 
-    merge(&database).await
+    // The CHECK drop below is DDL on the database the whole suite shares; a
+    // transaction that always rolls back keeps a failing run from leaving the
+    // table unconstrained for every test after it.
+    let mut tx = database.begin().await?;
+    let outcome = merge(&mut tx).await;
+    tx.rollback().await?;
+    outcome
 }
 
-async fn merge(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
+async fn merge(conn: &mut PgConnection) -> Result<(), Box<dyn std::error::Error>> {
     // The CHECK exists once the migration has run, and a duplicate is
     // non-canonical by definition — so the state this tests cannot be created
     // while the constraint stands. Dropping it is how the pre-migration world is
     // reconstructed; it goes back on at the end and must validate.
     sqlx::query("ALTER TABLE discovery_places DROP CONSTRAINT discovery_places_url_is_canonical")
-        .execute(pool)
+        .execute(&mut *conn)
         .await?;
 
     let workspace = Uuid::now_v7();
@@ -171,7 +177,7 @@ async fn merge(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
         .bind(workspace)
         .bind(format!("merge-{}", workspace.simple()))
         .bind("Place merge test")
-        .execute(pool)
+        .execute(&mut *conn)
         .await?;
 
     // Two spellings of one subreddit, as production held them. The survivor must
@@ -191,7 +197,7 @@ async fn merge(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
         .bind(workspace)
         .bind(url)
         .bind(membership)
-        .execute(pool)
+        .execute(&mut *conn)
         .await?;
         // Both children are unique per place, which is what the first attempt
         // tripped over.
@@ -200,11 +206,11 @@ async fn merge(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
         )
         .bind(workspace)
         .bind(id)
-        .execute(pool)
+        .execute(&mut *conn)
         .await?;
         sqlx::query("INSERT INTO discovery_place_rules (place_id) VALUES ($1)")
             .bind(id)
-            .execute(pool)
+            .execute(&mut *conn)
             .await?;
         // And one that is not unique per place, so it must simply repoint.
         sqlx::query(
@@ -214,7 +220,7 @@ async fn merge(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
         )
         .bind(workspace)
         .bind(id)
-        .execute(pool)
+        .execute(&mut *conn)
         .await?;
     }
 
@@ -228,12 +234,12 @@ async fn merge(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
         .split("-- Phase 3: keep it true.")
         .next()
         .ok_or("migration 0259 has no Phase 3 marker")?;
-    sqlx::raw_sql(body).execute(pool).await?;
+    sqlx::raw_sql(body).execute(&mut *conn).await?;
 
     let places: i64 =
         sqlx::query_scalar("SELECT count(*) FROM discovery_places WHERE workspace_id = $1")
             .bind(workspace)
-            .fetch_one(pool)
+            .fetch_one(&mut *conn)
             .await?;
     if places != 1 {
         return Err(format!("expected one place after the merge, found {places}").into());
@@ -243,7 +249,7 @@ async fn merge(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
         "SELECT id, url, membership_state FROM discovery_places WHERE workspace_id = $1",
     )
     .bind(workspace)
-    .fetch_one(pool)
+    .fetch_one(&mut *conn)
     .await?;
     if id != survivor {
         return Err("the joined place must survive, not the not_joined duplicate".into());
@@ -260,7 +266,7 @@ async fn merge(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
         let rows: i64 =
             sqlx::query_scalar(&format!("SELECT count(*) FROM {table} WHERE place_id = $1"))
                 .bind(survivor)
-                .fetch_one(pool)
+                .fetch_one(&mut *conn)
                 .await?;
         if rows != 1 {
             return Err(
@@ -274,7 +280,7 @@ async fn merge(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
     let evidence: i64 =
         sqlx::query_scalar("SELECT count(*) FROM discovery_place_evidence WHERE place_id = $1")
             .bind(survivor)
-            .fetch_one(pool)
+            .fetch_one(&mut *conn)
             .await?;
     if evidence != 2 {
         return Err(format!("both evidence rows should repoint, found {evidence}").into());
@@ -285,7 +291,7 @@ async fn merge(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
         "ALTER TABLE discovery_places ADD CONSTRAINT discovery_places_url_is_canonical \
          CHECK (url = crowdrelay_canonical_place_url(url))",
     )
-    .execute(pool)
+    .execute(&mut *conn)
     .await
     .map_err(|error| format!("the merged rows must satisfy the canonical CHECK: {error}"))?;
 

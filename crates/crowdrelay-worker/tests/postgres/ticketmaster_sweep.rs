@@ -12,6 +12,10 @@
 //!   identity);
 //! - nothing tenant-owned: no `event_acts`, no contacts, no capacity claims;
 //! - a re-sweep refreshes rather than duplicates.
+//!
+//! The sweep selects every pinned city with a show and the assertions count
+//! the shared registries (`place_venues`, `place_peer_acts`) table-wide, so
+//! each test runs on a database of its own.
 
 use crate::common;
 
@@ -131,11 +135,13 @@ const EVENT_AT_KNOWN_ROOM: &str = r#"{
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn a_tm_event_writes_evidence_onto_a_room_that_exists() -> Result<()> {
-    let database = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
+    let database = common::isolated_database("CROWDRELAY_TEST_DATABASE_URL")
         .await
-        .expect("connect to the migrated suite database");
+        .expect("create a migrated database of this test's own");
 
-    run_sweep_cases(&database).await
+    let outcome = run_sweep_cases(&database.pool).await;
+    database.drop().await?;
+    outcome
 }
 
 async fn run_sweep_cases(pool: &PgPool) -> Result<()> {
@@ -287,11 +293,13 @@ async fn run_sweep_cases(pool: &PgPool) -> Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn an_unknown_room_mints_nothing() -> Result<()> {
-    let database = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
+    let database = common::isolated_database("CROWDRELAY_TEST_DATABASE_URL")
         .await
-        .expect("connect to the migrated suite database");
+        .expect("create a migrated database of this test's own");
 
-    run_unknown_case(&database).await
+    let outcome = run_unknown_case(&database.pool).await;
+    database.drop().await?;
+    outcome
 }
 
 async fn run_unknown_case(pool: &PgPool) -> Result<()> {
@@ -365,11 +373,13 @@ async fn run_unknown_case(pool: &PgPool) -> Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn the_anchor_answers_before_the_name() -> Result<()> {
-    let database = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
+    let database = common::isolated_database("CROWDRELAY_TEST_DATABASE_URL")
         .await
-        .expect("connect to the migrated suite database");
+        .expect("create a migrated database of this test's own");
 
-    run_anchor_case(&database).await
+    let outcome = run_anchor_case(&database.pool).await;
+    database.drop().await?;
+    outcome
 }
 
 /// A Ticketmaster venue id already anchored to a room wins over the name —

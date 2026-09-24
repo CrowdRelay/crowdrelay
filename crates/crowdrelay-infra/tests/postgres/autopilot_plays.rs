@@ -1271,6 +1271,15 @@ async fn a_sweep_proposes_the_ticket_fix_in_ask_mode_and_applies_it_in_alone_mod
         .bind("Sweep Fix E2E")
         .execute(&pool)
         .await?;
+    // The link is built on the tenant's own site. Without this row it used to
+    // be built on the first tenant's, through a shipped default.
+    sqlx::query(
+        "INSERT INTO tenant_settings (workspace_id, key, value)
+         VALUES ($1, 'member_site_base_url', 'https://sweep-fix.example')",
+    )
+    .bind(workspace_id.into_uuid())
+    .execute(&pool)
+    .await?;
     let now = OffsetDateTime::now_utc();
     let anchor_at = now + time::Duration::days(30);
     let database = DatabaseConfig {
@@ -1318,7 +1327,7 @@ async fn a_sweep_proposes_the_ticket_fix_in_ask_mode_and_applies_it_in_alone_mod
     );
 
     approve_and_run_fix(&pool, &repository, workspace_id, event_id, now).await?;
-    let expected_url = format!("https://virya.music/live/fixable-show-{suffix}");
+    let expected_url = format!("https://sweep-fix.example/live/fixable-show-{suffix}");
     assert_eq!(
         sqlx::query_scalar::<_, Option<String>>(
             "SELECT ticket_url FROM events WHERE workspace_id=$1 AND id=$2"
@@ -1370,7 +1379,7 @@ async fn a_sweep_proposes_the_ticket_fix_in_ask_mode_and_applies_it_in_alone_mod
         .fetch_one(&pool)
         .await?
         .as_deref(),
-        Some(format!("https://virya.music/live/fixable-show-{suffix}b").as_str()),
+        Some(format!("https://sweep-fix.example/live/fixable-show-{suffix}b").as_str()),
         "the queued fix applies on its own dispatch"
     );
     Ok(())

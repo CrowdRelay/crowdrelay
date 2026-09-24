@@ -27,16 +27,19 @@ const TEST_TIMEOUT: Duration = Duration::from_secs(12);
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires CROWDRELAY_OUTBOX_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn signed_http_delivery_is_exact_and_durable() -> Result<()> {
-    let pool = common::test_pool("CROWDRELAY_OUTBOX_TEST_DATABASE_URL").await?;
-
-    crowdrelay_infra::database::MIGRATOR
-        .run(&pool)
-        .await
-        .context("apply migrations")?;
+    // The outbox worker claims pending events and deliveries database-wide;
+    // on the shared suite database it claims whatever other tests left
+    // pending, and the counts below stop meaning "this event".
+    let database = common::isolated_database("CROWDRELAY_OUTBOX_TEST_DATABASE_URL").await?;
+    let pool = database.pool.clone();
 
     let fixture = FixtureIds::new();
     let result = run_scenario(&pool, fixture).await;
     let cleanup_result = cleanup_fixture(&pool, fixture.workspace_id).await;
+    database
+        .drop()
+        .await
+        .context("drop the isolated database")?;
 
     result.context("signed webhook scenario must succeed")?;
     cleanup_result.context("remove signed webhook test fixture")?;

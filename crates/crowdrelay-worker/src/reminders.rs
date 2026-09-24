@@ -248,7 +248,11 @@ async fn enqueue_due_beacon_release_activations(
     // Set-based follow-ups: one pass partitions the locked batch, then each
     // side lands as a single statement instead of two-to-three round trips
     // per recipient inside this transaction.
-    let mut queued_rows: Vec<&DueBeaconReleaseActivationRow> = Vec::with_capacity(rows.len());
+    let mut queued_rows: Vec<(&DueBeaconReleaseActivationRow, String, String)> =
+        Vec::with_capacity(rows.len());
+    // One signature per workspace per pass: the launch mail's signer, so both
+    // letters of one release come from the same name.
+    let mut signatures: std::collections::HashMap<Uuid, String> = std::collections::HashMap::new();
     let mut suppressed_workspaces: Vec<Uuid> = Vec::new();
     let mut suppressed_campaigns: Vec<Uuid> = Vec::new();
     let mut suppressed_beacons: Vec<Uuid> = Vec::new();
@@ -257,8 +261,34 @@ async fn enqueue_due_beacon_release_activations(
             .contact_email
             .as_deref()
             .is_some_and(|value| !value.trim().is_empty());
-        if row.contactable && has_contact_email {
-            queued_rows.push(row);
+        // Brand is resolved per owning workspace through the cached port;
+        // repeat calls in one pass hit the 60 s process cache. A tenant with
+        // no site of its own has no page to send the recipient to — the
+        // follow-up is suppressed rather than sent with a dead link.
+        let member_url = if row.contactable && has_contact_email {
+            crowdrelay_infra::tenant_settings::TenantSettingsRepository::new(pool.clone())
+                .brand_settings(row.workspace_id)
+                .await
+                .map_err(ReminderSchedulerError::Database)?
+                .member_releases_url()
+        } else {
+            None
+        };
+        if let Some(member_url) = member_url {
+            let signature = match signatures.get(&row.workspace_id) {
+                Some(signature) => signature.clone(),
+                None => {
+                    let (signature, _) = crowdrelay_infra::beacon_signal::beacon_release_signature(
+                        &mut **transaction,
+                        row.workspace_id,
+                    )
+                    .await
+                    .map_err(ReminderSchedulerError::Database)?;
+                    signatures.insert(row.workspace_id, signature.clone());
+                    signature
+                }
+            };
+            queued_rows.push((row, member_url, signature));
         } else {
             suppressed_workspaces.push(row.workspace_id);
             suppressed_campaigns.push(row.campaign_id);
@@ -287,31 +317,33 @@ async fn enqueue_due_beacon_release_activations(
 
     let queued = u64::try_from(queued_rows.len()).unwrap_or(u64::MAX);
     if !queued_rows.is_empty() {
-        let workspaces: Vec<Uuid> = queued_rows.iter().map(|row| row.workspace_id).collect();
-        let campaigns: Vec<Uuid> = queued_rows.iter().map(|row| row.campaign_id).collect();
-        let beacons: Vec<Uuid> = queued_rows.iter().map(|row| row.beacon_id).collect();
+        let workspaces: Vec<Uuid> = queued_rows
+            .iter()
+            .map(|(row, _, _)| row.workspace_id)
+            .collect();
+        let campaigns: Vec<Uuid> = queued_rows
+            .iter()
+            .map(|(row, _, _)| row.campaign_id)
+            .collect();
+        let beacons: Vec<Uuid> = queued_rows
+            .iter()
+            .map(|(row, _, _)| row.beacon_id)
+            .collect();
         let mut payloads = Vec::with_capacity(queued_rows.len());
         let mut request_ids = Vec::with_capacity(queued_rows.len());
-        for row in &queued_rows {
+        for (row, member_url, signature) in &queued_rows {
             let contact_email = row
                 .contact_email
                 .as_deref()
                 .unwrap_or_default()
                 .trim()
                 .to_owned();
-            // Brand is resolved per owning workspace through the cached port;
-            // repeat calls in one pass hit the 60 s process cache.
-            let brand =
-                crowdrelay_infra::tenant_settings::TenantSettingsRepository::new(pool.clone())
-                    .brand_settings(row.workspace_id)
-                    .await
-                    .map_err(ReminderSchedulerError::Database)?;
-            let member_url = brand.member_releases_url();
             let copy = beacon_release_activation_copy(
                 &row.locale,
                 &row.display_name,
                 &row.release_title,
-                &member_url,
+                member_url,
+                signature,
             );
             payloads.push(json!({
                 "campaign_id": row.campaign_id,
