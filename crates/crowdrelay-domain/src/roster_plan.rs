@@ -615,13 +615,13 @@ fn choose_corridor_headliner<'a>(
         Some(starved) if !best.is_starved() => {
             let note = match starved.months_since_last_show {
                 Some(months) => format!(
-                    "{} headlines the corridor over {} on fairness: their draw across the run                      is within {}% and they have not played in {months} months.",
+                    "{} headlines the corridor over {} on fairness: their draw across the run is within {}% and they have not played in {months} months.",
                     starved.name,
                     best.name,
                     STARVED_ACT_MARGIN_BASIS_POINTS / 100
                 ),
                 None => format!(
-                    "{} headlines the corridor over {} on fairness: their draw across the run                      is within {}% and they have never played a show on record.",
+                    "{} headlines the corridor over {} on fairness: their draw across the run is within {}% and they have never played a show on record.",
                     starved.name,
                     best.name,
                     STARVED_ACT_MARGIN_BASIS_POINTS / 100
@@ -1621,7 +1621,7 @@ mod tests {
         };
         assert_eq!(
             headliner, "Beta",
-            "600 across the run beats 600 vs 700 — Beta wins the corridor              even though Alpha is bigger in Kraków alone"
+            "600 across the run beats 600 vs 700 — Beta wins the corridor even though Alpha is bigger in Kraków alone"
         );
     }
 

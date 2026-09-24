@@ -1289,7 +1289,7 @@ impl GrowthMetricSyncWorker {
         let subreddit = &conn.provider_account_id;
         let Some(auth_key) = self.agent_service_auth_key.as_deref() else {
             return Err(GrowthMetricSyncError::ProviderApi(
-                "reddit needs the agent service to read a subreddit and                  CROWDRELAY_AGENT_SERVICE_AUTH_KEY is not set"
+                "reddit needs the agent service to read a subreddit and CROWDRELAY_AGENT_SERVICE_AUTH_KEY is not set"
                     .to_owned(),
             ));
         };

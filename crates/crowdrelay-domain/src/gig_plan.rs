@@ -416,7 +416,7 @@ impl GigRefusal {
                  you want to — the data does not support calling it a plan"
             ),
             Self::AudienceNotMeasurable => {
-                "we cannot size the audience here — the city has no coordinates on record,                  so there is nothing to measure reach against. The show may still be worth                  playing; the data just cannot say"
+                "we cannot size the audience here — the city has no coordinates on record, so there is nothing to measure reach against. The show may still be worth playing; the data just cannot say"
                     .to_owned()
             }
             Self::NotWhatTheTenantIsDoing { intent } => match intent {

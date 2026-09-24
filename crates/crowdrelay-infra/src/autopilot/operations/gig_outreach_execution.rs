@@ -63,7 +63,7 @@ pub(in crate::autopilot) async fn execute_gig_outreach(
     // path exists to prevent.
     if draft.subject.trim().is_empty() || draft.body.trim().is_empty() {
         return Err(RepositoryError::ConflictBecause(
-            "gig outreach refused: this action carries no letter — it was queued before the              letter was composed at approval time, and nothing may write one on the band's              behalf now. Approve the proposal again to compose it.",
+            "gig outreach refused: this action carries no letter — it was queued before the letter was composed at approval time, and nothing may write one on the band's behalf now. Approve the proposal again to compose it.",
         ));
     }
     let mut addressed = Vec::with_capacity(recipients.len());
@@ -135,7 +135,7 @@ pub(in crate::autopilot) async fn execute_gig_outreach(
     .unwrap_or(false);
     if named_room_closed {
         return Err(RepositoryError::ConflictBecause(
-            "gig outreach refused: the room this letter names is on record as closed —              a closure reported after the proposal was made must take the letter down              rather than let a promoter read a pitch for a night at a dead room.",
+            "gig outreach refused: the room this letter names is on record as closed — a closure reported after the proposal was made must take the letter down rather than let a promoter read a pitch for a night at a dead room.",
         ));
     }
 

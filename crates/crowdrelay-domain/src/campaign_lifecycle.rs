@@ -100,7 +100,7 @@ impl EventCampaignPhase {
     pub const fn audience_basis(self) -> &'static str {
         match self {
             Self::Announcement => {
-                "every consented fan in the event's city — counted when the campaign is built,                  because the city's audience moves between the approval and the send"
+                "every consented fan in the event's city — counted when the campaign is built, because the city's audience moves between the approval and the send"
             }
             Self::InterestReminder | Self::LastCall => {
                 "fans who said they are coming and have not bought a ticket"
