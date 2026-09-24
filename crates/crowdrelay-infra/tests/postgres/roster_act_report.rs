@@ -112,7 +112,7 @@ async fn show(
     pool: &PgPool,
     workspace_id: Uuid,
     city_id: Uuid,
-    venue: &str,
+    venue: Option<&str>,
     status: &str,
     starts_at: OffsetDateTime,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -208,7 +208,7 @@ async fn run_report(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
         pool,
         act,
         warsaw,
-        "Hydro",
+        Some("Hydro"),
         "completed",
         now - time::Duration::days(10),
     )
@@ -217,7 +217,7 @@ async fn run_report(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
         pool,
         act,
         krakow,
-        "Studio",
+        Some("Studio"),
         "completed",
         now - time::Duration::days(3),
     )
@@ -226,13 +226,32 @@ async fn run_report(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
         pool,
         act,
         warsaw,
-        "Cancelled Room",
+        Some("Cancelled Room"),
         "cancelled",
         now - time::Duration::days(5),
     )
     .await?;
     // A labelmate's show is not the act's room.
-    show(pool, labelmate, warsaw, "Labelmate Venue", "completed", now).await?;
+    show(
+        pool,
+        labelmate,
+        warsaw,
+        Some("Labelmate Venue"),
+        "completed",
+        now,
+    )
+    .await?;
+    // A night whose room was never named. `events.venue` is nullable, and
+    // this row once failed the whole report instead of listing as `null`.
+    show(
+        pool,
+        act,
+        krakow,
+        None,
+        "published",
+        now - time::Duration::days(1),
+    )
+    .await?;
 
     fan_in_city(pool, act, warsaw, now - time::Duration::days(2)).await?;
     fan_in_city(pool, act, warsaw, now - time::Duration::days(1)).await?;
@@ -313,14 +332,18 @@ async fn run_report(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
             .any(|line| line.action_kind == "outreach.target.request" && line.count == 1)
     );
 
-    // Two rooms played; the cancelled night is not one, and the labelmate's
-    // room is not the act's.
-    let venues: Vec<&str> = report
+    // Three rooms played, one of them unnamed; the cancelled night is not
+    // one, and the labelmate's room is not the act's.
+    let venues: Vec<Option<&str>> = report
         .shows
         .iter()
-        .map(|show| show.venue.as_str())
+        .map(|show| show.venue.as_deref())
         .collect();
-    assert_eq!(venues, ["Hydro", "Studio"], "venues={venues:?}");
+    assert_eq!(
+        venues,
+        [Some("Hydro"), Some("Studio"), None],
+        "venues={venues:?}"
+    );
 
     // Fans gained: three total, split 2 Warsaw / 1 Kraków.
     assert_eq!(report.fans.gained_total, 3);

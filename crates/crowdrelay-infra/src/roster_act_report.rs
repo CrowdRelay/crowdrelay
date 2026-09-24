@@ -36,11 +36,14 @@ pub struct ActReportActionLine {
 
 /// One room the act played in the quarter — venue, city, date. `status` is
 /// the event's own (`completed`, `published`); a cancelled night is not a
-/// room played and is filtered out rather than listed as one.
+/// room played and is filtered out rather than listed as one. `venue` is
+/// `null` when the event never named its room — `events.venue` is nullable,
+/// and decoding it as a string failed the whole report for any act with one
+/// such show on its bill.
 #[derive(Clone, Debug, Serialize)]
 pub struct ActReportShow {
     pub event_id: Uuid,
-    pub venue: String,
+    pub venue: Option<String>,
     pub city: String,
     #[serde(with = "time::serde::rfc3339")]
     pub starts_at: OffsetDateTime,
@@ -145,7 +148,7 @@ struct ActionRow {
 #[derive(Debug, FromRow)]
 struct ShowRow {
     event_id: Uuid,
-    venue: String,
+    venue: Option<String>,
     city: String,
     starts_at: OffsetDateTime,
     status: String,
