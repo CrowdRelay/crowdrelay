@@ -34,6 +34,7 @@ pub mod commerce;
 pub mod commerce_inventory;
 pub mod community_intelligence;
 pub mod concert_qr;
+pub mod concert_room;
 pub mod config;
 pub mod content_arcs;
 pub mod content_engine;

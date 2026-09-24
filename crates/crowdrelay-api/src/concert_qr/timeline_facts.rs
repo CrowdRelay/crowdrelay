@@ -183,6 +183,9 @@ struct TimelineFacts {
     play_steps: Vec<TimelinePlayStepRow>,
     checklist: Vec<TimelineChecklistRow>,
     counts: TimelineCountsRow,
+    /// What the scan produced — counts only, assembled in infra so this
+    /// module never touches fan identity.
+    room: crowdrelay_infra::concert_room::RoomSplit,
     harvest: TimelineHarvestRow,
     cost: Option<TimelineCostRow>,
     booking: Option<TimelineBookingRow>,
@@ -423,6 +426,9 @@ async fn load_timeline_facts(
     .bind(event_id)
     .fetch_one(&state.database)
     .await?;
+    let room =
+        crowdrelay_infra::concert_room::room_split(&state.database, workspace_id, event_id)
+            .await?;
 
     // Harvest anchors on the content source the completed-show trigger
     // projects; artifact requests are content-supply actions whose subject is
@@ -648,6 +654,7 @@ async fn load_timeline_facts(
         play_steps,
         checklist,
         counts,
+        room,
         harvest,
         cost,
         booking,

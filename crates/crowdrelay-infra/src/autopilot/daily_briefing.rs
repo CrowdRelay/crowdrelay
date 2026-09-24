@@ -20,6 +20,7 @@
 //! system has nothing to say, the briefing says so.
 
 mod artifact_ask;
+mod join_ask_setup;
 
 use super::{team::queue_team_email_action, *};
 use artifact_ask::distinguish_artifact_ask;
@@ -61,6 +62,13 @@ struct BriefingFrame {
     /// and the fans those clicks produced, per platform. Absent entirely
     /// when no join-ask post exists: unmeasured is not zero.
     join_ask_label: &'static str,
+    /// §5: what the join-ask needs from a person before it can run at all.
+    ///
+    /// The scoreboard above reports a loop that works. This reports one that
+    /// cannot start — and it is the line a workspace nobody has set up is
+    /// the *only* line it would otherwise get, because every other section
+    /// here measures activity a cold tenant has none of.
+    join_ask_setup_label: &'static str,
     fans_flat: &'static str,
     fans_format_unrecorded: &'static str,
     awaiting_report: &'static str,
@@ -99,6 +107,7 @@ const fn briefing_frame(locale: BriefingLocale) -> BriefingFrame {
             fans_label: "nowi fani (30 dni)",
             recovered_label: "odzyskani z archiwum (30 dni)",
             join_ask_label: "dołącz-do-nas (7 dni)",
+            join_ask_setup_label: "dołącz-do-nas — do ustawienia",
             fans_flat: "brak konwersji — nic jeszcze nie działa, i to też jest wiedza",
             fans_format_unrecorded: "format niezapisany",
             awaiting_report: "Czeka na raport",
@@ -126,6 +135,7 @@ const fn briefing_frame(locale: BriefingLocale) -> BriefingFrame {
             fans_label: "new fans (30d)",
             recovered_label: "recovered from archive (30d)",
             join_ask_label: "join-ask (7d)",
+            join_ask_setup_label: "join-ask — setup needed",
             fans_flat: "no conversions — nothing is working yet, worth knowing",
             fans_format_unrecorded: "format unrecorded",
             awaiting_report: "Awaiting your report",
@@ -193,6 +203,11 @@ struct TopShareRow {
 /// workspace member. Returns the number of assignments created.
 pub(in crate::autopilot) async fn issue_daily_briefings(
     tx: &mut Transaction<'_, Postgres>,
+    // Read outside the transaction on purpose: the readiness line is
+    // advisory, it reads settings rows this sweep does not write, and
+    // routing it through the same pool-backed assembler the cycle and the
+    // attention board use is what keeps all three naming the same blocker.
+    pool: &sqlx::PgPool,
     workspace_id: WorkspaceId,
     now: OffsetDateTime,
     locale: BriefingLocale,
@@ -259,13 +274,12 @@ pub(in crate::autopilot) async fn issue_daily_briefings(
         return Ok(0);
     }
 
-    let frame = briefing_frame(locale);
     let (title, body, sections, pending_links) = compose_briefing(
         tx,
+        pool,
         workspace_id,
         local_date,
         now,
-        &frame,
         locale,
         &zone,
         approval_links,
@@ -378,15 +392,16 @@ pub(in crate::autopilot) async fn issue_daily_briefings(
 #[allow(clippy::too_many_arguments)]
 async fn compose_briefing(
     tx: &mut Transaction<'_, Postgres>,
+    pool: &sqlx::PgPool,
     workspace_id: WorkspaceId,
     local_date: time::Date,
     now: OffsetDateTime,
-    frame: &BriefingFrame,
     locale: BriefingLocale,
     zone: &str,
     approval_links: Option<&ApprovalLinkMinter>,
 ) -> Result<(String, String, serde_json::Value, Vec<PendingApprovalLink>), RepositoryError> {
     let ws = workspace_id.into_uuid();
+    let frame = &briefing_frame(locale);
 
     // ── The active arc ────────────────────────────────────────────────
     let arc = sqlx::query_as::<_, (String, serde_json::Value, Option<time::Date>)>(
@@ -820,6 +835,18 @@ async fn compose_briefing(
             parts.join(" | ")
         ));
     }
+
+    // §5: what the join-ask needs before it can run at all — see the
+    // submodule for why this is the line a cold tenant most needs.
+    join_ask_setup::append_join_ask_setup(
+        pool,
+        ws,
+        locale,
+        frame.join_ask_setup_label,
+        &mut sections_map,
+        &mut body,
+    )
+    .await;
 
     if pending_total > 0 {
         sections_map.insert("pending_asks".to_owned(), pending_total.into());

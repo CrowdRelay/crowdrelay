@@ -192,6 +192,12 @@ pub struct JoinAskSnapshot {
     /// `None` when it is blank, because a join-ask with no destination is a
     /// post without an ask.
     pub member_site_base_url: Option<String>,
+    /// Whether `member_site_base_url` is the shipped default rather than a
+    /// value this tenant set. The default is the first tenant's own site, so
+    /// for any other tenant an inherited URL is not "a destination exists" —
+    /// it is somebody else's destination. Readiness reports it; the decision
+    /// path does not act on it (see [`JoinAskHold::SiteUrlInherited`]).
+    pub member_site_base_url_inherited: bool,
     /// The `social_auto_post` tenant flag — the channel's standing publish
     /// approval. The same flag `AutoPostPlatforms::permits` reads for the
     /// agent-draft path: on means the operator already approved this
@@ -265,6 +271,17 @@ pub enum JoinAskHold {
     /// now assembles a snapshot either way, which makes this the cold-start
     /// signal rather than a corruption check.
     NoVariants,
+    /// The site URL is the shipped default, not one this tenant set.
+    ///
+    /// **Readiness only — [`evaluate_join_ask`] never returns it.** The
+    /// default is the first tenant's own site, so a new tenant that inherits
+    /// it would send its followers to another band's signup page. Holding the
+    /// ask on it would be the safe decision for every tenant but one — and
+    /// that one is the tenant the default was written for, whose live asks
+    /// would stop. Which tenants carry an explicit row is production state, so
+    /// the hold waits for that row to exist and the default to be removed;
+    /// until then this is reported, loudly, and not enforced.
+    SiteUrlInherited,
 }
 
 impl JoinAskHold {
@@ -278,6 +295,7 @@ impl JoinAskHold {
             Self::NoInstagramPhoto => "no_instagram_photo",
             Self::NoSiteUrl => "no_site_url",
             Self::NoVariants => "no_variants",
+            Self::SiteUrlInherited => "site_url_inherited",
         }
     }
 
@@ -302,6 +320,10 @@ impl JoinAskHold {
             Self::NoSiteUrl => "set the member site URL on Settings → Workspace",
             Self::NoVariants => {
                 "write the join-ask in the band's own words on Settings → Workspace"
+            }
+            Self::SiteUrlInherited => {
+                "set this tenant's own member site URL on Settings → Workspace — \
+                 until then the join-ask links to the shipped default site"
             }
         }
     }
@@ -357,6 +379,11 @@ pub fn join_ask_readiness(snapshot: &JoinAskSnapshot) -> Vec<JoinAskBlocker> {
         blockers.push(JoinAskBlocker {
             platform: None,
             hold: JoinAskHold::NoSiteUrl,
+        });
+    } else if snapshot.member_site_base_url_inherited {
+        blockers.push(JoinAskBlocker {
+            platform: None,
+            hold: JoinAskHold::SiteUrlInherited,
         });
     }
     for platform in &snapshot.platforms {
@@ -509,6 +536,7 @@ mod tests {
             cadence_days: 7,
             platforms: vec!["facebook".to_owned(), "instagram".to_owned()],
             member_site_base_url: Some("https://virya.music".to_owned()),
+            member_site_base_url_inherited: false,
             social_auto_post: true,
             connected_platforms: vec!["facebook".to_owned(), "instagram".to_owned()],
             posts: Vec::new(),
@@ -687,7 +715,12 @@ mod tests {
                 .iter()
                 .map(|platform| (*platform).to_owned())
                 .collect(),
-            member_site_base_url: None,
+            // What a new tenant actually resolves to: the shipped default
+            // site, inherited. An earlier version of this fixture used `None`,
+            // which is not a state a new tenant can reach — and so hid that
+            // `NoSiteUrl` never fires for one.
+            member_site_base_url: Some(SHIPPED_DEFAULT_SITE.to_owned()),
+            member_site_base_url_inherited: true,
             social_auto_post: false,
             connected_platforms: Vec::new(),
             posts: Vec::new(),
@@ -710,7 +743,7 @@ mod tests {
                 },
                 JoinAskBlocker {
                     platform: None,
-                    hold: JoinAskHold::NoSiteUrl,
+                    hold: JoinAskHold::SiteUrlInherited,
                 },
                 JoinAskBlocker {
                     platform: Some("facebook".to_owned()),
@@ -801,8 +834,50 @@ mod tests {
             JoinAskHold::NoInstagramPhoto,
             JoinAskHold::NoSiteUrl,
             JoinAskHold::NoVariants,
+            JoinAskHold::SiteUrlInherited,
         ] {
             assert!(!hold.remedy().is_empty(), "{} has no remedy", hold.as_str());
         }
+    }
+
+    /// The value `DEFAULT_MEMBER_SITE_BASE_URL` ships as — the first
+    /// tenant's own site. Restated here because the domain cannot see infra.
+    const SHIPPED_DEFAULT_SITE: &str = "https://virya.music";
+
+    #[test]
+    fn an_explicitly_blank_site_url_reports_missing_not_inherited() {
+        // A tenant that cleared the value has no destination at all, which is
+        // a different errand from pointing at somebody else's.
+        let mut snapshot = cold_snapshot();
+        snapshot.member_site_base_url = None;
+        let blockers = join_ask_readiness(&snapshot);
+        assert!(blockers.contains(&JoinAskBlocker {
+            platform: None,
+            hold: JoinAskHold::NoSiteUrl,
+        }));
+        assert!(
+            !blockers
+                .iter()
+                .any(|blocker| blocker.hold == JoinAskHold::SiteUrlInherited)
+        );
+    }
+
+    #[test]
+    fn an_inherited_site_url_is_reported_but_never_holds_the_ask() {
+        // Readiness names it; the decision path must not act on it. The
+        // default is the first tenant's own site, and enforcing this would
+        // halt that tenant's live asks — see `SiteUrlInherited`.
+        let mut snapshot = snapshot();
+        snapshot.member_site_base_url_inherited = true;
+        assert_eq!(
+            join_ask_readiness(&snapshot),
+            vec![JoinAskBlocker {
+                platform: None,
+                hold: JoinAskHold::SiteUrlInherited,
+            }]
+        );
+        let plan = evaluate_join_ask(&snapshot, datetime!(2026-09-23 10:00 UTC));
+        assert_eq!(plan.asks.len(), 2, "an inherited URL must not stop the ask");
+        assert!(plan.held.is_empty());
     }
 }

@@ -361,12 +361,28 @@ pub struct ChiefOfStaffOpportunity {
 pub struct ChannelPerformance {
     /// Where these people came from, or an honest statement that we cannot say.
     pub attribution: ChannelAttribution,
+    /// People who arrived through this channel and are still here.
     pub signups: u32,
     /// Signed up, consented, and did something meaningful in the last 30 days.
     pub activated_30d: u32,
     /// Activated out of signed up, in basis points. `None` when there are no
     /// signups to divide by — a rate from an empty denominator is not a zero.
+    ///
+    /// Read it beside `departed`. The denominator is the people who stayed,
+    /// so a channel that lost nine of every ten arrivals can still show a
+    /// perfect rate over the one who remained.
     pub activation_basis_points: Option<u32>,
+    /// People who arrived through this channel and have since gone —
+    /// unsubscribed, or suppressed (bounced, complained, or deleted their
+    /// account). Counted, never named: a deleted account is a number here
+    /// and nothing else.
+    ///
+    /// The counts above net churn out by construction, which is right for
+    /// "how many fans did this channel produce" and blind to "how many did
+    /// it burn to produce them". Without this, a channel that churns hard
+    /// is indistinguishable from one that brought fewer people who all
+    /// stayed (§4e-7 #4).
+    pub departed: u32,
     /// The strongest thing anybody from this channel actually did, so a channel
     /// that produces ticket buyers is distinguishable from one that produces
     /// people who clicked once.
@@ -405,6 +421,9 @@ pub struct UnattributedGroup {
     pub remedy: &'static str,
     pub signups: u32,
     pub activated_30d: u32,
+    /// Arrived, then left — the same count `ChannelPerformance::departed`
+    /// carries, for the people we cannot attribute to a channel.
+    pub departed: u32,
 }
 
 /// The band's vehicles and rates, as an operator reads and edits them.
