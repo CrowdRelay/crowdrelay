@@ -121,7 +121,8 @@ if over; then
   # Rustup toolchains: keep the channels any rust-toolchain.toml under the
   # runners' _work or ~/dev pins, plus stable/beta/nightly. A box that just
   # wiped _work pins nothing — the three channel names are the floor.
-  pins="$(cat /home/*/actions-runner*/_work/*/*/rust-toolchain.toml /home/*/dev/*/rust-toolchain.toml 2>/dev/null \
+  pins="$( { cat /home/*/actions-runner*/_work/*/*/rust-toolchain.toml 2>/dev/null; \
+             for home in /home/*; do cat "$home"/dev/*/rust-toolchain.toml 2>/dev/null; done; } \
           | grep -oE 'channel *= *"[^"]+"' | cut -d'"' -f2 | sort -u || true)"
   keep="stable beta nightly $pins"
   for tc in /home/*/.rustup/toolchains/*/ /root/.rustup/toolchains/*/; do
