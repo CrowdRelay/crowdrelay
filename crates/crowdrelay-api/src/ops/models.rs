@@ -108,7 +108,7 @@ pub struct DeliveryResults {
 #[derive(Debug, Serialize, FromRow)]
 pub struct DeliveryResult {
     /// What kind of delivery this is: community_post, social_post,
-    /// telegram_post, or signal_push.
+    /// telegram_post, discord_post, or signal_push.
     kind: String,
     /// UUID of the delivery row.
     id: String,

@@ -2,8 +2,10 @@
 //!
 //! Peers are the artists the band watches: the peer-act-graph scanner
 //! proposes candidates, the operator confirms or refuses them here, and
-//! only a `confirmed` row is ever observed. Admin rather than
-//! control-plane — this is operator tooling, not the band's console.
+//! only a `confirmed` row is ever observed. Operator tooling, not the band's
+//! console: the admin routes stay, and `control_plane_operator.rs` serves the
+//! same handlers to the Control Plane, which offers them to platform-level
+//! sessions only and never to a band member's.
 //!
 //! A proposal arrives without handles and is never observable until the
 //! operator adds them, so the resolve route's confirm carries an optional
