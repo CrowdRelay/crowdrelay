@@ -431,14 +431,19 @@ pub trait AutopilotDecisionRepository: Send + Sync {
     /// variants, cadence and platforms, the connected fanbase channels, the
     /// join-ask post ledger, and whether Instagram has a photo to publish.
     ///
-    /// `None` is a feature-off read, not an error: a tenant that never wrote
-    /// variants has no join-ask to evaluate, and the evaluator must not turn
-    /// that into a synthetic empty config.
+    /// Always a snapshot. This returned `Option` once, and `None` — "the
+    /// tenant never wrote variants" — made the evaluator skip the context, so
+    /// a workspace nobody had set up produced a cycle indistinguishable from
+    /// a healthy one. Not emitting an *ask* for a tenant with no words was
+    /// right; not reporting that it has none was not. An unconfigured tenant
+    /// now resolves to `JoinAskConfig::unconfigured` and is held on
+    /// `NoVariants` — the empty variant list is the first gate, so no ask can
+    /// escape it.
     async fn load_join_ask_snapshot(
         &self,
         workspace_id: WorkspaceId,
         now: OffsetDateTime,
-    ) -> Result<Option<crowdrelay_domain::join_ask::JoinAskSnapshot>, RepositoryError>;
+    ) -> Result<crowdrelay_domain::join_ask::JoinAskSnapshot, RepositoryError>;
 
     /// Returns one snapshot per worker template that the brain may dispatch.
     /// Each snapshot carries the hours since the last run and the workspace's

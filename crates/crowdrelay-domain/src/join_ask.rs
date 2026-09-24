@@ -142,6 +142,28 @@ pub struct JoinAskConfig {
     pub image_url: Option<String>,
 }
 
+impl JoinAskConfig {
+    /// What a tenant nobody has set up yet resolves to: no words, the
+    /// default cadence, and the platforms the feature aims at by default.
+    ///
+    /// The loader substitutes this rather than returning nothing, so a cold
+    /// workspace still reaches the gates and reports what it is missing.
+    /// Returning nothing is what made a brand-new tenant indistinguishable
+    /// from an evaluator that never ran.
+    #[must_use]
+    pub fn unconfigured() -> Self {
+        Self {
+            variants: Vec::new(),
+            cadence_days: DEFAULT_JOIN_ASK_CADENCE_DAYS,
+            platforms: DEFAULT_JOIN_ASK_PLATFORMS
+                .iter()
+                .map(|platform| (*platform).to_owned())
+                .collect(),
+            image_url: None,
+        }
+    }
+}
+
 /// A `social_posts` row bound to a `social.join_ask.publish` action — the
 /// ledger the cadence check and the variant rotation both read.
 #[derive(Clone, Debug, Serialize)]
@@ -233,9 +255,15 @@ pub enum JoinAskHold {
     NoInstagramPhoto,
     /// `member_site_base_url` is unset — the CTA would have no destination.
     NoSiteUrl,
-    /// The tenant's variant list is empty — defense in depth: the settings
-    /// reader already returns `None` for this, so reaching it means a
-    /// hand-edited row slipped past the writer's validation.
+    /// The tenant's variant list is empty — the ask has no words.
+    ///
+    /// This is the ordinary state of a workspace nobody has set up yet, and
+    /// it is the first thing a cold tenant is waiting on. It was previously
+    /// unreachable: the snapshot loader returned nothing at all for a tenant
+    /// with no variants, so the cycle skipped the context and the hold was
+    /// documented as defense in depth against a hand-edited row. The loader
+    /// now assembles a snapshot either way, which makes this the cold-start
+    /// signal rather than a corruption check.
     NoVariants,
 }
 
@@ -252,6 +280,117 @@ impl JoinAskHold {
             Self::NoVariants => "no_variants",
         }
     }
+
+    /// What a person would do to clear this hold.
+    ///
+    /// A hold nobody can act on is a log line with extra steps. These name
+    /// the surface the fix lives on rather than the field that is empty,
+    /// because an operator reading "no_site_url" still has to be told where
+    /// the site URL is set.
+    #[must_use]
+    pub const fn remedy(self) -> &'static str {
+        match self {
+            Self::NoExecutor => {
+                "nothing publishes to this platform yet — drop it from the join-ask \
+                 platforms, or wait for its executor"
+            }
+            Self::NotConnected => "connect the account on Settings → Destinations",
+            Self::OnCadence => "nothing to do — this week's ask already went out",
+            Self::NoInstagramPhoto => {
+                "add a join-ask image on Settings → Workspace, or activate a press photo"
+            }
+            Self::NoSiteUrl => "set the member site URL on Settings → Workspace",
+            Self::NoVariants => {
+                "write the join-ask in the band's own words on Settings → Workspace"
+            }
+        }
+    }
+
+    /// Whether this hold is work waiting on a person.
+    ///
+    /// [`Self::OnCadence`] is the one hold that means the feature is
+    /// working — the ask went out and the next is not due. Listing it beside
+    /// genuine gaps would teach an operator that the readiness list is
+    /// mostly noise, which is how a readiness surface dies.
+    #[must_use]
+    pub const fn needs_a_person(self) -> bool {
+        !matches!(self, Self::OnCadence)
+    }
+}
+
+/// One thing the join-ask loop needs and does not have.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct JoinAskBlocker {
+    /// The platform this stops, or `None` when the gap stops every platform
+    /// at once — the words and the destination are written per tenant, not
+    /// per channel, and repeating them under each platform would read as
+    /// four problems where there is one.
+    pub platform: Option<String>,
+    pub hold: JoinAskHold,
+}
+
+/// Everything standing between this tenant and its first join-ask, at once.
+///
+/// [`evaluate_join_ask`] stops at the first gate a platform fails, which is
+/// right for a decision: it only needs to know it cannot proceed. Somebody
+/// setting a tenant up needs the opposite. Cold start is precisely the case
+/// where every gate fails together, so first-match reporting turns a
+/// ten-minute setup into a six-week drip — clear the words, wait a cycle,
+/// learn about the site URL, clear that, wait a cycle, learn about the
+/// connection.
+///
+/// Pure, and reads the same snapshot the decision path reads, so the board
+/// and the cycle cannot drift into two answers about what is missing.
+///
+/// Ordered: the workspace-wide gaps first, because they stop every platform,
+/// then per-platform gaps in the tenant's own configured order.
+#[must_use]
+pub fn join_ask_readiness(snapshot: &JoinAskSnapshot) -> Vec<JoinAskBlocker> {
+    let mut blockers = Vec::new();
+    if snapshot.variants.is_empty() {
+        blockers.push(JoinAskBlocker {
+            platform: None,
+            hold: JoinAskHold::NoVariants,
+        });
+    }
+    if snapshot.member_site_base_url.is_none() {
+        blockers.push(JoinAskBlocker {
+            platform: None,
+            hold: JoinAskHold::NoSiteUrl,
+        });
+    }
+    for platform in &snapshot.platforms {
+        if !EXECUTABLE_PLATFORMS.contains(&platform.as_str()) {
+            // Nothing else about this platform is worth reporting: no
+            // executor claims its actions, so a missing connection or photo
+            // is not what stands in the way.
+            blockers.push(JoinAskBlocker {
+                platform: Some(platform.clone()),
+                hold: JoinAskHold::NoExecutor,
+            });
+            continue;
+        }
+        if !snapshot
+            .connected_platforms
+            .iter()
+            .any(|connected| connected == platform)
+        {
+            blockers.push(JoinAskBlocker {
+                platform: Some(platform.clone()),
+                hold: JoinAskHold::NotConnected,
+            });
+        }
+        if platform == "instagram"
+            && snapshot.instagram_photo_count == 0
+            && snapshot.image_url.is_none()
+        {
+            blockers.push(JoinAskBlocker {
+                platform: Some(platform.clone()),
+                hold: JoinAskHold::NoInstagramPhoto,
+            });
+        }
+    }
+    blockers
 }
 
 /// What one cycle decided: the asks to emit, and the platforms held back
@@ -535,5 +674,135 @@ mod tests {
         // Three priors over two variants → index 1.
         assert_eq!(plan.asks[0].variant_index, 1);
         assert_eq!(plan.asks[0].text, "come along");
+    }
+
+    /// A workspace nobody has set up: no words, no destination, nothing
+    /// connected, no photo. The settings reader supplies the default
+    /// platforms, so this is what every new tenant looks like on day one.
+    fn cold_snapshot() -> JoinAskSnapshot {
+        JoinAskSnapshot {
+            variants: Vec::new(),
+            cadence_days: DEFAULT_JOIN_ASK_CADENCE_DAYS,
+            platforms: DEFAULT_JOIN_ASK_PLATFORMS
+                .iter()
+                .map(|platform| (*platform).to_owned())
+                .collect(),
+            member_site_base_url: None,
+            social_auto_post: false,
+            connected_platforms: Vec::new(),
+            posts: Vec::new(),
+            instagram_photo_count: 0,
+            image_url: None,
+        }
+    }
+
+    #[test]
+    fn a_cold_tenant_reports_every_gap_at_once() {
+        // The point of the readiness list: clearing one item must not be the
+        // only way to discover the next. A new tenant sees the whole setup.
+        let blockers = join_ask_readiness(&cold_snapshot());
+        assert_eq!(
+            blockers,
+            vec![
+                JoinAskBlocker {
+                    platform: None,
+                    hold: JoinAskHold::NoVariants,
+                },
+                JoinAskBlocker {
+                    platform: None,
+                    hold: JoinAskHold::NoSiteUrl,
+                },
+                JoinAskBlocker {
+                    platform: Some("facebook".to_owned()),
+                    hold: JoinAskHold::NotConnected,
+                },
+                JoinAskBlocker {
+                    platform: Some("instagram".to_owned()),
+                    hold: JoinAskHold::NotConnected,
+                },
+                JoinAskBlocker {
+                    platform: Some("instagram".to_owned()),
+                    hold: JoinAskHold::NoInstagramPhoto,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn the_cold_tenant_is_held_rather_than_skipped() {
+        // The decision path's half of the same fix: an unconfigured tenant
+        // reaches the gates and records a hold per platform, instead of the
+        // evaluator never running and the cycle reading as empty.
+        let plan = evaluate_join_ask(&cold_snapshot(), datetime!(2026-09-23 10:00 UTC));
+        assert!(plan.asks.is_empty());
+        assert_eq!(
+            plan.held,
+            vec![
+                ("facebook".to_owned(), JoinAskHold::NoVariants),
+                ("instagram".to_owned(), JoinAskHold::NoVariants),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_configured_tenant_has_nothing_waiting_on_a_person() {
+        assert!(join_ask_readiness(&snapshot()).is_empty());
+    }
+
+    #[test]
+    fn a_posted_ask_inside_the_window_is_not_a_blocker() {
+        // `OnCadence` is the feature working. A readiness list that reports
+        // it teaches the operator to stop reading the list.
+        let mut snapshot = snapshot();
+        snapshot.posts.push(JoinAskPostRow {
+            platform: "facebook".to_owned(),
+            status: "posted".to_owned(),
+            created_at: datetime!(2026-09-20 10:00 UTC),
+        });
+        assert!(join_ask_readiness(&snapshot).is_empty());
+        assert!(!JoinAskHold::OnCadence.needs_a_person());
+        assert!(JoinAskHold::NoVariants.needs_a_person());
+    }
+
+    #[test]
+    fn a_platform_with_no_executor_reports_only_that() {
+        // Telling somebody to connect Discord when nothing would publish
+        // there is a remedy that wastes their afternoon.
+        let mut snapshot = snapshot();
+        snapshot.platforms.push("discord".to_owned());
+        let blockers = join_ask_readiness(&snapshot);
+        assert_eq!(
+            blockers,
+            vec![JoinAskBlocker {
+                platform: Some("discord".to_owned()),
+                hold: JoinAskHold::NoExecutor,
+            }]
+        );
+    }
+
+    #[test]
+    fn a_fixed_image_clears_the_instagram_photo_gap() {
+        let mut snapshot = cold_snapshot();
+        snapshot.image_url = Some("https://virya.music/join.png".to_owned());
+        let blockers = join_ask_readiness(&snapshot);
+        assert!(
+            !blockers
+                .iter()
+                .any(|blocker| blocker.hold == JoinAskHold::NoInstagramPhoto)
+        );
+    }
+
+    #[test]
+    fn every_hold_names_a_remedy() {
+        for hold in [
+            JoinAskHold::NoExecutor,
+            JoinAskHold::NotConnected,
+            JoinAskHold::OnCadence,
+            JoinAskHold::NoInstagramPhoto,
+            JoinAskHold::NoSiteUrl,
+            JoinAskHold::NoVariants,
+        ] {
+            assert!(!hold.remedy().is_empty(), "{} has no remedy", hold.as_str());
+        }
     }
 }

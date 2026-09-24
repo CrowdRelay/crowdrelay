@@ -73,6 +73,20 @@ struct BlockedCommunity {
     discovered_at: Option<OffsetDateTime>,
 }
 
+/// One prerequisite the weekly join-ask is waiting on, with its remedy.
+///
+/// `reason` is the same string the cycle report's holds carry, so an operator
+/// comparing the board against a log line is reading one vocabulary.
+#[derive(Debug, Serialize)]
+struct JoinAskGap {
+    /// The platform this stops, or absent when it stops every platform at
+    /// once — the words and the destination are written per tenant.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    platform: Option<String>,
+    reason: &'static str,
+    remedy: &'static str,
+}
+
 #[derive(Debug, Serialize)]
 struct OperatorAttentionSnapshot {
     summary: OpsSummary,
@@ -112,6 +126,22 @@ struct OperatorAttentionSnapshot {
     /// Most-recently-discovered first, capped: this is a prompt to go and join
     /// something, not a directory.
     blocked_communities: Vec<BlockedCommunity>,
+    /// What the weekly join-ask (§5) needs from a person before it can run.
+    ///
+    /// The third member of the family above, and the one that was missing.
+    /// `unpublished_drafts` is work the brain finished that nobody published;
+    /// `blocked_communities` is work it cannot start. This is work it cannot
+    /// even propose: the join-ask gates on the tenant's own words, its site
+    /// URL, a connected page and — on Instagram — a photo, and a tenant
+    /// missing any of them produces no decision, no draft and no queue entry.
+    /// The holds existed and went to a `tracing::warn!` nobody reads, so a
+    /// brand-new workspace was silent in exactly the way a healthy one is.
+    ///
+    /// Every gap at once, not the first: these are cleared in one sitting by
+    /// somebody setting the tenant up, and reporting them one per cycle turns
+    /// that sitting into six weeks. Empty means the loop is ready — a posted
+    /// ask inside its cadence window is the feature working, not a gap.
+    join_ask_readiness: Vec<JoinAskGap>,
     /// What the brain makes of its own recent performance.
     ///
     /// This view exists to answer "what needs me?", and a fanbase that is
@@ -250,15 +280,18 @@ pub async fn attention(State(state): State<crate::AppState>, headers: HeaderMap)
         timeout_duration,
         load_rejected_agent_outcomes(&state.ops),
     );
+    let join_ask = run_limited(budget, timeout_duration, load_join_ask_readiness(&state.ops));
 
     let (
         summary, alerts, dead_outbox, dead_deliveries, dead_push,
         ecosystem, findings, needs_you, brain, unpublished_drafts,
         blocked_communities, lapsed, failed, notices, rejected,
+        join_ask,
     ) = tokio::join!(
         summary, alerts, dead_outbox, dead_deliveries, dead_push,
         ecosystem, findings, needs_you, brain, unpublished_drafts,
         blocked_communities, lapsed, failed, notices, rejected,
+        join_ask,
     );
 
     let request_id_value = request_id(&headers);
@@ -322,6 +355,10 @@ pub async fn attention(State(state): State<crate::AppState>, headers: HeaderMap)
         Ok(value) => value,
         Err(error) => return error.into_response(request_id(&headers)),
     };
+    let join_ask_readiness = match join_ask {
+        Ok(value) => value,
+        Err(error) => return error.into_response(request_id(&headers)),
+    };
 
     let (needs_you, awaiting_approval) = needs_you;
 
@@ -339,6 +376,7 @@ pub async fn attention(State(state): State<crate::AppState>, headers: HeaderMap)
             awaiting_approval,
             unpublished_drafts,
             blocked_communities,
+            join_ask_readiness,
             brain,
             lapsed_approvals,
             failed_sends,
@@ -381,6 +419,30 @@ async fn load_unpublished_drafts(
     .fetch_all(state.ticketing.pool())
     .await
     .map_err(OpsError::sqlx)
+}
+
+/// What the weekly join-ask is waiting on, for this workspace.
+///
+/// Reads `crowdrelay_infra::join_ask`'s assembly — the same one the autopilot
+/// cycle decides from — and runs the domain's pure readiness check over it.
+/// Two surfaces, one set of facts: a board that named a different blocker
+/// than the cycle was actually held on would send somebody to fix the wrong
+/// thing, which is worse than saying nothing.
+async fn load_join_ask_readiness(state: &OpsState) -> Result<Vec<JoinAskGap>, OpsError> {
+    let snapshot = crowdrelay_infra::join_ask::load_join_ask_snapshot(
+        &state.pool,
+        state.workspace_id().into_uuid(),
+    )
+    .await
+    .map_err(OpsError::sqlx)?;
+    Ok(crowdrelay_domain::join_ask::join_ask_readiness(&snapshot)
+        .into_iter()
+        .map(|blocker| JoinAskGap {
+            platform: blocker.platform,
+            reason: blocker.hold.as_str(),
+            remedy: blocker.hold.remedy(),
+        })
+        .collect())
 }
 
 /// Communities with a wanted post and no membership.

@@ -418,7 +418,7 @@ impl AutopilotDecisionRepository for PostgresAutopilotRepository {
         &self,
         workspace_id: WorkspaceId,
         _now: OffsetDateTime,
-    ) -> Result<Option<crowdrelay_domain::join_ask::JoinAskSnapshot>, RepositoryError> {
+    ) -> Result<crowdrelay_domain::join_ask::JoinAskSnapshot, RepositoryError> {
         self.load_join_ask_snapshot_impl(workspace_id).await
     }
 

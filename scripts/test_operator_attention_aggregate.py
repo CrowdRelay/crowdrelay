@@ -99,6 +99,7 @@ class OperatorAttentionAggregateContract(unittest.TestCase):
                 "ecosystem",
                 "failed",
                 "findings",
+                "join_ask",
                 "lapsed",
                 "needs_you",
                 "notices",

@@ -761,24 +761,20 @@ where
                     }
                     // §5: the weekly join-ask rides this context — a post on
                     // the band's own pages in the band's own words is the
-                    // strategy surface's work. `None` means the tenant never
-                    // wrote variants, which is the feature off, not an
-                    // empty cycle.
-                    if let Some(snapshot) = self
+                    // strategy surface's work. Evaluated for every tenant,
+                    // including one that has written nothing: it is held on
+                    // `NoVariants` rather than skipped, so a workspace nobody
+                    // has set up reports what it is waiting on instead of
+                    // producing a cycle that reads as healthy and empty.
+                    let snapshot = self
                         .repository
                         .load_join_ask_snapshot(self.workspace_id, now)
-                        .await?
-                    {
-                        let evaluation = evaluate_join_ask_candidates(
-                            &snapshot,
-                            &policy,
-                            self.workspace_id,
-                            now,
-                        )?;
-                        report.join_ask_held.extend(evaluation.held);
-                        for candidate in &evaluation.candidates {
-                            self.persist(candidate, &mut limits, &mut report).await?;
-                        }
+                        .await?;
+                    let evaluation =
+                        evaluate_join_ask_candidates(&snapshot, &policy, self.workspace_id, now)?;
+                    report.join_ask_held.extend(evaluation.held);
+                    for candidate in &evaluation.candidates {
+                        self.persist(candidate, &mut limits, &mut report).await?;
                     }
                 }
                 AutopilotContext::Representation | AutopilotContext::BookingAgent => {
