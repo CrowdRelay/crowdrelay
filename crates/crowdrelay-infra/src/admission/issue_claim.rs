@@ -118,10 +118,12 @@ impl PostgresAdmissionRepository {
             r#"
             SELECT
                 encode(gen_random_bytes(32), 'hex') AS token,
-                'VIRYA-' || upper(substr(encode(gen_random_bytes(12), 'hex'), 1, 12))
+                crowdrelay_workspace_reference_prefix($1) || '-'
+                    || upper(substr(encode(gen_random_bytes(12), 'hex'), 1, 12))
                     AS public_reference
             "#,
         )
+        .bind(workspace_id.into_uuid())
         .fetch_one(&mut *transaction)
         .await
         .map_err(AdmissionStoreError::sqlx)?;

@@ -259,6 +259,15 @@ async fn issue_admission_winners(
     let target = usize::try_from(draw.winner_count.min(available).max(0))
         .map_err(|_| DrawWorkerError::Arithmetic)?;
     let mut selected = 0_usize;
+    // The workspace's own prefix (`crowdrelay_workspace_reference_prefix`),
+    // read once for the whole draw: a winner's pass shows the band that ran
+    // the draw, not the first tenant.
+    let reference_prefix: String =
+        sqlx::query_scalar("SELECT crowdrelay_workspace_reference_prefix($1)")
+            .bind(draw.workspace_id)
+            .fetch_one(&mut **transaction)
+            .await
+            .map_err(DrawWorkerError::sqlx)?;
 
     for candidate in candidates {
         if selected >= target {
@@ -272,7 +281,10 @@ async fn issue_admission_winners(
         fill_random(&mut token_bytes).map_err(|_| DrawWorkerError::Entropy)?;
         let claim_token = hex::encode(token_bytes);
         let reference_bytes = token_bytes.get(..6).ok_or(DrawWorkerError::Entropy)?;
-        let public_reference = format!("VIRYA-{}", hex::encode(reference_bytes).to_uppercase());
+        let public_reference = format!(
+            "{reference_prefix}-{}",
+            hex::encode(reference_bytes).to_uppercase()
+        );
         let pass_id = Uuid::now_v7();
         let claim_expires_at = OffsetDateTime::now_utc()
             .checked_add(time::Duration::hours(i64::from(draw.claim_expires_hours)))

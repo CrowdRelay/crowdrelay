@@ -32,7 +32,12 @@ use uuid::Uuid;
 const ACTIVE_TEMPLATE: &str = "community-engager";
 /// A template `WorkerTemplate::is_disabled` excludes, so no snapshot is built
 /// for it. What it produced is still knowledge, so it still gets delivered.
-const DISABLED_TEMPLATE: &str = "telegram-scanner";
+///
+/// `bandcamp-scanner` is the only disabled template. This named
+/// `telegram-scanner` until #241 re-enabled it — the product changed on
+/// purpose (`worker_template.rs` asserts it is enabled) and this test, outside
+/// CI's named Postgres set, kept testing a premise that was no longer true.
+const DISABLED_TEMPLATE: &str = "bandcamp-scanner";
 
 /// The agent service owns this table, so it is absent from a migrated test
 /// database. Create the columns the snapshot loader reads.

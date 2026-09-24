@@ -459,6 +459,8 @@ async fn seed_release_calendar(
         ("sustain", 3, "Sustain wave"),
         ("wrap", 14, "Campaign wrap"),
     ];
+    // One name per release's milestones, read once rather than per row.
+    let wordmark = crate::autopilot::workspace_wordmark(tx, workspace_id).await?;
     for (slug, days, label) in milestones {
         let calendar_key = format!("release:{}:{}", release_id, slug);
         let exists=sqlx::query_scalar::<_,bool>("SELECT EXISTS(SELECT 1 FROM calendar_requests WHERE workspace_id=$1 AND calendar_key=$2)")
@@ -470,10 +472,10 @@ async fn seed_release_calendar(
         let outbox_id = Uuid::now_v7();
         let starts_at = release_at + time::Duration::days(days);
         sqlx::query(r#"INSERT INTO outbox_events(id,workspace_id,event_type,event_version,payload,request_id,max_attempts) VALUES($1,$2,'crowdrelay.calendar.upsert_requested',1,$3,$4,12)"#)
-          .bind(outbox_id).bind(workspace_id.into_uuid()).bind(json!({"action_id":action_id,"calendar_key":calendar_key,"title":format!("VIRYA · {title} · {label}"),"starts_at":starts_at,"source_kind":"release","source_id":release_id})).bind(format!("autopilot-action:{action_id}:{slug}"))
+          .bind(outbox_id).bind(workspace_id.into_uuid()).bind(json!({"action_id":action_id,"calendar_key":calendar_key,"title":format!("{wordmark} · {title} · {label}"),"starts_at":starts_at,"source_kind":"release","source_id":release_id})).bind(format!("autopilot-action:{action_id}:{slug}"))
           .execute(&mut **tx).await.map_err(map_sqlx)?;
         sqlx::query(r#"INSERT INTO calendar_requests(workspace_id,source_kind,source_id,calendar_key,title,starts_at,action_id,outbox_event_id) VALUES($1,'release',$2,$3,$4,$5,$6,$7)"#)
-          .bind(workspace_id.into_uuid()).bind(release_id.into_uuid()).bind(&calendar_key).bind(format!("VIRYA · {title} · {label}")).bind(starts_at).bind(action_id.into_uuid()).bind(outbox_id)
+          .bind(workspace_id.into_uuid()).bind(release_id.into_uuid()).bind(&calendar_key).bind(format!("{wordmark} · {title} · {label}")).bind(starts_at).bind(action_id.into_uuid()).bind(outbox_id)
           .execute(&mut **tx).await.map_err(map_sqlx)?;
     }
     Ok(())
@@ -633,6 +635,7 @@ pub(in crate::autopilot) async fn execute_live_opportunity(
     .ok_or(RepositoryError::Conflict)?;
 
     if let Some(deadline) = row.10 {
+        let wordmark = crate::autopilot::workspace_wordmark(tx, workspace_id).await?;
         seed_deadline_calendar(
             tx,
             workspace_id,
@@ -640,7 +643,7 @@ pub(in crate::autopilot) async fn execute_live_opportunity(
             "opportunity",
             opportunity_id.into_uuid(),
             &format!("opportunity:{opportunity_id}:deadline"),
-            &format!("VIRYA · application deadline · {}", row.0),
+            &format!("{wordmark} · application deadline · {}", row.0),
             deadline,
         )
         .await?;
@@ -895,6 +898,7 @@ pub(in crate::autopilot) async fn prepare_funding_package(
     .map_err(map_sqlx)?
     .ok_or(RepositoryError::Conflict)?;
 
+    let wordmark = crate::autopilot::workspace_wordmark(tx, workspace_id).await?;
     seed_deadline_calendar(
         tx,
         workspace_id,
@@ -902,7 +906,7 @@ pub(in crate::autopilot) async fn prepare_funding_package(
         "funding",
         opportunity_id.into_uuid(),
         &format!("funding:{opportunity_id}:deadline"),
-        &format!("VIRYA · funding deadline · {}", row.0),
+        &format!("{wordmark} · funding deadline · {}", row.0),
         row.6,
     )
     .await?;

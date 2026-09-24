@@ -93,6 +93,7 @@ mod media;
 mod meta;
 mod mobile_fan;
 mod night;
+mod oauth_redirect;
 mod ops;
 mod ops_routes;
 mod ops_summary;

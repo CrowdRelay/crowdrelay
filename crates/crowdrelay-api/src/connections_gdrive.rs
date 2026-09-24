@@ -82,7 +82,7 @@ fn google_client_secret() -> Option<String> {
 /// `access_type=offline` + `prompt=consent` guarantee a refresh token on
 /// every connect, including reconnects.
 pub async fn authorize(
-    State(_state): State<crate::AppState>,
+    State(state): State<crate::AppState>,
     Query(params): Query<AuthorizeParams>,
     headers: HeaderMap,
 ) -> Response {
@@ -90,7 +90,8 @@ pub async fn authorize(
     let Some(client_id) = google_client_id() else {
         return Problem::service_unavailable(request_id_value).into_response();
     };
-    let redirect_uri = build_redirect_uri();
+    let redirect_uri =
+        crate::oauth_redirect::oauth_redirect_uri(state.public_api_origin.as_ref(), "gdrive");
     let state = uuid::Uuid::new_v4().to_string();
 
     let post_redirect = params
@@ -159,7 +160,8 @@ pub async fn callback(
     else {
         return Problem::service_unavailable(request_id_value).into_response();
     };
-    let redirect_uri = build_redirect_uri();
+    let redirect_uri =
+        crate::oauth_redirect::oauth_redirect_uri(state.public_api_origin.as_ref(), "gdrive");
 
     let response = match state
         .http_client
@@ -285,10 +287,4 @@ fn urlencoding(value: &str) -> String {
         .replace(' ', "%20")
         .replace(':', "%3A")
         .replace('/', "%2F")
-}
-
-/// Redirect URI for Google OAuth. Must be registered as an authorized
-/// redirect URI on the shared Google OAuth client.
-fn build_redirect_uri() -> String {
-    "https://signal-api.virya.music/v1/public/connections/gdrive/callback".to_string()
 }

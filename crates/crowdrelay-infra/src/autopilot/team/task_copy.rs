@@ -14,6 +14,7 @@
 /// interpolate `email_subject`, `email_greeting` and `email_intro`.
 pub(super) fn team_email_frame(
     locale: BriefingLocale,
+    wordmark: &str,
     recipient_name: &str,
     task_title: &str,
     reminder_number: u8,
@@ -24,14 +25,14 @@ pub(super) fn team_email_frame(
     // arrive, so ignoring it is a decision rather than a delay.
     let final_reminder = reminder && i32::from(reminder_number) >= MAX_REMINDERS_PER_ASSIGNMENT;
     let subject = match (locale, reminder, final_reminder) {
-        (BriefingLocale::Pl, false, _) => format!("VIRYA — nowe zadanie: {task_title}"),
-        (BriefingLocale::Pl, true, false) => format!("VIRYA — przypomnienie: {task_title}"),
+        (BriefingLocale::Pl, false, _) => format!("{wordmark} — nowe zadanie: {task_title}"),
+        (BriefingLocale::Pl, true, false) => format!("{wordmark} — przypomnienie: {task_title}"),
         (BriefingLocale::Pl, true, true) => {
-            format!("VIRYA — ostatnie przypomnienie: {task_title}")
+            format!("{wordmark} — ostatnie przypomnienie: {task_title}")
         }
-        (BriefingLocale::En, false, _) => format!("VIRYA — new task: {task_title}"),
-        (BriefingLocale::En, true, false) => format!("VIRYA — reminder: {task_title}"),
-        (BriefingLocale::En, true, true) => format!("VIRYA — last reminder: {task_title}"),
+        (BriefingLocale::En, false, _) => format!("{wordmark} — new task: {task_title}"),
+        (BriefingLocale::En, true, false) => format!("{wordmark} — reminder: {task_title}"),
+        (BriefingLocale::En, true, true) => format!("{wordmark} — last reminder: {task_title}"),
     };
     let greeting = match locale {
         BriefingLocale::Pl => format!("Cześć {recipient_name}!"),

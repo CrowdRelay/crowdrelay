@@ -499,7 +499,8 @@ impl BeaconSignalRepository for PostgresBeaconReleaseRepository {
                 )
                 SELECT $1,NULL,'beacon',endpoint.id,'beacon_nearby_concert',ranked.event_id,
                        CASE WHEN lower(ranked.locale) LIKE 'pl%'
-                            THEN 'VIRYA · materiał lokalny' ELSE 'VIRYA · local story' END,
+                            THEN crowdrelay_workspace_wordmark($1) || ' · materiał lokalny'
+                            ELSE crowdrelay_workspace_wordmark($1) || ' · local story' END,
                        CASE WHEN lower(ranked.locale) LIKE 'pl%'
                             THEN ranked.event_title || ' — gramy około ' || ranked.distance_km || ' km od Ciebie. Press room jest gotowy.'
                             ELSE ranked.event_title || ' — we play about ' || ranked.distance_km || ' km from you. The press room is ready.' END,

@@ -1142,8 +1142,17 @@ pub(super) async fn execute_play_step(
         PlayStepKind::ReleasePresaveLive => release_row.as_ref().map(presave_report),
         _ => None,
     };
+    // The act's own name for the copy, read in the transaction that writes
+    // the delivery — `crowdrelay_workspace_wordmark` is the one resolver the
+    // SQL-built campaign pushes use too.
+    let wordmark: String = sqlx::query_scalar("SELECT crowdrelay_workspace_wordmark($1)")
+        .bind(workspace_id.into_uuid())
+        .fetch_one(&mut **transaction)
+        .await
+        .map_err(map_sqlx)?;
     if let Some(fan_id) = fan_id
         && let Some(copy) = step_kind.push_copy(&PlayStepPushFacts {
+            wordmark: &wordmark,
             polish,
             event_title: event_row.as_ref().map(|event| event.title.as_str()),
             event_date: event_date.as_deref(),

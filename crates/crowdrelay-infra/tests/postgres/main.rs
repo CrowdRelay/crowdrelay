@@ -102,3 +102,4 @@ mod support_slot_ask;
 mod team_initial_digest;
 mod venue_directory;
 mod venue_seed;
+mod workspace_wordmark;

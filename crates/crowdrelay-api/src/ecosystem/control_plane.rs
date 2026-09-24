@@ -298,10 +298,12 @@ async fn emit_due_inner(
                    'show_checklist',
                    inserted.id,
                    'staff',
+                   -- The act's own name, so a roster's crew can tell whose
+                   -- show the checklist is for.
                    CASE inserted.payload ->> 'checklist'
-                       WHEN 'week' THEN 'VIRYA · koncert za 7 dni'
-                       WHEN 'two_days' THEN 'VIRYA · koncert za 2 dni'
-                       ELSE 'VIRYA · checklista koncertowa'
+                       WHEN 'week' THEN crowdrelay_workspace_wordmark(inserted.workspace_id) || ' · koncert za 7 dni'
+                       WHEN 'two_days' THEN crowdrelay_workspace_wordmark(inserted.workspace_id) || ' · koncert za 2 dni'
+                       ELSE crowdrelay_workspace_wordmark(inserted.workspace_id) || ' · checklista koncertowa'
                    END,
                    (inserted.payload ->> 'event_title') || ' — otwórz checklistę i odhacz przygotowania.',
                    '/staff/checklist?event=' || (inserted.payload ->> 'event_slug'),

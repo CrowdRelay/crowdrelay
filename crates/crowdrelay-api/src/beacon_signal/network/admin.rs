@@ -700,7 +700,27 @@ async fn preview_invites(
         }
     };
     let placeholder_url = brand.invite_url(&locale, "<jednorazowy-link>");
-    let delivery = invite_delivery_copy(&locale, "{{displayName}}", &placeholder_url);
+    let (wordmark, app_name, _) = match super::super::invite_names(
+        &state.database,
+        state.ticketing.workspace_id().into_uuid(),
+    )
+    .await
+    {
+        Ok(names) => names,
+        Err(error) => {
+            tracing::warn!(%error, "beacon invite names lookup failed");
+            return BeaconSignalError::Unavailable.response(request_id_value);
+        }
+    };
+    let delivery = invite_delivery_copy(
+        &locale,
+        "{{displayName}}",
+        &placeholder_url,
+        &super::super::invite_copy::InviteBrand {
+            wordmark: &wordmark,
+            app_name: &app_name,
+        },
+    );
     private_json(
         StatusCode::OK,
         json!({

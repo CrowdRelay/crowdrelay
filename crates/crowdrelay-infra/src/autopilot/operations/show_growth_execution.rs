@@ -132,7 +132,7 @@ pub(in crate::autopilot) async fn execute_show_growth(
             }
         }),
         ShowGrowthLever::AudienceCaptureSetup => json!({
-            "objective": "capture free show intent on provider-native discovery surfaces while keeping VIRYA Signal the primary first-party fan relationship",
+            "objective": "capture free show intent on provider-native discovery surfaces while keeping the band's own Signal app the primary first-party fan relationship",
             "surface_classes": [
                 "bandsintown_smart_link_with_canonical_event_and_ticket_url",
                 "bandsintown_follow_or_signup_surface",
@@ -163,7 +163,7 @@ pub(in crate::autopilot) async fn execute_show_growth(
             }
         }),
         ShowGrowthLever::PartnerCrossPromo => json!({
-            "objective": "borrow relevant local audiences through venue, bill and scene partners instead of making VIRYA carry discovery alone",
+            "objective": "borrow relevant local audiences through venue, bill and scene partners instead of making the band carry discovery alone",
             "preferred_actions": [
                 "venue_calendar_or_newsletter",
                 "venue_or_promoter_co_post",

@@ -907,7 +907,7 @@ pub fn friendly_action_title(action_kind: &str, locale: BriefingLocale) -> Strin
         ("opportunity.terms.counter", BriefingLocale::En) => "Approve the terms counter",
         ("opportunity.terms.accept", BriefingLocale::Pl) => "Zatwierdź przyjęcie warunków",
         ("opportunity.terms.accept", BriefingLocale::En) => "Approve accepting the terms",
-        (other, _) => return format!("VIRYA OS — {}", other.replace(['.', '_'], " ")),
+        (other, _) => return format!("CrowdRelay — {}", other.replace(['.', '_'], " ")),
     };
     title.to_owned()
 }
