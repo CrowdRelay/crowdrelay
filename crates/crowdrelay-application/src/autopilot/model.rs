@@ -1777,9 +1777,8 @@ pub struct TermsSettlement {
     pub reason: Option<TermsRefusal>,
 }
 
-/// Settling a step, and — when it never delivered — why. `reason` is absent
-/// for a step that sent: the row's `skip_reason` stays NULL so the timeline,
-/// the outcome ledger and the stopped-work report all read it as delivered.
+/// Settling a step; `reason` stays `None` for a step that delivered, so
+/// `skip_reason` writes NULL and every reader reports it as delivered.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PlayStepSettlement {
     pub play_id: PlayId,
