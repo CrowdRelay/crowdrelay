@@ -86,8 +86,9 @@ pub enum AgentOutcomeError {
     #[error("agent proposed target_kind {0:?}, which agent_outreach_targets does not accept")]
     UnknownTargetKind(String),
     #[error(
-        "no press target has a contact email, so a press pitch has nobody to reach — \
-         add a contact_email to an agent_outreach_targets row with target_kind='press'"
+        "the pitch does not name exactly one outreach target that can be mailed now \
+         (active, accepts outreach, not do-not-contact, has an address, outside the \
+         contact cooldown) — it is refused rather than sent to someone it was not written for"
     )]
     NoPressRecipient,
     #[error("agent outcome payload does not match the action schema")]
@@ -774,8 +775,12 @@ impl AgentOutcomeWorker {
                         // costs a model call and a dispatch slot, and an
                         // operator approving copy addressed to nobody is worse
                         // than never being asked.
-                        let Some(recipient) =
-                            press_recipient(&self.pool, self.workspace_id).await?
+                        let Some(recipient) = press_recipient(
+                            &self.pool,
+                            self.workspace_id,
+                            outcome.payload.item.as_ref(),
+                        )
+                        .await?
                         else {
                             return Err(AgentOutcomeError::NoPressRecipient);
                         };

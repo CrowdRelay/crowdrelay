@@ -276,3 +276,35 @@ fn the_ingest_path_routes_community_posts_and_pushes_through_the_model_text_rule
     );
     assert!(!source.contains("let authority = if channel_pre_approved"));
 }
+
+// ---------------------------------------------------------------------------
+// A pitch goes to the target it was written for, or nowhere.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_pitch_names_its_one_addressee() {
+    let id = Uuid::now_v7();
+    let draft = serde_json::json!({ "target_refs": [id.to_string()] });
+    assert_eq!(single_target_ref(Some(&draft)), Some(id));
+    // The same id twice is still one addressee.
+    let twice = serde_json::json!({ "target_refs": [id.to_string(), format!(" {id} ")] });
+    assert_eq!(single_target_ref(Some(&twice)), Some(id));
+}
+
+#[test]
+fn a_pitch_with_no_several_or_malformed_refs_has_no_recipient() {
+    assert_eq!(single_target_ref(None), None);
+    assert_eq!(single_target_ref(Some(&serde_json::json!({}))), None);
+    assert_eq!(
+        single_target_ref(Some(&serde_json::json!({ "target_refs": [] }))),
+        None
+    );
+    assert_eq!(
+        single_target_ref(Some(
+            &serde_json::json!({ "target_refs": ["Metal Devastation Radio"] })
+        )),
+        None
+    );
+    let two = serde_json::json!({ "target_refs": [Uuid::now_v7().to_string(), Uuid::now_v7().to_string()] });
+    assert_eq!(single_target_ref(Some(&two)), None);
+}
