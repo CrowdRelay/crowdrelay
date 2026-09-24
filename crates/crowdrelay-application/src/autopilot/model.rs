@@ -211,6 +211,11 @@ pub enum ActionSubject {
     /// season's shape. The UUID is `arcs.id`. The arc, not any beat
     /// inside it, is the approval unit.
     ContentArc(ArcId),
+    /// One social channel of the workspace — the subject of a platform's
+    /// own recurring ask, where two platforms must not collide on the
+    /// workspace-wide inflight-subject index. The UUID is derived, not a
+    /// table row: see `social_channel_subject`.
+    SocialChannel(uuid::Uuid),
 }
 
 impl From<GrowthDebtSubject> for ActionSubject {
@@ -251,6 +256,7 @@ impl ActionSubject {
             Self::Workspace(_) => "workspace",
             Self::ContentSuggestion(_) => "content_suggestion",
             Self::ContentArc(_) => "content_arc",
+            Self::SocialChannel(_) => "social_channel",
         }
     }
 
@@ -302,8 +308,36 @@ impl ActionSubject {
             Self::Workspace(id) => id.into_uuid(),
             Self::ContentSuggestion(id) => id.into_uuid(),
             Self::ContentArc(id) => id.into_uuid(),
+            Self::SocialChannel(id) => id,
         }
     }
+}
+
+/// The derived subject id for one (workspace, platform) channel. A weekly
+/// join-ask per platform must not collide with its sibling platforms on the
+/// inflight-subject index — without the split, one unanswered Facebook ask
+/// parks Instagram's lane for the whole approval window. The id keeps the
+/// workspace's own high bits so the subject still reads as belonging to it
+/// in the ledger, and mixes in the platform's hash for the low bits.
+#[must_use]
+pub fn social_channel_subject(workspace_id: WorkspaceId, platform: &str) -> ActionSubject {
+    // FNV-1a, written out so the derived id is stable across toolchain
+    // releases — a persisted dedupe key cannot ride `DefaultHasher`, whose
+    // output std does not freeze.
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for &byte in workspace_id
+        .into_uuid()
+        .as_bytes()
+        .iter()
+        .chain(platform.as_bytes())
+    {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    let id = uuid::Uuid::from_u128(
+        (workspace_id.into_uuid().as_u128() & !u128::from(u64::MAX)) | u128::from(hash),
+    );
+    ActionSubject::SocialChannel(id)
 }
 
 /// Typed executable intents. Infrastructure serializes these only at the

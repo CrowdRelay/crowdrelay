@@ -1054,6 +1054,10 @@ impl SocialPostExecutorWorker {
               AND status = 'posted'
               AND posted_at > now() - INTERVAL '30 days'
               AND content->>'text' IS NOT NULL
+              -- A join-ask is a deliberate, cadence-gated rotation — not
+              -- the accidental repeat this dedupe exists to catch. Counted
+              -- here it would hold every re-used variant forever.
+              AND NOT (content ? 'join_ask')
             ORDER BY posted_at DESC
             LIMIT 50
             "#,

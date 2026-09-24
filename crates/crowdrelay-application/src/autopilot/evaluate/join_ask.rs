@@ -52,7 +52,11 @@ fn join_ask_candidate(
     }
     Ok(DecisionCandidate {
         context: policy.context,
-        subject: ActionSubject::Workspace(workspace_id),
+        // Per-platform subject: the inflight-subject index keys on
+        // (workspace, context, action_kind, subject_id), and a workspace-wide
+        // subject makes every platform's ask collide — one unanswered
+        // Facebook ask would park Instagram's lane for its whole window.
+        subject: social_channel_subject(workspace_id, &ask.platform),
         decision_kind: "publish_join_ask",
         confidence,
         disposition,
