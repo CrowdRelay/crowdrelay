@@ -61,6 +61,18 @@ pub async fn observe_harm(
               AND push.delivered_at < $4
               AND push.source_kind = 'agent_signal_push'
             UNION ALL
+            -- Play steps push directly too — `source_id` is the action id
+            -- there the same as for signal pushes. Without this arm a
+            -- play-step contact is invisible to harm attribution, and a
+            -- withdrawal it caused lands on an earlier unrelated contact's
+            -- action instead.
+            SELECT push.fan_id, push.delivered_at, push.source_id
+            FROM fan_push_deliveries AS push
+            WHERE push.workspace_id = $1
+              AND push.delivered_at IS NOT NULL
+              AND push.delivered_at < $4
+              AND push.source_kind = 'play_step'
+            UNION ALL
             SELECT push.fan_id, push.delivered_at, outbox.action_id
             FROM fan_push_deliveries AS push
             JOIN communication_campaigns AS campaign

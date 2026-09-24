@@ -1051,23 +1051,6 @@ pub(super) async fn execute_play_step(
             .await
             .map_err(map_sqlx)?
             .ok_or(RepositoryError::Conflict)?;
-            // Written before the intent is emitted and in the same transaction,
-            // so a dispatched send is never missing from the record of who was
-            // reached.
-            sqlx::query(
-                r#"
-                INSERT INTO play_step_recipients (workspace_id, step_id, fan_id, action_id)
-                VALUES ($1,$2,$3,$4)
-                ON CONFLICT (workspace_id, step_id, fan_id) DO NOTHING
-                "#,
-            )
-            .bind(workspace_id.into_uuid())
-            .bind(step_id)
-            .bind(fan_id.into_uuid())
-            .bind(action_id.into_uuid())
-            .execute(&mut **transaction)
-            .await
-            .map_err(map_sqlx)?;
             Some(fan)
         }
         None => None,
@@ -1202,6 +1185,27 @@ pub(super) async fn execute_play_step(
         .map_err(map_sqlx)?
         .rows_affected() as i64;
         step_result = Some(json!({ "push_deliveries": push_deliveries }));
+    }
+    // "Reached" means a delivery exists: a fan with no live endpoint got no
+    // ledger row here — the alternative is counting a contact that could not
+    // have happened, which inflates the reach denominator the play's verdict
+    // is judged against and burns the fan out of the audience for a step
+    // that never touched them.
+    if fan_id.is_some() && push_deliveries > 0 {
+        sqlx::query(
+            r#"
+            INSERT INTO play_step_recipients (workspace_id, step_id, fan_id, action_id)
+            VALUES ($1,$2,$3,$4)
+            ON CONFLICT (workspace_id, step_id, fan_id) DO NOTHING
+            "#,
+        )
+        .bind(workspace_id.into_uuid())
+        .bind(step_id)
+        .bind(fan_id.map(Uuid::from))
+        .bind(action_id.into_uuid())
+        .execute(&mut **transaction)
+        .await
+        .map_err(map_sqlx)?;
     }
     if let Some(result) = &step_result {
         sqlx::query(

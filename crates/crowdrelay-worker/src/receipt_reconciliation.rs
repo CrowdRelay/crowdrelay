@@ -706,14 +706,20 @@ impl ReceiptReconciliationWorker {
 }
 
 /// Whether this action's payload obliges an external executor to file a
-/// terminal receipt. `community.engage.request` is the exception: it is
-/// executor-required at dispatch (capability gate) but executed by the
-/// internal community worker, whose `community_posts` row is the receipt.
+/// terminal receipt. Two exceptions among the executor-required kinds:
+/// `community.engage.request` is capability-gated at dispatch but executed by
+/// the internal community worker, whose `community_posts` row is the receipt;
+/// `play.step.run` executes entirely in-process (`plays.rs` commits the step's
+/// writes in the dispatch transaction) and its outward emit is the audit of
+/// that work — nobody external ever files a report, so without the carve-out
+/// every succeeded play step was flagged "missing receipt" 24h later and
+/// patched back with a fabricated reconciliation report.
 fn requires_terminal_receipt(payload: &AutopilotActionPayload) -> bool {
     payload_requires_executor(payload)
         && !matches!(
             payload,
             AutopilotActionPayload::RequestCommunityEngagement { .. }
+                | AutopilotActionPayload::RunPlayStep { .. }
         )
 }
 
@@ -1050,6 +1056,24 @@ mod tests {
     fn community_engagement_does_not_require_a_receipt() {
         // The community worker's community_posts row is the receipt.
         assert!(!requires_terminal_receipt(&community_payload()));
+    }
+
+    #[test]
+    fn play_step_does_not_require_a_receipt() {
+        // A play step executes in-process — the step's writes commit in the
+        // dispatch transaction and the outward emit is only the audit of that
+        // work. Requiring an executor receipt false-positives every succeeded
+        // play step into the missing-receipt sweep a day later.
+        let payload = AutopilotActionPayload::RunPlayStep {
+            play_id: crowdrelay_domain::ids::PlayId::from_uuid(Uuid::nil()),
+            play_kind: crowdrelay_domain::plays::PlayKind::FollowAskLadder,
+            step_index: 0,
+            step_kind: crowdrelay_domain::plays::PlayStepKind::FollowAskFirst,
+            event_id: None,
+            fan_id: None,
+            template_key: "k".to_owned(),
+        };
+        assert!(!requires_terminal_receipt(&payload));
     }
 
     #[test]
