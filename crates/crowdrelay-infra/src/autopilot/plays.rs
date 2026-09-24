@@ -803,7 +803,7 @@ impl PostgresAutopilotRepository {
             .bind(settlement.play_id.into_uuid())
             .bind(i32::from(settlement.step_index))
             .bind(now)
-            .bind(settlement.reason.as_str())
+            .bind(settlement.reason.map(StepSkipReason::as_str))
             .execute(&self.pool)
             .await
             .map_err(map_sqlx)?;

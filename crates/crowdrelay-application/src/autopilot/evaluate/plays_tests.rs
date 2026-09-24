@@ -189,8 +189,8 @@ mod plays_tests {
             .expect("decided");
         assert!(matches!(
             decision,
-            PlayDecision::SkipStep {
-                reason: crowdrelay_domain::plays::StepSkipReason::NoEligibleRecipients,
+            PlayDecision::SettleStep {
+                reason: Some(crowdrelay_domain::plays::StepSkipReason::NoEligibleRecipients),
                 ..
             }
         ));
@@ -232,7 +232,7 @@ mod plays_tests {
         let blocked = play_decision(&snapshot, &policy(AutonomyLevel::BoundedAuto), post_show_due)
             .expect("decided");
         assert!(
-            matches!(blocked, PlayDecision::SkipStep { index: 0, .. }),
+            matches!(blocked, PlayDecision::SettleStep { index: 0, .. }),
             "the earlier step settles first, as a recorded skip"
         );
         if let Some(step) = snapshot.steps.first_mut() {
