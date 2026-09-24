@@ -409,6 +409,7 @@ pub struct ProcessRelayRunDetail {
     body: Option<String>,
     #[serde(with = "time::serde::rfc3339::option")]
     occurred_at: Option<OffsetDateTime>,
+    #[serde(with = "time::serde::rfc3339")]
     decided_at: OffsetDateTime,
     confidence_bp: i32,
     /// The batch ask — the write path is per-source, so the approval step

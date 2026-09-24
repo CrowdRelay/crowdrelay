@@ -221,7 +221,7 @@ pub(crate) struct CalibrationReadout {
 
 pub async fn attention(State(state): State<crate::AppState>, headers: HeaderMap) -> Response {
     let timeout_duration = state.ops.operation_timeout;
-    // Fourteen reads, each paying one permit of the process-wide control-plane
+    // Fifteen reads, each paying one permit of the process-wide control-plane
     // budget — the ecosystem arm pays its leaves individually inside
     // `load_attention_ecosystem`. Without a shared bound this page asks for
     // more connections than the pool has and holds every one of them, so any
