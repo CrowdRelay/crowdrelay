@@ -433,6 +433,13 @@ impl GithubRegistrySyncWorker {
         let contacts = harvest.contacts;
         let saw_email_column = harvest.saw_email_column;
         let rows_read = harvest.rows_read;
+        // Same rule as the Drive transport: a row-level write failure must
+        // not be sealed under the unchanged marker or a transient error is
+        // never retried. Validation refusals do not block the marker.
+        let row_failures = harvest.venues_failed
+            + harvest.peer_acts_failed
+            + harvest.agents_failed
+            + harvest.beacons_failed;
 
         // A re-listed file is the truth about its rows: contacts it no
         // longer carries mark disappeared, exactly like a Drive file.
@@ -449,19 +456,21 @@ impl GithubRegistrySyncWorker {
             )
             .await
             .map_err(|e: GDriveError| e.to_string())?;
-        self.repo
-            .record_file_state(
-                self.workspace_id,
-                &file_id,
-                &entry.name,
-                "github.com/repository",
-                &state_marker,
-                !saw_email_column,
-                rows_read as i32,
-                contacts.len() as i32,
-            )
-            .await
-            .map_err(|e| e.to_string())?;
+        if row_failures == 0 {
+            self.repo
+                .record_file_state(
+                    self.workspace_id,
+                    &file_id,
+                    &entry.name,
+                    "github.com/repository",
+                    &state_marker,
+                    !saw_email_column,
+                    rows_read as i32,
+                    contacts.len() as i32,
+                )
+                .await
+                .map_err(|e| e.to_string())?;
+        }
         counts.files_scanned = 1;
         counts.contacts_upserted = summary.upserted;
         counts.agents_resolved = summary.agents_resolved;

@@ -613,6 +613,16 @@ impl GDriveContactsSyncWorker {
         counts.beacons_unresolved_city += harvest.beacons_unresolved_city;
         counts.beacons_failed += harvest.beacons_failed;
         let contacts = harvest.contacts;
+        // Row-level write failures are counted, not raised — but they must
+        // not be sealed under the unchanged marker: a transient sqlx error
+        // on one row would otherwise mark the file clean and the row would
+        // never retry until the file's mtime moved. Refusals and
+        // unresolved-city skips are deterministic validation outcomes, not
+        // failures, so they do not block the marker.
+        let row_failures = harvest.venues_failed
+            + harvest.peer_acts_failed
+            + harvest.agents_failed
+            + harvest.beacons_failed;
 
         if !harvest.saw_email_column {
             // Not a contact list — record the mtime so we do not re-export
@@ -633,19 +643,21 @@ impl GDriveContactsSyncWorker {
                 )
                 .await
                 .map_err(|e: GDriveError| e.to_string())?;
-            self.repo
-                .record_file_state(
-                    self.workspace_id,
-                    &file.id,
-                    &file.name,
-                    &file.mime_type,
-                    &state_marker,
-                    true,
-                    rows_read as i32,
-                    0,
-                )
-                .await
-                .map_err(|e| e.to_string())?;
+            if row_failures == 0 {
+                self.repo
+                    .record_file_state(
+                        self.workspace_id,
+                        &file.id,
+                        &file.name,
+                        &file.mime_type,
+                        &state_marker,
+                        true,
+                        rows_read as i32,
+                        0,
+                    )
+                    .await
+                    .map_err(|e| e.to_string())?;
+            }
             counts.files_scanned = 1;
             return Ok(counts);
         }
@@ -662,19 +674,21 @@ impl GDriveContactsSyncWorker {
             )
             .await
             .map_err(|e: GDriveError| e.to_string())?;
-        self.repo
-            .record_file_state(
-                self.workspace_id,
-                &file.id,
-                &file.name,
-                &file.mime_type,
-                &state_marker,
-                false,
-                rows_read as i32,
-                contacts.len() as i32,
-            )
-            .await
-            .map_err(|e| e.to_string())?;
+        if row_failures == 0 {
+            self.repo
+                .record_file_state(
+                    self.workspace_id,
+                    &file.id,
+                    &file.name,
+                    &file.mime_type,
+                    &state_marker,
+                    false,
+                    rows_read as i32,
+                    contacts.len() as i32,
+                )
+                .await
+                .map_err(|e| e.to_string())?;
+        }
         counts.files_scanned = 1;
         counts.contacts_upserted = summary.upserted;
         counts.agents_resolved = summary.agents_resolved;

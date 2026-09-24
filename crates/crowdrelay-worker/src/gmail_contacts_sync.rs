@@ -507,15 +507,28 @@ impl GmailContactsSyncWorker {
 
         // The cursor covers everything listed this cycle (history ids are
         // monotonic); advancing it is what makes the next cycle incremental.
-        self.repo
-            .set_sync_cursor(
-                self.workspace_id,
-                connection_id,
-                &cursor_to_set,
-                old_cursor.as_deref(),
-            )
-            .await
-            .map_err(|e| e.to_string())?;
+        // It must not advance over message-level failures: a scan error means
+        // that message's contacts were never written, and history.list only
+        // returns ids newer than the cursor — a permanently-skipped message
+        // is invisible forever. Attachment-level failures don't gate: their
+        // contacts already upserted, and a permanently-corrupt attachment
+        // would freeze the lane.
+        if failed == 0 {
+            self.repo
+                .set_sync_cursor(
+                    self.workspace_id,
+                    connection_id,
+                    &cursor_to_set,
+                    old_cursor.as_deref(),
+                )
+                .await
+                .map_err(|e| e.to_string())?;
+        } else {
+            tracing::warn!(
+                failed,
+                "gmail contacts sync: withholding cursor advance; failed messages retry next cycle"
+            );
+        }
         self.repo
             .mark_sync_ok(self.workspace_id, connection_id)
             .await
