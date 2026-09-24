@@ -92,9 +92,9 @@ def fields_of(body: str) -> list[tuple[str, str]]:
     for part in parts:
         attrs = " ".join(re.findall(r"#\[[^\]]*\]", part))
         rest = re.sub(r"#\[[^\]]*\]", "", part).strip()
-        match = re.match(r"(?:pub(?:\([^)]*\))?\s+)?(?:r#)?([a-z_][a-z0-9_]*)\s*:(?!:)", rest)
+        match = re.match(r"(?:pub(?:\([^)]*\))?\s+)?(?:r#)?([a-z_][a-z0-9_]*)\s*:(?!:)\s*(.*)", rest, re.S)
         if match:
-            out.append((attrs, match.group(1)))
+            out.append((attrs, match.group(1), " ".join(match.group(2).split())))
     return out
 
 
@@ -110,7 +110,8 @@ def load_structs() -> dict[str, list[tuple[Path, dict]]]:
             body = braced_body(text, match.end() - 1)
             rename_all = re.search(r'#\[sqlx\([^\]]*rename_all\s*=\s*"([^"]+)"', attrs)
             required, optional, flatten = [], [], False
-            for field_attrs, fname in fields_of(body):
+            types: dict[str, str] = {}
+            for field_attrs, fname, ftype in fields_of(body):
                 sqlx_attrs = " ".join(re.findall(r"#\[sqlx\(([^\]]*)\)\]", field_attrs))
                 if "flatten" in sqlx_attrs:
                     flatten = True
@@ -121,7 +122,11 @@ def load_structs() -> dict[str, list[tuple[Path, dict]]]:
                 if not renamed and rename_all and rename_all.group(1) == "camelCase":
                     column = snake_to_camel(fname)
                 (optional if re.search(r"\bdefault\b", sqlx_attrs) else required).append(column)
-            found.setdefault(name, []).append((path, {"required": required, "optional": optional, "flatten": flatten}))
+                if not re.search(r"\b(try_from|json)\b", sqlx_attrs):
+                    types[column] = ftype
+            found.setdefault(name, []).append(
+                (path, {"required": required, "optional": optional, "flatten": flatten, "types": types})
+            )
     return found
 
 
@@ -153,13 +158,17 @@ def query_sites(structs: dict) -> list[tuple[str, int, str, dict]]:
 
 
 def describe(container: str, sites: list) -> dict[int, list[str]]:
+    return {index: [name for name, _ in columns] for index, columns in describe_typed(container, sites).items()}
+
+
+def describe_typed(container: str, sites: list) -> dict[int, list[tuple[str, str]]]:
     script = ["\\set ON_ERROR_STOP 0"]
     for index, (_, _, sql, _) in enumerate(sites):
         script.append(f"\\echo BEGIN_{index}")
         script.append(sql.rstrip().rstrip(";") + " \\gdesc")
         script.append(f"\\echo END_{index}")
     result = _types.psql("\n".join(script), container)
-    columns: dict[int, list[str]] = {}
+    columns: dict[int, list[tuple[str, str]]] = {}
     current, rows = None, []
     for line in result.stdout.splitlines():
         if line.startswith("BEGIN_"):
@@ -169,8 +178,42 @@ def describe(container: str, sites: list) -> dict[int, list[str]]:
                 columns[current] = rows
             current = None
         elif current is not None and "|" in line:
-            rows.append(line.split("|", 1)[0])
+            name, pg_type = line.split("|", 1)
+            rows.append((name, pg_type.strip()))
     return columns
+
+
+# Rust type (Option stripped) -> the PostgreSQL types sqlx decodes it from.
+# Only these are judged; a custom type, a newtype or anything unlisted is
+# skipped rather than guessed at.
+COMPATIBLE: dict[str, set[str]] = {
+    "i64": {"bigint"},
+    "i32": {"integer"},
+    "i16": {"smallint"},
+    "f64": {"double precision"},
+    "f32": {"real"},
+    "bool": {"boolean"},
+    "String": {"text", "character varying", "name", "character", "bpchar", "citext"},
+    "Uuid": {"uuid"},
+    "uuid::Uuid": {"uuid"},
+    "OffsetDateTime": {"timestamp with time zone"},
+    "time::OffsetDateTime": {"timestamp with time zone"},
+    "PrimitiveDateTime": {"timestamp without time zone"},
+    "Date": {"date"},
+    "time::Date": {"date"},
+    "Value": {"jsonb", "json"},
+    "serde_json::Value": {"jsonb", "json"},
+    "Vec<String>": {"text[]", "character varying[]"},
+    "Vec<Uuid>": {"uuid[]"},
+    "Vec<i64>": {"bigint[]"},
+    "Vec<i32>": {"integer[]"},
+}
+
+
+def rust_base(rust_type: str) -> str:
+    rust_type = rust_type.strip()
+    match = re.fullmatch(r"Option<\s*(.*)\s*>", rust_type)
+    return match.group(1).strip() if match else rust_type
 
 
 class SqlRowShapes(unittest.TestCase):
@@ -199,6 +242,42 @@ class SqlRowShapes(unittest.TestCase):
             [],
             "these structs read columns their query does not return — each fails "
             "at runtime with `no column found for name`:\n  " + "\n  ".join(missing),
+        )
+
+
+class SqlRowTypes(unittest.TestCase):
+    """The same sites, judged on type: a column whose PostgreSQL type sqlx will
+    not decode into the field's Rust type fails on the first row with
+    `mismatched types` — P1 in the bug tracker, four times so far."""
+
+    def setUp(self) -> None:
+        self.container = _types.find_container()
+        if not self.container:
+            self.skipTest("no local crowdrelay-postgres-1 container; run `just db-up`")
+
+    def test_every_judged_field_decodes_from_its_column(self) -> None:
+        sites = query_sites(load_structs())
+        described = describe_typed(self.container, sites)
+        judged, wrong = 0, []
+        for index, (path, line, _, shape) in enumerate(sites):
+            for name, pg_type in described.get(index, []):
+                rust_type = shape["types"].get(name)
+                if rust_type is None:
+                    continue
+                accepted = COMPATIBLE.get(rust_base(rust_type))
+                if accepted is None:
+                    continue
+                judged += 1
+                # `character(3)`, `character varying(64)`, `numeric(10,2)`:
+                # the modifier does not change what sqlx decodes.
+                base_type = re.sub(r"\(\d+(?:,\d+)?\)", "", pg_type)
+                if base_type not in accepted:
+                    wrong.append(f"{path}:{line} {name}: Rust {rust_type} from SQL {pg_type}")
+        self.assertGreater(judged, 1000, f"only {judged} fields judged")
+        self.assertEqual(
+            wrong,
+            [],
+            "these fields cannot decode from their column:\n  " + "\n  ".join(wrong),
         )
 
 
