@@ -65,7 +65,7 @@ pub async fn approve_latarnik_invite(
     // written when the letter actually leaves.
     if let Some(status) = inflight_invite(pool, workspace_id, beacon_id).await? {
         return Err(InviteError::Refused(format!(
-            "an invitation to this contact is already {status} — one ask is the whole budget,              and a second would be nagging"
+            "an invitation to this contact is already {status} — one ask is the whole budget, and a second would be nagging"
         )));
     }
 
@@ -129,7 +129,7 @@ pub async fn approve_latarnik_invite(
     // than embed a dead link.
     let member_area = member_area_url(pool, workspace_id).await?.ok_or_else(|| {
         InviteError::Refused(
-            "the member-site address is not configured for this workspace — the letter has              nowhere to point"
+            "the member-site address is not configured for this workspace — the letter has nowhere to point"
                 .to_owned(),
         )
     })?;

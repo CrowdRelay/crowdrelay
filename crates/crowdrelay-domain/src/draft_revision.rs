@@ -114,13 +114,13 @@ impl RevisionRefusal {
     pub fn conflict_reason(&self) -> &'static str {
         match self {
             Self::FieldNotRevisable { .. } => {
-                "draft revision refused: that field cannot be revised — a revision changes                  the words a human reads, not who reads them, what they cost, or what they point at"
+                "draft revision refused: that field cannot be revised — a revision changes the words a human reads, not who reads them, what they cost, or what they point at"
             }
             Self::FieldEmptied { .. } => {
                 "draft revision refused: a revision may not empty a field — reject the draft instead"
             }
             Self::FieldTooLong { .. } => {
-                "draft revision refused: the revision is longer than the allowed multiple                  of the original"
+                "draft revision refused: the revision is longer than the allowed multiple of the original"
             }
             Self::NoChange => "draft revision refused: the revision makes no change",
         }

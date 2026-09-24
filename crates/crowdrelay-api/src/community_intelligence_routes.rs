@@ -172,7 +172,28 @@ async fn intro_draft(State(state): State<crate::AppState>, Path(place_id): Path<
         .cloned()
         .collect();
 
-    let draft = compose_intro(&place.name, &place.platform, &observed_genres, &shared);
+    // The draft speaks as the tenant's act, resolved the same way the beacon
+    // release mail signs itself — never as the first tenant by default.
+    let (signature, first_tenant) = match crowdrelay_infra::beacon_signal::beacon_release_signature(
+        &state.database,
+        workspace_id,
+    )
+    .await
+    {
+        Ok(signer) => signer,
+        Err(error) => {
+            tracing::warn!(%error, "signer lookup for intro draft failed");
+            return Problem::service_unavailable(None).into_response();
+        }
+    };
+
+    let draft = compose_intro(
+        &place.name,
+        &place.platform,
+        &observed_genres,
+        &shared,
+        (signature.as_str(), first_tenant),
+    );
     (
         StatusCode::OK,
         [(CACHE_CONTROL, PRIVATE_NO_STORE)],
@@ -193,13 +214,19 @@ async fn intro_draft(State(state): State<crate::AppState>, Path(place_id): Path<
 ///
 /// Separated from the handler so the wording is testable without a database —
 /// the thing most likely to go wrong here is tone, not SQL.
-fn compose_intro(name: &str, platform: &str, observed: &[String], shared: &[String]) -> String {
+fn compose_intro(
+    name: &str,
+    platform: &str,
+    observed: &[String],
+    shared: &[String],
+    signer: (&str, bool),
+) -> String {
     let mut draft = String::new();
     if observed.is_empty() {
         // No observation yet. Saying so beats a confident template that
         // claims a fit nobody has checked.
         draft.push_str(&format!(
-            "No observation of {name} yet, so this is a blank rather than a draft.\n\n             Read the rules and the last week of posts first, then write the              introduction yourself — a generic one is worse than none in a              {platform} community that sees them daily.\n\n             Once the community sync has looked at {name}, this draft will              name what they actually discuss."
+            "No observation of {name} yet, so this is a blank rather than a draft.\n\nRead the rules and the last week of posts first, then write the introduction yourself — a generic one is worse than none in a {platform} community that sees them daily.\n\nOnce the community sync has looked at {name}, this draft will name what they actually discuss."
         ));
         return draft;
     }
@@ -211,20 +238,28 @@ fn compose_intro(name: &str, platform: &str, observed: &[String], shared: &[Stri
         .collect::<Vec<_>>()
         .join(", ");
 
-    draft.push_str("Hey — we're Virya, a metal band from Poland.\n\n");
+    let (signature, first_tenant) = signer;
+    // The first tenant's opener keeps its genre and country — that is what
+    // its published intros already say. Any other act gets its own name and
+    // nothing borrowed: no genre, no country.
+    if first_tenant && signature == "Virya" {
+        draft.push_str("Hey — we're Virya, a metal band from Poland.\n\n");
+    } else {
+        draft.push_str(&format!("Hey — we're {signature}.\n\n"));
+    }
     if shared.is_empty() {
         draft.push_str(&format!(
-            "Worth checking before posting: {name} mostly discusses {topics},              which does not obviously overlap with what we play. If that is              wrong, say so in your own words below. If it is right, this is              probably not our room.\n\n"
+            "Worth checking before posting: {name} mostly discusses {topics}, which does not obviously overlap with what we play. If that is wrong, say so in your own words below. If it is right, this is probably not our room.\n\n"
         ));
     } else {
         draft.push_str(&format!(
-            "Found you while looking for people into {}. That is most of what              we play, so hopefully we are in the right room.\n\n",
+            "Found you while looking for people into {}. That is most of what we play, so hopefully we are in the right room.\n\n",
             shared.join(" and "),
         ));
     }
-    draft.push_str(
-        "Not here to drop a link and leave — happy to talk about what          everyone's listening to. If there's a channel or thread where sharing          our own stuff is welcome, point me at it and I'll keep it there.\n\n         — Virya",
-    );
+    draft.push_str(&format!(
+        "Not here to drop a link and leave — happy to talk about what everyone's listening to. If there's a channel or thread where sharing our own stuff is welcome, point me at it and I'll keep it there.\n\n— {signature}",
+    ));
     draft
 }
 
@@ -385,7 +420,7 @@ mod intro_draft_tests {
         // A confident introduction claiming a fit nobody checked is worse than
         // admitting there is nothing to go on — a generic intro is exactly what
         // gets a band ignored or banned.
-        let draft = compose_intro("r/Metal", "reddit", &[], &[]);
+        let draft = compose_intro("r/Metal", "reddit", &[], &[], ("Virya", true));
         assert!(draft.contains("No observation"), "{draft}");
         assert!(
             !draft.contains("hopefully we are in the right room"),
@@ -397,7 +432,13 @@ mod intro_draft_tests {
     fn a_shared_genre_becomes_the_reason_for_being_there() {
         let observed = vec!["Black Metal".to_owned(), "Doom Metal".to_owned()];
         let shared = vec!["Black Metal".to_owned()];
-        let draft = compose_intro("r/BlackMetal", "reddit", &observed, &shared);
+        let draft = compose_intro(
+            "r/BlackMetal",
+            "reddit",
+            &observed,
+            &shared,
+            ("Virya", true),
+        );
         assert!(draft.contains("Black Metal"), "{draft}");
         assert!(draft.contains("right room"), "{draft}");
     }
@@ -407,7 +448,7 @@ mod intro_draft_tests {
         // Posting into a community you do not fit is how a band gets banned.
         // Better to learn it before writing than after.
         let observed = vec!["Power Metal".to_owned(), "Folk Metal".to_owned()];
-        let draft = compose_intro("r/PowerMetal", "reddit", &observed, &[]);
+        let draft = compose_intro("r/PowerMetal", "reddit", &observed, &[], ("Virya", true));
         assert!(draft.contains("does not obviously overlap"), "{draft}");
         assert!(draft.contains("probably not our room"), "{draft}");
     }
@@ -424,7 +465,7 @@ mod intro_draft_tests {
             ),
             (vec!["Jazz".to_owned()], vec![]),
         ] {
-            let draft = compose_intro("somewhere", "forum", &observed, &shared);
+            let draft = compose_intro("somewhere", "forum", &observed, &shared, ("Virya", true));
             assert!(
                 draft.contains("Not here to drop a link"),
                 "draft lost its no-spam line: {draft}",
@@ -437,11 +478,34 @@ mod intro_draft_tests {
     }
 
     #[test]
+    fn another_act_speaks_as_itself_not_as_virya() {
+        // The intro borrows the tenant's name — a second tenant's draft
+        // must not claim Virya's genre, country or signature.
+        let observed = vec!["Stoner Rock".to_owned()];
+        let shared = vec!["Stoner Rock".to_owned()];
+        let draft = compose_intro(
+            "r/StonerRock",
+            "reddit",
+            &observed,
+            &shared,
+            ("Nightfall", false),
+        );
+        for borrowed in ["Virya", "metal band", "Poland"] {
+            assert!(
+                !draft.contains(borrowed),
+                "another tenant's intro borrowed first-tenant copy: {draft}",
+            );
+        }
+        assert!(draft.contains("we're Nightfall"), "{draft}");
+        assert!(draft.contains("— Nightfall"), "{draft}");
+    }
+
+    #[test]
     fn only_the_first_few_topics_are_named() {
         // Listing every genre reads as scraped output rather than a person who
         // looked at the group.
         let observed: Vec<String> = (0..9).map(|i| format!("Genre{i}")).collect();
-        let draft = compose_intro("big place", "forum", &observed, &[]);
+        let draft = compose_intro("big place", "forum", &observed, &[], ("Virya", true));
         assert!(draft.contains("Genre0"), "{draft}");
         assert!(!draft.contains("Genre5"), "too many topics named: {draft}");
     }

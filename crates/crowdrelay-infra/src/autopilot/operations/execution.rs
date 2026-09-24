@@ -28,7 +28,7 @@ pub(in crate::autopilot) async fn execute_audience_campaign(
     // lost — is refused rather than sending words nobody approved.
     if draft.subject.trim().is_empty() || draft.body.trim().is_empty() {
         return Err(RepositoryError::ConflictBecause(
-            "audience campaign refused: this action carries no copy — it was queued              before the draft was composed at approval time, and nothing may write one              on the tenant's behalf now",
+            "audience campaign refused: this action carries no copy — it was queued before the draft was composed at approval time, and nothing may write one on the tenant's behalf now",
         ));
     }
     let feature=sqlx::query_scalar::<_,bool>("SELECT COALESCE((SELECT enabled FROM ecosystem_feature_flags WHERE workspace_id=$1 AND key='communication_campaigns_enabled'),false)")

@@ -113,7 +113,7 @@ fn an_uncalibrated_bridge_is_discounted_and_only_that_regime_is() {
     // 11.0 x 0.8 = 8.8, which loses to 10.0. Without the penalty it wins.
     assert!(
         !contest(uncalibrated).contains("challenger"),
-        "an uncalibrated Y14Bridged candidate must be discounted enough to              lose to a lower-mean candidate it would otherwise beat"
+        "an uncalibrated Y14Bridged candidate must be discounted enough to lose to a lower-mean candidate it would otherwise beat"
     );
     assert!(
         contest(calibrated).contains("challenger"),
@@ -121,7 +121,7 @@ fn an_uncalibrated_bridge_is_discounted_and_only_that_regime_is() {
     );
     assert!(
         contest(observational).contains("challenger"),
-        "the penalty is scoped to Y14Bridged — an OutcomeModel candidate              with an unreliable-bridge flag must not be docked for it"
+        "the penalty is scoped to Y14Bridged — an OutcomeModel candidate with an unreliable-bridge flag must not be docked for it"
     );
 }
 

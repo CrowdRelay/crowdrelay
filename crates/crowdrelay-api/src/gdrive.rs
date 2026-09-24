@@ -443,7 +443,7 @@ pub async fn promote_contact(
             // about what happened.
             if counts.skipped_suppressed > 0 {
                 return Problem::conflict_because(
-                    "This address is suppressed on the fan list — an earlier complaint or                      bounce. Nothing was sent, and the row stays staged.",
+                    "This address is suppressed on the fan list — an earlier complaint or bounce. Nothing was sent, and the row stays staged.",
                     request_id_value,
                 )
                 .private()
