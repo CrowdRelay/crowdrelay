@@ -35,6 +35,15 @@ pub(crate) struct IntelligenceBrief {
     blocked_communities: Vec<BlockedCommunity>,
     /// Finished work nobody published.
     unpublished_drafts: Vec<UnpublishedDraftChannel>,
+    /// What the weekly join-ask needs from a person before it can run at all.
+    ///
+    /// The cold-start half of this brief. The three fields above describe a
+    /// brain with work in flight; a workspace nobody has set up has none, and
+    /// every one of them reads empty — which is also what a perfectly healthy
+    /// tenant looks like. This is the field that tells the two apart, and it
+    /// is the only one on this brief that is *fullest* when the tenant is
+    /// newest.
+    join_ask_readiness: Vec<JoinAskGap>,
 }
 
 /// Maps a repository error onto the operations error vocabulary so the
@@ -80,6 +89,7 @@ pub async fn intelligence(State(state): State<crate::AppState>, headers: HeaderM
         timeout_duration,
         load_unpublished_drafts(&state),
     );
+    let join_ask = run_limited(budget, timeout_duration, load_join_ask_readiness(&state.ops));
 
     let posture = budgeted(
         budget,
@@ -106,8 +116,8 @@ pub async fn intelligence(State(state): State<crate::AppState>, headers: HeaderM
             .load_chief_of_staff(workspace_id, now),
     );
 
-    let (worker, brain, needs_you, blocked, drafts, posture, cycle, chief) = tokio::join!(
-        worker, brain, needs_you, blocked, drafts, posture, cycle, chief,
+    let (worker, brain, needs_you, blocked, drafts, join_ask, posture, cycle, chief) = tokio::join!(
+        worker, brain, needs_you, blocked, drafts, join_ask, posture, cycle, chief,
     );
 
     let worker = match worker {
@@ -127,6 +137,10 @@ pub async fn intelligence(State(state): State<crate::AppState>, headers: HeaderM
         Err(error) => return error.into_response(request_id(&headers)),
     };
     let drafts = match drafts {
+        Ok(value) => value,
+        Err(error) => return error.into_response(request_id(&headers)),
+    };
+    let join_ask_readiness = match join_ask {
         Ok(value) => value,
         Err(error) => return error.into_response(request_id(&headers)),
     };
@@ -165,6 +179,7 @@ pub async fn intelligence(State(state): State<crate::AppState>, headers: HeaderM
             awaiting_approval,
             blocked_communities: blocked,
             unpublished_drafts: drafts,
+            join_ask_readiness,
         },
     )
 }

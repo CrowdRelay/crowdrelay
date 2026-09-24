@@ -12,7 +12,9 @@ use crowdrelay_application::{
         assess_measurement_effect, assess_play_claim, assess_wave_claim,
     },
 };
-use crowdrelay_domain::{WorkspaceId, play_measurement::PlayMeasurementPolicy};
+use crowdrelay_domain::{
+    WorkspaceId, join_ask::JoinAskHold, play_measurement::PlayMeasurementPolicy,
+};
 use crowdrelay_infra::autopilot::{CycleTrigger, PostgresAutopilotRepository};
 use sqlx::postgres::PgListener;
 use time::OffsetDateTime;
@@ -430,11 +432,31 @@ impl AutopilotWorker {
                 // join-ask platform that stays quiet is work waiting on a
                 // person (no connection, no photo, no site URL), and a
                 // silent skip reads exactly like a detector that never ran.
+                //
+                // Split by level, because the cold-start case now reaches
+                // here too and it arrives on every poll. A tenant that never
+                // wrote its ask is held on `NoVariants` alone — ordinary,
+                // expected, and already reported where somebody can act on
+                // it (`join_ask_readiness` on the attention board). Warning
+                // about it each tick would bury the case that is genuinely
+                // odd: a tenant that *did* write its ask and still cannot
+                // post.
                 if !report.join_ask_held.is_empty() {
-                    tracing::warn!(
-                        held = ?report.join_ask_held,
-                        "join-ask platforms held this cycle"
-                    );
+                    let never_configured = report
+                        .join_ask_held
+                        .iter()
+                        .all(|(_, hold)| matches!(hold, JoinAskHold::NoVariants));
+                    if never_configured {
+                        tracing::debug!(
+                            held = ?report.join_ask_held,
+                            "join-ask not set up for this workspace yet"
+                        );
+                    } else {
+                        tracing::warn!(
+                            held = ?report.join_ask_held,
+                            "join-ask platforms held this cycle"
+                        );
+                    }
                 }
             }
             Err(error) => {
