@@ -2,9 +2,10 @@
 //!
 //! Values that used to be compile-time constants of the first tenant (the
 //! member-site URL, its area path, the synesthesia campaign slug) move behind
-//! this repository. Every key carries the shipped default as fallback, so an
-//! empty table reproduces yesterday's behavior byte for byte — onboarding a
-//! new label is now data, not a fork.
+//! this repository. Every key carries a shipped default as fallback —
+//! onboarding a new label is data, not a fork — except the member-site URL,
+//! whose only possible default is some band's own site. That one defaults to
+//! nothing: a tenant without its own gets no link, never another band's.
 //!
 //! Reads are cached per workspace behind a short TTL: these values change at
 //! operator speed, while several call sites sit on warm request paths.
@@ -20,7 +21,11 @@ use uuid::Uuid;
 
 /// Shipped defaults. They exist so the first tenant's behavior is unchanged
 /// by this extraction; they are not special-cased anywhere else.
-pub const DEFAULT_MEMBER_SITE_BASE_URL: &str = "https://virya.music";
+///
+/// The member-site URL has none. It used to be the first tenant's own site,
+/// which for every other tenant meant links to another band's signup page;
+/// the first tenant now carries it as an explicit row (migration 0356).
+pub const DEFAULT_MEMBER_SITE_BASE_URL: &str = "";
 pub const DEFAULT_MEMBER_AREA_PATH: &str = "pl/latarnik";
 pub const DEFAULT_SYNESTHESIA_CAMPAIGN_SLUG: &str = "virya-synesthesia-album-v1";
 pub const DEFAULT_NORTH_STAR_METRIC: &str = "activated_fans_30d";
@@ -165,37 +170,41 @@ impl Default for TenantBrandSettings {
 }
 
 impl TenantBrandSettings {
+    /// `member_site_base_url` without its trailing slash, or `None` when the
+    /// tenant has no site of its own. Every link below is built on this, so
+    /// none of them can point at a site that is not the tenant's.
+    #[must_use]
+    pub fn site_root(&self) -> Option<&str> {
+        let root = self.member_site_base_url.trim().trim_end_matches('/');
+        (!root.is_empty()).then_some(root)
+    }
+
     /// The member-area landing page, e.g. `https://virya.music/pl/latarnik`.
     #[must_use]
-    pub fn member_area_url(&self) -> String {
-        format!(
+    pub fn member_area_url(&self) -> Option<String> {
+        Some(format!(
             "{}/{}",
-            self.member_site_base_url.trim_end_matches('/'),
+            self.site_root()?,
             self.member_area_path.trim_matches('/')
-        )
+        ))
     }
 
     /// Landing page with the releases anchor appended.
     #[must_use]
-    pub fn member_releases_url(&self) -> String {
-        format!("{}/#wydania", self.member_area_url())
+    pub fn member_releases_url(&self) -> Option<String> {
+        Some(format!("{}/#wydania", self.member_area_url()?))
     }
 
     /// Absolute invite link carrying the single-use token. Non-Polish locales
     /// keep the un-prefixed area path exactly as before the extraction.
     #[must_use]
-    pub fn invite_url(&self, locale: &str, token: &str) -> String {
+    pub fn invite_url(&self, locale: &str, token: &str) -> Option<String> {
         let area = if locale.starts_with("pl") {
             &self.member_area_path
         } else {
             "latarnik"
         };
-        format!(
-            "{}/{}?invite={}",
-            self.member_site_base_url.trim_end_matches('/'),
-            area,
-            token
-        )
+        Some(format!("{}/{}?invite={}", self.site_root()?, area, token))
     }
 }
 
@@ -541,18 +550,27 @@ impl TenantSettingsRepository {
 mod tests {
     use super::*;
 
+    /// The first tenant's site as an explicit row — what migration 0356
+    /// writes for it.
+    fn first_tenant() -> TenantBrandSettings {
+        TenantBrandSettings {
+            member_site_base_url: "https://virya.music".to_owned(),
+            ..TenantBrandSettings::default()
+        }
+    }
+
     #[test]
     fn defaults_reproduce_the_first_tenant_constants() {
+        let settings = first_tenant();
+        assert_eq!(
+            settings.member_area_url().as_deref(),
+            Some("https://virya.music/pl/latarnik")
+        );
+        assert_eq!(
+            settings.member_releases_url().as_deref(),
+            Some("https://virya.music/pl/latarnik/#wydania")
+        );
         let settings = TenantBrandSettings::default();
-        assert_eq!(settings.member_site_base_url, "https://virya.music");
-        assert_eq!(
-            settings.member_area_url(),
-            "https://virya.music/pl/latarnik"
-        );
-        assert_eq!(
-            settings.member_releases_url(),
-            "https://virya.music/pl/latarnik/#wydania"
-        );
         assert_eq!(
             settings.synesthesia_campaign_slug,
             "virya-synesthesia-album-v1"
@@ -567,16 +585,37 @@ mod tests {
         assert!(!settings.ticketing_enabled);
     }
 
+    /// A tenant with no site of its own gets no link at all. The default used
+    /// to be the first tenant's site, so every other tenant's invitations and
+    /// release mails pointed at another band's signup page.
+    #[test]
+    fn no_site_of_its_own_means_no_link_rather_than_somebody_elses() {
+        let settings = TenantBrandSettings::default();
+        assert_eq!(settings.site_root(), None);
+        assert_eq!(settings.member_area_url(), None);
+        assert_eq!(settings.member_releases_url(), None);
+        assert_eq!(settings.invite_url("pl-PL", "tok"), None);
+        let blank = TenantBrandSettings {
+            member_site_base_url: "  / ".to_owned(),
+            ..TenantBrandSettings::default()
+        };
+        assert_eq!(
+            blank.invite_url("en", "tok"),
+            None,
+            "a blanked value is no site"
+        );
+    }
+
     #[test]
     fn invite_urls_match_the_previous_locale_branching() {
-        let settings = TenantBrandSettings::default();
+        let settings = first_tenant();
         assert_eq!(
-            settings.invite_url("pl-PL", "tok"),
-            "https://virya.music/pl/latarnik?invite=tok"
+            settings.invite_url("pl-PL", "tok").as_deref(),
+            Some("https://virya.music/pl/latarnik?invite=tok")
         );
         assert_eq!(
-            settings.invite_url("en", "tok"),
-            "https://virya.music/latarnik?invite=tok"
+            settings.invite_url("en", "tok").as_deref(),
+            Some("https://virya.music/latarnik?invite=tok")
         );
     }
 
@@ -588,12 +627,12 @@ mod tests {
             ..TenantBrandSettings::default()
         };
         assert_eq!(
-            settings.member_area_url(),
-            "https://fans.mystic-coalition.example/members"
+            settings.member_area_url().as_deref(),
+            Some("https://fans.mystic-coalition.example/members")
         );
         assert_eq!(
-            settings.invite_url("de", "tok"),
-            "https://fans.mystic-coalition.example/latarnik?invite=tok"
+            settings.invite_url("de", "tok").as_deref(),
+            Some("https://fans.mystic-coalition.example/latarnik?invite=tok")
         );
         // The default object stays untouched — this is data, not global state.
         assert_eq!(

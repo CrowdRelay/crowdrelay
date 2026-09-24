@@ -389,7 +389,8 @@ async fn a_beacon_sheet_reimport_refreshes_rather_than_duplicates() -> Result<()
     // catalogue, and a sibling suite's second PL "Wrocław" makes that
     // lookup ambiguous — which the intake rightly refuses to guess through.
     let isolated = common::isolated_database("CROWDRELAY_TEST_DATABASE_URL").await?;
-    let outcome = a_beacon_sheet_reimport_refreshes_rather_than_duplicates_on(isolated.pool.clone()).await;
+    let outcome =
+        a_beacon_sheet_reimport_refreshes_rather_than_duplicates_on(isolated.pool.clone()).await;
     isolated.drop().await?;
     outcome
 }

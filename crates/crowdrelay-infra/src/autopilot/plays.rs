@@ -1371,8 +1371,9 @@ fn presave_report(release: &PlayStepReleaseRow) -> Value {
 /// The canonical ticket link for an event whose own sale is live.
 ///
 /// `None` when no sale is open — a link to a closed sale is a worse listing
-/// than the gap it would fill. The URL is the workspace's own site base plus
-/// the event's public path, both read rather than invented.
+/// than the gap it would fill — or when the workspace has no site of its own.
+/// The URL is the workspace's own site base plus the event's public path,
+/// both read rather than invented.
 async fn live_sale_url(
     transaction: &mut Transaction<'_, Postgres>,
     workspace_id: WorkspaceId,
@@ -1399,7 +1400,9 @@ async fn live_sale_url(
     if !sale_open {
         return Ok(None);
     }
-    let base = sqlx::query_scalar::<_, Option<String>>(
+    // The tenant's own site or no link: a shipped default here was the first
+    // tenant's site, which for anyone else is another band's show page.
+    let Some(base) = sqlx::query_scalar::<_, Option<String>>(
         "SELECT value FROM tenant_settings WHERE workspace_id = $1 AND key = 'member_site_base_url'",
     )
     .bind(workspace_id.into_uuid())
@@ -1407,10 +1410,13 @@ async fn live_sale_url(
     .await
     .map_err(map_sqlx)?
     .flatten()
-    .unwrap_or_else(|| crate::tenant_settings::DEFAULT_MEMBER_SITE_BASE_URL.to_owned());
+    .filter(|value| !value.trim().is_empty())
+    else {
+        return Ok(None);
+    };
     Ok(Some(format!(
         "{}/live/{event_slug}",
-        base.trim_end_matches('/')
+        base.trim().trim_end_matches('/')
     )))
 }
 

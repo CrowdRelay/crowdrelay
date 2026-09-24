@@ -419,10 +419,7 @@ impl BeaconBrand {
     /// `member_site_base_url`, no trailing slash. Empty when the tenant
     /// blanked it — there is then nowhere to send a press contact.
     fn site_root(&self) -> &str {
-        self.settings
-            .member_site_base_url
-            .trim()
-            .trim_end_matches('/')
+        self.settings.site_root().unwrap_or_default()
     }
 }
 
@@ -491,15 +488,14 @@ pub async fn create_invite(
             return BeaconSignalError::Unavailable.response(request_id_value);
         }
     };
-    // An invitation with no site to land on is a broken link in a stranger's
+    // The same builder the batch invites use: the tenant's site and its own
+    // member-area path, rather than a second, hardcoded copy of both. An
+    // invitation with no site to land on is a broken link in a stranger's
     // inbox; refuse it rather than send it.
-    if brand.site_root().is_empty() {
+    let Some(invite_url) = brand.settings.invite_url(&locale, &invite_token) else {
         tracing::warn!("beacon invite refused: member_site_base_url is blank");
         return BeaconSignalError::Conflict.response(request_id_value);
-    }
-    // The same builder the batch invites use: the tenant's site and its own
-    // member-area path, rather than a second, hardcoded copy of both.
-    let invite_url = brand.settings.invite_url(&locale, &invite_token);
+    };
     let delivery = invite_delivery_copy(
         &locale,
         &display_name,

@@ -21,7 +21,6 @@ mod join_ask_tests {
             cadence_days: 7,
             platforms: vec!["facebook".to_owned()],
             member_site_base_url: Some("https://virya.music".to_owned()),
-            member_site_base_url_inherited: false,
             social_auto_post: true,
             connected_platforms: vec!["facebook".to_owned()],
             posts: Vec::new(),

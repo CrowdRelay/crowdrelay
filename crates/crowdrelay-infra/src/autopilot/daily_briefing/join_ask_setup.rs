@@ -94,12 +94,6 @@ const fn join_ask_hold_phrase(hold: JoinAskHold, locale: BriefingLocale) -> &'st
         (JoinAskHold::NoInstagramPhoto, BriefingLocale::En) => "add a photo",
         (JoinAskHold::NoExecutor, BriefingLocale::Pl) => "kanał jeszcze nieobsługiwany",
         (JoinAskHold::NoExecutor, BriefingLocale::En) => "channel not wired yet",
-        (JoinAskHold::SiteUrlInherited, BriefingLocale::Pl) => {
-            "ustaw własny adres strony — teraz link prowadzi na domyślną"
-        }
-        (JoinAskHold::SiteUrlInherited, BriefingLocale::En) => {
-            "set your own site URL — the link points at the default site"
-        }
         // Never reported: `join_ask_readiness` excludes it, because an ask
         // that went out on schedule is the feature working, not a gap.
         (JoinAskHold::OnCadence, _) => "",

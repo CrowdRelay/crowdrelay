@@ -50,25 +50,29 @@ pub struct BeaconReleaseActivationCopy {
     pub text: String,
 }
 
+/// `signature` is who signs it — the act, never a constant: the first tenant
+/// signs "Virya", as its follow-ups always have, and every other act its own
+/// wordmark.
 #[must_use]
 pub fn beacon_release_activation_copy(
     locale: &str,
     display_name: &str,
     title: &str,
     member_url: &str,
+    signature: &str,
 ) -> BeaconReleaseActivationCopy {
     if locale.starts_with("pl") {
         BeaconReleaseActivationCopy {
             subject: format!("Latarniku — jak siadło {title}?"),
             text: format!(
-                "Hej {display_name}!\n\nMinęły dwa dni od dostarczenia {title}. Jak siadło wydanie? Jeśli masz ochotę pomóc przy tej premierze, w Press Roomie znajdziesz gotowe materiały do recenzji, radia/podcastu, zdjęć, wideo lub udostępnienia. Nic z tego nie jest obowiązkiem — dzięki, że jesteś częścią Latarnika.\n\n{member_url}\n\nVirya"
+                "Hej {display_name}!\n\nMinęły dwa dni od dostarczenia {title}. Jak siadło wydanie? Jeśli masz ochotę pomóc przy tej premierze, w Press Roomie znajdziesz gotowe materiały do recenzji, radia/podcastu, zdjęć, wideo lub udostępnienia. Nic z tego nie jest obowiązkiem — dzięki, że jesteś częścią Latarnika.\n\n{member_url}\n\n{signature}"
             ),
         }
     } else {
         BeaconReleaseActivationCopy {
             subject: format!("Beacon — how did {title} land?"),
             text: format!(
-                "Hey {display_name}!\n\nIt has been two days since {title} was delivered. How did the release land? If you feel like helping with this release, the Press Room has ready material for reviews, radio/podcasts, photos, video or sharing. None of this is an obligation — thank you for being part of Beacon.\n\n{member_url}\n\nVirya"
+                "Hey {display_name}!\n\nIt has been two days since {title} was delivered. How did the release land? If you feel like helping with this release, the Press Room has ready material for reviews, radio/podcasts, photos, video or sharing. None of this is an obligation — thank you for being part of Beacon.\n\n{member_url}\n\n{signature}"
             ),
         }
     }
@@ -96,10 +100,39 @@ mod tests {
             "Radio Test",
             "Echoes",
             "https://virya.music/pl/latarnik/#wydania",
+            "Virya",
         );
         assert!(copy.subject.contains("Echoes"));
         assert!(copy.text.contains("Press Room"));
         assert!(!copy.text.contains("Paczkomat"));
         assert!(!copy.text.to_lowercase().contains("telefon"));
+    }
+
+    /// The first tenant's follow-up is unchanged to the byte; another act's
+    /// is signed by that act and carries none of the first tenant's name.
+    #[test]
+    fn activation_copy_is_signed_by_the_act_that_sent_it() {
+        let first = beacon_release_activation_copy(
+            "en",
+            "Radio Test",
+            "Echoes",
+            "https://virya.music/pl/latarnik/#wydania",
+            "Virya",
+        );
+        assert!(
+            first
+                .text
+                .ends_with("https://virya.music/pl/latarnik/#wydania\n\nVirya")
+        );
+
+        let other = beacon_release_activation_copy(
+            "pl-PL",
+            "Radio Test",
+            "Echoes",
+            "https://mgla.example/pl/latarnik/#wydania",
+            "MGŁA",
+        );
+        assert!(other.text.ends_with("\n\nMGŁA"), "{}", other.text);
+        assert!(!other.text.contains("Virya"), "{}", other.text);
     }
 }

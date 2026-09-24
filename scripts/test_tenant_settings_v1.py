@@ -6,7 +6,11 @@ synesthesia campaign slug behind crowdrelay-infra::tenant_settings. Two
 invariants matter more than the feature itself:
 
 - ZERO REGRESSION: the shipped defaults must byte-equal the constants the code
-  used before the extraction, so an empty settings table changes nothing.
+  used before the extraction, so an empty settings table changes nothing —
+  except the member-site URL. Its only possible default was the first
+  tenant's own site, which for every other tenant was another band's signup
+  page; it defaults to nothing, and the first tenant carries the old value as
+  an explicit row (migration 0356), so it still sees no change.
 - NO WRITE SQL outside the infra repository, as with every newer surface.
 """
 import unittest
@@ -16,13 +20,21 @@ ROOT = Path(__file__).resolve().parents[1]
 
 INFRA = ROOT / "crates/crowdrelay-infra/src/tenant_settings.rs"
 MIGRATION = ROOT / "migrations/0111_tenant_settings.sql"
+FIRST_TENANT_SITE = ROOT / "migrations/0356_first_tenant_member_site.sql"
 WORKER = ROOT / "crates/crowdrelay-worker/src/reminders.rs"
 
 
 class TenantSettingsContract(unittest.TestCase):
     def test_defaults_byte_match_the_extracted_constants(self):
         source = INFRA.read_text()
-        self.assertIn('DEFAULT_MEMBER_SITE_BASE_URL: &str = "https://virya.music"', source)
+        # No tenant inherits another's site...
+        self.assertIn('DEFAULT_MEMBER_SITE_BASE_URL: &str = ""', source)
+        # ...and the first tenant keeps the exact value it read, as its own
+        # row, never overwriting one it already has.
+        migration = FIRST_TENANT_SITE.read_text()
+        self.assertIn("'member_site_base_url', 'https://virya.music'", migration)
+        self.assertIn("WHERE workspace.slug = 'virya'", migration)
+        self.assertIn("ON CONFLICT (workspace_id, key) DO NOTHING", migration)
         self.assertIn('DEFAULT_MEMBER_AREA_PATH: &str = "pl/latarnik"', source)
         self.assertIn(
             'DEFAULT_SYNESTHESIA_CAMPAIGN_SLUG: &str = "virya-synesthesia-album-v1"',

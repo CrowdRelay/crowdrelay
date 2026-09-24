@@ -65,7 +65,23 @@ pub(super) async fn execute_beacon_outreach(
     .fetch_one(&mut **transaction)
     .await
     .map_err(map_sqlx)?;
-    let show_url = format!("https://virya.music/pl/live/{}/", target.6);
+    // The show and press links are on the tenant's own site. They were the
+    // first tenant's for everyone, so another band's contacts were pointed at
+    // that band's show page and EPK. No site of its own means no links —
+    // the letter can still carry the event's ticket URL.
+    let site_root = sqlx::query_scalar::<_, String>(
+        "SELECT value FROM tenant_settings WHERE workspace_id = $1 AND key = 'member_site_base_url'",
+    )
+    .bind(workspace_id.into_uuid())
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(map_sqlx)?
+    .map(|value| value.trim().trim_end_matches('/').to_owned())
+    .filter(|root| !root.is_empty());
+    let show_url = site_root
+        .as_deref()
+        .map(|root| format!("{root}/pl/live/{}/", target.6));
+    let epk_url = site_root.as_deref().map(|root| format!("{root}/pl/epk/"));
     emit_outward_action(
         transaction,
         workspace_id,
@@ -95,7 +111,7 @@ pub(super) async fn execute_beacon_outreach(
                 "local_reason_required": true,
                 "human_tone": true,
                 "allowed_offers": allowed_offers,
-                "epk_url": "https://virya.music/pl/epk/",
+                "epk_url": epk_url,
                 "single_primary_ask": true,
                 "use_event_ticket_url_when_cta_is_relevant": true,
                 "use_verified_press_or_live_proof_only": true,
