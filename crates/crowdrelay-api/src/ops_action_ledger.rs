@@ -160,6 +160,120 @@ fn parse_uuid(value: &str) -> Result<Uuid, OpsError> {
     Uuid::parse_str(value.trim()).map_err(|_| OpsError::BadRequest)
 }
 
+// ── Action state machine aggregate ──
+
+/// Every in-flight state, in pipeline order — exactly the set the partial
+/// index `action_ledger_active_idx` (migration 0184) covers.
+const IN_FLIGHT: [ActionState; 6] = [
+    ActionState::Planned,
+    ActionState::Authorized,
+    ActionState::Queued,
+    ActionState::Running,
+    ActionState::Unknown,
+    ActionState::Reconciling,
+];
+
+/// The IN list is written as literals on purpose: it is the predicate of
+/// `action_ledger_active_idx`, so the planner can use the partial index.
+/// The unit test below keeps the literals and `IN_FLIGHT` from drifting.
+const ACTION_STATES_SQL: &str = r#"
+    SELECT state, count(*)::bigint AS count, min(state_entered_at) AS oldest_entered_at
+    FROM action_ledger
+    WHERE workspace_id = $1
+      AND state IN ('PLANNED','AUTHORIZED','QUEUED','RUNNING','UNKNOWN','RECONCILING')
+    GROUP BY state
+    "#;
+
+#[derive(Debug, Serialize)]
+pub struct ActionStatesReport {
+    #[serde(with = "time::serde::rfc3339")]
+    pub observed_at: OffsetDateTime,
+    /// Every in-flight state, always all six, in pipeline order — a state
+    /// with nothing in it is count 0 + oldest null, a measured zero.
+    pub in_flight: Vec<ActionStateCount>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ActionStateCount {
+    pub state: &'static str,
+    pub count: i64,
+    #[serde(with = "time::serde::rfc3339::option")]
+    pub oldest_entered_at: Option<OffsetDateTime>,
+}
+
+#[derive(Debug, FromRow)]
+struct ActionStateRow {
+    state: String,
+    count: i64,
+    oldest_entered_at: Option<OffsetDateTime>,
+}
+
+/// GET /v1/control-plane/ops/action-states and /v1/admin/ops/action-states —
+/// how much work sits in each in-flight state and how long the oldest has
+/// sat there. The actions list is newest-first and capped at 250 rows, so
+/// "oldest QUEUED" cannot be derived from it — this aggregate can answer it.
+pub async fn action_states(
+    State(state): State<crate::AppState>,
+    headers: HeaderMap,
+) -> Response {
+    match run_limited(
+        &state.read_budget,
+        state.ops.operation_timeout,
+        load_action_states(&state.ops),
+    )
+    .await
+    {
+        Ok(report) => private_json(StatusCode::OK, report),
+        Err(error) => error.into_response(request_id(&headers)),
+    }
+}
+
+async fn load_action_states(ops: &OpsState) -> Result<ActionStatesReport, OpsError> {
+    let rows = sqlx::query_as::<_, ActionStateRow>(ACTION_STATES_SQL)
+        .bind(ops.workspace_id.into_uuid())
+        .fetch_all(&ops.pool)
+        .await
+        .map_err(OpsError::sqlx)?;
+    let in_flight = IN_FLIGHT
+        .iter()
+        .map(|state| {
+            let row = rows.iter().find(|row| row.state == state.as_str());
+            ActionStateCount {
+                state: state.as_str(),
+                count: row.map_or(0, |row| row.count),
+                oldest_entered_at: row.and_then(|row| row.oldest_entered_at),
+            }
+        })
+        .collect();
+    Ok(ActionStatesReport {
+        observed_at: OffsetDateTime::now_utc(),
+        in_flight,
+    })
+}
+
+#[cfg(test)]
+mod action_states_tests {
+    use super::*;
+
+    /// The SQL's literal IN list must stay exactly `IN_FLIGHT` — it is also
+    /// the partial index's predicate, so drift means both a wrong answer and
+    /// a seq scan the index exists to prevent.
+    #[test]
+    fn in_flight_list_matches_sql_literals() {
+        let start = ACTION_STATES_SQL.find("IN (").expect("IN list") + "IN (".len();
+        let end = ACTION_STATES_SQL[start..]
+            .find(')')
+            .map(|offset| start + offset)
+            .expect("closing paren");
+        let literals: Vec<&str> = ACTION_STATES_SQL[start..end]
+            .split(',')
+            .map(|literal| literal.trim().trim_matches('\''))
+            .collect();
+        let expected: Vec<&str> = IN_FLIGHT.iter().map(|state| state.as_str()).collect();
+        assert_eq!(literals, expected);
+    }
+}
+
 // ── Brain cycle runs ──
 
 /// One brain cycle: when it ran, how it was triggered, whether every phase

@@ -14,7 +14,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use crowdrelay_application::autopilot::AutopilotControlRepository;
-use crowdrelay_domain::WorkspaceId;
+use crowdrelay_domain::{WorkspaceId, action_ledger::ActionState};
 use crowdrelay_infra::lapsed_approvals::LapsedApprovals;
 use crowdrelay_infra::sent_record::FailedSends;
 use serde::{Deserialize, Serialize};
@@ -40,6 +40,7 @@ include!("ops/models.rs");
 
 include!("ops_timeline.rs");
 include!("ops/trace_timeline_pg_tests.rs");
+include!("ops/action_states_pg_tests.rs");
 use crowdrelay_application::self_assessment::{DailyNorthStar, assess};
 
 include!("ops_action_ledger.rs");
