@@ -158,3 +158,102 @@ async fn run_anchor_cases(pool: &PgPool) -> Result<(), Box<dyn std::error::Error
 
     Ok(())
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn an_event_title_in_the_venue_field_mints_no_phantom_room()
+-> Result<(), Box<dyn std::error::Error>> {
+    let pool = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
+        .await
+        .expect("connect to the migrated suite database");
+    let wroclaw = city_id(&pool, "wroclaw").await?;
+
+    // A provider listing with no venue leaves the tour/show title in the
+    // venue field. The trigger must never mint a room out of it — production
+    // grew venues named "Sanity Check Tour" that way.
+    let workspace = Uuid::now_v7();
+    sqlx::query("INSERT INTO workspaces (id, slug, name) VALUES ($1, $2, 'Title Guard')")
+        .bind(workspace)
+        .bind(common::unique_slug("title-guard", workspace))
+        .execute(&pool)
+        .await?;
+
+    let phantom_event = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO events
+            (id, workspace_id, city_id, slug, title, venue, starts_at, status, published_at)
+         VALUES ($1, $2, $3, $4, 'Phantom Tour Night', 'phantom tour night',
+                 now() + interval '20 days', 'published', now())",
+    )
+    .bind(phantom_event)
+    .bind(workspace)
+    .bind(wroclaw)
+    .bind(common::unique_slug("phantom", phantom_event))
+    .execute(&pool)
+    .await?;
+
+    let minted: Option<Uuid> = sqlx::query_scalar(
+        "SELECT id FROM place_venues WHERE city_id = $1 AND name_key = 'phantom tour night'",
+    )
+    .bind(wroclaw)
+    .fetch_optional(&pool)
+    .await?;
+    assert!(minted.is_none(), "the event title is not a room");
+    let mark: Option<Uuid> =
+        sqlx::query_scalar("SELECT venue_id FROM place_venue_marks WHERE event_id = $1")
+            .bind(phantom_event)
+            .fetch_optional(&pool)
+            .await?;
+    assert!(mark.is_none(), "nothing to mark: no room was found");
+
+    // The guard refuses only the mint: a room that genuinely bears the name
+    // — a show literally named after its venue — still links to the row.
+    let real = PostgresVenueDirectoryRepository::new(pool.clone())
+        .upsert_venue(wroclaw, "Klub Echo", None, None)
+        .await?;
+    let named_event = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO events
+            (id, workspace_id, city_id, slug, title, venue, starts_at, status, published_at)
+         VALUES ($1, $2, $3, $4, 'Klub Echo', 'klub  echo',
+                 now() + interval '20 days', 'published', now())",
+    )
+    .bind(named_event)
+    .bind(workspace)
+    .bind(wroclaw)
+    .bind(common::unique_slug("named", named_event))
+    .execute(&pool)
+    .await?;
+    let linked: Option<Uuid> =
+        sqlx::query_scalar("SELECT venue_id FROM place_venue_marks WHERE event_id = $1")
+            .bind(named_event)
+            .fetch_optional(&pool)
+            .await?;
+    assert_eq!(
+        linked,
+        Some(real),
+        "the existing room still claims the mark"
+    );
+
+    // And an UPDATE that turns the venue field into the title retracts a
+    // mark it previously made.
+    sqlx::query("UPDATE events SET venue = 'Klub Echo' WHERE id = $1")
+        .bind(phantom_event)
+        .execute(&pool)
+        .await?;
+    sqlx::query("UPDATE events SET venue = 'Phantom Tour Night' WHERE id = $1")
+        .bind(phantom_event)
+        .execute(&pool)
+        .await?;
+    let mark_after: Option<Uuid> =
+        sqlx::query_scalar("SELECT venue_id FROM place_venue_marks WHERE event_id = $1")
+            .bind(phantom_event)
+            .fetch_optional(&pool)
+            .await?;
+    assert!(
+        mark_after.is_none(),
+        "flipping venue back to the title retracts the mark"
+    );
+
+    Ok(())
+}
