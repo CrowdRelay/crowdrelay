@@ -109,12 +109,15 @@ if over; then
     # A dispatched job gets a few minutes between directory creation and the
     # worker spawn — the housekeeping 10-minute grace, kept here for the
     # same reason.
-    recent="$(find "$dir/_work" -mindepth 1 -mmin -10 2>/dev/null | head -1)"
+    # -print -quit, not | head -1: head exits on the first line and find's
+    # next write gets SIGPIPE, which pipefail turns into a script-killing
+    # 141 mid-sweep (hit on the 2026-09-24 cron-shaped run).
+    recent="$(find "$dir/_work" -mindepth 1 -mmin -10 -print -quit 2>/dev/null)"
     if [[ -n "$recent" ]]; then log "  $dir/_work touched <10m — kept"; continue; fi
     sweep "$dir/_work"  rm -rf "$dir/_work"/*  "$dir/_work"/.[!.]*
     sweep "$dir/_diag"  bash -c "rm -rf '$dir/_diag'/* 2>/dev/null"
     # bin.* side dirs from runner self-updates — keep the live one only.
-    live="$(pgrep -af 'Runner\.Listener' 2>/dev/null | grep -oF "$dir/bin" | head -1 || true)"
+    live="$(pgrep -af 'Runner\.Listener' 2>/dev/null | grep -oFm1 "$dir/bin" || true)"
     for b in "$dir"/bin.*; do
       [[ -d "$b" ]] || continue
       [[ -n "$live" && "$b" == "$live".* ]] && continue
