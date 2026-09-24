@@ -688,6 +688,8 @@ pub async fn city_venues(State(state): State<crate::AppState>, headers: HeaderMa
           ON addr.venue_id = venue.id AND addr.attribute = 'address'
         LEFT JOIN resolved AS stat
           ON stat.venue_id = venue.id AND stat.attribute = 'status'
+        -- A room resolved closed is a dead lead; the list does not show it.
+        WHERE lower(btrim(COALESCE(stat.value, ''))) <> 'closed'
         GROUP BY venue.id, venue.display_name, city.slug, city.name,
                  city.country_code, repeaters.repeat_attenders,
                  comparable.comparable_acts
