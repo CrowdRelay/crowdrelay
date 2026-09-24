@@ -229,7 +229,15 @@ impl AgentOutcomeWorker {
         } else if unsupported_platform {
             Ok((None, Some("refused"), Some("unsupported_platform")))
         } else {
-            let snapshot = community_snapshot(evidence, place.as_ref());
+            // The act's declared scene, so a music space for a different
+            // one screens as a poor fit rather than an admitted target.
+            let act_style: Option<String> = sqlx::query_scalar(
+                "SELECT value FROM tenant_settings WHERE workspace_id = $1 AND key = 'act_style'",
+            )
+            .bind(workspace_id)
+            .fetch_optional(&mut **tx)
+            .await?;
+            let snapshot = community_snapshot(evidence, place.as_ref(), act_style.as_deref());
             Ok(match screen_community_candidate(&snapshot, TargetDiscoveryPolicy::default()) {
                 ScreeningVerdict::Admit { .. } => {
                     (place.map(|p| p.id), Some("admitted"), None)

@@ -9,7 +9,9 @@
 //! admitted on member count alone can be about anything at all.
 
 use crowdrelay_domain::audience_graph::canonical_place_url;
-use crowdrelay_domain::target_discovery::{CommunityCandidateSnapshot, community_topic_signal};
+use crowdrelay_domain::target_discovery::{
+    CommunityCandidateSnapshot, community_topic_signal, fit_to_act,
+};
 use serde_json::Value;
 use sqlx::{Postgres, Transaction};
 use uuid::Uuid;
@@ -220,9 +222,14 @@ fn place_from_row(row: CommunityPlaceRow) -> CommunityPlace {
 /// Reddit places are never sold placement through this path — the discovery
 /// adapters import public subreddits, not sponsorship inventory — so
 /// `sells_placement` stays false rather than being guessed from prose.
+///
+/// `act_style` is the tenant's declared `act_style` setting; a community whose
+/// own text names only other scenes screens as a poor fit (see
+/// `community_topic::fit_to_act`).
 pub fn community_snapshot(
     evidence: &Value,
     place: Option<&CommunityPlace>,
+    act_style: Option<&str>,
 ) -> CommunityCandidateSnapshot {
     let has_evidence = evidence.as_array().is_some_and(|items| {
         items
@@ -241,8 +248,13 @@ pub fn community_snapshot(
             .and_then(|v| u8::try_from(v).ok());
         snapshot.refused_by_us_or_them = place.status == "blocked"
             || matches!(place.membership_state.as_str(), "rejected" | "not_a_fit");
-        snapshot.topic_signal =
-            community_topic_signal(&place.name, place.notes.as_deref(), &place.genres);
+        snapshot.topic_signal = fit_to_act(
+            community_topic_signal(&place.name, place.notes.as_deref(), &place.genres),
+            act_style,
+            &place.name,
+            place.notes.as_deref(),
+            &place.genres,
+        );
     }
     snapshot
 }
@@ -273,5 +285,49 @@ mod url_tests {
         assert_eq!(normalize_place_url("file:///etc/passwd"), None);
         assert_eq!(normalize_place_url("not a url"), None);
         assert_eq!(normalize_place_url(""), None);
+    }
+}
+
+#[cfg(test)]
+mod act_fit_tests {
+    use super::{CommunityPlace, community_snapshot};
+    use crowdrelay_domain::target_discovery::{
+        CommunityTopicSignal, ScreeningVerdict, TargetDiscoveryPolicy, screen_community_candidate,
+    };
+
+    fn place(name: &str) -> CommunityPlace {
+        CommunityPlace {
+            id: uuid::Uuid::nil(),
+            name: name.to_owned(),
+            member_count: Some(150_000),
+            activity_bp: Some(2_000),
+            status: "active".to_owned(),
+            membership_state: "none".to_owned(),
+            self_promo_ratio_percent: Some(10),
+            notes: None,
+            genres: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_proposed_black_metal_space_is_refused_for_a_metalcore_act() {
+        let evidence = serde_json::json!(["https://www.reddit.com/r/BlackMetal/"]);
+        let snapshot =
+            community_snapshot(&evidence, Some(&place("r/BlackMetal")), Some("metalcore"));
+        assert_eq!(snapshot.topic_signal, CommunityTopicSignal::OtherSubgenre);
+        assert!(matches!(
+            screen_community_candidate(&snapshot, TargetDiscoveryPolicy::default()),
+            ScreeningVerdict::Refuse(_)
+        ));
+    }
+
+    #[test]
+    fn the_same_space_is_admitted_when_no_style_is_declared() {
+        let evidence = serde_json::json!(["https://www.reddit.com/r/BlackMetal/"]);
+        let snapshot = community_snapshot(&evidence, Some(&place("r/BlackMetal")), None);
+        assert!(matches!(
+            screen_community_candidate(&snapshot, TargetDiscoveryPolicy::default()),
+            ScreeningVerdict::Admit { .. }
+        ));
     }
 }

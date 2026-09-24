@@ -3,6 +3,110 @@
 // community. Lives with the candidate builders — it emits the same
 // `DecisionCandidate` shape, just more than one per post.
 
+/// Longest push title and body a relay may send, in characters. The same
+/// bounds the agents service holds its own push drafts to (`PUSH_TITLE_MAX`,
+/// `PUSH_BODY_MAX` in crowdrelay-agents `human-text.ts`): a lock screen shows
+/// a line or two, and everything past that is text nobody reads.
+const RELAY_PUSH_TITLE_MAX: usize = 80;
+const RELAY_PUSH_BODY_MAX: usize = 200;
+
+/// A caption written for Instagram, reduced to what a lock screen carries.
+///
+/// The relay used to paste the whole caption. On 2026-09-18 fans got a push
+/// whose body was a photo credit (`📷 @neohutsul_photo`), a venue handle, and
+/// `#virya #modernmetal #polishmetal #livemusic #wroclaw` — words for a feed
+/// algorithm, not for a person reading a notification. Hashtags and
+/// `@handles` are dropped, lines left with no letters or digits go with them,
+/// and the rest is cut at a word boundary to fit beside the permalink. The
+/// band's own sentences are kept as written; nothing is added.
+fn lock_screen_body(caption: &str, url: Option<&str>) -> String {
+    let room = url.map_or(RELAY_PUSH_BODY_MAX, |u| {
+        RELAY_PUSH_BODY_MAX.saturating_sub(u.chars().count() + 2)
+    });
+    let text = lock_screen_line(&strip_feed_markup(caption), room);
+    match (text.is_empty(), url) {
+        (false, Some(url)) => format!("{text}\n\n{url}"),
+        (true, Some(url)) => url.to_owned(),
+        (_, None) => text,
+    }
+}
+
+/// Removes hashtags and `@handles`, drops lines that are left with no letter
+/// or digit (an emoji, a separator, a bare credit mark), and joins what is
+/// left with single spaces.
+fn strip_feed_markup(caption: &str) -> String {
+    caption
+        .lines()
+        .map(|line| {
+            line.split_whitespace()
+                .filter(|word| !word.starts_with('#') && !word.starts_with('@'))
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .filter(|line| line.chars().any(char::is_alphanumeric))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// `text` on one line, cut at the last word boundary that fits `max`
+/// characters, with an ellipsis when anything was cut.
+fn lock_screen_line(text: &str, max: usize) -> String {
+    let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if flat.chars().count() <= max {
+        return flat;
+    }
+    let budget = max.saturating_sub(1);
+    let mut out = String::new();
+    for word in flat.split(' ') {
+        let next = if out.is_empty() { word.chars().count() } else { out.chars().count() + 1 + word.chars().count() };
+        if next > budget {
+            break;
+        }
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        out.push_str(word);
+    }
+    if out.is_empty() {
+        out = flat.chars().take(budget).collect();
+    }
+    out.push('…');
+    out
+}
+
+#[cfg(test)]
+mod relay_push_text_tests {
+    use super::{lock_screen_body, lock_screen_line};
+
+    #[test]
+    fn the_caption_that_reached_fans_on_2026_09_18_loses_its_feed_markup() {
+        let caption = "WROCŁAW // 11.09 // ŁĄCZNIK \n\nKilka klatek z tego, co wydarzyło się na scenie.\n\nDzięki wszystkim, którzy byli z nami pod sceną.\n\n📷 @neohutsul_photo\n\nNext stop: Gorzów Wielkopolski // 17.10 @klub_magnetoffon\n\n#virya #modernmetal #polishmetal #livemusic #wroclaw";
+        let url = "https://www.instagram.com/p/DdZSxWZCLhR/";
+        let body = lock_screen_body(caption, Some(url));
+        assert!(!body.contains('#'), "{body}");
+        assert!(!body.contains('@'), "{body}");
+        assert!(!body.contains('📷'), "{body}");
+        assert!(body.contains("Dzięki wszystkim"), "{body}");
+        assert!(body.ends_with(url), "{body}");
+        assert!(body.chars().count() <= 200, "{} chars: {body}", body.chars().count());
+    }
+
+    #[test]
+    fn a_short_caption_is_left_as_the_band_wrote_it() {
+        assert_eq!(
+            lock_screen_body("Gramy 17.10 w Gorzowie.", None),
+            "Gramy 17.10 w Gorzowie."
+        );
+    }
+
+    #[test]
+    fn a_long_line_is_cut_at_a_word_with_an_ellipsis() {
+        let cut = lock_screen_line("jeden dwa trzy cztery pięć", 12);
+        assert_eq!(cut, "jeden dwa…");
+        assert!(cut.chars().count() <= 12);
+    }
+}
+
 /// The relay fan-out for one synced band post: one push to the owned
 /// audience, plus one community post per admitted community. No version in
 /// either key — a caption edit bumps the source version, and re-relaying an
@@ -35,12 +139,10 @@ fn relay_candidates(
     // the push carries the band's words to fans who opted in. `task_id` is the
     // source id — no agent task produced this, and the dispatch-prediction
     // ref should point at what did.
-    let body = match (&post.body, &post.url) {
-        (Some(caption), Some(url)) => format!("{caption}\n\n{url}"),
-        (Some(caption), None) => caption.clone(),
-        (None, Some(url)) => format!("{}\n\n{url}", post.title),
-        (None, None) => post.title.clone(),
-    };
+    let body = lock_screen_body(
+        post.body.as_deref().unwrap_or(post.title.as_str()),
+        post.url.as_deref(),
+    );
     let mut out = vec![DecisionCandidate {
         context: policy.context,
         subject: ActionSubject::ContentSource(snapshot.source_id),
@@ -52,7 +154,7 @@ fn relay_candidates(
         policy_snapshot: policy_snapshot.clone(),
         action: AutopilotActionPayload::RequestSignalPush {
             task_id: source,
-            title: post.title.clone(),
+            title: lock_screen_line(&post.title, RELAY_PUSH_TITLE_MAX),
             body,
             target_path: None,
             event_id: None,

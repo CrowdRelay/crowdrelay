@@ -125,6 +125,27 @@ impl AgentOutcomeWorker {
     }
 }
 
+/// What the authority axes may still do for text a language model wrote.
+///
+/// Everything this worker ingests was written by a model. A workspace-wide
+/// answer — a context at `bounded_auto`, a class ceiling that allows it — is
+/// not a decision about any particular text, and on 2026-08-31 and 2026-09-03
+/// it let exactly that reach real people unread: four push notifications
+/// promising fans a presale code and rehearsal footage that did not exist, and
+/// an invented rehearsal story posted to a subreddit, all approved as
+/// `policy:bounded_auto`. So `Policy` is withdrawn here.
+///
+/// A standing grant survives, because it is not a setting: it is an operator
+/// who looked at one named community and said "stop asking me about this
+/// one", and it is revocable per target. That, an approved relay card, or a
+/// person approving the action itself are the only ways model text leaves.
+fn model_text_authority(authority: UnattendedAuthority) -> UnattendedAuthority {
+    match authority {
+        UnattendedAuthority::Policy => UnattendedAuthority::Denied,
+        other => other,
+    }
+}
+
 /// The community this post is for, or `None` when it is not a community post.
 ///
 /// Pure payload read: `platform == "reddit"` plus a `target_id` that parses.

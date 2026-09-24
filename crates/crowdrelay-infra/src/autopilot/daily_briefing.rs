@@ -1010,7 +1010,10 @@ async fn compose_briefing(
                      AND act.id::text = audit.metadata->>'action_id'
                      AND act.status = 'awaiting_approval'))
                AND (audit.metadata->>'deadline_at' IS NULL
-                    OR (audit.metadata->>'deadline_at')::timestamptz > $2)
+                    OR (CASE jsonb_typeof(audit.metadata->'deadline_at') WHEN 'string' THEN (audit.metadata->>'deadline_at')::timestamptz
+                      -- pre-2026-09-24 rows hold serde's tuple [y, ordinal day, h, m, s, ns, offset h/m/s]
+                      WHEN 'array' THEN make_timestamptz((audit.metadata->'deadline_at'->>0)::int, 1, 1, (audit.metadata->'deadline_at'->>2)::int, (audit.metadata->'deadline_at'->>3)::int, (audit.metadata->'deadline_at'->>4)::double precision, 'UTC')
+                          + ((audit.metadata->'deadline_at'->>1)::int - 1) * INTERVAL '1 day' - make_interval(hours => (audit.metadata->'deadline_at'->>6)::int, mins => (audit.metadata->'deadline_at'->>7)::int) END) > $2)
            ) waiting"#,
     )
     .bind(ws)
@@ -1029,7 +1032,10 @@ async fn compose_briefing(
                AND audit.occurred_at >= $2 - INTERVAL '30 days'
                AND audit.metadata->>'action_id' IS NULL
                AND audit.metadata->>'deadline_at' IS NOT NULL
-               AND (audit.metadata->>'deadline_at')::timestamptz <= $2
+               AND (CASE jsonb_typeof(audit.metadata->'deadline_at') WHEN 'string' THEN (audit.metadata->>'deadline_at')::timestamptz
+                      -- pre-2026-09-24 rows hold serde's tuple [y, ordinal day, h, m, s, ns, offset h/m/s]
+                      WHEN 'array' THEN make_timestamptz((audit.metadata->'deadline_at'->>0)::int, 1, 1, (audit.metadata->'deadline_at'->>2)::int, (audit.metadata->'deadline_at'->>3)::int, (audit.metadata->'deadline_at'->>4)::double precision, 'UTC')
+                          + ((audit.metadata->'deadline_at'->>1)::int - 1) * INTERVAL '1 day' - make_interval(hours => (audit.metadata->'deadline_at'->>6)::int, mins => (audit.metadata->'deadline_at'->>7)::int) END) <= $2
                AND NOT EXISTS (
                    SELECT 1 FROM team_assignments assignment
                    WHERE assignment.workspace_id = audit.workspace_id

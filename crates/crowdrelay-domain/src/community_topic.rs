@@ -43,6 +43,11 @@ pub enum CommunityTopicSignal {
     /// signal nobody has.
     #[default]
     Unknown,
+    /// A music space whose own text names only genres far from the act's —
+    /// a black-metal subreddit for a metalcore band. It is a music space, so
+    /// not `Unrelated`, but its members did not come for this act's sound.
+    /// See [`fit_to_act`].
+    OtherSubgenre,
 }
 
 /// Genre and scene phrases, normalized to `[a-z0-9]+` and matched as
@@ -254,6 +259,184 @@ fn contains_word(text: &str, term: &str) -> bool {
     };
     text.match_indices(term)
         .any(|(index, _)| (index == 0 || !word_char(index - 1)) && !word_char(index + term.len()))
+}
+
+/// Genre families, as separator-free phrases matched the same way
+/// [`MUSIC_GENRE_PHRASES`] are. A family is a set of scenes whose audiences
+/// overlap; two families are audiences that mostly do not.
+///
+/// Deliberately coarse and deliberately short. A community that names no
+/// family phrase — r/Metal, r/MetalForTheMasses, a regional music forum — is
+/// never judged by this, and neither is an act whose declared style names
+/// none. The rule only fires when both sides said which scene they are.
+const GENRE_FAMILIES: &[(&str, &[&str])] = &[
+    (
+        "extreme",
+        &[
+            "blackmetal",
+            "deathmetal",
+            "grindcore",
+            "doommetal",
+            "sludgemetal",
+            "funeraldoom",
+            "dsbm",
+            "warmetal",
+        ],
+    ),
+    (
+        "modern",
+        &[
+            "metalcore",
+            "deathcore",
+            "posthardcore",
+            "djent",
+            "progmetal",
+            "progressivemetal",
+            "alternativemetal",
+            "altmetal",
+            "numetal",
+            "mathcore",
+            "modernmetal",
+        ],
+    ),
+    (
+        "classic",
+        &[
+            "powermetal",
+            "speedmetal",
+            "glammetal",
+            "symphonicmetal",
+            "folkmetal",
+            "thrashmetal",
+            "heavymetal",
+        ],
+    ),
+];
+
+fn squash(text: &str) -> String {
+    text.chars()
+        .filter_map(|c| c.to_lowercase().next())
+        .filter(char::is_ascii_alphanumeric)
+        .collect()
+}
+
+fn families_in(text: &str) -> Vec<&'static str> {
+    let squashed = squash(text);
+    GENRE_FAMILIES
+        .iter()
+        .filter(|(_, phrases)| phrases.iter().any(|phrase| squashed.contains(phrase)))
+        .map(|(family, _)| *family)
+        .collect()
+}
+
+/// The topical signal, adjusted for whether the space's scene is the act's.
+///
+/// On 2026-09-24 the autopilot sent `community-engager` to r/BlackMetal for a
+/// band whose declared style is metalcore; the community had been promoted
+/// from the audience graph on "subreddit place, size not yet measured" with
+/// nothing reading its genre against the act's. A `MusicRelated` space whose
+/// own text names one or more genre families, none of them a family the
+/// act's style names, becomes [`CommunityTopicSignal::OtherSubgenre`]. Every
+/// other case — no declared style, a space naming no family, a space naming
+/// the act's family among others — keeps the signal it had.
+#[must_use]
+pub fn fit_to_act(
+    signal: CommunityTopicSignal,
+    act_style: Option<&str>,
+    name: &str,
+    notes: Option<&str>,
+    genres: &[String],
+) -> CommunityTopicSignal {
+    if signal != CommunityTopicSignal::MusicRelated {
+        return signal;
+    }
+    let Some(style) = act_style.map(str::trim).filter(|s| !s.is_empty()) else {
+        return signal;
+    };
+    let act = families_in(style);
+    if act.is_empty() {
+        return signal;
+    }
+    let community_text = format!("{name} {} {}", notes.unwrap_or_default(), genres.join(" "));
+    let community = families_in(&community_text);
+    if !community.is_empty() && !community.iter().any(|family| act.contains(family)) {
+        return CommunityTopicSignal::OtherSubgenre;
+    }
+    signal
+}
+
+#[cfg(test)]
+mod fit_to_act_tests {
+    use super::{CommunityTopicSignal, fit_to_act};
+
+    const MUSIC: CommunityTopicSignal = CommunityTopicSignal::MusicRelated;
+
+    #[test]
+    fn a_black_metal_space_is_not_a_metalcore_bands_audience() {
+        assert_eq!(
+            fit_to_act(MUSIC, Some("metalcore"), "r/BlackMetal", None, &[]),
+            CommunityTopicSignal::OtherSubgenre
+        );
+        assert_eq!(
+            fit_to_act(
+                MUSIC,
+                Some("Metalcore / djent"),
+                "progblackmetal",
+                None,
+                &[]
+            ),
+            CommunityTopicSignal::OtherSubgenre
+        );
+    }
+
+    #[test]
+    fn general_and_same_scene_spaces_keep_their_signal() {
+        for name in ["r/Metal", "MetalForTheMasses", "r/Metalcore", "Djent"] {
+            assert_eq!(
+                fit_to_act(MUSIC, Some("metalcore"), name, None, &[]),
+                MUSIC,
+                "{name}"
+            );
+        }
+        // Naming the act's scene among others is still a fit.
+        assert_eq!(
+            fit_to_act(
+                MUSIC,
+                Some("metalcore"),
+                "Deathcore and Death Metal",
+                None,
+                &[]
+            ),
+            MUSIC
+        );
+    }
+
+    #[test]
+    fn no_declared_style_judges_nothing() {
+        assert_eq!(fit_to_act(MUSIC, None, "r/BlackMetal", None, &[]), MUSIC);
+        assert_eq!(
+            fit_to_act(MUSIC, Some("  "), "r/BlackMetal", None, &[]),
+            MUSIC
+        );
+        assert_eq!(
+            fit_to_act(MUSIC, Some("rock"), "r/BlackMetal", None, &[]),
+            MUSIC
+        );
+    }
+
+    #[test]
+    fn a_non_music_signal_is_left_alone() {
+        assert_eq!(
+            fit_to_act(
+                CommunityTopicSignal::Unrelated,
+                Some("metalcore"),
+                "r/BlackMetal",
+                None,
+                &[]
+            ),
+            CommunityTopicSignal::Unrelated
+        );
+    }
 }
 
 #[cfg(test)]

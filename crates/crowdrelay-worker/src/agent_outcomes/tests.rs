@@ -234,3 +234,45 @@ fn valid_signal_push_passes() {
     );
     evaluate_outcome_quality(&outcome).expect("valid signal push must pass");
 }
+
+// ---------------------------------------------------------------------------
+// Model-written text never rides a workspace-wide "yes".
+//
+// On 2026-08-31 four push notifications promising fans a presale code and
+// rehearsal footage that did not exist, and on 2026-09-03 an invented
+// rehearsal story posted to a subreddit, went out approved as
+// `policy:bounded_auto` — a setting, not a person. A standing grant is a
+// person's decision about one named community and still carries.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_workspace_policy_cannot_release_model_written_text() {
+    assert_eq!(
+        model_text_authority(UnattendedAuthority::Policy),
+        UnattendedAuthority::Denied
+    );
+}
+
+#[test]
+fn a_persons_standing_grant_still_releases_its_one_community() {
+    assert_eq!(
+        model_text_authority(UnattendedAuthority::Grant),
+        UnattendedAuthority::Grant
+    );
+    assert_eq!(
+        model_text_authority(UnattendedAuthority::Denied),
+        UnattendedAuthority::Denied
+    );
+}
+
+#[test]
+fn the_ingest_path_routes_community_posts_and_pushes_through_the_model_text_rule() {
+    // A source check, because the rule only protects anything while the
+    // authority decision actually calls it — and the channel flag must not
+    // come back as a way around it.
+    let source = include_str!("../agent_outcomes.rs");
+    assert!(
+        source.contains("model_text_authority(\n                        self.may_auto_execute(")
+    );
+    assert!(!source.contains("let authority = if channel_pre_approved"));
+}

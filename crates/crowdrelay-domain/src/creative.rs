@@ -33,8 +33,9 @@ use std::collections::BTreeMap;
 )]
 #[serde(rename_all = "snake_case")]
 pub enum CreativeFamily {
-    /// Something that happened to the band, told as a story. The default
-    /// because it is the angle that reads least like promotion.
+    /// What the approved material itself says happened, told as a story —
+    /// never an anecdote the material does not contain. The default because it
+    /// is the angle that reads least like promotion.
     #[default]
     Story,
     /// The music itself — a riff, a passage, a video of it being played.
@@ -82,23 +83,33 @@ impl CreativeFamily {
     }
 
     /// The angle instruction handed to the drafting worker.
+    ///
+    /// Every angle is a way of framing the approved material, never a
+    /// request for facts beyond it. The first wording of `Story` — "tell
+    /// something that actually happened — a rehearsal, a drive, a bad show" —
+    /// asked a worker holding a video title and a date for an anecdote no
+    /// data source contains. Workers either wrote one (rehearsal stories
+    /// posted to r/Metal and r/metalcore as a "long-time lurker, first post",
+    /// accepted before 2026-09-24) or refused and drafted nothing. The family
+    /// names and what they measure are unchanged; only the instruction is
+    /// held to the material.
     #[must_use]
     pub const fn brief(self) -> &'static str {
         match self {
             Self::Story => {
-                "Angle: tell something that actually happened — a rehearsal, a drive, a bad show, a small win. No announcement, no call to action beyond the story itself."
+                "Angle: the story the approved material itself tells — what its own title, caption or description says happened. Tell only that; never add a rehearsal, a drive or a moment the material does not describe."
             }
             Self::Riff => {
-                "Angle: lead with the music. A riff, a passage, a section worth hearing on its own. Say what makes it worth a listen rather than that it exists."
+                "Angle: lead with the music in the approved material — the song, the video, the passage it names. Say what the material says about it rather than that it exists; invent no description of how it sounds."
             }
             Self::Technical => {
-                "Angle: how it was made — tuning, gear, arrangement, production choices. Write for people who will argue with the details."
+                "Angle: how it was made, as far as the approved material says — gear, tuning or production it names. If it names none, frame the post around the material itself instead; never supply details it does not contain."
             }
             Self::Identity => {
-                "Angle: the community's own subject, not the band. Contribute to what they already talk about; the band is context, not the point."
+                "Angle: the community's own subject, not the band. Connect the approved material to what the community's description says it is about; the band is context, not the point."
             }
             Self::Event => {
-                "Angle: a specific date — an upcoming show or release. The date is the reason this is worth posting now; say what is actually happening."
+                "Angle: a specific date — an upcoming show or release from the data. The date is the reason this is worth posting now; say what is actually happening, exactly as the data lists it."
             }
         }
     }
@@ -244,6 +255,22 @@ mod tests {
     fn every_family_briefs_the_worker() {
         for family in CreativeFamily::ALL {
             assert!(!family.brief().is_empty());
+            // No angle may ask for facts beyond the material: every brief
+            // names the data it draws on.
+            assert!(
+                family.brief().contains("approved material") || family.brief().contains("the data"),
+                "{family:?} brief is not held to the material: {}",
+                family.brief()
+            );
+            for invention in [
+                "a rehearsal, a drive, a bad show",
+                "tell something that actually happened",
+            ] {
+                assert!(
+                    !family.brief().contains(invention),
+                    "{family:?} asks for an invented story"
+                );
+            }
         }
     }
 
