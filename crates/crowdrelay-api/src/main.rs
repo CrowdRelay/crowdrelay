@@ -305,6 +305,7 @@ async fn main() -> Result<()> {
                 config.reddit_proxy_url.clone(),
                 reqwest::Client::new(),
             ),
+            config.public_api_origin.clone(),
         ),
         http_config,
     );

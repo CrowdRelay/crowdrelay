@@ -9,6 +9,7 @@ def read(path: str) -> str:
     return (ROOT / path).read_text(encoding="utf-8")
 
 router = read("crates/crowdrelay-api/src/control_plane.rs")
+media_rs = read("crates/crowdrelay-api/src/media.rs")
 lib = read("crates/crowdrelay-api/src/lib.rs")
 ecosystem = read("crates/crowdrelay-infra/src/ecosystem.rs")
 config = read("crates/crowdrelay-infra/src/config.rs")
@@ -27,21 +28,25 @@ assert "DefaultBodyLimit::max(MAX_CONTROL_BODY_BYTES)" in router
 # Route-level body limits override the router-wide one, so an unnoticed
 # override would quietly widen this namespace's exposure while the contract
 # still advertised 8 KiB. Every exception must be named here and bounded.
-overrides = set(re.findall(r"DefaultBodyLimit::max\((\w+)\)", router)) - {
+# The `(\w+)` group must also see qualified constants (`crate::media::X`) —
+# a name the regex cannot read is an override the ceiling never reviews.
+overrides = set(re.findall(r"DefaultBodyLimit::max\((?:\w+::)*(\w+)\)", router)) - {
     "MAX_CONTROL_BODY_BYTES"
 }
 # Each override is reviewed with its own ceiling: imports and event bills are
-# bounded records, the sheet upload carries a whole CSV the operator chose.
+# bounded records, the sheet upload carries a whole CSV the operator chose,
+# and media uploads carry a compressed image bounded where Meta bounds them.
 ceilings = {
     "MAX_IMPORT_BODY_BYTES": 512,
     "MAX_EVENT_BILL_BODY_BYTES": 512,
     "MAX_UPLOAD_BODY_BYTES": 2112,
+    "MAX_MEDIA_BODY_BYTES": 8192,
 }
 assert overrides <= set(ceilings), (
     f"unreviewed control-plane body-limit override: {sorted(overrides)}"
 )
 for name in overrides:
-    declared = re.search(rf"const {name}: usize = (\d+) \* 1024;", router)
+    declared = re.search(rf"const {name}: usize = (\d+) \* 1024;", router + media_rs)
     assert declared, f"{name} must be declared in KiB units for review"
     assert int(declared.group(1)) <= ceilings[name], (
         f"{name} exceeds its reviewed {ceilings[name]} KiB ceiling"

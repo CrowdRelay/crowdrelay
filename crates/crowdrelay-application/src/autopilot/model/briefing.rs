@@ -1039,7 +1039,7 @@ impl AutopilotActionPayload {
                 ],
                 deadline_note: String::new(),
             },
-            Self::PublishJoinAsk { platform, variant_index, text, cta_url, .. } => ActionBriefing {
+            Self::PublishJoinAsk { platform, variant_index, text, cta_url, image_url } => ActionBriefing {
                 summary: format!("Join-ask post on {platform}"),
                 why_it_matters: "The followers already on the page are the cheapest fans to win. This is the weekly ask — the tenant's own words, rotated, never rewritten.".into(),
                 steps: vec![
@@ -1050,6 +1050,7 @@ impl AutopilotActionPayload {
                     BriefingField { label: "Platform".into(), value: platform.clone() },
                     BriefingField { label: "Post".into(), value: truncate(text.clone(), 2000) },
                     BriefingField { label: "Link".into(), value: cta_url.clone() },
+                    BriefingField { label: "Image".into(), value: image_url.clone().unwrap_or_else(|| "— (per-platform fallback)".into()) },
                     BriefingField { label: "Variant".into(), value: format!("#{}", variant_index + 1) },
                 ],
                 deadline_note: String::new(),

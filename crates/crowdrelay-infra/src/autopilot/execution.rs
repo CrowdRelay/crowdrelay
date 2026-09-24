@@ -947,7 +947,7 @@ pub(super) async fn schedule_effect_measurement(
         // the post's doing (the mismeasurement F1's briefing split prevents).
         // Signups surface on the briefing line instead of a measurement row.
         AutopilotActionPayload::PublishJoinAsk { platform, .. } => {
-            if matches!(platform.as_str(), "instagram" | "facebook" | "x") {
+            if matches!(platform.as_str(), "instagram" | "facebook" | "x" | "telegram") {
                 plans.push((
                     AutopilotMeasurementKind::ContentLinkClicks7d,
                     action_id.into_uuid(),

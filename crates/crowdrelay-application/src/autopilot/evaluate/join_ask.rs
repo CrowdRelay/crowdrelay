@@ -63,6 +63,7 @@ fn join_ask_candidate(
             "variant_index": ask.variant_index,
             "text": ask.text,
             "cta_url": ask.cta_url,
+            "image_url": ask.image_url,
             "cadence_days": snapshot.cadence_days,
             // The decision-time prediction: clicks and signups through the
             // tracked link within 7 days. No follower claim — reach.rs reads
@@ -76,6 +77,7 @@ fn join_ask_candidate(
             variant_index: ask.variant_index,
             text: ask.text.clone(),
             cta_url: ask.cta_url.clone(),
+            image_url: ask.image_url.clone(),
         },
         // One ask per platform per ISO week, however many cycles run: the
         // week is inside both keys, so a second cycle in the same week

@@ -680,31 +680,15 @@ async fn run(database: PgPool, config: &Config, standby: bool) -> Result<()> {
     // Social post executor. Facebook Pages publish through the Graph API with
     // the same Page token the metric sync reads with; Instagram and X draft
     // and wait, for reasons the executor records on each held post.
-    let social_post_executor = match SocialPostExecutorWorker::new(
+    let social_post_executor = SocialPostExecutorWorker::build(
         database.clone(),
         workspace_id,
         !social_auto_post,
         facebook_page_access_token.clone(),
         config.public_site_base_url.origin().ascii_serialization(),
-    ) {
-        Ok(worker) => {
-            if social_auto_post {
-                tracing::info!(
-                    has_facebook_token = facebook_page_access_token.is_some(),
-                    "social post executor running in AUTOMATIC MODE — Facebook Pages publish; Instagram and X are drafted for an operator"
-                );
-            } else {
-                tracing::info!(
-                    "social post executor running in MANUAL MODE — posts are drafted and wait for an operator to publish them manually"
-                );
-            }
-            Some(worker)
-        }
-        Err(error) => {
-            tracing::warn!(error = %error, "social post executor disabled: HTTP client build failed");
-            None
-        }
-    };
+        config.response_encryption_key.clone(),
+        telegram_auto_post,
+    );
     let tiktok_client_key = std::env::var("CROWDRELAY_TIKTOK_CLIENT_KEY")
         .ok()
         .filter(|v| !v.trim().is_empty());

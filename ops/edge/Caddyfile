@@ -155,9 +155,12 @@ control.crowdrelay.music {
             }
         }
 
-        # Machine-to-machine automation event ingestion (n8n → control plane).
-        # Bearer token auth, not Basic — the backend validates the automation token.
-        @automation_ingest path /api/v1/automation/events
+        # Machine-to-machine automation traffic (n8n → control plane): event
+        # ingestion plus the join-ask runtime pull. Bearer token auth, not
+        # Basic — the backend validates the automation token, and the catch-all
+        # proxy would overwrite it with the admin Bearer if this handle did not
+        # take the whole /api/v1/automation subtree.
+        @automation_ingest path /api/v1/automation/*
         handle @automation_ingest {
             reverse_proxy {
                 import cp_upstream
@@ -182,7 +185,7 @@ control.crowdrelay.music {
         }
 
         @api {
-            not path /api/v1/automation/events
+            not path /api/v1/automation/*
             path /api/v1/*
             not path /api/v1/tenants/*/runtime
         }

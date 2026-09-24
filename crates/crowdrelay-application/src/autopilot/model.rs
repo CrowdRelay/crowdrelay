@@ -1108,6 +1108,11 @@ pub enum AutopilotActionPayload {
         variant_index: u32,
         text: String,
         cta_url: String,
+        /// `join_ask_image_url` at decision time — the fixed image the post
+        /// carries. `None` leaves each platform to its own fallback, and a
+        /// payload written before the setting existed deserializes to it.
+        #[serde(default)]
+        image_url: Option<String>,
     },
 }
 

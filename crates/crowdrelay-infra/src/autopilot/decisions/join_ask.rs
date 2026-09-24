@@ -83,11 +83,12 @@ macro_rules! decision_join_ask_reads {
 
             // Instagram has no text-only post: the executor's selector reads
             // the tenant's own press assets, so the eligibility check counts
-            // the same pool it would publish from.
+            // the same pool it would publish from — photos and logos both
+            // satisfy the executor's `asset_kind IN ('photo','logo')`.
             let instagram_photo_count = sqlx::query_scalar::<_, i64>(
                 r#"
                 SELECT COUNT(*) FROM beacon_press_assets
-                WHERE workspace_id = $1 AND active AND asset_kind = 'photo'
+                WHERE workspace_id = $1 AND active AND asset_kind IN ('photo', 'logo')
                 "#,
             )
             .bind(workspace_id.into_uuid())
@@ -99,6 +100,7 @@ macro_rules! decision_join_ask_reads {
                 variants: config.variants,
                 cadence_days: config.cadence_days,
                 platforms: config.platforms,
+                image_url: config.image_url,
                 member_site_base_url,
                 social_auto_post,
                 connected_platforms,

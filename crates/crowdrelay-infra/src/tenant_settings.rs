@@ -30,7 +30,7 @@ pub const DEFAULT_CREW_LOCALE: &str = "en";
 
 /// The keys an operator may edit. Anything else stays internal even if a row
 /// somehow appears, so the HTTP surface cannot be used to smuggle state.
-pub const EDITABLE_KEYS: [&str; 17] = [
+pub const EDITABLE_KEYS: [&str; 18] = [
     KEY_MEMBER_SITE_BASE_URL,
     KEY_MEMBER_AREA_PATH,
     KEY_SYNESTHESIA_CAMPAIGN_SLUG,
@@ -48,6 +48,7 @@ pub const EDITABLE_KEYS: [&str; 17] = [
     KEY_JOIN_ASK_VARIANTS,
     KEY_JOIN_ASK_CADENCE_DAYS,
     KEY_JOIN_ASK_PLATFORMS,
+    KEY_JOIN_ASK_IMAGE_URL,
 ];
 
 const KEY_MEMBER_SITE_BASE_URL: &str = "member_site_base_url";
@@ -110,6 +111,13 @@ pub const KEY_JOIN_ASK_CADENCE_DAYS: &str = "join_ask_cadence_days";
 /// `facebook,instagram` — the two whose followers are already standing on
 /// the band's own pages.
 pub const KEY_JOIN_ASK_PLATFORMS: &str = "join_ask_platforms";
+/// The image every join-ask post carries — the app screenshot the band
+/// wants under its words. Absent means per-platform fallback: Instagram
+/// rotates press assets, Facebook and Telegram post without a photo.
+/// `https://` only — Meta's and Telegram's crawlers fetch it at publish
+/// time, and a value that is not a fetchable image URL is refused at the
+/// edge rather than stored and silently ignored.
+pub const KEY_JOIN_ASK_IMAGE_URL: &str = "join_ask_image_url";
 
 const CACHE_TTL: Duration = Duration::from_secs(60);
 
@@ -451,13 +459,14 @@ impl TenantSettingsRepository {
             r#"
             SELECT key, value FROM tenant_settings
             WHERE workspace_id = $1
-              AND key IN ($2, $3, $4)
+              AND key IN ($2, $3, $4, $5)
             "#,
         )
         .bind(workspace_id)
         .bind(KEY_JOIN_ASK_VARIANTS)
         .bind(KEY_JOIN_ASK_CADENCE_DAYS)
         .bind(KEY_JOIN_ASK_PLATFORMS)
+        .bind(KEY_JOIN_ASK_IMAGE_URL)
         .fetch_all(&self.pool)
         .await?;
         let mut variants = None;
@@ -466,6 +475,7 @@ impl TenantSettingsRepository {
             .iter()
             .map(|platform| (*platform).to_owned())
             .collect();
+        let mut image_url = None;
         for (key, value) in rows {
             match key.as_str() {
                 KEY_JOIN_ASK_VARIANTS => variants = join_ask::parse_variants(&value),
@@ -479,6 +489,9 @@ impl TenantSettingsRepository {
                         platforms = parsed;
                     }
                 }
+                KEY_JOIN_ASK_IMAGE_URL => {
+                    image_url = join_ask::parse_image_url(&value);
+                }
                 _ => {}
             }
         }
@@ -486,6 +499,7 @@ impl TenantSettingsRepository {
             variants,
             cadence_days,
             platforms,
+            image_url,
         }))
     }
 

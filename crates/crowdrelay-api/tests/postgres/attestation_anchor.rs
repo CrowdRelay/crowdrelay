@@ -399,6 +399,7 @@ pub(crate) fn app_state(
             None,
             reqwest::Client::new(),
         ),
+        None,
     ))
 }
 

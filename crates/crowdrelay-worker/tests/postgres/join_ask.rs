@@ -58,6 +58,17 @@ async fn create_foreign_task_table(pool: &PgPool) -> Result<()> {
 /// carries the platform, the chosen variant index, the verbatim text and
 /// the member-site CTA. No task row — the brain wrote this one itself.
 async fn seed_join_ask_action(pool: &PgPool, workspace_id: WorkspaceId) -> Result<Uuid> {
+    seed_join_ask_action_for(pool, workspace_id, "facebook", None).await
+}
+
+/// Same persisted shape, for one platform and an optional fixed image — a
+/// join-ask carrying `join_ask_image_url` writes it onto the payload.
+async fn seed_join_ask_action_for(
+    pool: &PgPool,
+    workspace_id: WorkspaceId,
+    platform: &str,
+    image_url: Option<&str>,
+) -> Result<Uuid> {
     let decision_id = Uuid::now_v7();
     sqlx::query(
         r#"INSERT INTO autopilot_decisions
@@ -89,12 +100,13 @@ async fn seed_join_ask_action(pool: &PgPool, workspace_id: WorkspaceId) -> Resul
     .bind(workspace_id.into_uuid())
     .bind(decision_id)
     .bind(workspace_id.into_uuid())
-    .bind("join_ask:facebook:2026-W39")
+    .bind(format!("join_ask:{platform}:2026-W39"))
     .bind(json!({
-        "platform": "facebook",
+        "platform": platform,
         "variant_index": 0,
         "text": "Join us on Signal.",
-        "cta_url": "https://virya.music/signal?utm_source=facebook&utm_medium=join_ask&utm_campaign=join_ask_w39",
+        "cta_url": format!("https://virya.music/signal?utm_source={platform}&utm_medium=join_ask&utm_campaign=join_ask_w39"),
+        "image_url": image_url,
     }))
     .execute(pool)
     .await
@@ -111,6 +123,10 @@ fn executor(pool: &PgPool, workspace_id: WorkspaceId) -> SocialPostExecutorWorke
         true,
         None,
         "https://virya.music".to_owned(),
+        crowdrelay_infra::sensitive_response::SensitiveResponseKey::derive_from_secret(
+            b"test-encryption-key",
+        ),
+        false,
     )
     .expect("build executor")
 }
@@ -186,6 +202,59 @@ async fn a_join_ask_becomes_a_tracked_artifact_awaiting_a_person() -> Result<()>
         link.2.as_deref() == Some("facebook"),
         "channel_source must name the platform, got {:?}",
         link.2
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn a_telegram_join_ask_files_its_image_and_waits_for_a_person() -> Result<()> {
+    let database = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
+        .await
+        .expect("connect to the migrated suite database");
+
+    let ws = workspace(&database).await?;
+    create_foreign_task_table(&database).await?;
+    let action_id = seed_join_ask_action_for(
+        &database,
+        ws,
+        "telegram",
+        Some("https://signal-api.virya.music/v1/public/media/00000000-0000-7000-8000-000000000001"),
+    )
+    .await?;
+
+    // manual_mode + telegram_auto_post=false: the row files, then waits —
+    // the publish path itself needs a live Bot API, which is not this test.
+    executor(&database, ws).run_once().await?;
+
+    let (platform, status, image_url, content) =
+        sqlx::query_as::<_, (String, String, Option<String>, serde_json::Value)>(
+            "SELECT platform, status, image_url, content
+         FROM social_posts WHERE workspace_id = $1 AND action_id = $2",
+        )
+        .bind(ws.into_uuid())
+        .bind(action_id)
+        .fetch_one(&database)
+        .await
+        .context("read the telegram join-ask row")?;
+    ensure!(
+        platform == "telegram",
+        "platform must survive, got {platform}"
+    );
+    ensure!(
+        status == "awaiting_manual_post",
+        "a telegram ask with auto-post off must wait for a person, got {status}"
+    );
+    ensure!(
+        image_url.as_deref()
+            == Some(
+                "https://signal-api.virya.music/v1/public/media/00000000-0000-7000-8000-000000000001"
+            ),
+        "the fixed image must land on the row, got {image_url:?}"
+    );
+    ensure!(
+        content["join_ask"] == json!(true),
+        "the post must carry the join-ask marker, got {content}"
     );
     Ok(())
 }

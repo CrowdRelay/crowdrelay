@@ -16,7 +16,7 @@ impl SocialPostExecutorWorker {
     /// not have one yet.
     ///
     /// The platform guard is the set this executor claims — `instagram`,
-    /// `facebook`, `x`. A telegram/discord ask is held at the evaluator
+    /// `facebook`, `x`, `telegram`. A discord ask is held at the evaluator
     /// (`JoinAskHold::NoExecutor`), so it should never reach this insert;
     /// the guard is still restated here because a row filed for a platform
     /// nothing claims would sit `pending` forever, which reads as a stuck
@@ -27,7 +27,7 @@ impl SocialPostExecutorWorker {
     ) -> Result<(), SocialPostExecutorError> {
         sqlx::query(
             r#"
-            INSERT INTO social_posts (workspace_id, action_id, platform, content, smart_link, smart_link_id, status)
+            INSERT INTO social_posts (workspace_id, action_id, platform, content, smart_link, smart_link_id, image_url, status)
             SELECT
                 $1,
                 a.id,
@@ -36,10 +36,12 @@ impl SocialPostExecutorWorker {
                     'platform', a.payload->>'platform',
                     'text', a.payload->>'text',
                     'cta_url', a.payload->>'cta_url',
+                    'image_url', a.payload->>'image_url',
                     'join_ask', true
                 ),
                 COALESCE('/l/' || link.slug, a.payload->>'cta_url'),
                 link.id,
+                a.payload->>'image_url',
                 'pending'
             FROM autopilot_actions a
             LEFT JOIN smart_links link
@@ -53,7 +55,7 @@ impl SocialPostExecutorWorker {
             WHERE a.workspace_id = $1
               AND a.action_kind = 'social.join_ask.publish'
               AND a.status = 'succeeded'
-              AND a.payload->>'platform' IN ('instagram', 'facebook', 'x')
+              AND a.payload->>'platform' IN ('instagram', 'facebook', 'x', 'telegram')
               AND NOT EXISTS (
                   SELECT 1 FROM social_posts sp WHERE sp.action_id = a.id
               )

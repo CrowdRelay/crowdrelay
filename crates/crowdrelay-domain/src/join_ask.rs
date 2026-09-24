@@ -20,11 +20,12 @@ use time::OffsetDateTime;
 
 /// The platforms a `social.join_ask.publish` action can actually reach.
 ///
-/// The social post executor claims Facebook and Instagram rows; Telegram
-/// and Discord join-asks need an executor bridge that does not exist yet,
-/// so a platform outside this set is held with a named reason rather than
-/// emitted into an action nothing claims.
-pub const EXECUTABLE_PLATFORMS: [&str; 2] = ["facebook", "instagram"];
+/// The social post executor claims Facebook, Instagram and Telegram rows —
+/// Telegram goes through the Bot API with the tenant's own connected bot,
+/// not the Graph path the other two share. Discord still has no executor
+/// bridge, so a platform outside this set is held with a named reason
+/// rather than emitted into an action nothing claims.
+pub const EXECUTABLE_PLATFORMS: [&str; 3] = ["facebook", "instagram", "telegram"];
 
 /// Platforms the settings validator accepts for `join_ask_platforms` —
 /// a superset of [`EXECUTABLE_PLATFORMS`], because configuring a channel
@@ -100,6 +101,32 @@ pub fn parse_platforms(raw: &str) -> Option<Vec<String>> {
     Some(platforms)
 }
 
+/// The longest URL `join_ask_image_url` accepts — a bound so a pasted essay
+/// cannot be stored as "an image".
+pub const JOIN_ASK_MAX_IMAGE_URL_CHARS: usize = 2_048;
+
+/// Parses `join_ask_image_url` — the app screenshot (or other image) every
+/// join-ask post carries when set. Must be `https://`: the URL is fetched by
+/// Meta's crawler at publish time and by Telegram's, so it leaves our
+/// control either way, but `http://` would leak the image fetch
+/// unencrypted on the way out and an empty/absent value is simply "no
+/// fixed image". `None` means the value is not a usable image URL.
+///
+/// The reader treats an absent or blank setting the same as a refused-shape
+/// one — no fixed image — which is why the writer can refuse outright rather
+/// than storing a value the reader would silently ignore.
+#[must_use]
+pub fn parse_image_url(raw: &str) -> Option<String> {
+    let url = raw.trim();
+    if url.is_empty() || url.chars().count() > JOIN_ASK_MAX_IMAGE_URL_CHARS {
+        return None;
+    }
+    if !url.starts_with("https://") || url.bytes().any(|b| b.is_ascii_whitespace()) {
+        return None;
+    }
+    Some(url.to_owned())
+}
+
 /// What the settings keys resolve to for one tenant — `None` overall when
 /// the tenant never wrote a usable variants list, because a join-ask with
 /// no words is the feature switched off, not a half-configured one.
@@ -108,6 +135,11 @@ pub struct JoinAskConfig {
     pub variants: Vec<String>,
     pub cadence_days: u16,
     pub platforms: Vec<String>,
+    /// The image every ask carries, when the tenant set one — the app
+    /// screenshot is the join-ask's honest visual. `None` leaves each
+    /// platform to its own fallback (Instagram rotates press assets,
+    /// Facebook and Telegram post without a photo).
+    pub image_url: Option<String>,
 }
 
 /// A `social_posts` row bound to a `social.join_ask.publish` action — the
@@ -150,8 +182,12 @@ pub struct JoinAskSnapshot {
     /// comes from the same set the cadence window filters.
     pub posts: Vec<JoinAskPostRow>,
     /// Active `beacon_press_assets` photo rows. Instagram has no text-only
-    /// post — without a photo the ask cannot exist there.
+    /// post — without a photo the ask cannot exist there, unless
+    /// `image_url` already names the image it carries.
     pub instagram_photo_count: u32,
+    /// `join_ask_image_url` resolved — the fixed image every ask carries
+    /// when the tenant set one. `None` means per-platform fallback.
+    pub image_url: Option<String>,
 }
 
 /// One platform's ask for the week — the payload the decision carries.
@@ -173,6 +209,9 @@ pub struct JoinAskAsk {
     /// time component, so one ask per platform per week stands however
     /// many cycles run.
     pub week_key: String,
+    /// The fixed join-ask image, when `join_ask_image_url` is set —
+    /// published as the post's photo on platforms that carry one.
+    pub image_url: Option<String>,
 }
 
 /// Why a configured platform cannot take this week's ask.
@@ -183,7 +222,7 @@ pub struct JoinAskAsk {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum JoinAskHold {
     /// The platform is configurable but nothing claims its actions yet —
-    /// Telegram and Discord need their own executor bridge.
+    /// Discord still needs its own executor bridge.
     NoExecutor,
     /// No `fanbase_connections` row is `connected` for this platform.
     NotConnected,
@@ -264,7 +303,13 @@ pub fn evaluate_join_ask(snapshot: &JoinAskSnapshot, now: OffsetDateTime) -> Joi
                 && post.created_at > now - time::Duration::days(i64::from(snapshot.cadence_days))
         }) {
             Some(JoinAskHold::OnCadence)
-        } else if platform == "instagram" && snapshot.instagram_photo_count == 0 {
+        } else if platform == "instagram"
+            && snapshot.instagram_photo_count == 0
+            && snapshot.image_url.is_none()
+        {
+            // A fixed join-ask image satisfies Instagram's photo requirement
+            // on its own — the press-asset rotation is the fallback, not a
+            // second source the ask must wait for.
             Some(JoinAskHold::NoInstagramPhoto)
         } else if snapshot.member_site_base_url.is_none() {
             Some(JoinAskHold::NoSiteUrl)
@@ -296,6 +341,7 @@ pub fn evaluate_join_ask(snapshot: &JoinAskSnapshot, now: OffsetDateTime) -> Joi
                 base.trim_end_matches('/')
             ),
             week_key: week_key.clone(),
+            image_url: snapshot.image_url.clone(),
         });
     }
     plan
@@ -304,9 +350,10 @@ pub fn evaluate_join_ask(snapshot: &JoinAskSnapshot, now: OffsetDateTime) -> Joi
 /// Whether the channel carries the standing approval to publish without a
 /// per-post ask — the evaluator-side mirror of
 /// `AutoPostPlatforms::permits` for the platforms the social executor
-/// claims. Telegram and Discord resolve false here: their auto-post flags
-/// live worker-side, and no executor claims their join-ask rows yet, so
-/// asking a person is the only honest disposition.
+/// claims. Discord resolves false here: its executor bridge does not exist,
+/// so asking a person is the only honest disposition. Telegram's own
+/// worker-side kill switch (`CROWDRELAY_TELEGRAM_AUTO_POST`) still gates at
+/// publish time — a channel that permits here can still draft there.
 #[must_use]
 pub fn join_ask_channel_permits(snapshot: &JoinAskSnapshot, platform: &str) -> bool {
     snapshot.social_auto_post && EXECUTABLE_PLATFORMS.contains(&platform)
@@ -327,6 +374,7 @@ mod tests {
             connected_platforms: vec!["facebook".to_owned(), "instagram".to_owned()],
             posts: Vec::new(),
             instagram_photo_count: 1,
+            image_url: None,
         }
     }
 
@@ -400,14 +448,53 @@ mod tests {
     #[test]
     fn a_configured_platform_with_no_executor_is_held() {
         let mut snapshot = snapshot();
-        snapshot.platforms.push("telegram".to_owned());
-        snapshot.connected_platforms.push("telegram".to_owned());
+        snapshot.platforms.push("discord".to_owned());
+        snapshot.connected_platforms.push("discord".to_owned());
         let plan = evaluate_join_ask(&snapshot, datetime!(2026-09-23 10:00 UTC));
         assert_eq!(plan.asks.len(), 2);
         assert_eq!(
             plan.held,
-            vec![("telegram".to_owned(), JoinAskHold::NoExecutor)]
+            vec![("discord".to_owned(), JoinAskHold::NoExecutor)]
         );
+    }
+
+    #[test]
+    fn a_connected_telegram_gets_its_ask() {
+        let mut snapshot = snapshot();
+        snapshot.platforms.push("telegram".to_owned());
+        snapshot.connected_platforms.push("telegram".to_owned());
+        let plan = evaluate_join_ask(&snapshot, datetime!(2026-09-23 10:00 UTC));
+        assert_eq!(plan.asks.len(), 3);
+        assert_eq!(plan.asks[2].platform, "telegram");
+        assert!(plan.held.is_empty());
+    }
+
+    #[test]
+    fn a_fixed_image_carries_into_every_ask() {
+        let mut snapshot = snapshot();
+        snapshot.image_url = Some("https://signal-api.virya.music/v1/public/media/abc".to_owned());
+        // Instagram's photo requirement is met by the fixed image alone —
+        // zero press assets stops being a hold.
+        snapshot.instagram_photo_count = 0;
+        let plan = evaluate_join_ask(&snapshot, datetime!(2026-09-23 10:00 UTC));
+        assert_eq!(plan.asks.len(), 2);
+        assert!(plan.held.is_empty());
+        assert!(plan.asks.iter().all(|ask| ask.image_url.as_deref()
+            == Some("https://signal-api.virya.music/v1/public/media/abc")));
+    }
+
+    #[test]
+    fn image_url_parses_https_and_refuses_the_rest() {
+        assert_eq!(
+            parse_image_url(" https://virya.music/press/app.png "),
+            Some("https://virya.music/press/app.png".to_owned())
+        );
+        assert!(parse_image_url("http://virya.music/x.png").is_none());
+        assert!(parse_image_url("not a url").is_none());
+        assert!(parse_image_url("").is_none());
+        assert!(parse_image_url("https://has space/x.png").is_none());
+        let long = format!("https://virya.music/{}", "x".repeat(2_050));
+        assert!(parse_image_url(&long).is_none());
     }
 
     #[test]

@@ -48,6 +48,7 @@
         /v1/control-plane/portfolio/amplification/* \
         /v1/control-plane/tenant-settings \
         /v1/control-plane/tenant-settings/* \
+        /v1/control-plane/media \
         /v1/control-plane/secrets \
         /v1/control-plane/secrets/* \
         /v1/control-plane/attestations \
@@ -101,15 +102,15 @@
 
 	handle /healthz/ready {
 		rewrite * /v1/health/ready
-		reverse_proxy crowdrelay-api-1:8080
+		reverse_proxy crowdrelay-api-active:8080
 	}
 
 	handle @area {
-		reverse_proxy crowdrelay-api-1:8080
+		reverse_proxy crowdrelay-api-active:8080
 	}
 
 	handle @operations {
-		reverse_proxy crowdrelay-api-1:8080
+		reverse_proxy crowdrelay-api-active:8080
 	}
 
 	respond 404

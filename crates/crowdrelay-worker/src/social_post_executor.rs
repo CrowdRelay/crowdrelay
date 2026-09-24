@@ -62,10 +62,7 @@
 use std::time::Duration;
 
 use crowdrelay_domain::WorkspaceId;
-use crowdrelay_domain::growth_metrics::MetricPlatform;
-use crowdrelay_domain::publish_guard::{
-    PublishChannel, PublishContext, content_hash, review_outbound_post,
-};
+use crowdrelay_domain::publish_guard::content_hash;
 use sqlx::PgPool;
 use thiserror::Error;
 use tokio::{
@@ -75,6 +72,7 @@ use tokio::{
 use uuid::Uuid;
 
 pub(crate) mod join_ask;
+pub(crate) mod platforms;
 pub(crate) mod reach;
 pub(crate) mod tracked_links;
 
@@ -128,6 +126,13 @@ pub enum SocialPostExecutorError {
     /// "(#200) Requires pages_manage_posts permission" is.
     #[error("graph api refused the post: {0}")]
     GraphRefused(String),
+    #[error("telegram bot api request failed: {0}")]
+    TelegramRequest(reqwest::Error),
+    /// The Bot API refused the call — same contract as `GraphRefused`:
+    /// carries Telegram's own description ("chat not found", "bot is not
+    /// an administrator") because that is what the operator can act on.
+    #[error("telegram bot api refused the post: {0}")]
+    TelegramRefused(String),
 }
 
 #[derive(Clone)]
@@ -162,6 +167,14 @@ pub struct SocialPostExecutorWorker {
     /// The tenant's own public origin. A link in an automatically published
     /// post may point here and nowhere else — see `publish_guard`.
     public_origin: String,
+    /// Opens the encrypted bot token on the telegram `fanbase_connections`
+    /// row — the same key `TelegramExecutorWorker` uses, because it is the
+    /// same credential.
+    response_encryption_key: crowdrelay_infra::sensitive_response::SensitiveResponseKey,
+    /// `CROWDRELAY_TELEGRAM_AUTO_POST` at construction: the worker-side kill
+    /// switch for the telegram arm, separate from the tenant's
+    /// `social_auto_post`. Off means telegram posts draft for a person.
+    telegram_auto_post: bool,
 }
 
 impl SocialPostExecutorWorker {
@@ -181,6 +194,8 @@ impl SocialPostExecutorWorker {
         manual_mode: bool,
         facebook_page_access_token: Option<String>,
         public_origin: String,
+        response_encryption_key: crowdrelay_infra::sensitive_response::SensitiveResponseKey,
+        telegram_auto_post: bool,
     ) -> Result<Self, SocialPostExecutorError> {
         let http_client = reqwest::Client::builder()
             .timeout(GRAPH_API_TIMEOUT)
@@ -196,14 +211,64 @@ impl SocialPostExecutorWorker {
             facebook_page_access_token,
             http_client,
             public_origin,
+            response_encryption_key,
+            telegram_auto_post,
         })
     }
 
+    /// Builds the worker or explains why it did not start. The mode log line
+    /// lives here so `main` stays a wiring table: an operator reading the
+    /// worker's source sees the mode its process claims, not a log statement
+    /// a callsite could forget or contradict.
+    pub fn build(
+        pool: PgPool,
+        workspace_id: WorkspaceId,
+        manual_mode: bool,
+        facebook_page_access_token: Option<String>,
+        public_origin: String,
+        response_encryption_key: crowdrelay_infra::sensitive_response::SensitiveResponseKey,
+        telegram_auto_post: bool,
+    ) -> Option<Self> {
+        match Self::new(
+            pool,
+            workspace_id,
+            manual_mode,
+            facebook_page_access_token.clone(),
+            public_origin,
+            response_encryption_key,
+            telegram_auto_post,
+        ) {
+            Ok(worker) => {
+                if manual_mode {
+                    tracing::info!(
+                        "social post executor running in MANUAL MODE — posts are drafted and wait for an operator to publish them manually"
+                    );
+                } else {
+                    tracing::info!(
+                        has_facebook_token = facebook_page_access_token.is_some(),
+                        "social post executor running in AUTOMATIC MODE — Facebook Pages publish; Instagram and X are drafted for an operator"
+                    );
+                }
+                Some(worker)
+            }
+            Err(error) => {
+                tracing::warn!(error = %error, "social post executor disabled: HTTP client build failed");
+                None
+            }
+        }
+    }
+
     /// Returns true when the executor should draft (manual mode) rather than
-    /// publish automatically. Reads the live tenant setting from the database
-    /// (60s TTL cache); falls back to the env-var value on any error so a
-    /// database blip never silently enables publishing.
+    /// publish automatically. Two switches gate publishing: the deployment
+    /// kill switch (`CROWDRELAY_SOCIAL_AUTO_POST`, off forces manual no matter
+    /// what the tenant setting says) and the tenant's own `social_auto_post`,
+    /// read live from the database (60s TTL cache) so the control plane toggle
+    /// takes effect without a restart. A settings read failure also holds —
+    /// a database blip must never silently enable publishing.
     async fn is_manual_mode(&self) -> bool {
+        if self.env_manual_mode {
+            return true;
+        }
         use crowdrelay_infra::tenant_settings::TenantSettingsRepository;
         let repo = TenantSettingsRepository::new(self.pool.clone());
         match repo.brand_settings(self.workspace_id.into_uuid()).await {
@@ -211,9 +276,9 @@ impl SocialPostExecutorWorker {
             Err(error) => {
                 tracing::warn!(
                     %error,
-                    "failed to read social_auto_post from tenant settings; falling back to env default"
+                    "failed to read social_auto_post from tenant settings; holding posts for a human"
                 );
-                self.env_manual_mode
+                true
             }
         }
     }
@@ -458,7 +523,7 @@ impl SocialPostExecutorWorker {
                     LIMIT $2
                     FOR UPDATE SKIP LOCKED
                 )
-                RETURNING id, action_id, platform, smart_link, smart_link_id
+                RETURNING id, action_id, platform, smart_link, smart_link_id, image_url
             )
             -- Two payload shapes reach this read: the agent draft nests its
             -- fields under `draft`, the join-ask carries them flat. COALESCE
@@ -467,7 +532,7 @@ impl SocialPostExecutorWorker {
             SELECT c.id, c.action_id, c.platform,
                    COALESCE(a.payload->'draft'->>'text', a.payload->>'text') AS text,
                    COALESCE(a.payload->'draft'->>'cta_url', a.payload->>'cta_url') AS cta_url,
-                   c.smart_link, c.smart_link_id,
+                   c.smart_link, c.smart_link_id, c.image_url,
                    a.trace_id
             FROM claimed c
             LEFT JOIN autopilot_actions a ON a.id = c.action_id
@@ -500,7 +565,10 @@ impl SocialPostExecutorWorker {
     /// posts to the platform (or marks as awaiting manual post), and
     /// records the result.
     async fn process_action(&self, action: &ClaimedAction) -> Result<(), SocialPostExecutorError> {
-        if !matches!(action.platform.as_str(), "instagram" | "facebook" | "x") {
+        if !matches!(
+            action.platform.as_str(),
+            "instagram" | "facebook" | "x" | "telegram"
+        ) {
             return Err(SocialPostExecutorError::InvalidPlatform(
                 action.platform.clone(),
             ));
@@ -535,9 +603,10 @@ impl SocialPostExecutorWorker {
                 UPDATE social_posts
                 SET status = 'awaiting_manual_post',
                     updated_at = now()
-                WHERE id = $1
+                WHERE workspace_id = $1 AND id = $2
                 "#,
             )
+            .bind(self.workspace_id.into_uuid())
             .bind(action.id)
             .execute(&self.pool)
             .await?;
@@ -549,15 +618,19 @@ impl SocialPostExecutorWorker {
             return Ok(());
         }
 
-        // Automatic mode. Facebook Pages and Instagram publish; X still
-        // drafts, because its write API is behind a paid tier this tenant does
-        // not hold. Held with the reason so the queue says why rather than
-        // looking like a stuck job.
+        // Automatic mode. Facebook Pages and Instagram publish through the
+        // Graph API; Telegram through the Bot API when its own kill switch
+        // is on; X still drafts, because its write API is behind a paid tier
+        // this tenant does not hold. Held with the reason so the queue says
+        // why rather than looking like a stuck job.
         if action.platform == "facebook" {
             return self.publish_to_facebook_page(action).await;
         }
         if action.platform == "instagram" {
             return self.publish_to_instagram(action).await;
+        }
+        if action.platform == "telegram" {
+            return self.publish_to_telegram(action).await;
         }
 
         let reason = "x publishing needs a paid API tier";
@@ -569,449 +642,6 @@ impl SocialPostExecutorWorker {
             "social post held for an operator: this platform does not publish automatically"
         );
         Ok(())
-    }
-
-    /// Publishes a drafted caption to the tenant's own Instagram account.
-    ///
-    /// Two calls, because Instagram publishing is two steps: build a media
-    /// container from an image URL Meta fetches itself, then publish the
-    /// container. There is no text-only post on Instagram, so an image is not
-    /// decoration here — it is the post.
-    ///
-    /// **The system chooses the image, never the model.** A model naming an
-    /// image URL is the same risk as a model naming a link: it can point
-    /// anywhere, and what publishes under the band's name would be whatever it
-    /// picked. The selector reads the tenant's own asset rows and nothing
-    /// else, so an image that is not already CrowdRelay's cannot be published.
-    async fn publish_to_instagram(
-        &self,
-        action: &ClaimedAction,
-    ) -> Result<(), SocialPostExecutorError> {
-        let Some(token) = self.facebook_page_access_token.as_ref() else {
-            self.hold_for_human(action.id, "no meta access token is configured")
-                .await?;
-            return Ok(());
-        };
-        let Some(account_id) = self.instagram_account_id().await? else {
-            self.hold_for_human(
-                action.id,
-                "no connected instagram professional account to post to",
-            )
-            .await?;
-            return Ok(());
-        };
-        let caption = action.text.as_deref().unwrap_or("").trim();
-        if caption.is_empty() {
-            self.hold_for_human(action.id, "the draft has no caption")
-                .await?;
-            return Ok(());
-        }
-        let caption = self.publish_body(action, caption);
-        let Some(image_url) = self.next_instagram_image().await? else {
-            // Not a failure and not a defect: the tenant has published no
-            // photo the system may use. An operator can fix it by adding one,
-            // which is why the reason says what is missing.
-            self.hold_for_human(
-                action.id,
-                "no image available: add an active photo press asset to post on instagram",
-            )
-            .await?;
-            return Ok(());
-        };
-
-        let recent = self.recent_content_hashes("instagram").await?;
-        let verdict = review_outbound_post(
-            &caption,
-            &PublishContext {
-                channel: PublishChannel::Instagram,
-                approved_origins: &[self.public_origin.as_str()],
-                recent_content_hashes: &recent,
-                // Stored hashes cover the raw draft text; the reviewed
-                // caption carries the appended tracked link.
-                dedupe_text: action.text.as_deref(),
-            },
-        );
-        if let Some(reason) = verdict.hold_reason() {
-            tracing::info!(
-                action_id = %action.action_id,
-                reason = reason.as_str(),
-                "instagram post held for an operator by the publish guard"
-            );
-            self.hold_for_human(action.id, reason.as_str()).await?;
-            return Ok(());
-        }
-
-        match self
-            .submit_to_instagram(&account_id, &caption, &image_url, token)
-            .await
-        {
-            Ok(media_id) => {
-                // Post + re-anchor in one commit: the measurement window
-                // starts when the audience could see the post, not at
-                // dispatch — a deferred draft must not be observed across
-                // dead pre-exposure time.
-                // Read before the transaction: the audience snapshot is an
-                // input, not part of the commit's invariant, and a mid-tx
-                // pool acquire is a needless second connection held open.
-                let estimated_reach = self
-                    .measured_audience(MetricPlatform::Instagram)
-                    .await
-                    .unwrap_or(UNMEASURED_AUDIENCE_REACH);
-                let mut posted_tx = self.pool.begin().await?;
-                sqlx::query(
-                    r#"
-                    UPDATE social_posts
-                    SET status = 'posted',
-                        platform_post_id = $3,
-                        image_url = $4,
-                        posted_at = now(),
-                        updated_at = now(),
-                        error_message = NULL
-                    WHERE workspace_id = $1 AND id = $2
-                    "#,
-                )
-                .bind(self.workspace_id.into_uuid())
-                .bind(action.id)
-                .bind(&media_id)
-                .bind(&image_url)
-                .execute(&mut *posted_tx)
-                .await?;
-                crowdrelay_infra::fanbase::anchor_content_measurements_to_publication(
-                    &mut posted_tx,
-                    self.workspace_id.into_uuid(),
-                    "social_posts",
-                    action.id,
-                )
-                .await?;
-                self.file_reach_and_execute_assignment(
-                    &mut posted_tx,
-                    action,
-                    MetricPlatform::Instagram,
-                    &account_id,
-                    &media_id,
-                    estimated_reach,
-                )
-                .await?;
-                posted_tx.commit().await?;
-                tracing::info!(
-                    action_id = %action.action_id,
-                    media_id = %media_id,
-                    "instagram post published"
-                );
-                Ok(())
-            }
-            Err(SocialPostExecutorError::GraphRefused(message)) => {
-                tracing::warn!(
-                    action_id = %action.action_id,
-                    error = %message,
-                    "instagram refused the post; holding it for an operator"
-                );
-                self.hold_for_human(action.id, &format!("instagram refused the post: {message}"))
-                    .await?;
-                Ok(())
-            }
-            Err(error) => Err(error),
-        }
-    }
-
-    /// Creates the media container and publishes it. Returns the media id.
-    ///
-    /// A container that is created and never published is an orphan Meta
-    /// cleans up on its own, so a failure between the two steps costs nothing
-    /// and must not be retried into a duplicate post.
-    async fn submit_to_instagram(
-        &self,
-        account_id: &str,
-        caption: &str,
-        image_url: &str,
-        token: &str,
-    ) -> Result<String, SocialPostExecutorError> {
-        let creation_id = self
-            .graph_post(
-                &format!("https://graph.facebook.com/{GRAPH_API_VERSION}/{account_id}/media"),
-                &[
-                    ("image_url", image_url),
-                    ("caption", caption),
-                    ("access_token", token),
-                ],
-            )
-            .await?;
-        self.graph_post(
-            &format!("https://graph.facebook.com/{GRAPH_API_VERSION}/{account_id}/media_publish"),
-            &[("creation_id", &creation_id), ("access_token", token)],
-        )
-        .await
-    }
-
-    /// The connected Instagram Professional account's id.
-    ///
-    /// Instagram publishing runs against the IG user id, which is a different
-    /// identifier from the Page id even though one token covers both.
-    async fn instagram_account_id(&self) -> Result<Option<String>, SocialPostExecutorError> {
-        let account_id: Option<String> = sqlx::query_scalar(
-            r#"
-            SELECT provider_account_id
-            FROM fanbase_connections
-            WHERE workspace_id = $1
-              AND platform = 'instagram'
-              AND status = 'connected'
-              AND provider_account_id IS NOT NULL
-            ORDER BY updated_at DESC
-            LIMIT 1
-            "#,
-        )
-        .bind(self.workspace_id.into_uuid())
-        .fetch_optional(&self.pool)
-        .await?
-        .flatten();
-        Ok(account_id)
-    }
-
-    /// The image to publish next: the tenant's own photo assets, least
-    /// recently published first.
-    ///
-    /// Rotation rather than "the newest photo", because posting the same
-    /// picture every time is what a bot looks like — and the publish guard
-    /// cannot catch it, since it compares captions and the caption changes.
-    /// A photo that has never been published sorts first.
-    ///
-    /// Only `photo` and `logo` assets, only active ones, and only from this
-    /// workspace: the point of the selector is that a model cannot introduce
-    /// an image, so it reads rows an operator curated and nothing else.
-    async fn next_instagram_image(&self) -> Result<Option<String>, SocialPostExecutorError> {
-        let image_url: Option<String> = sqlx::query_scalar(
-            r#"
-            SELECT asset.url
-            FROM beacon_press_assets AS asset
-            LEFT JOIN LATERAL (
-                SELECT max(post.posted_at) AS last_published_at
-                FROM social_posts AS post
-                WHERE post.workspace_id = asset.workspace_id
-                  AND post.platform = 'instagram'
-                  AND post.status = 'posted'
-                  AND post.image_url = asset.url
-            ) AS use ON true
-            WHERE asset.workspace_id = $1
-              AND asset.active
-              AND asset.asset_kind IN ('photo', 'logo')
-              AND asset.url ~* '^https://'
-            ORDER BY use.last_published_at ASC NULLS FIRST,
-                     asset.sort_order,
-                     asset.asset_key
-            LIMIT 1
-            "#,
-        )
-        .bind(self.workspace_id.into_uuid())
-        .fetch_optional(&self.pool)
-        .await?;
-        Ok(image_url)
-    }
-
-    /// Publishes a drafted post to the tenant's own Facebook Page.
-    ///
-    /// The Page id is the connection's `provider_account_id` — the same one
-    /// `growth_metric_sync` reads Page metrics from, so publishing and
-    /// measuring cannot drift onto different Pages.
-    ///
-    /// Every refusal path holds the draft rather than failing it: a missing
-    /// token, a missing connection, a guard verdict and a Graph API refusal
-    /// all leave a post a person can still publish, with the reason recorded.
-    async fn publish_to_facebook_page(
-        &self,
-        action: &ClaimedAction,
-    ) -> Result<(), SocialPostExecutorError> {
-        let Some(token) = self.facebook_page_access_token.as_ref() else {
-            self.hold_for_human(action.id, "no facebook page access token is configured")
-                .await?;
-            return Ok(());
-        };
-        let Some(page_id) = self.facebook_page_id().await? else {
-            self.hold_for_human(action.id, "no connected facebook page to post to")
-                .await?;
-            return Ok(());
-        };
-        let body = action.text.as_deref().unwrap_or("").trim();
-        if body.is_empty() {
-            self.hold_for_human(action.id, "the draft has no text")
-                .await?;
-            return Ok(());
-        }
-        // The tracked link is part of the published body — a post that
-        // carries it can have its clicks counted; one that does not is
-        // content that chose to be unmeasured.
-        let body = self.publish_body(action, body);
-
-        // The read a person used to do before a post went out under the
-        // band's name. A held post lands in the operator queue with its
-        // reason, so the worst case of automatic mode is the behaviour that
-        // preceded it.
-        let recent = self.recent_content_hashes("facebook").await?;
-        let verdict = review_outbound_post(
-            &body,
-            &PublishContext {
-                channel: PublishChannel::Social,
-                approved_origins: &[self.public_origin.as_str()],
-                recent_content_hashes: &recent,
-                // Stored hashes cover the raw draft text; the reviewed body
-                // carries the appended tracked link.
-                dedupe_text: action.text.as_deref(),
-            },
-        );
-        if let Some(reason) = verdict.hold_reason() {
-            tracing::info!(
-                action_id = %action.action_id,
-                reason = reason.as_str(),
-                "facebook post held for an operator by the publish guard"
-            );
-            self.hold_for_human(action.id, reason.as_str()).await?;
-            return Ok(());
-        }
-
-        match self.submit_to_facebook_page(&page_id, &body, token).await {
-            Ok(post_id) => {
-                // Same one-commit shape as the Instagram arm: post +
-                // re-anchored measurement windows land or neither does.
-                let estimated_reach = self
-                    .measured_audience(MetricPlatform::Facebook)
-                    .await
-                    .unwrap_or(UNMEASURED_AUDIENCE_REACH);
-                let mut posted_tx = self.pool.begin().await?;
-                sqlx::query(
-                    r#"
-                    UPDATE social_posts
-                    SET status = 'posted',
-                        platform_post_url = $3,
-                        posted_at = now(),
-                        updated_at = now(),
-                        error_message = NULL
-                    WHERE workspace_id = $1 AND id = $2
-                    "#,
-                )
-                .bind(self.workspace_id.into_uuid())
-                .bind(action.id)
-                .bind(format!("https://www.facebook.com/{post_id}"))
-                .execute(&mut *posted_tx)
-                .await?;
-                crowdrelay_infra::fanbase::anchor_content_measurements_to_publication(
-                    &mut posted_tx,
-                    self.workspace_id.into_uuid(),
-                    "social_posts",
-                    action.id,
-                )
-                .await?;
-                self.file_reach_and_execute_assignment(
-                    &mut posted_tx,
-                    action,
-                    MetricPlatform::Facebook,
-                    &page_id,
-                    &format!("https://www.facebook.com/{post_id}"),
-                    estimated_reach,
-                )
-                .await?;
-                posted_tx.commit().await?;
-                tracing::info!(
-                    action_id = %action.action_id,
-                    post_id = %post_id,
-                    "facebook page post published"
-                );
-                Ok(())
-            }
-            // A refusal is a fact about the credential or the content, not a
-            // transient failure, so it holds rather than retries. The most
-            // likely one is the Page token lacking `pages_manage_posts`, and
-            // retrying that forever would bury it.
-            Err(SocialPostExecutorError::GraphRefused(message)) => {
-                tracing::warn!(
-                    action_id = %action.action_id,
-                    error = %message,
-                    "facebook refused the post; holding it for an operator"
-                );
-                self.hold_for_human(action.id, &format!("facebook refused the post: {message}"))
-                    .await?;
-                Ok(())
-            }
-            Err(error) => Err(error),
-        }
-    }
-
-    /// POSTs the message to the Page feed and returns the created post id.
-    async fn submit_to_facebook_page(
-        &self,
-        page_id: &str,
-        message: &str,
-        token: &str,
-    ) -> Result<String, SocialPostExecutorError> {
-        self.graph_post(
-            &format!("https://graph.facebook.com/{GRAPH_API_VERSION}/{page_id}/feed"),
-            &[("message", message), ("access_token", token)],
-        )
-        .await
-    }
-
-    /// One Graph API write, returning the id it created.
-    ///
-    /// Shared by the Page feed and both Instagram steps so there is one place
-    /// that decides what a Graph response means. A refusal carries Meta's own
-    /// message: `(#200) Requires pages_manage_posts permission` is something an
-    /// operator can act on and "posting failed" is not.
-    ///
-    /// Form body rather than query string throughout — the token is a
-    /// credential, and a URL is the one part of a request proxies log.
-    async fn graph_post(
-        &self,
-        url: &str,
-        form: &[(&str, &str)],
-    ) -> Result<String, SocialPostExecutorError> {
-        #[derive(serde::Deserialize)]
-        struct GraphResponse {
-            id: Option<String>,
-            error: Option<GraphError>,
-        }
-        #[derive(serde::Deserialize)]
-        struct GraphError {
-            message: String,
-        }
-
-        let response = self
-            .http_client
-            .post(url)
-            .form(form)
-            .send()
-            .await
-            .map_err(SocialPostExecutorError::GraphRequest)?;
-        let parsed: GraphResponse = response
-            .json()
-            .await
-            .map_err(SocialPostExecutorError::GraphRequest)?;
-        if let Some(error) = parsed.error {
-            return Err(SocialPostExecutorError::GraphRefused(error.message));
-        }
-        parsed.id.ok_or_else(|| {
-            SocialPostExecutorError::GraphRefused(
-                "the graph api returned neither an id nor an error".to_owned(),
-            )
-        })
-    }
-
-    /// The connected Facebook Page's id, if the tenant has one.
-    async fn facebook_page_id(&self) -> Result<Option<String>, SocialPostExecutorError> {
-        let page_id: Option<String> = sqlx::query_scalar(
-            r#"
-            SELECT provider_account_id
-            FROM fanbase_connections
-            WHERE workspace_id = $1
-              AND platform = 'facebook'
-              AND status = 'connected'
-              AND provider_account_id IS NOT NULL
-            ORDER BY updated_at DESC
-            LIMIT 1
-            "#,
-        )
-        .bind(self.workspace_id.into_uuid())
-        .fetch_optional(&self.pool)
-        .await?
-        .flatten();
-        Ok(page_id)
     }
 
     /// Parks a drafted post for an operator, with the reason it was held.
@@ -1109,11 +739,12 @@ impl SocialPostExecutorWorker {
             r#"
             UPDATE social_posts
             SET status = 'failed',
-                error_message = $2,
+                error_message = $3,
                 updated_at = now()
-            WHERE id = $1
+            WHERE workspace_id = $1 AND id = $2
             "#,
         )
+        .bind(self.workspace_id.into_uuid())
         .bind(post_id)
         .bind(reason)
         .execute(&self.pool)
@@ -1126,11 +757,12 @@ impl SocialPostExecutorWorker {
             r#"
             UPDATE social_posts
             SET status = 'rate_limited',
-                rate_limited_until = now() + make_interval(secs => $2::double precision),
+                rate_limited_until = now() + make_interval(secs => $3::double precision),
                 updated_at = now()
-            WHERE id = $1
+            WHERE workspace_id = $1 AND id = $2
             "#,
         )
+        .bind(self.workspace_id.into_uuid())
         .bind(post_id)
         .bind(RATE_LIMIT_BACKOFF.as_secs() as i64)
         .execute(&self.pool)
@@ -1152,6 +784,11 @@ struct ClaimedAction {
     /// validation.
     smart_link: Option<String>,
     smart_link_id: Option<Uuid>,
+    /// The image the action carries — only join-ask rows set it (the
+    /// tenant's `join_ask_image_url`). `None` means the platform's own
+    /// fallback: Instagram rotates press assets, the others post without
+    /// a photo.
+    image_url: Option<String>,
     #[allow(dead_code)]
     trace_id: Option<Uuid>,
 }
