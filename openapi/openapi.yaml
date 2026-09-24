@@ -162,6 +162,59 @@ paths:
                   web_push: { type: boolean }
                   vapid_public_key: { type: [string, 'null'], maxLength: 256 }
         '503': { $ref: '#/components/responses/PrivateProblem' }
+  /public/media/{id}:
+    get:
+      operationId: getPublicMedia
+      summary: Read one tenant-uploaded image
+      description: Public so a social platform's crawler can fetch an image attached to a post the tenant published. Ids are unguessable UUIDs and there is no listing route.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '200':
+          description: The image bytes, with the content type sniffed at upload.
+          content:
+            image/*:
+              schema: { type: string, format: binary }
+        '404': { description: No image with that id. }
+        '503': { description: The image store could not be read. }
+  /public/approvals/{token}:
+    parameters:
+      - { name: token, in: path, required: true, schema: { type: string, minLength: 1, maxLength: 1024 } }
+    get:
+      operationId: getPublicApproval
+      summary: Render one pending ask from a crew e-mail link
+      description: The mailed token is the whole credential. GET only renders the ask and never decides, so a link previewer cannot vote. An expired or already-decided ask says so.
+      responses:
+        '200':
+          description: An HTML page with one form per answer, or the decision already taken.
+          content:
+            text/html:
+              schema: { type: string }
+        '404': { description: The token does not name an ask. }
+        '410': { description: The link outlived its window. }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
+    post:
+      operationId: decidePublicApproval
+      summary: Answer one pending ask from a crew e-mail link
+      description: Applies the verdict through the same transition the console's approve and cancel use.
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              required: [verdict]
+              properties:
+                verdict: { type: string, enum: [approve, skip] }
+      responses:
+        '200':
+          description: An HTML page confirming what happened.
+          content:
+            text/html:
+              schema: { type: string }
+        '404': { description: The token does not name an ask. }
+        '410': { description: The link outlived its window. }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
   /me/push/endpoints:
     post:
       operationId: registerMyPushEndpoint

@@ -64,6 +64,8 @@ ROUTE_FILES = [
     "community_intelligence_routes.rs",
     "routing/growth.rs",
     "content_engine.rs",
+    "media.rs",
+    "team_approvals.rs",
     "control_plane_operator.rs",
 ]
 
