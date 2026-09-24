@@ -47,7 +47,7 @@ pub(crate) fn public_routes() -> axum::Router<crate::AppState> {
 /// Largest image Meta will fetch for a post; anything past it is rejected
 /// before the row exists. The route raises the body limit to this — the
 /// control-plane router default (8 KiB) is for JSON payloads, not files.
-pub const MAX_MEDIA_BODY_BYTES: usize = 8 * 1024 * 1024;
+pub const MAX_MEDIA_BODY_BYTES: usize = 8192 * 1024;
 
 const PUBLIC_IMMUTABLE: &str = "public, max-age=31536000, immutable";
 
@@ -199,8 +199,19 @@ pub async fn upload_media(
 /// URL at publish time. No auth, no listing route, unguessable uuid ids.
 pub async fn get_media(State(state): State<crate::AppState>, Path(id): Path<Uuid>) -> Response {
     let workspace_id = state.ticketing.workspace_id().into_uuid();
-    let Ok(Some(object)) = state.media.get(workspace_id, id).await else {
-        return StatusCode::NOT_FOUND.into_response();
+    let object = match state.media.get(workspace_id, id).await {
+        Ok(Some(object)) => object,
+        Ok(None) => return StatusCode::NOT_FOUND.into_response(),
+        // A transient read failure is not a missing object — Meta's crawler
+        // retries a 503 and abandons a 404, so the two cannot share an arm.
+        Err(error) => {
+            tracing::warn!(%error, media_id = %id, "media read failed");
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                [(CACHE_CONTROL, PRIVATE_NO_STORE)],
+            )
+                .into_response();
+        }
     };
     let Ok(content_type) = HeaderValue::from_str(&object.content_type) else {
         return StatusCode::NOT_FOUND.into_response();

@@ -259,10 +259,16 @@ impl SocialPostExecutorWorker {
     }
 
     /// Returns true when the executor should draft (manual mode) rather than
-    /// publish automatically. Reads the live tenant setting from the database
-    /// (60s TTL cache); falls back to the env-var value on any error so a
-    /// database blip never silently enables publishing.
+    /// publish automatically. Two switches gate publishing: the deployment
+    /// kill switch (`CROWDRELAY_SOCIAL_AUTO_POST`, off forces manual no matter
+    /// what the tenant setting says) and the tenant's own `social_auto_post`,
+    /// read live from the database (60s TTL cache) so the control plane toggle
+    /// takes effect without a restart. A settings read failure also holds —
+    /// a database blip must never silently enable publishing.
     async fn is_manual_mode(&self) -> bool {
+        if self.env_manual_mode {
+            return true;
+        }
         use crowdrelay_infra::tenant_settings::TenantSettingsRepository;
         let repo = TenantSettingsRepository::new(self.pool.clone());
         match repo.brand_settings(self.workspace_id.into_uuid()).await {
@@ -270,9 +276,9 @@ impl SocialPostExecutorWorker {
             Err(error) => {
                 tracing::warn!(
                     %error,
-                    "failed to read social_auto_post from tenant settings; falling back to env default"
+                    "failed to read social_auto_post from tenant settings; holding posts for a human"
                 );
-                self.env_manual_mode
+                true
             }
         }
     }
@@ -597,9 +603,10 @@ impl SocialPostExecutorWorker {
                 UPDATE social_posts
                 SET status = 'awaiting_manual_post',
                     updated_at = now()
-                WHERE id = $1
+                WHERE workspace_id = $1 AND id = $2
                 "#,
             )
+            .bind(self.workspace_id.into_uuid())
             .bind(action.id)
             .execute(&self.pool)
             .await?;
@@ -732,11 +739,12 @@ impl SocialPostExecutorWorker {
             r#"
             UPDATE social_posts
             SET status = 'failed',
-                error_message = $2,
+                error_message = $3,
                 updated_at = now()
-            WHERE id = $1
+            WHERE workspace_id = $1 AND id = $2
             "#,
         )
+        .bind(self.workspace_id.into_uuid())
         .bind(post_id)
         .bind(reason)
         .execute(&self.pool)
@@ -749,11 +757,12 @@ impl SocialPostExecutorWorker {
             r#"
             UPDATE social_posts
             SET status = 'rate_limited',
-                rate_limited_until = now() + make_interval(secs => $2::double precision),
+                rate_limited_until = now() + make_interval(secs => $3::double precision),
                 updated_at = now()
-            WHERE id = $1
+            WHERE workspace_id = $1 AND id = $2
             "#,
         )
+        .bind(self.workspace_id.into_uuid())
         .bind(post_id)
         .bind(RATE_LIMIT_BACKOFF.as_secs() as i64)
         .execute(&self.pool)

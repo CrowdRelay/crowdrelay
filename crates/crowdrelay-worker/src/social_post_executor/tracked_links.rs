@@ -67,23 +67,29 @@ impl SocialPostExecutorWorker {
             return Ok(());
         }
         // The destination came out of a language model — the same refusal
-        // the community path applies: only the tenant's own origin may be
+        // the community path applies: only a tenant-owned origin may be
         // wrapped, or the post would redirect the band's domain to wherever
-        // the model said.
-        let destination = match crowdrelay_domain::acquisition::agent_smart_link_destination(
-            cta_url,
-            &[self.public_origin.as_str()],
-        ) {
-            Ok(destination) => destination,
-            Err(refusal) => {
-                tracing::warn!(
-                    action_id = %row.action_id,
-                    refusal = %refusal,
-                    "refused a social-post link destination; the post goes out untracked"
-                );
-                return Ok(());
-            }
-        };
+        // the model said. Both of ours count: the site origin the `/l/`
+        // redirect lives under, and the member-site origin the join-ask
+        // evaluator mints its CTA on — the two are the same URL today but
+        // are configured separately and can diverge.
+        let member_origin = self.member_site_origin().await;
+        let allowed = [Some(self.public_origin.as_str()), member_origin.as_deref()]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
+        let destination =
+            match crowdrelay_domain::acquisition::agent_smart_link_destination(cta_url, &allowed) {
+                Ok(destination) => destination,
+                Err(refusal) => {
+                    tracing::warn!(
+                        action_id = %row.action_id,
+                        refusal = %refusal,
+                        "refused a social-post link destination; the post goes out untracked"
+                    );
+                    return Ok(());
+                }
+            };
         let slug = format!("social-{}", row.action_id.simple());
         sqlx::query(
             r#"
@@ -125,6 +131,28 @@ impl SocialPostExecutorWorker {
             row.smart_link_id = Some(link_id);
         }
         Ok(())
+    }
+
+    /// The tenant's member-site origin, when one is configured. Read through
+    /// the same cached settings repository `is_manual_mode` uses, so a claim
+    /// cycle costs at most one extra query per minute. A read failure narrows
+    /// the allowlist to the site origin rather than failing the claim.
+    async fn member_site_origin(&self) -> Option<String> {
+        use crowdrelay_infra::tenant_settings::TenantSettingsRepository;
+        let repo = TenantSettingsRepository::new(self.pool.clone());
+        match repo.brand_settings(self.workspace_id.into_uuid()).await {
+            Ok(settings) => {
+                let base = settings
+                    .member_site_base_url
+                    .trim_end_matches('/')
+                    .to_owned();
+                (!base.is_empty()).then_some(base)
+            }
+            Err(error) => {
+                tracing::warn!(%error, "member-site origin unreadable; wrapping against the site origin only");
+                None
+            }
+        }
     }
 
     /// The text that actually publishes — the draft body plus the tracked

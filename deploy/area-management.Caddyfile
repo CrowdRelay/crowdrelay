@@ -102,15 +102,15 @@
 
 	handle /healthz/ready {
 		rewrite * /v1/health/ready
-		reverse_proxy crowdrelay-api-1:8080
+		reverse_proxy crowdrelay-api-active:8080
 	}
 
 	handle @area {
-		reverse_proxy crowdrelay-api-1:8080
+		reverse_proxy crowdrelay-api-active:8080
 	}
 
 	handle @operations {
-		reverse_proxy crowdrelay-api-1:8080
+		reverse_proxy crowdrelay-api-active:8080
 	}
 
 	respond 404

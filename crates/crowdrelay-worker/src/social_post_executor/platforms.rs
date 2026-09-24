@@ -691,10 +691,18 @@ impl SocialPostExecutorWorker {
                     "the bot api returned ok but no message".to_owned(),
                 )
             })?;
+        // `-100…` numeric ids map to the `t.me/c/…` form; a username channel
+        // keeps its name — minus the `@` the connect form accepts and stores,
+        // which would otherwise land in the URL as a literal `@`.
         let public_channel = channel
             .strip_prefix("-100")
             .map(|stripped| format!("https://t.me/c/{stripped}/{message_id}"))
-            .unwrap_or_else(|| format!("https://t.me/{channel}/{message_id}"));
+            .unwrap_or_else(|| {
+                format!(
+                    "https://t.me/{}/{message_id}",
+                    channel.trim_start_matches('@')
+                )
+            });
         Ok(public_channel)
     }
 
