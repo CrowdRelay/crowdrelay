@@ -86,8 +86,9 @@ pub enum AgentOutcomeError {
     #[error("agent proposed target_kind {0:?}, which agent_outreach_targets does not accept")]
     UnknownTargetKind(String),
     #[error(
-        "no press target has a contact email, so a press pitch has nobody to reach — \
-         add a contact_email to an agent_outreach_targets row with target_kind='press'"
+        "the pitch does not name exactly one outreach target that can be mailed now \
+         (active, accepts outreach, not do-not-contact, has an address, outside the \
+         contact cooldown) — it is refused rather than sent to someone it was not written for"
     )]
     NoPressRecipient,
     #[error("agent outcome payload does not match the action schema")]
@@ -725,26 +726,27 @@ impl AgentOutcomeWorker {
 
             let is_community_post = community_target_id.is_some();
             let is_signal_push = outcome.kind == OutcomeKind::SignalPush;
-            // A channel whose auto-post flag is set already carries the
-            // operator's approval; asking again per post is asking twice, and
-            // the second ask is what expired. See `auto_post_platforms` for
-            // what that cost. Reddit cannot reach this: `permits` refuses it,
-            // and the executor needs `CROWDRELAY_REDDIT_WRITE_ENABLED` on top
-            // of the community auto-post flag besides.
+            // A channel auto-post flag used to count as the operator's
+            // standing approval of every draft for that channel, so an
+            // LLM-written post went out with nobody having read it. It no
+            // longer does: text a model wrote waits for a person, and the flag
+            // only decides whether an executor publishes that approved text
+            // itself or leaves it for the operator to post by hand. See
+            // `model_text_authority` for the rest of the rule.
             let draft_platform = outcome
                 .payload
                 .item
                 .as_ref()
                 .and_then(|i| i.get("platform"))
                 .and_then(Value::as_str);
-            let channel_pre_approved = outcome.kind == OutcomeKind::SocialPost
+            if outcome.kind == OutcomeKind::SocialPost
                 && community_target_id.is_none()
-                && self.auto_post_platforms.permits(draft_platform);
-            if channel_pre_approved {
+                && self.auto_post_platforms.permits(draft_platform)
+            {
                 tracing::info!(
                     outcome_id = %outcome.id,
                     platform = draft_platform.unwrap_or("unknown"),
-                    "channel has standing operator approval; dispatching without a second one"
+                    "channel auto-post is on, but model-written text still waits for an operator's approval"
                 );
             }
 
@@ -773,8 +775,12 @@ impl AgentOutcomeWorker {
                         // costs a model call and a dispatch slot, and an
                         // operator approving copy addressed to nobody is worse
                         // than never being asked.
-                        let Some(recipient) =
-                            press_recipient(&self.pool, self.workspace_id).await?
+                        let Some(recipient) = press_recipient(
+                            &self.pool,
+                            self.workspace_id,
+                            outcome.payload.item.as_ref(),
+                        )
+                        .await?
                         else {
                             return Err(AgentOutcomeError::NoPressRecipient);
                         };
@@ -968,22 +974,22 @@ impl AgentOutcomeWorker {
                 // gave, so it short-circuits. Everything else answers to both
                 // authority axes, the stricter winning, exactly as
                 // `evaluate::persist` does for the brain's own candidates.
-                let authority = if channel_pre_approved {
-                    UnattendedAuthority::Policy
-                } else if is_community_post || is_signal_push {
+                let authority = if is_community_post || is_signal_push {
                     // The community is the target an operator can judge once.
                     // A push has no single target to have judged, so it looks
                     // for no grant and answers to the two axes alone.
                     let target_key = community_target_id.map(|id| id.to_string());
-                    self.may_auto_execute(
-                        &mut tx,
-                        effective_context,
-                        class,
-                        action_kind,
-                        target_key.as_deref(),
-                        OffsetDateTime::now_utc(),
+                    model_text_authority(
+                        self.may_auto_execute(
+                            &mut tx,
+                            effective_context,
+                            class,
+                            action_kind,
+                            target_key.as_deref(),
+                            OffsetDateTime::now_utc(),
+                        )
+                        .await?,
                     )
-                    .await?
                 } else {
                     // Press pitches and everything unrecognised: a person
                     // decides. An outcome kind nobody has classified is

@@ -26,7 +26,7 @@ use crate::{action_class::ActionClass, autonomy::Confidence};
 
 // The topical vocabulary lives in its own module; the screen consults the
 // signal, and workers importing it through this path keep working.
-pub use crate::community_topic::{CommunityTopicSignal, community_topic_signal};
+pub use crate::community_topic::{CommunityTopicSignal, community_topic_signal, fit_to_act};
 
 /// Where a candidate came from. Recorded on every row so a source that turns
 /// out to be bad can be revoked wholesale instead of hunted row by row.
@@ -338,6 +338,12 @@ pub fn screen_community_candidate(
     // a removal and a moderator who remembers the band.
     if snapshot.topic_signal == CommunityTopicSignal::Unrelated {
         return ScreeningVerdict::Refuse(RefusalReason::OffTopic);
+    }
+    // A music space for a different scene is a poor fit, not off-topic: a
+    // black-metal forum is about music, just not about this act's. See
+    // `community_topic::fit_to_act`.
+    if snapshot.topic_signal == CommunityTopicSignal::OtherSubgenre {
+        return ScreeningVerdict::Refuse(RefusalReason::PoorFit);
     }
     // A community that bans self-promotion outright is not a growth target at
     // any size. Posting there costs a removal and a moderator who remembers.

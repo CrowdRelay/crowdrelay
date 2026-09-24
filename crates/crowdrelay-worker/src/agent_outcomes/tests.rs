@@ -234,3 +234,77 @@ fn valid_signal_push_passes() {
     );
     evaluate_outcome_quality(&outcome).expect("valid signal push must pass");
 }
+
+// ---------------------------------------------------------------------------
+// Model-written text never rides a workspace-wide "yes".
+//
+// On 2026-08-31 four push notifications promising fans a presale code and
+// rehearsal footage that did not exist, and on 2026-09-03 an invented
+// rehearsal story posted to a subreddit, went out approved as
+// `policy:bounded_auto` — a setting, not a person. A standing grant is a
+// person's decision about one named community and still carries.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_workspace_policy_cannot_release_model_written_text() {
+    assert_eq!(
+        model_text_authority(UnattendedAuthority::Policy),
+        UnattendedAuthority::Denied
+    );
+}
+
+#[test]
+fn a_persons_standing_grant_still_releases_its_one_community() {
+    assert_eq!(
+        model_text_authority(UnattendedAuthority::Grant),
+        UnattendedAuthority::Grant
+    );
+    assert_eq!(
+        model_text_authority(UnattendedAuthority::Denied),
+        UnattendedAuthority::Denied
+    );
+}
+
+#[test]
+fn the_ingest_path_routes_community_posts_and_pushes_through_the_model_text_rule() {
+    // A source check, because the rule only protects anything while the
+    // authority decision actually calls it — and the channel flag must not
+    // come back as a way around it.
+    let source = include_str!("../agent_outcomes.rs");
+    assert!(
+        source.contains("model_text_authority(\n                        self.may_auto_execute(")
+    );
+    assert!(!source.contains("let authority = if channel_pre_approved"));
+}
+
+// ---------------------------------------------------------------------------
+// A pitch goes to the target it was written for, or nowhere.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_pitch_names_its_one_addressee() {
+    let id = Uuid::now_v7();
+    let draft = serde_json::json!({ "target_refs": [id.to_string()] });
+    assert_eq!(single_target_ref(Some(&draft)), Some(id));
+    // The same id twice is still one addressee.
+    let twice = serde_json::json!({ "target_refs": [id.to_string(), format!(" {id} ")] });
+    assert_eq!(single_target_ref(Some(&twice)), Some(id));
+}
+
+#[test]
+fn a_pitch_with_no_several_or_malformed_refs_has_no_recipient() {
+    assert_eq!(single_target_ref(None), None);
+    assert_eq!(single_target_ref(Some(&serde_json::json!({}))), None);
+    assert_eq!(
+        single_target_ref(Some(&serde_json::json!({ "target_refs": [] }))),
+        None
+    );
+    assert_eq!(
+        single_target_ref(Some(
+            &serde_json::json!({ "target_refs": ["Metal Devastation Radio"] })
+        )),
+        None
+    );
+    let two = serde_json::json!({ "target_refs": [Uuid::now_v7().to_string(), Uuid::now_v7().to_string()] });
+    assert_eq!(single_target_ref(Some(&two)), None);
+}

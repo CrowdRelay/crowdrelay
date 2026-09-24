@@ -24,7 +24,7 @@
 
 use crowdrelay_domain::target_discovery::{
     CommunityCandidateSnapshot, ScreeningVerdict, TargetDiscoveryPolicy, community_topic_signal,
-    screen_community_candidate,
+    fit_to_act, screen_community_candidate,
 };
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -76,6 +76,12 @@ pub(super) async fn promote_community_places(
     pool: &PgPool,
     workspace_id: Uuid,
 ) -> Result<PromotionReport, sqlx::Error> {
+    let act_style: Option<String> = sqlx::query_scalar(
+        "SELECT value FROM tenant_settings WHERE workspace_id = $1 AND key = 'act_style'",
+    )
+    .bind(workspace_id)
+    .fetch_optional(pool)
+    .await?;
     let places: Vec<PlaceRow> = sqlx::query_as(
         r#"
         SELECT place.id,
@@ -161,7 +167,16 @@ pub(super) async fn promote_community_places(
             sells_placement: false,
             refused_by_us_or_them: status == "blocked"
                 || matches!(membership_state.as_str(), "rejected" | "not_a_fit"),
-            topic_signal: community_topic_signal(&name, notes.as_deref(), &genres),
+            // r/BlackMetal reached a metalcore band's posting queue through
+            // this sweep on "size not yet measured" with nothing reading its
+            // scene against the act's. See `community_topic::fit_to_act`.
+            topic_signal: fit_to_act(
+                community_topic_signal(&name, notes.as_deref(), &genres),
+                act_style.as_deref(),
+                &name,
+                notes.as_deref(),
+                &genres,
+            ),
         };
         // A refused community is still written, as a refused row. Recording
         // the refusal is what stops the next sweep rediscovering it.

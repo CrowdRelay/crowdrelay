@@ -202,6 +202,23 @@ pub(super) async fn close_release_making_of_assignments(
     Ok(())
 }
 
+/// The deferred ask's deadline as the audit row stores it: RFC 3339 text.
+///
+/// Not the bare `OffsetDateTime`. serde writes that as a nine-element tuple
+/// (`[2026, 270, 1, 58, 26, …]`), and the daily briefing reads this field
+/// back in SQL with `::timestamptz`. The tuple aborted team handoff
+/// reconciliation on every cycle from the first deferred ask that carried a
+/// deadline (seen in production on 2026-09-24). The briefing still decodes
+/// the tuple, for rows written before this.
+fn deadline_json(deadline_at: Option<OffsetDateTime>) -> serde_json::Value {
+    deadline_at
+        .and_then(|at| {
+            at.format(&time::format_description::well_known::Rfc3339)
+                .ok()
+        })
+        .map_or(serde_json::Value::Null, serde_json::Value::String)
+}
+
 /// §4i-6: an ask nobody could take is recorded, not dropped on the floor —
 /// one audit row per (ask, reason), so a sweep re-refusing the same ask for
 /// the same reason does not spam the trail, and the daily briefing can count
@@ -251,7 +268,7 @@ pub(super) async fn record_ask_refusal(
         "source_id": source_id,
         "source_ref": source_ref,
         "action_id": action_id,
-        "deadline_at": deadline_at,
+        "deadline_at": deadline_json(deadline_at),
         "primary_skill": need.primary_skill.as_str(),
         "secondary_skill": need.secondary_skill.map(|skill| skill.as_str()),
     }))
@@ -259,4 +276,22 @@ pub(super) async fn record_ask_refusal(
     .await
     .map_err(map_sqlx)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod deadline_json_tests {
+    use super::deadline_json;
+    use time::OffsetDateTime;
+
+    #[test]
+    fn a_deadline_is_stored_as_text_postgres_can_cast() {
+        let at = OffsetDateTime::from_unix_timestamp(1790474306).expect("valid timestamp");
+        let value = deadline_json(Some(at));
+        assert_eq!(value, serde_json::json!("2026-09-27T01:58:26Z"));
+    }
+
+    #[test]
+    fn no_deadline_is_null() {
+        assert_eq!(deadline_json(None), serde_json::Value::Null);
+    }
 }
