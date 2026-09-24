@@ -65,10 +65,11 @@ pub(super) async fn execute_beacon_outreach(
     .fetch_one(&mut **transaction)
     .await
     .map_err(map_sqlx)?;
-    // The show and press links are on the tenant's own site. They were the
-    // first tenant's for everyone, so another band's contacts were pointed at
-    // that band's show page and EPK. No site of its own means no links —
-    // the letter can still carry the event's ticket URL.
+    // The show and press links are on the tenant's own site, but the
+    // /pl/live/… and /pl/epk/ paths are the first tenant's layout — anyone
+    // else's letter gets no links rather than another band's show page and
+    // EPK. No site of its own means no links either — the letter can still
+    // carry the event's ticket URL.
     let site_root = sqlx::query_scalar::<_, String>(
         "SELECT value FROM tenant_settings WHERE workspace_id = $1 AND key = 'member_site_base_url'",
     )
@@ -78,10 +79,22 @@ pub(super) async fn execute_beacon_outreach(
     .map_err(map_sqlx)?
     .map(|value| value.trim().trim_end_matches('/').to_owned())
     .filter(|root| !root.is_empty());
-    let show_url = site_root
-        .as_deref()
-        .map(|root| format!("{root}/pl/live/{}/", target.6));
-    let epk_url = site_root.as_deref().map(|root| format!("{root}/pl/epk/"));
+    let (_, first_tenant) =
+        crate::beacon_signal::beacon_release_signature(&mut **transaction, workspace_id.into_uuid())
+            .await
+            .map_err(map_sqlx)?;
+    let show_url = if first_tenant {
+        site_root
+            .as_deref()
+            .map(|root| format!("{root}/pl/live/{}/", target.6))
+    } else {
+        None
+    };
+    let epk_url = if first_tenant {
+        site_root.as_deref().map(|root| format!("{root}/pl/epk/"))
+    } else {
+        None
+    };
     emit_outward_action(
         transaction,
         workspace_id,

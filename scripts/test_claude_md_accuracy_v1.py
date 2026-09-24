@@ -332,7 +332,7 @@ class LayoutIsRoughlyRight(ClaudeMdTestCase):
     def test_every_registration_file_is_named(self) -> None:
         """A new router file has to be added to the map before it can hide in it.
 
-        Nine files register routes. Grepping only `routing.rs` for a handler has
+        Twelve files register routes. Grepping only `routing.rs` for a handler has
         repeatedly produced the conclusion that a live endpoint is unrouted --
         against the ops timeline and against the autopilot dry-run preview, both
         of which are live in production behind auth.

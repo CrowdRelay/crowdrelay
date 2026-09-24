@@ -10,9 +10,13 @@ This test fails on any single-line, non-raw string literal under
 
     [A-Za-z.,;:—!?)]\s{6,}[A-Za-z(—]
 
-Skipped: raw strings (`r"..."`, `r#"..."#`), `//` line comments, and
+Skipped: raw strings (`r"..."`, `r#"..."#`), `//` line comments,
 literals that span more than one line — a multi-line literal is allowed to
-hold intentional block indentation.
+hold intentional block indentation — and a run that directly follows a
+single `\n` escape: that is indentation the literal put at the start of a
+line on purpose (e.g. a source-shape pin asserting formatted code), not a
+squashed continuation. A run after `\n\n` is still flagged — the paragraph
+breaks were exactly where the squash left its indents.
 """
 
 from __future__ import annotations
@@ -67,12 +71,32 @@ def literals_on(line: str) -> list[tuple[int, str]]:
     ]
 
 
+def mangled(literal: str) -> bool:
+    """Any run that is not deliberate line-start indentation.
+
+    `match.start() + 1` sits on the first space of the run. When the two
+    source characters before it are the `\n` escape — and the run does not
+    follow `\n\n` — the literal deliberately indented the next line (a
+    code-shape assertion like `include_str!` pinning formatted source), so
+    it is not the mangle this guard exists for.
+    """
+    for match in WHITESPACE_RUN.finditer(literal):
+        run_start = match.start() + 1
+        single_newline = (
+            literal[max(0, run_start - 2) : run_start] == "\\n"
+            and literal[max(0, run_start - 4) : run_start - 2] != "\\n"
+        )
+        if not single_newline:
+            return True
+    return False
+
+
 def offenders() -> list[str]:
     found: list[str] = []
     for source in sorted(REPO_ROOT.glob("crates/*/src/**/*.rs")):
         for number, line in enumerate(source.read_text().splitlines(), start=1):
             for _column, literal in literals_on(line):
-                if WHITESPACE_RUN.search(literal):
+                if mangled(literal):
                     found.append(f"{source.relative_to(REPO_ROOT)}:{number}: {literal[:80]}")
     return found
 

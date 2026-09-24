@@ -689,6 +689,11 @@ pub async fn me(State(state): State<crate::AppState>, headers: HeaderMap) -> Res
     } else {
         brand.site_root().to_owned()
     };
+    let home_url = format!(
+        "{}/{}",
+        brand.site_root(),
+        brand.settings.member_area_path_for(&principal.locale)
+    );
     // Only the first tenant's links are known to this build; anyone else gets
     // nothing rather than another band's music and inbox.
     let own = |value: &str| {
@@ -716,10 +721,10 @@ pub async fn me(State(state): State<crate::AppState>, headers: HeaderMap) -> Res
             },
             nearby_events,
             press_room: PressRoom {
-                home_url: format!("{root}/latarnik"),
-                epk_url: format!("{root}/epk"),
-                gallery_url: format!("{root}/gallery"),
-                rider_url: format!("{}/techrider.pdf", brand.site_root()),
+                home_url,
+                epk_url: own(&format!("{root}/epk")),
+                gallery_url: own(&format!("{root}/gallery")),
+                rider_url: own(&format!("{}/techrider.pdf", brand.site_root())),
                 spotify_url: own(FIRST_TENANT_SPOTIFY_URL),
                 youtube_url: own(FIRST_TENANT_YOUTUBE_URL),
                 contact_email: own(FIRST_TENANT_CONTACT_EMAIL),

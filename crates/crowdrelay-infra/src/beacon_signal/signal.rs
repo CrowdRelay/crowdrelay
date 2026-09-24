@@ -439,7 +439,12 @@ impl BeaconSignalRepository for PostgresBeaconReleaseRepository {
     ) -> Result<EmitNearbyResult, BeaconSignalRepositoryError> {
         let result = sqlx::query_as::<_, (i64, i64)>(
             r#"
-            WITH candidates AS (
+            WITH area_path AS (
+                SELECT COALESCE(
+                           (SELECT value FROM tenant_settings
+                            WHERE workspace_id=$1 AND key='member_area_path'),
+                           'pl/latarnik') AS path
+            ), candidates AS (
                 SELECT beacon.id AS beacon_id,event.id AS event_id,
                        event.title AS event_title,event.starts_at,profile.locale,profile.radius_km,
                        beacon.relationship_score,beacon.relevance_basis_points,
@@ -505,10 +510,12 @@ impl BeaconSignalRepository for PostgresBeaconReleaseRepository {
                             THEN ranked.event_title || ' — gramy około ' || ranked.distance_km || ' km od Ciebie. Press room jest gotowy.'
                             ELSE ranked.event_title || ' — we play about ' || ranked.distance_km || ' km from you. The press room is ready.' END,
                        CASE WHEN lower(ranked.locale) LIKE 'pl%'
-                            THEN '/pl/latarnik?event_id=' || ranked.event_id::text
-                            ELSE '/latarnik?event_id=' || ranked.event_id::text END,
+                            THEN '/' || btrim(area_path.path,'/') || '?event_id=' || ranked.event_id::text
+                            ELSE '/' || regexp_replace(btrim(area_path.path,'/'), '^pl/', '')
+                                 || '?event_id=' || ranked.event_id::text END,
                        'beacon-nearby:' || ranked.event_id::text
                 FROM ranked
+                CROSS JOIN area_path
                 JOIN engagement_seed seeded
                   ON seeded.beacon_id=ranked.beacon_id AND seeded.event_id=ranked.event_id
                 JOIN beacon_signal_sessions session
