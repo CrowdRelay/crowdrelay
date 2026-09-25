@@ -11,10 +11,13 @@ domain or application layer.
 
 This is a ratchet, not a hard cap, and it deliberately tracks *writes* only:
 a SELECT in the HTTP layer is a defensible read model, whereas an INSERT/UPDATE/
-DELETE there is a domain invariant that no longer has a single home. Files may
-shrink freely and drop out of the baseline; adding writes to a file, or
-introducing writes in a new one, fails until the slice is moved behind a
-repository or the baseline is deliberately raised in review.
+DELETE there is a domain invariant that no longer has a single home. Adding
+writes to a file, or introducing writes in a new one, fails until the slice is
+moved behind a repository or the baseline is deliberately raised in review.
+
+A file whose writes shrank fails too, until `--write-baseline` lowers its entry:
+a baseline above the count is room for a new write nobody reviewed (four on
+2026-09-25). That flag only lowers or drops entries, never raises one.
 """
 from __future__ import annotations
 
@@ -88,6 +91,26 @@ def main() -> int:
                 "new mutations belong behind a repository, not in the HTTP layer"
             )
 
+    stale = [
+        f"{path} has {current.get(path, 0)} SQL write(s) against a baseline of {limit}"
+        for path, limit in sorted(allowed.items())
+        if current.get(path, 0) < limit
+    ]
+    if "--write-baseline" in sys.argv:
+        baseline["maxWrites"] = {
+            path: min(limit, current[path])
+            for path, limit in sorted(allowed.items())
+            if current.get(path, 0) > 0
+        }
+        BASELINE_PATH.write_text(json.dumps(baseline, indent=2) + "\n", encoding="utf-8")
+        print(f"API_SQL_RATCHET=BASELINE_WRITTEN lowered={len(stale)}")
+        return 0
+    if stale and not failures:
+        failures = [
+            *stale,
+            "lower the baseline with `python3 scripts/api-sql-ratchet.py --write-baseline`",
+        ]
+
     if failures:
         for failure in failures:
             print(f"API_SQL_RATCHET=FAIL {failure}", file=sys.stderr)
@@ -98,13 +121,7 @@ def main() -> int:
         )
         return 1
 
-    total = sum(current.values())
-    budget = sum(allowed.values())
-    # Report the gap so the debt stays visible while it is paid down.
-    print(
-        f"API_SQL_RATCHET=PASS files={len(current)} writes={total} "
-        f"baseline={budget} headroom={budget - total}"
-    )
+    print(f"API_SQL_RATCHET=PASS files={len(current)} writes={sum(current.values())}")
     return 0
 
 

@@ -440,6 +440,67 @@ mod tests {
     }
 
     #[test]
+    fn a_retried_artifact_gets_its_own_keys() -> Result<(), Box<dyn std::error::Error>> {
+        use crowdrelay_domain::{
+            ContentSourceId,
+            content_supply::{
+                ContentArtifactKind, ContentSupplyPolicy, ContentSupplySnapshot, FailedArtifact,
+            },
+        };
+        let now = OffsetDateTime::now_utc();
+        let mut snapshot = ContentSupplySnapshot {
+            source_id: ContentSourceId::new(),
+            source_kind: ContentSourceKind::Event,
+            source_version: 2,
+            occurred_at: now - time::Duration::days(1),
+            expires_at: now + time::Duration::days(10),
+            communication_enabled: None,
+            press_enabled: None,
+            release_tier: None,
+            completed_artifacts: Vec::new(),
+            in_flight_artifacts: Vec::new(),
+            failed_artifacts: Vec::new(),
+            social_post: None,
+        };
+        let policy = AutopilotPolicy {
+            context: AutopilotContext::ContentSupply,
+            enabled: true,
+            autonomy_level: AutonomyLevel::BoundedAuto,
+            minimum_confidence: Confidence::from_basis_points(5_000)?,
+            max_actions_24h: 10,
+            config: AutopilotPolicyConfig::ContentSupply(ContentSupplyPolicy::default()),
+            version: 1,
+            guarded_until: None,
+            guardrail_reason: None,
+        };
+        let keys = |snapshot: &ContentSupplySnapshot| -> Result<(String, String), serde_json::Error> {
+            let candidates =
+                content_candidates(snapshot, &policy, &[], None, ContextEvidence::UNPROVEN, now)?;
+            assert_eq!(candidates.len(), 1);
+            Ok((
+                candidates[0].decision_key.clone(),
+                candidates[0].action_idempotency_key.clone(),
+            ))
+        };
+
+        // The first request keeps the key it always had, so actions already
+        // written stay deduplicated against it.
+        let (first_decision, first_action) = keys(&snapshot)?;
+        let source = snapshot.source_id;
+        assert_eq!(first_action, format!("action:content:{source}:sv2:LiveListing"));
+
+        snapshot.failed_artifacts = vec![FailedArtifact {
+            artifact: ContentArtifactKind::LiveListing,
+            failures: 1,
+            last_failed_at: now - time::Duration::hours(1),
+        }];
+        let (retry_decision, retry_action) = keys(&snapshot)?;
+        assert_eq!(retry_action, format!("{first_action}:attempt1"));
+        assert_eq!(retry_decision, format!("{first_decision}:attempt1"));
+        Ok(())
+    }
+
+    #[test]
     fn a_fresh_synced_post_relays_to_owned_channel_and_admitted_communities()
     -> Result<(), Box<dyn std::error::Error>> {
         use crowdrelay_domain::{
@@ -460,6 +521,7 @@ mod tests {
             release_tier: None,
             completed_artifacts: Vec::new(),
             in_flight_artifacts: Vec::new(),
+            failed_artifacts: Vec::new(),
             social_post: Some(SocialPostFact {
                 title: "soundcheck done".to_owned(),
                 url: Some("https://instagram.com/p/abc".to_owned()),
@@ -618,6 +680,7 @@ mod tests {
             release_tier: None,
             completed_artifacts: Vec::new(),
             in_flight_artifacts: Vec::new(),
+            failed_artifacts: Vec::new(),
             social_post: Some(SocialPostFact {
                 title: "new demo up".to_owned(),
                 url: None,

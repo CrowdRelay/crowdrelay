@@ -54,6 +54,40 @@ CADDY_BACKUP=""
 NEW_STARTED=false
 ALIAS_MOVED=false
 RELEASE_ID=""
+# The compose files use Docker's `local` log driver, which deletes a
+# container's logs together with the container. Every deploy removes the
+# outgoing colour (step 7), and a rollback removes the colour that failed —
+# the one whose logs explain the failure. That is how the cause of the
+# 2026-09-24 missed briefing was lost. Before removing a container, keep a
+# gzip of its full log here, the newest few per container name.
+CONTAINER_LOG_ARCHIVE_DIR="${CROWDRELAY_CONTAINER_LOG_ARCHIVE_DIR:-/var/lib/crowdrelay/container-logs}"
+CONTAINER_LOG_ARCHIVE_KEEP="${CROWDRELAY_CONTAINER_LOG_ARCHIVE_KEEP:-8}"
+
+# Never fails: it runs after cutover and inside rollback, where a non-zero
+# status would trip the ERR trap or abort the rollback. A lost archive is
+# reported, not fatal.
+archive_container_logs() {
+  local name archive
+  mkdir -p "$CONTAINER_LOG_ARCHIVE_DIR" 2>/dev/null || {
+    printf 'LOG_ARCHIVE=SKIPPED unwritable=%s\n' "$CONTAINER_LOG_ARCHIVE_DIR" >&2
+    return 0
+  }
+  for name in "$@"; do
+    [[ -n "$name" ]] || continue
+    docker inspect "$name" >/dev/null 2>&1 || continue
+    archive="$CONTAINER_LOG_ARCHIVE_DIR/${name}.$(date -u +%Y%m%dT%H%M%SZ).log.gz"
+    if docker logs --timestamps "$name" 2>&1 | gzip -c > "$archive"; then
+      printf 'LOG_ARCHIVE=%s\n' "$archive"
+    else
+      rm -f "$archive" || true
+      printf 'LOG_ARCHIVE=FAILED container=%s\n' "$name" >&2
+    fi
+    # Newest first; everything past the keep count goes.
+    { ls -1t "$CONTAINER_LOG_ARCHIVE_DIR/${name}".*.log.gz 2>/dev/null \
+        | tail -n +"$((CONTAINER_LOG_ARCHIVE_KEEP + 1))" \
+        | xargs -r rm -f; } || true
+  done
+}
 
 fail() {
   printf 'ERROR: %s\n' "$*" >&2
@@ -83,11 +117,13 @@ rollback() {
     if [[ "$DEPLOY_COLOR" == "green" ]]; then
       docker compose --env-file "$env_file" -f "$compose_file" -f compose.bluegreen.yaml \
         stop api-green worker-green >/dev/null 2>&1 || true
+      archive_container_logs "$GREEN_API" "$GREEN_WORKER"
       docker compose --env-file "$env_file" -f "$compose_file" -f compose.bluegreen.yaml \
         rm -f api-green worker-green >/dev/null 2>&1 || true
     else
       docker compose --env-file "$env_file" -f "$compose_file" \
         stop api worker >/dev/null 2>&1 || true
+      archive_container_logs "$BLUE_API" "$BLUE_WORKER"
       docker compose --env-file "$env_file" -f "$compose_file" \
         rm -f api worker >/dev/null 2>&1 || true
     fi
@@ -609,6 +645,7 @@ fi
 
 printf '\n==> 7/7 — Stop old containers, finalize\n'
 docker stop --time 30 "$CURRENT_API" "$CURRENT_WORKER" >/dev/null 2>&1 || true
+archive_container_logs "$CURRENT_API" "$CURRENT_WORKER"
 docker rm "$CURRENT_API" "$CURRENT_WORKER" >/dev/null 2>&1 || true
 
 # Drop the removed colour from the edge upstream list. It stayed listed as

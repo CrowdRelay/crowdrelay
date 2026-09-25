@@ -1,13 +1,11 @@
 {
   "policy": "ratchet-not-hard-cap",
-  "rationale": "docs/ARCHITECTURE.md keeps SQL in infrastructure or adapters. These files still write from the HTTP layer; the baseline may shrink freely and must not grow.",
+  "rationale": "docs/ARCHITECTURE.md keeps SQL in infrastructure or adapters. These files still write from the HTTP layer; the baseline must not grow, and shrinks with the code through --write-baseline.",
   "maxWrites": {
     "crates/crowdrelay-api/src/accounting/core.rs": 2,
     "crates/crowdrelay-api/src/area/challenge.rs": 1,
     "crates/crowdrelay-api/src/area/claims.rs": 1,
-    "crates/crowdrelay-api/src/area/endpoints.rs": 1,
     "crates/crowdrelay-api/src/area/ledger.rs": 1,
-    "crates/crowdrelay-api/src/area/legacy_wallet.rs": 3,
     "crates/crowdrelay-api/src/area/rewards.rs": 1,
     "crates/crowdrelay-api/src/area/storage.rs": 1,
     "crates/crowdrelay-api/src/area/ticket_rewards.rs": 1,

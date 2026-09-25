@@ -11,9 +11,18 @@ deleting the comment explaining the fix or editing the baseline in the same
 commit — and a baseline edited by reflex stops being a review signal at all.
 The allowance absorbs ordinary maintenance; anything past it is real growth and
 still has to be argued for.
+
+It fails downward too. An entry left at a file's old size is headroom nobody
+reviewed: in September 2026, 31 of 64 entries named files already under the
+threshold and five more sat below their record: 11,928 lines those files could
+regrow without anyone being asked. So a tracked file that is gone, back
+under the threshold, or more than the allowance below its record fails until
+`--write-baseline` lowers the record. That flag only lowers or drops entries; a
+new large file is still added by hand, in review.
 """
 from __future__ import annotations
 import json
+import sys
 from pathlib import Path
 
 root = Path(__file__).resolve().parents[1]
@@ -40,15 +49,35 @@ for path in root.rglob("*"):
         large[rel] = lines
         if rel not in tracked:
             errors.append(f"new large source needs review/baseline: {rel}={lines}")
+lowered: dict[str, int] = {}
+stale: list[str] = []
 for rel, maximum in tracked.items():
     path = root / rel
-    if not path.exists():
-        continue  # a completed extraction/removal is always an improvement
-    lines = sum(1 for _ in path.open("r", encoding="utf-8", errors="ignore"))
+    lines = (
+        sum(1 for _ in path.open("r", encoding="utf-8", errors="ignore"))
+        if path.exists()
+        else 0
+    )
     if lines > maximum + allowance:
         errors.append(
             f"ratchet exceeded: {rel}={lines} > {maximum}+{allowance} allowance"
         )
+    if lines > 1200:
+        lowered[rel] = min(maximum, lines)
+    if lines <= 1200:
+        stale.append(f"baseline entry no longer needed: {rel}={lines} (record {maximum})")
+    elif lines + allowance < maximum:
+        stale.append(f"baseline record too high: {rel}={lines} (record {maximum})")
+if "--write-baseline" in sys.argv:
+    baseline["maxLines"] = dict(sorted(lowered.items()))
+    baseline_path.write_text(json.dumps(baseline, indent=2) + "\n")
+    print(f"SOURCE_SIZE_RATCHET=BASELINE_WRITTEN tracked={len(lowered)} dropped_or_lowered={len(stale)}")
+    raise SystemExit(0)
+if stale:
+    errors.extend(stale)
+    errors.append(
+        "lower the records with `python3 scripts/source-size-ratchet.py --write-baseline`"
+    )
 if errors:
     print("SOURCE_SIZE_RATCHET=FAIL")
     for error in errors:

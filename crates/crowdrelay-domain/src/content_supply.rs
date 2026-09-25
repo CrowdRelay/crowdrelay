@@ -129,6 +129,36 @@ pub struct SignalPushAudience {
     pub reached: u32,
 }
 
+/// An artifact whose earlier requests failed, for one source version.
+///
+/// A failed request is neither done nor in flight, so the evaluator asks for
+/// the same artifact again next cycle — under the same idempotency key, which
+/// dedupes onto the failed action and writes nothing. Before this existed one
+/// failure froze the source's whole chain for good: on 2026-09-25 two
+/// `live_listing` requests hit Discord's rate limit (HTTP 429, five requests
+/// in one second to one webhook), and neither source got another artifact.
+/// A retry carries its attempt number in its key, waits out a growing delay,
+/// and stops after [`MAX_ARTIFACT_ATTEMPTS`]; the chain skips an artifact in
+/// either state rather than waiting on it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+pub struct FailedArtifact {
+    pub artifact: ContentArtifactKind,
+    pub failures: u32,
+    #[serde(with = "time::serde::rfc3339")]
+    pub last_failed_at: OffsetDateTime,
+}
+
+/// Requests per artifact and source version, the first included.
+pub const MAX_ARTIFACT_ATTEMPTS: u32 = 3;
+
+/// How long after its latest failure an artifact may be asked for again: 30
+/// minutes after the first failure, an hour after the second.
+#[must_use]
+pub fn artifact_retry_due(failed: &FailedArtifact) -> OffsetDateTime {
+    let doublings = failed.failures.saturating_sub(1).min(4);
+    failed.last_failed_at + Duration::minutes(30 * (1_i64 << doublings))
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct ContentSupplySnapshot {
     pub source_id: ContentSourceId,
@@ -152,6 +182,9 @@ pub struct ContentSupplySnapshot {
     pub release_tier: Option<ReleaseTier>,
     pub completed_artifacts: Vec<ContentArtifactKind>,
     pub in_flight_artifacts: Vec<ContentArtifactKind>,
+    /// Artifacts whose requests for this source version failed at the
+    /// executor. See [`FailedArtifact`].
+    pub failed_artifacts: Vec<FailedArtifact>,
     /// The synced post's own facts — `Some` only when `source_kind` is
     /// `SocialPost`. The relay needs them to carry the post; every other
     /// kind leaves it `None`.
@@ -188,6 +221,10 @@ pub enum ContentSupplyDecision {
     Hold(ContentSupplyHoldReason),
     Request {
         artifact: ContentArtifactKind,
+        /// Zero for the first request; a retry after `attempt` failures
+        /// otherwise. It goes into the idempotency key, so a retry is a new
+        /// action rather than a replay of the failed one.
+        attempt: u32,
         confidence: Confidence,
     },
     /// The band already made the post — the machine's job is to carry it to
@@ -273,12 +310,24 @@ pub fn evaluate_content_supply(
         }
         let already_done = snapshot.completed_artifacts.contains(artifact);
         let in_flight = snapshot.in_flight_artifacts.contains(artifact);
-        if !already_done && !in_flight {
-            return ContentSupplyDecision::Request {
-                artifact: *artifact,
-                confidence: Confidence::saturating_from_basis_points(9_500),
-            };
+        if already_done || in_flight {
+            continue;
         }
+        let failed = snapshot
+            .failed_artifacts
+            .iter()
+            .find(|failed| failed.artifact == *artifact);
+        if let Some(failed) = failed
+            && (failed.failures >= MAX_ARTIFACT_ATTEMPTS || now < artifact_retry_due(failed))
+        {
+            // Given up, or not yet due: the rest of the chain does not wait.
+            continue;
+        }
+        return ContentSupplyDecision::Request {
+            artifact: *artifact,
+            attempt: failed.map_or(0, |failed| failed.failures),
+            confidence: Confidence::saturating_from_basis_points(9_500),
+        };
     }
 
     ContentSupplyDecision::Hold(ContentSupplyHoldReason::Complete)
@@ -383,6 +432,7 @@ mod tests {
             release_tier: None,
             completed_artifacts: Vec::new(),
             in_flight_artifacts: Vec::new(),
+            failed_artifacts: Vec::new(),
             social_post: None,
         };
 
@@ -390,6 +440,7 @@ mod tests {
             evaluate_content_supply(&snapshot, ContentSupplyPolicy::default(), now()),
             ContentSupplyDecision::Request {
                 artifact: ContentArtifactKind::LiveListing,
+                attempt: 0,
                 confidence: Confidence::saturating_from_basis_points(9_500),
             }
         );
@@ -409,16 +460,85 @@ mod tests {
             social_post: None,
             completed_artifacts: vec![ContentArtifactKind::LiveListing],
             in_flight_artifacts: Vec::new(),
+            failed_artifacts: Vec::new(),
         };
 
         assert_eq!(
             evaluate_content_supply(&snapshot, ContentSupplyPolicy::default(), now()),
             ContentSupplyDecision::Request {
                 artifact: ContentArtifactKind::PressHook,
+                attempt: 0,
                 confidence: Confidence::saturating_from_basis_points(9_500),
             }
         );
     }
+
+    fn event_with_failed_listing(failures: u32, minutes_ago: i64) -> ContentSupplySnapshot {
+        ContentSupplySnapshot {
+            source_id: ContentSourceId::new(),
+            source_kind: ContentSourceKind::Event,
+            source_version: 1,
+            occurred_at: now() - Duration::days(1),
+            expires_at: now() + Duration::days(10),
+            communication_enabled: None,
+            press_enabled: None,
+            release_tier: None,
+            social_post: None,
+            completed_artifacts: Vec::new(),
+            in_flight_artifacts: Vec::new(),
+            failed_artifacts: vec![FailedArtifact {
+                artifact: ContentArtifactKind::LiveListing,
+                failures,
+                last_failed_at: now() - Duration::minutes(minutes_ago),
+            }],
+        }
+    }
+
+    fn requested(snapshot: &ContentSupplySnapshot) -> Option<(ContentArtifactKind, u32)> {
+        match evaluate_content_supply(snapshot, ContentSupplyPolicy::default(), now()) {
+            ContentSupplyDecision::Request {
+                artifact, attempt, ..
+            } => Some((artifact, attempt)),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn a_failed_artifact_is_retried_once_due_under_a_new_attempt() {
+        // Production, 2026-09-25: a live listing refused with HTTP 429 was
+        // asked for again under its old key every cycle, deduped onto the
+        // failed action, and the source never got another artifact.
+        assert_eq!(
+            requested(&event_with_failed_listing(1, 31)),
+            Some((ContentArtifactKind::LiveListing, 1))
+        );
+        assert_eq!(
+            requested(&event_with_failed_listing(2, 61)),
+            Some((ContentArtifactKind::LiveListing, 2))
+        );
+    }
+
+    #[test]
+    fn a_retry_not_yet_due_does_not_hold_the_chain() {
+        assert_eq!(
+            requested(&event_with_failed_listing(1, 10)),
+            Some((ContentArtifactKind::PressHook, 0))
+        );
+        // The second retry waits an hour, not thirty minutes.
+        assert_eq!(
+            requested(&event_with_failed_listing(2, 45)),
+            Some((ContentArtifactKind::PressHook, 0))
+        );
+    }
+
+    #[test]
+    fn an_artifact_that_failed_every_attempt_is_skipped() {
+        assert_eq!(
+            requested(&event_with_failed_listing(MAX_ARTIFACT_ATTEMPTS, 10_000)),
+            Some((ContentArtifactKind::PressHook, 0))
+        );
+    }
+
     #[test]
     fn release_requests_artifacts_one_at_a_time_and_respects_inflight() {
         let snapshot = ContentSupplySnapshot {
@@ -433,12 +553,14 @@ mod tests {
             social_post: None,
             completed_artifacts: vec![ContentArtifactKind::SignalPush],
             in_flight_artifacts: vec![ContentArtifactKind::SocialFeed],
+            failed_artifacts: Vec::new(),
         };
 
         assert_eq!(
             evaluate_content_supply(&snapshot, ContentSupplyPolicy::default(), now()),
             ContentSupplyDecision::Request {
                 artifact: ContentArtifactKind::SocialStory,
+                attempt: 0,
                 confidence: Confidence::saturating_from_basis_points(9_500),
             }
         );
@@ -457,6 +579,7 @@ mod tests {
             release_tier: None,
             completed_artifacts: Vec::new(),
             in_flight_artifacts: Vec::new(),
+            failed_artifacts: Vec::new(),
             social_post: None,
         };
         let old_video = ContentSupplySnapshot {
@@ -496,6 +619,7 @@ mod tests {
             release_tier: None,
             completed_artifacts: Vec::new(),
             in_flight_artifacts: Vec::new(),
+            failed_artifacts: Vec::new(),
             social_post: None,
         };
 
@@ -540,6 +664,7 @@ mod tests {
             release_tier: Some(ReleaseTier::Single),
             completed_artifacts: Vec::new(),
             in_flight_artifacts: Vec::new(),
+            failed_artifacts: Vec::new(),
             social_post: None,
         }
     }
@@ -629,6 +754,7 @@ mod tests {
             release_tier: None,
             completed_artifacts: Vec::new(),
             in_flight_artifacts: Vec::new(),
+            failed_artifacts: Vec::new(),
             social_post: None,
         };
 
