@@ -38,8 +38,8 @@ use crowdrelay_domain::{
     deliverability::{DeliverabilityPolicy, ramped_ceiling},
     experimentation::{ExperimentDecision, ExperimentSnapshot, evaluate_experiment},
     free_reach::{
-        FreeReachPolicy, WaveDecision, WaveSnapshot, WaveState, evaluate_wave, wave_capacity,
-        wave_is_worth_opening,
+        FreeReachPolicy, WaveAnchor, WaveDecision, WaveSnapshot, WaveState, evaluate_wave,
+        wave_capacity, wave_is_worth_opening,
     },
     funding::{FundingDecision, FundingOpportunitySnapshot, evaluate_funding},
     growth_envelope::{
@@ -406,10 +406,16 @@ where
                         // At most one open wave takes each pitch, and only
                         // while it still has room under the budget it was sized
                         // against. Everything else pitches exactly as before.
+                        // A threads wave is its own lane: a follow-up on a
+                        // hand-started thread must not draft into a release or
+                        // catalogue batch, and a pitch must not ride the
+                        // threads wave it has nothing to do with.
                         let wave_id = waves
                             .iter_mut()
                             .find(|wave| {
                                 wave.snapshot.target_kind == snapshot.target_kind
+                                    && matches!(wave.snapshot.anchor, WaveAnchor::Threads { .. })
+                                        == snapshot.thread_followup
                                     && matches!(wave.snapshot.state, WaveState::Drafting)
                                     && matches!(
                                         evaluate_wave(wave.snapshot, wave_policy, now),

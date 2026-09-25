@@ -386,6 +386,19 @@ pub struct RecordOutreachWritten {
     pub occurred_at: OffsetDateTime,
 }
 
+/// "Don't contact" — the operator's word that no machine letter ever goes
+/// to this address again. Deliberately not a reply: the ledger stays
+/// truthful about who spoke last, and the suppression is the target's own
+/// standing, not a message.
+#[derive(Clone, Debug)]
+pub struct SuppressOutreachTarget {
+    pub target_id: OutreachTargetId,
+    /// `true` stamps the suppression; `false` lifts it again for a contact
+    /// the operator re-opened.
+    pub do_not_contact: bool,
+    pub occurred_at: OffsetDateTime,
+}
+
 #[async_trait]
 pub trait AutopilotOutreachStateRepository: Send + Sync {
     async fn upsert_outreach_target(
@@ -413,6 +426,13 @@ pub trait AutopilotOutreachStateRepository: Send + Sync {
         &self,
         workspace_id: WorkspaceId,
         command: RecordOutreachWritten,
+        idempotency_key: &IdempotencyKey,
+        request_id: Option<&RequestId>,
+    ) -> Result<AutopilotControlMutation, RepositoryError>;
+    async fn suppress_outreach_target(
+        &self,
+        workspace_id: WorkspaceId,
+        command: SuppressOutreachTarget,
         idempotency_key: &IdempotencyKey,
         request_id: Option<&RequestId>,
     ) -> Result<AutopilotControlMutation, RepositoryError>;

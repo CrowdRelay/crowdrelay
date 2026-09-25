@@ -48,6 +48,8 @@ include!("ops/handlers.rs");
 include!("ops/attention.rs");
 include!("ops/funnel.rs");
 include!("ops/funnel_pg_tests.rs");
+include!("ops/outcomes.rs");
+include!("ops/outcomes_pg_tests.rs");
 include!("ops/intelligence.rs");
 include!("ops/processes.rs");
 

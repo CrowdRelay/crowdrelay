@@ -138,6 +138,37 @@ impl Fixture {
         Ok(id)
     }
 
+    /// One message on a thread — `None` opportunity is the imported,
+    /// hand-sent kind; `Some` is a send the engine itself wrote.
+    async fn message(
+        &self,
+        target: Uuid,
+        direction: &str,
+        opportunity: Option<Uuid>,
+        days_ago: i64,
+        source_key: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        sqlx::query(
+            "INSERT INTO outreach_interactions
+                 (workspace_id, target_id, opportunity_id, direction, phase, source_key, occurred_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)",
+        )
+        .bind(self.ws())
+        .bind(target)
+        .bind(opportunity)
+        .bind(direction)
+        .bind(if direction == "inbound" {
+            "reply"
+        } else {
+            "initial"
+        })
+        .bind(source_key)
+        .bind(self.now - time::Duration::days(days_ago))
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     /// Active opportunities as (source, subject_key, target name), sorted.
     async fn live(&self) -> Result<Vec<(String, String, String)>, Box<dyn std::error::Error>> {
         Ok(sqlx::query_as::<_, (String, String, String)>(
@@ -359,5 +390,177 @@ async fn the_catalogue_is_pitched_in_one_wave_of_composed_letters()
             "the letter names the pitch and links it: {body}"
         );
     }
+    Ok(())
+}
+
+/// Half of the act's pitchable contacts have a `.pl` address. Their letter is
+/// written in Polish; everyone else's stays English.
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn a_polish_address_gets_a_polish_letter() -> Result<(), Box<dyn std::error::Error>> {
+    let f = fixture("supply-polish").await?;
+    sqlx::query(
+        "INSERT INTO growth_envelope (workspace_id, agent_enabled, dry_run) VALUES ($1, true, false)
+         ON CONFLICT (workspace_id) DO UPDATE SET agent_enabled = true, dry_run = false",
+    )
+    .bind(f.ws())
+    .execute(&f.pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO autopilot_policies
+             (workspace_id, context, enabled, autonomy_level, minimum_confidence_basis_points,
+              max_actions_24h, config)
+         VALUES ($1, 'outreach', true, 'require_approval', 7500, 20,
+                 '{\"waves\": {\"min_pitches_per_wave\": 2}}')
+         ON CONFLICT (workspace_id, context) DO UPDATE SET enabled = true,
+             autonomy_level = 'require_approval', minimum_confidence_basis_points = 7500,
+             max_actions_24h = 20, config = EXCLUDED.config",
+    )
+    .bind(f.ws())
+    .execute(&f.pool)
+    .await?;
+    f.release_source(
+        "Echoes",
+        "https://listen.example/echoes",
+        "album",
+        Some(1_746_057_600),
+    )
+    .await?;
+    let polish = f.target("Polski Zin", "press", true, false, None).await?;
+    sqlx::query("UPDATE outreach_targets SET contact_email = $2 WHERE id = $1")
+        .bind(polish)
+        .bind(format!("redakcja-{}@zin.pl", polish.simple()))
+        .execute(&f.pool)
+        .await?;
+    f.target("English Zine", "press", true, false, None).await?;
+
+    f.repository
+        .refresh_outreach_supply(f.workspace_id, f.now)
+        .await?;
+    EvaluateAutopilot::new(&f.repository, f.workspace_id)
+        .execute(f.now)
+        .await?;
+
+    let letters = sqlx::query_as::<_, (String, String)>(
+        "SELECT payload->>'target_id', payload->'draft'->>'body'
+         FROM autopilot_actions WHERE workspace_id = $1 AND context = 'outreach'",
+    )
+    .bind(f.ws())
+    .fetch_all(&f.pool)
+    .await?;
+    assert_eq!(letters.len(), 2, "{letters:?}");
+    for (target, body) in &letters {
+        if *target == polish.to_string() {
+            assert!(body.starts_with("Dzień dobry, Polski Zin,"), "{body}");
+            assert!(body.contains("Pozdrawiamy,"), "{body}");
+        } else {
+            assert!(body.starts_with("Hi English Zine,"), "{body}");
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn the_hand_written_threads_seed_one_follow_up_each() -> Result<(), Box<dyn std::error::Error>>
+{
+    let f = fixture("supply-threads").await?;
+
+    // The thread the act started by hand: one unlinked outbound inside the
+    // window is exactly the follow-up opportunity.
+    let warm = f
+        .target("Bydgoszcz Radio", "press", true, false, None)
+        .await?;
+    f.message(warm, "outbound", None, 30, "master:ORC-1")
+        .await?;
+    // Their answer is the last word — the inbound kills the seed even before
+    // the reply is classified onto the target.
+    let answered = f.target("Replied Zine", "press", true, false, None).await?;
+    f.message(answered, "outbound", None, 30, "master:ORC-2")
+        .await?;
+    f.message(answered, "inbound", None, 5, "master:ORC-3")
+        .await?;
+    // Inside the window but not yet due — the row seeds now and the
+    // evaluator holds it until the thread turns ten days old.
+    let fresh = f
+        .target("Fresh Contact", "press", true, false, None)
+        .await?;
+    f.message(fresh, "outbound", None, 3, "master:ORC-4")
+        .await?;
+    // Older than the window — the thread aged out.
+    let stale = f.target("Aged Out", "press", true, false, None).await?;
+    f.message(stale, "outbound", None, 70, "master:ORC-5")
+        .await?;
+    // Suppressed and representation-kind contacts never seed.
+    let quiet = f.target("Quiet Please", "press", true, true, None).await?;
+    f.message(quiet, "outbound", None, 30, "master:ORC-6")
+        .await?;
+    // Representation kinds need a stated basis to stay writable — set it at
+    // insert so it is the kind filter, not the acceptance check, that
+    // excludes the contact.
+    let agent = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO outreach_targets
+             (id, workspace_id, target_kind, display_name, contact_email,
+              active, verified, accepts_outreach, accepts_outreach_basis, do_not_contact)
+         VALUES ($1, $2, 'agent', 'An Agency', $3, true, true, true, 'met at showcase', false)",
+    )
+    .bind(agent)
+    .bind(f.ws())
+    .bind(format!("an-agency-{}@test.example", agent.simple()))
+    .execute(&f.pool)
+    .await?;
+    f.message(agent, "outbound", None, 30, "master:ORC-7")
+        .await?;
+
+    f.repository
+        .refresh_outreach_supply(f.workspace_id, f.now)
+        .await?;
+    let mut live = f.live().await?;
+    live.sort();
+    let mut expected = vec![
+        (
+            "thread_followup".to_owned(),
+            format!("thread:{fresh}"),
+            "Fresh Contact".to_owned(),
+        ),
+        (
+            "thread_followup".to_owned(),
+            format!("thread:{warm}"),
+            "Bydgoszcz Radio".to_owned(),
+        ),
+    ];
+    expected.sort();
+    assert_eq!(live, expected);
+
+    // Idempotent — a second cycle changes nothing.
+    f.repository
+        .refresh_outreach_supply(f.workspace_id, f.now)
+        .await?;
+    assert_eq!(f.live().await?.len(), 2);
+
+    // Their answer retires the thread: the inbound is the last word.
+    f.message(warm, "inbound", None, 1, "master:ORC-8").await?;
+    f.repository
+        .refresh_outreach_supply(f.workspace_id, f.now)
+        .await?;
+    assert_eq!(f.live().await?.len(), 1);
+
+    // The follow-up itself going out retires it too — the newest word is
+    // then a linked outbound, so no unlinked last word remains to chase.
+    let (opportunity,): (Uuid,) = sqlx::query_as(
+        "SELECT id FROM outreach_opportunities
+         WHERE workspace_id = $1 AND target_id = $2",
+    )
+    .bind(f.ws())
+    .bind(fresh)
+    .fetch_one(&f.pool)
+    .await?;
+    f.message(fresh, "outbound", Some(opportunity), 0, "autopilot:send")
+        .await?;
+    f.repository
+        .refresh_outreach_supply(f.workspace_id, f.now)
+        .await?;
+    assert!(f.live().await?.is_empty());
     Ok(())
 }

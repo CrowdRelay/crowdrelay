@@ -148,6 +148,13 @@ pub struct OutreachSnapshot {
     /// each, up to the daily quota, and lapse unread. A wave is how a person
     /// reads a dozen of them at once.
     pub wave_only: bool,
+    /// The opportunity is a follow-up on a thread the act started by hand.
+    ///
+    /// The imported messages carry no opportunity id, so the per-opportunity
+    /// fields stay empty and the relationship-level window takes over: one
+    /// nudge, sent inside `thread_followup_after_days..thread_followup_window_days`
+    /// of the last handwritten touch, and never again.
+    pub thread_followup: bool,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -170,6 +177,20 @@ pub struct OutreachPolicy {
     /// as opportunities kept being discovered. That is indistinguishable from
     /// spam to the person receiving it, and it is what happened.
     pub maximum_lifetime_contacts: u16,
+    /// Days of silence before a hand-started thread earns its one nudge.
+    /// Under it, the thread is the act's own to answer.
+    ///
+    /// The supply seed and the waves planner inline this number in SQL —
+    /// `outreach_supply.rs` and `waves.rs` in crowdrelay-infra — because the
+    /// ledger probes cannot wait on a policy load inside their transactions.
+    /// A tuned value here must be mirrored there.
+    pub thread_followup_after_days: u32,
+    /// Days after which the thread is too old to reopen. The nudge says
+    /// "following up on my message"; past the window that claim stops being
+    /// one a stranger can still place.
+    ///
+    /// Inlined in the same SQL as `thread_followup_after_days` — see its note.
+    pub thread_followup_window_days: u32,
     /// How free-reach pitches are batched for approval. Nested here rather than
     /// given a context of its own because it is the same operator setting: how
     /// this workspace approaches people it does not know, and how much of that
@@ -189,6 +210,8 @@ impl Default for OutreachPolicy {
             // One pitch and one follow-up. A third unanswered email to a
             // stranger is not persistence.
             maximum_lifetime_contacts: 2,
+            thread_followup_after_days: 10,
+            thread_followup_window_days: 60,
             waves: FreeReachPolicy::default(),
         }
     }
@@ -284,6 +307,26 @@ pub fn evaluate_outreach(
     }
 
     let Some(last_outreach) = snapshot.last_outreach_at else {
+        // A thread the act started by hand skips the initial cooldown — the
+        // whole point of the lane is that the relationship clock was already
+        // running on a message the importer never linked. Its own rule is the
+        // window: not before `thread_followup_after_days` of silence, and not
+        // after `thread_followup_window_days` have made the thread stale.
+        if snapshot.thread_followup {
+            let Some(last) = snapshot.target_last_outreach_at else {
+                return OutreachDecision::Hold(OutreachHoldReason::InvalidSnapshot);
+            };
+            if last > now {
+                return OutreachDecision::Hold(OutreachHoldReason::InvalidSnapshot);
+            }
+            if now - last < Duration::days(i64::from(policy.thread_followup_after_days)) {
+                return OutreachDecision::Hold(OutreachHoldReason::FollowUpNotDue);
+            }
+            if now - last >= Duration::days(i64::from(policy.thread_followup_window_days)) {
+                return OutreachDecision::Hold(OutreachHoldReason::StaleOpportunity);
+            }
+            return request(OutreachPhase::FollowUp, snapshot);
+        }
         if snapshot.target_last_outreach_at.is_some_and(|at| {
             at > now || now - at < Duration::days(i64::from(policy.initial_cooldown_days))
         }) {
@@ -328,6 +371,9 @@ fn policy_is_valid(policy: OutreachPolicy) -> bool {
         && policy.maximum_followups <= 3
         && policy.maximum_lifetime_contacts >= 1
         && policy.maximum_lifetime_contacts <= 4
+        && policy.thread_followup_after_days > 0
+        && policy.thread_followup_after_days < policy.thread_followup_window_days
+        && policy.thread_followup_window_days <= 365
 }
 
 #[cfg(test)]
@@ -428,6 +474,7 @@ mod tests {
             last_reply: OutreachReplyDisposition::None,
             in_flight: false,
             wave_only: false,
+            thread_followup: false,
         }
     }
 
@@ -470,6 +517,81 @@ mod tests {
         assert_eq!(
             evaluate_outreach(snapshot, OutreachPolicy::default(), now()),
             OutreachDecision::Hold(OutreachHoldReason::Cooldown)
+        );
+    }
+
+    /// The imported case: the act wrote by hand, the sheet carried the date
+    /// and no opportunity, and the 90-day cooldown would hold the thread for
+    /// ever. The thread lane replaces that cooldown with its own window.
+    #[test]
+    fn a_thread_followup_skips_the_initial_cooldown_inside_its_window() {
+        let mut snapshot = eligible();
+        snapshot.thread_followup = true;
+        snapshot.wave_only = true;
+        snapshot.last_outreach_at = None;
+        snapshot.target_last_outreach_at = Some(now() - Duration::days(12));
+        assert!(matches!(
+            evaluate_outreach(snapshot, OutreachPolicy::default(), now()),
+            OutreachDecision::Request {
+                phase: OutreachPhase::FollowUp,
+                ..
+            }
+        ));
+    }
+
+    /// Under ten days the thread is still the act's own to answer; past sixty
+    /// the "following up on my message" claim is one nobody can place.
+    #[test]
+    fn a_thread_followup_waits_for_silence_and_dies_with_the_thread() {
+        let policy = OutreachPolicy::default();
+        let mut snapshot = eligible();
+        snapshot.thread_followup = true;
+        snapshot.last_outreach_at = None;
+
+        snapshot.target_last_outreach_at = Some(now() - Duration::days(3));
+        assert_eq!(
+            evaluate_outreach(snapshot, policy, now()),
+            OutreachDecision::Hold(OutreachHoldReason::FollowUpNotDue)
+        );
+
+        snapshot.target_last_outreach_at = Some(now() - Duration::days(90));
+        assert_eq!(
+            evaluate_outreach(snapshot, policy, now()),
+            OutreachDecision::Hold(OutreachHoldReason::StaleOpportunity)
+        );
+    }
+
+    /// One nudge is the whole lane. The send links the thread opportunity to
+    /// its own follow-up, and the per-opportunity cap does the rest.
+    #[test]
+    fn a_thread_followup_sends_exactly_once() {
+        let mut snapshot = eligible();
+        snapshot.thread_followup = true;
+        // The nudge already went out on this opportunity.
+        snapshot.last_outreach_at = Some(now() - Duration::days(40));
+        snapshot.target_last_outreach_at = Some(now() - Duration::days(40));
+        snapshot.followup_count = 1;
+        snapshot.lifetime_outbound = 2;
+        assert_eq!(
+            evaluate_outreach(snapshot, OutreachPolicy::default(), now()),
+            OutreachDecision::Hold(OutreachHoldReason::ContactExhausted)
+        );
+        // A relationship that has ever replied is not silence-capped; the
+        // opportunity's own follow-up counter is what keeps it at one nudge.
+        snapshot.target_ever_replied = true;
+        snapshot.lifetime_outbound = 50;
+        assert_eq!(
+            evaluate_outreach(snapshot, OutreachPolicy::default(), now()),
+            OutreachDecision::Hold(OutreachHoldReason::FollowUpLimit)
+        );
+        // And a reply at any point ends it, whether it classified or not.
+        let mut replied = eligible();
+        replied.thread_followup = true;
+        replied.target_last_outreach_at = Some(now() - Duration::days(12));
+        replied.last_reply = OutreachReplyDisposition::Received;
+        assert_eq!(
+            evaluate_outreach(replied, OutreachPolicy::default(), now()),
+            OutreachDecision::Hold(OutreachHoldReason::AlreadyReplied)
         );
     }
 }

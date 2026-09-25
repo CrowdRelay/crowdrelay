@@ -603,7 +603,13 @@ fn outreach_candidate(
     if wave_id.is_some() && matches!(disposition, PolicyDisposition::AutoExecute) {
         disposition = PolicyDisposition::RequireApproval;
     }
-    let template_key = match snapshot.target_kind {
+    let template_key = if snapshot.thread_followup {
+        // A thread follow-up continues a letter the act already wrote; the
+        // pitch templates would have it claiming a listen link the thread
+        // never carried.
+        "outreach.thread.v1"
+    } else {
+        match snapshot.target_kind {
         crowdrelay_domain::outreach::OutreachTargetKind::Playlist => "outreach.playlist.v1",
         crowdrelay_domain::outreach::OutreachTargetKind::Radio => "outreach.radio.v1",
         crowdrelay_domain::outreach::OutreachTargetKind::Press => "outreach.press.v1",
@@ -619,6 +625,7 @@ fn outreach_candidate(
         // pitching an agent — exactly the posture §4h-12 forbids.
         crowdrelay_domain::outreach::OutreachTargetKind::Agent
         | crowdrelay_domain::outreach::OutreachTargetKind::Label => return Ok(None),
+        }
     };
     Ok(Some(DecisionCandidate {
         context: policy.context,
@@ -626,7 +633,11 @@ fn outreach_candidate(
         decision_kind: "request_relationship_outreach",
         confidence,
         disposition,
-        reason: "verified relationship target matches a fresh high-relevance opportunity",
+        reason: if snapshot.thread_followup {
+            "the thread you started by hand is still unanswered inside the follow-up window"
+        } else {
+            "verified relationship target matches a fresh high-relevance opportunity"
+        },
         input_snapshot: serde_json::to_value(snapshot)?,
         policy_snapshot: policy_evidence(policy, domain_policy)?,
         action: AutopilotActionPayload::RequestOutreach {
@@ -651,9 +662,16 @@ fn outreach_candidate(
             snapshot.relevance_basis_points,
             snapshot.observed_at.unix_timestamp()
         ),
+        // The wave is part of the attempt's identity: a pitch that died with
+        // one wave must not dedupe the re-draft into next month's, or a
+        // wave-bound pitch becomes one attempt ever, sent or not.
         action_idempotency_key: format!(
-            "action:outreach:{}:{}:{:?}:{}",
-            snapshot.opportunity_id, snapshot.target_id, phase, snapshot.followup_count
+            "action:outreach:{}:{}:{:?}:{}:{}",
+            snapshot.opportunity_id,
+            snapshot.target_id,
+            phase,
+            snapshot.followup_count,
+            wave_id.map_or(String::new(), |id| id.to_string())
         ),
     }))
 }

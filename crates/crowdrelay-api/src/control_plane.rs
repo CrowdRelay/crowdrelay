@@ -49,6 +49,9 @@ pub(crate) fn router(state: crate::AppState) -> Router {
         // channel, with internal housekeeping counted separately so motion
         // cannot pass for growth.
         .route("/v1/control-plane/ops/funnel", get(crate::ops::funnel))
+        // What the approved asks produced: terminal actions with their
+        // measurement verdicts — the funnel's other half, per action.
+        .route("/v1/control-plane/ops/outcomes", get(crate::ops::outcomes))
         // The intelligence brief: one read composing the brain's verdict,
         // its posture, its plan, what it found, what it did, and what needs
         // the operator — the "are we getting anywhere" answer.
@@ -246,6 +249,21 @@ pub(crate) fn router(state: crate::AppState) -> Router {
         .route(
             "/v1/control-plane/autopilot/outreach-targets/{target_id}/written",
             post(crate::autopilot::record_outreach_written),
+        )
+        // The drawer's read: one contact's whole thread — every message either
+        // way, the letters the machine drafted or sent, and what happens next
+        // per the evaluator's own rules.
+        .route(
+            "/v1/control-plane/autopilot/outreach-targets/{target_id}/conversation",
+            get(crate::autopilot::get_outreach_conversation),
+        )
+        // "Log their answer" is already registered on this prefix in
+        // `control_plane_operator.rs` — the drawer uses that route.
+        // "Don't contact" — the contact's standing changes, the ledger does
+        // not pretend a reply arrived.
+        .route(
+            "/v1/control-plane/autopilot/outreach-targets/{target_id}/suppression",
+            post(crate::autopilot::suppress_outreach_target),
         )
         // The negotiation table: every live terms conversation with the
         // ladder it was argued from and the move parked for approval. The

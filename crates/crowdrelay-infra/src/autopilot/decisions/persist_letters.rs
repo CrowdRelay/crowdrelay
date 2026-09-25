@@ -93,8 +93,8 @@ async fn sender_identity_in_tx(
         .fetch_optional(&mut **transaction)
         .await
         .map_err(map_sqlx)?
-        .map(|value| value.trim().to_owned())
-        .filter(|value| !value.is_empty()),
+        .as_deref()
+        .and_then(crowdrelay_domain::gig_letter::letter_style),
         home_city: sqlx::query_scalar::<_, String>(
             r#"
             SELECT city.name
@@ -143,6 +143,7 @@ async fn enrich_outreach_draft(
         draft,
         target_id,
         phase,
+        template_key,
         ..
     } = action
     else {
@@ -150,15 +151,18 @@ async fn enrich_outreach_draft(
     };
 
     let ws = workspace_id.into_uuid();
-    let target = sqlx::query_as::<_, (String, String)>(
-        "SELECT display_name, target_kind FROM outreach_targets WHERE workspace_id = $1 AND id = $2",
+    if template_key == "outreach.thread.v1" {
+        return enrich_thread_draft(transaction, workspace_id, target_id, draft).await;
+    }
+    let target = sqlx::query_as::<_, (String, String, String)>(
+        "SELECT display_name, target_kind, contact_email FROM outreach_targets WHERE workspace_id = $1 AND id = $2",
     )
     .bind(ws)
     .bind(target_id.into_uuid())
     .fetch_optional(&mut **transaction)
     .await
     .map_err(map_sqlx)?;
-    let Some((target_name, target_kind)) = target else {
+    let Some((target_name, target_kind, contact_email)) = target else {
         // A target the action names must exist — the candidate carried its id.
         return Err(RepositoryError::NotFound);
     };
@@ -180,6 +184,7 @@ async fn enrich_outreach_draft(
         pitch_title: &pitch_title,
         pitch_url: &pitch_url,
         phase: *phase,
+        language: crowdrelay_domain::outreach_letter::language_for_contact(&contact_email),
     }) {
         *draft = letter;
     }
@@ -260,6 +265,61 @@ async fn enrich_reply_draft(
         shape,
         pitch_title: &pitch_title,
         pitch_url: &pitch_url,
+    }) {
+        *draft = letter;
+    }
+    Ok(())
+}
+
+/// Composes the one nudge a hand-started thread gets onto a
+/// `RequestOutreach` payload whose template is `outreach.thread.v1`.
+///
+/// What it may say is narrower than a pitch: the import kept the date of the
+/// act's own message and nothing else, so the letter names that date and
+/// does not pretend to remember what the thread was about. The language
+/// comes from the contact's mailbox — a `.pl` address reads Polish.
+async fn enrich_thread_draft(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    workspace_id: WorkspaceId,
+    target_id: &crowdrelay_domain::OutreachTargetId,
+    draft: &mut crowdrelay_domain::outreach_letter::OutreachLetter,
+) -> Result<(), RepositoryError> {
+    use crowdrelay_domain::outreach_letter::{ThreadFollowUpInput, compose_thread_followup_letter};
+
+    let ws = workspace_id.into_uuid();
+    let target = sqlx::query_as::<_, (String, String, Option<OffsetDateTime>)>(
+        r#"
+        SELECT target.display_name, target.contact_email,
+               (SELECT max(message.occurred_at)
+                FROM outreach_interactions AS message
+                WHERE message.workspace_id = target.workspace_id
+                  AND message.target_id = target.id
+                  AND message.direction = 'outbound'
+                  AND message.opportunity_id IS NULL) AS thread_started_at
+        FROM outreach_targets AS target
+        WHERE target.workspace_id = $1 AND target.id = $2
+        "#,
+    )
+    .bind(ws)
+    .bind(target_id.into_uuid())
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(map_sqlx)?;
+    let Some((target_name, contact_email, thread_started_at)) = target else {
+        // A target the action names must exist — the candidate carried its id.
+        return Err(RepositoryError::NotFound);
+    };
+    let Some(thread_started_at) = thread_started_at else {
+        // A thread letter without a thread is a letter inventing a past —
+        // leave the draft empty so dispatch fails closed on it.
+        return Ok(());
+    };
+    let sender = sender_identity_in_tx(transaction, ws).await?;
+    if let Ok(letter) = compose_thread_followup_letter(&ThreadFollowUpInput {
+        sender: &sender,
+        target_name: &target_name,
+        contact_email: &contact_email,
+        thread_started_at,
     }) {
         *draft = letter;
     }

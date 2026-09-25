@@ -208,6 +208,10 @@ impl AutopilotControlRepository for PostgresAutopilotRepository {
                               action.action_kind = 'community.engage.request'
                               AND action.payload ->> 'source_id' IS NOT NULL
                           )
+                          -- A pitch inside an outreach wave asks through the
+                          -- wave's own card — one approval for the batch, not
+                          -- a loose card per letter that would send it alone.
+                          AND action.payload ->> 'wave_id' IS NULL
                         ORDER BY action.created_at, action.id
                         LIMIT 50
                         "#,
