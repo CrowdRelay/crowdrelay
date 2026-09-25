@@ -148,10 +148,12 @@ impl Default for PlacementPolicy {
 pub struct PlacementSnapshot {
     pub opportunity_id: OutreachOpportunityId,
     pub state: PlacementState,
+    #[serde(with = "time::serde::rfc3339")]
     pub claimed_at: OffsetDateTime,
     /// The last read that actually happened. `Unreadable` reads are not
     /// recorded here, because they are not reads.
     pub last_observation: Option<PlacementObservation>,
+    #[serde(with = "time::serde::rfc3339::option")]
     pub last_checked_at: Option<OffsetDateTime>,
     /// Checkpoints already satisfied by a real read: confirmation, first
     /// re-check, final re-check.

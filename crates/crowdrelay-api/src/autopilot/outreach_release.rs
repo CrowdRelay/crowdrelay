@@ -882,8 +882,10 @@ struct ReleaseOutcomeRow {
     release_id: Uuid,
     title: String,
     tier: String,
+    #[serde(with = "time::serde::rfc3339")]
     release_at: OffsetDateTime,
     report_kind: String,
+    #[serde(with = "time::serde::rfc3339")]
     generated_at: OffsetDateTime,
     window_days: i32,
     verdict: String,

@@ -108,6 +108,7 @@ pub struct DeliverabilitySnapshot {
     pub complaints_30d: u32,
     /// When this workspace first sent anything at all. `None` means it never
     /// has, and the ramp starts at the bottom.
+    #[serde(with = "time::serde::rfc3339::option")]
     pub first_sent_at: Option<OffsetDateTime>,
     /// The operator's weekly third-party budget. The ramp never exceeds it.
     pub weekly_third_party_ceiling: u32,

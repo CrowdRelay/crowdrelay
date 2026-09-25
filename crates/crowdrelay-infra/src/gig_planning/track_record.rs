@@ -23,6 +23,7 @@ const SHOW_ATTRIBUTION_WINDOW_DAYS: i64 = 120;
 pub struct ProposalOutcome {
     pub city: String,
     pub venue: String,
+    #[serde(with = "time::serde::rfc3339")]
     pub approved_at: OffsetDateTime,
     /// The action's own status — `queued` for a letter parked on a missing
     /// executor, `succeeded` once the outreach actually ran. A score only

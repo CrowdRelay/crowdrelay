@@ -15,7 +15,9 @@ pub struct PlayClaimView {
     pub claim_means: &'static str,
     pub success_metric_platform: String,
     pub success_metric_key: String,
+    #[serde(with = "time::serde::rfc3339")]
     pub window_start: OffsetDateTime,
+    #[serde(with = "time::serde::rfc3339")]
     pub window_end: OffsetDateTime,
     /// `pending` until the window closes, then `succeeded` or `failed`.
     pub status: String,
@@ -44,12 +46,15 @@ pub struct PlayLedgerEntry {
     /// naming only a uuid would leave an operator guessing whether it points at
     /// a show or at one of their own fans.
     pub anchor: PlayAnchorRef,
+    #[serde(with = "time::serde::rfc3339")]
     pub anchor_at: OffsetDateTime,
     /// Frozen when the play started, so the claim can be read back rather than
     /// reconstructed from whatever the code says today.
     pub hypothesis: String,
     pub state: String,
+    #[serde(with = "time::serde::rfc3339")]
     pub started_at: OffsetDateTime,
+    #[serde(with = "time::serde::rfc3339::option")]
     pub completed_at: Option<OffsetDateTime>,
     pub steps_total: u32,
     pub steps_settled: u32,

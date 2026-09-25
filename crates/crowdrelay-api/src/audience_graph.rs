@@ -95,6 +95,7 @@ struct PlaceRulesResponse {
     requires_approval: bool,
     cooldown_days: Option<i16>,
     rules_summary: Option<String>,
+    #[serde(with = "time::serde::rfc3339::option")]
     verified_at: Option<time::OffsetDateTime>,
 }
 
@@ -102,7 +103,9 @@ struct PlaceRulesResponse {
 #[serde(rename_all = "camelCase")]
 struct OutreachResponse {
     stage: String,
+    #[serde(with = "time::serde::rfc3339::option")]
     next_eligible_at: Option<time::OffsetDateTime>,
+    #[serde(with = "time::serde::rfc3339::option")]
     last_action_at: Option<time::OffsetDateTime>,
 }
 

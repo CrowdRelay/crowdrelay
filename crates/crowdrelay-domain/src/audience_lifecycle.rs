@@ -14,10 +14,14 @@ pub struct FanLifecycleSnapshot {
     pub fan_id: FanId,
     pub active: bool,
     pub marketing_consent: bool,
+    #[serde(with = "time::serde::rfc3339")]
     pub created_at: OffsetDateTime,
+    #[serde(with = "time::serde::rfc3339::option")]
     pub synesthesia_completed_at: Option<OffsetDateTime>,
+    #[serde(with = "time::serde::rfc3339::option")]
     pub last_marketing_touch_at: Option<OffsetDateTime>,
     pub has_paid_ticket: bool,
+    #[serde(with = "time::serde::rfc3339::option")]
     pub last_paid_ticket_at: Option<OffsetDateTime>,
     /// Shows this fan has paid for. Needed to tell a first ticket from a fifth,
     /// which is the difference between a true thank-you and an embarrassing one.
@@ -27,6 +31,7 @@ pub struct FanLifecycleSnapshot {
     pub qualified_referrals: u32,
     /// When the most recent one converted. Without it the rule cannot say
     /// "recently", and it says nothing rather than guessing.
+    #[serde(with = "time::serde::rfc3339::option")]
     pub last_qualified_referral_at: Option<OffsetDateTime>,
     /// Whether this fan already has an active referral code.
     ///
@@ -34,6 +39,7 @@ pub struct FanLifecycleSnapshot {
     /// behind it is a dead end. So the code is issued first, for the same
     /// reason a show gets its tracked link before anything is shared.
     pub has_referral_code: bool,
+    #[serde(with = "time::serde::rfc3339::option")]
     pub last_event_interest_at: Option<OffsetDateTime>,
 }
 

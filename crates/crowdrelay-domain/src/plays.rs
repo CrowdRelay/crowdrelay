@@ -842,7 +842,9 @@ pub struct PlayStepState {
     pub index: u16,
     pub kind: PlayStepKind,
     pub class: ActionClass,
+    #[serde(with = "time::serde::rfc3339")]
     pub due_at: OffsetDateTime,
+    #[serde(with = "time::serde::rfc3339")]
     pub expires_at: OffsetDateTime,
     /// True once the step reached a terminal state — fully delivered, or
     /// skipped. Terminal steps are never revisited.
@@ -866,6 +868,7 @@ impl PlayStepState {
 pub struct PlaySnapshot {
     pub play_id: PlayId,
     pub kind: PlayKind,
+    #[serde(with = "time::serde::rfc3339")]
     pub anchor_at: OffsetDateTime,
     /// False once the show is cancelled or unpublished. Every remaining step is
     /// then skipped rather than sent: the reason to act has gone.

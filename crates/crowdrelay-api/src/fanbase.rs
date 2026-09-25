@@ -47,10 +47,12 @@ pub struct FanbaseResponse {
     fetch_url: Option<String>,
     consent_attested_by: Option<String>,
     enabled: bool,
+    #[serde(with = "time::serde::rfc3339")]
     created_at: time::OffsetDateTime,
     members: Option<i64>,
     active_members: Option<i64>,
     last_status: Option<String>,
+    #[serde(with = "time::serde::rfc3339::option")]
     last_finished_at: Option<time::OffsetDateTime>,
     last_imported_pending: Option<i32>,
 }

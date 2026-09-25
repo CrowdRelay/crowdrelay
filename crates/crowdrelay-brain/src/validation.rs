@@ -70,14 +70,19 @@ pub struct WalkForwardResult {
 #[derive(Clone, Copy, Debug, Serialize)]
 pub struct PointInTimeObservation {
     /// When the dispatch event actually happened.
+    #[serde(with = "time::serde::rfc3339")]
     pub event_time: time::OffsetDateTime,
     /// When the data was ingested into our system.
+    #[serde(with = "time::serde::rfc3339")]
     pub ingestion_time: time::OffsetDateTime,
     /// When the data was available for decisions.
+    #[serde(with = "time::serde::rfc3339")]
     pub availability_time: time::OffsetDateTime,
     /// When the brain made a decision based on this data.
+    #[serde(with = "time::serde::rfc3339")]
     pub decision_time: time::OffsetDateTime,
     /// When the action was actually executed (None if not yet).
+    #[serde(with = "time::serde::rfc3339::option")]
     pub execution_time: Option<time::OffsetDateTime>,
     /// The observed incremental fans (Y30).
     pub incremental_fans: f64,

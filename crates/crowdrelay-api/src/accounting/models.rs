@@ -119,7 +119,9 @@ pub struct AccountingTotals {
 
 #[derive(Clone, Debug, Serialize)]
 pub struct AccountingPreview {
+    #[serde(with = "crowdrelay_domain::iso_date")]
     period_start: Date,
+    #[serde(with = "crowdrelay_domain::iso_date")]
     period_end: Date,
     currency: String,
     suggested_document_number: String,
@@ -135,7 +137,9 @@ pub struct AccountingPreview {
 #[derive(Clone, Debug, Serialize, FromRow)]
 pub struct AccountingDocumentSummary {
     id: Uuid,
+    #[serde(with = "crowdrelay_domain::iso_date")]
     period_start: Date,
+    #[serde(with = "crowdrelay_domain::iso_date")]
     period_end: Date,
     document_number: String,
     currency: String,

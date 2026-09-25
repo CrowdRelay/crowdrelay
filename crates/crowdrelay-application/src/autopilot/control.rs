@@ -618,6 +618,7 @@ pub struct OpportunityShortlistEntry {
 /// the answer is still 200, and the absent sections stay `null`-shaped.
 #[derive(Clone, Debug, Serialize)]
 pub struct OpportunityShortlist {
+    #[serde(with = "time::serde::rfc3339")]
     pub generated_at: OffsetDateTime,
     pub entries: Vec<OpportunityShortlistEntry>,
     /// Rows whose `stale_reason` is set.

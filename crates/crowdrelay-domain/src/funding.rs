@@ -18,6 +18,7 @@ pub struct FundingOpportunitySnapshot {
     pub fit_basis_points: u16,
     pub amount_minor: i64,
     pub own_contribution_minor: i64,
+    #[serde(with = "time::serde::rfc3339")]
     pub deadline: OffsetDateTime,
     pub package_prepared: bool,
     pub submitted: bool,

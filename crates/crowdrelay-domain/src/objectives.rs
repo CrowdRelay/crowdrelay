@@ -68,7 +68,9 @@ pub struct GrowthObjective {
     /// progress measured from a baseline that moves is not progress.
     pub baseline_value: i64,
     pub target_value: i64,
+    #[serde(with = "time::serde::rfc3339")]
     pub declared_at: OffsetDateTime,
+    #[serde(with = "time::serde::rfc3339")]
     pub deadline: OffsetDateTime,
 }
 

@@ -106,11 +106,15 @@ pub struct OutreachSnapshot {
     pub accepts_outreach: bool,
     pub relevance_basis_points: u16,
     pub evidence_confidence: Confidence,
+    #[serde(with = "time::serde::rfc3339")]
     pub observed_at: OffsetDateTime,
+    #[serde(with = "time::serde::rfc3339")]
     pub expires_at: OffsetDateTime,
     /// Latest outbound touch for this specific opportunity.
+    #[serde(with = "time::serde::rfc3339::option")]
     pub last_outreach_at: Option<OffsetDateTime>,
     /// Latest outbound touch to this relationship across any opportunity.
+    #[serde(with = "time::serde::rfc3339::option")]
     pub target_last_outreach_at: Option<OffsetDateTime>,
     pub followup_count: u16,
     /// Every outbound touch this relationship has ever received, across all

@@ -412,6 +412,7 @@ pub struct OutreachSupplySnapshot {
     /// Candidates that passed screening and are waiting for a human to confirm
     /// the route. Supply that exists but cannot be used yet.
     pub admitted_candidates: u32,
+    #[serde(with = "time::serde::rfc3339::option")]
     pub last_sweep_requested_at: Option<OffsetDateTime>,
     /// Candidates ingested since the last sweep was asked for. Zero means the
     /// adapter never came back, which is a different problem from a dry source.

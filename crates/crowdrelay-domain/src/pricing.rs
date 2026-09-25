@@ -24,7 +24,9 @@ pub struct TicketYieldSnapshot {
     pub sale_capacity: u32,
     pub paid_last_72h: u32,
     pub days_to_event: u32,
+    #[serde(with = "time::serde::rfc3339::option")]
     pub last_price_change_at: Option<OffsetDateTime>,
+    #[serde(with = "time::serde::rfc3339::option")]
     pub last_capacity_change_at: Option<OffsetDateTime>,
     pub allocation_guardrail: Option<TicketAllocationGuardrail>,
 }

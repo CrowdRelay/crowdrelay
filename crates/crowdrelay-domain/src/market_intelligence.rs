@@ -44,7 +44,9 @@ pub struct CityMarketSignal {
     pub kind: CityMarketSignalKind,
     pub score_basis_points: u16,
     pub confidence: Confidence,
+    #[serde(with = "time::serde::rfc3339")]
     pub observed_at: OffsetDateTime,
+    #[serde(with = "time::serde::rfc3339")]
     pub expires_at: OffsetDateTime,
 }
 

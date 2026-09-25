@@ -14,6 +14,7 @@ pub struct MerchInventorySnapshot {
     pub available_quantity: u32,
     pub sold_last_30d: u32,
     pub reorder_in_flight: bool,
+    #[serde(with = "time::serde::rfc3339::option")]
     pub last_reorder_at: Option<OffsetDateTime>,
 }
 
@@ -123,6 +124,7 @@ pub struct MerchPriceSnapshot {
     pub available_quantity: u32,
     pub sold_last_7d: u32,
     pub sold_last_30d: u32,
+    #[serde(with = "time::serde::rfc3339::option")]
     pub last_price_change_at: Option<OffsetDateTime>,
 }
 

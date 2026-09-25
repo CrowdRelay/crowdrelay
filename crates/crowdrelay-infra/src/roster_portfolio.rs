@@ -133,6 +133,7 @@ pub struct RosterActPool {
     /// run (or found nothing) since the pool existed — `refreshed_at` says
     /// which.
     pub pool_size: u32,
+    #[serde(with = "time::serde::rfc3339::option")]
     pub refreshed_at: Option<OffsetDateTime>,
     /// How many of this act's candidates the pooled rank selected.
     pub selected: u32,

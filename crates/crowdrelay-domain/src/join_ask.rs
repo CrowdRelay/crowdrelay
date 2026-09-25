@@ -170,6 +170,7 @@ impl JoinAskConfig {
 pub struct JoinAskPostRow {
     pub platform: String,
     pub status: String,
+    #[serde(with = "time::serde::rfc3339")]
     pub created_at: OffsetDateTime,
 }
 

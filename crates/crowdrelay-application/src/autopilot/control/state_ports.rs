@@ -684,7 +684,9 @@ pub struct ContentSourceView {
     pub source_kind: ContentSourceKind,
     pub source_key: String,
     pub title: String,
+    #[serde(with = "time::serde::rfc3339")]
     pub occurred_at: OffsetDateTime,
+    #[serde(with = "time::serde::rfc3339")]
     pub expires_at: OffsetDateTime,
     pub metadata: serde_json::Value,
     /// The declared catalogue format, when one was filed — the operator's
@@ -707,7 +709,9 @@ pub struct ContentSourceSendView {
     pub action_id: uuid::Uuid,
     pub artifact: String,
     pub status: String,
+    #[serde(with = "time::serde::rfc3339")]
     pub created_at: OffsetDateTime,
+    #[serde(with = "time::serde::rfc3339::option")]
     pub emitted_at: Option<OffsetDateTime>,
 }
 /// The two outcomes an operator may report on an approved suggestion.
