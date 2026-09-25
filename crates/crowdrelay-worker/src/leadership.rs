@@ -279,17 +279,6 @@ async fn renew_loop(pool: PgPool, worker_id: String, mut shutdown: watch::Receiv
     }
 }
 
-/// Returns the current leader ID and generation, or `None` if the table
-/// is empty (should not happen after migration).
-pub async fn current_leader(pool: &PgPool) -> Result<Option<(String, i64)>, LeadershipError> {
-    let row = sqlx::query_as::<_, (String, i64)>(
-        "SELECT leader_id, generation FROM worker_leadership WHERE id = 1",
-    )
-    .fetch_optional(pool)
-    .await?;
-    Ok(row)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

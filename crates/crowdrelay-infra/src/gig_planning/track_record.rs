@@ -74,18 +74,6 @@ impl ProposalOutcome {
             && self.recipients > 0
             && self.unfinished_measurements == 0
     }
-
-    /// The letter was cancelled before it left, so nothing about it is
-    /// evidence about the reasons it carried.
-    ///
-    /// Kept distinct from "settled with no reply", which is a real answer from
-    /// a real promoter. A console that shows these as the same thing teaches
-    /// the band that their reasons do not work, when the truth is that nothing
-    /// was ever sent.
-    #[must_use]
-    pub fn never_sent(&self) -> bool {
-        self.action_status == "cancelled"
-    }
 }
 
 /// The tally the learning question is asked with: of the settled proposals

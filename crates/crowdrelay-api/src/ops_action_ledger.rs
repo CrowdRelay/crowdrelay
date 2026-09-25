@@ -303,6 +303,11 @@ pub struct CycleRunEntry {
     /// Absent for every cycle that ran before migration 0261. An empty list is
     /// a different statement: that cycle recorded no phase failure.
     pub degraded_phases: Option<Vec<String>>,
+    /// Why each degraded phase fell over: phase to the database faults the
+    /// worker recorded before it failed (migration 0358). The phase alone
+    /// left the reason in a worker log that each deploy throws away. NULL for
+    /// a clean cycle and for every cycle before the column.
+    pub degraded_reasons: Option<serde_json::Value>,
     /// Why a quiet cycle was quiet, in the brain's own words ("WAIT wins:
     /// VOI=0.85 > best_action_value=0.00"). The system may do nothing and say
     /// so — but only if the reason is readable next to the silence. NULL when
@@ -411,6 +416,7 @@ async fn load_cycle_runs(
                actions_created,
                north_star_value,
                degraded_phases,
+               degraded_reasons,
                wait_reason
         FROM autopilot_cycle_runs
         WHERE workspace_id = $1

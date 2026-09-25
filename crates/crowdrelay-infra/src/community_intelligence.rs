@@ -206,27 +206,6 @@ impl PostgresCommunityIntelligenceRepository {
         .map_err(CommunityIntelligenceError::unexpected)
     }
 
-    pub async fn latest_observations(
-        &self,
-        workspace_id: Uuid,
-        limit: i64,
-    ) -> Result<Vec<ObservationRow>, CommunityIntelligenceError> {
-        sqlx::query_as::<_, ObservationRow>(
-            r#"SELECT id, workspace_id, place_id, observed_at, source,
-                      source_url, collector_version, raw_activity_metrics,
-                      observation_quality, created_at
-               FROM community_observations
-               WHERE workspace_id = $1
-               ORDER BY observed_at DESC
-               LIMIT $2"#,
-        )
-        .bind(workspace_id)
-        .bind(limit)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(CommunityIntelligenceError::unexpected)
-    }
-
     /// Returns the observation time series for one place (tenant-scoped).
     pub async fn observations_for_place(
         &self,

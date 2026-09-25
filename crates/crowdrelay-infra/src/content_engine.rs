@@ -805,25 +805,6 @@ impl PostgresContentEngineRepository {
         CapturePlan::try_from(row)
     }
 
-    pub async fn capture_plans_for_event(
-        &self,
-        workspace_id: WorkspaceId,
-        production_event_id: ProductionEventId,
-    ) -> Result<Vec<CapturePlan>> {
-        let rows = sqlx::query_as::<_, CapturePlanRow>(
-            r#"
-            SELECT * FROM capture_plans
-            WHERE workspace_id = $1 AND production_event_id = $2
-            ORDER BY created_at ASC
-            "#,
-        )
-        .bind(workspace_id.into_uuid())
-        .bind(production_event_id.into_uuid())
-        .fetch_all(&self.pool)
-        .await?;
-        rows.into_iter().map(CapturePlan::try_from).collect()
-    }
-
     // Arcs ─────────────────────────────────────────────────────────────────
 
     pub async fn create_arc(&self, workspace_id: WorkspaceId, arc: &NewArc) -> Result<Arc> {

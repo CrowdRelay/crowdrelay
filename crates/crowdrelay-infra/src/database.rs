@@ -62,6 +62,12 @@ pub(crate) fn classify_sqlx_error(error: &sqlx::Error) -> SqlxErrorClass {
         }
         _ => SqlxErrorClass::Unexpected,
     };
+    if matches!(
+        class,
+        SqlxErrorClass::Unexpected | SqlxErrorClass::Unavailable
+    ) {
+        note_fault(error);
+    }
     if class == SqlxErrorClass::Unexpected {
         if let sqlx::Error::Database(database) = error {
             tracing::error!(
@@ -406,5 +412,83 @@ mod tests {
              migration file is present that the migrator did not parse, most likely a filename \
              the version prefix parser rejects"
         );
+    }
+}
+
+tokio::task_local! {
+    static FAULTS: std::cell::RefCell<Vec<String>>;
+}
+
+/// Most faults kept per scope; a phase failing on every item of a batch
+/// should not grow a cycle row without bound.
+const MAX_FAULTS: usize = 16;
+/// Longest fault text kept.
+const MAX_FAULT_CHARS: usize = 300;
+
+/// Runs `future` with a fault list that [`classify_sqlx_error`] appends to.
+///
+/// The worker wraps each autopilot cycle in this so a degraded phase can be
+/// recorded with the database error behind it. Only unexpected and
+/// unavailable failures are noted; a conflict or a missing row is an answer,
+/// not a fault. Work spawned onto another task is outside the scope.
+pub async fn capture_faults<F: std::future::Future>(future: F) -> F::Output {
+    FAULTS
+        .scope(std::cell::RefCell::new(Vec::new()), future)
+        .await
+}
+
+/// Takes the faults recorded in the current scope so far. Empty outside one.
+#[must_use]
+pub fn take_faults() -> Vec<String> {
+    FAULTS
+        .try_with(|faults| std::mem::take(&mut *faults.borrow_mut()))
+        .unwrap_or_default()
+}
+
+fn note_fault(error: &sqlx::Error) {
+    let text = match error {
+        sqlx::Error::Database(database) => format!(
+            "{}: {}",
+            database.code().as_deref().unwrap_or("?????"),
+            database.message()
+        ),
+        other => other.to_string(),
+    };
+    let text: String = text.chars().take(MAX_FAULT_CHARS).collect();
+    let _ = FAULTS.try_with(|faults| {
+        let mut faults = faults.borrow_mut();
+        if faults.len() < MAX_FAULTS && !faults.contains(&text) {
+            faults.push(text);
+        }
+    });
+}
+
+#[cfg(test)]
+mod fault_capture_tests {
+    use super::{SqlxErrorClass, capture_faults, classify_sqlx_error, take_faults};
+
+    /// A fault classified inside a cycle's scope is there to record; one
+    /// outside any scope is not kept anywhere, and a missing row is an answer
+    /// rather than a fault.
+    #[tokio::test]
+    async fn faults_inside_a_scope_are_kept_and_answers_are_not() {
+        assert_eq!(
+            classify_sqlx_error(&sqlx::Error::PoolTimedOut),
+            SqlxErrorClass::Unavailable
+        );
+        assert!(take_faults().is_empty(), "no scope, nothing kept");
+
+        let kept = capture_faults(async {
+            let _ = classify_sqlx_error(&sqlx::Error::RowNotFound);
+            let _ = classify_sqlx_error(&sqlx::Error::PoolTimedOut);
+            let _ = classify_sqlx_error(&sqlx::Error::PoolTimedOut);
+            let first = take_faults();
+            let after = take_faults();
+            (first, after)
+        })
+        .await;
+        assert_eq!(kept.0.len(), 1, "one fault, deduplicated: {:?}", kept.0);
+        assert!(kept.0[0].contains("pool timed out"), "{:?}", kept.0);
+        assert!(kept.1.is_empty(), "taking the faults empties the list");
     }
 }

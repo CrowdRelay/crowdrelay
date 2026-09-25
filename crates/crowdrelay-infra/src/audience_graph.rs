@@ -120,11 +120,6 @@ pub struct PlaceRulesInput<'a> {
     pub rules_summary: Option<&'a str>,
 }
 
-#[must_use]
-pub fn place_kind_or_other(value: &str) -> PlaceKind {
-    PlaceKind::from_storage(value).unwrap_or(PlaceKind::Other)
-}
-
 impl PostgresAudienceGraphRepository {
     #[must_use]
     pub fn new(pool: PgPool) -> Self {
