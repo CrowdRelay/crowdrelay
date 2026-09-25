@@ -47,7 +47,9 @@ def phase_constants() -> dict[str, str]:
 
 
 def failure_sites() -> list[str]:
-    return re.findall(r"degraded\.failed\((?P<arg>[^)]*)\)", WORKER.read_text())
+    # Any receiver (`degraded`, `skipped`), first argument only — the kind
+    # expression that follows can hold `)`s of its own.
+    return re.findall(r"\.failed\(\s*(phase::[A-Z_]+)", WORKER.read_text())
 
 
 class CycleDegradedPhases(unittest.TestCase):
