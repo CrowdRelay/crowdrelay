@@ -68,6 +68,10 @@ AUTHORITY_PREFIXES = [
 # How far a crate's size may drift before the claim is stale rather than round.
 FILE_COUNT_TOLERANCE = 6
 LINE_COUNT_TOLERANCE_K = 2
+# The headline "≈Nk lines" is orientation, not navigation — a wider band than
+# the per-crate one, so it only fires when the tree has genuinely outgrown
+# the sentence.
+HEADLINE_TOLERANCE_K = 10
 
 
 def route_paths(name: str) -> list[str]:
@@ -242,6 +246,35 @@ class ClaudeMdCounts(unittest.TestCase):
             "these have drifted past rounding, so the layout block is now "
             f"describing a different tree: {stale}",
         )
+
+    def test_the_headline_total_is_in_the_right_neighbourhood(self):
+        """A band like the per-crate sizes — the "≈Nk lines" in the Layout
+        heading is orientation, but it had drifted ten thousand lines stale
+        before anything checked it."""
+        src_lines = sum(
+            len(f.read_text().splitlines())
+            for crate in (ROOT / "crates").iterdir()
+            if (src := crate / "src").is_dir()
+            for f in src.rglob("*.rs")
+        )
+        all_lines = sum(
+            len(f.read_text().splitlines())
+            for f in (ROOT / "crates").rglob("*.rs")
+        )
+        for pattern, actual in (
+            (r"≈(\d+)k lines of src", src_lines),
+            (r"≈(\d+)k with tests", all_lines),
+        ):
+            stated = re.search(pattern, self.doc)
+            self.assertIsNotNone(
+                stated, f"the Layout heading no longer states '{pattern}'"
+            )
+            self.assertLessEqual(
+                abs(actual / 1000 - int(stated.group(1))),
+                HEADLINE_TOLERANCE_K,
+                f"CLAUDE.md says ≈{stated.group(1)}k; the tree holds "
+                f"{actual / 1000:.1f}k — re-measure before writing the number",
+            )
 
 
 if __name__ == "__main__":
