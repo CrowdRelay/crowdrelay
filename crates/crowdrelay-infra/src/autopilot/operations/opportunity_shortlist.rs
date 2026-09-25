@@ -40,7 +40,9 @@ struct ShortlistRow {
     application_fee_minor: i64,
     currency: String,
     distance_km: Option<i32>,
-    nights_away: Option<i32>,
+    /// `smallint` in the table. Declared `i32`, every shortlist with a row in
+    /// it failed to decode (`INT4` from `INT2`) and the whole read degraded.
+    nights_away: Option<i16>,
     fit_basis_points: i32,
     reputation_basis_points: i32,
     confidence_basis_points: i32,

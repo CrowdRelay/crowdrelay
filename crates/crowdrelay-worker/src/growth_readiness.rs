@@ -176,7 +176,11 @@ impl GrowthReadiness {
 
     /// Logs a structured growth readiness summary. Each component is logged
     /// as a field so it can be searched/alerted on in log aggregation.
-    pub fn log(&self) {
+    /// `community_executor_missing` is the switch the publishing posture says
+    /// is off. The warning used to name `CROWDRELAY_AGENT_SERVICE_AUTH_KEY`
+    /// whatever was actually missing, so a host with the key set and the write
+    /// switch off was told to set the key it already had.
+    pub fn log(&self, community_executor_missing: Option<&str>) {
         let components = self.components();
         // The count was compared against a hard-coded 8 while the array had
         // grown to twelve, so a healthy boot could report "11/8 active".
@@ -220,7 +224,8 @@ impl GrowthReadiness {
         }
         if !self.community_executor_enabled {
             tracing::warn!(
-                "growth readiness: community executor is OFF — set CROWDRELAY_AGENT_SERVICE_AUTH_KEY for automatic posting via the agents service browser, or the executor will run in manual mode (operator posts manually)"
+                missing = community_executor_missing.unwrap_or("unknown"),
+                "growth readiness: community executor is OFF — drafts wait for an operator to post them by hand until the missing switch is set"
             );
         }
         if !self.reddit_discovery_enabled {

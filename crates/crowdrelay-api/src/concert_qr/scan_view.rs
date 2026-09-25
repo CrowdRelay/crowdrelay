@@ -77,6 +77,13 @@ pub async fn control_plane_event_scan(
                 }) {
                     Some(url) => Some(url),
                     None => {
+                        // A 503 with nothing in the log is a fault nobody can
+                        // find: name which half failed.
+                        tracing::warn!(
+                            event_slug = %facts.event_slug,
+                            signing_key = state.concert_qr.has_signing_key(),
+                            "control-plane event scan: a live campaign produced no check-in URL"
+                        );
                         return Problem::service_unavailable(request_id_value)
                             .private()
                             .into_response()
@@ -112,6 +119,12 @@ pub async fn control_plane_event_scan(
     }
 }
 
+#[derive(Debug, sqlx::FromRow)]
+struct ScanEventRow {
+    id: Uuid,
+    slug: String,
+}
+
 struct ScanFacts {
     event_slug: String,
     campaign_is_live: bool,
@@ -132,9 +145,15 @@ async fn load_scan_facts(
     event_slug: &str,
 ) -> Result<Option<ScanFacts>, sqlx::Error> {
     let workspace_id = state.workspace_id.into_uuid();
-    let Some(event) = sqlx::query_as::<_, TimelineEventRow>(
+    // Its own two-column row, not the timeline's. Borrowing `TimelineEventRow`
+    // meant every column the timeline grew (venue_address, counterparty_*,
+    // place_event_id, booking_opportunity_id) had to be added here too, and
+    // none was: the door view answered 503 for every show with "no column
+    // found for name: venue_address", and the query still compiled, linted
+    // and prepared clean.
+    let Some(event) = sqlx::query_as::<_, ScanEventRow>(
         r#"
-        SELECT id, slug, title, venue, status, starts_at, ends_at
+        SELECT id, slug
         FROM events
         WHERE workspace_id = $1 AND slug = $2
           AND status IN ('published','completed')

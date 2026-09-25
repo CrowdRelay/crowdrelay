@@ -49,6 +49,13 @@ pub struct ConcertQrState {
 }
 
 impl ConcertQrState {
+    /// Whether tokens can be signed at all — `CROWDRELAY_QR_SIGNING_SECRET`
+    /// reached this process.
+    #[must_use]
+    pub fn has_signing_key(&self) -> bool {
+        self.signing_key.is_some()
+    }
+
     #[must_use]
     pub fn new(
         workspace_id: WorkspaceId,

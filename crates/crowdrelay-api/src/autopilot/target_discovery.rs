@@ -78,7 +78,12 @@ fn valid_candidate_text(value: &str, max_length: usize) -> bool {
 fn validate_candidate(
     request: OutreachCandidateRequest,
 ) -> Result<IngestOutreachCandidate, ()> {
-    if !valid_candidate_text(&request.display_name, 200)
+    // Agents and labels are representation contacts with their own intake;
+    // `outreach_candidates.target_kind` does not admit them and the OpenAPI
+    // enum does not list them. Deserialising into the full Rust enum let them
+    // through to the CHECK, which failed the whole batch as a 500.
+    if request.target_kind.is_representation()
+        || !valid_candidate_text(&request.display_name, 200)
         || !valid_candidate_text(&request.source_reference, 2048)
         || !valid_candidate_text(&request.route_value, 2048)
         || request.fit_basis_points > 10_000
@@ -354,5 +359,35 @@ pub async fn upsert_submission_channel(
     {
         Ok(result) => private_json(StatusCode::OK, result),
         Err(error) => repository_problem(error, request_id(&headers)),
+    }
+}
+
+#[cfg(test)]
+mod target_discovery_tests {
+    use super::*;
+
+    fn candidate(target_kind: &str) -> OutreachCandidateRequest {
+        serde_json::from_value(serde_json::json!({
+            "target_kind": target_kind,
+            "display_name": "Night Shift",
+            "source": "playlist_description",
+            "source_reference": "https://example.test/playlist",
+            "evidence": "Submissions: curator@example.test",
+            "route_kind": "email",
+            "route_value": "curator@example.test",
+            "route_is_published": true,
+            "channel_slug": null,
+            "fit_basis_points": 7000,
+            "follower_count": null,
+            "engagement_count": null
+        }))
+        .expect("candidate fixture deserialises")
+    }
+
+    #[test]
+    fn a_representation_kind_is_refused_at_the_boundary() {
+        assert!(validate_candidate(candidate("playlist")).is_ok());
+        assert!(validate_candidate(candidate("agent")).is_err());
+        assert!(validate_candidate(candidate("label")).is_err());
     }
 }
