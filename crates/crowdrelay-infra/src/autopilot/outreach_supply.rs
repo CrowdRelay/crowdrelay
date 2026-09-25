@@ -316,6 +316,9 @@ impl PostgresAutopilotRepository {
                               WHERE target.workspace_id = opportunity.workspace_id
                                 AND target.id = opportunity.target_id
                                 AND {ELIGIBLE_TARGET}
+                                AND target.target_kind IN
+                                    ('playlist', 'radio', 'press', 'creator',
+                                     'support_slot', 'endorsement', 'media_patronage')
                                 AND last_out.occurred_at > $3 - interval '60 days'
                           ))
                   )

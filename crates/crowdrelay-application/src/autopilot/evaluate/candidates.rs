@@ -662,9 +662,16 @@ fn outreach_candidate(
             snapshot.relevance_basis_points,
             snapshot.observed_at.unix_timestamp()
         ),
+        // The wave is part of the attempt's identity: a pitch that died with
+        // one wave must not dedupe the re-draft into next month's, or a
+        // wave-bound pitch becomes one attempt ever, sent or not.
         action_idempotency_key: format!(
-            "action:outreach:{}:{}:{:?}:{}",
-            snapshot.opportunity_id, snapshot.target_id, phase, snapshot.followup_count
+            "action:outreach:{}:{}:{:?}:{}:{}",
+            snapshot.opportunity_id,
+            snapshot.target_id,
+            phase,
+            snapshot.followup_count,
+            wave_id.map_or(String::new(), |id| id.to_string())
         ),
     }))
 }

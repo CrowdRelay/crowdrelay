@@ -335,13 +335,20 @@ const CONVERSATION_TIMELINE_SQL: &str = r#"
            message.occurred_at, message.opportunity_id,
            NULLIF(btrim(COALESCE(message.metadata->>'result',
                                  message.metadata->>'response_type')), '') AS reply_label,
-           NULLIF(btrim(classification.reply_text), '') AS reply_text
+           NULLIF(btrim(COALESCE(message.metadata->>'reply_text',
+                                 classification.reply_text)), '') AS reply_text
     FROM outreach_interactions AS message
+    -- Legacy fallback only: replies recorded before the interaction carried
+    -- its own reply_text keep the words solely on the triage row, matched by
+    -- the stamp ingress copied from the reply's occurred_at. Once the worker
+    -- triages that row it rewrites classified_at to now(), so the fallback
+    -- only ever joins rows still pending triage.
     LEFT JOIN reply_classifications AS classification
       ON classification.workspace_id = message.workspace_id
      AND classification.target_id = message.target_id
      AND classification.classified_at = message.occurred_at
      AND message.direction = 'inbound'
+     AND message.metadata->>'reply_text' IS NULL
     WHERE message.workspace_id = $1 AND message.target_id = $2
     ORDER BY message.occurred_at, message.id
 "#;
@@ -598,10 +605,9 @@ fn conversation_next(
                             Some((_, state)) if state == "drafting" => {
                                 "follow-up due — drafts into the threads wave being built".to_owned()
                             }
-                            Some((_, state)) if state == "sealed" => {
-                                "follow-up due — the sealed threads wave is waiting on your approval"
-                                    .to_owned()
-                            }
+                            // A sealed wave holds only the pitches drafted
+                            // before it closed — this contact's letter lands
+                            // in the next month's wave, not this one.
                             _ => "follow-up due — lands in the next threads wave".to_owned(),
                         },
                         None,
@@ -715,7 +721,25 @@ fn conversation_next(
         },
         Some(message) => {
             let unlinked = message.direction == "outbound" && message.opportunity_id.is_none();
-            let eligible = contact.verified && contact.accepts_outreach;
+            // The seed's own eligibility test — an answered thread is never
+            // picked up, whatever a later unlinked message says, and
+            // representation contacts never ride the thread lane at all.
+            let eligible = contact.verified
+                && contact.accepts_outreach
+                && matches!(
+                    contact.target_kind.as_str(),
+                    "playlist"
+                        | "radio"
+                        | "press"
+                        | "creator"
+                        | "support_slot"
+                        | "endorsement"
+                        | "media_patronage"
+                )
+                && !matches!(
+                    contact.last_reply_disposition.as_str(),
+                    "received" | "positive" | "declined"
+                );
             let age = now - message.occurred_at;
             if unlinked
                 && eligible
@@ -729,12 +753,28 @@ fn conversation_next(
                     wave_id: None,
                 }
             } else if unlinked && !eligible {
+                let pitchable_kind = matches!(
+                    contact.target_kind.as_str(),
+                    "playlist"
+                        | "radio"
+                        | "press"
+                        | "creator"
+                        | "support_slot"
+                        | "endorsement"
+                        | "media_patronage"
+                );
                 ConversationNext {
                     kind: "held",
                     detail: if !contact.verified {
                         "held — the address is unverified".to_owned()
-                    } else {
+                    } else if !contact.accepts_outreach {
                         "held — they opted out of outreach".to_owned()
+                    } else if !pitchable_kind {
+                        "held — agents and labels are approached through the listing, never followed up"
+                            .to_owned()
+                    } else {
+                        "their answer is already on record — the thread lane does not reopen it"
+                            .to_owned()
                     },
                     due_at: None,
                     wave_id: None,

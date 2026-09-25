@@ -284,6 +284,14 @@ pub async fn record_outreach_reply(
         Ok(value) => value,
         Err(response) => return response,
     };
+    // A reply stamped in the future would stand as the thread's last word
+    // until that date passes — the same guard the written and suppression
+    // controls carry.
+    if request.occurred_at > OffsetDateTime::now_utc() + time::Duration::minutes(5) {
+        return Problem::bad_request_because("occurred_at is in the future", request_id(&headers))
+            .private()
+            .into_response();
+    }
     let request_id_value = parsed_request_id(&headers);
     let command = RecordOutreachReply {
         target_id: OutreachTargetId::from_uuid(target_id),

@@ -179,10 +179,17 @@ pub struct OutreachPolicy {
     pub maximum_lifetime_contacts: u16,
     /// Days of silence before a hand-started thread earns its one nudge.
     /// Under it, the thread is the act's own to answer.
+    ///
+    /// The supply seed and the waves planner inline this number in SQL —
+    /// `outreach_supply.rs` and `waves.rs` in crowdrelay-infra — because the
+    /// ledger probes cannot wait on a policy load inside their transactions.
+    /// A tuned value here must be mirrored there.
     pub thread_followup_after_days: u32,
     /// Days after which the thread is too old to reopen. The nudge says
     /// "following up on my message"; past the window that claim stops being
     /// one a stranger can still place.
+    ///
+    /// Inlined in the same SQL as `thread_followup_after_days` — see its note.
     pub thread_followup_window_days: u32,
     /// How free-reach pitches are batched for approval. Nested here rather than
     /// given a context of its own because it is the same operator setting: how

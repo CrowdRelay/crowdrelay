@@ -85,7 +85,8 @@ SELECT
     CASE WHEN wave.anchor_kind = 'threads' THEN (
         -- The threads lane counts a different pool: contacts whose latest
         -- message is the act's own hand-sent one, inside the follow-up
-        -- window, unanswered since. The supply seed reads the same test.
+        -- window, unanswered since — and due now, since a thread younger
+        -- than the silence floor cannot draft this cycle.
         SELECT count(*)::bigint
         FROM outreach_targets AS target
         WHERE target.workspace_id = wave.workspace_id
@@ -102,7 +103,7 @@ SELECT
                 AND last_out.target_id = target.id
                 AND last_out.direction = 'outbound'
                 AND last_out.opportunity_id IS NULL
-                AND last_out.occurred_at <= now()
+                AND last_out.occurred_at <= now() - interval '10 days'
                 AND last_out.occurred_at > now() - interval '60 days'
                 AND NOT EXISTS (
                     SELECT 1
@@ -212,7 +213,9 @@ WITH anchors AS (
                 AND last_out.target_id = target.id
                 AND last_out.direction = 'outbound'
                 AND last_out.opportunity_id IS NULL
-                AND last_out.occurred_at <= $2
+                -- Due now: under the silence floor the evaluator only
+                -- holds, so a younger thread must not open the season.
+                AND last_out.occurred_at <= $2 - interval '10 days'
                 AND last_out.occurred_at > $2 - interval '60 days'
                 AND NOT EXISTS (
                     SELECT 1
@@ -260,7 +263,7 @@ SELECT
                     AND last_out.target_id = target.id
                     AND last_out.direction = 'outbound'
                     AND last_out.opportunity_id IS NULL
-                    AND last_out.occurred_at <= $2
+                    AND last_out.occurred_at <= $2 - interval '10 days'
                     AND last_out.occurred_at > $2 - interval '60 days'
                     AND NOT EXISTS (
                         SELECT 1

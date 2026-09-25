@@ -38,11 +38,35 @@ pub(in crate::autopilot) async fn suppress_outreach_target(
         )
         .await?
         {
+            // Replay tells the truth the first answer told: a request that
+            // found the flag already set is still a no-op, not a recording.
+            // The recorded path stamps the operation id into the history
+            // snapshot — that row's existence is the original outcome.
+            let wrote_change = sqlx::query_scalar::<_, bool>(
+                r#"
+                SELECT EXISTS(
+                    SELECT 1 FROM outreach_target_history
+                    WHERE workspace_id = $1 AND target_id = $2
+                      AND snapshot->>'operation_id' = $3::text
+                )
+                "#,
+            )
+            .bind(workspace_id.into_uuid())
+            .bind(command.target_id.into_uuid())
+            .bind(existing.to_string())
+            .fetch_one(&mut *transaction)
+            .await
+            .map_err(map_sqlx)?;
             transaction.commit().await.map_err(map_sqlx)?;
             return Ok(AutopilotControlMutation {
                 operation_id: existing,
                 target_id: command.target_id.into_uuid(),
-                status: "suppression_recorded".into(),
+                status: if wrote_change {
+                    "suppression_recorded"
+                } else {
+                    "suppression_unchanged"
+                }
+                .into(),
                 replayed: true,
             });
         }
@@ -98,6 +122,7 @@ pub(in crate::autopilot) async fn suppress_outreach_target(
             r#"
             INSERT INTO outreach_target_history (workspace_id, target_id, version, snapshot)
             SELECT workspace_id, id, version, jsonb_build_object(
+                'operation_id', $4::text,
                 'target_kind', target_kind,
                 'display_name', display_name,
                 'contact_email', contact_email,
@@ -118,6 +143,7 @@ pub(in crate::autopilot) async fn suppress_outreach_target(
         .bind(workspace_id.into_uuid())
         .bind(command.target_id.into_uuid())
         .bind(suppressed)
+        .bind(operation_id.to_string())
         .execute(&mut *transaction)
         .await
         .map_err(map_sqlx)?;

@@ -279,7 +279,28 @@ const OUTREACH_SNAPSHOT_SQL: &str = r#"
              WHERE interaction.workspace_id = opportunity.workspace_id
                AND interaction.opportunity_id = opportunity.id
                AND interaction.direction = 'outbound') AS last_outreach_at,
-            target.last_outreach_at AS target_last_outreach_at,
+            -- A thread's silence clock is the imported unlinked message the
+            -- seed anchored on, not the denormalized column: any ledger
+            -- writer that forgets to stamp `last_outreach_at` would hold a
+            -- standing thread at InvalidSnapshot forever.
+            CASE WHEN opportunity.source = 'thread_followup' THEN (
+                SELECT message.occurred_at
+                FROM outreach_interactions AS message
+                WHERE message.workspace_id = opportunity.workspace_id
+                  AND message.target_id = target.id
+                  AND message.direction = 'outbound'
+                  AND message.opportunity_id IS NULL
+                  AND message.occurred_at <= now()
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM outreach_interactions AS later
+                      WHERE later.workspace_id = opportunity.workspace_id
+                        AND later.target_id = target.id
+                        AND later.occurred_at > message.occurred_at
+                  )
+                ORDER BY message.occurred_at DESC, message.id DESC
+                LIMIT 1
+            ) ELSE target.last_outreach_at END AS target_last_outreach_at,
             (SELECT count(*)::integer
              FROM outreach_interactions AS interaction
              WHERE interaction.workspace_id = opportunity.workspace_id

@@ -275,7 +275,17 @@ async fn persist_decision_and_action_tx(
             $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,
             CASE WHEN $10 = 'queued' THEN now() ELSE NULL END,
             CASE WHEN $10 = 'queued' THEN $14 ELSE NULL END,
-            CASE WHEN $10 = 'awaiting_approval' THEN now() + INTERVAL '72 hours' ELSE NULL END,
+            -- A pitch inside a wave is approved with the wave, so its clock
+            -- is the wave's close — the 72h lapse window would kill it long
+            -- before a monthly season ever reached approval.
+            CASE WHEN $10 = 'awaiting_approval'
+                 THEN COALESCE(
+                     (SELECT wave.anchor_at
+                      FROM outreach_waves AS wave
+                      WHERE wave.workspace_id = $2
+                        AND wave.id = ($9->>'wave_id')::uuid),
+                     now() + INTERVAL '72 hours')
+                 ELSE NULL END,
             $12, $13,
             -- The ladder is the approval, not a shortcut past the hold that
             -- makes revoking meaningful: a ladder-queued outward rung waits
