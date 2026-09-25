@@ -377,6 +377,15 @@ pub struct RecordOutreachReply {
     pub occurred_at: OffsetDateTime,
 }
 
+/// The act wrote to an outreach contact outside the machine — from its own
+/// mailbox, usually in answer to a reply. Logged so the contact's
+/// conversation shows the act spoke last and leaves "your turn".
+#[derive(Clone, Debug)]
+pub struct RecordOutreachWritten {
+    pub target_id: OutreachTargetId,
+    pub occurred_at: OffsetDateTime,
+}
+
 #[async_trait]
 pub trait AutopilotOutreachStateRepository: Send + Sync {
     async fn upsert_outreach_target(
@@ -397,6 +406,13 @@ pub trait AutopilotOutreachStateRepository: Send + Sync {
         &self,
         workspace_id: WorkspaceId,
         command: RecordOutreachReply,
+        idempotency_key: &IdempotencyKey,
+        request_id: Option<&RequestId>,
+    ) -> Result<AutopilotControlMutation, RepositoryError>;
+    async fn record_outreach_written(
+        &self,
+        workspace_id: WorkspaceId,
+        command: RecordOutreachWritten,
         idempotency_key: &IdempotencyKey,
         request_id: Option<&RequestId>,
     ) -> Result<AutopilotControlMutation, RepositoryError>;

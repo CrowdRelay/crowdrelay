@@ -26,12 +26,12 @@ use crowdrelay_application::{
         FreezeShowCostPrediction, GrowthMetricSubject, GrowthMetricTrendView, GrowthObjectiveView,
         GrowthPosture, IngestOutreachCandidate, ManagerConfigSource, OutreachSweepReport,
         PromoterPosition, RecordBeaconReply, RecordBookingReply, RecordDeliveryFault,
-        RecordGrowthMetricPoint, RecordOutreachReply, RecordPlaylistPlacement,
-        RecordTeamOpportunityProgress, RecordTeamOpportunityTerms, ReportSuggestionOutcome,
-        SetAutopilotAuthority, SetGrowthEnvelope, SetGrowthPosture, SetManagerBookingPolicy,
-        SetTourEconomics, SettleShowCost, ShowCostLedgerEntry, SuggestionReportOutcome,
-        TeamOpportunityKind, TeamOpportunityProgress, UpsertBeacon, UpsertBookingTarget,
-        UpsertCityMarketSignal, UpsertContentSource, UpsertFestivalEdition,
+        RecordGrowthMetricPoint, RecordOutreachReply, RecordOutreachWritten,
+        RecordPlaylistPlacement, RecordTeamOpportunityProgress, RecordTeamOpportunityTerms,
+        ReportSuggestionOutcome, SetAutopilotAuthority, SetGrowthEnvelope, SetGrowthPosture,
+        SetManagerBookingPolicy, SetTourEconomics, SettleShowCost, ShowCostLedgerEntry,
+        SuggestionReportOutcome, TeamOpportunityKind, TeamOpportunityProgress, UpsertBeacon,
+        UpsertBookingTarget, UpsertCityMarketSignal, UpsertContentSource, UpsertFestivalEdition,
         UpsertGrowthMetricSeries, UpsertMerchProductEconomics, UpsertOutreachOpportunity,
         UpsertOutreachTarget, UpsertPromotionBudgetGuardrail, UpsertPromotionCampaignState,
         UpsertReleasePlan, UpsertSubmissionChannel, UpsertTeamOpportunity,
@@ -264,6 +264,7 @@ include!("autopilot/booking_discovery.rs");
 include!("autopilot/scorecard.rs");
 include!("autopilot/measurement.rs");
 include!("autopilot/reply_triage.rs");
+include!("autopilot/outreach_contacts.rs");
 include!("autopilot/negotiations.rs");
 include!("autopilot/show_ladder.rs");
 include!("autopilot/decision_evidence.rs");
