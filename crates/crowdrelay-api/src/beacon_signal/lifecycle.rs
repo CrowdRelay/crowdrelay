@@ -534,6 +534,12 @@ struct AdminProfileView {
     open_press_requests: i64,
     active_engagements: i64,
     coverage_count: i64,
+    relevance_basis_points: i32,
+    relationship_score: i32,
+    destination_url: Option<String>,
+    verified: bool,
+    accepts_outreach: bool,
+    do_not_contact: bool,
 }
 
 #[derive(Debug, Serialize)]
