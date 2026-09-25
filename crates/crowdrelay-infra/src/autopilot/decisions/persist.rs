@@ -44,6 +44,47 @@ async fn persist_decision_and_action_tx(
     candidate: &DecisionCandidate,
     trace: &TraceContext,
 ) -> Result<DecisionActionOutcome, RepositoryError> {
+    // ── Executor check ──
+    // Work that no live executor can perform is recorded as a
+    // recommendation, not asked for and not queued. Asking cost a person
+    // their attention and queuing cost the week's outward budget, and both
+    // bought an action the dispatcher parks and the stale sweep cancels a day
+    // later. On 2026-09-25 seven approved `beacon.outreach` actions sat
+    // parked (no executor has ever advertised it) and held seven of the ten
+    // weekly third-party touches, so no outreach wave could open for a show
+    // three weeks out.
+    //
+    // The decision row still records the finding, and because a later cycle
+    // re-evaluates the same key, the action is minted the first cycle after
+    // an executor advertises the capability. Fail-open on an empty registry,
+    // like every other executor gate: nothing registered is not "everything
+    // is blocked".
+    let withheld;
+    let candidate = match executor_capability_for_payload(&candidate.action) {
+        Some(capability)
+            if matches!(
+                candidate.disposition,
+                PolicyDisposition::RequireApproval | PolicyDisposition::AutoExecute
+            ) && executor_registry_is_active(transaction, workspace_id).await?
+                && !executor_capability_available(transaction, workspace_id, capability)
+                    .await? =>
+        {
+            tracing::warn!(
+                action_kind = candidate.action.action_kind(),
+                capability,
+                decision_key = %candidate.decision_key,
+                "recorded as a recommendation: no live executor advertises this \
+                 capability, so asking or queuing would spend budget on work \
+                 nothing can perform"
+            );
+            withheld = DecisionCandidate {
+                disposition: PolicyDisposition::RecommendOnly,
+                ..candidate.clone()
+            };
+            &withheld
+        }
+        _ => candidate,
+    };
     // ── Quota check ──
     if matches!(
         candidate.disposition,
