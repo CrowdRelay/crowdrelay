@@ -285,6 +285,41 @@ pub struct SenderIdentity {
     pub site_url: Option<String>,
 }
 
+/// The longest style phrase a letter will carry. Past this it is a
+/// description, not a genre, and "a {style} act" stops being a sentence.
+const MAX_STYLE_PHRASE: usize = 60;
+
+/// The part of the act's style declaration a letter can say in one breath.
+///
+/// Every letter reads `SenderIdentity::style` into "a {style} act", which is
+/// only a sentence when the declaration is a genre. The setting is free text
+/// and operators write more than a genre into it: on 2026-09-25 Virya's read
+/// "metalcore, modern metal. The act is about mental health and mental
+/// struggles.", and every pitch in the outreach queue said "I am writing
+/// from Virya, a metalcore, modern metal. The act is about mental health
+/// and mental struggles. act from Gorzów Wielkopolski". The first sentence
+/// is the genre; the rest belongs somewhere other than a noun phrase.
+///
+/// `None` when nothing usable is left, or when even the first sentence is
+/// too long to be a genre — the letter then says nothing about style, which
+/// is what it does for an act that never declared one.
+#[must_use]
+pub fn letter_style(declared: &str) -> Option<String> {
+    let text = declared.trim();
+    let end = [". ", "! ", "? ", "; ", "\n"]
+        .iter()
+        .filter_map(|stop| text.find(stop))
+        .min()
+        .unwrap_or(text.len());
+    let phrase = text
+        .get(..end)
+        .unwrap_or(text)
+        .trim()
+        .trim_end_matches(['.', '!', '?', ';', ',', ':'])
+        .trim();
+    (!phrase.is_empty() && phrase.chars().count() <= MAX_STYLE_PHRASE).then(|| phrase.to_owned())
+}
+
 /// Everything the letter is composed from.
 #[derive(Clone, Debug)]
 pub struct LetterInput<'a> {
@@ -692,6 +727,37 @@ mod tests {
             home_city: Some("Wrocław".to_owned()),
             site_url: Some("https://virya.music/".to_owned()),
         }
+    }
+
+    #[test]
+    fn a_style_declaration_is_cut_to_the_genre_a_letter_can_say() {
+        assert_eq!(
+            letter_style(
+                "metalcore, modern metal. The act is about mental health and mental struggles."
+            )
+            .as_deref(),
+            Some("metalcore, modern metal"),
+        );
+        assert_eq!(
+            letter_style("  modern metal  ").as_deref(),
+            Some("modern metal")
+        );
+        assert_eq!(
+            letter_style("doom-leaning post-metal.").as_deref(),
+            Some("doom-leaning post-metal")
+        );
+        assert_eq!(
+            letter_style("sludge\nwe sound like a truck").as_deref(),
+            Some("sludge")
+        );
+        assert_eq!(letter_style(" . "), None, "nothing left to say");
+        assert_eq!(
+            letter_style(
+                "heavy music for people who grew up on nineties metal and never really left it behind"
+            ),
+            None,
+            "a description, not a genre"
+        );
     }
 
     fn reasons() -> Vec<String> {

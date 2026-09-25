@@ -42,7 +42,7 @@ class AutopilotDistributionExecutionContract(unittest.TestCase):
         self.assertIn("route.requires_captcha===true", encoded)
         # The letter is composed in CrowdRelay at approval time — the executor
         # sends `draft.body` verbatim and refuses a payload without one. The
-        # "one follow-up is the maximum" promise lives in the composed letter
+        # "we will not follow up" promise lives in the composed letter
         # (pinned by the domain tests), not in this handler.
         self.assertIn("draft.body", encoded)
         self.assertIn("no approved letter in the payload", encoded)

@@ -93,8 +93,8 @@ async fn sender_identity_in_tx(
         .fetch_optional(&mut **transaction)
         .await
         .map_err(map_sqlx)?
-        .map(|value| value.trim().to_owned())
-        .filter(|value| !value.is_empty()),
+        .as_deref()
+        .and_then(crowdrelay_domain::gig_letter::letter_style),
         home_city: sqlx::query_scalar::<_, String>(
             r#"
             SELECT city.name
