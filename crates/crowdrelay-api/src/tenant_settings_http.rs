@@ -175,6 +175,10 @@ pub async fn get_brand_settings(
                 effective.member_area_path.clone(),
             );
             settings.insert(
+                "live_page_path".to_owned(),
+                effective.live_page_path.clone(),
+            );
+            settings.insert(
                 "synesthesia_campaign_slug".to_owned(),
                 effective.synesthesia_campaign_slug.clone(),
             );
@@ -328,8 +332,9 @@ fn validate_value(key: &str, value: &str) -> bool {
     if key == "join_ask_platforms" {
         return crowdrelay_domain::join_ask::parse_platforms(value).is_some();
     }
-    // The area path becomes a URL segment; keep it URL-safe like the defaults.
-    if key == "member_area_path"
+    // The area and live-page paths become URL segments; keep them URL-safe
+    // like the defaults.
+    if (key == "member_area_path" || key == "live_page_path")
         && !value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'-' | b'_'))
@@ -441,6 +446,7 @@ pub async fn upsert_setting(
                         let value = match key.as_str() {
                             "member_site_base_url" => effective.member_site_base_url.clone(),
                             "member_area_path" => effective.member_area_path.clone(),
+                            "live_page_path" => effective.live_page_path.clone(),
                             "signal_enabled" => if effective.signal_enabled {
                                 "true"
                             } else {

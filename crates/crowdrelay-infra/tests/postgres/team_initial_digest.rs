@@ -310,7 +310,17 @@ async fn email_opt_out_suppresses_the_send_but_keeps_the_assignment()
     let (pool, url) = common::test_pool_with_url("CROWDRELAY_TEST_DATABASE_URL")
         .await
         .expect("connect to the migrated suite database");
+    // The briefing issues from 08:00 crew-local, and with no `crew_timezone`
+    // crew-local is UTC. On the wall clock this test failed every night
+    // between 00:00 and 08:00 UTC — the code correctly issued nothing yet.
+    // Move `now` forward into the window when it is early; never backward,
+    // so rows stamped with the database's own now() stay in its past.
     let now = OffsetDateTime::now_utc();
+    let now = if now.hour() < 9 {
+        now.replace_time(time::macros::time!(12:00))
+    } else {
+        now
+    };
     let workspace = workspace(&pool).await?;
     advertise_team_email(&pool, workspace, now).await?;
     let human = member(&pool, workspace, "human").await?;

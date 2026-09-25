@@ -73,6 +73,7 @@ mod ecosystem;
 mod events;
 mod fan_identity;
 mod fan_lifecycle;
+mod fan_privacy_unpublish;
 mod first_tenant_member_site;
 mod gdrive_contacts;
 mod gig_outreach;
