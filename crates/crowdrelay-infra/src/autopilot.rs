@@ -32,6 +32,7 @@ mod measurement;
 mod objectives;
 mod operations;
 pub(crate) mod operator_actions;
+mod outcome_recovery;
 mod placements;
 mod play_outcomes;
 mod plays;
