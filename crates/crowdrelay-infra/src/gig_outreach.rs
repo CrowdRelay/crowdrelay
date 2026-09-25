@@ -340,7 +340,13 @@ pub(crate) async fn sender_identity(
         .await?
         .unwrap_or_default();
     let settings = TenantSettingsRepository::new(pool.clone());
-    let style = settings.act_style(workspace_id).await?;
+    // Cut to the genre: the letter says "a {style} act", and the setting is
+    // free text an operator may have written a paragraph into.
+    let style = settings
+        .act_style(workspace_id)
+        .await?
+        .as_deref()
+        .and_then(crowdrelay_domain::gig_letter::letter_style);
     // The stored override only. `brand_settings` would fall back to a shipped
     // default, and a default URL in a letter to a stranger is a link to
     // somebody else's website.

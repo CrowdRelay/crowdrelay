@@ -174,8 +174,9 @@ fn initial_pl(
         String::new(),
         format!("Do posłuchania: {url}"),
         String::new(),
-        "Jeśli to nie dla Was, nic nie szkodzi — odezwiemy się najwyżej jeszcze raz, \
-         a każda odpowiedź zatrzymuje dalsze wiadomości."
+        // Same promise as the English letter, said the way the band says it.
+        "Jeśli to nie dla Was, nic nie szkodzi — wystarczy krótka odpowiedź \
+         i nie będziemy się więcej odzywać."
             .to_owned(),
     ];
     lines.extend(sign_off_pl(input.sender, act));
@@ -281,9 +282,11 @@ fn initial(
         String::new(),
         format!("Listen: {url}"),
         String::new(),
-        "If it is not a fit, no worries — one follow-up is the maximum and any reply \
-         stops automation."
-            .to_owned(),
+        // The recipient is a stranger reading a letter from a band, so the
+        // promise is said the way the band would say it. It is still the
+        // governor's promise: any reply ends the sequence, and at most one
+        // follow-up goes to someone who never answers.
+        "If it is not a fit, no worries — just say so and we will not follow up.".to_owned(),
     ];
     lines.extend(sign_off(input.sender, act));
     OutreachLetter {
@@ -412,7 +415,14 @@ mod tests {
                 .contains("\"Rytuał\" for playlist consideration")
         );
         assert!(letter.body.contains("Listen: https://virya.music/f/rytual"));
-        assert!(letter.body.contains("one follow-up is the maximum"));
+        assert!(
+            letter
+                .body
+                .contains("just say so and we will not follow up")
+        );
+        // A stranger reads this. It is a letter from a band, and it says so
+        // in the band's words, not the machinery's.
+        assert!(!letter.body.to_lowercase().contains("automat"));
         assert!(letter.body.ends_with("https://virya.music"));
         assert_eq!(letter.subject, "VIRYA — our new single \"Rytuał\"");
     }
@@ -533,6 +543,7 @@ mod tests {
             !letter.body.contains("Hi "),
             "no English left in a Polish letter"
         );
+        assert!(letter.body.contains("i nie będziemy się więcej odzywać"));
         assert_eq!(letter.subject, "VIRYA — our new single \"Rytuał\"");
     }
 
