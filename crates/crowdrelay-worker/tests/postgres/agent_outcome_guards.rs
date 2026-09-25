@@ -406,6 +406,54 @@ async fn empty_outreach_inner(pool: &PgPool) -> Result<()> {
     Ok(())
 }
 
+// ── Honest empty: item-less social_post is a refusal, not a draft ──
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn an_empty_social_post_records_a_decision_but_no_action() -> Result<()> {
+    let database = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
+        .await
+        .expect("connect to the migrated suite database");
+
+    let ws = workspace(&database).await?;
+    // A drafter that correctly refuses — "the target community is not
+    // admitted" — still emits the envelope row, with a rationale and no
+    // `item`. Before the guard generalised, that row parked an
+    // `awaiting_approval` action carrying `draft: null`: the panel showed
+    // a card the operator could accept, and accepting it published nothing
+    // (or seeded an empty post row for a poster template).
+    let outcome_id = insert_outcome(
+        &database,
+        ws,
+        "social_post",
+        5000,
+        json!({
+            "rationale": "Produced zero items: the target community is not in the admitted list.",
+        }),
+    )
+    .await?;
+
+    let processed = worker(&database, ws).run_once().await?;
+    ensure!(
+        processed == 1,
+        "honest refusal must process, got {processed}"
+    );
+    ensure!(
+        decision_count(&database, ws).await? == 1,
+        "the refusal must land as a decision record"
+    );
+    ensure!(
+        action_count(&database, ws).await? == 0,
+        "no draft means no approval to park — an action here is a phantom"
+    );
+    let reason = rejection_reason(&database, outcome_id).await?;
+    ensure!(
+        reason.is_none(),
+        "honest refusal must not be rejected, got {reason:?}"
+    );
+    Ok(())
+}
+
 // ── Positive: zero-confidence insight still passes (recommend_only) ──
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
