@@ -27,6 +27,7 @@ const tokenFile = env.CROWDRELAY_COMMERCE_API_KEY_FILE || "/run/secrets/crowdrel
 const pendingFile = env.ANCHOR_PENDING_FILE || "/data/pending-confirmation.json"
 const pollMs = boundedInt(env.ANCHOR_POLL_MS, 1_000, 60_000, 5_000)
 const dependencyProbeMs = boundedInt(env.DEPENDENCY_PROBE_MS, 5_000, 300_000, 30_000)
+const errorLogRepeatMs = boundedInt(env.ERROR_LOG_REPEAT_MS, 60_000, 3_600_000, 300_000)
 const requestTimeoutMs = boundedInt(env.REQUEST_TIMEOUT_MS, 1_000, 60_000, 15_000)
 const maxJsonResponseBytes = boundedInt(env.MAX_JSON_RESPONSE_BYTES, 16 * 1024, 2 * 1024 * 1024, 512 * 1024)
 const maxTextResponseBytes = boundedInt(env.MAX_TEXT_RESPONSE_BYTES, 16 * 1024, 1024 * 1024, 256 * 1024)
@@ -47,6 +48,13 @@ let lastSuccessAt = null
 let lastError = "startup.dependencies_unchecked"
 let lastDependencyCheckAt = null
 let lastDependencyCheckMs = 0
+// Dedup state: a dead dependency would otherwise write the same error line on
+// every poll cycle. Identical failures log once, then at most once per
+// `errorLogRepeatMs`, carrying the count of suppressed repeats.
+let lastDependencyError = null
+let lastErrorSignature = null
+let lastErrorLoggedAtMs = 0
+let repeatedErrorCount = 0
 let dependencies = {
   crowdrelay: { ready: false, error: "unchecked" },
   rekor: { ready: false, error: "unchecked" },
@@ -83,19 +91,43 @@ while (!stopping) {
     const worked = await processOne()
     ready = true
     lastError = null
+    // A success closes the episode: the next identical failure is a new
+    // incident and logs immediately rather than counting as a repeat.
+    lastErrorSignature = null
+    repeatedErrorCount = 0
     if (worked) lastSuccessAt = new Date().toISOString()
     if (!worked) await delay(pollMs)
   } catch (error) {
     ready = false
     lastError = errorKind(error)
-    console.error(JSON.stringify({ level: "error", error_kind: lastError, message: safeMessage(error) }))
+    const signature = `${lastError}: ${safeMessage(error)}`
+    const now = Date.now()
+    if (signature !== lastErrorSignature || now - lastErrorLoggedAtMs >= errorLogRepeatMs) {
+      console.error(JSON.stringify({
+        level: "error",
+        error_kind: lastError,
+        message: safeMessage(error),
+        ...(repeatedErrorCount > 0 ? { suppressed_repeats: repeatedErrorCount } : {}),
+      }))
+      lastErrorSignature = signature
+      lastErrorLoggedAtMs = now
+      repeatedErrorCount = 0
+    } else {
+      repeatedErrorCount += 1
+    }
     await delay(pollMs)
   }
 }
 
 async function ensureDependenciesReady(force = false) {
   const now = Date.now()
-  if (!force && ready && now - lastDependencyCheckMs < dependencyProbeMs) return
+  // The throttle must cover the dead path too: without it a dead dependency is
+  // re-probed every poll cycle, and a 15s request timeout turns each cycle
+  // into ~30s of waiting plus another identical error line.
+  if (!force && now - lastDependencyCheckMs < dependencyProbeMs) {
+    if (ready) return
+    throw new Error(lastDependencyError ?? "dependency readiness failed")
+  }
 
   const checkedAt = new Date().toISOString()
   const next = {
@@ -154,8 +186,10 @@ async function ensureDependenciesReady(force = false) {
       .filter(([, state]) => !state.ready)
       .map(([name, state]) => `${name}: ${state.error ?? "not ready"}`)
       .join("; ")
-    throw new Error(`dependency readiness failed (${causes})`)
+    lastDependencyError = `dependency readiness failed (${causes})`
+    throw new Error(lastDependencyError)
   }
+  lastDependencyError = null
 }
 
 async function processOne() {
