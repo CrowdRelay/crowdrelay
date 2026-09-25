@@ -18,8 +18,10 @@ A ratchet rather than a hard rule, following `source-size-ratchet.py` and
 `api-sql-ratchet.py`. Most of the recorded statements are benign -- a write keyed
 by a primary key the caller just read from a scoped query is not a leak, and
 rewriting dozens of those tonight would be churn with no behaviour change. What
-matters is that the number cannot grow: a new unscoped statement fails, and the
-baseline may shrink freely.
+matters is that the number cannot grow: a new unscoped statement fails. The
+baseline must shrink with the count, or the difference is room for the next
+unscoped query to land unreviewed; a count below the baseline fails until
+`--write-baseline` re-records it.
 
 Not a substitute for reading the query. A statement can name `workspace_id` and
 still be wrong -- binding the wrong one, or scoping an outer query while an inner
@@ -162,6 +164,27 @@ def main() -> int:
             failures.append(
                 f"  {path}: {count} unscoped statements, baseline allows {allowed}"
             )
+    # Downward too: a baseline above the count is room for a new unscoped query
+    # that nobody reviewed. On 2026-09-25 it was eight statements.
+    stale = [
+        f"  {path}: baseline allows {allowed}, the file has {current.get(path, 0)}"
+        for path, allowed in sorted(baseline.items())
+        if current.get(path, 0) < allowed
+    ]
+    if stale and not failures:
+        print("WORKSPACE_SCOPE_RATCHET=FAIL", file=sys.stderr)
+        print(
+            "The baseline is above the current count, so a new unscoped query would "
+            "pass unnoticed:",
+            file=sys.stderr,
+        )
+        for line in stale:
+            print(line, file=sys.stderr)
+        print(
+            "Lower it with `python3 scripts/workspace-scope-ratchet.py --write-baseline`.",
+            file=sys.stderr,
+        )
+        return 1
 
     if failures:
         print("WORKSPACE_SCOPE_RATCHET=FAIL", file=sys.stderr)
@@ -181,11 +204,9 @@ def main() -> int:
         return 1
 
     total = sum(current.values())
-    shrunk = sum(baseline.values()) - total
     print(
         f"WORKSPACE_SCOPE_RATCHET=PASS scoped_tables={len(tables)} "
         f"unscoped_statements={total} files={len(current)}"
-        + (f" shrunk_by={shrunk}" if shrunk > 0 else "")
     )
     return 0
 
