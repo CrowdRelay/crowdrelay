@@ -47,6 +47,26 @@ async fn action(
     approved_by: Option<&str>,
     created_at: OffsetDateTime,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    classed_action(
+        pool,
+        workspace_id,
+        context,
+        "third_party",
+        approved_by,
+        created_at,
+    )
+    .await
+}
+
+/// The same, in a chosen action class.
+async fn classed_action(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    context: &str,
+    class: &str,
+    approved_by: Option<&str>,
+    created_at: OffsetDateTime,
+) -> Result<(), Box<dyn std::error::Error>> {
     let decision_id = Uuid::now_v7();
     sqlx::query(
         "INSERT INTO autopilot_decisions \
@@ -72,7 +92,7 @@ async fn action(
           idempotency_key, payload, status, action_class, approved_by, approved_at, created_at, \
           trace_id) \
          VALUES ($1,$2,$3,$4,'test.action','test',$5,$6,'{}'::jsonb,'queued', \
-                 'first_party_reversible',$7,$8,$8,$9)",
+                 $10,$7,$8,$8,$9)",
     )
     .bind(action_id)
     .bind(workspace_id)
@@ -83,6 +103,7 @@ async fn action(
     .bind(approved_by)
     .bind(created_at)
     .bind(Uuid::now_v7())
+    .bind(class)
     .execute(pool)
     .await?;
     Ok(())
@@ -143,6 +164,20 @@ async fn the_warm_up_spend_counts_unattended_actions_per_context()
         now,
     )
     .await?;
+    // Unattended internal work spends nothing: an artifact render never
+    // needed the allowance, and counting it starved the outward work that
+    // does (production, 2026-09-25: 67 renders against a cap of 5).
+    for _ in 0..4 {
+        classed_action(
+            &pool,
+            workspace_id,
+            "outreach",
+            "first_party_reversible",
+            Some("policy:bounded_auto"),
+            now,
+        )
+        .await?;
+    }
     // A parked action nobody has approved yet has spent nothing either.
     action(&pool, workspace_id, "outreach", None, now).await?;
     // And one outside the window: the allowance is weekly, not lifetime, or it

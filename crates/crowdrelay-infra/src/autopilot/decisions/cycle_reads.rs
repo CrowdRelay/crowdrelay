@@ -171,6 +171,16 @@ macro_rules! decision_cycle_reads {
     /// unattended, and an action an operator pulled back was still an action
     /// that went out of the gate without them.
     ///
+    /// Only outward classes count. First-party reversible work (an artifact
+    /// render, an agent drafting run) never needs the allowance: it is
+    /// upgraded to unattended by `internal_work_disposition` whatever the
+    /// evidence says, and it produces no observation the floor is waiting
+    /// for. Counting it spent the allowance anyway: on 2026-09-25 content
+    /// supply had 67 unattended artifact renders in the week against a cap
+    /// of 5, so every relay of the band's own post to its opted-in fans was
+    /// held for approval, and with the approval budget spent, dropped to a
+    /// recommendation nobody saw.
+    ///
     /// A context whose name this build cannot parse is skipped rather than
     /// bucketed somewhere: a spend attributed to the wrong context would widen
     /// one allowance while narrowing another.
@@ -186,6 +196,7 @@ macro_rules! decision_cycle_reads {
                 FROM autopilot_actions
                 WHERE workspace_id = $1
                   AND approved_by = 'policy:bounded_auto'
+                  AND action_class IN ('owned_audience', 'third_party')
                   -- Cast so the statement can be PREPAREd standalone, which is
                   -- what `sql-result-types.py` needs to check it at all. Without
                   -- it Postgres infers `interval` for $2 and the query silently
