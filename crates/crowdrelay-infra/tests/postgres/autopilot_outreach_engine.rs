@@ -361,3 +361,70 @@ async fn the_catalogue_is_pitched_in_one_wave_of_composed_letters()
     }
     Ok(())
 }
+
+/// Half of the act's pitchable contacts have a `.pl` address. Their letter is
+/// written in Polish; everyone else's stays English.
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn a_polish_address_gets_a_polish_letter() -> Result<(), Box<dyn std::error::Error>> {
+    let f = fixture("supply-polish").await?;
+    sqlx::query(
+        "INSERT INTO growth_envelope (workspace_id, agent_enabled, dry_run) VALUES ($1, true, false)
+         ON CONFLICT (workspace_id) DO UPDATE SET agent_enabled = true, dry_run = false",
+    )
+    .bind(f.ws())
+    .execute(&f.pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO autopilot_policies
+             (workspace_id, context, enabled, autonomy_level, minimum_confidence_basis_points,
+              max_actions_24h, config)
+         VALUES ($1, 'outreach', true, 'require_approval', 7500, 20,
+                 '{\"waves\": {\"min_pitches_per_wave\": 2}}')
+         ON CONFLICT (workspace_id, context) DO UPDATE SET enabled = true,
+             autonomy_level = 'require_approval', minimum_confidence_basis_points = 7500,
+             max_actions_24h = 20, config = EXCLUDED.config",
+    )
+    .bind(f.ws())
+    .execute(&f.pool)
+    .await?;
+    f.release_source(
+        "Echoes",
+        "https://listen.example/echoes",
+        "album",
+        Some(1_746_057_600),
+    )
+    .await?;
+    let polish = f.target("Polski Zin", "press", true, false, None).await?;
+    sqlx::query("UPDATE outreach_targets SET contact_email = $2 WHERE id = $1")
+        .bind(polish)
+        .bind(format!("redakcja-{}@zin.pl", polish.simple()))
+        .execute(&f.pool)
+        .await?;
+    f.target("English Zine", "press", true, false, None).await?;
+
+    f.repository
+        .refresh_outreach_supply(f.workspace_id, f.now)
+        .await?;
+    EvaluateAutopilot::new(&f.repository, f.workspace_id)
+        .execute(f.now)
+        .await?;
+
+    let letters = sqlx::query_as::<_, (String, String)>(
+        "SELECT payload->>'target_id', payload->'draft'->>'body'
+         FROM autopilot_actions WHERE workspace_id = $1 AND context = 'outreach'",
+    )
+    .bind(f.ws())
+    .fetch_all(&f.pool)
+    .await?;
+    assert_eq!(letters.len(), 2, "{letters:?}");
+    for (target, body) in &letters {
+        if *target == polish.to_string() {
+            assert!(body.starts_with("Dzień dobry, Polski Zin,"), "{body}");
+            assert!(body.contains("Pozdrawiamy,"), "{body}");
+        } else {
+            assert!(body.starts_with("Hi English Zine,"), "{body}");
+        }
+    }
+    Ok(())
+}
