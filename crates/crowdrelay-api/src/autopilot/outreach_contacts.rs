@@ -70,7 +70,11 @@ const OUTREACH_CONTACT_STATES: [&str; 4] =
 const OUTREACH_CONTACTS_DEFAULT_LIMIT: u32 = 200;
 const OUTREACH_CONTACTS_MAX_LIMIT: u32 = 500;
 
-const OUTREACH_CONVERSATIONS_CTE: &str = r#"
+// The same conversation CTE opens both statements. It is written out twice,
+// not spliced in with `format!`, because a spliced fragment cannot be prepared
+// on its own and `sql-result-types.py` would never check either statement;
+// `the_two_statements_share_one_conversation_cte` fails if they drift apart.
+const OUTREACH_CONTACTS_SQL: &str = r#"
     WITH conversation AS (
         SELECT target.id AS target_id, target.display_name,
                target.target_kind::text AS target_kind,
@@ -112,6 +116,71 @@ const OUTREACH_CONVERSATIONS_CTE: &str = r#"
                END AS state
         FROM conversation
     )
+    SELECT target_id, display_name, target_kind, state, last_message_at,
+           CASE WHEN last_direction = 'inbound' THEN last_disposition END AS answer_disposition,
+           CASE WHEN last_direction = 'inbound' THEN
+               NULLIF(btrim(COALESCE(last_metadata->>'result',
+                                     last_metadata->>'response_type')), '')
+           END AS reply_label,
+           messages_sent, answers, last_written_at, last_answered_at
+    FROM staged
+    WHERE ($2::text IS NULL OR state = $2)
+      AND ($3::text IS NULL OR target_kind = $3)
+    ORDER BY CASE state
+                 WHEN 'your_turn' THEN 0
+                 WHEN 'waiting_on_them' THEN 1
+                 WHEN 'not_contacted' THEN 2
+                 ELSE 3
+             END,
+             (last_direction = 'inbound' AND last_disposition = 'positive') DESC,
+             last_message_at ASC NULLS LAST,
+             display_name, target_id
+    LIMIT $4
+"#;
+
+const OUTREACH_CONTACT_COUNTS_SQL: &str = r#"
+    WITH conversation AS (
+        SELECT target.id AS target_id, target.display_name,
+               target.target_kind::text AS target_kind,
+               target.active, target.do_not_contact,
+               latest.direction AS last_direction,
+               latest.disposition AS last_disposition,
+               latest.metadata AS last_metadata,
+               latest.occurred_at AS last_message_at,
+               COALESCE(tally.sent, 0) AS messages_sent,
+               COALESCE(tally.answers, 0) AS answers,
+               tally.last_written_at, tally.last_answered_at
+        FROM outreach_targets AS target
+        LEFT JOIN LATERAL (
+            SELECT message.direction, message.disposition, message.metadata, message.occurred_at
+            FROM outreach_interactions AS message
+            WHERE message.workspace_id = $1 AND message.target_id = target.id
+            ORDER BY message.occurred_at DESC, message.id DESC
+            LIMIT 1
+        ) AS latest ON true
+        LEFT JOIN LATERAL (
+            SELECT count(*) FILTER (WHERE message.direction = 'outbound')::bigint AS sent,
+                   count(*) FILTER (WHERE message.direction = 'inbound')::bigint AS answers,
+                   max(message.occurred_at) FILTER (WHERE message.direction = 'outbound') AS last_written_at,
+                   max(message.occurred_at) FILTER (WHERE message.direction = 'inbound') AS last_answered_at
+            FROM outreach_interactions AS message
+            WHERE message.workspace_id = $1 AND message.target_id = target.id
+        ) AS tally ON true
+        WHERE target.workspace_id = $1
+    ), staged AS (
+        SELECT conversation.*,
+               CASE
+                   WHEN NOT active OR do_not_contact
+                     OR (last_direction = 'inbound'
+                         AND last_disposition IN ('declined', 'do_not_contact'))
+                   THEN 'closed'
+                   WHEN last_direction = 'inbound' THEN 'your_turn'
+                   WHEN last_direction = 'outbound' THEN 'waiting_on_them'
+                   ELSE 'not_contacted'
+               END AS state
+        FROM conversation
+    )
+    SELECT state, count(*)::bigint FROM staged GROUP BY state
 "#;
 
 pub async fn list_outreach_contacts(
@@ -139,29 +208,7 @@ pub async fn list_outreach_contacts(
     let workspace_id = state.ops.workspace_id().into_uuid();
     let pool = &state.database;
 
-    let contacts = sqlx::query_as::<_, OutreachContact>(&format!(
-        "{OUTREACH_CONVERSATIONS_CTE}
-        SELECT target_id, display_name, target_kind, state, last_message_at,
-               CASE WHEN last_direction = 'inbound' THEN last_disposition END AS answer_disposition,
-               CASE WHEN last_direction = 'inbound' THEN
-                   NULLIF(btrim(COALESCE(last_metadata->>'result',
-                                         last_metadata->>'response_type')), '')
-               END AS reply_label,
-               messages_sent, answers, last_written_at, last_answered_at
-        FROM staged
-        WHERE ($2::text IS NULL OR state = $2)
-          AND ($3::text IS NULL OR target_kind = $3)
-        ORDER BY CASE state
-                     WHEN 'your_turn' THEN 0
-                     WHEN 'waiting_on_them' THEN 1
-                     WHEN 'not_contacted' THEN 2
-                     ELSE 3
-                 END,
-                 (last_direction = 'inbound' AND last_disposition = 'positive') DESC,
-                 last_message_at ASC NULLS LAST,
-                 display_name, target_id
-        LIMIT $4"
-    ))
+    let contacts = sqlx::query_as::<_, OutreachContact>(OUTREACH_CONTACTS_SQL)
     .bind(workspace_id)
     .bind(query.state.as_deref())
     .bind(query.kind.as_deref().map(str::trim))
@@ -169,10 +216,7 @@ pub async fn list_outreach_contacts(
     .fetch_all(pool)
     .await;
 
-    let counts = sqlx::query_as::<_, (String, i64)>(&format!(
-        "{OUTREACH_CONVERSATIONS_CTE}
-        SELECT state, count(*)::bigint FROM staged GROUP BY state"
-    ))
+    let counts = sqlx::query_as::<_, (String, i64)>(OUTREACH_CONTACT_COUNTS_SQL)
     .bind(workspace_id)
     .fetch_all(pool)
     .await;
@@ -243,5 +287,23 @@ pub async fn record_outreach_written(
     {
         Ok(result) => private_json(StatusCode::OK, result),
         Err(error) => repository_problem(error, request_id(&headers)),
+    }
+}
+
+#[cfg(test)]
+mod outreach_contacts_sql_tests {
+    use super::{OUTREACH_CONTACT_COUNTS_SQL, OUTREACH_CONTACTS_SQL};
+
+    fn conversation_cte(sql: &str) -> &str {
+        let end = sql.rfind("\n    SELECT").expect("a final SELECT");
+        &sql[..end]
+    }
+
+    #[test]
+    fn the_two_statements_share_one_conversation_cte() {
+        assert_eq!(
+            conversation_cte(OUTREACH_CONTACTS_SQL),
+            conversation_cte(OUTREACH_CONTACT_COUNTS_SQL)
+        );
     }
 }
