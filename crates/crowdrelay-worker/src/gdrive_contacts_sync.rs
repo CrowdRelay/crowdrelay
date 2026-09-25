@@ -750,12 +750,14 @@ impl GDriveContactsSyncWorker {
             .bearer_auth(token)
             .send()
             .await
-            .map_err(|e| format!("download failed: {e}"))?;
+            .map_err(|e| {
+                // Display stops at the top of the chain; a large export that
+                // outlives HTTP_TIMEOUT otherwise reads as a bare send error.
+                let timed_out = if e.is_timeout() { " (timed out)" } else { "" };
+                format!("download failed{timed_out}: {e}")
+            })?;
         if !response.status().is_success() {
-            return Err(format!(
-                "download failed status={}",
-                response.status().as_u16()
-            ));
+            return Err(download_refusal(response).await);
         }
         response
             .text()
@@ -781,12 +783,14 @@ impl GDriveContactsSyncWorker {
             .bearer_auth(token)
             .send()
             .await
-            .map_err(|e| format!("download failed: {e}"))?;
+            .map_err(|e| {
+                // Display stops at the top of the chain; a large export that
+                // outlives HTTP_TIMEOUT otherwise reads as a bare send error.
+                let timed_out = if e.is_timeout() { " (timed out)" } else { "" };
+                format!("download failed{timed_out}: {e}")
+            })?;
         if !response.status().is_success() {
-            return Err(format!(
-                "download failed status={}",
-                response.status().as_u16()
-            ));
+            return Err(download_refusal(response).await);
         }
         response
             .bytes()
@@ -809,12 +813,14 @@ impl GDriveContactsSyncWorker {
             .bearer_auth(token)
             .send()
             .await
-            .map_err(|e| format!("download failed: {e}"))?;
+            .map_err(|e| {
+                // Display stops at the top of the chain; a large export that
+                // outlives HTTP_TIMEOUT otherwise reads as a bare send error.
+                let timed_out = if e.is_timeout() { " (timed out)" } else { "" };
+                format!("download failed{timed_out}: {e}")
+            })?;
         if !response.status().is_success() {
-            return Err(format!(
-                "download failed status={}",
-                response.status().as_u16()
-            ));
+            return Err(download_refusal(response).await);
         }
         response
             .bytes()
@@ -837,5 +843,56 @@ impl GDriveContactsSyncWorker {
             self.google_client_secret.as_deref(),
         )
         .await
+    }
+}
+
+/// A refused download, with the reason Google gave. A bare `status=403`
+/// covers a file too large to export (`exportSizeLimitExceeded`, over 10 MB),
+/// an owner who disabled downloads (`cannotDownloadFile`) and a token
+/// without access (`insufficientFilePermissions`) — three different fixes.
+/// Production logged the same workbook failing with nothing but the status
+/// every hour; the reason is what tells the operator which fix it needs.
+async fn download_refusal(response: reqwest::Response) -> String {
+    let status = response.status().as_u16();
+    let body = response.text().await.unwrap_or_default();
+    match google_error_reason(&body) {
+        Some(reason) => format!("download failed status={status} reason={reason}"),
+        None => format!("download failed status={status}"),
+    }
+}
+
+/// `error.errors[0].reason` from a Google API error body, falling back to
+/// `error.status` (the v2 shape). Bounded: the value lands in a log line.
+fn google_error_reason(body: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(body).ok()?;
+    let error = value.get("error")?;
+    let reason = error
+        .get("errors")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|errors| errors.first())
+        .and_then(|first| first.get("reason"))
+        .or_else(|| error.get("status"))
+        .and_then(serde_json::Value::as_str)?;
+    Some(reason.chars().take(80).collect())
+}
+
+#[cfg(test)]
+mod download_refusal_tests {
+    use super::google_error_reason;
+
+    #[test]
+    fn the_reason_google_gave_is_kept() {
+        let v3 = r#"{"error":{"errors":[{"domain":"global","reason":"exportSizeLimitExceeded","message":"This file is too large to be exported."}],"code":403,"message":"This file is too large to be exported."}}"#;
+        assert_eq!(
+            google_error_reason(v3).as_deref(),
+            Some("exportSizeLimitExceeded")
+        );
+        let v2 = r#"{"error":{"code":403,"message":"denied","status":"PERMISSION_DENIED"}}"#;
+        assert_eq!(
+            google_error_reason(v2).as_deref(),
+            Some("PERMISSION_DENIED")
+        );
+        assert_eq!(google_error_reason("<html>quota</html>"), None);
+        assert_eq!(google_error_reason(""), None);
     }
 }
