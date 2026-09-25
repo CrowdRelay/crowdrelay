@@ -41,7 +41,7 @@ jobs:
     # are not entitled on this account, and a notification that never
     # dispatches is the same silence this workflow exists to end. The job
     # is a single curl; it drains in seconds whenever a lane frees.
-    runs-on: [self-hosted, arm64]
+    runs-on: { group: ops, labels: [ops] }
     timeout-minutes: 5
     env:
       ALERT_WEBHOOK_URL: ${{ secrets.PRODUCTION_DISCORD_WEBHOOK_URL }}

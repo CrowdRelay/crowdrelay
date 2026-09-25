@@ -36,7 +36,7 @@ jobs:
     # never hold that lane while polling: the checks are fail-fast, not
     # hour-long awaits (2026-09-24 — a deploy deadlocked against the CI run
     # queued behind it on this same runner).
-    runs-on: [self-hosted, arm64]
+    runs-on: { group: ops, labels: [ops] }
     timeout-minutes: 60
     environment:
       name: production
