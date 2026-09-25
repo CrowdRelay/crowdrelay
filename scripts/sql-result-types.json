@@ -1,5 +1,5 @@
 {
-  "minimum_prepared": 1347,
+  "minimum_prepared": 1351,
   "unprepared": [
     "crates/crowdrelay-api/src/area/rewards.rs:70",
     "crates/crowdrelay-api/src/area/ticket_rewards.rs:36",

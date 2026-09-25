@@ -16,6 +16,7 @@ use thiserror::Error;
 use uuid::Uuid;
 
 mod segments;
+mod sightings;
 pub use segments::*;
 
 #[derive(Debug, Error)]
@@ -451,32 +452,6 @@ impl PostgresGDriveRepository {
             marked_disappeared: marked,
             agents_resolved,
         })
-    }
-
-    /// The moment this address last wrote to the band's mailbox — message
-    /// `From` = the address, `internalDate` of the message. `last_seen_at`
-    /// is any sighting in any header; this is direction. Monotonic: an
-    /// earlier timestamp never lowers the stored one.
-    pub async fn record_inbound_sighting(
-        &self,
-        workspace_id: Uuid,
-        normalized_email: &str,
-        at: time::OffsetDateTime,
-    ) -> Result<(), GDriveError> {
-        sqlx::query(
-            r#"
-            UPDATE drive_contacts
-            SET last_inbound_at = GREATEST(COALESCE(last_inbound_at, $3), $3),
-                updated_at = now()
-            WHERE workspace_id = $1 AND normalized_email = $2
-            "#,
-        )
-        .bind(workspace_id)
-        .bind(normalized_email)
-        .bind(at)
-        .execute(&self.pool)
-        .await?;
-        Ok(())
     }
 
     /// The review queue: staged rows first, newest seen first, every row
