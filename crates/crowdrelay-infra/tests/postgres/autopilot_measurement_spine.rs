@@ -31,6 +31,7 @@ use crowdrelay_application::autopilot::{
     AutopilotDecisionRepository, AutopilotMeasurementKind, AutopilotMeasurementRepository,
     ClaimedAutopilotMeasurement, HarmObservation, assess_measurement_effect,
 };
+use crowdrelay_application::ports::RepositoryError;
 use crowdrelay_domain::WorkspaceId;
 use crowdrelay_domain::ids::{AutopilotActionId, AutopilotMeasurementId};
 use crowdrelay_infra::{autopilot::PostgresAutopilotRepository, config::DatabaseConfig};
@@ -524,9 +525,16 @@ async fn d_community_outcome_is_read_from_the_community_ledger() {
         .repository
         .observe_measurement(f.workspace_id, &measurement, f.now)
         .await;
+    // And it says so in the kind every never-reached dispatch records, not
+    // as a missing subject: production listed fourteen of these as
+    // `subject_not_found` when each was a draft nobody had posted.
     assert!(
-        unpublished.is_err(),
-        "a community whose post is still a draft has no outcome to report"
+        matches!(
+            unpublished,
+            Err(RepositoryError::ConflictBecause(reason))
+                if reason == AutopilotMeasurementKind::NEVER_PUBLISHED
+        ),
+        "a community whose post is still a draft has no outcome to report, got {unpublished:?}"
     );
 
     // Publish, and give the community two real conversions.
