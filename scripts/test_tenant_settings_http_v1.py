@@ -57,6 +57,23 @@ class TenantSettingsHttpContract(unittest.TestCase):
         routing = ROUTING.read_text()
         self.assertIn("/v1/admin/tenant-settings", routing)
 
+    def test_openapi_key_enum_matches_editable_keys(self):
+        # The contract listed 13 keys while the server accepted 19: a client
+        # generated from it refused ticketing_enabled, brand_wordmark and the
+        # join-ask settings the console edits every day.
+        infra = INFRA.read_text()
+        constants = dict(re.findall(r'const (KEY_[A-Z_]+): &str = "([a-z_]+)";', infra))
+        block = re.search(r"EDITABLE_KEYS: \[&str; \d+\] = \[(.*?)\];", infra, re.S)
+        self.assertIsNotNone(block, "EDITABLE_KEYS not found")
+        editable = {constants[name] for name in re.findall(r"KEY_[A-Z_]+", block.group(1))}
+        self.assertGreater(len(editable), 10)
+        spec = (ROOT / "openapi/openapi.yaml").read_text()
+        path = spec.split("  /admin/tenant-settings/{key}:", 1)[1].split("\n  /", 1)[0]
+        enum = re.search(r"name: key\n(?:.*\n){0,4}?\s+enum: \[([^\]]*)\]", path)
+        self.assertIsNotNone(enum, "no key enum on /admin/tenant-settings/{key}")
+        documented = {value.strip() for value in enum.group(1).split(",")}
+        self.assertEqual(documented, editable)
+
 
 if __name__ == "__main__":
     unittest.main()

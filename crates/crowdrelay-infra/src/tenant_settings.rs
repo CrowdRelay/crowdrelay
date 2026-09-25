@@ -27,6 +27,12 @@ use uuid::Uuid;
 /// the first tenant now carries it as an explicit row (migration 0356).
 pub const DEFAULT_MEMBER_SITE_BASE_URL: &str = "";
 pub const DEFAULT_MEMBER_AREA_PATH: &str = "pl/latarnik";
+/// Where the fan site serves a show's page, under the member-site root: the
+/// door's check-in QR is `{site}/{live_page_path}/{event_slug}/#checkin=…`.
+/// The default is the first tenant's layout, like the member-area path; a
+/// tenant whose site is laid out differently sets it rather than forking the
+/// URL shape.
+pub const DEFAULT_LIVE_PAGE_PATH: &str = "pl/live";
 pub const DEFAULT_SYNESTHESIA_CAMPAIGN_SLUG: &str = "virya-synesthesia-album-v1";
 pub const DEFAULT_NORTH_STAR_METRIC: &str = "activated_fans_30d";
 /// The language briefings are authored in. A tenant that never sets
@@ -35,9 +41,10 @@ pub const DEFAULT_CREW_LOCALE: &str = "en";
 
 /// The keys an operator may edit. Anything else stays internal even if a row
 /// somehow appears, so the HTTP surface cannot be used to smuggle state.
-pub const EDITABLE_KEYS: [&str; 19] = [
+pub const EDITABLE_KEYS: [&str; 20] = [
     KEY_MEMBER_SITE_BASE_URL,
     KEY_MEMBER_AREA_PATH,
+    KEY_LIVE_PAGE_PATH,
     KEY_SYNESTHESIA_CAMPAIGN_SLUG,
     KEY_SIGNAL_ENABLED,
     KEY_SYNESTHESIA_ENABLED,
@@ -59,6 +66,7 @@ pub const EDITABLE_KEYS: [&str; 19] = [
 
 const KEY_MEMBER_SITE_BASE_URL: &str = "member_site_base_url";
 const KEY_MEMBER_AREA_PATH: &str = "member_area_path";
+const KEY_LIVE_PAGE_PATH: &str = "live_page_path";
 const KEY_SYNESTHESIA_CAMPAIGN_SLUG: &str = "synesthesia_campaign_slug";
 const KEY_SIGNAL_ENABLED: &str = "signal_enabled";
 const KEY_SYNESTHESIA_ENABLED: &str = "synesthesia_enabled";
@@ -136,6 +144,8 @@ const CACHE_TTL: Duration = Duration::from_secs(60);
 pub struct TenantBrandSettings {
     pub member_site_base_url: String,
     pub member_area_path: String,
+    /// See [`DEFAULT_LIVE_PAGE_PATH`].
+    pub live_page_path: String,
     pub synesthesia_campaign_slug: String,
     /// Signal mobile app opt-in. Default true (preserves existing tenants).
     pub signal_enabled: bool,
@@ -159,6 +169,7 @@ impl Default for TenantBrandSettings {
         Self {
             member_site_base_url: DEFAULT_MEMBER_SITE_BASE_URL.to_owned(),
             member_area_path: DEFAULT_MEMBER_AREA_PATH.to_owned(),
+            live_page_path: DEFAULT_LIVE_PAGE_PATH.to_owned(),
             synesthesia_campaign_slug: DEFAULT_SYNESTHESIA_CAMPAIGN_SLUG.to_owned(),
             signal_enabled: true,
             synesthesia_enabled: false,
@@ -187,6 +198,17 @@ impl TenantBrandSettings {
             self.site_root()?,
             self.member_area_path.trim_matches('/')
         ))
+    }
+
+    /// The check-in path for one show, relative to the member-site root:
+    /// `pl/live/{slug}/#checkin={token}` under the default. Relative, because
+    /// the door view joins it onto the deployment's public site.
+    #[must_use]
+    pub fn live_checkin_path(&self, event_slug: &str, token: &str) -> String {
+        format!(
+            "{}/{event_slug}/#checkin={token}",
+            self.live_page_path.trim_matches('/')
+        )
     }
 
     /// Landing page with the releases anchor appended.
@@ -279,7 +301,7 @@ impl TenantSettingsRepository {
             r#"
             SELECT key, value FROM tenant_settings
             WHERE workspace_id = $1
-              AND key IN ($2, $3, $4, $5, $6, $7, $8, $9)
+              AND key IN ($2, $3, $4, $5, $6, $7, $8, $9, $10)
             "#,
         )
         .bind(workspace_id)
@@ -291,6 +313,7 @@ impl TenantSettingsRepository {
         .bind(KEY_NORTH_STAR_METRIC)
         .bind(KEY_SOCIAL_AUTO_POST)
         .bind(KEY_TICKETING_ENABLED)
+        .bind(KEY_LIVE_PAGE_PATH)
         .fetch_all(&self.pool)
         .await?;
         let mut settings = TenantBrandSettings::default();
@@ -298,6 +321,7 @@ impl TenantSettingsRepository {
             match key.as_str() {
                 KEY_MEMBER_SITE_BASE_URL => settings.member_site_base_url = value,
                 KEY_MEMBER_AREA_PATH => settings.member_area_path = value,
+                KEY_LIVE_PAGE_PATH => settings.live_page_path = value,
                 KEY_SYNESTHESIA_CAMPAIGN_SLUG => settings.synesthesia_campaign_slug = value,
                 KEY_SIGNAL_ENABLED => settings.signal_enabled = value == "true",
                 KEY_SYNESTHESIA_ENABLED => settings.synesthesia_enabled = value == "true",
@@ -583,6 +607,10 @@ mod tests {
             settings.member_releases_url().as_deref(),
             Some("https://virya.music/pl/latarnik/#wydania")
         );
+        assert_eq!(
+            settings.live_checkin_path("hydro-2026", "abc"),
+            "pl/live/hydro-2026/#checkin=abc"
+        );
         let settings = TenantBrandSettings::default();
         assert_eq!(
             settings.synesthesia_campaign_slug,
@@ -658,6 +686,20 @@ mod tests {
     /// `pl*` keeps it whole, everyone else drops a leading `pl/` segment.
     /// The default `pl/latarnik` therefore still reads `latarnik` to an
     /// English fan — the first tenant's URLs are unchanged.
+    /// The door QR follows the tenant's own page path; slashes around the
+    /// setting do not double up in the URL.
+    #[test]
+    fn live_checkin_path_follows_the_tenant_setting() {
+        let settings = TenantBrandSettings {
+            live_page_path: "/shows/".to_owned(),
+            ..TenantBrandSettings::default()
+        };
+        assert_eq!(
+            settings.live_checkin_path("night-one", "t0k"),
+            "shows/night-one/#checkin=t0k"
+        );
+    }
+
     #[test]
     fn member_area_path_for_locale_strips_the_polish_segment() {
         let settings = TenantBrandSettings::default();

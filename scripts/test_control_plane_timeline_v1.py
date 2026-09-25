@@ -251,13 +251,18 @@ class ControlPlaneScanContract(unittest.TestCase):
 
     def test_scan_url_matches_the_print_tool(self) -> None:
         # The fragment-bound credential belongs on the fan site's live
-        # page — the same /pl/live/{slug} the staff print tool emits —
-        # assembled from the configured site base, never a hardcoded host.
+        # page, assembled from the configured site base, never a hardcoded
+        # host. The page path is the tenant's `live_page_path` setting; its
+        # default is the /pl/live/{slug} the first tenant's staff print tool
+        # emits. It used to be that literal here, for every tenant.
         self.assertIn("public_site_base_url", self.source)
-        self.assertIn('"pl/live"', self.source)
+        self.assertIn("live_checkin_path(", self.source)
+        self.assertNotIn('"pl/live', self.source)
+        settings = (ROOT / "crates/crowdrelay-infra/src/tenant_settings.rs").read_text()
+        self.assertIn('DEFAULT_LIVE_PAGE_PATH: &str = "pl/live";', settings)
         self.assertRegex(
-            self.source,
-            r'"#checkin=\{token\}"|#checkin=\{token\}',
+            settings,
+            r'#checkin=\{token\}',
             "the URL must carry the token in the fragment",
         )
 

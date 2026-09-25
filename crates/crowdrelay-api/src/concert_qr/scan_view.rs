@@ -7,12 +7,6 @@
 // timeline responses deliberately: this endpoint exists to hand it to the
 // person holding the door, on demand, nothing else.
 
-/// The fan-site path the QR points at — the same `/pl/live/...` the staff
-/// print tool produces for the first tenant, so a phone scan and a poster
-/// scan land on the same page. A tenant whose fan site defaults to another
-/// locale changes the convention here, not by forking the URL shape.
-const PUBLIC_LIVE_PATH_PREFIX: &str = "pl/live";
-
 #[derive(Debug, FromRow)]
 struct ScanCampaignRow {
     id: Uuid,
@@ -28,7 +22,9 @@ struct ScanCampaignRow {
 
 #[derive(Debug, Serialize)]
 struct ControlPlaneEventScanResponse {
-    /// The scannable URL — `{public_site}/pl/live/{slug}/#checkin={token}` —
+    /// The scannable URL — `{public_site}/{live_page_path}/{slug}/#checkin={token}`,
+    /// `live_page_path` being the tenant setting (`pl/live` by default, the
+    /// same page the first tenant's staff print tool points at) —
     /// or null when no campaign is live for the night. A null here is a fact
     /// (nothing to scan yet), not an error.
     checkin_url: Option<String>,
@@ -68,10 +64,7 @@ pub async fn control_plane_event_scan(
                     state
                         .acquisition
                         .public_site_base_url()
-                        .join(&format!(
-                            "{PUBLIC_LIVE_PATH_PREFIX}/{}/#checkin={token}",
-                            facts.event_slug
-                        ))
+                        .join(&facts.live_page.live_checkin_path(&facts.event_slug, &token))
                         .map(|url| url.to_string())
                         .ok()
                 }) {
@@ -127,6 +120,10 @@ struct ScanEventRow {
 
 struct ScanFacts {
     event_slug: String,
+    /// The tenant's settings, for the page path the QR points at. This used
+    /// to be the first tenant's `pl/live` compiled in, so every other
+    /// tenant's door handed out a QR for a page their site may not have.
+    live_page: std::sync::Arc<crowdrelay_infra::tenant_settings::TenantBrandSettings>,
     campaign_is_live: bool,
     token: Option<String>,
     label: Option<String>,
@@ -202,8 +199,13 @@ async fn load_scan_facts(
             .as_ref()
             .and_then(|key| sign_token(row.id, row.event_id, row.valid_until, key))
     });
+    let live_page =
+        crowdrelay_infra::tenant_settings::TenantSettingsRepository::new(state.database.clone())
+            .brand_settings(workspace_id)
+            .await?;
     Ok(Some(ScanFacts {
         event_slug: event.slug,
+        live_page,
         campaign_is_live: live.is_some(),
         token,
         label: live.as_ref().map(|row| row.label.clone()),
