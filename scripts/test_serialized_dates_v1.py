@@ -16,9 +16,12 @@ snapshot. Each of its `OffsetDateTime` fields must carry
 or an explicit `serialize_with` or `skip`. A bare `Date` is `[2026, 268]`: the
 public night page printed exactly that.
 
-Structs that derive both are left alone. They round-trip their own JSON through
-serde, rows already stored hold the tuple, and changing the format there needs
-a reader that accepts both. The briefing's `deadline_at` reader shows how.
+Structs that derive both write JSON and read it back, and rows already stored
+hold the tuple. They use `crowdrelay_domain::wire_time`, which writes text and
+reads either shape: passes, coupons, referral rewards, attestations, approval
+tokens and roster briefs all reached a client that way. The exceptions are
+named in `INTERNAL_ROUND_TRIP` with the reason they stay: brain-internal
+records that never leave Rust.
 """
 from __future__ import annotations
 
@@ -43,7 +46,23 @@ def braced(text: str, open_brace: int) -> str:
     return text[open_brace + 1 : index - 1]
 
 
-def unformatted() -> tuple[list[str], int]:
+# Round-trip types that never leave Rust: the brain's own evidence and
+# experiment records, persisted as JSON and read back only by the brain.
+# Adding a name here is a claim that no client, payload or SQL cast reads it.
+INTERNAL_ROUND_TRIP = {
+    "FanOutcome",
+    "GrowthEvidence",
+    "EvidenceEvent",
+    "ExperimentAssignment",
+    "ExperimentDesign",
+    "FanProvenanceEvent",
+    "LifecycleTransition",
+    "GrowthHypothesis",
+    "ValidationWindow",
+}
+
+
+def unformatted(round_trip: bool = False) -> tuple[list[str], int]:
     found, judged = [], 0
     for path in sorted((ROOT / "crates").rglob("*.rs")):
         relative = path.relative_to(ROOT).as_posix()
@@ -52,7 +71,11 @@ def unformatted() -> tuple[list[str], int]:
         text = path.read_text(errors="ignore")
         for struct in STRUCT.finditer(text):
             attributes = struct.group(1)
-            if not re.search(r"\bSerialize\b", attributes) or re.search(r"\bDeserialize\b", attributes):
+            if not re.search(r"\bSerialize\b", attributes):
+                continue
+            if bool(re.search(r"\bDeserialize\b", attributes)) != round_trip:
+                continue
+            if round_trip and struct.group(2) in INTERNAL_ROUND_TRIP:
                 continue
             body = braced(text, struct.end() - 1)
             for field in FIELD.finditer(body):
@@ -73,6 +96,17 @@ class SerializedDates(unittest.TestCase):
             [],
             "these timestamps serialize as serde's tuple; add "
             '#[serde(with = "time::serde::rfc3339")] (or ::option):\n  ' + "\n  ".join(found),
+        )
+
+    def test_round_trip_timestamps_write_text_and_read_both(self) -> None:
+        found, judged = unformatted(round_trip=True)
+        self.assertGreater(judged, 10, f"only {judged} round-trip timestamp fields judged")
+        self.assertEqual(
+            found,
+            [],
+            "these round-trip timestamps still write serde's tuple; use "
+            '#[serde(with = "crowdrelay_domain::wire_time")] (or ::option, ::date), '
+            "or name the type in INTERNAL_ROUND_TRIP with the reason:\n  " + "\n  ".join(found),
         )
 
 

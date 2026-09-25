@@ -238,6 +238,7 @@ pub struct MeasuredFigure {
     /// The lookback the measurement used. `0` means a lifetime figure, which is
     /// correct for repeat attenders and wrong for active fans.
     pub window_days: u16,
+    #[serde(with = "crate::wire_time")]
     pub observed_at: OffsetDateTime,
 }
 
@@ -278,6 +279,7 @@ pub struct AttestedFigure {
     pub scope: FigureScope,
     pub value: PublishedValue,
     pub window_days: u16,
+    #[serde(with = "crate::wire_time")]
     pub observed_at: OffsetDateTime,
 }
 
@@ -325,7 +327,9 @@ pub struct Attestation {
     /// Sorted deterministically at issue time, so the digest does not depend on
     /// the order a query happened to return rows in.
     pub figures: Vec<AttestedFigure>,
+    #[serde(with = "crate::wire_time")]
     pub issued_at: OffsetDateTime,
+    #[serde(with = "crate::wire_time")]
     pub valid_until: OffsetDateTime,
     /// Hex SHA-256 over the canonical form. Recomputable by anyone holding the
     /// document, which is what makes an edited copy detectable.

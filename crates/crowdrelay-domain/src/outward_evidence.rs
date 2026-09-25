@@ -61,6 +61,7 @@ pub struct OutwardEvidence {
     /// Filled at dispatch from the durable action rows: the call site cannot
     /// know it without a query, and a claimed value would be evidence the
     /// system asserted rather than measured.
+    #[serde(with = "crate::wire_time::option", default)]
     last_contact_at: Option<time::OffsetDateTime>,
 }
 

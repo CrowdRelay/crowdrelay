@@ -37,6 +37,7 @@ pub struct QualifiedReferral {
     pub referrer_fan_id: FanId,
     pub referred_fan_id: FanId,
     pub status: ReferralStatus,
+    #[serde(with = "crate::wire_time")]
     pub qualified_at: OffsetDateTime,
 }
 
@@ -178,6 +179,7 @@ pub struct MerchCoupon {
     pub max_uses: u32,
     pub used_count: u32,
     pub status: CouponStatus,
+    #[serde(with = "crate::wire_time::option", default)]
     pub expires_at: Option<OffsetDateTime>,
 }
 
@@ -225,7 +227,9 @@ pub struct WeightedDrawEntry {
     pub slug: String,
     pub name: String,
     pub prize_kind: RewardDrawPrizeKind,
+    #[serde(with = "crate::wire_time")]
     pub closes_at: OffsetDateTime,
+    #[serde(with = "crate::wire_time")]
     pub draw_at: OffsetDateTime,
     pub qualified_referrals: u64,
     pub base_entries: u32,
@@ -274,7 +278,9 @@ pub struct PhysicalRewardGrant {
     pub item_name: String,
     pub sku: String,
     pub status: PhysicalRewardStatus,
+    #[serde(with = "crate::wire_time")]
     pub granted_at: OffsetDateTime,
+    #[serde(with = "crate::wire_time::option", default)]
     pub expires_at: Option<OffsetDateTime>,
 }
 
@@ -286,6 +292,7 @@ pub struct CouponRedemptionResult {
     pub status: CouponStatus,
     pub used_count: u32,
     pub max_uses: u32,
+    #[serde(with = "crate::wire_time")]
     pub redeemed_at: OffsetDateTime,
 }
 

@@ -125,12 +125,15 @@ pub struct AdmissionPassView {
     pub event_slug: String,
     pub event_title: String,
     pub venue: Option<String>,
+    #[serde(with = "crate::wire_time")]
     pub starts_at: OffsetDateTime,
     pub holder_name: Option<String>,
     pub holder_email_masked: String,
     pub public_reference: String,
     pub status: AdmissionPassStatus,
+    #[serde(with = "crate::wire_time")]
     pub session_expires_at: OffsetDateTime,
+    #[serde(with = "crate::wire_time::option", default)]
     pub redeemed_at: Option<OffsetDateTime>,
 }
 
@@ -142,6 +145,7 @@ pub struct AdmissionPassIssued {
     pub fan_id: FanId,
     pub public_reference: String,
     pub claim_token: PassClaimToken,
+    #[serde(with = "crate::wire_time")]
     pub claim_expires_at: OffsetDateTime,
     pub created: bool,
 }
@@ -215,6 +219,7 @@ pub struct AdmissionRedemptionResult {
     pub holder_name: Option<String>,
     pub holder_email_masked: String,
     pub status: AdmissionRedemptionStatus,
+    #[serde(with = "crate::wire_time::option", default)]
     pub redeemed_at: Option<OffsetDateTime>,
 }
 

@@ -81,6 +81,7 @@ pub struct ActOverview {
     pub pipeline: ActPipeline,
     /// The newest day the act's briefing spoke for. `None` is the honest
     /// "nothing yet" — it is also what `no_briefing` reads.
+    #[serde(with = "crate::wire_time::date_option", default)]
     pub latest_briefing_date: Option<Date>,
     /// Active fans holding a latest `marketing` consent grant — the send-path
     /// count, the audience the attention budget exists to reach. It sits on

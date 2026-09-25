@@ -146,6 +146,7 @@ pub mod values;
 pub mod venue_evidence;
 pub mod venue_seed;
 pub mod venue_terms;
+pub mod wire_time;
 pub mod worker_template;
 
 pub use acquisition::{
