@@ -96,12 +96,19 @@ mod phase {
 /// A set, because a phase that iterates (actions, measurements, replies) can
 /// fail on many items in one cycle and that is still one broken phase. Ordered,
 /// so the recorded value does not change with iteration order.
+///
+/// Each phase also carries the database faults the cycle recorded up to its
+/// failure (`crowdrelay_infra::database::capture_faults`), so the row says
+/// why, not only where. The faults are those since the previous failed
+/// phase, which can include one an earlier phase handled and carried on
+/// from; an empty list means the failure was not a database fault.
 #[derive(Clone, Debug, Default)]
-struct DegradedPhases(std::collections::BTreeSet<&'static str>);
+struct DegradedPhases(std::collections::BTreeMap<&'static str, Vec<String>>);
 
 impl DegradedPhases {
     fn failed(&mut self, phase: &'static str) {
-        self.0.insert(phase);
+        let faults = crowdrelay_infra::database::take_faults();
+        self.0.entry(phase).or_default().extend(faults);
     }
 
     fn any(&self) -> bool {
@@ -111,7 +118,19 @@ impl DegradedPhases {
     /// The value written to the cycle row. Empty means no phase failed, which
     /// is a different statement from the NULL a pre-column cycle carries.
     fn recorded(&self) -> Vec<String> {
-        self.0.iter().map(|phase| (*phase).to_owned()).collect()
+        self.0.keys().map(|phase| (*phase).to_owned()).collect()
+    }
+
+    /// Phase to the faults behind it, or `None` when no phase failed.
+    fn reasons(&self) -> Option<serde_json::Value> {
+        self.any().then(|| {
+            serde_json::Value::Object(
+                self.0
+                    .iter()
+                    .map(|(phase, faults)| ((*phase).to_owned(), serde_json::json!(faults)))
+                    .collect(),
+            )
+        })
     }
 }
 
@@ -264,16 +283,19 @@ impl AutopilotWorker {
                     self.repository.pool(),
                     self.workspace_id,
                     cycle_id,
-                    // A park-skipped cycle ran no phase, so the only thing that
-                    // can degrade it is the park check itself.
-                    if park_check_failed {
-                        std::slice::from_ref(&park_check_phase)
-                    } else {
-                        &[]
+                    crowdrelay_infra::autopilot::CycleClose {
+                        // A park-skipped cycle ran no phase, so the only thing
+                        // that can degrade it is the park check itself.
+                        degraded_phases: if park_check_failed {
+                            std::slice::from_ref(&park_check_phase)
+                        } else {
+                            &[]
+                        },
+                        degraded_reasons: None,
+                        finished_at: OffsetDateTime::now_utc(),
+                        north_star_observed: None,
+                        wait_reason: None,
                     },
-                    OffsetDateTime::now_utc(),
-                    None,
-                    None,
                 )
                 .await;
             }
@@ -293,17 +315,20 @@ impl AutopilotWorker {
         );
         let observed = {
             let _entered = span.enter();
-            self.run_once(started).await
+            crowdrelay_infra::database::capture_faults(self.run_once(started)).await
         };
         if let Some(cycle_id) = cycle_id {
             crowdrelay_infra::autopilot::close_cycle_run(
                 self.repository.pool(),
                 self.workspace_id,
                 cycle_id,
-                &observed.degraded.recorded(),
-                OffsetDateTime::now_utc(),
-                observed.north_star,
-                observed.wait_reason.as_deref(),
+                crowdrelay_infra::autopilot::CycleClose {
+                    degraded_phases: &observed.degraded.recorded(),
+                    degraded_reasons: observed.degraded.reasons().as_ref(),
+                    finished_at: OffsetDateTime::now_utc(),
+                    north_star_observed: observed.north_star,
+                    wait_reason: observed.wait_reason.as_deref(),
+                },
             )
             .await;
         }

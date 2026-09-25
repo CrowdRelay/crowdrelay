@@ -160,6 +160,19 @@ pub async fn open_cycle_run(
     }
 }
 
+/// What the record of one finished cycle says.
+pub struct CycleClose<'a> {
+    /// Which phases fell over; empty for a clean cycle.
+    pub degraded_phases: &'a [String],
+    /// Phase to the database faults behind it (migration 0358).
+    pub degraded_reasons: Option<&'a serde_json::Value>,
+    pub finished_at: OffsetDateTime,
+    /// The North Star as the evaluation phase read it, when it did.
+    pub north_star_observed: Option<u32>,
+    /// Why a quiet cycle was quiet.
+    pub wait_reason: Option<&'a str>,
+}
+
 /// Closes a cycle-run row, counting what the cycle produced.
 ///
 /// The counts are read back from the tables that hold the truth rather than
@@ -180,11 +193,15 @@ pub async fn close_cycle_run(
     pool: &PgPool,
     workspace_id: WorkspaceId,
     cycle_id: uuid::Uuid,
-    degraded_phases: &[String],
-    finished_at: OffsetDateTime,
-    north_star_observed: Option<u32>,
-    wait_reason: Option<&str>,
+    close: CycleClose<'_>,
 ) {
+    let CycleClose {
+        degraded_phases,
+        degraded_reasons,
+        finished_at,
+        north_star_observed,
+        wait_reason,
+    } = close;
     let closed = sqlx::query(
         r#"
         UPDATE autopilot_cycle_runs AS run
@@ -195,6 +212,9 @@ pub async fn close_cycle_run(
             -- array for a clean cycle, which is a different statement from the
             -- NULL carried by every cycle that ran before the column existed.
             degraded_phases = $4::text[],
+            -- Phase to the database faults behind it (migration 0358): the
+            -- reason outlives the worker log a deploy throws away.
+            degraded_reasons = $7::jsonb,
             decisions_recorded = (
                 SELECT count(*)
                 FROM autopilot_decisions AS decision
@@ -238,6 +258,7 @@ pub async fn close_cycle_run(
     .bind(degraded_phases)
     .bind(north_star_observed.and_then(|value| i32::try_from(value).ok()))
     .bind(wait_reason)
+    .bind(degraded_reasons)
     .execute(pool)
     .await;
     if let Err(error) = closed {

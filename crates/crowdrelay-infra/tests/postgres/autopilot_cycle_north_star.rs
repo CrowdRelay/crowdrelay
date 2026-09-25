@@ -26,7 +26,8 @@ use crate::common;
 use crowdrelay_brain::self_assessment::{BrainState, assess};
 use crowdrelay_domain::WorkspaceId;
 use crowdrelay_infra::autopilot::{
-    CycleTrigger, NORTH_STAR_WINDOW_DAYS, close_cycle_run, daily_north_star, open_cycle_run,
+    CycleClose, CycleTrigger, NORTH_STAR_WINDOW_DAYS, close_cycle_run, daily_north_star,
+    open_cycle_run,
 };
 use sqlx::PgPool;
 use time::{Duration, OffsetDateTime};
@@ -298,7 +299,19 @@ async fn the_cycle_records_the_reading_it_was_given_not_a_fan_count() -> Result<
         .await
         .ok_or("the cycle run record must open")?;
     // The reading the world model resolved: signal installs, not the three fans.
-    close_cycle_run(&pool, workspace_id, cycle_id, &[], now, Some(1), None).await;
+    close_cycle_run(
+        &pool,
+        workspace_id,
+        cycle_id,
+        CycleClose {
+            degraded_phases: &[],
+            degraded_reasons: None,
+            finished_at: now,
+            north_star_observed: Some(1),
+            wait_reason: None,
+        },
+    )
+    .await;
 
     let stored: Option<i32> = sqlx::query_scalar(
         "SELECT north_star_value FROM autopilot_cycle_runs WHERE workspace_id = $1 AND id = $2",
@@ -337,17 +350,33 @@ async fn a_cycle_that_took_no_reading_records_none() -> Result<()> {
     let cycle_id = open_cycle_run(&pool, workspace_id, CycleTrigger::Scheduled, now)
         .await
         .ok_or("the cycle run record must open")?;
-    // The evaluation phase never got far enough to read anything.
+    // The evaluation phase never got far enough to read anything, and the
+    // row keeps why (migration 0358) — the worker log would not survive a
+    // deploy.
+    let reasons = serde_json::json!({
+        "evaluation": ["22007: invalid input syntax for type timestamp with time zone"],
+    });
     close_cycle_run(
         &pool,
         workspace_id,
         cycle_id,
-        &["evaluation".to_owned()],
-        now,
-        None,
-        None,
+        CycleClose {
+            degraded_phases: &["evaluation".to_owned()],
+            degraded_reasons: Some(&reasons),
+            finished_at: now,
+            north_star_observed: None,
+            wait_reason: None,
+        },
     )
     .await;
+    let stored_reasons: Option<serde_json::Value> = sqlx::query_scalar(
+        "SELECT degraded_reasons FROM autopilot_cycle_runs WHERE workspace_id = $1 AND id = $2",
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(cycle_id)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(stored_reasons, Some(reasons));
 
     let stored: Option<i32> = sqlx::query_scalar(
         "SELECT north_star_value FROM autopilot_cycle_runs WHERE workspace_id = $1 AND id = $2",
@@ -394,10 +423,13 @@ async fn a_degraded_cycle_records_which_phases_failed() -> Result<()> {
         &pool,
         workspace_id,
         cycle_id,
-        &["action_claim".to_owned(), "reply_triage_claim".to_owned()],
-        now,
-        Some(7),
-        None,
+        CycleClose {
+            degraded_phases: &["action_claim".to_owned(), "reply_triage_claim".to_owned()],
+            degraded_reasons: None,
+            finished_at: now,
+            north_star_observed: Some(7),
+            wait_reason: None,
+        },
     )
     .await;
 
@@ -440,7 +472,19 @@ async fn a_clean_cycle_records_an_empty_phase_list_not_null() -> Result<()> {
     let cycle_id = open_cycle_run(&pool, workspace_id, CycleTrigger::Scheduled, now)
         .await
         .ok_or("the cycle run record must open")?;
-    close_cycle_run(&pool, workspace_id, cycle_id, &[], now, Some(7), None).await;
+    close_cycle_run(
+        &pool,
+        workspace_id,
+        cycle_id,
+        CycleClose {
+            degraded_phases: &[],
+            degraded_reasons: None,
+            finished_at: now,
+            north_star_observed: Some(7),
+            wait_reason: None,
+        },
+    )
+    .await;
 
     let row = sqlx::query(
         "SELECT outcome, degraded_phases FROM autopilot_cycle_runs \
@@ -486,10 +530,13 @@ async fn a_quiet_cycle_records_its_reason_and_an_active_one_records_none() -> Re
         &pool,
         workspace_id,
         quiet_id,
-        &[],
-        now,
-        Some(20),
-        Some("WAIT wins: VOI=0.85 > best_action_value=0.00"),
+        CycleClose {
+            degraded_phases: &[],
+            degraded_reasons: None,
+            finished_at: now,
+            north_star_observed: Some(20),
+            wait_reason: Some("WAIT wins: VOI=0.85 > best_action_value=0.00"),
+        },
     )
     .await;
 
@@ -554,10 +601,13 @@ async fn a_quiet_cycle_records_its_reason_and_an_active_one_records_none() -> Re
         &pool,
         workspace_id,
         active_id,
-        &[],
-        now + Duration::minutes(6),
-        Some(20),
-        Some("WAIT overridden by min_dispatches=1 dispatched 1 candidate(s)"),
+        CycleClose {
+            degraded_phases: &[],
+            degraded_reasons: None,
+            finished_at: now + Duration::minutes(6),
+            north_star_observed: Some(20),
+            wait_reason: Some("WAIT overridden by min_dispatches=1 dispatched 1 candidate(s)"),
+        },
     )
     .await;
 
@@ -593,7 +643,19 @@ async fn the_latest_wait_reason_is_scoped_to_the_workspace() -> Result<()> {
         let id = open_cycle_run(&pool, ws, CycleTrigger::Scheduled, now)
             .await
             .ok_or("the cycle run record must open")?;
-        close_cycle_run(&pool, ws, id, &[], now, None, Some(reason)).await;
+        close_cycle_run(
+            &pool,
+            ws,
+            id,
+            CycleClose {
+                degraded_phases: &[],
+                degraded_reasons: None,
+                finished_at: now,
+                north_star_observed: None,
+                wait_reason: Some(reason),
+            },
+        )
+        .await;
     }
 
     // The same query shape `ops/attention` runs: latest non-NULL reason,
