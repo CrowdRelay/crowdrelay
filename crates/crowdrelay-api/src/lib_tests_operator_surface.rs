@@ -102,3 +102,34 @@
         }
         Ok(())
     }
+
+    /// An approval without an idempotency key is refused, and the refusal
+    /// says so. Production logged an operator's six approvals refused in a
+    /// row, each retried blind, because the answer was the generic "could
+    /// not be parsed or validated".
+    #[tokio::test]
+    async fn an_approval_without_an_idempotency_key_names_the_header()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let response = test_router()?
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(concrete("/v1/control-plane/autopilot/actions/{action_id}/approve"))
+                    .header(
+                        AUTHORIZATION,
+                        "Bearer test-control-plane-key-123456789012",
+                    )
+                    .body(Body::empty())?,
+            )
+            .await?;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = to_bytes(response.into_body(), 16 * 1024).await?;
+        let problem: Value = serde_json::from_slice(&body)?;
+        assert!(
+            problem["detail"]
+                .as_str()
+                .is_some_and(|detail| detail.contains("Idempotency-Key")),
+            "the refusal must name the missing header: {problem}"
+        );
+        Ok(())
+    }

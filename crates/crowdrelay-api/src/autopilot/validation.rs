@@ -142,10 +142,18 @@ fn parse_idempotency_key(headers: &HeaderMap) -> Result<IdempotencyKey, Response
         .get(&IDEMPOTENCY_KEY)
         .and_then(|value| value.to_str().ok())
         .and_then(|value| IdempotencyKey::parse(value).ok());
+    // Named, because this refusal is the one a hand-written client hits
+    // first: production logged an operator's six approvals refused in a row,
+    // each retried blind, with nothing in the answer saying the header was
+    // the problem.
     value.ok_or_else(|| {
-        Problem::bad_request(request_id(headers))
-            .private()
-            .into_response()
+        Problem::bad_request_because(
+            "The Idempotency-Key header is required: 8 to 128 visible ASCII characters, \
+             for example a UUID.",
+            request_id(headers),
+        )
+        .private()
+        .into_response()
     })
 }
 
