@@ -105,6 +105,7 @@ class OperatorAttentionAggregateContract(unittest.TestCase):
                 "notices",
                 "rejected",
                 "summary",
+                "unanswered",
                 "unpublished_drafts",
             ],
         )

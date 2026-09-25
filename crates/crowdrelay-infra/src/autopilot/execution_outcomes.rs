@@ -57,6 +57,7 @@ pub(super) async fn record_execution_outcome(
             bundle_price_minor, ..
         } => ("merch_bundle_price_minor", *bundle_price_minor as f64, None),
         AutopilotActionPayload::RequestOutreach { .. } => ("outreach_requested", 1.0, None),
+        AutopilotActionPayload::RequestOutreachReply { .. } => ("outreach_reply_sent", 1.0, None),
         // One letter, one person. The measure worth having later is how many
         // of these turned into somebody who hears the dates, which is a fan
         // row appearing against an address the band already knew.
@@ -66,6 +67,15 @@ pub(super) async fn record_execution_outcome(
         }
         AutopilotActionPayload::RequestBookingAgentApproach { .. } => {
             ("booking_agent_approach_requested", 1.0, None)
+        }
+        // The wave's measure is letters sent, not waves approved — the
+        // funnel reads per agent either way.
+        AutopilotActionPayload::RequestBookingAgentApproachWave { approaches, .. } => {
+            (
+                "booking_agent_approach_requested",
+                approaches.len() as f64,
+                None,
+            )
         }
         AutopilotActionPayload::RequestBeaconDiscovery { .. } => ("beacon_discovery_requested", 1.0, None),
         AutopilotActionPayload::RequestOutreachDiscovery { .. } => ("outreach_discovery_requested", 1.0, None),

@@ -216,6 +216,12 @@ The payload names `action_id`, `city_id`, the anchor `target_id` and `contact_em
 
 The payload names `action_id`, `opportunity_id`, `target_id`, `target_name`, `contact_email`, `phase` (`initial` or `follow_up`), `template_key`, `wave_id` when the pitch belongs to a wave, `evidence` (the numbers measured at request time — for the receipt and the ledger), and **`draft`, the finished letter: `subject` and `body`, composed in CrowdRelay when the action was written**. The pitch itself is the tenant's own release plan — **send `draft.body` verbatim and refuse a payload whose draft is missing or empty rather than composing from env vars, template keys or evidence**. A verified free-form route, when the target has one, takes the same `draft.body` as its `{{message}}` field — the transport changes, the words do not. A claim disposition other than `claimed` (`in_flight`, `ambiguous`) fails closed; `already_succeeded` is a no-op replay. `examples/autopilot-outreach-executor.example.json` is the reference handler.
 
+## Outreach replies
+
+`outreach.send` also carries `crowdrelay.outreach.reply_requested`: the band approved an answer to somebody who wrote back to an earlier pitch. Same transport, same mailbox, same claim/receipt rules as `crowdrelay.outreach.requested` — the events are separate so an executor that does not know replies skips this one rather than mistaking it for a pitch.
+
+The payload names `action_id`, `target_id`, `target_name`, `target_kind`, `contact_email`, `answers_interaction_id` (the inbound interaction this letter closes), `reply_disposition`, `sheet_verdict` when one was imported (audit only — never quoted), and **`draft`, the reply `subject` and `body` composed in CrowdRelay when the action was written**. **Send `draft.body` verbatim and refuse a payload whose draft is missing or empty.** The draft is deliberately a scaffold — the system holds the sheet's verdict, not the reply's text — so nothing downstream may extend it into a guess at what they said. When the executor can thread by provider reference it should reply on the existing conversation; a fresh message with the `Re:` subject is the acceptable fallback. `Re:` subjects are how the operator sees the difference at a glance, so they must not be rewritten away.
+
 ## Opportunity applications
 
 `opportunity.application` carries `crowdrelay.opportunity.application_requested`: the band approved an application to one scored live opportunity — a festival, showcase, contest or support slot — and the approval read the letter that goes to the organiser.

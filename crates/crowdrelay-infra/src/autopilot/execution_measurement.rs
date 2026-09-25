@@ -221,3 +221,18 @@ async fn ticket_revenue_baseline_72h(
     .await
     .map_err(map_sqlx)
 }
+
+/// One approach's `BookingAgentReply30d` plan, keyed to the agent's own id.
+/// A reply answers that agent's ask, not the batch's; lumping them under the
+/// wave would let one answer count N times.
+fn wave_reply_measurement(
+    approach: &crowdrelay_application::autopilot::BookingAgentApproachDraft,
+    now: OffsetDateTime,
+) -> (AutopilotMeasurementKind, uuid::Uuid, f64, OffsetDateTime) {
+    (
+        AutopilotMeasurementKind::BookingAgentReply30d,
+        approach.agent_id.into_uuid(),
+        0.0,
+        now + time::Duration::days(30),
+    )
+}

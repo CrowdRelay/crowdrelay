@@ -152,6 +152,22 @@ pub(super) async fn ensure_dispatch_envelope(
             Some(format!("agent:{agent_id}")),
             DispatchContext::default(),
         ),
+        // A reply rides the contact's own grouping: whether the person wrote
+        // back again is the pitch's posterior continuing, not a new lever.
+        AutopilotActionPayload::RequestOutreachReply { target_id, .. } => (
+            "outreach-reply".to_owned(),
+            format!("contact:{target_id}"),
+            Some(format!("contact:{target_id}")),
+            DispatchContext::default(),
+        ),
+        // One evidence row per wave — the per-agent measurements merge their
+        // observed counts onto it, so the batch learns as one intervention.
+        AutopilotActionPayload::RequestBookingAgentApproachWave { wave_id, .. } => (
+            "booking-agent-approach-wave".to_owned(),
+            format!("wave:{wave_id}"),
+            None,
+            DispatchContext::default(),
+        ),
         AutopilotActionPayload::RequestAudienceCampaign { event_id, .. } => (
             "audience-campaign".to_owned(),
             format!("event:{event_id}"),
@@ -317,6 +333,36 @@ pub(super) async fn emit_outward_action(
         );
     }
     emit_external_action(transaction, workspace_id, action_id, event_type, payload).await
+}
+
+/// The keyed form of [`emit_outward_action`] — for the one action that
+/// legitimately sends more than one letter under a single approval: an
+/// approach wave. The caller builds the evidence itself so the function
+/// stays inside the argument budget; the suffix becomes part of the
+/// emission key, so every approach gets its own outbox row and a dispatch
+/// retry re-targets the same rows instead of minting a second letter — or
+/// swallowing every approach after the first under the shared default key.
+pub(super) async fn emit_outward_action_keyed(
+    transaction: &mut Transaction<'_, Postgres>,
+    workspace_id: WorkspaceId,
+    action_id: AutopilotActionId,
+    event_type: &'static str,
+    send_evidence: Value,
+    mut payload: Value,
+    emission_suffix: &str,
+) -> Result<(), RepositoryError> {
+    if let Some(map) = payload.as_object_mut() {
+        map.insert("send_evidence".to_owned(), send_evidence);
+    }
+    emit_external_action_keyed(
+        transaction,
+        workspace_id,
+        action_id,
+        event_type,
+        payload,
+        Some(emission_suffix),
+    )
+    .await
 }
 
 /// The evidence gate every outward send must pass (2.1/2.2).

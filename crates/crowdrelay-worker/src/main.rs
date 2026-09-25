@@ -189,6 +189,10 @@ async fn main() -> Result<()> {
                 summary.read, summary.written, summary.skipped, summary.with_deadline
             );
         }
+        Command::BackfillOutreachVerdicts { dry_run } => {
+            let workspace = trusted_workspace_id(&database, &config).await?;
+            worker_cli::run_backfill_outreach_verdicts(&database, workspace, dry_run).await?;
+        }
         Command::Run { standby } => {
             tracing::info!(environment = %config.environment, standby, "CrowdRelay worker started");
             run(database.clone(), &config, standby).await?;

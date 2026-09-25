@@ -147,6 +147,12 @@ struct CycleCounts {
     beacon_refusals: usize,
     beacons_unresolved_city: u64,
     beacons_failed: u64,
+    /// Outreach-log rows: sends and replies written, rows already known,
+    /// contacts no target carries, and writes that failed.
+    outreach_sends_recorded: u64,
+    outreach_replies_recorded: u64,
+    outreach_unmatched: u64,
+    outreach_failed: u64,
 }
 
 impl GDriveContactsSyncWorker {
@@ -316,6 +322,10 @@ impl GDriveContactsSyncWorker {
                     counts.beacon_refusals += file_counts.beacon_refusals;
                     counts.beacons_unresolved_city += file_counts.beacons_unresolved_city;
                     counts.beacons_failed += file_counts.beacons_failed;
+                    counts.outreach_sends_recorded += file_counts.outreach_sends_recorded;
+                    counts.outreach_replies_recorded += file_counts.outreach_replies_recorded;
+                    counts.outreach_unmatched += file_counts.outreach_unmatched;
+                    counts.outreach_failed += file_counts.outreach_failed;
                 }
                 Err(error) => {
                     counts.files_failed += 1;
@@ -357,6 +367,10 @@ impl GDriveContactsSyncWorker {
             beacon_refusals = counts.beacon_refusals,
             beacons_unresolved_city = counts.beacons_unresolved_city,
             beacons_failed = counts.beacons_failed,
+            outreach_sends = counts.outreach_sends_recorded,
+            outreach_replies = counts.outreach_replies_recorded,
+            outreach_unmatched = counts.outreach_unmatched,
+            outreach_failed = counts.outreach_failed,
             "gdrive contacts sync cycle complete"
         );
         Ok(())
@@ -645,6 +659,10 @@ impl GDriveContactsSyncWorker {
         counts.beacon_refusals += harvest.beacon_refusals;
         counts.beacons_unresolved_city += harvest.beacons_unresolved_city;
         counts.beacons_failed += harvest.beacons_failed;
+        counts.outreach_sends_recorded += harvest.outreach_sends_recorded;
+        counts.outreach_replies_recorded += harvest.outreach_replies_recorded;
+        counts.outreach_unmatched += harvest.outreach_unmatched;
+        counts.outreach_failed += harvest.outreach_failed;
         let contacts = harvest.contacts;
         // Row-level write failures are counted, not raised — but they must
         // not be sealed under the unchanged marker: a transient sqlx error
@@ -655,7 +673,8 @@ impl GDriveContactsSyncWorker {
         let row_failures = harvest.venues_failed
             + harvest.peer_acts_failed
             + harvest.agents_failed
-            + harvest.beacons_failed;
+            + harvest.beacons_failed
+            + harvest.outreach_failed;
 
         if !harvest.saw_email_column {
             // Not a contact list — record the mtime so we do not re-export
@@ -738,8 +757,9 @@ impl GDriveContactsSyncWorker {
         &self,
         connection_id: Uuid,
         file: &DriveFile,
-    ) -> Result<Vec<Vec<Vec<String>>>, String> {
-        let single = |grid: Vec<Vec<String>>| vec![grid];
+    ) -> Result<Vec<crate::sheet_intake::SheetGrid>, String> {
+        let single =
+            |grid: Vec<Vec<String>>| vec![crate::sheet_intake::SheetGrid { name: None, grid }];
         match file.mime_type.as_str() {
             "application/vnd.google-apps.spreadsheet" => {
                 // The CSV export answers the first worksheet only — a

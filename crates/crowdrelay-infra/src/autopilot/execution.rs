@@ -105,7 +105,9 @@ pub(super) async fn schedule_effect_measurement(
         // An approach is measured the way a pitch is: did the contact write
         // back inside the week. The kind it is approached about lives on
         // the target, so the reply count needs no new measurement kind.
-        | AutopilotActionPayload::RequestRepresentationApproach { target_id, .. } => plans.push((
+        // A reply measures the same counter on the same subject.
+        | AutopilotActionPayload::RequestRepresentationApproach { target_id, .. }
+        | AutopilotActionPayload::RequestOutreachReply { target_id, .. } => plans.push((
             AutopilotMeasurementKind::OutreachReply7d,
             target_id.into_uuid(),
             0.0,
@@ -120,6 +122,13 @@ pub(super) async fn schedule_effect_measurement(
             0.0,
             now + time::Duration::days(30),
         )),
+        // Each agent in the wave measures on their own ledger — a reply
+        // answers that agent's ask, not the batch's.
+        AutopilotActionPayload::RequestBookingAgentApproachWave { approaches, .. } => {
+            for approach in approaches {
+                plans.push(wave_reply_measurement(approach, now));
+            }
+        }
         AutopilotActionPayload::RequestAudienceCampaign { event_id, .. } => {
             let baseline = sqlx::query_scalar::<_, f64>(
                 r#"

@@ -3,16 +3,22 @@
 //! what each sheet IS and route its rows to the right registry.
 //!
 //! Dispatch order is the whole contract:
-//!   agent seed → beacon seed → registry dump → venue seed → band seed → contact list
+//!   agent seed → beacon seed → outreach log → festival profile →
+//!   registry dump → venue seed → band seed → contact list
 //! The booking-agent sheet is claimed first because its own header carries
 //! registry state columns (`Refused_Until`, `Do_Not_Contact`) that would
 //! trip the dump guard; the beacon registry sheet is claimed next because
 //! its state columns (`Verified`, `Accepts_Outreach`, …) are the same
 //! vocabulary the guard rejects on — here they are intake, not a readout;
-//! the dump guard runs before the venue reader
-//! because a registry readout's `Name`/`City`/`Source_URL` satisfies the
-//! venue pin and must never mint its rows as rooms. Only a sheet none of
-//! the four claims reaches the contact reader.
+//! the outreach log is claimed ahead of the dump guard for the same reason
+//! (`Status`/`Result`/`Source_System` are the band's send bookkeeping, and
+//! its contact column is history, not leads to stage); the festival
+//! profile claims on its `Entity_Name`/`Application_Cycle` pair — the
+//! `deadline=` cells seed `festival_editions`, which is the only input the
+//! festival-window evaluator reads; the dump guard runs before the venue
+//! reader because a registry readout's `Name`/`City`/`Source_URL`
+//! satisfies the venue pin and must never mint its rows as rooms. Only a
+//! sheet none of the six claims reaches the contact reader.
 //!
 //! A workbook may carry a banner above the real header ("venue_seed intake
 //! columns — re-importable as-is"). A banner hides the sheet from every
@@ -26,12 +32,15 @@ use crowdrelay_domain::booking_agent_seed::{AgentSheetReport, extract_agent_shee
 use crowdrelay_domain::drive_contacts::{
     ExtractedContact, extract_contacts, is_email_header, is_registry_dump,
 };
+use crowdrelay_domain::festival_seed::{FestivalSeedReport, extract_festival_sheet};
+use crowdrelay_domain::outreach_log::{OutreachLogReport, extract_outreach_log};
 use crowdrelay_domain::peer_act_seed::{
     PeerActSeedReport, extract_seed_sheet as extract_band_sheet,
 };
 use crowdrelay_domain::venue_seed::{SeedSheetReport, extract_seed_sheet as extract_venue_sheet};
 use crowdrelay_infra::{
     beacon_seed::PostgresBeaconSeedRepository, booking_agents::PostgresBookingAgentRepository,
+    festival_seed::PostgresFestivalSeedRepository, outreach_log::PostgresOutreachLogRepository,
     peer_act_seed::PostgresPeerActSeedRepository, venue_seed::PostgresVenueSeedRepository,
 };
 use sqlx::PgPool;
@@ -46,7 +55,21 @@ pub const MAX_ROWS_PER_FILE: usize = 5000;
 /// every transport's skip-unchanged marker (`<sha|mtime>#<rev>`). Bump it
 /// when the intake rules change or previously-scanned files stay skipped
 /// under rules they predate.
-pub const SHEET_INTAKE_REVISION: u32 = 4;
+pub const SHEET_INTAKE_REVISION: u32 = 6;
+
+/// One worksheet: its tab name when the transport knows it (a CSV has
+/// none) and the grid of cell text.
+pub struct SheetGrid {
+    pub name: Option<String>,
+    pub grid: Vec<Vec<String>>,
+}
+
+impl From<Vec<Vec<String>>> for SheetGrid {
+    /// A nameless sheet — single-grid transports and tests.
+    fn from(grid: Vec<Vec<String>>) -> Self {
+        Self { name: None, grid }
+    }
+}
 
 /// What one file's sheets produced: the contacts to stage under the file's
 /// own source identity, plus the counts the cycle report folds in.
@@ -96,6 +119,35 @@ pub struct SheetHarvest {
     pub beacons_unresolved_city: u64,
     /// Beacon rows whose own write failed — isolated per row.
     pub beacons_failed: u64,
+    /// Sheets carrying an outreach log (`VIRYA_MASTER`/`PROMO` OUTREACH
+    /// tabs) that the dedicated reader claimed.
+    pub outreach_log_sheets: usize,
+    /// Send rows newly written to `outreach_interactions`.
+    pub outreach_sends_recorded: u64,
+    /// Reply rows newly written.
+    pub outreach_replies_recorded: u64,
+    /// Log rows already present under their `{book}:{id}` key.
+    pub outreach_already_present: u64,
+    /// Log rows the sheet marks as never sent (drafts).
+    pub outreach_drafts_skipped: u64,
+    /// Log rows whose contact matched no `outreach_targets` email.
+    pub outreach_unmatched: u64,
+    /// Replies whose verdict settled nothing — minted into triage.
+    pub outreach_triage_minted: u64,
+    /// Log rows whose own write failed — isolated per row.
+    pub outreach_failed: u64,
+    /// Sheets carrying the master's `FESTIVAL_PROFILE` tab.
+    pub festival_sheets: usize,
+    /// Edition windows newly written to `festival_editions`.
+    pub festival_editions_seeded: u64,
+    /// Editions whose `(target, label)` already existed — refreshed.
+    pub festival_editions_refreshed: u64,
+    /// Festival rows skipped by the parser (terminal status, no deadline).
+    pub festival_rows_skipped: usize,
+    /// Festival rows naming no `festival` booking target.
+    pub festival_unmatched: usize,
+    /// Festival rows whose own write failed — isolated per row.
+    pub festival_failed: u64,
 }
 
 /// Which structured reader claims a view, if one does. Extraction is
@@ -104,6 +156,8 @@ pub struct SheetHarvest {
 enum Claim {
     Agent(AgentSheetReport),
     Beacon(BeaconSeedReport),
+    OutreachLog(OutreachLogReport),
+    Festival(FestivalSeedReport),
     Dump,
     Venue(SeedSheetReport),
     Band(PeerActSeedReport),
@@ -122,6 +176,19 @@ fn claim(view: &[Vec<String>]) -> Option<Claim> {
         // `Accepts_Outreach` and friends are registry-state columns, but
         // on this sheet they are the intake, not an export of it.
         Some(Claim::Beacon(report))
+    } else if let Some(report) = extract_outreach_log(view) {
+        // The send log ahead of the dump guard too — `Status`/`Result`/
+        // `Source_System` are the band's own bookkeeping columns, and the
+        // `Recipient`/`Kontakt` email column must not reach the contact
+        // reader (the band already wrote to these people; they are
+        // history, not leads to stage).
+        Some(Claim::OutreachLog(report))
+    } else if let Some(report) = extract_festival_sheet(view) {
+        // The master's festival tab — `Application_Cycle` deadlines seed
+        // `festival_editions` so the deadline-driven ask lane has windows
+        // to read. Ahead of the dump guard for the same reason the agent
+        // sheet is: its columns are the band's bookkeeping, not a readout.
+        Some(Claim::Festival(report))
     } else if view.first().is_some_and(|header| is_registry_dump(header)) {
         // A registry readout is context for a human, not intake — without
         // this its `Name`/`City`/`Source_URL` mints press contacts as venues.
@@ -164,17 +231,18 @@ pub enum SheetTrust {
 }
 
 /// Routes every sheet of one file to its reader and returns what to stage.
-/// `file_name` labels refusal logs only — writes carry no file identity.
+/// `file_name` labels refusal logs and the `source` provenance written on
+/// outreach-log rows.
 pub async fn harvest_grids(
     pool: &PgPool,
     workspace_id: Uuid,
     file_name: &str,
-    sheets: Vec<Vec<Vec<String>>>,
+    sheets: Vec<SheetGrid>,
     trust: SheetTrust,
 ) -> Result<SheetHarvest, String> {
     let mut harvest = SheetHarvest::default();
-    for raw in sheets {
-        let grid: Vec<Vec<String>> = raw.into_iter().take(MAX_ROWS_PER_FILE + 1).collect();
+    for sheet in sheets {
+        let grid: Vec<Vec<String>> = sheet.grid.into_iter().take(MAX_ROWS_PER_FILE + 1).collect();
         let full: &[Vec<String>] = &grid;
         let stripped: &[Vec<String>] = grid.get(1..).unwrap_or(full);
 
@@ -198,12 +266,17 @@ pub async fn harvest_grids(
 
         // An untrusted sheet keeps only its contacts: every registry
         // claim defangs to the review path, where a person decides. The
-        // defanged reader must skip the registry-dump guard — a beacon or
-        // agent sheet's own headers trip it, and refusing them would turn
-        // "defanged into contacts" into "silently dropped".
+        // outreach log defangs for the strongest reason of all — an
+        // inbound attachment that minted "replied: positive" history
+        // would bait re-contact with people nobody actually wrote to.
+        // The defanged reader must skip the registry-dump guard — a
+        // beacon or agent sheet's own headers trip it, and refusing them
+        // would turn "defanged into contacts" into "silently dropped".
         let (claimed, defanged) = match (trust, claimed) {
             (SheetTrust::InboundUntrusted, Claim::Agent(_))
             | (SheetTrust::InboundUntrusted, Claim::Beacon(_))
+            | (SheetTrust::InboundUntrusted, Claim::OutreachLog(_))
+            | (SheetTrust::InboundUntrusted, Claim::Festival(_))
             | (SheetTrust::InboundUntrusted, Claim::Venue(_))
             | (SheetTrust::InboundUntrusted, Claim::Band(_)) => (Claim::Contacts, true),
             (_, claim) => (claim, false),
@@ -261,6 +334,77 @@ pub async fn harvest_grids(
                 harvest.beacon_refusals += report.refusals.len();
                 harvest.beacons_unresolved_city += summary.unresolved_city;
                 harvest.beacons_failed += summary.failed;
+            }
+            Claim::OutreachLog(report) => {
+                harvest.outreach_log_sheets += 1;
+                harvest.rows_read += report.rows_read;
+                let sheet_name = sheet.name.as_deref().unwrap_or("sheet");
+                let source_label = format!("{file_name}#{sheet_name}");
+                if !report.refusals.is_empty() {
+                    tracing::info!(
+                        file = %file_name,
+                        sheet = %sheet_name,
+                        refusals = ?report
+                            .refusals
+                            .iter()
+                            .map(|(row, refusal)| (*row + row_shift, refusal.message()))
+                            .collect::<Vec<_>>(),
+                        "outreach log rows refused"
+                    );
+                }
+                let summary = PostgresOutreachLogRepository::new(pool.clone())
+                    .import_sheet(workspace_id, &source_label, &report)
+                    .await
+                    .map_err(|e: sqlx::Error| e.to_string())?;
+                harvest.outreach_sends_recorded += summary.sends_recorded;
+                harvest.outreach_replies_recorded += summary.replies_recorded;
+                harvest.outreach_already_present += summary.already_present;
+                harvest.outreach_drafts_skipped += summary.drafts_skipped;
+                harvest.outreach_unmatched += summary.unmatched;
+                harvest.outreach_triage_minted += summary.triage_minted;
+                harvest.outreach_failed += summary.failed;
+            }
+            Claim::Festival(report) => {
+                harvest.festival_sheets += 1;
+                harvest.rows_read += report.rows.len() + report.skipped.len();
+                if !report.skipped.is_empty() {
+                    tracing::info!(
+                        file = %file_name,
+                        skips = ?report
+                            .skipped
+                            .iter()
+                            .map(|(row, skip)| (*row + row_shift, skip.message()))
+                            .collect::<Vec<_>>(),
+                        "festival profile rows skipped"
+                    );
+                }
+                if !report.unknown_statuses.is_empty() {
+                    tracing::info!(
+                        file = %file_name,
+                        statuses = ?report.unknown_statuses,
+                        "festival cycle statuses the map does not know"
+                    );
+                }
+                let summary = PostgresFestivalSeedRepository::new(pool.clone())
+                    .import_sheet(
+                        workspace_id,
+                        &format!("{file_name}#{}", sheet.name.as_deref().unwrap_or("sheet")),
+                        &report,
+                    )
+                    .await
+                    .map_err(|e: sqlx::Error| e.to_string())?;
+                harvest.festival_editions_seeded += summary.seeded;
+                harvest.festival_editions_refreshed += summary.refreshed;
+                harvest.festival_unmatched += summary.unmatched.len();
+                if summary.past_deadline > 0 || !summary.unmatched.is_empty() {
+                    tracing::info!(
+                        file = %file_name,
+                        past_deadline = summary.past_deadline,
+                        unmatched = ?summary.unmatched,
+                        "festival profile rows with no live window or no target"
+                    );
+                }
+                harvest.festival_failed += summary.failed;
             }
             Claim::Dump => {
                 harvest.registry_dump_sheets += 1;
@@ -350,12 +494,14 @@ pub async fn harvest_grids(
     Ok(harvest)
 }
 
-/// xlsx → one grid per non-empty worksheet via calamine. A workbook whose
-/// cover sheet is a dashboard must not hide its data tabs — the seed
-/// readers run per sheet. (The Drive CSV export of a Google Sheet still
-/// carries only the first tab — exporting a chosen tab would need the
-/// gid-aware export URL, which is a deliberate non-goal here.)
-pub fn parse_xlsx_sheets(bytes: &[u8]) -> Result<Vec<Vec<Vec<String>>>, String> {
+/// xlsx → one named grid per non-empty worksheet via calamine. A workbook
+/// whose cover sheet is a dashboard must not hide its data tabs — the seed
+/// readers run per sheet. The tab name travels with the grid because the
+/// outreach-log importer writes `{file}#{sheet}` provenance into metadata.
+/// (The Drive CSV export of a Google Sheet still carries only the first
+/// tab — exporting a chosen tab would need the gid-aware export URL, which
+/// is a deliberate non-goal here.)
+pub fn parse_xlsx_sheets(bytes: &[u8]) -> Result<Vec<SheetGrid>, String> {
     use calamine::{Data, Reader, Xlsx, open_workbook_from_rs};
     let mut workbook: Xlsx<std::io::Cursor<&[u8]>> =
         open_workbook_from_rs(std::io::Cursor::new(bytes))
@@ -399,7 +545,10 @@ pub fn parse_xlsx_sheets(bytes: &[u8]) -> Result<Vec<Vec<Vec<String>>>, String> 
                     .collect()
             })
             .collect();
-        sheets.push(grid);
+        sheets.push(SheetGrid {
+            name: Some(name),
+            grid,
+        });
     }
     Ok(sheets)
 }

@@ -557,6 +557,35 @@ pub enum AutopilotActionPayload {
         #[serde(default)]
         draft: crowdrelay_domain::outreach_letter::OutreachLetter,
     },
+    /// The answer to somebody who wrote back — the lane the `AlreadyReplied`
+    /// hold deliberately refuses to serve, because re-pitching a person who
+    /// answered is spam and writing back is the thing that was missing.
+    ///
+    /// The draft is a verdict-shaped scaffold (`reply_letter`), composed at
+    /// persist time like every letter here: the imported reply cohort
+    /// carries the sheet's verdict rather than the reply's text, so the
+    /// operator edits against the real thread and the send goes verbatim.
+    RequestOutreachReply {
+        target_id: OutreachTargetId,
+        target_version: i64,
+        target_name: String,
+        /// The inbound interaction being answered — pins the reply to one
+        /// conversation, so a second answer to the same thread is provably
+        /// a different action rather than a resend.
+        reply_interaction_id: i64,
+        /// `positive` or `received` when the decision was written — the
+        /// shape the scaffold was composed against, kept for the ledger.
+        reply_disposition: String,
+        /// The sheet's own verdict when the reply was imported — audit,
+        /// never quoted in the letter.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sheet_verdict: Option<String>,
+        /// Composed when the action is written; rides under `draft` so
+        /// `draft_revision` can offer `subject`/`body` for editing, and
+        /// dispatch refuses it empty rather than inventing a reply.
+        #[serde(default)]
+        draft: crowdrelay_domain::outreach_letter::OutreachLetter,
+    },
     /// Ask the platform to introduce the band to a representation contact —
     /// a booking agent or a label the band wants carrying its career. The
     /// published listing is the pitch: the emitted event carries its
@@ -621,6 +650,41 @@ pub enum AutopilotActionPayload {
         /// the band's behalf.
         #[serde(default)]
         draft: crowdrelay_domain::approach_letter::ApproachLetter,
+    },
+    /// The season's approach run as one card, not one card per agent.
+    ///
+    /// A wave asks several agents at once — the operator picked the batch
+    /// from the gate-state list, every letter was composed at request time,
+    /// and one `awaiting_approval` row carries them all so the approval
+    /// reads as the decision it actually is: "these people hear about the
+    /// season", not eight separate asks the second of which is already a
+    /// nag. Dispatch fans the wave back out into one locked send per agent
+    /// — each approach re-runs the season gate under the advisory lock
+    /// before its letter goes, so a door that closed since the approval
+    /// refuses that agent and takes the wave's transaction with it rather
+    /// than sending half a batch.
+    ///
+    /// `standing_approval_target` stays `None`: like `RequestGigOutreach`'s
+    /// recipient list, a wave names several counterparties and a grant over
+    /// one card could not say which of them it covered. A season's worth of
+    /// relationships is exactly the spend a grant should never blanket.
+    RequestBookingAgentApproachWave {
+        /// Minted at request time. Groups the asks on the board and keys
+        /// the action's idempotency — a retried submit returns this wave.
+        wave_id: uuid::Uuid,
+        /// One line of the band's own words, shared by every letter in the
+        /// wave. Per-agent notes would make the card a form with N fields;
+        /// a line worth saying is worth saying to all of them.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        note: Option<String>,
+        /// The draw readings every letter argues from, measured once under
+        /// the request lock — the approval screen and all N sends argue
+        /// from the same numbers.
+        evidence: AgentDrawEvidence,
+        /// The approaches the wave carries: agent, version lock and the
+        /// finished letter. Dispatch refuses the wave if any draft is
+        /// empty — the same rule the single lane holds.
+        approaches: Vec<BookingAgentApproachDraft>,
     },
     /// Write to everybody who books one room about one night (§12-6, 4G.4).
     ///
@@ -1151,32 +1215,6 @@ pub enum AutopilotActionPayload {
 }
 
 impl AutopilotActionPayload {
-    /// The target a standing approval for this action would cover, if there is
-    /// one a person could sensibly judge once.
-    ///
-    /// `None` is the honest answer for most actions and the safe one for all
-    /// of them: a standing approval is the operator saying "this *target* is
-    /// fine, stop asking", and that sentence only means something where the
-    /// action has a target that recurs. A push to the whole audience, a price
-    /// change and a budget request each happen to one thing once; granting a
-    /// standing approval over them would be granting it over the action kind,
-    /// which is the wildcard `standing_approval` deliberately cannot express.
-    ///
-    /// A community is the case that does recur. The band posts to the same
-    /// subreddit again next month, and by then the operator has read three
-    /// drafts from it and knows the answer.
-    ///
-    /// The key is the target's own id rather than the action's `subject_id`:
-    /// an agent-outcome action carries the outcome id there, so a grant keyed
-    /// on the subject would cover one draft and never the next.
-    #[must_use]
-    pub fn standing_approval_target(&self) -> Option<String> {
-        match self {
-            Self::RequestCommunityEngagement { target_id, .. } => Some(target_id.to_string()),
-            _ => None,
-        }
-    }
-
     /// What this action costs and how far its effects reach.
     ///
     /// Exhaustive on purpose: a new payload variant must not compile until
@@ -1202,11 +1240,17 @@ impl AutopilotActionPayload {
             Self::RequestBookingOutreach { .. }
             | Self::RequestGigOutreach { .. }
             | Self::RequestOutreach { .. }
+            // A reply still writes to somebody else's inbox — the warmest
+            // possible third-party send, but third-party all the same.
+            | Self::RequestOutreachReply { .. }
             | Self::RequestRepresentationApproach { .. }
             // The agent application is somebody else's relationship in the
             // most literal sense — they sell *us*, and a bad first approach
             // spends a season, not a cooldown.
             | Self::RequestBookingAgentApproach { .. }
+            // A wave is the same relationships N at a time — the class does
+            // not dilute because the asks shared one card.
+            | Self::RequestBookingAgentApproachWave { .. }
             | Self::RequestBeaconOutreach { .. }
             // An invitation is a letter to somebody outside the band's own
             // audience — that is the whole point of it — so it carries the
@@ -1344,6 +1388,7 @@ pub use briefing_locale::BriefingLocale;
 
 include!("model/action_kind.rs");
 include!("model/briefing.rs");
+include!("model/reply_wave.rs");
 
 /// Formats a minor-currency amount as a human-readable string.
 /// Assumes the amount is in the workspace's currency; the label is neutral
@@ -1982,78 +2027,6 @@ mod tests {
         // A payload written before the letter travelled in it decodes to the
         // empty draft — dispatch refuses it rather than composing on the
         // band's behalf.
-        assert!(draft.subject.is_empty() && draft.body.is_empty());
-        Ok(())
-    }
-
-    /// Outreach payloads queued before the letter rode along must still
-    /// parse — the draft field is serde-defaulted and decodes empty, which
-    /// dispatch then refuses rather than composing on the band's behalf.
-    #[test]
-    fn outreach_payload_without_draft_still_parses() -> Result<(), Box<dyn std::error::Error>> {
-        let legacy = serde_json::json!({
-            "kind": "request_outreach",
-            "opportunity_id": uuid::Uuid::now_v7(),
-            "target_id": uuid::Uuid::now_v7(),
-            "target_version": 1,
-            "target_name": "Metal Playlists Weekly",
-            "phase": "initial",
-            "template_key": "outreach.press.v1",
-        });
-        let AutopilotActionPayload::RequestOutreach { draft, .. } = serde_json::from_value(legacy)?
-        else {
-            panic!("the legacy payload must still parse as RequestOutreach")
-        };
-        assert!(draft.subject.is_empty() && draft.body.is_empty());
-        Ok(())
-    }
-
-    /// Approach payloads queued before the letter rode along must still
-    /// parse — the draft deserializes empty and dispatch refuses it rather
-    /// than composing after the approval.
-    #[test]
-    fn approach_payloads_without_draft_still_parse() -> Result<(), Box<dyn std::error::Error>> {
-        let AutopilotActionPayload::RequestRepresentationApproach { draft, .. } =
-            serde_json::from_value(serde_json::json!({
-                "kind": "request_representation_approach",
-                "target_id": uuid::Uuid::now_v7(),
-                "target_version": 1,
-                "target_name": "Agent X",
-            }))?
-        else {
-            panic!("the legacy payload must still parse as RequestRepresentationApproach")
-        };
-        assert!(draft.subject.is_empty() && draft.body.is_empty());
-        let AutopilotActionPayload::RequestBookingAgentApproach { draft, .. } =
-            serde_json::from_value(serde_json::json!({
-                "kind": "request_booking_agent_approach",
-                "agent_id": uuid::Uuid::now_v7(),
-                "agent_version": 1,
-                "agent_name": "Agent Y",
-                "evidence": {},
-            }))?
-        else {
-            panic!("the legacy payload must still parse as RequestBookingAgentApproach")
-        };
-        assert!(draft.subject.is_empty() && draft.body.is_empty());
-        Ok(())
-    }
-
-    /// Application payloads queued before the letter rode along must still
-    /// parse — the draft deserializes empty and dispatch refuses it rather
-    /// than composing after the approval.
-    #[test]
-    fn apply_payload_without_draft_still_parses() -> Result<(), Box<dyn std::error::Error>> {
-        let AutopilotActionPayload::ApplyLiveOpportunity { draft, .. } =
-            serde_json::from_value(serde_json::json!({
-                "kind": "apply_live_opportunity",
-                "opportunity_id": uuid::Uuid::now_v7(),
-                "opportunity_kind": "festival",
-                "score": 42,
-            }))?
-        else {
-            panic!("the legacy payload must still parse as ApplyLiveOpportunity")
-        };
         assert!(draft.subject.is_empty() && draft.body.is_empty());
         Ok(())
     }

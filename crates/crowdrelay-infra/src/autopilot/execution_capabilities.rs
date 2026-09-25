@@ -13,6 +13,11 @@ fn executor_capability_for_event(event_type: &str) -> &'static str {
         "crowdrelay.gig.outreach_requested" => "gig.outreach",
         "crowdrelay.merch.bundle_requested" => "merch.bundle",
         "crowdrelay.outreach.requested" => "outreach.send",
+        // A reply sends through the same transport as the pitch it answers —
+        // one mailbox, one sender identity. The event is separate so an
+        // executor that does not know replies skips it rather than sending
+        // the wrong thing.
+        "crowdrelay.outreach.reply_requested" => "outreach.send",
         "crowdrelay.representation.approach_requested" => "representation.approach",
         // Its own capability rather than riding `representation.approach`:
         // the payload names a registry agent and carries the draw snapshot,
@@ -141,8 +146,10 @@ pub const fn payload_requires_executor(payload: &AutopilotActionPayload) -> bool
                 | AutopilotActionPayload::RequestLatarnikInvite { .. }
                 | AutopilotActionPayload::RequestMerchBundle { .. }
                 | AutopilotActionPayload::RequestOutreach { .. }
+                | AutopilotActionPayload::RequestOutreachReply { .. }
                 | AutopilotActionPayload::RequestRepresentationApproach { .. }
                 | AutopilotActionPayload::RequestBookingAgentApproach { .. }
+                | AutopilotActionPayload::RequestBookingAgentApproachWave { .. }
                 | AutopilotActionPayload::RequestBeaconDiscovery { .. }
                 | AutopilotActionPayload::RequestOutreachDiscovery { .. }
                 | AutopilotActionPayload::RequestBeaconInviteBatch { .. }
@@ -196,8 +203,15 @@ pub(in crate::autopilot) fn executor_capability_for_payload(
         AutopilotActionPayload::RequestGigOutreach { .. } => "gig.outreach",
         AutopilotActionPayload::RequestMerchBundle { .. } => "merch.bundle",
         AutopilotActionPayload::RequestOutreach { .. } => "outreach.send",
+        AutopilotActionPayload::RequestOutreachReply { .. } => "outreach.send",
         AutopilotActionPayload::RequestRepresentationApproach { .. } => "representation.approach",
-        AutopilotActionPayload::RequestBookingAgentApproach { .. } => "booking_agent.approach",
+        // A wave rides the same capability: dispatch fans it back out into
+        // the per-agent `approach_requested` event the executor already
+        // knows, so no new contract is advertised for a batched ask.
+        AutopilotActionPayload::RequestBookingAgentApproach { .. }
+        | AutopilotActionPayload::RequestBookingAgentApproachWave { .. } => {
+            "booking_agent.approach"
+        }
         AutopilotActionPayload::RequestBeaconDiscovery { .. } => "beacon.discovery",
         AutopilotActionPayload::RequestOutreachDiscovery { .. } => "outreach.discovery",
         AutopilotActionPayload::RequestBookingTargetDiscovery { .. } => "booking.discovery",

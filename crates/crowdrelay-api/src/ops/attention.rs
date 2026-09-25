@@ -73,6 +73,42 @@ struct BlockedCommunity {
     discovered_at: Option<OffsetDateTime>,
 }
 
+/// One inbound reply the band has not answered — the most valuable row on
+/// this board.
+///
+/// The reply-triage view covers only replies that passed through the
+/// reply-text ingress: `reply_classifications` gets a row when reply text
+/// arrives. The `master:`/`promo:` sheet import carried verdicts but no
+/// text, so every imported answer sat outside that queue — measured in
+/// production, 82 inbound replies with the triage table empty and the
+/// oldest conversation waiting since 2026-07-22 while the board read
+/// "nothing needs you". This section reads the interaction log itself:
+/// the last word on the target is theirs, and nothing outbound answered
+/// it. Oldest first — the age is the point.
+#[derive(Debug, Serialize, sqlx::FromRow)]
+struct UnansweredReply {
+    /// `outreach` or `booking` — which log the reply lives in.
+    channel: String,
+    target_id: uuid::Uuid,
+    /// The counterparty as the operator knows them.
+    target_name: String,
+    target_kind: String,
+    contact_email: Option<String>,
+    /// `positive` or `received` — both wait on a person; terminal
+    /// dispositions (`declined`, `do_not_contact`, `booked`) are closed
+    /// and never list.
+    disposition: String,
+    /// The sheet's own verdict code when the reply was imported
+    /// (`POSITIVE`, `GMAIL_REPLY`, `NEGOTIATING`); null for replies that
+    /// arrived through a channel that carries text.
+    sheet_verdict: Option<String>,
+    #[serde(with = "time::serde::rfc3339")]
+    replied_at: OffsetDateTime,
+    /// Days the reply has waited — computed in SQL so the field is the
+    /// same clock the row carries.
+    waiting_days: i64,
+}
+
 /// One prerequisite the weekly join-ask is waiting on, with its remedy.
 ///
 /// `reason` is the same string the cycle report's holds carry, so an operator
@@ -188,6 +224,14 @@ struct OperatorAttentionSnapshot {
     /// output or in the gate's own words why. Newest first, bounded: this is
     /// a prompt-quality feed to act on, not an archive.
     rejected_agent_outcomes: Vec<RejectedAgentOutcome>,
+    /// Inbound replies whose last word is theirs — nobody has written back.
+    ///
+    /// The queue `needs_you` cannot express: those are actions the system
+    /// proposed; this is conversations people started with us. A positive
+    /// answer ageing in a sheet is the single most perishable thing this
+    /// product touches, and it was invisible here until the board read the
+    /// interaction log directly.
+    unanswered_replies: Vec<UnansweredReply>,
 }
 
 /// The brain's own verdict, and whether it is asking for a person.
@@ -281,17 +325,19 @@ pub async fn attention(State(state): State<crate::AppState>, headers: HeaderMap)
         load_rejected_agent_outcomes(&state.ops),
     );
     let join_ask = run_limited(budget, timeout_duration, load_join_ask_readiness(&state.ops));
+    let unanswered =
+        run_limited(budget, timeout_duration, load_unanswered_replies(&state.ops));
 
     let (
         summary, alerts, dead_outbox, dead_deliveries, dead_push,
         ecosystem, findings, needs_you, brain, unpublished_drafts,
         blocked_communities, lapsed, failed, notices, rejected,
-        join_ask,
+        join_ask, unanswered,
     ) = tokio::join!(
         summary, alerts, dead_outbox, dead_deliveries, dead_push,
         ecosystem, findings, needs_you, brain, unpublished_drafts,
         blocked_communities, lapsed, failed, notices, rejected,
-        join_ask,
+        join_ask, unanswered,
     );
 
     let request_id_value = request_id(&headers);
@@ -359,6 +405,10 @@ pub async fn attention(State(state): State<crate::AppState>, headers: HeaderMap)
         Ok(value) => value,
         Err(error) => return error.into_response(request_id(&headers)),
     };
+    let unanswered_replies = match unanswered {
+        Ok(value) => value,
+        Err(error) => return error.into_response(request_id(&headers)),
+    };
 
     let (needs_you, awaiting_approval) = needs_you;
 
@@ -382,8 +432,94 @@ pub async fn attention(State(state): State<crate::AppState>, headers: HeaderMap)
             failed_sends,
             band_notices,
             rejected_agent_outcomes,
+            unanswered_replies,
         },
     )
+}
+
+/// The conversations waiting on the band — inbound replies whose last word
+/// is theirs, oldest first.
+///
+/// One row per target across both interaction logs: a target lists when its
+/// newest reply arrived after its newest outbound touch, and its newest
+/// reply's disposition is not a closed one. `received` means the verdict
+/// was never classified (the whole imported cohort); `positive` means a
+/// yes is sitting unanswered. Capped so the board stays a board.
+async fn load_unanswered_replies(
+    state: &OpsState,
+) -> Result<Vec<UnansweredReply>, OpsError> {
+    sqlx::query_as::<_, UnansweredReply>(
+        r#"
+        SELECT channel, target_id, target_name, target_kind, contact_email,
+               disposition, sheet_verdict, replied_at,
+               GREATEST(0, EXTRACT(EPOCH FROM (now() - replied_at))::bigint / 86400) AS waiting_days
+        FROM (
+            SELECT 'outreach' AS channel, i.target_id, t.display_name AS target_name,
+                   t.target_kind, t.contact_email, i.disposition,
+                   COALESCE(
+                       NULLIF(i.metadata->>'response_type', ''),
+                       NULLIF(i.metadata->>'result', '')
+                   ) AS sheet_verdict,
+                   i.occurred_at AS replied_at
+            FROM outreach_interactions i
+            JOIN outreach_targets t
+              ON t.workspace_id = i.workspace_id AND t.id = i.target_id
+            WHERE i.workspace_id = $1
+              AND i.direction = 'inbound' AND i.phase = 'reply'
+              AND i.disposition IN ('positive', 'received')
+              AND NOT EXISTS (
+                  SELECT 1 FROM outreach_interactions later
+                  WHERE later.workspace_id = i.workspace_id
+                    AND later.target_id = i.target_id
+                    AND later.direction = 'outbound'
+                    AND later.occurred_at > i.occurred_at
+              )
+              AND NOT EXISTS (
+                  -- A newer inbound reply supersedes this one — list the
+                  -- conversation once, at its latest unanswered state.
+                  SELECT 1 FROM outreach_interactions newer
+                  WHERE newer.workspace_id = i.workspace_id
+                    AND newer.target_id = i.target_id
+                    AND newer.direction = 'inbound'
+                    AND newer.occurred_at > i.occurred_at
+              )
+            UNION ALL
+            SELECT 'booking', i.target_id, t.display_name, t.target_kind,
+                   t.contact_email, i.disposition,
+                   COALESCE(
+                       NULLIF(i.metadata->>'response_type', ''),
+                       NULLIF(i.metadata->>'result', '')
+                   ),
+                   i.occurred_at
+            FROM booking_interactions i
+            JOIN booking_targets t
+              ON t.workspace_id = i.workspace_id AND t.id = i.target_id
+            WHERE i.workspace_id = $1
+              AND i.direction = 'inbound' AND i.phase = 'reply'
+              AND i.disposition IN ('positive', 'received')
+              AND NOT EXISTS (
+                  SELECT 1 FROM booking_interactions later
+                  WHERE later.workspace_id = i.workspace_id
+                    AND later.target_id = i.target_id
+                    AND later.direction = 'outbound'
+                    AND later.occurred_at > i.occurred_at
+              )
+              AND NOT EXISTS (
+                  SELECT 1 FROM booking_interactions newer
+                  WHERE newer.workspace_id = i.workspace_id
+                    AND newer.target_id = i.target_id
+                    AND newer.direction = 'inbound'
+                    AND newer.occurred_at > i.occurred_at
+              )
+        ) unanswered
+        ORDER BY replied_at ASC
+        LIMIT 50
+        "#,
+    )
+    .bind(state.workspace_id.into_uuid())
+    .fetch_all(&state.pool)
+    .await
+    .map_err(OpsError::sqlx)
 }
 
 /// The drafted posts waiting on a person, per channel.

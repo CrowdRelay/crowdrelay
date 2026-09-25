@@ -468,6 +468,89 @@ pub(super) fn festival_window_candidate(
     }))
 }
 
+/// The cold-start lane: where the city demand gate cannot score yet (a
+/// 23-fan roster never reaches `minimum_score = 65`), a venue-linked
+/// target's own room history proposes an initial letter instead. The room
+/// demonstrably booking comparable acts is the demand signal the fan
+/// density cannot yet supply.
+///
+/// Same `RequestBookingOutreach` action kind as the demand path — one
+/// send lane, one hold window, one draft composer. The distinct
+/// `decision_kind`/key prefix keeps the lanes separable in the trace and
+/// lets a lapsed ask re-raise under the same bounded-ask contract.
+pub(super) fn venue_fit_candidate(
+    target: &BookingTargetSnapshot,
+    policy: &AutopilotPolicy,
+    now: OffsetDateTime,
+) -> Result<Option<DecisionCandidate>, serde_json::Error> {
+    let AutopilotPolicyConfig::BookingOpportunity(domain_policy) = &policy.config else {
+        return Ok(None);
+    };
+    let fit_policy = VenueFitPolicy::default();
+    let VenueFitDecision::Request {
+        confidence,
+        evidence_score,
+    } = evaluate_venue_fit(target, fit_policy, now)
+    else {
+        return Ok(None);
+    };
+    let disposition = disposition(policy.autonomy_level, confidence, policy.minimum_confidence);
+    Ok(Some(DecisionCandidate {
+        context: policy.context,
+        subject: ActionSubject::City(target.city_id),
+        decision_kind: "request_booking_venue_fit",
+        confidence,
+        disposition,
+        reason: "the venue's own booking history shows it programs comparable acts",
+        input_snapshot: serde_json::to_value(target)?,
+        policy_snapshot: policy_evidence(
+            policy,
+            serde_json::json!({"opportunity":domain_policy,"venue_fit":fit_policy}),
+        )?,
+        action: AutopilotActionPayload::RequestBookingOutreach {
+            city_id: target.city_id,
+            target_id: target.target_id,
+            target_version: target.version,
+            target_name: target.display_name.clone(),
+            score: evidence_score,
+            phase: BookingOutreachPhase::Initial,
+            // No derived window — the room's marks are the pitch context,
+            // and a proposed date read from a cold-start evidence row would
+            // fabricate precision the lane does not have.
+            proposed_window: None,
+            additional_recipients: Vec::new(),
+            venue_evidence: target.venue_evidence.clone(),
+            draft: crowdrelay_domain::booking_letter::BookingLetter::default(),
+        },
+        decision_key: format!(
+            "decision:venue-fit:v{}:{}:tv{}:{}:{}:{}",
+            policy.version,
+            target.target_id,
+            target.version,
+            target
+                .last_outreach_at
+                .map_or(0, OffsetDateTime::unix_timestamp),
+            target
+                .venue_evidence
+                .as_ref()
+                .map_or(0, |evidence| evidence.shows_last_12m),
+            target
+                .venue_evidence
+                .as_ref()
+                .map_or(0, |evidence| evidence.comparable_acts),
+        ),
+        action_idempotency_key: format!(
+            "action:booking-venuefit:{}:tv{}:{}",
+            target.target_id,
+            target.version,
+            target.last_outreach_at.map_or_else(
+                || "initial".to_owned(),
+                |at| at.unix_timestamp().to_string(),
+            )
+        ),
+    }))
+}
+
 pub(super) fn campaign_lifecycle_candidate(
     snapshot: &EventCampaignSnapshot,
     policy: &AutopilotPolicy,

@@ -186,6 +186,86 @@ async fn enrich_outreach_draft(
     Ok(())
 }
 
+/// Composes the reply scaffold onto a `RequestOutreachReply` payload while
+/// the action is still being written — the same rule as the pitch letters.
+///
+/// The scaffold's shape comes from what the ledger honestly knows: the
+/// interaction's disposition first, then the sheet's raw verdict — a
+/// `NEGOTIATING` keeps terms open while a bare `GMAIL_REPLY` gets the
+/// holding text, because neither row carries the words the person actually
+/// wrote. The operator edits against the real thread; this only decides
+/// which starting point they see.
+async fn enrich_reply_draft(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    workspace_id: WorkspaceId,
+    action: &mut AutopilotActionPayload,
+) -> Result<(), RepositoryError> {
+    use crowdrelay_domain::outreach::{OutreachReplyDisposition, OutreachTargetKind};
+    use crowdrelay_domain::reply_letter::{ReplyLetterInput, ReplyShape, compose_reply_letter};
+    use crowdrelay_domain::reply_verdict_map::{ImportedVerdict, map_sheet_verdict};
+
+    let AutopilotActionPayload::RequestOutreachReply {
+        draft,
+        target_id,
+        reply_disposition,
+        sheet_verdict,
+        ..
+    } = action
+    else {
+        return Ok(());
+    };
+
+    let ws = workspace_id.into_uuid();
+    let target = sqlx::query_as::<_, (String, String)>(
+        "SELECT display_name, target_kind FROM outreach_targets WHERE workspace_id = $1 AND id = $2",
+    )
+    .bind(ws)
+    .bind(target_id.into_uuid())
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(map_sqlx)?;
+    let Some((target_name, target_kind)) = target else {
+        // A target the action names must exist — the candidate carried its id.
+        return Err(RepositoryError::NotFound);
+    };
+    let shape = if reply_disposition == OutreachReplyDisposition::Positive.as_str()
+        || sheet_verdict.as_deref().map(map_sheet_verdict)
+            == Some(ImportedVerdict::Terminal(OutreachReplyDisposition::Positive))
+    {
+        ReplyShape::Positive
+    } else if sheet_verdict
+        .as_deref()
+        .is_some_and(|verdict| verdict.trim().eq_ignore_ascii_case("negotiating"))
+    {
+        ReplyShape::Negotiation
+    } else {
+        ReplyShape::Holding
+    };
+    // The reply threads onto the same pitch the conversation started on —
+    // the most recent active release with a link, same rule the pitch uses.
+    // Absent, the letter shortens rather than refusing.
+    let pitch = sqlx::query_as::<_, (String, String)>(
+        "SELECT title, listen_url FROM release_plans WHERE workspace_id = $1 AND active AND listen_url IS NOT NULL AND btrim(listen_url) <> '' AND btrim(title) <> '' ORDER BY release_at DESC LIMIT 1",
+    )
+    .bind(ws)
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(map_sqlx)?;
+    let (pitch_title, pitch_url) = pitch.unwrap_or_default();
+    let sender = sender_identity_in_tx(transaction, ws).await?;
+    if let Ok(letter) = compose_reply_letter(&ReplyLetterInput {
+        sender: &sender,
+        target_name: &target_name,
+        target_kind: OutreachTargetKind::parse(&target_kind),
+        shape,
+        pitch_title: &pitch_title,
+        pitch_url: &pitch_url,
+    }) {
+        *draft = letter;
+    }
+    Ok(())
+}
+
 /// Composes the application letter onto an `ApplyLiveOpportunity` payload
 /// while the action is still being written — the same rule as the booking
 /// and outreach letters.

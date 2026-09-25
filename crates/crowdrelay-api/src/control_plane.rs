@@ -45,6 +45,10 @@ pub(crate) fn router(state: crate::AppState) -> Router {
             "/v1/control-plane/ops/attention",
             get(crate::ops::attention),
         )
+        // The outward funnel: proposals → approvals → sends → replies per
+        // channel, with internal housekeeping counted separately so motion
+        // cannot pass for growth.
+        .route("/v1/control-plane/ops/funnel", get(crate::ops::funnel))
         // The intelligence brief: one read composing the brain's verdict,
         // its posture, its plan, what it found, what it did, and what needs
         // the operator — the "are we getting anywhere" answer.
@@ -558,6 +562,12 @@ pub(crate) fn router(state: crate::AppState) -> Router {
         .route(
             "/v1/control-plane/booking-agents/approach",
             post(crate::booking_agents::request_booking_agent_approach),
+        )
+        // The batch form: the operator picks several agents off the
+        // gate-state list and gets one card, not one card per agent.
+        .route(
+            "/v1/control-plane/booking-agents/approach-wave",
+            post(crate::booking_agents::request_booking_agent_approach_wave),
         )
         .route(
             "/v1/control-plane/booking-agents/{agent_id}/reply",

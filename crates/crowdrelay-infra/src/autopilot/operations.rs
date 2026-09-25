@@ -19,6 +19,7 @@ use crowdrelay_domain::{
     merch_bundle::MerchBundleSnapshot,
     outreach::{OutreachReplyDisposition, OutreachSnapshot, OutreachTargetKind},
     release_autopilot::ReleaseTier,
+    reply_rescue::UnansweredReplySnapshot,
     show_operations::{ShowTaskKind, ShowTaskSnapshot},
 };
 use serde_json::{Value, json};
@@ -37,6 +38,7 @@ use crowdrelay_application::{IdempotencyKey, RepositoryError, RequestId};
 mod acquisition_channels;
 pub(in crate::autopilot) mod attribution;
 pub(in crate::autopilot) mod belief_revisions;
+mod booking_agent_wave_execution;
 pub(in crate::autopilot) mod booking_agents;
 mod booking_outreach_execution;
 mod chief;
@@ -62,13 +64,16 @@ pub(in crate::autopilot) mod reach;
 mod release_links;
 mod release_r3_report;
 mod release_waves;
+mod reply_execution;
 pub(in crate::autopilot) mod reply_model;
+mod reply_snapshots;
 mod reply_triage;
 mod show_growth;
 mod show_growth_execution;
 mod snapshots;
 
 pub(super) use acquisition_channels::*;
+pub(super) use booking_agent_wave_execution::*;
 pub(super) use booking_outreach_execution::*;
 pub(super) use chief::*;
 pub(super) use community_relays::*;
@@ -86,6 +91,8 @@ pub(super) use opportunity_shortlist::*;
 pub(super) use push_segments::*;
 pub(super) use release_links::*;
 pub(super) use release_waves::*;
+pub(super) use reply_execution::*;
+pub(super) use reply_snapshots::*;
 pub(super) use show_growth::*;
 pub(super) use show_growth_execution::*;
 pub(super) use snapshots::*;

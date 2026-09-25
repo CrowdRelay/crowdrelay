@@ -1,6 +1,14 @@
 /// Result of the shared decision + action persistence primitive.
 /// Both `persist_candidate_impl` and `persist_treatment_with_assignment_impl`
 /// call `persist_decision_and_action_tx` and match on this outcome.
+/// How many cards the *same* proposal may mint while every one dies
+/// unanswered: the initial ask plus two re-raises, three chances over
+/// roughly a week. Persistence — and a fourth card for the same ask is
+/// nagging. The lapse sweep re-keys each expired ask (`:lapsed:{id}`), so
+/// this count is the family's dead rows; the decision still records the
+/// proposal, only the action stops being minted.
+const MAX_APPROVAL_ASKS: i64 = 3;
+
 enum DecisionActionOutcome {
     /// Quota check throttled — no decision or action created.
     Throttled,
@@ -87,6 +95,9 @@ async fn persist_decision_and_action_tx(
         }
         AutopilotActionPayload::RequestOutreach { .. } => {
             enrich_outreach_draft(transaction, workspace_id, &mut action).await?;
+        }
+        AutopilotActionPayload::RequestOutreachReply { .. } => {
+            enrich_reply_draft(transaction, workspace_id, &mut action).await?;
         }
         AutopilotActionPayload::ApplyLiveOpportunity { .. } => {
             enrich_application_draft(transaction, workspace_id, &mut action).await?;
@@ -178,8 +189,61 @@ async fn persist_decision_and_action_tx(
         .await
         .map_err(map_sqlx)?;
     }
+    // The standing-grant half of the same gate: an operator who already
+    // answered "this target is fine, stop asking" is not asked again. Read
+    // inside this transaction for the same reason the ladder re-asks — a
+    // revoke that landed since evaluation must win. The grant row carries
+    // its own class; a grant written when the kind was reversible cannot
+    // license it after reclassification, so the class must match what the
+    // action carries *now*.
+    let mut standing_authorized = false;
+    if !ladder_authorized
+        && candidate.disposition == PolicyDisposition::RequireApproval
+        && let Some(target_key) = candidate.action.standing_approval_target()
+    {
+        standing_authorized = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS (SELECT 1 FROM standing_approvals \
+             WHERE workspace_id=$1 AND action_kind=$2 AND target_key=$3 \
+               AND action_class=$4 AND revoked_at IS NULL AND expires_at > now())",
+        )
+        .bind(workspace_id.into_uuid())
+        .bind(candidate.action.action_kind())
+        .bind(&target_key)
+        .bind(candidate.action.action_class().as_str())
+        .fetch_one(&mut **transaction)
+        .await
+        .map_err(map_sqlx)?;
+    }
+    // Re-raise bound: the sweep re-keys a lapsed ask so the same proposal
+    // can come back — but only a bounded number of times. Count the dead
+    // asks of this exact key family (`base` plus every `:lapsed:{id}`
+    // re-key the sweep wrote) before agreeing to mint another card.
+    let mut re_raise_exhausted = false;
+    if candidate.disposition == PolicyDisposition::RequireApproval
+        && !ladder_authorized
+        && !standing_authorized
+    {
+        let lapsed = sqlx::query_scalar::<_, i64>(
+            r#"
+            SELECT COUNT(*) FROM autopilot_actions
+            WHERE workspace_id = $1
+              AND last_error_kind = 'approval_expired'
+              AND (idempotency_key = $2
+                   OR starts_with(idempotency_key, $2 || ':lapsed:'))
+            "#,
+        )
+        .bind(workspace_id.into_uuid())
+        .bind(&candidate.action_idempotency_key)
+        .fetch_one(&mut **transaction)
+        .await
+        .map_err(map_sqlx)?;
+        re_raise_exhausted = lapsed >= MAX_APPROVAL_ASKS;
+    }
     let status = match candidate.disposition {
-        PolicyDisposition::RequireApproval if ladder_authorized => Some("queued"),
+        _ if re_raise_exhausted => None,
+        PolicyDisposition::RequireApproval if ladder_authorized || standing_authorized => {
+            Some("queued")
+        }
         PolicyDisposition::RequireApproval => Some("awaiting_approval"),
         PolicyDisposition::AutoExecute => Some("queued"),
         PolicyDisposition::ObserveOnly
@@ -240,17 +304,29 @@ async fn persist_decision_and_action_tx(
     .bind(action_trace.trace_id().into_uuid())
     .bind(action_trace.causation_id().map(|c| c.into_uuid()))
     // Provenance distinguishes who answered the human gate: the ladder row the
-    // operator signed, or the workspace's own bounded-auto policy.
-    .bind(if ladder_authorized && candidate.disposition == PolicyDisposition::RequireApproval {
-        "operator:show_ladder"
-    } else {
-        "policy:bounded_auto"
-    })
+    // operator signed, a standing grant on this target, or the workspace's
+    // own bounded-auto policy.
+    .bind(
+        if candidate.disposition != PolicyDisposition::RequireApproval {
+            "policy:bounded_auto"
+        } else if ladder_authorized {
+            "operator:show_ladder"
+        } else if standing_authorized {
+            "operator:standing_grant"
+        } else {
+            "policy:bounded_auto"
+        },
+    )
     // The hold comes from the domain, per class — a first-party rung queues
     // immediately either way, and a plain bounded-auto row keeps the same
-    // available_at it always had.
+    // available_at it always had. A grant-queued third-party send holds the
+    // class window exactly like a ladder-queued or hand-approved one: the
+    // grant is an answer to "may this go out", not a way to send it faster,
+    // and the hold is the window a revoke can still act inside.
     .bind(
-        if ladder_authorized && candidate.disposition == PolicyDisposition::RequireApproval {
+        if (ladder_authorized || standing_authorized)
+            && candidate.disposition == PolicyDisposition::RequireApproval
+        {
             candidate.action.action_class().hold_seconds() as f64
         } else {
             0.0

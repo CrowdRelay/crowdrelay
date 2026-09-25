@@ -25,10 +25,15 @@ pub(crate) enum Command {
     ImportOpportunities {
         path: std::path::PathBuf,
     },
+    /// Repair imported outreach replies: remap sheet verdicts onto
+    /// dispositions and mint triage rows for unresolved answers.
+    BackfillOutreachVerdicts {
+        dry_run: bool,
+    },
 }
 
 impl Command {
-    pub(crate) const KNOWN: &'static str = "`run`, `run --standby`, `migrate`, `bootstrap`, `setup`, `replay`, `import-outreach <csv>`, or `import-opportunities <csv>`";
+    pub(crate) const KNOWN: &'static str = "`run`, `run --standby`, `migrate`, `bootstrap`, `setup`, `replay`, `import-outreach <csv>`, `import-opportunities <csv>`, or `backfill-outreach-verdicts [--dry-run]`";
 }
 
 pub(crate) fn parse_command(args: impl IntoIterator<Item = String>) -> Result<Command> {
@@ -78,6 +83,18 @@ pub(crate) fn parse_command(args: impl IntoIterator<Item = String>) -> Result<Co
                 path: std::path::PathBuf::from(path),
             }
         }
+        Some("backfill-outreach-verdicts") => {
+            let mut dry_run = false;
+            for arg in &rest {
+                match arg.as_str() {
+                    "--dry-run" => dry_run = true,
+                    other => bail!(
+                        "unexpected `backfill-outreach-verdicts` argument `{other}`; expected `--dry-run`"
+                    ),
+                }
+            }
+            Command::BackfillOutreachVerdicts { dry_run }
+        }
         Some(other) => bail!(
             "unknown worker command `{other}`; expected {}",
             Command::KNOWN
@@ -103,4 +120,39 @@ fn parse_standby_flag(rest: &[String]) -> Result<bool> {
         }
     }
     Ok(standby)
+}
+
+/// Runs the imported-verdict backfill and reports it on both channels — the
+/// tracing line for the log, the `BACKFILL_OUTREACH_VERDICTS=OK` line for the
+/// operator who ran it by hand.
+pub(crate) async fn run_backfill_outreach_verdicts(
+    database: &sqlx::PgPool,
+    workspace: crowdrelay_domain::WorkspaceId,
+    dry_run: bool,
+) -> Result<()> {
+    let summary = crowdrelay_worker::backfill_outreach_verdicts::backfill_outreach_verdicts(
+        database, workspace, dry_run,
+    )
+    .await?;
+    tracing::info!(
+        scanned = summary.scanned,
+        positive = summary.remapped_positive,
+        declined = summary.remapped_declined,
+        do_not_contact = summary.remapped_do_not_contact,
+        triage_minted = summary.triage_minted,
+        no_verdict = summary.no_verdict,
+        dry_run,
+        "outreach verdict backfill"
+    );
+    println!(
+        "BACKFILL_OUTREACH_VERDICTS=OK scanned={} positive={} declined={} dnc={} triage={} no_verdict={} dry_run={}",
+        summary.scanned,
+        summary.remapped_positive,
+        summary.remapped_declined,
+        summary.remapped_do_not_contact,
+        summary.triage_minted,
+        summary.no_verdict,
+        dry_run
+    );
+    Ok(())
 }

@@ -19,8 +19,12 @@ impl AutopilotActionPayload {
             Self::RequestAudienceCampaign { .. } => "audience.campaign.request",
             Self::RequestMerchBundle { .. } => "merch.bundle.request",
             Self::RequestOutreach { .. } => "outreach.request",
+            Self::RequestOutreachReply { .. } => "outreach.reply.request",
             Self::RequestRepresentationApproach { .. } => "representation.approach.request",
             Self::RequestBookingAgentApproach { .. } => "booking_agent.approach.request",
+            Self::RequestBookingAgentApproachWave { .. } => {
+                "booking_agent.approach_wave.request"
+            }
             Self::RequestBeaconDiscovery { .. } => "beacon.discovery.request",
             Self::RequestBookingTargetDiscovery { .. } => "booking.target_discovery.request",
             Self::RequestBeaconInviteBatch { .. } => "beacon.invite_batch.request",

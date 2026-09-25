@@ -20,7 +20,8 @@ use crowdrelay_application::autopilot::{
 use crowdrelay_domain::BookingAgentId;
 use crowdrelay_domain::booking_agent::BookingAgentReplyDisposition;
 use crowdrelay_infra::booking_agents::{
-    BookingAgentApproachOutcome, BookingAgentError, PostgresBookingAgentRepository,
+    BookingAgentApproachOutcome, BookingAgentError, BookingAgentWaveOutcome,
+    PostgresBookingAgentRepository,
 };
 use serde::Deserialize;
 use serde_json::json;
@@ -58,13 +59,29 @@ pub async fn list_booking_agents(
 ) -> Response {
     let request_id_value = request_id(&headers);
     let workspace_id = state.ops.workspace_id().into_uuid();
-    match repo(&state).list_agents(workspace_id).await {
-        Ok(agents) => (
-            StatusCode::OK,
-            [(axum::http::header::CACHE_CONTROL, "private, no-store")],
-            Json(json!({ "agents": agents })),
-        )
-            .into_response(),
+    let repository = repo(&state);
+    match repository.list_agents(workspace_id).await {
+        Ok(agents) => {
+            // The season's draw travels with the list — the gate floors are
+            // published beside it so the batch view can say "the pitch
+            // clears today" rather than letting the operator discover it at
+            // submit.
+            let evidence = repository.draw_evidence(workspace_id).await.ok();
+            (
+                StatusCode::OK,
+                [(axum::http::header::CACHE_CONTROL, "private, no-store")],
+                Json(json!({
+                    "agents": agents,
+                    "draw_evidence": evidence,
+                    "draw_floors": {
+                        "shows_played_12m": crowdrelay_domain::booking_agent::MIN_SHOWS_PLAYED_12M,
+                        "paid_tickets_12m": crowdrelay_domain::booking_agent::MIN_PAID_TICKETS_12M,
+                        "distinct_buyers_12m": crowdrelay_domain::booking_agent::MIN_DISTINCT_BUYERS_12M,
+                    },
+                })),
+            )
+                .into_response()
+        }
         Err(error) => booking_agent_problem(error, request_id_value),
     }
 }
@@ -120,6 +137,89 @@ pub async fn request_booking_agent_approach(
             StatusCode::ACCEPTED,
             [(axum::http::header::CACHE_CONTROL, "private, no-store")],
             Json(json!({ "action_id": action_id, "status": status })),
+        )
+            .into_response(),
+        Err(error) => booking_agent_problem(error, request_id_value),
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BookingAgentApproachWaveBody {
+    /// The agents the operator picked off the gate-state list. Order is
+    /// the order the card shows; duplicates collapse.
+    agent_ids: Vec<Uuid>,
+    /// One line of the band's own words, shared by every letter in the
+    /// wave.
+    #[serde(default)]
+    note: Option<String>,
+}
+
+/// POST — the band asks to approach a batch of agents under one card.
+/// Every agent is gated at request time; the ones the gate refuses come
+/// back named with the gate's own sentence, and the rest queue as one
+/// `awaiting_approval` wave. Dispatch re-runs every agent's gate under
+/// the row lock before that letter goes, so a stale approval cannot send.
+pub async fn request_booking_agent_approach_wave(
+    State(state): State<crate::AppState>,
+    headers: HeaderMap,
+    payload: Result<Json<BookingAgentApproachWaveBody>, axum::extract::rejection::JsonRejection>,
+) -> Response {
+    let request_id_value = request_id(&headers);
+    let Ok(Json(body)) = payload else {
+        return Problem::bad_request(request_id_value)
+            .private()
+            .into_response();
+    };
+    let Some(idempotency_key) = headers
+        .get(&IDEMPOTENCY_KEY)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| IdempotencyKey::parse(value).ok())
+    else {
+        return Problem::bad_request(request_id_value)
+            .private()
+            .into_response();
+    };
+    let workspace_id = state.ops.workspace_id().into_uuid();
+    match repo(&state)
+        .request_approach_wave(
+            workspace_id,
+            &body.agent_ids,
+            body.note.as_deref(),
+            &idempotency_key,
+        )
+        .await
+    {
+        Ok(BookingAgentWaveOutcome::Queued {
+            action_id,
+            wave_id,
+            queued,
+            refused,
+        }) => (
+            StatusCode::ACCEPTED,
+            [(axum::http::header::CACHE_CONTROL, "private, no-store")],
+            Json(json!({
+                "action_id": action_id,
+                "wave_id": wave_id,
+                "status": "awaiting_approval",
+                "queued": queued,
+                "refused": refused,
+            })),
+        )
+            .into_response(),
+        Ok(BookingAgentWaveOutcome::Replayed { action_id, status }) => (
+            StatusCode::ACCEPTED,
+            [(axum::http::header::CACHE_CONTROL, "private, no-store")],
+            Json(json!({ "action_id": action_id, "status": status })),
+        )
+            .into_response(),
+        Ok(BookingAgentWaveOutcome::AllRefused { refused }) => (
+            StatusCode::CONFLICT,
+            [(axum::http::header::CACHE_CONTROL, "private, no-store")],
+            Json(json!({
+                "status": "refused",
+                "refused": refused,
+            })),
         )
             .into_response(),
         Err(error) => booking_agent_problem(error, request_id_value),

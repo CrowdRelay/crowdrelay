@@ -241,7 +241,10 @@ async fn the_registry_workbook_routes_every_tab_on(pool: PgPool) -> Result<()> {
         &pool,
         workspace_id,
         "database.xlsx",
-        vec![venues, bands, beacons, agents, contacts_dump, list],
+        vec![venues, bands, beacons, agents, contacts_dump, list]
+            .into_iter()
+            .map(Into::into)
+            .collect(),
         SheetTrust::RegistryTrusted,
     )
     .await
@@ -490,7 +493,7 @@ async fn a_beacon_sheet_reimport_refreshes_rather_than_duplicates_on(pool: PgPoo
         &pool,
         workspace_id,
         "database.xlsx",
-        vec![beacons("t", "80.0")],
+        vec![beacons("t", "80.0").into()],
         SheetTrust::RegistryTrusted,
     )
     .await
@@ -507,7 +510,7 @@ async fn a_beacon_sheet_reimport_refreshes_rather_than_duplicates_on(pool: PgPoo
         &pool,
         workspace_id,
         "database.xlsx",
-        vec![beacons("f", "60.0")],
+        vec![beacons("f", "60.0").into()],
         SheetTrust::RegistryTrusted,
     )
     .await
@@ -574,7 +577,7 @@ async fn a_beacon_sheet_reimport_refreshes_rather_than_duplicates_on(pool: PgPoo
         &pool,
         workspace_id,
         "database.xlsx",
-        vec![beacons("t", "80.0")],
+        vec![beacons("t", "80.0").into()],
         SheetTrust::RegistryTrusted,
     )
     .await
@@ -648,7 +651,7 @@ async fn an_inbound_sheet_defangs_registry_claims_to_contacts() -> Result<()> {
         &pool,
         workspace_id,
         "invoice.xlsx",
-        vec![forged],
+        vec![forged.into()],
         SheetTrust::InboundUntrusted,
     )
     .await
@@ -862,7 +865,7 @@ async fn a_multi_cell_banner_still_hides_nothing_on(pool: PgPool) -> Result<()> 
         &pool,
         workspace_id,
         "database.xlsx",
-        vec![dump, venues],
+        vec![dump, venues].into_iter().map(Into::into).collect(),
         SheetTrust::RegistryTrusted,
     )
     .await
