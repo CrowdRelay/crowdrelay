@@ -11,8 +11,9 @@
 #
 #   ALWAYS   provably cannot break a running job or the app:
 #            dangling images, unattached volumes, build cache >48h,
-#            orphaned GitHub-Actions service containers (>4h when a job is
-#            in-flight, >1h when idle), journald vacuum, rotated logs, /tmp,
+#            orphaned GitHub-Actions service containers (running >4h when a
+#            job is in-flight, >1h when idle; EXITED ones at any age — a dead
+#            job's service is residue), journald vacuum, rotated logs, /tmp,
 #            apt clean/autoremove, snap disabled revisions, coredumps, and
 #            stale test-clone databases inside postgres containers.
 #
@@ -29,8 +30,16 @@
 #            build beats a dead disk"). Never _work, never the workspace.
 #            Two caches are exempt from the pressure tier while a job runs:
 #            they are live source trees, not pure caches (see below).
+#            sccache gets BOTH sweeps here: files >2d, and a byte cap —
+#            oldest entries first — because a busy box rewrites it daily and
+#            the age floor alone never trims (2026-09-25: 4 GB held with 0
+#            files >2d). Content-addressed: a miss rebuilds, never corrupts.
 #            At CRITICAL_PCT the same tier also takes build cache >12h —
-#            a cold build is recoverable, ENOSPC is not (2026-09-23).
+#            a cold build is recoverable, ENOSPC is not (2026-09-23) — and
+#            additionally (a) per-repo image pruning beyond KEEP_IMAGES_PER_REPO
+#            even mid-job (docker's in-use refusal is the fail-closed layer;
+#            worst case a not-yet-containerized pull gets re-fetched) and
+#            (b) idle lanes' _work/_tool caches >1d (CI re-downloads them).
 #
 # Hard rules encoded from incidents:
 #   - Never wipe a runner _work while ANY job is active (2026-09-13 ENOSPC).
@@ -75,6 +84,11 @@ KEEP_IMAGES_PER_REPO="${KEEP_IMAGES_PER_REPO:-2}"
 # daily reclaim pass (vps-disk-reclaim.sh --target 60) takes the deep cut.
 PRESSURE_PCT="${PRESSURE_PCT:-70}"
 CRITICAL_PCT="${CRITICAL_PCT:-85}"
+# sccache byte cap — the same ceiling SCCACHE_CACHE_SIZE=2G puts on each
+# runner daemon, enforced host-wide because the daemons share the dir and
+# do not see each other's evictions (2026-09-25: 4 GB present with 0 files
+# >2d — age rules alone cannot hold a cache every job warms).
+SCCACHE_MAX_MB="${SCCACHE_MAX_MB:-2048}"
 STALE_DB_AGE_H="${STALE_DB_AGE_H:-12}"
 GHA_CONTAINER_IDLE_MAX_H="${GHA_CONTAINER_IDLE_MAX_H:-1}"
 GHA_CONTAINER_BUSY_MAX_H="${GHA_CONTAINER_BUSY_MAX_H:-4}"
@@ -137,6 +151,32 @@ sweep() {
   fi
 }
 
+# Keep the KEEP_IMAGES_PER_REPO newest tags per repository. `docker images`
+# output is newest-first, so order is the age authority. Dedup by image ID:
+# rmi by ID removes every tag on the image, so an ID already kept (or
+# already attempted) must never be submitted again. Docker refuses removal
+# of anything a container references — fail-closed. Shared by the idle tier
+# and the critical-tier busy escalation.
+prune_repo_images() {
+  # NOTE: declare -A is load-bearing — without it the subscript is evaluated
+  # arithmetically, hex IDs fail under set -u, and the whole prune silently
+  # never ran (found 2026-09-23: 18 tags accumulated despite keep-2).
+  declare -A seen_id=() seen_repo=()
+  docker images --format '{{.Repository}} {{.ID}}' 2>/dev/null | \
+  while read -r repo id; do
+    [[ "$repo" == "<none>" ]] && continue
+    [[ "${seen_id[$id]:-}" == "1" ]] && continue
+    seen_id[$id]=1
+    seen_repo[$repo]=$(( ${seen_repo[$repo]:-0} + 1 ))
+    [[ ${seen_repo[$repo]} -le $KEEP_IMAGES_PER_REPO ]] && continue
+    if [[ "$REPORT" -eq 1 ]]; then
+      log "  [dry] would rmi $repo $id"
+    else
+      docker rmi "$id" >/dev/null 2>&1 && log "  pruned image $repo ($id)"
+    fi
+  done
+}
+
 # ── Install / uninstall ───────────────────────────────────────────────────
 if [[ "${1:-}" == "--install" ]]; then
   install -m 0755 "$0" /usr/local/sbin/vps-housekeeping.sh
@@ -192,6 +232,14 @@ log "--- pass start (disk ${PCT:-?}% used, avail $(mb "${AVAIL0:-0}")$(runner_bu
 # Orphaned GitHub Actions service containers. GHA names them
 # "<32-hex>_<image-sanitized>_<16-hex>"; they should die with their job but
 # leak when a job is killed (the 2026-09-21 ENOSPC left one running 5h).
+# Exited ones need no age gate — a stopped GHA-named service is dead residue;
+# the name pattern cannot match a compose project or a named container.
+docker ps -a --filter status=exited --format '{{.Names}}' 2>/dev/null | \
+while read -r name; do
+  [[ "$name" =~ ^[0-9a-f]{32}_ ]] || continue
+  if [[ "$REPORT" -eq 0 ]]; then docker rm "$name" >/dev/null 2>&1; fi
+  log "  reaped exited CI service container $name"
+done
 docker ps --format '{{.Names}} {{.CreatedAt}}' 2>/dev/null | \
 while read -r name _rest; do
   [[ "$name" =~ ^[0-9a-f]{32}_ ]] || continue
@@ -265,6 +313,9 @@ command -v journalctl >/dev/null && sweep "journald vacuum <=$JOURNAL_MAX" \
 if [[ "$REPORT" -eq 0 ]]; then
   find /var/log -xdev -type f \( -name '*.gz' -o -name '*.1' -o -name '*.old' \) \
     -mtime +10 -delete 2>/dev/null
+  # sysstat (sar) archives keep themselves — cron.retention caps them at a
+  # month by default; a small box does not need the full window.
+  find /var/log/sysstat -xdev -type f -mtime +14 -delete 2>/dev/null
   rm -rf /var/crash/* /var/lib/systemd/coredump/* 2>/dev/null
   for t in /tmp /var/tmp; do
     find "$t" -xdev -depth -mindepth 1 \
@@ -273,8 +324,10 @@ if [[ "$REPORT" -eq 0 ]]; then
          -o -name '.Test-unix' \) -prune -o \
       -mtime +1 -exec rm -rf {} + 2>/dev/null
   done
+  log "  swept: rotated logs >10d, sysstat >14d, coredumps, /tmp+/var/tmp >1d"
+else
+  log "  [dry] rotated logs >10d, sysstat >14d, coredumps, /tmp+/var/tmp >1d"
 fi
-log "  swept: rotated logs >10d, coredumps, /tmp+/var/tmp >1d"
 
 command -v apt-get >/dev/null && {
   sweep "apt clean" apt-get clean
@@ -337,17 +390,47 @@ clear_caches() {
         rm -rf "$home/.cache/ms-playwright" && log "  cleared playwright browsers $home"
       fi
     fi
-    # sccache: files only, by age — the dir itself survives.
+    # sccache: files only — the dir itself survives. Two passes: files >2d,
+    # then a byte cap deleting oldest-first until under SCCACHE_MAX_MB. Age
+    # alone cannot hold it (every build warms the whole cache; 2026-09-25 had
+    # 4 GB with zero files >2d). Entries are content-addressed — a delete is
+    # a cache miss, never corruption, so this runs even mid-job.
     if [[ -d "$home/.cache/sccache" ]]; then
-      cb=$(find "$home/.cache/sccache" -type f -mtime +4 -printf '%s\n' 2>/dev/null \
+      cb=$(find "$home/.cache/sccache" -type f -mtime +2 -printf '%s\n' 2>/dev/null \
            | awk '{s+=$1} END {print s+0}')
       if [[ "$REPORT" -eq 1 ]]; then
-        [[ "${cb:-0}" -gt 0 ]] && log "  [dry] sccache >4d $home: $(mb "$cb")"
+        [[ "${cb:-0}" -gt 0 ]] && log "  [dry] sccache >2d $home: $(mb "$cb")"
       else
-        find "$home/.cache/sccache" -type f -mtime +4 -delete 2>/dev/null
-        [[ "${cb:-0}" -gt 0 ]] && log "  cleared sccache >4d $home: $(mb "$cb")"
+        find "$home/.cache/sccache" -type f -mtime +2 -delete 2>/dev/null
+        [[ "${cb:-0}" -gt 0 ]] && log "  cleared sccache >2d $home: $(mb "$cb")"
+      fi
+      cur=$(du -sb "$home/.cache/sccache" 2>/dev/null | cut -f1); cur=${cur:-0}
+      cap=$(( SCCACHE_MAX_MB * 1048576 ))
+      if [[ "$cur" -gt "$cap" ]]; then
+        over=$(( cur - cap ))
+        if [[ "$REPORT" -eq 1 ]]; then
+          log "  [dry] sccache over cap $home: $(mb "$over") above ${SCCACHE_MAX_MB}M"
+        else
+          find "$home/.cache/sccache" -type f -printf '%T@ %s %p\n' 2>/dev/null \
+            | sort -n | awk -v cur="$cur" -v cap="$cap" \
+                '{if (cur > cap) {cur -= $2; print $3}}' \
+            | xargs -r rm -f
+          log "  trimmed sccache $home to cap: $(mb "$over") oldest entries removed"
+        fi
       fi
     fi
+    # Other pure lookup caches — a miss just re-downloads or recompiles.
+    # Same class as pip: cleared inside clear_caches only (idle or pressure).
+    for sub in go-build yarn/berry yarn/v6 pnpm-store uv composer gradle ccache trunk bun; do
+      d="$home/.cache/$sub"
+      [[ -d "$d" ]] || continue
+      cb=$(du -sb "$d" 2>/dev/null | cut -f1)
+      if [[ "$REPORT" -eq 1 ]]; then
+        [[ "${cb:-0}" -gt 0 ]] && log "  [dry] $sub cache $home: $(mb "$cb")"
+      else
+        rm -rf "$d" && [[ "${cb:-0}" -gt 0 ]] && log "  cleared $sub cache $home: $(mb "$cb")"
+      fi
+    done
   done
 }
 
@@ -357,11 +440,20 @@ if [[ "${PCT:-0}" -ge "$PRESSURE_PCT" ]]; then
 fi
 
 # Critical tier: same regeneratable-only rule, deeper cut. Build cache <12h
-# is the only remaining lever that cannot break a running job — buildkit
+# is the first remaining lever that cannot break a running job — buildkit
 # entries are content-addressed, a running build never re-reads old ones.
 if [[ "${PCT:-0}" -ge "$CRITICAL_PCT" ]]; then
   log "  disk critical (${PCT}% >= ${CRITICAL_PCT}%) — pruning build cache >12h"
   sweep "build cache >12h" docker builder prune -f --filter until=12h
+
+  # Per-repo image pruning escalates into busy windows at critical: docker
+  # refuses to remove anything a container references (fail-closed), so the
+  # only job at risk is one holding a pulled-but-not-yet-run image — a
+  # re-pull beats ENOSPC (the deploy + one rollback floor still holds).
+  if runner_busy; then
+    log "  critical escalation — pruning images beyond keep-$KEEP_IMAGES_PER_REPO despite busy lanes"
+    prune_repo_images
+  fi
 fi
 
 # ══ TIER: IDLE — lane-local dirs first, then shared docker state ═════════
@@ -439,6 +531,18 @@ for runner in $RUNNER_GLOB; do
     [[ "$REPORT" -eq 0 ]] && rm -rf "$runner/_work/_update"
     log "  cleaned $runner/_work/_update"
   }
+  # _work/_tool caches CI toolchains (node/go/…) — normally kept, but at
+  # critical disk an idle lane's stale entries are pure re-downloads.
+  if [[ "${PCT:-0}" -ge "$CRITICAL_PCT" && -d "$runner/_work/_tool" ]]; then
+    find "$runner/_work/_tool" -mindepth 1 -maxdepth 1 -mtime +1 -printf '%s %p\n' 2>/dev/null | \
+    while read -r _sz tp; do
+      if [[ "$REPORT" -eq 1 ]]; then
+        log "  [dry] _tool entry $tp"
+      else
+        rm -rf "$tp" && log "  cleared idle _tool entry $tp (critical)"
+      fi
+    done
+  fi
   # Self-update residue: keep the two newest bin.* (current + rollback).
   ls -d "$runner"/bin.* 2>/dev/null | sort -V | head -n -2 | while read -r b; do
     [[ "$REPORT" -eq 0 ]] && rm -rf "$b"
@@ -514,28 +618,10 @@ else
     fi
   done
 
-  # Images: keep the KEEP_IMAGES_PER_REPO newest tags per repository.
-  # `docker images` output is newest-first, so order is the age authority.
-  # Dedup by image ID: rmi by ID removes every tag on the image, so an ID
-  # already kept (or already attempted) must never be submitted again.
-  # Docker refuses removal of anything a container references — fail-closed.
-  # NOTE: declare -A is load-bearing — without it the subscript is evaluated
-  # arithmetically, hex IDs fail under set -u, and the whole prune silently
-  # never ran (found 2026-09-23: 18 tags accumulated despite keep-2).
-  declare -A seen_id=() seen_repo=()
-  docker images --format '{{.Repository}} {{.ID}}' 2>/dev/null | \
-  while read -r repo id; do
-    [[ "$repo" == "<none>" ]] && continue
-    [[ "${seen_id[$id]:-}" == "1" ]] && continue
-    seen_id[$id]=1
-    seen_repo[$repo]=$(( ${seen_repo[$repo]:-0} + 1 ))
-    [[ ${seen_repo[$repo]} -le $KEEP_IMAGES_PER_REPO ]] && continue
-    if [[ "$REPORT" -eq 1 ]]; then
-      log "  [dry] would rmi $repo $id"
-    else
-      docker rmi "$id" >/dev/null 2>&1 && log "  pruned image $repo ($id)"
-    fi
-  done
+  # Images: keep the KEEP_IMAGES_PER_REPO newest tags per repository
+  # (docker's in-use refusal is the fail-closed layer, so compose members —
+  # blue/green rollback handles, one-shot setup containers — keep theirs).
+  prune_repo_images
   # docker image prune already cleared dangling layers above.
 
   # Idle floor sits below PRESSURE_PCT: between 65% and 70% an idle box
@@ -544,5 +630,19 @@ else
   if [[ "${PCT:-0}" -ge 65 ]]; then clear_caches; fi
 fi
 
+# Return freed blocks to thin-provisioned storage where the hypervisor
+# supports it — pure win, and on a cloud VPS it is a no-op that costs <1s.
+command -v fstrim >/dev/null && sweep "fstrim all mounts" fstrim -av
+
 AVAIL1=$(avail_bytes)
 log "--- pass end (avail $(mb "${AVAIL1:-0}"), freed $(mb "$(( ${AVAIL1:-0} - ${AVAIL0:-0} ))")$(runner_busy && echo ', runner still busy')) ---"
+
+# Report mode ends with the current top offenders — the same `du` pass a
+# manual cleanup starts with, so a dry-run shows where the next pass lands.
+if [[ "$REPORT" -eq 1 ]]; then
+  echo "── top consumers ──"
+  for root in /var/lib/docker /home /opt /srv /var/log /root; do
+    [[ -d "$root" ]] || continue
+    du -xsm "$root"/* 2>/dev/null
+  done | sort -rn | head -10 | awk '{printf "  %6dM  %s\n", $1, $2}'
+fi
