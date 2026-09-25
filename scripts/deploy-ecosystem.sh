@@ -148,23 +148,31 @@ require_sibling_fresh() {
   printf 'CHECKOUT=PASS component=%s repo=%s sha=%s\n' "$name" "$repo" "$head"
 }
 
-# Wait for a workflow run on a SHA and require it to succeed. Timing out, or
-# the run failing, fails the deploy: a green summary line over a red CI run is
-# worse than no automation at all.
-await_workflow() {
-  local label="$1" repo="$2" workflow="$3" sha="$4" timeout="${5:-3600}" run_id deadline
-  deadline=$((SECONDS + timeout))
-  while (( SECONDS < deadline )); do
-    run_id="$(gh run list --repo "$repo" --workflow "$workflow" --branch main --commit "$sha" \
-      --limit 1 --json databaseId --jq '.[0].databaseId // empty' 2>/dev/null || true)"
-    [[ -n "$run_id" ]] && break
-    sleep 5
-  done
-  [[ -n "${run_id:-}" ]] || fail "$label: no '$workflow' run appeared for $sha within ${timeout}s"
-  printf '%s_RUN=%s\n' "$label" "$run_id"
-  gh run watch "$run_id" --repo "$repo" --exit-status \
-    || fail "$label: '$workflow' run $run_id failed for $sha"
-  printf '%s_CI=PASS sha=%s\n' "$label" "$sha"
+# Require a green workflow run on a SHA — fail fast, never wait.
+#
+# This job runs on the single self-hosted ARM lane. A deploy that sat on the
+# lane polling for CI deadlocked the ecosystem: the CI run it waited for was
+# queued behind the deploy itself (2026-09-24, twice). So this check is a
+# verdict, not a wait — dispatch the deploy once CI and images are green;
+# if they are not, this fails in seconds and the lane stays free.
+require_green_workflow() {
+  local label="$1" repo="$2" workflow="$3" sha="$4" run_id conclusion
+  run_id="$(gh run list --repo "$repo" --workflow "$workflow" --branch main --commit "$sha" \
+    --limit 1 --json databaseId --jq '.[0].databaseId // empty' 2>/dev/null || true)"
+  [[ -n "$run_id" ]] || fail "$label: no '$workflow' run exists for $sha — run CI first, then dispatch the deploy"
+  conclusion="$(gh run view "$run_id" --repo "$repo" --json status,conclusion \
+    --jq 'if .status != "completed" then "running" else (.conclusion // "unknown") end' 2>/dev/null || true)"
+  case "$conclusion" in
+    success)
+      printf '%s_RUN=%s\n%s_CI=PASS sha=%s\n' "$label" "$run_id" "$label" "$sha"
+      ;;
+    running|"")
+      fail "$label: '$workflow' run $run_id for $sha is still in progress — dispatch the deploy when it completes"
+      ;;
+    *)
+      fail "$label: '$workflow' run $run_id for $sha concluded '$conclusion' — a green run is required"
+      ;;
+  esac
 }
 
 # --- Rollback mode ----------------------------------------------------------
@@ -254,25 +262,21 @@ printf 'CHECKOUTS=PASS\n'
 # to main: the alternative is this script reasoning about which differences CI was
 # allowed to ignore, in a release path where being subtly wrong is worse than the
 # runner minutes it would save.
-printf '\n==> 0b — Wait for CrowdRelay CI\n'
-await_workflow CROWDRELAY "$REPO" "CI" "$TARGET" 3600
+printf '\n==> 0b — CrowdRelay CI must already be green\n'
+require_green_workflow CROWDRELAY "$REPO" "CI" "$TARGET"
 
-# 0c. Wait for image release (immutable digest artifact)
-printf '\n==> 0c — Wait for image release\n'
+# 0c. Image release must already exist (immutable digest artifact)
+printf '\n==> 0c — Image release must already exist\n'
 artifact_name="crowdrelay-image-digests-${TARGET}"
-deadline=$((SECONDS + 3600))
-while (( SECONDS < deadline )); do
-  artifact_run="$(gh api -H 'Accept: application/vnd.github+json' \
-    "/repos/${REPO}/actions/artifacts?name=${artifact_name}&per_page=100" \
-    --jq '[.artifacts[] | select(.expired == false)] | sort_by(.created_at) | reverse | .[0].workflow_run.id // empty' \
-    2>/dev/null || true)"
-  if [[ -n "$artifact_run" ]]; then
-    printf 'IMAGES=PASS sha=%s artifact=%s\n' "$TARGET" "$artifact_name"
-    break
-  fi
-  sleep 5
-done
-[[ -n "${artifact_run:-}" ]] || fail "timed out waiting for image release"
+artifact_run="$(gh api -H 'Accept: application/vnd.github+json' \
+  "/repos/${REPO}/actions/artifacts?name=${artifact_name}&per_page=100" \
+  --jq '[.artifacts[] | select(.expired == false)] | sort_by(.created_at) | reverse | .[0].workflow_run.id // empty' \
+  2>/dev/null || true)"
+if [[ -n "${artifact_run:-}" ]]; then
+  printf 'IMAGES=PASS sha=%s artifact=%s\n' "$TARGET" "$artifact_name"
+else
+  fail "no image-digest artifact for $TARGET — publish-images must finish before the deploy is dispatched"
+fi
 
 # 0d. Agent image is current with the agents repo
 printf '\n==> 0d — Agent image currency\n'

@@ -30,12 +30,13 @@ concurrency:
 jobs:
   deploy:
     name: Ecosystem blue-green deploy
-    # Orchestration only — checkout, poll sibling CI/releases, SSH. No builds
-    # happen here, so it must not sit on the single self-hosted ARM lane:
-    # when it did, the job's CI-wait deadlocked against the CI job queued
-    # behind it on the same runner (2026-09-24 — two deploys burned the full
-    # await timeout and failed while the check they waited on could not start).
-    runs-on: ubuntu-24.04
+    # Orchestration only — checkout, verify prerequisites, SSH. This org has
+    # no hosted-runner entitlement (ubuntu-24.04 jobs fail at scheduling),
+    # so the job stays on the self-hosted lane — and the deploy script must
+    # never hold that lane while polling: the checks are fail-fast, not
+    # hour-long awaits (2026-09-24 — a deploy deadlocked against the CI run
+    # queued behind it on this same runner).
+    runs-on: [self-hosted, arm64]
     timeout-minutes: 60
     environment:
       name: production
