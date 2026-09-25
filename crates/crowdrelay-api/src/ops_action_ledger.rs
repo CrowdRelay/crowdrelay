@@ -308,6 +308,14 @@ pub struct CycleRunEntry {
     /// left the reason in a worker log that each deploy throws away. NULL for
     /// a clean cycle and for every cycle before the column.
     pub degraded_reasons: Option<serde_json::Value>,
+    /// What each failed phase failed with — phase identifier → error kind in
+    /// the `last_error_kind` vocabulary. `degraded_phases` named the phase and
+    /// left the error in a worker log that rotated away; this pair answers
+    /// "which phase keeps breaking, and with what" from the row alone.
+    ///
+    /// Absent for every cycle that ran before migration 0360. An empty object
+    /// is a different statement: that cycle recorded no phase failure.
+    pub degraded_errors: Option<serde_json::Value>,
     /// Why a quiet cycle was quiet, in the brain's own words ("WAIT wins:
     /// VOI=0.85 > best_action_value=0.00"). The system may do nothing and say
     /// so — but only if the reason is readable next to the silence. NULL when
@@ -417,6 +425,7 @@ async fn load_cycle_runs(
                north_star_value,
                degraded_phases,
                degraded_reasons,
+               degraded_errors,
                wait_reason
         FROM autopilot_cycle_runs
         WHERE workspace_id = $1

@@ -306,6 +306,7 @@ async fn the_cycle_records_the_reading_it_was_given_not_a_fan_count() -> Result<
         CycleClose {
             degraded_phases: &[],
             degraded_reasons: None,
+            degraded_errors: &serde_json::json!({}),
             finished_at: now,
             north_star_observed: Some(1),
             north_star_metric: None,
@@ -364,6 +365,7 @@ async fn a_cycle_that_took_no_reading_records_none() -> Result<()> {
         CycleClose {
             degraded_phases: &["evaluation".to_owned()],
             degraded_reasons: Some(&reasons),
+            degraded_errors: &serde_json::json!({"evaluation": "unexpected"}),
             finished_at: now,
             north_star_observed: None,
             north_star_metric: None,
@@ -428,6 +430,10 @@ async fn a_degraded_cycle_records_which_phases_failed() -> Result<()> {
         CycleClose {
             degraded_phases: &["action_claim".to_owned(), "reply_triage_claim".to_owned()],
             degraded_reasons: None,
+            degraded_errors: &serde_json::json!({
+                "action_claim": "repository_unavailable",
+                "reply_triage_claim": "unexpected",
+            }),
             finished_at: now,
             north_star_observed: Some(7),
             north_star_metric: None,
@@ -437,7 +443,7 @@ async fn a_degraded_cycle_records_which_phases_failed() -> Result<()> {
     .await;
 
     let row = sqlx::query(
-        "SELECT outcome, degraded_phases FROM autopilot_cycle_runs \
+        "SELECT outcome, degraded_phases, degraded_errors FROM autopilot_cycle_runs \
          WHERE workspace_id = $1 AND id = $2",
     )
     .bind(workspace_id.into_uuid())
@@ -456,6 +462,14 @@ async fn a_degraded_cycle_records_which_phases_failed() -> Result<()> {
             "reply_triage_claim".to_owned()
         ]),
         "the operator must be able to read which phase broke",
+    );
+    assert_eq!(
+        sqlx::Row::try_get::<Option<serde_json::Value>, _>(&row, "degraded_errors")?,
+        Some(serde_json::json!({
+            "action_claim": "repository_unavailable",
+            "reply_triage_claim": "unexpected",
+        })),
+        "and what it broke with — the phase name alone expired with the worker log",
     );
     Ok(())
 }
@@ -482,6 +496,7 @@ async fn a_clean_cycle_records_an_empty_phase_list_not_null() -> Result<()> {
         CycleClose {
             degraded_phases: &[],
             degraded_reasons: None,
+            degraded_errors: &serde_json::json!({}),
             finished_at: now,
             north_star_observed: Some(7),
             north_star_metric: None,
@@ -491,7 +506,7 @@ async fn a_clean_cycle_records_an_empty_phase_list_not_null() -> Result<()> {
     .await;
 
     let row = sqlx::query(
-        "SELECT outcome, degraded_phases FROM autopilot_cycle_runs \
+        "SELECT outcome, degraded_phases, degraded_errors FROM autopilot_cycle_runs \
          WHERE workspace_id = $1 AND id = $2",
     )
     .bind(workspace_id.into_uuid())
@@ -506,6 +521,11 @@ async fn a_clean_cycle_records_an_empty_phase_list_not_null() -> Result<()> {
         sqlx::Row::try_get::<Option<Vec<String>>, _>(&row, "degraded_phases")?,
         Some(Vec::<String>::new()),
         "a clean cycle states that no phase failed; NULL would mean it did not look",
+    );
+    assert_eq!(
+        sqlx::Row::try_get::<Option<serde_json::Value>, _>(&row, "degraded_errors")?,
+        Some(serde_json::json!({})),
+        "the error map carries the same empty-recorded statement as the phase list",
     );
     Ok(())
 }
@@ -537,6 +557,7 @@ async fn a_quiet_cycle_records_its_reason_and_an_active_one_records_none() -> Re
         CycleClose {
             degraded_phases: &[],
             degraded_reasons: None,
+            degraded_errors: &serde_json::json!({}),
             finished_at: now,
             north_star_observed: Some(20),
             north_star_metric: None,
@@ -609,6 +630,7 @@ async fn a_quiet_cycle_records_its_reason_and_an_active_one_records_none() -> Re
         CycleClose {
             degraded_phases: &[],
             degraded_reasons: None,
+            degraded_errors: &serde_json::json!({}),
             finished_at: now + Duration::minutes(6),
             north_star_observed: Some(20),
             north_star_metric: None,
@@ -656,6 +678,7 @@ async fn the_latest_wait_reason_is_scoped_to_the_workspace() -> Result<()> {
             CycleClose {
                 degraded_phases: &[],
                 degraded_reasons: None,
+                degraded_errors: &serde_json::json!({}),
                 finished_at: now,
                 north_star_observed: None,
                 north_star_metric: None,

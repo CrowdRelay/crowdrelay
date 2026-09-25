@@ -62,6 +62,19 @@ const MINIMUM_DAYS: usize = 6;
 /// call the first noise and the second a triumph.
 const MATERIAL_CHANGE: f64 = 0.05;
 
+/// How much the North Star has to move for the change to count at all,
+/// in absolute units.
+///
+/// The proportional threshold alone reads one event at a small base as a
+/// third of the audience: losing a single install out of three is a 33%
+/// "regression", and the brain answered that by halving its dispatch budget
+/// — on 2026-09-13 it stayed there on nothing but ordinary churn. A one-unit
+/// move cannot be a trend at any base, so the fraction and the count both
+/// have to say something moved. Two rather than one is what lets the whole
+/// of a two-install audience disappearing still count — the smallest loss
+/// worth a person's attention.
+const MIN_ABSOLUTE_CHANGE: f64 = 2.0;
+
 /// The brain's assessment of its own recent performance.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -199,7 +212,19 @@ pub fn assess(mut samples: Vec<DailyNorthStar>) -> BrainState {
         };
     }
 
-    let change = (later - earlier) / earlier;
+    let delta = later - earlier;
+    // Below the absolute floor the move is churn, not a trend — at a young
+    // audience it is the difference between "one uninstall" and "a third of
+    // the fanbase left", and only the proportional check cannot tell them
+    // apart.
+    if delta.abs() < MIN_ABSOLUTE_CHANGE {
+        return if samples.len() >= STAGNATION_AFTER_FLAT_DAYS {
+            BrainState::Stagnant
+        } else {
+            BrainState::Learning
+        };
+    }
+    let change = delta / earlier;
     if change > MATERIAL_CHANGE {
         BrainState::Improving
     } else if change < -MATERIAL_CHANGE {
@@ -383,15 +408,44 @@ mod tests {
 
     #[test]
     fn the_threshold_is_proportional_not_absolute() {
-        // One fan out of ten is a real move; one out of a thousand is not.
-        // An absolute threshold would have to call both the same.
+        // Two fans out of ten is a real move; one out of a thousand is not.
+        // An absolute-only threshold would have to call both the same — and a
+        // proportional-only one reads one install at a small base as a third
+        // of the audience, which is what `MIN_ABSOLUTE_CHANGE` now floors out.
         assert_eq!(
-            assess(series(&[10.0, 10.0, 10.0, 11.0, 11.0, 11.0])),
+            assess(series(&[10.0, 10.0, 10.0, 12.0, 12.0, 12.0])),
             BrainState::Improving
         );
         assert_eq!(
             assess(series(&[1000.0, 1000.0, 1000.0, 1001.0, 1001.0, 1001.0])),
             BrainState::Learning
+        );
+    }
+
+    #[test]
+    fn one_uninstall_at_a_small_base_is_not_a_regression() {
+        // The 2026-09-13 shape: a North Star of three installs losing one —
+        // a 33% proportional drop that is churn, not a trend, and that used
+        // to halve the dispatch budget through `sizing_multiplier`.
+        assert_eq!(
+            assess(series(&[3.0, 3.0, 3.0, 2.0, 2.0, 2.0])),
+            BrainState::Learning
+        );
+        // Symmetric on the way up: one install gained at a small base is not
+        // an improvement trend either.
+        assert_eq!(
+            assess(series(&[3.0, 3.0, 3.0, 4.0, 4.0, 4.0])),
+            BrainState::Learning
+        );
+    }
+
+    #[test]
+    fn losing_the_whole_of_a_tiny_audience_still_regresses() {
+        // The floor is two, not "a few": two installs going to none is the
+        // smallest loss that is always worth a person's attention.
+        assert_eq!(
+            assess(series(&[2.0, 2.0, 2.0, 0.0, 0.0, 0.0])),
+            BrainState::Regressing
         );
     }
 

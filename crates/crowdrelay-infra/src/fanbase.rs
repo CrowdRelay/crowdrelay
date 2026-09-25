@@ -306,37 +306,6 @@ impl PostgresFanbaseRepository {
         .map_err(Self::unexpected)
     }
 
-    pub async fn create_connection(
-        &self,
-        workspace_id: Uuid,
-        platform: &str,
-        external_account_ref: &str,
-        credential_ref: &str,
-        label: &str,
-    ) -> Result<Uuid, FanbaseError> {
-        let id = sqlx::query_scalar::<_, Uuid>(
-            r#"
-            INSERT INTO fanbase_connections (
-                workspace_id, platform, external_account_ref,
-                credential_ref, label, status
-            )
-            VALUES ($1, $2, $3, $4, $5, 'connected')
-            ON CONFLICT (workspace_id, platform, external_account_ref) DO NOTHING
-            RETURNING id
-            "#,
-        )
-        .bind(workspace_id)
-        .bind(platform)
-        .bind(external_account_ref.trim())
-        .bind(credential_ref.trim())
-        .bind(label.trim())
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(Self::unexpected)?
-        .ok_or(FanbaseError::ConnectionExists)?;
-        Ok(id)
-    }
-
     /// The connection's platform — a scope write validates against it, so
     /// the API needs it before it may update.
     pub async fn connection_platform(

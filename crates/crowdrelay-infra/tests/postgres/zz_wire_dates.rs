@@ -25,7 +25,9 @@ async fn no_payload_or_audit_row_carries_a_tuple_timestamp()
         .await
         .expect("connect to the migrated suite database");
     let judged: i64 = sqlx::query_scalar(
-        "SELECT (SELECT count(*) FROM outbox_events) + (SELECT count(*) FROM audit_events)",
+        "SELECT (SELECT count(*) FROM outbox_events) + (SELECT count(*) FROM audit_events)
+              + (SELECT count(*) FROM operator_actions)
+              + (SELECT count(*) FROM autopilot_decisions)",
     )
     .fetch_one(&pool)
     .await?;
@@ -40,6 +42,15 @@ async fn no_payload_or_audit_row_carries_a_tuple_timestamp()
         UNION ALL
         SELECT 'audit', action, count(*)::bigint
         FROM audit_events WHERE metadata::text ~ $1 GROUP BY action
+        UNION ALL
+        SELECT 'operator_action', action, count(*)::bigint
+        FROM operator_actions WHERE details::text ~ $1 GROUP BY action
+        UNION ALL
+        SELECT 'decision.input_snapshot', decision_kind, count(*)::bigint
+        FROM autopilot_decisions WHERE input_snapshot::text ~ $1 GROUP BY decision_kind
+        UNION ALL
+        SELECT 'decision.policy_snapshot', decision_kind, count(*)::bigint
+        FROM autopilot_decisions WHERE policy_snapshot::text ~ $1 GROUP BY decision_kind
         ORDER BY 1, 2
         "#,
     )

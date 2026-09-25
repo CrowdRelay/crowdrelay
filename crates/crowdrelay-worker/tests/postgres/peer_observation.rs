@@ -8,12 +8,8 @@
 use std::time::Duration;
 
 use crate::common;
-use crowdrelay_domain::{
-    WorkspaceId,
-    content_engine::{PeerStatus, PeerTier},
-};
+use crowdrelay_domain::{WorkspaceId, content_engine::PeerStatus};
 use crowdrelay_infra::content_engine::PostgresContentEngineRepository;
-use crowdrelay_infra::content_peers::NewPeer;
 use crowdrelay_worker::peer_observation::PeerObservationWorker;
 use serde_json::json;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -83,23 +79,23 @@ async fn sweep_records_dated_facts_once() -> Result<(), Box<dyn std::error::Erro
     let feed_url = format!("http://feed.test:{}/feed", feed_addr.port());
     tokio::spawn(serve_canned_feed(listener));
 
-    let repository = PostgresContentEngineRepository::new(pool.clone());
-    let peer = repository
-        .create_peer(
-            workspace_id,
-            &NewPeer {
-                name: format!("Feed Peer {}", workspace_id.into_uuid().simple()),
-                handles: json!({"rss": feed_url}),
-                tier: PeerTier::NearPeer,
-                watch_for: vec!["format".to_owned()],
-                why: "sweep fixture".to_owned(),
-                proposed_by: "operator".to_owned(),
-                confirmed: true,
-            },
-        )
-        .await?
-        .expect("peer lands");
-    assert_eq!(peer.status, PeerStatus::Confirmed);
+    // The peer the sweep will read — confirmed, with the canned feed as its
+    // rss handle and the `format` watch tag. Peer writes go through the
+    // operator-ledger paths now; a fixture seeds the row directly.
+    let peer_id: uuid::Uuid = sqlx::query_scalar(
+        "INSERT INTO peers (
+             id, workspace_id, name, handles, tier, watch_for, why,
+             proposed_by, status, confirmed_at
+         ) VALUES ($1, $2, $3, $4, 'near_peer', '{format}', 'sweep fixture',
+                   'operator', 'confirmed', now())
+         RETURNING id",
+    )
+    .bind(uuid::Uuid::now_v7())
+    .bind(workspace_id.into_uuid())
+    .bind(format!("Feed Peer {}", workspace_id.into_uuid().simple()))
+    .bind(json!({"rss": feed_url}))
+    .fetch_one(&pool)
+    .await?;
 
     let client = reqwest::Client::builder()
         .resolve("feed.test", feed_addr)
@@ -115,18 +111,31 @@ async fn sweep_records_dated_facts_once() -> Result<(), Box<dyn std::error::Erro
     let recorded = worker.sweep().await?;
     assert_eq!(recorded, 2, "both dated feed entries should land");
 
-    let tail = repository.recent_observations(workspace_id, 10).await?;
+    let tail: Vec<(
+        String,
+        String,
+        String,
+        uuid::Uuid,
+        Option<String>,
+        serde_json::Value,
+    )> = sqlx::query_as(
+        "SELECT fact, platform, kind, peer_id, url, metrics FROM peer_observations
+         WHERE workspace_id = $1 ORDER BY observed_at DESC, id DESC LIMIT 10",
+    )
+    .bind(workspace_id.into_uuid())
+    .fetch_all(&pool)
+    .await?;
     assert_eq!(tail.len(), 2);
-    assert_eq!(tail[0].fact, "Playthrough of the new single");
-    assert_eq!(tail[0].platform, "rss");
-    assert_eq!(tail[0].kind, "post");
-    assert_eq!(tail[0].peer_id, peer.id);
+    assert_eq!(tail[0].0, "Playthrough of the new single");
+    assert_eq!(tail[0].1, "rss");
+    assert_eq!(tail[0].2, "post");
+    assert_eq!(tail[0].3, peer_id);
     assert_eq!(
-        tail[0].url.as_deref(),
+        tail[0].4.as_deref(),
         Some("https://peer.test/v/1"),
         "the evidence link rides with the fact"
     );
-    assert_eq!(tail[0].metrics["views"], json!(1_200_000));
+    assert_eq!(tail[0].5["views"], json!(1_200_000));
 
     // A resweep records nothing new — the dedup index, not luck.
     let again = worker.sweep().await?;

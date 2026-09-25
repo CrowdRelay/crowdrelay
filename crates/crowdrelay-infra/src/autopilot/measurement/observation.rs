@@ -90,6 +90,17 @@ pub(super) async fn observe(
             }
         }
     }
+    // `agent_service_tasks` is the agent service's table — a stack without
+    // that service has no such table at all, and the joins below fail with
+    // `relation does not exist`. That is not a transient miss to retry and
+    // not a zero to learn: the measurement can never be read here, so it
+    // abandons with a named kind, the same terminal answer never-published
+    // and cancelled-event get.
+    if measurement.kind.reads_agent_service() && !agent_tasks_table_exists(pool).await? {
+        return Err(RepositoryError::ConflictBecause(
+            AutopilotMeasurementKind::NO_AGENT_SERVICE,
+        ));
+    }
     let observed = match measurement.kind {
             AutopilotMeasurementKind::TicketRevenue72h => sqlx::query_scalar::<_, f64>(
                 r#"
@@ -1081,6 +1092,16 @@ pub(super) async fn observe(
     } else {
         Err(RepositoryError::Unexpected)
     }
+}
+
+/// Whether the agent service's task table exists on this deployment — the
+/// probe every `agent_service_tasks` read makes first, because no migration
+/// in this repository creates the table.
+async fn agent_tasks_table_exists(pool: &sqlx::PgPool) -> Result<bool, RepositoryError> {
+    sqlx::query_scalar::<_, bool>("SELECT to_regclass('agent_service_tasks') IS NOT NULL")
+        .fetch_one(pool)
+        .await
+        .map_err(map_sqlx)
 }
 
 /// Whether the event a measurement is bound to was cancelled. A missing row

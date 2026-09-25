@@ -166,6 +166,10 @@ pub struct CycleClose<'a> {
     pub degraded_phases: &'a [String],
     /// Phase to the database faults behind it (migration 0358).
     pub degraded_reasons: Option<&'a serde_json::Value>,
+    /// Phase to the error kind it failed with, in the
+    /// `repository_error_kind` vocabulary (migration 0360). Always written —
+    /// an empty object for a clean cycle, matching the empty phases array.
+    pub degraded_errors: &'a serde_json::Value,
     pub finished_at: OffsetDateTime,
     /// The North Star as the evaluation phase read it, when it did.
     pub north_star_observed: Option<u32>,
@@ -200,6 +204,7 @@ pub async fn close_cycle_run(
     let CycleClose {
         degraded_phases,
         degraded_reasons,
+        degraded_errors,
         finished_at,
         north_star_observed,
         north_star_metric,
@@ -219,6 +224,12 @@ pub async fn close_cycle_run(
             -- reason outlives the worker log a deploy throws away.
             degraded_reasons = $7::jsonb,
             north_star_metric = $8,
+            -- And what each phase failed with, in the error-kind vocabulary
+            -- (migration 0360) — the pair answers "which phase keeps breaking"
+            -- without the worker log the phase warning was written to. An
+            -- empty object for a clean cycle, matching the empty
+            -- `degraded_phases` array.
+            degraded_errors = $9::jsonb,
             decisions_recorded = (
                 SELECT count(*)
                 FROM autopilot_decisions AS decision
@@ -264,6 +275,7 @@ pub async fn close_cycle_run(
     .bind(wait_reason)
     .bind(degraded_reasons)
     .bind(north_star_metric)
+    .bind(degraded_errors)
     .execute(pool)
     .await;
     if let Err(error) = closed {

@@ -1,8 +1,4 @@
-//! After the rest of the worker suite: no tuple-shaped timestamp left the building.
-//!
-//! The infra suite runs the same check (`zz_wire_dates` there). This one
-//! covers what the worker writes: event sync, outbox materialization, the
-//! post executors, reminders.
+//! After the rest of the suite: no tuple-shaped timestamp left the building.
 //!
 //! Named `zz_` so the single-threaded suite runs it last, against every outbox
 //! event and audit row the other tests wrote. A bare `OffsetDateTime` inside a
@@ -15,7 +11,11 @@
 //! `crowdrelay_domain::wire_time::Wire(&value)`.
 //!
 //! A static gate cannot do this job: `json!` hides the type. The rows the
-//! suite actually produced do not.
+//! suite actually produced do not. The worker suite writes its own outbox and
+//! audit rows — the reconciliation, retention and approval paths all emit —
+//! and until this file existed none of them were checked.
+//!
+//! Copied verbatim from the infra suite's check; keep the two in step.
 
 use crate::common;
 
@@ -29,12 +29,14 @@ async fn no_payload_or_audit_row_carries_a_tuple_timestamp()
         .await
         .expect("connect to the migrated suite database");
     let judged: i64 = sqlx::query_scalar(
-        "SELECT (SELECT count(*) FROM outbox_events) + (SELECT count(*) FROM audit_events)",
+        "SELECT (SELECT count(*) FROM outbox_events) + (SELECT count(*) FROM audit_events)
+              + (SELECT count(*) FROM operator_actions)
+              + (SELECT count(*) FROM autopilot_decisions)",
     )
     .fetch_one(&pool)
     .await?;
     assert!(
-        judged > 10,
+        judged > 50,
         "only {judged} rows to judge; this must run after the rest of the suite"
     );
     let offenders: Vec<(String, String, i64)> = sqlx::query_as(
@@ -44,6 +46,15 @@ async fn no_payload_or_audit_row_carries_a_tuple_timestamp()
         UNION ALL
         SELECT 'audit', action, count(*)::bigint
         FROM audit_events WHERE metadata::text ~ $1 GROUP BY action
+        UNION ALL
+        SELECT 'operator_action', action, count(*)::bigint
+        FROM operator_actions WHERE details::text ~ $1 GROUP BY action
+        UNION ALL
+        SELECT 'decision.input_snapshot', decision_kind, count(*)::bigint
+        FROM autopilot_decisions WHERE input_snapshot::text ~ $1 GROUP BY decision_kind
+        UNION ALL
+        SELECT 'decision.policy_snapshot', decision_kind, count(*)::bigint
+        FROM autopilot_decisions WHERE policy_snapshot::text ~ $1 GROUP BY decision_kind
         ORDER BY 1, 2
         "#,
     )

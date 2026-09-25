@@ -151,18 +151,6 @@ fn ledger_error(error: RepositoryError) -> ContentEngineError {
 }
 
 impl PostgresContentEngineRepository {
-    /// Inserts a peer in `proposed` or `confirmed` status. The unique index
-    /// on `(workspace_id, lower(name))` keeps a name from landing twice;
-    /// `ON CONFLICT DO NOTHING` returns `None` on a clash rather than
-    /// failing, so a scanner re-proposing the same artist is a no-op.
-    pub async fn create_peer(
-        &self,
-        workspace_id: WorkspaceId,
-        peer: &NewPeer,
-    ) -> Result<Option<Peer>> {
-        Self::insert_peer(&self.pool, workspace_id, PeerId::new().into_uuid(), peer).await
-    }
-
     async fn insert_peer<'e, E>(
         executor: E,
         workspace_id: WorkspaceId,
@@ -307,27 +295,6 @@ impl PostgresContentEngineRepository {
         .fetch_all(&self.pool)
         .await?;
         rows.into_iter().map(Peer::try_from).collect()
-    }
-
-    /// Resolves a `proposed` peer to `confirmed` or `rejected`. The
-    /// transition guard runs in the `WHERE` clause so a stale approval can
-    /// never un-reject a peer. A rejection must carry its reason — that is
-    /// the record that stops the same wrong name being proposed twice — and
-    /// a confirmation must not carry one.
-    ///
-    /// `patch` applies only on confirm: a scanner proposal arrives without
-    /// handles and is never observable until the operator adds them, so the
-    /// fields patch the row in the same `UPDATE` that confirms it.
-    pub async fn resolve_peer(
-        &self,
-        workspace_id: WorkspaceId,
-        peer_id: PeerId,
-        next: PeerStatus,
-        rejection_reason: Option<&str>,
-        patch: Option<&PeerPatch>,
-    ) -> Result<Peer> {
-        let reason = check_resolution(next, rejection_reason, patch)?;
-        Self::resolve_peer_in(&self.pool, workspace_id, peer_id, next, reason, patch).await
     }
 
     /// The operator's resolve, ledger'd like the create: the audit row lands

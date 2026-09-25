@@ -994,9 +994,12 @@ async fn connection_scan_scope_is_stored_and_a_change_resets_the_cursor()
     let repo = PostgresFanbaseRepository::new(pool.clone());
     let gdrive = PostgresGDriveRepository::new(pool.clone());
 
-    let connection_id = repo
-        .create_connection(workspace, "gmail", "band@x.test", "cred", "Band mailbox")
-        .await?;
+    let connection_id: uuid::Uuid = sqlx::query_scalar(
+        "INSERT INTO fanbase_connections (workspace_id, platform, external_account_ref, credential_ref, label, status) VALUES ($1, 'gmail', 'band@x.test', 'cred', 'Band mailbox', 'connected') RETURNING id",
+    )
+    .bind(workspace)
+    .fetch_one(&pool)
+    .await?;
 
     // A brand-new connection has never answered the scope question — the
     // worker reads `None` and scans nothing.

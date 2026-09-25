@@ -18,32 +18,33 @@ use crowdrelay_infra::autopilot::{
 };
 use time::OffsetDateTime;
 
-/// Runs the phase. Returns `false` when the phase must count as degraded —
-/// the caller marks it, since `DegradedPhases` is cycle bookkeeping, not
-/// this module's. A not-due hour or an unreadable North Star series is not
-/// a degradation: the first skips the replay it would discard anyway, the
-/// second still writes the attribution half of the snapshot.
+/// Runs the phase. Returns the error kind when the phase must count as
+/// degraded — the caller marks it, since `DegradedPhases` is cycle
+/// bookkeeping, not this module's. A not-due hour or an unreadable North
+/// Star series is not a degradation: the first skips the replay it would
+/// discard anyway, the second still writes the attribution half of the
+/// snapshot.
 pub(crate) async fn run(
     repository: &PostgresAutopilotRepository,
     workspace_id: WorkspaceId,
     now: OffsetDateTime,
-) -> bool {
+) -> Result<(), &'static str> {
     // The due-check runs first: the evidence load is a full-window replay
     // and there is no reason to pay for it eleven cycles out of twelve
     // when the hour is already written.
     match fan_source_snapshot_due(repository.pool(), workspace_id, now).await {
         Ok(true) => {}
-        Ok(false) => return true,
+        Ok(false) => return Ok(()),
         Err(error) => {
             tracing::warn!(error = %error, "CrowdRelay fan-source snapshot due-check failed");
-            return false;
+            return Err(crate::autopilot::repository_error_kind(error));
         }
     }
     let evidence = match repository.load_growth_evidence(workspace_id, None).await {
         Ok(evidence) => evidence,
         Err(error) => {
             tracing::warn!(error = %error, "CrowdRelay fan-source snapshot evidence load failed");
-            return false;
+            return Err(crate::autopilot::repository_error_kind(error));
         }
     };
     let attribution = crowdrelay_brain::attribution::attribute_fan_growth(&evidence);
@@ -83,11 +84,11 @@ pub(crate) async fn run(
                     "CrowdRelay recorded fan-source attribution snapshot"
                 );
             }
-            true
+            Ok(())
         }
         Err(error) => {
             tracing::warn!(error = %error, "CrowdRelay fan-source snapshot write failed");
-            false
+            Err(crate::autopilot::repository_error_kind(error))
         }
     }
 }
