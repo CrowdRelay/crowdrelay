@@ -5,10 +5,8 @@
 //! outcome instead of holding a slot forever.
 
 use crate::common;
-use crowdrelay_domain::{WorkspaceId, content_engine::SuggestionOutcomeKind};
-use crowdrelay_infra::content_engine::{
-    NewOutcome, NewSuggestion, PostgresContentEngineRepository,
-};
+use crowdrelay_domain::WorkspaceId;
+use crowdrelay_infra::content_engine::PostgresContentEngineRepository;
 use serde_json::json;
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -56,17 +54,22 @@ async fn a_declined_format_stays_out_until_the_verdict_ages_out()
     assert_eq!(raised.len(), 1);
     assert_eq!(raised[0].format_key.as_deref(), Some("playthrough"));
 
-    // The band says "not for us" — recorded as a first-class outcome.
-    repo.resolve_suggestion(
-        workspace_id,
-        &NewOutcome {
-            suggestion_id: raised[0].id,
-            outcome: SuggestionOutcomeKind::Declined,
-            decided_by: Some("operator".to_owned()),
-            reason: Some("not for us".to_owned()),
-            results: json!({}),
-        },
+    // The band says "not for us" — a decline and its outcome row land
+    // together, the pair the unbuilt resolve path used to write in one
+    // transaction.
+    sqlx::query(
+        "UPDATE content_suggestions SET status = 'declined', updated_at = now() WHERE id = $1",
     )
+    .bind(raised[0].id.into_uuid())
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO suggestion_outcomes (workspace_id, suggestion_id, outcome, decided_by, reason, results)
+         VALUES ($1, $2, 'declined', 'operator', 'not for us', '{}'::jsonb)",
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(raised[0].id.into_uuid())
+    .execute(&pool)
     .await?;
 
     // Inside the cooldown the verdict holds: nothing is re-asked — the
@@ -202,26 +205,22 @@ async fn an_unreported_commitment_expires_when_its_day_passes()
 
     let today = time::OffsetDateTime::now_utc().date();
     // The band committed; the beat's day was yesterday; nobody reported.
-    let suggestion = repo
-        .create_suggestion(
-            workspace_id,
-            &NewSuggestion {
-                arc_id: None,
-                format_key: Some("playthrough".to_owned()),
-                concept: "film the playthrough during the shoot".to_owned(),
-                reason: "peer playthroughs outperform 4:1".to_owned(),
-                evidence: json!({}),
-                suggested_after: Some(today - time::Duration::days(7)),
-                suggested_before: Some(today - time::Duration::days(1)),
-                effort: None,
-                proposed_assignee_member_id: None,
-                distribution_promise: json!({"consented_fans": 340}),
-                expires_at: None,
-            },
-        )
-        .await?;
+    let suggestion_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO content_suggestions (
+             id, workspace_id, format_key, concept, reason, evidence,
+             suggested_after, suggested_before, distribution_promise, status
+         ) VALUES ($1, $2, 'playthrough', 'film the playthrough during the shoot',
+                   'peer playthroughs outperform 4:1', '{}'::jsonb,
+                   current_date - interval '7 days', current_date - interval '1 day',
+                   '{\"consented_fans\": 340}'::jsonb, 'raised')
+         RETURNING id",
+    )
+    .bind(Uuid::now_v7())
+    .bind(workspace_id.into_uuid())
+    .fetch_one(&pool)
+    .await?;
     sqlx::query("UPDATE content_suggestions SET status = 'approved' WHERE id = $1")
-        .bind(suggestion.id.into_uuid())
+        .bind(suggestion_id)
         .execute(&pool)
         .await?;
 
@@ -234,7 +233,7 @@ async fn an_unreported_commitment_expires_when_its_day_passes()
                     AND o.outcome = 'expired')
          FROM content_suggestions s WHERE s.id = $1",
     )
-    .bind(suggestion.id.into_uuid())
+    .bind(suggestion_id)
     .fetch_one(&pool)
     .await?;
     assert_eq!(
@@ -247,7 +246,7 @@ async fn an_unreported_commitment_expires_when_its_day_passes()
          WHERE workspace_id = $1 AND suggestion_id = $2",
     )
     .bind(workspace_id.into_uuid())
-    .bind(suggestion.id.into_uuid())
+    .bind(suggestion_id)
     .fetch_one(&pool)
     .await?;
     assert_eq!(decided_by.as_deref(), Some("system"));
@@ -258,32 +257,26 @@ async fn an_unreported_commitment_expires_when_its_day_passes()
 
     // A timeless commitment (`suggested_before` NULL) stays open — there is
     // no day whose passing makes it dead.
-    let timeless = repo
-        .create_suggestion(
-            workspace_id,
-            &NewSuggestion {
-                arc_id: None,
-                format_key: None,
-                concept: "record an acoustic session whenever".to_owned(),
-                reason: "unbounded".to_owned(),
-                evidence: json!({}),
-                suggested_after: None,
-                suggested_before: None,
-                effort: None,
-                proposed_assignee_member_id: None,
-                distribution_promise: json!({"consented_fans": 340}),
-                expires_at: None,
-            },
-        )
-        .await?;
+    let timeless: Uuid = sqlx::query_scalar(
+        "INSERT INTO content_suggestions (
+             id, workspace_id, format_key, concept, reason, evidence,
+             distribution_promise, status
+         ) VALUES ($1, $2, NULL, 'record an acoustic session whenever', 'unbounded',
+                   '{}'::jsonb, '{\"consented_fans\": 340}'::jsonb, 'raised')
+         RETURNING id",
+    )
+    .bind(Uuid::now_v7())
+    .bind(workspace_id.into_uuid())
+    .fetch_one(&pool)
+    .await?;
     sqlx::query("UPDATE content_suggestions SET status = 'approved' WHERE id = $1")
-        .bind(timeless.id.into_uuid())
+        .bind(timeless)
         .execute(&pool)
         .await?;
     repo.refresh_suggestions(workspace_id, today).await?;
     let still_open: String =
         sqlx::query_scalar("SELECT status FROM content_suggestions WHERE id = $1")
-            .bind(timeless.id.into_uuid())
+            .bind(timeless)
             .fetch_one(&pool)
             .await?;
     assert_eq!(still_open, "approved");

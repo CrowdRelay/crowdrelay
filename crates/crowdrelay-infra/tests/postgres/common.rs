@@ -94,3 +94,35 @@ impl IsolatedDatabase {
         Ok(())
     }
 }
+
+/// A peer row seeded directly, for suites whose subject is machinery
+/// downstream of the peer registry rather than the registry itself.
+///
+/// Peer writes go through the operator-ledger paths now (`create_operator_peer`,
+/// `resolve_peer_operator`); the unguarded `create_peer`/`resolve_peer` they
+/// used to share were removed as unwired, so a fixture that just needs a
+/// standing row writes it the way a proposal leaves it.
+pub async fn seed_peer(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    name: &str,
+    status: &str,
+    rejection_reason: Option<&str>,
+) -> Result<Uuid, sqlx::Error> {
+    sqlx::query_scalar(
+        "INSERT INTO peers (
+             id, workspace_id, name, handles, tier, watch_for, why,
+             proposed_by, status, rejection_reason, confirmed_at
+         )
+         VALUES ($1, $2, $3, '{}'::jsonb, 'near_peer', '{}', 'fixture', 'fixture',
+                 $4, $5, CASE WHEN $4 = 'confirmed' THEN now() END)
+         RETURNING id",
+    )
+    .bind(Uuid::now_v7())
+    .bind(workspace_id)
+    .bind(name)
+    .bind(status)
+    .bind(rejection_reason)
+    .fetch_one(pool)
+    .await
+}

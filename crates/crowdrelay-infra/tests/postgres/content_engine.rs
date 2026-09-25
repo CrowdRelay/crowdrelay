@@ -6,19 +6,16 @@
 //! that every row a second workspace asks for comes back empty.
 
 use crate::common;
+use crowdrelay_application::IdempotencyKey;
 use crowdrelay_domain::{
-    WorkspaceId, WorkspaceMemberId,
-    content_engine::{
-        ArcStatus, PeerStatus, PeerTier, ProductionEventKind, ProductionEventStatus,
-        SuggestionOutcomeKind,
-    },
+    WorkspaceId,
+    content_engine::{PeerStatus, PeerTier},
     team_operations::TeamSkill,
 };
 use crowdrelay_infra::content_engine::{
-    ContentEngineError, NewArc, NewCapturePlan, NewFanObservation, NewOutcome, NewPeerObservation,
-    NewProductionEvent, NewSuggestion, PostgresContentEngineRepository,
+    ContentEngineError, NewFanObservation, NewPeerObservation, PostgresContentEngineRepository,
 };
-use crowdrelay_infra::content_peers::NewPeer;
+use crowdrelay_infra::content_peers::{NewPeer, PeerOutcome};
 use serde_json::json;
 use sqlx::PgPool;
 use time::{Date, Month};
@@ -77,6 +74,13 @@ async fn catalogue_is_seeded_and_global() -> Result<(), Box<dyn std::error::Erro
     Ok(())
 }
 
+/// A fresh idempotency key for each operator-path call — the ledger turns a
+/// reused key into a replay, which is not the assertion these fixtures make.
+fn key(label: &str) -> IdempotencyKey {
+    IdempotencyKey::parse(&format!("ce-{label}-{}", Uuid::now_v7().simple()))
+        .expect("valid idempotency key")
+}
+
 #[tokio::test]
 #[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and disposable PostgreSQL"]
 async fn peers_resolve_once_and_dedup_by_name() -> Result<(), Box<dyn std::error::Error>> {
@@ -87,8 +91,8 @@ async fn peers_resolve_once_and_dedup_by_name() -> Result<(), Box<dyn std::error
     let name = format!("Peer Band {unique}");
 
     // A scanner proposal lands `proposed` — never observed until confirmed.
-    let proposed = repo
-        .create_peer(
+    let proposed = match repo
+        .create_operator_peer(
             workspace_id,
             &NewPeer {
                 name: name.clone(),
@@ -99,9 +103,14 @@ async fn peers_resolve_once_and_dedup_by_name() -> Result<(), Box<dyn std::error
                 proposed_by: "release-scanner".to_owned(),
                 confirmed: false,
             },
+            &key("create"),
+            None,
         )
         .await?
-        .expect("first insert lands");
+    {
+        PeerOutcome::Applied(peer) => peer,
+        PeerOutcome::Replayed(_) => panic!("a fresh key must apply, not replay"),
+    };
     assert_eq!(proposed.status, PeerStatus::Proposed);
     assert_eq!(
         proposed.watch_for,
@@ -109,9 +118,10 @@ async fn peers_resolve_once_and_dedup_by_name() -> Result<(), Box<dyn std::error
         "watch_for is normalized and deduplicated"
     );
 
-    // The same name again — scanner retries and operator typos both collapse.
-    let duplicate = repo
-        .create_peer(
+    // The same name again — scanner retries and operator typos both collapse
+    // into the standing-row conflict.
+    let taken = repo
+        .create_operator_peer(
             workspace_id,
             &NewPeer {
                 name: name.clone(),
@@ -122,9 +132,12 @@ async fn peers_resolve_once_and_dedup_by_name() -> Result<(), Box<dyn std::error
                 proposed_by: "operator".to_owned(),
                 confirmed: true,
             },
+            &key("dupe"),
+            None,
         )
-        .await?;
-    assert!(duplicate.is_none(), "the name index makes a repeat a no-op");
+        .await
+        .expect_err("a live same-name row conflicts");
+    assert!(matches!(taken, ContentEngineError::PeerNameTaken));
 
     // Proposed peers are invisible to sweeps.
     let confirmed_before = repo
@@ -132,19 +145,33 @@ async fn peers_resolve_once_and_dedup_by_name() -> Result<(), Box<dyn std::error
         .await?;
     assert!(confirmed_before.is_empty());
 
-    let confirmed = repo
-        .resolve_peer(workspace_id, proposed.id, PeerStatus::Confirmed, None, None)
-        .await?;
+    let confirmed = match repo
+        .resolve_peer_operator(
+            workspace_id,
+            proposed.id,
+            PeerStatus::Confirmed,
+            None,
+            None,
+            &key("confirm"),
+            None,
+        )
+        .await?
+    {
+        PeerOutcome::Applied(peer) => peer,
+        PeerOutcome::Replayed(_) => panic!("a fresh key must apply, not replay"),
+    };
     assert_eq!(confirmed.status, PeerStatus::Confirmed);
     assert!(confirmed.confirmed_at.is_some());
 
     // A confirmed peer cannot be rejected afterwards — one way only.
     let err = repo
-        .resolve_peer(
+        .resolve_peer_operator(
             workspace_id,
             proposed.id,
             PeerStatus::Rejected,
             Some("late"),
+            None,
+            &key("late-reject"),
             None,
         )
         .await
@@ -153,35 +180,43 @@ async fn peers_resolve_once_and_dedup_by_name() -> Result<(), Box<dyn std::error
 
     // A rejection without its reason is refused — the reason is the record
     // that stops the same wrong name being proposed twice.
-    let second = repo
-        .create_peer(
-            workspace_id,
-            &NewPeer {
-                name: format!("Second {unique}"),
-                handles: json!({}),
-                tier: PeerTier::Lateral,
-                watch_for: vec![],
-                why: "to reject".to_owned(),
-                proposed_by: "release-scanner".to_owned(),
-                confirmed: false,
-            },
-        )
-        .await?
-        .expect("second peer lands");
+    let second_id = common::seed_peer(
+        &pool,
+        workspace_id.into_uuid(),
+        &format!("Second {unique}"),
+        "proposed",
+        None,
+    )
+    .await?;
+    let second = crowdrelay_domain::PeerId::from_uuid(second_id);
     let silent = repo
-        .resolve_peer(workspace_id, second.id, PeerStatus::Rejected, None, None)
+        .resolve_peer_operator(
+            workspace_id,
+            second,
+            PeerStatus::Rejected,
+            None,
+            None,
+            &key("silent"),
+            None,
+        )
         .await
         .expect_err("a reasonless rejection is refused");
     assert!(matches!(silent, ContentEngineError::MissingReason));
-    let rejected = repo
-        .resolve_peer(
+    let rejected = match repo
+        .resolve_peer_operator(
             workspace_id,
-            second.id,
+            second,
             PeerStatus::Rejected,
             Some("wrong genre"),
             None,
+            &key("reject"),
+            None,
         )
-        .await?;
+        .await?
+    {
+        PeerOutcome::Applied(peer) => peer,
+        PeerOutcome::Replayed(_) => panic!("a fresh key must apply, not replay"),
+    };
     assert_eq!(rejected.rejection_reason.as_deref(), Some("wrong genre"));
     Ok(())
 }
@@ -192,24 +227,17 @@ async fn observations_dedup_the_same_fact() -> Result<(), Box<dyn std::error::Er
     let (repo, pool) = repository().await?;
     let workspace_id = WorkspaceId::new();
     seed_workspace(&pool, workspace_id).await?;
-    let peer = repo
-        .create_peer(
-            workspace_id,
-            &NewPeer {
-                name: format!("Observed {}", workspace_id.into_uuid().simple()),
-                handles: json!({}),
-                tier: PeerTier::Lateral,
-                watch_for: vec![],
-                why: "watch".to_owned(),
-                proposed_by: "operator".to_owned(),
-                confirmed: true,
-            },
-        )
-        .await?
-        .expect("peer lands");
+    let peer_id: Uuid = common::seed_peer(
+        &pool,
+        workspace_id.into_uuid(),
+        &format!("Observed {}", workspace_id.into_uuid().simple()),
+        "confirmed",
+        None,
+    )
+    .await?;
 
     let fact = NewPeerObservation {
-        peer_id: peer.id,
+        peer_id: crowdrelay_domain::PeerId::from_uuid(peer_id),
         observed_at: date(2026, 9, 10),
         platform: "youtube".to_owned(),
         kind: "post".to_owned(),
@@ -222,189 +250,50 @@ async fn observations_dedup_the_same_fact() -> Result<(), Box<dyn std::error::Er
     assert!(first.is_some());
     assert_eq!(second, None, "a repeated sweep records the fact once");
 
-    let tail = repo.recent_observations(workspace_id, 10).await?;
-    assert_eq!(tail.len(), 1);
-    assert_eq!(tail[0].fact, fact.fact);
+    let stored: String = sqlx::query_scalar(
+        "SELECT fact FROM peer_observations WHERE workspace_id = $1 ORDER BY observed_at DESC, id DESC LIMIT 1",
+    )
+    .bind(workspace_id.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(stored, fact.fact);
     Ok(())
 }
 
 #[tokio::test]
 #[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and disposable PostgreSQL"]
-async fn capture_plans_issue_before_the_day() -> Result<(), Box<dyn std::error::Error>> {
+async fn upcoming_production_events_reads_the_schedule() -> Result<(), Box<dyn std::error::Error>> {
     let (repo, pool) = repository().await?;
     let workspace_id = WorkspaceId::new();
     seed_workspace(&pool, workspace_id).await?;
-    let event = repo
-        .create_production_event(
-            workspace_id,
-            &NewProductionEvent {
-                kind: ProductionEventKind::Shoot,
-                title: "video shoot".to_owned(),
-                scheduled_for: date(2026, 10, 2),
-                event_id: None,
-                notes: String::new(),
-            },
-        )
-        .await?;
-    assert_eq!(event.status, ProductionEventStatus::Scheduled);
+    sqlx::query(
+        "INSERT INTO production_events (id, workspace_id, kind, title, scheduled_for)
+         VALUES ($1, $2, 'shoot', 'video shoot', '2026-10-02')",
+    )
+    .bind(Uuid::now_v7())
+    .bind(workspace_id.into_uuid())
+    .execute(&pool)
+    .await?;
 
     let upcoming = repo
         .upcoming_production_events(workspace_id, date(2026, 9, 1))
         .await?;
     assert_eq!(upcoming.len(), 1);
+    assert_eq!(upcoming[0].title, "video shoot");
 
-    let member = WorkspaceMemberId::new();
-    let plan = repo
-        .create_capture_plan(
-            workspace_id,
-            &NewCapturePlan {
-                production_event_id: event.id,
-                items: json!([{"item": "10 min handheld", "skill": "video"}]),
-                assignee_member_id: None,
-            },
-        )
-        .await?;
-    assert!(plan.issued_at.is_none(), "a draft was never issued");
-
-    let issued = repo
-        .issue_capture_plan(workspace_id, plan.id, member)
-        .await?;
-    assert!(issued.issued_at.is_some());
-    assert_eq!(issued.assignee_member_id, Some(member));
-
-    // Issuing twice must fail — the reminder keys off the first issue.
-    let err = repo
-        .issue_capture_plan(workspace_id, plan.id, member)
-        .await
-        .expect_err("an issued plan does not re-issue");
-    assert!(matches!(err, ContentEngineError::InvalidTransition));
-
-    // Completing the event honours the status graph.
-    repo.set_production_event_status(
-        workspace_id,
-        event.id,
-        ProductionEventStatus::Scheduled,
-        ProductionEventStatus::Done,
-    )
-    .await?;
-    let stuck = repo
-        .set_production_event_status(
-            workspace_id,
-            event.id,
-            ProductionEventStatus::Scheduled,
-            ProductionEventStatus::Cancelled,
-        )
-        .await;
+    // A past-day boundary and a foreign workspace both see nothing.
     assert!(
-        matches!(stuck, Err(ContentEngineError::InvalidTransition)),
-        "a done event cannot be re-scheduled or cancelled"
+        repo.upcoming_production_events(workspace_id, date(2026, 10, 3))
+            .await?
+            .is_empty()
     );
-    Ok(())
-}
-
-#[tokio::test]
-#[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and disposable PostgreSQL"]
-async fn arcs_approve_as_a_whole_and_suggestions_resolve_with_outcomes()
--> Result<(), Box<dyn std::error::Error>> {
-    let (repo, pool) = repository().await?;
-    let workspace_id = WorkspaceId::new();
-    seed_workspace(&pool, workspace_id).await?;
-    let arc = repo
-        .create_arc(
-            workspace_id,
-            &NewArc {
-                title: "autumn push".to_owned(),
-                summary: "three beats around the single".to_owned(),
-                horizon_start: Some(date(2026, 9, 15)),
-                horizon_end: Some(date(2026, 11, 15)),
-                spine: json!([{"at": "2026-10-02", "beat": "playthrough"}]),
-                evidence: json!({"peer_observations": [1, 2]}),
-            },
-        )
-        .await?;
-    assert_eq!(arc.status, ArcStatus::Proposed);
-
-    // Skipping approval is not a legal move.
-    let skip = repo
-        .transition_arc(
-            workspace_id,
-            arc.id,
-            ArcStatus::Proposed,
-            ArcStatus::Active,
-            None,
-        )
-        .await;
-    assert!(matches!(skip, Err(ContentEngineError::InvalidTransition)));
-
-    let approved = repo
-        .transition_arc(
-            workspace_id,
-            arc.id,
-            ArcStatus::Proposed,
-            ArcStatus::Approved,
-            Some("operator"),
-        )
-        .await?;
-    assert!(approved.approved_at.is_some());
-    assert_eq!(approved.approved_by.as_deref(), Some("operator"));
-
-    let suggestion = repo
-        .create_suggestion(
-            workspace_id,
-            &NewSuggestion {
-                arc_id: Some(arc.id),
-                format_key: Some("playthrough".to_owned()),
-                concept: "film the playthrough during the shoot".to_owned(),
-                reason: "peer X's playthrough outperformed 4:1".to_owned(),
-                evidence: json!({"peer_observations": [1]}),
-                suggested_after: Some(date(2026, 10, 2)),
-                suggested_before: Some(date(2026, 10, 16)),
-                effort: None,
-                proposed_assignee_member_id: None,
-                distribution_promise: json!({"consented_fans": 340, "communities": ["r/metal"]}),
-                expires_at: None,
-            },
-        )
-        .await?;
-    let open = repo.list_open_suggestions(workspace_id).await?;
-    assert_eq!(open.len(), 1);
-
-    let outcome = repo
-        .resolve_suggestion(
-            workspace_id,
-            &NewOutcome {
-                suggestion_id: suggestion.id,
-                outcome: SuggestionOutcomeKind::Declined,
-                decided_by: Some("operator".to_owned()),
-                reason: Some("not for us".to_owned()),
-                results: json!({}),
-            },
-        )
-        .await?;
-    assert_eq!(outcome.outcome, SuggestionOutcomeKind::Declined);
-    assert_eq!(outcome.reason.as_deref(), Some("not for us"));
-
-    // The decision and its outcome committed together, and a decided
-    // suggestion cannot be resolved a second time.
-    assert!(repo.list_open_suggestions(workspace_id).await?.is_empty());
-    let again = repo
-        .resolve_suggestion(
-            workspace_id,
-            &NewOutcome {
-                suggestion_id: suggestion.id,
-                outcome: SuggestionOutcomeKind::Done,
-                decided_by: None,
-                reason: None,
-                results: json!({}),
-            },
-        )
-        .await;
-    assert!(matches!(again, Err(ContentEngineError::InvalidTransition)));
-
-    let history = repo
-        .outcomes_for_suggestion(workspace_id, suggestion.id)
-        .await?;
-    assert_eq!(history.len(), 1);
+    let theirs = WorkspaceId::new();
+    seed_workspace(&pool, theirs).await?;
+    assert!(
+        repo.upcoming_production_events(theirs, date(2026, 9, 1))
+            .await?
+            .is_empty()
+    );
     Ok(())
 }
 
@@ -414,26 +303,22 @@ async fn a_second_workspace_sees_nothing() -> Result<(), Box<dyn std::error::Err
     let (repo, pool) = repository().await?;
     let ours = WorkspaceId::new();
     seed_workspace(&pool, ours).await?;
+    // The foreign workspace exists — the resolve must still miss because the
+    // peer id is ours, not because there is nowhere to write.
     let theirs = WorkspaceId::new();
-    let peer = repo
-        .create_peer(
-            ours,
-            &NewPeer {
-                name: format!("Scoped {}", ours.into_uuid().simple()),
-                handles: json!({}),
-                tier: PeerTier::NearPeer,
-                watch_for: vec![],
-                why: "ours".to_owned(),
-                proposed_by: "operator".to_owned(),
-                confirmed: true,
-            },
-        )
-        .await?
-        .expect("peer lands");
+    seed_workspace(&pool, theirs).await?;
+    let peer_id = common::seed_peer(
+        &pool,
+        ours.into_uuid(),
+        &format!("Scoped {}", ours.into_uuid().simple()),
+        "proposed",
+        None,
+    )
+    .await?;
     repo.record_observation(
         ours,
         &NewPeerObservation {
-            peer_id: peer.id,
+            peer_id: crowdrelay_domain::PeerId::from_uuid(peer_id),
             observed_at: date(2026, 9, 12),
             platform: "instagram".to_owned(),
             kind: "post".to_owned(),
@@ -443,25 +328,57 @@ async fn a_second_workspace_sees_nothing() -> Result<(), Box<dyn std::error::Err
         },
     )
     .await?;
+    sqlx::query(
+        "INSERT INTO content_suggestions (id, workspace_id, format_key, concept, status)
+         VALUES ($1, $2, 'playthrough', 'a beat', 'raised')",
+    )
+    .bind(Uuid::now_v7())
+    .bind(ours.into_uuid())
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO arcs (id, workspace_id, title, spine)
+         VALUES ($1, $2, 'season', '[]'::jsonb)",
+    )
+    .bind(Uuid::now_v7())
+    .bind(ours.into_uuid())
+    .execute(&pool)
+    .await?;
 
     assert!(repo.list_peers(theirs, None).await?.is_empty());
-    assert!(repo.recent_observations(theirs, 50).await?.is_empty());
     assert!(
         repo.upcoming_production_events(theirs, date(2020, 1, 1))
             .await?
             .is_empty()
     );
-    assert!(repo.list_open_suggestions(theirs).await?.is_empty());
-    assert!(repo.list_arcs(theirs, None).await?.is_empty());
+    let foreign_rows: i64 = sqlx::query_scalar(
+        "SELECT (SELECT count(*) FROM peer_observations WHERE workspace_id = $1)
+              + (SELECT count(*) FROM content_suggestions WHERE workspace_id = $1)
+              + (SELECT count(*) FROM arcs WHERE workspace_id = $1)",
+    )
+    .bind(theirs.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(foreign_rows, 0, "every content row is workspace-scoped");
 
-    // And the other workspace cannot reach our rows by id either.
-    let cross = repo
-        .resolve_peer(theirs, peer.id, PeerStatus::Rejected, Some("x"), None)
-        .await;
-    assert!(
-        matches!(cross, Err(ContentEngineError::InvalidTransition)),
-        "the workspace clause makes a foreign id a no-match"
-    );
+    // And the other workspace cannot reach our rows by id either: a scoped
+    // UPDATE matches nothing rather than answering a foreign peer.
+    let resolved = match repo
+        .resolve_peer_operator(
+            theirs,
+            crowdrelay_domain::PeerId::from_uuid(peer_id),
+            PeerStatus::Rejected,
+            Some("x"),
+            None,
+            &key("cross"),
+            None,
+        )
+        .await
+    {
+        Err(ContentEngineError::InvalidTransition) => true,
+        other => panic!("the workspace clause makes a foreign id a no-match: {other:?}"),
+    };
+    assert!(resolved);
     Ok(())
 }
 
@@ -507,16 +424,26 @@ async fn fan_observations_deduplicate_and_scope_to_the_place()
         "the same fact at the same place+date must not record twice"
     );
 
-    let tail = repo.recent_fan_observations(workspace_id, 10).await?;
-    assert_eq!(tail.len(), 1);
-    assert_eq!(tail[0].fact, "What albums this week?");
-    assert_eq!(tail[0].place_id, place_id);
-    assert_eq!(tail[0].metrics["score"], json!(412));
+    let stored: (String, Uuid, serde_json::Value) = sqlx::query_as(
+        "SELECT fact, place_id, metrics FROM fan_observations
+         WHERE workspace_id = $1 ORDER BY observed_at DESC, id DESC LIMIT 1",
+    )
+    .bind(workspace_id.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(stored.0, "What albums this week?");
+    assert_eq!(stored.1, place_id);
+    assert_eq!(stored.2["score"], json!(412));
 
     // Another workspace sees none of it.
     let theirs = WorkspaceId::new();
     seed_workspace(&pool, theirs).await?;
-    assert!(repo.recent_fan_observations(theirs, 10).await?.is_empty());
+    let foreign: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM fan_observations WHERE workspace_id = $1")
+            .bind(theirs.into_uuid())
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(foreign, 0);
     Ok(())
 }
 
@@ -532,21 +459,8 @@ async fn trends_detect_corroboration_and_fade() -> Result<(), Box<dyn std::error
     let today = time::OffsetDateTime::now_utc().date();
     let recent = today - time::Duration::days(3);
     for name in ["Peer Alpha", "Peer Beta"] {
-        let peer = repo
-            .create_peer(
-                workspace_id,
-                &NewPeer {
-                    name: name.to_owned(),
-                    handles: json!({}),
-                    tier: PeerTier::NearPeer,
-                    watch_for: vec![],
-                    why: "trend fixture".to_owned(),
-                    proposed_by: "operator".to_owned(),
-                    confirmed: true,
-                },
-            )
-            .await?
-            .expect("peer lands");
+        let peer_id =
+            common::seed_peer(&pool, workspace_id.into_uuid(), name, "confirmed", None).await?;
         for (day, fact) in [
             (recent, "new playthrough of the single"),
             (today, "another playthrough video"),
@@ -554,7 +468,7 @@ async fn trends_detect_corroboration_and_fade() -> Result<(), Box<dyn std::error
             repo.record_observation(
                 workspace_id,
                 &NewPeerObservation {
-                    peer_id: peer.id,
+                    peer_id: crowdrelay_domain::PeerId::from_uuid(peer_id),
                     observed_at: day,
                     platform: "youtube".to_owned(),
                     kind: "video".to_owned(),
@@ -794,16 +708,13 @@ async fn suggestion_engine_raises_only_what_the_band_can_do()
 
     // A scheduled shoot — the harvest rule should price covered formats
     // marginally.
-    repo.create_production_event(
-        workspace_id,
-        &NewProductionEvent {
-            kind: ProductionEventKind::Shoot,
-            title: "Video day".to_owned(),
-            scheduled_for: time::OffsetDateTime::now_utc().date() + time::Duration::days(5),
-            event_id: None,
-            notes: String::new(),
-        },
+    sqlx::query(
+        "INSERT INTO production_events (id, workspace_id, kind, title, scheduled_for)
+         VALUES ($1, $2, 'shoot', 'Video day', current_date + 5)",
     )
+    .bind(Uuid::now_v7())
+    .bind(workspace_id.into_uuid())
+    .execute(&pool)
     .await?;
 
     // Reach: one admitted community, one consented fan, one press route.

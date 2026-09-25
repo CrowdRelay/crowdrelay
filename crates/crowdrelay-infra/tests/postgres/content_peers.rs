@@ -183,25 +183,18 @@ async fn run_operator_path(pool: &PgPool) -> Result<(), Box<dyn std::error::Erro
 
     // A scanner-style proposal arrives with empty handles — never
     // observable until the confirm patches them in the same UPDATE.
-    let proposal = repo
-        .create_peer(
+    let proposal_id = common::seed_peer(
+        pool,
+        workspace_id.into_uuid(),
+        &format!("Scanned {unique}"),
+        "proposed",
+        None,
+    )
+    .await?;
+    let patched = match repo
+        .resolve_peer_operator(
             workspace_id,
-            &NewPeer {
-                name: format!("Scanned {unique}"),
-                handles: json!({}),
-                tier: PeerTier::NearPeer,
-                watch_for: vec![],
-                why: "shared genre doom metal".to_owned(),
-                proposed_by: "peer-act-graph".to_owned(),
-                confirmed: false,
-            },
-        )
-        .await?
-        .expect("the proposal lands");
-    let patched = repo
-        .resolve_peer(
-            workspace_id,
-            proposal.id,
+            crowdrelay_domain::PeerId::from_uuid(proposal_id),
             PeerStatus::Confirmed,
             None,
             Some(&PeerPatch {
@@ -209,8 +202,14 @@ async fn run_operator_path(pool: &PgPool) -> Result<(), Box<dyn std::error::Erro
                 watch_for: Some(vec!["tour_routing".to_owned()]),
                 tier: Some(PeerTier::Lateral),
             }),
+            &key("patch"),
+            None,
         )
-        .await?;
+        .await?
+    {
+        PeerOutcome::Applied(peer) => peer,
+        PeerOutcome::Replayed(_) => panic!("a fresh key must apply, not replay"),
+    };
     assert_eq!(patched.status, PeerStatus::Confirmed);
     assert_eq!(patched.handles, json!({"rss": "https://example.test/feed"}));
     assert_eq!(patched.watch_for, vec!["tour_routing".to_owned()]);
@@ -219,31 +218,26 @@ async fn run_operator_path(pool: &PgPool) -> Result<(), Box<dyn std::error::Erro
 
     // Fields on a reject are refused — the row is terminal, there is
     // nothing left to edit.
-    let second = repo
-        .create_peer(
-            workspace_id,
-            &NewPeer {
-                name: format!("Refuse {unique}"),
-                handles: json!({}),
-                tier: PeerTier::NearPeer,
-                watch_for: vec![],
-                why: "wrong fit".to_owned(),
-                proposed_by: "peer-act-graph".to_owned(),
-                confirmed: false,
-            },
-        )
-        .await?
-        .expect("the second proposal lands");
+    let second_id = common::seed_peer(
+        pool,
+        workspace_id.into_uuid(),
+        &format!("Refuse {unique}"),
+        "proposed",
+        None,
+    )
+    .await?;
     let with_fields = repo
-        .resolve_peer(
+        .resolve_peer_operator(
             workspace_id,
-            second.id,
+            crowdrelay_domain::PeerId::from_uuid(second_id),
             PeerStatus::Rejected,
             Some("not our scene"),
             Some(&PeerPatch {
                 tier: Some(PeerTier::Lateral),
                 ..PeerPatch::default()
             }),
+            &key("with-fields"),
+            None,
         )
         .await
         .expect_err("a rejection carrying edits is invalid");
@@ -253,7 +247,7 @@ async fn run_operator_path(pool: &PgPool) -> Result<(), Box<dyn std::error::Erro
     let resolved = match repo
         .resolve_peer_operator(
             workspace_id,
-            second.id,
+            crowdrelay_domain::PeerId::from_uuid(second_id),
             PeerStatus::Rejected,
             Some("not our scene"),
             None,
@@ -270,7 +264,7 @@ async fn run_operator_path(pool: &PgPool) -> Result<(), Box<dyn std::error::Erro
     match repo
         .resolve_peer_operator(
             workspace_id,
-            second.id,
+            crowdrelay_domain::PeerId::from_uuid(second_id),
             PeerStatus::Rejected,
             Some("not our scene"),
             None,
@@ -355,43 +349,22 @@ async fn run_proposals(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> 
     seed_peer_act(pool, "Listed Already", &["doom metal"]).await?;
     seed_peer_act(pool, "Refused Once", &["doom metal"]).await?;
     // A live peer already carrying the name is not re-proposed.
-    repo.create_peer(
-        workspace_id,
-        &NewPeer {
-            name: "listed already".to_owned(),
-            handles: json!({}),
-            tier: PeerTier::NearPeer,
-            watch_for: vec![],
-            why: "operator already watches".to_owned(),
-            proposed_by: "operator".to_owned(),
-            confirmed: true,
-        },
+    common::seed_peer(
+        pool,
+        workspace_id.into_uuid(),
+        "listed already",
+        "confirmed",
+        None,
     )
-    .await?
-    .expect("the standing peer lands");
+    .await?;
     // Nor is a refused name — the rejection row is the suppression record,
     // and the name match is case-insensitive on both sides.
-    let refused = repo
-        .create_peer(
-            workspace_id,
-            &NewPeer {
-                name: "REFUSED ONCE".to_owned(),
-                handles: json!({}),
-                tier: PeerTier::NearPeer,
-                watch_for: vec![],
-                why: "asked once".to_owned(),
-                proposed_by: "peer-act-graph".to_owned(),
-                confirmed: false,
-            },
-        )
-        .await?
-        .expect("the soon-refused proposal lands");
-    repo.resolve_peer(
-        workspace_id,
-        refused.id,
-        PeerStatus::Rejected,
+    common::seed_peer(
+        pool,
+        workspace_id.into_uuid(),
+        "REFUSED ONCE",
+        "rejected",
         Some("not our scene"),
-        None,
     )
     .await?;
 
