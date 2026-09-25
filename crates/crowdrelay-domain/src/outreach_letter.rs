@@ -17,7 +17,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::gig_letter::SenderIdentity;
+use crate::gig_letter::{LetterLanguage, SenderIdentity};
 use crate::outreach::{OutreachPhase, OutreachTargetKind};
 
 /// A finished letter — the wire shape every letter executor reads.
@@ -41,6 +41,33 @@ pub struct OutreachLetterInput<'a> {
     /// Where the target listens to it.
     pub pitch_url: &'a str,
     pub phase: OutreachPhase,
+    /// The language the recipient reads. See [`language_for_contact`].
+    pub language: LetterLanguage,
+}
+
+/// The language to write to a contact in, from the one fact the registry
+/// holds about where they are: the domain of their address. A `.pl` address
+/// reads Polish; anything else, including a free-mail address that says
+/// nothing about its owner, reads English.
+///
+/// In production on 2026-09-25, 99 of the act's 196 pitchable contacts had
+/// a `.pl` address — Polish zines, radio shows and webzines that received an
+/// English pitch from a Polish band. A whitelist, like
+/// [`LetterLanguage::for_country`]: a guess we have no copy for would be an
+/// English letter under a Polish label.
+#[must_use]
+pub fn language_for_contact(contact_email: &str) -> LetterLanguage {
+    let domain = contact_email
+        .rsplit_once('@')
+        .map_or("", |(_, domain)| domain)
+        .trim()
+        .trim_end_matches('.')
+        .to_ascii_lowercase();
+    if domain.ends_with(".pl") {
+        LetterLanguage::Polish
+    } else {
+        LetterLanguage::English
+    }
 }
 
 /// Why a letter could not be composed — each a missing fact, shown to the
@@ -98,10 +125,125 @@ pub fn compose_outreach_letter(
     if title.is_empty() || url.is_empty() {
         return Err(OutreachLetterRefusal::NoPitch);
     }
-    Ok(match input.phase {
-        OutreachPhase::Initial => initial(input, target, act, title, url, ask),
-        OutreachPhase::FollowUp => follow_up(input, target, act, title, url, ask),
+    Ok(match (input.language, input.phase) {
+        (LetterLanguage::English, OutreachPhase::Initial) => {
+            initial(input, target, act, title, url, ask)
+        }
+        (LetterLanguage::English, OutreachPhase::FollowUp) => {
+            follow_up(input, target, act, title, url, ask)
+        }
+        (LetterLanguage::Polish, OutreachPhase::Initial) => {
+            initial_pl(input, target, act, title, url)
+        }
+        (LetterLanguage::Polish, OutreachPhase::FollowUp) => {
+            follow_up_pl(input, target, act, title, url)
+        }
     })
+}
+
+/// The Polish ask, completing "chcielibyśmy zaproponować Wam {title} …".
+/// Same whitelist as [`purpose`]; the kinds `purpose` refuses never get here.
+fn purpose_pl(kind: OutreachTargetKind) -> &'static str {
+    match kind {
+        OutreachTargetKind::Playlist => "do Waszej playlisty",
+        OutreachTargetKind::Radio => "do anteny",
+        OutreachTargetKind::Press => "do omówienia lub recenzji",
+        OutreachTargetKind::Creator => "do wspólnego materiału albo prezentacji",
+        OutreachTargetKind::SupportSlot => "i zapytać o granie jako support",
+        OutreachTargetKind::Endorsement => "z prośbą o rekomendację",
+        OutreachTargetKind::MediaPatronage => "z prośbą o patronat medialny",
+        OutreachTargetKind::Agent | OutreachTargetKind::Label => "",
+    }
+}
+
+fn initial_pl(
+    input: &OutreachLetterInput<'_>,
+    target: &str,
+    act: &str,
+    title: &str,
+    url: &str,
+) -> OutreachLetter {
+    let mut lines = vec![
+        format!("Dzień dobry, {target},"),
+        String::new(),
+        format!(
+            "{} i chcielibyśmy zaproponować Wam {title} {}.",
+            introduction_pl(input.sender, act),
+            purpose_pl(input.target_kind),
+        ),
+        String::new(),
+        format!("Do posłuchania: {url}"),
+        String::new(),
+        "Jeśli to nie dla Was, nic nie szkodzi — odezwiemy się najwyżej jeszcze raz, \
+         a każda odpowiedź zatrzymuje dalsze wiadomości."
+            .to_owned(),
+    ];
+    lines.extend(sign_off_pl(input.sender, act));
+    OutreachLetter {
+        subject: truncate(format!("{act} — {title}"), MAX_SUBJECT),
+        body: lines.join("\n"),
+    }
+}
+
+fn follow_up_pl(
+    input: &OutreachLetterInput<'_>,
+    target: &str,
+    act: &str,
+    title: &str,
+    url: &str,
+) -> OutreachLetter {
+    let mut lines = vec![
+        format!("Dzień dobry, {target},"),
+        String::new(),
+        format!(
+            "Krótko wracamy do poprzedniej wiadomości w sprawie {title}. \
+             Jeśli to nie dla Was, krótkie „nie” też bardzo nam pomoże."
+        ),
+        String::new(),
+        format!("Do posłuchania: {url}"),
+    ];
+    lines.extend(sign_off_pl(input.sender, act));
+    OutreachLetter {
+        subject: truncate(format!("Przypomnienie: {act} — {title}"), MAX_SUBJECT),
+        body: lines.join("\n"),
+    }
+}
+
+/// "Piszemy w imieniu {act}{ — zespołu {style}}{ z miasta {home}}". The city
+/// is named after "z miasta" so it stays in the nominative: "z Wrocław" is
+/// not Polish, and declining a city name without a dictionary is a guess.
+fn introduction_pl(sender: &SenderIdentity, act: &str) -> String {
+    let style = sender
+        .style
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let home = sender
+        .home_city
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    match (style, home) {
+        (Some(style), Some(home)) => {
+            format!("Piszemy w imieniu {act} — zespołu {style} z miasta {home} —")
+        }
+        (Some(style), None) => format!("Piszemy w imieniu {act} — zespołu {style} —"),
+        (None, Some(home)) => format!("Piszemy w imieniu {act} z miasta {home}"),
+        (None, None) => format!("Piszemy w imieniu {act}"),
+    }
+}
+
+fn sign_off_pl(sender: &SenderIdentity, act: &str) -> Vec<String> {
+    let mut lines = vec![String::new(), "Pozdrawiamy,".to_owned(), act.to_owned()];
+    if let Some(url) = sender
+        .site_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|u| !u.is_empty())
+    {
+        lines.push(url.to_owned());
+    }
+    lines
 }
 
 /// What the target is being asked for, in the words the letter uses. `None`
@@ -245,6 +387,7 @@ mod tests {
             pitch_title: "our new single \"Rytuał\"",
             pitch_url: "https://virya.music/f/rytual",
             phase,
+            language: LetterLanguage::English,
         }
     }
 
@@ -327,6 +470,101 @@ mod tests {
                 Err(OutreachLetterRefusal::RepresentationTarget),
                 "{kind:?} must refuse — the listing carries that approach"
             );
+        }
+    }
+
+    #[test]
+    fn a_pl_address_reads_polish_and_everything_else_english() {
+        assert_eq!(
+            language_for_contact("redakcja@metalrulez.pl"),
+            LetterLanguage::Polish
+        );
+        assert_eq!(
+            language_for_contact("Radio@Onet.PL."),
+            LetterLanguage::Polish
+        );
+        assert_eq!(
+            language_for_contact("zine@gmail.com"),
+            LetterLanguage::English
+        );
+        assert_eq!(
+            language_for_contact("booking@club.de"),
+            LetterLanguage::English
+        );
+        // A `.pl` that is not the domain says nothing.
+        assert_eq!(
+            language_for_contact("jan.pl@example.com"),
+            LetterLanguage::English
+        );
+        assert_eq!(
+            language_for_contact("no-at-sign.pl"),
+            LetterLanguage::English
+        );
+    }
+
+    #[test]
+    fn a_polish_pitch_is_polish_end_to_end() {
+        let sender = sender();
+        let letter = compose_outreach_letter(&OutreachLetterInput {
+            language: LetterLanguage::Polish,
+            ..input(&sender, OutreachTargetKind::Press, OutreachPhase::Initial)
+        })
+        .expect("a complete input composes");
+        assert!(
+            letter
+                .body
+                .starts_with("Dzień dobry, Metal Playlists Weekly,")
+        );
+        assert!(letter.body.contains(
+            "Piszemy w imieniu VIRYA — zespołu modern metal z miasta Wrocław — i chcielibyśmy \
+             zaproponować Wam our new single \"Rytuał\" do omówienia lub recenzji."
+        ));
+        assert!(
+            letter
+                .body
+                .contains("Do posłuchania: https://virya.music/f/rytual")
+        );
+        assert!(
+            letter
+                .body
+                .ends_with("Pozdrawiamy,\nVIRYA\nhttps://virya.music")
+        );
+        assert!(
+            !letter.body.contains("Hi "),
+            "no English left in a Polish letter"
+        );
+        assert_eq!(letter.subject, "VIRYA — our new single \"Rytuał\"");
+    }
+
+    #[test]
+    fn a_polish_follow_up_says_so_in_the_subject() {
+        let sender = sender();
+        let letter = compose_outreach_letter(&OutreachLetterInput {
+            language: LetterLanguage::Polish,
+            ..input(&sender, OutreachTargetKind::Radio, OutreachPhase::FollowUp)
+        })
+        .expect("a complete input composes");
+        assert!(letter.subject.starts_with("Przypomnienie: VIRYA"));
+        assert!(
+            letter
+                .body
+                .contains("Krótko wracamy do poprzedniej wiadomości")
+        );
+    }
+
+    #[test]
+    fn every_pitchable_kind_has_a_polish_ask() {
+        for kind in [
+            OutreachTargetKind::Playlist,
+            OutreachTargetKind::Radio,
+            OutreachTargetKind::Press,
+            OutreachTargetKind::Creator,
+            OutreachTargetKind::SupportSlot,
+            OutreachTargetKind::Endorsement,
+            OutreachTargetKind::MediaPatronage,
+        ] {
+            assert!(purpose(kind).is_some());
+            assert!(!purpose_pl(kind).is_empty(), "{kind:?} has no Polish ask");
         }
     }
 }

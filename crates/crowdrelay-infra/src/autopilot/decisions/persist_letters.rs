@@ -150,15 +150,15 @@ async fn enrich_outreach_draft(
     };
 
     let ws = workspace_id.into_uuid();
-    let target = sqlx::query_as::<_, (String, String)>(
-        "SELECT display_name, target_kind FROM outreach_targets WHERE workspace_id = $1 AND id = $2",
+    let target = sqlx::query_as::<_, (String, String, String)>(
+        "SELECT display_name, target_kind, contact_email FROM outreach_targets WHERE workspace_id = $1 AND id = $2",
     )
     .bind(ws)
     .bind(target_id.into_uuid())
     .fetch_optional(&mut **transaction)
     .await
     .map_err(map_sqlx)?;
-    let Some((target_name, target_kind)) = target else {
+    let Some((target_name, target_kind, contact_email)) = target else {
         // A target the action names must exist — the candidate carried its id.
         return Err(RepositoryError::NotFound);
     };
@@ -180,6 +180,7 @@ async fn enrich_outreach_draft(
         pitch_title: &pitch_title,
         pitch_url: &pitch_url,
         phase: *phase,
+        language: crowdrelay_domain::outreach_letter::language_for_contact(&contact_email),
     }) {
         *draft = letter;
     }
