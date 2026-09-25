@@ -18,6 +18,7 @@ mod autopilot_bootstrap_allowance;
 mod autopilot_campaign_metrics;
 mod autopilot_capture_plans;
 mod autopilot_content_arc;
+mod autopilot_content_retry;
 mod autopilot_content_suggestion;
 mod autopilot_content_synergy;
 mod autopilot_control_plane;

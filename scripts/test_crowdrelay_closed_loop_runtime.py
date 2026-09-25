@@ -88,7 +88,9 @@ class ViryaOsClosedLoopRuntime(unittest.TestCase):
         ).read_text()
         execution = (ROOT / 'crates/crowdrelay-infra/src/autopilot/execution_capabilities.rs').read_text()
         runtime = (ROOT / 'crates/crowdrelay-infra/src/autopilot/runtime.rs').read_text()
-        snapshots = (ROOT / 'crates/crowdrelay-infra/src/autopilot/operations/snapshots.rs').read_text()
+        # The content-supply loader, whose completed/in-flight reads these
+        # assertions pin, moved out of `snapshots.rs` into its own module.
+        snapshots = (ROOT / 'crates/crowdrelay-infra/src/autopilot/operations/content_supply_snapshots.rs').read_text()
         self.assertIn('payload_requires_executor', execution)
         self.assertIn('if !payload_requires_executor(&action.payload)', actions)
         succeeded = runtime[runtime.index('ExecutorReportStatus::Succeeded =>'):runtime.index('ExecutorReportStatus::Accepted | ExecutorReportStatus::Executing')]

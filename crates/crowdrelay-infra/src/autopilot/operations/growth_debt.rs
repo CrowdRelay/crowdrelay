@@ -851,6 +851,7 @@ mod tests {
             release_tier: None,
             completed_artifacts: completed,
             in_flight_artifacts: Vec::new(),
+            failed_artifacts: Vec::new(),
             social_post: None,
         }
     }

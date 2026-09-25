@@ -676,8 +676,17 @@ fn content_candidates(
     match evaluate_content_supply(snapshot, *domain_policy, now) {
         ContentSupplyDecision::Request {
             artifact,
+            attempt,
             confidence,
         } => {
+            // The first request keeps the key it always had; a retry after a
+            // failure needs its own, or it dedupes onto the failed action and
+            // nothing is written (see `FailedArtifact`).
+            let retry = if attempt == 0 {
+                String::new()
+            } else {
+                format!(":attempt{attempt}")
+            };
             // Producing an artifact is internal work: the rendered copy
             // lands in the content library and every use of it — a push, a
             // feed post, a newsletter — gates on its own approval action.
@@ -704,11 +713,11 @@ fn content_candidates(
                     template_key: artifact.template_key().to_owned(),
                 },
                 decision_key: format!(
-                    "decision:content:v{}:{}:sv{}:{:?}",
+                    "decision:content:v{}:{}:sv{}:{:?}{retry}",
                     policy.version, snapshot.source_id, snapshot.source_version, artifact
                 ),
                 action_idempotency_key: format!(
-                    "action:content:{}:sv{}:{:?}",
+                    "action:content:{}:sv{}:{:?}{retry}",
                     snapshot.source_id, snapshot.source_version, artifact
                 ),
             }])
