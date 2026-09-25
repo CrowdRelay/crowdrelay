@@ -703,7 +703,7 @@ async fn run(database: PgPool, config: &Config, standby: bool) -> Result<()> {
         .filter(|v| !v.trim().is_empty());
     let growth_metric_sync = GrowthMetricSyncWorker::new(
         database.clone(),
-        youtube_api_key,
+        youtube_api_key.clone(),
         facebook_page_access_token.clone(),
         config.agent_service_url.clone(),
         agent_service_auth_key.clone(),
@@ -747,11 +747,12 @@ async fn run(database: PgPool, config: &Config, standby: bool) -> Result<()> {
         workspace_id.into_uuid(),
     );
 
-    // Video source sync — watches each connected YouTube channel's public
-    // Atom feed and registers new uploads as trusted `video` content sources.
+    // Video source sync — watches each connected YouTube channel's uploads
+    // (Data API when the key is set, the Atom feed otherwise) and registers new uploads as trusted `video` content sources.
     // This is how a new video reaches the community loop on its own.
-    let video_source_sync = VideoSourceSyncWorker::new(database.clone(), workspace_id.into_uuid())
-        .context("invalid video source sync worker configuration")?;
+    let video_source_sync =
+        VideoSourceSyncWorker::new(database.clone(), workspace_id.into_uuid(), youtube_api_key)
+            .context("invalid video source sync worker configuration")?;
 
     // Release source sync — watches connected Spotify/Bandcamp/SoundCloud
     // accounts and registers new releases as trusted `release` content

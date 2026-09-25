@@ -1,5 +1,13 @@
-//! Video source sync: watch each connected YouTube channel's public Atom feed
-//! and register new uploads as trusted `video` content sources.
+//! Video source sync: watch each connected YouTube channel's uploads and
+//! register new ones as trusted `video` content sources.
+//!
+//! Uploads are read from the Data API's uploads playlist when
+//! `CROWDRELAY_YOUTUBE_API_KEY` is set, and from the public Atom feed
+//! otherwise. The feed was the only path until 2026-09-25, when
+//! `youtube.com/feeds/videos.xml` answered 404 for every channel, Google's
+//! own included, from production and from a residential line alike. Every
+//! sweep failed, so no new video reached the community loop. The API costs
+//! one quota unit per channel per sweep and carries the same fields.
 //!
 //! This is how a new music video reaches the community loop without a human
 //! pasting a link: the feed entry becomes a `content_sources` row the
@@ -63,6 +71,9 @@ pub struct VideoSourceSyncWorker {
     pool: PgPool,
     http_client: reqwest::Client,
     workspace_id: Uuid,
+    /// The Data API key the metric sync already reads with. Present, uploads
+    /// come from the API; absent, from the Atom feed.
+    youtube_api_key: Option<String>,
 }
 
 /// The longest description kept as a voice sample.
@@ -88,7 +99,11 @@ struct FeedEntry {
 }
 
 impl VideoSourceSyncWorker {
-    pub fn new(pool: PgPool, workspace_id: Uuid) -> Result<Self, VideoSourceSyncError> {
+    pub fn new(
+        pool: PgPool,
+        workspace_id: Uuid,
+        youtube_api_key: Option<String>,
+    ) -> Result<Self, VideoSourceSyncError> {
         let http_client = reqwest::Client::builder()
             .connect_timeout(HTTP_TIMEOUT.min(Duration::from_secs(10)))
             .timeout(HTTP_TIMEOUT)
@@ -102,6 +117,7 @@ impl VideoSourceSyncWorker {
             pool,
             http_client,
             workspace_id,
+            youtube_api_key,
         })
     }
 
@@ -187,20 +203,10 @@ impl VideoSourceSyncWorker {
     }
 
     async fn sync_channel(&self, channel_id: &str) -> Result<(), String> {
-        let url = format!("https://www.youtube.com/feeds/videos.xml?channel_id={channel_id}");
-        let body = self
-            .http_client
-            .get(&url)
-            .send()
-            .await
-            .map_err(|e| format!("feed fetch failed: {e}"))?
-            .error_for_status()
-            .map_err(|e| format!("feed returned {e}"))?
-            .text()
-            .await
-            .map_err(|e| format!("feed body read failed: {e}"))?;
-
-        let entries = parse_feed(&body);
+        let entries = match self.youtube_api_key.as_deref() {
+            Some(key) => self.uploads_via_api(channel_id, key).await?,
+            None => self.uploads_via_feed(channel_id).await?,
+        };
         for entry in entries.into_iter().take(MAX_ENTRIES_PER_FEED) {
             // Only full videos become share sources — a Short is a format the
             // community strategy never turns into a thread post. The probe
@@ -216,6 +222,53 @@ impl VideoSourceSyncWorker {
             self.upsert_video(channel_id, &entry).await?;
         }
         Ok(())
+    }
+
+    async fn uploads_via_feed(&self, channel_id: &str) -> Result<Vec<FeedEntry>, String> {
+        let url = format!("https://www.youtube.com/feeds/videos.xml?channel_id={channel_id}");
+        let body = self
+            .http_client
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| format!("feed fetch failed: {e}"))?
+            .error_for_status()
+            .map_err(|e| format!("feed returned {e}"))?
+            .text()
+            .await
+            .map_err(|e| format!("feed body read failed: {e}"))?;
+        Ok(parse_feed(&body))
+    }
+
+    /// The channel's uploads playlist through the Data API. A channel id is
+    /// `UC…` and its uploads playlist is the same id with `UU`; anything else
+    /// is not a channel id this can read. The key rides in the query string,
+    /// so every error is stripped of its URL before it can reach a log.
+    async fn uploads_via_api(&self, channel_id: &str, key: &str) -> Result<Vec<FeedEntry>, String> {
+        let Some(suffix) = channel_id.strip_prefix("UC") else {
+            return Err(format!("not a YouTube channel id: {channel_id}"));
+        };
+        let response = self
+            .http_client
+            .get("https://www.googleapis.com/youtube/v3/playlistItems")
+            .query(&[
+                ("part", "snippet,contentDetails"),
+                ("maxResults", "25"),
+                ("playlistId", &format!("UU{suffix}")),
+                ("key", key),
+            ])
+            .send()
+            .await
+            .map_err(|e| format!("uploads fetch failed: {}", e.without_url()))?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(format!("YouTube playlistItems API returned HTTP {status}"));
+        }
+        let body: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|e| format!("uploads body read failed: {}", e.without_url()))?;
+        Ok(parse_playlist_items(&body))
     }
 
     /// Whether a `youtube:{id}` source row already exists for this workspace.
@@ -393,6 +446,52 @@ fn parse_feed(body: &str) -> Vec<FeedEntry> {
     entries
 }
 
+/// The same entries from a Data API `playlistItems` response.
+///
+/// `contentDetails.videoPublishedAt` is when the video went public;
+/// `snippet.publishedAt` is when it joined the playlist, which for the
+/// uploads playlist is the upload, not the release. A private or deleted
+/// item carries no `videoPublishedAt` and is skipped, the same as a feed
+/// entry missing its id: it is not a video anyone can be sent to.
+fn parse_playlist_items(body: &serde_json::Value) -> Vec<FeedEntry> {
+    let Some(items) = body.get("items").and_then(serde_json::Value::as_array) else {
+        return Vec::new();
+    };
+    items
+        .iter()
+        .filter_map(|item| {
+            let snippet = item.get("snippet")?;
+            let video_id = snippet
+                .get("resourceId")?
+                .get("videoId")?
+                .as_str()?
+                .trim()
+                .to_owned();
+            let title = snippet.get("title")?.as_str()?.trim().to_owned();
+            let published = item
+                .get("contentDetails")?
+                .get("videoPublishedAt")?
+                .as_str()
+                .and_then(|value| {
+                    OffsetDateTime::parse(value, &time::format_description::well_known::Rfc3339)
+                        .ok()
+                })?;
+            let description = snippet
+                .get("description")
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|text| !text.is_empty())
+                .map(|text| text.chars().take(MAX_DESCRIPTION_CHARS).collect());
+            (!video_id.is_empty() && !title.is_empty()).then_some(FeedEntry {
+                video_id,
+                title,
+                published: Some(published),
+                description,
+            })
+        })
+        .collect()
+}
+
 /// The shorts probe's answer, decided on status alone: YouTube serves the
 /// /shorts/{id} URL for a Short and redirects a full video to /watch.
 fn is_short_status(status: reqwest::StatusCode) -> bool {
@@ -453,6 +552,73 @@ mod tests {
         assert_eq!(entries[0].title, "Virya — Ashes (Official Video)");
         assert_eq!(entries[1].title, "Live at Mystic Festival");
         assert!(entries[0].published.is_some());
+    }
+
+    /// The Data API path yields the same entries the feed did: the band's
+    /// description, the release time rather than the playlist time, and no
+    /// private or deleted uploads.
+    #[test]
+    fn playlist_items_become_the_same_entries() {
+        let long = "ą".repeat(MAX_DESCRIPTION_CHARS + 10);
+        let body = serde_json::json!({
+            "items": [
+                {
+                    "snippet": {
+                        "title": " Virya — Ashes (Official Video) ",
+                        "description": "Wrote this one in a week.",
+                        "publishedAt": "2026-09-01T00:00:00Z",
+                        "resourceId": { "kind": "youtube#video", "videoId": "abc123XYZ_-" }
+                    },
+                    "contentDetails": { "videoId": "abc123XYZ_-", "videoPublishedAt": "2026-08-30T18:00:00Z" }
+                },
+                {
+                    "snippet": {
+                        "title": "Private video",
+                        "description": "This video is private.",
+                        "resourceId": { "kind": "youtube#video", "videoId": "hidden00001" }
+                    },
+                    "contentDetails": { "videoId": "hidden00001" }
+                },
+                {
+                    "snippet": {
+                        "title": "Live at Mystic Festival",
+                        "description": "   ",
+                        "resourceId": { "kind": "youtube#video", "videoId": "live0000001" }
+                    },
+                    "contentDetails": { "videoId": "live0000001", "videoPublishedAt": "2026-08-02T12:00:00Z" }
+                },
+                {
+                    "snippet": {
+                        "title": "Long notes",
+                        "description": long,
+                        "resourceId": { "kind": "youtube#video", "videoId": "long0000001" }
+                    },
+                    "contentDetails": { "videoId": "long0000001", "videoPublishedAt": "2026-07-02T12:00:00Z" }
+                }
+            ]
+        });
+        let entries = parse_playlist_items(&body);
+        assert_eq!(entries.len(), 3, "the private upload is skipped");
+        assert_eq!(entries[0].video_id, "abc123XYZ_-");
+        assert_eq!(entries[0].title, "Virya — Ashes (Official Video)");
+        assert_eq!(
+            entries[0].published,
+            Some(time::macros::datetime!(2026-08-30 18:00 UTC)),
+            "release time, not the playlist insertion time"
+        );
+        assert_eq!(
+            entries[0].description.as_deref(),
+            Some("Wrote this one in a week.")
+        );
+        assert_eq!(
+            entries[1].description, None,
+            "a blank description is absent"
+        );
+        assert_eq!(
+            entries[2].description.as_ref().map(|d| d.chars().count()),
+            Some(MAX_DESCRIPTION_CHARS)
+        );
+        assert!(parse_playlist_items(&serde_json::json!({})).is_empty());
     }
 
     #[test]

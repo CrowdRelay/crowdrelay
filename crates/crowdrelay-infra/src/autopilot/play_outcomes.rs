@@ -204,6 +204,8 @@ impl PostgresAutopilotRepository {
         now: OffsetDateTime,
     ) -> Result<Vec<ClaimedPlayOutcome>, RepositoryError> {
         self.bounded(async {
+            super::outcome_recovery::recover_stale_play_outcomes(&self.pool, workspace_id, now)
+                .await?;
             let rows = sqlx::query_as::<_, PlayOutcomeRow>(
                 r#"
                 WITH due AS (
@@ -1069,6 +1071,8 @@ impl PostgresAutopilotRepository {
         now: OffsetDateTime,
     ) -> Result<Vec<ClaimedWaveOutcome>, RepositoryError> {
         self.bounded(async {
+            super::outcome_recovery::recover_stale_wave_outcomes(&self.pool, workspace_id, now)
+                .await?;
             let rows = sqlx::query_as::<_, WaveOutcomeRow>(
                 r#"
                 WITH due AS (
@@ -1076,6 +1080,7 @@ impl PostgresAutopilotRepository {
                     FROM outreach_wave_outcomes AS outcome
                     WHERE outcome.workspace_id = $1
                       AND outcome.status = 'pending'
+                      AND outcome.available_at <= $2
                       AND outcome.window_end <= $2
                     ORDER BY outcome.available_at
                     LIMIT $3
@@ -1247,10 +1252,13 @@ impl PostgresAutopilotRepository {
             sqlx::query(
                 r#"
                 UPDATE outreach_wave_outcomes
-                SET status = CASE WHEN $4 THEN 'pending' ELSE 'failed' END,
+                SET status = CASE WHEN $4 AND attempt_count < $6 THEN 'pending' ELSE 'failed' END,
                     last_error_kind = $3,
                     last_error_retryable = $4,
-                    finished_at = CASE WHEN $4 THEN NULL ELSE $5 END
+                    available_at = CASE WHEN $4 AND attempt_count < $6
+                        THEN $5 + INTERVAL '6 hours' ELSE available_at END,
+                    started_at = CASE WHEN $4 AND attempt_count < $6 THEN NULL ELSE started_at END,
+                    finished_at = CASE WHEN $4 AND attempt_count < $6 THEN NULL ELSE $5 END
                 WHERE workspace_id = $1 AND id = $2 AND status = 'processing'
                 "#,
             )
@@ -1259,6 +1267,10 @@ impl PostgresAutopilotRepository {
             .bind(error_kind)
             .bind(retryable)
             .bind(now)
+            // Same cap and backoff as a play outcome. Without them a retryable
+            // failure was pending again at once and, the claim not reading
+            // available_at, re-claimed every cycle for ever.
+            .bind(super::outcome_recovery::MAX_OUTCOME_ATTEMPTS)
             .execute(&self.pool)
             .await
             .map_err(map_sqlx)?;

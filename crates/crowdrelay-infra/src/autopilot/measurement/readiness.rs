@@ -158,21 +158,21 @@ pub(super) async fn observable_community(
     };
     // The handle, and the evidence that the post reached the community.
     // `posted_at` is stamped when the operator registers the published URL,
-    // so a row that is still `awaiting_manual_post` correctly yields nothing.
-    let community: Option<String> = sqlx::query_scalar::<_, String>(
+    // so a row that is still `awaiting_manual_post` correctly reads false.
+    let community: Option<(String, bool)> = sqlx::query_as::<_, (String, bool)>(
         r#"
-        SELECT target.display_name
+        SELECT target.display_name,
+               EXISTS (
+                   SELECT 1
+                   FROM community_posts AS post
+                   WHERE post.workspace_id = target.workspace_id
+                     AND post.target_id = target.id
+                     AND post.status = 'posted'
+                     AND post.posted_at IS NOT NULL
+               ) AS published
         FROM agent_outreach_targets AS target
         WHERE target.workspace_id = $1
           AND target.id = $2
-          AND EXISTS (
-              SELECT 1
-              FROM community_posts AS post
-              WHERE post.workspace_id = target.workspace_id
-                AND post.target_id = target.id
-                AND post.status = 'posted'
-                AND post.posted_at IS NOT NULL
-          )
         "#,
     )
     .bind(workspace_id.into_uuid())
@@ -183,7 +183,20 @@ pub(super) async fn observable_community(
     // The unit is a community, so the workspace-level fallback would answer a
     // different question about a different population. Nothing published means
     // no outcome exists, and that is not the same fact as an outcome of zero.
-    community.map_or(Err(RepositoryError::NotFound), |handle| Ok(Some(handle)))
+    //
+    // The two refusals are kept apart. A community with no published post
+    // is `dispatch_never_published`, the kind every other never-reached
+    // dispatch records. It used to share `NotFound` with a target row that
+    // is genuinely gone, so production's measurement ledger listed fourteen
+    // community measurements as `subject_not_found`: a missing row nobody
+    // could find, when every one of them was a draft nobody had posted.
+    match community {
+        None => Err(RepositoryError::NotFound),
+        Some((_, false)) => Err(RepositoryError::ConflictBecause(
+            super::AutopilotMeasurementKind::NEVER_PUBLISHED,
+        )),
+        Some((handle, true)) => Ok(Some(handle)),
+    }
 }
 
 /// Marks an action's evidence complete once every measurement it is waiting on

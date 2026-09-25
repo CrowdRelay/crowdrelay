@@ -11,7 +11,8 @@ use std::time::Duration;
 use crate::common;
 use crowdrelay_application::autopilot::{
     AutopilotControlRepository, AutopilotDecisionRepository, AutopilotPlayLedgerRepository,
-    AutopilotPlayOutcomeRepository, PlayAnchorRef, PlayStart, PlayStepPlan, assess_play_claim,
+    AutopilotPlayOutcomeRepository, AutopilotWaveOutcomeRepository, PlayAnchorRef, PlayStart,
+    PlayStepPlan, assess_play_claim,
 };
 use crowdrelay_domain::{
     EventId, WorkspaceId,
@@ -772,5 +773,137 @@ async fn the_brief_reports_metric_outcomes_alongside_play_outcomes()
     assert_eq!(movement.claim, "attributed");
     assert_eq!(movement.assessment, "improved");
     assert_eq!(movement.delta_basis_points, Some(4000));
+    Ok(())
+}
+
+/// A claimed outcome whose worker died — a deploy between claim and settle —
+/// is claimable again once stale, and failed once it has died on every
+/// attempt. It used to stay `processing` for good.
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn a_claim_whose_worker_died_is_recovered_not_stranded()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = fixture("outcome-stale").await?;
+    let start = play_start(&fixture, 10);
+    assert!(
+        fixture
+            .repository
+            .start_play(fixture.workspace_id, &start)
+            .await?
+    );
+    let after = fixture.now + time::Duration::days(11);
+    let claimed = fixture
+        .repository
+        .claim_due_play_outcomes(fixture.workspace_id, 8, after)
+        .await?;
+    assert_eq!(claimed.len(), 2);
+    // The worker dies here: nothing settles either claim.
+
+    let too_soon = after + time::Duration::minutes(5);
+    assert!(
+        fixture
+            .repository
+            .claim_due_play_outcomes(fixture.workspace_id, 8, too_soon)
+            .await?
+            .is_empty(),
+        "a claim still inside its window belongs to the worker holding it"
+    );
+
+    // One of the two has already died four times before this one.
+    sqlx::query("UPDATE play_outcomes SET attempt_count = 5 WHERE id = $1")
+        .bind(claimed[0].id)
+        .execute(&fixture.pool)
+        .await?;
+    let later = after + time::Duration::minutes(20);
+    let reclaimed = fixture
+        .repository
+        .claim_due_play_outcomes(fixture.workspace_id, 8, later)
+        .await?;
+    assert_eq!(
+        reclaimed.len(),
+        1,
+        "the stale claim with attempts left comes back"
+    );
+    assert_eq!(reclaimed[0].id, claimed[1].id);
+    assert_eq!(reclaimed[0].attempt_number, 2);
+    let exhausted: (String, Option<String>) =
+        sqlx::query_as("SELECT status, last_error_kind FROM play_outcomes WHERE id = $1")
+            .bind(claimed[0].id)
+            .fetch_one(&fixture.pool)
+            .await?;
+    assert_eq!(exhausted.0, "failed");
+    assert_eq!(exhausted.1.as_deref(), Some("stale_retry_exhausted"));
+
+    // Wave outcomes: the same recovery, plus a retryable failure that backs
+    // off and stops instead of being re-claimed every cycle.
+    let wave_id = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO outreach_waves (id, workspace_id, anchor_kind, anchor_id, anchor_at, target_kind, capacity)
+         VALUES ($1, $2, 'event', $3, $4, 'press', 5)",
+    )
+    .bind(wave_id)
+    .bind(fixture.workspace_id.into_uuid())
+    .bind(fixture.event_id.into_uuid())
+    .bind(fixture.now + time::Duration::days(30))
+    .execute(&fixture.pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO outreach_wave_outcomes (workspace_id, wave_id, target_kind, window_start, window_end, pitches_sent)
+         VALUES ($1, $2, 'press', $3, $4, 3)",
+    )
+    .bind(fixture.workspace_id.into_uuid())
+    .bind(wave_id)
+    .bind(fixture.now - time::Duration::days(20))
+    .bind(fixture.now - time::Duration::days(1))
+    .execute(&fixture.pool)
+    .await?;
+    // The row's available_at defaults to the database clock, a moment after
+    // the fixture's; claim just past it.
+    let first = fixture.now + time::Duration::minutes(1);
+    let waves = fixture
+        .repository
+        .claim_due_wave_outcomes(fixture.workspace_id, 8, first)
+        .await?;
+    assert_eq!(waves.len(), 1);
+    let stale = first + time::Duration::minutes(20);
+    let waves = fixture
+        .repository
+        .claim_due_wave_outcomes(fixture.workspace_id, 8, stale)
+        .await?;
+    assert_eq!(waves.len(), 1, "a stale wave claim comes back");
+    assert_eq!(waves[0].attempt_number, 2);
+
+    fixture
+        .repository
+        .fail_wave_outcome(fixture.workspace_id, waves[0].id, "transient", true, stale)
+        .await?;
+    assert!(
+        fixture
+            .repository
+            .claim_due_wave_outcomes(fixture.workspace_id, 8, stale + time::Duration::minutes(1))
+            .await?
+            .is_empty(),
+        "a retryable failure waits out its backoff"
+    );
+    sqlx::query("UPDATE outreach_wave_outcomes SET attempt_count = 5 WHERE id = $1")
+        .bind(waves[0].id)
+        .execute(&fixture.pool)
+        .await?;
+    let last = stale + time::Duration::hours(7);
+    let waves = fixture
+        .repository
+        .claim_due_wave_outcomes(fixture.workspace_id, 8, last)
+        .await?;
+    assert_eq!(waves.len(), 1);
+    fixture
+        .repository
+        .fail_wave_outcome(fixture.workspace_id, waves[0].id, "transient", true, last)
+        .await?;
+    let status: String =
+        sqlx::query_scalar("SELECT status FROM outreach_wave_outcomes WHERE id = $1")
+            .bind(waves[0].id)
+            .fetch_one(&fixture.pool)
+            .await?;
+    assert_eq!(status, "failed", "the sixth attempt is not scheduled");
     Ok(())
 }

@@ -333,7 +333,11 @@ impl DiscordExecutorWorker {
         // payload — it's on the `agent_service_tasks` row referenced by
         // `payload->>'task_id'`. We join through it to filter on
         // `template_id = 'discord-poster'`.
-        sqlx::query(
+        // Under a savepoint: without an agent service the joined table does
+        // not exist, and there is nothing to materialise — see
+        // `crate::foreign_relation`. The claim below still runs.
+        let mut materialize = sqlx::Acquire::begin(&mut *tx).await?;
+        let materialized = sqlx::query(
             r#"
             INSERT INTO discord_posts (workspace_id, action_id, channel_id, status)
             SELECT
@@ -358,8 +362,15 @@ impl DiscordExecutorWorker {
             "#,
         )
         .bind(ws)
-        .execute(&mut *tx)
-        .await?;
+        .execute(&mut *materialize)
+        .await;
+        match materialized {
+            Ok(_) => materialize.commit().await?,
+            Err(error) if crate::foreign_relation::is_undefined_table(&error) => {
+                materialize.rollback().await?;
+            }
+            Err(error) => return Err(error.into()),
+        }
 
         // Step 2: Claim pending and rate_limited (past backoff) rows.
         let rows = sqlx::query_as::<_, ClaimedAction>(
