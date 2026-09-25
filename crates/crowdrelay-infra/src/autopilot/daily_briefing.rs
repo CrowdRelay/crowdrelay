@@ -20,6 +20,7 @@
 //! system has nothing to say, the briefing says so.
 
 mod artifact_ask;
+mod growth_pulse;
 mod join_ask_setup;
 
 use super::{team::queue_team_email_action, *};
@@ -873,6 +874,8 @@ async fn compose_briefing(
         }
         body.push('\n');
     }
+
+    growth_pulse::growth_pulse_lines(tx, ws, locale, &mut sections_map, &mut body).await?;
 
     if awaiting_report_total > 0 {
         sections_map.insert("awaiting_report".to_owned(), awaiting_report_total.into());

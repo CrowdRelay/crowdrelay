@@ -123,6 +123,20 @@ impl AutopilotDecisionRepository for PostgresAutopilotRepository {
         self.load_outreach_snapshots_impl(workspace_id, now).await
     }
 
+    async fn load_unanswered_reply_snapshots(
+        &self,
+        workspace_id: WorkspaceId,
+        now: OffsetDateTime,
+    ) -> Result<Vec<crowdrelay_domain::reply_rescue::UnansweredReplySnapshot>, RepositoryError>
+    {
+        self.bounded(operations::load_unanswered_reply_snapshots(
+            self,
+            workspace_id,
+            now,
+        ))
+        .await
+    }
+
     async fn load_content_supply_snapshots(
         &self,
         workspace_id: WorkspaceId,

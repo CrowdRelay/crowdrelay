@@ -114,6 +114,12 @@ struct CycleCounts {
     beacon_refusals: usize,
     beacons_unresolved_city: u64,
     beacons_failed: u64,
+    /// Outreach-log rows: sends and replies written, rows already known,
+    /// drafts skipped, contacts no target carries, and writes that failed.
+    outreach_sends_recorded: u64,
+    outreach_replies_recorded: u64,
+    outreach_unmatched: u64,
+    outreach_failed: u64,
 }
 
 impl GithubRegistrySyncWorker {
@@ -274,6 +280,10 @@ impl GithubRegistrySyncWorker {
                     counts.beacon_refusals += file_counts.beacon_refusals;
                     counts.beacons_unresolved_city += file_counts.beacons_unresolved_city;
                     counts.beacons_failed += file_counts.beacons_failed;
+                    counts.outreach_sends_recorded += file_counts.outreach_sends_recorded;
+                    counts.outreach_replies_recorded += file_counts.outreach_replies_recorded;
+                    counts.outreach_unmatched += file_counts.outreach_unmatched;
+                    counts.outreach_failed += file_counts.outreach_failed;
                 }
                 Err(error) => {
                     counts.files_failed += 1;
@@ -310,6 +320,10 @@ impl GithubRegistrySyncWorker {
             beacon_refusals = counts.beacon_refusals,
             beacons_unresolved_city = counts.beacons_unresolved_city,
             beacons_failed = counts.beacons_failed,
+            outreach_sends = counts.outreach_sends_recorded,
+            outreach_replies = counts.outreach_replies_recorded,
+            outreach_unmatched = counts.outreach_unmatched,
+            outreach_failed = counts.outreach_failed,
             "github registry sync cycle"
         );
     }
@@ -391,12 +405,14 @@ impl GithubRegistrySyncWorker {
 
         let bytes = self.download_file(&entry.path).await?;
         let lower = entry.name.to_ascii_lowercase();
+        let single =
+            |grid: Vec<Vec<String>>| vec![crate::sheet_intake::SheetGrid { name: None, grid }];
         let sheets = if lower.ends_with(".xlsx") {
             parse_xlsx_sheets(&bytes)?
         } else if lower.ends_with(".tsv") {
-            parse_delimited(&bytes, b'\t').map(|g| vec![g])?
+            parse_delimited(&bytes, b'\t').map(single)?
         } else {
-            parse_delimited(&bytes, b',').map(|g| vec![g])?
+            parse_delimited(&bytes, b',').map(single)?
         };
 
         let harvest = harvest_grids(
@@ -430,6 +446,10 @@ impl GithubRegistrySyncWorker {
         counts.beacon_refusals = harvest.beacon_refusals;
         counts.beacons_unresolved_city = harvest.beacons_unresolved_city;
         counts.beacons_failed = harvest.beacons_failed;
+        counts.outreach_sends_recorded = harvest.outreach_sends_recorded;
+        counts.outreach_replies_recorded = harvest.outreach_replies_recorded;
+        counts.outreach_unmatched = harvest.outreach_unmatched;
+        counts.outreach_failed = harvest.outreach_failed;
         let contacts = harvest.contacts;
         let saw_email_column = harvest.saw_email_column;
         let rows_read = harvest.rows_read;
@@ -439,7 +459,8 @@ impl GithubRegistrySyncWorker {
         let row_failures = harvest.venues_failed
             + harvest.peer_acts_failed
             + harvest.agents_failed
-            + harvest.beacons_failed;
+            + harvest.beacons_failed
+            + harvest.outreach_failed;
 
         // A re-listed file is the truth about its rows: contacts it no
         // longer carries mark disappeared, exactly like a Drive file.

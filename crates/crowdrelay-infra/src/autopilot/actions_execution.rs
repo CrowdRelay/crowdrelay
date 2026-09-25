@@ -279,6 +279,15 @@ impl PostgresAutopilotRepository {
                     )
                     .await?;
                 }
+                AutopilotActionPayload::RequestOutreachReply { .. } => {
+                    operations::execute_outreach_reply(
+                        &mut transaction,
+                        workspace_id,
+                        action,
+                        now,
+                    )
+                    .await?;
+                }
                 AutopilotActionPayload::RequestRepresentationApproach {
                     target_id,
                     target_version,
@@ -433,6 +442,19 @@ impl PostgresAutopilotRepository {
                         workspace_id,
                         action.id,
                         *agent_id,
+                        now,
+                    )
+                    .await?;
+                }
+                // Every approach the approval covered re-runs its own gates
+                // inside the wave's transaction — one moved gate fails the
+                // wave rather than sending the rest of a batch the approval
+                // never priced separately.
+                AutopilotActionPayload::RequestBookingAgentApproachWave { .. } => {
+                    operations::execute_booking_agent_approach_wave(
+                        &mut transaction,
+                        workspace_id,
+                        action,
                         now,
                     )
                     .await?;

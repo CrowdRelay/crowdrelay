@@ -16,7 +16,7 @@
     },
     {
       "parameters": {
-        "jsCode": "// One event, one letter, one named target — the executor sends the words\n// the approval read, verbatim, to the address the sending lock resolved.\n//\n// This node does not write any of the letter. CrowdRelay composed it when\n// the action was written — the words the operator approved ride in `draft`,\n// and a payload without one is refused rather than filled in here. The pitch\n// itself is the tenant's release plan, not an environment variable.\nconst e = $json;\nif (!e || e.type !== 'crowdrelay.outreach.requested' || e.version !== 1) {\n  throw new Error('outreach refused: unsupported event');\n}\nconst d = e.data ?? {};\nconst actionId = String(d.action_id || '').trim();\nconst draft = d.draft || {};\nconst subject = String(draft.subject || '').trim();\nconst body = String(draft.body || '').trim();\nif (!actionId || !d.target_id || !d.target_name || !d.phase || !d.template_key) {\n  throw new Error('outreach refused: invalid intent');\n}\n// The refusal that keeps the promise: no approved words, no send.\nif (!subject || !body) {\n  throw new Error(\n    'outreach refused: no approved letter in the payload — nothing may compose one here'\n  );\n}\nconst email = String(d.contact_email || '').trim();\nif (!email.includes('@')) {\n  throw new Error('outreach refused: target without contact_email');\n}\n// A verified free-form route, when the target has one, is the address the\n// letter takes instead of Gmail. The letter itself does not change.\nconst routes = JSON.parse($env.VIRYA_OUTREACH_FORM_ROUTES_JSON || '{}');\nconst route = routes[String(d.target_id)] ?? null;\nreturn [{ json: {\n  event_id: e.id,\n  action_id: actionId,\n  target_id: String(d.target_id),\n  target_name: String(d.target_name),\n  contact_email: email,\n  phase: String(d.phase),\n  template_key: String(d.template_key),\n  route,\n  SendSubject: subject.slice(0, 220),\n  SendBody: body,\n}}];"
+        "jsCode": "// One event, one letter, one named target — the executor sends the words\n// the approval read, verbatim, to the address the sending lock resolved.\n//\n// This node does not write any of the letter. CrowdRelay composed it when\n// the action was written — the words the operator approved ride in `draft`,\n// and a payload without one is refused rather than filled in here.\n//\n// Two event types share this transport:\n//  - crowdrelay.outreach.requested        — the pitch (phase, template_key)\n//  - crowdrelay.outreach.reply_requested  — an answer to somebody who wrote\n//    back (answers_interaction_id, no phase/template). A reply always takes\n//    the mailbox: a form route is a pitch transport and never applies.\nconst e = $json;\nconst isPitch = e && e.type === 'crowdrelay.outreach.requested';\nconst isReply = e && e.type === 'crowdrelay.outreach.reply_requested';\nif (!e || (!isPitch && !isReply) || e.version !== 1) {\n  throw new Error('outreach refused: unsupported event');\n}\nconst d = e.data ?? {};\nconst actionId = String(d.action_id || '').trim();\nconst draft = d.draft || {};\nconst subject = String(draft.subject || '').trim();\nconst body = String(draft.body || '').trim();\nif (!actionId || !d.target_id || !d.target_name) {\n  throw new Error('outreach refused: invalid intent');\n}\nif (isPitch && (!d.phase || !d.template_key)) {\n  throw new Error('outreach refused: invalid intent');\n}\nif (isReply && !d.answers_interaction_id) {\n  throw new Error('outreach reply refused: no interaction to answer');\n}\n// The refusal that keeps the promise: no approved words, no send. A reply's\n// draft is a scaffold the operator completed — extending it here would be\n// writing on the band's behalf, which is the one thing this lane forbids.\nif (!subject || !body) {\n  throw new Error(\n    'outreach refused: no approved letter in the payload — nothing may compose one here'\n  );\n}\nconst email = String(d.contact_email || '').trim();\nif (!email.includes('@')) {\n  throw new Error('outreach refused: target without contact_email');\n}\n// A verified free-form route, when the target has one, is the address the\n// pitch takes instead of Gmail. Replies never take it — a form is not an\n// answer to a person.\nconst routes = JSON.parse($env.VIRYA_OUTREACH_FORM_ROUTES_JSON || '{}');\nconst route = isPitch ? (routes[String(d.target_id)] ?? null) : null;\nreturn [{ json: {\n  event_id: e.id,\n  action_id: actionId,\n  is_reply: isReply,\n  answers_interaction_id: isReply ? Number(d.answers_interaction_id) : null,\n  target_id: String(d.target_id),\n  target_name: String(d.target_name),\n  contact_email: email,\n  phase: isPitch ? String(d.phase) : 'reply',\n  template_key: isPitch ? String(d.template_key) : 'outreach.reply.v1',\n  route,\n  SendSubject: subject.slice(0, 220),\n  SendBody: body,\n}}];"
       },
       "id": "a1000000-0000-4000-8000-000000000002",
       "name": "Validate the approved letter",
@@ -148,7 +148,7 @@
         }
       },
       "id": "a1000000-0000-4000-8000-000000000008",
-      "name": "Send Gmail pitch",
+      "name": "Send Gmail letter",
       "type": "n8n-nodes-base.gmail",
       "typeVersion": 2.1,
       "position": [
@@ -246,7 +246,7 @@
         ],
         [
           {
-            "node": "Send Gmail pitch",
+            "node": "Send Gmail letter",
             "type": "main",
             "index": 0
           }
@@ -297,7 +297,7 @@
         ]
       ]
     },
-    "Send Gmail pitch": {
+    "Send Gmail letter": {
       "main": [
         [
           {

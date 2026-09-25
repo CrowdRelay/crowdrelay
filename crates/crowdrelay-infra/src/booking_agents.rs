@@ -96,6 +96,41 @@ pub enum BookingAgentApproachOutcome {
     Replayed { action_id: Uuid, status: String },
 }
 
+/// An agent the wave could not take, with the gate's own sentence. The
+/// caller lists these beside the queued card — "three approached, one
+/// declined in-season" is the honest summary, and a hidden refusal would
+/// read as a silent send.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct BookingAgentWaveRefusal {
+    pub agent_id: Uuid,
+    pub name: String,
+    pub reason: String,
+}
+
+/// What `request_approach_wave` did. `Queued` carries the wave's one
+/// approval card plus the per-agent refusals the batch produced; a wave
+/// that queued nobody is `AllRefused`, not an empty card.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum BookingAgentWaveOutcome {
+    Queued {
+        action_id: Uuid,
+        wave_id: Uuid,
+        queued: usize,
+        refused: Vec<BookingAgentWaveRefusal>,
+    },
+    Replayed {
+        action_id: Uuid,
+        status: String,
+    },
+    AllRefused {
+        refused: Vec<BookingAgentWaveRefusal>,
+    },
+}
+
+/// A wave is one card a person reads — bigger and the letters stop being
+/// read, which is exactly the failure the season rule exists to prevent.
+const MAX_APPROACH_WAVE: usize = 8;
+
 #[derive(Clone)]
 pub struct PostgresBookingAgentRepository {
     pool: PgPool,
@@ -194,9 +229,17 @@ impl PostgresBookingAgentRepository {
                        SELECT 1 FROM autopilot_actions action
                        WHERE action.workspace_id = agent.workspace_id
                          AND action.context = 'booking_agent'
-                         AND action.action_kind = 'booking_agent.approach.request'
-                         AND action.subject_id = agent.id
                          AND action.status IN ('awaiting_approval','queued','processing')
+                         AND (
+                             (action.action_kind = 'booking_agent.approach.request'
+                              AND action.subject_id = agent.id)
+                             -- A wave carries its agents in the payload —
+                             -- the pending flag must see a queued batch
+                             -- letter the same way it sees a queued single.
+                             OR (action.action_kind = 'booking_agent.approach_wave.request'
+                                 AND action.payload->'approaches' @>
+                                     jsonb_build_array(jsonb_build_object('agent_id', agent.id::text)))
+                         )
                    ) AS approach_pending
             FROM booking_agents AS agent
             WHERE agent.workspace_id = $1
@@ -226,6 +269,26 @@ impl PostgresBookingAgentRepository {
                 version: row.get("version"),
             })
             .collect())
+    }
+
+    /// The workspace's current draw readings — the evidence every approach
+    /// is pitched on. The band-facing list shows it beside the agents so
+    /// "will the gate take this" is answerable before the request is made:
+    /// a floor that does not clear today is a fact about the season, not an
+    /// error to discover at submit.
+    ///
+    /// # Errors
+    ///
+    /// `Database` on any read failure.
+    pub async fn draw_evidence(
+        &self,
+        workspace_id: Uuid,
+    ) -> Result<AgentDrawEvidence, BookingAgentError> {
+        let mut tx = self.pool.begin().await?;
+        let evidence =
+            load_agent_draw_evidence(&mut tx, workspace_id, OffsetDateTime::now_utc()).await?;
+        tx.commit().await?;
+        Ok(evidence)
     }
 
     /// Queues a band-initiated agent application as an `awaiting_approval`
@@ -299,9 +362,16 @@ impl PostgresBookingAgentRepository {
             SELECT EXISTS (
                 SELECT 1 FROM autopilot_actions
                 WHERE workspace_id = $1 AND context = 'booking_agent'
-                  AND action_kind = 'booking_agent.approach.request'
-                  AND subject_id = $2
                   AND status IN ('awaiting_approval','queued','processing')
+                  AND (
+                      (action_kind = 'booking_agent.approach.request' AND subject_id = $2)
+                      -- A wave already queued to this agent is the pending
+                      -- ask too — subject_id is the wave's, the agents ride
+                      -- in the payload.
+                      OR (action_kind = 'booking_agent.approach_wave.request'
+                          AND payload->'approaches' @>
+                              jsonb_build_array(jsonb_build_object('agent_id', $2::text)))
+                  )
             )
             "#,
         )
@@ -470,6 +540,309 @@ impl PostgresBookingAgentRepository {
 
         tx.commit().await?;
         Ok(BookingAgentApproachOutcome::Queued { action_id })
+    }
+
+    /// Queues one `awaiting_approval` wave action covering a batch of
+    /// agents the operator picked off the gate-state list.
+    ///
+    /// Same contract as `request_approach`, lifted to the batch: the
+    /// advisory lock serializes it with dispatch, every agent is gated and
+    /// composed inside the one transaction, and the draw evidence is
+    /// measured once so every letter in the wave argues from the same
+    /// numbers. An agent who fails the gate does not sink the wave — the
+    /// refusal is reported beside the queued card, which is the honest
+    /// answer to "pick the batch, see who it could not take". A wave that
+    /// could take nobody is refused outright rather than queueing an empty
+    /// card.
+    ///
+    /// The replay key is the request's, as on the single lane: a retried
+    /// submit returns the wave it already made.
+    ///
+    /// # Errors
+    ///
+    /// `Refused` for a malformed batch (empty, or larger than the wave
+    /// bound). `NotFound` is never returned per agent — a selected row
+    /// that does not resolve is a refusal on the wave, not a 404.
+    pub async fn request_approach_wave(
+        &self,
+        workspace_id: Uuid,
+        agent_ids: &[Uuid],
+        note: Option<&str>,
+        idempotency_key: &IdempotencyKey,
+    ) -> Result<BookingAgentWaveOutcome, BookingAgentError> {
+        let mut tx = self.pool.begin().await?;
+        let now = OffsetDateTime::now_utc();
+
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1::text))")
+            .bind(workspace_id)
+            .execute(&mut *tx)
+            .await?;
+
+        if let Some((existing, status)) = sqlx::query_as::<_, (Uuid, String)>(
+            "SELECT id, status FROM autopilot_actions WHERE workspace_id = $1 AND idempotency_key = $2 AND action_kind = 'booking_agent.approach_wave.request'",
+        )
+        .bind(workspace_id)
+        .bind(idempotency_key.as_str())
+        .fetch_optional(&mut *tx)
+        .await?
+        {
+            tx.commit().await?;
+            return Ok(BookingAgentWaveOutcome::Replayed {
+                action_id: existing,
+                status,
+            });
+        }
+
+        // The batch as the operator meant it: deduped, in the order they
+        // picked, bounded by what one card can honestly show.
+        let mut selected: Vec<Uuid> = Vec::new();
+        for agent_id in agent_ids {
+            if !selected.contains(agent_id) {
+                selected.push(*agent_id);
+            }
+        }
+        if selected.is_empty() {
+            return Err(BookingAgentError::Refused(
+                "a wave needs at least one agent — select who the season's letters go to"
+                    .to_owned(),
+            ));
+        }
+        if selected.len() > MAX_APPROACH_WAVE {
+            return Err(BookingAgentError::Refused(format!(
+                "a wave of {} is a mail-merge, not a batch — {MAX_APPROACH_WAVE} letters is \
+                 what one approval card can honestly show",
+                selected.len()
+            )));
+        }
+
+        let trimmed_note = note.map(str::trim).filter(|value| !value.is_empty());
+        if let Some(value) = trimmed_note
+            && value.chars().count() > 280
+        {
+            return Err(BookingAgentError::Refused(
+                "the note rides over the numbers — 280 characters is plenty for one line of the band's own words".to_owned(),
+            ));
+        }
+
+        // One measurement for the whole wave — the workspace's draw is the
+        // pitch every letter argues from.
+        let evidence = load_agent_draw_evidence(&mut tx, workspace_id, now).await?;
+        let sender = crate::gig_outreach::sender_identity(&self.pool, workspace_id)
+            .await
+            .map_err(|_| BookingAgentError::Refused("the sender could not be read".to_owned()))?;
+
+        let mut prepared: Vec<crowdrelay_application::autopilot::BookingAgentApproachDraft> =
+            Vec::new();
+        let mut refused: Vec<BookingAgentWaveRefusal> = Vec::new();
+        for agent_id in &selected {
+            let agent = sqlx::query(
+                r#"
+                SELECT name, agency, active, do_not_contact, contact_verified_at,
+                       approached_at, refused_until, version
+                FROM booking_agents
+                WHERE workspace_id = $1 AND id = $2
+                FOR UPDATE
+                "#,
+            )
+            .bind(workspace_id)
+            .bind(agent_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+            let Some(agent) = agent else {
+                refused.push(BookingAgentWaveRefusal {
+                    agent_id: *agent_id,
+                    name: "unknown agent".to_owned(),
+                    reason: "not in this workspace's registry".to_owned(),
+                });
+                continue;
+            };
+            let agent_name: String = agent.get("name");
+
+            let pending = sqlx::query_scalar::<_, bool>(
+                r#"
+                SELECT EXISTS (
+                    SELECT 1 FROM autopilot_actions
+                    WHERE workspace_id = $1 AND context = 'booking_agent'
+                      AND status IN ('awaiting_approval','queued','processing')
+                      AND (
+                          (action_kind = 'booking_agent.approach.request' AND subject_id = $2)
+                          OR (action_kind = 'booking_agent.approach_wave.request'
+                              AND payload->'approaches' @>
+                                  jsonb_build_array(jsonb_build_object('agent_id', $2::text)))
+                      )
+                )
+                "#,
+            )
+            .bind(workspace_id)
+            .bind(agent_id)
+            .fetch_one(&mut *tx)
+            .await?;
+
+            let ledger_approach = sqlx::query_scalar::<_, Option<OffsetDateTime>>(
+                r#"
+                SELECT max(occurred_at) FROM booking_agent_interactions
+                WHERE workspace_id = $1 AND agent_id = $2
+                  AND direction = 'outbound' AND phase = 'approach'
+                "#,
+            )
+            .bind(workspace_id)
+            .bind(agent_id)
+            .fetch_one(&mut *tx)
+            .await?;
+            let approached_effective = match (
+                agent.get::<Option<OffsetDateTime>, _>("approached_at"),
+                ledger_approach,
+            ) {
+                (Some(a), Some(b)) => Some(a.max(b)),
+                (a, b) => a.or(b),
+            };
+
+            let gate = review_agent_approach(&AgentApproachRequest {
+                active: agent.get("active"),
+                do_not_contact: agent.get("do_not_contact"),
+                route_verified: agent
+                    .get::<Option<OffsetDateTime>, _>("contact_verified_at")
+                    .is_some(),
+                approached_at: approached_effective,
+                refused_until: agent.get("refused_until"),
+                approach_pending: pending,
+                evidence,
+                now,
+            });
+            if let Err(refusal) = gate {
+                refused.push(BookingAgentWaveRefusal {
+                    agent_id: *agent_id,
+                    name: agent_name,
+                    reason: refusal.message(),
+                });
+                continue;
+            }
+
+            match crowdrelay_domain::approach_letter::compose_booking_agent_letter(
+                &crowdrelay_domain::approach_letter::BookingAgentLetterInput {
+                    sender: &sender,
+                    agent_name: &agent_name,
+                    agency: agent.get::<Option<String>, _>("agency").as_deref(),
+                    evidence: &evidence,
+                    note: trimmed_note,
+                },
+            ) {
+                Ok(draft) => prepared.push(
+                    crowdrelay_application::autopilot::BookingAgentApproachDraft {
+                        agent_id: BookingAgentId::from_uuid(*agent_id),
+                        agent_version: agent.get("version"),
+                        agent_name,
+                        agency: agent.get("agency"),
+                        draft,
+                    },
+                ),
+                Err(refusal) => refused.push(BookingAgentWaveRefusal {
+                    agent_id: *agent_id,
+                    name: agent_name,
+                    reason: refusal.message().to_owned(),
+                }),
+            }
+        }
+
+        if prepared.is_empty() {
+            tx.commit().await?;
+            return Ok(BookingAgentWaveOutcome::AllRefused { refused });
+        }
+
+        let wave_id = Uuid::now_v7();
+        let payload = crowdrelay_application::autopilot::AutopilotActionPayload::RequestBookingAgentApproachWave {
+            wave_id,
+            note: trimmed_note.map(str::to_owned),
+            evidence,
+            approaches: prepared,
+        };
+        let action_kind = payload.action_kind();
+        let action_class = payload.action_class().as_str();
+        let payload_json = serde_json::to_value(&payload)
+            .map_err(|_| BookingAgentError::Refused("the wave could not be encoded".to_owned()))?;
+
+        let trace = TraceContext::root(WorkspaceId::from_uuid(workspace_id));
+        let decision_key = format!("booking_agent.approach_wave:{}", idempotency_key.as_str());
+        let decision_id = match sqlx::query_scalar::<_, Uuid>(
+            r#"
+            INSERT INTO autopilot_decisions (
+                id, workspace_id, decision_key, context, subject_kind, subject_id,
+                decision_kind, confidence_basis_points, disposition, reason,
+                input_snapshot, policy_snapshot, recommendation, evaluated_at, trace_id
+            ) VALUES ($1,$2,$3,'booking_agent','booking_agent_wave',$4,
+                      'booking_agent.approach_wave',10000,'require_approval',
+                      'Band-initiated booking-agent approach wave',
+                      $5,$6,$7,$8,$9)
+            ON CONFLICT (workspace_id, decision_key) DO NOTHING RETURNING id
+            "#,
+        )
+        .bind(Uuid::now_v7())
+        .bind(workspace_id)
+        .bind(&decision_key)
+        .bind(wave_id)
+        .bind(json!({
+            "wave_id": wave_id,
+            "agent_ids": selected,
+            "note": trimmed_note,
+            "evidence": evidence,
+            "refused": refused,
+        }))
+        .bind(json!({"require_approval": true}))
+        .bind(payload_json.clone())
+        .bind(now)
+        .bind(trace.trace_id().into_uuid())
+        .fetch_optional(&mut *tx)
+        .await?
+        {
+            Some(id) => id,
+            None => sqlx::query_scalar::<_, Uuid>(
+                "SELECT id FROM autopilot_decisions WHERE workspace_id = $1 AND decision_key = $2",
+            )
+            .bind(workspace_id)
+            .bind(&decision_key)
+            .fetch_one(&mut *tx)
+            .await?,
+        };
+
+        let action_id = Uuid::now_v7();
+        let action_trace = TraceContext::for_action(
+            WorkspaceId::from_uuid(workspace_id),
+            trace.trace_id(),
+            action_id,
+            Some(decision_id),
+        );
+        sqlx::query(
+            r#"
+            INSERT INTO autopilot_actions (
+                id, workspace_id, decision_id, context, action_kind,
+                subject_kind, subject_id, idempotency_key, payload, status,
+                action_class, approval_expires_at, trace_id, causation_id
+            ) VALUES ($1,$2,$3,'booking_agent',$4,'booking_agent_wave',$5,$6,$7,
+                      'awaiting_approval',$8, now() + INTERVAL '72 hours',
+                      $9,$10)
+            "#,
+        )
+        .bind(action_id)
+        .bind(workspace_id)
+        .bind(decision_id)
+        .bind(action_kind)
+        .bind(wave_id)
+        .bind(idempotency_key.as_str())
+        .bind(payload_json)
+        .bind(action_class)
+        .bind(action_trace.trace_id().into_uuid())
+        .bind(action_trace.causation_id().map(|c| c.into_uuid()))
+        .execute(&mut *tx)
+        .await?;
+
+        let queued = selected.len() - refused.len();
+        tx.commit().await?;
+        Ok(BookingAgentWaveOutcome::Queued {
+            action_id,
+            wave_id,
+            queued,
+            refused,
+        })
     }
 }
 

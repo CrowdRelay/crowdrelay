@@ -349,6 +349,43 @@ impl AutopilotActionPayload {
                 },
                 deadline_note: String::new(),
             },
+            Self::RequestOutreachReply { target_name, reply_disposition, sheet_verdict, draft, .. } => ActionBriefing {
+                summary: format!("Answer {}'s reply", target_name),
+                why_it_matters: "They wrote back and nobody has answered. The draft is a starting point — read their actual reply and edit this to fit before sending.".into(),
+                steps: vec![
+                    BriefingStep { what_to_do: "Read their reply in the mailbox first".into(), why_it_matters: "The sheet recorded a verdict, not their words — the draft cannot answer what it never read".into() },
+                    BriefingStep { what_to_do: "Edit the reply below to fit".into(), why_it_matters: "It is the exact text they receive — approve the words, not the idea".into() },
+                    BriefingStep { what_to_do: "Click APPROVE to send it".into(), why_it_matters: "Once approved the answer is sent and the conversation is recorded".into() },
+                ],
+                content: {
+                    let mut fields = vec![
+                        BriefingField { label: "Target".into(), value: target_name.clone() },
+                        BriefingField { label: "Their answer".into(), value: match reply_disposition.as_str() {
+                            "positive" => "positive".to_owned(),
+                            _ => "received — verdict unknown".to_owned(),
+                        }},
+                    ];
+                    if let Some(verdict) = sheet_verdict {
+                        fields.push(BriefingField { label: "Sheet verdict".into(), value: verdict.clone() });
+                    }
+                    fields.push(BriefingField {
+                        label: "Subject".into(),
+                        value: match draft.subject.trim().is_empty() {
+                            true => "not composed".to_owned(),
+                            false => draft.subject.clone(),
+                        },
+                    });
+                    fields.push(BriefingField {
+                        label: "Body".into(),
+                        value: match draft.body.trim().is_empty() {
+                            true => "not composed".to_owned(),
+                            false => truncate(draft.body.clone(), 2000),
+                        },
+                    });
+                    fields
+                },
+                deadline_note: String::new(),
+            },
             Self::RequestRepresentationApproach { target_name, note, draft, .. } => ActionBriefing {
                 summary: format!("Approach for representation: {}", target_name),
                 why_it_matters: "The platform sends this on the band's behalf — the agent never sees the address until they reply. The published listing is the pitch, and it costs one of the month's few approaches.".into(),
@@ -418,6 +455,62 @@ impl AutopilotActionPayload {
                             },
                         },
                     ],
+                    deadline_note: String::new(),
+                }
+            }
+            Self::RequestBookingAgentApproachWave { approaches, note, evidence, .. } => {
+                let names = approaches
+                    .iter()
+                    .map(|approach| {
+                        approach.agency.as_ref().map_or_else(
+                            || approach.agent_name.clone(),
+                            |agency| format!("{} ({})", approach.agent_name, agency),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let draw = [
+                    evidence.shows_played_12m.map(|v| format!("{v} shows played (12m)")),
+                    evidence.paid_tickets_12m.map(|v| format!("{v} paid tickets (12m)")),
+                    evidence.distinct_buyers_12m.map(|v| format!("{v} distinct buyers (12m)")),
+                ]
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>()
+                .join(", ");
+                let mut content = vec![
+                    BriefingField { label: "Agents".into(), value: names },
+                    BriefingField { label: "Draw".into(), value: if draw.is_empty() { "—".into() } else { draw } },
+                    BriefingField { label: "Note".into(), value: note.clone().unwrap_or_else(|| "—".into()) },
+                ];
+                // Every letter the wave carries, in the wave's own order —
+                // the approver reads the words each agent gets, not a count
+                // of drafts.
+                for approach in approaches {
+                    content.push(BriefingField {
+                        label: format!("{} — subject", approach.agent_name),
+                        value: match approach.draft.subject.trim().is_empty() {
+                            true => "not composed".to_owned(),
+                            false => approach.draft.subject.clone(),
+                        },
+                    });
+                    content.push(BriefingField {
+                        label: format!("{} — body", approach.agent_name),
+                        value: match approach.draft.body.trim().is_empty() {
+                            true => "not composed".to_owned(),
+                            false => truncate(approach.draft.body.clone(), 2000),
+                        },
+                    });
+                }
+                ActionBriefing {
+                    summary: format!("Apply to {} booking agents", approaches.len()),
+                    why_it_matters: "One approval, one letter per agent — the platform sends on the band's behalf and the addresses never reach the band. Each send re-runs the season gate under lock, and one approach spends the season either way.".into(),
+                    steps: vec![
+                        BriefingStep { what_to_do: "Check the draw numbers are the ones you want sent".into(), why_it_matters: "Every letter in the wave argues from them, and dispatch refuses without them".into() },
+                        BriefingStep { what_to_do: "Read each letter — approving the wave sends them all".into(), why_it_matters: "A letter that should not go yet means decline the wave and re-pick the batch".into() },
+                        BriefingStep { what_to_do: "Click APPROVE to send the wave".into(), why_it_matters: "Each agent is approached once a season, and a decline closes that door for one".into() },
+                    ],
+                    content,
                     deadline_note: String::new(),
                 }
             }

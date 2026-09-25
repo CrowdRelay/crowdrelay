@@ -95,6 +95,19 @@ pub enum OutreachReplyDisposition {
     DoNotContact,
 }
 
+impl OutreachReplyDisposition {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Received => "received",
+            Self::Positive => "positive",
+            Self::Declined => "declined",
+            Self::DoNotContact => "do_not_contact",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 pub struct OutreachSnapshot {
     pub opportunity_id: OutreachOpportunityId,

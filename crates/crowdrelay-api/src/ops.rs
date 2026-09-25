@@ -18,7 +18,7 @@ use crowdrelay_domain::{WorkspaceId, action_ledger::ActionState};
 use crowdrelay_infra::lapsed_approvals::LapsedApprovals;
 use crowdrelay_infra::sent_record::FailedSends;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{Value, json};
 use sqlx::{FromRow, PgPool, Postgres, Transaction};
 use time::OffsetDateTime;
 use tokio::time::timeout;
@@ -46,6 +46,8 @@ use crowdrelay_application::self_assessment::{DailyNorthStar, assess};
 include!("ops_action_ledger.rs");
 include!("ops/handlers.rs");
 include!("ops/attention.rs");
+include!("ops/funnel.rs");
+include!("ops/funnel_pg_tests.rs");
 include!("ops/intelligence.rs");
 include!("ops/processes.rs");
 

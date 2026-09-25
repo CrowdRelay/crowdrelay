@@ -69,7 +69,15 @@ pub async fn sweep_lapsed_approval_asks(
         UPDATE autopilot_actions AS action
         SET status = 'cancelled',
             finished_at = $2,
-            last_error_kind = 'approval_expired'
+            last_error_kind = 'approval_expired',
+            -- Re-key the dead row so the same proposal may be raised again:
+            -- the key's job is to dedupe a *live* ask, and an expired ask
+            -- holding the key forever meant a proposal nobody answered
+            -- could never re-raise — measured in production, fifty-one of
+            -- them died silently in fourteen days. The suffix keeps the
+            -- dead row's key unique (its own id), the audit trail intact,
+            -- and the next evaluation free to mint the same ask afresh.
+            idempotency_key = idempotency_key || ':lapsed:' || action.id::text
         FROM candidates
         WHERE action.workspace_id = candidates.workspace_id
           AND action.id = candidates.id

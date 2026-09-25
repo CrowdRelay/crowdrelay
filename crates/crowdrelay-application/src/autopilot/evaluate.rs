@@ -28,6 +28,7 @@ use crowdrelay_domain::{
         evaluate_booking_followup, evaluate_booking_opportunity, evaluate_festival_window,
         select_booking_target,
     },
+    booking_venue_fit::{VenueFitDecision, VenueFitPolicy, evaluate_venue_fit},
     booking_window::{BookingWindowInputSet, BookingWindowInputs, propose_booking_window},
     campaign_lifecycle::{EventCampaignDecision, EventCampaignSnapshot, evaluate_event_campaign},
     content_supply::{
@@ -101,6 +102,7 @@ use booking_supply::booking_supply_candidate;
 use commercial::{
     booking_candidate, booking_followup_candidate, campaign_lifecycle_candidate,
     festival_window_candidate, funding_candidate, merch_candidate, merch_price_candidate,
+    venue_fit_candidate,
 };
 use content_strategy::{content_arc_candidate, content_strategy_candidate};
 use crowdrelay_domain::worker_template::WorkerTemplate;
@@ -300,6 +302,18 @@ where
                             continue;
                         }
                         if let Some(candidate) = booking_followup_candidate(target, &policy, now)? {
+                            // One letter per target per cycle: a live
+                            // follow-up means the cold-start fit lane
+                            // stands down even if the room evidence would
+                            // have qualified on its own.
+                            festival_proposed.insert(target.target_id);
+                            self.persist(&candidate, &mut limits, &mut report).await?;
+                            continue;
+                        }
+                        if let Some(candidate) = venue_fit_candidate(target, &policy, now)? {
+                            // Fit asks are per-target cold-start proposals,
+                            // not city asks — they do not exclude the
+                            // target from the demand path's recipient set.
                             self.persist(&candidate, &mut limits, &mut report).await?;
                         }
                     }
@@ -428,6 +442,21 @@ where
                                         .unwrap_or(serde_json::Value::Null),
                                 );
                             }
+                            self.persist(&candidate, &mut limits, &mut report).await?;
+                        }
+                    }
+                    // The other half of the conversation: every inbound reply
+                    // with no answer is work, not a stop — the pitch loop's
+                    // `AlreadyReplied` hold refuses them, this lane answers.
+                    // Replies run after the pitches: a cycle that can only
+                    // afford one kind of letter owes the answer first in
+                    // spirit, and the per-context cap orders what persists.
+                    let reply_snapshots = self
+                        .repository
+                        .load_unanswered_reply_snapshots(self.workspace_id, now)
+                        .await?;
+                    for snapshot in reply_snapshots {
+                        if let Some(candidate) = reply_rescue_candidate(snapshot, &policy, now)? {
                             self.persist(&candidate, &mut limits, &mut report).await?;
                         }
                     }
@@ -874,6 +903,7 @@ include!("evaluate/types.rs");
 include!("evaluate/candidates.rs");
 include!("evaluate/candidates_terms.rs");
 include!("evaluate/candidates_relay.rs");
+include!("evaluate/candidates_reply_rescue.rs");
 include!("evaluate/supply_quiet.rs");
 include!("evaluate/growth_intelligence_context.rs");
 include!("evaluate/hypothesis_validation.rs");

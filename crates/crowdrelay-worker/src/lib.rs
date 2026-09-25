@@ -26,6 +26,7 @@ pub mod attribution;
 pub mod audience_graph;
 pub mod auto_post_platforms;
 pub mod autopilot;
+pub mod backfill_outreach_verdicts;
 pub mod bootstrap;
 pub mod city_geocoding;
 pub mod community_executor;

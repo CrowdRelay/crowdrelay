@@ -857,6 +857,18 @@ pub fn friendly_action_title(action_kind: &str, locale: BriefingLocale) -> Strin
         ("beacon.discovery.request", BriefingLocale::En) => "Approve the Beacon search",
         ("beacon.outreach.request", BriefingLocale::Pl) => "Zatwierdź outreach do Beacona",
         ("beacon.outreach.request", BriefingLocale::En) => "Approve the Beacon outreach",
+        ("booking_agent.approach.request", BriefingLocale::Pl) => {
+            "Zatwierdź zgłoszenie do agenta bookingowego"
+        }
+        ("booking_agent.approach.request", BriefingLocale::En) => {
+            "Approve the booking-agent approach"
+        }
+        ("booking_agent.approach_wave.request", BriefingLocale::Pl) => {
+            "Zatwierdź falę zgłoszeń do agentów"
+        }
+        ("booking_agent.approach_wave.request", BriefingLocale::En) => {
+            "Approve the booking-agent approach wave"
+        }
         ("community.engage.request", BriefingLocale::Pl) => "Zatwierdź publikację w społeczności",
         ("community.engage.request", BriefingLocale::En) => "Approve the community post",
         ("community.decline.advisory", BriefingLocale::Pl) => {

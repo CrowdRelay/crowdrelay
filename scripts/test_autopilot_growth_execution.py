@@ -51,7 +51,7 @@ class AutopilotGrowthExecutionContractTest(unittest.TestCase):
     def test_outreach_executor_claims_before_side_effect_and_reports_after(self):
         workflow = self.workflow("n8n/examples/autopilot-outreach-executor.example.json")
         names = self.node_names(workflow)
-        self.assertLess(names.index("Claim action once"), names.index("Send Gmail pitch"))
+        self.assertLess(names.index("Claim action once"), names.index("Send Gmail letter"))
         self.assertLess(names.index("Claim action once"), names.index("Submit verified free form"))
         self.assertIn("Report provider receipt", names)
         serialized = self.read("n8n/examples/autopilot-outreach-executor.example.json")

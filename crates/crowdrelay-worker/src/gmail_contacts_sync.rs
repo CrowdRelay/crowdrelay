@@ -971,15 +971,17 @@ impl GmailContactsSyncWorker {
         // parse as comma-CSV.
         let lower = filename.to_ascii_lowercase();
         let mime = mime_type.unwrap_or_default().to_ascii_lowercase();
+        let single =
+            |grid: Vec<Vec<String>>| vec![crate::sheet_intake::SheetGrid { name: None, grid }];
         let sheets = if mime.contains("spreadsheetml")
             || mime == "application/vnd.ms-excel"
             || lower.ends_with(".xlsx")
         {
             crate::sheet_intake::parse_xlsx_sheets(&bytes)?
         } else if mime == "text/tab-separated-values" || lower.ends_with(".tsv") {
-            crowdrelay_domain::drive_contacts::parse_delimited(&bytes, b'\t').map(|g| vec![g])?
+            crowdrelay_domain::drive_contacts::parse_delimited(&bytes, b'\t').map(single)?
         } else {
-            crowdrelay_domain::drive_contacts::parse_delimited(&bytes, b',').map(|g| vec![g])?
+            crowdrelay_domain::drive_contacts::parse_delimited(&bytes, b',').map(single)?
         };
         let file_label = format!("{} — {}", subject.trim(), filename)
             .trim_matches(|c| c == '—' || c == ' ')

@@ -25,10 +25,10 @@ class AutopilotDistributionExecutionContract(unittest.TestCase):
         nodes = workflow["nodes"]
         names = {node["name"]: node for node in nodes}
         self.assertIn("Claim action once", names)
-        self.assertIn("Send Gmail pitch", names)
+        self.assertIn("Send Gmail letter", names)
         self.assertIn("Submit verified free form", names)
         self.assertIn("Report provider receipt", names)
-        self.assertEqual(names["Send Gmail pitch"]["type"], "n8n-nodes-base.gmail")
+        self.assertEqual(names["Send Gmail letter"]["type"], "n8n-nodes-base.gmail")
 
         encoded = path.read_text()
         self.assertIn("/execution-claim", encoded)

@@ -70,6 +70,12 @@ pub enum HumanReviewReason {
     /// already filed its disposition with the reply, and the number inside
     /// the text is a proposal to confirm, not a disposition to infer.
     NegotiationReply,
+    /// The reply arrived through the sheet import carrying a verdict the
+    /// deterministic map does not settle — `GMAIL_REPLY`, `NEGOTIATING`,
+    /// `DECLINED_TEMPORARILY`, or a code nobody taught the map. No reply
+    /// text exists to classify, so a human reads the thread itself.
+    /// The classifier never produces this reason; the importer does.
+    ImportedVerdict,
 }
 
 impl HumanReviewReason {
@@ -82,6 +88,7 @@ impl HumanReviewReason {
             Self::PreviousDoNotContact => "previous_do_not_contact",
             Self::UnmatchedText => "unmatched_text",
             Self::NegotiationReply => "negotiation_reply",
+            Self::ImportedVerdict => "imported_verdict",
         }
     }
 }
