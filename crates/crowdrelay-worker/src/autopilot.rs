@@ -467,20 +467,23 @@ impl AutopilotWorker {
                 // about it each tick would bury the case that is genuinely
                 // odd: a tenant that *did* write its ask and still cannot
                 // post.
+                // `OnCadence` is not a gap either: the ask went out and the
+                // next is not due (`JoinAskHold::needs_a_person`). It was
+                // warned about every poll — seven warnings in half an hour of
+                // production logs for a feature that was working.
                 if !report.join_ask_held.is_empty() {
-                    let never_configured = report
-                        .join_ask_held
-                        .iter()
-                        .all(|(_, hold)| matches!(hold, JoinAskHold::NoVariants));
-                    if never_configured {
-                        tracing::debug!(
-                            held = ?report.join_ask_held,
-                            "join-ask not set up for this workspace yet"
-                        );
-                    } else {
+                    let actionable = report.join_ask_held.iter().any(|(_, hold)| {
+                        hold.needs_a_person() && !matches!(hold, JoinAskHold::NoVariants)
+                    });
+                    if actionable {
                         tracing::warn!(
                             held = ?report.join_ask_held,
                             "join-ask platforms held this cycle"
+                        );
+                    } else {
+                        tracing::debug!(
+                            held = ?report.join_ask_held,
+                            "join-ask not set up yet, or this week's ask already went out"
                         );
                     }
                 }
