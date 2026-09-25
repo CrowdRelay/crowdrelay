@@ -231,6 +231,18 @@ pub(crate) fn router(state: crate::AppState) -> Router {
             "/v1/control-plane/autopilot/reply-triage",
             get(crate::autopilot::reply_triage_handler),
         )
+        // The outreach conversation list — every press, radio, venue and
+        // agent contact with where the conversation stands — and the act
+        // saying it wrote back from its own mailbox, which is what moves a
+        // conversation out of "your turn".
+        .route(
+            "/v1/control-plane/autopilot/outreach-contacts",
+            get(crate::autopilot::list_outreach_contacts),
+        )
+        .route(
+            "/v1/control-plane/autopilot/outreach-targets/{target_id}/written",
+            post(crate::autopilot::record_outreach_written),
+        )
         // The negotiation table: every live terms conversation with the
         // ladder it was argued from and the move parked for approval. The
         // position write reuses the canonical admin handler — this surface

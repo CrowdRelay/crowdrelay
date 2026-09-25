@@ -10,10 +10,10 @@ use crowdrelay_application::autopilot::{
     ContentSourceView, CreateExperiment, ExperimentAssignmentSource, ExperimentAssignmentVariant,
     ExperimentMutation, ExperimentObservation, OutreachOpportunityMutation, OutreachTargetMutation,
     PromoterPosition, RecordBeaconReply, RecordDeliveryFault, RecordOutreachReply,
-    RecordPlaylistPlacement, RecordTeamOpportunityProgress, RecordTeamOpportunityTerms,
-    ReleasePlanMutation, ReportSuggestionOutcome, TeamOpportunityKind, TeamOpportunityMutation,
-    TeamOpportunityProgress, UpsertBeacon, UpsertContentSource, UpsertOutreachOpportunity,
-    UpsertOutreachTarget, UpsertReleasePlan, UpsertTeamOpportunity,
+    RecordOutreachWritten, RecordPlaylistPlacement, RecordTeamOpportunityProgress,
+    RecordTeamOpportunityTerms, ReleasePlanMutation, ReportSuggestionOutcome, TeamOpportunityKind,
+    TeamOpportunityMutation, TeamOpportunityProgress, UpsertBeacon, UpsertContentSource,
+    UpsertOutreachOpportunity, UpsertOutreachTarget, UpsertReleasePlan, UpsertTeamOpportunity,
 };
 use crowdrelay_application::{IdempotencyKey, RequestId};
 use crowdrelay_domain::{
@@ -603,6 +603,23 @@ impl AutopilotOutreachStateRepository for PostgresAutopilotRepository {
                 replayed: false,
             })
         })
+        .await
+    }
+
+    async fn record_outreach_written(
+        &self,
+        workspace_id: WorkspaceId,
+        command: RecordOutreachWritten,
+        idempotency_key: &IdempotencyKey,
+        request_id: Option<&RequestId>,
+    ) -> Result<AutopilotControlMutation, RepositoryError> {
+        super::outreach_written::record_outreach_written(
+            self,
+            workspace_id,
+            command,
+            idempotency_key,
+            request_id,
+        )
         .await
     }
 }

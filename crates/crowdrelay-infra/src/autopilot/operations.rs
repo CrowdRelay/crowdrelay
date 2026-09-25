@@ -55,6 +55,7 @@ pub(in crate::autopilot) mod growth_intelligence;
 mod ingress;
 mod next_best_action;
 mod opportunity_shortlist;
+mod outreach_written;
 pub(in crate::autopilot) mod portfolio_pool;
 pub(in crate::autopilot) mod push_segments;
 pub(in crate::autopilot) mod reach;
