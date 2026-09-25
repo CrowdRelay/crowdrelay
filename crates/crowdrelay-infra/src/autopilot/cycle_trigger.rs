@@ -160,12 +160,23 @@ pub async fn open_cycle_run(
     }
 }
 
-/// Which phases of a cycle failed and what each failed with — one value
-/// because `degraded_phases` and `degraded_errors` are one record on the row,
-/// and two parameters a caller could pair wrongly.
-pub struct CycleDegradation {
-    pub phases: Vec<String>,
-    pub errors: serde_json::Value,
+/// What the record of one finished cycle says.
+pub struct CycleClose<'a> {
+    /// Which phases fell over; empty for a clean cycle.
+    pub degraded_phases: &'a [String],
+    /// Phase to the database faults behind it (migration 0358).
+    pub degraded_reasons: Option<&'a serde_json::Value>,
+    /// Phase to the error kind it failed with, in the
+    /// `repository_error_kind` vocabulary (migration 0360). Always written —
+    /// an empty object for a clean cycle, matching the empty phases array.
+    pub degraded_errors: &'a serde_json::Value,
+    pub finished_at: OffsetDateTime,
+    /// The North Star as the evaluation phase read it, when it did.
+    pub north_star_observed: Option<u32>,
+    /// Which metric that reading is in (migration 0358).
+    pub north_star_metric: Option<&'a str>,
+    /// Why a quiet cycle was quiet.
+    pub wait_reason: Option<&'a str>,
 }
 
 /// Closes a cycle-run row, counting what the cycle produced.
@@ -188,11 +199,17 @@ pub async fn close_cycle_run(
     pool: &PgPool,
     workspace_id: WorkspaceId,
     cycle_id: uuid::Uuid,
-    degradation: &CycleDegradation,
-    finished_at: OffsetDateTime,
-    north_star_observed: Option<u32>,
-    wait_reason: Option<&str>,
+    close: CycleClose<'_>,
 ) {
+    let CycleClose {
+        degraded_phases,
+        degraded_reasons,
+        degraded_errors,
+        finished_at,
+        north_star_observed,
+        north_star_metric,
+        wait_reason,
+    } = close;
     let closed = sqlx::query(
         r#"
         UPDATE autopilot_cycle_runs AS run
@@ -203,11 +220,16 @@ pub async fn close_cycle_run(
             -- array for a clean cycle, which is a different statement from the
             -- NULL carried by every cycle that ran before the column existed.
             degraded_phases = $4::text[],
-            -- And what each phase failed with, in the error-kind vocabulary —
-            -- the pair answers "which phase keeps breaking" without the worker
-            -- log the phase warning was written to. An empty object for a
-            -- clean cycle, matching the empty `degraded_phases` array.
-            degraded_errors = $7::jsonb,
+            -- Phase to the database faults behind it (migration 0358): the
+            -- reason outlives the worker log a deploy throws away.
+            degraded_reasons = $7::jsonb,
+            north_star_metric = $8,
+            -- And what each phase failed with, in the error-kind vocabulary
+            -- (migration 0360) — the pair answers "which phase keeps breaking"
+            -- without the worker log the phase warning was written to. An
+            -- empty object for a clean cycle, matching the empty
+            -- `degraded_phases` array.
+            degraded_errors = $9::jsonb,
             decisions_recorded = (
                 SELECT count(*)
                 FROM autopilot_decisions AS decision
@@ -248,10 +270,12 @@ pub async fn close_cycle_run(
     .bind(workspace_id.into_uuid())
     .bind(cycle_id)
     .bind(finished_at)
-    .bind(&degradation.phases)
+    .bind(degraded_phases)
     .bind(north_star_observed.and_then(|value| i32::try_from(value).ok()))
     .bind(wait_reason)
-    .bind(&degradation.errors)
+    .bind(degraded_reasons)
+    .bind(north_star_metric)
+    .bind(degraded_errors)
     .execute(pool)
     .await;
     if let Err(error) = closed {
@@ -290,6 +314,20 @@ pub async fn daily_north_star(
 ) -> Result<Vec<DailyNorthStar>, RepositoryError> {
     let rows = sqlx::query_as::<_, (time::Date, i32)>(
         r#"
+        WITH latest AS (
+            -- The metric the newest reading is in. The series keeps only
+            -- readings in that metric: a tenant that changed its North Star
+            -- otherwise has two metrics in one series, and the brain read
+            -- the switch from Signal installs (2-4) to weighted audience
+            -- (~680) as improvement. Rows before migration 0358 carry no
+            -- metric and drop out once a newer one does.
+            SELECT north_star_metric
+            FROM autopilot_cycle_runs
+            WHERE workspace_id = $1
+              AND north_star_value IS NOT NULL
+            ORDER BY started_at DESC
+            LIMIT 1
+        )
         SELECT DISTINCT ON (started_at::date)
                started_at::date AS day,
                north_star_value
@@ -297,6 +335,7 @@ pub async fn daily_north_star(
         WHERE workspace_id = $1
           AND north_star_value IS NOT NULL
           AND started_at >= now() - ($2::int * interval '1 day')
+          AND north_star_metric IS NOT DISTINCT FROM (SELECT north_star_metric FROM latest)
         ORDER BY started_at::date DESC, started_at DESC
         "#,
     )

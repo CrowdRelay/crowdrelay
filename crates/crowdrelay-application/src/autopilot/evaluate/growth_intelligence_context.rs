@@ -19,6 +19,9 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
         report.north_star_observed = snapshots
             .first()
             .map(|snapshot| snapshot.world_model.north_star_current);
+        report.north_star_metric = snapshots
+            .first()
+            .map(|snapshot| snapshot.world_model.north_star.as_str());
         // Walk-forward validation, then the hypothesis lifecycle transitions
         // it justifies. Extracted to `evaluate/hypothesis_validation.rs`: it
         // is one coherent job — judge each template against its own measured

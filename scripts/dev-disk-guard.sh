@@ -8,14 +8,18 @@
 # build dirs, caches and /tmp work dirs. This one covers the three classes that
 # script does not — see ~/dev/BUILD_AND_DISK_PLAN.md §5:
 #
-#   1. Stale Postgres test databases in the local dev container: pgt_* test
-#      clones and ci_* suite databases older than 24h with no open
+#   1. Stale Postgres test databases in EVERY running postgres container:
+#      pgt_* test clones and ci_* suite databases older than 24h with no open
 #      connections. Never touches crowdrelay*, templates, or anything live.
+#      (2026-09-25: control-plane-postgres held stray test DBs the single
+#      container sweep could never see.)
 #   2. Docker: build cache >72h, dangling images, unattached volumes — the
 #      VPS guard's rule, unchanged.
-#   3. Abandoned worktree targets: target/ under .claude/worktrees/* and
-#      ~/dev/.worktrees/* whose git worktree is gone or untouched for 7 days.
-#      The worktree itself is never removed — only the rebuildable output.
+#   3. Abandoned worktree targets: target/ under .claude/worktrees/*,
+#      ~/dev/*/.worktrees/* and ~/dev/.worktrees/* whose git worktree is gone
+#      or untouched for 7 days. The worktree itself is never removed — only
+#      the rebuildable output. `git worktree prune` runs first per repo so a
+#      deleted dir's stale registration reads as gone, not as a live checkout.
 #   4. Report: every pass appends per-class freed bytes to the log.
 #
 # Log: ~/.config/devin/dev-disk-guard.log
@@ -47,8 +51,13 @@ used_pct=$(df -h /System/Volumes/Data | awk 'NR==2 {gsub("%","",$5); print $5}')
 log "--- pass start ($mode, disk ${used_pct}%) ---"
 
 # ── 1. stale postgres test databases ────────────────────────────────────────
-if docker inspect "$PG_CONTAINER" >/dev/null 2>&1; then
-  psql() { docker exec -i "$PG_CONTAINER" psql -U "$PG_USER" -d postgres -At "$@"; }
+# Every running postgres-image container is swept — a second dev compose
+# (control-plane, agents) can hold test clones the default name never sees.
+# PG_USER comes from the container's own env (postgres default), never hardcoded.
+sweep_pg_container() {
+  local c="$1" user
+  user=$(docker exec "$c" printenv POSTGRES_USER 2>/dev/null)
+  psql() { docker exec -i "$c" psql -U "${user:-postgres}" -d postgres -At "$@"; }
   # pgt_* and crowdrelay_<tag>_<uuid>: age is in the name — uuid v7 leading
   # 48 bits are unix ms. crowdrelay_* is the previous clone naming; nothing
   # creates it anymore but the strays still occupy disk. Named databases like
@@ -84,12 +93,16 @@ if docker inspect "$PG_CONTAINER" >/dev/null 2>&1; then
     if [ "$APPLY" -eq 1 ]; then
       psql -c "DROP DATABASE \"$db\"" >/dev/null 2>&1 && note "pg-drop" "${size_kb:-0}" "$db"
     else
-      note "pg-drop(dry)" 0 "$db (${size_kb:-0} KB)"
+      note "pg-drop(dry)" 0 "$c: $db (${size_kb:-0} KB)"
     fi
   done
-else
-  log "  pg: container $PG_CONTAINER absent — skipped"
-fi
+}
+
+pg_found=0
+while read -r cname cimage; do
+  case "$cimage" in *postgres*) pg_found=1; sweep_pg_container "$cname" ;; esac
+done < <(docker ps --format '{{.Names}} {{.Image}}' 2>/dev/null)
+[[ "$pg_found" -eq 0 ]] && log "  pg: no postgres container running — skipped"
 
 # ── 2. docker: cache >72h, dangling images, unattached volumes ──────────────
 if docker info >/dev/null 2>&1; then
@@ -108,7 +121,16 @@ else
 fi
 
 # ── 3. abandoned worktree target dirs ───────────────────────────────────────
-for wtroot in "$HOME"/dev/*/.claude/worktrees "$HOME"/dev/.worktrees; do
+# Prune stale registrations first: a worktree whose dir was deleted by hand
+# keeps its .git/worktrees/<name> entry, which would make `gone` below read
+# false and keep a dead target alive forever. prune only drops metadata for
+# dirs that no longer exist — a live checkout is structurally unreachable.
+if [ "$APPLY" -eq 1 ]; then
+  for repo in "$HOME"/dev/*/; do
+    git -C "$repo" worktree prune 2>/dev/null
+  done
+fi
+for wtroot in "$HOME"/dev/*/.claude/worktrees "$HOME"/dev/*/.worktrees "$HOME"/dev/.worktrees; do
   [ -d "$wtroot" ] || continue
   for wt in "$wtroot"/*/; do
     [ -d "$wt/target" ] || continue

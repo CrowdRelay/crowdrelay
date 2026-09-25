@@ -161,12 +161,6 @@ impl SignupFanCommand {
     pub fn signup(&self) -> &FanSignup {
         &self.signup
     }
-
-    /// Consumes the command and returns the inner signup.
-    #[must_use]
-    pub fn into_signup(self) -> FanSignup {
-        self.signup
-    }
 }
 
 impl fmt::Debug for SignupFanCommand {

@@ -8,7 +8,7 @@ mod cycle_trigger;
 mod daily_briefing;
 mod decline_advisories;
 pub use cycle_trigger::{
-    AUTOPILOT_CYCLE_CHANNEL, CycleDegradation, CyclePreview, CycleTrigger, NORTH_STAR_WINDOW_DAYS,
+    AUTOPILOT_CYCLE_CHANNEL, CycleClose, CyclePreview, CycleTrigger, NORTH_STAR_WINDOW_DAYS,
     close_cycle_run, daily_north_star, open_cycle_run, preview_autopilot_cycle,
     request_autopilot_cycle,
 };

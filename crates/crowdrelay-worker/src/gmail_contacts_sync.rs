@@ -486,6 +486,7 @@ impl GmailContactsSyncWorker {
 
         let mut scanned = 0usize;
         let mut failed = 0usize;
+        let mut vanished = 0usize;
         let mut upserted = 0u64;
         let mut attachments_failed = 0u64;
         for id in &ids {
@@ -497,6 +498,16 @@ impl GmailContactsSyncWorker {
                     scanned += 1;
                     upserted += n;
                     attachments_failed += attachment_failures;
+                }
+                // Gone between listing and fetching: a draft replaced or
+                // sent, a message deleted. There is nothing left to read and
+                // no retry will change that, so it does not hold the cursor.
+                // Counting it as a failure froze the lane in production: nine
+                // vanished drafts failed every cycle and the cursor stopped,
+                // while the connection still reported `working`.
+                Err(error) if message_vanished(&error) => {
+                    vanished += 1;
+                    tracing::info!(message_id = %id, "gmail message gone before it was read; skipped");
                 }
                 Err(error) => {
                     failed += 1;
@@ -537,6 +548,7 @@ impl GmailContactsSyncWorker {
             full_sweep,
             messages = scanned,
             failed,
+            vanished,
             attachments_failed,
             contacts_upserted = upserted,
             "gmail contacts sync cycle complete"
@@ -1081,8 +1093,26 @@ enum HistoryError {
     Other(String),
 }
 
+/// Whether a message fetch failed because the message no longer exists.
+///
+/// `get` reports a non-success status as `gmail request failed status=N`;
+/// 404 on `messages/{id}` is Gmail's answer for a deleted message or a
+/// draft that was replaced or sent.
+fn message_vanished(error: &str) -> bool {
+    error == "gmail request failed status=404"
+}
+
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_vanished_message_is_not_a_failure() {
+        assert!(super::message_vanished("gmail request failed status=404"));
+        assert!(!super::message_vanished("gmail request failed status=500"));
+        assert!(!super::message_vanished("gmail request failed status=4040"));
+        assert!(!super::message_vanished("gmail response parse failed: eof"));
+    }
+
     use super::*;
 
     #[test]

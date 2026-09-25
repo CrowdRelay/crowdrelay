@@ -303,12 +303,17 @@ pub struct CycleRunEntry {
     /// Absent for every cycle that ran before migration 0261. An empty list is
     /// a different statement: that cycle recorded no phase failure.
     pub degraded_phases: Option<Vec<String>>,
+    /// Why each degraded phase fell over: phase to the database faults the
+    /// worker recorded before it failed (migration 0358). The phase alone
+    /// left the reason in a worker log that each deploy throws away. NULL for
+    /// a clean cycle and for every cycle before the column.
+    pub degraded_reasons: Option<serde_json::Value>,
     /// What each failed phase failed with — phase identifier → error kind in
     /// the `last_error_kind` vocabulary. `degraded_phases` named the phase and
     /// left the error in a worker log that rotated away; this pair answers
     /// "which phase keeps breaking, and with what" from the row alone.
     ///
-    /// Absent for every cycle that ran before migration 0358. An empty object
+    /// Absent for every cycle that ran before migration 0360. An empty object
     /// is a different statement: that cycle recorded no phase failure.
     pub degraded_errors: Option<serde_json::Value>,
     /// Why a quiet cycle was quiet, in the brain's own words ("WAIT wins:
@@ -419,6 +424,7 @@ async fn load_cycle_runs(
                actions_created,
                north_star_value,
                degraded_phases,
+               degraded_reasons,
                degraded_errors,
                wait_reason
         FROM autopilot_cycle_runs

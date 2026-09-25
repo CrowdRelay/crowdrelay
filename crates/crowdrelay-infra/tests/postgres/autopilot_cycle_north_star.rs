@@ -26,7 +26,7 @@ use crate::common;
 use crowdrelay_brain::self_assessment::{BrainState, assess};
 use crowdrelay_domain::WorkspaceId;
 use crowdrelay_infra::autopilot::{
-    CycleDegradation, CycleTrigger, NORTH_STAR_WINDOW_DAYS, close_cycle_run, daily_north_star,
+    CycleClose, CycleTrigger, NORTH_STAR_WINDOW_DAYS, close_cycle_run, daily_north_star,
     open_cycle_run,
 };
 use sqlx::PgPool;
@@ -303,13 +303,15 @@ async fn the_cycle_records_the_reading_it_was_given_not_a_fan_count() -> Result<
         &pool,
         workspace_id,
         cycle_id,
-        &CycleDegradation {
-            phases: vec![],
-            errors: serde_json::json!({}),
+        CycleClose {
+            degraded_phases: &[],
+            degraded_reasons: None,
+            degraded_errors: &serde_json::json!({}),
+            finished_at: now,
+            north_star_observed: Some(1),
+            north_star_metric: None,
+            wait_reason: None,
         },
-        now,
-        Some(1),
-        None,
     )
     .await;
 
@@ -350,20 +352,35 @@ async fn a_cycle_that_took_no_reading_records_none() -> Result<()> {
     let cycle_id = open_cycle_run(&pool, workspace_id, CycleTrigger::Scheduled, now)
         .await
         .ok_or("the cycle run record must open")?;
-    // The evaluation phase never got far enough to read anything.
+    // The evaluation phase never got far enough to read anything, and the
+    // row keeps why (migration 0358) — the worker log would not survive a
+    // deploy.
+    let reasons = serde_json::json!({
+        "evaluation": ["22007: invalid input syntax for type timestamp with time zone"],
+    });
     close_cycle_run(
         &pool,
         workspace_id,
         cycle_id,
-        &CycleDegradation {
-            phases: vec!["evaluation".to_owned()],
-            errors: serde_json::json!({"evaluation": "unexpected"}),
+        CycleClose {
+            degraded_phases: &["evaluation".to_owned()],
+            degraded_reasons: Some(&reasons),
+            degraded_errors: &serde_json::json!({"evaluation": "unexpected"}),
+            finished_at: now,
+            north_star_observed: None,
+            north_star_metric: None,
+            wait_reason: None,
         },
-        now,
-        None,
-        None,
     )
     .await;
+    let stored_reasons: Option<serde_json::Value> = sqlx::query_scalar(
+        "SELECT degraded_reasons FROM autopilot_cycle_runs WHERE workspace_id = $1 AND id = $2",
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(cycle_id)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(stored_reasons, Some(reasons));
 
     let stored: Option<i32> = sqlx::query_scalar(
         "SELECT north_star_value FROM autopilot_cycle_runs WHERE workspace_id = $1 AND id = $2",
@@ -410,16 +427,18 @@ async fn a_degraded_cycle_records_which_phases_failed() -> Result<()> {
         &pool,
         workspace_id,
         cycle_id,
-        &CycleDegradation {
-            phases: vec!["action_claim".to_owned(), "reply_triage_claim".to_owned()],
-            errors: serde_json::json!({
+        CycleClose {
+            degraded_phases: &["action_claim".to_owned(), "reply_triage_claim".to_owned()],
+            degraded_reasons: None,
+            degraded_errors: &serde_json::json!({
                 "action_claim": "repository_unavailable",
                 "reply_triage_claim": "unexpected",
             }),
+            finished_at: now,
+            north_star_observed: Some(7),
+            north_star_metric: None,
+            wait_reason: None,
         },
-        now,
-        Some(7),
-        None,
     )
     .await;
 
@@ -474,13 +493,15 @@ async fn a_clean_cycle_records_an_empty_phase_list_not_null() -> Result<()> {
         &pool,
         workspace_id,
         cycle_id,
-        &CycleDegradation {
-            phases: vec![],
-            errors: serde_json::json!({}),
+        CycleClose {
+            degraded_phases: &[],
+            degraded_reasons: None,
+            degraded_errors: &serde_json::json!({}),
+            finished_at: now,
+            north_star_observed: Some(7),
+            north_star_metric: None,
+            wait_reason: None,
         },
-        now,
-        Some(7),
-        None,
     )
     .await;
 
@@ -533,13 +554,15 @@ async fn a_quiet_cycle_records_its_reason_and_an_active_one_records_none() -> Re
         &pool,
         workspace_id,
         quiet_id,
-        &CycleDegradation {
-            phases: vec![],
-            errors: serde_json::json!({}),
+        CycleClose {
+            degraded_phases: &[],
+            degraded_reasons: None,
+            degraded_errors: &serde_json::json!({}),
+            finished_at: now,
+            north_star_observed: Some(20),
+            north_star_metric: None,
+            wait_reason: Some("WAIT wins: VOI=0.85 > best_action_value=0.00"),
         },
-        now,
-        Some(20),
-        Some("WAIT wins: VOI=0.85 > best_action_value=0.00"),
     )
     .await;
 
@@ -604,13 +627,15 @@ async fn a_quiet_cycle_records_its_reason_and_an_active_one_records_none() -> Re
         &pool,
         workspace_id,
         active_id,
-        &CycleDegradation {
-            phases: vec![],
-            errors: serde_json::json!({}),
+        CycleClose {
+            degraded_phases: &[],
+            degraded_reasons: None,
+            degraded_errors: &serde_json::json!({}),
+            finished_at: now + Duration::minutes(6),
+            north_star_observed: Some(20),
+            north_star_metric: None,
+            wait_reason: Some("WAIT overridden by min_dispatches=1 dispatched 1 candidate(s)"),
         },
-        now + Duration::minutes(6),
-        Some(20),
-        Some("WAIT overridden by min_dispatches=1 dispatched 1 candidate(s)"),
     )
     .await;
 
@@ -650,13 +675,15 @@ async fn the_latest_wait_reason_is_scoped_to_the_workspace() -> Result<()> {
             &pool,
             ws,
             id,
-            &CycleDegradation {
-                phases: vec![],
-                errors: serde_json::json!({}),
+            CycleClose {
+                degraded_phases: &[],
+                degraded_reasons: None,
+                degraded_errors: &serde_json::json!({}),
+                finished_at: now,
+                north_star_observed: None,
+                north_star_metric: None,
+                wait_reason: Some(reason),
             },
-            now,
-            None,
-            Some(reason),
         )
         .await;
     }
@@ -676,6 +703,58 @@ async fn the_latest_wait_reason_is_scoped_to_the_workspace() -> Result<()> {
         latest.as_deref(),
         Some("my reason: WAIT wins"),
         "the operator reads this tenant's reason, not a neighbour's",
+    );
+    Ok(())
+}
+
+/// A tenant that changes its North Star starts a new series. Production read
+/// Signal installs (2 to 4) and then weighted audience (~680) in one series,
+/// and the brain called the switch `improving`.
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn a_changed_north_star_metric_is_not_read_as_growth() -> Result<()> {
+    let pool = pool().await?;
+    let workspace_id = workspace(&pool).await?;
+    let now = OffsetDateTime::now_utc()
+        .replace_time(time::Time::from_hms(12, 0, 0).expect("a valid time of day"));
+    for day in 0..10_i64 {
+        let (metric, value) = if day < 6 {
+            ("signal_installs", 3)
+        } else {
+            ("weighted_audience", 680)
+        };
+        sqlx::query(
+            r#"
+            INSERT INTO autopilot_cycle_runs
+                (id, workspace_id, trigger, started_at, finished_at, duration_ms,
+                 outcome, decisions_recorded, actions_created, north_star_value,
+                 north_star_metric)
+            VALUES ($1,$2,'scheduled',$3,$3,10,'succeeded',0,0,$4,$5)
+            "#,
+        )
+        .bind(Uuid::now_v7())
+        .bind(workspace_id.into_uuid())
+        .bind(now - Duration::days(9 - day))
+        .bind(value)
+        .bind(metric)
+        .execute(&pool)
+        .await?;
+    }
+    let samples = daily_north_star(&pool, workspace_id, NORTH_STAR_WINDOW_DAYS).await?;
+    assert_eq!(
+        samples.len(),
+        4,
+        "only the four readings in the current metric belong to its series"
+    );
+    assert!(
+        samples
+            .iter()
+            .all(|sample| (sample.value - 680.0).abs() < f64::EPSILON)
+    );
+    assert_eq!(
+        assess(samples),
+        BrainState::Initializing,
+        "four days of a new metric is too little to judge — not a 22,000% rise"
     );
     Ok(())
 }

@@ -33,6 +33,11 @@ use uuid::Uuid;
 
 /// Contacts change slowly — an hour is fresh and leans on nothing.
 const SYNC_INTERVAL: Duration = Duration::from_secs(60 * 60);
+/// Drive's refusal for a native file over its 10 MB export limit, as
+/// `download_refusal` reports it.
+const EXPORT_TOO_LARGE_REASON: &str = "reason=exportSizeLimitExceeded";
+/// Suffix on a file's recorded state marking a version Drive would not export.
+const EXPORT_TOO_LARGE_MARKER: &str = "#refused:exportSizeLimitExceeded";
 /// Bound on Drive files considered per cycle.
 const MAX_FILES_PER_CYCLE: usize = 200;
 /// A folder scope walks this many levels deep and this many folders wide —
@@ -558,20 +563,48 @@ impl GDriveContactsSyncWorker {
         // misfiled — say, the 716-band workbook the single-sheet reader
         // counted as a 17-row contact sheet — skipped-unchanged forever.
         let state_marker = format!("{mtime}#{SHEET_INTAKE_REVISION}");
-        if !mtime.is_empty()
-            && self
+        // A version Drive refused to export for size is recorded as refused,
+        // not as read, and skipped until the file changes. Retrying it cost
+        // an export attempt and a warning every hour for a workbook Drive
+        // will never hand over whole (production, 2026-09-25).
+        let refused_marker = format!("{state_marker}{EXPORT_TOO_LARGE_MARKER}");
+        if !mtime.is_empty() {
+            let recorded = self
                 .repo
                 .file_mtime(self.workspace_id, &file.id)
                 .await
-                .map_err(|e| e.to_string())?
-                .as_deref()
-                == Some(state_marker.as_str())
-        {
-            counts.files_skipped_unchanged = 1;
-            return Ok(counts);
+                .map_err(|e| e.to_string())?;
+            if recorded.as_deref() == Some(state_marker.as_str())
+                || recorded.as_deref() == Some(refused_marker.as_str())
+            {
+                counts.files_skipped_unchanged = 1;
+                return Ok(counts);
+            }
         }
 
-        let sheets = self.fetch_sheets(connection_id, file).await?;
+        let sheets = match self.fetch_sheets(connection_id, file).await {
+            Ok(sheets) => sheets,
+            Err(error) if !mtime.is_empty() && error.contains(EXPORT_TOO_LARGE_REASON) => {
+                self.repo
+                    .record_file_state(
+                        self.workspace_id,
+                        &file.id,
+                        &file.name,
+                        &file.mime_type,
+                        &refused_marker,
+                        false,
+                        0,
+                        0,
+                    )
+                    .await
+                    .map_err(|e| e.to_string())?;
+                return Err(format!(
+                    "{error}; Drive exports at most 10 MB, so this version is skipped until the \
+                     file changes — split it or trim it to have it read"
+                ));
+            }
+            Err(error) => return Err(error),
+        };
         // Workbook reality: a .xlsx can be a dashboard over a data tab —
         // the deep-scan feed keeps its 716-band table on "Master" behind a
         // "Summary" cover sheet. Seed readers therefore inspect EVERY sheet;

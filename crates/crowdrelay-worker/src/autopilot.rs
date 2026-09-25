@@ -97,16 +97,34 @@ mod phase {
 /// fail on many items in one cycle and that is still one broken phase. Ordered,
 /// so the recorded value does not change with iteration order.
 ///
-/// The value paired with each phase is the error kind it first failed with, in
-/// the `repository_error_kind` vocabulary. First wins for the same reason the
-/// phase itself is a set: one broken phase is one entry, whatever the iteration
-/// count behind it was.
+/// The value paired with each phase is both halves of why it failed: the
+/// first error kind in the `repository_error_kind` vocabulary, and the
+/// database faults the worker captured up to that failure
+/// (`crowdrelay_infra::database::capture_faults`). First kind wins for the
+/// same reason the phase itself is a set: one broken phase is one entry,
+/// whatever the iteration count behind it was. The faults are those since
+/// the previous failed phase, which can include one an earlier phase handled
+/// and carried on from; an empty list means the failure was not a database
+/// fault.
 #[derive(Clone, Debug, Default)]
-struct DegradedPhases(std::collections::BTreeMap<&'static str, &'static str>);
+struct DegradedPhases(std::collections::BTreeMap<&'static str, PhaseFailure>);
+
+/// One failed phase's evidence: its first error kind and the faults captured
+/// up to it. Kept as one value so the two columns the cycle row writes cannot
+/// disagree about which phase they belong to.
+#[derive(Clone, Debug)]
+struct PhaseFailure {
+    kind: &'static str,
+    faults: Vec<String>,
+}
 
 impl DegradedPhases {
     fn failed(&mut self, phase: &'static str, kind: &'static str) {
-        self.0.entry(phase).or_insert(kind);
+        let faults = crowdrelay_infra::database::take_faults();
+        self.0
+            .entry(phase)
+            .and_modify(|failure| failure.faults.extend(faults.iter().cloned()))
+            .or_insert(PhaseFailure { kind, faults });
     }
 
     fn any(&self) -> bool {
@@ -125,18 +143,23 @@ impl DegradedPhases {
     fn recorded_errors(&self) -> serde_json::Value {
         self.0
             .iter()
-            .map(|(phase, kind)| ((*phase).to_owned(), (*kind).into()))
+            .map(|(phase, failure)| ((*phase).to_owned(), failure.kind.into()))
             .collect::<serde_json::Map<String, serde_json::Value>>()
             .into()
     }
 
-    /// The pair `close_cycle_run` writes — one value so the phases and the
-    /// kinds cannot disagree about which map they came from.
-    fn cycle_degradation(&self) -> crowdrelay_infra::autopilot::CycleDegradation {
-        crowdrelay_infra::autopilot::CycleDegradation {
-            phases: self.recorded(),
-            errors: self.recorded_errors(),
-        }
+    /// Phase to the faults behind it, or `None` when no phase failed.
+    fn reasons(&self) -> Option<serde_json::Value> {
+        self.any().then(|| {
+            serde_json::Value::Object(
+                self.0
+                    .iter()
+                    .map(|(phase, failure)| {
+                        ((*phase).to_owned(), serde_json::json!(failure.faults))
+                    })
+                    .collect(),
+            )
+        })
     }
 }
 
@@ -152,6 +175,8 @@ struct CycleObservation {
     /// tenant has chosen. `None` when that phase did not get far enough to
     /// take a reading.
     north_star: Option<u32>,
+    /// The metric that reading is in.
+    north_star_metric: Option<&'static str>,
     /// Why the portfolio selected nothing, in the brain's own words. The
     /// system may do nothing and say so — but only if the reason survives
     /// past the worker log it was first written to.
@@ -294,10 +319,18 @@ impl AutopilotWorker {
                     self.repository.pool(),
                     self.workspace_id,
                     cycle_id,
-                    &skipped.cycle_degradation(),
-                    OffsetDateTime::now_utc(),
-                    None,
-                    None,
+                    crowdrelay_infra::autopilot::CycleClose {
+                        // The park check runs before the fault-capture wrapper
+                        // around run_once, so there are no reasons to report —
+                        // only the phase and its kind.
+                        degraded_phases: &skipped.recorded(),
+                        degraded_reasons: None,
+                        degraded_errors: &skipped.recorded_errors(),
+                        finished_at: OffsetDateTime::now_utc(),
+                        north_star_observed: None,
+                        north_star_metric: None,
+                        wait_reason: None,
+                    },
                 )
                 .await;
             }
@@ -317,17 +350,22 @@ impl AutopilotWorker {
         );
         let observed = {
             let _entered = span.enter();
-            self.run_once(started).await
+            crowdrelay_infra::database::capture_faults(self.run_once(started)).await
         };
         if let Some(cycle_id) = cycle_id {
             crowdrelay_infra::autopilot::close_cycle_run(
                 self.repository.pool(),
                 self.workspace_id,
                 cycle_id,
-                &observed.degraded.cycle_degradation(),
-                OffsetDateTime::now_utc(),
-                observed.north_star,
-                observed.wait_reason.as_deref(),
+                crowdrelay_infra::autopilot::CycleClose {
+                    degraded_phases: &observed.degraded.recorded(),
+                    degraded_reasons: observed.degraded.reasons().as_ref(),
+                    degraded_errors: &observed.degraded.recorded_errors(),
+                    finished_at: OffsetDateTime::now_utc(),
+                    north_star_observed: observed.north_star,
+                    north_star_metric: observed.north_star_metric,
+                    wait_reason: observed.wait_reason.as_deref(),
+                },
             )
             .await;
         }
@@ -347,6 +385,7 @@ impl AutopilotWorker {
         // or evidence collection from a previous cycle.
         let mut degraded = DegradedPhases::default();
         let mut north_star_observed = None;
+        let mut north_star_metric = None;
         let mut wait_reason = None;
 
         // Recording first-party observations runs before evaluation so a cycle
@@ -377,6 +416,7 @@ impl AutopilotWorker {
         match evaluator.execute(now).await {
             Ok(report) => {
                 north_star_observed = report.north_star_observed;
+                north_star_metric = report.north_star_metric;
                 // A quiet cycle owes its reason in full: the portfolio's WAIT
                 // math and, when the watcher found nothing, the missing
                 // material itself. Both ride the same column — an operator
@@ -466,20 +506,23 @@ impl AutopilotWorker {
                 // about it each tick would bury the case that is genuinely
                 // odd: a tenant that *did* write its ask and still cannot
                 // post.
+                // `OnCadence` is not a gap either: the ask went out and the
+                // next is not due (`JoinAskHold::needs_a_person`). It was
+                // warned about every poll — seven warnings in half an hour of
+                // production logs for a feature that was working.
                 if !report.join_ask_held.is_empty() {
-                    let never_configured = report
-                        .join_ask_held
-                        .iter()
-                        .all(|(_, hold)| matches!(hold, JoinAskHold::NoVariants));
-                    if never_configured {
-                        tracing::debug!(
-                            held = ?report.join_ask_held,
-                            "join-ask not set up for this workspace yet"
-                        );
-                    } else {
+                    let actionable = report.join_ask_held.iter().any(|(_, hold)| {
+                        hold.needs_a_person() && !matches!(hold, JoinAskHold::NoVariants)
+                    });
+                    if actionable {
                         tracing::warn!(
                             held = ?report.join_ask_held,
                             "join-ask platforms held this cycle"
+                        );
+                    } else {
+                        tracing::debug!(
+                            held = ?report.join_ask_held,
+                            "join-ask not set up yet, or this week's ask already went out"
                         );
                     }
                 }
@@ -940,6 +983,7 @@ impl AutopilotWorker {
         CycleObservation {
             degraded,
             north_star: north_star_observed,
+            north_star_metric,
             wait_reason,
         }
     }

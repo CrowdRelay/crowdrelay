@@ -98,6 +98,9 @@ pub struct AutopilotCycleReport {
     /// reading records no reading, because a zero here is indistinguishable
     /// from having lost the entire audience.
     pub north_star_observed: Option<u32>,
+    /// The metric `north_star_observed` is in (`NorthStarMetric::as_str`), so
+    /// a series of readings never mixes two metrics under one name.
+    pub north_star_metric: Option<&'static str>,
     /// Diagnostic: how many GI candidates were scored before portfolio selection.
     pub gi_candidates: u32,
     /// Diagnostic: WAIT reason if the portfolio selected nothing.
