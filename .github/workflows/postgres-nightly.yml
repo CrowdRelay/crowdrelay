@@ -28,7 +28,7 @@ concurrency:
 jobs:
   full-suite:
     name: Every ignored PostgreSQL test
-    runs-on: [self-hosted, arm64]
+    runs-on: { group: Default, labels: [self-hosted, arm64] }
     # One compile (~6 min warm, ~14 cold) plus ~5 min of serial tests.
     timeout-minutes: 60
 

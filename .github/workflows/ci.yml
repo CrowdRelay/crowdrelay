@@ -39,7 +39,7 @@ jobs:
   # per-test databases, no lanes.
   rust-tests:
     name: Rust checks and PostgreSQL integration
-    runs-on: [self-hosted, arm64]
+    runs-on: { group: Default, labels: [self-hosted, arm64] }
     # Warm-cache runs land around 6 minutes; a fully cold sccache+target
     # compile needs ~14. 35 is headroom for the box being shared: the
     # frontend lane now runs Tauri/Android builds alongside, and at 20 a
@@ -414,7 +414,7 @@ jobs:
     name: All checks passed
     needs: [rust-tests]
     if: always()
-    runs-on: [self-hosted, arm64]
+    runs-on: { group: Default, labels: [self-hosted, arm64] }
     timeout-minutes: 5
     steps:
       - name: Aggregate job results
