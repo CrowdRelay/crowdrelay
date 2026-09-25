@@ -981,40 +981,6 @@ pub async fn resolve_fan_for_email(
     follow_merge_hops(tx, workspace_id, resolved).await
 }
 
-/// Read-path variant of [`resolve_fan_for_email`] — same resolution, no row
-/// locks, safe to call from a plain pool outside a transaction.
-///
-/// # Errors
-///
-/// Returns the `sqlx` error; callers map it to their store error.
-pub async fn resolve_fan_for_email_pool(
-    pool: &PgPool,
-    workspace_id: Uuid,
-    normalized_email: &str,
-) -> Result<Option<(Uuid, String)>, sqlx::Error> {
-    let resolved = sqlx::query_as::<_, (Uuid, String, Option<Uuid>)>(
-        "SELECT f.id, f.status, f.merged_into_fan_id \
-         FROM fan_identifiers i \
-         JOIN fans f ON f.workspace_id = i.workspace_id AND f.id = i.fan_id \
-         WHERE i.workspace_id = $1 AND i.kind = 'email' AND i.value = $2 \
-         UNION ALL \
-         SELECT f.id, f.status, f.merged_into_fan_id FROM fans f \
-         WHERE f.workspace_id = $1 AND f.normalized_email = $2 \
-         AND NOT EXISTS ( \
-             SELECT 1 FROM fan_identifiers i \
-             WHERE i.workspace_id = $1 AND i.kind = 'email' AND i.value = $2) \
-         LIMIT 1",
-    )
-    .bind(workspace_id)
-    .bind(normalized_email)
-    .fetch_optional(pool)
-    .await?;
-    match resolved {
-        Some(row) => follow_merge_hops_pool(pool, workspace_id, Some(row)).await,
-        None => Ok(None),
-    }
-}
-
 /// Walks `merged_into_fan_id` inside a transaction until a non-merged fan
 /// answers. Hard-capped: a cycle can only come from corrupt data, and the
 /// merge writer forbids chains.
@@ -1035,33 +1001,6 @@ async fn follow_merge_hops(
                 .bind(workspace_id)
                 .bind(survivor)
                 .fetch_optional(&mut **tx)
-                .await?;
-            }
-            Some((id, status, _)) => return Ok(Some((id, status))),
-            None => return Ok(None),
-        }
-    }
-    Ok(None)
-}
-
-/// Pool variant of the hop walk — no transaction, no locks.
-async fn follow_merge_hops_pool(
-    pool: &PgPool,
-    workspace_id: Uuid,
-    resolved: Option<(Uuid, String, Option<Uuid>)>,
-) -> Result<Option<(Uuid, String)>, sqlx::Error> {
-    const MAX_HOPS: u8 = 8;
-    let mut current = resolved;
-    for _ in 0..MAX_HOPS {
-        match current {
-            Some((_, status, Some(survivor))) if status == "merged" => {
-                current = sqlx::query_as::<_, (Uuid, String, Option<Uuid>)>(
-                    "SELECT id, status, merged_into_fan_id FROM fans \
-                     WHERE workspace_id = $1 AND id = $2",
-                )
-                .bind(workspace_id)
-                .bind(survivor)
-                .fetch_optional(pool)
                 .await?;
             }
             Some((id, status, _)) => return Ok(Some((id, status))),
