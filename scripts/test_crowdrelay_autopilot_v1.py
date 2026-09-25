@@ -265,7 +265,7 @@ class ViryaOsAutopilotV1(unittest.TestCase):
         self.assertIn("assess_effect", performance)
         self.assertIn("schedule_effect_measurement", infra)
         self.assertIn("gross-list-price proxy", infra)
-        self.assertIn("observed_at >= $3 + INTERVAL '7 days'", infra)
+        self.assertIn("observed_at >= $3::timestamptz + INTERVAL '7 days'", infra)
         self.assertIn("FOR UPDATE SKIP LOCKED", infra)
         self.assertIn("stale_processing_recovered", infra)
         self.assertIn("claim_due_measurements", worker)

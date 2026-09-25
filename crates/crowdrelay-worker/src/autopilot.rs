@@ -51,6 +51,10 @@ const REPLY_TRIAGE_BATCH_SIZE: u32 = 50;
 /// deliberately not the log messages, which are prose and change freely.
 mod phase {
     pub const GROWTH_METRIC_CAPTURE: &str = "growth_metric_capture";
+    /// Keeping outreach opportunities current: the pitch, the next shows,
+    /// and contacts imported since. A failure leaves last cycle's
+    /// opportunities in place, so the evaluator sees slightly older supply.
+    pub const OUTREACH_SUPPLY_REFRESH: &str = "outreach_supply_refresh";
     pub const EVALUATION: &str = "evaluation";
     pub const TEAM_HANDOFF_RECONCILIATION: &str = "team_handoff_reconciliation";
     /// The roster brief's issue attempt — one org-wide artifact plus its
@@ -409,6 +413,33 @@ impl AutopilotWorker {
             Err(error) => {
                 degraded.failed(phase::GROWTH_METRIC_CAPTURE, repository_error_kind(error));
                 tracing::warn!(error = %error, "CrowdRelay first-party growth metric capture failed");
+            }
+        }
+
+        // Supply before evaluation, for the same reason as the metrics: the
+        // outreach evaluator reads only opportunities, and a contact imported
+        // since the last announcement had none.
+        match self
+            .repository
+            .refresh_outreach_supply(self.workspace_id, now)
+            .await
+        {
+            Ok(report) if report.opportunities_retired > 0 || report.pitch.is_none() => {
+                tracing::info!(
+                    pitch = ?report.pitch,
+                    live = report.opportunities_live,
+                    retired = report.opportunities_retired,
+                    "CrowdRelay refreshed outreach supply"
+                );
+            }
+            Ok(report) => tracing::debug!(
+                pitch = ?report.pitch,
+                live = report.opportunities_live,
+                "CrowdRelay refreshed outreach supply"
+            ),
+            Err(error) => {
+                degraded.failed(phase::OUTREACH_SUPPLY_REFRESH, repository_error_kind(error));
+                tracing::warn!(error = %error, "CrowdRelay outreach supply refresh failed");
             }
         }
 

@@ -253,6 +253,7 @@ struct OutreachRow {
     target_ever_replied: bool,
     last_reply_disposition: String,
     in_flight: bool,
+    wave_only: bool,
 }
 
 pub(in crate::autopilot) async fn load_outreach_snapshots(
@@ -317,7 +318,10 @@ pub(in crate::autopilot) async fn load_outreach_snapshots(
                   AND action.context = 'outreach'
                   AND action.subject_id = opportunity.id
                   AND action.status IN ('awaiting_approval','queued','processing')
-            ) AS in_flight
+            ) AS in_flight,
+            -- Catalogue pitches go out in waves or not at all; see
+            -- `OutreachSnapshot::wave_only`.
+            opportunity.source = 'catalogue_autopilot' AS wave_only
         FROM outreach_opportunities AS opportunity
         JOIN outreach_targets AS target
           ON target.workspace_id = opportunity.workspace_id
@@ -362,6 +366,7 @@ pub(in crate::autopilot) async fn load_outreach_snapshots(
                 target_ever_replied: row.target_ever_replied,
                 last_reply: parse_outreach_reply(&row.last_reply_disposition)?,
                 in_flight: row.in_flight,
+                wave_only: row.wave_only,
             })
         })
         .collect()
@@ -787,7 +792,7 @@ pub(in crate::autopilot) async fn load_show_task_snapshots(
           -- The trailing edge must outlast the T+7 report's due time plus
           -- evaluation-cycle slack, or a show ages out of the snapshot the
           -- morning its report comes due and the artifact never ships.
-          AND event.starts_at BETWEEN $2 - INTERVAL '9 days' AND $2 + INTERVAL '14 days'
+          AND event.starts_at BETWEEN $2::timestamptz - INTERVAL '9 days' AND $2::timestamptz + INTERVAL '14 days'
           -- The announce beat exists only where a live campaign does — a
           -- task telling the band to announce a QR that was never minted
           -- would be noise wearing a checklist's clothes.

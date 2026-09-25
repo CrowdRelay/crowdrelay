@@ -126,8 +126,10 @@ async fn sender_identity_in_tx(
 /// action is still being written — the same rule as the booking letter.
 ///
 /// The pitch is the tenant's most recent active release plan that carries a
-/// listen link; with none, the composer refuses and the action parks on an
-/// empty draft rather than pitching at nothing. The target's display name is
+/// listen link, else its newest dated album, EP or single from the synced
+/// catalogue (`outreach_supply::outreach_pitch`); with neither, the composer
+/// refuses and the action parks on an empty draft rather than pitching at
+/// nothing. The target's display name is
 /// read here because the evaluator's snapshot carries only its id.
 async fn enrich_outreach_draft(
     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
@@ -164,14 +166,12 @@ async fn enrich_outreach_draft(
         // A kind the vocabulary does not know is not a letter we can write.
         return Ok(());
     };
-    let pitch = sqlx::query_as::<_, (String, String)>(
-        "SELECT title, listen_url FROM release_plans WHERE workspace_id = $1 AND active AND listen_url IS NOT NULL AND btrim(listen_url) <> '' AND btrim(title) <> '' ORDER BY release_at DESC LIMIT 1",
-    )
-    .bind(ws)
-    .fetch_optional(&mut **transaction)
-    .await
-    .map_err(map_sqlx)?;
-    let (pitch_title, pitch_url) = pitch.unwrap_or_default();
+    // The same pitch the supply refresh keys opportunities by: a release
+    // plan with a listen link, else the newest dated catalogue release.
+    let pitch = crate::autopilot::outreach_supply::outreach_pitch(transaction, ws).await?;
+    let (pitch_title, pitch_url) = pitch
+        .map(|pitch| (pitch.title, pitch.url))
+        .unwrap_or_default();
     let sender = sender_identity_in_tx(transaction, ws).await?;
     if let Ok(letter) = compose_outreach_letter(&OutreachLetterInput {
         sender: &sender,

@@ -30,7 +30,7 @@ pub struct ReplyTriageView {
 /// mailbox import or a sheet import never passes the classifier, so on
 /// 2026-09-25 sixteen contacts whose last word was theirs (19 positive
 /// answers in the ledger) sat behind a triage view that showed nothing.
-#[derive(Debug, FromRow, Serialize)]
+#[derive(Debug, Serialize)]
 pub struct WaitingReply {
     pub target_id: uuid::Uuid,
     pub display_name: String,
@@ -99,6 +99,33 @@ struct ReplyTriageRow {
     classified_at: OffsetDateTime,
 }
 
+#[derive(Debug, FromRow)]
+struct WaitingRow {
+    target_id: uuid::Uuid,
+    display_name: String,
+    target_kind: String,
+    disposition: String,
+    reply_label: Option<String>,
+    replied_at: OffsetDateTime,
+    last_written_at: Option<OffsetDateTime>,
+    /// Every waiting contact, beyond the limit too.
+    total: i64,
+}
+
+impl WaitingRow {
+    fn into_reply(self) -> WaitingReply {
+        WaitingReply {
+            target_id: self.target_id,
+            display_name: self.display_name,
+            target_kind: self.target_kind,
+            disposition: self.disposition,
+            reply_label: self.reply_label,
+            replied_at: self.replied_at,
+            last_written_at: self.last_written_at,
+        }
+    }
+}
+
 const NEEDS_HUMAN_LIMIT: i64 = 50;
 const RECENT_AUTO_LIMIT: i64 = 30;
 const WAITING_LIMIT: i64 = 50;
@@ -106,39 +133,6 @@ const WAITING_LIMIT: i64 = 50;
 /// conversation. Ninety days keeps a season's press round in view.
 const WAITING_WINDOW_DAYS: i32 = 90;
 
-/// Each contact's latest message, when it is theirs, it is recent, and it
-/// did not close the conversation. A declined or do-not-contact answer asks
-/// nothing of the act; an inactive or do-not-contact target is not written
-/// to anyway.
-const WAITING_ON_YOU_CTE: &str = r#"
-    WITH latest AS (
-        SELECT DISTINCT ON (interaction.target_id)
-               interaction.target_id, interaction.direction, interaction.disposition,
-               interaction.occurred_at, interaction.metadata
-        FROM outreach_interactions AS interaction
-        WHERE interaction.workspace_id = $1
-        ORDER BY interaction.target_id, interaction.occurred_at DESC, interaction.id DESC
-    ), waiting AS (
-        SELECT latest.target_id, target.display_name, target.target_kind,
-               latest.disposition,
-               NULLIF(btrim(COALESCE(latest.metadata->>'result',
-                                     latest.metadata->>'response_type')), '') AS reply_label,
-               latest.occurred_at AS replied_at,
-               (SELECT max(sent.occurred_at)
-                  FROM outreach_interactions AS sent
-                 WHERE sent.workspace_id = $1
-                   AND sent.target_id = latest.target_id
-                   AND sent.direction = 'outbound') AS last_written_at
-        FROM latest
-        JOIN outreach_targets AS target
-          ON target.workspace_id = $1 AND target.id = latest.target_id
-        WHERE latest.direction = 'inbound'
-          AND latest.disposition NOT IN ('declined', 'do_not_contact')
-          AND latest.occurred_at > now() - make_interval(days => $2)
-          AND target.active
-          AND NOT target.do_not_contact
-    )
-"#;
 
 pub async fn reply_triage_handler(
     State(state): State<AppState>,
@@ -184,26 +178,52 @@ pub async fn reply_triage_handler(
     .fetch_all(pool)
     .await;
 
-    let waiting_on_you = sqlx::query_as::<_, WaitingReply>(&format!(
-        "{WAITING_ON_YOU_CTE}
+    // Each contact's latest message, when it is theirs, it is recent, and it
+    // did not close the conversation. A declined or do-not-contact answer asks
+    // nothing of the act; an inactive or do-not-contact target is not written
+    // to anyway. One whole statement, with the full count as a window over the
+    // same rows: a shared CTE spliced in with `format!` cannot be prepared on
+    // its own, so `sql-result-types.py` could never check it.
+    let waiting_on_you = sqlx::query_as::<_, WaitingRow>(
+        r#"
+    WITH latest AS (
+        SELECT DISTINCT ON (interaction.target_id)
+               interaction.target_id, interaction.direction, interaction.disposition,
+               interaction.occurred_at, interaction.metadata
+        FROM outreach_interactions AS interaction
+        WHERE interaction.workspace_id = $1
+        ORDER BY interaction.target_id, interaction.occurred_at DESC, interaction.id DESC
+    ), waiting AS (
+        SELECT latest.target_id, target.display_name, target.target_kind,
+               latest.disposition,
+               NULLIF(btrim(COALESCE(latest.metadata->>'result',
+                                     latest.metadata->>'response_type')), '') AS reply_label,
+               latest.occurred_at AS replied_at,
+               (SELECT max(sent.occurred_at)
+                  FROM outreach_interactions AS sent
+                 WHERE sent.workspace_id = $1
+                   AND sent.target_id = latest.target_id
+                   AND sent.direction = 'outbound') AS last_written_at
+        FROM latest
+        JOIN outreach_targets AS target
+          ON target.workspace_id = $1 AND target.id = latest.target_id
+        WHERE latest.direction = 'inbound'
+          AND latest.disposition NOT IN ('declined', 'do_not_contact')
+          AND latest.occurred_at > now() - make_interval(days => $2)
+          AND target.active
+          AND NOT target.do_not_contact
+    )
         SELECT target_id, display_name, target_kind, disposition, reply_label,
-               replied_at, last_written_at
+               replied_at, last_written_at, count(*) OVER ()::bigint AS total
         FROM waiting
         ORDER BY (disposition = 'positive') DESC, replied_at ASC, target_id
-        LIMIT $3"
-    ))
+        LIMIT $3
+        "#,
+    )
     .bind(workspace_id)
     .bind(WAITING_WINDOW_DAYS)
     .bind(WAITING_LIMIT)
     .fetch_all(pool)
-    .await;
-
-    let waiting_on_you_count = sqlx::query_scalar::<_, i64>(&format!(
-        "{WAITING_ON_YOU_CTE} SELECT count(*)::bigint FROM waiting"
-    ))
-    .bind(workspace_id)
-    .bind(WAITING_WINDOW_DAYS)
-    .fetch_one(pool)
     .await;
 
     let summary = sqlx::query_as::<_, ReplyTriageSummary>(
@@ -223,12 +243,13 @@ pub async fn reply_triage_handler(
     .fetch_one(pool)
     .await;
 
-    match (needs_human, recent_auto, waiting_on_you, waiting_on_you_count, summary) {
-        (Ok(nh), Ok(ra), Ok(waiting), Ok(waiting_count), Ok(s)) => {
+    match (needs_human, recent_auto, waiting_on_you, summary) {
+        (Ok(nh), Ok(ra), Ok(waiting), Ok(s)) => {
+            let waiting_count = waiting.first().map_or(0, |row| row.total);
             let view = ReplyTriageView {
                 needs_human: nh.into_iter().map(row_to_entry).collect(),
                 recent_auto: ra.into_iter().map(row_to_entry).collect(),
-                waiting_on_you: waiting,
+                waiting_on_you: waiting.into_iter().map(WaitingRow::into_reply).collect(),
                 summary: ReplyTriageSummary {
                     waiting_on_you_count: waiting_count,
                     ..s

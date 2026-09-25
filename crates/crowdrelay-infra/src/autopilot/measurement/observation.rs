@@ -170,8 +170,8 @@ pub(super) async fn observe(
                     FROM promotion_campaign_states
                     WHERE workspace_id = $1
                       AND id = $2
-                      AND observed_at >= $3 + INTERVAL '7 days'
-                      AND observed_at <= $4
+                      AND observed_at >= $3::timestamptz + INTERVAL '7 days'
+                      AND observed_at <= $4::timestamptz
                     ORDER BY observed_at DESC
                     LIMIT 1
                     "#,
@@ -484,16 +484,16 @@ pub(super) async fn observe(
                         SELECT
                             (SELECT p.value FROM growth_metric_points p
                              WHERE p.series_id = s.id
-                               AND p.captured_at >= $3 - INTERVAL '28 days'
-                               AND p.captured_at < $3 - INTERVAL '14 days'
+                               AND p.captured_at >= $3::timestamptz - INTERVAL '28 days'
+                               AND p.captured_at < $3::timestamptz - INTERVAL '14 days'
                              ORDER BY p.captured_at DESC LIMIT 1) AS pre_start,
                             (SELECT p.value FROM growth_metric_points p
                              WHERE p.series_id = s.id AND p.captured_at < $3
                              ORDER BY p.captured_at DESC LIMIT 1) AS pre_end,
                             (SELECT p.value FROM growth_metric_points p
                              WHERE p.series_id = s.id
-                               AND p.captured_at >= $3 + INTERVAL '10 days'
-                               AND p.captured_at < $3 + INTERVAL '14 days'
+                               AND p.captured_at >= $3::timestamptz + INTERVAL '10 days'
+                               AND p.captured_at < $3::timestamptz + INTERVAL '14 days'
                              ORDER BY p.captured_at DESC LIMIT 1) AS post_end
                         FROM growth_metric_series AS s
                         WHERE s.workspace_id=$1 AND s.subject_kind='release_plan'

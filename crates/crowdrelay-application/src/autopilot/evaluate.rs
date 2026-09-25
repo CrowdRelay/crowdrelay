@@ -350,18 +350,39 @@ where
                         .repository
                         .load_outreach_snapshots(self.workspace_id, now)
                         .await?;
-                    // Shadow-mode reply probability model. Loaded once per
-                    // cycle, used to log a P(positive reply) prediction
-                    // alongside the existing relevance/confidence. This is
-                    // an additive, reversible advisory signal: it does NOT
-                    // change eligibility, ordering, disposition, or action.
-                    // A load failure or cold start produces the global prior
-                    // for every target, which is a no-op for ranking.
+                    // The reply probability model. Loaded once per cycle; its
+                    // P(positive reply) is logged on every candidate and, below,
+                    // orders the pitches. It does NOT change eligibility,
+                    // disposition or action. A load failure or cold start
+                    // produces the global prior for every target, which is a
+                    // no-op for the (stable) ordering.
                     let reply_model = self
                         .repository
                         .load_reply_model(self.workspace_id)
                         .await
                         .unwrap_or_default();
+                    // The model ranks who is pitched first, and nothing else.
+                    // A wave holds a dozen pitches and the quota twenty a day,
+                    // while one catalogue pitch reaches two hundred contacts,
+                    // so the order decides who is asked at all. Asking first
+                    // the contacts most likely to answer, by kind and by their
+                    // own history, is what the model learns for. Eligibility,
+                    // cadence, confidence and disposition still come only from
+                    // the deterministic evaluation. The sort is stable: with a
+                    // cold model every prediction is the prior and the loader's
+                    // order stands.
+                    let mut snapshots = snapshots;
+                    snapshots.sort_by(|left, right| {
+                        let p = |snapshot: &crowdrelay_domain::outreach::OutreachSnapshot| {
+                            reply_model
+                                .predict(
+                                    snapshot.target_kind.as_str(),
+                                    &snapshot.target_id.to_string(),
+                                )
+                                .probability
+                        };
+                        p(right).total_cmp(&p(left))
+                    });
                     for snapshot in snapshots {
                         // Extract target identifiers before the snapshot is
                         // moved into outreach_candidate, so the shadow
@@ -385,6 +406,11 @@ where
                                 wave.snapshot.pitches = wave.snapshot.pitches.saturating_add(1);
                                 wave.wave_id
                             });
+                        // Wave-only supply waits for a wave with room rather
+                        // than arriving as its own approval card.
+                        if snapshot.wave_only && wave_id.is_none() {
+                            continue;
+                        }
                         if let Some(mut candidate) =
                             outreach_candidate(snapshot, &policy, wave_id, now)?
                         {
