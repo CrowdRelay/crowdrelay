@@ -333,7 +333,7 @@ fn release_candidate(
                     "protected_shows": collisions.iter().map(|show| serde_json::json!({
                         "event_id": show.event_id,
                         "title": show.title,
-                        "starts_at": show.starts_at,
+                        "starts_at": crowdrelay_domain::wire_time::Wire(&show.starts_at),
                     })).collect::<Vec<_>>(),
                     "held_milestone": milestone_key,
                 }));

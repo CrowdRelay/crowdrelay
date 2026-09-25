@@ -344,7 +344,7 @@ async fn issue_admission_winners(
                 "display_name": candidate.display_name,
                 "public_reference": public_reference,
                 "claim_token": claim_token,
-                "claim_expires_at": claim_expires_at,
+                "claim_expires_at": crowdrelay_domain::wire_time::Wire(&claim_expires_at),
                 "issuance_method": "weighted_draw",
                 "draw_id": draw.id,
                 "draw_slug": draw.slug,

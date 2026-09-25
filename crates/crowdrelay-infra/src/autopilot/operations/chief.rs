@@ -13,7 +13,7 @@ pub(in crate::autopilot) async fn record_booking_reply(
         if matches!(command.disposition, BookingReplyDisposition::None) { return Err(RepositoryError::Unexpected); }
         let mut tx=repo.pool.begin().await.map_err(map_sqlx)?;
         let operation_id=Uuid::now_v7(); let disposition=booking_reply_str(command.disposition);
-        let details=json!({"target_id":command.target_id,"disposition":disposition,"occurred_at":command.occurred_at,"reply_text":command.reply_text.as_deref().map(str::trim).filter(|t| !t.is_empty())});
+        let details=json!({"target_id":command.target_id,"disposition":disposition,"occurred_at":crowdrelay_domain::wire_time::Wire(&command.occurred_at),"reply_text":command.reply_text.as_deref().map(str::trim).filter(|t| !t.is_empty())});
         if let Some(existing)=super::insert_operator_action(&mut tx,workspace_id,operation_id,"record_autopilot_booking_reply","booking_target",command.target_id.into_uuid(),"admin_api_key",idempotency_key,request_id,&details).await?{
             tx.commit().await.map_err(map_sqlx)?; return Ok(AutopilotControlMutation{operation_id:existing,target_id:command.target_id.into_uuid(),status:"reply_recorded".into(),replayed:true});
         }

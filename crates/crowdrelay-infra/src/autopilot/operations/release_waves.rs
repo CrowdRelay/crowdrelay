@@ -258,7 +258,7 @@ pub(in crate::autopilot) async fn tag_likely_listeners(
                 "consented active fans tagged as likely listeners — ranking formula travels with the artifact",
             )?,
             "release": { "title": title },
-            "generated_at": now,
+            "generated_at": crowdrelay_domain::wire_time::Wire(&now),
             "tag": tag,
             "likely_listeners": ranked
                 .iter()
@@ -266,7 +266,7 @@ pub(in crate::autopilot) async fn tag_likely_listeners(
                 .map(|(fan_id, email, last_action_at, edge_count)| json!({
                     "fan_id": fan_id,
                     "email": email,
-                    "last_meaningful_action_at": last_action_at,
+                    "last_meaningful_action_at": crowdrelay_domain::wire_time::Wire(&last_action_at),
                     "edge_count": edge_count,
                 }))
                 .collect::<Vec<_>>(),

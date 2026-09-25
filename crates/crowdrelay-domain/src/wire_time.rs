@@ -148,6 +148,49 @@ pub mod date_option {
     }
 }
 
+/// A timestamp or date inside a `json!` literal, written as text.
+///
+/// `json!({"due_at": due_at})` serializes a bare `OffsetDateTime` as the
+/// tuple. Every team-assignment email payload (301 in production), every
+/// `event.updated`, `event.cancelled`, `event.change_due` and
+/// `ticket.order.paid` carried one, and the n8n workflows that read them
+/// call `new Date(...)` or `String(...)` on the value. Write
+/// `json!({"due_at": Wire(&due_at)})` instead.
+pub struct Wire<'a, T>(pub &'a T);
+
+impl serde::Serialize for Wire<'_, OffsetDateTime> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        time::serde::rfc3339::serialize(self.0, serializer)
+    }
+}
+
+impl serde::Serialize for Wire<'_, Option<OffsetDateTime>> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        time::serde::rfc3339::option::serialize(self.0, serializer)
+    }
+}
+
+impl serde::Serialize for Wire<'_, Date> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        crate::iso_date::serialize(self.0, serializer)
+    }
+}
+
+impl serde::Serialize for Wire<'_, Option<Date>> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        crate::iso_date::option::serialize(self.0, serializer)
+    }
+}
+
+impl<T> serde::Serialize for Wire<'_, &T>
+where
+    for<'b> Wire<'b, T>: serde::Serialize,
+{
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        Wire(*self.0).serialize(serializer)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use serde::{Deserialize, Serialize};

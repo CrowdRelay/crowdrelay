@@ -231,7 +231,7 @@ async fn bind_stripe_checkout_inner(
         request_id_value,
         json!({
             "stripe_checkout_session_id": request.stripe_checkout_session_id,
-            "expires_at": request.stripe_expires_at,
+            "expires_at": crowdrelay_domain::wire_time::Wire(&request.stripe_expires_at),
         }),
     )
     .await?;
@@ -691,8 +691,8 @@ async fn process_paid_order(
             return Err(TicketingError::Unexpected);
         };
         object.insert("qr_token".to_owned(), Value::String(qr_token));
-        object.insert("qr_not_before".to_owned(), json!(qr_not_before));
-        object.insert("qr_expires_at".to_owned(), json!(qr_expires_at));
+        object.insert("qr_not_before".to_owned(), json!(crowdrelay_domain::wire_time::Wire(&qr_not_before)));
+        object.insert("qr_expires_at".to_owned(), json!(crowdrelay_domain::wire_time::Wire(&qr_expires_at)));
     }
 
     append_outbox(
@@ -708,7 +708,7 @@ async fn process_paid_order(
             "event_title": order.event_title,
             "venue": order.venue,
             "timezone": order.timezone,
-            "starts_at": order.starts_at,
+            "starts_at": crowdrelay_domain::wire_time::Wire(&order.starts_at),
             "buyer_email": order.buyer_email,
             "buyer_name": order.buyer_name,
             "buyer_locale": order.buyer_locale,

@@ -362,7 +362,7 @@ pub async fn approve_support_slot_ask(
         "city": slot.city_name,
         "city_id": city_id,
         "venue": slot.venue,
-        "starts_at": slot.starts_at,
+        "starts_at": crowdrelay_domain::wire_time::Wire(&slot.starts_at),
         "show_date": show_date,
         "open_slots": slot.open_slots,
         "days_until_show": slot.days_until_show,

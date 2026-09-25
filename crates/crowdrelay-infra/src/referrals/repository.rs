@@ -482,7 +482,7 @@ impl PostgresReferralRepository {
                 "order_reference": command.order_reference(),
                 "used_count": used_count,
                 "max_uses": row.max_uses,
-                "redeemed_at": redeemed_at,
+                "redeemed_at": crowdrelay_domain::wire_time::Wire(&redeemed_at),
             }),
         )
         .await?;

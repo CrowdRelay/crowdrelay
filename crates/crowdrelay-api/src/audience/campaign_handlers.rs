@@ -285,7 +285,7 @@ pub async fn schedule_campaign(
         "communication_campaign",
         &campaign_id.to_string(),
         request_id_value.as_deref(),
-        serde_json::json!({ "dispatch_event_id": event_id, "scheduled_at": scheduled_at }),
+        serde_json::json!({ "dispatch_event_id": event_id, "scheduled_at": crowdrelay_domain::wire_time::Wire(&scheduled_at) }),
     )
     .await
     {

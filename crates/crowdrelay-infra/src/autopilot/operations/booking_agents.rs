@@ -23,7 +23,7 @@ pub(in crate::autopilot) async fn record_booking_agent_reply(
         let details = json!({
             "agent_id": command.agent_id,
             "disposition": disposition,
-            "occurred_at": command.occurred_at,
+            "occurred_at": crowdrelay_domain::wire_time::Wire(&command.occurred_at),
         });
         if let Some(existing) = super::insert_operator_action(
             &mut tx,

@@ -113,7 +113,7 @@ pub(super) async fn execute_beacon_outreach(
                 "title": target.3,
                 "venue": target.4,
                 "city": city,
-                "starts_at": target.5,
+                "starts_at": crowdrelay_domain::wire_time::Wire(&target.5),
                 "slug": target.6,
                 "ticket_url": target.7,
                 "show_url": show_url,

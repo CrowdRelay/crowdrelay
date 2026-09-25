@@ -144,7 +144,7 @@ impl ConcertQrRepository for PostgresConcertQrRepository {
             "event_id": event.id,
             "event_slug": event.slug,
             "valid_from": command.valid_from,
-            "valid_until": command.valid_until,
+            "valid_until": crowdrelay_domain::wire_time::Wire(&command.valid_until),
             "max_checkins": command.max_checkins,
         }))
         .execute(&mut *tx)
@@ -557,7 +557,7 @@ impl ConcertQrRepository for PostgresConcertQrRepository {
             "event_id": event.id,
             "event_slug": event.slug,
             "fan_id": fan_id,
-            "checked_in_at": checked_in_at,
+            "checked_in_at": crowdrelay_domain::wire_time::Wire(&checked_in_at),
         }))
         .bind(&command.request_id)
         .execute(&mut *tx)
@@ -760,7 +760,7 @@ impl PostgresConcertQrRepository {
             "event_slug": event.slug,
             "event_title": event.title,
             "venue": event.venue,
-            "event_starts_at": event.starts_at,
+            "event_starts_at": crowdrelay_domain::wire_time::Wire(&event.starts_at),
             "source": "concert_checkin",
         });
         let event_type = match status {

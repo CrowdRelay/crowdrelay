@@ -219,9 +219,9 @@ impl AutopilotBookingStateRepository for PostgresAutopilotRepository {
             let details = json!({
                 "target_id": command.target_id,
                 "edition_label": edition_label,
-                "starts_at": command.starts_at,
-                "application_opens_at": command.application_opens_at,
-                "application_closes_at": command.application_closes_at,
+                "starts_at": crowdrelay_domain::wire_time::Wire(&command.starts_at),
+                "application_opens_at": crowdrelay_domain::wire_time::Wire(&command.application_opens_at),
+                "application_closes_at": crowdrelay_domain::wire_time::Wire(&command.application_closes_at),
                 "lineup_url": lineup_url,
             });
             let operation_id = Uuid::now_v7();
@@ -747,9 +747,9 @@ impl AutopilotMarketStateRepository for PostgresAutopilotRepository {
                 "spend_month_to_date_minor": command.spend_month_to_date_minor,
                 "attributed_revenue_last_7d_minor": command.attributed_revenue_last_7d_minor,
                 "active": command.active,
-                "last_budget_change_at": command.last_budget_change_at,
-                "observed_at": command.observed_at,
-                "expires_at": command.expires_at,
+                "last_budget_change_at": crowdrelay_domain::wire_time::Wire(&command.last_budget_change_at),
+                "observed_at": crowdrelay_domain::wire_time::Wire(&command.observed_at),
+                "expires_at": crowdrelay_domain::wire_time::Wire(&command.expires_at),
             });
             let replay = insert_operator_action(
                 &mut transaction,
@@ -902,8 +902,8 @@ impl AutopilotMarketStateRepository for PostgresAutopilotRepository {
                 "signal_kind": command.kind.as_str(),
                 "score_basis_points": command.score_basis_points,
                 "confidence_basis_points": command.confidence.basis_points(),
-                "observed_at": command.observed_at,
-                "expires_at": command.expires_at,
+                "observed_at": crowdrelay_domain::wire_time::Wire(&command.observed_at),
+                "expires_at": crowdrelay_domain::wire_time::Wire(&command.expires_at),
             });
             let replay = insert_operator_action(
                 &mut transaction,

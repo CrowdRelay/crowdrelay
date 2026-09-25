@@ -190,7 +190,7 @@ impl PostgresAdmissionRepository {
                 "display_name": &fan.display_name,
                 "public_reference": &result.public_reference,
                 "claim_token": claim_token.as_str(),
-                "claim_expires_at": claim_expires_at,
+                "claim_expires_at": crowdrelay_domain::wire_time::Wire(&claim_expires_at),
             }),
         )
         .await?;

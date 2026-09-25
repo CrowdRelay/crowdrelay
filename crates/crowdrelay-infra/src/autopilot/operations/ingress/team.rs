@@ -54,7 +54,7 @@ impl AutopilotTeamStateRepository for PostgresAutopilotRepository {
                 "release_id": release_id,
                 "source_key": &command.source_key,
                 "title": &command.title,
-                "release_at": command.release_at,
+                "release_at": crowdrelay_domain::wire_time::Wire(&command.release_at),
                 "listen_url": &command.listen_url,
                 "tier": command.tier.map(|tier| tier.as_str()),
                 "active": command.active,
@@ -247,8 +247,8 @@ impl AutopilotTeamStateRepository for PostgresAutopilotRepository {
                 "eligible": command.eligible,
                 "funding_amount_minor": command.funding_amount_minor,
                 "own_contribution_minor": command.own_contribution_minor,
-                "deadline": command.deadline,
-                "event_starts_at": command.event_starts_at,
+                "deadline": crowdrelay_domain::wire_time::Wire(&command.deadline),
+                "event_starts_at": crowdrelay_domain::wire_time::Wire(&command.event_starts_at),
                 "country_code": command.country_code,
                 "travel_band": command.travel_band.map(|band| band.as_str()),
                 "expected_version": command.expected_version,
@@ -750,7 +750,7 @@ impl AutopilotTeamStateRepository for PostgresAutopilotRepository {
             let details = json!({
                 "opportunity_id": command.opportunity_id,
                 "progress": progress,
-                "occurred_at": command.occurred_at,
+                "occurred_at": crowdrelay_domain::wire_time::Wire(&command.occurred_at),
                 "reason": reason,
             });
             if let Some(existing) = super::insert_operator_action(

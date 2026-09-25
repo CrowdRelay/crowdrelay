@@ -509,7 +509,7 @@ async fn reserve_order_inner(
             "quantity": reservation.total_quantity,
             "amount_gross_minor": amount_gross_minor,
             "currency": sale.currency,
-            "expires_at": expires_at,
+            "expires_at": crowdrelay_domain::wire_time::Wire(&expires_at),
         }),
     )
     .await?;

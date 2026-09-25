@@ -160,7 +160,7 @@ impl PostgresAdmissionRepository {
                         "pass_id": pass.id,
                         "event_id": pass.event_id,
                         "public_reference": &pass.public_reference,
-                        "redeemed_at": now,
+                        "redeemed_at": crowdrelay_domain::wire_time::Wire(&now),
                     }),
                 )
                 .await?;
