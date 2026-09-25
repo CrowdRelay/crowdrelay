@@ -645,11 +645,31 @@ impl ReceiptReconciliationWorker {
             WHERE a.workspace_id = $1
               AND a.status = 'unknown'
               AND a.action_kind NOT IN ('community.engage.request', 'agent.content.request')
+              -- `approval_requested` is the system asking a human about the
+              -- action, not the action's own delivery: it shares `action_id`,
+              -- carries no `autopilot_action_emissions` row, and resolving the
+              -- action from its status inverted the record — a dead approval
+              -- webhook read as the send itself failing (the 2026-09-21/22
+              -- team emails), and terminal retention then deleted that row,
+              -- leaving a verdict of "via outbox delivery" with no outbox row.
+              AND e.event_type <> 'crowdrelay.autopilot.approval_requested'
               AND NOT EXISTS (
                   SELECT 1 FROM autopilot_execution_reports r
                   WHERE r.workspace_id = a.workspace_id AND r.action_id = a.id
                     AND r.status IN ('succeeded', 'failed')
               )
+            -- One action can hold several events (keyed emissions send more
+            -- than once). A delivered event is the only positive proof a send
+            -- happened, so it resolves before a dead sibling; the newest row
+            -- wins inside a status because it is the latest attempt. The
+            -- resolve is idempotent per action, so this order decides the
+            -- verdict rather than query-plan luck.
+            ORDER BY CASE e.status
+                         WHEN 'delivered' THEN 0
+                         WHEN 'dead' THEN 1
+                         ELSE 2
+                     END,
+                     e.created_at DESC
             LIMIT $2
             "#,
         )

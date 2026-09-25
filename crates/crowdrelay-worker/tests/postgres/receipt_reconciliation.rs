@@ -248,3 +248,165 @@ async fn a_late_executor_report_is_not_duplicated() -> Result<()> {
     }
     .await
 }
+
+/// A dead approval webhook is not the send failing.
+///
+/// `approval_requested` outbox rows carry `action_id`, but they are the system
+/// asking a human about the action — they carry no `autopilot_action_emissions`
+/// row, and they are not the send's delivery evidence. The resolver used to
+/// join on `action_id` alone, so a permanently rejected approval webhook read
+/// as the send itself failing — and terminal retention, which only keeps rows
+/// the emission ledger or a handful of foreign keys still reference, then
+/// deleted that notification row. That is how eleven team emails came to read
+/// "failed via outbox delivery" on 2026-09-21/22 with no outbox row left to
+/// inspect. Three legs: the notification cannot fail a delivered send, cannot
+/// resolve an action that has nothing else, and cannot shield a real dead
+/// event from resolving `failed`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn a_dead_approval_notification_is_not_the_delivery() -> Result<()> {
+    let db = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
+        .await
+        .expect("connect to the migrated suite database");
+
+    async {
+        let ws = workspace(&db).await?;
+
+        // Unknown action + a permanently rejected approval notification + a
+        // delivered send: resolves from the send, not the notification.
+        let action_id = emitted_action_without_receipt(&db, ws).await?;
+        sqlx::query(
+            r#"
+            INSERT INTO outbox_events
+                (id, workspace_id, event_type, payload, status, action_id,
+                 last_error_kind, dead_at)
+            VALUES ($1,$2,'crowdrelay.autopilot.approval_requested','{}'::jsonb,
+                    'dead',$3,'http_permanent_404',now())
+            "#,
+        )
+        .bind(Uuid::now_v7())
+        .bind(ws.into_uuid())
+        .bind(action_id)
+        .execute(&db)
+        .await
+        .context("insert dead approval notification")?;
+        sqlx::query("UPDATE autopilot_actions SET status = 'unknown' WHERE id = $1")
+            .bind(action_id)
+            .execute(&db)
+            .await?;
+        worker(db.clone(), ws).run_once().await?;
+        assert_eq!(
+            action_status(&db, action_id).await?,
+            "succeeded",
+            "the delivered send is the evidence; the dead approval ping is not"
+        );
+
+        // An action whose only linked row is the notification stays unknown —
+        // nothing yet proves what happened to the send itself.
+        let orphan_id = unknown_action(&db, ws).await?;
+        sqlx::query(
+            r#"
+            INSERT INTO outbox_events
+                (id, workspace_id, event_type, payload, status, action_id,
+                 last_error_kind, dead_at)
+            VALUES ($1,$2,'crowdrelay.autopilot.approval_requested','{}'::jsonb,
+                    'dead',$3,'http_permanent_404',now())
+            "#,
+        )
+        .bind(Uuid::now_v7())
+        .bind(ws.into_uuid())
+        .bind(orphan_id)
+        .execute(&db)
+        .await?;
+        worker(db.clone(), ws).run_once().await?;
+        assert_eq!(
+            action_status(&db, orphan_id).await?,
+            "unknown",
+            "an approval notification is not delivery evidence"
+        );
+
+        // And the exclusion does not shield a real dead event: a permanently
+        // rejected send still resolves `failed` beside the notification.
+        let failed_id = unknown_action(&db, ws).await?;
+        for (event_type, kind) in [
+            (
+                "crowdrelay.autopilot.approval_requested",
+                "http_permanent_404",
+            ),
+            (
+                "crowdrelay.outreach.discovery_requested",
+                "http_permanent_410",
+            ),
+        ] {
+            sqlx::query(
+                r#"
+                INSERT INTO outbox_events
+                    (id, workspace_id, event_type, payload, status, action_id,
+                     last_error_kind, dead_at)
+                VALUES ($1,$2,$3,'{}'::jsonb,'dead',$4,$5,now())
+                "#,
+            )
+            .bind(Uuid::now_v7())
+            .bind(ws.into_uuid())
+            .bind(event_type)
+            .bind(failed_id)
+            .bind(kind)
+            .execute(&db)
+            .await?;
+        }
+        worker(db.clone(), ws).run_once().await?;
+        assert_eq!(
+            action_status(&db, failed_id).await?,
+            "failed",
+            "the send's own dead row still resolves the action"
+        );
+        Ok(())
+    }
+    .await
+}
+
+/// An `unknown` action with no emissions and no evidence — the shape a
+/// dispatch sits in after an ambiguous emit failure.
+async fn unknown_action(pool: &PgPool, workspace_id: WorkspaceId) -> Result<Uuid> {
+    let decision_id = Uuid::now_v7();
+    let action_id = Uuid::now_v7();
+    sqlx::query(
+        r#"
+        INSERT INTO autopilot_decisions (
+            id, workspace_id, decision_key, context, subject_kind, subject_id,
+            decision_kind, confidence_basis_points, disposition, reason,
+            input_snapshot, policy_snapshot, recommendation, trace_id
+        ) VALUES ($1,$2,$3,'outreach_supply','workspace',$4,
+                  'outreach.discovery',9000,'auto_execute','discover outreach targets',
+                  '{}'::jsonb,'{}'::jsonb,'{}'::jsonb,$5)
+        "#,
+    )
+    .bind(decision_id)
+    .bind(workspace_id.into_uuid())
+    .bind(format!("dispatch-{decision_id}"))
+    .bind(workspace_id.into_uuid())
+    .bind(Uuid::now_v7())
+    .execute(pool)
+    .await
+    .context("insert decision")?;
+    sqlx::query(
+        r#"
+        INSERT INTO autopilot_actions (
+            id, workspace_id, decision_id, context, action_kind, subject_kind,
+            subject_id, idempotency_key, payload, status, finished_at, trace_id
+        ) VALUES ($1,$2,$3,'outreach_supply','outreach.discovery.request','workspace',
+                  $4,$5,$6,'unknown',now() - interval '2 days',$7)
+        "#,
+    )
+    .bind(action_id)
+    .bind(workspace_id.into_uuid())
+    .bind(decision_id)
+    .bind(workspace_id.into_uuid())
+    .bind(format!("action-{action_id}"))
+    .bind(json!({"kind":"request_outreach_discovery","requested_candidates":5}))
+    .bind(Uuid::now_v7())
+    .execute(pool)
+    .await
+    .context("insert unknown action")?;
+    Ok(action_id)
+}
