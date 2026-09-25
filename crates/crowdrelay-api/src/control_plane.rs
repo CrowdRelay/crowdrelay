@@ -49,6 +49,9 @@ pub(crate) fn router(state: crate::AppState) -> Router {
         // channel, with internal housekeeping counted separately so motion
         // cannot pass for growth.
         .route("/v1/control-plane/ops/funnel", get(crate::ops::funnel))
+        // What the approved asks produced: terminal actions with their
+        // measurement verdicts — the funnel's other half, per action.
+        .route("/v1/control-plane/ops/outcomes", get(crate::ops::outcomes))
         // The intelligence brief: one read composing the brain's verdict,
         // its posture, its plan, what it found, what it did, and what needs
         // the operator — the "are we getting anywhere" answer.
