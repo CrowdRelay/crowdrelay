@@ -601,11 +601,15 @@ impl AgentOutcomeWorker {
         // An item-less outreach_targets outcome is the emit side's honest
         // empty — "looked, found nothing". It records a decision (the audit
         // trail that the scan ran) but there is no target to approve, so an
-        // awaiting_approval row would be a phantom.
+        // awaiting_approval row would be a phantom. The same holds for every
+        // remaining require_approval kind: a social_post, press_pitch or
+        // signal_push with no item is a refusal, and its action row would
+        // carry `draft: null` — an approval card that publishes nothing,
+        // which for a poster template would even seed an empty post row.
         let action_id = if outcome.kind.disposition() == "require_approval"
             && outcome.kind != OutcomeKind::OpportunityFindings
             && outcome.kind != OutcomeKind::StrategyProposals
-            && (outcome.kind != OutcomeKind::OutreachTargets || outcome.payload.item.is_some())
+            && outcome.payload.item.is_some()
         {
             let action_id = Uuid::now_v7();
 
