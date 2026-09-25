@@ -11,7 +11,11 @@
 //! `crowdrelay_domain::wire_time::Wire(&value)`.
 //!
 //! A static gate cannot do this job: `json!` hides the type. The rows the
-//! suite actually produced do not.
+//! suite actually produced do not. The worker suite writes its own outbox and
+//! audit rows — the reconciliation, retention and approval paths all emit —
+//! and until this file existed none of them were checked.
+//!
+//! Copied verbatim from the infra suite's check; keep the two in step.
 
 use crate::common;
 

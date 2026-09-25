@@ -606,7 +606,7 @@ impl AutopilotTeamStateRepository for PostgresAutopilotRepository {
                 "position": position,
                 "offered_fee_minor": offered_fee_minor,
                 "currency": command.currency,
-                "responds_by": command.responds_by,
+                "responds_by": crowdrelay_domain::wire_time::Wire(&command.responds_by),
             });
             if let Some(existing) = super::insert_operator_action(
                 &mut tx,
