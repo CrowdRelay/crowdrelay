@@ -114,6 +114,7 @@ pub struct ActBrief {
     pub slipped_items: Vec<SlippedItem>,
     /// The tenant-local day the act's newest briefing speaks for. `None`
     /// means none has ever issued — stated as null, never as a zero date.
+    #[serde(with = "crate::wire_time::date_option", default)]
     pub latest_briefing_date: Option<Date>,
     /// The act's North Star growth across the observed window — newest
     /// reading minus oldest. `None` under two readings: a delta that cannot

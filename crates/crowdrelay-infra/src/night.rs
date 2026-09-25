@@ -142,6 +142,7 @@ pub struct NightView {
     pub lens: NightLens,
     pub venue: NightVenueView,
     /// The room's night — the UTC date the rendezvous is keyed on.
+    #[serde(with = "crowdrelay_domain::iso_date")]
     pub event_date: Date,
     /// Every act on every bill of the night.
     pub lineup: Vec<NightActView>,

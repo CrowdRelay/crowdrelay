@@ -193,8 +193,8 @@ impl AutopilotOutreachStateRepository for PostgresAutopilotRepository {
                 "relevance_basis_points": command.relevance_basis_points,
                 "confidence_basis_points": command.confidence.basis_points(),
                 "active": command.active,
-                "observed_at": command.observed_at,
-                "expires_at": command.expires_at,
+                "observed_at": crowdrelay_domain::wire_time::Wire(&command.observed_at),
+                "expires_at": crowdrelay_domain::wire_time::Wire(&command.expires_at),
             });
             if let Some(existing) = super::insert_operator_action(
                 &mut tx,
@@ -302,7 +302,7 @@ impl AutopilotOutreachStateRepository for PostgresAutopilotRepository {
                 "target_id": command.target_id,
                 "opportunity_id": command.opportunity_id,
                 "disposition": disposition,
-                "occurred_at": command.occurred_at,
+                "occurred_at": crowdrelay_domain::wire_time::Wire(&command.occurred_at),
             });
             if let Some(existing) = super::insert_operator_action(
                 &mut transaction,
@@ -661,8 +661,8 @@ impl AutopilotContentStateRepository for PostgresAutopilotRepository {
                 "source_kind": kind,
                 "source_key": &command.source_key,
                 "title": &command.title,
-                "occurred_at": command.occurred_at,
-                "expires_at": command.expires_at,
+                "occurred_at": crowdrelay_domain::wire_time::Wire(&command.occurred_at),
+                "expires_at": crowdrelay_domain::wire_time::Wire(&command.expires_at),
                 "metadata": &command.metadata,
                 "active": command.active,
                 "format_key": &command.format_key,
@@ -1143,7 +1143,7 @@ impl AutopilotExperimentStateRepository for PostgresAutopilotRepository {
                 "exposures_delta": command.exposures_delta,
                 "conversions_delta": command.conversions_delta,
                 "value_minor_delta": command.value_minor_delta,
-                "observed_at": command.observed_at,
+                "observed_at": crowdrelay_domain::wire_time::Wire(&command.observed_at),
             });
             if let Some(existing) = super::insert_operator_action(
                 &mut transaction,

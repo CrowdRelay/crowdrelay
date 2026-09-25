@@ -356,7 +356,7 @@ pub(in crate::autopilot) async fn execute_release_milestone(
                     "action_id": action_id,
                     "release_id": release_id,
                     "title": title,
-                    "release_at": release_at,
+                    "release_at": crowdrelay_domain::wire_time::Wire(&release_at),
                     "submitted_by_agent": false,
                 }),
             )
@@ -472,7 +472,7 @@ async fn seed_release_calendar(
         let outbox_id = Uuid::now_v7();
         let starts_at = release_at + time::Duration::days(days);
         sqlx::query(r#"INSERT INTO outbox_events(id,workspace_id,event_type,event_version,payload,request_id,max_attempts) VALUES($1,$2,'crowdrelay.calendar.upsert_requested',1,$3,$4,12)"#)
-          .bind(outbox_id).bind(workspace_id.into_uuid()).bind(json!({"action_id":action_id,"calendar_key":calendar_key,"title":format!("{wordmark} · {title} · {label}"),"starts_at":starts_at,"source_kind":"release","source_id":release_id})).bind(format!("autopilot-action:{action_id}:{slug}"))
+          .bind(outbox_id).bind(workspace_id.into_uuid()).bind(json!({"action_id":action_id,"calendar_key":calendar_key,"title":format!("{wordmark} · {title} · {label}"),"starts_at":crowdrelay_domain::wire_time::Wire(&starts_at),"source_kind":"release","source_id":release_id})).bind(format!("autopilot-action:{action_id}:{slug}"))
           .execute(&mut **tx).await.map_err(map_sqlx)?;
         sqlx::query(r#"INSERT INTO calendar_requests(workspace_id,source_kind,source_id,calendar_key,title,starts_at,action_id,outbox_event_id) VALUES($1,'release',$2,$3,$4,$5,$6,$7)"#)
           .bind(workspace_id.into_uuid()).bind(release_id.into_uuid()).bind(&calendar_key).bind(format!("{wordmark} · {title} · {label}")).bind(starts_at).bind(action_id.into_uuid()).bind(outbox_id)
@@ -552,7 +552,7 @@ async fn seed_deadline_calendar(
         "action_id": action_id,
         "calendar_key": calendar_key,
         "title": title,
-        "starts_at": starts_at,
+        "starts_at": crowdrelay_domain::wire_time::Wire(&starts_at),
         "source_kind": source_kind,
         "source_id": source_id,
     }))
@@ -679,7 +679,7 @@ pub(in crate::autopilot) async fn execute_live_opportunity(
             "application_fee_minor": row.7,
             "requires_contract": row.8,
             "exclusive": row.9,
-            "deadline": row.10,
+            "deadline": crowdrelay_domain::wire_time::Wire(&row.10),
             "payment_execution_allowed": false,
             // The letter the approval read — the executor sends `draft.body`
             // verbatim and writes nothing of its own.
@@ -925,7 +925,7 @@ pub(in crate::autopilot) async fn prepare_funding_package(
             "currency": row.3,
             "funding_amount_minor": row.4,
             "own_contribution_minor": row.5,
-            "deadline": row.6,
+            "deadline": crowdrelay_domain::wire_time::Wire(&row.6),
             "facts": row.7,
             "generator": "deterministic_template",
         }),
@@ -986,7 +986,7 @@ pub(in crate::autopilot) async fn submit_funding_application(
             "organization": row.1,
             "destination_url": row.2,
             "currency": row.3,
-            "deadline": row.4,
+            "deadline": crowdrelay_domain::wire_time::Wire(&row.4),
             "human_approved": true,
         }),
     )
@@ -1030,7 +1030,7 @@ pub(in crate::autopilot) async fn escalate_editorial_pitch(
             "action_id": action_id,
             "release_id": release_id,
             "title": title,
-            "due_at": due_at,
+            "due_at": crowdrelay_domain::wire_time::Wire(&due_at),
             "submitted_by_agent": false,
         }),
     )

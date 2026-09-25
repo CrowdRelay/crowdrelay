@@ -69,10 +69,16 @@ pub struct BookingAgentListRow {
     /// the timestamp: the band needs to know it can be mailed, not when.
     pub route_verified: bool,
     /// When the season's letter went out, if one did.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        with = "time::serde::rfc3339::option"
+    )]
     pub approached_at: Option<OffsetDateTime>,
     /// The day a decline stops binding — the door's own answer.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        with = "crowdrelay_domain::iso_date::option"
+    )]
     pub refused_until: Option<time::Date>,
     /// An approach already queued or in flight — the second ask the season
     /// exists to prevent.

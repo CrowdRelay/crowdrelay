@@ -589,7 +589,7 @@ impl PostgresAutopilotRepository {
                                 "id": event_id,
                                 "title": event.0,
                                 "venue": event.1,
-                                "starts_at": event.2,
+                                "starts_at": crowdrelay_domain::wire_time::Wire(&event.2),
                                 "city": event.3,
                                 "country_code": event.4,
                                 "region": event.5,
@@ -686,7 +686,7 @@ impl PostgresAutopilotRepository {
                             "event": {
                                 "title": target.2,
                                 "slug": target.3,
-                                "starts_at": target.4,
+                                "starts_at": crowdrelay_domain::wire_time::Wire(&target.4),
                             },
                             "callback_path": "/v1/admin/beacons",
                             "invite_contract": {
@@ -1116,7 +1116,7 @@ impl PostgresAutopilotRepository {
                             "recipient_name": recipient_name,
                             "task_title": task_title,
                             "task_detail": task_detail,
-                            "due_at": due_at,
+                            "due_at": crowdrelay_domain::wire_time::Wire(&due_at),
                             "action_url_path": action_url_path,
                             "reminder_number": reminder_number,
                             "approve_url": approve_url,

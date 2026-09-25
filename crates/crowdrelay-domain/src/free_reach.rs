@@ -142,9 +142,11 @@ pub struct WaveSnapshot {
     pub anchor: WaveAnchor,
     pub target_kind: OutreachTargetKind,
     pub state: WaveState,
+    #[serde(with = "time::serde::rfc3339")]
     pub opened_at: OffsetDateTime,
     /// When the thing being pitched happens. Past it, an unapproved wave is a
     /// worse message than none.
+    #[serde(with = "time::serde::rfc3339")]
     pub anchor_at: OffsetDateTime,
     /// Pitches already drafted into this wave.
     pub pitches: u16,

@@ -211,8 +211,10 @@ pub enum BeaconOutreachPhase {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 pub struct BeaconDiscoverySnapshot {
     pub event_id: EventId,
+    #[serde(with = "time::serde::rfc3339")]
     pub event_starts_at: OffsetDateTime,
     pub known_local_beacons: u16,
+    #[serde(with = "time::serde::rfc3339::option")]
     pub last_discovery_at: Option<OffsetDateTime>,
     pub in_flight: bool,
 }
@@ -249,7 +251,9 @@ pub struct BeaconCampaignSnapshot {
     pub relationship_score: u16,
     pub relevance_basis_points: u16,
     pub evidence_confidence: Confidence,
+    #[serde(with = "time::serde::rfc3339")]
     pub event_starts_at: OffsetDateTime,
+    #[serde(with = "time::serde::rfc3339::option")]
     pub last_outreach_at: Option<OffsetDateTime>,
     pub followup_count: u16,
     pub last_reply: BeaconReplyDisposition,
@@ -375,6 +379,7 @@ pub struct CityBeaconSnapshot {
     /// Real people, not signups — a city full of dormant accounts is not warm.
     pub activated_fans: u32,
     pub known_local_beacons: u16,
+    #[serde(with = "time::serde::rfc3339::option")]
     pub last_discovery_at: Option<OffsetDateTime>,
 }
 

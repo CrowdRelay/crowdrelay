@@ -27,8 +27,11 @@ pub struct PromotionPerformanceSnapshot {
     pub workspace_maximum_monthly_spend_minor: Option<i64>,
     pub days_to_event: u32,
     pub active: bool,
+    #[serde(with = "time::serde::rfc3339::option")]
     pub last_budget_change_at: Option<OffsetDateTime>,
+    #[serde(with = "time::serde::rfc3339")]
     pub observed_at: OffsetDateTime,
+    #[serde(with = "time::serde::rfc3339")]
     pub expires_at: OffsetDateTime,
 }
 

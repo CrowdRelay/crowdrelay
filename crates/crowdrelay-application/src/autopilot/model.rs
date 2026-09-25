@@ -1739,10 +1739,10 @@ pub struct EvidencePacket {
     pub paid_tickets_90d: Option<i64>,
     /// Shows actually played in the last year.
     pub shows_played_12m: Option<i64>,
-    /// Relationships that have replied positively before. Coverage we can point
-    /// at rather than coverage we hope for.
+    /// Relationships that have replied positively before: coverage to point at, not hope for.
     pub positive_replies_12m: Option<i64>,
     /// When these were read. A number without one is a number from any time.
+    #[serde(with = "time::serde::rfc3339::option")]
     pub as_of: Option<OffsetDateTime>,
 }
 

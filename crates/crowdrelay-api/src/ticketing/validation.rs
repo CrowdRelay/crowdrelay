@@ -584,7 +584,7 @@ async fn request_ticket_delivery(
             "event_title": order.event_title,
             "venue": order.venue,
             "timezone": order.timezone,
-            "starts_at": order.starts_at,
+            "starts_at": crowdrelay_domain::wire_time::Wire(&order.starts_at),
             "buyer_email": order.buyer_email,
             "buyer_name": order.buyer_name,
             "buyer_locale": order.buyer_locale,
@@ -667,10 +667,10 @@ fn wallet_rows_payload(
                 "status": row.status,
                 "holder_name": row.holder_name,
                 "holder_email": row.holder_email,
-                "redeemed_at": row.redeemed_at,
+                "redeemed_at": crowdrelay_domain::wire_time::Wire(&row.redeemed_at),
                 "qr_token": qr_token,
                 "qr_not_before": qr_not_before,
-                "qr_expires_at": qr_expires_at,
+                "qr_expires_at": crowdrelay_domain::wire_time::Wire(&qr_expires_at),
             }))
         })
         .collect()

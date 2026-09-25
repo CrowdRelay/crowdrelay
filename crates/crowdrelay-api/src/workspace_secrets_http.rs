@@ -49,7 +49,7 @@ fn masked_json(secret: &MaskedSecret) -> serde_json::Value {
     json!({
         "name": secret.name,
         "masked_hint": secret.masked_hint,
-        "updated_at": secret.updated_at,
+        "updated_at": crowdrelay_domain::wire_time::Wire(&secret.updated_at),
     })
 }
 

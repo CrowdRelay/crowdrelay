@@ -217,11 +217,11 @@ pub(in crate::autopilot) async fn issue_release_outcome_report(
     // not run and reporting a zero would imply it had.
     let mut report = json!({
         "kind": kind,
-        "generated_at": now,
+        "generated_at": crowdrelay_domain::wire_time::Wire(&now),
         "tier": tier,
         "window": {
-            "from": release_at,
-            "to": release_at + time::Duration::days(window),
+            "from": crowdrelay_domain::wire_time::Wire(&release_at),
+            "to": crowdrelay_domain::wire_time::Wire(&(release_at + time::Duration::days(window))),
         },
         "observed": {
             "fans_acquired_via_release_campaign": bound_acquisitions,
@@ -248,10 +248,10 @@ pub(in crate::autopilot) async fn issue_release_outcome_report(
                 "slug": row.0,
                 "template_key": row.1,
                 "status": row.2,
-                "scheduled_at": row.3,
+                "scheduled_at": crowdrelay_domain::wire_time::Wire(&row.3),
                 "recipients": row.4,
                 "delivered": row.5,
-                "completed_at": row.6,
+                "completed_at": crowdrelay_domain::wire_time::Wire(&row.6),
             }))
             .collect::<Vec<_>>(),
         "evidence_gaps": evidence_gaps,
@@ -349,7 +349,7 @@ pub(in crate::autopilot) async fn issue_release_outcome_report(
             )?,
             "release": {
                 "title": title,
-                "release_at": release_at,
+                "release_at": crowdrelay_domain::wire_time::Wire(&release_at),
                 "tier": tier,
             },
             "report": report,

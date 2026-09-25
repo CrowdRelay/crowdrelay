@@ -48,7 +48,9 @@ pub struct ShowCostMutation {
 pub struct ShowCostLedgerEntry {
     pub event_id: EventId,
     pub event_title: String,
+    #[serde(with = "time::serde::rfc3339")]
     pub starts_at: OffsetDateTime,
+    #[serde(with = "time::serde::rfc3339")]
     pub predicted_at: OffsetDateTime,
     pub offered_fee_minor: i64,
     /// Absent when the estimate was an honest refusal; `prediction_missing_input`
@@ -56,6 +58,7 @@ pub struct ShowCostLedgerEntry {
     pub predicted_total_cost_minor: Option<i64>,
     pub predicted_net_margin_minor: Option<i64>,
     pub prediction_missing_input: Option<String>,
+    #[serde(with = "time::serde::rfc3339::option")]
     pub settled_at: Option<OffsetDateTime>,
     pub settled_by: Option<String>,
     pub settled_total_cost_minor: Option<i64>,

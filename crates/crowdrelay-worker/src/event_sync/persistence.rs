@@ -167,7 +167,7 @@ async fn persist_success(
         "empty_response": empty_response,
         "authoritative_response": authoritative,
         "consecutive_empty_syncs": if empty_response { source.consecutive_empty_syncs.saturating_add(1) } else { 0 },
-        "sync_started_at": sync_started_at,
+        "sync_started_at": crowdrelay_domain::wire_time::Wire(&sync_started_at),
     }))
     .execute(&mut *transaction)
     .await

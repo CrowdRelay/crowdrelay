@@ -1251,7 +1251,7 @@ pub(super) async fn execute_play_step(
                 "id": event_id,
                 "title": event.title,
                 "slug": event.slug,
-                "starts_at": event.starts_at,
+                "starts_at": crowdrelay_domain::wire_time::Wire(&event.starts_at),
                 "venue": event.venue,
             })
         }),
@@ -1259,7 +1259,7 @@ pub(super) async fn execute_play_step(
             json!({
                 "id": anchor_id,
                 "title": release.title,
-                "release_at": release.release_at,
+                "release_at": crowdrelay_domain::wire_time::Wire(&release.release_at),
                 "listen_url": release.listen_url,
                 "link": release_link,
             })

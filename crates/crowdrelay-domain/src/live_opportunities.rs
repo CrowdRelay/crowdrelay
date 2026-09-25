@@ -54,9 +54,11 @@ pub struct LiveOpportunitySnapshot {
     pub application_fee_minor: i64,
     pub requires_contract: bool,
     pub exclusive: bool,
+    #[serde(with = "time::serde::rfc3339::option")]
     pub deadline: Option<OffsetDateTime>,
     /// Calendar/travel facts and manager policy are folded into the snapshot by
     /// the infrastructure adapter so the domain owns the actual booking gate.
+    #[serde(with = "time::serde::rfc3339::option")]
     pub event_starts_at: Option<OffsetDateTime>,
     pub travel_band: Option<LiveTravelBand>,
     /// True when [`crate::tour_economics`] costed this trip from real inputs

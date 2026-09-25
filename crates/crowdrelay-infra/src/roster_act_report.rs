@@ -74,6 +74,7 @@ pub struct ActReportCityGain {
 pub struct ActReleaseCollision {
     /// The ISO Monday the colliding releases share — the frame the
     /// calendar argues in.
+    #[serde(with = "crowdrelay_domain::iso_date")]
     pub week_start: Date,
     /// This act's release in the collision.
     pub release_id: Uuid,
@@ -101,6 +102,7 @@ pub struct RosterActReport {
     /// Calendar-quarter-to-date: the first day of the current quarter
     /// through `generated_at`. Stated as dates so "quarter" is checkable
     /// rather than assumed.
+    #[serde(with = "crowdrelay_domain::iso_date")]
     pub period_start: Date,
     #[serde(with = "time::serde::rfc3339")]
     pub generated_at: OffsetDateTime,

@@ -63,15 +63,24 @@ pub struct RepresentationTarget {
     pub verified: bool,
     /// Optimistic-concurrency token the approach request pins to.
     pub version: i64,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        with = "time::serde::rfc3339::option"
+    )]
     pub last_outreach_at: Option<OffsetDateTime>,
     /// When the registry's booking-agent row was last approached — agents
     /// only; always `None` on a label or a contact the registry does not
     /// know.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        with = "time::serde::rfc3339::option"
+    )]
     pub approached_at: Option<OffsetDateTime>,
     /// The date the agent's refusal stops binding — agents only.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        with = "crowdrelay_domain::iso_date::option"
+    )]
     pub refused_until: Option<time::Date>,
 }
 

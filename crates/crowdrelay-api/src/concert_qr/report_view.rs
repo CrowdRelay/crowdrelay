@@ -333,10 +333,10 @@ async fn load_report_facts(
                     "slug": row.0,
                     "template_key": row.1,
                     "status": row.2,
-                    "scheduled_at": row.3,
+                    "scheduled_at": crowdrelay_domain::wire_time::Wire(&row.3),
                     "recipients": row.4,
                     "delivered": row.5,
-                    "completed_at": row.6,
+                    "completed_at": crowdrelay_domain::wire_time::Wire(&row.6),
                 }))
                 .collect::<Vec<_>>(),
             "evidence_gaps": evidence_gaps,

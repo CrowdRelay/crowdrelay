@@ -180,9 +180,13 @@ pub async fn approve_action(
         match serde_json::from_slice::<ApproveActionRequest>(&body) {
             Ok(request) => (request.revision, request.remember),
             Err(_) => {
-                return Problem::bad_request(request_id(&headers))
-                    .private()
-                    .into_response();
+                return Problem::bad_request_because(
+                    "The approve body must be empty or a JSON object with optional \
+                     `revision` (field to text) and `remember` ({days, note}).",
+                    request_id(&headers),
+                )
+                .private()
+                .into_response();
             }
         }
     };

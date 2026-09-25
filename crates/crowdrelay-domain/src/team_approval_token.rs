@@ -70,6 +70,7 @@ pub struct ApprovalTokenClaims {
     pub action_id: Uuid,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub assignment_id: Option<Uuid>,
+    #[serde(with = "crate::wire_time")]
     pub expires_at: OffsetDateTime,
 }
 
@@ -168,6 +169,30 @@ mod tests {
         let decoded =
             decode(&token, &key(), datetime!(2026-01-01 00:00 UTC)).expect("a fresh token decodes");
         assert_eq!(decoded, claims());
+    }
+
+    /// Links already sitting in crew inboxes carry the claims as serde's
+    /// tuple. The MAC covers the bytes as presented, and the reader still
+    /// takes the old shape, so every one of them keeps working.
+    #[test]
+    fn a_token_minted_before_rfc3339_still_decodes() {
+        let payload = br#"{"action_id":"00000000-0000-0000-0000-00000000aaaa","assignment_id":"00000000-0000-0000-0000-00000000bbbb","expires_at":[2030,1,0,0,0,0,0,0,0]}"#;
+        let token = format!(
+            "{}.{}",
+            URL_SAFE_NO_PAD.encode(payload),
+            URL_SAFE_NO_PAD.encode(mac(&key().0, payload))
+        );
+        assert_eq!(
+            decode(&token, &key(), datetime!(2026-01-01 00:00 UTC)),
+            Ok(claims())
+        );
+        let fresh = encode(&claims(), &key());
+        let (fresh_payload, _) = fresh.split_once('.').expect("two parts");
+        let fresh_json = URL_SAFE_NO_PAD.decode(fresh_payload).expect("base64");
+        assert!(
+            String::from_utf8_lossy(&fresh_json).contains(r#""expires_at":"2030-01-01T00:00:00Z""#),
+            "new tokens carry text"
+        );
     }
 
     #[test]

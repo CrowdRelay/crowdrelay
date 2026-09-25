@@ -134,7 +134,9 @@ pub struct ContentSupplySnapshot {
     pub source_id: ContentSourceId,
     pub source_kind: ContentSourceKind,
     pub source_version: i64,
+    #[serde(with = "time::serde::rfc3339")]
     pub occurred_at: OffsetDateTime,
+    #[serde(with = "time::serde::rfc3339")]
     pub expires_at: OffsetDateTime,
     /// The plan's own communication switch, projected as fact for a release
     /// source. `None` means the kind carries no such switch — events, videos,

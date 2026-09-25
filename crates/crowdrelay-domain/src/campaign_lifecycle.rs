@@ -27,6 +27,7 @@ pub struct EventCampaignSnapshot {
     pub event_id: EventId,
     pub published: bool,
     pub communication_enabled: bool,
+    #[serde(with = "time::serde::rfc3339")]
     pub starts_at: OffsetDateTime,
     pub interested_fans: u32,
     pub paid_buyers: u32,

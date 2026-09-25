@@ -516,6 +516,7 @@ pub use crate::value_tier::MetricValueTier;
 /// snapshot unrecoverable, and re-ingesting it would double-count.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 pub struct MetricPoint {
+    #[serde(with = "time::serde::rfc3339")]
     pub captured_at: OffsetDateTime,
     pub value: i64,
 }
@@ -525,6 +526,7 @@ pub struct MetricPoint {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 pub struct MetricTrend {
     pub latest_value: i64,
+    #[serde(with = "time::serde::rfc3339")]
     pub latest_at: OffsetDateTime,
     /// `None` when the window has no observation old enough to compare against.
     pub delta_24h: Option<i64>,

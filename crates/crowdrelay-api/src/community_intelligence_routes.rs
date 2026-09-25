@@ -292,7 +292,7 @@ async fn list_communities(State(state): State<crate::AppState>) -> Response {
                         "latestObservation": p.latest_observation_id.map(|id| {
                             json!({
                                 "id": id,
-                                "observedAt": p.latest_observed_at,
+                                "observedAt": crowdrelay_domain::wire_time::Wire(&p.latest_observed_at),
                                 "source": p.latest_source,
                                 "quality": p.latest_observation_quality,
                                 "rawActivityMetrics": p.latest_raw_activity_metrics,
@@ -332,13 +332,13 @@ async fn list_observations(
                     json!({
                         "id": o.id,
                         "placeId": o.place_id,
-                        "observedAt": o.observed_at,
+                        "observedAt": crowdrelay_domain::wire_time::Wire(&o.observed_at),
                         "source": o.source,
                         "sourceUrl": o.source_url,
                         "collectorVersion": o.collector_version,
                         "rawActivityMetrics": o.raw_activity_metrics,
                         "observationQuality": o.observation_quality,
-                        "createdAt": o.created_at,
+                        "createdAt": crowdrelay_domain::wire_time::Wire(&o.created_at),
                     })
                 })
                 .collect();
@@ -393,7 +393,7 @@ async fn list_entities(
                         "entityType": e.entity_type,
                         "entityRef": e.entity_ref,
                         "strength": e.strength,
-                        "observedAt": e.observed_at,
+                        "observedAt": crowdrelay_domain::wire_time::Wire(&e.observed_at),
                     })
                 })
                 .collect();

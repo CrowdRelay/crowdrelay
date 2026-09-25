@@ -67,7 +67,9 @@ struct ConsentResponse {
     cooldown_days: i16,
     campaigns_this_month: i64,
     approved_by: Option<String>,
+    #[serde(with = "time::serde::rfc3339::option")]
     approved_at: Option<time::OffsetDateTime>,
+    #[serde(with = "time::serde::rfc3339::option")]
     revoked_at: Option<time::OffsetDateTime>,
 }
 

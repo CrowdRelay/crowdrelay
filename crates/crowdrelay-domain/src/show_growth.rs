@@ -34,6 +34,7 @@ pub struct ShowGrowthSnapshot {
     pub event_id: EventId,
     pub published: bool,
     pub communication_enabled: bool,
+    #[serde(with = "time::serde::rfc3339")]
     pub starts_at: OffsetDateTime,
     /// Zero means the venue/sale capacity is unknown; pace checks then stay off.
     pub capacity: u32,
@@ -50,6 +51,7 @@ pub struct ShowGrowthSnapshot {
     /// the show has had time to end, mirroring the check-in welcome's
     /// scheduling. `None` only when the event's timezone is not a known IANA
     /// name, in which case the recap sends when the decision lands.
+    #[serde(with = "time::serde::rfc3339::option")]
     pub morning_after_send_at: Option<OffsetDateTime>,
     /// §4e-2: an active `event_crossbill` edge points at this workspace and
     /// not one of them is reciprocated — no reverse-direction consent has
@@ -1036,6 +1038,7 @@ pub enum ShowLifecyclePhase {
 pub struct ShowLifecycleView {
     pub phase: ShowLifecyclePhase,
     pub next_milestone: Option<&'static str>,
+    #[serde(with = "time::serde::rfc3339::option")]
     pub next_milestone_at: Option<OffsetDateTime>,
 }
 

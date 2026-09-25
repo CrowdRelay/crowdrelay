@@ -68,6 +68,7 @@ impl ReleaseTier {
 pub struct ReleasePlanSnapshot {
     pub release_id: ReleasePlanId,
     pub title: String,
+    #[serde(with = "time::serde::rfc3339")]
     pub release_at: OffsetDateTime,
     pub active: bool,
     pub tier: ReleaseTier,
@@ -76,9 +77,11 @@ pub struct ReleasePlanSnapshot {
     pub press_enabled: bool,
     /// Somebody says they submitted the form, and when. The only way this
     /// becomes set, because nothing the agent can read would tell it.
+    #[serde(with = "time::serde::rfc3339::option")]
     pub editorial_pitch_completed_at: Option<OffsetDateTime>,
     /// When the agent last nudged about it, so a reminder is a reminder rather
     /// than a stream.
+    #[serde(with = "time::serde::rfc3339::option")]
     pub editorial_pitch_escalated_at: Option<OffsetDateTime>,
     /// Consecutive most-recent R+14 outcome reports at this tier that showed
     /// no lift — `within_noise` or `insufficient_evidence`, broken only by an
@@ -431,10 +434,12 @@ pub struct ReleaseTimelineStep {
     pub milestone: ReleaseMilestone,
     /// Days relative to the release: -28 is R-28, 3 is R+3.
     pub offset_days: i32,
+    #[serde(with = "time::serde::rfc3339")]
     pub due_at: OffsetDateTime,
     /// When the step's work actually finished. For the editorial pitch that
     /// is the human's say-so, not the parking — parked is a state, not a
     /// completion.
+    #[serde(with = "time::serde::rfc3339::option")]
     pub completed_at: Option<OffsetDateTime>,
     pub state: ReleaseStepState,
 }

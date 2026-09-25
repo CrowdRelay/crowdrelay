@@ -99,7 +99,9 @@ pub struct BookingWindowInputs {
 /// named, so the operator approving the send can see why these dates.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ProposedWindow {
+    #[serde(with = "crate::wire_time::date")]
     pub start: Date,
+    #[serde(with = "crate::wire_time::date")]
     pub end: Date,
     pub basis: Vec<WindowBasis>,
 }

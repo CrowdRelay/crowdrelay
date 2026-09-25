@@ -52,6 +52,7 @@ pub struct RosterRelease {
 pub struct ReleaseCollision {
     /// The Monday (UTC) the colliding releases share — the frame the
     /// proposal argues about.
+    #[serde(with = "crate::wire_time::date")]
     pub week_start: time::Date,
     /// Every release in the collision, in standing order — the act that
     /// keeps the week first, then each mover.

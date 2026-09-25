@@ -21,6 +21,7 @@ pub struct CityOpportunitySnapshot {
     pub months_since_last_show: Option<u32>,
     pub market_evidence: Option<CityMarketEvidence>,
     pub outreach_in_flight: bool,
+    #[serde(with = "time::serde::rfc3339::option")]
     pub last_outreach_at: Option<OffsetDateTime>,
 }
 
@@ -243,6 +244,7 @@ pub struct BookingTargetSnapshot {
     /// Relationship quality derived from verified outcomes, `0..=100`.
     pub relationship_score: u16,
     pub outreach_in_flight: bool,
+    #[serde(with = "time::serde::rfc3339::option")]
     pub last_outreach_at: Option<OffsetDateTime>,
     pub followup_count: u16,
     pub last_reply: BookingReplyDisposition,
@@ -256,6 +258,7 @@ pub struct BookingTargetSnapshot {
     /// watches; the timestamp is the edition's identity — it changes only
     /// when a *different* edition becomes the next to close, which makes it
     /// the stable key a decision dedupes on.
+    #[serde(with = "time::serde::rfc3339::option")]
     pub next_application_closes_at: Option<OffsetDateTime>,
     /// Every room this target resolves to: the primary `venue_id` union the
     /// promoter↔venue edges (§12-5 entity 6). Venue-level evidence should

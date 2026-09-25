@@ -87,7 +87,7 @@ impl BeaconReleaseAdminRepository for PostgresBeaconReleaseRepository {
                 details: serde_json::json!({
                     "slug": command.slug,
                     "sku": command.sku,
-                    "claim_deadline": command.claim_deadline
+                    "claim_deadline": crowdrelay_domain::wire_time::Wire(&command.claim_deadline)
                 }),
             },
         )
@@ -771,7 +771,7 @@ impl BeaconReleaseAdminRepository for PostgresBeaconReleaseRepository {
                     "beacon_id": beacon_id,
                     "from": row.0,
                     "to": command.status,
-                    "activation_due_at": activation_due_at,
+                    "activation_due_at": crowdrelay_domain::wire_time::Wire(&activation_due_at),
                 }),
             },
         )

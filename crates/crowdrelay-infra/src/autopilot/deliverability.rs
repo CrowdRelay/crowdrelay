@@ -140,7 +140,7 @@ impl PostgresAutopilotRepository {
                     "target_id": target_id,
                     "fault": command.fault.as_str(),
                     "provider_reference": command.provider_reference,
-                    "occurred_at": command.occurred_at,
+                    "occurred_at": crowdrelay_domain::wire_time::Wire(&command.occurred_at),
                 }),
             )
             .await?

@@ -47,10 +47,12 @@ pub struct FanbaseResponse {
     fetch_url: Option<String>,
     consent_attested_by: Option<String>,
     enabled: bool,
+    #[serde(with = "time::serde::rfc3339")]
     created_at: time::OffsetDateTime,
     members: Option<i64>,
     active_members: Option<i64>,
     last_status: Option<String>,
+    #[serde(with = "time::serde::rfc3339::option")]
     last_finished_at: Option<time::OffsetDateTime>,
     last_imported_pending: Option<i32>,
 }
@@ -262,18 +264,18 @@ pub async fn list_fanbase_connections(
                         "external_account_ref": c.external_account_ref,
                         "label": c.label,
                         "status": c.status,
-                        "last_sync_at": c.last_sync_at,
+                        "last_sync_at": crowdrelay_domain::wire_time::Wire(&c.last_sync_at),
                         // `status` reports whether credentials exist, not
                         // whether the channel works. Five production
                         // connections said `connected` while failing every
                         // cycle, so the console needs both facts.
                         "last_sync_error": c.last_sync_error,
-                        "last_sync_failed_at": c.last_sync_failed_at,
+                        "last_sync_failed_at": crowdrelay_domain::wire_time::Wire(&c.last_sync_failed_at),
                         // The tenant's chosen read boundary — the console
                         // renders it so "what does the scan read" is a
                         // question with a visible answer.
                         "scan_scope": c.scan_scope,
-                        "created_at": c.created_at,
+                        "created_at": crowdrelay_domain::wire_time::Wire(&c.created_at),
                     })
                 })
                 .collect();

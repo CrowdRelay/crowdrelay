@@ -12,6 +12,7 @@
 /// One captured attribution reading.
 #[derive(Debug, Serialize, FromRow)]
 pub(crate) struct FanSourceSnapshot {
+    #[serde(with = "time::serde::rfc3339")]
     captured_at: OffsetDateTime,
     total_observed_fans: f64,
     total_incremental_fans: f64,

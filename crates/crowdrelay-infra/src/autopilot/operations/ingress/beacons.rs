@@ -256,7 +256,7 @@ impl AutopilotBeaconStateRepository for PostgresAutopilotRepository {
                 "beacon_id": command.beacon_id,
                 "event_id": command.event_id,
                 "disposition": disposition,
-                "occurred_at": command.occurred_at,
+                "occurred_at": crowdrelay_domain::wire_time::Wire(&command.occurred_at),
             });
             if let Some(existing) = super::insert_operator_action(
                 &mut tx,

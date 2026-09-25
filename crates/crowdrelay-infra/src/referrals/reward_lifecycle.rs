@@ -174,7 +174,7 @@ pub(crate) async fn qualify_signup_referral_and_rewards(
             "attribution_id": attribution_id,
             "referrer_fan_id": referrer_fan_id,
             "referred_fan_id": referred_fan_id,
-            "qualified_at": qualified_at,
+            "qualified_at": crowdrelay_domain::wire_time::Wire(&qualified_at),
         }),
     )
     .await?;
@@ -293,7 +293,7 @@ pub(crate) async fn qualify_signup_referral_and_rewards(
                 "fan_id": referrer_fan_id,
                 "qualified_referral_count": qualified_count,
                 "threshold": threshold,
-                "expires_at": expires_at,
+                "expires_at": crowdrelay_domain::wire_time::Wire(&expires_at),
             }),
         )
         .await?;
@@ -360,7 +360,7 @@ pub(crate) async fn qualify_signup_referral_and_rewards(
                         "coupon_code": &coupon.code_display,
                         "discount_percent": config.discount_percent,
                         "max_uses": 1,
-                        "expires_at": expires_at,
+                        "expires_at": crowdrelay_domain::wire_time::Wire(&expires_at),
                         "qualified_referral_count": qualified_count,
                     }),
                 )
@@ -384,7 +384,7 @@ pub(crate) async fn qualify_signup_referral_and_rewards(
                         "display_name": &owner.display_name,
                         "item_name": config.item_name,
                         "sku": config.sku,
-                        "expires_at": expires_at,
+                        "expires_at": crowdrelay_domain::wire_time::Wire(&expires_at),
                         "qualified_referral_count": qualified_count,
                     }),
                 )

@@ -201,6 +201,7 @@ pub struct TermsSnapshot {
     /// improved their offer twice is the band talking itself out of a show.
     pub counter_rounds: u8,
     /// When the promoter's side of this goes cold.
+    #[serde(with = "time::serde::rfc3339")]
     pub responds_by: OffsetDateTime,
 }
 

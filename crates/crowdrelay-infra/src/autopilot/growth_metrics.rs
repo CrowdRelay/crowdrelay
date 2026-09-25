@@ -413,7 +413,7 @@ impl AutopilotGrowthMetricRepository for PostgresAutopilotRepository {
             let operation_id = Uuid::now_v7();
             let details = json!({
                 "series_id": command.series_id.into_uuid(),
-                "captured_at": command.captured_at,
+                "captured_at": crowdrelay_domain::wire_time::Wire(&command.captured_at),
                 "value": command.value,
                 "source": &command.source,
             });

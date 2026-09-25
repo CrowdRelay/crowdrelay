@@ -103,6 +103,7 @@ pub struct ClickEvent {
     campaign_id: Option<CampaignId>,
     visitor_id: Option<VisitorId>,
     referrer_host: Option<String>,
+    #[serde(with = "crate::wire_time")]
     occurred_at: OffsetDateTime,
 }
 

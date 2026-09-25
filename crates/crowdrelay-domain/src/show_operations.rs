@@ -69,9 +69,11 @@ impl ShowTaskKind {
 pub struct ShowTaskSnapshot {
     pub event_id: EventId,
     pub task: ShowTaskKind,
+    #[serde(with = "time::serde::rfc3339")]
     pub starts_at: OffsetDateTime,
     pub already_done: bool,
     pub verifiable_fact: bool,
+    #[serde(with = "time::serde::rfc3339::option")]
     pub last_escalated_at: Option<OffsetDateTime>,
 }
 
