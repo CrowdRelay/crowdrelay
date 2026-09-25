@@ -459,7 +459,11 @@ impl SocialPostExecutorWorker {
         // namespace is ours, so the join cannot point anywhere else. A bare
         // destination URL resolves in the claim pass below, which mints the
         // `smart_links` row first.
-        sqlx::query(
+        // Under a savepoint: without an agent service the joined table does
+        // not exist, and there is nothing to materialise — see
+        // `crate::foreign_relation`. The join-ask and the claim below still run.
+        let mut materialize = sqlx::Acquire::begin(&mut *tx).await?;
+        let materialized = sqlx::query(
             r#"
             INSERT INTO social_posts (workspace_id, action_id, platform, content, smart_link, smart_link_id, status)
             SELECT
@@ -498,8 +502,15 @@ impl SocialPostExecutorWorker {
         )
         .bind(ws)
         .bind(self.public_origin.trim_end_matches('/'))
-        .execute(&mut *tx)
-        .await?;
+        .execute(&mut *materialize)
+        .await;
+        match materialized {
+            Ok(_) => materialize.commit().await?,
+            Err(error) if crate::foreign_relation::is_undefined_table(&error) => {
+                materialize.rollback().await?;
+            }
+            Err(error) => return Err(error.into()),
+        }
 
         // Step 1b: the weekly join-ask (§5) — same claim shape, no task join.
         self.file_join_ask_posts(&mut tx).await?;
