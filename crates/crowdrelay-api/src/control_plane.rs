@@ -247,6 +247,21 @@ pub(crate) fn router(state: crate::AppState) -> Router {
             "/v1/control-plane/autopilot/outreach-targets/{target_id}/written",
             post(crate::autopilot::record_outreach_written),
         )
+        // The drawer's read: one contact's whole thread — every message either
+        // way, the letters the machine drafted or sent, and what happens next
+        // per the evaluator's own rules.
+        .route(
+            "/v1/control-plane/autopilot/outreach-targets/{target_id}/conversation",
+            get(crate::autopilot::get_outreach_conversation),
+        )
+        // "Log their answer" is already registered on this prefix in
+        // `control_plane_operator.rs` — the drawer uses that route.
+        // "Don't contact" — the contact's standing changes, the ledger does
+        // not pretend a reply arrived.
+        .route(
+            "/v1/control-plane/autopilot/outreach-targets/{target_id}/suppression",
+            post(crate::autopilot::suppress_outreach_target),
+        )
         // The negotiation table: every live terms conversation with the
         // ladder it was argued from and the move parked for approval. The
         // position write reuses the canonical admin handler — this surface

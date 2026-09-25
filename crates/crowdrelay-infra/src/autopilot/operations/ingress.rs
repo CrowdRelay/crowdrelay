@@ -11,9 +11,10 @@ use crowdrelay_application::autopilot::{
     ExperimentMutation, ExperimentObservation, OutreachOpportunityMutation, OutreachTargetMutation,
     PromoterPosition, RecordBeaconReply, RecordDeliveryFault, RecordOutreachReply,
     RecordOutreachWritten, RecordPlaylistPlacement, RecordTeamOpportunityProgress,
-    RecordTeamOpportunityTerms, ReleasePlanMutation, ReportSuggestionOutcome, TeamOpportunityKind,
-    TeamOpportunityMutation, TeamOpportunityProgress, UpsertBeacon, UpsertContentSource,
-    UpsertOutreachOpportunity, UpsertOutreachTarget, UpsertReleasePlan, UpsertTeamOpportunity,
+    RecordTeamOpportunityTerms, ReleasePlanMutation, ReportSuggestionOutcome,
+    SuppressOutreachTarget, TeamOpportunityKind, TeamOpportunityMutation, TeamOpportunityProgress,
+    UpsertBeacon, UpsertContentSource, UpsertOutreachOpportunity, UpsertOutreachTarget,
+    UpsertReleasePlan, UpsertTeamOpportunity,
 };
 use crowdrelay_application::{IdempotencyKey, RequestId};
 use crowdrelay_domain::{
@@ -614,6 +615,23 @@ impl AutopilotOutreachStateRepository for PostgresAutopilotRepository {
         request_id: Option<&RequestId>,
     ) -> Result<AutopilotControlMutation, RepositoryError> {
         super::outreach_written::record_outreach_written(
+            self,
+            workspace_id,
+            command,
+            idempotency_key,
+            request_id,
+        )
+        .await
+    }
+
+    async fn suppress_outreach_target(
+        &self,
+        workspace_id: WorkspaceId,
+        command: SuppressOutreachTarget,
+        idempotency_key: &IdempotencyKey,
+        request_id: Option<&RequestId>,
+    ) -> Result<AutopilotControlMutation, RepositoryError> {
+        super::outreach_suppression::suppress_outreach_target(
             self,
             workspace_id,
             command,

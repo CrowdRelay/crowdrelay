@@ -215,11 +215,67 @@ impl PostgresAutopilotRepository {
             .map_err(map_sqlx)?;
             report.opportunities_live += shows.rows_affected();
 
+            // The threads the act started by hand. The sheet import never
+            // linked those messages to an opportunity, so without this seed
+            // the relationship cooldown holds them for ever — 111 contacts
+            // in production were waiting on an answer no engine would chase.
+            // One opportunity per thread, keyed on the target: the unique
+            // constraint is what makes the seed idempotent across cycles,
+            // and the lane's own one-nudge cap stops a reactivated row from
+            // ever sending twice.
+            let threads = sqlx::query(&format!(
+                r#"
+                INSERT INTO outreach_opportunities(
+                    workspace_id, target_id, source, subject_kind, subject_key, template_key,
+                    relevance_basis_points, confidence_basis_points, active, observed_at, expires_at)
+                SELECT target.workspace_id, target.id, 'thread_followup', 'thread',
+                       'thread:' || target.id::text, 'outreach.thread.v1',
+                       GREATEST(7000, LEAST(10000, target.relationship_score * 100)), 8000,
+                       true, $2, last_out.occurred_at + interval '60 days'
+                FROM outreach_targets AS target
+                JOIN LATERAL (
+                    SELECT message.occurred_at
+                    FROM outreach_interactions AS message
+                    WHERE message.workspace_id = target.workspace_id
+                      AND message.target_id = target.id
+                      AND message.direction = 'outbound'
+                      AND message.opportunity_id IS NULL
+                      AND message.occurred_at <= $2
+                      AND NOT EXISTS (
+                          SELECT 1 FROM outreach_interactions AS later
+                          WHERE later.workspace_id = target.workspace_id
+                            AND later.target_id = target.id
+                            AND later.occurred_at > message.occurred_at
+                      )
+                    ORDER BY message.occurred_at DESC, message.id DESC
+                    LIMIT 1
+                ) AS last_out ON true
+                WHERE target.workspace_id = $1
+                  AND {ELIGIBLE_TARGET}
+                  AND target.target_kind IN
+                      ('playlist', 'radio', 'press', 'creator', 'support_slot', 'endorsement', 'media_patronage')
+                  AND last_out.occurred_at > $2 - interval '60 days'
+                ON CONFLICT (workspace_id, source, target_id, subject_kind, subject_key) DO UPDATE SET
+                    active = true, observed_at = EXCLUDED.observed_at,
+                    expires_at = EXCLUDED.expires_at
+                "#
+            ))
+            .bind(ws)
+            .bind(now)
+            .execute(&mut *transaction)
+            .await
+            .map_err(map_sqlx)?;
+            report.opportunities_live += threads.rows_affected();
+
             // Retire what no longer stands: a catalogue pitch that is not the
-            // current one, and a show that is cancelled, moved into the past
-            // or no longer published. A release plan's own rows are left to
-            // the release path, which owns their window.
-            let retired = sqlx::query(
+            // current one, a show that is cancelled, moved into the past or
+            // no longer published, and a thread that stopped being the act's
+            // unanswered handwritten message — they answered, the operator
+            // wrote again, the contact went do-not-contact, or the nudge
+            // itself already went out, which also makes the latest message a
+            // linked one. A release plan's own rows are left to the release
+            // path, which owns their window.
+            let retired = sqlx::query(&format!(
                 r#"
                 UPDATE outreach_opportunities AS opportunity
                 SET active = false, updated_at = now()
@@ -236,9 +292,35 @@ impl PostgresAutopilotRepository {
                                 AND event.status = 'published'
                                 AND event.starts_at > $3
                           ))
+                      OR (opportunity.source = 'thread_followup'
+                          AND NOT EXISTS (
+                              SELECT 1
+                              FROM outreach_targets AS target
+                              JOIN LATERAL (
+                                  SELECT message.occurred_at
+                                  FROM outreach_interactions AS message
+                                  WHERE message.workspace_id = target.workspace_id
+                                    AND message.target_id = target.id
+                                    AND message.direction = 'outbound'
+                                    AND message.opportunity_id IS NULL
+                                    AND message.occurred_at <= $3
+                                    AND NOT EXISTS (
+                                        SELECT 1 FROM outreach_interactions AS later
+                                        WHERE later.workspace_id = target.workspace_id
+                                          AND later.target_id = target.id
+                                          AND later.occurred_at > message.occurred_at
+                                    )
+                                  ORDER BY message.occurred_at DESC, message.id DESC
+                                  LIMIT 1
+                              ) AS last_out ON true
+                              WHERE target.workspace_id = opportunity.workspace_id
+                                AND target.id = opportunity.target_id
+                                AND {ELIGIBLE_TARGET}
+                                AND last_out.occurred_at > $3 - interval '60 days'
+                          ))
                   )
-                "#,
-            )
+                "#
+            ))
             .bind(ws)
             .bind(
                 pitch

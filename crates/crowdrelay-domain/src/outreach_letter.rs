@@ -16,6 +16,7 @@
 //! through the approach path, where the published listing is the pitch.
 
 use serde::{Deserialize, Serialize};
+use time::OffsetDateTime;
 
 use crate::gig_letter::{LetterLanguage, SenderIdentity};
 use crate::outreach::{OutreachPhase, OutreachTargetKind};
@@ -317,6 +318,140 @@ fn follow_up(
     }
 }
 
+/// Everything a thread follow-up is composed from.
+///
+/// Separate from `OutreachLetterInput` because this letter is *about* a gap:
+/// the import kept the date of the act's handwritten message and nothing
+/// else, so the letter may name that date and no more. Giving it the pitch
+/// fields would invite a sentence the record cannot support.
+#[derive(Clone, Debug)]
+pub struct ThreadFollowUpInput<'a> {
+    pub sender: &'a SenderIdentity,
+    /// The target's display name — a playlist, a station, an editor.
+    pub target_name: &'a str,
+    /// The mailbox this goes to — the only address signal a target carries,
+    /// and what picks the language.
+    pub contact_email: &'a str,
+    /// When the act's handwritten message went out, from the import ledger.
+    pub thread_started_at: OffsetDateTime,
+}
+
+/// Composes the one nudge a hand-started thread gets, in the contact's
+/// language.
+///
+/// The letter never says what the first message asked for, because the
+/// import does not record it — a letter that guessed would be the machine
+/// inventing words under the operator's name.
+///
+/// # Errors
+///
+/// Returns the missing fact, same contract as `compose_outreach_letter`.
+pub fn compose_thread_followup_letter(
+    input: &ThreadFollowUpInput<'_>,
+) -> Result<OutreachLetter, OutreachLetterRefusal> {
+    let target = input.target_name.trim();
+    let act = input.sender.act_name.trim();
+    if target.is_empty() {
+        return Err(OutreachLetterRefusal::NoTarget);
+    }
+    if act.is_empty() {
+        return Err(OutreachLetterRefusal::NoSenderName);
+    }
+    Ok(match language_for_contact(input.contact_email) {
+        LetterLanguage::Polish => thread_followup_pl(input, target, act),
+        LetterLanguage::English => thread_followup_en(input, target, act),
+    })
+}
+
+fn thread_followup_en(input: &ThreadFollowUpInput<'_>, target: &str, act: &str) -> OutreachLetter {
+    let mut lines = vec![
+        format!("Hi {target},"),
+        String::new(),
+        format!(
+            "Following up on my message from {} — happy to send anything \
+             that makes a reply easier.",
+            format_thread_date_en(input.thread_started_at),
+        ),
+        String::new(),
+        "If now is not the time, a short \"no\" helps just as much.".to_owned(),
+    ];
+    lines.extend(sign_off(input.sender, act));
+    OutreachLetter {
+        subject: truncate(format!("Following up — {act}"), MAX_SUBJECT),
+        body: lines.join("\n"),
+    }
+}
+
+fn thread_followup_pl(input: &ThreadFollowUpInput<'_>, target: &str, act: &str) -> OutreachLetter {
+    let mut lines = vec![
+        format!("Cześć {target},"),
+        String::new(),
+        format!(
+            "Nawiązuję do mojej wiadomości z {} — chętnie doszlę wszystko, \
+             co ułatwi odpowiedź.",
+            format_thread_date_pl(input.thread_started_at),
+        ),
+        String::new(),
+        "Jeśli to nie ten moment, krótkie „nie” też bardzo pomaga.".to_owned(),
+    ];
+    lines.extend(thread_sign_off_pl(input.sender, act));
+    OutreachLetter {
+        subject: truncate(format!("Nawiązanie — {act}"), MAX_SUBJECT),
+        body: lines.join("\n"),
+    }
+}
+
+/// "12 Sep" — day number and the month's short English name.
+fn format_thread_date_en(at: OffsetDateTime) -> String {
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    let month = MONTHS
+        .get(usize::from(u8::from(at.month()) - 1))
+        .copied()
+        .unwrap_or_default();
+    format!("{} {}", at.day(), month)
+}
+
+/// "12 września" — the Polish month names in the genitive, which is how a
+/// date is read after "z".
+fn format_thread_date_pl(at: OffsetDateTime) -> String {
+    const MONTHS: [&str; 12] = [
+        "stycznia",
+        "lutego",
+        "marca",
+        "kwietnia",
+        "maja",
+        "czerwca",
+        "lipca",
+        "sierpnia",
+        "września",
+        "października",
+        "listopada",
+        "grudnia",
+    ];
+    let month = MONTHS
+        .get(usize::from(u8::from(at.month()) - 1))
+        .copied()
+        .unwrap_or_default();
+    format!("{} {}", at.day(), month)
+}
+
+/// The Polish closing block — same shape as `sign_off`, in the language the
+/// rest of the letter is in.
+fn thread_sign_off_pl(sender: &SenderIdentity, act: &str) -> Vec<String> {
+    let mut lines = vec![String::new(), "Pozdrawiam,".to_owned(), act.to_owned()];
+    if let Some(url) = sender
+        .site_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|u| !u.is_empty())
+    {
+        lines.push(url.to_owned());
+    }
+    lines
+}
+
 /// "I am writing from {act}{, a {style} act}{ from {home_city}}" — each part
 /// present only when the tenant's own records say it.
 fn introduction(sender: &SenderIdentity, act: &str) -> String {
@@ -458,6 +593,56 @@ mod tests {
         assert_eq!(
             compose_outreach_letter(&no_sender),
             Err(OutreachLetterRefusal::NoSenderName)
+        );
+    }
+
+    fn thread_input<'a>(sender: &'a SenderIdentity, email: &'a str) -> ThreadFollowUpInput<'a> {
+        ThreadFollowUpInput {
+            sender,
+            target_name: "Radio Zet",
+            contact_email: email,
+            thread_started_at: OffsetDateTime::from_unix_timestamp(1_758_000_000)
+                .expect("a fixed timestamp"),
+        }
+    }
+
+    #[test]
+    fn a_thread_followup_names_the_message_date_and_no_more() {
+        let sender = sender();
+        // 1_758_000_000 is 2025-09-16.
+        let letter = compose_thread_followup_letter(&thread_input(&sender, "music@zine.example"))
+            .expect("a complete input composes");
+        assert!(letter.body.contains("Hi Radio Zet,"));
+        assert!(letter.body.contains("my message from 16 Sep"));
+        assert!(!letter.body.contains("Listen:"));
+        assert_eq!(letter.subject, "Following up — VIRYA");
+    }
+
+    #[test]
+    fn a_polish_mailbox_gets_the_polish_followup() {
+        let sender = sender();
+        let letter = compose_thread_followup_letter(&thread_input(&sender, "redakcja@radio.pl"))
+            .expect("a complete input composes");
+        assert!(letter.body.contains("Cześć Radio Zet,"));
+        assert!(letter.body.contains("wiadomości z 16 września"));
+        assert!(letter.body.contains("Pozdrawiam,"));
+        assert_eq!(letter.subject, "Nawiązanie — VIRYA");
+        // And the same sender, an international mailbox: English.
+        let en = compose_thread_followup_letter(&thread_input(&sender, "desk@station.fm"))
+            .expect("a complete input composes");
+        assert!(en.body.contains("Following up on my message"));
+    }
+
+    #[test]
+    fn a_thread_followup_still_refuses_anonymous() {
+        let sender = sender();
+        let no_target = ThreadFollowUpInput {
+            target_name: " ",
+            ..thread_input(&sender, "music@zine.example")
+        };
+        assert_eq!(
+            compose_thread_followup_letter(&no_target),
+            Err(OutreachLetterRefusal::NoTarget)
         );
     }
 
