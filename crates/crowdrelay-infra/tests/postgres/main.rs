@@ -37,6 +37,7 @@ mod autopilot_learning_proof;
 mod autopilot_measurement_spine;
 mod autopilot_metric_learning;
 mod autopilot_objectives;
+mod autopilot_outreach_engine;
 mod autopilot_outreach_supply;
 mod autopilot_placements;
 mod autopilot_play_outcomes;

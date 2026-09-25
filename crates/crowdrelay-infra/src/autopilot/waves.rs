@@ -72,6 +72,8 @@ SELECT
               AND plan.id = wave.anchor_id
               AND plan.active
         )
+        -- A catalogue season stands until its own date passes.
+        WHEN 'catalogue' THEN true
         ELSE COALESCE((
             SELECT event.status = 'published'
             FROM events AS event
@@ -124,6 +126,34 @@ WITH anchors AS (
     WHERE event.workspace_id = $1
       AND event.status = 'published'
       AND event.starts_at > $2
+    UNION ALL
+    -- The catalogue season: only while the catalogue is the pitch (no active
+    -- release plan with a listen link), one id per catalogue item per month,
+    -- closing a week into the next month so a wave opened on the last day
+    -- still has its drafting window. See `outreach_supply::outreach_pitch`,
+    -- whose catalogue choice this repeats.
+    SELECT 'catalogue'::text,
+           md5(pitch.id::text || ':' || to_char($2 AT TIME ZONE 'UTC', 'YYYY-MM'))::uuid,
+           date_trunc('month', $2 AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'
+               + interval '1 month' + interval '8 days'
+    FROM (
+        SELECT source.id
+        FROM content_sources AS source
+        WHERE source.workspace_id = $1
+          AND source.source_kind = 'release'
+          AND source.metadata->>'release_type' IN ('album', 'ep', 'single')
+          AND source.metadata->>'released_at' ~ '^[0-9]{1,12}$'
+          AND COALESCE(btrim(source.metadata->>'url'), '') ~* '^https?://'
+          AND btrim(source.title) <> ''
+          AND NOT EXISTS (
+              SELECT 1 FROM release_plans AS plan
+              WHERE plan.workspace_id = $1 AND plan.active
+                AND plan.listen_url IS NOT NULL AND btrim(plan.listen_url) <> ''
+                AND btrim(plan.title) <> ''
+          )
+        ORDER BY (source.metadata->>'released_at')::bigint DESC, source.id
+        LIMIT 1
+    ) AS pitch
 ),
 kinds AS (
     SELECT unnest(ARRAY['radio', 'press', 'creator', 'endorsement', 'media_patronage']::text[])
@@ -441,6 +471,9 @@ fn parse_wave_anchor(kind: &str, anchor_id: Uuid) -> Result<WaveAnchor, Reposito
         }),
         "event" => Ok(WaveAnchor::Event {
             event_id: EventId::from_uuid(anchor_id),
+        }),
+        "catalogue" => Ok(WaveAnchor::Catalogue {
+            season_id: anchor_id,
         }),
         _ => Err(RepositoryError::Unexpected),
     }

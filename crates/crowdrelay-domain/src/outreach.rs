@@ -129,6 +129,12 @@ pub struct OutreachSnapshot {
     pub target_ever_replied: bool,
     pub last_reply: OutreachReplyDisposition,
     pub in_flight: bool,
+    /// The opportunity may only be pitched inside a wave. Catalogue pitches
+    /// are evergreen and plentiful — 196 contacts for one album in
+    /// production — so outside a wave they would arrive as one approval card
+    /// each, up to the daily quota, and lapse unread. A wave is how a person
+    /// reads a dozen of them at once.
+    pub wave_only: bool,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -408,6 +414,7 @@ mod tests {
             target_ever_replied: false,
             last_reply: OutreachReplyDisposition::None,
             in_flight: false,
+            wave_only: false,
         }
     }
 

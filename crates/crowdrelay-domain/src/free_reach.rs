@@ -40,8 +40,19 @@ use crate::{EventId, ReleasePlanId, outreach::OutreachTargetKind};
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum WaveAnchor {
-    Release { release_id: ReleasePlanId },
-    Event { event_id: EventId },
+    Release {
+        release_id: ReleasePlanId,
+    },
+    Event {
+        event_id: EventId,
+    },
+    /// A month of pitching the act's catalogue. A catalogue has no date of
+    /// its own, and one wave per kind per anchor is for ever, so the anchor is
+    /// the season: one id per catalogue item per calendar month, which caps a
+    /// catalogue's reach at one wave per kind per month.
+    Catalogue {
+        season_id: uuid::Uuid,
+    },
 }
 
 impl WaveAnchor {
@@ -50,6 +61,7 @@ impl WaveAnchor {
         match self {
             Self::Release { .. } => "release",
             Self::Event { .. } => "event",
+            Self::Catalogue { .. } => "catalogue",
         }
     }
 
@@ -58,6 +70,7 @@ impl WaveAnchor {
         match self {
             Self::Release { release_id } => release_id.into_uuid(),
             Self::Event { event_id } => event_id.into_uuid(),
+            Self::Catalogue { season_id } => season_id,
         }
     }
 }
