@@ -29,6 +29,7 @@
     "crates/crowdrelay-infra/tests/postgres/gig_outreach.rs": 1251,
     "crates/crowdrelay-worker/src/ad_conversion.rs": 1364,
     "crates/crowdrelay-worker/src/agent_outcomes.rs": 1793,
+    "crates/crowdrelay-worker/src/autopilot.rs": 1239,
     "crates/crowdrelay-worker/src/community_executor.rs": 1823,
     "crates/crowdrelay-worker/src/growth_metric_sync.rs": 2251,
     "crates/crowdrelay-worker/src/main.rs": 1423,

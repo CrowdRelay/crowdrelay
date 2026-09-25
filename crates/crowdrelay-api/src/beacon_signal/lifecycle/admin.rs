@@ -106,7 +106,9 @@ pub async fn admin_candidates(
         Ok(candidates) => (
             StatusCode::OK,
             [(CACHE_CONTROL, PRIVATE_NO_STORE)],
-            Json(AdminCandidatesResponse { candidates }),
+            Json(AdminCandidatesResponse {
+                candidates: fold_candidates(candidates),
+            }),
         )
             .into_response(),
         Err(error) => {
@@ -163,7 +165,9 @@ pub async fn admin_dashboard(State(state): State<crate::AppState>, headers: Head
                COALESCE(endpoint_counts.active_push_endpoints,0)::bigint AS active_push_endpoints,
                COALESCE(request_counts.open_press_requests,0)::bigint AS open_press_requests,
                COALESCE(engagement_counts.active_engagements,0)::bigint AS active_engagements,
-               COALESCE(coverage_counts.coverage_count,0)::bigint AS coverage_count
+               COALESCE(coverage_counts.coverage_count,0)::bigint AS coverage_count,
+               beacon.relevance_basis_points,beacon.relationship_score,
+               beacon.destination_url,beacon.verified,beacon.accepts_outreach,beacon.do_not_contact
         FROM beacons beacon
         LEFT JOIN beacon_signal_profiles profile
           ON profile.workspace_id=beacon.workspace_id AND profile.beacon_id=beacon.id
@@ -177,6 +181,7 @@ pub async fn admin_dashboard(State(state): State<crate::AppState>, headers: Head
         ORDER BY CASE COALESCE(profile.status,'unverified')
                    WHEN 'active' THEN 0 WHEN 'invited' THEN 1
                    WHEN 'paused' THEN 2 WHEN 'revoked' THEN 3 ELSE 4 END,
+                 (beacon.contact_email IS NOT NULL) DESC,
                  beacon.relevance_basis_points DESC,beacon.relationship_score DESC,beacon.display_name,beacon.id
         LIMIT 500
         "#,
@@ -186,6 +191,7 @@ pub async fn admin_dashboard(State(state): State<crate::AppState>, headers: Head
     .await;
     match profiles {
         Ok(profiles) => {
+            let profiles = fold_profiles(profiles);
             let active = profiles
                 .iter()
                 .filter(|profile| profile.status == "active")
@@ -221,6 +227,243 @@ pub async fn admin_dashboard(State(state): State<crate::AppState>, headers: Head
             BeaconSignalError::Unavailable.response(request_id_value)
         }
     }
+}
+
+/// The roster is entities, not rows. The same person arrives under several
+/// kinds — a radio that is also a scene partner is one human, and the
+/// per-kind identity keys that keep contact routes honest also let those
+/// facets stand side by side in the list: three identical names, three
+/// kinds, one person. Rows sharing a normalized (name, city) fold into the
+/// entity they describe when at most one of them carries a contact identity
+/// (an email or a destination URL). Two rows with the same name and
+/// different addresses stay apart — that is a second way to reach the
+/// entity, not a duplicate.
+///
+/// The folded row keeps the facet an invite would mint against — the
+/// emailable, consented, strongest facet — while the kind column names
+/// every hat the entity wears ("community · creator"), the truth the
+/// per-row display could not say. Suppression dominates: one revoked or
+/// paused facet makes the entity read revoked or paused, because the
+/// operator set that state and no sibling stub may quietly reopen it.
+fn fold_profiles(profiles: Vec<AdminProfileView>) -> Vec<AdminProfileView> {
+    use std::collections::BTreeMap;
+
+    /// Suppression-first ranking for folded status: an operator-set state
+    /// outranks a flow state, and any reached state outranks unverified.
+    fn status_rank(status: &str) -> u8 {
+        match status {
+            "revoked" => 0,
+            "paused" => 1,
+            "active" => 2,
+            "invited" => 3,
+            _ => 4,
+        }
+    }
+    /// Display order — the ranking the dashboard already sorted by.
+    fn display_rank(status: &str) -> u8 {
+        match status {
+            "active" => 0,
+            "invited" => 1,
+            "paused" => 2,
+            "revoked" => 3,
+            _ => 4,
+        }
+    }
+    let key_of = |p: &AdminProfileView| {
+        let name = p
+            .display_name
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_lowercase();
+        let city = p
+            .city
+            .clone()
+            .unwrap_or_default()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_lowercase();
+        (name, city)
+    };
+    let anchor_of = |p: &AdminProfileView| {
+        p.contact_email
+            .as_deref()
+            .map(str::trim)
+            .map(str::to_lowercase)
+            .or_else(|| {
+                p.destination_url
+                    .as_deref()
+                    .map(str::trim)
+                    .map(str::to_lowercase)
+            })
+    };
+    // The facet a mint would pick: emailable + consented first, then simply
+    // reachable — a folded entity whose only address sits on an unverified
+    // facet still names that address, otherwise the row would read "no
+    // email" over a contact route that exists. Then the strongest signal,
+    // stable on id.
+    let strength = |p: &AdminProfileView| {
+        (
+            p.contact_email.is_some() && p.verified && p.accepts_outreach && !p.do_not_contact,
+            p.contact_email.is_some(),
+            p.relevance_basis_points,
+            p.relationship_score,
+            p.invite_count,
+            std::cmp::Reverse(p.beacon_id),
+        )
+    };
+
+    let mut groups: BTreeMap<(String, String), Vec<AdminProfileView>> = BTreeMap::new();
+    for profile in profiles {
+        groups.entry(key_of(&profile)).or_default().push(profile);
+    }
+    let mut folded: Vec<AdminProfileView> = Vec::with_capacity(groups.len());
+    for (_, mut rows) in groups {
+        let anchors: std::collections::BTreeSet<String> =
+            rows.iter().filter_map(&anchor_of).collect();
+        if rows.len() == 1 || anchors.len() > 1 {
+            folded.append(&mut rows);
+            continue;
+        }
+        rows.sort_by_key(|p| std::cmp::Reverse(strength(p)));
+        let mut kinds: Vec<String> = rows.iter().map(|p| p.beacon_kind.clone()).collect();
+        kinds.sort();
+        kinds.dedup();
+        // The row owning the strictest status supplies the status-bound
+        // fields (expiry, radius, locale, nearby flag).
+        let Some(state_row) = rows.iter().min_by(|a, b| {
+            status_rank(&a.status)
+                .cmp(&status_rank(&b.status))
+                .then(a.beacon_id.cmp(&b.beacon_id))
+        }) else {
+            continue;
+        };
+        let status = state_row.status.clone();
+        let radius_km = state_row.radius_km;
+        let locale = state_row.locale.clone();
+        let nearby_gigs_enabled = state_row.nearby_gigs_enabled;
+        let invite_expires_at = state_row.invite_expires_at;
+        let max_opt = |f: &dyn Fn(&AdminProfileView) -> Option<OffsetDateTime>| {
+            rows.iter().filter_map(f).max()
+        };
+        // Contact-identity and consent fields come from the canonical facet —
+        // the row the mint would act on. `any()` here would lie in both
+        // directions: a sibling stub's missing email would still show an
+        // address the mint cannot use, and a sibling's do-not-contact would
+        // grey out a row the mint happily mails.
+        let Some(canonical) = rows.first() else {
+            continue;
+        };
+        folded.push(AdminProfileView {
+            beacon_id: canonical.beacon_id,
+            display_name: canonical.display_name.clone(),
+            beacon_kind: kinds.join(" · "),
+            contact_email: canonical.contact_email.clone(),
+            city: canonical.city.clone(),
+            status,
+            radius_km,
+            locale,
+            nearby_gigs_enabled,
+            invite_count: rows.iter().map(|p| p.invite_count).sum(),
+            last_invited_at: max_opt(&|p| p.last_invited_at),
+            invite_expires_at,
+            // `joined_at` gates the Resume button, and Resume posts the
+            // canonical id — the group max would render a button the
+            // upstream refuses when only a sibling ever joined.
+            joined_at: canonical.joined_at,
+            last_seen_at: max_opt(&|p| p.last_seen_at),
+            active_sessions: rows.iter().map(|p| p.active_sessions).sum(),
+            active_push_endpoints: rows.iter().map(|p| p.active_push_endpoints).sum(),
+            open_press_requests: rows.iter().map(|p| p.open_press_requests).sum(),
+            active_engagements: rows.iter().map(|p| p.active_engagements).sum(),
+            coverage_count: rows.iter().map(|p| p.coverage_count).sum(),
+            relevance_basis_points: canonical.relevance_basis_points,
+            relationship_score: canonical.relationship_score,
+            destination_url: canonical.destination_url.clone(),
+            verified: canonical.verified,
+            accepts_outreach: canonical.accepts_outreach,
+            do_not_contact: canonical.do_not_contact,
+        });
+    }
+    folded.sort_by(|a, b| {
+        display_rank(&a.status)
+            .cmp(&display_rank(&b.status))
+            .then(b.contact_email.is_some().cmp(&a.contact_email.is_some()))
+            .then(b.relevance_basis_points.cmp(&a.relevance_basis_points))
+            .then(b.relationship_score.cmp(&a.relationship_score))
+            .then(a.display_name.cmp(&b.display_name))
+            .then(a.beacon_id.cmp(&b.beacon_id))
+    });
+    folded
+}
+
+/// One letter per address. The candidate list is keyed by contact route,
+/// so the same address under two kinds is one letter, not two — the mint
+/// dedupes on the email, and the list now reads the same way.
+fn fold_candidates(candidates: Vec<AdminCandidateView>) -> Vec<AdminCandidateView> {
+    use std::collections::BTreeMap;
+
+    fn status_rank(status: Option<&str>) -> u8 {
+        match status {
+            Some("revoked") => 0,
+            Some("paused") => 1,
+            Some("active") => 2,
+            Some("invited") => 3,
+            _ => 4,
+        }
+    }
+    let mut groups: BTreeMap<String, Vec<AdminCandidateView>> = BTreeMap::new();
+    for candidate in candidates {
+        let key = candidate.contact_email.trim().to_lowercase();
+        groups.entry(key).or_default().push(candidate);
+    }
+    let mut folded: Vec<AdminCandidateView> = Vec::with_capacity(groups.len());
+    for (_, mut rows) in groups {
+        if rows.len() == 1 {
+            folded.append(&mut rows);
+            continue;
+        }
+        rows.sort_by(|a, b| {
+            (
+                b.relevance_basis_points,
+                b.relationship_score,
+                b.invite_count,
+                std::cmp::Reverse(b.beacon_id),
+            )
+                .cmp(&(
+                    a.relevance_basis_points,
+                    a.relationship_score,
+                    a.invite_count,
+                    std::cmp::Reverse(a.beacon_id),
+                ))
+        });
+        let mut kinds: Vec<String> = rows.iter().map(|c| c.beacon_kind.clone()).collect();
+        kinds.sort();
+        kinds.dedup();
+        let signal_status = rows
+            .iter()
+            .min_by(|a, b| {
+                status_rank(a.signal_status.as_deref())
+                    .cmp(&status_rank(b.signal_status.as_deref()))
+            })
+            .and_then(|c| c.signal_status.clone());
+        let invite_count = rows.iter().map(|c| c.invite_count).sum();
+        let last_invited_at = rows.iter().filter_map(|c| c.last_invited_at).max();
+        let mut canonical = rows.remove(0);
+        canonical.beacon_kind = kinds.join(" · ");
+        canonical.signal_status = signal_status;
+        canonical.invite_count = invite_count;
+        canonical.last_invited_at = last_invited_at;
+        folded.push(canonical);
+    }
+    folded.sort_by(|a, b| {
+        (b.relevance_basis_points, b.relationship_score)
+            .cmp(&(a.relevance_basis_points, a.relationship_score))
+            .then(a.display_name.cmp(&b.display_name))
+            .then(a.beacon_id.cmp(&b.beacon_id))
+    });
+    folded
 }
 
 pub async fn admin_set_state(
@@ -677,5 +920,143 @@ pub async fn admin_press_requests(
             tracing::warn!(%error, "Beacon press-request list failed");
             BeaconSignalError::Unavailable.response(request_id_value)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn profile(name: &str, kind: &str, city: Option<&str>, id: u128) -> AdminProfileView {
+        AdminProfileView {
+            beacon_id: Uuid::from_u128(id),
+            display_name: name.to_string(),
+            beacon_kind: kind.to_string(),
+            contact_email: None,
+            city: city.map(str::to_string),
+            status: "unverified".to_string(),
+            radius_km: 0,
+            locale: String::new(),
+            nearby_gigs_enabled: false,
+            invite_count: 0,
+            last_invited_at: None,
+            invite_expires_at: None,
+            joined_at: None,
+            last_seen_at: None,
+            active_sessions: 0,
+            active_push_endpoints: 0,
+            open_press_requests: 0,
+            active_engagements: 0,
+            coverage_count: 0,
+            relevance_basis_points: 0,
+            relationship_score: 0,
+            destination_url: None,
+            verified: true,
+            accepts_outreach: true,
+            do_not_contact: false,
+        }
+    }
+
+    fn candidate(name: &str, kind: &str, email: &str, id: u128) -> AdminCandidateView {
+        AdminCandidateView {
+            beacon_id: Uuid::from_u128(id),
+            display_name: name.to_string(),
+            beacon_kind: kind.to_string(),
+            contact_email: email.to_string(),
+            city: None,
+            relevance_basis_points: 0,
+            relationship_score: 0,
+            signal_status: None,
+            invite_count: 0,
+            last_invited_at: None,
+        }
+    }
+
+    #[test]
+    fn folds_kind_facets_of_one_entity() {
+        let mut a = profile(
+            "Bydgoszcz radio, słuchaj online",
+            "creator",
+            Some("Bydgoszcz"),
+            1,
+        );
+        a.relevance_basis_points = 9000;
+        let b = profile(
+            "Bydgoszcz radio, słuchaj online",
+            "community",
+            Some("Bydgoszcz"),
+            2,
+        );
+        let c = profile(
+            "bydgoszcz  radio, słuchaj online",
+            "creator",
+            Some("Bydgoszcz"),
+            3,
+        );
+        let folded = fold_profiles(vec![a, b, c]);
+        assert_eq!(folded.len(), 1);
+        assert_eq!(
+            folded[0].beacon_id,
+            Uuid::from_u128(1),
+            "strongest facet keeps the id"
+        );
+        assert_eq!(folded[0].beacon_kind, "community · creator");
+    }
+
+    #[test]
+    fn keeps_distinct_contact_routes_apart() {
+        let mut a = profile("Radio", "radio", Some("Bydgoszcz"), 1);
+        a.contact_email = Some("a@example.com".into());
+        let mut b = profile("Radio", "radio", Some("Bydgoszcz"), 2);
+        b.contact_email = Some("b@example.com".into());
+        assert_eq!(fold_profiles(vec![a, b]).len(), 2);
+    }
+
+    #[test]
+    fn stub_adopts_into_the_emailed_facet() {
+        let mut a = profile("Zine", "zine", None, 1);
+        a.contact_email = Some("zine@example.com".into());
+        a.relevance_basis_points = 5000;
+        let b = profile("Zine", "collective", None, 2);
+        let folded = fold_profiles(vec![b, a]);
+        assert_eq!(folded.len(), 1);
+        assert_eq!(folded[0].beacon_id, Uuid::from_u128(1));
+        assert_eq!(folded[0].contact_email.as_deref(), Some("zine@example.com"));
+        assert_eq!(folded[0].beacon_kind, "collective · zine");
+    }
+
+    #[test]
+    fn distinct_destinations_stay_apart() {
+        let mut a = profile("Shop", "shop", Some("Gdańsk"), 1);
+        a.destination_url = Some("https://a.example".into());
+        let mut b = profile("Shop", "shop", Some("Gdańsk"), 2);
+        b.destination_url = Some("https://b.example".into());
+        assert_eq!(fold_profiles(vec![a, b]).len(), 2);
+    }
+
+    #[test]
+    fn an_operator_state_outranks_a_flow_state() {
+        let mut a = profile("Collective", "collective", None, 1);
+        a.status = "revoked".to_string();
+        let mut b = profile("Collective", "community", None, 2);
+        b.status = "invited".to_string();
+        let folded = fold_profiles(vec![b, a]);
+        assert_eq!(folded[0].status, "revoked");
+    }
+
+    #[test]
+    fn different_cities_are_different_entities() {
+        let a = profile("City Radio", "radio", Some("Bydgoszcz"), 1);
+        let b = profile("City Radio", "radio", Some("Toruń"), 2);
+        assert_eq!(fold_profiles(vec![a, b]).len(), 2);
+    }
+
+    #[test]
+    fn folds_candidates_by_address() {
+        let a = candidate("Es KA", "radio", "Host@example.com", 1);
+        let b = candidate("Es KA", "community", "host@example.com", 2);
+        let folded = fold_candidates(vec![a, b]);
+        assert_eq!(folded.len(), 1);
+        assert_eq!(folded[0].beacon_kind, "community · radio");
     }
 }
