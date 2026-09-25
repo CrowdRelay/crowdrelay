@@ -146,6 +146,8 @@ struct CycleObservation {
     /// tenant has chosen. `None` when that phase did not get far enough to
     /// take a reading.
     north_star: Option<u32>,
+    /// The metric that reading is in.
+    north_star_metric: Option<&'static str>,
     /// Why the portfolio selected nothing, in the brain's own words. The
     /// system may do nothing and say so — but only if the reason survives
     /// past the worker log it was first written to.
@@ -294,6 +296,7 @@ impl AutopilotWorker {
                         degraded_reasons: None,
                         finished_at: OffsetDateTime::now_utc(),
                         north_star_observed: None,
+                        north_star_metric: None,
                         wait_reason: None,
                     },
                 )
@@ -327,6 +330,7 @@ impl AutopilotWorker {
                     degraded_reasons: observed.degraded.reasons().as_ref(),
                     finished_at: OffsetDateTime::now_utc(),
                     north_star_observed: observed.north_star,
+                    north_star_metric: observed.north_star_metric,
                     wait_reason: observed.wait_reason.as_deref(),
                 },
             )
@@ -348,6 +352,7 @@ impl AutopilotWorker {
         // or evidence collection from a previous cycle.
         let mut degraded = DegradedPhases::default();
         let mut north_star_observed = None;
+        let mut north_star_metric = None;
         let mut wait_reason = None;
 
         // Recording first-party observations runs before evaluation so a cycle
@@ -378,6 +383,7 @@ impl AutopilotWorker {
         match evaluator.execute(now).await {
             Ok(report) => {
                 north_star_observed = report.north_star_observed;
+                north_star_metric = report.north_star_metric;
                 // A quiet cycle owes its reason in full: the portfolio's WAIT
                 // math and, when the watcher found nothing, the missing
                 // material itself. Both ride the same column — an operator
@@ -938,6 +944,7 @@ impl AutopilotWorker {
         CycleObservation {
             degraded,
             north_star: north_star_observed,
+            north_star_metric,
             wait_reason,
         }
     }

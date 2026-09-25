@@ -308,6 +308,7 @@ async fn the_cycle_records_the_reading_it_was_given_not_a_fan_count() -> Result<
             degraded_reasons: None,
             finished_at: now,
             north_star_observed: Some(1),
+            north_star_metric: None,
             wait_reason: None,
         },
     )
@@ -365,6 +366,7 @@ async fn a_cycle_that_took_no_reading_records_none() -> Result<()> {
             degraded_reasons: Some(&reasons),
             finished_at: now,
             north_star_observed: None,
+            north_star_metric: None,
             wait_reason: None,
         },
     )
@@ -428,6 +430,7 @@ async fn a_degraded_cycle_records_which_phases_failed() -> Result<()> {
             degraded_reasons: None,
             finished_at: now,
             north_star_observed: Some(7),
+            north_star_metric: None,
             wait_reason: None,
         },
     )
@@ -481,6 +484,7 @@ async fn a_clean_cycle_records_an_empty_phase_list_not_null() -> Result<()> {
             degraded_reasons: None,
             finished_at: now,
             north_star_observed: Some(7),
+            north_star_metric: None,
             wait_reason: None,
         },
     )
@@ -535,6 +539,7 @@ async fn a_quiet_cycle_records_its_reason_and_an_active_one_records_none() -> Re
             degraded_reasons: None,
             finished_at: now,
             north_star_observed: Some(20),
+            north_star_metric: None,
             wait_reason: Some("WAIT wins: VOI=0.85 > best_action_value=0.00"),
         },
     )
@@ -606,6 +611,7 @@ async fn a_quiet_cycle_records_its_reason_and_an_active_one_records_none() -> Re
             degraded_reasons: None,
             finished_at: now + Duration::minutes(6),
             north_star_observed: Some(20),
+            north_star_metric: None,
             wait_reason: Some("WAIT overridden by min_dispatches=1 dispatched 1 candidate(s)"),
         },
     )
@@ -652,6 +658,7 @@ async fn the_latest_wait_reason_is_scoped_to_the_workspace() -> Result<()> {
                 degraded_reasons: None,
                 finished_at: now,
                 north_star_observed: None,
+                north_star_metric: None,
                 wait_reason: Some(reason),
             },
         )
@@ -673,6 +680,58 @@ async fn the_latest_wait_reason_is_scoped_to_the_workspace() -> Result<()> {
         latest.as_deref(),
         Some("my reason: WAIT wins"),
         "the operator reads this tenant's reason, not a neighbour's",
+    );
+    Ok(())
+}
+
+/// A tenant that changes its North Star starts a new series. Production read
+/// Signal installs (2 to 4) and then weighted audience (~680) in one series,
+/// and the brain called the switch `improving`.
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn a_changed_north_star_metric_is_not_read_as_growth() -> Result<()> {
+    let pool = pool().await?;
+    let workspace_id = workspace(&pool).await?;
+    let now = OffsetDateTime::now_utc()
+        .replace_time(time::Time::from_hms(12, 0, 0).expect("a valid time of day"));
+    for day in 0..10_i64 {
+        let (metric, value) = if day < 6 {
+            ("signal_installs", 3)
+        } else {
+            ("weighted_audience", 680)
+        };
+        sqlx::query(
+            r#"
+            INSERT INTO autopilot_cycle_runs
+                (id, workspace_id, trigger, started_at, finished_at, duration_ms,
+                 outcome, decisions_recorded, actions_created, north_star_value,
+                 north_star_metric)
+            VALUES ($1,$2,'scheduled',$3,$3,10,'succeeded',0,0,$4,$5)
+            "#,
+        )
+        .bind(Uuid::now_v7())
+        .bind(workspace_id.into_uuid())
+        .bind(now - Duration::days(9 - day))
+        .bind(value)
+        .bind(metric)
+        .execute(&pool)
+        .await?;
+    }
+    let samples = daily_north_star(&pool, workspace_id, NORTH_STAR_WINDOW_DAYS).await?;
+    assert_eq!(
+        samples.len(),
+        4,
+        "only the four readings in the current metric belong to its series"
+    );
+    assert!(
+        samples
+            .iter()
+            .all(|sample| (sample.value - 680.0).abs() < f64::EPSILON)
+    );
+    assert_eq!(
+        assess(samples),
+        BrainState::Initializing,
+        "four days of a new metric is too little to judge — not a 22,000% rise"
     );
     Ok(())
 }
