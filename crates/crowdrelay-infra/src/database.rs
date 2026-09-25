@@ -55,6 +55,20 @@ pub(crate) fn classify_sqlx_error(error: &sqlx::Error) -> SqlxErrorClass {
             {
                 SqlxErrorClass::Unavailable
             } else if code == "23505" {
+                // The row becomes `error_kind = "state_changed"` and nothing
+                // else — the constraint name that would say *which* unique key
+                // fired is dropped here, one frame from the only place it
+                // exists. Production has run bursts of exactly that: 27
+                // community engagements failed in a week, every one
+                // diagnosable from this line and none diagnosable anywhere
+                // else. Warn once per occurrence — a conflict burst is a
+                // symptom, and the constraint is the symptom's name.
+                tracing::warn!(
+                    sqlstate = code,
+                    constraint = database.constraint(),
+                    message = %database.message(),
+                    "unique-violation persistence failure — surfaces as error_kind=state_changed"
+                );
                 SqlxErrorClass::Conflict
             } else {
                 SqlxErrorClass::Unexpected
