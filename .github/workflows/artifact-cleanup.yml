@@ -12,7 +12,7 @@ permissions:
 
 jobs:
   cleanup:
-    runs-on: [self-hosted, arm64]
+    runs-on: { group: Default, labels: [self-hosted, arm64] }
     timeout-minutes: 25
     steps:
       - name: Clean artifacts and runs across all CrowdRelay repos
