@@ -26,7 +26,8 @@ use crate::common;
 use crowdrelay_brain::self_assessment::{BrainState, assess};
 use crowdrelay_domain::WorkspaceId;
 use crowdrelay_infra::autopilot::{
-    CycleTrigger, NORTH_STAR_WINDOW_DAYS, close_cycle_run, daily_north_star, open_cycle_run,
+    CycleDegradation, CycleTrigger, NORTH_STAR_WINDOW_DAYS, close_cycle_run, daily_north_star,
+    open_cycle_run,
 };
 use sqlx::PgPool;
 use time::{Duration, OffsetDateTime};
@@ -302,8 +303,10 @@ async fn the_cycle_records_the_reading_it_was_given_not_a_fan_count() -> Result<
         &pool,
         workspace_id,
         cycle_id,
-        &[],
-        serde_json::json!({}),
+        &CycleDegradation {
+            phases: vec![],
+            errors: serde_json::json!({}),
+        },
         now,
         Some(1),
         None,
@@ -352,8 +355,10 @@ async fn a_cycle_that_took_no_reading_records_none() -> Result<()> {
         &pool,
         workspace_id,
         cycle_id,
-        &["evaluation".to_owned()],
-        serde_json::json!({"evaluation": "unexpected"}),
+        &CycleDegradation {
+            phases: vec!["evaluation".to_owned()],
+            errors: serde_json::json!({"evaluation": "unexpected"}),
+        },
         now,
         None,
         None,
@@ -405,11 +410,13 @@ async fn a_degraded_cycle_records_which_phases_failed() -> Result<()> {
         &pool,
         workspace_id,
         cycle_id,
-        &["action_claim".to_owned(), "reply_triage_claim".to_owned()],
-        serde_json::json!({
-            "action_claim": "repository_unavailable",
-            "reply_triage_claim": "unexpected",
-        }),
+        &CycleDegradation {
+            phases: vec!["action_claim".to_owned(), "reply_triage_claim".to_owned()],
+            errors: serde_json::json!({
+                "action_claim": "repository_unavailable",
+                "reply_triage_claim": "unexpected",
+            }),
+        },
         now,
         Some(7),
         None,
@@ -467,8 +474,10 @@ async fn a_clean_cycle_records_an_empty_phase_list_not_null() -> Result<()> {
         &pool,
         workspace_id,
         cycle_id,
-        &[],
-        serde_json::json!({}),
+        &CycleDegradation {
+            phases: vec![],
+            errors: serde_json::json!({}),
+        },
         now,
         Some(7),
         None,
@@ -524,8 +533,10 @@ async fn a_quiet_cycle_records_its_reason_and_an_active_one_records_none() -> Re
         &pool,
         workspace_id,
         quiet_id,
-        &[],
-        serde_json::json!({}),
+        &CycleDegradation {
+            phases: vec![],
+            errors: serde_json::json!({}),
+        },
         now,
         Some(20),
         Some("WAIT wins: VOI=0.85 > best_action_value=0.00"),
@@ -593,8 +604,10 @@ async fn a_quiet_cycle_records_its_reason_and_an_active_one_records_none() -> Re
         &pool,
         workspace_id,
         active_id,
-        &[],
-        serde_json::json!({}),
+        &CycleDegradation {
+            phases: vec![],
+            errors: serde_json::json!({}),
+        },
         now + Duration::minutes(6),
         Some(20),
         Some("WAIT overridden by min_dispatches=1 dispatched 1 candidate(s)"),
@@ -637,8 +650,10 @@ async fn the_latest_wait_reason_is_scoped_to_the_workspace() -> Result<()> {
             &pool,
             ws,
             id,
-            &[],
-            serde_json::json!({}),
+            &CycleDegradation {
+                phases: vec![],
+                errors: serde_json::json!({}),
+            },
             now,
             None,
             Some(reason),

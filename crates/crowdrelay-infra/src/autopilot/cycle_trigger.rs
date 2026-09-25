@@ -160,6 +160,14 @@ pub async fn open_cycle_run(
     }
 }
 
+/// Which phases of a cycle failed and what each failed with — one value
+/// because `degraded_phases` and `degraded_errors` are one record on the row,
+/// and two parameters a caller could pair wrongly.
+pub struct CycleDegradation {
+    pub phases: Vec<String>,
+    pub errors: serde_json::Value,
+}
+
 /// Closes a cycle-run row, counting what the cycle produced.
 ///
 /// The counts are read back from the tables that hold the truth rather than
@@ -180,8 +188,7 @@ pub async fn close_cycle_run(
     pool: &PgPool,
     workspace_id: WorkspaceId,
     cycle_id: uuid::Uuid,
-    degraded_phases: &[String],
-    degraded_errors: serde_json::Value,
+    degradation: &CycleDegradation,
     finished_at: OffsetDateTime,
     north_star_observed: Option<u32>,
     wait_reason: Option<&str>,
@@ -241,10 +248,10 @@ pub async fn close_cycle_run(
     .bind(workspace_id.into_uuid())
     .bind(cycle_id)
     .bind(finished_at)
-    .bind(degraded_phases)
+    .bind(&degradation.phases)
     .bind(north_star_observed.and_then(|value| i32::try_from(value).ok()))
     .bind(wait_reason)
-    .bind(degraded_errors)
+    .bind(&degradation.errors)
     .execute(pool)
     .await;
     if let Err(error) = closed {

@@ -129,6 +129,15 @@ impl DegradedPhases {
             .collect::<serde_json::Map<String, serde_json::Value>>()
             .into()
     }
+
+    /// The pair `close_cycle_run` writes — one value so the phases and the
+    /// kinds cannot disagree about which map they came from.
+    fn cycle_degradation(&self) -> crowdrelay_infra::autopilot::CycleDegradation {
+        crowdrelay_infra::autopilot::CycleDegradation {
+            phases: self.recorded(),
+            errors: self.recorded_errors(),
+        }
+    }
 }
 
 /// What one cycle produced, for the record that describes it.
@@ -285,8 +294,7 @@ impl AutopilotWorker {
                     self.repository.pool(),
                     self.workspace_id,
                     cycle_id,
-                    &skipped.recorded(),
-                    skipped.recorded_errors(),
+                    &skipped.cycle_degradation(),
                     OffsetDateTime::now_utc(),
                     None,
                     None,
@@ -316,8 +324,7 @@ impl AutopilotWorker {
                 self.repository.pool(),
                 self.workspace_id,
                 cycle_id,
-                &observed.degraded.recorded(),
-                observed.degraded.recorded_errors(),
+                &observed.degraded.cycle_degradation(),
                 OffsetDateTime::now_utc(),
                 observed.north_star,
                 observed.wait_reason.as_deref(),

@@ -77,7 +77,7 @@ async fn catalogue_is_seeded_and_global() -> Result<(), Box<dyn std::error::Erro
 /// A fresh idempotency key for each operator-path call — the ledger turns a
 /// reused key into a replay, which is not the assertion these fixtures make.
 fn key(label: &str) -> IdempotencyKey {
-    IdempotencyKey::parse(&format!("ce-{label}-{}", Uuid::now_v7().simple()))
+    IdempotencyKey::parse(format!("ce-{label}-{}", Uuid::now_v7().simple()))
         .expect("valid idempotency key")
 }
 
