@@ -43,6 +43,7 @@ mod foreign_relation;
 pub mod gdrive_contacts_sync;
 pub mod github_registry_sync;
 pub mod gmail_contacts_sync;
+pub mod gmail_outreach_ledger;
 pub mod google_oauth;
 pub mod growth_metric_sync;
 pub mod growth_readiness;

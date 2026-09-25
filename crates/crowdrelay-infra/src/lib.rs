@@ -64,6 +64,7 @@ pub mod night;
 pub mod observability;
 pub mod organization_settings;
 pub mod outreach_log;
+pub mod outreach_mail;
 pub mod peer_act_seed;
 pub mod place_reach;
 pub mod portfolio;

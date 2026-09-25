@@ -90,7 +90,12 @@ pub enum GmailContactsSyncError {
 pub struct GmailContactsSyncWorker {
     repo: PostgresGDriveRepository,
     http_client: reqwest::Client,
-    workspace_id: Uuid,
+    pub(crate) workspace_id: Uuid,
+    /// The outreach ledger's pool — see `gmail_outreach_ledger`.
+    pub(crate) pool: PgPool,
+    /// When each outreach contact was last reconciled against the mailbox.
+    pub(crate) reconciled:
+        std::sync::Arc<std::sync::Mutex<std::collections::HashMap<Uuid, std::time::Instant>>>,
     response_encryption_key: SensitiveResponseKey,
     google_client_id: Option<String>,
     google_client_secret: Option<String>,
@@ -217,9 +222,11 @@ impl GmailContactsSyncWorker {
             .build()
             .map_err(GmailContactsSyncError::ClientBuild)?;
         Ok(Self {
-            repo: PostgresGDriveRepository::new(pool),
+            repo: PostgresGDriveRepository::new(pool.clone()),
             http_client,
             workspace_id,
+            pool,
+            reconciled: std::sync::Arc::default(),
             response_encryption_key,
             google_client_id: std::env::var("CROWDRELAY_GOOGLE_ADS_CLIENT_ID")
                 .ok()
@@ -325,7 +332,7 @@ impl GmailContactsSyncWorker {
         .await
     }
 
-    async fn get<T: serde::de::DeserializeOwned>(
+    pub(crate) async fn get<T: serde::de::DeserializeOwned>(
         &self,
         connection_id: Uuid,
         url: &str,
@@ -544,6 +551,23 @@ impl GmailContactsSyncWorker {
             .mark_sync_ok(self.workspace_id, connection_id)
             .await
             .map_err(|e| e.to_string())?;
+        // The ledger's rotating reconciliation, after the scan committed. A
+        // failure here is logged, not the cycle's: the contacts sync worked.
+        match self
+            .reconcile_outreach_ledger(connection_id, &self_email)
+            .await
+        {
+            Ok(report) if report.touches_recorded > 0 => tracing::info!(
+                contacts = report.contacts_searched,
+                messages = report.messages_read,
+                touches = report.touches_recorded,
+                "gmail outreach ledger reconciled"
+            ),
+            Ok(_) => {}
+            Err(error) => {
+                tracing::warn!(error = %error, "gmail outreach ledger reconciliation failed")
+            }
+        }
         tracing::info!(
             full_sweep,
             messages = scanned,
@@ -884,6 +908,17 @@ impl GmailContactsSyncWorker {
                 .await
                 .map_err(|e: GDriveError| e.to_string())?;
         }
+        // The same message as an outreach ledger touch: a reply the act sent
+        // from this mailbox, or an answer it received.
+        let recipients: Vec<String> = values_of("To").into_iter().chain(values_of("Cc")).collect();
+        self.record_scanned_touch(
+            message_id,
+            &from,
+            &recipients,
+            self_email,
+            message.internal_date.as_deref(),
+        )
+        .await?;
         Ok((upserted, attachments_failed))
     }
 
