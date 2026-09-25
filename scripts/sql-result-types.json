@@ -1,5 +1,5 @@
 {
-  "minimum_prepared": 1321,
+  "minimum_prepared": 1316,
   "unprepared": [
     "crates/crowdrelay-api/src/area/rewards.rs:70",
     "crates/crowdrelay-api/src/area/ticket_rewards.rs:36",
@@ -69,7 +69,7 @@
     "crates/crowdrelay-infra/src/autopilot/team_routing.rs:73",
     "crates/crowdrelay-infra/src/autopilot/waves.rs:479",
     "crates/crowdrelay-infra/src/autopilot/waves.rs:508",
-    "crates/crowdrelay-infra/src/booking_agents.rs:504",
+    "crates/crowdrelay-infra/src/booking_agents.rs:510",
     "crates/crowdrelay-infra/src/cross_tenant_priors.rs:83",
     "crates/crowdrelay-infra/src/fan_identity.rs:557",
     "crates/crowdrelay-infra/src/fan_identity.rs:577",
