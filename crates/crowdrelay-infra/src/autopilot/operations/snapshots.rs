@@ -254,15 +254,14 @@ struct OutreachRow {
     last_reply_disposition: String,
     in_flight: bool,
     wave_only: bool,
+    thread_followup: bool,
 }
 
-pub(in crate::autopilot) async fn load_outreach_snapshots(
-    repo: &PostgresAutopilotRepository,
-    workspace_id: WorkspaceId,
-    _now: OffsetDateTime,
-) -> Result<Vec<OutreachSnapshot>, RepositoryError> {
-    let rows = sqlx::query_as::<_, OutreachRow>(
-        r#"
+/// The live-opportunity read shared by the cycle's snapshot load and the
+/// conversation drawer's "what happens next" — one statement so the drawer
+/// explains the same rules the evaluator applies, not a second opinion of
+/// them. `$3` scopes to one target; `NULL` loads them all.
+const OUTREACH_SNAPSHOT_SQL: &str = r#"
         SELECT
             opportunity.id AS opportunity_id,
             target.id AS target_id,
@@ -280,7 +279,28 @@ pub(in crate::autopilot) async fn load_outreach_snapshots(
              WHERE interaction.workspace_id = opportunity.workspace_id
                AND interaction.opportunity_id = opportunity.id
                AND interaction.direction = 'outbound') AS last_outreach_at,
-            target.last_outreach_at AS target_last_outreach_at,
+            -- A thread's silence clock is the imported unlinked message the
+            -- seed anchored on, not the denormalized column: any ledger
+            -- writer that forgets to stamp `last_outreach_at` would hold a
+            -- standing thread at InvalidSnapshot forever.
+            CASE WHEN opportunity.source = 'thread_followup' THEN (
+                SELECT message.occurred_at
+                FROM outreach_interactions AS message
+                WHERE message.workspace_id = opportunity.workspace_id
+                  AND message.target_id = target.id
+                  AND message.direction = 'outbound'
+                  AND message.opportunity_id IS NULL
+                  AND message.occurred_at <= now()
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM outreach_interactions AS later
+                      WHERE later.workspace_id = opportunity.workspace_id
+                        AND later.target_id = target.id
+                        AND later.occurred_at > message.occurred_at
+                  )
+                ORDER BY message.occurred_at DESC, message.id DESC
+                LIMIT 1
+            ) ELSE target.last_outreach_at END AS target_last_outreach_at,
             (SELECT count(*)::integer
              FROM outreach_interactions AS interaction
              WHERE interaction.workspace_id = opportunity.workspace_id
@@ -319,9 +339,10 @@ pub(in crate::autopilot) async fn load_outreach_snapshots(
                   AND action.subject_id = opportunity.id
                   AND action.status IN ('awaiting_approval','queued','processing')
             ) AS in_flight,
-            -- Catalogue pitches go out in waves or not at all; see
-            -- `OutreachSnapshot::wave_only`.
-            opportunity.source = 'catalogue_autopilot' AS wave_only
+            -- Catalogue pitches and hand-thread follow-ups go out in waves or
+            -- not at all; see `OutreachSnapshot::wave_only`.
+            opportunity.source IN ('catalogue_autopilot', 'thread_followup') AS wave_only,
+            opportunity.source = 'thread_followup' AS thread_followup
         FROM outreach_opportunities AS opportunity
         JOIN outreach_targets AS target
           ON target.workspace_id = opportunity.workspace_id
@@ -332,44 +353,76 @@ pub(in crate::autopilot) async fn load_outreach_snapshots(
           -- never by an auto-pitched opportunity; a stray row for one must not
           -- reach `parse_outreach_kind` and poison the whole context.
           AND target.target_kind IN ('playlist','radio','press','creator','support_slot','endorsement','media_patronage')
+          AND ($3::uuid IS NULL OR target.id = $3)
         ORDER BY opportunity.relevance_basis_points DESC, opportunity.id
         LIMIT $2
-        "#,
-    )
-    .bind(workspace_id.into_uuid())
-    .bind(MAX_SNAPSHOTS_PER_CONTEXT)
-    .fetch_all(&repo.pool)
-    .await
-    .map_err(map_sqlx)?;
+"#;
 
-    rows.into_iter()
-        .map(|row| {
-            Ok(OutreachSnapshot {
-                opportunity_id: OutreachOpportunityId::from_uuid(row.opportunity_id),
-                target_id: OutreachTargetId::from_uuid(row.target_id),
-                target_kind: parse_outreach_kind(&row.target_kind)?,
-                target_version: row.target_version,
-                active: row.active,
-                verified: row.verified,
-                accepts_outreach: row.accepts_outreach,
-                relevance_basis_points: u16::try_from(row.relevance_basis_points)
-                    .map_err(|_| RepositoryError::Unexpected)?,
-                evidence_confidence: parse_confidence(row.confidence_basis_points)?,
-                observed_at: row.observed_at,
-                expires_at: row.expires_at,
-                last_outreach_at: row.last_outreach_at,
-                target_last_outreach_at: row.target_last_outreach_at,
-                followup_count: u16::try_from(row.followup_count)
-                    .map_err(|_| RepositoryError::Unexpected)?,
-                lifetime_outbound: u16::try_from(row.lifetime_outbound)
-                    .map_err(|_| RepositoryError::Unexpected)?,
-                target_ever_replied: row.target_ever_replied,
-                last_reply: parse_outreach_reply(&row.last_reply_disposition)?,
-                in_flight: row.in_flight,
-                wave_only: row.wave_only,
-            })
+fn outreach_row_to_snapshot(row: OutreachRow) -> Result<OutreachSnapshot, RepositoryError> {
+    Ok(OutreachSnapshot {
+        opportunity_id: OutreachOpportunityId::from_uuid(row.opportunity_id),
+        target_id: OutreachTargetId::from_uuid(row.target_id),
+        target_kind: parse_outreach_kind(&row.target_kind)?,
+        target_version: row.target_version,
+        active: row.active,
+        verified: row.verified,
+        accepts_outreach: row.accepts_outreach,
+        relevance_basis_points: u16::try_from(row.relevance_basis_points)
+            .map_err(|_| RepositoryError::Unexpected)?,
+        evidence_confidence: parse_confidence(row.confidence_basis_points)?,
+        observed_at: row.observed_at,
+        expires_at: row.expires_at,
+        last_outreach_at: row.last_outreach_at,
+        target_last_outreach_at: row.target_last_outreach_at,
+        followup_count: u16::try_from(row.followup_count)
+            .map_err(|_| RepositoryError::Unexpected)?,
+        lifetime_outbound: u16::try_from(row.lifetime_outbound)
+            .map_err(|_| RepositoryError::Unexpected)?,
+        target_ever_replied: row.target_ever_replied,
+        last_reply: parse_outreach_reply(&row.last_reply_disposition)?,
+        in_flight: row.in_flight,
+        wave_only: row.wave_only,
+        thread_followup: row.thread_followup,
+    })
+}
+
+pub(in crate::autopilot) async fn load_outreach_snapshots(
+    repo: &PostgresAutopilotRepository,
+    workspace_id: WorkspaceId,
+    _now: OffsetDateTime,
+) -> Result<Vec<OutreachSnapshot>, RepositoryError> {
+    let rows = sqlx::query_as::<_, OutreachRow>(OUTREACH_SNAPSHOT_SQL)
+        .bind(workspace_id.into_uuid())
+        .bind(MAX_SNAPSHOTS_PER_CONTEXT)
+        .bind(Option::<Uuid>::None)
+        .fetch_all(&repo.pool)
+        .await
+        .map_err(map_sqlx)?;
+
+    rows.into_iter().map(outreach_row_to_snapshot).collect()
+}
+
+impl PostgresAutopilotRepository {
+    /// One contact's live opportunities — the conversation drawer's "what
+    /// happens next" runs the evaluator on exactly these, so the explanation
+    /// it gives is the same one the cycle acts on.
+    pub async fn load_target_outreach_snapshots(
+        &self,
+        workspace_id: WorkspaceId,
+        target_id: OutreachTargetId,
+    ) -> Result<Vec<OutreachSnapshot>, RepositoryError> {
+        self.bounded(async {
+            let rows = sqlx::query_as::<_, OutreachRow>(OUTREACH_SNAPSHOT_SQL)
+                .bind(workspace_id.into_uuid())
+                .bind(MAX_SNAPSHOTS_PER_CONTEXT)
+                .bind(target_id.into_uuid())
+                .fetch_all(&self.pool)
+                .await
+                .map_err(map_sqlx)?;
+            rows.into_iter().map(outreach_row_to_snapshot).collect()
         })
-        .collect()
+        .await
+    }
 }
 
 #[derive(Debug, FromRow)]

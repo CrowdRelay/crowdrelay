@@ -11,9 +11,10 @@ use crowdrelay_application::autopilot::{
     ExperimentMutation, ExperimentObservation, OutreachOpportunityMutation, OutreachTargetMutation,
     PromoterPosition, RecordBeaconReply, RecordDeliveryFault, RecordOutreachReply,
     RecordOutreachWritten, RecordPlaylistPlacement, RecordTeamOpportunityProgress,
-    RecordTeamOpportunityTerms, ReleasePlanMutation, ReportSuggestionOutcome, TeamOpportunityKind,
-    TeamOpportunityMutation, TeamOpportunityProgress, UpsertBeacon, UpsertContentSource,
-    UpsertOutreachOpportunity, UpsertOutreachTarget, UpsertReleasePlan, UpsertTeamOpportunity,
+    RecordTeamOpportunityTerms, ReleasePlanMutation, ReportSuggestionOutcome,
+    SuppressOutreachTarget, TeamOpportunityKind, TeamOpportunityMutation, TeamOpportunityProgress,
+    UpsertBeacon, UpsertContentSource, UpsertOutreachOpportunity, UpsertOutreachTarget,
+    UpsertReleasePlan, UpsertTeamOpportunity,
 };
 use crowdrelay_application::{IdempotencyKey, RequestId};
 use crowdrelay_domain::{
@@ -140,6 +141,9 @@ impl AutopilotOutreachStateRepository for PostgresAutopilotRepository {
             {
                 return Err(RepositoryError::Unexpected);
             }
+            // `thread` is deliberately absent: a thread opportunity anchors on
+            // the imported unlinked message the caller cannot nominate, so the
+            // supply seed is the only writer that may create one.
             if !matches!(command.subject_kind.as_str(), "release" | "event" | "catalogue" | "band") {
                 return Err(RepositoryError::Unexpected);
             }
@@ -549,8 +553,8 @@ impl AutopilotOutreachStateRepository for PostgresAutopilotRepository {
                 r#"
                 INSERT INTO outreach_interactions (
                     workspace_id, target_id, opportunity_id, direction, phase,
-                    disposition, source_key, occurred_at
-                ) VALUES ($1,$2,$3,'inbound','reply',$4,$5,$6)
+                    disposition, source_key, occurred_at, metadata
+                ) VALUES ($1,$2,$3,'inbound','reply',$4,$5,$6,$7)
                 ON CONFLICT (workspace_id, target_id, source_key) DO NOTHING
                 "#,
             )
@@ -560,6 +564,15 @@ impl AutopilotOutreachStateRepository for PostgresAutopilotRepository {
             .bind(disposition)
             .bind(format!("operator:{operation_id}"))
             .bind(command.occurred_at)
+            // The reply's words belong to the interaction itself — the
+            // classifications row is a triage queue entry whose
+            // `classified_at` the worker rewrites, so it cannot be the
+            // drawer's source for what they said.
+            .bind(if has_reply_text {
+                json!({ "reply_text": command.reply_text.as_deref().map(str::trim).unwrap_or("") })
+            } else {
+                json!({})
+            })
             .execute(&mut *transaction)
             .await
             .map_err(map_sqlx)?;
@@ -614,6 +627,23 @@ impl AutopilotOutreachStateRepository for PostgresAutopilotRepository {
         request_id: Option<&RequestId>,
     ) -> Result<AutopilotControlMutation, RepositoryError> {
         super::outreach_written::record_outreach_written(
+            self,
+            workspace_id,
+            command,
+            idempotency_key,
+            request_id,
+        )
+        .await
+    }
+
+    async fn suppress_outreach_target(
+        &self,
+        workspace_id: WorkspaceId,
+        command: SuppressOutreachTarget,
+        idempotency_key: &IdempotencyKey,
+        request_id: Option<&RequestId>,
+    ) -> Result<AutopilotControlMutation, RepositoryError> {
+        super::outreach_suppression::suppress_outreach_target(
             self,
             workspace_id,
             command,

@@ -106,12 +106,26 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
             .load_outreach_wave_anchors(self.workspace_id, now)
             .await?
         {
+            // A threads wave closes one person's loop, not a batch — the
+            // minimum that keeps a pitch wave from embarrassing the act would
+            // starve a one-thread month into never drafting at all.
+            let open_policy = if matches!(
+                anchor.anchor,
+                crowdrelay_domain::free_reach::WaveAnchor::Threads { .. }
+            ) {
+                crowdrelay_domain::free_reach::FreeReachPolicy {
+                    min_pitches_per_wave: 1,
+                    ..wave_policy
+                }
+            } else {
+                wave_policy
+            };
             if !wave_is_worth_opening(
                 anchor.active,
                 anchor.hours_until,
                 anchor.eligible_targets,
                 remaining,
-                wave_policy,
+                open_policy,
             ) {
                 continue;
             }

@@ -53,6 +53,12 @@ pub enum WaveAnchor {
     Catalogue {
         season_id: uuid::Uuid,
     },
+    /// A month of following up threads the act started by hand. The threads
+    /// are nobody's pitch — the season anchor exists only so the batch reads
+    /// as one wave a human approves, never as loose follow-up cards.
+    Threads {
+        season_id: uuid::Uuid,
+    },
 }
 
 impl WaveAnchor {
@@ -62,6 +68,7 @@ impl WaveAnchor {
             Self::Release { .. } => "release",
             Self::Event { .. } => "event",
             Self::Catalogue { .. } => "catalogue",
+            Self::Threads { .. } => "threads",
         }
     }
 
@@ -70,7 +77,7 @@ impl WaveAnchor {
         match self {
             Self::Release { release_id } => release_id.into_uuid(),
             Self::Event { event_id } => event_id.into_uuid(),
-            Self::Catalogue { season_id } => season_id,
+            Self::Catalogue { season_id } | Self::Threads { season_id } => season_id,
         }
     }
 }

@@ -72,8 +72,9 @@ SELECT
               AND plan.id = wave.anchor_id
               AND plan.active
         )
-        -- A catalogue season stands until its own date passes.
+        -- A catalogue or threads season stands until its own date passes.
         WHEN 'catalogue' THEN true
+        WHEN 'threads' THEN true
         ELSE COALESCE((
             SELECT event.status = 'published'
             FROM events AS event
@@ -81,7 +82,38 @@ SELECT
               AND event.id = wave.anchor_id
         ), false)
     END AS anchor_active,
-    (
+    CASE WHEN wave.anchor_kind = 'threads' THEN (
+        -- The threads lane counts a different pool: contacts whose latest
+        -- message is the act's own hand-sent one, inside the follow-up
+        -- window, unanswered since — and due now, since a thread younger
+        -- than the silence floor cannot draft this cycle.
+        SELECT count(*)::bigint
+        FROM outreach_targets AS target
+        WHERE target.workspace_id = wave.workspace_id
+          AND target.target_kind = wave.target_kind
+          AND target.active
+          AND target.verified
+          AND target.accepts_outreach
+          AND NOT target.do_not_contact
+          AND COALESCE(target.last_reply_disposition::text,'none') NOT IN ('received','positive','declined')
+          AND EXISTS (
+              SELECT 1
+              FROM outreach_interactions AS last_out
+              WHERE last_out.workspace_id = target.workspace_id
+                AND last_out.target_id = target.id
+                AND last_out.direction = 'outbound'
+                AND last_out.opportunity_id IS NULL
+                AND last_out.occurred_at <= now() - interval '10 days'
+                AND last_out.occurred_at > now() - interval '60 days'
+                AND NOT EXISTS (
+                    SELECT 1
+                    FROM outreach_interactions AS later
+                    WHERE later.workspace_id = target.workspace_id
+                      AND later.target_id = target.id
+                      AND later.occurred_at > last_out.occurred_at
+                )
+          )
+    ) ELSE (
         SELECT count(*)::bigint
         FROM outreach_targets AS target
         WHERE target.workspace_id = wave.workspace_id
@@ -95,7 +127,7 @@ SELECT
           -- its own forecast.
           AND NOT target.do_not_contact
           AND COALESCE(target.last_reply_disposition::text,'none') NOT IN ('received','positive','declined')
-    ) AS eligible_targets
+    ) END AS eligible_targets
 FROM outreach_waves AS wave
 WHERE wave.workspace_id = $1
   AND wave.settled_at IS NULL
@@ -154,10 +186,58 @@ WITH anchors AS (
         ORDER BY (source.metadata->>'released_at')::bigint DESC, source.id
         LIMIT 1
     ) AS pitch
+    UNION ALL
+    -- The threads season: one wave per kind per month for the threads the
+    -- act opened by hand and nobody answered. There is no record to anchor
+    -- on, so the calendar month is the anchor — closing a week into the next
+    -- one, the same overhang the catalogue season gets, so a wave opened on
+    -- the last day still has its drafting window. The EXISTS keeps a
+    -- workspace with nothing due from paying an empty anchor for it.
+    SELECT 'threads'::text,
+           md5('threads:' || to_char($2 AT TIME ZONE 'UTC', 'YYYY-MM'))::uuid,
+           date_trunc('month', $2 AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'
+               + interval '1 month' + interval '8 days'
+    WHERE EXISTS (
+        SELECT 1
+        FROM outreach_targets AS target
+        WHERE target.workspace_id = $1
+          AND target.active
+          AND target.verified
+          AND target.accepts_outreach
+          AND NOT target.do_not_contact
+          AND COALESCE(target.last_reply_disposition::text,'none') NOT IN ('received','positive','declined')
+          AND EXISTS (
+              SELECT 1
+              FROM outreach_interactions AS last_out
+              WHERE last_out.workspace_id = target.workspace_id
+                AND last_out.target_id = target.id
+                AND last_out.direction = 'outbound'
+                AND last_out.opportunity_id IS NULL
+                -- Due now: under the silence floor the evaluator only
+                -- holds, so a younger thread must not open the season.
+                AND last_out.occurred_at <= $2 - interval '10 days'
+                AND last_out.occurred_at > $2 - interval '60 days'
+                AND NOT EXISTS (
+                    SELECT 1
+                    FROM outreach_interactions AS later
+                    WHERE later.workspace_id = target.workspace_id
+                      AND later.target_id = target.id
+                      AND later.occurred_at > last_out.occurred_at
+                )
+          )
+    )
 ),
 kinds AS (
+    -- Pitch waves cover the free-reach kinds. A threads wave covers every
+    -- kind the act can hold a thread with — a support slot or a playlist
+    -- curator can owe a reply the same as an editor can. Representation
+    -- kinds stay out on both lists: agents and labels are approached through
+    -- the listing path, never pitched, and the nudge is still a pitch's lane.
     SELECT unnest(ARRAY['radio', 'press', 'creator', 'endorsement', 'media_patronage']::text[])
-        AS target_kind
+        AS target_kind, false AS thread_lane
+    UNION ALL
+    SELECT unnest(ARRAY['playlist', 'radio', 'press', 'creator', 'support_slot', 'endorsement', 'media_patronage']::text[]),
+        true
 )
 SELECT
     anchors.anchor_kind,
@@ -166,22 +246,51 @@ SELECT
     kinds.target_kind,
     FLOOR(EXTRACT(EPOCH FROM (anchors.anchor_at - $2)) / 3600)::bigint AS hours_until,
     (
-        SELECT count(*)::bigint
-        FROM outreach_targets AS target
-        WHERE target.workspace_id = $1
-          AND target.target_kind = kinds.target_kind
-          AND target.active
-          AND target.verified
-          AND target.accepts_outreach
-          -- The send path filters on this too. Counting a suppressed target
-          -- as eligible makes the plan promise reach the dispatch will not
-          -- deliver, and the gap only shows up as a wave that under-performs
-          -- its own forecast.
-          AND NOT target.do_not_contact
-          AND COALESCE(target.last_reply_disposition::text,'none') NOT IN ('received','positive','declined')
+        CASE WHEN anchors.anchor_kind = 'threads' THEN (
+            SELECT count(*)::bigint
+            FROM outreach_targets AS target
+            WHERE target.workspace_id = $1
+              AND target.target_kind = kinds.target_kind
+              AND target.active
+              AND target.verified
+              AND target.accepts_outreach
+              AND NOT target.do_not_contact
+              AND COALESCE(target.last_reply_disposition::text,'none') NOT IN ('received','positive','declined')
+              AND EXISTS (
+                  SELECT 1
+                  FROM outreach_interactions AS last_out
+                  WHERE last_out.workspace_id = target.workspace_id
+                    AND last_out.target_id = target.id
+                    AND last_out.direction = 'outbound'
+                    AND last_out.opportunity_id IS NULL
+                    AND last_out.occurred_at <= $2 - interval '10 days'
+                    AND last_out.occurred_at > $2 - interval '60 days'
+                    AND NOT EXISTS (
+                        SELECT 1
+                        FROM outreach_interactions AS later
+                        WHERE later.workspace_id = target.workspace_id
+                          AND later.target_id = target.id
+                          AND later.occurred_at > last_out.occurred_at
+                    )
+              )
+        ) ELSE (
+            SELECT count(*)::bigint
+            FROM outreach_targets AS target
+            WHERE target.workspace_id = $1
+              AND target.target_kind = kinds.target_kind
+              AND target.active
+              AND target.verified
+              AND target.accepts_outreach
+              -- The send path filters on this too. Counting a suppressed
+              -- target as eligible makes the plan promise reach the dispatch
+              -- will not deliver, and the gap only shows up as a wave that
+              -- under-performs its own forecast.
+              AND NOT target.do_not_contact
+              AND COALESCE(target.last_reply_disposition::text,'none') NOT IN ('received','positive','declined')
+        ) END
     ) AS eligible_targets
 FROM anchors
-CROSS JOIN kinds
+JOIN kinds ON kinds.thread_lane = (anchors.anchor_kind = 'threads')
 WHERE NOT EXISTS (
     SELECT 1
     FROM outreach_waves AS wave
@@ -473,6 +582,9 @@ fn parse_wave_anchor(kind: &str, anchor_id: Uuid) -> Result<WaveAnchor, Reposito
             event_id: EventId::from_uuid(anchor_id),
         }),
         "catalogue" => Ok(WaveAnchor::Catalogue {
+            season_id: anchor_id,
+        }),
+        "threads" => Ok(WaveAnchor::Threads {
             season_id: anchor_id,
         }),
         _ => Err(RepositoryError::Unexpected),

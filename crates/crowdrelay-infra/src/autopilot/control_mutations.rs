@@ -110,6 +110,33 @@ impl PostgresAutopilotRepository {
                 });
             }
 
+            // A wave is approved as a wave: an individual approve or cancel on
+            // one of its pitches would send — or silently pull — a letter the
+            // batch review never covered. While the wave is unsettled the
+            // only doors are its own approval and its expiry.
+            let wave_locked = sqlx::query_scalar::<_, bool>(
+                r#"
+                SELECT EXISTS(
+                    SELECT 1
+                    FROM outreach_waves AS wave
+                    JOIN autopilot_actions AS action
+                      ON action.workspace_id = wave.workspace_id
+                     AND action.payload->>'wave_id' = wave.id::text
+                    WHERE action.workspace_id = $1
+                      AND action.id = $2
+                      AND wave.state IN ('drafting', 'sealed')
+                )
+                "#,
+            )
+            .bind(workspace_id.into_uuid())
+            .bind(action_id.into_uuid())
+            .fetch_one(&mut *transaction)
+            .await
+            .map_err(map_sqlx)?;
+            if wave_locked {
+                return Err(RepositoryError::Conflict);
+            }
+
             // Approve-with-revision: the operator's edit is reviewed against
             // the stored payload before anything moves — a refused revision
             // refuses the whole approval rather than silently approving the
