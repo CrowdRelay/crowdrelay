@@ -27,6 +27,9 @@ class SynesthesiaLeaderboardUnpublishContract(unittest.TestCase):
         self.assertIn("fan_id = $2", block)
         self.assertIn("leaderboard_name IS NOT NULL", block)
         self.assertNotIn("fan_id = NULL", block)
+        # Every campaign: a slug filter here once limited "unlist me" to the
+        # first tenant's album campaign.
+        self.assertNotIn("campaign_slug =", block)
         self.assertIn("synesthesia.leaderboard_unpublished", block)
 
     def test_endpoint_and_capability_are_public_contract(self):

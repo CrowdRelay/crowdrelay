@@ -260,24 +260,31 @@ impl PostgresFanPrivacyRepository {
     ) -> Result<SynesthesiaLeaderboardUnpublishReceipt, FanPrivacyError> {
         let mut tx = self.pool.begin().await.map_err(Self::unexpected)?;
         let fan_id = Self::lock_current_fan(&mut tx, workspace_id, session_token).await?;
-        let result = sqlx::query(
+        // Every campaign, not one. The filter used to name the first tenant's
+        // album campaign, so on any other tenant — or any later campaign —
+        // "take my name off the leaderboard" matched nothing and reported
+        // success. A fan asking to be unlisted means unlisted everywhere; the
+        // audit row records which campaigns that touched.
+        let mut campaigns = sqlx::query_scalar::<_, String>(
             r#"
             UPDATE synesthesia_runs
             SET leaderboard_name = NULL,
                 leaderboard_published_at = NULL,
                 updated_at = now()
             WHERE workspace_id = $1
-              AND campaign_slug = 'virya-synesthesia-album-v1'
               AND fan_id = $2
               AND leaderboard_name IS NOT NULL
+            RETURNING campaign_slug
             "#,
         )
         .bind(workspace_id)
         .bind(fan_id)
-        .execute(&mut *tx)
+        .fetch_all(&mut *tx)
         .await
         .map_err(Self::unexpected)?;
-        let changed = result.rows_affected() > 0;
+        campaigns.sort();
+        campaigns.dedup();
+        let changed = !campaigns.is_empty();
 
         if changed {
             // `actor_kind` is 'service' like the erasure audit above: the
@@ -291,13 +298,14 @@ impl PostgresFanPrivacyRepository {
                 )
                 VALUES (
                     $1, 'service', 'synesthesia.leaderboard_unpublished', 'fan', $2, $3,
-                    jsonb_build_object('campaign_slug', 'virya-synesthesia-album-v1')
+                    jsonb_build_object('campaign_slugs', $4::text[])
                 )
                 "#,
             )
             .bind(workspace_id)
             .bind(fan_id.to_string())
             .bind(request_id)
+            .bind(&campaigns)
             .execute(&mut *tx)
             .await
             .map_err(Self::unexpected)?;
