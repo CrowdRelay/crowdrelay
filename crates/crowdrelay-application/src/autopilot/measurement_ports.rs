@@ -351,6 +351,12 @@ impl AutopilotMeasurementKind {
     /// not have produced one.
     pub const NO_TRACKED_LINK: &'static str = "no_tracked_link";
 
+    /// Why an agent-run measurement was abandoned: the stack has no agent
+    /// service, so the task rows the observation joins through do not exist
+    /// and never will on this deployment. "Cannot ever be read" is a
+    /// terminal answer, not a zero and not a retry.
+    pub const NO_AGENT_SERVICE: &'static str = "no_agent_service";
+
     /// Whether the kind's `subject_id` is an `events.id` — the kinds whose
     /// observation is a fact about a show. A cancelled show has no outcome
     /// to observe, and observing one anyway would write a zero that the
@@ -434,6 +440,22 @@ impl AutopilotMeasurementKind {
         matches!(
             self,
             Self::CampaignTicketConversion14d | Self::CampaignUnsubscribe7d
+        )
+    }
+
+    /// Whether the observation joins through `agent_service_tasks` — the
+    /// agent service's own table. On a stack without that service the table
+    /// does not exist at all, and an unguarded join aborts the measurement
+    /// with a bare `relation does not exist` instead of a named abandon.
+    #[must_use]
+    pub const fn reads_agent_service(self) -> bool {
+        matches!(
+            self,
+            Self::ScannerDiscoveryQuality14d
+                | Self::ScannerDiscoveryQuality1h
+                | Self::StrategistInsightQuality14d
+                | Self::StrategistInsightQuality1h
+                | Self::AgentRunOutcomeQuality1h
         )
     }
 

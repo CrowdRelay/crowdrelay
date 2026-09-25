@@ -298,7 +298,17 @@ async fn the_cycle_records_the_reading_it_was_given_not_a_fan_count() -> Result<
         .await
         .ok_or("the cycle run record must open")?;
     // The reading the world model resolved: signal installs, not the three fans.
-    close_cycle_run(&pool, workspace_id, cycle_id, &[], now, Some(1), None).await;
+    close_cycle_run(
+        &pool,
+        workspace_id,
+        cycle_id,
+        &[],
+        serde_json::json!({}),
+        now,
+        Some(1),
+        None,
+    )
+    .await;
 
     let stored: Option<i32> = sqlx::query_scalar(
         "SELECT north_star_value FROM autopilot_cycle_runs WHERE workspace_id = $1 AND id = $2",
@@ -343,6 +353,7 @@ async fn a_cycle_that_took_no_reading_records_none() -> Result<()> {
         workspace_id,
         cycle_id,
         &["evaluation".to_owned()],
+        serde_json::json!({"evaluation": "unexpected"}),
         now,
         None,
         None,
@@ -395,6 +406,10 @@ async fn a_degraded_cycle_records_which_phases_failed() -> Result<()> {
         workspace_id,
         cycle_id,
         &["action_claim".to_owned(), "reply_triage_claim".to_owned()],
+        serde_json::json!({
+            "action_claim": "repository_unavailable",
+            "reply_triage_claim": "unexpected",
+        }),
         now,
         Some(7),
         None,
@@ -402,7 +417,7 @@ async fn a_degraded_cycle_records_which_phases_failed() -> Result<()> {
     .await;
 
     let row = sqlx::query(
-        "SELECT outcome, degraded_phases FROM autopilot_cycle_runs \
+        "SELECT outcome, degraded_phases, degraded_errors FROM autopilot_cycle_runs \
          WHERE workspace_id = $1 AND id = $2",
     )
     .bind(workspace_id.into_uuid())
@@ -422,6 +437,14 @@ async fn a_degraded_cycle_records_which_phases_failed() -> Result<()> {
         ]),
         "the operator must be able to read which phase broke",
     );
+    assert_eq!(
+        sqlx::Row::try_get::<Option<serde_json::Value>, _>(&row, "degraded_errors")?,
+        Some(serde_json::json!({
+            "action_claim": "repository_unavailable",
+            "reply_triage_claim": "unexpected",
+        })),
+        "and what it broke with — the phase name alone expired with the worker log",
+    );
     Ok(())
 }
 
@@ -440,10 +463,20 @@ async fn a_clean_cycle_records_an_empty_phase_list_not_null() -> Result<()> {
     let cycle_id = open_cycle_run(&pool, workspace_id, CycleTrigger::Scheduled, now)
         .await
         .ok_or("the cycle run record must open")?;
-    close_cycle_run(&pool, workspace_id, cycle_id, &[], now, Some(7), None).await;
+    close_cycle_run(
+        &pool,
+        workspace_id,
+        cycle_id,
+        &[],
+        serde_json::json!({}),
+        now,
+        Some(7),
+        None,
+    )
+    .await;
 
     let row = sqlx::query(
-        "SELECT outcome, degraded_phases FROM autopilot_cycle_runs \
+        "SELECT outcome, degraded_phases, degraded_errors FROM autopilot_cycle_runs \
          WHERE workspace_id = $1 AND id = $2",
     )
     .bind(workspace_id.into_uuid())
@@ -458,6 +491,11 @@ async fn a_clean_cycle_records_an_empty_phase_list_not_null() -> Result<()> {
         sqlx::Row::try_get::<Option<Vec<String>>, _>(&row, "degraded_phases")?,
         Some(Vec::<String>::new()),
         "a clean cycle states that no phase failed; NULL would mean it did not look",
+    );
+    assert_eq!(
+        sqlx::Row::try_get::<Option<serde_json::Value>, _>(&row, "degraded_errors")?,
+        Some(serde_json::json!({})),
+        "the error map carries the same empty-recorded statement as the phase list",
     );
     Ok(())
 }
@@ -487,6 +525,7 @@ async fn a_quiet_cycle_records_its_reason_and_an_active_one_records_none() -> Re
         workspace_id,
         quiet_id,
         &[],
+        serde_json::json!({}),
         now,
         Some(20),
         Some("WAIT wins: VOI=0.85 > best_action_value=0.00"),
@@ -555,6 +594,7 @@ async fn a_quiet_cycle_records_its_reason_and_an_active_one_records_none() -> Re
         workspace_id,
         active_id,
         &[],
+        serde_json::json!({}),
         now + Duration::minutes(6),
         Some(20),
         Some("WAIT overridden by min_dispatches=1 dispatched 1 candidate(s)"),
@@ -593,7 +633,17 @@ async fn the_latest_wait_reason_is_scoped_to_the_workspace() -> Result<()> {
         let id = open_cycle_run(&pool, ws, CycleTrigger::Scheduled, now)
             .await
             .ok_or("the cycle run record must open")?;
-        close_cycle_run(&pool, ws, id, &[], now, None, Some(reason)).await;
+        close_cycle_run(
+            &pool,
+            ws,
+            id,
+            &[],
+            serde_json::json!({}),
+            now,
+            None,
+            Some(reason),
+        )
+        .await;
     }
 
     // The same query shape `ops/attention` runs: latest non-NULL reason,

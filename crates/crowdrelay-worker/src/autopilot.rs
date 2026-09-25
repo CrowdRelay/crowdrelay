@@ -5,7 +5,7 @@ use std::time::Duration;
 use crowdrelay_application::{
     RepositoryError,
     autopilot::{
-        AutopilotActionRepository, AutopilotContext, AutopilotDecisionRepository,
+        AutopilotActionRepository, AutopilotContext, AutopilotDecisionRepository, AutopilotError,
         AutopilotFirstPartyGrowthMetrics, AutopilotMeasurementKind, AutopilotMeasurementRepository,
         AutopilotPlayOutcomeRepository, AutopilotPolicyConfig, AutopilotReplyTriageRepository,
         AutopilotWaveOutcomeRepository, EvaluateAutopilot, ORG_ATTENTION_BUDGET_ERROR_KIND,
@@ -96,12 +96,17 @@ mod phase {
 /// A set, because a phase that iterates (actions, measurements, replies) can
 /// fail on many items in one cycle and that is still one broken phase. Ordered,
 /// so the recorded value does not change with iteration order.
+///
+/// The value paired with each phase is the error kind it first failed with, in
+/// the `repository_error_kind` vocabulary. First wins for the same reason the
+/// phase itself is a set: one broken phase is one entry, whatever the iteration
+/// count behind it was.
 #[derive(Clone, Debug, Default)]
-struct DegradedPhases(std::collections::BTreeSet<&'static str>);
+struct DegradedPhases(std::collections::BTreeMap<&'static str, &'static str>);
 
 impl DegradedPhases {
-    fn failed(&mut self, phase: &'static str) {
-        self.0.insert(phase);
+    fn failed(&mut self, phase: &'static str, kind: &'static str) {
+        self.0.entry(phase).or_insert(kind);
     }
 
     fn any(&self) -> bool {
@@ -111,7 +116,18 @@ impl DegradedPhases {
     /// The value written to the cycle row. Empty means no phase failed, which
     /// is a different statement from the NULL a pre-column cycle carries.
     fn recorded(&self) -> Vec<String> {
-        self.0.iter().map(|phase| (*phase).to_owned()).collect()
+        self.0.keys().map(|phase| (*phase).to_owned()).collect()
+    }
+
+    /// Phase → error kind, written beside `recorded()` so "which phase broke"
+    /// also answers "with what" after the worker log rolls. An empty object
+    /// for a clean cycle, matching the empty `degraded_phases` array.
+    fn recorded_errors(&self) -> serde_json::Value {
+        self.0
+            .iter()
+            .map(|(phase, kind)| ((*phase).to_owned(), (*kind).into()))
+            .collect::<serde_json::Map<String, serde_json::Value>>()
+            .into()
     }
 }
 
@@ -231,7 +247,7 @@ impl AutopilotWorker {
         // measurements. The flag lives on the growth envelope row, set by the
         // Control Plane on park and cleared on resume. A read failure must not
         // gate the cycle: the agent stays live if the park check itself breaks.
-        let mut park_check_failed = false;
+        let mut park_check_error = None;
         let parked = match AutopilotDecisionRepository::load_growth_envelope(
             &self.repository,
             self.workspace_id,
@@ -245,13 +261,18 @@ impl AutopilotWorker {
                 // the tenant as parked so autonomous actions are not taken
                 // while an operator may believe growth is paused.
                 tracing::warn!(error = %error, "park check failed; treating tenant as parked (fail closed)");
-                park_check_failed = true;
+                park_check_error = Some(repository_error_kind(error));
                 true
             }
         };
         if parked {
             tracing::info!("autopilot cycle skipped — tenant is parked");
-            let park_check_phase = phase::PARK_CHECK.to_owned();
+            // A park-skipped cycle ran no phase, so the only thing that can
+            // degrade it is the park check itself.
+            let mut skipped = DegradedPhases::default();
+            if let Some(kind) = park_check_error {
+                skipped.failed(phase::PARK_CHECK, kind);
+            }
             let cycle_id = crowdrelay_infra::autopilot::open_cycle_run(
                 self.repository.pool(),
                 self.workspace_id,
@@ -264,13 +285,8 @@ impl AutopilotWorker {
                     self.repository.pool(),
                     self.workspace_id,
                     cycle_id,
-                    // A park-skipped cycle ran no phase, so the only thing that
-                    // can degrade it is the park check itself.
-                    if park_check_failed {
-                        std::slice::from_ref(&park_check_phase)
-                    } else {
-                        &[]
-                    },
+                    &skipped.recorded(),
+                    skipped.recorded_errors(),
                     OffsetDateTime::now_utc(),
                     None,
                     None,
@@ -301,6 +317,7 @@ impl AutopilotWorker {
                 self.workspace_id,
                 cycle_id,
                 &observed.degraded.recorded(),
+                observed.degraded.recorded_errors(),
                 OffsetDateTime::now_utc(),
                 observed.north_star,
                 observed.wait_reason.as_deref(),
@@ -344,7 +361,7 @@ impl AutopilotWorker {
             }
             Ok(_) => {}
             Err(error) => {
-                degraded.failed(phase::GROWTH_METRIC_CAPTURE);
+                degraded.failed(phase::GROWTH_METRIC_CAPTURE, repository_error_kind(error));
                 tracing::warn!(error = %error, "CrowdRelay first-party growth metric capture failed");
             }
         }
@@ -461,7 +478,7 @@ impl AutopilotWorker {
                 }
             }
             Err(error) => {
-                degraded.failed(phase::EVALUATION);
+                degraded.failed(phase::EVALUATION, autopilot_error_kind(&error));
                 tracing::warn!(error = %error, "CrowdRelay Autopilot evaluation failed");
             }
         }
@@ -474,7 +491,10 @@ impl AutopilotWorker {
             Ok(count) if count > 0 => tracing::info!(count, "assigned CrowdRelay human handoffs"),
             Ok(_) => {}
             Err(error) => {
-                degraded.failed(phase::TEAM_HANDOFF_RECONCILIATION);
+                degraded.failed(
+                    phase::TEAM_HANDOFF_RECONCILIATION,
+                    repository_error_kind(error),
+                );
                 tracing::warn!(error = %error, "CrowdRelay team handoff reconciliation failed");
             }
         }
@@ -491,7 +511,7 @@ impl AutopilotWorker {
             }
             Ok(_) => {}
             Err(error) => {
-                degraded.failed(phase::ROSTER_BRIEF_ISSUE);
+                degraded.failed(phase::ROSTER_BRIEF_ISSUE, repository_error_kind(error));
                 tracing::warn!(error = %error, "CrowdRelay roster weekly brief issue failed");
             }
         }
@@ -505,7 +525,7 @@ impl AutopilotWorker {
             }
             Ok(_) => {}
             Err(error) => {
-                degraded.failed(phase::NO_EXECUTOR_SWEEP);
+                degraded.failed(phase::NO_EXECUTOR_SWEEP, repository_error_kind(error));
                 tracing::warn!(error = %error, "CrowdRelay no-executor sweep failed");
             }
         }
@@ -521,7 +541,7 @@ impl AutopilotWorker {
         {
             Ok(_) => {}
             Err(error) => {
-                degraded.failed(phase::ABANDONED_CLAIM_SWEEP);
+                degraded.failed(phase::ABANDONED_CLAIM_SWEEP, repository_error_kind(error));
                 tracing::warn!(error = %error, "CrowdRelay abandoned-claim sweep failed");
             }
         }
@@ -538,8 +558,8 @@ impl AutopilotWorker {
                         .execute_action(self.workspace_id, &action, OffsetDateTime::now_utc())
                         .await
                     {
-                        degraded.failed(phase::ACTION_EXECUTION);
                         let error_kind = repository_error_kind(error);
+                        degraded.failed(phase::ACTION_EXECUTION, error_kind);
                         let retryable = repository_error_retryable(error);
                         tracing::warn!(
                             action_id = %action.id,
@@ -569,7 +589,7 @@ impl AutopilotWorker {
                 }
             }
             Err(error) => {
-                degraded.failed(phase::ACTION_CLAIM);
+                degraded.failed(phase::ACTION_CLAIM, repository_error_kind(error));
                 tracing::warn!(error = %error, "CrowdRelay Autopilot action claim failed");
             }
         }
@@ -633,8 +653,8 @@ impl AutopilotWorker {
                         Ok(()) => succeeded += 1,
                         Err(error) => {
                             failed += 1;
-                            degraded.failed(phase::MEASUREMENT_RESOLUTION);
                             let error_kind = repository_error_kind(error);
+                            degraded.failed(phase::MEASUREMENT_RESOLUTION, error_kind);
                             let retryable = repository_error_retryable(error);
                             tracing::warn!(
                                 measurement_id = %measurement.id,
@@ -678,7 +698,7 @@ impl AutopilotWorker {
                 }
             }
             Err(error) => {
-                degraded.failed(phase::MEASUREMENT_CLAIM);
+                degraded.failed(phase::MEASUREMENT_CLAIM, repository_error_kind(error));
                 tracing::warn!(error = %error, "CrowdRelay Autopilot measurement claim failed");
             }
         }
@@ -715,8 +735,8 @@ impl AutopilotWorker {
                     .await;
 
                     if let Err(error) = result {
-                        degraded.failed(phase::PLAY_OUTCOME_RESOLUTION);
                         let error_kind = repository_error_kind(error);
+                        degraded.failed(phase::PLAY_OUTCOME_RESOLUTION, error_kind);
                         let retryable = repository_error_retryable(error);
                         tracing::warn!(
                             play_id = %outcome.play_id,
@@ -746,7 +766,7 @@ impl AutopilotWorker {
                 }
             }
             Err(error) => {
-                degraded.failed(phase::PLAY_OUTCOME_CLAIM);
+                degraded.failed(phase::PLAY_OUTCOME_CLAIM, repository_error_kind(error));
                 tracing::warn!(error = %error, "CrowdRelay play outcome claim failed");
             }
         }
@@ -781,8 +801,8 @@ impl AutopilotWorker {
                     .await;
 
                     if let Err(error) = result {
-                        degraded.failed(phase::WAVE_OUTCOME_RESOLUTION);
                         let error_kind = repository_error_kind(error);
+                        degraded.failed(phase::WAVE_OUTCOME_RESOLUTION, error_kind);
                         let retryable = repository_error_retryable(error);
                         tracing::warn!(
                             wave_id = %outcome.wave_id,
@@ -812,7 +832,7 @@ impl AutopilotWorker {
                 }
             }
             Err(error) => {
-                degraded.failed(phase::WAVE_OUTCOME_CLAIM);
+                degraded.failed(phase::WAVE_OUTCOME_CLAIM, repository_error_kind(error));
                 tracing::warn!(error = %error, "CrowdRelay wave outcome claim failed");
             }
         }
@@ -862,7 +882,7 @@ impl AutopilotWorker {
                         .record_reply_classification(self.workspace_id, reply.reply_id, &result)
                         .await
                     {
-                        degraded.failed(phase::REPLY_CLASSIFICATION);
+                        degraded.failed(phase::REPLY_CLASSIFICATION, repository_error_kind(error));
                         tracing::warn!(
                             reply_id = %reply.reply_id,
                             error = %error,
@@ -872,7 +892,7 @@ impl AutopilotWorker {
                 }
             }
             Err(error) => {
-                degraded.failed(phase::REPLY_TRIAGE_CLAIM);
+                degraded.failed(phase::REPLY_TRIAGE_CLAIM, repository_error_kind(error));
                 tracing::warn!(error = %error, "CrowdRelay reply triage claim failed");
             }
         }
@@ -888,16 +908,19 @@ impl AutopilotWorker {
             }
             Ok(_) => {}
             Err(error) => {
-                degraded.failed(phase::LLM_TUNING);
+                degraded.failed(phase::LLM_TUNING, repository_error_kind(error));
                 tracing::warn!(error = %error, "CrowdRelay LLM call tuning failed");
             }
         }
 
         // The fan-source snapshot runs last so the measurement phases above
         // land in the reading. The phase lives in its own module — `run`
-        // returns false exactly when the cycle should record it degraded.
-        if !crate::fan_source_snapshot::run(&self.repository, self.workspace_id, now).await {
-            degraded.failed(phase::FAN_SOURCE_SNAPSHOT);
+        // returns the error kind exactly when the cycle should record it
+        // degraded.
+        if let Err(kind) =
+            crate::fan_source_snapshot::run(&self.repository, self.workspace_id, now).await
+        {
+            degraded.failed(phase::FAN_SOURCE_SNAPSHOT, kind);
         }
 
         if degraded.any() {
@@ -1062,7 +1085,16 @@ const fn repository_error_retryable(error: RepositoryError) -> bool {
     )
 }
 
-fn repository_error_kind(error: RepositoryError) -> &'static str {
+/// The evaluator wraps repository errors and adds a serialization failure of
+/// its own, so the EVALUATION phase's kind is resolved through both layers.
+fn autopilot_error_kind(error: &AutopilotError) -> &'static str {
+    match error {
+        AutopilotError::Repository(inner) => repository_error_kind(*inner),
+        AutopilotError::Serialization(_) => "serialization",
+    }
+}
+
+pub(crate) fn repository_error_kind(error: RepositoryError) -> &'static str {
     match error {
         RepositoryError::Unavailable => "repository_unavailable",
         RepositoryError::NotFound => "subject_not_found",
@@ -1099,7 +1131,12 @@ fn repository_error_kind(error: RepositoryError) -> &'static str {
         RepositoryError::ConflictBecause(reason)
             if reason == AutopilotMeasurementKind::NO_RELEASE_LINK
                 || reason == AutopilotMeasurementKind::NO_RELEASE_SERIES_DATA
-                || reason == AutopilotMeasurementKind::NO_TRACKED_LINK =>
+                || reason == AutopilotMeasurementKind::NO_TRACKED_LINK
+                // A stack without an agent service names the same thing in
+                // both directions: a measurement it can never read and a
+                // dispatch it can never run are `no_agent_service`, not a
+                // bare relation error and not `state_changed`.
+                || reason == AutopilotMeasurementKind::NO_AGENT_SERVICE =>
         {
             reason
         }

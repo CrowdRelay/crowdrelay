@@ -1085,6 +1085,19 @@ pub(in crate::autopilot) async fn execute_agent_run(
     tier: crowdrelay_brain::AgentTier,
     _now: OffsetDateTime,
 ) -> Result<(), RepositoryError> {
+    // `agent_service_tasks` belongs to the agent service — no migration here
+    // creates it, and a stack without that service cannot dispatch. The probe
+    // turns "relation does not exist" into a named conflict the failure row
+    // can say: the run was asked for on a deployment where it can never run.
+    if !sqlx::query_scalar::<_, bool>("SELECT to_regclass('agent_service_tasks') IS NOT NULL")
+        .fetch_one(&mut **tx)
+        .await
+        .map_err(map_sqlx)?
+    {
+        return Err(RepositoryError::ConflictBecause(
+            crowdrelay_application::autopilot::AutopilotMeasurementKind::NO_AGENT_SERVICE,
+        ));
+    }
     // The trace the dispatching action belongs to. `agent_service_tasks` has no
     // trace column of its own and is consumed by a service outside this
     // repository, so the correlation travels in `metadata` where that service

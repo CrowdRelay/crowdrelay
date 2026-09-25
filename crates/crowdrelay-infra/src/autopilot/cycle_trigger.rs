@@ -181,6 +181,7 @@ pub async fn close_cycle_run(
     workspace_id: WorkspaceId,
     cycle_id: uuid::Uuid,
     degraded_phases: &[String],
+    degraded_errors: serde_json::Value,
     finished_at: OffsetDateTime,
     north_star_observed: Option<u32>,
     wait_reason: Option<&str>,
@@ -195,6 +196,11 @@ pub async fn close_cycle_run(
             -- array for a clean cycle, which is a different statement from the
             -- NULL carried by every cycle that ran before the column existed.
             degraded_phases = $4::text[],
+            -- And what each phase failed with, in the error-kind vocabulary —
+            -- the pair answers "which phase keeps breaking" without the worker
+            -- log the phase warning was written to. An empty object for a
+            -- clean cycle, matching the empty `degraded_phases` array.
+            degraded_errors = $7::jsonb,
             decisions_recorded = (
                 SELECT count(*)
                 FROM autopilot_decisions AS decision
@@ -238,6 +244,7 @@ pub async fn close_cycle_run(
     .bind(degraded_phases)
     .bind(north_star_observed.and_then(|value| i32::try_from(value).ok()))
     .bind(wait_reason)
+    .bind(degraded_errors)
     .execute(pool)
     .await;
     if let Err(error) = closed {
