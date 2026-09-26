@@ -118,6 +118,7 @@ struct DraftRow {
     post_title: String,
     post_body: String,
     parent_body: Option<String>,
+    parent_by_band: bool,
     attempts: i32,
 }
 
@@ -275,11 +276,15 @@ impl CommunityExecutorWorker {
             .into_iter()
             .take(HARVEST_PER_POST)
         {
+            // The thread is in hand: keep what this comment answers, and who
+            // said it, so the draft continues the real conversation.
+            let parent = harvested.iter().find(|c| c.id == comment.parent_id);
             sqlx::query(
                 r#"
                 INSERT INTO community_comments
-                    (workspace_id, community_post_id, reddit_comment_id, parent_id, author, body)
-                VALUES ($1, $2, $3, $4, $5, $6)
+                    (workspace_id, community_post_id, reddit_comment_id, parent_id, author, body,
+                     parent_body, parent_by_band)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
                 ON CONFLICT (workspace_id, reddit_comment_id) DO NOTHING
                 "#,
             )
@@ -289,6 +294,8 @@ impl CommunityExecutorWorker {
             .bind(&comment.parent_id)
             .bind(comment.author.chars().take(64).collect::<String>())
             .bind(comment.body.chars().take(4000).collect::<String>())
+            .bind(parent.map(|p| p.body.chars().take(4000).collect::<String>()))
+            .bind(parent.is_some_and(|p| p.by_band))
             .execute(&mut *tx)
             .await?;
         }
@@ -342,11 +349,9 @@ impl CommunityExecutorWorker {
             r#"
             SELECT c.id, c.parent_id, c.author, c.body, p.subreddit,
                    p.title AS post_title, p.body AS post_body,
-                   parent.body AS parent_body, c.attempts
+                   c.parent_body, c.parent_by_band, c.attempts
             FROM community_comments c
             JOIN community_posts p ON p.id = c.community_post_id AND p.workspace_id = c.workspace_id
-            LEFT JOIN community_comments parent
-              ON parent.workspace_id = c.workspace_id AND parent.reddit_comment_id = c.parent_id
             WHERE c.workspace_id = $1
               AND c.status = 'unanswered'
               AND (c.not_before IS NULL OR c.not_before <= now())
@@ -387,14 +392,15 @@ impl CommunityExecutorWorker {
         recent: &[String],
     ) -> Result<(), CommunityExecutorError> {
         let ws = self.workspace_id.into_uuid();
-        // The harvest stores fans' comments, never the band's own. A parent
-        // that is a comment but not a harvested one is therefore the band's:
-        // the fan is answering the band, and the drafter should know it is
-        // continuing its own conversation.
+        // What this comment answers, stored at harvest: the band's own words
+        // when a fan is answering the band. Rows harvested before the parent
+        // was kept fall back to naming the band without quoting it.
         let thread = match (&row.parent_body, row.parent_id.starts_with("t1_")) {
-            (Some(body), _) => {
-                vec![serde_json::json!({ "author": "someone", "body": body, "is_band": false })]
-            }
+            (Some(body), _) => vec![serde_json::json!({
+                "author": if row.parent_by_band { "the band" } else { "someone" },
+                "body": body,
+                "is_band": row.parent_by_band,
+            })],
             (None, true) => vec![serde_json::json!({
                 "author": "the band",
                 "body": "(the band's earlier reply in this thread)",
