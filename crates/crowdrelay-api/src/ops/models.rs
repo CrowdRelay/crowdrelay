@@ -31,6 +31,15 @@ impl OpsState {
         .await
     }
 
+    pub(crate) async fn outreach_alert_prometheus(&self) -> Result<String, OpsError> {
+        run_with_timeout(self.operation_timeout, async {
+            outreach_alert_prometheus(&self.pool, self.workspace_id.into_uuid())
+                .await
+                .map_err(OpsError::sqlx)
+        })
+        .await
+    }
+
     #[must_use]
     pub(crate) const fn workspace_id(&self) -> WorkspaceId {
         self.workspace_id

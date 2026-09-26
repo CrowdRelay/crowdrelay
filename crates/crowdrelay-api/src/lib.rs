@@ -905,6 +905,15 @@ crowdrelay_brain_signal_fans_push_enabled {}\n",
         ));
     }
 
+    // Absent on failure, never zero: a halted account read as "not halted"
+    // is the one wrong answer this block exists to prevent.
+    match state.ops.outreach_alert_prometheus().await {
+        Ok(block) => body.push_str(&block),
+        Err(error) => {
+            tracing::warn!(error = ?error, "outreach alert gauges unavailable");
+        }
+    }
+
     match state.ops.growth_component_prometheus().await {
         Ok(block) => body.push_str(&block),
         Err(error) => {

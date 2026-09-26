@@ -161,6 +161,7 @@ report_control_plane_runtime() {
   # under the heartbeat timer, where a second `docker compose exec` costs more
   # CPU than the reading is worth.
   local api_healthy worker_healthy outbox_pending awaiting_approval worker_id metrics
+  local reddit_halted replies_waiting cut_lanes
   # Empty (unknown) until the probe succeeds — same semantics as the worker
   # probe below. A failed compose exec is a probe failure, not proof the API
   # is down: reporting false overwrites the last known good state in the
@@ -209,6 +210,17 @@ report_control_plane_runtime() {
   north_star_fans="$(awk '$1 == "crowdrelay_brain_north_star_fans" { print $2; exit }' <<<"$metrics")"
   [[ "$north_star_fans" =~ ^[0-9]+$ ]] || north_star_fans=""
 
+  # Outreach conditions a person should hear about without opening the
+  # console: the Reddit breaker, replies waiting over 12h, lanes that made no
+  # fan in 60 days. The Control Plane notifies on a rise. Same rule — empty
+  # on probe failure, reported as null.
+  reddit_halted="$(awk '$1 == "crowdrelay_outreach_reddit_halted" { print $2; exit }' <<<"$metrics")"
+  case "$reddit_halted" in 1) reddit_halted=true ;; 0) reddit_halted=false ;; *) reddit_halted="" ;; esac
+  replies_waiting="$(awk '$1 == "crowdrelay_outreach_replies_waiting_12h" { print $2; exit }' <<<"$metrics")"
+  [[ "$replies_waiting" =~ ^[0-9]+$ ]] || replies_waiting=""
+  cut_lanes="$(awk '$1 == "crowdrelay_outreach_lanes_cut_candidate" { print $2; exit }' <<<"$metrics")"
+  [[ "$cut_lanes" =~ ^[0-9]+$ ]] || cut_lanes=""
+
   if ! CONTROL_PLANE_BASE_URL="$CROWDRELAY_CONTROL_PLANE_BASE_URL" \
     CONTROL_PLANE_TELEMETRY_TOKEN="$CROWDRELAY_CONTROL_PLANE_TELEMETRY_TOKEN" \
     CONTROL_PLANE_TENANT_SLUG="$CROWDRELAY_CONTROL_PLANE_TENANT_SLUG" \
@@ -218,6 +230,9 @@ report_control_plane_runtime() {
     OUTBOX_PENDING="$outbox_pending" \
     AWAITING_APPROVAL="$awaiting_approval" \
     NORTH_STAR_FANS="$north_star_fans" \
+    REDDIT_HALTED="$reddit_halted" \
+    REPLIES_WAITING="$replies_waiting" \
+    CUT_CANDIDATE_LANES="$cut_lanes" \
     "$reporter"; then
     echo "Control Plane runtime report failed; production deploy remains valid." >&2
   fi

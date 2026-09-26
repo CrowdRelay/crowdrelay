@@ -155,45 +155,7 @@ async fn load_goal_scoreboard(
     .fetch_one(pool)
     .await?;
 
-    // Per lane over 60 days — long enough for a 30-day outcome to resolve on
-    // most of the window, short enough that a lane cut last quarter does
-    // not linger on the list.
-    let lanes = sqlx::query_as::<_, (String, String, i64, i64, f64)>(
-        r#"
-        SELECT action.context::text,
-               action.action_kind::text,
-               count(*)::bigint,
-               count(*) FILTER (WHERE evidence.resolved_at IS NOT NULL)::bigint,
-               COALESCE(sum(evidence.observed_fans)
-                        FILTER (WHERE evidence.resolved_at IS NOT NULL), 0)::double precision
-        FROM growth_evidence AS evidence
-        JOIN autopilot_actions AS action
-          ON action.workspace_id = evidence.workspace_id
-         AND action.id = evidence.action_id
-        WHERE evidence.workspace_id = $1
-          AND evidence.timestamp >= $2 - interval '60 days'
-          AND evidence.treatment = 'treatment'
-        GROUP BY 1, 2
-        ORDER BY 5 ASC, 4 DESC, 1, 2
-        "#,
-    )
-    .bind(workspace_id)
-    .bind(now)
-    .fetch_all(pool)
-    .await?;
-    let cut_list: Vec<serde_json::Value> = lanes
-        .into_iter()
-        .map(|(context, action_kind, dispatched, resolved, fans)| {
-            json!({
-                "context": context,
-                "action_kind": action_kind,
-                "dispatched": dispatched,
-                "resolved": resolved,
-                "fans": fans,
-                "cut_candidate": resolved >= CUT_MIN_RESOLVED && fans <= 0.0,
-            })
-        })
-        .collect();
+    let cut_list = load_lanes_60d(pool, workspace_id, now).await?;
 
     let reddit = load_reddit_standing(pool, workspace_id, now).await?;
 
@@ -231,6 +193,103 @@ async fn load_goal_scoreboard(
         "lanes_60d": cut_list,
         "reddit": reddit,
     }))
+}
+
+/// Every lane (context × action kind) dispatched in the last 60 days — long
+/// enough for a 30-day outcome to resolve on most of the window, short enough
+/// that a lane cut last quarter does not linger — with what it produced.
+async fn load_lanes_60d(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    now: OffsetDateTime,
+) -> Result<Vec<serde_json::Value>, sqlx::Error> {
+    let lanes = sqlx::query_as::<_, (String, String, i64, i64, f64)>(
+        r#"
+        SELECT action.context::text,
+               action.action_kind::text,
+               count(*)::bigint,
+               count(*) FILTER (WHERE evidence.resolved_at IS NOT NULL)::bigint,
+               COALESCE(sum(evidence.observed_fans)
+                        FILTER (WHERE evidence.resolved_at IS NOT NULL), 0)::double precision
+        FROM growth_evidence AS evidence
+        JOIN autopilot_actions AS action
+          ON action.workspace_id = evidence.workspace_id
+         AND action.id = evidence.action_id
+        WHERE evidence.workspace_id = $1
+          AND evidence.timestamp >= $2 - interval '60 days'
+          AND evidence.treatment = 'treatment'
+        GROUP BY 1, 2
+        ORDER BY 5 ASC, 4 DESC, 1, 2
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(now)
+    .fetch_all(pool)
+    .await?;
+    Ok(lanes
+        .into_iter()
+        .map(|(context, action_kind, dispatched, resolved, fans)| {
+            json!({
+                "context": context,
+                "action_kind": action_kind,
+                "dispatched": dispatched,
+                "resolved": resolved,
+                "fans": fans,
+                "cut_candidate": resolved >= CUT_MIN_RESOLVED && fans <= 0.0,
+            })
+        })
+        .collect())
+}
+
+/// The three outreach conditions a person should hear about without opening
+/// the console, as Prometheus gauges. The heartbeat forwards them and the
+/// Control Plane notifies on a rise:
+///
+/// - `crowdrelay_outreach_reddit_halted` — 1 when the breaker halted
+///   unattended Reddit posting (a filter removal or repeated removals).
+/// - `crowdrelay_outreach_replies_waiting_12h` — drafted answers to people
+///   who commented, waiting on a person for more than 12 hours. A reply a day
+///   late reads as a brand, not a band.
+/// - `crowdrelay_outreach_lanes_cut_candidate` — lanes with enough resolved
+///   outcomes and not one fan in 60 days.
+pub(crate) async fn outreach_alert_prometheus(
+    pool: &PgPool,
+    workspace_id: Uuid,
+) -> Result<String, sqlx::Error> {
+    let now = OffsetDateTime::now_utc();
+    let reddit = load_reddit_standing(pool, workspace_id, now).await?;
+    let halted = u8::from(reddit.get("state").and_then(Value::as_str) == Some("halted"));
+    let waiting: i64 = sqlx::query_scalar(
+        r#"
+        SELECT count(*)::bigint FROM community_comments
+        WHERE workspace_id = $1
+          AND status = 'awaiting_approval'
+          AND created_at < $2 - interval '12 hours'
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(now)
+    .fetch_one(pool)
+    .await?;
+    let cut = load_lanes_60d(pool, workspace_id, now)
+        .await?
+        .iter()
+        .filter(|lane| lane.get("cut_candidate").and_then(Value::as_bool) == Some(true))
+        .count();
+    Ok(format!(
+        concat!(
+            "# HELP crowdrelay_outreach_reddit_halted 1 when unattended Reddit posting is halted by the account's standing.\n",
+            "# TYPE crowdrelay_outreach_reddit_halted gauge\n",
+            "crowdrelay_outreach_reddit_halted {}\n",
+            "# HELP crowdrelay_outreach_replies_waiting_12h Drafted replies to commenters waiting on a person for over 12 hours.\n",
+            "# TYPE crowdrelay_outreach_replies_waiting_12h gauge\n",
+            "crowdrelay_outreach_replies_waiting_12h {}\n",
+            "# HELP crowdrelay_outreach_lanes_cut_candidate Lanes with 5+ resolved outcomes and no fan in 60 days.\n",
+            "# TYPE crowdrelay_outreach_lanes_cut_candidate gauge\n",
+            "crowdrelay_outreach_lanes_cut_candidate {}\n",
+        ),
+        halted, waiting, cut
+    ))
 }
 
 /// The standing the community executor applies, from the same 180-day post
