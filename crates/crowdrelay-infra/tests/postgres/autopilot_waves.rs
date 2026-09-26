@@ -357,8 +357,9 @@ async fn only_active_non_filler_releases_anchor_waves() -> Result<(), Box<dyn st
         .filter(|anchor| matches!(anchor.anchor, WaveAnchor::Release { .. }))
         .count();
     assert_eq!(
-        release_anchors, 5,
-        "five free-reach kinds anchor on the one live non-filler plan"
+        release_anchors, 6,
+        "six free-reach kinds (organiser joined in 0364) anchor on the one live \
+         non-filler plan"
     );
     assert!(
         anchors.iter().all(|anchor| {
@@ -371,8 +372,8 @@ async fn only_active_non_filler_releases_anchor_waves() -> Result<(), Box<dyn st
             .iter()
             .filter(|anchor| anchor.anchor.id() == fixture.event_id)
             .count(),
-        5,
-        "the published show still anchors its five kinds beside it"
+        6,
+        "the published show still anchors its six kinds beside it"
     );
     Ok(())
 }

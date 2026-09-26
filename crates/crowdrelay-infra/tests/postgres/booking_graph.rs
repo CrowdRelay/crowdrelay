@@ -297,8 +297,11 @@ async fn run_edge_case(
     let workspace = seed_workspace(pool).await?;
     let other = seed_workspace(pool).await?;
     let workspace_id = WorkspaceId::from_uuid(workspace);
-    let wroclaw = seed_city(pool, "wroclaw").await?;
-    let praha = seed_city(pool, "praha").await?;
+    // Cities of its own: `place_venues` is a shared registry unique on
+    // (city, name), and another test (or an earlier run) that registers
+    // "Klub X" in the catalogue's Wrocław would collide with this one.
+    let wroclaw = seed_city(pool, &format!("wroclaw-{}", workspace.simple())).await?;
+    let praha = seed_city(pool, &format!("praha-{}", workspace.simple())).await?;
     let klub_x = seed_venue(pool, wroclaw, "Klub X").await?;
     let klub_y = seed_venue(pool, wroclaw, "Klub Y").await?;
     let lucerna = seed_venue(pool, praha, "Lucerna").await?;
