@@ -71,7 +71,7 @@ async fn a_waiting_reply_is_approved_as_edited_once_and_skips_are_final() {
     .expect("post");
     let waiting: Uuid = sqlx::query_scalar(
         r#"INSERT INTO community_comments
-           (workspace_id, community_post_id, reddit_comment_id, parent_id, author, body,
+           (workspace_id, community_post_id, platform_comment_id, parent_id, author, body,
             status, draft, review_score)
            VALUES ($1,$2,'t1_aaa','t3_abc123','fan1','what tuning is this?',
                    'awaiting_approval','Drop C, the whole record.',8)
@@ -83,9 +83,65 @@ async fn a_waiting_reply_is_approved_as_edited_once_and_skips_are_final() {
     .await
     .expect("waiting reply");
 
+    // A comment on the band's own Instagram post joins the same queue,
+    // attached to the synced post rather than a community post.
+    let source_id: Uuid = sqlx::query_scalar(
+        r#"INSERT INTO content_sources
+           (workspace_id, source_kind, source_key, title, occurred_at, expires_at, metadata)
+           VALUES ($1,'social_post','instagram:17900000000000001','Ashes — live',
+                   now(), now() + interval '45 days',
+                   '{"platform":"instagram","url":"https://instagram.com/p/x","body":"Dzięki za wczoraj"}'::jsonb)
+           RETURNING id"#,
+    )
+    .bind(ws)
+    .fetch_one(&pool)
+    .await
+    .expect("synced instagram post");
+    sqlx::query(
+        r#"INSERT INTO community_comments
+           (workspace_id, platform, content_source_id, platform_comment_id, parent_id,
+            author, body, status, draft)
+           VALUES ($1,'instagram',$2,'17900000000000002','17900000000000001',
+                   'fan2','czy będzie winyl?','awaiting_approval','Będzie, jesienią.')"#,
+    )
+    .bind(ws)
+    .bind(source_id)
+    .execute(&pool)
+    .await
+    .expect("instagram reply row");
+    // A row that claims both parents is refused by the schema.
+    let both = sqlx::query(
+        r#"INSERT INTO community_comments
+           (workspace_id, platform, community_post_id, content_source_id,
+            platform_comment_id, parent_id, author, body)
+           VALUES ($1,'instagram',$2,$3,'17900000000000003','17900000000000001','x','y')"#,
+    )
+    .bind(ws)
+    .bind(post_id)
+    .bind(source_id)
+    .execute(&pool)
+    .await;
+    assert!(
+        both.is_err(),
+        "a comment belongs to one post, on one platform"
+    );
+
     let listed = list_community_replies(&pool, ws).await.expect("list");
-    assert_eq!(listed.len(), 1);
-    assert_eq!(listed[0].status, "awaiting_approval");
+    assert_eq!(listed.len(), 2);
+    assert!(
+        listed
+            .iter()
+            .all(|reply| reply.status == "awaiting_approval")
+    );
+    let instagram = listed
+        .iter()
+        .find(|reply| reply.platform == "instagram")
+        .expect("the instagram reply lists");
+    assert_eq!(instagram.post_title, "Ashes — live");
+    assert_eq!(
+        instagram.post_url.as_deref(),
+        Some("https://instagram.com/p/x")
+    );
 
     let later = OffsetDateTime::now_utc() + time::Duration::minutes(20);
     assert!(matches!(

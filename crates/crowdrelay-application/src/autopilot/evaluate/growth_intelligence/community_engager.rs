@@ -302,8 +302,9 @@ pub(super) fn community_engager_candidates(
         if target.converted_fans_90d > 0 || target.interactions_90d > 0 {
             prompt.push_str(&format!(
                 "\n- measured record: {} fan(s) and {} click(s) arrived through this \
-                 community's tracked links in the last 90 days — match what worked",
-                target.converted_fans_90d, target.interactions_90d
+                 community's tracked links in the last 90 days, {} of those fans still \
+                 active — match what worked",
+                target.converted_fans_90d, target.interactions_90d, target.durable_fans_90d
             ));
         }
         // The community's own promotion rule is the difference between a
@@ -459,6 +460,7 @@ mod tests {
             joined: Some(true),
             converted_fans_90d: 0,
             interactions_90d: 0,
+            durable_fans_90d: 0,
         }
     }
 

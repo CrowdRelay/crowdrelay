@@ -112,7 +112,7 @@ pub struct SocialPostFact {
 /// share is a person doing something, a like is a thumb. Compared with the
 /// median of the same account's earlier posts, so the bar is the band's own
 /// normal, not a number from somebody else's audience.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize)]
 pub struct PostResonance {
     pub engagement: i64,
     /// Median engagement of the account's earlier posts on this platform,
@@ -120,6 +120,41 @@ pub struct PostResonance {
     pub peer_median: Option<i64>,
     /// How many earlier posts the median is over.
     pub peers: u32,
+    /// Engagement per thousand people reached, when the platform reported
+    /// reach (Instagram insights). Fair to a post shown to fewer people.
+    pub rate_per_mille: Option<i64>,
+    /// The same rate's median over earlier posts that reported reach.
+    pub peer_rate_median: Option<i64>,
+    /// How many earlier posts the rate median is over.
+    pub rate_peers: u32,
+    /// Average watch time in milliseconds (a reel) — what a hook moves.
+    pub watch_ms: Option<i64>,
+    /// Median average watch time of earlier reels.
+    pub peer_watch_median: Option<i64>,
+}
+
+/// How long an outlier stays relayable. A post that did twice the account's
+/// usual stays worth carrying for a week, not the normal three days: a
+/// community admitted later, or one the daily cap held back, still gets it.
+/// It never goes to the same community twice — the relay keys see to that.
+pub const OUTLIER_RELAY_HOURS: u32 = 168;
+
+/// Whether a post did at least twice the account's usual — by rate when the
+/// platform reported reach, by raw engagement otherwise.
+#[must_use]
+pub fn is_outlier(resonance: &PostResonance) -> bool {
+    if let (Some(rate), Some(peer_rate)) = (resonance.rate_per_mille, resonance.peer_rate_median)
+        && resonance.rate_peers >= RESONANCE_MIN_PEERS
+        && peer_rate > 0
+    {
+        return rate >= peer_rate.saturating_mul(2);
+    }
+    matches!(
+        resonance.peer_median,
+        Some(median) if resonance.peers >= RESONANCE_MIN_PEERS
+            && median > 0
+            && resonance.engagement >= median.saturating_mul(2)
+    )
 }
 
 /// Posts younger than this have not had time to show how they landed.
@@ -147,6 +182,19 @@ pub fn resonates_for_communities(
     };
     if now - occurred_at < Duration::hours(RESONANCE_SETTLE_HOURS) || resonance.engagement <= 0 {
         return false;
+    }
+    // With reach on both sides, the rate decides: engagement per thousand
+    // reached against the account's usual rate. A reel below that rate still
+    // earns its place when people watched it clearly longer than usual — a
+    // hook that held attention is the signal, even when nobody tapped like.
+    if let (Some(rate), Some(peer_rate)) = (resonance.rate_per_mille, resonance.peer_rate_median)
+        && resonance.rate_peers >= RESONANCE_MIN_PEERS
+    {
+        let held_attention = matches!(
+            (resonance.watch_ms, resonance.peer_watch_median),
+            (Some(watch), Some(peer)) if peer > 0 && watch.saturating_mul(4) >= peer.saturating_mul(5)
+        );
+        return rate >= peer_rate || held_attention;
     }
     match resonance.peer_median {
         Some(median) if resonance.peers >= RESONANCE_MIN_PEERS => resonance.engagement >= median,
@@ -345,8 +393,17 @@ pub fn evaluate_content_supply(
         // the post's own facts has nothing to carry, and a relay that would
         // have to invent the share is exactly what this path exists to
         // prevent.
-        let fresh = now - snapshot.occurred_at
-            <= Duration::hours(i64::from(policy.social_post_relay_hours.max(1)));
+        let relay_hours = if snapshot
+            .social_post
+            .as_ref()
+            .and_then(|post| post.resonance.as_ref())
+            .is_some_and(is_outlier)
+        {
+            policy.social_post_relay_hours.max(OUTLIER_RELAY_HOURS)
+        } else {
+            policy.social_post_relay_hours
+        };
+        let fresh = now - snapshot.occurred_at <= Duration::hours(i64::from(relay_hours.max(1)));
         return if fresh && snapshot.social_post.is_some() {
             ContentSupplyDecision::Relay {
                 confidence: Confidence::saturating_from_basis_points(9_000),
@@ -966,11 +1023,13 @@ mod tests {
             engagement: 80,
             peer_median: Some(50),
             peers: 10,
+            ..Default::default()
         };
         let below = PostResonance {
             engagement: 30,
             peer_median: Some(50),
             peers: 10,
+            ..Default::default()
         };
         assert!(resonates_for_communities(
             &fact(Some(above)),
@@ -995,6 +1054,7 @@ mod tests {
             engagement: 4,
             peer_median: None,
             peers: 0,
+            ..Default::default()
         };
         assert!(resonates_for_communities(
             &fact(Some(first)),
@@ -1005,11 +1065,86 @@ mod tests {
             engagement: 0,
             peer_median: None,
             peers: 0,
+            ..Default::default()
         };
         assert!(!resonates_for_communities(
             &fact(Some(silent)),
             posted,
             settled
         ));
+    }
+
+    #[test]
+    fn reach_and_watch_time_decide_when_the_platform_reports_them() {
+        let posted = OffsetDateTime::UNIX_EPOCH + Duration::days(20_000);
+        let settled = posted + Duration::hours(40);
+        let with = |rate: i64, watch: Option<i64>| PostResonance {
+            engagement: 10,
+            peer_median: Some(500), // raw engagement alone would refuse it
+            peers: 10,
+            rate_per_mille: Some(rate),
+            peer_rate_median: Some(40),
+            rate_peers: 8,
+            watch_ms: watch,
+            peer_watch_median: Some(4_000),
+        };
+        // Shown to few people, but those people engaged at a high rate.
+        assert!(resonates_for_communities(
+            &fact(Some(with(55, None))),
+            posted,
+            settled
+        ));
+        // Low rate, and watched no longer than usual: not spread.
+        assert!(!resonates_for_communities(
+            &fact(Some(with(20, Some(4_100)))),
+            posted,
+            settled
+        ));
+        // Low rate, but held attention 25%+ longer than usual: the hook worked.
+        assert!(resonates_for_communities(
+            &fact(Some(with(20, Some(5_000)))),
+            posted,
+            settled
+        ));
+    }
+
+    #[test]
+    fn an_outlier_stays_relayable_for_a_week_and_an_ordinary_post_does_not() {
+        let now = OffsetDateTime::UNIX_EPOCH + Duration::days(20_000);
+        let snapshot = |resonance: PostResonance| ContentSupplySnapshot {
+            source_id: crate::ContentSourceId::new(),
+            source_kind: ContentSourceKind::SocialPost,
+            source_version: 1,
+            occurred_at: now - Duration::days(5),
+            expires_at: now + Duration::days(30),
+            communication_enabled: None,
+            press_enabled: None,
+            release_tier: None,
+            completed_artifacts: Vec::new(),
+            in_flight_artifacts: Vec::new(),
+            failed_artifacts: Vec::new(),
+            social_post: Some(fact(Some(resonance))),
+        };
+        let outlier = PostResonance {
+            engagement: 120,
+            peer_median: Some(50),
+            peers: 10,
+            ..Default::default()
+        };
+        let ordinary = PostResonance {
+            engagement: 60,
+            ..outlier
+        };
+        assert!(is_outlier(&outlier));
+        assert!(!is_outlier(&ordinary));
+        let policy = ContentSupplyPolicy::default();
+        assert!(matches!(
+            evaluate_content_supply(&snapshot(outlier), policy, now),
+            ContentSupplyDecision::Relay { .. }
+        ));
+        assert_eq!(
+            evaluate_content_supply(&snapshot(ordinary), policy, now),
+            ContentSupplyDecision::Hold(ContentSupplyHoldReason::Complete)
+        );
     }
 }

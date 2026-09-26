@@ -190,6 +190,19 @@ mod goal_postgres_tests {
         assert_eq!(board["learning"]["resolved_since"], 1);
         assert_eq!(board["learning"]["resolved_total"], 2);
         assert_eq!(board["learning"]["pending"], 1);
+        // One lane, two of three resolved, no fans — too few resolved to
+        // call it a cut yet.
+        let lane = &board["lanes_60d"][0];
+        assert_eq!(lane["context"], "outreach");
+        assert_eq!(lane["action_kind"], "outreach.request");
+        assert_eq!(lane["dispatched"], 3);
+        assert_eq!(lane["resolved"], 2);
+        assert_eq!(lane["fans"], 0.0);
+        assert_eq!(lane["cut_candidate"], false);
+        // No posts yet: open at the floor, nothing removed.
+        assert_eq!(board["reddit"]["state"], "open");
+        assert_eq!(board["reddit"]["daily_cap"], 1);
+        assert_eq!(board["reddit"]["removed_by"], json!([]));
         assert_eq!(
             board["approvals"]["approved_by_people"], 2,
             "a standing grant is not a person, and a pre-goal approval is outside the window"

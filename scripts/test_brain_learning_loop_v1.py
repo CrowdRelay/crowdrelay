@@ -155,48 +155,37 @@ class BrainLearningLoopDoc(unittest.TestCase):
             f"its error instead of propagating: {swallowed}",
         )
 
-    def test_the_dormant_world_model_fields_are_still_dormant(self) -> None:
-        """`WorldModel`'s dormant set must stay out of the decision path.
+    def test_the_deleted_world_model_fields_stay_deleted(self) -> None:
+        """`WorldModel` carries only fields a decision reads.
 
-        `WorldModel` is never persisted and never returned from an endpoint, so
-        a field nothing reads in this workspace is a field nothing reads
-        anywhere. Five of the original eight dormant fields have been wired
-        into strategy selection and EFE scoring:
-        `discovered_communities`, `active_communities`,
-        `avg_community_engagement_bps`, `pending_outreach_targets`, and
-        `engaged_outreach_targets`. The remaining three are reporting-only
-        and still dormant.
+        `best_performing_community`, `worst_performing_community` and
+        `promoted_outreach_targets` were computed every cycle and read by
+        nothing — `WorldModel` is never persisted nor served, so unread here
+        was unread everywhere. They were deleted rather than kept as
+        reporting-only: a number on the world model reads as something the
+        brain knows and uses. Bringing one back means wiring it into a
+        decision in the same change, and deleting this guard.
         """
-        dormant = [
+        model = (ROOT / "crates/crowdrelay-brain/src/world_model.rs").read_text()
+        struct = model[model.index("pub struct WorldModel {"):]
+        struct = struct[: struct.index("\n}\n")]
+        for field in (
             "best_performing_community",
             "worst_performing_community",
             "promoted_outreach_targets",
-        ]
-        loader = (
-            ROOT
-            / "crates/crowdrelay-infra/src/autopilot/operations/growth_intelligence.rs"
-        )
-        model = ROOT / "crates/crowdrelay-brain/src/world_model.rs"
-        for field in dormant:
-            readers = [
-                str(path.relative_to(ROOT))
-                for path, text in production_sources()
-                if path not in (loader, model)
-                and re.search(r"\.\s*" + field + r"\b", text)
-            ]
-            self.assertEqual(
-                readers,
-                [],
-                f"`WorldModel::{field}` is documented as dormant and {readers} "
-                f"now reads it. If the brain genuinely uses it, move it out of "
-                f"the dormant list in world_model.rs and out of this one",
+        ):
+            self.assertNotIn(
+                f"pub {field}:",
+                struct,
+                f"`WorldModel::{field}` is back. Wire it into a decision and "
+                f"update this guard, or leave it off the world model",
             )
 
     def test_the_dormant_edges_are_still_dormant(self) -> None:
         """Every DORMANT entry must still be unread on a decision path.
 
-        The list is legitimately empty: `test_the_dormant_world_model_fields_are_still_dormant`
-        is the standing guard for the remaining dormant set. Add an entry here
+        The list is legitimately empty: `test_the_deleted_world_model_fields_stay_deleted`
+        keeps the deleted world-model fields off the struct. Add an entry here
         when a value is written on a decision path and deliberately unread —
         and write the regex against the consumer's binding, not the type name.
         """

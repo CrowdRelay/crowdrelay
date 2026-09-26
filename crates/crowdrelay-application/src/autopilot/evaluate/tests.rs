@@ -537,6 +537,7 @@ mod tests {
                     engagement: 90,
                     peer_median: Some(40),
                     peers: 12,
+                    ..Default::default()
                 }),
             }),
         };
@@ -759,6 +760,7 @@ mod tests {
                     engagement,
                     peer_median: Some(40),
                     peers: 12,
+                    ..Default::default()
                 }),
             }),
         };

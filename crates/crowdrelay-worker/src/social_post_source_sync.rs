@@ -56,6 +56,8 @@ const MAX_TITLE_CHARS: usize = 230;
 /// How much of a caption becomes the row title — the first line, short.
 const TITLE_HEAD_CHARS: usize = 80;
 const USER_AGENT: &str = "CrowdRelay/1.0 (social post source sync)";
+mod insights;
+
 const GRAPH_API_BASE: &str = "https://graph.facebook.com/v21.0";
 
 #[derive(Debug, Error)]
@@ -101,6 +103,9 @@ pub struct PostEntry {
     /// shares ×5. `None` when the platform reported none of the counts (an
     /// owner can hide likes), which is not zero engagement.
     pub engagement: Option<i64>,
+    /// Comments the platform reported, when it did. The reply lane harvests
+    /// a post's comments only when this grows past what it last read.
+    pub comments_count: Option<i64>,
 }
 
 /// Likes + comments ×3 + shares ×5: a comment or share is a person doing
@@ -304,6 +309,7 @@ impl SocialPostSourceSyncWorker {
                     post.comments.as_ref().and_then(GraphCount::total),
                     post.shares.as_ref().and_then(|shares| shares.count),
                 ),
+                comments_count: post.comments.as_ref().and_then(GraphCount::total),
             };
             self.upsert_post("facebook", &entry).await?;
         }
@@ -403,8 +409,15 @@ impl SocialPostSourceSyncWorker {
                 media_type: media.media_type.clone(),
                 thumbnail_url: media.thumbnail_url.clone(),
                 engagement: weighted_engagement(media.like_count, media.comments_count, None),
+                comments_count: media.comments_count,
             };
             self.upsert_post("instagram", &entry).await?;
+            self.refresh_instagram_insights(
+                &media.id,
+                media.media_type.as_deref(),
+                entry.posted_at,
+            )
+            .await;
         }
         Ok(())
     }
@@ -457,7 +470,9 @@ impl SocialPostSourceSyncWorker {
                OR content_sources.expires_at IS DISTINCT FROM EXCLUDED.expires_at
                -- Engagement is written separately below and is not an edit;
                -- compared with it, every sync would look like a new version.
-               OR (content_sources.metadata - 'engagement' - 'engagement_at')
+               OR (content_sources.metadata - 'engagement' - 'engagement_at'
+                   - 'comments_count' - 'comments_harvested'
+                   - 'reach' - 'saves' - 'shares' - 'views' - 'avg_watch_ms' - 'insights_at')
                   IS DISTINCT FROM EXCLUDED.metadata
             RETURNING id, version
             "#,
@@ -493,6 +508,25 @@ impl SocialPostSourceSyncWorker {
             .execute(&mut *tx)
             .await
             .map_err(|e| format!("engagement: {e}"))?;
+        }
+
+        // The comment count, the same way: the reply lane's trigger, not an
+        // edit of the post.
+        if let Some(comments) = entry.comments_count {
+            sqlx::query(
+                r#"
+                UPDATE content_sources
+                SET metadata = metadata || jsonb_build_object('comments_count', $3::bigint)
+                WHERE workspace_id = $1 AND source_kind = 'social_post' AND source_key = $2
+                  AND (metadata->'comments_count') IS DISTINCT FROM to_jsonb($3::bigint)
+                "#,
+            )
+            .bind(self.workspace_id)
+            .bind(&source_key)
+            .bind(comments.max(0))
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| format!("comments count: {e}"))?;
         }
 
         if let Some((source_id, version)) = upserted {

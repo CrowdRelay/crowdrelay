@@ -227,7 +227,8 @@ economic terms (`intrinsic_y30`, `economic_value_fans`, `harm_fans`, the
 exchange rate used, `risk_penalty`, `opportunity_cost`, marginal
 `adjustments`), epistemic terms (`estimation_regime`, `evidence_quality`,
 `sample_size`, `uncertainty`, `uses_y30`, `bridge_confidence`,
-`bridge_is_reliable`), policy identity, and the `competition` block naming
+`bridge_is_reliable`, and the candidate's own Y30 `posterior` — mean, std,
+P(meaningful effect) — as it stood at decision time), policy identity, and the `competition` block naming
 what else was considered and why each lost. The same value is serialised
 into the `portfolio_pool` row. `input_snapshot.learning` records the
 strategy prior vs applied pair (`strategy_source` = `prior` | `posterior` |
@@ -235,9 +236,10 @@ strategy prior vs applied pair (`strategy_source` = `prior` | `posterior` |
 
 Re-deriving the rest later does not recover it: the posteriors have moved,
 so a re-derivation answers "what would the brain decide now", which is a
-different question and looks identical in a report. What is still not
-durable is the posterior state itself — the provenance records what the
-posteriors concluded, not what they were.
+different question and looks identical in a report. The candidate's own
+posterior is durable; what is still not is the causal model's full state
+(every other key's posterior, the bridge, the harm model) — the
+`belief_state` identity names which checkpoint it was, not its contents.
 
 ## Dormant edges
 
@@ -245,7 +247,6 @@ Written, never read on a decision path. Listed so nobody has to discover it.
 
 | Value | Written by | Read by |
 |---|---|---|
-| `WorldModel`: `best_performing_community`, `worst_performing_community`, `promoted_outreach_targets` | the snapshot loader, two dedicated queries per cycle | nothing — and `WorldModel` is neither persisted nor served, so unread here is unread everywhere |
 | `SelfAssessment` verdict | `/v1/control-plane/ops/attention` | operator only; changes no ranking, by design |
 
 Wired or deleted since this table first listed them:
@@ -255,6 +256,10 @@ Wired or deleted since this table first listed them:
   P(challenger exceeds the hysteresis incumbent by ≥1 fan) ≥ 0.6.
 - `DecisionValue::contamination` — deleted; the truthful record is the
   assignment row's `final_contamination`.
+- `WorldModel`: `best_performing_community`, `worst_performing_community`,
+  `promoted_outreach_targets` — deleted; nothing read them, and the promoted
+  count still reaches the engager as the snapshot's
+  `unengaged_outreach_targets`.
 - `GrowthEvidence::creative_family` — consumed by `update_family_effect` in
   evidence replay and the community-engager's Thompson sampling.
 
@@ -268,12 +273,11 @@ Wired or deleted since this table first listed them:
 2. **WAIT is under-valued by construction.** Two of its four declared terms are
    never computed, both in the direction that would favour waiting. The fix is
    to measure fatigue recovery, not to pick a number for it.
-3. **The posterior state itself is not durable per decision.** The
-   `decision_value` provenance block records what the posteriors concluded —
-   regime, quality, terms, competition — but not the posterior values that
-   produced them. Re-deriving them answers "what would the brain decide now",
-   which is a different question and looks the same in a report. See the
-   provenance section.
+3. **Only the chosen candidate's posterior is durable per decision.** The
+   `decision_value` block keeps its Y30 posterior (mean, std, P(meaningful))
+   beside the regime, terms and competition, so a resolved outcome can be
+   scored against what the brain believed. The rest of the causal model's
+   state is named by checkpoint hash, not copied. See the provenance section.
 4. **Goal-directed control is a ceiling and a posture, not a planner.** A
    declared objective that is `Behind` raises the dispatch ceiling by its pace
    gap (capped) and withholds the exploration boost; on track, nothing

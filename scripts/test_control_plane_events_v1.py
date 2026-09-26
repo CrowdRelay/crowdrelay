@@ -35,7 +35,15 @@ ROUTER = ROOT / "crates/crowdrelay-api/src/control_plane.rs"
 class ControlPlaneEventsContract(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
-        cls.source = SOURCE.read_text(encoding="utf-8")
+        # concert_qr.rs pulls its sections in with include!(); the events list
+        # query lives in concert_qr/events_list.rs since the Shows pages
+        # moved it, so the gate reads the module as the compiler does.
+        main = SOURCE.read_text(encoding="utf-8")
+        included = [
+            (SOURCE.parent / name).read_text(encoding="utf-8")
+            for name in re.findall(r'include!\("([^"]+)"\)', main)
+        ]
+        cls.source = "\n".join([main, *included])
         cls.router = ROUTER.read_text(encoding="utf-8")
 
     def test_route_is_registered(self) -> None:
@@ -46,18 +54,20 @@ class ControlPlaneEventsContract(unittest.TestCase):
         self.assertIn("interval '36 hours') AS upcoming", self.source)
 
     def test_ordering_is_upcoming_then_past(self) -> None:
-        self.assertIn("ORDER BY upcoming DESC", self.source)
-        # Postgres resolves output aliases only as bare ORDER BY terms — a
-        # SELECT alias inside an expression is looked up as an input column
-        # and the query fails on first request. The CASE arms must repeat the
-        # predicate, never reference `upcoming` bare.
+        # The flag is computed once in the `listed` CTE, so the outer ORDER BY
+        # reads it as an input column (`listed.upcoming`) — valid inside the
+        # CASE arms. A bare `upcoming` there would be a SELECT output alias,
+        # which Postgres does not resolve inside an expression: the query
+        # would fail on first request.
+        self.assertIn("ORDER BY listed.upcoming DESC", self.source)
         self.assertNotIn("CASE WHEN upcoming", self.source)
         self.assertNotIn("CASE WHEN NOT upcoming", self.source)
         self.assertIn(
-            "CASE WHEN event.starts_at >= now() - interval '36 hours'", self.source
+            "CASE WHEN listed.upcoming THEN listed.starts_at END,", self.source
         )
         self.assertIn(
-            "CASE WHEN event.starts_at < now() - interval '36 hours'", self.source
+            "CASE WHEN NOT listed.upcoming THEN listed.starts_at END DESC",
+            self.source,
         )
 
     def test_terminal_shows_stay_listed_with_bounded_lookback(self) -> None:
@@ -73,7 +83,9 @@ class ControlPlaneEventsContract(unittest.TestCase):
 
     def test_workspace_scoped_including_checkin_join(self) -> None:
         self.assertIn("event.workspace_id = $1", self.source)
-        self.assertIn("checkin.workspace_id = event.workspace_id", self.source)
+        # The check-in join scopes through the CTE row, which carries the
+        # event's own workspace_id.
+        self.assertIn("checkin.workspace_id = listed.workspace_id", self.source)
 
 
 if __name__ == "__main__":

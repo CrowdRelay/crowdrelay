@@ -102,6 +102,7 @@ async fn post_upsert_writes_and_repeats_idempotently() -> Result<()> {
         media_type: Some("IMAGE".to_owned()),
         thumbnail_url: None,
         engagement: Some(42),
+        comments_count: Some(3),
     };
     worker
         .upsert_post("instagram", &entry)

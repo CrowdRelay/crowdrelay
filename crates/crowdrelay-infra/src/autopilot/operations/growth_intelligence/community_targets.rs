@@ -47,6 +47,7 @@ type CommunityTargetRow = (
     Option<String>,
     i64,
     i64,
+    i64,
 );
 
 /// Loads the communities the growth loop may engage this cycle.
@@ -73,7 +74,8 @@ pub(super) async fn load_community_targets(
                last_post.days_since,
                place.membership_state,
                provenance.converted_fans,
-               provenance.interactions
+               provenance.interactions,
+               durable.durable_fans
         FROM agent_outreach_targets AS t
         LEFT JOIN discovery_places AS place
                ON place.id = t.place_id
@@ -110,6 +112,43 @@ pub(super) async fn load_community_targets(
               AND normalize_subreddit(pe.community) = normalize_subreddit(t.subreddit)
               AND pe.occurred_at >= now() - interval '90 days'
         ) AS provenance ON true
+        -- Of those fans, the ones who stayed: still active, still consented
+        -- to hear from the band, and did something meaningful in the last
+        -- 30 days — the acquisition-channel read's "activated" definition.
+        -- A community whose conversions all went quiet produced signups,
+        -- not fans, and a signup farm must not outrank a slower community
+        -- whose people are still here.
+        LEFT JOIN LATERAL (
+            SELECT COUNT(*)::bigint AS durable_fans
+            FROM fans AS fan
+            WHERE fan.workspace_id = t.workspace_id
+              AND fan.status = 'active'
+              AND fan.id IN (
+                  SELECT pe.fan_id
+                  FROM fan_provenance_events pe
+                  WHERE pe.workspace_id = t.workspace_id
+                    AND pe.event_kind = 'conversion'
+                    AND pe.channel = 'reddit'
+                    AND pe.fan_id IS NOT NULL
+                    AND normalize_subreddit(pe.community) = normalize_subreddit(t.subreddit)
+                    AND pe.occurred_at >= now() - interval '90 days'
+              )
+              AND EXISTS (
+                  SELECT 1 FROM fan_consents AS consent
+                  WHERE consent.workspace_id = fan.workspace_id
+                    AND consent.fan_id = fan.id
+                    AND consent.purpose = 'marketing'
+                    AND consent.granted
+                    AND consent.recorded_at = (
+                        SELECT max(latest.recorded_at) FROM fan_consents AS latest
+                        WHERE latest.workspace_id = fan.workspace_id
+                          AND latest.fan_id = fan.id
+                          AND latest.purpose = 'marketing'
+                    )
+              )
+              AND fan_last_meaningful_action(fan.workspace_id, fan.id, fan.normalized_email)
+                  >= now() - interval '30 days'
+        ) AS durable ON true
         WHERE t.workspace_id = $1
           AND t.status = 'promoted'
           AND t.target_kind = 'community'
@@ -124,12 +163,13 @@ pub(super) async fn load_community_targets(
           AND (place.id IS NULL
                OR (place.status = 'active'
                    AND place.membership_state NOT IN ('rejected', 'not_a_fit')))
-        -- Evidence before audience: a community whose links produced a fan
-        -- or a clicker leads the pool, then biggest measured audience as the
+        -- Evidence before audience: a community whose fans stayed leads,
+        -- then one whose links produced a fan or a clicker, then biggest measured audience as the
         -- tiebreak. An unmeasured community sorts last rather than first: it
         -- may be excellent, but the cap has to fall on the least evidenced
         -- candidates, not the most recent ones.
-        ORDER BY provenance.converted_fans DESC,
+        ORDER BY durable.durable_fans DESC,
+                 provenance.converted_fans DESC,
                  provenance.interactions DESC,
                  place.member_count DESC NULLS LAST,
                  t.created_at DESC,
@@ -162,6 +202,7 @@ pub(super) async fn load_community_targets(
                 membership_state,
                 converted_fans,
                 interactions,
+                durable_fans,
             )| UnengagedTarget {
                 target_id,
                 display_name,
@@ -181,6 +222,7 @@ pub(super) async fn load_community_targets(
                 joined: membership_state.map(|state| state == "joined"),
                 converted_fans_90d: u32::try_from(converted_fans.max(0)).unwrap_or(u32::MAX),
                 interactions_90d: u32::try_from(interactions.max(0)).unwrap_or(u32::MAX),
+                durable_fans_90d: u32::try_from(durable_fans.max(0)).unwrap_or(u32::MAX),
             },
         )
         .collect())

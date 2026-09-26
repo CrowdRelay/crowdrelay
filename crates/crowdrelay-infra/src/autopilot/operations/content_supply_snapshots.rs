@@ -22,6 +22,11 @@ struct ContentRow {
     post_engagement: Option<i64>,
     peer_median: Option<i64>,
     peer_count: i64,
+    post_rate: Option<i64>,
+    post_watch_ms: Option<i64>,
+    peer_rate_median: Option<i64>,
+    rate_peer_count: i64,
+    peer_watch_median: Option<i64>,
     communication_enabled: Option<bool>,
     press_enabled: Option<bool>,
     release_tier: Option<String>,
@@ -73,6 +78,20 @@ pub(in crate::autopilot) async fn load_content_supply_snapshots(
                  THEN (source.metadata->>'engagement')::bigint END AS post_engagement,
             peers.peer_median,
             COALESCE(peers.peer_count, 0) AS peer_count,
+            -- Engagement per thousand reached, and average watch time, when
+            -- the platform's insights reported them (Instagram).
+            CASE WHEN source.source_kind = 'social_post'
+                  AND jsonb_typeof(source.metadata->'engagement') = 'number'
+                  AND jsonb_typeof(source.metadata->'reach') = 'number'
+                  AND (source.metadata->>'reach')::bigint > 0
+                 THEN (source.metadata->>'engagement')::bigint * 1000
+                      / (source.metadata->>'reach')::bigint END AS post_rate,
+            CASE WHEN source.source_kind = 'social_post'
+                  AND jsonb_typeof(source.metadata->'avg_watch_ms') = 'number'
+                 THEN (source.metadata->>'avg_watch_ms')::bigint END AS post_watch_ms,
+            peers.peer_rate_median,
+            COALESCE(peers.rate_peer_count, 0) AS rate_peer_count,
+            peers.peer_watch_median,
             -- The three switches are release-plan vocabulary, so the read is
             -- scoped to release rows: a video or event whose own metadata
             -- happens to carry a `tier` key must not inherit release gating.
@@ -149,7 +168,18 @@ pub(in crate::autopilot) async fn load_content_supply_snapshots(
                 ceil(percentile_cont(0.5) WITHIN GROUP (
                     ORDER BY (peer.metadata->>'engagement')::double precision
                 ))::bigint AS peer_median,
-                count(*)::bigint AS peer_count
+                count(*)::bigint AS peer_count,
+                ceil(percentile_cont(0.5) WITHIN GROUP (
+                    ORDER BY (peer.metadata->>'engagement')::double precision * 1000
+                             / NULLIF((peer.metadata->>'reach')::double precision, 0)
+                ))::bigint AS peer_rate_median,
+                count(*) FILTER (
+                    WHERE jsonb_typeof(peer.metadata->'reach') = 'number'
+                      AND (peer.metadata->>'reach')::bigint > 0
+                )::bigint AS rate_peer_count,
+                ceil(percentile_cont(0.5) WITHIN GROUP (
+                    ORDER BY (peer.metadata->>'avg_watch_ms')::double precision
+                ))::bigint AS peer_watch_median
             FROM content_sources AS peer
             WHERE peer.workspace_id = source.workspace_id
               AND peer.source_kind = 'social_post'
@@ -247,6 +277,11 @@ pub(in crate::autopilot) async fn load_content_supply_snapshots(
                             engagement,
                             peer_median: row.peer_median,
                             peers: u32::try_from(row.peer_count).unwrap_or(0),
+                            rate_per_mille: row.post_rate,
+                            peer_rate_median: row.peer_rate_median,
+                            rate_peers: u32::try_from(row.rate_peer_count).unwrap_or(0),
+                            watch_ms: row.post_watch_ms,
+                            peer_watch_median: row.peer_watch_median,
                         }),
                     })
                 } else {
