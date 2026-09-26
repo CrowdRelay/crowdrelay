@@ -22,6 +22,11 @@
 //   produced. A lane with enough resolved outcomes and not one fan is a cut
 //   candidate: spend the next 21 days where fans come from.
 //
+// - **reddit.** The account's standing as the executor reads it — open with
+//   its earned daily cap, or halted and why — and the communities whose
+//   moderators removed us, so the operator sees the breaker before a draft
+//   hits it.
+//
 // With no live objective the window is the trailing 21 days, so the learning
 // and approval numbers still answer before anybody declares a target.
 
@@ -190,6 +195,8 @@ async fn load_goal_scoreboard(
         })
         .collect();
 
+    let reddit = load_reddit_standing(pool, workspace_id, now).await?;
+
     Ok(json!({
         "objective": objective,
         "pace": pace,
@@ -222,5 +229,82 @@ async fn load_goal_scoreboard(
             "oldest_awaiting_hours": oldest_awaiting_hours,
         },
         "lanes_60d": cut_list,
+        "reddit": reddit,
+    }))
+}
+
+/// The standing the community executor applies, from the same 180-day post
+/// history (`community_executor::standing::post_history`) and the same
+/// domain rule, so the screen and the breaker cannot disagree.
+async fn load_reddit_standing(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    now: OffsetDateTime,
+) -> Result<serde_json::Value, sqlx::Error> {
+    use crowdrelay_domain::reddit_standing::{
+        PostRecord, RedditStanding, RemovalCause, SUBREDDIT_MEMORY, reddit_standing,
+    };
+
+    let rows = sqlx::query_as::<
+        _,
+        (
+            String,
+            OffsetDateTime,
+            Option<String>,
+            Option<OffsetDateTime>,
+            Option<OffsetDateTime>,
+        ),
+    >(
+        r#"
+        SELECT normalize_subreddit(subreddit), posted_at, removed_by_category,
+               removal_seen_at, last_seen_live_at
+        FROM community_posts
+        WHERE workspace_id = $1
+          AND status = 'posted'
+          AND posted_at IS NOT NULL
+          AND posted_at > $2 - interval '180 days'
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(now)
+    .fetch_all(pool)
+    .await?;
+    let history: Vec<PostRecord> = rows
+        .into_iter()
+        .map(
+            |(subreddit, posted_at, category, removal_seen_at, last_seen_live_at)| PostRecord {
+                subreddit,
+                posted_at,
+                removal: category.as_deref().and_then(RemovalCause::from_category),
+                removal_seen_at,
+                last_seen_live_at,
+            },
+        )
+        .collect();
+    let posted_24h = history
+        .iter()
+        .filter(|post| now - post.posted_at <= time::Duration::hours(24))
+        .count();
+    let mut removed_by: Vec<&str> = history
+        .iter()
+        .filter(|post| {
+            post.removal.is_some_and(RemovalCause::is_verdict)
+                && now - post.removal_seen_at.unwrap_or(post.posted_at) <= SUBREDDIT_MEMORY
+        })
+        .map(|post| post.subreddit.as_str())
+        .collect();
+    removed_by.sort_unstable();
+    removed_by.dedup();
+    let (state, daily_cap, halt_reason) = match reddit_standing(&history, now) {
+        RedditStanding::Open { daily_cap } => ("open", Some(daily_cap), None),
+        RedditStanding::Halted(reason) => ("halted", None, Some(reason.as_str())),
+    };
+    Ok(json!({
+        "state": state,
+        "daily_cap": daily_cap,
+        "halt_reason": halt_reason,
+        "posted_24h": posted_24h,
+        "posts_180d": history.len(),
+        "removed_by": removed_by,
     }))
 }

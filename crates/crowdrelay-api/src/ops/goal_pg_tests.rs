@@ -199,6 +199,10 @@ mod goal_postgres_tests {
         assert_eq!(lane["resolved"], 2);
         assert_eq!(lane["fans"], 0.0);
         assert_eq!(lane["cut_candidate"], false);
+        // No posts yet: open at the floor, nothing removed.
+        assert_eq!(board["reddit"]["state"], "open");
+        assert_eq!(board["reddit"]["daily_cap"], 1);
+        assert_eq!(board["reddit"]["removed_by"], json!([]));
         assert_eq!(
             board["approvals"]["approved_by_people"], 2,
             "a standing grant is not a person, and a pre-goal approval is outside the window"
