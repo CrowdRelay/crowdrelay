@@ -36,6 +36,7 @@ mod connection_health;
 mod release_videos;
 mod simple_platforms;
 mod spotify_cities;
+mod tiktok_videos;
 
 use serde::Deserialize;
 pub use spotify_cities::resolve_spotify_city;
@@ -1250,6 +1251,13 @@ impl GrowthMetricSyncWorker {
             followers = follower_count,
             "tiktok follower count recorded"
         );
+        tiktok_videos::sync_videos(
+            &self.pool,
+            &self.http_client,
+            conn.workspace_id,
+            &access_token,
+        )
+        .await;
         Ok(())
     }
 
